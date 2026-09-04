@@ -1585,12 +1585,12 @@ infrastructure for a 3h17m game, not a harder milestone.
 
 | goal | before | now |
 |---|---|---|
-| `researched("automation")` | 21.34 min | **8:17** measured on seed `31337`; **planned 8:01** since rocks (`130b3bde`) |
+| `researched("automation")` | 21.34 min | **8:17** measured on seed `31337`; **planned 7:17** since the lookahead scheduler (`51c7f695`), unmeasured live |
 | red science cell standing | never satisfied, `stuck_silent` | satisfied in 1 iteration |
 | red science producing **once** | never observed | witnessed six times, all inside 780 ticks |
 | red science producing **at a rate** | impossible to claim | **5 packs in 3,240 ticks (~5.5/min)**, twice |
 | green science, planning | did not expand at all | plans end to end |
-| green science, live | never run | **executes, `exhausted` at best 200 steps** |
+| green science, live | never run | executes; run 5 (`run-1788559688-08406`) is the first with no rock or siting failure in its first batch |
 | furnaces per run | 42 | **8** |
 | recovery (`obs:recover`) | never executed in any run | **fires live** |
 
@@ -1608,13 +1608,26 @@ does only automation.
   264, 231, 210, 134, 213, 172, 136, 189, 114`. Downward overall, with repeated
   regressions.
 
-### What blocks green now
+### What blocks green now (refreshed 2026-09-05 00:50)
 
-**Capacity.** A furnace's output slot holds exactly one stack, and the planner
-sizes transfers from demand. `735efeba` bounded `PlaceDrill`'s take only; the
-smelt bank, the ore insert and seven fuel sites remain unbounded, and **5 of
-green's 11 failures are still divergence.** Already specified in
-`docs/superpowers/specs/2026-09-04-world-model-divergence-design.md`.
+**Not capacity.** Runs 3–5 on the red-witness savepoint, with rocks executing
+live, showed the real classes and each has a mechanism fix on master:
+
+| class | what it was | fix |
+|---|---|---|
+| walk refused at a rock | Chop aimed at the rock's own centre | `98ca85d8` stand beside it; `76f3e153` reach measured to the box |
+| `removed 40 of 64` from a cell | drill sited on the patch's thin rim, mined its four tiles dry | `bdec88af` yield-aware siting; `7c93d57e` refuel and drain standing cells at replans |
+| `removed 5 but 3` from a furnace | fuel landed 8,000 ticks after a shared insert; fuel edge carried no lag | `330a9a39` |
+| tier-1 re-issued an identical take | recovery could not see divergence | `c1c41412` |
+| `craft 75 packs` lost at 360 s | flat deadline shorter than the craft | `fffdb37e` |
+| bot 1 walled in by its own placement | stand-point chosen blind; enclosure fill on an eighth-tile grid found cracks the game cannot use | `79f3f9d3` |
+| bot idle 24 min waiting on one furnace | the list scheduler's `(end, id)` key | `51c7f695` lookahead key |
+
+What remains structural: three bots idle while bot 1 hand-crafts 75 red packs
+and researches; science is not machine-made across milestones; copper is
+mined in minute one. Those are the world-record lessons
+(`docs/superpowers/notes/2026-09-04-world-record-replays.md`), and they are
+ladder decisions (a rate rung such as `producing:iron-plate:60`), not fixes.
 
 ### Landed
 

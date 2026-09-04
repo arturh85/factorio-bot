@@ -661,6 +661,22 @@ MINE_BLOCKED_TIMEOUT_TICKS = 300
 --- leaves the bot comfortably inside it. Half the reach split over two axes is
 --- `reach * 0.5 / sqrt(2)` each, giving a straight-line distance of exactly
 --- half the reach.
+--- Whether `player` may mine `ent` from where it stands, by the game's own
+--- rule. `can_reach_entity` measures to the entity's collision box; the
+--- centre-distance check it replaces refused a character standing 2.9 tiles
+--- from a huge-rock's centre and 1.4 from the rock itself, in every batch of
+--- run-1788551693-66583, after the bot had walked exactly where the plan
+--- sent it. The Rust side measures the same way (`mining_distance`,
+--- crates/core/src/factorio/rcon.rs). A player with no character has no
+--- reach at all and the call raises, so the old centre rule stands in.
+function mining_target_reachable(player, ent)
+	local ok, reachable = pcall(function() return player.can_reach_entity(ent) end)
+	if ok and type(reachable) == "boolean" then
+		return reachable
+	end
+	return distance(player.position, ent.position) <= player.resource_reach_distance
+end
+
 function mine_step_aside_waypoint(player, ent)
 	local reach = player.resource_reach_distance
 	if reach == nil or reach <= 0 or reach > 1000 then
@@ -1324,7 +1340,7 @@ function on_tick(event)
 					-- It also has to *stop*: the old branch reported the failure and then
 					-- fell straight through into setting mining_state anyway, so the same
 					-- action could be reported failed and later completed.
-					if distance(player.position, ent.position) > player.resource_reach_distance then
+					if not mining_target_reachable(player, ent) then
 						action_failed(event.tick, storage.p[idx].mining.action_id, "ERROR: too far too mine")
 						storage.p[idx].mining = nil
 					else

@@ -11,6 +11,41 @@ four bots.
 
 ---
 
+## Run 3 finished `stuck` at 50 game-minutes — and its four failure classes are all named
+
+`run-1788552801-73005` (green, seed 31337, resumed from the red witness, first
+run with both rock fixes): **649 successes, 3 failed, 1 lost, 3 refused walks;
+fleet utilisation 22.2%; hand-mining iron ore 184 actions / 83,267 ticks (23
+min of bot time, 51% of the span)**. Plans: 386 → 302 → 275 → 363 → 313 steps.
+The rocks are gone from the failure list for good. What remains:
+
+| class | count | fix |
+|---|---|---|
+| `removed 40 of 64` — the cell's drill mined its tiles dry | 3 | drills agent: amount-aware siting (in flight) |
+| tier-1 re-issued the identical take | 1 | `c1c41412` — divergence is not rescheduled |
+| `craft 75 automation-science-pack` **lost** at the flat 360 s deadline while still crafting | 1 | `fffdb37e` — deadline sized from the recipe (packs alone are 375 s) |
+| `failed to path find`, bot 1, three different targets | 3 | **open** — no enclosure was recorded; needs the next run's world |
+
+The lost craft is the worst of these: the supervisor refuses to recover a run
+with a lost action, so it replanned around a craft the game finished anyway.
+
+### Bot death, bench-verified (`a002efc3`)
+
+Scratch run `run-1788556166-27937`, `game.players[2].character.die("enemy")`
+mid-batch while bot 2 was mining: the mod wrote `player_died` at tick 76,342,
+failed the mining action in flight with `player 2 has no character: died at
+tick 76342`, and `player_respawned` 600 ticks later. The record shows the
+failure as `no_character` and carries `bot_died` / `bot_respawned` — stamped
+at the flush tick (85,828), not the death tick, which is a small inaccuracy
+to fix when someone touches the recorder. No `roster_changed`, correctly: the
+bot was back before the next plan.
+
+**A defect of the merge, found by the agent that shipped the recovery fix and
+by the core suite:** the new guard refuses a player without a `character`, and
+every BotBridge stub test built players without one — 30-odd tests across four
+files went red on master for an hour. Fixed by giving the stubs a character
+(`fffdb37e`, `07b6e6a9`, `1b80112c`).
+
 ## The cell's drill mines its four tiles dry — the `removed 40 of 64` divergence, root-caused live
 
 Run 3 (`run-1788552801-73005`), batch 3: `take 64 iron-plate from the cell`

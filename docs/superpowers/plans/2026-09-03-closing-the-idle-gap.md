@@ -11,6 +11,58 @@ four bots.
 
 ---
 
+## Reach is measured to the box, not the centre — the second rock defect (`76f3e153`)
+
+`run-1788551693-66583`, same savepoint as the run below, with `98ca85d8`
+(stand beside the rock). **The walks all succeeded — 109 of 109** — and six
+chops went through: four huge-rocks, one big-rock, one tree. Then the far
+huge-rocks failed, now as *actions*:
+
+```
+too far away, moving first!
+the walk to [53.625, -109.4375] would end at [53.5, -108.5], inside a
+collision box spanning [52.13, -110.54] to [55.13, -108.34]
+```
+
+Two rules measured reach to the entity's **centre**: `within_resource_reach`
+in `rcon.rs` and the mod's `on_tick` guard. The game measures to the
+**collision box** (`can_reach_entity`). For a 3 × 2.2 rock the planned annulus
+is (2.14, 2.7], the walker's stop box is 0.3, and a landing at 2.72 read as out
+of reach — after which the corrective walk aimed a plain disc at the centre,
+inside the rock, and `judge_path` refused it. 5 plans, 11 game-minutes, 4
+rejected actions, killed once the fix was built.
+
+Now `mining_distance` is to the blocking box when the target has one and to the
+centre for ore; the corrective walk is an annulus (clearance, reach + shorter
+half-side] beside a boxed target; the mod's guard asks `can_reach_entity`, with
+the centre rule as fallback for a player without a character. Three tests pin
+the Rust side against a huge-rock with its live box. **The mod side is
+untested until run 3** (`--resume-force`, because the mod digest changed).
+
+### Two agents landed in the same hour, and both found their brief wrong
+
+- **`7ad5cba9` — a hand cannot mine crude oil, and an unseen ore is
+  "unexplored, not absent".** The discriminator is categorical and **was not
+  in the data**: `resource_category` (`basic-fluid`) against the character's
+  `resource_categories` (`basic-solid`); the mod never sent either. Both now
+  travel end to end, `#[serde(default)]` so old dumps load. `NotHandMinable`
+  and `NotCharted` (with a resource census and a compass frontier) are
+  verdicts, not faults. Offline plans byte-identical. **Corrections:**
+  `refusal_for` lives in `crates/scripting_lua/src/globals/goal/mod.rs`, not
+  the planner; the `schedule.rs:543` reclassification cannot touch an
+  expansion-time refusal; and `an_unobtainable_item_has_no_method` had pinned
+  the very ambiguity being removed.
+- **`febdeead` — the Stockpile cost model never inverted on the map.** With
+  the chest: red 28,897, red-producing 43,797, green 216,370; without it:
+  32,172 / 54,952 / 221,253. **The chest pays on every goal** (10.2%, 20.3%,
+  2.2%). The fixture inversion was **mining seats**: one five-ore stockpile put
+  three runners on a nine-seat patch, the smelt behind it failed `G6` and bot 1
+  hand-mined 20 ore. Rocks were irrelevant. `worth_stockpiling` now reserves a
+  whole further convergence (`seats >= k + 2·known`); the map is unchanged
+  because 3 + 2·4 = 12 is exactly the seat cap, and the signed assertion is
+  back. **The record above that says "the Stockpile cost model is now
+  questionable" was wrong.**
+
 ## Rocks had never been chopped live — the first run to try lost bot 1 in every batch (`98ca85d8`)
 
 `run-1788549906-13347`, seed `31337`, resumed from `run-1788528493-60555:3`

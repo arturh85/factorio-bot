@@ -80,6 +80,30 @@ honestly, as before. Also fixed on the way: `scripting_lua`'s
 `plan_cell` call was one argument behind `bdec88af` and failed
 `--all-targets` clippy on master.
 
+## ✅ AUTOMATION IN 7:04 — `just bench` run for the first time, seed 31337 validated
+
+`run-1788565090-80288`: `just bench automation_speedrun.lua --clients 4 --bots
+4 --logs` — **release build, `--seed 31337 --new`, a fresh map**, git
+`b297bbb8`, roster `[1,2,3,4]`, not resumed, no cheats.
+
+| | |
+|---|---|
+| `researched("automation")` | **25,461 ticks = 7:04 game time** |
+| planned makespan | 24,940 (6:56) — execution within 2% of the plan |
+| plans | **1**; 132 actions, 170 steps, 0 failed, 0 lost, 76 of 76 walks |
+| fleet utilisation | 31.0% (bot 1 75.6%, bots 2–4 14–18%) |
+| map | digest `cb1032c7fa39cb2a`; iron 940, copper 803, coal 466, stone 397 tiles charted |
+
+Previous best 8:17 (unidentifiable build, run 3 days ago); the bar is 6:12.
+**A 73-second improvement from the day's planner work executed exactly as
+planned**: rocks stood beside, reach measured to the box, the lookahead
+scheduler, yield-aware drill siting. The seed is now validated — the water
+fits the pump, the shoreline was never refused — and every earlier caveat
+about `just bench` having never run is closed.
+
+The remaining minute against the record is in the roster: bot 1 does 87 of
+132 actions and is busy 75% of the span while the others are busy 15%.
+
 ## Ore under a standing drill: the graph forgot the drill's ground (`3c05e0a3`)
 
 My brief said the model does not know an entity stands on an ore tile. **Wrong:
@@ -1661,7 +1685,7 @@ infrastructure for a 3h17m game, not a harder milestone.
 
 | goal | before | now |
 |---|---|---|
-| `researched("automation")` | 21.34 min | **8:17** measured on seed `31337`; **planned 7:17** since the lookahead scheduler (`51c7f695`), unmeasured live |
+| `researched("automation")` | 21.34 min | **7:04** measured on a fresh seed-`31337` map (`run-1788565090-80288`, release, one plan, zero failures); planned 6:56 |
 | red science cell standing | never satisfied, `stuck_silent` | satisfied in 1 iteration |
 | red science producing **once** | never observed | witnessed six times, all inside 780 ticks |
 | red science producing **at a rate** | impossible to claim | **5 packs in 3,240 ticks (~5.5/min)**, twice |

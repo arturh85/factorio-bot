@@ -189,6 +189,45 @@ That has already happened once.
 - **A fresh map has charted almost nothing.** Distances read off an early dump
   measure what has been *seen*, not what exists.
 
+### Ask the RUNNING game directly -- `rcon -s localhost`
+
+`factorio-bot rcon -s localhost -- '<command>'` attaches to an **already
+running** instance and prints the reply. No MCP server, no schema, no second
+process: it is the fastest loop in this project for any question about live
+game state, which is exactly the class `world.dump` cannot answer (its
+`inventories` is always `[]`).
+
+```bash
+factorio-bot rcon -s localhost -- '/c rcon.print(game.tick)'
+factorio-bot rcon -s localhost -- '/c rcon.print(serpent.line(remote.interfaces))'
+```
+
+Worked example, from a run whose `BatchProgress` counters had been frozen for
+690 s with one action in flight:
+
+```
+1:char   2:char MINING   3:char MINING   4:char MINING
+```
+
+Bot 1 idle while the others mined -- so the game was healthy and **bot 1's
+completion signal was lost**, not a lag wait. Thirty seconds, against the
+25-minute run that question used to cost.
+
+The mod's interface (`remote.interfaces.botbridge`) includes `world_snapshot`,
+`inventory_contents_at`, `find_entities_filtered`, `find_tiles_filtered`,
+`player_info`, `player_force`, `players`, `set_recipe`, `savepoint`,
+`session_reset` and the `action_start_*` family. **`freeplay` also exposes
+`set_chart_distance`** -- relevant to exploration, which this mod otherwise
+never does.
+
+**Two rules.** Keep it **read-only during a measured run**: a query is cheap,
+but mutating a live game contaminates the measurement, and provenance has no
+field that would record it. Anything goes against a savepoint-resumed world.
+And do not add `rcon.print` *inside* a mod function the executor calls -- that
+output lands in the RCON reply body and the executor reads it as the action's
+result. An ad-hoc command on your own connection is a different thing and is
+safe.
+
 ### Action ids are PER-PLAN, not global
 
 A run replans, and ids are reused across plans: in `run-1788465258-49050`, id 38

@@ -856,6 +856,78 @@ against one human, on a map chosen for short walks, doing only automation.**
 **steel**, **multi-output recipes** — are what stand between us and it. Another
 minute off rung one is not.
 
+## ⚠ WE HAVE BEEN CHEATING WITHOUT KNOWING IT
+
+`918f0d6d`, and it bears directly on the owner's rule that final measured runs
+must be cheat-free.
+
+**`on_chunk_generated` ingest — what this project does today — is
+`force.chart` with extra steps.** In `run-1788532631-48030` the **furthest any
+bot ever travelled was 63.8 tiles**, and the world model it produced holds
+crude oil at **380 and 505 tiles**, 559 uranium tiles, and 36 biter spawners
+out to 500. The hook catches chunk *generation* and never consults the force's
+charted area, so the model sees ground nobody has been near.
+
+**Do not rip it out.** Flipping to charted-only collapses the model to ~418
+chunks and breaks every milestone. The order is: **measure it in provenance →
+make it optional (`is_chunk_charted` + `on_chunk_charted`) → then flip the
+default.**
+
+### Three things I asserted that were wrong
+
+1. **"The planner cannot see crude oil."** False for a *resumed* workspace.
+   `provenance.json` for `run-1788538389-09170` records `crude-oil: 12` and
+   `uranium-ore: 559`. The four-resource list is what a **fresh** map holds;
+   charting grows, and `ResourceFingerprint`'s own doc already said so.
+2. **"`researched:oil-processing` cannot begin because oil is invisible."** It
+   cannot begin — **for a different reason**. `oil-processing` is a **trigger
+   technology** (`research_trigger: {type: "mine-entity"}`, zero science), and
+   `mods/BotBridge/types.lua:265-291` deliberately sends `mine-entity` triggers
+   **without a payload**, so the planner raises `UnsupportedResearchTrigger`
+   whether or not a well is charted. **Charting does not unblock oil; fixing
+   the trigger payload does.** Everything up to `oil-gathering` (100 red+green)
+   is science-only.
+3. **"Exploration is the missing mechanism."** The mechanism is not missing —
+   the honesty is. See above.
+
+### Legitimacy, settled
+
+| mechanism | verdict |
+|---|---|
+| bot walks there | **legitimate** — the reference; the honest price is the price |
+| **radar** | **legitimate, and cheaper than assumed**: 20 red science (prereq already met), 10 iron / 5 gears / 5 circuits, 300 kW |
+| `force.chart` | **cheat** — development only, must be recorded |
+| `freeplay.set_chart_distance` | **neither** — sets `storage.chart_distance` once at scenario init; a map property, declare it in provenance |
+| `on_chunk_generated` ingest | **cheat, uncounted** — see above |
+
+### Two prerequisite defects, not follow-ups
+
+- **Nothing notices a bot has died.** The roster is computed once at script
+  start and never recomputed, and `start_walk_waypoints` returns a bare `false`
+  for `character == nil` — **indistinguishable from "not connected"**. Nearest
+  charted enemy structure is **246.6 tiles**; oil is at **380**, so any oil
+  route leaves the safe radius. **This promotes radar above walking**: it risks
+  no bot at all.
+- **The planner will plan hand-mining crude oil.** `Mine::applicable` gates
+  only on `has_resource_patches`, and that trap is *newly reachable* because
+  the model now contains oil.
+
+### Implemented
+
+`EntityGraph` gains a `threats` map (`unit-spawner` + `turret`, by name and
+tile) with `nearest_threat` / `threats_from` / `threat_census`. **The mod
+always sent these** — `EntityType::from_str` returned `Err` for all three enemy
+spellings, so they left only an anonymous rect in `blocked_tree`. Live biters
+excluded deliberately: a stored unit is a permanent phantom.
+
+### And the ±512 wall
+
+From the mod's **first commit in 2021, with no rationale**. It drops entities,
+tiles *and* the map-area update, admitting exactly 1,024 chunks — **the binding
+constraint on this workspace, not the game**. Oil patch A's westernmost well
+sits **2.5 tiles inside** it. Recoverable: `initial_discovery` re-emits
+everything on the next boot.
+
 ## WHERE THIS STANDS (read this first)
 
 **Sections below are reverse-chronological — newest first.** The plan began as

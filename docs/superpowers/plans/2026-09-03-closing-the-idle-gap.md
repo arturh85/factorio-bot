@@ -444,6 +444,29 @@ as a plan.
   text was ever captured.
 - **The 34-furnace bank** crowds out the ore cell that feeds it. Under
   investigation; may be a costing defect rather than a spatial one.
+- **A long-handed inserter may unlock the third feed mouth — unmeasured.**
+  Owner's point, queued rather than actioned. The mechanism is real and
+  **already modelled**: `state.rs:311` gives `long-handed-inserter` a reach of
+  `2.`, the doc says it "skips a tile on both sides", and
+  `a_long_handed_inserter_reaches_two_tiles_on_each_side` pins it. It is
+  craftable from iron plate + gear + inserter with no tech gate.
+
+  **`MAX_FEED = 2` is a bound on pole *coverage*, not on inserter reach** — the
+  intermediate's third west mouth is unpowered and an inserter there will not
+  run however far it reaches. But **a long-handed inserter need not occupy that
+  dark tile**: it can sit in a powered tile two away and still reach the
+  machine. `the_pole_lights_a_third_product_mouth_but_no_third_feed_row`
+  measured the *standard adjacent row* at all four facings; **whether a powered
+  tile at distance 2 can host a long-handed feed has never been measured.**
+
+  **Payoff for green is 0.44%** (`craft 32 inserter` = 960 of 216,474 ticks; the
+  whole inserter chain ~2%), which is why it is queued and not urgent. It
+  becomes **structural at stage 3+** — oil refineries, chemical plants and
+  anything else with three or more ingredients. Whoever picks this up should
+  start from `crates/planner/src/method/assemble.rs`'s module doc, which already
+  works through the three-ingredient case on the *product* side; this extends it
+  to the *feed* side by reach rather than coverage.
+
 - **Nothing checks a cell's servicing lane when siting the lab**, and
   `enclosure::check` runs for cells and plants but not for the lab. Does not
   bite on this map; the check simply does not exist.

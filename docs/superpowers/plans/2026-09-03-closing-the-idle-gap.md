@@ -769,6 +769,43 @@ known to be powered and unused** (`31c8d579`), which is where it would go.
 
 Until then, **"produces 6/min" should not be quoted for red or green.**
 
+## THE BENCHMARK WAS WRONG ALL DAY — this is Space Age
+
+`workspace/factorio-space-age_linux_2.1.17.tar.xz`, and the data directory
+carries `elevated-rails`. **We run Space Age**, so the comparison is the Space
+Age record, not the pre-Space-Age one.
+
+| | automation | whole game |
+|---|---|---|
+| **Space Age WR** (owner) | **9:12** | 3h17m |
+| pre-Space-Age WR — *the wrong benchmark, used all day* | 6:12 | ~1h |
+| **ours, benchmark seed `31337`** | **8:17** | — |
+| ours, old unidentified map | 8:41 / 8:43 | — |
+
+**We are ahead of the single-player Space Age record on automation.** Every
+"still short of the target" note earlier in this document was measured against
+a benchmark from a different game.
+
+### Three ways the comparison flatters us, and they are not small
+
+1. **Four bots against one human.**
+2. **The map was chosen for short walks.** Seed `31337` puts iron 18.4 tiles
+   from spawn and was selected for that — the justfile's own warning that
+   optimising the seed "stops being comparable" applies exactly here.
+3. **We do only automation.** The runner is en route to a rocket over 3h17m and
+   is not optimising this milestone in isolation; much of what they do by
+   minute 9 is groundwork for hour two.
+
+**The honest claim: four bots on a favourable map beat one human's split in the
+same game version.** Not "we beat the world record."
+
+### What it changes
+
+The 9-minute target is met and was met earlier than realised. The interesting
+horizon is no longer automation but **3h17m for a rocket** — which makes the
+open capability gaps (exploration, fluids, steel, multi-output recipes) the
+things that matter, not another minute off rung one.
+
 ## WHERE THIS STANDS (read this first)
 
 **Sections below are reverse-chronological — newest first.** The plan began as

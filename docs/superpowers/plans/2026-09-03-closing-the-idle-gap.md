@@ -11,6 +11,52 @@ four bots.
 
 ---
 
+## The crash is fixed; the furnace reuse gap is now the binding constraint
+
+`run-1788513716-64336`, seed `31337`, with the double-spend fix:
+
+| rung | result |
+|---|---|
+| 1 — red cell | satisfied |
+| 2 — red witness | **WITNESSED** — fourth time |
+| 3 — green cell | **`stuck` after 1 iteration** |
+
+No crash — `3b79eb20` held. The refusal is the ore-cell one again:
+
+```
+no room for a iron-ore cell within 12 tiles of the patch: a drill needs to
+stand on the ore with a furnace two tiles ahead of it standing off it
+```
+
+**But it now fails on the FIRST iteration, where the old map took six.**
+
+### Why: red alone places 42 furnaces, and the seed put the ore underneath them
+
+Red's cell and witness placed **42 stone-furnaces**, spread `x −18..33,
+y −49..−12`. On `31337` iron ore is **18.4 tiles from spawn** — so those
+furnaces land on and around the very patch green needs. `3ba0d441` reserves six
+cell sites; 42 furnaces overwhelm that.
+
+**The seed exposed a tension nobody had stated.** `31337` was chosen for *short
+walks* — iron at 18.4 tiles against 40.4 — and that inadvertently made
+*crowding worse*, because everything then competes for the same ground. Short
+walks and room to build are not the same objective, and `score-map` only scores
+the first. Whether `31337` is net better is now **an open question, not a
+settled one**; the old map's green run reached six iterations before crowding
+out, this one reached one — though the runs are not directly comparable, since
+this one built red's whole factory first.
+
+### This makes the reuse gap the thing to fix
+
+`smelt_steps` commits a furnace and **never releases the commitment**, so a plan
+needs one furnace per `Smelt` goal — 28 furnaces for 276 ore in an earlier run,
+several smelting a single ore. It has now been named as the disease twice and
+deferred twice as "its own piece of work". It is the reason 42 furnaces exist,
+and fewer furnaces helps **both** halves of the tension above.
+
+Dispatched, with red explicitly allowed to move — unlike every other change
+this week — provided the reason is stated and the before/after reported.
+
 ## It was not a shortfall — the plan double-spent its own stock (`3b79eb20`)
 
 **Bot 1 held ZERO iron plates**, not 141. `samples.jsonl` at tick 56,460:

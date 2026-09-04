@@ -755,7 +755,55 @@ fn expand_goal_body(
         ctx.chain.is_some() && chain_on_entry.is_none() && ctx.state.bot_ids().len() > 1;
     let produce_before = opened_chain.then(|| ctx.state.item_totals());
 
+    // **The stock this goal is about to size itself against is claimed by this
+    // goal, for as long as its own expansion runs.**
+    //
+    // `shortfall` credits what the holder already has towards a `Goal::Have`
+    // and asks a method to make only the difference. That credit is a promise:
+    // the items are counted as part of the `count` the goal will deliver. But
+    // until 2026-09-04 nothing recorded the promise, so anything *inside* the
+    // goal's own expansion could spend the very stock the shortfall had
+    // already committed -- and the goal then delivered less than it said.
+    //
+    // `run-1788509918-33958` is why, and its numbers are the whole argument.
+    // Green science asked for `Have { iron-plate, 150, Share(bot 1) }`.
+    // `Withdraw` emptied seventeen furnaces into bot 1's hands and recursed;
+    // the recursion sized itself at `150 - 17 = 133` and built a cell for the
+    // difference. Building that cell needs a drill, the drill needs three
+    // gears and three plates, and its `Have { iron-plate, 3 }` and
+    // `Have { iron-plate, 6 }` subgoals looked at the seventeen plates sitting
+    // unclaimed in bot 1's inventory, planned nothing, and spent nine of them.
+    // The take delivered its 133 onto the eight that were left, the craft
+    // demanded the 150 it had been promised, and `PlanState::lose` found 141.
+    // The run died on the raise, having reached green science.
+    //
+    // Reserved rather than spent, like every other entry in this ledger:
+    // `inventory_count` and `lose` still see the items, so this goal's own
+    // arithmetic and its `Condition::HasItem`s are untouched, and only *other*
+    // goals asking `available` are told the stock is spoken for.
+    //
+    // Measured **before** `method.expand`, because that is the number the
+    // shortfall was computed from -- `registry.find` and the method's own
+    // `demand` both read it here -- and applied **after**, because reserving
+    // it first would hide the credit from the very sizing it describes and
+    // make the method produce the whole `count` again.
+    //
+    // Only `Goal::Have` credits anything. `Goal::Produced` asks for the whole
+    // count regardless of what is held (possession is not production), so it
+    // has no credit to protect.
+    let credited: Option<(Holder, ItemId, u32)> = match goal {
+        Goal::Have { item, count, whose } => {
+            let held = (*count).min(ctx.state.available(whose, item));
+            (held > 0).then(|| (whose.clone(), item.clone(), held))
+        }
+        _ => None,
+    };
+
     let steps = method.expand(goal, ctx)?;
+
+    if let Some((whose, item, count)) = &credited {
+        ctx.state.reserve(whose, item, *count);
+    }
 
     // Everything below this line was asked for by a method, not by the caller,
     // so nothing in the subtree is top level. `expand_goal` restores the flag
@@ -770,6 +818,12 @@ fn expand_goal_body(
     let mut promised: Vec<(Holder, ItemId, u32)> = Vec::new();
     let result = run_steps(steps, ctx, net, registry, &mut promised);
     for (whose, item, count) in &promised {
+        ctx.state.release(whose, item, *count);
+    }
+    // Save, run, restore, on every exit path including the error one: a credit
+    // held past its own goal would make every later goal size itself against
+    // stock that is permanently invisible.
+    if let Some((whose, item, count)) = &credited {
         ctx.state.release(whose, item, *count);
     }
 
@@ -2806,5 +2860,209 @@ mod tests {
 
         let chains: BTreeSet<ChainId> = net.actions().filter_map(|a| net.chain_of(a.id)).collect();
         assert_eq!(chains, BTreeSet::from([outer]));
+    }
+
+    /// **A goal may not have the stock it was sized against spent underneath
+    /// it.** The regression for `run-1788509918-33958`, which reached green
+    /// science and then died on `bot 1 has 141 iron-plate, needs 150`.
+    ///
+    /// The shape, with the live run's numbers in brackets. A goal asks for ten
+    /// plates [150] and the bot already holds four [17], so its method plans
+    /// to make the six-plate difference [133]. Making them needs a tool [a
+    /// drill], the tool costs three plates [nine], and the tool's own
+    /// `Have { plate, 3 }` subgoal looks at the four plates sitting in the
+    /// inventory, sees no shortfall, and plans nothing -- then spends three of
+    /// the four the outer goal had already counted towards its ten. Six made
+    /// plus one left is seven [141], the caller's craft demands ten [150], and
+    /// `PlanState::lose` refuses.
+    ///
+    /// The distinction that makes this a defect rather than a world condition:
+    /// nothing here is short of anything. Every plate is makeable and the
+    /// method to make it is right there -- the plan simply spent the same
+    /// stock twice. `refusal_for` classifies `InsufficientItems` as a fault
+    /// for exactly this reason, and it is right to.
+    #[test]
+    fn stock_a_goal_was_sized_against_is_not_spent_underneath_it() {
+        /// Nothing left to do: the holder already has what was asked for.
+        struct Enough;
+        impl Method for Enough {
+            fn name(&self) -> &'static str {
+                "enough"
+            }
+            fn applicable(&self, goal: &Goal, state: &PlanState) -> bool {
+                matches!(goal, Goal::Have { item, count, whose }
+                    if state.available(whose, item) >= *count)
+            }
+            fn expand(&self, _g: &Goal, _c: &mut ExpansionCtx) -> Result<Vec<Step>, PlannerError> {
+                Ok(vec![])
+            }
+        }
+
+        /// A big plate order needs a tool to fill it -- the cell in the live
+        /// run, and the reason the outer goal has a subtree at all.
+        struct Assemble;
+        impl Method for Assemble {
+            fn name(&self) -> &'static str {
+                "assemble"
+            }
+            fn applicable(&self, goal: &Goal, state: &PlanState) -> bool {
+                matches!(goal, Goal::Have { item, count, whose }
+                    if item == "plate"
+                        && *count >= 10
+                        && state.available(whose, item) < *count)
+            }
+            fn expand(
+                &self,
+                goal: &Goal,
+                ctx: &mut ExpansionCtx,
+            ) -> Result<Vec<Step>, PlannerError> {
+                let Goal::Have { item, count, whose } = goal else {
+                    unreachable!()
+                };
+                let short = count.saturating_sub(ctx.state.available(whose, item));
+                Ok(vec![
+                    Step::Subgoal(Goal::Have {
+                        item: "tool".into(),
+                        count: 1,
+                        whose: whose.clone(),
+                    }),
+                    Step::Act(Box::new(gain_action(ctx, "plate", short))),
+                ])
+            }
+        }
+
+        /// A small plate order is made directly.
+        struct Smelt;
+        impl Method for Smelt {
+            fn name(&self) -> &'static str {
+                "smelt"
+            }
+            fn applicable(&self, goal: &Goal, state: &PlanState) -> bool {
+                matches!(goal, Goal::Have { item, count, whose }
+                    if item == "plate"
+                        && *count < 10
+                        && state.available(whose, item) < *count)
+            }
+            fn expand(
+                &self,
+                goal: &Goal,
+                ctx: &mut ExpansionCtx,
+            ) -> Result<Vec<Step>, PlannerError> {
+                let Goal::Have { item, count, whose } = goal else {
+                    unreachable!()
+                };
+                let short = count.saturating_sub(ctx.state.available(whose, item));
+                Ok(vec![Step::Act(Box::new(gain_action(ctx, "plate", short)))])
+            }
+        }
+
+        /// The tool costs three plates -- the drill's nine.
+        struct MakeTool;
+        impl Method for MakeTool {
+            fn name(&self) -> &'static str {
+                "make-tool"
+            }
+            fn applicable(&self, goal: &Goal, _s: &PlanState) -> bool {
+                matches!(goal, Goal::Have { item, .. } if item == "tool")
+            }
+            fn expand(
+                &self,
+                goal: &Goal,
+                ctx: &mut ExpansionCtx,
+            ) -> Result<Vec<Step>, PlannerError> {
+                let Goal::Have { whose, .. } = goal else {
+                    unreachable!()
+                };
+                let mut a = gain_action(ctx, "tool", 1);
+                a.eff.push(Effect::LoseItem {
+                    who: Actor::Role,
+                    item: "plate".into(),
+                    count: 3,
+                });
+                Ok(vec![
+                    Step::Subgoal(Goal::Have {
+                        item: "plate".into(),
+                        count: 3,
+                        whose: whose.clone(),
+                    }),
+                    Step::Act(Box::new(a)),
+                ])
+            }
+        }
+
+        /// The caller: it asks for ten plates and then spends all ten.
+        struct MakeGadget;
+        impl Method for MakeGadget {
+            fn name(&self) -> &'static str {
+                "make-gadget"
+            }
+            fn applicable(&self, goal: &Goal, _s: &PlanState) -> bool {
+                matches!(goal, Goal::Have { item, .. } if item == "gadget")
+            }
+            fn expand(
+                &self,
+                goal: &Goal,
+                ctx: &mut ExpansionCtx,
+            ) -> Result<Vec<Step>, PlannerError> {
+                let Goal::Have { whose, .. } = goal else {
+                    unreachable!()
+                };
+                let mut a = gain_action(ctx, "gadget", 1);
+                a.eff.push(Effect::LoseItem {
+                    who: Actor::Role,
+                    item: "plate".into(),
+                    count: 10,
+                });
+                Ok(vec![
+                    Step::Subgoal(Goal::Have {
+                        item: "plate".into(),
+                        count: 10,
+                        whose: whose.clone(),
+                    }),
+                    Step::Act(Box::new(a)),
+                ])
+            }
+        }
+
+        let mut state = PlanState::from_world(Arc::new(fixture_world()), &[BotId(1)]);
+        // The four plates already in hand: the seventeen the live run had
+        // withdrawn out of its furnaces before green's craft asked for 150.
+        state.gain(BotId(1), "plate", 4);
+        let reg = MethodRegistry::new()
+            .with(Box::new(Enough))
+            .with(Box::new(MakeGadget))
+            .with(Box::new(MakeTool))
+            .with(Box::new(Assemble))
+            .with(Box::new(Smelt));
+
+        let net = expand(
+            &[Goal::Have {
+                item: "gadget".into(),
+                count: 1,
+                whose: Holder::Bot(BotId(1)),
+            }],
+            &state,
+            &reg,
+            BotId(1),
+        )
+        .expect("ten plates is a reachable number of plates");
+
+        // Six for the outer order and three more for the tool: the tool must
+        // make its own, not help itself to stock the ten-plate goal has
+        // already counted. Before the credit was reserved this summed to six
+        // and the expansion died applying the gadget's `LoseItem`.
+        let plates: u32 = net
+            .actions()
+            .filter_map(|a| match &a.kind {
+                ActionKind::Craft { item, count } if item == "plate" => Some(*count),
+                _ => None,
+            })
+            .sum();
+        assert_eq!(
+            plates,
+            9,
+            "six for the order and three for the tool: {:?}",
+            net.actions().map(|a| &a.label).collect::<Vec<_>>()
+        );
     }
 }

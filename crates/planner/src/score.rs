@@ -175,30 +175,11 @@ pub struct WoodScore {
     pub charted_sources: usize,
 }
 
-/// How much of the search disc this dump actually has terrain for.
-///
-/// **This is the field that decides whether the rest of the report means
-/// anything**, and it exists because the failure it guards against is silent:
-/// `EntityGraph` holds charted chunks, so a map whose iron is at 400 tiles and
-/// a map whose iron has not been looked at produce the *same* report — "no
-/// iron-ore within the radius" — and only this tells them apart.
-///
-/// # What t=0 actually charts
-///
-/// Nothing in `mods/BotBridge` calls `force.chart`. The mod replays
-/// `surface.get_chunks()` once at `whoami("server")` (`initial_discovery`,
-/// `control.lua:827`), one chunk per tick, and after that only reacts to
-/// `on_chunk_generated`. So what a t=0 dump knows is **the chunks the save was
-/// created with**, which for a plain `--create` is the generated spawn region:
-/// measured off `workspace/server-log.txt`, 418 chunks in a 20x20 core block,
-/// tiles spanning `[-320, 320)` on both axes — 409,600 tiles.
-///
-/// [`DEFAULT_SEARCH_RADIUS`] is 256, and every point inside a disc of radius
-/// 256 has `|x| <= 256 < 320`, so **the whole default search disc fits inside
-/// the region a t=0 dump has already charted**. That is what makes scoring a
-/// fresh map worth doing at all, and it is a fact about one measured save
-/// rather than a guarantee — which is exactly why this is probed per dump and
-/// reported, instead of being asserted in a comment.
+/// Where the tile tree runs out around the origin. Defined on
+/// [`crate::state`] since the charting query moved onto `PlanState`; the doc
+/// there says what a probe is and what a blind one means. This report reads
+/// it for one reason `state` does not spell out: an incomplete disc makes
+/// every "nearest" below a **lower bound**, and the verdict says so.
 ///
 /// Two things it still cannot repair: `control.lua:1311` drops any chunk
 /// outside `[-512, 512]` permanently, and the discovery pass has been observed
@@ -206,25 +187,7 @@ pub struct WoodScore {
 /// thousands of ticks later (`docs/superpowers/notes/2026-09-02-resource-double-count.md`).
 /// So even a fully covered disc gives a resource census that is a **lower
 /// bound**.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ChartingScore {
-    /// Probe points that landed on ground the dump has a tile for.
-    pub covered: usize,
-    /// Probe points tried.
-    pub probes: usize,
-    /// The probes that found nothing: the directions this score is blind in.
-    /// Listed rather than counted because "blind to the north-east" and "blind
-    /// everywhere past half the radius" are different findings.
-    pub blind: Vec<Position>,
-}
-
-impl ChartingScore {
-    /// Whether every probe found charted ground.
-    #[must_use]
-    pub fn is_complete(&self) -> bool {
-        self.blind.is_empty() && self.probes > 0
-    }
-}
+pub use crate::state::ChartingScore;
 
 /// What the report concludes, and how strongly.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -402,7 +365,7 @@ impl MapScore {
             charted_sources: sources.len(),
         };
 
-        let charting = probe_charting(state, origin, radius);
+        let charting = state.charting(origin, radius);
 
         let mut missing: Vec<String> = resources
             .iter()
@@ -549,66 +512,6 @@ impl MapScore {
             }
         }
         out
-    }
-}
-
-/// The eight compass directions, as unit vectors.
-///
-/// Written out rather than derived from `cos`/`sin`: the planner's determinism
-/// rule is about floats, and a table of constants cannot differ between two
-/// builds of the same source the way a libm call can.
-const COMPASS: [(f64, f64); 8] = [
-    (1., 0.),
-    (D, D),
-    (0., 1.),
-    (-D, D),
-    (-1., 0.),
-    (-D, -D),
-    (0., -1.),
-    (D, -D),
-];
-const D: f64 = std::f64::consts::FRAC_1_SQRT_2;
-
-/// Asks the dump whether it has terrain at the edge and the middle of the
-/// search disc.
-///
-/// Seventeen points — the origin, then the eight compass directions at half
-/// the radius and at the full radius — each answered by a one-tile box query
-/// against the tile tree. Deliberately *not* a count of every charted tile: a
-/// fully charted map carries ~410,000 water tiles alone, and reading them to
-/// find a bounding box would cost more than the whole rest of this scorer for
-/// an answer no better than seventeen probes give.
-///
-/// A probe finds a tile iff the mod wrote that chunk's tiles out, which it
-/// does once per chunk for every tile in it (`writeout_tiles`,
-/// `control.lua:2151`) — so a hit means the chunk is charted, not merely that
-/// something interesting stands there.
-fn probe_charting(state: &PlanState, origin: &Position, radius: f64) -> ChartingScore {
-    let graph = &state.base().entity_graph;
-    let mut points = vec![origin.clone()];
-    for scale in [0.5, 1.0] {
-        for (dx, dy) in COMPASS {
-            points.push(Position::new(
-                origin.x() + dx * radius * scale,
-                origin.y() + dy * radius * scale,
-            ));
-        }
-    }
-    let probes = points.len();
-    let blind: Vec<Position> = points
-        .into_iter()
-        .filter(|point| {
-            let box_around = Rect::new(
-                &Position::new(point.x() - 0.5, point.y() - 0.5),
-                &Position::new(point.x() + 0.5, point.y() + 0.5),
-            );
-            graph.tiles_within(&box_around).is_empty()
-        })
-        .collect();
-    ChartingScore {
-        covered: probes - blind.len(),
-        probes,
-        blind,
     }
 }
 

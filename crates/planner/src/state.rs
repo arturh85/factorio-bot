@@ -8,9 +8,10 @@ use factorio_bot_core::factorio::util::{add_to_rect, calculate_distance};
 use factorio_bot_core::factorio::world::{FactorioWorld, WalkRefusal};
 use factorio_bot_core::num_traits::FromPrimitive;
 use factorio_bot_core::types::{
-    Direction, FactorioEntity, FactorioTechnology, FactorioTile, PlayerId, Pos, Position, Rect,
-    ResourcePatch,
+    Direction, FactorioEntity, FactorioTechnology, FactorioTile, HandMiningObstacle, PlayerId, Pos,
+    Position, Rect, ResourcePatch, VANILLA_CHARACTER_RESOURCE_CATEGORIES,
 };
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -655,6 +656,143 @@ pub struct MachineQueue {
     /// with another machine's, so that a bank spreads across the least-loaded
     /// furnaces instead of piling onto the nearest one.
     pub queued: Ticks,
+}
+
+/// The eight compass directions, as unit vectors, with their names.
+///
+/// Written out rather than derived from `cos`/`sin`: the planner's determinism
+/// rule is about floats, and a table of constants cannot differ between two
+/// builds of the same source the way a libm call can. Named in Factorio's
+/// frame, where `y` grows southward, so `(0, -1)` is north.
+const COMPASS: [(&str, f64, f64); 8] = [
+    ("east", 1., 0.),
+    ("south-east", D, D),
+    ("south", 0., 1.),
+    ("south-west", -D, D),
+    ("west", -1., 0.),
+    ("north-west", -D, -D),
+    ("north", 0., -1.),
+    ("north-east", D, -D),
+];
+const D: f64 = std::f64::consts::FRAC_1_SQRT_2;
+
+/// Where the tile tree runs out: seventeen probes of the ground around a
+/// point, and which of them found nothing.
+///
+/// Built by [`PlanState::charting`]; read by `crate::score`, which reports
+/// it beside a map's resource distances, and by [`ChartingSummary`], which
+/// turns it into the sentence a `NotCharted` refusal carries. **A blind probe
+/// says the chunk was never written out, not that nothing stands there** --
+/// see [`PlanState::charting`] for what a probe is.
+///
+/// **This is the field that decides whether a map score means anything**,
+/// and it exists because the failure it guards against is silent:
+/// `EntityGraph` holds charted chunks, so a map whose iron is at 400 tiles and
+/// a map whose iron has not been looked at produce the *same* report -- "no
+/// iron-ore within the radius" -- and only this tells them apart. The same
+/// silence is what `PlannerError::NotCharted` names for a plan.
+///
+/// # What t=0 actually charts
+///
+/// Nothing in `mods/BotBridge` calls `force.chart`. The mod replays
+/// `surface.get_chunks()` once at `whoami("server")` (`initial_discovery`,
+/// `control.lua:827`), one chunk per tick, and after that only reacts to
+/// `on_chunk_generated`. So what a t=0 dump knows is **the chunks the save was
+/// created with**, which for a plain `--create` is the generated spawn region:
+/// measured off `workspace/server-log.txt`, 418 chunks in a 20x20 core block,
+/// tiles spanning `[-320, 320)` on both axes -- 409,600 tiles.
+///
+/// `crate::score::DEFAULT_SEARCH_RADIUS` is 256, and every point inside a disc
+/// of radius 256 has `|x| <= 256 < 320`, so **the whole default search disc
+/// fits inside the region a t=0 dump has already charted**. That is what makes
+/// scoring a fresh map worth doing at all, and it is a fact about one measured
+/// save rather than a guarantee -- which is exactly why this is probed per
+/// dump and reported, instead of being asserted in a comment. It is also why
+/// a `NotCharted` refusal on a t=0 dump usually reports the disc as fully
+/// covered and points *beyond* the radius: the resource is not inside the
+/// generated spawn region, and the ground past it has never been generated.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ChartingScore {
+    /// Probe points that landed on ground the model has a tile for.
+    pub covered: usize,
+    /// Probe points tried.
+    pub probes: usize,
+    /// The probes that found nothing: the directions this score is blind in.
+    /// Listed rather than counted because "blind to the north-east" and "blind
+    /// everywhere past half the radius" are different findings. In probe
+    /// order -- the origin, then the compass at half the radius, then at the
+    /// full radius -- so the first entry is also the nearest.
+    pub blind: Vec<Position>,
+}
+
+impl ChartingScore {
+    /// Whether every probe found charted ground.
+    #[must_use]
+    pub fn is_complete(&self) -> bool {
+        self.blind.is_empty() && self.probes > 0
+    }
+}
+
+/// The nearest probe that found no ground: the direction charting ends
+/// soonest in, and how far out that is.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Frontier {
+    /// A compass name, or `here` when the origin itself is uncharted.
+    pub direction: &'static str,
+    pub position: Position,
+    pub distance: f64,
+}
+
+/// What a plan can see of the map around a point, as a sentence.
+///
+/// This is the payload of [`PlannerError::NotCharted`]: which resources the
+/// model holds at all, how much of the disc around `origin` is charted, and
+/// where charted ground ends. It exists so that a refusal says "unexplored"
+/// with a direction attached rather than "absent" with nothing -- piece 1 of
+/// `docs/superpowers/specs/2026-09-04-exploration-design.md`.
+///
+/// `seen` is the resource census the fingerprint already computes: tiles per
+/// resource name, charted anywhere in the model. Tiles rather than patches,
+/// for the reason [`PlanState::resource_patches`] documents about the flood
+/// fill.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChartingSummary {
+    pub origin: Position,
+    pub radius: f64,
+    pub score: ChartingScore,
+    pub frontier: Option<Frontier>,
+    pub seen: BTreeMap<String, usize>,
+}
+
+impl std::fmt::Display for ChartingSummary {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.seen.is_empty() {
+            write!(f, "the plan sees no resource tile at all")?;
+        } else {
+            let seen: Vec<String> = self
+                .seen
+                .iter()
+                .map(|(name, tiles)| format!("{name} ({tiles} tiles)"))
+                .collect();
+            write!(f, "the plan sees {}", seen.join(", "))?;
+        }
+        write!(
+            f,
+            "; charted ground covers {} of {} probes within {:.0} tiles of {}",
+            self.score.covered, self.score.probes, self.radius, self.origin
+        )?;
+        match &self.frontier {
+            Some(Frontier {
+                direction: "here", ..
+            }) => write!(f, ", and the ground under the origin itself is uncharted"),
+            Some(frontier) => write!(
+                f,
+                ", ending soonest {:.0} tiles {} at {}",
+                frontier.distance, frontier.direction, frontier.position
+            ),
+            None => write!(f, ", so the uncharted ground is beyond that radius"),
+        }
+    }
 }
 
 /// The world at a point in a hypothetical plan.
@@ -3680,6 +3818,158 @@ impl PlanState {
         self.base.entity_graph.has_resource_patches(item)
     }
 
+    /// Why a character could not mine `resource` by hand, or `None` when
+    /// nothing the prototypes say forbids it.
+    ///
+    /// The rule is [`FactorioEntityPrototype::hand_mining_obstacle`]'s, and
+    /// this supplies its two inputs from the base world: the character's own
+    /// `resource_categories`, falling back to the vanilla default when the
+    /// prototype table has no `character` or one captured before the field
+    /// existed (the same situation `character_mining_speed` covers), and the
+    /// item table, which cannot say anything when it is empty and is then
+    /// trusted rather than read as "nothing is an item".
+    ///
+    /// `None` also for a name with no prototype: a question about iron plate
+    /// is not a question about mining, and this method has nothing to say.
+    ///
+    /// [`FactorioEntityPrototype::hand_mining_obstacle`]:
+    /// factorio_bot_core::types::FactorioEntityPrototype::hand_mining_obstacle
+    pub fn hand_mining_obstacle(&self, resource: &str) -> Option<HandMiningObstacle> {
+        let prototypes = &self.base.entity_prototypes;
+        let character_categories: Vec<String> = prototypes
+            .get("character")
+            .and_then(|character| character.resource_categories.clone())
+            // An empty list is a character that mines nothing, which no game
+            // ships; it is what a `{}` on the wire deserialises to, and it is
+            // read as "not said" rather than as a ban on every ore.
+            .filter(|categories| !categories.is_empty())
+            .unwrap_or_else(|| {
+                VANILLA_CHARACTER_RESOURCE_CATEGORIES
+                    .iter()
+                    .map(|category| (*category).to_string())
+                    .collect()
+            });
+        let items = &self.base.item_prototypes;
+        let is_item = |name: &str| items.is_empty() || items.contains_key(name);
+        let proto = prototypes.get(resource)?;
+        proto.hand_mining_obstacle(&character_categories, &is_item)
+    }
+
+    /// The resource entity whose mining yields `item`, **whether or not any of
+    /// it is charted**.
+    ///
+    /// Read off the prototype table, which the game sends whole, rather than
+    /// off the resource map, which holds only charted tiles. That difference
+    /// is the whole point: it is what lets a refusal tell "this item does not
+    /// come out of the ground" from "it does, and no ground the plan can see
+    /// has any".
+    ///
+    /// The prototype named like the item wins when it qualifies -- every
+    /// vanilla ore is named for what it yields -- and otherwise the smallest
+    /// qualifying name, so the answer does not depend on `DashMap`'s
+    /// iteration order. `None` for anything no `resource` prototype yields.
+    pub fn resource_yielding(&self, item: &str) -> Option<String> {
+        let yields = |proto: &factorio_bot_core::types::FactorioEntityPrototype| {
+            proto.entity_type == "resource"
+                && proto
+                    .mine_result
+                    .as_ref()
+                    .is_some_and(|products| products.contains_key(item))
+        };
+        let prototypes = &self.base.entity_prototypes;
+        if prototypes.get(item).is_some_and(|proto| yields(&proto)) {
+            return Some(item.to_string());
+        }
+        prototypes
+            .iter()
+            .filter(|proto| yields(proto))
+            .map(|proto| proto.name.clone())
+            .min()
+    }
+
+    /// Asks the model whether it has terrain at the edge and the middle of the
+    /// disc of `radius` around `origin`.
+    ///
+    /// Seventeen points -- the origin, then the eight compass directions at
+    /// half the radius and at the full radius -- each answered by a one-tile
+    /// box query against the tile tree. Deliberately *not* a count of every
+    /// charted tile: a fully charted map carries ~410,000 water tiles alone,
+    /// and reading them to find a bounding box would cost more than a whole
+    /// map score for an answer no better than seventeen probes give.
+    ///
+    /// A probe finds a tile iff the mod wrote that chunk's tiles out, which it
+    /// does once per chunk for every tile in it (`writeout_tiles`,
+    /// `control.lua`) -- so a hit means the chunk is charted, not merely that
+    /// something interesting stands there. A world attached from a snapshot
+    /// fetches no tiles at all and answers blind everywhere.
+    ///
+    /// This used to live in `crate::score` and reach past `PlanState` into
+    /// the entity graph; it is here so a refusal can ask the same question a
+    /// map score does.
+    #[must_use]
+    pub fn charting(&self, origin: &Position, radius: f64) -> ChartingScore {
+        let probes = charting_probes(origin, radius);
+        let blind: Vec<Position> = probes
+            .into_iter()
+            .filter(|(_, _, point)| {
+                self.base
+                    .entity_graph
+                    .tiles_within(&tile_box(point))
+                    .is_empty()
+            })
+            .map(|(_, _, point)| point)
+            .collect();
+        ChartingScore {
+            covered: CHARTING_PROBES - blind.len(),
+            probes: CHARTING_PROBES,
+            blind,
+        }
+    }
+
+    /// [`Self::charting`] with the frontier and the resource census attached:
+    /// the sentence a `NotCharted` refusal carries.
+    ///
+    /// The frontier is the nearest blind probe, ties broken by probe order
+    /// (the compass, east first, clockwise) so two runs on one dump name the
+    /// same direction. The census is the fingerprint's, so it costs one walk
+    /// of the charted resource tiles -- affordable on a refusal path, and the
+    /// same number `score-map` prints.
+    #[must_use]
+    pub fn charting_summary(&self, origin: &Position, radius: f64) -> ChartingSummary {
+        let score = self.charting(origin, radius);
+        let frontier = charting_probes(origin, radius)
+            .into_iter()
+            .filter(|(_, _, point)| {
+                self.base
+                    .entity_graph
+                    .tiles_within(&tile_box(point))
+                    .is_empty()
+            })
+            .map(|(direction, distance, position)| Frontier {
+                direction,
+                position,
+                distance,
+            })
+            // The probe list is ordered by distance already (origin, half,
+            // full), so the first blind probe is the nearest; stated as a
+            // `min_by` anyway so the claim does not depend on the list's
+            // construction.
+            .min_by(|a, b| a.distance.total_cmp(&b.distance));
+        let seen = self
+            .base
+            .entity_graph
+            .resource_fingerprint()
+            .map(|print| print.tiles)
+            .unwrap_or_default();
+        ChartingSummary {
+            origin: origin.clone(),
+            radius,
+            score,
+            frontier,
+            seen,
+        }
+    }
+
     /// Every standing tree or rock that yields `item`, as
     /// `(entity name, position, what one of them yields)`.
     ///
@@ -3728,6 +4018,38 @@ impl PlanState {
                     .any(|position| !self.removed.contains(&Pos::from(position)))
             })
     }
+}
+
+/// How many points [`PlanState::charting`] probes: the origin and the compass
+/// at two ranges.
+const CHARTING_PROBES: usize = 1 + 2 * COMPASS.len();
+
+/// The probe points of [`PlanState::charting`], in probe order, each with the
+/// compass name of its direction and its distance from `origin`.
+fn charting_probes(origin: &Position, radius: f64) -> Vec<(&'static str, f64, Position)> {
+    let mut points = Vec::with_capacity(CHARTING_PROBES);
+    points.push(("here", 0., origin.clone()));
+    for scale in [0.5, 1.0] {
+        for (name, dx, dy) in COMPASS {
+            points.push((
+                name,
+                radius * scale,
+                Position::new(
+                    origin.x() + dx * radius * scale,
+                    origin.y() + dy * radius * scale,
+                ),
+            ));
+        }
+    }
+    points
+}
+
+/// The one-tile box around `point` a charting probe asks the tile tree for.
+fn tile_box(point: &Position) -> Rect {
+    Rect::new(
+        &Position::new(point.x() - TILE_HALF_SIDE, point.y() - TILE_HALF_SIDE),
+        &Position::new(point.x() + TILE_HALF_SIDE, point.y() + TILE_HALF_SIDE),
+    )
 }
 
 #[cfg(test)]

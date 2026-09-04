@@ -470,6 +470,46 @@ fn judge_set_recipe_reply(
 /// that was not given.
 const CAN_PLACE_REFUSAL: &str = "can_place_entity said 'no'";
 
+/// The mod's wording for a placement refused because some character *other*
+/// than the acting bot is standing in the footprint.
+///
+/// Deliberately outside the [`CAN_PLACE_REFUSAL`] family -- see
+/// `rcon_place_entity` in `mods/BotBridge/control.lua`, which chooses between
+/// the three answers -- so it is never remembered as a fact about the ground.
+/// It is a fact about a character, and a character moves. Matched here, at the
+/// one place the game's own line is still a line, for the same reason
+/// [`CAN_PLACE_REFUSAL`] is: a wording change costs a retry that no longer
+/// happens, never a site fenced off for a reason nobody gave.
+const FOOTPRINT_CHARACTER_REFUSAL: &str = "a character is standing in the footprint";
+
+/// How many times [`FactorioRcon::place_entity_timed`] issues a placement whose
+/// footprint a character is standing in, counting the first.
+///
+/// Four -- three waits of [`FOOTPRINT_CLEAR_BACKOFF`], so 1.8 s, about 108
+/// ticks. The mod dispatches a step-aside walk for the blocker as it refuses,
+/// so the question being asked again is "has it moved yet"; the one measurement
+/// there is says 53 ticks (see [`FOOTPRINT_CLEAR_BACKOFF`]), and the budget is
+/// twice that because the sample beat that produced the 53 is 60 ticks wide and
+/// the true figure is anywhere inside it.
+///
+/// The only blocker that never moves is one the mod declined to steer -- it is
+/// already walking or mining for an action of its own, and so is leaving anyway
+/// -- or one the game found nowhere to put. Both of those keep the old
+/// behaviour once the attempts run out, two seconds later.
+const FOOTPRINT_CLEAR_ATTEMPTS: u32 = 4;
+
+/// How long to wait between the attempts [`FOOTPRINT_CLEAR_ATTEMPTS`] counts.
+///
+/// Sized from the run that motivated the retry: the blocker in
+/// `run-1788481380-80843` was clear of the footprint **53 ticks** -- under a
+/// second at 60 UPS -- after the refusal that asked it to move. A step aside is
+/// one or two tiles by construction (`placement_step_aside_target` leaves by
+/// the *nearest* edge), so this is a walk measured in tens of ticks, not
+/// hundreds. Wall clock rather than ticks because that is what this layer has:
+/// nothing here reads the game clock, and a placement is judged in the tick it
+/// is received.
+const FOOTPRINT_CLEAR_BACKOFF: Duration = Duration::from_millis(600);
+
 /// Remembers `line` as a refused site, if it is one.
 ///
 /// Called on both arms that turn an unrecognised reply into an error: the
@@ -2896,144 +2936,209 @@ impl FactorioRcon {
             self.move_player(world, player_id, &entity_position, Some(build_distance))
                 .await?;
         }
-        let (lines, tick) = self
-            .remote_call_timed(
-                "place_entity",
-                vec![
-                    player_id.to_string(),
-                    str_to_lua(&item_name),
-                    position_to_lua(&entity_position),
-                    direction.to_string(),
-                ],
-            )
-            .await?;
-        // Past this point the game has answered the RPC, so every failure below
-        // is a verdict the game gave and carries the tick it gave it at. On the
-        // blocked-and-retry path that stays true: `refused_at` is re-bound to
-        // the retry's stamp, which is the dispatch the outcome belongs to.
-        let refused_at = ActionTicks::at(tick);
-        if let Some(lines) = lines {
+        // **The loop is the missing half of `step_aside_from_footprint`.**
+        //
+        // The mod answers a placement refused for a character *other* than the
+        // acting bot with wording deliberately outside the
+        // `can_place_entity said 'no'` family -- nothing durable is learned --
+        // and, since `537adf30`, it also asks that character to walk out of the
+        // footprint (`mods/BotBridge/control.lua`). Its own comment says what
+        // it cannot do: "This does not make the placement succeed ... the
+        // difference is that by the time anything asks again, the blocker is
+        // somewhere else." **Nothing asked again.** The action failed, the
+        // executor stopped that bot's chain, and the supervisor loop re-planned
+        // the milestone from scratch.
+        //
+        // `run-1788481380-80843` is what that costs. Bot 4 walked to within
+        // build reach of the furnace it was to load at `[-38, -16]`, stopped at
+        // `(-38.25, -11.2)`, and stood there from tick 11760 waiting for bot 1
+        // to build that furnace -- 4,000 ticks parked a third of a tile inside
+        // the footprint of a *different* furnace, `[-39, -12]`, that bot 1 was
+        // to place next. The placement was refused at tick 15727. The mod's
+        // step-aside walk moved bot 4 clear by tick 15780, **53 ticks later**;
+        // by then the run had already been abandoned with 39 of its 194 steps
+        // never dispatched and re-planned from scratch, and the milestone
+        // finished at 41,365 instead of the 34,065 the first plan was on course
+        // for -- 10.5 minutes against 8.5.
+        //
+        // So: ask again. A bounded number of times, with a wait long enough for
+        // a step aside -- a walk of one or two tiles -- to land. A blocker that
+        // is *not* going to move (one the mod declined to steer because it is
+        // already walking or mining for an action of its own, or one that fits
+        // nowhere near) costs the attempts and then reports exactly what it
+        // reported before, so nothing that used to be diagnosable stops being.
+        //
+        // Not the planner's job. `PlanState::is_area_free` already refuses a
+        // site with a character in it, roster bot or not, and did so here: at
+        // plan time bot 4 was at `(0.6, -0.6)`, twelve thousand ticks and forty
+        // tiles from where it would be standing. A snapshot cannot see that,
+        // which is why the recovery has to be here, where the game's own
+        // refusal is still a line.
+        let mut attempt: u32 = 0;
+        // Labelled because the actor-blocks branch nested inside also needs to
+        // come back here -- see `continue 'place` in it.
+        'place: loop {
+            let (lines, tick) = self
+                .remote_call_timed(
+                    "place_entity",
+                    vec![
+                        player_id.to_string(),
+                        str_to_lua(&item_name),
+                        position_to_lua(&entity_position),
+                        direction.to_string(),
+                    ],
+                )
+                .await?;
+            // Past this point the game has answered the RPC, so every failure
+            // below is a verdict the game gave and carries the tick it gave it
+            // at. On the blocked-and-retry path that stays true: `refused_at`
+            // is re-bound to the retry's stamp, which is the dispatch the
+            // outcome belongs to.
+            let refused_at = ActionTicks::at(tick);
+            let Some(lines) = lines else {
+                return Err(ActionFailure::refused(
+                    RconUnexpectedEmptyResponse {}.into(),
+                    refused_at,
+                ));
+            };
             if lines.len() != 1 {
-                Err(ActionFailure::refused(
+                return Err(ActionFailure::refused(
                     RconUnexpectedOutput {
                         output: lines.join("\n"),
                     }
                     .into(),
                     refused_at,
-                ))
-            } else {
-                let line = &lines[0];
-                // `starts_with`, not a grapheme index. The old form built a
-                // grapheme vector and read `chars[0]`, which panics on the
-                // empty line an empty reply body splits into -- a panic inside
-                // a run's dispatch task, on the failure path, where a returned
-                // error is what the executor is waiting for.
-                if line.starts_with('{') {
-                    Ok((
-                        parse_reply("place_entity", line)
-                            .map_err(|e| ActionFailure::refused(e, refused_at))?,
-                        ActionTicks::at(tick),
-                    ))
-                } else if &line[..] == "§player_blocks_placement§" {
-                    // The eight compass points. This was `0..8u8` on the
-                    // Factorio 1.x scale, where those were all eight
-                    // directions; on the 2.x scale `0..8` is only half a
-                    // circle, so it has to be named rather than counted.
-                    for test_direction in Direction::compass() {
-                        let Some(test_position) =
-                            move_position(&player_position, test_direction, 5.0)
-                        else {
-                            continue;
-                        };
-                        if self
-                            .is_area_empty(&AreaFilter::PositionRadius((
-                                test_position.clone(),
-                                Some(2.0),
-                            )))
+                ));
+            }
+            let line = &lines[0];
+            // `starts_with`, not a grapheme index. The old form built a
+            // grapheme vector and read `chars[0]`, which panics on the
+            // empty line an empty reply body splits into -- a panic inside
+            // a run's dispatch task, on the failure path, where a returned
+            // error is what the executor is waiting for.
+            if line.starts_with('{') {
+                return Ok((
+                    parse_reply("place_entity", line)
+                        .map_err(|e| ActionFailure::refused(e, refused_at))?,
+                    ActionTicks::at(tick),
+                ));
+            }
+            if &line[..] == "§player_blocks_placement§" {
+                // The eight compass points. This was `0..8u8` on the
+                // Factorio 1.x scale, where those were all eight
+                // directions; on the 2.x scale `0..8` is only half a
+                // circle, so it has to be named rather than counted.
+                for test_direction in Direction::compass() {
+                    let Some(test_position) = move_position(&player_position, test_direction, 5.0)
+                    else {
+                        continue;
+                    };
+                    if self
+                        .is_area_empty(&AreaFilter::PositionRadius((
+                            test_position.clone(),
+                            Some(2.0),
+                        )))
+                        .await
+                        .map_err(|e| ActionFailure::refused(e, refused_at))?
+                    {
+                        self.move_player(world, player_id, &test_position, Some(1.0))
                             .await
-                            .map_err(|e| ActionFailure::refused(e, refused_at))?
-                        {
-                            self.move_player(world, player_id, &test_position, Some(1.0))
-                                .await
-                                .map_err(|e| ActionFailure::refused(e, refused_at))?;
-                            let (lines, tick) = self
-                                .remote_call_timed(
-                                    "place_entity",
-                                    vec![
-                                        player_id.to_string(),
-                                        str_to_lua(&item_name),
-                                        position_to_lua(&entity_position),
-                                        direction.to_string(),
-                                    ],
-                                )
-                                .await?;
-                            let refused_at = ActionTicks::at(tick);
-                            return if let Some(lines) = lines {
-                                if lines.len() != 1 {
-                                    return Err(ActionFailure::refused(
-                                        RconUnexpectedOutput {
-                                            output: lines.join("\n"),
-                                        }
-                                        .into(),
-                                        refused_at,
-                                    ));
-                                }
-                                let line = &lines[0];
-                                if line.starts_with('{') {
-                                    Ok((
-                                        parse_reply("place_entity", line)
-                                            .map_err(|e| ActionFailure::refused(e, refused_at))?,
-                                        ActionTicks::at(tick),
-                                    ))
-                                } else if &line[..] == "§player_blocks_placement§" {
-                                    Err(ActionFailure::refused(
-                                        RconPlayerBlockesPlacement {}.into(),
-                                        refused_at,
-                                    ))
-                                } else {
-                                    note_placement_refusal(
-                                        world,
-                                        tick,
-                                        line,
-                                        &item_name,
-                                        &entity_position,
-                                    );
-                                    Err(ActionFailure::refused(
-                                        RconError {
-                                            message: line.clone(),
-                                        }
-                                        .into(),
-                                        refused_at,
-                                    ))
-                                }
-                            } else {
+                            .map_err(|e| ActionFailure::refused(e, refused_at))?;
+                        let (lines, tick) = self
+                            .remote_call_timed(
+                                "place_entity",
+                                vec![
+                                    player_id.to_string(),
+                                    str_to_lua(&item_name),
+                                    position_to_lua(&entity_position),
+                                    direction.to_string(),
+                                ],
+                            )
+                            .await?;
+                        let refused_at = ActionTicks::at(tick);
+                        return if let Some(lines) = lines {
+                            if lines.len() != 1 {
+                                return Err(ActionFailure::refused(
+                                    RconUnexpectedOutput {
+                                        output: lines.join("\n"),
+                                    }
+                                    .into(),
+                                    refused_at,
+                                ));
+                            }
+                            let line = &lines[0];
+                            if line.starts_with('{') {
+                                Ok((
+                                    parse_reply("place_entity", line)
+                                        .map_err(|e| ActionFailure::refused(e, refused_at))?,
+                                    ActionTicks::at(tick),
+                                ))
+                            } else if &line[..] == "§player_blocks_placement§" {
                                 Err(ActionFailure::refused(
-                                    RconUnexpectedEmptyResponse {}.into(),
+                                    RconPlayerBlockesPlacement {}.into(),
                                     refused_at,
                                 ))
-                            };
-                        }
+                            } else if line.contains(FOOTPRINT_CHARACTER_REFUSAL)
+                                && attempt + 1 < FOOTPRINT_CLEAR_ATTEMPTS
+                            {
+                                // Both blockers at once: the actor was in the
+                                // expanded box (which is why the mod answered
+                                // with the sentinel, actor first) *and* someone
+                                // else is in the raw one, so walking the actor
+                                // aside only uncovered the second. The same
+                                // transient as below, reached by a different
+                                // road, and it goes back to the same loop --
+                                // which re-issues from the actor's new position
+                                // and gives the step-aside walk the mod has just
+                                // dispatched time to land.
+                                attempt += 1;
+                                sleep(FOOTPRINT_CLEAR_BACKOFF).await;
+                                continue 'place;
+                            } else {
+                                note_placement_refusal(
+                                    world,
+                                    tick,
+                                    line,
+                                    &item_name,
+                                    &entity_position,
+                                );
+                                Err(ActionFailure::refused(
+                                    RconError {
+                                        message: line.clone(),
+                                    }
+                                    .into(),
+                                    refused_at,
+                                ))
+                            }
+                        } else {
+                            Err(ActionFailure::refused(
+                                RconUnexpectedEmptyResponse {}.into(),
+                                refused_at,
+                            ))
+                        };
                     }
-                    Err(ActionFailure::refused(
-                        RconPlayerBlockesAllPlacement {}.into(),
-                        refused_at,
-                    ))
-                } else {
-                    note_placement_refusal(world, tick, line, &item_name, &entity_position);
-                    Err(ActionFailure::refused(
-                        RconError {
-                            message: line.clone(),
-                        }
-                        .into(),
-                        refused_at,
-                    ))
                 }
+                return Err(ActionFailure::refused(
+                    RconPlayerBlockesAllPlacement {}.into(),
+                    refused_at,
+                ));
             }
-        } else {
-            Err(ActionFailure::refused(
-                RconUnexpectedEmptyResponse {}.into(),
+            // The transient the mod has just acted on. Retried rather than
+            // reported, because the report is what threw the run away.
+            if line.contains(FOOTPRINT_CHARACTER_REFUSAL) && attempt + 1 < FOOTPRINT_CLEAR_ATTEMPTS
+            {
+                attempt += 1;
+                sleep(FOOTPRINT_CLEAR_BACKOFF).await;
+                continue;
+            }
+            note_placement_refusal(world, tick, line, &item_name, &entity_position);
+            return Err(ActionFailure::refused(
+                RconError {
+                    message: line.clone(),
+                }
+                .into(),
                 refused_at,
-            ))
+            ));
         }
     }
 
@@ -5172,6 +5277,26 @@ mod transfer_guarantee_tests {
     /// footprint is the `§player_blocks_placement§` case, and `held` at zero is
     /// the "does not have any" case.
     fn stub_place(can_place: bool, held: i64) -> String {
+        // Standing dead centre of the tile it is about to build on: the live
+        // 2026-09-02 case, and what puts the acting player inside its own
+        // footprint.
+        stub_place_at(can_place, held, 38.3046875, 16.4765625, "{}")
+    }
+
+    /// [`stub_place`] with the acting player's position and the characters the
+    /// surface reports named.
+    ///
+    /// The third refusal branch -- some *other* character in the footprint --
+    /// is unreachable from `stub_place`: `rcon_place_entity` tests the acting
+    /// player first, on purpose, so the acting player has to be standing clear
+    /// before `character_in_footprint` is ever asked.
+    fn stub_place_at(
+        can_place: bool,
+        held: i64,
+        player_x: f64,
+        player_y: f64,
+        characters: &str,
+    ) -> String {
         format!(
             r#"
             local function auto()
@@ -5196,16 +5321,19 @@ mod transfer_guarantee_tests {
             _rcon_lines = {{}}
             rcon = {{ print = function(s) _rcon_lines[#_rcon_lines + 1] = tostring(s) end }}
 
+            local characters = {characters}
             local surface = {{
                 can_place_entity = function(args) return {can_place} end,
                 create_entity = function(args) return nil end,
                 find_entity = function(name, pos) return nil end,
+                -- Only `character_in_footprint` and
+                -- `step_aside_from_footprint` ask, and both ask for
+                -- characters, so the filter is not modelled.
+                find_entities_filtered = function(args) return characters end,
             }}
             local player = {{
                 name = "bot1",
-                -- Standing dead centre of the tile it is about to build on:
-                -- the live 2026-09-02 case.
-                position = {{ x = 38.3046875, y = 16.4765625 }},
+                position = {{ x = {player_x}, y = {player_y} }},
                 force = "player",
                 surface = surface,
                 get_item_count = function(name) return {held} end,
@@ -5228,6 +5356,9 @@ mod transfer_guarantee_tests {
         "#,
             can_place = if can_place { "true" } else { "false" },
             held = held,
+            player_x = player_x,
+            player_y = player_y,
+            characters = characters,
             tick = STUB_TICK,
         )
     }
@@ -5267,6 +5398,58 @@ mod transfer_guarantee_tests {
                 "expected {expected:?} in {lines:?}"
             );
         }
+    }
+
+    /// **The seam the retry hangs on.** `place_entity_timed` decides whether to
+    /// ask again by matching [`FOOTPRINT_CHARACTER_REFUSAL`] against the line
+    /// the mod prints, so the two have to be pinned together: a wording change
+    /// on the Lua side would otherwise cost the retry silently and the only
+    /// symptom would be a run thrown away, six weeks later, for a blocker that
+    /// walked out of the way one second after being asked.
+    ///
+    /// Also asserts what the line must *not* say. The refusal ledger is
+    /// permanent and never expires, so a character -- which moves -- must never
+    /// be recorded as a fact about the ground; that is decided here, by the
+    /// wording, and [`the_footprint_character_refusal_is_not_remembered`] holds
+    /// the Rust half.
+    #[test]
+    fn a_character_in_the_footprint_is_refused_in_its_own_wording() {
+        // The acting player stands well clear, so the actor-first branch does
+        // not claim this refusal. The blocker's `player` is nil -- a character
+        // nobody is driving -- which is the one case `step_aside_from_footprint`
+        // must skip rather than raise on, and skipping it keeps this stub to
+        // the branch under test.
+        let blocker = r#"{ {
+            position = { x = 38.5, y = 16.5 },
+            bounding_box = {
+                left_top = { x = 38.3, y = 16.3 },
+                right_bottom = { x = 38.7, y = 16.7 },
+            },
+            player = nil,
+        } }"#;
+        let printed = run_handler(stub_place_at(false, 1, 30.5, 16.5, blocker), PLACE_FURNACE);
+        let body = reply_body(&printed);
+        let (lines, tick) = take_tick_stamp(split_reply(&body, true));
+        assert_eq!(
+            tick,
+            Some(STUB_TICK),
+            "a refusal the game reached must carry its tick; it printed {printed:?}"
+        );
+        let lines = lines.expect("the refusal itself must survive the stamp being taken off");
+        assert_eq!(
+            lines.len(),
+            1,
+            "`place_entity_timed` reads a one-line reply; got {lines:?}"
+        );
+        assert!(
+            lines[0].contains(FOOTPRINT_CHARACTER_REFUSAL),
+            "`place_entity_timed` retries on this exact substring; got {lines:?}"
+        );
+        assert!(
+            !lines[0].contains(CAN_PLACE_REFUSAL),
+            "a character is not a fact about the ground, and the refusal ledger \
+             never expires; got {lines:?}"
+        );
     }
 
     /// Enough of the API for `rcon_can_place_entities` to run, plus a record
@@ -6095,6 +6278,28 @@ mod placement_refusal_tests {
             world.placement_refusals().is_empty(),
             "the mod named the cause and the RCON layer retries it; that is \
              not a fact about the ground"
+        );
+    }
+
+    /// The third answer, and the one that cost `run-1788481380-80843` its
+    /// nine-minute target. A bot parked in the footprint is a transient the mod
+    /// has already asked to move; remembering it would fence the planner out of
+    /// good ground for the rest of the run **and** suppress the retry, because
+    /// `place_entity_timed` re-issues this refusal and `recover`'s tier 1 is
+    /// gated on `is_site_refused`.
+    #[test]
+    fn the_footprint_character_refusal_is_not_remembered() {
+        let world = world();
+        note_placement_refusal(
+            &world,
+            Some(15727),
+            "cannot place item 'stone-furnace' because a character is standing in the footprint",
+            "stone-furnace",
+            &Position::new(-39., -12.),
+        );
+        assert!(
+            world.placement_refusals().is_empty(),
+            "a character moves -- and this one had moved 53 ticks later"
         );
     }
 

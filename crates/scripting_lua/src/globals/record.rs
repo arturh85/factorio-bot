@@ -376,6 +376,15 @@ fn classify_failure(error: &str) -> ActionFailure {
         FailureKind::Unreachable
     } else if error.contains("player still blocks placement")
         || error.contains("player blocks placement in all directions")
+        // The third member of the same family, and the one that reaches a
+        // record only after `place_entity_timed` has re-issued the placement
+        // `FOOTPRINT_CLEAR_ATTEMPTS` times and the blocker still has not moved
+        // (`crates/core/src/factorio/rcon.rs`). Without this arm it lands in
+        // `Rejected` -- indistinguishable in a query from a chest that was
+        // full or an ore that was gone -- which is how `run-1788481380-80843`
+        // recorded `kind: "rejected", detail: null` for the one failure that
+        // cost it the whole plan.
+        || error.contains("a character is standing in the footprint")
     {
         FailureKind::Blocked
     } else if error.contains("does not have any") {
@@ -2541,6 +2550,27 @@ mod tests {
             recorded_failure(
                 "failed",
                 r#""game rejected the command: player still blocks placement""#
+            ),
+            Some(ActionFailure {
+                kind: FailureKind::Blocked,
+                detail: None,
+            })
+        );
+    }
+
+    /// The exact line `run-1788481380-80843` recorded as
+    /// `kind: "rejected", detail: null`, which put the failure that cost the
+    /// run its plan in the same bucket as a full chest and an absent ore.
+    ///
+    /// It reaches a record at all only when `place_entity_timed`'s retries have
+    /// run out -- the blocker never moved -- and that is precisely the case a
+    /// reader needs to be able to find.
+    #[test]
+    fn a_character_in_the_footprint_is_blocked_not_merely_rejected() {
+        assert_eq!(
+            recorded_failure(
+                "failed",
+                r#""game rejected the command: Unexpected Response: cannot place item 'stone-furnace' because a character is standing in the footprint""#
             ),
             Some(ActionFailure {
                 kind: FailureKind::Blocked,

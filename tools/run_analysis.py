@@ -385,7 +385,13 @@ WALK_TEXT_RULES = (
 )
 
 ACTION_TEXT_RULES = (
-    ("blocked", re.compile(r"another character is standing|is in the way|blocked", re.I)),
+    # `character is standing` rather than `another character is standing`:
+    # the mining refusal says "another", the placement refusal
+    # (`rcon_place_entity`, `mods/BotBridge/control.lua`) says "a character is
+    # standing in the footprint", and the narrower pattern derived "rejected"
+    # for every one of the second kind -- including the one that ended
+    # `run-1788481380-80843`'s first plan.
+    ("blocked", re.compile(r"character is standing|is in the way|blocked", re.I)),
     ("missing_item", re.compile(r"not enough|missing|does not have", re.I)),
     ("unreachable", re.compile(r"too far|out of reach|unreachable", re.I)),
     ("partial_transfer", re.compile(r"moved \d+ of \d+", re.I)),

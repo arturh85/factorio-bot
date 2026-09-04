@@ -1,4 +1,6 @@
 use crate::ids::{ActionId, BotId, ChainId, ItemId};
+use crate::state::ChartingSummary;
+use factorio_bot_core::types::HandMiningObstacle;
 use miette::Diagnostic;
 use thiserror::Error;
 
@@ -116,6 +118,86 @@ pub enum PlannerError {
     #[error("no method can satisfy goal: {goal}")]
     #[diagnostic(code(planner::no_applicable_method))]
     NoApplicableMethod { goal: String },
+
+    /// The item comes out of the ground, and a character cannot dig it.
+    ///
+    /// **Deliberately not a `NoApplicableMethod`**, and deliberately raised
+    /// even when the wells are right there. Until 2026-09-04 the planner
+    /// gated hand-mining on `has_resource_patches(item)` alone, and a
+    /// resource's name and its product's name are both `crude-oil`, so a
+    /// world holding twelve charted wells (the provenance of
+    /// `run-1788538389-09170`, resumed from a savepoint) planned
+    /// `mine 10 crude-oil` and would have dispatched it. The game answers
+    /// `character.mine_entity(crude-oil) -> false` and leaves the well
+    /// untouched -- verified live that day -- so the action can only ever
+    /// fail, and a plan that cannot finish is worse than one that refuses.
+    ///
+    /// `mineable_properties.minable` is **not** the discriminator: it is true
+    /// for crude oil, because a pumpjack mines it. The game's own rule is the
+    /// resource's category against the character's `resource_categories`,
+    /// and that is what `obstacle` reports, along with the two other
+    /// prototype facts that refuse a hand -- a required fluid, or a product
+    /// that is not an item. See
+    /// [`factorio_bot_core::types::FactorioEntityPrototype::hand_mining_obstacle`].
+    ///
+    /// A verdict about the prototypes, not the map: exploring finds more of
+    /// the same wells. A script acts on it by not asking a bot's hands for
+    /// the item.
+    #[error("{item} comes from {resource}, which a character cannot mine by hand: {obstacle}")]
+    #[diagnostic(
+        code(planner::not_hand_minable),
+        help(
+            "`minable` on the prototype is what a mining drill or a pumpjack uses; a character \
+             mines only the resource categories its own prototype lists, needs no fluid piped \
+             in, and can only hold items"
+        )
+    )]
+    NotHandMinable {
+        item: ItemId,
+        /// The resource entity the item would be mined from.
+        resource: String,
+        obstacle: HandMiningObstacle,
+    },
+
+    /// The item comes out of the ground, and no ground the plan can see has
+    /// any.
+    ///
+    /// **"Unexplored", not "absent".** This is piece 1 of the exploration
+    /// design (`docs/superpowers/specs/2026-09-04-exploration-design.md`,
+    /// Q4): the model holds only the chunks the game has charted, so a
+    /// resource with no patch anywhere in it has *not been seen*, which a map
+    /// that genuinely lacks it and a map nobody has walked both produce.
+    /// Before this, that state fell through `Mine::applicable` to
+    /// `NoApplicableMethod`, whose text -- "no method can satisfy goal: have
+    /// 10 crude-oil" -- is true and says nothing a caller can act on.
+    ///
+    /// `charting` says what *was* seen, from where, and where seen ground
+    /// ends, so a supervisor script can walk a bot to the frontier and
+    /// re-plan; because the mod ingests charting as the bots walk, the
+    /// re-plan sees the new ground with no world-model change. That script
+    /// is piece 2 of the design and lives outside this crate; a first-class
+    /// exploration goal is piece 3 and is deliberately not built here.
+    #[error(
+        "no {resource} is charted anywhere this plan can see, so {item} has nowhere to come \
+         from; {charting}"
+    )]
+    #[diagnostic(
+        code(planner::not_charted),
+        help(
+            "the model holds only the chunks the game has charted, and a world attached from a \
+             snapshot holds only what the snapshot held; walk a bot towards the uncharted \
+             ground and plan again"
+        )
+    )]
+    NotCharted {
+        item: ItemId,
+        /// The resource entity the item would be mined from.
+        resource: String,
+        /// Boxed for `clippy::result_large_err`: the summary carries an
+        /// origin, a probe list and a census, and every `Result<_,
+        /// PlannerError>` in the crate would otherwise grow to carry it.
+        charting: Box<ChartingSummary>,
+    },
 
     /// A goal several bots could have shared, in a world with nowhere for even
     /// one of them to work on it.

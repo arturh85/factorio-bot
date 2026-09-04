@@ -189,6 +189,9 @@ mod tests {
             crafting_speed: None,
             max_underground_distance: None,
             fluidbox_prototypes: None,
+            resource_category: None,
+            resource_categories: None,
+            mining_fluid: None,
         }
     }
 
@@ -387,6 +390,9 @@ mod tests {
             crafting_speed: None,
             max_underground_distance: None,
             fluidbox_prototypes: None,
+            resource_category: None,
+            resource_categories: None,
+            mining_fluid: None,
         });
         assert!(
             !snapshot.is_plannable(),
@@ -427,6 +433,9 @@ mod tests {
             crafting_speed: None,
             max_underground_distance: None,
             fluidbox_prototypes: None,
+            resource_category: None,
+            resource_categories: None,
+            mining_fluid: None,
         });
         snapshot.item_prototypes.push(FactorioItemPrototype {
             name: "iron-plate".into(),

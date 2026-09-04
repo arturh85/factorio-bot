@@ -365,6 +365,38 @@ function serialize_entity_prototype(entity)
     ok, val = pcall(function() return entity.get_crafting_speed() end)
     if ok then record.crafting_speed = val end
     record.mine_result = mine_result
+    -- Whether a CHARACTER can mine this by hand, which `minable` and
+    -- `mine_result` cannot say: crude oil is `minable` with a product of ten
+    -- crude oil, exactly as iron ore is `minable` with a product of one iron
+    -- ore, and `products_to_dict` flattens the product's `type` away. `minable`
+    -- is the flag a pumpjack uses. Verified live on 2026-09-04:
+    -- `character.mine_entity(crude-oil)` returns false and leaves the well
+    -- untouched. The game's own rule is categorical: a resource carries a
+    -- `resource_category` (`category` at data stage) and a character or drill
+    -- carries the `resource_categories` it supports, and mining is allowed iff
+    -- the former is in the latter. Both halves are sent so the planner reads
+    -- the rule off the prototypes instead of naming crude oil.
+    ok, val = pcall(function() return entity.resource_category end)
+    if ok then record.resource_category = val end
+    ok, val = pcall(function()
+        local categories = entity.resource_categories
+        if categories == nil then return nil end
+        local names = {}
+        for name, _ in pairs(categories) do
+            table.insert(names, name)
+        end
+        -- Sorted so the order is the data's and not `pairs()`'s; nil rather
+        -- than `{}` so an empty set does not arrive as an empty *map*.
+        if #names == 0 then return nil end
+        table.sort(names)
+        return names
+    end)
+    if ok then record.resource_categories = val end
+    -- `required_fluid`: uranium ore needs sulfuric acid piped in, and a
+    -- character has no pipe.
+    if entity.mineable_properties and entity.mineable_properties.minable then
+        record.mining_fluid = entity.mineable_properties.required_fluid
+    end
     if fluidbox_found then
         record.fluidbox_prototypes = fluidbox_prototypes
     end

@@ -279,6 +279,26 @@ pub trait Method {
     }
 
     fn expand(&self, goal: &Goal, ctx: &mut ExpansionCtx) -> Result<Vec<Step>, PlannerError>;
+
+    /// Why this method, which did not claim `goal`, could not: a named
+    /// refusal in place of the driver's `NoApplicableMethod`, or `None` --
+    /// the default -- when the method has nothing to say.
+    ///
+    /// Asked only after every method has declined `goal` (see
+    /// [`MethodRegistry::refusal`]), so it never changes which method runs;
+    /// it changes what a caller is told when none does. A method answers here
+    /// when it can tell a *world* reason from "not mine": `Mine` says an item
+    /// comes out of the ground and a hand cannot dig it, or that no ground the
+    /// plan can see has any. Both are facts a script can act on, where "no
+    /// method can satisfy goal" is not.
+    ///
+    /// Takes the context rather than the state because a refusal about the
+    /// map is asked *from somewhere* -- the chain actor's position is where
+    /// charting is measured from -- and the state alone does not say who is
+    /// asking.
+    fn refusal(&self, _goal: &Goal, _ctx: &ExpansionCtx) -> Option<PlannerError> {
+        None
+    }
 }
 
 /// Methods in preference order. The first applicable one wins.
@@ -302,6 +322,18 @@ impl MethodRegistry {
             .iter()
             .find(|m| m.claims(site) && m.applicable(goal, state))
             .map(|m| m.as_ref())
+    }
+
+    /// The first named refusal any method offers for a goal none of them
+    /// claimed, or `None` when the driver's `NoApplicableMethod` is all there
+    /// is to say. See [`Method::refusal`].
+    ///
+    /// Every method is asked, in registration order and regardless of
+    /// `claims`: a refusal is knowledge about the goal, not a bid to run it,
+    /// and a method that would not have claimed the goal at this site can
+    /// still know why nobody can.
+    pub fn refusal(&self, goal: &Goal, ctx: &ExpansionCtx) -> Option<PlannerError> {
+        self.methods.iter().find_map(|m| m.refusal(goal, ctx))
     }
 
     /// How many holders may pursue `goal` at once: the tightest limit any
@@ -566,12 +598,16 @@ fn expand_goal_body(
         in_chain: ctx.chain.is_some(),
         converging: ctx.converging,
     };
-    let method =
-        registry
-            .find(goal, &ctx.state, site)
-            .ok_or_else(|| PlannerError::NoApplicableMethod {
+    // When nobody claims the goal, a method that knows *why* gets to say so
+    // before the driver falls back to "no method can satisfy goal", which is
+    // true and unactionable. See `Method::refusal`.
+    let Some(method) = registry.find(goal, &ctx.state, site) else {
+        return Err(registry.refusal(goal, ctx).unwrap_or_else(|| {
+            PlannerError::NoApplicableMethod {
                 goal: goal.to_string(),
-            })?;
+            }
+        }));
+    };
 
     // How many holders may pursue this goal at once, if any method names a
     // limit. See `Method::concurrency` for why the question exists and

@@ -2440,12 +2440,68 @@ impl Method for Mine {
         if need == 0 {
             return false;
         }
+        // A hand, not a drill. `has_resource_patches` alone said yes to crude
+        // oil, because the resource and its product share a name and the
+        // wells are charted like ore is; `character.mine_entity(crude-oil)`
+        // answers false. Refused here so the action is never emitted, and
+        // named in `refusal` so the caller hears why.
+        if state.hand_mining_obstacle(item).is_some() {
+            return false;
+        }
         // Position-independent, as before: whether the patches can supply
         // `need` in total does not depend on which bot is asking. Which tiles
         // are nearest is `expand`'s business, where the chain actor is known —
         // so this asks the total directly instead of building and sorting the
         // union of every tile of every patch only to test it for emptiness.
         resource_supply_at_least(state, item, need)
+    }
+
+    /// The two things this method knows about a goal it declined, both
+    /// verdicts about the world rather than about the plan:
+    ///
+    /// * the item comes out of the ground and a character cannot dig it --
+    ///   [`PlannerError::NotHandMinable`], checked first because exploring
+    ///   finds more of the same wells; and
+    /// * the item comes out of the ground and no ground the plan can see has
+    ///   any -- [`PlannerError::NotCharted`], with where charted ground ends
+    ///   measured from the chain actor.
+    ///
+    /// `None` for everything else: an item no resource yields is not this
+    /// method's business, and a patch that exists but cannot supply the goal
+    /// -- exhausted, or committed to other miners -- keeps its existing
+    /// answers (`NoApplicableMethod`, or `NoRoomToWork` via `concurrency`).
+    /// The check that the resource is *charted somewhere* is deliberately
+    /// `has_resource_patches` and not `applicable`'s supply test, so a patch
+    /// the plan has drained is never reported as unexplored.
+    fn refusal(&self, goal: &Goal, ctx: &ExpansionCtx) -> Option<PlannerError> {
+        let Demand { item, need, .. } = demand(goal, &ctx.state)?;
+        if need == 0 {
+            return None;
+        }
+        let resource = ctx.state.resource_yielding(item)?;
+        if let Some(obstacle) = ctx.state.hand_mining_obstacle(&resource) {
+            return Some(PlannerError::NotHandMinable {
+                item: item.clone(),
+                resource,
+                obstacle,
+            });
+        }
+        if ctx.state.has_resource_patches(&resource) {
+            return None;
+        }
+        let origin = ctx
+            .state
+            .bot(ctx.chain_actor)
+            .map(|bot| bot.position.clone())
+            .unwrap_or_default();
+        Some(PlannerError::NotCharted {
+            item: item.clone(),
+            resource,
+            charting: Box::new(
+                ctx.state
+                    .charting_summary(&origin, crate::score::DEFAULT_SEARCH_RADIUS),
+            ),
+        })
     }
 
     /// How many bots can mine this item at once: the patches' free *seats*.
@@ -2482,6 +2538,12 @@ impl Method for Mine {
         // world's resource list beside it; see
         // `EntityGraph::has_resource_patches`.
         if !state.has_resource_patches(item) {
+            return None;
+        }
+        // Wells a hand cannot work seat nobody, and saying `Some(0)` here
+        // would turn the refusal into `NoRoomToWork`, which blames crowding.
+        // `None` -- nothing to say -- lets `refusal` name the real reason.
+        if state.hand_mining_obstacle(item).is_some() {
             return None;
         }
         Some(resource_seats(state, item, cap))
@@ -6788,6 +6850,299 @@ mod tests {
         assert_eq!(action.duration, 600);
     }
 
+    /// A world with the mod's fixture prototypes and item table, and
+    /// whatever ground `entities` puts in it -- nothing else, so a test can
+    /// state exactly which resources are charted.
+    fn world_holding(
+        entities: Vec<FactorioEntity>,
+    ) -> factorio_bot_core::factorio::world::FactorioWorld {
+        let world = factorio_bot_core::factorio::world::FactorioWorld::new();
+        world
+            .update_entity_prototypes(
+                factorio_bot_core::test_utils::fixture_entity_prototypes()
+                    .iter()
+                    .map(|v| v.clone())
+                    .collect(),
+            )
+            .expect("the fixture prototypes load");
+        world
+            .update_item_prototypes(
+                factorio_bot_core::test_utils::fixture_item_prototypes()
+                    .iter()
+                    .map(|v| v.clone())
+                    .collect(),
+            )
+            .expect("the fixture items load");
+        world
+            .update_chunk_entities(entities)
+            .expect("a chunk of ground");
+        world
+    }
+
+    /// Twelve crude-oil wells, as a workspace resumed from a savepoint holds
+    /// them (the provenance of `run-1788538389-09170`).
+    fn crude_oil_wells() -> Vec<FactorioEntity> {
+        let mut entities = Vec::new();
+        for i in 0..12 {
+            entities.push(FactorioEntity::new_resource(
+                &Position::new(20.5 + 4. * f64::from(i), 20.5),
+                factorio_bot_core::types::Direction::North,
+                "crude-oil",
+            ));
+        }
+        entities
+    }
+
+    /// **The planner will not hand-mine crude oil.** Until 2026-09-04 it did:
+    /// `Mine::applicable` gated on `has_resource_patches(item)`, the resource
+    /// and its product are both named `crude-oil`, and a world holding
+    /// charted wells planned `mine 10 crude-oil`. `character.mine_entity`
+    /// answers false to that, verified live. The refusal names the reason,
+    /// and no `Mine` action exists to dispatch.
+    ///
+    /// The fixture prototype is an *old* capture with no `resource_category`,
+    /// so what refuses here is the item table: crude oil is a fluid, and the
+    /// fixture's item table has no such item. The category rule is pinned by
+    /// the next test.
+    #[test]
+    fn a_world_holding_only_crude_oil_wells_refuses_by_name_and_emits_no_mine() {
+        let world = world_holding(crude_oil_wells());
+        let s = PlanState::from_world(Arc::new(world), &[BotId(1), BotId(2)]);
+        assert!(
+            s.has_resource_patches("crude-oil"),
+            "the wells are charted, exactly as ore would be"
+        );
+        let err = expand(
+            &[Goal::Have {
+                item: "crude-oil".into(),
+                count: 10,
+                whose: Holder::Anyone,
+            }],
+            &s,
+            &registry_for(&[BotId(1), BotId(2)]),
+            BotId(1),
+        )
+        .expect_err("a hand cannot mine crude oil");
+        match &err {
+            PlannerError::NotHandMinable {
+                item,
+                resource,
+                obstacle,
+            } => {
+                assert_eq!(item, "crude-oil");
+                assert_eq!(resource, "crude-oil");
+                assert_eq!(
+                    obstacle,
+                    &factorio_bot_core::types::HandMiningObstacle::YieldsNoItem {
+                        product: "crude-oil".into()
+                    }
+                );
+            }
+            other => panic!("expected NotHandMinable, got {other}"),
+        }
+        assert!(
+            err.to_string().contains("cannot mine by hand"),
+            "the reason is in the message: {err}"
+        );
+    }
+
+    /// The game's own discriminator, once the mod sends it: `resource_category`
+    /// against the character's `resource_categories`. Neither the resource's
+    /// name nor `minable` (true, for the pumpjack's sake) decides anything.
+    #[test]
+    fn a_resource_category_the_character_does_not_mine_refuses_by_category() {
+        let world = world_holding(crude_oil_wells());
+        {
+            let mut well = world
+                .entity_prototypes
+                .get_mut("crude-oil")
+                .expect("the fixture has a crude-oil prototype");
+            well.resource_category = Some("basic-fluid".into());
+        }
+        {
+            let mut character = world
+                .entity_prototypes
+                .get_mut("character")
+                .expect("the fixture has a character prototype");
+            character.resource_categories = Some(vec!["basic-solid".into()]);
+        }
+        let s = PlanState::from_world(Arc::new(world), &[BotId(1)]);
+        let err = expand(
+            &[Goal::Have {
+                item: "crude-oil".into(),
+                count: 10,
+                whose: Holder::Anyone,
+            }],
+            &s,
+            &registry_for(&[BotId(1)]),
+            BotId(1),
+        )
+        .expect_err("a hand cannot mine crude oil");
+        match &err {
+            PlannerError::NotHandMinable { obstacle, .. } => assert_eq!(
+                obstacle,
+                &factorio_bot_core::types::HandMiningObstacle::Category {
+                    resource_category: "basic-fluid".into(),
+                    character_categories: vec!["basic-solid".into()],
+                }
+            ),
+            other => panic!("expected NotHandMinable, got {other}"),
+        }
+    }
+
+    /// A goal with an owner reaches the same refusal under the same name.
+    /// `schedule` reclassifies an owned chain's failed precondition as
+    /// `ChainOwnerInfeasible`, but this refusal is raised in expansion, before
+    /// any chain is scheduled, so it never passes through that path.
+    #[test]
+    fn an_owned_crude_oil_goal_keeps_the_refusals_name() {
+        let world = world_holding(crude_oil_wells());
+        let s = PlanState::from_world(Arc::new(world), &[BotId(1)]);
+        let err = expand(
+            &[Goal::Have {
+                item: "crude-oil".into(),
+                count: 10,
+                whose: Holder::Bot(BotId(1)),
+            }],
+            &s,
+            &registry_for(&[BotId(1)]),
+            BotId(1),
+        )
+        .expect_err("a hand cannot mine crude oil");
+        assert!(
+            matches!(err, PlannerError::NotHandMinable { .. }),
+            "got {err}"
+        );
+    }
+
+    /// Wells a hand cannot work seat nobody -- and say so by having nothing
+    /// to say, not by answering zero, which would turn the refusal into
+    /// `NoRoomToWork` and blame crowding.
+    #[test]
+    fn crude_oil_wells_name_no_concurrency_limit() {
+        let world = world_holding(crude_oil_wells());
+        let s = PlanState::from_world(Arc::new(world), &[BotId(1)]);
+        let goal = Goal::Have {
+            item: "crude-oil".into(),
+            count: 10,
+            whose: Holder::Anyone,
+        };
+        assert_eq!(Mine.concurrency(&goal, &s, 4), None);
+        assert!(!Mine.applicable(&goal, &s));
+    }
+
+    /// A resource nothing in the model has charted is refused as
+    /// **unexplored**, with where charted ground ends -- not as
+    /// `NoApplicableMethod`, which reads as "absent".
+    ///
+    /// The world here has iron ore charted and no uranium; uranium's fixture
+    /// prototype is an old capture with no `mining_fluid`, so nothing refuses
+    /// a hand and the only thing wrong is that no patch was seen. Ground is
+    /// charted under the origin and at half the radius in every direction but
+    /// north-east, so that is the direction charting ends soonest in.
+    #[test]
+    fn an_uncharted_resource_is_refused_as_not_charted_with_a_frontier() {
+        let mut entities = Vec::new();
+        factorio_bot_core::test_utils::spawn_ore(
+            &mut entities,
+            factorio_bot_core::factorio::util::add_to_rect(
+                &factorio_bot_core::types::Rect::from_wh(4., 4.),
+                &Position::new(-30., 0.),
+            ),
+            "iron-ore",
+        );
+        let world = world_holding(entities);
+        let radius = crate::score::DEFAULT_SEARCH_RADIUS;
+        let half = radius / 2.;
+        let d = std::f64::consts::FRAC_1_SQRT_2;
+        let mut tiles = Vec::new();
+        for (dx, dy) in [
+            (0., 0.),
+            (1., 0.),
+            (d, d),
+            (0., 1.),
+            (-d, d),
+            (-1., 0.),
+            (-d, -d),
+            (0., -1.),
+        ] {
+            tiles.push(factorio_bot_core::types::FactorioTile {
+                position: Position::new(dx * half, dy * half),
+                name: "grass-1".into(),
+                player_collidable: false,
+                color: None,
+            });
+        }
+        world
+            .update_chunk_tiles(tiles)
+            .expect("a few charted tiles");
+        let s = PlanState::from_world(Arc::new(world), &[BotId(1)]);
+        let err = expand(
+            &[Goal::Have {
+                item: "uranium-ore".into(),
+                count: 5,
+                whose: Holder::Anyone,
+            }],
+            &s,
+            &registry_for(&[BotId(1)]),
+            BotId(1),
+        )
+        .expect_err("no uranium is charted");
+        match &err {
+            PlannerError::NotCharted {
+                item,
+                resource,
+                charting,
+            } => {
+                assert_eq!(item, "uranium-ore");
+                assert_eq!(resource, "uranium-ore");
+                assert_eq!(charting.radius, radius);
+                assert_eq!(
+                    charting.score.covered, 8,
+                    "origin plus seven half-radius probes"
+                );
+                assert_eq!(charting.score.probes, 17);
+                assert!(
+                    charting.seen.contains_key("iron-ore")
+                        && !charting.seen.contains_key("uranium-ore"),
+                    "the census says what was seen: {:?}",
+                    charting.seen
+                );
+                let frontier = charting.frontier.as_ref().expect("nine probes are blind");
+                assert_eq!(frontier.direction, "north-east");
+                assert_eq!(frontier.distance, half);
+            }
+            other => panic!("expected NotCharted, got {other}"),
+        }
+        let text = err.to_string();
+        assert!(
+            text.contains("north-east") && text.contains("iron-ore"),
+            "the message says where to look and what was seen: {text}"
+        );
+    }
+
+    /// An item no resource yields is still `NoApplicableMethod`: the refusal
+    /// hook adds names to answers, never answers to names.
+    #[test]
+    fn an_item_nothing_yields_is_still_no_applicable_method() {
+        let s = state(&[BotId(1)]);
+        let err = expand(
+            &[Goal::Have {
+                item: "unobtainium".into(),
+                count: 1,
+                whose: Holder::Anyone,
+            }],
+            &s,
+            &registry_for(&[BotId(1)]),
+            BotId(1),
+        )
+        .expect_err("nothing makes unobtainium");
+        assert!(
+            matches!(err, PlannerError::NoApplicableMethod { .. }),
+            "got {err}"
+        );
+    }
+
     #[test]
     fn mining_only_asks_for_what_is_missing() {
         let mut s = state(&[BotId(1)]);
@@ -6891,8 +7246,13 @@ mod tests {
         );
     }
 
+    /// An ore the fixture world has none of. This used to expect
+    /// `NoApplicableMethod`, which is the ambiguity piece 1 of the exploration
+    /// design removes: uranium ore *is* something the ground yields, and the
+    /// fixture simply has no charted patch of it, so the answer is
+    /// "unexplored" with a direction, not "no method".
     #[test]
-    fn an_unobtainable_item_has_no_method() {
+    fn an_ore_the_world_has_not_charted_is_not_no_applicable_method() {
         let s = state(&[BotId(1)]);
         let result = expand(
             &[Goal::Have {
@@ -6904,10 +7264,10 @@ mod tests {
             &default_registry(),
             BotId(1),
         );
-        assert!(matches!(
-            result,
-            Err(PlannerError::NoApplicableMethod { .. })
-        ));
+        assert!(
+            matches!(result, Err(PlannerError::NotCharted { .. })),
+            "got {result:?}"
+        );
     }
 
     #[test]

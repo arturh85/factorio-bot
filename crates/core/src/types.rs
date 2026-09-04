@@ -1132,6 +1132,153 @@ pub struct FactorioEntityPrototype {
     pub crafting_speed: Option<f64>,
     pub max_underground_distance: Option<u8>,
     pub fluidbox_prototypes: Option<Vec<FactorioFluidBoxPrototype>>,
+    // The three fields below decide whether a *character* can mine a resource
+    // by hand, which `mine_result` alone cannot: crude oil is `minable` with a
+    // product of ten crude oil, exactly like iron ore is `minable` with a
+    // product of one iron ore, and the mod's `products_to_dict` flattens the
+    // product's `type` away. `minable` is the flag a pumpjack uses. Verified
+    // live on 2026-09-04: `character.mine_entity(crude-oil)` returns false and
+    // leaves the well untouched.
+    //
+    // Every one is `default`, so a dump or a snapshot written before these
+    // existed still loads with `None`, and `hand_mining_obstacle` says what it
+    // can and cannot conclude from that.
+    /// A `resource` prototype's category -- `basic-solid`, `basic-fluid`,
+    /// `hard-solid` -- named `category` at data stage and `resource_category`
+    /// at runtime. This is the discriminator the game itself uses: a character
+    /// or a drill mines a resource iff the category is in its own
+    /// `resource_categories`.
+    #[serde(default)]
+    pub resource_category: Option<String>,
+    /// The categories a `character` or `mining-drill` prototype can mine.
+    /// Sorted by the mod so the order is the data's, not `pairs()`'s.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_helpers::option_vec_or_empty_map"
+    )]
+    pub resource_categories: Option<Vec<String>>,
+    /// `mineable_properties.required_fluid`: the fluid that must be piped in
+    /// to mine this at all. Uranium ore needs sulfuric acid, and a character
+    /// has no pipe.
+    #[serde(default)]
+    pub mining_fluid: Option<String>,
+}
+
+/// The resource categories a vanilla character mines, used when the world's
+/// prototype table has no `character` entry or one captured before
+/// [`FactorioEntityPrototype::resource_categories`] existed.
+///
+/// The data-stage default of `CharacterPrototype::mining_categories`, and the
+/// value the base game ships. Not a guess about what is *reachable*: this is
+/// the game's own answer, and a modded character that mines more will say so
+/// in its own prototype.
+pub const VANILLA_CHARACTER_RESOURCE_CATEGORIES: [&str; 1] = ["basic-solid"];
+
+/// Why a character cannot mine a resource by hand.
+///
+/// Every variant is a fact read off prototypes, never off the map, so the
+/// answer does not change with charting and never needs a bot to be anywhere.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum HandMiningObstacle {
+    /// The resource's category is not one the character mines.
+    Category {
+        resource_category: String,
+        character_categories: Vec<String>,
+    },
+    /// Mining it needs a fluid piped in, and a character has no pipe.
+    NeedsFluid { fluid: String },
+    /// What it yields is not an item, so no inventory can receive it. This is
+    /// the reading of a prototype captured *before* `resource_category` was
+    /// serialized -- crude oil's product is a fluid, and a fluid is not in the
+    /// item table.
+    YieldsNoItem { product: String },
+}
+
+impl std::fmt::Display for HandMiningObstacle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HandMiningObstacle::Category {
+                resource_category,
+                character_categories,
+            } => write!(
+                f,
+                "its resource category is {resource_category}, and a character mines only {}",
+                character_categories.join(", ")
+            ),
+            HandMiningObstacle::NeedsFluid { fluid } => {
+                write!(
+                    f,
+                    "mining it needs {fluid} piped in, and a character has no pipe"
+                )
+            }
+            HandMiningObstacle::YieldsNoItem { product } => write!(
+                f,
+                "it yields {product}, which is not an item, so no inventory can receive it"
+            ),
+        }
+    }
+}
+
+impl FactorioEntityPrototype {
+    /// Why a character could not mine this prototype by hand, or `None` when
+    /// nothing in the prototype says it cannot.
+    ///
+    /// `character_categories` is the character prototype's
+    /// `resource_categories`, falling back to
+    /// [`VANILLA_CHARACTER_RESOURCE_CATEGORIES`]; `is_item` answers whether a
+    /// name is in the world's item table, or `true` when the table is empty
+    /// and cannot say.
+    ///
+    /// Three checks, each independent of the others, in the order a reader
+    /// can act on them:
+    ///
+    /// 1. `mining_fluid` is set -- the resource needs a fluid piped in, whoever
+    ///    is mining it.
+    /// 2. `resource_category` is known and not one the character mines. This
+    ///    is the game's own rule, and it is the one that catches crude oil
+    ///    (`basic-fluid`) and Space Age's tungsten ore (`hard-solid`).
+    /// 3. A product of mining is not an item. This is what an *old* capture
+    ///    can still say: `mine_result` for crude oil reads `{crude-oil: 10}`
+    ///    and there is no crude-oil item, so the well still refuses even when
+    ///    field 2 is `None`. Checked whether or not the category is known,
+    ///    because a category the character mines with a product nobody can
+    ///    hold is a contradiction worth refusing rather than trusting.
+    ///
+    /// `None` for a prototype whose `entity_type` is not `resource`: trees
+    /// and rocks are mined by a different path and never asked.
+    pub fn hand_mining_obstacle(
+        &self,
+        character_categories: &[String],
+        is_item: &dyn Fn(&str) -> bool,
+    ) -> Option<HandMiningObstacle> {
+        if self.entity_type != "resource" {
+            return None;
+        }
+        if let Some(fluid) = &self.mining_fluid {
+            return Some(HandMiningObstacle::NeedsFluid {
+                fluid: fluid.clone(),
+            });
+        }
+        if let Some(category) = &self.resource_category
+            && !character_categories.iter().any(|c| c == category)
+        {
+            return Some(HandMiningObstacle::Category {
+                resource_category: category.clone(),
+                character_categories: character_categories.to_vec(),
+            });
+        }
+        // `mine_result` is a `BTreeMap`, so the first non-item is the same one
+        // on every call.
+        if let Some(products) = &self.mine_result
+            && let Some((product, _)) = products.iter().find(|(name, _)| !is_item(name))
+        {
+            return Some(HandMiningObstacle::YieldsNoItem {
+                product: product.clone(),
+            });
+        }
+        None
+    }
 }
 
 #[derive(
@@ -1739,6 +1886,125 @@ impl IntoLua for FactorioEntity {
 mod tests {
     use super::*;
     use crate::factorio::util::{move_pos, move_position};
+
+    fn resource_prototype(name: &str, product: &str) -> FactorioEntityPrototype {
+        FactorioEntityPrototype {
+            name: name.into(),
+            entity_type: "resource".into(),
+            collision_mask: None,
+            collision_box: Rect::from_wh(1., 1.),
+            mine_result: Some(BTreeMap::from([(product.to_string(), 1)])),
+            mining_time: Some(1.),
+            mining_speed: None,
+            crafting_speed: None,
+            max_underground_distance: None,
+            fluidbox_prototypes: None,
+            resource_category: None,
+            resource_categories: None,
+            mining_fluid: None,
+        }
+    }
+
+    fn character_mines(categories: &[&str]) -> Vec<String> {
+        categories.iter().map(|c| (*c).to_string()).collect()
+    }
+
+    /// The game's rule: a resource whose category the character does not
+    /// list is not hand-minable, whatever `minable` and `mine_result` say.
+    /// Crude oil is `basic-fluid`; the character mines `basic-solid`.
+    #[test]
+    fn a_resource_outside_the_characters_categories_refuses_a_hand() {
+        let mut well = resource_prototype("crude-oil", "crude-oil");
+        well.resource_category = Some("basic-fluid".into());
+        // `is_item` says yes to everything here, so the category alone
+        // carries the refusal.
+        let obstacle = well.hand_mining_obstacle(&character_mines(&["basic-solid"]), &|_| true);
+        assert_eq!(
+            obstacle,
+            Some(HandMiningObstacle::Category {
+                resource_category: "basic-fluid".into(),
+                character_categories: character_mines(&["basic-solid"]),
+            })
+        );
+        // And a character that does list it may mine it.
+        let obstacle =
+            well.hand_mining_obstacle(&character_mines(&["basic-solid", "basic-fluid"]), &|_| true);
+        assert_eq!(obstacle, None);
+    }
+
+    /// Uranium ore is `basic-solid` and still refuses a hand: mining it needs
+    /// sulfuric acid piped in.
+    #[test]
+    fn a_resource_needing_a_fluid_refuses_a_hand() {
+        let mut ore = resource_prototype("uranium-ore", "uranium-ore");
+        ore.resource_category = Some("basic-solid".into());
+        ore.mining_fluid = Some("sulfuric-acid".into());
+        assert_eq!(
+            ore.hand_mining_obstacle(&character_mines(&["basic-solid"]), &|_| true),
+            Some(HandMiningObstacle::NeedsFluid {
+                fluid: "sulfuric-acid".into()
+            })
+        );
+    }
+
+    /// A prototype captured before `resource_category` existed -- every dump
+    /// written before 2026-09-04, and `tests/entity-prototype-fixtures.json`
+    /// -- still refuses crude oil, because its product is not an item.
+    #[test]
+    fn an_old_capture_still_refuses_a_product_that_is_not_an_item() {
+        let well = resource_prototype("crude-oil", "crude-oil");
+        assert_eq!(well.resource_category, None, "the old shape");
+        let is_item = |name: &str| name != "crude-oil";
+        assert_eq!(
+            well.hand_mining_obstacle(&character_mines(&["basic-solid"]), &is_item),
+            Some(HandMiningObstacle::YieldsNoItem {
+                product: "crude-oil".into()
+            })
+        );
+        // The same old shape for iron ore says nothing against a hand.
+        let ore = resource_prototype("iron-ore", "iron-ore");
+        assert_eq!(
+            ore.hand_mining_obstacle(&character_mines(&["basic-solid"]), &is_item),
+            None
+        );
+    }
+
+    /// Trees and rocks are mined by another path and are never this
+    /// method's business, whatever their products are.
+    #[test]
+    fn only_resource_prototypes_are_judged() {
+        let mut tree = resource_prototype("tree-01", "wood");
+        tree.entity_type = "tree".into();
+        tree.resource_category = Some("basic-fluid".into());
+        assert_eq!(
+            tree.hand_mining_obstacle(&character_mines(&["basic-solid"]), &|_| false),
+            None
+        );
+    }
+
+    /// The three fields are optional on the wire, and the mod's empty-table
+    /// spelling of "no categories" is tolerated: a prototype record written
+    /// before the fields existed, or by a Lua table that serialised `{}`,
+    /// loads with `None`.
+    #[test]
+    fn hand_mining_fields_default_when_absent_or_empty() {
+        let old = r#"{"name":"crude-oil","entity_type":"resource","collision_box":{"left_top":{"x":-1.4,"y":-1.4},"right_bottom":{"x":1.4,"y":1.4}},"mine_result":{"crude-oil":10},"mining_time":1.0}"#;
+        let proto: FactorioEntityPrototype = serde_json::from_str(old).expect("old shape loads");
+        assert_eq!(proto.resource_category, None);
+        assert_eq!(proto.resource_categories, None);
+        assert_eq!(proto.mining_fluid, None);
+
+        let empty = r#"{"name":"character","entity_type":"character","collision_box":{"left_top":{"x":-0.2,"y":-0.2},"right_bottom":{"x":0.2,"y":0.2}},"resource_categories":{}}"#;
+        let proto: FactorioEntityPrototype =
+            serde_json::from_str(empty).expect("an empty Lua table loads");
+        // The helper's contract: an empty table is an empty list, not `None`.
+        // `PlanState::hand_mining_obstacle` reads an empty list as "not said".
+        assert_eq!(proto.resource_categories, Some(vec![]));
+
+        let new = r#"{"name":"crude-oil","entity_type":"resource","collision_box":{"left_top":{"x":-1.4,"y":-1.4},"right_bottom":{"x":1.4,"y":1.4}},"mine_result":{"crude-oil":10},"mining_time":1.0,"resource_category":"basic-fluid"}"#;
+        let proto: FactorioEntityPrototype = serde_json::from_str(new).expect("new shape loads");
+        assert_eq!(proto.resource_category.as_deref(), Some("basic-fluid"));
+    }
 
     /// The trigger shapes, verbatim from the shipped API definition:
     /// `workspace/factorio-api-docs/runtime-api.json`, `application_version`

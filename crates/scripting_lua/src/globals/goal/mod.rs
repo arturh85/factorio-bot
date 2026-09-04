@@ -252,6 +252,17 @@ impl std::error::Error for PlanRefusal {}
 ///   could see, on a borrowed 64-tile bound guarding a walk the schedule
 ///   already prices, and a distant plant is now a slower plan rather than a
 ///   refusal.
+/// - [`NotHandMinable`](PlannerError::NotHandMinable) -- a verdict about the
+///   *prototypes* rather than the map: a character cannot hand-mine crude
+///   oil, and no amount of exploring changes that. A script acts on it by
+///   not asking a bot for the item at all, so it is a verdict rather than a
+///   fault: the goal is meaningful, it is the hand that is wrong.
+/// - [`NotCharted`](PlannerError::NotCharted) -- the verdict the first piece
+///   of the exploration design
+///   (`docs/superpowers/specs/2026-09-04-exploration-design.md`) asked for:
+///   the item's resource is nowhere in the model, and the error says where
+///   charted ground ends. That is the fact a supervisor script branches on
+///   to walk a bot to the frontier and re-plan.
 fn refusal_for(err: &PlannerError) -> Option<PlanRefusal> {
     use miette::Diagnostic;
 
@@ -269,7 +280,9 @@ fn refusal_for(err: &PlannerError) -> Option<PlanRefusal> {
         | PlannerError::NoCellProduces { .. }
         | PlannerError::NoPatchForCell { .. }
         | PlannerError::NoRoomForCell { .. }
-        | PlannerError::NoRoomForCellNearPower { .. } => true,
+        | PlannerError::NoRoomForCellNearPower { .. }
+        | PlannerError::NotHandMinable { .. }
+        | PlannerError::NotCharted { .. } => true,
 
         PlannerError::InsufficientItems { .. }
         | PlannerError::UnknownBot(_)

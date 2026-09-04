@@ -1330,6 +1330,13 @@
               "null"
             ]
           },
+          "mining_fluid": {
+            "description": "`mineable_properties.required_fluid`: the fluid that must be piped in\nto mine this at all. Uranium ore needs sulfuric acid, and a character\nhas no pipe.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "mining_speed": {
             "format": "double",
             "type": [
@@ -1346,6 +1353,23 @@
           },
           "name": {
             "type": "string"
+          },
+          "resource_categories": {
+            "description": "The categories a `character` or `mining-drill` prototype can mine.\nSorted by the mod so the order is the data's, not `pairs()`'s.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "resource_category": {
+            "description": "A `resource` prototype's category -- `basic-solid`, `basic-fluid`,\n`hard-solid` -- named `category` at data stage and `resource_category`\nat runtime. This is the discriminator the game itself uses: a character\nor a drill mines a resource iff the category is in its own\n`resource_categories`.",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [

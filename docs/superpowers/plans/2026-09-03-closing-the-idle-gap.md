@@ -11,6 +11,81 @@ four bots.
 
 ---
 
+## Self-sustaining green: composition rejected, and the target was 0.44% (`31c8d579`)
+
+**Both load-bearing premises of my brief were wrong.**
+
+1. *"an inserter cell avoids the pole geometry"* — it does not.
+   `assembly_spec` requires the **product** recipe to have exactly two
+   ingredients, and `inserter` has three, **so an inserter cell does not exist
+   today either.** Composition moves the three-ingredient problem from the
+   intermediate to the product; it does not remove it.
+2. *"reuses machinery that works"* — `Stockpile` is **bot-mediated**: a
+   supplier deposits, the owner withdraws. **Nothing in the planner ever takes
+   items out of a cell's product machine.** Routing one cell's output into
+   another's chest needs an output inserter and a composed layout — new
+   geometry, not `Stockpile`.
+
+### The arithmetic loses, and nothing amortises
+
+Per 9,000-tick charge: saves ~**700** ticks of hand-crafting, costs ~**1,640**
+in placements and recipes, plus thousands of ticks mining and smelting ~66 iron
+and ~8 copper. **Four of the inserters it costs are a third of the twelve it
+exists to save.** And there is exactly **one** charge — `CELL_CHARGE_TICKS` is
+9,000, nothing refills the chest, and `Producing` is satisfied once the cell
+stands, so the plan ends.
+
+**The general form, which is the real finding: chest-fed cells compose into
+*more* hand-fill points, never fewer.** One chest of 12 inserters becomes three
+chests. **Autonomy comes only from attaching an input to something that
+renews** — a drill on ore, a furnace — which is `produce`'s stage-1 shape.
+
+### The thing I called "the next step" is 0.44% of the makespan
+
+Green baseline (`producing:logistic-science-pack:6`): **619 actions, makespan
+216,474 (1:00:07), utilisation 20.2%.** Bot 1: 360 steps, 91,704 planned,
+**124,770 idle**. Bots 2-4: ~28,000 planned, **~189,000 idle each**.
+
+Bot 1's craft time: `automation-science-pack` **25,500** (85 packs) ·
+`iron-gear-wheel` 5,580 · `copper-cable` 2,520 · `electronic-circuit` 1,620 ·
+**`inserter` 960**.
+
+**`craft 32 inserter` is 960 of 216,474 ticks — 0.44%.** The whole inserter
+supply chain is ~2.0%. The makespan is **85 hand-crafted red packs (11.8%)
+plus 28,500 ticks of lab time, on one bot, while three bots idle.**
+
+### One new fact, measured and pinned
+
+At all four facings, on the cell's own pole: the intermediate's third feed mouth
+is **dark**, but the **product's west `y = 3` mouth is POWERED and unused**, on
+free ground already serviced by the existing lane.
+
+**A three-ingredient *product* costs no second pole; a third *feed* chest
+does.** `MAX_FEED = 2` is a bound on the feed side alone — the module doc's
+phrasing implied a bound on the whole cell, which is what produced my wrong
+premise. Pinned by
+`the_pole_lights_a_third_product_mouth_but_no_third_feed_row`; previously only
+the positive half was tested, so a `POLE_OFFSET` change could have made
+`MAX_FEED` wrong in either direction silently.
+
+This also corrects the earlier finding that chest-feeding circuits into an
+inserter machine is *geometrically out of reach*: out of reach as an
+**intermediate**, in reach as a **product**.
+
+### A pin correction that would have misled the next reader
+
+`actions 202, makespan 30085, utilisation 36.4%` is **`score-map`'s** output.
+`plan --goal producing:automation-science-pack:6` is **369 actions / 47,330
+ticks / 37.0%**. Anyone diffing the wrong one will conclude red moved when it
+did not.
+
+### Where the real increment is
+
+**Not inserters.** Getting the 85 red science packs and the 28,500 ticks of lab
+time off the single converging bot. Genuine green self-sustenance is a stage-3
+factory — machine-to-machine routing, ~6 assembling machines, 2 smelting lines
+— not a next step.
+
 ## Recovery: wired, deliberate, and aimed at the wrong failure class (`33dc079f`)
 
 Design at `docs/superpowers/specs/2026-09-04-recovery-instead-of-replan-design.md`.

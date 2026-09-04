@@ -11,6 +11,92 @@ four bots.
 
 ---
 
+## Recovery: wired, deliberate, and aimed at the wrong failure class (`33dc079f`)
+
+Design at `docs/superpowers/specs/2026-09-04-recovery-instead-of-replan-design.md`.
+**Four things I asserted were wrong.**
+
+1. **`obs:recover()` is fully wired to Lua** (`66404580`, five end-to-end Lua
+   tests, the log-pairing hazard made unrepresentable at the boundary).
+   **There is no API work.** The gap is entirely in `scripts/supervisor.lua`.
+2. **It is not an oversight — it is decision D2** of
+   `2026-08-31-supervisor-loop-design.md`: *"Replan on completion or failure
+   only"*, justified by *"planning is ~1s, cheap enough to redo constantly."*
+   `supervisor.lua` was written **3.5 hours after** recovery existed. **The
+   premise is true and the conclusion does not follow**: a replan is not only a
+   recomputation, it is a **re-decision of layout**, and half the layout is
+   already built.
+3. **The dominant failure class is a walk, and recovery cannot see walks.**
+   Across 21 runs: **28 failed/lost actions against 76 failed walks**, and
+   **28 of 57 replans (49%) had no action failure at all.** `recover()` reads
+   only `net.actions()`; `ExecutionLog` keeps walks in a separate map it never
+   touches.
+4. **The agent retracted its own first cost figure.** Last-settle→next-plan
+   gaps looked like 143 game-minutes of planning; measured against
+   `batch_progress` heartbeats they are a median of 1,396 ticks. The big gaps
+   were the executor's **deadline waits**. D2's cost premise stands.
+
+### The latent defect this would have hit
+
+**Tier 1 has no loop breaker for a walk-only failure.** A failed walk halts the
+bot; `abandon_rest` publishes `Failed` on the watch channels but writes
+**nothing to the log**, so abandoned actions stay `Pending`.
+`exhausted_tier_one` scans for `Failed` with `attempts >= 3`, and nothing is
+ever dispatched, so no attempt count rises. **`recover()` would propose
+`Rescheduled` forever**, and `MAX_TIER_ONE_ATTEMPTS` cannot stop it because the
+budget is denominated in a unit the failure never produces. Latent only because
+nothing calls `recover`.
+
+### The replan's cost, proven in one line
+
+`run-1788481380-80843`: 194 steps, 154 succeeded, one placement failed on a
+standing character **that cleared 53 ticks later**, and the replan discarded
+**11,966 ticks**. The pole placed at tick 13,813 at `[10.5, -41.5]` was
+stranded — the replan re-sited the whole power plant **65 tiles away** to
+`[-5.5, -57.5]`. No amount of cheap planning offsets that.
+
+### 38 of 57 replans (67%) had a trigger tier 1 is designed for
+
+| n | trigger | tier 1 |
+|---:|---|---|
+| 28 | walk failed only | yes, **but needs a budget** |
+| 10 | character in placement footprint | yes — the canonical case |
+| 8 | **no failure at all** | **no** — replan is correct |
+| 7 | `tried to remove N but removed 0` | costs 2 wasted dispatches |
+| 3 | action `lost` | **dangerous** — retries a possibly-executed action |
+| 2 | mining blocked by a character | yes |
+
+### The trade is symmetric, which corrects my framing
+
+I argued a replan is *robust* because it re-derives from the world. But
+`propose()` already reads a fresh `PlanState` off the live world and
+`schedule()` re-checks every precondition — continuation inherits only **site
+choices, quantities and chain bindings**. So: continuing risks finishing a
+layout the world outgrew; **replanning strands the half that already stands,
+unconditionally, every time.** And the `cells_standing` incident proves
+re-deriving layout from a *wrong* world model is not robustness either.
+
+### Recommendation, in three sizes
+
+- **S0 (~half a day)** — `cause` on `PlanCreated` plus a discarded-step count.
+  **Nothing today distinguishes a first plan from a replan**, so the
+  justification for the whole change is currently unmeasurable.
+- **S1 (~2-3 days, `scripts/supervisor.lua` only, no Rust change)** —
+  tier-1-only recovery with all three defects fixed inside it: refuse
+  `reexpanded`, refuse any run with `obs.lost > 0`, cap at 2 recoveries per
+  plan lineage, and **abandon when `obs.success` does not strictly increase**,
+  which catches the walk loop on its first repetition in three lines.
+- **S2 (deferred, `crates/planner`)** — site affinity in expansion, the actual
+  fix for the stranded pole.
+
+**Savepoints do not change the calculus**: `--resume-from` restores the
+Factorio world only — new run dir, ladder from milestone 1, no supervisor
+state, no plan, no log.
+
+**Never executed in a live run:** the walk-refusal demotion
+(`schedule.rs:421-438`) has never picked a different bot, because nothing has
+reached it.
+
 ## The crash is fixed; the furnace reuse gap is now the binding constraint
 
 `run-1788513716-64336`, seed `31337`, with the double-spend fix:

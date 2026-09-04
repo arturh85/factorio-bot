@@ -305,39 +305,12 @@ fn parse_satisfied_reason(reason: &str) -> LuaResult<SatisfiedReason> {
 /// number. Nothing here invents a count: both must parse as integers or this
 /// declines.
 fn partial_transfer_detail(error: &str) -> Option<String> {
-    fn digits(text: &str) -> Option<u64> {
-        let head: &str = text.split(|c: char| !c.is_ascii_digit()).next()?;
-        head.parse().ok()
-    }
-    fn between<'a>(text: &'a str, open: &str, close: &str) -> Option<(&'a str, &'a str)> {
-        text.split_once(open)?.1.split_once(close)
-    }
-
-    // `tried to remove <asked> <item> but removed <moved>`
-    if let Some((head, tail)) = between(error, "tried to remove ", " but removed ")
-        && let Some((asked, item)) = head.split_once(' ')
-        && let (Some(asked), Some(moved)) = (digits(asked), digits(tail))
-    {
-        return Some(format!("moved {moved} of {asked} {item}"));
-    }
-    // `tried to insert <asked>x <item> but inserted <moved>`
-    if let Some((head, tail)) = between(error, "tried to insert ", " but inserted ")
-        && let Some((asked, item)) = head.split_once("x ")
-        && let (Some(asked), Some(moved)) = (digits(asked), digits(tail))
-    {
-        return Some(format!("moved {moved} of {asked} {item}"));
-    }
-    // `cannot insert <asked>x <item>, because player #<id> only has <moved>.
-    //  clamping...` -- the insert did happen, at the clamped count.
-    if let Some((head, tail)) = between(error, "cannot insert ", ", because ")
-        && tail.contains("clamping")
-        && let Some((asked, item)) = head.split_once("x ")
-        && let Some(have) = tail.split_once("only has ")
-        && let (Some(asked), Some(moved)) = (digits(asked), digits(have.1))
-    {
-        return Some(format!("moved {moved} of {asked} {item}"));
-    }
-    None
+    // One parser, and it lives in the executor: `recover` reads the same
+    // wording to refuse re-dispatching a diverged transfer
+    // (`crates/executor/src/divergence.rs`), and two copies of the mod's
+    // three sentences would drift the way `classify_walk_failure` once did.
+    let d = factorio_bot_executor::divergence(error)?;
+    Some(format!("moved {} of {} {}", d.moved, d.asked, d.item))
 }
 
 /// Classifies a settled action's error text into a coarse [`FailureKind`].

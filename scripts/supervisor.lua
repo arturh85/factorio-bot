@@ -801,7 +801,7 @@ end
 -- retained action's preconditions re-checked. See
 -- `docs/superpowers/specs/2026-09-04-recovery-instead-of-replan-design.md`.
 --
--- Four refusals, and none of them is decoration:
+-- Five refusals, and none of them is decoration:
 --
 --   * **`"reexpanded"` is refused.** Tier 2 is a replan by another name -- a
 --     new network numbered from zero against a fresh log -- and taking it here
@@ -828,6 +828,26 @@ end
 --     failure -- 76 failed walks against 28 failed/lost actions, and 28 of 57
 --     replans had no action failure at all -- so this is the common path, not
 --     the corner.
+--   * **A run whose failure is a DIVERGENCE is refused, and not even asked.**
+--     `tried to remove 64 iron-plate but removed 40` is not a circumstance; it
+--     is the game saying the plan's model of that container was wrong -- and
+--     the 40 are already in the bot's hands. A reschedule issues the identical
+--     take against the identical container, which can only answer with a
+--     smaller number. `run-1788552801-73005` (green, seed 31337), batch 3,
+--     spent a whole recovery learning exactly that:
+--
+--         first error: ... ["tried to remove 64 iron-plate but removed 40"]
+--         planned 79 steps (best 302) -- recovered: rescheduled 1
+--         first error: ... ["tried to remove 64 iron-plate but removed 0"]
+--
+--     `recover()` now refuses tier 1 for this class itself
+--     (`crates/executor/src/recover.rs`, `diverged_from_the_world`), so the
+--     ask would come back `reexpanded` and be declined anyway; refusing here
+--     saves the `PlanState::from_world` and the expansion, and lets the
+--     transition say why (`t.not_recovered = "divergence"`). A replan re-reads
+--     the world -- the plates in the bot's inventory, the cell's real contents
+--     -- which is what a resized take could not do without pretending to be a
+--     reschedule while changing every downstream consumer's arithmetic.
 --
 -- Three things a recovery deliberately does NOT touch:
 --
@@ -839,29 +859,95 @@ end
 --   * the `goal.plan` call. A recovery costs no planner expansion, which is the
 --     whole point.
 
+--- The world-model divergence a failed action's verdict reports, or nil.
+--
+-- The mod's transfer handlers complain, in three wordings, when the count
+-- that moved is not the count the plan asked for:
+--
+--   tried to remove 64 iron-plate but removed 40
+--   tried to insert 17x coal but inserted 3
+--   cannot insert 20x iron-ore, because player #1 only has 18. clamping...
+--
+-- Each reaches `obs.actions[id].error` wrapped in `game rejected the command:
+-- Unexpected Response: [...]`, so this matches the inner sentence. The same
+-- three sentences are parsed by `crates/executor/src/divergence.rs` (which is
+-- what makes `recover()` refuse the reschedule) and classified as
+-- `partial_transfer` by `record.actions`; this is the third reader, and it
+-- exists so the loop can refuse BEFORE asking and name the reason.
+--
+-- Returns `{ item, asked, moved }`. Parsed rather than substring-matched so a
+-- wording change costs a nil -- the failure is then an ordinary one and the
+-- ask is made, which is the behaviour before this existed -- rather than a
+-- refusal on a sentence nobody read.
+local function divergence(err)
+    if type(err) ~= "string" then return nil end
+    local asked, item, moved = err:match("tried to remove (%d+) (%S+) but removed (%d+)")
+    if asked == nil then
+        asked, item, moved = err:match("tried to insert (%d+)x (%S+) but inserted (%d+)")
+    end
+    if asked == nil then
+        asked, item, moved = err:match("cannot insert (%d+)x (%S+), because .- only has (%d+)%. clamping")
+    end
+    if asked == nil then return nil end
+    return { item = item, asked = tonumber(asked), moved = tonumber(moved) }
+end
+supervisor.divergence = divergence
+
+--- The verdict of the lowest-id FAILED action of `obs` that is a divergence,
+-- or nil. Lowest id rather than `pairs` order so two reads of one observation
+-- name the same action. Falls back to `obs.first_error` when the binding hands
+-- over no action table at all.
+local function first_divergence(obs)
+    if type(obs.actions) ~= "table" then
+        return divergence(obs.first_error) and obs.first_error or nil
+    end
+    local ids = {}
+    for id, a in pairs(obs.actions) do
+        if type(a) == "table" and a.status == "failed" then ids[#ids + 1] = id end
+    end
+    table.sort(ids)
+    for _, id in ipairs(ids) do
+        local err = obs.actions[id].error
+        if divergence(err) then return err end
+    end
+    return nil
+end
+
 --- May this observation be recovered rather than replanned?
 -- `trouble` is this run's own trouble count, already de-cumulated.
+--
+-- Returns `false, reason` for a refusal of a run that HAD something to recover
+-- (`"lost"`, `"limit"`, `"no_progress"`, `"divergence"`), and `false, nil` when
+-- there was nothing to ask about in the first place -- recovery disabled, no
+-- `recover` on the observation, nothing outstanding. The reason reaches the
+-- driver as `t.not_recovered`, so a run that was replanned instead of
+-- continued says which rule decided that; before this a refusal and a
+-- recovery that was never available printed identically.
 function Sup:_may_recover(obs, trouble)
-    if (self.recovery_limit or 0) <= 0 then return false end
+    if (self.recovery_limit or 0) <= 0 then return false, nil end
     -- Absent rather than failing: every live `goal.run` installs `recover` on
     -- its observation, so this is a stub or an older binding, and the honest
     -- answer for "cannot ask" is the behaviour that existed before the question
     -- did -- replan.
-    if type(obs) ~= "table" or type(obs.recover) ~= "function" then return false end
+    if type(obs) ~= "table" or type(obs.recover) ~= "function" then return false, nil end
     -- Nothing outstanding: `recover()` would answer `Complete` and we would
     -- have paid a `PlanState::from_world` to be told what we already know.
-    if trouble <= 0 and (obs.pending or 0) <= 0 then return false end
-    if (obs.lost or 0) > 0 then return false end
-    if self.recoveries >= self.recovery_limit then return false end
+    if trouble <= 0 and (obs.pending or 0) <= 0 then return false, nil end
+    if (obs.lost or 0) > 0 then return false, "lost" end
+    -- Before the budget rules, because it is a fact about THIS run's verdict,
+    -- not about the lineage: a diverged take is refused on a lineage's first
+    -- ask exactly as on its last.
+    if first_divergence(obs) ~= nil then return false, "divergence" end
+    if self.recoveries >= self.recovery_limit then return false, "limit" end
     -- `nil` means this lineage has not recovered yet, so there is no previous
     -- recovery to have failed to make progress. The rule is about a recovery
     -- that achieved nothing, not about a first run that achieved nothing --
     -- a run whose opening walk failed has `success == 0` and is exactly the
     -- case tier 1 exists for.
     if self.chain_success ~= nil and (obs.success or 0) <= self.chain_success then
-        return false
+        return false, "no_progress"
     end
-    return true
+    return true, nil
 end
 
 --- Perform exactly one action and return a transition record.
@@ -1240,15 +1326,32 @@ function Sup:step()
     -- existed.
     self.state = "planning"
     local recovery = nil
-    if self:_may_recover(obs, trouble) then
+    -- Why this run is about to be replanned rather than continued, when a
+    -- continuation was on the table at all: a `_may_recover` rule's name, or
+    -- what became of the ask -- `"reexpanded"` (declined, see above),
+    -- `"no_plan"` (an answer with nothing in it) or `"raised"`. Nil when the
+    -- run is continued, and nil when there was nothing to ask about.
+    local not_recovered = nil
+    local may, refused = self:_may_recover(obs, trouble)
+    if may then
         local ok, next_plan, why = pcall(obs.recover, obs)
         if ok and next_plan ~= nil and why == "rescheduled" then
             -- Read once: `PlanValue.steps` rebuilds the whole array per read.
             local next_steps = next_plan.steps
             if type(next_steps) == "table" and #next_steps > 0 then
                 recovery = { plan = next_plan, steps = next_steps, why = why }
+            else
+                not_recovered = "no_plan"
             end
+        elseif not ok then
+            not_recovered = "raised"
+        elseif next_plan == nil then
+            not_recovered = "no_plan"
+        else
+            not_recovered = why
         end
+    else
+        not_recovered = refused
     end
     if recovery ~= nil then
         self._recovery = recovery
@@ -1291,6 +1394,11 @@ function Sup:step()
              -- lines belong to one plan. The plan itself arrives on the next
              -- transition.
              recovering = recovery ~= nil and recovery.why or nil,
+             -- Set when a continuation was possible and refused, naming the
+             -- rule -- so a driver can print `-- not recovered: divergence`
+             -- beside the replan instead of leaving the reader to infer the
+             -- refusal from a `planned` line that carries no `recovery`.
+             not_recovered = not_recovered,
              steps = steps, actions = obs.actions, walks = walks }
 end
 

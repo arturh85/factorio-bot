@@ -1879,6 +1879,167 @@ mod tests {
         assert_eq!(runs, 1);
     }
 
+    /// Drives one milestone and returns the `not_recovered` reasons of its
+    /// `ran` transitions, in order, `-` standing for nil.
+    fn refusals(lua: &Lua, opts: &str) -> String {
+        let driver = r#"
+            local sup = supervisor.new(supervisor.list {"a"}, OPTS)
+            local out, guard = {}, 0
+            repeat
+                local t = sup:step()
+                if t.action == "ran" then
+                    out[#out + 1] = t.not_recovered or "-"
+                end
+                guard = guard + 1
+                if guard > 200 then error("did not terminate") end
+            until sup:finished()
+            __refusals = table.concat(out, " ")
+        "#
+        .replace("OPTS", opts);
+        lua.load(&driver).exec().expect("driver runs");
+        lua.globals().get::<String>("__refusals").unwrap()
+    }
+
+    /// The verdict of `run-1788552801-73005`, batch 3, as it reaches Lua.
+    const DIVERGED_TAKE: &str = r#"game rejected the command: Unexpected Response: ["tried to remove 64 iron-plate but removed 40"]"#;
+
+    /// **Rule 5: a run whose failure is a divergence is never recovered --
+    /// and never even asked about.**
+    ///
+    /// `run-1788552801-73005`, batch 3: `take 64 iron-plate from the cell`
+    /// found 40, the game handed them over, and the action was recorded
+    /// failed. Tier 1 re-issued the identical take against the now-empty
+    /// cell and got `removed 0` -- a whole recovery spent on a retry that
+    /// could only fail. The plan's model of the container was wrong; only a
+    /// replan re-reads it.
+    ///
+    /// Asserted on the ask, like the lost-action rule: `recover()` itself now
+    /// refuses tier 1 for this class, so the ask would come back declined
+    /// anyway, but refusing before asking is the stronger fact and the one
+    /// that costs no `PlanState::from_world`. And asserted on the reason: the
+    /// transition names the rule, so a driver can print why.
+    #[test]
+    fn a_diverged_take_is_replanned_without_asking_for_a_recovery() {
+        let obs = format!(
+            "{{{{failed=1, success=5, pending=4,
+               first_error='{DIVERGED_TAKE}',
+               actions={{[38]={{status='failed', attempts=1, error='{DIVERGED_TAKE}'}}}},
+               recover={{why='rescheduled', steps=4}}}},
+              {{success=9}}}}"
+        );
+        let lua = harness("{10, 0}", &obs);
+        let (trace, plans, runs, asks) = trace(&lua, "{}");
+        assert_eq!(
+            trace, "acquired planned(10) ran(planning) satisfied finished",
+            "the remainder is replanned, not continued"
+        );
+        assert_eq!(
+            asks, "",
+            "a diverged take must not even be offered to `recover`: the \
+             proposal would issue the identical take against the same cell"
+        );
+        assert_eq!(plans, 2);
+        assert_eq!(runs, 1);
+
+        let lua = harness("{10, 0}", &obs);
+        assert_eq!(refusals(&lua, "{}"), "divergence");
+    }
+
+    /// The divergence is read off the failed ACTIONS, not off `first_error`
+    /// alone: the first failure of a batch can be something else entirely,
+    /// and the take that diverged still decides.
+    #[test]
+    fn a_divergence_behind_an_earlier_failure_is_still_found() {
+        let obs = format!(
+            "{{{{failed=2, success=5, pending=4,
+               first_error='no path to (12, 7)',
+               actions={{[3]={{status='failed', error='no path to (12, 7)'}},
+                        [38]={{status='failed', error='{DIVERGED_TAKE}'}},
+                        [40]={{status='success'}}}},
+               recover={{why='rescheduled', steps=4}}}},
+              {{success=9}}}}"
+        );
+        let lua = harness("{10, 0}", &obs);
+        let (_, _, _, asks) = trace(&lua, "{}");
+        assert_eq!(asks, "");
+        let lua = harness("{10, 0}", &obs);
+        assert_eq!(refusals(&lua, "{}"), "divergence");
+    }
+
+    /// The other refusals name themselves the same way, and a run that was
+    /// continued -- or had nothing to continue -- names nothing.
+    #[test]
+    fn every_refusal_names_its_rule_and_a_continuation_names_none() {
+        let lua = harness(
+            "{10, 0}",
+            "{{failed=1, lost=1, success=5, recover={why='rescheduled', steps=4}}}",
+        );
+        assert_eq!(refusals(&lua, "{}"), "lost");
+
+        let lua = harness(
+            "{10, 0}",
+            "{{failed=1, success=5, recover={why='reexpanded', steps=4}}}",
+        );
+        assert_eq!(refusals(&lua, "{}"), "reexpanded");
+
+        // Continued, then the continuation ran clean: nothing to refuse on
+        // either transition.
+        let lua = harness(
+            "{10, 0}",
+            "{{failed=1, success=5, pending=4, recover={why='rescheduled', steps=4}},
+              {success=9}}",
+        );
+        assert_eq!(refusals(&lua, "{}"), "- -");
+    }
+
+    /// `supervisor.divergence` reads exactly the mod's three wordings and
+    /// declines everything else -- the same contract as the executor's
+    /// parser (`crates/executor/src/divergence.rs`), which is what makes the
+    /// two refusals agree.
+    #[test]
+    fn the_divergence_reader_matches_the_three_wordings_and_nothing_else() {
+        let lua = harness("{}", "{}");
+        // One string per answer, because a multi-value return needs
+        // `FromLuaMulti` and a tuple does not implement it.
+        let read = |err: &str| -> Option<String> {
+            lua.globals().set("__err", err).unwrap();
+            lua.load(
+                "local d = supervisor.divergence(__err)
+                 if d == nil then return nil end
+                 return d.item .. ' ' .. d.asked .. ' ' .. d.moved",
+            )
+            .eval::<Option<String>>()
+            .unwrap()
+        };
+        assert_eq!(read(DIVERGED_TAKE).as_deref(), Some("iron-plate 64 40"));
+        assert_eq!(
+            read(r#"["tried to remove 64 iron-plate but removed 0"]"#).as_deref(),
+            Some("iron-plate 64 0")
+        );
+        assert_eq!(
+            read("tried to insert 50x coal but inserted 12").as_deref(),
+            Some("coal 50 12")
+        );
+        assert_eq!(
+            read("cannot insert 20x iron-ore, because player #1 only has 18. clamping...")
+                .as_deref(),
+            Some("iron-ore 20 18")
+        );
+        for text in [
+            "game rejected the command: cannot insert to inventory of nonexisting entity",
+            "tried to remove some iron-plate but removed fewer",
+            "no action result received in time",
+            "",
+        ] {
+            assert_eq!(read(text), None, "{text:?}");
+        }
+        assert!(
+            lua.load("return supervisor.divergence(nil) == nil")
+                .eval::<bool>()
+                .unwrap()
+        );
+    }
+
     /// **Rule 3: at most `recovery_limit` recoveries per plan lineage.**
     ///
     /// Every run here makes progress, so the progress rule never fires and the

@@ -122,6 +122,24 @@ impl Subcommand for ThisCommand {
           .help("number of bots the script plans for [default: same as --clients]"),
       )
       .arg(
+        Arg::new("headless")
+          .long("headless")
+          .action(ArgAction::SetTrue)
+          .conflicts_with("connect")
+          .help(
+            "bots are server-side character entities created by the mod; no graphical \
+             client is started (implies --clients 0; --bots defaults to 1)",
+          ),
+      )
+      .arg(
+        Arg::new("game-speed")
+          .long("game-speed")
+          .value_name("speed")
+          .default_value("1")
+          .value_parser(value_parser!(f64))
+          .help("run the world at this game.speed; every wall-clock deadline scales with it"),
+      )
+      .arg(
         Arg::new("server")
           .short('s')
           .long("server")
@@ -189,10 +207,50 @@ impl Subcommand for ThisCommand {
 ///
 /// `--bots` defaults to `--clients` so every invocation written before the split
 /// keeps its old meaning.
-pub fn resolve_counts(matches: &ArgMatches) -> (u8, u8) {
+/// [`resolve_counts`] plus the headless flag.
+///
+/// `--headless` means the bots are character entities the mod creates on the
+/// server, so there is nothing for `--clients` to count: it must be absent or
+/// `0`, and `--bots` -- which normally defaults to `--clients` -- defaults to
+/// one bot instead of zero. A run is all clients or all characters, and the
+/// mix is refused here, before a process is spawned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RunCounts {
+  pub clients: u8,
+  pub bots: u8,
+  pub headless: bool,
+}
+
+pub fn resolve_run_counts(matches: &ArgMatches) -> Result<RunCounts> {
   let clients = *matches.get_one::<u8>("clients").expect("defaulted by clap");
+  let headless = matches
+    .try_get_one::<bool>("headless")
+    .ok()
+    .flatten()
+    .copied()
+    .unwrap_or(false);
+  if headless {
+    if clients > 0
+      && matches.value_source("clients") == Some(clap::parser::ValueSource::CommandLine)
+    {
+      return Err(factorio_bot_core::miette::miette!(
+        "--headless spawns character bots and cannot also start {clients} graphical \
+         client(s): a run is all clients or all characters (drop --clients)"
+      ));
+    }
+    let bots = matches.get_one::<u8>("bots").copied().unwrap_or(1);
+    return Ok(RunCounts {
+      clients: 0,
+      bots,
+      headless: true,
+    });
+  }
   let bots = matches.get_one::<u8>("bots").copied().unwrap_or(clients);
-  (clients, bots)
+  Ok(RunCounts {
+    clients,
+    bots,
+    headless: false,
+  })
 }
 
 async fn run(matches: &ArgMatches, _context: &mut Context) -> Result<()> {
@@ -200,9 +258,17 @@ async fn run(matches: &ArgMatches, _context: &mut Context) -> Result<()> {
   let script_path = matches
     .get_one::<String>("script")
     .expect("required by clap");
-  let (clients, bots) = resolve_counts(matches);
+  let RunCounts {
+    clients,
+    bots,
+    headless,
+  } = resolve_run_counts(matches)?;
+  let game_speed = *matches
+    .get_one::<f64>("game-speed")
+    .expect("defaulted by clap");
   let connect_mode = matches.get_flag("connect");
   let server_host = matches.get_one::<String>("server").cloned();
+  warn_if_server_flags_are_ignored(connect_mode || server_host.is_some(), headless, game_speed);
 
   if connect_mode {
     // Fast iteration mode: connect to already-running Factorio
@@ -252,37 +318,16 @@ async fn run(matches: &ArgMatches, _context: &mut Context) -> Result<()> {
     info!("Script completed");
   } else {
     // Full mode: start Factorio server + clients
-    let write_logs = matches.get_flag("logs");
-    let verbose = matches.get_flag("verbose");
-    let seed = matches.get_one::<String>("seed").cloned();
-    let map_exchange_string = matches.get_one::<String>("map").cloned();
-    let recreate = matches.get_flag("new");
-
-    if clients == 0 {
-      info!("Planning-only run: no graphical clients, {} bot(s)", bots);
-    }
-    info!("Starting Factorio to run script: {}", script_path);
-
-    // Resolved and judged before Factorio is touched: a refusal after the
-    // server is up costs a minute of startup to say something that was knowable
-    // from two files.
-    let resume_from = resolve_resume(
+    let params = start_params(
       matches,
-      Path::new(app_settings.factorio.workspace_path.as_ref()),
-    )?;
-
-    let params = FactorioParams {
-      seed,
-      resume_from,
+      &app_settings,
+      headless,
+      clients,
+      bots,
+      game_speed,
       server_host,
-      client_count: clients,
-      recreate,
-      write_logs,
-      map_exchange_string,
-      wait_until: FactorioStartCondition::DiscoveryComplete,
-      silent: !verbose,
-      ..FactorioParams::default()
-    };
+    )?;
+    info!("Starting Factorio to run script: {}", script_path);
 
     // Was `.expect("failed to start factorio")`. A missing archive, a mod that
     // fails to load or an occupied port are all expected conditions and are
@@ -300,7 +345,7 @@ async fn run(matches: &ArgMatches, _context: &mut Context) -> Result<()> {
       Some(world) => {
         info!("Factorio started, running script...");
         let mut planner = Planner::new(world.clone(), Some(instance_state.rcon.clone()));
-        if clients == 0 {
+        if clients == 0 && !headless {
           // The one mode entitled to bots the game does not have. `--clients 0`
           // starts no Factorio client at all, so the world has no players and
           // `Planner::roster` -- which is what every other run gets -- would
@@ -330,6 +375,72 @@ async fn run(matches: &ArgMatches, _context: &mut Context) -> Result<()> {
   Ok(())
 }
 
+/// `--headless` and `--game-speed` decide how a server this process starts is
+/// set up. With `--connect` or `--server` it starts none, so both would be
+/// silently ignored; say so instead. Not gated on `silent`, for the reason the
+/// `--seed` warning is not: a flag that looks honoured and is not is worse
+/// than one that is loud.
+fn warn_if_server_flags_are_ignored(attached: bool, headless: bool, game_speed: f64) {
+  let speed_requested = (game_speed - 1.0).abs() > f64::EPSILON;
+  if attached && (headless || speed_requested) {
+    warn!(
+      "--headless / --game-speed are IGNORED with --connect or --server: this process \
+       does not start the server and cannot decide what its bots are"
+    );
+  }
+}
+
+/// Everything `FactorioInstance::start` needs for a run this process starts,
+/// resolved and judged before Factorio is touched: a refusal after the server
+/// is up costs a minute of startup to say something that was knowable from
+/// two files.
+#[allow(clippy::too_many_arguments)]
+fn start_params(
+  matches: &ArgMatches,
+  app_settings: &factorio_bot_core::app_settings::AppSettings,
+  headless: bool,
+  clients: u8,
+  bots: u8,
+  game_speed: f64,
+  server_host: Option<String>,
+) -> Result<FactorioParams> {
+  let write_logs = matches.get_flag("logs");
+  let verbose = matches.get_flag("verbose");
+  let seed = matches.get_one::<String>("seed").cloned();
+  let map_exchange_string = matches.get_one::<String>("map").cloned();
+  let recreate = matches.get_flag("new");
+
+  if headless {
+    info!(
+      "Headless run: {} character bot(s), no graphical client",
+      bots
+    );
+  } else if clients == 0 {
+    info!("Planning-only run: no graphical clients, {} bot(s)", bots);
+  }
+
+  let resume_from = resolve_resume(
+    matches,
+    Path::new(app_settings.factorio.workspace_path.as_ref()),
+  )?;
+
+  Ok(FactorioParams {
+    seed,
+    resume_from,
+    server_host,
+    client_count: clients,
+    character_bots: if headless { bots } else { 0 },
+    game_speed,
+    factorio_port: app_settings.factorio.factorio_port,
+    recreate,
+    write_logs,
+    map_exchange_string,
+    wait_until: FactorioStartCondition::DiscoveryComplete,
+    silent: !verbose,
+    ..FactorioParams::default()
+  })
+}
+
 fn print_script_output(stdout: &str, stderr: &str) {
   if !stdout.is_empty() {
     print!("{stdout}");
@@ -354,7 +465,76 @@ mod tests {
       .try_get_matches_from(argv)
       .unwrap_or_else(|e| panic!("parses {argv:?}: {e}"));
     let sub = matches.subcommand_matches("lua").expect("lua matched");
-    resolve_counts(sub)
+    let counts = resolve_run_counts(sub).expect("no --headless in these argv");
+    (counts.clients, counts.bots)
+  }
+
+  fn run_counts_for(argv: &[&str]) -> Result<RunCounts> {
+    let matches = build_app()
+      .try_get_matches_from(argv)
+      .unwrap_or_else(|e| panic!("parses {argv:?}: {e}"));
+    let sub = matches.subcommand_matches("lua").expect("lua matched");
+    resolve_run_counts(sub)
+  }
+
+  #[test]
+  fn headless_means_no_clients_and_the_bots_asked_for() {
+    let counts =
+      run_counts_for(&["factorio-bot", "lua", "x.lua", "--headless", "--bots", "4"]).unwrap();
+    assert_eq!(
+      counts,
+      RunCounts {
+        clients: 0,
+        bots: 4,
+        headless: true
+      }
+    );
+  }
+
+  /// `--bots` normally defaults to `--clients`, which would be zero here and
+  /// plan for nobody.
+  #[test]
+  fn headless_alone_is_one_bot() {
+    let counts = run_counts_for(&["factorio-bot", "lua", "x.lua", "--headless"]).unwrap();
+    assert_eq!(
+      counts,
+      RunCounts {
+        clients: 0,
+        bots: 1,
+        headless: true
+      }
+    );
+  }
+
+  #[test]
+  fn headless_with_clients_is_refused_by_name() {
+    let err = run_counts_for(&[
+      "factorio-bot",
+      "lua",
+      "x.lua",
+      "--headless",
+      "--clients",
+      "2",
+    ])
+    .unwrap_err();
+    let message = err.to_string();
+    assert!(
+      message.contains("--headless") && message.contains("2 graphical"),
+      "{message}"
+    );
+  }
+
+  #[test]
+  fn without_headless_nothing_changes() {
+    let counts = run_counts_for(&["factorio-bot", "lua", "x.lua", "--clients", "3"]).unwrap();
+    assert_eq!(
+      counts,
+      RunCounts {
+        clients: 3,
+        bots: 3,
+        headless: false
+      }
+    );
   }
 
   /// Backwards compatibility: with no `--bots`, the two numbers stay equal, so

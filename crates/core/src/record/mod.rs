@@ -22,6 +22,7 @@ pub mod lanes;
 pub mod map;
 pub mod provenance;
 pub mod retention;
+pub mod run_mode;
 pub mod samples;
 pub mod savepoint;
 pub mod splits;
@@ -29,6 +30,9 @@ pub mod video;
 pub use lanes::{Lane, derive_lanes};
 pub use provenance::{GitProvenance, PROVENANCE_FILE, Provenance, git_provenance, read_provenance};
 pub use retention::{DEFAULT_KEEP, KEEP_MARKER, Reaped, reap};
+pub use run_mode::{
+    BotMode, RUN_MODE_MARKER, RunMode, clear_run_mode, read_run_mode, write_run_mode,
+};
 pub use samples::{
     BotSample, IngestProgress, MachineSample, NetworkPower, PowerSample, ProductionSample,
     ReadSamples, ResearchSample, Sample, SampleKind, TravelObservation, ingest_samples_incremental,
@@ -2121,6 +2125,8 @@ mod tests {
             roster_requested: vec![1, 2, 3, 4],
             workspace: None,
             resumed_from: None,
+            bot_mode: None,
+            game_speed: None,
         };
         recorder.record_provenance(&provenance).unwrap();
         drop(recorder);

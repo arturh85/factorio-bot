@@ -4982,12 +4982,21 @@ local function character_proxy(id, bot)
 	})
 end
 
+-- `storage` is nil in the stub interpreter the Rust tests run this file
+-- in, so every reader below tolerates its absence: no storage, no bots.
+function character_bots()
+	if storage == nil then return nil end
+	return storage.bots
+end
+
 function is_character_bot(id)
-	return storage.bots ~= nil and storage.bots[id] ~= nil
+	local bots = character_bots()
+	return bots ~= nil and bots[id] ~= nil
 end
 
 function has_character_bots()
-	return storage.bots ~= nil and next(storage.bots) ~= nil
+	local bots = character_bots()
+	return bots ~= nil and next(bots) ~= nil
 end
 
 function bot_handle(id)
@@ -5003,7 +5012,7 @@ end
 function each_bot()
 	local list = {}
 	for idx, player in pairs(game.players) do list[#list + 1] = { idx, player } end
-	for id, bot in pairs(storage.bots or {}) do list[#list + 1] = { id, character_proxy(id, bot) } end
+	for id, bot in pairs(character_bots() or {}) do list[#list + 1] = { id, character_proxy(id, bot) } end
 	local i = 0
 	return function()
 		i = i + 1
@@ -5014,8 +5023,9 @@ end
 
 -- The id of the character bot that owns `entity`, or nil.
 function character_bot_id_of(entity)
-	if storage.bots == nil or entity == nil or not entity.valid or entity.name ~= "character" then return nil end
-	for id, bot in pairs(storage.bots) do
+	local bots = character_bots()
+	if bots == nil or entity == nil or not entity.valid or entity.name ~= "character" then return nil end
+	for id, bot in pairs(bots) do
 		if bot.entity ~= nil and bot.entity.valid and bot.entity.unit_number == entity.unit_number then
 			return id
 		end
@@ -5087,8 +5097,9 @@ end
 -- (`inventory_before` on the mining record) because it needs the mining
 -- record's accounting.
 function poll_character_bots(tick)
-	if storage.bots == nil then return end
-	for id, bot in pairs(storage.bots) do
+	local bots = character_bots()
+	if bots == nil then return end
+	for id, bot in pairs(bots) do
 		if bot.entity == nil or not bot.entity.valid then
 			if bot.respawn_at ~= nil and tick >= bot.respawn_at then
 				bot.entity = create_bot_character(game.surfaces[1], game.forces["player"])

@@ -624,6 +624,17 @@ impl Actuator for RconActuator {
         Ok(self.rcon.game_tick().await.ok().flatten())
     }
 
+    /// The real `game.speed`, asked of the game. A run started with
+    /// `--game-speed` has it set before any schedule runs, and a lag wait
+    /// sized for normal speed at speed 10 would sleep ten times too long
+    /// before its first look at the clock.
+    async fn game_speed(&self) -> Result<f64, ActuatorError> {
+        self.rcon
+            .game_speed()
+            .await
+            .map_err(|e| ActuatorError::Rejected(e.to_string()))
+    }
+
     /// Claims the placement `bot` most recently made, if one is waiting.
     ///
     /// Removes it: a placement is a fact about one attempt, and leaving it in

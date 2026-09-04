@@ -69,6 +69,25 @@ impl Subcommand for ThisCommand {
           .help("enabled writing server & client logs to workspace"),
       )
       .arg(
+        Arg::new("headless")
+          .long("headless")
+          .value_name("bots")
+          .required(false)
+          .value_parser(value_parser!(u8))
+          .conflicts_with("server")
+          .help(
+            "create this many server-side character bots instead of clients (needs --clients 0)",
+          ),
+      )
+      .arg(
+        Arg::new("game-speed")
+          .long("game-speed")
+          .value_name("speed")
+          .default_value("1")
+          .value_parser(value_parser!(f64))
+          .help("run the world at this game.speed"),
+      )
+      .arg(
         Arg::new("verbose")
           .short('v')
           .long("verbose")
@@ -102,6 +121,10 @@ async fn run(matches: &ArgMatches, context: &mut Context) -> Result<()> {
   let map_exchange_string = matches.get_one::<String>("map").cloned();
   let recreate = matches.get_flag("new");
   let server_host = matches.get_one::<String>("server").cloned();
+  let character_bots = matches.get_one::<u8>("headless").copied().unwrap_or(0);
+  let game_speed = *matches
+    .get_one::<f64>("game-speed")
+    .expect("defaulted by clap");
   // let websocket_server = FactorioWebSocketServer { listeners: vec![] }.start();
 
   let resume_from = resolve_resume(
@@ -114,6 +137,9 @@ async fn run(matches: &ArgMatches, context: &mut Context) -> Result<()> {
     resume_from,
     server_host,
     client_count: clients,
+    character_bots,
+    game_speed,
+    factorio_port: app_settings.factorio.factorio_port,
     recreate,
     write_logs,
     map_exchange_string,

@@ -8,6 +8,11 @@ pub struct FactorioSettings {
     pub map_exchange_string: Cow<'static, str>,
     pub rcon_pass: Cow<'static, str>,
     pub rcon_port: u16,
+    /// The game port the server listens on; `None` means Factorio's default
+    /// 34197. Set it, with `rcon_port` and `workspace_path`, to run a second
+    /// instance beside a live one.
+    #[serde(default)]
+    pub factorio_port: Option<u16>,
     pub recreate: bool,
     pub seed: Cow<'static, str>,
     pub workspace_path: Cow<'static, str>,
@@ -23,6 +28,7 @@ impl Default for FactorioSettings {
             ),
             rcon_pass: Cow::Borrowed("foobar"),
             rcon_port: 4321,
+            factorio_port: None,
             recreate: false,
             seed: Cow::Borrowed(""),
             workspace_path: Cow::Borrowed(""),

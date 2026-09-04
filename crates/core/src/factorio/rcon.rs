@@ -2095,6 +2095,31 @@ pub struct FactorioRcon {
     /// `0` means "no stamped reply yet", which is why the accessor returns an
     /// `Option` rather than handing out a tick that never happened.
     last_tick: Arc<std::sync::atomic::AtomicU64>,
+    /// `game.speed` as this process last set or read it, as `f64` bits.
+    ///
+    /// Every wall-clock deadline in this file is sized for a world running at
+    /// normal speed; at `game.speed = 10` a craft that needs 60 game-seconds
+    /// is done in six wall seconds, and a deadline that still waits six
+    /// minutes for it would hide a lost reply for ten times longer than it
+    /// should. See [`scale_deadline`]. Initialised to `1.0` and updated by
+    /// [`FactorioRcon::set_game_speed`] and [`FactorioRcon::game_speed`].
+    speed: Arc<std::sync::atomic::AtomicU64>,
+}
+
+/// A wall-clock deadline sized for normal speed, rescaled to `speed`.
+///
+/// Divides: at speed 10 the game delivers its ticks ten times sooner, so the
+/// same number of game ticks fits in a tenth of the wall clock. A speed below
+/// one lengthens the deadline for the same reason. A speed that is not
+/// positive is treated as normal rather than dividing by it, and the result
+/// never drops below ten seconds -- RCON round trips and the mod's own
+/// reply latency do not speed up with the game.
+fn scale_deadline(base: Duration, speed: f64) -> Duration {
+    const FLOOR: Duration = Duration::from_secs(10);
+    if speed.is_nan() || speed <= 0.0 || speed == 1.0 {
+        return base;
+    }
+    Duration::from_secs_f64(base.as_secs_f64() / speed).max(FLOOR)
 }
 
 #[cfg_attr(test, mockall::automock)]
@@ -2108,6 +2133,7 @@ impl FactorioRcon {
         let manager = ConnectionManager::new(&address, &settings.pass);
         Ok(FactorioRcon {
             last_tick: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            speed: Arc::new(std::sync::atomic::AtomicU64::new(1.0f64.to_bits())),
             pool: Some(
                 bb8::Pool::builder()
                     .max_size(15)
@@ -2127,6 +2153,7 @@ impl FactorioRcon {
     pub fn new_empty() -> Self {
         FactorioRcon {
             last_tick: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            speed: Arc::new(std::sync::atomic::AtomicU64::new(1.0f64.to_bits())),
             pool: None,
             silent: Arc::new(RwLock::new(true)),
         }
@@ -2451,6 +2478,78 @@ impl FactorioRcon {
     pub async fn server_save(&self) -> Result<()> {
         self.send("/server-save").await?;
         Ok(())
+    }
+
+    /// Asks the mod to create `count` server-side character bots, ids
+    /// `1..=count`, and answers with every id that now has one -- created or
+    /// kept from a resumed save. The mod refuses when a player is connected:
+    /// a run is all clients or all characters.
+    pub async fn spawn_bots(&self, count: u8) -> Result<Vec<u8>> {
+        let lines = self
+            .remote_call("spawn_bots", vec![count.to_string()])
+            .await?
+            .ok_or_else(|| miette!("spawn_bots: the mod answered nothing"))?;
+        let reply = lines.join("");
+        if let Some(err) = reply.strip_prefix("Error: ") {
+            return Err(miette!("{err}"));
+        }
+        // `helpers.table_to_json({})` yields `{}` for an empty list, so each
+        // half is read as a `Value` and an object counts as empty.
+        #[derive(Deserialize)]
+        struct Reply {
+            spawned: Value,
+            kept: Value,
+        }
+        let parsed: Reply = serde_json::from_str(&reply)
+            .into_diagnostic()
+            .wrap_err_with(|| format!("spawn_bots: unreadable reply: {reply}"))?;
+        let ids =
+            |v: Value| -> Vec<u8> { serde_json::from_value::<Vec<u8>>(v).unwrap_or_default() };
+        let mut all = ids(parsed.spawned);
+        all.extend(ids(parsed.kept));
+        all.sort_unstable();
+        Ok(all)
+    }
+
+    /// Sets `game.speed` and remembers it for [`scale_deadline`].
+    pub async fn set_game_speed(&self, speed: f64) -> Result<()> {
+        let lines = self
+            .remote_call("set_game_speed", vec![speed.to_string()])
+            .await?
+            .ok_or_else(|| miette!("set_game_speed: the mod answered nothing"))?;
+        let got: f64 = lines
+            .join("")
+            .trim()
+            .parse()
+            .into_diagnostic()
+            .wrap_err_with(|| format!("set_game_speed: unreadable reply: {lines:?}"))?;
+        self.speed
+            .store(got.to_bits(), std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Reads `game.speed` from the game and remembers it.
+    pub async fn game_speed(&self) -> Result<f64> {
+        let lines = self
+            .remote_call("game_speed", vec![])
+            .await?
+            .ok_or_else(|| miette!("game_speed: the mod answered nothing"))?;
+        let got: f64 = lines
+            .join("")
+            .trim()
+            .parse()
+            .into_diagnostic()
+            .wrap_err_with(|| format!("game_speed: unreadable reply: {lines:?}"))?;
+        self.speed
+            .store(got.to_bits(), std::sync::atomic::Ordering::Relaxed);
+        Ok(got)
+    }
+
+    /// The speed the deadlines are scaled by: the last value set or read,
+    /// normal speed until then.
+    pub fn speed_factor(&self) -> f64 {
+        let s = f64::from_bits(self.speed.load(std::sync::atomic::Ordering::Relaxed));
+        if s > 0.0 { s } else { 1.0 }
     }
 
     /// Starts initial discovery process for "server"
@@ -2851,8 +2950,13 @@ impl FactorioRcon {
         action_id: ActionId,
         dispatched: Option<u64>,
     ) -> Result<ActionTicks, ActionFailure> {
-        self.sleep_for_action_result_until(world, action_id, dispatched, ACTION_RESULT_DEADLINE)
-            .await
+        self.sleep_for_action_result_until(
+            world,
+            action_id,
+            dispatched,
+            scale_deadline(ACTION_RESULT_DEADLINE, self.speed_factor()),
+        )
+        .await
     }
 
     /// How long to wait for a hand craft's verdict.
@@ -3366,7 +3470,7 @@ impl FactorioRcon {
             world,
             action_id,
             dispatched,
-            Self::craft_deadline(energy, count),
+            scale_deadline(Self::craft_deadline(energy, count), self.speed_factor()),
         )
         .await
     }
@@ -8246,5 +8350,31 @@ mod craft_deadline_tests {
             FactorioRcon::craft_deadline(0.0, 100),
             ACTION_RESULT_DEADLINE
         );
+    }
+}
+
+#[cfg(test)]
+mod scale_deadline_tests {
+    use super::*;
+
+    #[test]
+    fn deadlines_scale_with_game_speed() {
+        let base = Duration::from_secs(360);
+        assert_eq!(scale_deadline(base, 10.0), Duration::from_secs(36));
+        assert_eq!(scale_deadline(base, 1.0), base);
+        assert_eq!(scale_deadline(base, 0.5), Duration::from_secs(720));
+        // Not positive: treated as normal, never divided by.
+        assert_eq!(scale_deadline(base, 0.0), base);
+        assert_eq!(scale_deadline(base, -3.0), base);
+        // The floor: round trips do not get faster with the game.
+        assert_eq!(
+            scale_deadline(Duration::from_secs(20), 100.0),
+            Duration::from_secs(10)
+        );
+    }
+
+    #[test]
+    fn a_fresh_client_assumes_normal_speed() {
+        assert_eq!(FactorioRcon::new_empty().speed_factor(), 1.0);
     }
 }

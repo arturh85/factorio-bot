@@ -22,6 +22,7 @@ use factorio_bot_core::process::instance_setup::{installed_factorio_version, rea
 use factorio_bot_core::record::map::{
     Divergence, EntitySnapshot, MapKind, MapRecord, Placement, bounds_around, divergence_between,
 };
+use factorio_bot_core::record::run_mode;
 use factorio_bot_core::record::savepoint;
 use factorio_bot_core::record::video::Resolution;
 use factorio_bot_core::record::{
@@ -1050,6 +1051,7 @@ end
                     // (`process_control.rs`). A workspace set up under another
                     // name reads as "seed unknown", which is true of it.
                     let instance = workspace.join("server");
+                    let run_mode = run_mode::read_run_mode(&instance);
                     let seed = read_map_gen_seed(&instance);
                     let factorio = installed_factorio_version(&workspace.join("data"));
                     // The working tree of the process's own directory. See
@@ -1108,6 +1110,12 @@ end
                         // instance this process did not start.
                         resumed_from: savepoint::read_resume_marker(&instance)
                             .map(|marker| marker.label),
+                        // Same road, same caveats: written by the process that
+                        // started `<workspace>/server`, absent for a build
+                        // that predates it or a server this process did not
+                        // start. See `crates/core/src/record/run_mode.rs`.
+                        bot_mode: run_mode.as_ref().map(|m| m.bot_mode.as_str().to_string()),
+                        game_speed: run_mode.as_ref().map(|m| m.game_speed),
                     };
                     // Never fatal. A run that cannot write its provenance is
                     // still a run worth recording, and the reader's rule is
@@ -1191,6 +1199,18 @@ end
                     }
 
                     if let Some(video) = video {
+                        // Video is filmed from a client's window, and a
+                        // headless run has none. Refused here by name rather
+                        // than left to `VideoRecorder::start` to report "no
+                        // window found", which reads as a capture fault.
+                        if run_mode.as_ref().map(|m| m.bot_mode)
+                            == Some(run_mode::BotMode::Characters)
+                        {
+                            return Err(record_error(
+                                "video is filmed from a graphical client, and this run has \
+                                 none (--headless); start the run without video or with clients",
+                            ));
+                        }
                         // Never fatal: `VideoRecorder::start` returns `Ok` with
                         // `status: failed` and a reason for every capture
                         // failure, and the run goes on without it. Only an

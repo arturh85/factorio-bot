@@ -11,6 +11,80 @@ four bots.
 
 ---
 
+## It was not a shortfall — the plan double-spent its own stock (`3b79eb20`)
+
+**Bot 1 held ZERO iron plates**, not 141. `samples.jsonl` at tick 56,460:
+`{"coal":5,"copper-cable":1,"small-electric-pole":2,"wood":3}`. The 141 was a
+number in the planner's own ledger, and the nine-plate gap was **the same stock
+counted twice**. There was nothing to mine, so my framing — "green's expansion
+meeting a bot nine plates short" — pointed the fix in exactly the wrong
+direction.
+
+### The mechanism
+
+- Green asks `Have{iron-plate, 150, Share(bot 1)}` for `craft 75 iron-gear-wheel`.
+- `Withdraw` empties 17 furnaces into bot 1 and recurses.
+- The recursion sizes itself at `150 − 17 = 133` and builds a cell for the rest.
+- That cell needs a drill, and **the drill's own `Have{iron-plate,3}` and
+  `Have{iron-plate,6}` subgoals see those 17 plates sitting unreserved**, plan
+  nothing, and spend 9 of them.
+- `take 133 from the cell` lands on the 8 remaining → **141**. The craft demands
+  its promised 150. `PlanState::lose` refuses.
+
+`shortfall` credits stock in hand towards a `Have` goal, but **nothing recorded
+that credit**, so the goal's *own subtree* could spend it. This is the
+shared-intermediate defect the reservation machinery exists to prevent,
+arriving through a door it did not cover.
+
+### The fix, and why it is not a refusal
+
+`expand_goal_body` now reserves `min(count, available)` for a `Goal::Have`
+across its own expansion — measured **before** `method.expand` (that is the
+number the shortfall was computed from) and applied **after** it (reserving
+first would hide the credit from the sizing that describes it). Released on
+every exit path including errors.
+
+**I was wrong to ask for this to become a named refusal.** `refusal_for`
+deliberately classifies `InsufficientItems` as a *fault*, not a verdict, because
+"it means the feasibility check and the effect disagree" — which is exactly what
+happened. Filing it as a refusal would have recorded a planner defect as a fact
+about the map.
+
+Red byte-identical: 290-line `--steps` listing, md5 `d097106e…`, and structurally
+unable to move since no bot holds an iron plate at t=0.
+
+### The retry window: do NOT widen it, and my suggestion was refuted
+
+At the refusal, `samples.jsonl` puts **bot 2 at (31.34, −47.34)** — dead centre
+of the footprint — **mining copper ore**, its action running ticks
+20,689→21,172 (483 ticks). And `step_aside_from_footprint` only steers a
+blocker when `state.walking == nil and state.mining == nil`, so **it skipped bot
+2 entirely.**
+
+The retry's premise — "the blocker has been asked to move; has it gone yet?" —
+was **false**. No clock fixes a blocker nobody asked to move. That also refutes
+my own suggestion of waiting until the step-aside walk settles: **there was no
+step-aside walk.** It would fix the `c2b2698a` case and do nothing here.
+
+What would justify a number is a different *signal*, not a longer clock: the mod
+already knows whether it steered the blocker and does not say so in the reply.
+Left unfixed.
+
+**And the record cannot tell the difference**: the settle carries
+`elapsed_ticks: 0`, so "retried four times and failed" is indistinguishable from
+"failed instantly" — another instance of the project's own "silence is not
+success" pattern.
+
+### A real limitation of the offline loop, found here
+
+**`world.dump` never calls `Planner::refresh_buffers`**, so a dump's
+`inventories` is `[]`, and the `plan` CLI does not refresh either — only the Lua
+`goal.plan` path does. **The entire `Withdraw` path is unreachable offline.**
+A plain resume of the failing world plans fine (530 actions); reproducing this
+needed the sampled inventories *and* 26 furnaces holding a plate each, injected
+by hand. The 4-second loop has a blind spot, and it is exactly where this bug
+lived.
+
 ## RED WITNESSED ON THE BENCHMARK SEED — and green crashes on nine plates
 
 `run-1788509918-33958`, **seed `31337`**, roster `[1,2,3,4]`. The first result

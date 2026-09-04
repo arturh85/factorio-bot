@@ -104,6 +104,51 @@ Two structural facts explain why nothing fills the idle:
   variant (`Have`, `Researched`, `Produced`, `Producing`, `All`) is
   demand-driven.
 
+## STAGE 3: green science does not plan at all — a capability gap, not a defect
+
+```
+$ factorio-bot plan --world workspace/scripts/map.json \
+      --goal producing:logistic-science-pack:6 --bots 1,2,3,4
+Error: the goal did not expand: no method can satisfy goal:
+       produce 6 logistic-science-pack/min
+```
+
+**Established in 4 seconds rather than a 20-minute run.**
+
+### The constraint, precisely
+
+`assembly_spec` (`crates/planner/src/method/assemble.rs`) requires a recipe
+with **exactly two ingredients, exactly one of which is craftable**. That
+craftable one becomes the cell's single intermediate machine; the other is
+chest-supplied. The module doc says so outright, and notes that a second
+craftable ingredient "would need a second intermediate machine".
+
+| recipe | ingredients | verdict |
+|---|---|---|
+| `automation-science-pack` (red) | `copper-plate`, `iron-gear-wheel` | one craftable — **the shape the model was built for** |
+| `logistic-science-pack` (green) | `transport-belt`, `inserter` | **both craftable** |
+| `transport-belt` | `iron-plate`, `iron-gear-wheel` | fine as an intermediate |
+| `inserter` | `iron-plate`, `iron-gear-wheel`, `electronic-circuit` | **three ingredients** |
+| `electronic-circuit` | `copper-cable`, `iron-plate` | another level down |
+
+So green breaks the model twice: it needs **two** intermediates rather than
+one, and an intermediate with **three** ingredients, one of which is itself
+crafted. Red's cell is two machines; green is genuinely deeper.
+
+This is a **capability gap, not a defect** — nothing is broken, the planner
+simply cannot express this shape. That distinction matters for how it is
+approached: red science was months of chasing defects, green starts by
+designing a thing that does not exist.
+
+### The trap that must not be repeated
+
+The cell that works and the cell the model *believes* works are different
+things — that was tonight's decisive bug, and every `holds_assembling` test
+missed it because they stood their cells through the **overlay**, which a
+replan never has. Any new cell shape needs a seam test that pushes it through
+`update_chunk_entities`, the door the mod's events actually use, or it will
+pass every test and fail every run.
+
 ## STAGE 2 IS DONE — THE FIRST WITNESS IN THIS PROJECT'S HISTORY
 
 `run-1788489532-62404`, roster `[1,2,3,4]`, `scripts/factory_stage2.lua`.

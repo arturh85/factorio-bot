@@ -582,6 +582,45 @@ more furnace ground, and an escape from the crowding that halted the first
 green run — `3ba0d441` reserves cell sites on a patch, but a bot that can reach
 a *second* patch does not need the reservation.
 
+## ⚠ STAGE 2 HAS ARGUABLY NEVER PRODUCED AT A RATE
+
+Found while designing the capacity fix (`97922af5`), and it is the most
+important thing on this page.
+
+**1,249 of 1,281 `full_output` samples in the reference run belong to the two
+stage-2 red-science assemblers, not to any furnace.** The science-pack
+assembler **jammed at tick 74,100 holding four packs, never held more, and
+finished four crafts in the entire run.**
+
+**`plan_cell` gives the product machine no output inserter — by design.** Its
+roles are `Pole, Intermediate, Product, FeedChest, SupplyChest, FeedInserter,
+LinkInserter, SupplyInserter`. **Nothing removes the product.** An assembling
+machine stops when its output backs up, which for an assembler is three or four
+items, not a stack.
+
+`milestone_satisfied` was recorded anyway.
+
+### What this does and does not invalidate
+
+- **The witness is still true.** It asserts a pack appeared while every bot
+  stood still, and one did — inside the first 780 ticks, before the jam. **A
+  bot-built machine did assemble science.** That claim stands.
+- **`producing("automation-science-pack", 6)` does not.** The rung's own doc
+  says it means the cell *stands*, and it does stand — but the number **6/min**
+  has never been achieved, and could not be, because the cell physically cannot
+  run for a minute.
+- **Six witnesses across six runs all fired in the same 780 ticks.** They were
+  never evidence of a rate and never claimed to be. **I have been reporting
+  them as "red science works", which overstates what was shown.**
+
+### The fix is a cell-design change, not a bug
+
+The cell needs an output path — an inserter and a chest, or a consumer. That is
+`assemble.rs` geometry, and the product machine's **third mouth is already
+known to be powered and unused** (`31c8d579`), which is where it would go.
+
+Until then, **"produces 6/min" should not be quoted for red or green.**
+
 ## WHERE THIS STANDS (read this first)
 
 **Sections below are reverse-chronological — newest first.** The plan began as

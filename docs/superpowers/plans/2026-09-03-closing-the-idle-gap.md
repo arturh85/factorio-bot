@@ -11,6 +11,76 @@ four bots.
 
 ---
 
+## Rocks had never been chopped live — the first run to try lost bot 1 in every batch (`98ca85d8`)
+
+`run-1788549906-13347`, seed `31337`, resumed from `run-1788528493-60555:3`
+(red rate-witnessed, 8 furnaces), `factory_stage3.lua`, roster `[1,2,3,4]`.
+The first live run since rocks landed (`130b3bde`), and therefore **the first
+run in which a bot was ever sent to chop a rock**. The "8:01 planned since
+rocks" figure had never been executed.
+
+Every batch ended the same way:
+
+```
+ran: success=100 pending=207 actions(failed=0 lost=0) walks(failed=1 lost=0)
+first error: game rejected the command: the walk to [-7, 16.375] would end at
+[-6.5, 15.5], inside a collision box spanning [-8, 15.48] to [-6, 17.38] —
+a character cannot stand there, so the walk could only stall
+```
+
+The box is the rock's own. The step was `chop big-rock at [-7, 16.38] for 20
+stone`, and `Chop`'s `AtPosition` carried **`min_radius: 0.0`**, so the walk
+asked the game for a disc centred on the rock; the pathfinder's last waypoint
+landed inside it and `judge_path` refused before dispatch — correctly. Trees
+never showed this because a tree's box is 0.8 wide and the path happens to end
+beside it. A `big-rock` is 2 × 1.9, a `huge-rock` 3 × 2.2.
+
+**12 plans in 24.9 game-minutes, zero action failures, one refused walk per
+batch, always bot 1's** — the bot holding 198 of 307 steps. Tier-1 recovery
+fired three times and each time re-issued the identical walk to the identical
+rock, which answers a question the recovery section left open: *a tier-1
+reschedule after a walk refusal does not reassign the work* when the chain
+owner pins the bot. Rule 4 did not catch it because `obs.success` kept rising —
+the other three bots were working. Killed deliberately at 25.9 min wall once
+the fix was built; the record is complete up to the last batch.
+
+### The fix, and what it moves
+
+The inner radius is now the entity's **placement clearance** — half its
+collision diagonal plus half the character's — the same bound `Place` uses,
+for the same reason. Pinned by `a_chop_stands_beside_the_rock_not_on_it`, which
+also asserts the annulus is non-empty against the character's reach.
+
+| goal, baseline map | before | after |
+|---|---|---|
+| `researched:automation` | 136 / 28,897 | 136 / **28,918** (+21) |
+| `producing:automation-science-pack:6` | 299 / 43,797 | 299 / 43,821 (+24) |
+| `producing:logistic-science-pack:6` | 443 / 216,370 | 443 / 216,172 (−198) |
+
+The ticks are the schedule's simulated arrival point moving off the rock's
+centre; the old figures priced a stand-point the game refuses. Two exact pins
+moved and say why (`38,606 → 38,620`, `5,773 → 5,800`).
+
+### Corrections to the brief I was handed
+
+- **Green's offline baseline is 443 actions / 216,370 ticks**, not the
+  619 / 216,474 the record still quotes further down — that figure predates
+  rocks.
+- **"Planned 8:01 since rocks" was an offline number only.** Nothing had run
+  it. A planner change that alters *where a bot stands* cannot be verified by
+  the 4-second loop, which never asks the pathfinder anything.
+
+### What the plan itself says about green, before any execution
+
+First plan: 307 steps, makespan 191,189 (53 min). Bot 1: 198 steps, 66,316
+planned ticks, **last step ends at 191,189**; bots 2–4: ~36 steps, ~8,500
+planned ticks each, done by 42,613. The tail is `craft 75
+automation-science-pack` (22,500 ticks, starting at 146,076) followed by
+`research logistic-science-pack` (22,500). **Bot 1 waits ~125,000 ticks inside
+its own plan** — on smelt lags feeding the packs — while three bots stand idle
+from tick 42,613. That is the shape the previous green run showed too (207 of
+406 steps on bot 1) and it is the number to move once green completes at all.
+
 ## A stalled walk now names what blocked it (`52d35716`) — and the message was lying
 
 The mod probes at the instant the leg gives up and appends the cause:

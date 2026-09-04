@@ -1291,39 +1291,80 @@ impl Method for PlaceDrill {
         // The one step `BuildCell` never takes: pull `need` of the item back
         // out of the furnace and into the acting bot's hands, which is what
         // turns a standing structure into a satisfied `Have`/`Produced`.
-        let take_id = ctx.ids.next();
-        let mut take_pre = vec![
-            Condition::AtPosition {
-                who: Actor::Role,
-                pos: cell.furnace.clone(),
-                radius: reach,
-                min_radius: 0.0,
-            },
-            Condition::EntityAt {
-                pos: cell.furnace.clone(),
-                name: FURNACE.into(),
-            },
-        ];
-        take_pre.extend(research_pre.iter().cloned());
-        steps.push(Step::Act(Box::new(Action {
-            id: take_id,
-            kind: ActionKind::Remove {
-                pos: cell.furnace.clone(),
-                entity: FURNACE.into(),
-                slot: InventorySlot::FurnaceResult,
-                item: item.clone(),
-                count: need,
-            },
-            pre: take_pre,
-            eff: vec![Effect::GainItem {
-                who: Actor::Role,
-                item: item.clone(),
-                count: need,
-            }],
-            duration: TRANSFER_TICKS,
-            pinned: None,
-            label: format!("take {} {} from the cell", need, item),
-        })));
+        //
+        // # One take per stack, not one take per goal
+        //
+        // A stone furnace's output is a **single slot holding exactly one
+        // stack**, so `take 141 iron-plate` was never physically possible --
+        // not at plan time, not at dispatch, not at any moment in between. It
+        // came back `tried to remove 141 iron-plate but removed 100`, and the
+        // larger cost was the 9,600 ticks *before* that: a furnace whose
+        // output slot is full reports `full_output` and **stops smelting**,
+        // with a bot idle beside it and its input backing up. Sizing this take
+        // from demand asks the game for something a slot cannot hold; sizing
+        // it from `slot_capacity` asks for a stack at a time and empties the
+        // slot often enough that the machine never stalls.
+        //
+        // Each cycle's lag is the time to produce everything taken *so far*,
+        // so the take of the first stack lands when the first stack exists
+        // rather than at the end of the whole job. The last cycle's lag is
+        // `duration` exactly, which is what a single take used to carry -- so
+        // a goal that already fits in one stack plans byte-for-byte as before.
+        //
+        // `None` from `slot_capacity` means the world has no prototype for the
+        // item (fixtures only) and is deliberately *not* a guessed cap: it
+        // falls back to one take of `need`, today's behaviour.
+        // See `docs/superpowers/specs/2026-09-04-world-model-divergence-design.md`.
+        let cap = ctx
+            .state
+            .slot_capacity(InventorySlot::FurnaceResult, item)
+            .unwrap_or(need)
+            .max(1);
+        let mut take_ids: Vec<crate::ids::ActionId> = Vec::new();
+        let mut take_lags: Vec<Ticks> = Vec::new();
+        let mut taken = 0u32;
+        loop {
+            let count = cap.min(need.saturating_sub(taken));
+            taken = taken.saturating_add(count);
+            let take_id = ctx.ids.next();
+            let mut take_pre = vec![
+                Condition::AtPosition {
+                    who: Actor::Role,
+                    pos: cell.furnace.clone(),
+                    radius: reach,
+                    min_radius: 0.0,
+                },
+                Condition::EntityAt {
+                    pos: cell.furnace.clone(),
+                    name: FURNACE.into(),
+                },
+            ];
+            take_pre.extend(research_pre.iter().cloned());
+            steps.push(Step::Act(Box::new(Action {
+                id: take_id,
+                kind: ActionKind::Remove {
+                    pos: cell.furnace.clone(),
+                    entity: FURNACE.into(),
+                    slot: InventorySlot::FurnaceResult,
+                    item: item.clone(),
+                    count,
+                },
+                pre: take_pre,
+                eff: vec![Effect::GainItem {
+                    who: Actor::Role,
+                    item: item.clone(),
+                    count,
+                }],
+                duration: TRANSFER_TICKS,
+                pinned: None,
+                label: format!("take {} {} from the cell", count, item),
+            })));
+            take_ids.push(take_id);
+            take_lags.push(spec.ticks_per_item.saturating_mul(taken.saturating_add(1)));
+            if taken >= need {
+                break;
+            }
+        }
 
         // Production cannot start before either machine is fuelled, and the
         // scheduler needs to be told: an `Insert`'s effect satisfies no
@@ -1332,14 +1373,34 @@ impl Method for PlaceDrill {
         // and for the same reason -- a removal timed to land exactly on the
         // last item is right only if nothing about it runs long.
         for id in fuel_ids {
+            for (take_id, lag) in take_ids.iter().zip(&take_lags) {
+                steps.push(Step::Link {
+                    from: id,
+                    to: *take_id,
+                    lag: *lag,
+                });
+            }
+        }
+        // One slot, emptied in order. The staggered lags above already imply
+        // it, but the ordering is physical rather than a consequence of the
+        // arithmetic, so it is stated: stack `n + 1` is not in the slot until
+        // stack `n` has been carried away.
+        for pair in take_ids.windows(2) {
             steps.push(Step::Link {
-                from: id,
-                to: take_id,
-                lag: duration,
+                from: pair[0],
+                to: pair[1],
+                lag: 0,
             });
         }
 
-        attach_unlock(&mut steps, item, unlocks);
+        // The unlock rides on the *last* take, because that is the one that
+        // completes `need`; `attach_unlock` takes the first producing action
+        // it finds, so it is handed only the tail of the step list.
+        let last_take_at = steps
+            .iter()
+            .rposition(|s| matches!(s, Step::Act(a) if Some(&a.id) == take_ids.last()))
+            .unwrap_or(0);
+        attach_unlock(&mut steps[last_take_at..], item, unlocks);
         Ok(steps)
     }
 }
@@ -2260,6 +2321,67 @@ mod tests {
         assert!(
             schedule(&net, &s, &bots).is_ok(),
             "the plan this method emits must be schedulable, not merely constructible"
+        );
+        assert_eq!(
+            net.actions()
+                .filter(|a| a.label.ends_with("from the cell"))
+                .count(),
+            1,
+            "fifty fits in one stack, so it is still exactly one take -- \
+             the split must not touch a plan that was already legal"
+        );
+    }
+
+    /// A stone furnace's output is one slot holding one stack, so a goal
+    /// larger than a stack is a **sequence of visits**, not one visit.
+    ///
+    /// This is the live failure: `take 141 iron-plate` came back
+    /// `tried to remove 141 but removed 100`, and the 9,600 ticks before that
+    /// were the furnace sitting in `full_output` -- stopped, not merely full
+    /// -- because the plan would not come and empty it. 150 plates now leave
+    /// as 100 and then 50, and the first take is timed to when the first
+    /// hundred exist rather than to the end of the whole job.
+    #[test]
+    fn a_count_over_one_stack_leaves_the_cell_a_stack_at_a_time() {
+        let bots = vec![BotId(1)];
+        let s = state(&bots);
+        let net = expand(
+            &[Goal::Have {
+                item: "iron-plate".into(),
+                count: 150,
+                whose: Holder::Anyone,
+            }],
+            &s,
+            &crate::method::have::default_registry(),
+            BotId(1),
+        )
+        .expect("a hundred and fifty plates plan");
+
+        let takes: Vec<String> = net
+            .actions()
+            .filter(|a| a.label.ends_with("from the cell"))
+            .map(|a| a.label.clone())
+            .collect();
+        assert_eq!(
+            takes,
+            vec![
+                "take 100 iron-plate from the cell".to_string(),
+                "take 50 iron-plate from the cell".to_string(),
+            ],
+            "one stack, then the remainder -- and never a take above the cap"
+        );
+        assert!(
+            net.actions().all(|a| !matches!(
+                &a.kind,
+                ActionKind::Remove { slot, item, count, .. }
+                    if *slot == InventorySlot::FurnaceResult
+                        && s.slot_capacity(*slot, item).is_some_and(|cap| *count > cap)
+            )),
+            "no removal in the plan asks a slot for more than it holds"
+        );
+        assert!(
+            schedule(&net, &s, &bots).is_ok(),
+            "the split plan must schedule, not merely construct"
         );
     }
 }

@@ -45,6 +45,31 @@ const VANILLA_CHARACTER_COLLISION_HALF_SIDE: f64 = 0.19921875;
 /// tile centres; see [`PlanState::mining_tile_separation`].
 const TILE_HALF_SIDE: f64 = 0.5;
 
+/// How much more than one stack a crafting machine's *input* slot accepts, in
+/// items, in vanilla 2.1.
+///
+/// An empirical constant of this game version, named as one. Measured on a
+/// live 2.1.17 instance by creating a machine, inserting 1000–5000 of an
+/// ingredient into `defines.inventory.crafter_input` and recording what was
+/// accepted: iron-ore, copper-ore, stone and solid-fuel all took **70** on a
+/// stack of 50; iron-plate **120** on a stack of 100; copper-cable **220** on a
+/// stack of 200.
+///
+/// **The margin is additive, not proportional** — 50→70, 100→120, 200→220.
+/// Proportional would have made the stack of 200 answer 240. It was the same
+/// +20 across every machine, every recipe and every ingredient amount tried,
+/// which is why it is one number here rather than a table.
+///
+/// Two caveats belong with it. Every measurement was on a *freshly created,
+/// empty* machine, so whether a mid-craft machine answers the same is
+/// unverified; and [`PlanState::slot_capacity`] uses this only to make a
+/// transfer *smaller*, so being wrong costs an extra trip rather than a
+/// failed action. Do not read it as a production-stop threshold: what makes a
+/// machine stop is a different question with a different answer per machine
+/// type (a stone furnace stops at a full output stack, an
+/// assembling-machine-1 at three or four items).
+pub const INPUT_OVERLOAD: u32 = 20;
+
 /// A vanilla character's `resource_reach_distance`, used when no bot in the
 /// roster reports a plausible one.
 ///
@@ -1445,6 +1470,91 @@ impl PlanState {
             .get(force)
             .map(|entry| entry.technologies.keys().cloned().collect())
             .unwrap_or_default()
+    }
+
+    /// How many of `item` fit in one stack, from the world's own
+    /// `item_prototypes`.
+    ///
+    /// `None` means the world carries no prototype for `item`, which on the
+    /// production path never happens — `workspace/scripts/map.json` carries
+    /// all 342 of them — and in this crate's fixtures happens constantly. See
+    /// [`PlanState::slot_capacity`] for what a caller must do with that.
+    pub fn stack_size(&self, item: &str) -> Option<u32> {
+        self.base.item_prototypes.get(item).map(|p| p.stack_size)
+    }
+
+    /// The most of `item` one machine's `slot` can hold at once.
+    ///
+    /// **The planner otherwise models every machine inventory as unbounded**,
+    /// and sizes a load, a batch and a take from what the *goal* needs while
+    /// the game sizes them from what a *slot* holds. Where the two disagree
+    /// the game wins: silently on the way in (a full output slot puts a
+    /// furnace in `full_output` and it stops smelting) and loudly on the way
+    /// out (`tried to remove 141 iron-plate but removed 100`). This is the one
+    /// function that knows the difference; see
+    /// `docs/superpowers/specs/2026-09-04-world-model-divergence-design.md`.
+    ///
+    /// The rules are measured against a live Factorio 2.1.17 instance, by
+    /// creating an entity, inserting 1000–5000 of the item into the named
+    /// `defines.inventory` and recording what was accepted:
+    ///
+    /// * **Outputs are one slot of exactly `stack_size`** — stone-furnace /
+    ///   iron-plate 100, assembling-machine-1 / iron-gear-wheel 100,
+    ///   assembling-machine-1 / electronic-circuit 200. The number tracks the
+    ///   *item*, not the machine, which is why this is read per item rather
+    ///   than tabulated.
+    /// * **`Fuel` is one slot of exactly `stack_size`** — stone-furnace /
+    ///   coal 50, burner-mining-drill / coal 50.
+    /// * **Inputs are `stack_size` + [`INPUT_OVERLOAD`]** — iron-ore,
+    ///   copper-ore, stone and solid-fuel 70 (stack 50); iron-plate 120
+    ///   (stack 100); copper-cable 220 (stack 200).
+    /// * **`LabInput` is one stack per science type** — lab /
+    ///   automation-science-pack 200.
+    /// * **`Chest` is `slots × stack_size` and cannot be computed here.**
+    ///   `FactorioEntityPrototype` carries no inventory size, so this answers
+    ///   `None` for a chest. A wooden chest holds 1600 iron-plate and the
+    ///   largest chest transfer in any plan measured so far is 37, so nothing
+    ///   comes near it; sending the slot count is the follow-up.
+    ///
+    /// **Capacity comes from prototypes and never from the game**, and that is
+    /// settled rather than chosen: the furnace whose take failed was placed by
+    /// the *same plan* that planned to empty it, so at expansion time there was
+    /// no entity to ask. Nor is `get_insertable_count` a usable oracle — on the
+    /// bench it answered 50 for an input slot that `insert` then filled to 70.
+    ///
+    /// # `None` means "unknown, therefore unbounded"
+    ///
+    /// Never a guessed number. Several of this crate's fixtures build worlds
+    /// with no `item_prototypes` at all and pin their plans byte-for-byte, so
+    /// a fallback constant would silently re-size every one of them. A caller
+    /// must treat `None` as "do not split", which is exactly today's
+    /// behaviour, and the `warn!` below is here because a silently uncapped
+    /// path is the failure mode this accessor exists to end.
+    pub fn slot_capacity(&self, slot: InventorySlot, item: &str) -> Option<u32> {
+        if slot == InventorySlot::Chest {
+            // Known-unknowable rather than missing, so no warning: see above.
+            return None;
+        }
+        let Some(stack) = self.stack_size(item) else {
+            factorio_bot_core::tracing::warn!(
+                item,
+                slot = ?slot,
+                "no item prototype, so this slot is planned as unbounded"
+            );
+            return None;
+        };
+        Some(match slot {
+            InventorySlot::FurnaceSource | InventorySlot::AssemblerInput => {
+                stack.saturating_add(INPUT_OVERLOAD)
+            }
+            InventorySlot::FurnaceResult
+            | InventorySlot::AssemblerOutput
+            | InventorySlot::Fuel
+            | InventorySlot::LabInput => stack,
+            // Returned above; matched rather than `_` so a new variant is a
+            // compile error here and not a silently wrong capacity.
+            InventorySlot::Chest => return None,
+        })
     }
 
     pub fn bot_ids(&self) -> Vec<BotId> {
@@ -3637,6 +3747,83 @@ mod tests {
             position: Position::new(x, y),
             ..Default::default()
         }
+    }
+
+    // ---- slot capacity -----------------------------------------------------
+
+    /// The §2 table of
+    /// `docs/superpowers/specs/2026-09-04-world-model-divergence-design.md`,
+    /// as measured on a live 2.1.17 instance, restated against the fixture's
+    /// own stack sizes (iron-plate 100, iron-ore 50, electronic-circuit 200).
+    ///
+    /// The point of the assertions on `electronic-circuit` is that the answer
+    /// **tracks the item, not the machine**: an assembler holds 100 gears and
+    /// 200 circuits in the same output slot, which is what makes this a read
+    /// of `stack_size` rather than a table of machines.
+    #[test]
+    fn slot_capacity_is_a_stack_out_and_a_stack_plus_the_overload_in() {
+        let s = state();
+        for (slot, item, want) in [
+            (InventorySlot::FurnaceResult, "iron-plate", 100),
+            (InventorySlot::AssemblerOutput, "iron-gear-wheel", 100),
+            (InventorySlot::AssemblerOutput, "electronic-circuit", 200),
+            (InventorySlot::Fuel, "coal", 50),
+            (InventorySlot::LabInput, "automation-science-pack", 200),
+            (InventorySlot::FurnaceSource, "iron-ore", 70),
+            (InventorySlot::AssemblerInput, "iron-plate", 120),
+            (InventorySlot::AssemblerInput, "electronic-circuit", 220),
+        ] {
+            assert_eq!(
+                s.slot_capacity(slot, item),
+                Some(want),
+                "{slot:?} of {item}"
+            );
+        }
+    }
+
+    /// The input margin is **additive**, not proportional: 50 -> 70,
+    /// 100 -> 120, 200 -> 220. Proportional would have made the stack of 200
+    /// answer 240, and this is the assertion that would catch someone
+    /// "simplifying" it into a multiplier.
+    #[test]
+    fn the_input_overload_is_additive_across_every_stack_size() {
+        let s = state();
+        for item in ["iron-ore", "iron-plate", "electronic-circuit"] {
+            let stack = s.stack_size(item).expect("the fixture has this prototype");
+            assert_eq!(
+                s.slot_capacity(InventorySlot::AssemblerInput, item),
+                Some(stack + INPUT_OVERLOAD),
+                "{item} stacks to {stack}"
+            );
+        }
+    }
+
+    /// **Unknown must mean unbounded, never a guessed number.** Several
+    /// fixtures in this crate build worlds with no item prototypes at all and
+    /// pin their plans byte-for-byte; a fallback constant would silently
+    /// re-size every transfer in them. A chest answers the same way for a
+    /// different reason -- `slots x stack_size` needs an inventory size the
+    /// entity prototypes do not carry.
+    #[test]
+    fn an_unknown_item_and_a_chest_are_both_unbounded() {
+        let s = state();
+        assert_eq!(
+            s.stack_size("no-such-item"),
+            None,
+            "no prototype, no stack size"
+        );
+        for slot in InventorySlot::ALL {
+            assert_eq!(
+                s.slot_capacity(slot, "no-such-item"),
+                None,
+                "{slot:?} of an item the world does not describe"
+            );
+        }
+        assert_eq!(
+            s.slot_capacity(InventorySlot::Chest, "iron-plate"),
+            None,
+            "a chest's slot count is not in the prototypes"
+        );
     }
 
     // ---- electric supply ---------------------------------------------------

@@ -232,10 +232,33 @@ const BOILER_SEARCH_RADIUS: f64 = 16.0;
 /// What the boiler burns, in kJ per unit, and how many of them fit in its one
 /// fuel slot.
 ///
-/// Coal is 4 MJ and stacks to 50, so a full slot is 200 MJ. Written down here
-/// rather than read, for the same reason `COAL_BURN_TICKS` is: **the mod does
-/// not send `fuel_value` or `stack_size`**, so neither number can come out of
-/// the world.
+/// Coal is 4 MJ and stacks to 50, so a full slot is 200 MJ.
+///
+/// # These are readable, and this comment used to say they were not
+///
+/// It said "**the mod does not send `fuel_value` or `stack_size`**, so neither
+/// number can come out of the world", and that was false in both halves.
+/// `serialize_item_prototype` (`mods/BotBridge/types.lua`) sends both,
+/// `FactorioItemPrototype` (`crates/core/src/types.rs`) carries both, and
+/// `workspace/scripts/map.json` has them for all 342 item prototypes — coal's
+/// `fuel_value` is `4000000` and its `stack_size` is `50`, which is exactly
+/// these two constants. So the numbers are right and the reason given for
+/// hardcoding them was not.
+///
+/// They are still constants, deliberately, and that is a scope decision rather
+/// than a claim about the data: `PlanState::stack_size` answers `None` for a
+/// world with no prototype for an item, and several fixtures in this crate are
+/// exactly that and pin their plans byte-for-byte, so reading these two would
+/// change plan arithmetic in the fixtures for no gain here. Replacing
+/// `COAL_STACK` with `slot_capacity(InventorySlot::Fuel, "coal")` and `COAL_KJ`
+/// with `fuel_value / 1000` belongs with the fuel-capping increment (§9.3 of
+/// `docs/superpowers/specs/2026-09-04-world-model-divergence-design.md`),
+/// which has to decide what an unknown fuel means anyway.
+///
+/// The precedent this comment used to invoke does not say what it was quoted
+/// as saying: `COAL_BURN_TICKS`' own doc names the machine's `energy_usage` as
+/// the field the mod withholds, and that is correct and is a different field.
+/// `fuel_value` and `stack_size` were never in that sentence.
 const COAL_KJ: u64 = 4_000;
 const COAL_STACK: u32 = 50;
 

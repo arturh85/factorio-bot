@@ -11,6 +11,36 @@ four bots.
 
 ---
 
+## The cell's drill mines its four tiles dry — the `removed 40 of 64` divergence, root-caused live
+
+Run 3 (`run-1788552801-73005`), batch 3: `take 64 iron-plate from the cell`
+→ `removed 40`; tier-1 recovery re-issued the identical take → `removed 0`.
+Asked the running game, read-only, while the next cell was mid-wait:
+
+```
+burner-mining-drill@-10,-33  status=21 (no_minable_resources)  fuel=3 coal left  ore=NONE
+stone-furnace@-10,-35        status=18 (no_ingredients)        products_finished=40
+neighbouring cells: products_finished = 36, 37
+iron tiles within 6 of the cells: n=45  min=9  median=271  max=511
+```
+
+**Not fuel, not rate.** Bot 1 handed over the coal (178 → 162 across the
+drill's and furnace's fuelling) and the drill still has 3 left. The drill
+mined its 2 × 2 area dry after 40 ore: `PlaceDrill` sites the drill on the
+*nearest* tiles of the patch, which on seed 31337 are the thin edge at ~10 ore
+per tile, and sizes the take from the coal it gave the drill (10 coal = 267 s
+≈ 66 ore) with no check that the mining area holds that much. The model has
+the number — `EntityGraph::resource_amount` carries the mod's reported
+`amount` per tile — and nothing reads it when siting. Handed to the drills
+agent as the first fix, ahead of the count lever: on this seed it is the
+largest single source of the divergence class.
+
+Two smaller things from the same query: `defines.inventory.furnace_source` is
+gone in 2.x (`crafter_input` / `crafter_output`), and a tier-1 retry of a
+partial transfer is exactly the "identical command to the identical
+container" the recovery design warned about — the recovery agent is closing
+it.
+
 ## Two world-record replays, read for lessons — the lever is drill COUNT
 
 Full note: `docs/superpowers/notes/2026-09-04-world-record-replays.md`. Final

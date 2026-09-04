@@ -769,6 +769,49 @@ known to be powered and unused** (`31c8d579`), which is where it would go.
 
 Until then, **"produces 6/min" should not be quoted for red or green.**
 
+## Green: resumed from a savepoint, exhausted, and it oscillates rather than converges
+
+`run-1788538389-09170`, resumed from `run-1788532631-48030:2` (red witnessed),
+seed `31337`. **First real use of `--resume-from`** — it skipped red's
+16-minute prelude and announced its own limitation unprompted: *"this run is
+NOT comparable with a fresh-world run, and --compare will refuse to try."*
+
+`exhausted` after 10 iterations, best 200 steps.
+
+### I mis-called the convergence, twice
+
+Plan step counts across the run:
+
+```
+406, 295, 219, 264, 231, 210, 134, 213, 172, 136, 189, 114
+```
+
+**That oscillates.** It trends downward but bounces up repeatedly — 219→264,
+134→213, 136→189. I reported "converging steadily" twice from partial views.
+The honest description is a downward trend with repeated regressions, which is
+a different and less encouraging shape.
+
+### The remaining failures are the capacity sites we did not fix
+
+11 failures: **5 divergence**, 6 other. The capacity increment deliberately
+covered only `PlaceDrill`'s take (`735efeba`); the design named three more
+emitters — the smelt bank (`have.rs:1898`), the ore insert (`have.rs:1553/1706`)
+and seven fuel sites — and they are still unbounded. **That is the clear next
+lever for green**, and it is already specified.
+
+### Two things that did work
+
+- **Provenance is populated for the first time**: `seed 31337`,
+  `factorio 2.1.17`, `git 0db94f6f`. Every number from this run is traceable to
+  the map and the code that made it.
+- **The waiting field earned itself**: a 351/406 pause resolved as
+  `take 100 iron-plate · waiting_on=lag_deadline · deadline=187650`, a
+  legitimate 20,000-tick wait for one drill-and-furnace cell. Yesterday that was
+  frozen counters and a guess — and a guess of that kind once killed a healthy
+  run.
+
+`max_iterations` raised 10 → 25 for stage 3, matching the starter.
+
 ## THE BENCHMARK, SETTLED — 6:12 is the bar, 9:12 is a strategy
 
 We run **Space Age** (`factorio-space-age_linux_2.1.17.tar.xz`, `elevated-rails`

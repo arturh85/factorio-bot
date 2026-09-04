@@ -251,7 +251,7 @@ local names = {
 }
 
 local sup = supervisor.new(supervisor.list(goals),
-    { bots = BOTS, stall_limit = 3, max_iterations = 10 })
+    { bots = BOTS, stall_limit = 3, max_iterations = 25 })
 
 -- The loop is wrapped so a raise still closes the recording. A run that died
 -- part-way is the one most worth opening, and it is no use if it never got a

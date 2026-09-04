@@ -1734,17 +1734,25 @@ mod tests {
         // The single-bot path is the efficient one and must stay exactly where
         // it is: a "fix" that made four bots match one by making one worse
         // would pass the comparison below and be a regression.
+        //
+        // **Fifty stone -> fifteen**, which is seven furnaces this plan no
+        // longer builds. With a roster of one, `have::patch_furnace_budget` is
+        // one furnace per ore patch, so a smelt that finds the patch's furnace
+        // busy queues behind the batch in it instead of mining for another. It
+        // is pinned rather than bounded for the reason above: the number going
+        // *down* is the result, and only an exact pin can tell that from four
+        // bots being made to look good by making one bot worse.
         assert_eq!(
             mined(&solo),
             BTreeMap::from([
                 ("coal".to_string(), 29),
                 ("copper-ore".to_string(), 29),
                 ("iron-ore".to_string(), 41),
-                ("stone".to_string(), 50),
+                ("stone".to_string(), 15),
             ]),
             "one bot's rung-1 bill"
         );
-        assert_eq!(solo.len(), 113, "one bot's rung-1 step count");
+        assert_eq!(solo.len(), 92, "one bot's rung-1 step count");
 
         // The defect, stated as the property it breaks. Four bots dig no more
         // than one bot does -- they may split it differently and they may
@@ -1760,7 +1768,20 @@ mod tests {
         // assertion to `<=` would let the original duplication back in on a
         // *different* item, so both halves are asserted: no item exceeds the
         // solo bill, and the whole fleet bill is pinned.
+        //
+        // **Stone is exempt, and the exemption is a policy and not a
+        // loophole.** `have::patch_furnace_budget` is one stone furnace per bot
+        // per ore patch, because a bot loads and unloads one furnace at a time
+        // and independent smelts queueing behind each other is expensive —
+        // four ten-plate smelts on one furnace measured 10,899 ticks against
+        // 4,971 on four. So a fleet legitimately puts more furnaces on the
+        // ground than a solo bot, and the stone under them is bought
+        // deliberately. It is pinned exactly below, in both directions, which
+        // is the assertion that would catch it growing again.
         for (item, count) in mined(&solo) {
+            if item == "stone" {
+                continue;
+            }
             let fleet_count = mined(&fleet).get(&item).copied().unwrap_or(0);
             assert!(
                 fleet_count <= count,
@@ -1774,9 +1795,13 @@ mod tests {
                 ("coal".to_string(), 29),
                 ("copper-ore".to_string(), 29),
                 ("iron-ore".to_string(), 41),
-                // Fifteen below the solo bill: three of R3's supplier-owned
-                // furnaces come out of bots 2-4's starting inventory.
-                ("stone".to_string(), 35),
+                // Ten *above* the solo bill, and see the exemption above for
+                // why that is bought rather than wasted: four bots get four
+                // furnaces per ore patch and one bot gets one. Still far below
+                // the 35 this plan mined before in-plan reuse existed, and
+                // that number was itself already net of the three furnaces R3
+                // takes out of bots 2-4's starting inventory.
+                ("stone".to_string(), 25),
             ]),
             "four bots' rung-1 bill"
         );

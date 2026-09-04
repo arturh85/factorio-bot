@@ -54,7 +54,7 @@ use crate::method::util::{
 use crate::method::{ExpansionCtx, GoalSite, Method, MethodRegistry, Step};
 use crate::state::PlanState;
 use factorio_bot_core::factorio::util::calculate_distance;
-use factorio_bot_core::types::{FactorioEntity, Position};
+use factorio_bot_core::types::{FactorioEntity, Pos, Position};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Does `item` still have to be *produced*, in the sense that no single bot
@@ -505,11 +505,25 @@ const FED_FURNACE_RADIUS: f64 = 4.;
 /// be sited. `None` when no patch contains the anchor — a smelt whose
 /// ingredient is not minable at all — and the caller falls back to the
 /// anchor-local ring.
+///
+/// # Membership, not the bounding box
+///
+/// `ResourcePatch::contains` asks whether the anchor tile is one of the
+/// patch's own elements. `Rect::contains` was asked instead, and it is
+/// **strictly** exclusive on all four sides — so an anchor exactly on the
+/// bounding box answered `None` and fell back to the anchor-local ring this
+/// function exists to replace. That is not an edge case: the anchor is
+/// `nearest_resource_tile` from where the bot stands, which is the tile of the
+/// patch *nearest the bot*, which is on the boundary. On
+/// `test_utils::fixture_world` the iron patch's box is `x -44.5..-34.5,
+/// y 35.5..45.5` and eight of the ten anchors a rung-1 plan picks sit exactly
+/// on it, so the patch-wide scan was reached by two smelts out of ten and the
+/// documented behaviour above was the exception rather than the rule.
 fn patch_scan(state: &PlanState, item: &str, anchor: &Position) -> Option<(Position, f64)> {
     let patch = state
         .resource_patches(item)
         .into_iter()
-        .find(|patch| patch.rect.contains(anchor))?;
+        .find(|patch| patch.contains(Pos::from(anchor)))?;
     let centre = Position::new(
         (patch.rect.left_top.x() + patch.rect.right_bottom.x()) / 2.,
         (patch.rect.left_top.y() + patch.rect.right_bottom.y()) / 2.,
@@ -540,13 +554,8 @@ fn patch_scan(state: &PlanState, item: &str, anchor: &Position) -> Option<(Posit
 /// Ties break on `(x, y)`, which `entities_within` has already sorted by, so
 /// the answer does not depend on the order the entity tree happened to return.
 ///
-/// # Three furnaces are refused, and each refusal is load-bearing
+/// # Two furnaces are refused outright, and each refusal is load-bearing
 ///
-/// * one this plan has already **committed** to a batch
-///   ([`PlanState::machine_committed`]) — a furnace is a serial machine with
-///   one source slot, so two smelts queued in one are two waits neither of
-///   which modelled the other, and for two different ores it is not even a bad
-///   estimate but an insert the game refuses;
 /// * one something **delivers into**, which is a cell's terminal furnace. A
 ///   drill is filling it and `PlaceDrill`'s own take is counting what comes
 ///   out, so a smelt that loaded it would be spending plates already promised.
@@ -557,21 +566,60 @@ fn patch_scan(state: &PlanState, item: &str, anchor: &Position) -> Option<(Posit
 ///   planned to take what is in it. Also not hypothetical —
 ///   `tests/buffers.rs::two_goals_cannot_both_spend_the_same_plates` caught
 ///   exactly that, a smelt taking five plates a withdrawal had already spent.
+///
+/// # And a third is *queued* rather than refused
+///
+/// A furnace this plan has already committed to a batch
+/// ([`PlanState::machine_committed`]) used to be refused here, permanently,
+/// because a furnace is a serial machine with one source slot: two smelts that
+/// both load it are two waits neither of which modelled the other, and for two
+/// different ores it is not a bad estimate but an insert the game refuses.
+///
+/// The refusal was right and the permanence was not. **The commitment was
+/// never released**, so a plan needed as many furnaces as it had `Smelt`
+/// goals — 28 of them on `run-1788497495-79997`, several smelting a single
+/// ore — and red science alone put 42 stone furnaces on the ground on seed
+/// `31337`, on and around the iron patch the green-science cell then had no
+/// room in.
+///
+/// So a committed furnace comes back as [`Reuse::Queued`], carrying the action
+/// that empties it, and the caller states an edge from that action to its own
+/// inserts. What makes the wait *modelled* rather than merely hoped for is that
+/// edge; what makes the insert legal is
+/// [`machine_queue`](PlanState#structfield.machine_queue) refusing to hand out
+/// a release for a batch it cannot prove drains the machine, and refusing one
+/// for a different item at all.
+///
+/// # Order, which is the whole policy
+///
+/// Idle furnaces first, nearest the anchor — a furnace with nothing queued in
+/// it is strictly better than one with a batch to wait for, whatever the
+/// distance. Then queued ones, **least-loaded first**
+/// ([`crate::state::MachineQueue::queued`]), so a bank spreads across the
+/// patch's furnaces instead of piling onto whichever is nearest.
+///
+/// Ties break on distance and then on `(x, y)`, which `entities_within` has
+/// already sorted by, so the answer does not depend on the order the entity
+/// tree happened to return.
 fn adoptable_furnaces(
     state: &PlanState,
     ore: &str,
+    item: &str,
     anchor: &Position,
     entity: &str,
     want: u32,
-) -> Vec<Position> {
+) -> PatchFurnaces {
     let (centre, radius) = patch_scan(state, ore, anchor)
         .unwrap_or_else(|| (anchor.clone(), f64::from(FREE_TILE_SEARCH_RADIUS)));
-    let mut found: Vec<Position> = state
+    let standing: Vec<Position> = state
         .entities_within(&centre, radius)
         .into_iter()
         .filter(|e| e.name == entity)
         .map(|e| e.position)
-        .filter(|pos| !state.machine_committed(pos))
+        .collect();
+    let crowd = standing.len() as u32;
+    let usable: Vec<Position> = standing
+        .into_iter()
         .filter(|pos| !state.holds_buffer(pos))
         .filter(|pos| {
             !state
@@ -580,14 +628,153 @@ fn adoptable_furnaces(
                 .any(|feeder| feeder.position != *pos && state.delivers_into(&feeder.position, pos))
         })
         .collect();
-    found.sort_by(|a, b| {
+    let mut idle: Vec<Position> = usable
+        .iter()
+        .filter(|pos| !state.machine_committed(pos))
+        .cloned()
+        .collect();
+    idle.sort_by(|a, b| {
         calculate_distance(a, anchor)
             .total_cmp(&calculate_distance(b, anchor))
             .then(a.x.total_cmp(&b.x))
             .then(a.y.total_cmp(&b.y))
     });
-    found.truncate(want as usize);
-    found
+    let mut queued: Vec<(Ticks, Position, ActionId)> = usable
+        .iter()
+        .filter(|pos| state.machine_committed(pos))
+        .filter_map(|pos| {
+            let entry = state.machine_queue(pos)?;
+            (entry.item == item).then(|| (entry.queued, pos.clone(), entry.release))
+        })
+        .collect();
+    queued.sort_by(|(a_queued, a, _), (b_queued, b, _)| {
+        a_queued
+            .cmp(b_queued)
+            .then_with(|| calculate_distance(a, anchor).total_cmp(&calculate_distance(b, anchor)))
+            .then(a.x.total_cmp(&b.x))
+            .then(a.y.total_cmp(&b.y))
+    });
+    let mut furnaces: Vec<Reuse> = idle.into_iter().map(Reuse::Idle).collect();
+    let idle_count = furnaces.len() as u32;
+    furnaces.extend(
+        queued
+            .into_iter()
+            .map(|(_, pos, release)| Reuse::Queued { pos, release }),
+    );
+    furnaces.truncate(want as usize);
+    PatchFurnaces {
+        furnaces,
+        idle_count,
+        crowd,
+    }
+}
+
+/// A furnace this smelt may use, and what using it costs in ordering.
+#[derive(Clone, Debug)]
+enum Reuse {
+    /// Nothing in this plan has loaded it. Take it as it is.
+    Idle(Position),
+    /// This plan has already queued a batch into it. Every insert this smelt
+    /// makes has to be ordered after `release`, the action that empties it.
+    Queued { pos: Position, release: ActionId },
+}
+
+impl Reuse {
+    fn position(&self) -> &Position {
+        match self {
+            Reuse::Idle(pos) | Reuse::Queued { pos, .. } => pos,
+        }
+    }
+
+    /// The action this smelt's inserts must wait for, if any.
+    fn release(&self) -> Option<ActionId> {
+        match self {
+            Reuse::Idle(_) => None,
+            Reuse::Queued { release, .. } => Some(*release),
+        }
+    }
+}
+
+/// What [`adoptable_furnaces`] found beside one ore patch.
+struct PatchFurnaces {
+    /// Usable furnaces in preference order: idle first, then queued.
+    furnaces: Vec<Reuse>,
+    /// How many of `furnaces` are [`Reuse::Idle`], which is the count
+    /// [`bank_size`] was measured against and must keep being given — see
+    /// [`patch_furnace_budget`] for why the queued ones are not simply added to it.
+    idle_count: u32,
+    /// Every stone furnace standing near the patch, usable or not, which is
+    /// what [`patch_furnace_budget`] is a bound on. A cell's terminal furnace is
+    /// refused as an adoption *and* takes up ground, so it counts here.
+    crowd: u32,
+}
+
+/// The most stone furnaces this plan puts on the ground beside one ore patch
+/// before a hand-smelt has to queue behind one instead of building another:
+/// **one per bot in the roster**.
+///
+/// # Why there is a bound here at all
+///
+/// With reuse available, `bank_size`'s `widest = min(runs, MAX_BANK, standing)`
+/// would settle the question by itself — and it settles it *wrong*, in the
+/// direction of never building a second furnace. The first smelt of a plan
+/// builds one, every later smelt then sees exactly one usable furnace, queues
+/// behind it, and every independent smelt in the plan serialises onto a single
+/// furnace at the patch.
+///
+/// The opposite bound is the one already measured and rejected: letting
+/// `bank_size` build up to its own crossover cost 3,297 ticks of makespan and
+/// 1,375 ticks of *extra idle* on the one-bot fixture, because the work that
+/// was filling the lag is what paid for shortening it. So the growth rule
+/// deliberately does **not** feed a buildable slot into `bank_size`: a smelt
+/// builds at most the one furnace it would have built anyway, and only while
+/// the patch is under this bound.
+///
+/// # Why the roster, and not a constant
+///
+/// A bot loads and unloads one furnace at a time, so *one furnace per bot* is
+/// exactly the width at which independent smelts stop queueing behind each
+/// other. Below it they do, and it is expensive; above it the extra furnace can
+/// only be reached by a bot walking away from another one, which `bank_size`
+/// has already measured and refuses to build for.
+///
+/// Measured on `workspace/scripts/map.json`, four bots, four independent
+/// ten-plate smelts (one per bot) — the shape this bound exists to protect:
+///
+/// | budget | furnaces | makespan |
+/// | ---: | ---: | ---: |
+/// | 1 | 1 | 10,899 |
+/// | 2 | 2 | 7,090 |
+/// | 3 | 3 | 7,090 |
+/// | **4 = roster** | 4 | **4,971** |
+/// | unbounded (before) | 4 | 4,971 |
+///
+/// And the same fixture solo, `Researched("automation")`, where the budget is
+/// 1 and the saving is the furnace's own bill — five stone, a craft and a
+/// placement are the *only* bot's time, and the lag they shorten was being
+/// filled by other work anyway, which is `bank_size`'s own mechanism:
+///
+/// | budget | furnaces | actions | makespan |
+/// | ---: | ---: | ---: | ---: |
+/// | **1 = roster** | 3 | 85 | **42,931** |
+/// | 4 | 8 | 100 | 53,521 |
+/// | unbounded (before) | 9 | 103 | 53,692 |
+///
+/// # Why per patch
+///
+/// It is a bound on *ground*. The failure it exists to prevent is a
+/// `Producing` goal finding no cell site left on the patch it needs: on seed
+/// `31337`, red science alone placed 42 stone furnaces spread `x −18..33,
+/// y −49..−12`, on a map whose iron ore is 18.4 tiles from spawn, and green
+/// then refused after one iteration with *no room for a iron-ore cell within
+/// 12 tiles of the patch*. `produce::CELL_SITES_RESERVED` reserves six sites;
+/// 42 furnaces overwhelm that and a roster's worth does not.
+///
+/// The count it is compared against is every stone furnace standing near the
+/// patch, a cell's terminal furnace included — that one is refused as an
+/// adoption but still takes up ground, and ground is what this is about.
+fn patch_furnace_budget(state: &PlanState) -> u32 {
+    state.bot_ids().len().max(1) as u32
 }
 
 /// One furnace of a smelt's bank: where it is, whether it had to be built, and
@@ -597,6 +784,16 @@ struct BankFurnace {
     /// False for a furnace this smelt places, so the caller knows whether to
     /// emit a `Place` and whether the bill needs another `stone-furnace`.
     adopted: bool,
+    /// The action that empties this furnace of the batch an *earlier* smelt in
+    /// this plan queued into it, and which every insert of this smelt must
+    /// therefore be ordered after. `None` for a furnace this smelt built and
+    /// for one that was idle.
+    wait_for: Option<ActionId>,
+    /// Does this smelt leave the furnace empty — every ore it inserted smelted
+    /// and every plate it made taken? Only then may a further smelt queue
+    /// behind it. See
+    /// [`machine_queue`](crate::state::PlanState#structfield.machine_queue).
+    drains: bool,
     /// Batches this furnace runs, which is what its own lag is built from.
     runs: u32,
     coal: u32,
@@ -864,16 +1061,55 @@ fn smelt_steps(
     // The ore this smelt is anchored on, which is also the patch the search
     // for standing furnaces is scoped to.
     let anchor_ore = ingredients.first().map(|(name, _)| name.clone());
-    let standing = anchor_ore.as_deref().map_or_else(Vec::new, |ore| {
-        adoptable_furnaces(&ctx.state, ore, &anchor, &furnace_entity, MAX_BANK)
-    });
+    let patch = anchor_ore.as_deref().map_or_else(
+        || PatchFurnaces {
+            furnaces: Vec::new(),
+            idle_count: 0,
+            crowd: 0,
+        },
+        |ore| adoptable_furnaces(&ctx.state, ore, item, &anchor, &furnace_entity, MAX_BANK),
+    );
+    // How wide a bank pays, asked with the **idle** count and not the usable
+    // one. `bank_size`'s own measurement is that a furnace is worth spreading
+    // onto when an earlier plan already paid for it and it is standing there
+    // free; a furnace with a batch queued in it is not that, and widening a
+    // bank onto one buys a longer queue rather than a shorter wait.
     let k = bank_size(
         &ctx.state,
         runs,
         per_run,
         recipe_run_ticks,
-        standing.len() as u32,
+        patch.idle_count,
     );
+    // One entry per bank slot; `None` is "site and build a furnace here".
+    //
+    // Three cases, and the third is the whole of this change:
+    //
+    // * something at the patch is **idle** — adopt it, exactly as before, and
+    //   `bank_size` has already said how many;
+    // * nothing is idle and the patch is **under the roster's furnace budget**
+    //   — build one, exactly as every smelt used to. `bank_size` answers 1 by
+    //   construction (`widest` is the idle count), so a buildable slot is never
+    //   fed back into it and its measured refusal to build for the lag alone
+    //   stands;
+    // * nothing is idle and the patch is **full** — queue behind the
+    //   least-loaded furnace already there rather than putting another one on
+    //   ground a cell will need.
+    //
+    // The last arm can still fall through to building: a patch whose furnaces
+    // are all a cell's or all holding buffers offers nothing to queue behind,
+    // and refusing to smelt at all would be worse than one more furnace.
+    let grow = patch.idle_count == 0 && patch.crowd < patch_furnace_budget(&ctx.state);
+    let mut slots: Vec<Option<Reuse>> = Vec::new();
+    if grow {
+        slots.push(None);
+    }
+    let from_patch = (k as usize).saturating_sub(slots.len());
+    slots.extend(patch.furnaces.iter().take(from_patch).cloned().map(Some));
+    if slots.is_empty() {
+        slots.push(None);
+    }
+    let k = slots.len() as u32;
     let runs_per_furnace = bank_runs(runs, k);
     let coal_per_furnace = bank_coal(recipe_run_ticks, &runs_per_furnace);
 
@@ -899,8 +1135,8 @@ fn smelt_steps(
         .zip(coal_per_furnace.iter())
         .enumerate()
     {
-        let (pos, adopted) = match standing.get(index) {
-            Some(pos) => (pos.clone(), true),
+        let (pos, adopted, wait_for) = match slots.get(index).and_then(|slot| slot.as_ref()) {
+            Some(reuse) => (reuse.position().clone(), true, reuse.release()),
             None => {
                 // Two tiers, and the order is the whole point. The first is
                 // asked only on a patch that has run short (`room_to_spare`
@@ -931,7 +1167,7 @@ fn smelt_steps(
                     position: pos.clone(),
                     ..Default::default()
                 });
-                (pos, false)
+                (pos, false, None)
             }
         };
         // What this furnace makes bounds what its take can ask for, and the
@@ -940,12 +1176,25 @@ fn smelt_steps(
         // takes the remainder.
         let take = furnace_runs.saturating_mul(per_craft).min(need_left);
         need_left = need_left.saturating_sub(take);
-        // Committed whether it was adopted or sited, so no later smelt in this
-        // plan queues a second batch behind this one.
+        // Committed whether it was adopted, queued behind or sited, so no
+        // later smelt treats it as idle. What a later smelt *may* still do is
+        // queue behind this batch, which `queue_machine` below decides.
         ctx.state.commit_machine(&pos);
+        // Withheld until the take is emitted and known to drain the furnace.
+        // Cleared here rather than left alone, because this slot may be a
+        // furnace an earlier smelt queued into: its entry names *that* smelt's
+        // release, and a third smelt reading it would wait for the wrong
+        // action and load a furnace still full.
+        ctx.state.unqueue_machine(&pos);
         bank.push(BankFurnace {
             pos,
             adopted,
+            wait_for,
+            // A take capped below what the slot produces leaves plates in the
+            // result slot, so nothing may queue behind it. The shared-ore path
+            // below can also leave a slot over- or under-filled, and clears
+            // this again where it does.
+            drains: take == furnace_runs.saturating_mul(per_craft),
             runs: furnace_runs,
             coal: furnace_coal,
             take,
@@ -1439,6 +1688,13 @@ fn smelt_steps(
                 if put == 0 {
                     continue;
                 }
+                // Ore this furnace has no room for is ore that will still be
+                // sitting in its source slot when the take fires, so nothing
+                // may queue behind it. The excess is still put down — see the
+                // comment above — it is only the *reuse* that is refused.
+                if put > room[index] {
+                    bank[index].drains = false;
+                }
                 room[index] = room[index].saturating_sub(put);
                 left -= put;
                 let pos = bank[index].pos.clone();
@@ -1492,6 +1748,16 @@ fn smelt_steps(
                     whose: Holder::Share(bot),
                     steps: block,
                 });
+            }
+        }
+        // A furnace the shares did not fill produces less than the bank was
+        // sized for, so its take asks for plates that will not be there and
+        // the slot is not drained either. Same treatment as an over-filled
+        // one: the smelt is emitted as it always was, and only reuse is
+        // refused.
+        for (index, left) in room.iter().enumerate() {
+            if *left > 0 {
+                bank[index].drains = false;
             }
         }
         // `Condition::EntityAt` is world-scoped, so `infer_edges` would keep
@@ -1573,6 +1839,54 @@ fn smelt_steps(
     // 1920 came back with nine plates out of ten, and the run spent the
     // rest of its iteration budget replanning around the one that was
     // missing.
+    // A furnace this smelt is *queueing* behind: every insert it makes has to
+    // follow the action that empties the batch already in it.
+    //
+    // **This is the edge that makes in-plan reuse legal**, and it is stated
+    // rather than inferred because `infer_edges` cannot see it: the earlier
+    // take's effect is `GainItem`, which satisfies no precondition of an
+    // insert, and there is no condition anywhere that says "this machine is
+    // empty". Without it the plan would schedule a copper load into a furnace
+    // still holding iron and the game would refuse the insert — the failure
+    // `committed_machines` was made permanent to avoid.
+    //
+    // Every insert, not just the ore: a fuel load into a furnace mid-batch is
+    // legal in the game, but ordering it with the rest costs one bot trip that
+    // was going to happen anyway and keeps the rule one sentence long.
+    //
+    // Lag zero. The queue's own smelting time is already on the edges from the
+    // *earlier* smelt's inserts to that smelt's take, so charging it again
+    // here would double-count it.
+    //
+    // # Why this cannot close a cycle
+    //
+    // The stated edges of a furnace are a chain — place, its inserts, its take,
+    // the next batch's inserts, the next take — and nothing joins two furnaces,
+    // so the stated graph stays a forest whatever this loop adds. An *inferred*
+    // edge could in principle close a loop through it, and `infer_edges`
+    // already handles that by rolling the candidate back; the one shape that
+    // would make it a common event is ruled out by construction instead.
+    //
+    // That shape is a batch queueing behind a take its own subtree depends on.
+    // It cannot arise, because reuse is restricted to a smelt of the **same
+    // item** and a smelt's subgoals are its ore, its coal, its furnace and the
+    // research that gates it — so a nested smelt under this one produces an
+    // *ingredient*, never the item itself, and never asks for this take. The
+    // restriction was written for the game's sake (an insert of the wrong item
+    // into a full furnace is refused outright); it earns its keep twice.
+    for (index, furnace_slot) in bank.iter().enumerate() {
+        let Some(release) = furnace_slot.wait_for else {
+            continue;
+        };
+        for id in &insert_ids[index] {
+            steps.push(Step::Link {
+                from: release,
+                to: *id,
+                lag: 0,
+            });
+        }
+    }
+
     let mut last_remove = 0usize;
     for (index, furnace_slot) in bank.iter().enumerate() {
         let pos = furnace_slot.pos.clone();
@@ -1643,6 +1957,23 @@ fn smelt_steps(
                 to: remove_id,
                 lag,
             });
+        }
+
+        // Hand the furnace on. A later smelt of the same item may queue behind
+        // this take — and only behind *this* take, since it is the newest batch
+        // in the machine.
+        //
+        // The machine time recorded is `per_run * runs` and not `smelt_lag`:
+        // the extra cycle in the lag is schedule headroom against a start that
+        // misses a craft boundary, not time the furnace is busy, and this
+        // number exists only to be compared with another furnace's.
+        if furnace_slot.drains {
+            ctx.state.queue_machine(
+                &furnace_slot.pos,
+                item,
+                remove_id,
+                per_run.saturating_mul(furnace_slot.runs),
+            );
         }
     }
 
@@ -10594,17 +10925,25 @@ mod owned_gathering {
         assert_eq!(first_plan.steps, second_plan.steps);
     }
 
-    /// **The single-bot path is the efficient one and does not move.**
+    /// **The single-bot path, pinned exactly.**
     ///
-    /// R3 changes who does the work, and with one bot in the roster there is
-    /// nobody else — `furnace_suppliers` returns the taker for every slot, so
-    /// not one step, edge or `ActionId` differs from the plan before it. Pinned
-    /// exactly, because "unchanged" is the claim and a ratio cannot make it.
+    /// It was pinned as *untouched* by R3, which changes who does the work and
+    /// so cannot move a roster with nobody else in it. In-plan furnace reuse
+    /// does move it, and this is where that shows up: with a roster of one,
+    /// [`patch_furnace_budget`] is one furnace per patch, so every smelt after
+    /// the first queues behind the batch already in it instead of mining five
+    /// more stone, crafting and placing.
+    ///
+    /// 113 actions -> 92, and 46,446 ticks -> 41,835 with them. **The plan gets
+    /// shorter by building less**, which is `bank_size`'s own measured
+    /// mechanism read the other way round: the furnace's bill is the only
+    /// bot's own time, and the lag that a second furnace would have halved was
+    /// being filled by the very work that paid for it.
     #[test]
     fn the_single_bot_rung_one_plan_is_untouched() {
         let (_, net, plan) = rung_one_plan(&[BotId(1)]);
-        assert_eq!(net.len(), 113, "one bot's rung-1 action count");
-        assert_eq!(plan.makespan, 46446, "one bot's rung-1 makespan");
+        assert_eq!(net.len(), 92, "one bot's rung-1 action count");
+        assert_eq!(plan.makespan, 41835, "one bot's rung-1 makespan");
         assert!(
             net.actions().all(|a| net
                 .chain_of(a.id)

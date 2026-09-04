@@ -1,7 +1,7 @@
 use crate::action::InventorySlot;
 use crate::error::PlannerError;
 use crate::goal::Holder;
-use crate::ids::{BotId, ChainId, ItemId};
+use crate::ids::{ActionId, BotId, ChainId, ItemId, Ticks};
 use crate::method::util::rotated_collision_box;
 use factorio_bot_core::constants::BOT_FORCE;
 use factorio_bot_core::factorio::util::{add_to_rect, calculate_distance};
@@ -611,6 +611,27 @@ fn withdraw_slot(entity_type: &str) -> Option<InventorySlot> {
     }
 }
 
+/// A batch this plan has queued into a machine, and what a further batch would
+/// have to wait for.
+///
+/// See [`machine_queue`](PlanState#structfield.machine_queue) for what an entry
+/// promises and why one is sometimes withheld.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MachineQueue {
+    /// What the queued batch smelts. A batch of a *different* item may not
+    /// queue behind it.
+    pub item: ItemId,
+    /// The action that leaves the machine empty — the take of the newest batch
+    /// queued into it. A later batch's inserts must be ordered after this.
+    pub release: ActionId,
+    /// Machine time this plan has already queued into it, across every batch.
+    /// Not a start tick and not a finish tick: nothing in this crate knows when
+    /// an action runs until `schedule` says so. It exists only to be compared
+    /// with another machine's, so that a bank spreads across the least-loaded
+    /// furnaces instead of piling onto the nearest one.
+    pub queued: Ticks,
+}
+
 /// The world at a point in a hypothetical plan.
 ///
 /// `base` is shared and never mutated; every difference lives in the overlay
@@ -702,14 +723,68 @@ pub struct PlanState {
     ///
     /// So a furnace a smelt adopts, or places for itself, is committed **whole
     /// for the whole plan**, exactly as a mining claim commits a tile whole.
-    /// The cost is that a later smelt in the *same* plan re-places rather than
-    /// reuses; the benefit lands on the next plan, which sees the furnaces the
-    /// last one really built standing and uncommitted. Over-building rather
-    /// than over-claiming is the direction this crate takes everywhere.
+    ///
+    /// **A commitment is no longer permanent**, and that is what
+    /// [`machine_queue`](PlanState#structfield.machine_queue) adds. The
+    /// membership here still says "not idle, do not adopt this as though it
+    /// were free"; a later smelt that is willing to *queue* behind the batch
+    /// already in it asks that map instead, and gets the action id it has to
+    /// wait for. Everything that asks about ground
+    /// ([`PlanState::machine_committed_near`]) reads this set and is unchanged
+    /// by reuse: the tile stays taken however many batches run on it.
     ///
     /// Keyed by `Pos`, which floors — sound here because every entry is an
     /// entity position tested only for equality, never for distance.
     committed_machines: BTreeSet<Pos>,
+    /// Machines a later batch in *this* plan may queue behind, and what it
+    /// costs to do so.
+    ///
+    /// # The defect this closes
+    ///
+    /// [`committed_machines`](PlanState#structfield.committed_machines) is a
+    /// commitment that was never released, so a plan needed **as many furnaces
+    /// as it had `Smelt` goals**. Measured on `run-1788497495-79997`: 28
+    /// independent hand-smelts for 276 iron ore and 46 copper, several
+    /// smelting a single ore, each with a furnace of its own. Cross-plan reuse
+    /// worked — a later plan adopts what the last one left standing — so each
+    /// epoch added ~13 rather than starting over, and *within* a plan there was
+    /// no reuse at all.
+    ///
+    /// That is a space cost as much as a stone cost. Red science alone placed
+    /// 42 stone furnaces on seed `31337`, spread `x −18..33, y −49..−12`, on a
+    /// map whose iron ore is 18.4 tiles from spawn — so they landed on and
+    /// around the very patch the green-science cell then needed, and `Producing`
+    /// refused with *no room for a iron-ore cell within 12 tiles of the patch*.
+    ///
+    /// # What an entry promises
+    ///
+    /// [`MachineQueue::release`] is an action that leaves the machine **empty**:
+    /// its source slot smelted out and its result slot taken. A later smelt may
+    /// therefore state an ordering edge from it to its own inserts and load the
+    /// machine with anything. An entry is written **only** when that is
+    /// provable at expansion time — see `method::have::smelt_steps`, which
+    /// withholds one for a bank slot whose take is capped below what the slot
+    /// produces, or whose ore inserts do not match the runs it was sized for.
+    /// A machine with no entry is committed and never reused, which is exactly
+    /// the old behaviour.
+    ///
+    /// [`MachineQueue::item`] is what the queued batch smelts, and reuse is
+    /// restricted to a smelt of the same item. The drain argument above is an
+    /// argument about a *model*: `bank_coal` is explicitly an approximation
+    /// that "ignores partial burns", so a furnace can come up a plate short of
+    /// what the plan believed. Same item, that is a shortfall the replan sees;
+    /// a different item, it is an insert the game refuses outright. The narrow
+    /// rule costs almost nothing in practice, because
+    /// `method::have::adoptable_furnaces` scopes its search to the *ore patch*
+    /// and two ores are two patches.
+    ///
+    /// [`MachineQueue::queued`] is the smelting time this plan has already put
+    /// into the machine, and is what makes several reusable furnaces spread
+    /// rather than pile onto the nearest one.
+    ///
+    /// Keyed by `Pos` for the same reason and with the same soundness argument
+    /// as `committed_machines`.
+    machine_queue: BTreeMap<Pos, MachineQueue>,
     /// Buffers this plan is *filling*, whose contents are therefore already
     /// spoken for.
     ///
@@ -1241,6 +1316,7 @@ impl PlanState {
             consumed: Default::default(),
             claimed: Default::default(),
             committed_machines: Default::default(),
+            machine_queue: Default::default(),
             stockpiled: Default::default(),
             claim_runner: None,
             force,
@@ -3120,6 +3196,59 @@ impl PlanState {
     /// method that sites a bank re-commits its own members on a replan.
     pub fn commit_machine(&mut self, position: &Position) {
         self.committed_machines.insert(Pos::from(position));
+    }
+
+    /// What a later batch would have to wait for to use the machine at
+    /// `position`, or `None` if nothing in this plan may queue behind it.
+    ///
+    /// `None` covers two different situations on purpose, because a caller
+    /// treats them alike: a machine this plan never committed (ask
+    /// [`PlanState::machine_committed`] to tell them apart) and one it
+    /// committed without being able to prove the batch drains it. Both mean
+    /// "do not queue here".
+    pub fn machine_queue(&self, position: &Position) -> Option<&MachineQueue> {
+        self.machine_queue.get(&Pos::from(position))
+    }
+
+    /// Record that the batch this plan just put into the machine at `position`
+    /// smelts `item`, is finished and removed by `release`, and adds `ticks` of
+    /// machine time to whatever was queued there already.
+    ///
+    /// Additive in `queued` and replacing in `release` and `item`: the release
+    /// of the *newest* batch is the one a further batch has to wait for, while
+    /// the machine time is the whole queue. Committing the machine is a
+    /// separate call ([`PlanState::commit_machine`]) and must still be made —
+    /// this map says a batch *may* queue, never that the machine is free.
+    pub fn queue_machine(
+        &mut self,
+        position: &Position,
+        item: &str,
+        release: ActionId,
+        ticks: Ticks,
+    ) {
+        let key = Pos::from(position);
+        let queued = self
+            .machine_queue
+            .get(&key)
+            .map_or(0, |q| q.queued)
+            .saturating_add(ticks);
+        self.machine_queue.insert(
+            key,
+            MachineQueue {
+                item: item.to_owned(),
+                release,
+                queued,
+            },
+        );
+    }
+
+    /// Forget that anything may queue behind the machine at `position`.
+    ///
+    /// Called where a batch is emitted that cannot be proved to leave the
+    /// machine empty. It does **not** un-commit the machine, and that asymmetry
+    /// is the point: the plan is still using it, and now nothing else may.
+    pub fn unqueue_machine(&mut self, position: &Position) {
+        self.machine_queue.remove(&Pos::from(position));
     }
 
     /// Bind claims made from here on to `runner`'s timeline, and answer

@@ -2042,8 +2042,8 @@ mod tests {
     /// One bot, one cell, 15 iron plates a minute: hand-mine and hand-smelt
     /// nine iron plates, craft three gears and a spare furnace, craft the
     /// drill (which eats a furnace of its own), mine 37 coal, place the pair
-    /// at the iron patch's edge and fuel both. 27 actions and 10,315 ticks --
-    /// about 2.9 minutes of game time, against a cell that then makes 150
+    /// at the iron patch's edge and fuel both. 24 actions and 11,025 ticks --
+    /// about 3.1 minutes of game time, against a cell that then makes 150
     /// plates in its first ten.
     ///
     /// Pinned rather than described, because every number here is a
@@ -2059,15 +2059,30 @@ mod tests {
     /// are `[-34.5, 36.5]` and `[-36.5, 35.5]`, one tile further out each, and
     /// the two hand-smelting furnaces sited from those tiles follow them. The
     /// action count does not move -- the same work, 27 ticks more walking.
+    ///
+    /// **27 actions and 10,315 ticks until in-plan furnace reuse.** The two
+    /// hand-smelts are one furnace now, because `have::patch_furnace_budget`
+    /// is one per bot per ore patch and this roster is one bot: three actions
+    /// go (a stone mine, a craft, a placement) and the second smelt waits on
+    /// the first instead, which costs 710 ticks.
+    ///
+    /// **This is the one fixture in the crate where reuse loses on time**, and
+    /// it is pinned that way deliberately rather than tuned away. Two smelts
+    /// is the smallest case there is, so a furnace's bill is at its least
+    /// amortised here; the same change on the rung-1 solo plan
+    /// (`have::the_single_bot_rung_one_plan_is_untouched`) is 113 actions ->
+    /// 92 and 46,446 ticks -> 41,835. A bound that got both right would have
+    /// to price bot idle time, which this crate cannot do -- `bank_size` says
+    /// so at length and for the same reason.
     #[test]
     fn the_whole_of_stage_one_costs_this_much() {
         let bots = [BotId(1)];
         let s = state(&bots);
         let net = plan(15).expect("the fixture can build a cell");
-        assert_eq!(net.len(), 27, "actions in a one-cell plan");
+        assert_eq!(net.len(), 24, "actions in a one-cell plan");
         let sched = crate::schedule::schedule(&net, &s, &bots).expect("it schedules");
         assert_eq!(
-            sched.makespan, 10_315,
+            sched.makespan, 11_025,
             "ticks for one bot to build one cell"
         );
     }

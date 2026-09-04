@@ -13,6 +13,7 @@ use factorio_bot_core::test_utils::fixture_world;
 use factorio_bot_core::types::Position;
 use factorio_bot_planner::action::{ActionKind, InventorySlot};
 use factorio_bot_planner::goal::{Goal, Holder};
+use factorio_bot_planner::ids::ActionId;
 use factorio_bot_planner::method::expand;
 use factorio_bot_planner::method::have::registry_for;
 use factorio_bot_planner::schedule::StepKind;
@@ -49,38 +50,107 @@ fn plan(bots: &[BotId]) -> (ActionNetwork, PlanState, Schedule) {
     (net, state, result)
 }
 
-/// Who works each furnace, split by what the work *converges into*.
+/// Who works each **batch**, split by what the work *converges into*.
 ///
-/// `.0` is the furnace's **inventory-convergent** side: the ore that goes in
-/// and the plates that come out. Those actions read and write one bot's
-/// pockets, and that bot has to be the one the smelt was sized against.
+/// `.0` is the batch's **inventory-convergent** side: the ore that goes in and
+/// the plates that come out. Those actions read and write one bot's pockets,
+/// and that bot has to be the one the smelt was sized against.
 ///
 /// `.1` is its **world-convergent** side: the placement and the fuel load.
 /// Both produce map facts — the next action's precondition is
 /// `Condition::EntityAt`, which names a position and no bot — so R3 hands them
 /// to another bot when doing so takes real work off the taker. See
 /// `crates/planner`'s `furnace_suppliers`.
-type FurnaceWorkers = (BTreeSet<BotId>, BTreeSet<BotId>);
+///
+/// # A batch, and not a furnace
+///
+/// It was keyed by furnace position until in-plan reuse: a plan committed a
+/// furnace for its whole length, so one furnace *was* one batch and the two
+/// keys could not be told apart. A later smelt may now queue behind an earlier
+/// one in the same furnace, and the two are different smelts, sized against
+/// different bots and legitimately run by different bots — so grouping by
+/// position asserts something the plan never claimed, and this fixture really
+/// does produce a furnace worked by bots 2 and 4.
+///
+/// A batch is **a take and the inserts feeding it**, which the network states
+/// exactly: `smelt_steps` links every insert of a slot to that slot's own
+/// removal and to no other. The placement is one edge further out — it feeds
+/// the inserts, not the take — so it is found through them, and a batch that
+/// *reused* a standing furnace finds none, which is correct: it did not build
+/// one.
+type BatchWorkers = (BTreeSet<BotId>, BTreeSet<BotId>);
 
-fn by_furnace(net: &ActionNetwork, result: &Schedule) -> BTreeMap<String, FurnaceWorkers> {
-    let mut out: BTreeMap<String, FurnaceWorkers> = BTreeMap::new();
-    for step in &result.steps {
-        let StepKind::Act { action, .. } = &step.what else {
+fn by_batch(net: &ActionNetwork, result: &Schedule) -> BTreeMap<String, BatchWorkers> {
+    let ran: BTreeMap<ActionId, BotId> = result
+        .steps
+        .iter()
+        .filter_map(|step| match &step.what {
+            StepKind::Act { action, .. } => Some((*action, step.bot)),
+            _ => None,
+        })
+        .collect();
+    let at = |id: ActionId| -> Option<Position> {
+        match &net.action(id)?.kind {
+            ActionKind::Place { entity } => Some(entity.position.clone()),
+            ActionKind::Insert { pos, .. } | ActionKind::Remove { pos, .. } => Some(pos.clone()),
+            _ => None,
+        }
+    };
+    let mut out: BTreeMap<String, BatchWorkers> = BTreeMap::new();
+    for action in net.actions() {
+        let ActionKind::Remove { pos, .. } = &action.kind else {
             continue;
         };
-        let action = net.action(*action).expect("scheduled action is in the net");
-        let (pos, world_convergent): (Position, bool) = match &action.kind {
-            ActionKind::Place { entity } => (entity.position.clone(), true),
-            ActionKind::Insert { pos, slot, .. } => (pos.clone(), *slot == InventorySlot::Fuel),
-            ActionKind::Remove { pos, .. } => (pos.clone(), false),
-            _ => continue,
-        };
-        let entry = out.entry(pos.to_string()).or_default();
-        if world_convergent {
-            entry.1.insert(step.bot);
-        } else {
-            entry.0.insert(step.bot);
+        let mut workers = BatchWorkers::default();
+        if let Some(bot) = ran.get(&action.id) {
+            workers.0.insert(*bot);
         }
+        for (insert, _) in net.preds(action.id) {
+            if at(insert).as_ref() != Some(pos) {
+                continue;
+            }
+            let Some(ActionKind::Insert { slot, .. }) = net.action(insert).map(|a| &a.kind) else {
+                continue;
+            };
+            let side = if *slot == InventorySlot::Fuel {
+                &mut workers.1
+            } else {
+                &mut workers.0
+            };
+            if let Some(bot) = ran.get(&insert) {
+                side.insert(*bot);
+            }
+            // The placement, one edge further out: `smelt_steps` links a
+            // furnace's own place to the inserts that need it to stand.
+            //
+            // **Only for the batch that built it.** A furnace's `Place` is a
+            // predecessor of every insert ever made into it — `Condition::
+            // EntityAt` is world-scoped, so `infer_edges` links it across
+            // batches — and a batch that queued behind an earlier one did not
+            // place anything. It is told apart by the release edge that let it
+            // queue at all: an earlier `Remove` at this position among its
+            // inserts' predecessors.
+            let queued_behind = net.preds(insert).into_iter().any(|(earlier, _)| {
+                matches!(
+                    net.action(earlier).map(|a| &a.kind),
+                    Some(ActionKind::Remove { .. })
+                ) && at(earlier).as_ref() == Some(pos)
+            });
+            if queued_behind {
+                continue;
+            }
+            for (place, _) in net.preds(insert) {
+                if matches!(
+                    net.action(place).map(|a| &a.kind),
+                    Some(ActionKind::Place { .. })
+                ) && at(place).as_ref() == Some(pos)
+                    && let Some(bot) = ran.get(&place)
+                {
+                    workers.1.insert(*bot);
+                }
+            }
+        }
+        out.insert(format!("{pos} batch {:?}", action.id), workers);
     }
     out
 }
@@ -110,23 +180,23 @@ fn by_furnace(net: &ActionNetwork, result: &Schedule) -> BTreeMap<String, Furnac
 fn every_furnace_is_placed_loaded_and_emptied_by_one_bot() {
     let bots = [BotId(1), BotId(2), BotId(3), BotId(4)];
     let (net, _, result) = plan(&bots);
-    let furnaces = by_furnace(&net, &result);
+    let batches = by_batch(&net, &result);
     assert!(
-        furnaces.len() >= 3,
+        batches.len() >= 3,
         "the fixture is supposed to produce several smelts, got {}",
-        furnaces.len()
+        batches.len()
     );
-    for (pos, (consumers, builders)) in &furnaces {
+    for (pos, (consumers, builders)) in &batches {
         assert_eq!(
             consumers.len(),
             1,
-            "the furnace at {pos} has its ore put in and its plates taken out by \
+            "the {pos} has its ore put in and its plates taken out by \
              {consumers:?}; that side of a furnace is one inventory's, so its ore \
              and its output are one bot's"
         );
         assert!(
             builders.len() <= 1,
-            "the furnace at {pos} was built and fuelled by {builders:?}; that side \
+            "the {pos} was built and fuelled by {builders:?}; that side \
              may be somebody else's errand, but it is emitted as one owned block \
              and so is one bot's"
         );

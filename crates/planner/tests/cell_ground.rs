@@ -88,7 +88,7 @@ fn packable(state: &PlanState) -> usize {
     let spec = cell_spec(state, "iron-plate").expect("the fixture smelts iron");
     let mut trial = state.fork();
     let mut packed = 0;
-    while let Ok(cell) = plan_cell(&trial, &origin(), &spec) {
+    while let Ok(cell) = plan_cell(&trial, &origin(), &spec, 1) {
         for entity in parts(&trial, &cell) {
             trial.create_entity(entity);
         }
@@ -251,7 +251,7 @@ fn a_patch_with_no_cell_sites_left_withholds_nothing() {
 fn ground_stops_being_cell_ground_when_no_drill_can_face_it() {
     let state = bare();
     let spec = cell_spec(&state, "iron-plate").expect("the fixture smelts iron");
-    let cell = plan_cell(&state, &origin(), &spec).expect("a bare patch sites a cell");
+    let cell = plan_cell(&state, &origin(), &spec, 1).expect("a bare patch sites a cell");
     assert!(is_cell_furnace_ground(&state, "iron-ore", &cell.furnace));
 
     // Everything that could stand on the ore two tiles behind it, blocked.

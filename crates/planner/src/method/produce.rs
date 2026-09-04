@@ -47,7 +47,7 @@
 use crate::action::{Action, ActionKind, Actor, Condition, Effect, InventorySlot};
 use crate::error::PlannerError;
 use crate::goal::{Goal, Holder};
-use crate::ids::{ItemId, Ticks};
+use crate::ids::{ActionId, ItemId, Ticks};
 use crate::method::have::{
     COAL_BURN_TICKS, Demand, PLACE_TICKS, TRANSFER_TICKS, attach_unlock, demand,
 };
@@ -59,7 +59,7 @@ use crate::method::util::{
 use crate::method::{ExpansionCtx, Method, Step};
 use crate::state::PlanState;
 use factorio_bot_core::num_traits::{FromPrimitive, ToPrimitive};
-use factorio_bot_core::types::{Direction, FactorioEntity, FactorioRecipe, Pos, Position};
+use factorio_bot_core::types::{Direction, FactorioEntity, FactorioRecipe, Pos, Position, Rect};
 use std::collections::BTreeSet;
 
 /// The two machines a stage-1 cell is made of.
@@ -315,7 +315,10 @@ pub fn is_cell_furnace_ground(state: &PlanState, ore: &str, site: &Position) -> 
             return false;
         };
         let drill = site.add(&Position::new(-offset.x(), -offset.y()));
-        fit(state, &drill, facing, ore).is_some()
+        // Ground a cell would run one load on, not ground a cell could stand
+        // on: a site whose drill would go dry inside a load is not one a
+        // `Producing` goal will ever want, so a hand-smelt may have it.
+        fit(state, &drill, facing, ore, load_ore(state, ore)).is_some()
     })
 }
 
@@ -360,8 +363,9 @@ pub fn cell_room_to_spare(state: &PlanState, from: &Position, item: &str) -> boo
         return true;
     };
     let mut trial = state.fork();
+    let ore = rate_cell_ore(&spec);
     for _ in 0..CELL_SITES_RESERVED {
-        let Ok(cell) = plan_cell(&trial, from, &spec) else {
+        let Ok(cell) = plan_cell(&trial, from, &spec, ore) else {
             return false;
         };
         for entity in parts(&trial, &cell) {
@@ -433,13 +437,31 @@ fn machine(
 /// 4. with both machines standing, the drill's drop point really does land in
 ///    the furnace. Asked of a fork with the pair placed, so it is the same
 ///    predicate [`Condition::Feeds`] will be checked with rather than a
-///    restatement of it.
-fn fit(state: &PlanState, drill: &Position, facing: Direction, ore: &str) -> Option<Cell> {
+///    restatement of it;
+/// 5. the tiles under the drill hold at least `ore` between them
+///    ([`cell_yield`]). A drill mines what is under it and nothing else, and
+///    the tile of a patch nearest a bot is its thin edge: on seed `31337`
+///    the iron patch's rim holds 3–10 ore a tile against 200+ three tiles
+///    in. The live run `run-1788552801-73005` sited a cell on that rim,
+///    fuelled it for 66 ore, and got `take 64 iron-plate ... removed 40`
+///    with the drill reporting no mining target and coal still in it;
+///    its neighbours stopped at 36 and 37. The plan had sized the take
+///    from the coal and never asked the ground.
+fn fit(
+    state: &PlanState,
+    drill: &Position,
+    facing: Direction,
+    ore: &str,
+    want: u32,
+) -> Option<Cell> {
     let area = state.collision_area_facing(DRILL, drill, facing)?;
     if !state.covers_resource(&area, ore) {
         return None;
     }
     if state.covers_claimed_resource(&area) {
+        return None;
+    }
+    if cell_yield(state, drill, facing, ore) < want {
         return None;
     }
     if !state.is_area_free_facing(DRILL, drill, facing) {
@@ -464,12 +486,113 @@ fn fit(state: &PlanState, drill: &Position, facing: Direction, ore: &str) -> Opt
     Some(cell)
 }
 
+/// Ore a drill standing at `drill` facing `facing` can still reach: the sum of
+/// what is left on every tile under its footprint.
+///
+/// **The mining area is taken to be the footprint.** A burner mining drill's
+/// `resource_searching_radius` is 0.99 in vanilla -- exactly the 2x2 it stands
+/// on -- and the prototype capture this crate reads carries no such field, so
+/// the footprint is an assumption stated here rather than a number read from
+/// the world. An electric drill (radius 2.49, a 5x5 area) would be
+/// under-counted; no stage-1 cell uses one.
+///
+/// `resource_available`, not the tile's reported amount: what this plan's own
+/// mining and its earlier cells' takes have already spoken for is gone. The
+/// reported amount itself is what the mod sent when the chunk was written
+/// out, refreshed only when the entity is delivered again -- a drill from an
+/// earlier plan may have eaten some of it since, and nothing here can tell.
+/// That is the one way this can still over-count, and it is why a site is
+/// asked for more than the take (see [`site_ore`]).
+pub fn cell_yield(state: &PlanState, drill: &Position, facing: Direction, ore: &str) -> u32 {
+    let Some(area) = state.collision_area_facing(DRILL, drill, facing) else {
+        return 0;
+    };
+    footprint_tiles(&area)
+        .iter()
+        .map(|tile| state.resource_available(&Position::from(tile), ore))
+        .fold(0u32, u32::saturating_add)
+}
+
+/// The tiles a collision box covers, the way `PlanState` counts them: a box
+/// that merely touches a tile edge (within 1/512) does not cover that tile.
+/// Restated here because `PlanState::tiles_under` is private to `state.rs`.
+fn footprint_tiles(area: &Rect) -> Vec<Pos> {
+    const SLACK: f64 = 1. / 512.;
+    let x0 = (area.left_top.x() + SLACK).floor() as i32;
+    let x1 = (area.right_bottom.x() - SLACK).floor() as i32;
+    let y0 = (area.left_top.y() + SLACK).floor() as i32;
+    let y1 = (area.right_bottom.y() - SLACK).floor() as i32;
+    let mut out = Vec::new();
+    for y in y0..=y1 {
+        for x in x0..=x1 {
+            out.push(Pos(x, y));
+        }
+    }
+    out
+}
+
+/// Ore the drill has to dig for `items` of the cell's product.
+///
+/// `cell_spec` admits only a recipe taking one of its ore per run, so this is
+/// `items` over the recipe's yield per run -- one to one in vanilla.
+fn ore_for(spec: &CellSpec, items: u32) -> u32 {
+    items.div_ceil(output_per_craft(&spec.recipe, &spec.item).max(1))
+}
+
+/// Ore one load of coal ([`CELL_FUELLED_TICKS`]) lets a cell dig.
+///
+/// The ground a *rate* cell is sited on, and the floor for a one-shot cell's
+/// site too: a `Producing` goal refuels for ever, so the least a site has to
+/// hold is one load's worth, and `cell_room_to_spare` reserves sites on that
+/// definition. Vanilla iron: 150.
+fn rate_cell_ore(spec: &CellSpec) -> u32 {
+    let cycles = CELL_FUELLED_TICKS / spec.ticks_per_item.max(1);
+    ore_for(spec, cycles)
+}
+
+/// [`rate_cell_ore`] for whatever cell makes `item`, or zero when nothing
+/// does -- for callers that hold an ore name rather than a spec.
+fn load_ore(state: &PlanState, ore: &str) -> u32 {
+    let item = state
+        .base()
+        .recipes
+        .iter()
+        .find(|entry| {
+            entry.value().category == SMELTING_CATEGORY
+                && matches!(ingredients_of(entry.value()).as_slice(), [(i, 1)] if i == ore)
+        })
+        .map(|entry| entry.key().clone());
+    item.and_then(|item| cell_spec(state, &item))
+        .map(|spec| rate_cell_ore(&spec))
+        .unwrap_or(0)
+}
+
+/// Ground a one-shot cell for `items` is sited on: the ore it will take plus
+/// one cycle of headroom and an eighth again, and never less than a load.
+///
+/// The eighth is the allowance for what [`cell_yield`] cannot see -- a tile's
+/// reported amount is as old as the last time its chunk was delivered. The
+/// load floor is what makes a cell worth draining later: a site that covers
+/// exactly this fragment is a site the next fragment finds empty.
+fn site_ore(spec: &CellSpec, items: u32) -> u32 {
+    let ore = ore_for(spec, items.saturating_add(1));
+    ore.saturating_add(ore / 8).max(rate_cell_ore(spec))
+}
+
 // ---------------------------------------------------------------------------
 // Siting
 // ---------------------------------------------------------------------------
 
-/// Find somewhere to put one cell for `ore` within reach of `from`, or say why
-/// not.
+/// Find somewhere to put one cell for `ore` within reach of `from` whose drill
+/// can reach at least `want` ore, or say why not.
+///
+/// The ring walks outward from the tile nearest `from`, so the answer is the
+/// **nearest site that covers `want`**, not the richest: a 2x2 on the rim
+/// with 40 ore under it is skipped for one three tiles in with 900, and a
+/// site is never traded for a farther, richer one once it covers what was
+/// asked. `NoRoomForCell` now also means "nothing within the radius holds
+/// that much", which the error does not distinguish; a caller reading it
+/// should know both refusals share the name.
 ///
 /// Deterministic by construction: the anchor is the tile
 /// `nearest_resource_tile` orders first (distance, then `x`, then `y`), the
@@ -480,6 +603,7 @@ pub fn plan_cell(
     state: &PlanState,
     from: &Position,
     spec: &CellSpec,
+    want: u32,
 ) -> Result<Cell, PlannerError> {
     let anchor = nearest_resource_tile(state, &spec.ore, from, 1).ok_or_else(|| {
         PlannerError::NoPatchForCell {
@@ -506,7 +630,7 @@ pub fn plan_cell(
                         f64::from(base.0 + dx) + offset_x,
                         f64::from(base.1 + dy) + offset_y,
                     );
-                    if let Some(cell) = fit(state, &candidate, facing, &spec.ore) {
+                    if let Some(cell) = fit(state, &candidate, facing, &spec.ore, want) {
                         return Ok(cell);
                     }
                 }
@@ -530,11 +654,12 @@ pub fn plan_cells(
     from: &Position,
     spec: &CellSpec,
     count: u32,
+    want: u32,
 ) -> Result<Vec<Cell>, PlannerError> {
     let mut trial = state.fork();
     let mut out = Vec::new();
     for _ in 0..count {
-        let cell = plan_cell(&trial, from, spec)?;
+        let cell = plan_cell(&trial, from, spec, want)?;
         for entity in parts(&trial, &cell) {
             trial.create_entity(entity);
         }
@@ -793,11 +918,6 @@ fn cell_steps(ctx: &mut ExpansionCtx, spec: &CellSpec, cells: &[Cell]) -> Vec<St
         }));
     }
 
-    let build = ctx
-        .state
-        .bot(ctx.chain_actor)
-        .map(|b| b.build_distance)
-        .unwrap_or(10.0);
     let reach = ctx
         .state
         .bot(ctx.chain_actor)
@@ -805,101 +925,23 @@ fn cell_steps(ctx: &mut ExpansionCtx, spec: &CellSpec, cells: &[Cell]) -> Vec<St
         .unwrap_or(10.0);
 
     for cell in cells {
-        for entity in parts(&ctx.state, cell) {
-            let name = entity.name.clone();
-            let position = entity.position.clone();
-            // The annulus's inner bound, exactly as the furnace, the lab and
-            // the plant use it: standing *on* the tile a building is going for
-            // satisfies a plain disc and then has the game refuse the build
-            // with `player_blocks_placement`.
-            let min_radius = ctx.state.placement_clearance(&name).unwrap_or(0.0);
-            let id = ctx.ids.next();
-            steps.push(Step::Act(Box::new(Action {
-                id,
-                kind: ActionKind::Place {
-                    entity: Box::new(entity.clone()),
-                },
-                pre: vec![
-                    Condition::AtPosition {
-                        who: Actor::Role,
-                        pos: position.clone(),
-                        radius: build,
-                        min_radius,
-                    },
-                    Condition::AreaFree {
-                        pos: position.clone(),
-                        entity: name.clone(),
-                        direction: entity.direction,
-                    },
-                    Condition::HasItem {
-                        who: Actor::Role,
-                        item: name.clone(),
-                        count: 1,
-                    },
-                ],
-                eff: vec![
-                    Effect::LoseItem {
-                        who: Actor::Role,
-                        item: name.clone(),
-                        count: 1,
-                    },
-                    Effect::CreateEntity(Box::new(entity.clone())),
-                ],
-                duration: PLACE_TICKS,
-                pinned: None,
-                label: format!("place {} at {}", name, position),
-            })));
-            ctx.state.create_entity(entity);
-        }
-
-        for (machine_name, position, coal, burn_ticks, feeds) in [
-            (
-                DRILL,
-                cell.drill.clone(),
-                drill_coal,
-                DRILL_BURN_TICKS,
-                false,
-            ),
-            (
-                FURNACE,
-                cell.furnace.clone(),
-                furnace_coal,
-                COAL_BURN_TICKS,
-                true,
-            ),
-        ] {
-            let mut extra_pre: Vec<Condition> = Vec::new();
-            if feeds {
-                // Both ends named, so this action cannot be scheduled before
-                // either machine stands, and cannot be scheduled at all unless
-                // the drill really delivers into the furnace. Fuelling a
-                // furnace nothing feeds is the placed-but-dead machine this
-                // whole stage exists to make impossible.
-                extra_pre.push(Condition::EntityAt {
-                    pos: cell.drill.clone(),
-                    name: DRILL.into(),
-                });
-                extra_pre.push(Condition::Feeds {
-                    from: cell.drill.clone(),
-                    to: cell.furnace.clone(),
-                });
-                extra_pre.extend(research_pre.iter().cloned());
-            }
-            // One visit, always, at `CELL_FUELLED_TICKS`: 23 coal for the
-            // drill and 14 for the furnace, both well inside the 50 a fuel
-            // slot holds. Routed through `fuel_steps` anyway so that a change
-            // to `CELL_FUELLED_TICKS` cannot quietly reintroduce the defect
-            // it is bounded by rather than protected from.
-            let (fuel, _) = fuel_steps(
-                ctx,
-                machine_name,
-                &position,
-                coal,
-                burn_ticks,
-                reach,
-                &extra_pre,
-            );
-            steps.extend(fuel);
+        place_steps(ctx, spec, cell, &mut steps);
+        let fuel_ids = fuel_both(
+            ctx,
+            cell,
+            drill_coal,
+            furnace_coal,
+            &research_pre,
+            reach,
+            &mut steps,
+        );
+        // A rate cell promises nothing when it is stood; it is fuelled for a
+        // load and refuelled for ever, and its output is a rate a
+        // `supervisor.witness` reads. It is still entered in the ledger, timed
+        // from its drill's first fuel visit, so a later one-shot fragment can
+        // draw on it -- see `cell_ledger`.
+        if let Some(started_by) = fuel_ids.first().copied() {
+            promise(ctx, spec, cell, started_by, 0);
         }
     }
     steps
@@ -969,7 +1011,7 @@ impl Method for BuildCell {
             .bot(ctx.chain_actor)
             .map(|b| b.position.clone())
             .unwrap_or_default();
-        let cells = plan_cells(&ctx.state, &from, &spec, build)?;
+        let cells = plan_cells(&ctx.state, &from, &spec, build, rate_cell_ore(&spec))?;
         Ok(cell_steps(ctx, &spec, &cells))
     }
 }
@@ -1027,7 +1069,7 @@ pub(crate) fn craft_ticks(state: &PlanState, item: &str, count: u32, depth: u32)
     // world's whole resource list beside it, which cost ~22 spurious warning
     // pairs per plan.
     if state.has_resource_patches(item) {
-        return mining_ticks(state, item).saturating_mul(count);
+        return raw_ticks(state, item, count);
     }
     let Some(recipe) = recipe_for(state, item) else {
         // Neither minable nor recipe-bearing: a free item, exactly as
@@ -1056,6 +1098,54 @@ pub(crate) fn craft_ticks(state: &PlanState, item: &str, count: u32, depth: u32)
         })
 }
 
+/// Character ticks to get `count` of a raw resource the cheaper of the two
+/// ways a plan has: off a tile by hand, or off a rock.
+///
+/// `crate::method::have::Chop` sits ahead of `Mine` in the registry and takes
+/// the rock whenever its `chop_beats_mining` says the swings pay, so a price
+/// that only knew the tile charged a cell's coal at 120 ticks apiece when the
+/// plan pays 15 -- one swing at a `huge-rock` is 360 ticks for 24 coal *and*
+/// 24 stone -- and the gate refused cells the plan could afford. The two
+/// world-record replays read on 2026-09-04 take every gram of early stone and
+/// coal from rocks; this is the price at which they do.
+///
+/// The rule is `chop_beats_mining`'s own, restated rather than shared because
+/// that function answers yes-or-no and this one needs the number: the
+/// **worst** ticks-per-item deal among the standing sources, taken only when
+/// they can supply `count` at all, and never more than the tile costs. Like
+/// it, this reads no distance -- a rock across the map is priced like one
+/// beside the bot -- which flatters the rock in exactly the way `Chop`'s own
+/// choice already does.
+fn raw_ticks(state: &PlanState, item: &str, count: u32) -> Ticks {
+    let hand = mining_ticks(state, item).saturating_mul(count);
+    let mut supply: u32 = 0;
+    let mut worst: Option<(Ticks, u32)> = None;
+    for (entity, _position, yields) in state.minable_sources(item) {
+        if yields == 0 {
+            continue;
+        }
+        supply = supply.saturating_add(yields);
+        let candidate = (mining_ticks(state, &entity), yields);
+        let worse = match worst {
+            None => true,
+            Some(best) => {
+                u64::from(candidate.0) * u64::from(best.1)
+                    > u64::from(best.0) * u64::from(candidate.1)
+            }
+        };
+        if worse {
+            worst = Some(candidate);
+        }
+    }
+    let Some((swing, yields)) = worst else {
+        return hand;
+    };
+    if supply < count {
+        return hand;
+    }
+    hand.min(swing.saturating_mul(count.div_ceil(yields)))
+}
+
 /// Bot-busy ticks [`crate::method::have::Smelt`] actually spends
 /// hand-supplying `need` of `spec.item`, mirroring `smelt_steps`'s own
 /// arithmetic for the ore, the coal and the furnace's one-time overhead.
@@ -1075,9 +1165,8 @@ fn hand_smelt_bot_ticks(state: &PlanState, spec: &CellSpec, need: u32) -> Ticks 
     // Mine the ore, mine the coal, place one furnace, load it twice (ore,
     // fuel) and take the result once -- `smelt_steps`'s whole action list
     // minus the wait between the last load and the take.
-    mining_ticks(state, &spec.ore)
-        .saturating_mul(runs)
-        .saturating_add(mining_ticks(state, "coal").saturating_mul(coal))
+    raw_ticks(state, &spec.ore, runs)
+        .saturating_add(raw_ticks(state, "coal", coal))
         .saturating_add(PLACE_TICKS)
         .saturating_add(TRANSFER_TICKS.saturating_mul(3))
 }
@@ -1174,6 +1263,11 @@ impl Method for PlaceDrill {
         true
     }
 
+    /// Claimed for **any** count once this plan has a live cell for the item
+    /// -- see [`cell_ledger`] for what "live" is and [`Drain`] for how the
+    /// count is then served. Only a goal with no live cell behind it is priced,
+    /// and that comparison is what it costs to *open* the first cell against
+    /// hand-smelting the goal.
     fn applicable(&self, goal: &Goal, state: &PlanState) -> bool {
         let Some(Demand { item, need, .. }) = demand(goal, state) else {
             return false;
@@ -1184,19 +1278,45 @@ impl Method for PlaceDrill {
         let Some(spec) = cell_spec(state, item) else {
             return false;
         };
+        let drain = Drain::new(state, &spec);
         // A structural refusal -- no ore patch reachable, no room for the
         // pair -- is `expand`'s business, exactly as `BuildCell` leaves it to
         // its own `expand`: answering it here would pay for the same siting
         // search twice.
-        cell_setup_bot_ticks(state, &spec, need) < hand_smelt_bot_ticks(state, &spec, need)
+        !drain.eligible.is_empty()
+            || cell_setup_bot_ticks(state, &spec, need) < hand_smelt_bot_ticks(state, &spec, need)
     }
 
+    /// Serve the count from the plan's live cells, open another while they
+    /// are all backlogged, and price only what no cell can serve.
+    ///
+    /// In order:
+    ///
+    /// 1. every live cell under the drain bound is drawn on, least backlog
+    ///    first, up to what is left under its drill ([`drain_steps`]);
+    /// 2. if that did not cover the count and the remainder pays for a cell
+    ///    of its own ([`cell_setup_bot_ticks`] against
+    ///    [`hand_smelt_bot_ticks`]), a fresh cell is opened for it
+    ///    ([`open_cell_steps`]). A patch with no site
+    ///    left is not a failure here: the backlogged cells are drawn on
+    ///    instead, bound or no bound -- a wait is still cheaper in bot time
+    ///    than a hand -- and with nothing live to draw on the remainder is
+    ///    hand-smelted in place through `Smelt`, because re-stating the goal
+    ///    would only bring it back here to the same refusal;
+    /// 3. whatever is still uncovered goes back out as the same goal for the
+    ///    methods behind this one. `Withdraw`'s construction: the takes'
+    ///    effects have landed by the time the subgoal is expanded, so a `Have`
+    ///    is re-stated with its own count and `shortfall` recomputes, while a
+    ///    `Produced` -- which ignores inventory by design -- carries the
+    ///    remainder and the unlock. It terminates because every pass either
+    ///    empties the cells it drew on or is refused by `applicable`, which
+    ///    reads the same [`Drain`].
     fn expand(&self, goal: &Goal, ctx: &mut ExpansionCtx) -> Result<Vec<Step>, PlannerError> {
         let Some(Demand {
             item,
             need,
+            whose,
             unlocks,
-            ..
         }) = demand(goal, &ctx.state)
         else {
             return Err(PlannerError::NoApplicableMethod {
@@ -1221,236 +1341,104 @@ impl Method for PlaceDrill {
             RecipeGate::Open | RecipeGate::Unobtainable => {}
         }
 
-        let duration = spec.ticks_per_item.saturating_mul(need.saturating_add(1));
-        let drill_coal = fuel_for_duration(duration, DRILL_BURN_TICKS);
-        let furnace_coal = fuel_for_duration(duration, COAL_BURN_TICKS);
-
-        for (bill_item, amount) in bill(1, drill_coal.saturating_add(furnace_coal)) {
-            steps.push(Step::Subgoal(Goal::Have {
-                item: bill_item.into(),
-                count: amount,
-                whose: Holder::Share(ctx.chain_actor),
-            }));
-        }
-
-        let from = ctx
-            .state
-            .bot(ctx.chain_actor)
-            .map(|b| b.position.clone())
-            .unwrap_or_default();
-        let cells = plan_cells(&ctx.state, &from, &spec, 1)?;
-        let cell = cells
-            .into_iter()
-            .next()
-            .ok_or_else(|| PlannerError::NoPatchForCell {
-                item: spec.item.clone(),
-                ore: spec.ore.clone(),
-            })?;
-
-        let build = ctx
-            .state
-            .bot(ctx.chain_actor)
-            .map(|b| b.build_distance)
-            .unwrap_or(10.0);
         let reach = ctx
             .state
             .bot(ctx.chain_actor)
             .map(|b| b.reach_distance)
             .unwrap_or(10.0);
+        let per = output_per_craft(&spec.recipe, &spec.item).max(1);
 
-        for entity in parts(&ctx.state, &cell) {
-            let name = entity.name.clone();
-            let position = entity.position.clone();
-            let min_radius = ctx.state.placement_clearance(&name).unwrap_or(0.0);
-            let id = ctx.ids.next();
-            steps.push(Step::Act(Box::new(Action {
-                id,
-                kind: ActionKind::Place {
-                    entity: Box::new(entity.clone()),
-                },
-                pre: vec![
-                    Condition::AtPosition {
-                        who: Actor::Role,
-                        pos: position.clone(),
-                        radius: build,
-                        min_radius,
-                    },
-                    Condition::AreaFree {
-                        pos: position.clone(),
-                        entity: name.clone(),
-                        direction: entity.direction,
-                    },
-                    Condition::HasItem {
-                        who: Actor::Role,
-                        item: name.clone(),
-                        count: 1,
-                    },
-                ],
-                eff: vec![
-                    Effect::LoseItem {
-                        who: Actor::Role,
-                        item: name.clone(),
-                        count: 1,
-                    },
-                    Effect::CreateEntity(Box::new(entity.clone())),
-                ],
-                duration: PLACE_TICKS,
-                pinned: None,
-                label: format!("place {} at {}", name, position),
-            })));
-            ctx.state.create_entity(entity);
-        }
-
-        // The first fuel visit of each machine, which is when that machine
-        // starts running and so what the takes below are timed from. A job
-        // longer than a stack of coal will burn adds refuel visits behind it
-        // -- `fuel_steps` chains those by burn time, and nothing waits on
-        // them.
-        let mut fuel_ids: Vec<crate::ids::ActionId> = Vec::new();
-        for (machine_name, position, coal, burn_ticks, feeds) in [
-            (
-                DRILL,
-                cell.drill.clone(),
-                drill_coal,
-                DRILL_BURN_TICKS,
-                false,
-            ),
-            (
-                FURNACE,
-                cell.furnace.clone(),
-                furnace_coal,
-                COAL_BURN_TICKS,
-                true,
-            ),
-        ] {
-            let mut extra_pre: Vec<Condition> = Vec::new();
-            if feeds {
-                extra_pre.push(Condition::EntityAt {
-                    pos: cell.drill.clone(),
-                    name: DRILL.into(),
-                });
-                extra_pre.push(Condition::Feeds {
-                    from: cell.drill.clone(),
-                    to: cell.furnace.clone(),
-                });
-                extra_pre.extend(research_pre.iter().cloned());
-            }
-            let (fuel, visits) = fuel_steps(
-                ctx,
-                machine_name,
-                &position,
-                coal,
-                burn_ticks,
-                reach,
-                &extra_pre,
-            );
-            steps.extend(fuel);
-            fuel_ids.extend(visits.first().copied());
-        }
-
-        // The one step `BuildCell` never takes: pull `need` of the item back
-        // out of the furnace and into the acting bot's hands, which is what
-        // turns a standing structure into a satisfied `Have`/`Produced`.
-        //
-        // # One take per stack, not one take per goal
-        //
-        // A stone furnace's output is a **single slot holding exactly one
-        // stack**, so `take 141 iron-plate` was never physically possible --
-        // not at plan time, not at dispatch, not at any moment in between. It
-        // came back `tried to remove 141 iron-plate but removed 100`, and the
-        // larger cost was the 9,600 ticks *before* that: a furnace whose
-        // output slot is full reports `full_output` and **stops smelting**,
-        // with a bot idle beside it and its input backing up. Sizing this take
-        // from demand asks the game for something a slot cannot hold; sizing
-        // it from `slot_capacity` asks for a stack at a time and empties the
-        // slot often enough that the machine never stalls.
-        //
-        // Each cycle's lag is the time to produce everything taken *so far*,
-        // so the take of the first stack lands when the first stack exists
-        // rather than at the end of the whole job. The last cycle's lag is
-        // `duration` exactly, which is what a single take used to carry -- so
-        // a goal that already fits in one stack plans byte-for-byte as before.
-        //
-        // `None` from `slot_capacity` means the world has no prototype for the
-        // item (fixtures only) and is deliberately *not* a guessed cap: it
-        // falls back to one take of `need`, today's behaviour.
-        // See `docs/superpowers/specs/2026-09-04-world-model-divergence-design.md`.
-        let cap = ctx
-            .state
-            .slot_capacity(InventorySlot::FurnaceResult, item)
-            .unwrap_or(need)
-            .max(1);
-        let mut take_ids: Vec<crate::ids::ActionId> = Vec::new();
-        let mut take_lags: Vec<Ticks> = Vec::new();
-        let mut taken = 0u32;
-        loop {
-            let count = cap.min(need.saturating_sub(taken));
-            taken = taken.saturating_add(count);
-            let take_id = ctx.ids.next();
-            let mut take_pre = vec![
-                Condition::AtPosition {
-                    who: Actor::Role,
-                    pos: cell.furnace.clone(),
-                    radius: reach,
-                    min_radius: 0.0,
-                },
-                Condition::EntityAt {
-                    pos: cell.furnace.clone(),
-                    name: FURNACE.into(),
-                },
-            ];
-            take_pre.extend(research_pre.iter().cloned());
-            steps.push(Step::Act(Box::new(Action {
-                id: take_id,
-                kind: ActionKind::Remove {
-                    pos: cell.furnace.clone(),
-                    entity: FURNACE.into(),
-                    slot: InventorySlot::FurnaceResult,
-                    item: item.clone(),
-                    count,
-                },
-                pre: take_pre,
-                eff: vec![Effect::GainItem {
-                    who: Actor::Role,
-                    item: item.clone(),
-                    count,
-                }],
-                duration: TRANSFER_TICKS,
-                pinned: None,
-                label: format!("take {} {} from the cell", count, item),
-            })));
-            take_ids.push(take_id);
-            take_lags.push(spec.ticks_per_item.saturating_mul(taken.saturating_add(1)));
-            if taken >= need {
+        let drain = Drain::new(&ctx.state, &spec);
+        let mut left = need;
+        let mut last_take: Option<ActionId> = None;
+        let mut drained: BTreeSet<Pos> = BTreeSet::new();
+        for cell in &drain.eligible {
+            if left == 0 {
                 break;
             }
+            let count = cell.room.saturating_mul(per).min(left);
+            let (drawn, last) = drain_steps(ctx, &spec, cell, count, &research_pre, reach);
+            steps.extend(drawn);
+            last_take = last;
+            drained.insert(Pos::from(&cell.cell.drill));
+            left = left.saturating_sub(count);
         }
 
-        // Production cannot start before either machine is fuelled, and the
-        // scheduler needs to be told: an `Insert`'s effect satisfies no
-        // condition of the `Remove` above, so nothing here is inferred. One
-        // cycle of headroom, the same margin `smelt_steps` gives its own wait
-        // and for the same reason -- a removal timed to land exactly on the
-        // last item is right only if nothing about it runs long.
-        for id in fuel_ids {
-            for (take_id, lag) in take_ids.iter().zip(&take_lags) {
-                steps.push(Step::Link {
-                    from: id,
-                    to: *take_id,
-                    lag: *lag,
-                });
+        if left > 0 {
+            let pays = cell_setup_bot_ticks(&ctx.state, &spec, left)
+                < hand_smelt_bot_ticks(&ctx.state, &spec, left);
+            if pays {
+                match open_cell_steps(ctx, &spec, left, &research_pre, reach) {
+                    Ok((built, last)) => {
+                        steps.extend(built);
+                        last_take = last;
+                        left = 0;
+                    }
+                    Err(
+                        PlannerError::NoRoomForCell { .. } | PlannerError::NoPatchForCell { .. },
+                    ) => {
+                        // No site for another cell. The backlogged cells
+                        // still hold ore, and a wait costs no bot time.
+                        for cell in &drain.live {
+                            if left == 0 || drained.contains(&Pos::from(&cell.cell.drill)) {
+                                continue;
+                            }
+                            let count = cell.room.saturating_mul(per).min(left);
+                            let (drawn, last) =
+                                drain_steps(ctx, &spec, cell, count, &research_pre, reach);
+                            steps.extend(drawn);
+                            last_take = last;
+                            left = left.saturating_sub(count);
+                        }
+                        if left > 0 {
+                            // Nothing live to draw on either. `applicable`
+                            // would say yes again to the same goal for the
+                            // same reason, so the hand path is taken here
+                            // rather than re-stated. The count is stated so
+                            // that `Smelt` sees `left`: the takes above have
+                            // not landed yet, and a `Have`'s shortfall is
+                            // against what is held.
+                            let hand = match goal {
+                                Goal::Produced { .. } => Goal::Produced {
+                                    item: item.clone(),
+                                    count: left,
+                                    whose: whose.clone(),
+                                    unlocks: unlocks.map(str::to_owned),
+                                },
+                                Goal::Have { count, .. } => Goal::Have {
+                                    item: item.clone(),
+                                    count: count.saturating_sub(need.saturating_sub(left)),
+                                    whose: whose.clone(),
+                                },
+                                _ => unreachable!("`demand` admits only Have and Produced"),
+                            };
+                            steps.extend(crate::method::have::Smelt.expand(&hand, ctx)?);
+                            return Ok(steps);
+                        }
+                    }
+                    Err(e) => return Err(e),
+                }
             }
         }
-        // One slot, emptied in order. The staggered lags above already imply
-        // it, but the ordering is physical rather than a consequence of the
-        // arithmetic, so it is stated: stack `n + 1` is not in the slot until
-        // stack `n` has been carried away.
-        for pair in take_ids.windows(2) {
-            steps.push(Step::Link {
-                from: pair[0],
-                to: pair[1],
-                lag: 0,
-            });
+
+        if left > 0 {
+            steps.push(Step::Subgoal(match goal {
+                Goal::Produced { .. } => Goal::Produced {
+                    item: item.clone(),
+                    count: left,
+                    whose: whose.clone(),
+                    unlocks: unlocks.map(str::to_owned),
+                },
+                _ => Goal::Have {
+                    item: item.clone(),
+                    count: match goal {
+                        Goal::Have { count, .. } => *count,
+                        _ => left,
+                    },
+                    whose: whose.clone(),
+                },
+            }));
+            return Ok(steps);
         }
 
         // The unlock rides on the *last* take, because that is the one that
@@ -1458,11 +1446,687 @@ impl Method for PlaceDrill {
         // it finds, so it is handed only the tail of the step list.
         let last_take_at = steps
             .iter()
-            .rposition(|s| matches!(s, Step::Act(a) if Some(&a.id) == take_ids.last()))
+            .rposition(|s| matches!(s, Step::Act(a) if Some(a.id) == last_take))
             .unwrap_or(0);
         attach_unlock(&mut steps[last_take_at..], item, unlocks);
         Ok(steps)
     }
+}
+
+/// One cell this plan built and may still draw on.
+#[derive(Clone, Debug)]
+struct LiveCell {
+    cell: Cell,
+    /// Ore left under the drill after everything this plan has already
+    /// promised out of it -- [`cell_yield`] read after the earlier takes'
+    /// own `Effect::ConsumeResource` landed.
+    room: u32,
+    /// Ticks of production this plan has already promised out of the cell.
+    queued: Ticks,
+    /// The action the cell's production is timed from: the first fuel visit
+    /// to its drill, from `PlanState::machine_queue`.
+    started_by: ActionId,
+}
+
+/// Cells this plan has stood for `spec` and can still draw on, least backlog
+/// first and then by `(x, y)` of the drill.
+///
+/// # This plan's cells, and only those
+///
+/// A cell is known to be this plan's by the queue entry [`promise`] leaves on
+/// its furnace (`PlanState::queue_machine`): nothing else queues a furnace a
+/// drill feeds -- `adoptable_furnaces` refuses fed furnaces before it ever
+/// reads the queue -- so the entry is both the bookkeeping and the mark. A
+/// cell standing from an *earlier* plan is deliberately not here: its output
+/// is timed from the moment it was fuelled, which this plan cannot name an
+/// action for, and whatever it has produced by now is a buffer `Withdraw`
+/// sees once the inventories are refreshed. Both `PlaceDrill`'s one-shot
+/// cells and `BuildCell`'s rate cells are here: a rate cell promises nothing
+/// when it is stood, and a later fragment draws on it exactly as on a
+/// one-shot cell.
+///
+/// # Not before its own placement has been simulated
+///
+/// A cell is promised at expand time -- its machines are written into the
+/// overlay and its furnace queued so that nothing else is sited or smelted
+/// there -- but its **bill** (the drill's nine plates, its furnace's stone)
+/// expands afterwards, as subgoals, and those plates are a `Have` of the very
+/// item the cell makes. Offered the cell then, they would drain it: a take
+/// whose furnace is placed by a drill crafted from the take's own plates,
+/// which the scheduler rejects as `ChainOwnerInfeasible` (measured, not
+/// imagined: `has 6 iron-plate` on the fixture's fifty-plate plan). So a cell
+/// is live only once a tile under its drill is **claimed** -- the mark the
+/// drill's placement leaves when it is simulated ([`place_steps`]), which is
+/// after the bill, and a mark nothing else can have left there because
+/// [`fit`] never sites a drill on a claimed tile.
+///
+/// # Bounded by ground
+///
+/// `room` is what is left under the drill, so a cell whose ore this plan has
+/// already spoken for is not offered again -- that is the exhaustion the live
+/// run hit (`take 64 ... removed 40`), moved from the game into the model.
+fn cell_ledger(state: &PlanState, spec: &CellSpec) -> Vec<LiveCell> {
+    let mut seen: BTreeSet<Pos> = BTreeSet::new();
+    let mut out: Vec<LiveCell> = Vec::new();
+    for patch in state.resource_patches(&spec.ore) {
+        let centre = Position::new(
+            (patch.rect.left_top.x() + patch.rect.right_bottom.x()) / 2.,
+            (patch.rect.left_top.y() + patch.rect.right_bottom.y()) / 2.,
+        );
+        let reach = (patch.rect.width() / 2.).hypot(patch.rect.height() / 2.)
+            + f64::from(CELL_SEARCH_RADIUS)
+            + CELL_PAIR_RADIUS;
+        for drill in state.entities_within(&centre, reach) {
+            if drill.name != DRILL || !seen.insert(Pos::from(&drill.position)) {
+                continue;
+            }
+            let Some(facing) = Direction::from_u8(drill.direction) else {
+                continue;
+            };
+            let Some(furnace) = state
+                .entities_within(&drill.position, CELL_PAIR_RADIUS)
+                .into_iter()
+                .find(|target| {
+                    target.name == FURNACE && state.delivers_into(&drill.position, &target.position)
+                })
+            else {
+                continue;
+            };
+            let Some(queue) = state.machine_queue(&furnace.position) else {
+                continue;
+            };
+            if queue.item != spec.item {
+                continue;
+            }
+            let Some(area) = state.collision_area_facing(DRILL, &drill.position, facing) else {
+                continue;
+            };
+            let placed = footprint_tiles(&area)
+                .iter()
+                .any(|tile| state.is_resource_claimed(&Position::from(tile)));
+            if !placed {
+                continue;
+            }
+            let room = cell_yield(state, &drill.position, facing, &spec.ore);
+            if room == 0 {
+                continue;
+            }
+            out.push(LiveCell {
+                cell: Cell {
+                    drill: drill.position.clone(),
+                    facing,
+                    furnace: furnace.position.clone(),
+                },
+                room,
+                queued: queue.queued,
+                started_by: queue.release,
+            });
+        }
+    }
+    out.sort_by(|a, b| {
+        a.queued
+            .cmp(&b.queued)
+            .then(a.cell.drill.x.total_cmp(&b.cell.drill.x))
+            .then(a.cell.drill.y.total_cmp(&b.cell.drill.y))
+    });
+    out
+}
+
+/// What the plan's live cells can do for a fragment.
+///
+/// # The count lever, and what a fragment is allowed to see
+///
+/// Two world-record replays read on 2026-09-04 put their first six minutes
+/// into 40–70 burner drills and let everything after draw on them; our best
+/// run had none. A method sees one fragment of a goal at a time -- green's
+/// plates arrive four and six at a time -- so *count* cannot be decided here
+/// from demand. What a fragment can see is each live cell's **backlog**, and
+/// that decides one thing: a cell with more queued than a cell takes to
+/// stand ([`bound`](Self::bound)) is a cell this fragment would wait on
+/// longer than a hand would take, so it is not offered, and the fragment
+/// goes by hand unless it pays for a cell of its own. Once the plan has as
+/// many live cells as match the roster's own hand-mining rate
+/// ([`cap`](Self::cap)) every cell is offered whatever its backlog: past that
+/// the hands are the slower supply, and measured on
+/// `producing:logistic-science-pack:6` the difference is 7 drills, 217,766
+/// ticks and 19,560 ticks of hand-mining against 10, 233,002 and 29,160.
+///
+/// **Opening a cell on that backlog was measured and rejected.** With "open
+/// another while every live cell is past the bound, up to two cells a bot",
+/// `producing:automation-science-pack:6` on `workspace/scripts/map.json` went
+/// from 43,871 ticks to 78,240 with eight drills: each cell's nine-plate bill
+/// was hand-smelted, serially, by the one bot that owns every chain, and each
+/// take then waited its turn behind the cell's queue. A cell is cheap in bot
+/// time and slow in wall time -- 240 ticks a plate against four hands at 120
+/// -- and a plan whose roster is 15–35 % busy is short of wall time, not bot
+/// time. Count ahead of demand is a *ladder* decision (`producing:iron-plate`
+/// before the goal that needs the plates): `BuildCell` stands the cells and
+/// every fragment after them drains, which is what [`cell_ledger`] admitting
+/// rate cells is for.
+struct Drain {
+    /// Every live cell, least backlog first.
+    live: Vec<LiveCell>,
+    /// The live cells a fragment may draw on now: all of them once the
+    /// roster is matched, otherwise those under the bound.
+    eligible: Vec<LiveCell>,
+}
+
+impl Drain {
+    fn new(state: &PlanState, spec: &CellSpec) -> Self {
+        let live = cell_ledger(state, spec);
+        let bound = Self::bound(state, spec);
+        // Cells *stood*, not cells live: a cell this plan has already spent
+        // to the last ore is capacity it built, and the question is whether
+        // the roster's rate has been matched by building, not whether every
+        // cell still has ground. Measured on
+        // `producing:logistic-science-pack:6`: counting live cells instead
+        // made 10 drills, 234,213 ticks and 25,200 ticks of hand-mining out
+        // of 7, 217,766 and 19,560.
+        let eligible: Vec<LiveCell> = if cells_stood(state, spec) >= Self::cap(state, spec) {
+            live.clone()
+        } else {
+            live.iter().filter(|c| c.queued < bound).cloned().collect()
+        };
+        Drain { live, eligible }
+    }
+
+    /// Cells that match the roster's own hand-mining rate: hand ticks an ore
+    /// over the cell's ticks an item, times the roster. Vanilla: two a bot.
+    fn cap(state: &PlanState, spec: &CellSpec) -> usize {
+        let hand = mining_ticks(state, &spec.ore).max(1);
+        let per_bot = spec.ticks_per_item.div_ceil(hand).max(1) as usize;
+        per_bot.saturating_mul(state.bot_ids().len()).max(1)
+    }
+
+    /// Backlog past which a fragment would wait longer than a cell takes to
+    /// stand: [`cell_setup_bot_ticks`] for one item, which is the cell's
+    /// fixed cost with next to no coal in it. Vanilla, with rocks to hand:
+    /// about 4,000 ticks, sixteen plates.
+    fn bound(state: &PlanState, spec: &CellSpec) -> Ticks {
+        cell_setup_bot_ticks(state, spec, 1)
+    }
+}
+
+/// How many cells for `spec` this plan has stood, placed or still being
+/// billed, spent or not: the furnaces carrying [`promise`]'s queue entry for
+/// the item.
+fn cells_stood(state: &PlanState, spec: &CellSpec) -> usize {
+    let mut seen: BTreeSet<Pos> = BTreeSet::new();
+    for patch in state.resource_patches(&spec.ore) {
+        let centre = Position::new(
+            (patch.rect.left_top.x() + patch.rect.right_bottom.x()) / 2.,
+            (patch.rect.left_top.y() + patch.rect.right_bottom.y()) / 2.,
+        );
+        let reach = (patch.rect.width() / 2.).hypot(patch.rect.height() / 2.)
+            + f64::from(CELL_SEARCH_RADIUS)
+            + CELL_PAIR_RADIUS;
+        for furnace in state.entities_within(&centre, reach) {
+            if furnace.name == FURNACE
+                && state
+                    .machine_queue(&furnace.position)
+                    .is_some_and(|queue| queue.item == spec.item)
+            {
+                seen.insert(Pos::from(&furnace.position));
+            }
+        }
+    }
+    seen.len()
+}
+
+/// Record on the furnace what this plan has now promised out of `cell`:
+/// `count` more items, timed from `started_by`, the first fuel visit to the
+/// cell's drill.
+///
+/// `PlanState::queue_machine` is the ledger: its `item` names the product,
+/// its `release` the action the machine's work is timed from, its `queued`
+/// the ticks of work waiting in it -- the same three things a hand-smelt
+/// records when it loads a furnace, read with the same meanings. A drill-fed
+/// furnace is never a candidate for a hand-smelt (`adoptable_furnaces`
+/// filters fed furnaces before it reads the queue), so the entry is seen by
+/// [`cell_ledger`] and by nothing else. `started_by` is passed back unchanged
+/// on every later promise, since `queue_machine` overwrites it.
+fn promise(ctx: &mut ExpansionCtx, spec: &CellSpec, cell: &Cell, started_by: ActionId, count: u32) {
+    ctx.state.queue_machine(
+        &cell.furnace,
+        &spec.item,
+        started_by,
+        spec.ticks_per_item.saturating_mul(count),
+    );
+}
+
+/// Pull `count` of the cell's product out of its furnace, a stack at a time,
+/// each take eating its ore off the tiles under the drill.
+///
+/// # One take per stack, not one take per goal
+///
+/// A stone furnace's output is a **single slot holding exactly one stack**,
+/// so `take 141 iron-plate` was never physically possible -- not at plan
+/// time, not at dispatch, not at any moment in between. It came back `tried
+/// to remove 141 iron-plate but removed 100`, and the larger cost was the
+/// 9,600 ticks *before* that: a furnace whose output slot is full reports
+/// `full_output` and **stops smelting**, with a bot idle beside it and its
+/// input backing up. Sizing this take from demand asks the game for something
+/// a slot cannot hold; sizing it from `slot_capacity` asks for a stack at a
+/// time and empties the slot often enough that the machine never stalls.
+///
+/// Each take's lag is `already` plus the time to produce everything taken
+/// *so far* plus one cycle of headroom -- the same margin `smelt_steps` gives
+/// its own wait, and for the same reason: a removal timed to land exactly on
+/// the last item is right only if nothing about it runs long. The caller
+/// links the action the cell's production is timed from to every take with
+/// that take's lag.
+///
+/// `None` from `slot_capacity` means the world has no prototype for the item
+/// (fixtures only) and is deliberately *not* a guessed cap: it falls back to
+/// one take of `count`.
+/// See `docs/superpowers/specs/2026-09-04-world-model-divergence-design.md`.
+///
+/// # The ore is spent here, on the take
+///
+/// Each take carries an `Effect::ConsumeResource` for the ore it stands for,
+/// laid over the drill's tiles in tile order. That closes the gap
+/// `PlanState::covers_resource` documents -- "a drill neither claims nor
+/// consumes what it stands on" -- from this side: a later [`cell_ledger`]
+/// reads the room that is left, and a later cell is never sited on ore this
+/// one has spoken for. Nothing checks the effect at dispatch
+/// (`Condition::ResourceAvailable` is not on a take), so a stale amount costs
+/// a short take, which the executor already reports, and never a refused
+/// action.
+fn take_steps(
+    ctx: &mut ExpansionCtx,
+    spec: &CellSpec,
+    cell: &Cell,
+    count: u32,
+    already: Ticks,
+    research_pre: &[Condition],
+    reach: f64,
+) -> (Vec<Step>, Vec<(ActionId, Ticks)>) {
+    let item = &spec.item;
+    let cap = ctx
+        .state
+        .slot_capacity(InventorySlot::FurnaceResult, item)
+        .unwrap_or(count)
+        .max(1);
+    let mut tiles: Vec<(Pos, u32)> = ctx
+        .state
+        .collision_area_facing(DRILL, &cell.drill, cell.facing)
+        .map(|area| footprint_tiles(&area))
+        .unwrap_or_default()
+        .into_iter()
+        .map(|tile| {
+            let left = ctx
+                .state
+                .resource_available(&Position::from(&tile), &spec.ore);
+            (tile, left)
+        })
+        .collect();
+    let mut steps: Vec<Step> = Vec::new();
+    let mut takes: Vec<(ActionId, Ticks)> = Vec::new();
+    let mut taken = 0u32;
+    loop {
+        let take = cap.min(count.saturating_sub(taken));
+        taken = taken.saturating_add(take);
+        let id = ctx.ids.next();
+        let mut pre = vec![
+            Condition::AtPosition {
+                who: Actor::Role,
+                pos: cell.furnace.clone(),
+                radius: reach,
+                min_radius: 0.0,
+            },
+            Condition::EntityAt {
+                pos: cell.furnace.clone(),
+                name: FURNACE.into(),
+            },
+        ];
+        pre.extend(research_pre.iter().cloned());
+        let mut eff = vec![Effect::GainItem {
+            who: Actor::Role,
+            item: item.clone(),
+            count: take,
+        }];
+        let mut ore = ore_for(spec, take);
+        for (tile, left) in tiles.iter_mut() {
+            if ore == 0 {
+                break;
+            }
+            let dig = (*left).min(ore);
+            if dig == 0 {
+                continue;
+            }
+            *left -= dig;
+            ore -= dig;
+            eff.push(Effect::ConsumeResource {
+                pos: Position::from(&*tile),
+                item: spec.ore.clone(),
+                count: dig,
+            });
+        }
+        steps.push(Step::Act(Box::new(Action {
+            id,
+            kind: ActionKind::Remove {
+                pos: cell.furnace.clone(),
+                entity: FURNACE.into(),
+                slot: InventorySlot::FurnaceResult,
+                item: item.clone(),
+                count: take,
+            },
+            pre,
+            eff,
+            duration: TRANSFER_TICKS,
+            pinned: None,
+            label: format!("take {} {} from the cell", take, item),
+        })));
+        takes.push((
+            id,
+            already.saturating_add(spec.ticks_per_item.saturating_mul(taken.saturating_add(1))),
+        ));
+        if taken >= count {
+            break;
+        }
+    }
+    // One slot, emptied in order. The staggered lags already imply it, but
+    // the ordering is physical rather than a consequence of the arithmetic,
+    // so it is stated: stack `n + 1` is not in the slot until stack `n` has
+    // been carried away.
+    for pair in takes.windows(2) {
+        steps.push(Step::Link {
+            from: pair[0].0,
+            to: pair[1].0,
+            lag: 0,
+        });
+    }
+    (steps, takes)
+}
+
+/// Fuel `cell`'s two machines for `count` more items and take them.
+///
+/// A cell is fuelled for exactly what has been asked of it, one cycle over
+/// (see [`open_cell_steps`]), so a further `count` is a further top-up: the
+/// coal for `count` cycles in each machine, at least one apiece, brought by
+/// the taking bot on the same walk. Each take is then timed twice -- from the
+/// cell's start by everything promised before it plus its own share, and
+/// from the top-up by its own share alone, since the drill may have stood
+/// idle until the coal came -- and the scheduler holds the later of the two.
+/// Both are conservative: a drill still running on its headroom makes the
+/// take late, never early.
+fn drain_steps(
+    ctx: &mut ExpansionCtx,
+    spec: &CellSpec,
+    cell: &LiveCell,
+    count: u32,
+    research_pre: &[Condition],
+    reach: f64,
+) -> (Vec<Step>, Option<ActionId>) {
+    let mut steps: Vec<Step> = Vec::new();
+    if count == 0 {
+        return (steps, None);
+    }
+    let duration = spec.ticks_per_item.saturating_mul(count);
+    let drill_coal = fuel_for_duration(duration, DRILL_BURN_TICKS);
+    let furnace_coal = fuel_for_duration(duration, COAL_BURN_TICKS);
+    steps.push(Step::Subgoal(Goal::Have {
+        item: "coal".into(),
+        count: drill_coal.saturating_add(furnace_coal),
+        whose: Holder::Share(ctx.chain_actor),
+    }));
+    let fuel_ids = fuel_both(
+        ctx,
+        &cell.cell,
+        drill_coal,
+        furnace_coal,
+        research_pre,
+        reach,
+        &mut steps,
+    );
+    let (takes, timed) = take_steps(
+        ctx,
+        spec,
+        &cell.cell,
+        count,
+        cell.queued,
+        research_pre,
+        reach,
+    );
+    steps.extend(takes);
+    for (take, lag) in &timed {
+        steps.push(Step::Link {
+            from: cell.started_by,
+            to: *take,
+            lag: *lag,
+        });
+        for fuel in &fuel_ids {
+            steps.push(Step::Link {
+                from: *fuel,
+                to: *take,
+                lag: lag.saturating_sub(cell.queued),
+            });
+        }
+    }
+    let last = timed.last().map(|(id, _)| *id);
+    if last.is_some() {
+        promise(ctx, spec, &cell.cell, cell.started_by, count);
+    }
+    (steps, last)
+}
+
+/// Place a cell's two machines, drill first, and write them into the overlay.
+///
+/// The drill first, so a furnace can never be standing where the drill has
+/// to go: the two footprints are disjoint by construction
+/// ([`tests::a_cells_two_machines_never_overlap`]) but the order is what
+/// makes the reservation mean anything.
+///
+/// # The drill's placement claims its ground
+///
+/// The drill's `Place` carries an `Effect::ConsumeResource` of **zero** for
+/// each ore tile under it. Zero, because placing a drill digs nothing; an
+/// effect at all, because `PlanState::consume_resource` claims the tile on
+/// the way through, and that claim is what makes the ground a *machine's*
+/// rather than a hand's: `Mine`'s selectors skip it, a second cell is never
+/// sited over it, and -- the reason it was added -- [`cell_ledger`] reads it
+/// as "this cell's placement has been simulated", which is the one thing that
+/// separates a cell that stands from a cell whose own bill is still being
+/// gathered. `PlanState::covers_resource` documents the gap this closes.
+fn place_steps(ctx: &mut ExpansionCtx, spec: &CellSpec, cell: &Cell, steps: &mut Vec<Step>) {
+    let build = ctx
+        .state
+        .bot(ctx.chain_actor)
+        .map(|b| b.build_distance)
+        .unwrap_or(10.0);
+    for entity in parts(&ctx.state, cell) {
+        let name = entity.name.clone();
+        let position = entity.position.clone();
+        let min_radius = ctx.state.placement_clearance(&name).unwrap_or(0.0);
+        let id = ctx.ids.next();
+        let mut eff = vec![
+            Effect::LoseItem {
+                who: Actor::Role,
+                item: name.clone(),
+                count: 1,
+            },
+            Effect::CreateEntity(Box::new(entity.clone())),
+        ];
+        if name == DRILL
+            && let Some(area) = ctx
+                .state
+                .collision_area_facing(DRILL, &cell.drill, cell.facing)
+        {
+            for tile in footprint_tiles(&area) {
+                let pos = Position::from(&tile);
+                if ctx.state.resource_available(&pos, &spec.ore) > 0 {
+                    eff.push(Effect::ConsumeResource {
+                        pos,
+                        item: spec.ore.clone(),
+                        count: 0,
+                    });
+                }
+            }
+        }
+        steps.push(Step::Act(Box::new(Action {
+            id,
+            kind: ActionKind::Place {
+                entity: Box::new(entity.clone()),
+            },
+            pre: vec![
+                Condition::AtPosition {
+                    who: Actor::Role,
+                    pos: position.clone(),
+                    radius: build,
+                    min_radius,
+                },
+                Condition::AreaFree {
+                    pos: position.clone(),
+                    entity: name.clone(),
+                    direction: entity.direction,
+                },
+                Condition::HasItem {
+                    who: Actor::Role,
+                    item: name.clone(),
+                    count: 1,
+                },
+            ],
+            eff,
+            duration: PLACE_TICKS,
+            pinned: None,
+            label: format!("place {} at {}", name, position),
+        })));
+        ctx.state.create_entity(entity);
+    }
+}
+
+/// The first fuel visit of each of a cell's machines, drill first, which is
+/// when that machine starts running and so what a take is timed from. A job
+/// longer than a stack of coal will burn adds refuel visits behind it --
+/// `fuel_steps` chains those by burn time, and nothing waits on them.
+fn fuel_both(
+    ctx: &mut ExpansionCtx,
+    cell: &Cell,
+    drill_coal: u32,
+    furnace_coal: u32,
+    research_pre: &[Condition],
+    reach: f64,
+    steps: &mut Vec<Step>,
+) -> Vec<ActionId> {
+    let mut fuel_ids: Vec<ActionId> = Vec::new();
+    for (machine_name, position, coal, burn_ticks, feeds) in [
+        (
+            DRILL,
+            cell.drill.clone(),
+            drill_coal,
+            DRILL_BURN_TICKS,
+            false,
+        ),
+        (
+            FURNACE,
+            cell.furnace.clone(),
+            furnace_coal,
+            COAL_BURN_TICKS,
+            true,
+        ),
+    ] {
+        let mut extra_pre: Vec<Condition> = Vec::new();
+        if feeds {
+            extra_pre.push(Condition::EntityAt {
+                pos: cell.drill.clone(),
+                name: DRILL.into(),
+            });
+            extra_pre.push(Condition::Feeds {
+                from: cell.drill.clone(),
+                to: cell.furnace.clone(),
+            });
+            extra_pre.extend(research_pre.iter().cloned());
+        }
+        let (fuel, visits) = fuel_steps(
+            ctx,
+            machine_name,
+            &position,
+            coal,
+            burn_ticks,
+            reach,
+            &extra_pre,
+        );
+        steps.extend(fuel);
+        fuel_ids.extend(visits.first().copied());
+    }
+    fuel_ids
+}
+
+/// Stand a fresh cell for `need` of the product: its bill, its two
+/// placements, one cycle of headroom's worth of coal in each machine, and
+/// the takes that bring `need` back out.
+///
+/// Sited on ground that holds [`site_ore`] -- the take, the headroom, an
+/// allowance for a stale amount, and never less than a load -- from where the
+/// acting bot stands.
+fn open_cell_steps(
+    ctx: &mut ExpansionCtx,
+    spec: &CellSpec,
+    need: u32,
+    research_pre: &[Condition],
+    reach: f64,
+) -> Result<(Vec<Step>, Option<ActionId>), PlannerError> {
+    let mut steps: Vec<Step> = Vec::new();
+    let duration = spec.ticks_per_item.saturating_mul(need.saturating_add(1));
+    let drill_coal = fuel_for_duration(duration, DRILL_BURN_TICKS);
+    let furnace_coal = fuel_for_duration(duration, COAL_BURN_TICKS);
+
+    for (bill_item, amount) in bill(1, drill_coal.saturating_add(furnace_coal)) {
+        steps.push(Step::Subgoal(Goal::Have {
+            item: bill_item.into(),
+            count: amount,
+            whose: Holder::Share(ctx.chain_actor),
+        }));
+    }
+
+    let from = ctx
+        .state
+        .bot(ctx.chain_actor)
+        .map(|b| b.position.clone())
+        .unwrap_or_default();
+    let cells = plan_cells(&ctx.state, &from, spec, 1, site_ore(spec, need))?;
+    let cell = cells
+        .into_iter()
+        .next()
+        .ok_or_else(|| PlannerError::NoPatchForCell {
+            item: spec.item.clone(),
+            ore: spec.ore.clone(),
+        })?;
+
+    place_steps(ctx, spec, &cell, &mut steps);
+    let fuel_ids = fuel_both(
+        ctx,
+        &cell,
+        drill_coal,
+        furnace_coal,
+        research_pre,
+        reach,
+        &mut steps,
+    );
+
+    // The one step `BuildCell` never takes: pull `need` of the item back out
+    // of the furnace and into the acting bot's hands, which is what turns a
+    // standing structure into a satisfied `Have`/`Produced`.
+    let (takes, timed) = take_steps(ctx, spec, &cell, need, 0, research_pre, reach);
+    steps.extend(takes);
+    // Production cannot start before either machine is fuelled, and the
+    // scheduler needs to be told: an `Insert`'s effect satisfies no condition
+    // of the `Remove` above, so nothing here is inferred.
+    for fuel in &fuel_ids {
+        for (take, lag) in &timed {
+            steps.push(Step::Link {
+                from: *fuel,
+                to: *take,
+                lag: *lag,
+            });
+        }
+    }
+    let last = timed.last().map(|(id, _)| *id);
+    if let (Some(last), Some(started_by)) = (last, fuel_ids.first().copied()) {
+        let _ = last;
+        promise(ctx, spec, &cell, started_by, need);
+    }
+    Ok((steps, last))
 }
 
 /// How far apart a cell's own two machines are, for the tests below and for
@@ -1520,7 +2184,8 @@ mod tests {
     /// A cell that stands in `s`, built the way the planner would build it.
     fn stand_a_cell(s: &mut PlanState) -> Cell {
         let spec = iron();
-        let cell = plan_cell(s, &Position::new(0., 0.), &spec).expect("the fixture has iron ore");
+        let cell =
+            plan_cell(s, &Position::new(0., 0.), &spec, 1).expect("the fixture has iron ore");
         for entity in parts(s, &cell) {
             s.create_entity(entity);
         }
@@ -1755,7 +2420,8 @@ mod tests {
     fn a_cell_sits_at_a_patch_edge_with_its_drill_on_the_ore() {
         let s = state(&[BotId(1)]);
         let spec = iron();
-        let cell = plan_cell(&s, &Position::new(0., 0.), &spec).expect("the fixture has iron ore");
+        let cell =
+            plan_cell(&s, &Position::new(0., 0.), &spec, 1).expect("the fixture has iron ore");
         let drill_area = s
             .collision_area_facing(DRILL, &cell.drill, cell.facing)
             .unwrap();
@@ -1784,11 +2450,25 @@ mod tests {
         // mutation deleting the ore check left it passing.
         let s = state(&[BotId(1)]);
         assert!(
-            fit(&s, &Position::new(-32., 40.), Direction::North, "iron-ore").is_none(),
+            fit(
+                &s,
+                &Position::new(-32., 40.),
+                Direction::North,
+                "iron-ore",
+                1
+            )
+            .is_none(),
             "the ground east of the patch is clear, and a drill on it mines nothing"
         );
         assert!(
-            fit(&s, &Position::new(-35., 35.), Direction::North, "iron-ore").is_some(),
+            fit(
+                &s,
+                &Position::new(-35., 35.),
+                Direction::North,
+                "iron-ore",
+                1
+            )
+            .is_some(),
             "and the patch edge two tiles west of it does fit, so the refusal \
              above is about the ore and not about the ground"
         );
@@ -1829,7 +2509,7 @@ mod tests {
     fn two_cells_never_land_on_one_site() {
         let s = state(&[BotId(1)]);
         let spec = iron();
-        let cells = plan_cells(&s, &Position::new(0., 0.), &spec, 3).expect("room for three");
+        let cells = plan_cells(&s, &Position::new(0., 0.), &spec, 3, 1).expect("room for three");
         let sites: BTreeSet<Pos> = cells
             .iter()
             .flat_map(|c| [Pos::from(&c.drill), Pos::from(&c.furnace)])
@@ -1867,7 +2547,7 @@ mod tests {
         let spec = cell_spec(&s, "iron-plate").expect("the recipe shape is still describable");
         assert!(
             matches!(
-                plan_cell(&s, &Position::new(0., 0.), &spec),
+                plan_cell(&s, &Position::new(0., 0.), &spec, 1),
                 Err(PlannerError::NoPatchForCell { .. })
             ),
             "a map with no ore refuses by name rather than siting a drill on nothing"
@@ -2248,25 +2928,31 @@ mod tests {
     ///   (120 * K) = 312 * K.
     /// * `craft_ticks(iron-gear-wheel, K)` = craft (30 * K) +
     ///   `craft_ticks(iron-plate, 2K)` = 30K + 624K = 654 * K.
-    /// * `craft_ticks(stone-furnace, K)` = craft (30 * K) + mine 5 stone a
-    ///   furnace (5 * 120 * K) = 630 * K.
+    /// * `craft_ticks(stone-furnace, 1)` = craft (30) + **one swing at the
+    ///   fixture's `rock-huge`** for its 5 stone (360) = 390. It was 630 --
+    ///   five stone hand-mined at 120 each -- until 2026-09-04, when
+    ///   [`raw_ticks`] started pricing stone and coal the way `Chop` supplies
+    ///   them: the rock is 360 ticks for 24 stone, so anything up to 24 stone
+    ///   costs one swing, and 5 stone is that swing rather than 600 ticks of
+    ///   digging. A world with no rock still prices at 630.
     ///
     /// So one drill -- which needs its *own* stone-furnace as an ingredient,
-    /// per its recipe -- costs `120 + 312*3 + 654*3 + 630 = 3648` ticks, and
-    /// the cell's own, separate placement furnace costs another flat `630`:
-    /// `4278` for the pair, the number [`the_hand_and_cell_costs_cross_over_near_fifty_plates`]
+    /// per its recipe -- costs `120 + 312*3 + 654*3 + 390 = 3408` ticks, and
+    /// the cell's own, separate placement furnace costs another flat `390`:
+    /// `3798` for the pair, the number [`the_hand_and_cell_costs_cross_over_near_fifty_plates`]
     /// builds on.
     #[test]
     fn craft_ticks_prices_a_drill_and_a_furnace_from_raw_materials() {
         let s = state(&[BotId(1)]);
         assert_eq!(
             craft_ticks(&s, "stone-furnace", 1, CRAFT_TICKS_MAX_DEPTH),
-            630
+            390,
+            "30 (craft) + 360 (one swing at a rock for the 5 stone)"
         );
         assert_eq!(
             craft_ticks(&s, DRILL, 1, CRAFT_TICKS_MAX_DEPTH),
-            3648,
-            "120 (assemble) + 3*312 (plate) + 3*654 (gear wheel) + 630 (the drill's own furnace)"
+            3408,
+            "120 (assemble) + 3*312 (plate) + 3*654 (gear wheel) + 390 (the drill's own furnace)"
         );
     }
 
@@ -2275,40 +2961,45 @@ mod tests {
     /// `steam-power` trigger) and at one small enough that nobody wants a
     /// drill built for it.
     ///
-    /// Hand-smelting fifty: mine 50 ore (`120 * 50 = 6000`), mine the coal a
+    /// Hand-smelting fifty: mine 50 ore (`120 * 50 = 6000`), get the coal a
     /// furnace burns smelting them (`recipe_ticks(iron-plate) * 50 = 9600`
-    /// ticks of energy, `div_ceil`d by `COAL_BURN_TICKS = 2666` is 4 coal,
-    /// `120 * 4 = 480`), one placement (`30`) and three transfers (`3 * 10 =
-    /// 30`): `6000 + 480 + 30 + 30 = 6540`.
+    /// ticks of energy, `div_ceil`d by `COAL_BURN_TICKS = 2666` is 4 coal --
+    /// **one swing at the fixture's `rock-huge`, 360**, where it was 480 of
+    /// digging until [`raw_ticks`] learned what `Chop` pays), one placement
+    /// (`30`) and three transfers (`3 * 10 = 30`): `6000 + 360 + 30 + 30 =
+    /// 6420`.
     ///
     /// Building a cell for fifty: the drill and furnace from
     /// [`craft_ticks_prices_a_drill_and_a_furnace_from_raw_materials`]
-    /// (`3648 + 630 = 4278`), two placements (`60`) and three transfers
-    /// (`30`) -- `4368` fixed -- plus coal for 51 cycles at the cell's own
+    /// (`3408 + 390 = 3798`), two placements (`60`) and three transfers
+    /// (`30`) -- `3888` fixed -- plus coal for 51 cycles at the cell's own
     /// 240-tick rate (`51 * 240 = 12240`; `div_ceil(1600) = 8` for the
-    /// drill, `div_ceil(2666) = 5` for the furnace, `120 * 13 = 1560`):
-    /// `4368 + 1560 = 5928`. That is below hand-smelting's `6540`, so a cell
-    /// wins fifty plates -- by a margin of 612 ticks, not a landslide, which
-    /// is what makes fifty a real crossover and not an arbitrary example.
+    /// drill, `div_ceil(2666) = 5` for the furnace, 13 coal, one swing:
+    /// `360`): `3888 + 360 = 4248`. That is below hand-smelting's `6420`, so
+    /// a cell wins fifty plates. The margin was 612 ticks when stone and coal
+    /// were priced as dug (`5928` against `6540`); with rocks priced as the
+    /// plan actually swings at them the crossover sits near thirty-two
+    /// plates, and fifty wins by 2,172.
     ///
-    /// Five: hand-smelting stays cheap (`120*5 + 120*1(coal) + 30 + 30 =
-    /// 780`) while a cell's fixed cost barely moves with the quantity
-    /// (`4368 + 120*2(coal for 6 cycles) = 4608`), so hand-mining wins by a
-    /// wide margin -- nobody builds a drill for five plates.
+    /// Five: hand-smelting stays cheap (`120*5 + 120*1(coal: one coal is
+    /// cheaper dug than swung for) + 30 + 30 = 780`) while a cell's fixed
+    /// cost barely moves with the quantity (`3888 + 240 (2 coal, dug) =
+    /// 4128`), so hand-mining wins by a wide margin -- nobody builds a drill
+    /// for five plates.
     #[test]
     fn the_hand_and_cell_costs_cross_over_near_fifty_plates() {
         let s = state(&[BotId(1)]);
         let spec = iron();
 
-        assert_eq!(hand_smelt_bot_ticks(&s, &spec, 50), 6540);
-        assert_eq!(cell_setup_bot_ticks(&s, &spec, 50), 5928);
+        assert_eq!(hand_smelt_bot_ticks(&s, &spec, 50), 6420);
+        assert_eq!(cell_setup_bot_ticks(&s, &spec, 50), 4248);
         assert!(
             cell_setup_bot_ticks(&s, &spec, 50) < hand_smelt_bot_ticks(&s, &spec, 50),
             "fifty plates must be cheaper in bot-time to build than to hand-smelt"
         );
 
         assert_eq!(hand_smelt_bot_ticks(&s, &spec, 5), 780);
-        assert_eq!(cell_setup_bot_ticks(&s, &spec, 5), 4608);
+        assert_eq!(cell_setup_bot_ticks(&s, &spec, 5), 4128);
         assert!(
             cell_setup_bot_ticks(&s, &spec, 5) > hand_smelt_bot_ticks(&s, &spec, 5),
             "five plates must stay cheaper to hand-smelt than to build a cell for"
@@ -2405,6 +3096,184 @@ mod tests {
             "fifty fits in one stack, so it is still exactly one take -- \
              the split must not touch a plan that was already legal"
         );
+    }
+
+    /// The fixture's iron patch with a thin rim: every tile whose `x` is
+    /// within three of the patch's near (east) edge holds `rim` ore, the rest
+    /// keep the fixture's default. The near edge is the one
+    /// `nearest_resource_tile` anchors on from the origin, exactly as seed
+    /// `31337`'s rim is the one the live run drilled dry.
+    fn world_with_a_thin_rim(rim: u32) -> factorio_bot_core::factorio::world::FactorioWorld {
+        use factorio_bot_core::factorio::util::add_to_rect;
+        use factorio_bot_core::types::Rect;
+        let world = fixture_world();
+        let mut ore: Vec<FactorioEntity> = Vec::new();
+        factorio_bot_core::test_utils::spawn_ore(
+            &mut ore,
+            add_to_rect(&Rect::from_wh(10., 10.), &Position::new(-40., 40.)),
+            "iron-ore",
+        );
+        let east = ore.iter().map(|e| e.position.x()).fold(f64::MIN, f64::max);
+        for entity in &mut ore {
+            entity.amount = Some(if entity.position.x() > east - 3. {
+                rim
+            } else {
+                crate::state::DEFAULT_RESOURCE_PER_TILE
+            });
+        }
+        world
+            .update_chunk_entities(ore)
+            .expect("the amounts are delivered");
+        world
+    }
+
+    /// The live failure, in the model: a drill sited on the thin rim of a
+    /// patch runs dry inside the take it was fuelled for. A site now has to
+    /// hold what the cell is asked for, and the ring walk finds the nearest
+    /// one that does -- three tiles further in, on the same patch, rather
+    /// than nowhere.
+    #[test]
+    fn a_cell_is_sited_where_the_ground_covers_what_it_is_asked_for() {
+        let s = PlanState::from_world(Arc::new(world_with_a_thin_rim(10)), &[BotId(1)]);
+        let spec = iron();
+        let from = Position::new(0., 0.);
+
+        let anywhere = plan_cell(&s, &from, &spec, 1).expect("a drill fits on the rim");
+        assert!(
+            cell_yield(&s, &anywhere.drill, anywhere.facing, "iron-ore") < 150,
+            "asked for nothing, the nearest site is on the rim and would run dry"
+        );
+
+        let covered = plan_cell(&s, &from, &spec, 150).expect("the patch holds 150 three tiles in");
+        assert!(
+            cell_yield(&s, &covered.drill, covered.facing, "iron-ore") >= 150,
+            "asked for a load, the site holds a load: {covered:?}"
+        );
+        assert!(
+            covered.drill.x() < anywhere.drill.x(),
+            "and it is further into the patch, not somewhere else: {:?} against {:?}",
+            covered.drill,
+            anywhere.drill
+        );
+    }
+
+    /// A take spends the ore it stands for, on the tiles under the drill --
+    /// the gap `PlanState::covers_resource` documents, closed from the take's
+    /// side -- and the drill's placement claims that ground.
+    #[test]
+    fn a_take_spends_the_ore_under_the_drill_and_the_placement_claims_it() {
+        let bots = vec![BotId(1)];
+        let s = state(&bots);
+        let net = expand(
+            &[Goal::Have {
+                item: "iron-plate".into(),
+                count: 50,
+                whose: Holder::Anyone,
+            }],
+            &s,
+            &crate::method::have::default_registry(),
+            BotId(1),
+        )
+        .expect("fifty plates plan");
+        let drill = net
+            .actions()
+            .find_map(|a| match &a.kind {
+                ActionKind::Place { entity } if entity.name == DRILL => Some(entity.clone()),
+                _ => None,
+            })
+            .expect("a drill is placed");
+        let facing = Direction::from_u8(drill.direction).expect("a cardinal");
+        let area = s
+            .collision_area_facing(DRILL, &drill.position, facing)
+            .expect("the fixture has a drill prototype");
+        let under: BTreeSet<Pos> = footprint_tiles(&area).into_iter().collect();
+
+        let spent: u32 = net
+            .actions()
+            .filter(|a| a.label.ends_with("from the cell"))
+            .flat_map(|a| a.eff.iter())
+            .filter_map(|e| match e {
+                Effect::ConsumeResource { pos, item, count } if item == "iron-ore" => {
+                    assert!(
+                        under.contains(&Pos::from(pos)),
+                        "ore spent at {pos}, which is not under the drill at {}",
+                        drill.position
+                    );
+                    Some(*count)
+                }
+                _ => None,
+            })
+            .sum();
+        assert_eq!(
+            spent, 50,
+            "fifty plates are fifty ore off the drill's own tiles"
+        );
+
+        let claims = net
+            .actions()
+            .filter(|a| a.label.starts_with("place burner-mining-drill"))
+            .flat_map(|a| a.eff.iter())
+            .filter(|e| matches!(e, Effect::ConsumeResource { count: 0, .. }))
+            .count();
+        assert!(
+            claims > 0,
+            "the placement claims the ground under the drill"
+        );
+    }
+
+    /// A rate cell stood earlier in the plan is drawn on by a later one-shot
+    /// fragment -- no second drill, no hand-smelt, one take timed after the
+    /// cell's first fuel -- which is the whole mechanism a ladder with
+    /// `producing:iron-plate` on its first rung relies on.
+    #[test]
+    fn a_later_fragment_drains_a_cell_the_plan_already_stood() {
+        let bots = vec![BotId(1)];
+        let s = state(&bots);
+        let net = expand(
+            &[
+                Goal::Producing {
+                    item: "iron-plate".into(),
+                    per_minute: 15,
+                },
+                Goal::Have {
+                    item: "iron-plate".into(),
+                    count: 5,
+                    whose: Holder::Share(BotId(1)),
+                },
+            ],
+            &s,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .expect("a cell and a fragment plan");
+        assert_eq!(
+            net.actions()
+                .filter(|a| a.label.starts_with("place burner-mining-drill"))
+                .count(),
+            1,
+            "the fragment draws on the rate cell instead of standing its own"
+        );
+        let take = net
+            .actions()
+            .find(|a| a.label == "take 5 iron-plate from the cell")
+            .expect("the five come out of the cell");
+        assert!(
+            net.actions().all(|a| a.label != "insert 5 iron-ore"),
+            "and are not hand-smelted"
+        );
+        let fuel = net
+            .actions()
+            .find(|a| a.label.starts_with("fuel the burner-mining-drill"))
+            .expect("the drill is fuelled");
+        assert!(
+            net.preds(take.id)
+                .iter()
+                .any(|(from, lag)| *from == fuel.id && *lag >= 5 * 240),
+            "the take is timed from the drill's first fuel by at least its own five cycles: {:?}",
+            net.preds(take.id)
+        );
+        let plan = schedule(&net, &s, &bots).expect("it schedules");
+        assert!(plan.makespan > 0);
     }
 
     /// A stone furnace's output is one slot holding one stack, so a goal

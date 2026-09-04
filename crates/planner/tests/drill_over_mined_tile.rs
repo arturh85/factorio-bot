@@ -190,7 +190,7 @@ fn a_tile_a_mine_has_claimed_is_not_a_drill_site() {
     let spec = cell_spec(&state, "iron-plate").expect("iron plate smelts from one ore");
     let from = Position::new(0., 0.);
 
-    let clean = plan_cell(&state, &from, &spec).expect("the run's patch has room for a cell");
+    let clean = plan_cell(&state, &from, &spec, 1).expect("the run's patch has room for a cell");
     let clean_area = state
         .collision_area_facing("burner-mining-drill", &clean.drill, clean.facing)
         .expect("the fixture has a drill prototype");
@@ -215,7 +215,7 @@ fn a_tile_a_mine_has_claimed_is_not_a_drill_site() {
         with_claim.set_claim_runner(Some(ClaimRunner::Bot(BotId(1))));
         with_claim.claim_resource(&claimed);
 
-        let resited = plan_cell(&with_claim, &from, &spec).expect("there is other ore to build on");
+        let resited = plan_cell(&with_claim, &from, &spec, 1).expect("there is other ore to build on");
         let resited_area = with_claim
             .collision_area_facing("burner-mining-drill", &resited.drill, resited.facing)
             .expect("the fixture has a drill prototype");
@@ -248,7 +248,7 @@ fn a_drill_the_last_plan_built_was_already_out_of_selection() {
     let from = Position::new(0., 0.);
     let clean = run_world(&[BotId(1)]);
     let spec = cell_spec(&clean, "iron-plate").expect("iron plate smelts from one ore");
-    let cell = plan_cell(&clean, &from, &spec).expect("room for a cell");
+    let cell = plan_cell(&clean, &from, &spec, 1).expect("room for a cell");
     let area = clean
         .collision_area_facing("burner-mining-drill", &cell.drill, cell.facing)
         .expect("the fixture has a drill prototype");

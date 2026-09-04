@@ -12367,11 +12367,24 @@ mod owned_gathering {
     /// **-> 38,680 the same evening**, when a furnace's fuel load started
     /// carrying the smelting lag like its ore does: a take now waits for the
     /// later of the two, which is what the furnace itself does.
+    ///
+    /// **-> 34,611 and 82 actions on 2026-09-04**, when the cell the
+    /// `steam-power` trigger stands became something the rest of the plan
+    /// draws on (`produce::PlaceDrill`, `produce::cell_ledger`): the small
+    /// plate fragments after it -- the drill's own gears, the pipes, the
+    /// lab's -- are taken out of that cell instead of dug and smelted by
+    /// hand, 36 of the plan's 41 hand-mined iron ore gone with them. Fewer
+    /// actions *and* a shorter plan, because a take waits on a lag the bot
+    /// spends elsewhere where a mine occupies it. The take's ore is spent
+    /// off the drill's tiles and the placement claims them, so what is
+    /// still hand-mined keeps its separation from the cell; and the supply
+    /// edge from a take to the craft it feeds is stated by the driver rather
+    /// than inferred (`run_steps`).
     #[test]
     fn the_single_bot_rung_one_plan_is_untouched() {
         let (_, net, plan) = rung_one_plan(&[BotId(1)]);
-        assert_eq!(net.len(), 86, "one bot's rung-1 action count");
-        assert_eq!(plan.makespan, 38680, "one bot's rung-1 makespan");
+        assert_eq!(net.len(), 82, "one bot's rung-1 action count");
+        assert_eq!(plan.makespan, 34611, "one bot's rung-1 makespan");
         assert!(
             net.actions().all(|a| net
                 .chain_of(a.id)

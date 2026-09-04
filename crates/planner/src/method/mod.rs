@@ -7,7 +7,7 @@ pub mod power;
 pub mod produce;
 pub mod util;
 
-use crate::action::Action;
+use crate::action::{Action, Actor, Condition, Effect};
 use crate::error::PlannerError;
 use crate::goal::{Goal, Holder};
 use crate::ids::{ActionId, ActionIdGen, BotId, ChainId, ChainIdGen, ItemId, Ticks};
@@ -139,6 +139,13 @@ pub struct ExpansionCtx {
     /// own production must not itself converge either.
     pub(crate) converging: bool,
     pub depth: u32,
+    /// Where each bot's items came from: for every `(bot, item)`, the
+    /// actions that gained it for the role and how much of each gain is
+    /// still unspent, oldest first. Written by `run_steps` as it simulates an
+    /// action's effects, read there to **state** the supply edge from the
+    /// producers a consumer draws on -- see `run_steps` for why that edge is
+    /// stated rather than left to `ActionNetwork::infer_edges`.
+    pub(crate) stock: BTreeMap<(BotId, ItemId), Vec<(ActionId, u32)>>,
 }
 
 impl ExpansionCtx {
@@ -157,6 +164,7 @@ impl ExpansionCtx {
             chain: None,
             top_level: true,
             concurrency: None,
+            stock: BTreeMap::new(),
             converging: false,
             depth: 0,
         }
@@ -1030,12 +1038,100 @@ fn run_steps(
                 for effect in &action.eff {
                     effect.apply(&mut ctx.state, binding)?;
                 }
+                // **The supply edge is stated, not inferred.** `infer_edges`
+                // pairs every producer of an item with every consumer of it
+                // and drops whichever pairing would close a cycle -- so with
+                // two cells standing, "gears crafted for the second cell's
+                // drill" is paired with "craft the first cell's drill", and
+                // the one edge that is real -- the take that supplies those
+                // gears' plates -- arrives last and is the one dropped. The
+                // scheduler then finds the chain owner without the plates:
+                // `ChainOwnerInfeasible: has 6 iron-plate`, measured on
+                // `producing:automation-science-pack:6` the moment a cell's
+                // output could feed another cell's bill; and `has 42
+                // iron-plate` on a ladder whose second rung spent the fifty
+                // plates a `Produced` trigger had left as free stock. The
+                // overlay knows what a bot holds; `ctx.stock` knows which
+                // actions put it there, oldest first, and a consumer is
+                // linked to the producers it would spend, in that order.
+                // Stated edges go in before inference and are never the ones
+                // inference drops, and they cannot cycle: a producer is
+                // always in the network before what it supplies.
+                let suppliers: Vec<ActionId> = action
+                    .pre
+                    .iter()
+                    .filter_map(|c| match c {
+                        Condition::HasItem {
+                            who: Actor::Role,
+                            item,
+                            count,
+                        } => Some((item.clone(), *count)),
+                        _ => None,
+                    })
+                    .flat_map(|(item, count)| {
+                        let mut covered = 0u32;
+                        ctx.stock
+                            .get(&(binding, item))
+                            .into_iter()
+                            .flatten()
+                            .take_while(move |(_, left)| {
+                                let short = covered < count;
+                                covered = covered.saturating_add(*left);
+                                short
+                            })
+                            .map(|(producer, _)| *producer)
+                            .collect::<Vec<_>>()
+                    })
+                    .collect();
+                let mut spends: Vec<(ItemId, u32)> = Vec::new();
+                let mut gains: Vec<(ItemId, u32)> = Vec::new();
+                for effect in &action.eff {
+                    match effect {
+                        Effect::LoseItem {
+                            who: Actor::Role,
+                            item,
+                            count,
+                        } => spends.push((item.clone(), *count)),
+                        Effect::GainItem {
+                            who: Actor::Role,
+                            item,
+                            count,
+                        } => gains.push((item.clone(), *count)),
+                        _ => {}
+                    }
+                }
                 let id = net.add(*action);
                 // Stamp it with the chain it was expanded under, so the
                 // scheduler keeps the chain together. Outside a per-bot
                 // subtree there is no chain and the action stays free.
                 if let Some(chain) = ctx.chain {
                     net.set_chain(id, chain);
+                }
+                for producer in suppliers {
+                    net.link(producer, id, 0);
+                }
+                for (item, count) in spends {
+                    let mut left = count;
+                    if let Some(stock) = ctx.stock.get_mut(&(binding, item)) {
+                        while left > 0
+                            && let Some((_, first)) = stock.first_mut()
+                        {
+                            let spent = left.min(*first);
+                            *first -= spent;
+                            left -= spent;
+                            if *first == 0 {
+                                stock.remove(0);
+                            }
+                        }
+                    }
+                }
+                for (item, count) in gains {
+                    if count > 0 {
+                        ctx.stock
+                            .entry((binding, item))
+                            .or_default()
+                            .push((id, count));
+                    }
                 }
             }
             Step::Link { from, to, lag } => net.link(from, to, lag),
@@ -1121,6 +1217,56 @@ mod tests {
     use factorio_bot_core::test_utils::fixture_world;
     use std::collections::BTreeSet;
     use std::sync::Arc;
+
+    /// The supply edge is stated from stock provenance, not inferred: a
+    /// consumer whose ingredients were already in the bot's hands -- put
+    /// there by an earlier action of the same plan, with no subgoal of its
+    /// own producing them -- is still ordered after that action. This is the
+    /// ladder failure (`has 42 iron-plate`): a `Produced` trigger's fifty
+    /// plates are free stock, the next goal's gears are crafted from them,
+    /// and without the edge the scheduler crafted the gears before the take.
+    #[test]
+    fn a_consumer_is_ordered_after_the_actions_that_stocked_what_it_spends() {
+        let bots = [BotId(1)];
+        let state = PlanState::from_world(Arc::new(fixture_world()), &bots);
+        let net = expand(
+            &[
+                Goal::Produced {
+                    item: "iron-plate".into(),
+                    count: 50,
+                    whose: Holder::Share(BotId(1)),
+                    unlocks: None,
+                },
+                Goal::Have {
+                    item: "iron-gear-wheel".into(),
+                    count: 5,
+                    whose: Holder::Share(BotId(1)),
+                },
+            ],
+            &state,
+            &crate::method::have::registry_for(&bots),
+            BotId(1),
+        )
+        .expect("both plan");
+        let take = net
+            .actions()
+            .find(|a| a.label == "take 50 iron-plate from the cell")
+            .expect("the trigger's fifty come out of a cell");
+        let craft = net
+            .actions()
+            .find(|a| a.label == "craft 5 iron-gear-wheel")
+            .expect("the gears are crafted");
+        assert!(
+            net.actions()
+                .all(|a| !a.label.starts_with("take 10 iron-plate")),
+            "the gears' ten plates are the trigger's, not a second production"
+        );
+        assert!(
+            net.preds(craft.id).iter().any(|(from, _)| *from == take.id),
+            "the craft is ordered after the take that stocked its plates: {:?}",
+            net.preds(craft.id)
+        );
+    }
 
     fn ctx() -> ExpansionCtx {
         let state = PlanState::from_world(Arc::new(fixture_world()), &[BotId(1)]);
@@ -1755,6 +1901,22 @@ mod tests {
                             }
                         }
                     }
+                    // A take from a cell is ore a *drill* dug: the take
+                    // carries `Effect::ConsumeResource` for exactly what it
+                    // stands for (`produce::take_steps`), which is the same
+                    // ledger a `Mine` writes. Counted since 2026-09-04, when
+                    // the solo plan started drawing thirty-six of its
+                    // forty-one iron ore out of the trigger's cell: the plan
+                    // digs the same ore, by a machine.
+                    ActionKind::Remove { .. } => {
+                        for effect in &action.eff {
+                            if let crate::action::Effect::ConsumeResource { item, count, .. } =
+                                effect
+                            {
+                                *out.entry(item.clone()).or_default() += count;
+                            }
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -1809,17 +1971,31 @@ mod tests {
         // which schedules this same expansion. Units are the wrong currency
         // for effort now; they are still the right one for *duplication*,
         // which is what this test is about.
+        //
+        // **Iron 41 -> 91, coal 33 -> 59, stone 24 -> 48, 86 actions -> 82,
+        // later on 2026-09-04**, and the iron figure is the one to read
+        // first: it did not go up, it became *visible*. The trigger's fifty
+        // plates always came out of a burner cell, and `mined` never counted
+        // what the drill dug. Now a take spends its ore off the drill's
+        // tiles (`produce::take_steps`) and `mined` reads that, so the 91 is
+        // the plan's whole iron: 5 dug by hand and 86 by the cell, where it
+        // was 41 by hand and 50 the ledger could not see. The solo plan
+        // draws its small fragments out of the cell it stood for the
+        // trigger instead of digging for them -- 82 actions and a makespan
+        // of 34,611 against 38,680 (`have::the_single_bot_rung_one_plan_is_untouched`)
+        // -- and swings at a second rock for the coal that keeps the cell
+        // running, which is the 59 and the 48.
         assert_eq!(
             mined(&solo),
             BTreeMap::from([
-                ("coal".to_string(), 33),
+                ("coal".to_string(), 59),
                 ("copper-ore".to_string(), 29),
-                ("iron-ore".to_string(), 41),
-                ("stone".to_string(), 24),
+                ("iron-ore".to_string(), 91),
+                ("stone".to_string(), 48),
             ]),
             "one bot's rung-1 bill"
         );
-        assert_eq!(solo.len(), 86, "one bot's rung-1 step count");
+        assert_eq!(solo.len(), 82, "one bot's rung-1 step count");
 
         // The defect, stated as the property it breaks. Four bots dig no more
         // than one bot does -- they may split it differently and they may
@@ -1861,7 +2037,10 @@ mod tests {
             BTreeMap::from([
                 ("coal".to_string(), 33),
                 ("copper-ore".to_string(), 29),
-                ("iron-ore".to_string(), 41),
+                // The same 91 as the solo bill, and for the same reason it
+                // moved from 41: the trigger's fifty were always drilled,
+                // and are now counted.
+                ("iron-ore".to_string(), 91),
                 // **One** above the solo bill, not ten: see the exemption
                 // above for why any excess is bought rather than wasted, and
                 // note that rocks made the excess almost vanish. A rock hands

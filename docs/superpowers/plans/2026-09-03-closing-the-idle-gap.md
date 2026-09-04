@@ -856,6 +856,22 @@ against one human, on a map chosen for short walks, doing only automation.**
 **steel**, **multi-output recipes** — are what stand between us and it. Another
 minute off rung one is not.
 
+## Owner decisions (2026-09-04, on the chunk-ingest finding)
+
+1. **Measure the free vision now, flip the default later.** Record how much
+   ground each run was given without visiting it, make charted-only an option,
+   and flip once milestones survive it. Flipping first would collapse the model
+   to ~418 chunks and break every milestone.
+2. **Green and oil in parallel.** Green's remaining blocker is three specified
+   capacity sites; oil's is a trigger payload the mod deliberately omits. They
+   are in different crates.
+3. **The 8:17 automation result stands, with a footnote.** Everything
+   automation needs — iron 18.4, copper 54.9, coal 32.1, stone 33.3, water 48.1
+   — is **within ~68 tiles**, well inside what a bot's own walking would
+   legitimately reveal. The free vision reached 505 tiles and was not needed
+   for this milestone. **Record the caveat, not a doubt**; do not mark past
+   numbers provisional.
+
 ## ⚠ WE HAVE BEEN CHEATING WITHOUT KNOWING IT
 
 `918f0d6d`, and it bears directly on the owner's rule that final measured runs

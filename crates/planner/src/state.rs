@@ -1222,6 +1222,31 @@ pub struct PlanState {
     /// `Withdraw` claims nothing. That is why registering a new method ahead
     /// of `Smelt` and `Mine` moved no makespan.
     buffers: BTreeMap<Pos, Buffer>,
+    /// What each burner machine was last seen holding in its fuel slot, by
+    /// tile -- the `fuel` half of the same readings `buffers` is the `output`
+    /// half of.
+    ///
+    /// # A credit, not a buffer
+    ///
+    /// Nothing withdraws fuel: coal in a running machine is that machine's
+    /// consumable, and taking it out stalls whatever the plan may be waiting
+    /// on (see [`Buffer`]). What a reading *is* good for is not paying twice.
+    /// A cell standing from an earlier plan with coal still in its drill and
+    /// its furnace is topped up by [`crate::method::produce::PlaceDrill`] for
+    /// what it is asked for, less this, so the top-up is what the job needs
+    /// and not what the job needs plus what is already burning. Read through
+    /// [`PlanState::fuelled`]; never decremented, because nothing in a plan
+    /// spends it -- the game does.
+    ///
+    /// # Read once, like every other reading
+    ///
+    /// Seeded in [`PlanState::from_world`] from
+    /// [`FactorioWorld::observed_inventories`], under the same guard as
+    /// `buffers`: the entity the reading names must still be the entity
+    /// standing on that tile. Empty in every fixture and in every offline
+    /// dump, since `world.dump` never refreshes inventories -- so offline a
+    /// standing cell is topped up in full, which is the safe direction.
+    fuel: BTreeMap<Pos, BTreeMap<ItemId, u32>>,
     /// Walks the game's pathfinder searched for and did not find, this run.
     ///
     /// The `refused` field's twin for *getting somewhere* rather than for
@@ -1438,8 +1463,9 @@ impl PlanState {
         // there. See the `buffers` field for what a buffer is and where the
         // decision about which ones to observe actually lives.
         let mut buffers: BTreeMap<Pos, Buffer> = BTreeMap::new();
+        let mut fuel: BTreeMap<Pos, BTreeMap<ItemId, u32>> = BTreeMap::new();
         for (tile, observed) in base.observed_inventories() {
-            if observed.output.is_empty() {
+            if observed.output.is_empty() && observed.fuel.is_empty() {
                 continue;
             }
             // A reading is keyed by tile, and a tile can be cleared and
@@ -1455,6 +1481,12 @@ impl PlanState {
                 continue;
             };
             if entity.name != observed.name {
+                continue;
+            }
+            if !observed.fuel.is_empty() {
+                fuel.insert(tile.clone(), observed.fuel);
+            }
+            if observed.output.is_empty() {
                 continue;
             }
             let Some(slot) = withdraw_slot(&entity.entity_type) else {
@@ -1491,6 +1523,7 @@ impl PlanState {
             characters,
             refused,
             buffers,
+            fuel,
             refused_walks,
             walled_in: BTreeMap::new(),
         };
@@ -1840,6 +1873,22 @@ impl PlanState {
     /// nothing to withdraw, which is all of them until a caller refreshes.
     pub fn has_buffers(&self) -> bool {
         !self.buffers.is_empty()
+    }
+
+    /// How much `item` the burner machine on `position`'s tile was last seen
+    /// holding in its fuel slot.
+    ///
+    /// Zero for a machine nobody has asked the game about, which is every
+    /// machine offline and every machine outside the list `refresh_buffers`
+    /// queries -- and zero is the answer that makes a caller *bring* the fuel,
+    /// so an unread slot costs a few coal and never a stalled machine. See
+    /// the [`fuel`](PlanState#structfield.fuel) field.
+    pub fn fuelled(&self, position: &Position, item: &str) -> u32 {
+        self.fuel
+            .get(&Pos::from(position))
+            .and_then(|slot| slot.get(item))
+            .copied()
+            .unwrap_or(0)
     }
 
     /// Is anything at all still sitting in the buffer on `position`'s tile?

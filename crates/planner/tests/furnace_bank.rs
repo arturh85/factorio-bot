@@ -206,6 +206,13 @@ fn a_standing_furnace_takes_the_stone_out_of_the_bill() {
 /// furnace at `[-35, 33]` that the drill at `[-35, 35]` had been placed to
 /// feed, five actions after placing it — and would then have taken plates
 /// `PlaceDrill`'s own take had already been promised.
+///
+/// Since 2026-09-05 the cell itself is what serves the twenty: a standing
+/// pair on the ore is topped up and drained by `PlaceDrill` rather than
+/// left idle beside a furnace built for the hand. So the smelt builds
+/// nothing here either — not because it adopted the furnace, but because it
+/// was never asked. What the guard protects is unchanged and still pinned:
+/// no hand loads ore into a furnace a drill feeds.
 #[test]
 fn a_furnace_a_drill_feeds_is_not_adopted() {
     let world = fixture_world();
@@ -227,10 +234,20 @@ fn a_furnace_a_drill_feeds_is_not_adopted() {
         state.entity_at(&furnace).is_some(),
         "the fixture really stands a furnace there"
     );
-    assert_eq!(
-        furnaces_placed(&net).len(),
-        1,
-        "a drill-fed furnace belongs to its cell; the smelt must build its own"
+    assert!(
+        !loaded_furnaces(&net).contains(&format!("{furnace}")),
+        "a drill-fed furnace belongs to its cell; no hand loads ore into it"
+    );
+    assert!(
+        furnaces_placed(&net).is_empty(),
+        "and the cell serves the plates, so the smelt is never asked to build its own"
+    );
+    assert!(
+        net.actions().any(|a| matches!(
+            &a.kind,
+            ActionKind::Remove { pos, item, .. } if *pos == furnace && item == "iron-plate"
+        )),
+        "the plates come out of the cell's furnace"
     );
 }
 

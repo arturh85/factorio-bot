@@ -1464,26 +1464,50 @@ struct LiveCell {
     /// Ticks of production this plan has already promised out of the cell.
     queued: Ticks,
     /// The action the cell's production is timed from: the first fuel visit
-    /// to its drill, from `PlanState::machine_queue`.
-    started_by: ActionId,
+    /// to its drill, from `PlanState::machine_queue`. `None` for a cell
+    /// standing from an earlier plan, which this plan has no action for --
+    /// its production is timed from the top-up this plan brings it instead.
+    started_by: Option<ActionId>,
+    /// Coal already in the drill's and the furnace's fuel slots, as last
+    /// read (`PlanState::fuelled`); zero when nobody asked. A top-up is
+    /// sized net of this.
+    drill_fuel: u32,
+    furnace_fuel: u32,
 }
 
 /// Cells this plan has stood for `spec` and can still draw on, least backlog
 /// first and then by `(x, y)` of the drill.
 ///
-/// # This plan's cells, and only those
+/// # This plan's cells, and the ones an earlier plan left standing
 ///
 /// A cell is known to be this plan's by the queue entry [`promise`] leaves on
 /// its furnace (`PlanState::queue_machine`): nothing else queues a furnace a
 /// drill feeds -- `adoptable_furnaces` refuses fed furnaces before it ever
-/// reads the queue -- so the entry is both the bookkeeping and the mark. A
-/// cell standing from an *earlier* plan is deliberately not here: its output
-/// is timed from the moment it was fuelled, which this plan cannot name an
-/// action for, and whatever it has produced by now is a buffer `Withdraw`
-/// sees once the inventories are refreshed. Both `PlaceDrill`'s one-shot
-/// cells and `BuildCell`'s rate cells are here: a rate cell promises nothing
-/// when it is stood, and a later fragment draws on it exactly as on a
-/// one-shot cell.
+/// reads the queue -- so the entry is both the bookkeeping and the mark. Both
+/// `PlaceDrill`'s one-shot cells and `BuildCell`'s rate cells are here: a
+/// rate cell promises nothing when it is stood, and a later fragment draws
+/// on it exactly as on a one-shot cell.
+///
+/// A cell standing from an **earlier plan** -- a drill on the ore feeding a
+/// furnace, with no queue entry at all -- is here too, since 2026-09-05, with
+/// `started_by: None` and nothing queued. It used to be left out on the
+/// grounds that its output is timed from a fuelling this plan cannot name an
+/// action for. Measured on `run-1788552801-73005`, that timing did not
+/// exist to be missed: every one of the run's five drills had burned its
+/// ten coal (~16,000 ticks) and stood `no_fuel` at every replan that
+/// followed, over 77 and 166 ore, while plans 5 and 6 each hand-mined 44 and
+/// 30 iron ore and stood *another* cell. What a standing cell has now is a
+/// furnace slot `Withdraw` already empties, and what it can do next is
+/// exactly what [`drain_steps`] does to a live cell: bring coal, take
+/// plates. So it is offered as one, timed from this plan's own top-up, and
+/// its slots' coal (`PlanState::fuelled`, when the game was asked) is
+/// credited against the top-up rather than counted on as a rate: a machine
+/// that is still running only makes the take early, and the top-up is what
+/// makes the take *certain*.
+///
+/// Its feed is the ground under the drill and nothing else -- a cell has no
+/// chests, so the "never drain an input" rule the stage-2 chest list keeps
+/// (`BUFFER_ENTITIES`) has nothing here to protect.
 ///
 /// # Not before its own placement has been simulated
 ///
@@ -1532,21 +1556,38 @@ fn cell_ledger(state: &PlanState, spec: &CellSpec) -> Vec<LiveCell> {
             else {
                 continue;
             };
-            let Some(queue) = state.machine_queue(&furnace.position) else {
-                continue;
-            };
-            if queue.item != spec.item {
-                continue;
-            }
             let Some(area) = state.collision_area_facing(DRILL, &drill.position, facing) else {
                 continue;
             };
-            let placed = footprint_tiles(&area)
+            let claimed = footprint_tiles(&area)
                 .iter()
                 .any(|tile| state.is_resource_claimed(&Position::from(tile)));
-            if !placed {
-                continue;
-            }
+            let (queued, started_by) = match state.machine_queue(&furnace.position) {
+                Some(queue) => {
+                    if queue.item != spec.item {
+                        continue;
+                    }
+                    // This plan's cell, live only once its placement has
+                    // been simulated -- the claim is the mark; see above.
+                    if !claimed {
+                        continue;
+                    }
+                    (queue.queued, Some(queue.release))
+                }
+                None => {
+                    // Standing from an earlier plan. A claim under it with
+                    // no queue on its furnace is a hand's, and a tile a hand
+                    // has spoken for is not offered twice; a furnace a
+                    // hand-smelt has committed is that smelt's.
+                    if claimed || state.machine_committed(&furnace.position) {
+                        continue;
+                    }
+                    if !state.covers_resource(&area, &spec.ore) {
+                        continue;
+                    }
+                    (0, None)
+                }
+            };
             let room = cell_yield(state, &drill.position, facing, &spec.ore);
             if room == 0 {
                 continue;
@@ -1558,8 +1599,10 @@ fn cell_ledger(state: &PlanState, spec: &CellSpec) -> Vec<LiveCell> {
                     furnace: furnace.position.clone(),
                 },
                 room,
-                queued: queue.queued,
-                started_by: queue.release,
+                queued,
+                started_by,
+                drill_fuel: state.fuelled(&drill.position, "coal"),
+                furnace_fuel: state.fuelled(&furnace.position, "coal"),
             });
         }
     }
@@ -1850,6 +1893,16 @@ fn take_steps(
 /// idle until the coal came -- and the scheduler holds the later of the two.
 /// Both are conservative: a drill still running on its headroom makes the
 /// take late, never early.
+///
+/// # A standing cell is topped up net of what it holds, and timed from that
+///
+/// For a cell from an earlier plan (`started_by: None`) there is no start to
+/// time from, so the top-up's first visit to the drill *is* the start, and
+/// every take is timed from it. The top-up is what the job burns less the
+/// coal last read in each slot -- and never less than one apiece, because
+/// the visit is the anchor the take needs and a slot that already holds a
+/// stack still has room for one more. Offline, or for a machine nobody
+/// asked about, the credit is zero and the cell is fuelled in full.
 fn drain_steps(
     ctx: &mut ExpansionCtx,
     spec: &CellSpec,
@@ -1863,8 +1916,12 @@ fn drain_steps(
         return (steps, None);
     }
     let duration = spec.ticks_per_item.saturating_mul(count);
-    let drill_coal = fuel_for_duration(duration, DRILL_BURN_TICKS);
-    let furnace_coal = fuel_for_duration(duration, COAL_BURN_TICKS);
+    let drill_coal = fuel_for_duration(duration, DRILL_BURN_TICKS)
+        .saturating_sub(cell.drill_fuel)
+        .max(1);
+    let furnace_coal = fuel_for_duration(duration, COAL_BURN_TICKS)
+        .saturating_sub(cell.furnace_fuel)
+        .max(1);
     steps.push(Step::Subgoal(Goal::Have {
         item: "coal".into(),
         count: drill_coal.saturating_add(furnace_coal),
@@ -1879,6 +1936,12 @@ fn drain_steps(
         reach,
         &mut steps,
     );
+    let Some(started_by) = cell.started_by.or_else(|| fuel_ids.first().copied()) else {
+        // `fuel_both` always emits a visit per machine, so this is a
+        // fixture with no coal prototype at all; nothing to time from and
+        // nothing to promise.
+        return (steps, None);
+    };
     let (takes, timed) = take_steps(
         ctx,
         spec,
@@ -1890,11 +1953,13 @@ fn drain_steps(
     );
     steps.extend(takes);
     for (take, lag) in &timed {
-        steps.push(Step::Link {
-            from: cell.started_by,
-            to: *take,
-            lag: *lag,
-        });
+        if cell.started_by.is_some() {
+            steps.push(Step::Link {
+                from: started_by,
+                to: *take,
+                lag: *lag,
+            });
+        }
         for fuel in &fuel_ids {
             steps.push(Step::Link {
                 from: *fuel,
@@ -1905,7 +1970,7 @@ fn drain_steps(
     }
     let last = timed.last().map(|(id, _)| *id);
     if last.is_some() {
-        promise(ctx, spec, &cell.cell, cell.started_by, count);
+        promise(ctx, spec, &cell.cell, started_by, count);
     }
     (steps, last)
 }
@@ -3274,6 +3339,250 @@ mod tests {
         );
         let plan = schedule(&net, &s, &bots).expect("it schedules");
         assert!(plan.makespan > 0);
+    }
+
+    // ---- cells an earlier plan left standing --------------------------------
+
+    /// The fixture's iron patch with every tile holding `amount` ore.
+    fn world_with_ore_amount(amount: u32) -> factorio_bot_core::factorio::world::FactorioWorld {
+        use factorio_bot_core::factorio::util::add_to_rect;
+        use factorio_bot_core::types::Rect;
+        let world = fixture_world();
+        let mut ore: Vec<FactorioEntity> = Vec::new();
+        factorio_bot_core::test_utils::spawn_ore(
+            &mut ore,
+            add_to_rect(&Rect::from_wh(10., 10.), &Position::new(-40., 40.)),
+            "iron-ore",
+        );
+        for entity in &mut ore {
+            entity.amount = Some(amount);
+        }
+        world
+            .update_chunk_entities(ore)
+            .expect("the amounts are delivered");
+        world
+    }
+
+    /// Put a cell an *earlier plan* built into `world` itself -- the entity
+    /// graph, not an overlay -- so that a state built from it finds the two
+    /// machines standing with no queue entry, no claim and, when `fuel` says
+    /// so, coal in their slots as the game would have reported it.
+    fn leave_a_cell_standing(
+        world: &factorio_bot_core::factorio::world::FactorioWorld,
+        fuel: Option<(u32, u32)>,
+    ) -> Cell {
+        let s = PlanState::from_world(Arc::new(fixture_world()), &[BotId(1)]);
+        let spec = iron();
+        let cell =
+            plan_cell(&s, &Position::new(0., 0.), &spec, 1).expect("the fixture has iron ore");
+        for mut entity in parts(&s, &cell) {
+            let facing = Direction::from_u8(entity.direction).expect("a cardinal");
+            entity.bounding_box = s
+                .collision_area_facing(&entity.name, &entity.position, facing)
+                .expect("the fixture has both prototypes");
+            world
+                .on_some_entity_created(entity)
+                .expect("the machine stands");
+        }
+        if let Some((drill_coal, furnace_coal)) = fuel {
+            let coal = |count: u32| {
+                Box::new(Some(vec![
+                    factorio_bot_core::types::InventoryItemWithQuality {
+                        name: "coal".into(),
+                        count,
+                        quality: "normal".into(),
+                    },
+                ]))
+            };
+            world.observe_inventories(vec![
+                factorio_bot_core::types::InventoryResponse {
+                    name: DRILL.into(),
+                    position: cell.drill.clone(),
+                    output_inventory: Box::new(None),
+                    fuel_inventory: coal(drill_coal),
+                },
+                factorio_bot_core::types::InventoryResponse {
+                    name: FURNACE.into(),
+                    position: cell.furnace.clone(),
+                    output_inventory: Box::new(None),
+                    fuel_inventory: coal(furnace_coal),
+                },
+            ]);
+        }
+        cell
+    }
+
+    fn fifty_plates(s: &PlanState) -> ActionNetwork {
+        expand(
+            &[Goal::Have {
+                item: "iron-plate".into(),
+                count: 50,
+                whose: Holder::Anyone,
+            }],
+            s,
+            &crate::method::have::default_registry(),
+            BotId(1),
+        )
+        .expect("fifty plates plan")
+    }
+
+    fn fuel_loads(net: &ActionNetwork, machine: &str) -> Vec<(ActionId, u32)> {
+        net.actions()
+            .filter_map(|a| match &a.kind {
+                ActionKind::Insert {
+                    slot: InventorySlot::Fuel,
+                    entity,
+                    count,
+                    ..
+                } if entity == machine => Some((a.id, *count)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The replan case `run-1788552801-73005` paid for five times: a cell
+    /// from an earlier plan stands on ore, fuel burned out, and the plan
+    /// stood another one beside it. Now the standing cell is topped up and
+    /// drained -- no second drill, no hand-smelt -- and the take is timed
+    /// from this plan's own fuel visit, since there is no earlier one.
+    #[test]
+    fn a_cell_left_standing_by_an_earlier_plan_is_refuelled_and_drained_not_rebuilt() {
+        let bots = vec![BotId(1)];
+        let world = fixture_world();
+        leave_a_cell_standing(&world, None);
+        let s = PlanState::from_world(Arc::new(world), &bots);
+        assert_eq!(
+            cell_ledger(&s, &iron()).len(),
+            1,
+            "the standing cell is in the ledger with nothing queued on it"
+        );
+
+        let net = fifty_plates(&s);
+        assert_eq!(
+            net.actions()
+                .filter(|a| a.label.starts_with("place burner-mining-drill"))
+                .count(),
+            0,
+            "no drill is placed: the one standing is used"
+        );
+        assert!(
+            net.actions()
+                .all(|a| !a.label.starts_with("insert") || !a.label.contains("iron-ore")),
+            "and nothing is hand-smelted"
+        );
+        let take = net
+            .actions()
+            .find(|a| a.label == "take 50 iron-plate from the cell")
+            .expect("the fifty come out of the standing cell");
+        let drill_fuel = fuel_loads(&net, DRILL);
+        assert_eq!(drill_fuel.len(), 1, "one top-up visit to the drill");
+        assert!(
+            net.preds(take.id)
+                .iter()
+                .any(|(from, lag)| *from == drill_fuel[0].0 && *lag >= 50 * 240),
+            "the take is timed from this plan's top-up by at least its own fifty cycles: {:?}",
+            net.preds(take.id)
+        );
+        assert!(
+            schedule(&net, &s, &bots).is_ok(),
+            "an adopted cell's plan must schedule, not merely construct"
+        );
+    }
+
+    /// A standing cell whose ground is gone is not a source. Same two
+    /// machines, same facing, zero ore under the drill -- the state the live
+    /// run's first cell was in at every replan after tick 135,300.
+    #[test]
+    fn a_standing_cell_over_exhausted_ground_is_not_offered() {
+        let world = world_with_ore_amount(0);
+        let cell = leave_a_cell_standing(&world, None);
+        let s = PlanState::from_world(Arc::new(world), &[BotId(1)]);
+        assert!(
+            s.delivers_into(&cell.drill, &cell.furnace),
+            "the pair still feeds -- it is only the ore that is gone"
+        );
+        assert!(
+            cell_ledger(&s, &iron()).is_empty(),
+            "a dry cell is not in the ledger"
+        );
+    }
+
+    /// What a standing cell is offered for is bounded by the ore under its
+    /// drill, and what it cannot cover is made some other way.
+    #[test]
+    fn a_standing_cell_is_offered_for_no_more_than_the_ground_under_it() {
+        let bots = vec![BotId(1)];
+        let world = world_with_ore_amount(3);
+        leave_a_cell_standing(&world, None);
+        let s = PlanState::from_world(Arc::new(world), &bots);
+        let ledger = cell_ledger(&s, &iron());
+        assert_eq!(ledger.len(), 1);
+        assert_eq!(
+            ledger[0].room, 6,
+            "a cell sits on the patch's edge, so two of the drill's four tiles \
+             are on ore: two tiles of three"
+        );
+
+        let net = fifty_plates(&s);
+        let from_cell: u32 = net
+            .actions()
+            .filter_map(|a| match &a.kind {
+                ActionKind::Remove { count, .. } if a.label.ends_with("from the cell") => {
+                    Some(*count)
+                }
+                _ => None,
+            })
+            .sum();
+        assert_eq!(from_cell, 6, "six plates is all the ground holds");
+        assert!(
+            net.actions()
+                .any(|a| a.label.starts_with("insert") && a.label.contains("iron-ore")),
+            "the other forty-four are hand-smelted, on a patch too thin for a new cell"
+        );
+    }
+
+    /// Coal the game reported in a standing cell's slots is credited against
+    /// the top-up, never counted on as production: the visit still happens
+    /// (it is what the take is timed from) but brings only what the job
+    /// burns beyond what is already there.
+    #[test]
+    fn a_standing_cell_is_topped_up_net_of_the_coal_it_holds() {
+        let bots = vec![BotId(1)];
+        let world = fixture_world();
+        leave_a_cell_standing(&world, Some((5, 2)));
+        let s = PlanState::from_world(Arc::new(world), &bots);
+        let ledger = cell_ledger(&s, &iron());
+        assert_eq!((ledger[0].drill_fuel, ledger[0].furnace_fuel), (5, 2));
+
+        let net = fifty_plates(&s);
+        let duration = 50 * 240;
+        let drill_full = fuel_for_duration(duration, DRILL_BURN_TICKS);
+        let furnace_full = fuel_for_duration(duration, COAL_BURN_TICKS);
+        assert_eq!(
+            fuel_loads(&net, DRILL).iter().map(|(_, n)| *n).sum::<u32>(),
+            drill_full - 5,
+            "the drill gets what fifty cycles burn less the five it holds"
+        );
+        assert_eq!(
+            fuel_loads(&net, FURNACE)
+                .iter()
+                .map(|(_, n)| *n)
+                .sum::<u32>(),
+            furnace_full - 2,
+            "and the furnace less its two"
+        );
+
+        // With more in the slot than the job burns, one coal still goes in:
+        // the visit is the anchor the take is timed from.
+        let world = fixture_world();
+        leave_a_cell_standing(&world, Some((50, 50)));
+        let s = PlanState::from_world(Arc::new(world), &bots);
+        let net = fifty_plates(&s);
+        assert_eq!(
+            fuel_loads(&net, DRILL).iter().map(|(_, n)| *n).sum::<u32>(),
+            1,
+            "a full slot is still visited once, with one coal"
+        );
     }
 
     /// A stone furnace's output is one slot holding one stack, so a goal

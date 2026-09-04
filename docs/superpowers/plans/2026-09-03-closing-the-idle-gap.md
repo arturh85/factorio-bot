@@ -11,6 +11,52 @@ four bots.
 
 ---
 
+## RED WITNESSED ON THE BENCHMARK SEED — and green crashes on nine plates
+
+`run-1788509918-33958`, **seed `31337`**, roster `[1,2,3,4]`. The first result
+in this project on a map anyone can regenerate.
+
+| rung | result |
+|---|---|
+| 1 — red cell producing 6/min | satisfied, 2 iterations (363 steps) |
+| 2 — red witness | **WITNESSED** — third time, first reproducible |
+| 3 — green cell | **CRASHED** |
+
+```
+RAISED: runtime error: goal: bot 1 has 141 iron-plate, needs 150
+RUN FINISHED state=crashed
+```
+
+**A nine-plate shortfall raised a Lua runtime error and killed the run.** That
+is the defect. A shortfall is an ordinary planning condition — mining and
+smelting nine plates is work this planner does constantly. It should be planned
+for, or at worst **refused by name** the way `PowerPlantNeedsWater`,
+`ResearchNeedsRoom` and "no room for a iron-ore cell" are. Crashing loses the
+run and everything after it.
+
+Note what preceded it: rungs 1 and 2 **succeeded**. This is not a broken world,
+it is green's expansion meeting a bot nine plates short.
+
+### The placement collision recurred, and the retry was not enough
+
+```
+first error: cannot place item 'stone-furnace' because a character is
+standing in the footprint          actions(failed=1)
+```
+
+`c2b2698a` retries 4 times over 1.8 s, a window sized at **twice the single
+measurement available** (a blocker that cleared in 53 ticks). One sample was
+never much of a basis, and here the window was too short. The replan recovered
+and red still satisfied, so this cost iterations rather than the run.
+
+### What the seed change did and did not do
+
+Red satisfied in **2 iterations / 363 steps** here against 1 iteration / 263
+steps on the old map — the collision cost the extra iteration, not the map. The
+planned makespan for `researched:automation` on `31337` is **29,000** against
+30,077, so the map is better on paper; **no clean end-to-end timing on it exists
+yet**, because this run crashed before finishing.
+
 ## AFTER GREEN: oil, and why exploration comes first
 
 The owner asked whether oil processing is the next hard milestone and whether

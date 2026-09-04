@@ -42,13 +42,36 @@
 //!
 //! Green science is `transport-belt` + `inserter`, and **both** are craftable.
 //! Only the belt fits an intermediate machine (an inserter takes three
-//! ingredients, which is one chest more than one small pole can light), so the
-//! choice is forced rather than picked -- and the consequence is stated
-//! plainly: **the inserters green science eats arrive in a chest, hand-crafted
-//! by a bot, exactly as red's copper plates do.** A green cell automates the
-//! belts and the packs; it does not automate the inserters. That is a first
-//! green cell, not a green factory, and [`CELL_CHARGE_TICKS`] is how long it
-//! runs before somebody fills it again.
+//! ingredients, which is one chest more than the pole can light *on the
+//! intermediate's side*), so the choice is forced rather than picked -- and
+//! the consequence is stated plainly: **the inserters green science eats
+//! arrive in a chest, hand-crafted by a bot, exactly as red's copper plates
+//! do.** A green cell automates the belts and the packs; it does not automate
+//! the inserters. That is a first green cell, not a green factory, and
+//! [`CELL_CHARGE_TICKS`] is how long it runs before somebody fills it again.
+//!
+//! **Do not read that as "this cell cannot reach a three-ingredient item".**
+//! The bound is on the *intermediate* machine and not on the cell, and the two
+//! sides are not symmetric: the product machine has a second powered mouth the
+//! layout does not use, at north-frame `(-2, 3)`, drawing from free ground at
+//! `(-3, 3)` that the existing lane already services. So a product with three
+//! ingredients -- one made by the intermediate, two arriving in chests --
+//! costs no second pole, where a third *feed* chest does.
+//! `tests::the_pole_lights_a_third_product_mouth_but_no_third_feed_row` pins
+//! both halves at all four facings, because the difference has already been
+//! misread once: an `inserter`-producing cell composed onto this one was
+//! proposed as a way to "avoid the pole geometry entirely", and it does not --
+//! it moves the third ingredient from the intermediate to the product, which
+//! is the half that has room.
+//!
+//! What such a composition would *not* buy is worth writing down beside it.
+//! An inserter cell's own three inputs are hand-filled chests, so it converts
+//! "fill one chest with twelve inserters" into "fill three chests" and adds a
+//! machine, three chests and four inserters of build cost. **Chest-fed cells
+//! compose into more hand-fill points, never fewer.** Autonomy comes from
+//! attaching an input to something that renews -- a drill on ore, a furnace --
+//! which is `crate::method::produce`'s shape, not from stacking another
+//! charged cell behind this one.
 //!
 //! # What this claims, and what it deliberately does not
 //!
@@ -116,6 +139,13 @@ pub const INSERTER: &str = "inserter";
 ///
 /// What it forecloses is named in the module doc: an `inserter` machine, which
 /// takes three ingredients, is not an intermediate this cell can build.
+///
+/// **This is a bound on the feed side alone.** The product machine's west face
+/// has a second mouth inside the same pole's area, at `(-2, 3)`, which the
+/// layout leaves empty -- so the same pole that refuses a third feed chest
+/// would light a second *supply* chest. Both facts are checked together in
+/// `tests::the_pole_lights_a_third_product_mouth_but_no_third_feed_row`, so a
+/// change to [`POLE_OFFSET`] cannot quietly make either of them wrong.
 pub const MAX_FEED: usize = 2;
 
 /// What the cell's inputs sit in.
@@ -2440,6 +2470,64 @@ mod tests {
                     s.pole_would_supply(POLE, &pole.position, &area),
                     "the cell's own pole does not reach its {:?} at {facing:?}",
                     part.role
+                );
+            }
+        }
+    }
+
+    /// The other half of the claim above: what the cell's own pole does
+    /// **not** reach, and the one spare mouth it does.
+    ///
+    /// [`MAX_FEED`] is two because the pole cannot light a third feed row, and
+    /// until now that was a comment rather than a check -- so a change to
+    /// [`POLE_OFFSET`] could have made it wrong in either direction with
+    /// nothing failing. Both directions are pinned here, at all four facings:
+    ///
+    /// * the intermediate machine's third west tile, `y = -1`, is **dark**.
+    ///   A third feed chest costs a second pole, which is what forecloses an
+    ///   `inserter` intermediate;
+    /// * the product machine's west tile at `y = 3` is **lit**, and the chest
+    ///   tile west of it at `x = -3` is empty ground the existing lane at
+    ///   `x = -4` already services.
+    ///
+    /// **The asymmetry is the point.** A third ingredient on the *product*
+    /// machine costs nothing; a third on the *intermediate* costs a pole. A
+    /// reader who takes the module doc's "one chest more than one small pole
+    /// can light" as a fact about cells in general concludes that a cell for a
+    /// three-ingredient item is out of reach, and that is only true of the
+    /// intermediate half.
+    #[test]
+    fn the_pole_lights_a_third_product_mouth_but_no_third_feed_row() {
+        let s = bare(&[BotId(1)]);
+        let origin = Position::new(10.5, 10.5);
+        for facing in Direction::orthogonal() {
+            let parts = layout(&origin, facing, true, MAX_FEED).unwrap();
+            let pole = parts.iter().find(|p| p.role == Role::Pole).unwrap();
+            let at = |offset: (f64, f64)| -> Position {
+                origin.add(&Position::new(offset.0, offset.1).turn(facing).unwrap())
+            };
+            let lit = |offset: (f64, f64)| -> bool {
+                let area = s
+                    .collision_area_facing(INSERTER, &at(offset), Direction::West)
+                    .unwrap();
+                s.pole_would_supply(POLE, &pole.position, &area)
+            };
+            assert!(
+                !lit((-2., -1.)),
+                "a third feed inserter would stand unpowered at {facing:?} -- this is why \
+                 MAX_FEED is two"
+            );
+            assert!(
+                lit((-2., 3.)),
+                "the product machine's second supply mouth is lit at {facing:?}"
+            );
+            // And the ground it would draw from is free, at every facing: no
+            // part of the cell stands on the chest tile or on the mouth.
+            for offset in [(-2., 3.), (-3., 3.)] {
+                let tile = at(offset);
+                assert!(
+                    parts.iter().all(|part| part.position != tile),
+                    "{offset:?} is occupied at {facing:?}"
                 );
             }
         }

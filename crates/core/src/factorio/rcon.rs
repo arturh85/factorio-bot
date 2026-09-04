@@ -2580,10 +2580,15 @@ impl FactorioRcon {
     ///
     /// # The deadline this is subject to
     ///
-    /// `ACTION_RESULT_DEADLINE` is 360 wall-clock seconds. Research is the one
-    /// action kind whose real duration is set by the factory rather than by the
-    /// bot -- lab count, science supply, speed modules -- so it is also the one
-    /// most able to outlast that deadline honestly. A research that does so is
+    /// The wait is sized from `expected_ticks`, the plan's own duration for the
+    /// research, by [`FactorioRcon::sized_deadline`]; it used to be the flat
+    /// `ACTION_RESULT_DEADLINE` of 360 wall-clock seconds, and
+    /// run-1788559688-08406 declared `research logistic-science-pack` -- 75
+    /// units of 5 s in one lab, 375 s -- lost while the lab was still working,
+    /// which the supervisor then replanned around. Research is the one action
+    /// kind whose real duration is set by the factory rather than by the bot
+    /// -- lab count, science supply, speed modules -- so it is also the one
+    /// most able to outlast any deadline honestly. A research that does so is
     /// reported [`Dispatch::NoVerdict`], which is the correct claim (the game
     /// took the command and we stopped listening) but is not the same as a
     /// failure.
@@ -2591,6 +2596,7 @@ impl FactorioRcon {
         &self,
         world: &Arc<FactorioWorld>,
         technology_name: &str,
+        expected_ticks: u32,
     ) -> Result<ActionTicks, ActionFailure> {
         let mut next_action_id = world.as_ref().next_action_id.lock().await;
         let action_id: ActionId = *next_action_id;
@@ -2616,8 +2622,13 @@ impl FactorioRcon {
                 ActionTicks::at(dispatched),
             ));
         }
-        self.sleep_for_action_result(world, action_id, dispatched)
-            .await
+        self.sleep_for_action_result_until(
+            world,
+            action_id,
+            dispatched,
+            Self::sized_deadline(expected_ticks),
+        )
+        .await
     }
 
     /// Cheats in an Item in given quantity to given player
@@ -2866,10 +2877,20 @@ impl FactorioRcon {
     /// craft keeps the deadline every other action has. Wall clock, not ticks:
     /// the wait is measured with `Instant`.
     fn craft_deadline(energy: f64, count: u32) -> Duration {
-        let expected = Duration::from_secs_f64((energy.max(0.0) * f64::from(count) * 3.0) + 60.0);
-        expected.max(ACTION_RESULT_DEADLINE)
+        let ticks = (energy.max(0.0) * f64::from(count) * 60.0).round();
+        Self::sized_deadline(ticks.min(f64::from(u32::MAX)) as u32)
     }
 
+    /// How long to wait for the verdict of an action whose nominal duration
+    /// the plan already knows: three times that duration on the wall clock,
+    /// plus a minute, never less than [`ACTION_RESULT_DEADLINE`]. The factor
+    /// covers a lab short of packs or a game running below 1x; the floor keeps
+    /// a short action's deadline the one every other action has. One rule for
+    /// crafts and research, so the next long action kind is a one-line change.
+    fn sized_deadline(expected_ticks: u32) -> Duration {
+        let expected = Duration::from_secs_f64(f64::from(expected_ticks) / 60.0 * 3.0 + 60.0);
+        expected.max(ACTION_RESULT_DEADLINE)
+    }
     /// [`FactorioRcon::sleep_for_action_result`] with the deadline named, so a
     /// test can reach the timeout branch without waiting six minutes for it.
     /// Nothing else about the two differs.
@@ -8236,6 +8257,14 @@ mod craft_deadline_tests {
             "packs alone take 375 s: {d:?}"
         );
         assert_eq!(d, Duration::from_secs_f64(5.0 * 75.0 * 3.0 + 60.0));
+    }
+
+    /// The research that was declared lost: 75 units of 5 s = 22,500 ticks.
+    #[test]
+    fn a_long_research_gets_a_deadline_sized_from_the_plan() {
+        let d = FactorioRcon::sized_deadline(22_500);
+        assert!(d > Duration::from_secs(375), "one lab needs 375 s: {d:?}");
+        assert_eq!(FactorioRcon::sized_deadline(0), ACTION_RESULT_DEADLINE);
     }
 
     /// A short craft keeps the deadline every other action has.

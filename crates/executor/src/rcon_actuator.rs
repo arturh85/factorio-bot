@@ -568,9 +568,13 @@ impl Actuator for RconActuator {
     /// success was reported the instant the research was *requested* and every
     /// step that depended on the technology ran against a belief nothing
     /// established. See [`FactorioRcon::research_timed`].
-    async fn research(&self, tech: &str) -> Result<ActionTicks, ActuatorFailure> {
+    async fn research(
+        &self,
+        tech: &str,
+        expected_ticks: u32,
+    ) -> Result<ActionTicks, ActuatorFailure> {
         self.rcon
-            .research_timed(&self.world, tech)
+            .research_timed(&self.world, tech, expected_ticks)
             .await
             .map_err(classify)
     }

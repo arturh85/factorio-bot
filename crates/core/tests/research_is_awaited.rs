@@ -162,7 +162,7 @@ async fn research_reports_success_only_when_the_game_finishes_it() {
 
     let waiting = {
         let (rcon, world) = (rcon.clone(), world.clone());
-        tokio::spawn(async move { rcon.research_timed(&world, "automation").await })
+        tokio::spawn(async move { rcon.research_timed(&world, "automation", 0).await })
     };
 
     tokio::time::sleep(SETTLE).await;
@@ -222,7 +222,7 @@ async fn a_completion_for_another_action_does_not_release_this_one() {
 
     let waiting = {
         let (rcon, world) = (rcon.clone(), world.clone());
-        tokio::spawn(async move { rcon.research_timed(&world, "automation").await })
+        tokio::spawn(async move { rcon.research_timed(&world, "automation", 0).await })
     };
     tokio::time::sleep(SETTLE).await;
 
@@ -260,7 +260,7 @@ async fn a_refused_research_fails_at_once_rather_than_waiting() {
 
     let failure = tokio::time::timeout(
         Duration::from_secs(5),
-        rcon.research_timed(&world, "nonsuch"),
+        rcon.research_timed(&world, "nonsuch", 0),
     )
     .await
     .expect("a refusal must not be waited out")

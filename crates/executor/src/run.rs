@@ -669,7 +669,7 @@ async fn run_action(
     // settled action can never be listed as still awaiting its reply.
     let dispatched = {
         let _awaiting_reply = WaitGuard::enter(log, WaitKey::Action(action), bot, WaitKind::Reply);
-        perform(act, bot, &a.kind).await
+        perform(act, bot, &a.kind, a.duration).await
     };
     match dispatched {
         Ok(ticks) => {
@@ -1219,6 +1219,7 @@ async fn perform<A: Actuator + ?Sized>(
     act: &A,
     bot: BotId,
     kind: &ActionKind,
+    expected_ticks: u32,
 ) -> Result<ActionTicks, ActuatorFailure> {
     match kind {
         ActionKind::Mine { pos, item, count } => {
@@ -1257,7 +1258,7 @@ async fn perform<A: Actuator + ?Sized>(
             act.remove(bot, entity, pos.clone(), *slot, item.as_str(), *count)
                 .await
         }
-        ActionKind::Research { tech } => act.research(tech).await,
+        ActionKind::Research { tech } => act.research(tech, expected_ticks).await,
         ActionKind::SetRecipe {
             pos,
             entity,
@@ -1309,7 +1310,7 @@ mod tests {
             async fn place(&self, bot: BotId, item: &str, at: Position, direction: u8) -> Result<ActionTicks, ActuatorFailure>;
             async fn insert(&self, bot: BotId, entity: &str, at: Position, slot: InventorySlot, item: &str, count: u32) -> Result<ActionTicks, ActuatorFailure>;
             async fn remove(&self, bot: BotId, entity: &str, at: Position, slot: InventorySlot, item: &str, count: u32) -> Result<ActionTicks, ActuatorFailure>;
-            async fn research(&self, tech: &str) -> Result<ActionTicks, ActuatorFailure>;
+            async fn research(&self, tech: &str, expected_ticks: u32) -> Result<ActionTicks, ActuatorFailure>;
             async fn set_recipe(&self, bot: BotId, entity: &str, at: Position, recipe: &str) -> Result<ActionTicks, ActuatorFailure>;
         }
     }
@@ -1874,7 +1875,7 @@ mod tests {
             Ok(self.ticks_now())
         }
 
-        async fn research(&self, tech: &str) -> Result<ActionTicks, ActuatorFailure> {
+        async fn research(&self, tech: &str, _: u32) -> Result<ActionTicks, ActuatorFailure> {
             self.record(Dispatch::ResearchStart(tech.to_string()));
             Self::delay(self.script.research_delay_ms).await;
             self.record(Dispatch::ResearchEnd(tech.to_string()));
@@ -2465,7 +2466,7 @@ mod tests {
             item: "iron-ore".into(),
             count: 4,
         };
-        perform(&act, BotId(0), &kind).await.unwrap();
+        perform(&act, BotId(0), &kind, 0).await.unwrap();
     }
 
     /// The dispatch arm's whole contract: the machine's **name**, its
@@ -2497,7 +2498,7 @@ mod tests {
             entity: "assembling-machine-1".into(),
             recipe: "automation-science-pack".into(),
         };
-        perform(&act, BotId(0), &kind).await.unwrap();
+        perform(&act, BotId(0), &kind, 0).await.unwrap();
     }
 
     // ------------------------------------------------------- cross-bot waits

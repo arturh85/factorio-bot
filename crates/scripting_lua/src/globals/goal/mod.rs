@@ -1165,7 +1165,7 @@ mod tests {
         ) -> Result<ActionTicks, ActuatorFailure> {
             self.act().await
         }
-        async fn research(&self, _tech: &str) -> Result<ActionTicks, ActuatorFailure> {
+        async fn research(&self, _tech: &str, _: u32) -> Result<ActionTicks, ActuatorFailure> {
             self.act().await
         }
         async fn set_recipe(
@@ -1830,7 +1830,7 @@ mod tests {
         ) -> Result<ActionTicks, ActuatorFailure> {
             self.note(bot)
         }
-        async fn research(&self, _tech: &str) -> Result<ActionTicks, ActuatorFailure> {
+        async fn research(&self, _tech: &str, _: u32) -> Result<ActionTicks, ActuatorFailure> {
             Ok(ActionTicks::UNKNOWN)
         }
         async fn set_recipe(

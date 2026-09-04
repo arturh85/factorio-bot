@@ -932,6 +932,7 @@ mod tests {
         async fn research(
             &self,
             _: &str,
+            _: u32,
         ) -> Result<crate::actuator::ActionTicks, crate::ActuatorFailure> {
             Ok(crate::actuator::ActionTicks::UNKNOWN)
         }

@@ -189,7 +189,15 @@ pub trait Actuator: Send + Sync {
         count: u32,
     ) -> Result<ActionTicks, ActuatorFailure>;
     /// Research is server-wide in Factorio: it takes no player id.
-    async fn research(&self, tech: &str) -> Result<ActionTicks, ActuatorFailure>;
+    /// `expected_ticks` is the plan's nominal duration for the research -- the
+    /// one action kind whose real length is set by the factory (lab count,
+    /// pack supply) rather than by a bot, and the one most able to outlast a
+    /// flat wall-clock deadline honestly. The actuator sizes its wait from it.
+    async fn research(
+        &self,
+        tech: &str,
+        expected_ticks: u32,
+    ) -> Result<ActionTicks, ActuatorFailure>;
 
     /// Put `recipe` on the crafting machine named `entity` at `at`.
     ///
@@ -491,7 +499,7 @@ mod tests {
             ) -> Result<ActionTicks, ActuatorFailure> {
                 unreachable!()
             }
-            async fn research(&self, _: &str) -> Result<ActionTicks, ActuatorFailure> {
+            async fn research(&self, _: &str, _: u32) -> Result<ActionTicks, ActuatorFailure> {
                 unreachable!()
             }
             async fn set_recipe(

@@ -877,6 +877,16 @@ fn smelt_steps(
     let runs_per_furnace = bank_runs(runs, k);
     let coal_per_furnace = bank_coal(recipe_run_ticks, &runs_per_furnace);
 
+    // Does this patch have cell sites nobody could ever claim? Asked once, of
+    // the state before the bank is sited, because the answer is a property of
+    // the patch rather than of a slot -- and because packing a patch is not
+    // free. While it is true the bank sites exactly where it always did; once
+    // it is false, every remaining site is one a `Producing` goal might need
+    // and the search below starts stepping around them.
+    let room_to_spare = anchor_ore
+        .as_deref()
+        .is_none_or(|_| crate::method::produce::cell_room_to_spare(&ctx.state, &anchor, item));
+
     // Sites for the furnaces adoption did not supply, chosen against a fork
     // that already carries the ones before them — the same construction
     // `produce::plan_cells` uses, and for the same reason: `free_area_near`
@@ -892,11 +902,29 @@ fn smelt_steps(
         let (pos, adopted) = match standing.get(index) {
             Some(pos) => (pos.clone(), true),
             None => {
-                let pos = free_area_near(&trial, &anchor, &furnace_entity).ok_or_else(|| {
-                    PlannerError::NoApplicableMethod {
+                // Two tiers, and the order is the whole point. The first is
+                // asked only on a patch that has run short (`room_to_spare`
+                // above) and looks for ground no cell could use; the second is
+                // the search that was always here, and it is what answers on
+                // every patch with room and whenever the first finds nothing.
+                // See `produce::is_cell_furnace_ground` for the measurement --
+                // a hand-smelt's furnace and a cell's furnace want the same
+                // ring of non-ore tiles at the patch edge, the smelt is
+                // expanded first, and what it builds is still standing on the
+                // next plan.
+                let clear = anchor_ore
+                    .as_deref()
+                    .filter(|_| !room_to_spare)
+                    .and_then(|ore| {
+                        free_area_near_where(&trial, &anchor, &furnace_entity, |candidate| {
+                            !crate::method::produce::is_cell_furnace_ground(&trial, ore, candidate)
+                        })
+                    });
+                let pos = clear
+                    .or_else(|| free_area_near(&trial, &anchor, &furnace_entity))
+                    .ok_or_else(|| PlannerError::NoApplicableMethod {
                         goal: goal.to_string(),
-                    }
-                })?;
+                    })?;
                 trial.create_entity(FactorioEntity {
                     name: furnace_entity.clone(),
                     entity_type: "furnace".into(),

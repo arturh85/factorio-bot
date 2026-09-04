@@ -285,6 +285,92 @@ fn furnace_site(drill: &Position, facing: Direction) -> Option<Position> {
     Some(drill.add(&Position::new(FURNACE_OFFSET.0, FURNACE_OFFSET.1).turn(facing)?))
 }
 
+/// Would a stone furnace standing at `site` take ground a stage-1 `ore` cell
+/// needs?
+///
+/// # Why a hand-smelt has to ask
+///
+/// A cell is a drill standing **on** the ore with its furnace two tiles ahead
+/// standing **off** it, so the only ground a cell's furnace can occupy is the
+/// ring of non-ore tiles immediately outside the patch — the same ring
+/// [`crate::method::util::free_area_near`] settles on when a hand-smelt sites
+/// its furnace from `nearest_resource_tile`. The two want the identical tiles,
+/// and the smelt gets there first: it is expanded inline, the cell arrives as a
+/// subgoal, and the furnace it built is still standing on the next plan.
+///
+/// Measured on `workspace/runs/run-1788497495-79997`'s world: the iron patch
+/// packs 15 cells clean, 7 with the run's 44 standing furnaces, and 7 again
+/// after a single further plan's 13 hand-smelt furnaces are sited on the clean
+/// world. Roughly **0.6 cell sites per hand-smelt furnace**, and the run halted
+/// on `NoRoomForCell` after six epochs of it with zero drills ever placed.
+///
+/// Asked of the *state as it stands*, which is what makes it cheap and honest:
+/// a site is refused only when a cell really does fit there **now**, so ground
+/// no cell could use is never withheld and a patch with no cell sites left
+/// withholds nothing at all.
+pub fn is_cell_furnace_ground(state: &PlanState, ore: &str, site: &Position) -> bool {
+    Direction::orthogonal().into_iter().any(|facing| {
+        // Invert `furnace_site`: the drill this site would be the furnace of.
+        let Some(offset) = Position::new(FURNACE_OFFSET.0, FURNACE_OFFSET.1).turn(facing) else {
+            return false;
+        };
+        let drill = site.add(&Position::new(-offset.x(), -offset.y()));
+        fit(state, &drill, facing, ore).is_some()
+    })
+}
+
+/// Cell sites a hand-smelt has to leave a patch.
+///
+/// **Not [`MAX_CELLS`].** That is a bound on *work* — "an order of magnitude
+/// past anything the ladder has ever consumed", by its own docstring — and
+/// reserving that many would withhold ground on patches in no danger whatever;
+/// on this map the copper patch packs 12 to 16, so a reserve of `MAX_CELLS`
+/// fires on `researched:automation` and moves red.
+///
+/// This is the other number: the most cells anything on the ladder has
+/// actually asked one patch for. `producing:logistic-science-pack:6` sites
+/// **four** iron cells and two copper ones, in every one of the six epochs of
+/// `workspace/runs/run-1788497495-79997`. Six is that with margin, and it sits
+/// under the nine `researched:automation` leaves standing at its tightest —
+/// measured, not assumed — so red is untouched.
+///
+/// What it buys, paving that run's own map one furnace at a time from where
+/// its last bot stood: the iron patch's cell count decays
+/// `15, 11, 10, 8, 6, 4, 3, 2, 1` over sixty furnaces without the reserve, and
+/// `15, 11, 10, 8, 6, 5, 5, 5, 5` with it. A **floor of five**, against the
+/// four iron cells green asks for — and against the zero the live run reached.
+const CELL_SITES_RESERVED: u32 = 6;
+
+/// Can the patch near `from` still site [`CELL_SITES_RESERVED`] cells for
+/// `item`?
+///
+/// While it can, a hand-smelt standing its furnace on a cell site costs the
+/// planner nothing and sites exactly where it always did. Once it cannot,
+/// every remaining site is one a `Producing` goal is likely to need, and
+/// [`is_cell_furnace_ground`] starts withholding them.
+///
+/// Packed on a fork, so this counts sites that can **co-exist** rather than
+/// sites that each fit on their own — two cells a tile apart do not both fit,
+/// and counting them separately would report room that is not there. It stops
+/// at the reserve because the only question is which side of it the patch is
+/// on, never how far past.
+pub fn cell_room_to_spare(state: &PlanState, from: &Position, item: &str) -> bool {
+    let Some(spec) = cell_spec(state, item) else {
+        // Nothing a cell can make, so nothing a cell can be crowded out of.
+        return true;
+    };
+    let mut trial = state.fork();
+    for _ in 0..CELL_SITES_RESERVED {
+        let Ok(cell) = plan_cell(&trial, from, &spec) else {
+            return false;
+        };
+        for entity in parts(&trial, &cell) {
+            trial.create_entity(entity);
+        }
+    }
+    true
+}
+
 /// The drill and the furnace `cell` is made of, in build order.
 ///
 /// The drill first, so a furnace can never be standing where the drill has to

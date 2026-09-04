@@ -14,57 +14,83 @@
 -- RUNG 2 -- `producing("automation-science-pack", 6)`. The cell: an iron-plate
 -- chest, an inserter, an assembling machine set to `iron-gear-wheel`, an
 -- inserter, an assembling machine set to `automation-science-pack`, an
--- inserter and a copper-plate chest, with one small pole in the gap between
--- the two machines reaching all five electric parts. Six a minute is one
--- machine's output: 5 s of recipe divided by an assembling-machine-1's 0.5
--- crafting speed is 10 s a pack.
+-- inserter and a copper-plate chest, and -- since the output path landed -- an
+-- inserter taking finished packs out of the pack machine into a chest of their
+-- own, with one small pole in the gap between the two machines reaching all
+-- six electric parts. Six a minute is one machine's output: 5 s of recipe
+-- divided by an assembling-machine-1's 0.5 crafting speed is 10 s a pack.
 --
--- Satisfying it means the cell STANDS -- eight buildings, two recipes, six
+-- Satisfying it means the cell STANDS -- ten buildings, two recipes, eight
 -- delivery links and enough uncommitted capacity on the network for all of it.
 -- Standing is not producing. `PlanState` reads no container contents and no
--- fuel level, so a cell whose chests are empty, whose boiler has run dry, or
--- whose output has backed up satisfies this rung exactly as a working one
--- does.
+-- fuel level, so a cell whose chests are empty or whose boiler has run dry
+-- satisfies this rung exactly as a working one does.
+--
+-- "Whose output has backed up" used to be on that list and is not any more.
+-- Before the output inserter existed the pack machine halted on `full_output`
+-- after FOUR crafts and stayed there -- 1,249 of 1,281 `full_output` samples
+-- on the reference run were this cell's two machines -- so the rate this rung
+-- names was one nothing had ever reached. `cells_standing` now requires a
+-- drain, which is structure and belongs here rather than in a witness that
+-- could not see it either.
 --
 -- RUNG 3 -- the witness, and the only line in this run that is evidence about
--- production. It **dispatches no actions at all**: it reads the fed machines'
--- output inventories, waits, reads them again, and asserts the count of
--- `automation-science-pack` rose. Because no bot acted in between, a pack that
--- appeared can only have been assembled there.
+-- production. It **dispatches no actions at all**: it reads the output chest,
+-- waits, reads it again, and asserts the count of `automation-science-pack`
+-- rose by at least `at_least` inside `within_ticks`. Because no bot acted in
+-- between, a pack that appeared can only have been assembled there.
 --
--- WHICH MACHINE THE WITNESS WATCHES, AND WHY THAT NEEDED NO NEW MACHINERY.
--- `supervisor.witness` takes `from`/`into` -- the two ends of ONE
--- machine-to-machine link -- and red science is a chain: chest, inserter, gear
--- machine, inserter, pack machine. `from = "inserter"` and
--- `into = "assembling-machine-1"` therefore watches BOTH machines, because an
--- inserter drops into each. That is not a fudge and it is not a generalisation
--- either: the terminal is chosen by the ITEM. The gear machine's output holds
--- gears, never packs, so it contributes zero to both readings and the delta is
--- the pack machine's alone. A chain whose terminal made the same item as an
--- earlier stage would need `from`/`into` to name positions rather than kinds;
--- this one does not, and inventing that without a chain to check it against
--- would be inventing it.
+-- WHAT IT WATCHES, AND WHY THAT MOVED. It used to watch the assembling
+-- machines' own output slots (`from = "inserter"`, `into =
+-- "assembling-machine-1"`, which catches both machines because an inserter
+-- drops into each, and the ITEM picks the terminal because the gear machine's
+-- output never holds packs). That reading is no longer the right one and would
+-- now fail on a HEALTHY cell: the output inserter drains the pack machine's
+-- output slot continuously, so it sits at zero -- measured on a bench cell at
+-- 94 packs made, output slot 0, status `working`.
 --
--- HOW LONG THE WITNESS WAITS. The planner's own arithmetic for this cell
+-- So the witness watches the OUTPUT CHEST instead: `from = "inserter"`,
+-- `into = "iron-chest"`. `supervisor.fed_machines` keeps the selector honest
+-- without naming a tile -- the cell's feed and supply chests are filled BY
+-- HAND and no inserter drops into either, so the output chest is the only
+-- `iron-chest` in the sweep that anything drops into. The mod reports a
+-- container's contents as `output_inventory` (`get_output_inventory()` in
+-- `mods/BotBridge/types.lua`), which is what `supervisor.count_item` reads,
+-- so this needed no new machinery either.
+--
+-- AND IT IS NOW A RATE, WHICH IT COULD NOT PREVIOUSLY BE. `at_least = 1` was
+-- the strongest claim available while the terminal was a machine output slot:
+-- that slot holds three or four items and then the machine STOPS, so "the
+-- count rose" and "it is producing at 6/min" were indistinguishable, and six
+-- witnesses across six runs all fired inside the same 780 ticks -- before the
+-- jam. The chest accumulates monotonically, so `at_least` over `within_ticks`
+-- is a genuine floor on the rate, at no extra cost and with no new API.
+--
+-- WHY FIVE, AND WHY 5400 TICKS. Five is one more than the four crafts an
+-- undrained machine manages before it halts, so this is specifically a claim
+-- the defective cell could not satisfy however long it waited. The planner's
+-- own arithmetic for this cell
 -- (`crates/planner/src/method/assemble.rs`) is
 --
 --     gear machine: smelting_ticks(iron-gear-wheel, AM1)         =  60 ticks
 --     pack machine: smelting_ticks(automation-science-pack, AM1) = 600 ticks
 --
 -- Those are the two stages of one pipeline, so the FIRST pack is 660 ticks
--- away plus three inserter swings -- the fill, not the period -- and every pack
--- after it is 600, because the pack machine is the bottleneck. 3600 is about
--- five times that fill, the same margin stage 1 chose and for the same reason:
--- the two numbers above are a MODEL, read off prototypes, and the whole point
--- of witnessing a cell is that the model can be optimistic.
+-- away plus a few inserter swings -- the fill, not the period -- and every
+-- pack after it is 600, because the pack machine is the bottleneck. Five packs
+-- is therefore about 3,060 ticks nominal, and 5,400 leaves ~76 % margin for
+-- the same reason the old 3600 left five times the fill: the two numbers above
+-- are a MODEL, read off prototypes, and the whole point of witnessing a cell
+-- is that the model can be optimistic. Five packs is also well inside the one
+-- charge the cell is built with (`CELL_CHARGE_TICKS` is sized for fifteen).
 --
--- The cost is asymmetric on purpose. `at_least = 1` with a 3600-tick window
--- means a working cell stops the wait at about 700 ticks (twelve seconds),
--- while only a dead one pays the whole minute.
+-- The cost is asymmetric on purpose. A working cell stops the wait as soon as
+-- the fifth pack lands, about 51 seconds; only a dead or jammed one pays the
+-- whole 90.
 --
 -- `near`/`radius` are how the cell is found at all: the planner chose its site
--- and this script never learns it, so the witness sweeps for assembling
--- machines that an inserter's own reported `drop_position` lands in.
+-- and this script never learns it, so the witness sweeps for chests that an
+-- inserter's own reported `drop_position` lands in.
 --
 -- WHAT THIS RUN CANNOT TELL US, said here rather than discovered later. The
 -- chests are charged BY HAND, with two and a half minutes' worth of
@@ -182,7 +208,11 @@ print("recording run " .. run_id)
 -- since 2026-09-02, so a plant a previous milestone built is readable rather
 -- than invisible. Before that whitelist widened, this ladder would have built
 -- a second power plant on rung 2 and said nothing about it.
-local WITNESS_WITHIN_TICKS = 3600
+local WITNESS_WITHIN_TICKS = 5400
+-- One more than the four crafts a machine with no output path manages before
+-- it halts on `full_output`. See RUNG 3 above: this is the number that makes
+-- the witness a rate claim rather than an existence claim.
+local WITNESS_AT_LEAST = 5
 
 local goals = {
     goal.researched("automation"),
@@ -190,10 +220,10 @@ local goals = {
     supervisor.witness {
         item = "automation-science-pack",
         from = "inserter",
-        into = "assembling-machine-1",
+        into = "iron-chest",
         near = { x = 0, y = 0 },
         radius = 300,
-        at_least = 1,
+        at_least = WITNESS_AT_LEAST,
         within_ticks = WITNESS_WITHIN_TICKS,
     },
 }
@@ -203,7 +233,7 @@ local goals = {
 local names = {
     "automation researched, which needs a lab and therefore a power plant",
     "a red-science cell producing 6/min, on the plant's own network",
-    "witness: packs appear in the assembler while every bot stands still",
+    "witness: 5 packs reach the output chest in 90 s with every bot idle",
 }
 
 local sup = supervisor.new(supervisor.list(goals),

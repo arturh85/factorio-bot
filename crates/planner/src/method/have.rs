@@ -2820,6 +2820,20 @@ impl Method for Chop {
                     count: *count,
                 });
             }
+            // Stand *beside* the thing, never on it. `pos` is the entity's
+            // own centre, which is inside its own collision box, and a walk
+            // with `min_radius: 0.0` asks the game for a disc centred there:
+            // the pathfinder's last waypoint then lands inside the box and
+            // `judge_path` refuses the walk before dispatch -- "the walk to
+            // [-7, 16.375] would end at [-6.5, 15.5], inside a collision box
+            // spanning [-8, 15.48] to [-6, 17.38]", run-1788549906-13347,
+            // the first live run to chop a rock. A tree got away with it
+            // only because its box is 0.8 wide and the path ends next to it
+            // by accident. A `big-rock` is 2 by 1.9 and a `huge-rock` 3 by
+            // 2.2, and every batch of that run lost bot 1 to the same
+            // refusal. Same inner radius `Place` uses, for the same reason;
+            // it is well inside the character's reach for every rock.
+            let stand_off = ctx.state.placement_clearance(&entity).unwrap_or(0.0);
             let action = Action {
                 id: ctx.ids.next(),
                 kind: ActionKind::Chop {
@@ -2832,7 +2846,7 @@ impl Method for Chop {
                     who: Actor::Role,
                     pos: position.clone(),
                     radius: reach,
-                    min_radius: 0.0,
+                    min_radius: stand_off,
                 }],
                 eff,
                 // Read against the *entity's* prototype, not the item's:
@@ -11137,6 +11151,65 @@ mod tests {
         );
     }
 
+    /// A rock is stood beside, never on.
+    ///
+    /// `run-1788549906-13347`, the first live run to chop a rock: every batch
+    /// lost bot 1 to "the walk to [-7, 16.375] would end at [-6.5, 15.5],
+    /// inside a collision box spanning [-8, 15.48] to [-6, 17.38]" -- the
+    /// rock's own box, because the walk carried `min_radius: 0.0` and so
+    /// aimed at the rock's centre. The inner radius is the same clearance a
+    /// `Place` uses: half the entity's collision diagonal plus half the
+    /// character's, at which the two boxes can at most touch at a corner. And
+    /// it must leave an annulus: a clearance at or beyond the reach describes
+    /// nowhere and the executor refuses it deliberately.
+    #[test]
+    fn a_chop_stands_beside_the_rock_not_on_it() {
+        let bots = [BotId(1)];
+        let state = wooded_state(&bots, &[Position::new(5., 5.)]);
+        let steps = expand_with(
+            &registry_for(&bots),
+            &Goal::Have {
+                item: "stone".into(),
+                count: 4,
+                whose: Holder::Share(BotId(1)),
+            },
+            &state,
+        );
+        let chop = steps
+            .iter()
+            .find_map(|step| match step {
+                Step::Act(a) if matches!(a.kind, ActionKind::Chop { .. }) => Some(a),
+                _ => None,
+            })
+            .expect("four stone chops a rock");
+        let (pos, min_radius, radius) = chop.required_position().expect("a chop stands somewhere");
+        let expected = state
+            .placement_clearance("rock-huge")
+            .expect("the fixture carries the rock's prototype");
+        assert_eq!(
+            min_radius, expected,
+            "the inner radius is the placement clearance"
+        );
+        let half_diag = {
+            let b = &state
+                .base()
+                .entity_prototypes
+                .get("rock-huge")
+                .unwrap()
+                .collision_box;
+            (b.width() / 2.).hypot(b.height() / 2.)
+        };
+        assert!(
+            min_radius > half_diag,
+            "standing at {min_radius} from {pos} is inside the rock's own \
+             half-diagonal {half_diag}"
+        );
+        assert!(
+            min_radius < radius,
+            "the annulus ({min_radius}, {radius}] must be somewhere at all"
+        );
+    }
+
     /// The other side of the same comparison: a goal too small to pay for a
     /// whole rock still comes off the patch.
     ///
@@ -11874,11 +11947,17 @@ mod owned_gathering {
     /// the ground one unit at a time. Same direction as the paragraph above,
     /// and a sharper mechanism: not fewer buildings, but twenty times the
     /// yield per swing. See `Chop`'s own doc for the arithmetic.
+    ///
+    /// **38,606 -> 38,620 later the same day**, when a chop learned to stand
+    /// *beside* the rock rather than on it (`min_radius` = the rock's
+    /// placement clearance). The 14 ticks are the schedule's simulated
+    /// arrival point moving off the rock's centre and the next walk starting
+    /// from there; the old figure priced a stand-point the game refuses.
     #[test]
     fn the_single_bot_rung_one_plan_is_untouched() {
         let (_, net, plan) = rung_one_plan(&[BotId(1)]);
         assert_eq!(net.len(), 86, "one bot's rung-1 action count");
-        assert_eq!(plan.makespan, 38606, "one bot's rung-1 makespan");
+        assert_eq!(plan.makespan, 38620, "one bot's rung-1 makespan");
         assert!(
             net.actions().all(|a| net
                 .chain_of(a.id)

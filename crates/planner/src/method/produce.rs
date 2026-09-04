@@ -2205,6 +2205,12 @@ mod tests {
     /// that comes with it is what removes the other actions: the furnaces this
     /// plan crafts no longer need their stone dug for separately. See
     /// `have::Chop`.
+    ///
+    /// **5,773 -> 5,800 later the same day**, when a chop learned to stand
+    /// beside the rock rather than on it: the bot now walks to the rock's
+    /// placement clearance and starts its next walk from there. 27 ticks for
+    /// a stand-point the game will actually grant, against one it refused
+    /// before dispatch in every batch of the first live run to chop a rock.
     #[test]
     fn the_whole_of_stage_one_costs_this_much() {
         let bots = [BotId(1)];
@@ -2212,7 +2218,7 @@ mod tests {
         let net = plan(15).expect("the fixture can build a cell");
         assert_eq!(net.len(), 21, "actions in a one-cell plan");
         let sched = crate::schedule::schedule(&net, &s, &bots).expect("it schedules");
-        assert_eq!(sched.makespan, 5_773, "ticks for one bot to build one cell");
+        assert_eq!(sched.makespan, 5_800, "ticks for one bot to build one cell");
     }
 
     #[test]

@@ -162,6 +162,65 @@ Two structural facts explain why nothing fills the idle:
   variant (`Have`, `Researched`, `Produced`, `Producing`, `All`) is
   demand-driven.
 
+## The chain-owner error was a bystander (`374d7aa3`)
+
+Green science now plans as **research**: 313 actions, makespan **122,356
+(33:59)**, utilisation 21.7%. Red is byte-identical.
+
+### The error named the wrong thing
+
+`bot 1 owns chain ChainId(50) … but burner-mining-drill at [-44, -11] does not
+hold there` is `Condition::EntityAt` — **world state, satisfiable by any bot.**
+It failed for *every* bot. Bot 1 was named only because `schedule.rs` picks the
+cheapest rejected candidate and then **`schedule.rs:543` upgrades
+`PreconditionUnsatisfied` to `ChainOwnerInfeasible` whenever that candidate's
+chain has an owner.** The sizing-versus-binding invariant was intact and never
+violated.
+
+**So a plain world-state failure inside an owned chain always arrives dressed
+as an ownership problem.** Worth remembering the next time this variant appears
+— I took the framing at face value in the brief I wrote, and said "something
+sizes a bill against bot 1 and then requires an entity bot 1 does not hold".
+Nothing was mis-sized. The entity was required of everyone and existed for
+no one, because the action that creates it had been unlinked.
+
+### The real defect: a cycle broke the wrong edge
+
+`ActionNetwork::infer_edges` matches items **by name, ignoring counts**, so it
+linked `take 150 iron-plate from the cell → craft 1 burner-mining-drill`,
+closing the loop `place → fuel → take → craft → place`. One edge had to go, and
+the loop popped whichever it happened to be adding when `validate()` first
+failed — **a fact about iteration order, not about the plan.** The placement
+edge lost, so `fuel the drill` ended up with no predecessors and the scheduler
+stalled at 297 of 313 actions.
+
+The fix: **two passes over the same pair loop — world-scoped pairings first,
+then inventory-scoped.** A world-scoped edge (`EntityAt`, `Feeds`, `Researched`,
+`BufferHas`) states something only its producer can make true. An item edge is
+an over-approximation by construction, and the stock its consumer was sized
+against is still in the inventory the scheduler per-bot-checks. **So only an
+item edge can ever be what a cycle costs.** Nine lines of logic.
+
+**Why red never hit it:** `researched:automation` places its one drill from a
+bot's *starting inventory* — every bot begins with one — so there is no
+`craft drill` node and no loop. Green needs two more cells after bot 1's
+starting drill is spent, and chain 50 is owned by bot 1, so the spares bots 2-4
+still hold are out of reach.
+
+Red was verified the strong way rather than by the pin: a 290-line `--steps`
+listing captured before and after, diffed **empty**.
+
+### Corrections to my brief
+
+- **`PlaceDrill` was not the participant.** The cell here is built by the
+  `Goal::Have` one-off method that emits `take N <item> from the cell`, not by
+  `BuildCell`/`cell_steps`. Its cost model was not involved — **the defect is
+  ordering, not costing.**
+- **The `craft_ticks`/wood trap does not bear on this.** `no resource patch
+  found for 'wood'` appears identically on the *passing* `researched:automation`
+  run. Background noise on this map, not a signal — I flagged it as possibly
+  relevant and it was not.
+
 ## Green science: the cell now resolves, blocked by two further walls (`240d3efb`)
 
 **Red is byte-identical** — 205 actions, makespan 30,077, utilisation 38.8%.

@@ -11,6 +11,58 @@ four bots.
 
 ---
 
+## Rocks work live; the next failure is a furnace fuelled 8,000 ticks after it was fed (`330a9a39`)
+
+`run-1788552801-73005`, same savepoint, with both rock fixes and `--resume-force`
+(the mod digest changed). **All nine chops succeeded** — one tree, one big-rock,
+seven huge-rocks including every far one — and all six corrective walks landed
+within reach. First batch: 140 of 306 succeeded, 0 walks failed, **1 action
+failed**, and it is a different class:
+
+```
+take 5 copper-plate from the furnace        tried to remove 5 copper-plate but removed 3
+```
+
+The trace: bot 2 inserted 5 copper ore at tick 75,932 through the shared-ore
+path; bot 1's own fuel landed at 84,023 — after every rock it chopped for the
+coal — and the take fired 26 ticks after that. The furnace had made three
+plates on **residual fuel from the red prelude** and gone cold. And **the plan
+itself** had the take 40 ticks after the fuel and 6,800 after the insert,
+which no furnace can do: the taker's own fuel edge carried zero lag, on the
+assumption that it sits one action after the ore insert on one serial
+timeline. That held only while the ore was the taker's too.
+
+Fix: every fuel edge carries the smelting lag. The executor's rule is
+`max over preds (finish + lag)`, so this is exact whichever of ore and fuel
+lands last and cannot double-count. Four pins moved and say why; the four-bot
+fixture ceiling in `red_science.rs` went 2,310 → 2,950 (measured 2,682) because
+on that fixture the coal is mined *after* the ore, so the old 2,063 took plates
+from a furnace that had not started. **Scheduling the coal ahead of the ore
+would win most of that back** — a planning improvement, queued.
+
+| goal, baseline map | before | after |
+|---|---|---|
+| `researched:automation` | 136 / 28,918 | **unchanged** |
+| `producing:automation-science-pack:6` | 299 / 43,821 | 299 / 43,871 |
+| `producing:logistic-science-pack:6` | 443 / 216,172 | 443 / 216,322 |
+
+Not yet in a live binary: run 3 was left running on the previous build to see
+how far green gets with bot 1 no longer halted. **Residual fuel in a reused
+furnace is a second, unmodelled fact** — `refresh_buffers` reads contents the
+plan can draw on, not the fuel slot's state — and it is what let three plates
+exist at all.
+
+### What run 3 looks like mid-way, and why it is not a stall
+
+At tick 111,292 the heartbeat read 151 of 254 settled, nothing in flight, three
+bots waiting on bot 1's `take 12 iron-plate` and bot 1 waiting on a
+`lag_deadline` for `take 34 iron-plate` from the same furnace at `[-10, -15]`.
+The live game confirmed four idle characters. **That is a legitimate wait**: a
+34-plate smelt is 6,528 ticks of one furnace, and the plan queues every bot's
+ore insert behind the take that empties the slot. Eight furnaces stand on this
+map and the plan serialises the whole roster on one. That is the shape of
+green's idle problem now that the defects in front of it are gone.
+
 ## Reach is measured to the box, not the centre — the second rock defect (`76f3e153`)
 
 `run-1788551693-66583`, same savepoint as the run below, with `98ca85d8`

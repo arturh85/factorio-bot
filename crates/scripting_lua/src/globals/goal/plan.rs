@@ -1339,10 +1339,13 @@ mod tests {
         // One cell stands: the partial branch, and the one that must not read
         // as "done".
         let spec = cell_spec(&state, "iron-plate").expect("iron plate smelts from one ore");
+        // `want = 1`: this test asks where a cell stands, not how much ore
+        // it must sit on (`bdec88af` made siting yield-aware).
         let cell = plan_cell(
             &state,
             &factorio_bot_core::types::Position::new(0., 0.),
             &spec,
+            1,
         )
         .expect("the fixture has iron ore");
         for (name, position, facing) in [

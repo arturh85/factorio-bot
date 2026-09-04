@@ -582,6 +582,52 @@ more furnace ground, and an escape from the crowding that halted the first
 green run — `3ba0d441` reserves cell sites on a patch, but a bot that can reach
 a *second* patch does not need the reservation.
 
+## Recovery S1 shipped (`ba5211d3`) — and its own spec would have broken twice
+
+A run that does not finish its plan now asks `obs:recover()` before replanning,
+and takes **only tier 1**. Implemented as a **second transition** rather than a
+mutated one, for a reason the design missed.
+
+**Two defects in the design, each of which would have negated it:**
+
+1. **The design's snippet would have recorded nothing at all.** It mutates the
+   `ran` transition to `t.action = "planned"` and returns it, claiming drivers
+   record it as a plan. But the mutated table has **no `t.plan`**, so
+   `plan_created` never fires — and because the word changed, the `ran` branch
+   that writes `record.actions` / `walks` / `teleports` / `refusals` is skipped
+   too. **Both recordings lost.**
+2. **Rule 4 as literally spelled refuses the class it was written for.**
+   `obs.success <= self.chain_success` with `chain_success` starting at 0 means
+   a walk-only failure on the first run has `success == 0`, so `0 <= 0`
+   **refuses the first recovery — killing all 28 walk-only cases**, which are
+   49% of replans. The baseline must be `nil` until a recovery is accepted: the
+   rule is about a recovery that achieved nothing, not a first run that did.
+
+All four rules pinned by 15 tests driving the shipped file via `include_str!`.
+Walks are handed to a driver once per lineage, keyed
+`(bot, step_index, dispatched_tick)`, so a genuine re-walk is still offered
+while a survivor of the carried log is not.
+
+Also established **by reading rather than by running**: `obs.success` *is*
+cumulative (`build_observation` counts over `net.actions()` against the handed-in
+log, and tier 1 keeps succeeded actions in `net` for their lag edges). And
+**nothing copies `supervisor.lua`** — release extracts only when
+`workspace/scripts` is absent, debug creates it empty and never seeds it, so
+both copies needed updating.
+
+Red unmoved: a Lua file on a path `score-map` never loads.
+
+**S1's effect is hard to measure until S0** (`PlanCreated` has no `cause`, so a
+recovery and a first plan are indistinguishable). Two mitigations shipped: the
+drivers print `-- recovered: rescheduled N`, and **`recovery_limit = 0`
+restores pre-change behaviour byte for byte**, so an A/B on one seed is
+possible without S0.
+
+**Never executed live:** whether a tier-1 reschedule after a walk refusal
+actually reassigns the work. A chain owner may pin the same bot, in which case
+rule 4 fires on the first repeat and we are back to today's behaviour — safe,
+but worth nothing.
+
 ## ⚠ STAGE 2 HAS ARGUABLY NEVER PRODUCED AT A RATE
 
 Found while designing the capacity fix (`97922af5`), and it is the most

@@ -80,6 +80,38 @@ honestly, as before. Also fixed on the way: `scripting_lua`'s
 `plan_cell` call was one argument behind `bdec88af` and failed
 `--all-targets` clippy on master.
 
+## The scheduler learns to look one step ahead — automation planned at 7:17 (`51c7f695`)
+
+The greedy list scheduler's key was `(end, action, bot)`: whatever finishes
+soonest goes first. The trace on the four-bot fixture showed why the coal trip
+came last (every nearer place/mine *ends* sooner) and why the take then waited
+beside a furnace that had only just started. **My proposed fix — a static
+critical-path priority — made every real plan worse** (automation 28,023 →
+29,210): bot 1 walked to the coal patch three separate times, because a
+priority computed on the network alone cannot see where the bot stands.
+
+What landed instead: a **lookahead bound** — for a candidate on a bot, the
+worst of "its own end plus what follows it" and "the other ready work on this
+bot, reached by walking from it, plus that work's remaining path" — as the
+primary key, old tie-breaks preserved, integer ticks, deterministic.
+
+| goal | before | after |
+|---|---|---|
+| `researched:automation` | 136 / 28,023 | 136 / **26,212 (7:17)** |
+| `producing:automation-science-pack:6` | 300 / 46,089 | 300 / 44,641 |
+| `producing:logistic-science-pack:6` | 402 / 217,749 | 402 / 217,105 |
+| four-bot fixture | 2,682 | 2,543 |
+
+Utilisation on automation 29.3% → 32.0%; bot 1's idle 7,916 → 6,383. Two new
+pins fail under the old key (a far trip gating a lag goes before nearer work;
+co-located work is finished before walking away). Four method-layer pins moved
+down with it. **Correction:** the 2,063 the earlier note wanted back was never
+honest — it took plates from a furnace that had not started; the floor is bot
+work plus walking, and each bot now idles 22–29 ticks on that fixture.
+
+**Unmeasured live.** 7:17 planned against 8:17 measured on the previous
+planner; the next automation run says what the schedule is worth executed.
+
 ## The walled-in bot, root-caused: the stand-point is chosen blind, and the fill was too fine (`79f3f9d3`)
 
 Bot 1 walked to place `assembling-machine-1 [31.5, -4.5]` arriving from the

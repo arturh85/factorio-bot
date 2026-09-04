@@ -2315,6 +2315,98 @@ mod tests {
         }
     }
 
+    /// **The same cell, arriving from the world instead of from this plan.**
+    ///
+    /// Every other test here stands its cell with `PlanState::create_entity`
+    /// and `PlanState::set_recipe`, which write the overlay. A *replan* has no
+    /// overlay: `PlanState::from_world` starts empty and everything standing
+    /// comes back out of `FactorioWorld`'s entity graph. So the overlay tests
+    /// could all pass while the predicate was unsatisfiable against a real
+    /// world, and that is exactly what happened -- in `run-1788485718-45723`
+    /// four consecutive replans each built a whole new cell, every action
+    /// succeeded, and the goal was never met, because a recipe set over RCON
+    /// had no route into the entity graph and every stored machine read
+    /// `recipe: None`.
+    ///
+    /// This test is the seam: the cell is pushed into the base world through
+    /// `update_chunk_entities`, the same door the mod's entity events use.
+    #[test]
+    fn a_cell_the_world_reports_holds_as_well_as_one_this_plan_built() {
+        let bots = [BotId(1)];
+        let spec = spec();
+
+        // Lay the cell out exactly as the planner would, then take its parts.
+        let mut planned = powered(&bots);
+        let cell = stand_a_cell(&mut planned);
+        let mut standing: Vec<FactorioEntity> = cell
+            .parts
+            .iter()
+            .map(|part| entity_for(&planned, part))
+            .collect();
+        for (name, position) in [
+            (POLE, Position::new(10.5, 10.5)),
+            ("steam-engine", Position::new(12.5, 10.5)),
+            (BOILER, Position::new(12.5, 14.5)),
+        ] {
+            let world = world();
+            let entity_type = world
+                .entity_prototypes
+                .get(name)
+                .map(|p| p.entity_type.clone())
+                .unwrap_or_else(|| name.to_string());
+            standing.push(FactorioEntity {
+                name: name.into(),
+                entity_type,
+                bounding_box: planned
+                    .collision_area(name, &position)
+                    .expect("the fixture sizes everything it places"),
+                position,
+                ..Default::default()
+            });
+        }
+        // A bounding box, because `EntityGraph::add` drops anything with a
+        // zero-width one -- the overlay needs none and the graph does.
+        for entity in &mut standing {
+            if entity.bounding_box.width() == 0. {
+                if let Some(area) = planned.collision_area(&entity.name, &entity.position) {
+                    entity.bounding_box = area;
+                }
+            }
+        }
+
+        // A world that has never heard of this plan, told only what a game
+        // would have told it.
+        let observed = |with_recipes: bool| {
+            let world = world();
+            world
+                .update_chunk_entities(standing.clone())
+                .expect("a fixture world accepts a cell");
+            if with_recipes {
+                assert!(world.entity_graph.set_recipe(
+                    &cell.at(Role::Intermediate).unwrap().position,
+                    &spec.intermediate.recipe.name,
+                ));
+                assert!(
+                    world
+                        .entity_graph
+                        .set_recipe(&cell.at(Role::Product).unwrap().position, &spec.recipe.name)
+                );
+            }
+            PlanState::from_world(Arc::new(world), &bots)
+        };
+
+        assert!(
+            !holds_assembling(&observed(false), PACK, 6),
+            "machines with no recipe on them are the placed-but-dead cell, however \
+             complete the rest of it is -- this is the state every replan used to see"
+        );
+        assert!(
+            holds_assembling(&observed(true), PACK, 6),
+            "the cell stands, is powered, is fed, and the world knows what each \
+             machine is set to; a replan that rebuilt it would build a second factory"
+        );
+    }
+
     /// A cell that stands is not built twice.
     #[test]
     fn a_replan_against_a_standing_cell_builds_nothing() {

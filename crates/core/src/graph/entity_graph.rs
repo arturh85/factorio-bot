@@ -1695,6 +1695,44 @@ impl EntityGraph {
         self.entity_tree.read().get(id).cloned()
     }
 
+    /// Record that the crafting machine standing at `position` is now set to
+    /// `recipe`. Returns whether there was a machine there to record it on.
+    ///
+    /// **The one write-back this graph has, and it exists because the graph is
+    /// otherwise append-only.** Entities enter through [`Self::add`], which
+    /// refuses a tile something already stands on ("failed to add ... blocked
+    /// by"), and `FactorioWorld::on_some_entity_updated` is a no-op that the
+    /// mod raises only on rotation. So a recipe -- which is put on a machine
+    /// by an RCON call *after* it was built, never at build time -- had no
+    /// route into the world model at all.
+    ///
+    /// What that cost is the whole of `run-1788485718-45723`. The planner's
+    /// `Goal::Producing` predicate counts machines whose stored `recipe` is
+    /// the one the cell needs; every stored machine read `None`; so a cell
+    /// that stood, was powered, was fed and had produced four science packs
+    /// counted as zero cells, and four consecutive replans each built another
+    /// complete cell somewhere else before the supervisor gave up. Every
+    /// action in all four succeeded.
+    ///
+    /// In place through [`crate::aabb_quadtree::QuadTree::get_mut`] rather
+    /// than remove-and-reinsert, because reinserting mints a fresh [`ItemId`]
+    /// and `entity_nodes` maps the old one to this entity's graph node. A
+    /// recipe changes no footprint and draws no edge -- `connect` routes on
+    /// drop and pickup positions -- so nothing else in the graph has to move.
+    pub fn set_recipe(&self, position: &Position, recipe: &str) -> bool {
+        let Some(id) = self.entity_at(position) else {
+            return false;
+        };
+        let mut tree = self.entity_tree.write();
+        match tree.get_mut(id) {
+            Some(entity) => {
+                entity.recipe = Some(recipe.to_string());
+                true
+            }
+            None => false,
+        }
+    }
+
     /// [`node_at`] one offset step away along `direction`.
     ///
     /// `None` when the direction names no tile -- the Factorio 2.x
@@ -3718,5 +3756,90 @@ mod tests {
                 "the same graph wrote different bytes"
             );
         }
+    }
+
+    /// A machine standing here with a recipe on it.
+    fn assembler(at: &Position) -> FactorioEntity {
+        FactorioEntity {
+            name: "assembling-machine-1".into(),
+            entity_type: "assembling-machine".into(),
+            position: at.clone(),
+            bounding_box: add_to_rect(&Rect::from_wh(2.4, 2.4), at),
+            ..Default::default()
+        }
+    }
+
+    /// **The recipe an RCON call put on a machine has to reach the model, and
+    /// this is the only door it has.**
+    ///
+    /// A machine is built with no recipe and given one afterwards, so the
+    /// *created* event carries `recipe: None` and nothing later corrects it:
+    /// `add` refuses a tile that is already occupied, and
+    /// `on_some_entity_updated` is a no-op the mod raises only on rotation.
+    /// The planner's `Goal::Producing` counts machines by the recipe stored on
+    /// them, so before this every replan read zero cells however many stood --
+    /// see `set_recipe`'s own doc for the run that cost.
+    #[test]
+    fn a_recipe_set_on_a_standing_machine_is_readable_back() {
+        let at = Position::new(6.5, -35.5);
+        let graph = entity_graph_from(vec![assembler(&at)]).expect("adding must not fail");
+        assert_eq!(
+            graph
+                .find_entities_in_radius(at.clone(), 1., None, None)
+                .first()
+                .and_then(|e| e.recipe.clone()),
+            None,
+            "a machine is built empty; anything else here would be invented"
+        );
+
+        assert!(graph.set_recipe(&at, "automation-science-pack"));
+
+        assert_eq!(
+            graph
+                .find_entities_in_radius(at.clone(), 1., None, None)
+                .first()
+                .and_then(|e| e.recipe.clone()),
+            Some("automation-science-pack".to_string()),
+            "the reader the planner uses has to see it"
+        );
+        assert_eq!(
+            graph
+                .entity_at(&at)
+                .and_then(|id| graph.entity_by_id(id))
+                .and_then(|e| e.recipe),
+            Some("automation-science-pack".to_string()),
+            "and so does the by-tile reader `PlanState::entity_at` goes through"
+        );
+        assert_eq!(
+            graph
+                .find_entities_in_radius(at.clone(), 1., None, None)
+                .len(),
+            1,
+            "the machine was updated in place, not duplicated"
+        );
+    }
+
+    /// Setting a recipe on bare ground reports that it landed nowhere rather
+    /// than inventing a machine to hang it on.
+    #[test]
+    fn a_recipe_set_where_nothing_stands_is_refused() {
+        let graph = entity_graph_from(vec![]).expect("adding must not fail");
+        assert!(!graph.set_recipe(&Position::new(6.5, -35.5), "automation-science-pack"));
+    }
+
+    /// A second recipe replaces the first. A machine has exactly one.
+    #[test]
+    fn setting_a_second_recipe_replaces_the_first() {
+        let at = Position::new(6.5, -35.5);
+        let graph = entity_graph_from(vec![assembler(&at)]).expect("adding must not fail");
+        assert!(graph.set_recipe(&at, "iron-gear-wheel"));
+        assert!(graph.set_recipe(&at, "automation-science-pack"));
+        assert_eq!(
+            graph
+                .entity_at(&at)
+                .and_then(|id| graph.entity_by_id(id))
+                .and_then(|e| e.recipe),
+            Some("automation-science-pack".to_string())
+        );
     }
 }

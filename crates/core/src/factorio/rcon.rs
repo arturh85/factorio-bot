@@ -3378,7 +3378,37 @@ impl FactorioRcon {
                 ],
             )
             .await?;
-        judge_set_recipe_reply(lines, tick)
+        let verdict = judge_set_recipe_reply(lines, tick)?;
+        // The world model learns it here, and here is the only place it can.
+        //
+        // Nothing else ever tells it: the mod sends a machine's recipe on
+        // every `serialize_entity`, but the only entity events it raises are
+        // *created* (which fires at build time, before any recipe is on the
+        // machine), *deleted*, and *updated* -- which the mod raises solely
+        // from `on_player_rotated_entity` and `FactorioWorld` handles as a
+        // no-op. So the planner replanned against machines whose stored recipe
+        // was `None` for ever, and `Goal::Producing`, which counts machines by
+        // the recipe on them, could never hold against a cell that really
+        // stood. See `EntityGraph::set_recipe` for what that cost.
+        //
+        // This is a recorded fact and not an assumption: `rcon_set_recipe`
+        // reads `entity.get_recipe()` back and refuses in the reply body
+        // unless it names this recipe, and a refusal never reaches this line.
+        if !world.entity_graph.set_recipe(&entity_position, &recipe) {
+            // Not a failure of the action -- the game did it. It means this
+            // graph does not know the machine, which `add` reports on its own
+            // path; saying so here keeps the two halves of "did the model
+            // learn" from disagreeing silently.
+            warn!(
+                // `tracing`, not `paris` -- this file imports `tracing::warn`,
+                // so colour markup would print literally.
+                recipe = %recipe,
+                entity = %entity_name,
+                position = %entity_position,
+                "recipe was set in the game but no such entity stands there in the world model"
+            );
+        }
+        Ok(verdict)
     }
 
     pub async fn is_area_empty(&self, area_filter: &AreaFilter) -> Result<bool> {

@@ -206,6 +206,21 @@ impl<T, S, A: Array<Item = (ItemId, Rect<S>)>> QuadTree<T, S, A> {
         self.elements.get(&id).map(|(a, _)| a)
     }
 
+    /// Retrieves an element **for modification** by looking it up from the
+    /// ItemId.
+    ///
+    /// The bounding box is not reachable through this handle, and that is the
+    /// point: the tree's spatial index is keyed by the box it was inserted
+    /// with, so a caller that could change the box would silently leave the
+    /// index pointing at the old ground. Only fields that do not move the
+    /// element may be written through here -- `EntityGraph::set_recipe` is the
+    /// one caller, and a recipe has no extent. Anything that moves must go
+    /// through [`Self::remove`] and a fresh insert, which mints a new
+    /// [`ItemId`].
+    pub fn get_mut(&mut self, id: ItemId) -> Option<&mut T> {
+        self.elements.get_mut(&id).map(|(a, _)| a)
+    }
+
     /// Returns an iterator of (element, bounding-box, id)
     /// for each element whose bounding box intersects
     /// with `bounding_box`.

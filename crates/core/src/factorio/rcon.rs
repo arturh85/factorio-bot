@@ -1173,6 +1173,207 @@ fn within_resource_reach(player: &Position, target: &Position, reach: f64) -> bo
     calculate_distance(player, target) <= reach
 }
 
+/// The collision box of whatever stands *on* `target`, if anything does.
+///
+/// A tree or a rock the plan means to chop has one -- `blocked_tree` holds
+/// every entity a character cannot walk through. Ore has none: a resource
+/// does not collide with a character, so the tree never saw it, and `None`
+/// here means "the target is ground a character can stand on".
+fn blocking_box_at(world: &FactorioWorld, target: &Position) -> Option<Rect> {
+    let probe = Rect::new(
+        &Position::new(
+            target.x() - BLOCKER_PROBE_MARGIN,
+            target.y() - BLOCKER_PROBE_MARGIN,
+        ),
+        &Position::new(
+            target.x() + BLOCKER_PROBE_MARGIN,
+            target.y() + BLOCKER_PROBE_MARGIN,
+        ),
+    );
+    // The quad tree admits boxes that merely come close; the exact test is
+    // whether the target's own centre lies inside the box.
+    world
+        .entity_graph
+        .blocking_boxes_within(&probe)
+        .into_iter()
+        .find(|b| b.contains(target))
+}
+
+/// Distance from `from` to the nearest point of `rect`; zero inside it.
+fn distance_to_rect(from: &Position, rect: &Rect) -> f64 {
+    let dx = (rect.left_top.x() - from.x())
+        .max(from.x() - rect.right_bottom.x())
+        .max(0.0);
+    let dy = (rect.left_top.y() - from.y())
+        .max(from.y() - rect.right_bottom.y())
+        .max(0.0);
+    dx.hypot(dy)
+}
+
+/// How far `from` is from a mining target, **the way the game measures it**.
+///
+/// `LuaControl::can_reach_entity` measures to the entity's collision box, not
+/// its centre. For ore that is the same thing to within half a tile; for a
+/// `huge-rock` (3 by 2.2) it is the difference between "1.4 from the rock"
+/// and "2.9 from the rock", and the second number is what a centre rule
+/// refused in run-1788551693-66583 after the bot had walked exactly where
+/// the plan sent it. A boxless target falls back to the centre.
+fn mining_distance(world: &FactorioWorld, from: &Position, target: &Position) -> f64 {
+    match blocking_box_at(world, target) {
+        Some(rect) => distance_to_rect(from, &rect),
+        None => calculate_distance(from, target),
+    }
+}
+
+/// [`within_resource_reach`], measured by [`mining_distance`].
+fn within_mining_reach(
+    world: &FactorioWorld,
+    player: &Position,
+    target: &Position,
+    reach: f64,
+) -> bool {
+    match blocking_box_at(world, target) {
+        Some(rect) => distance_to_rect(player, &rect) <= reach,
+        None => within_resource_reach(player, target, reach),
+    }
+}
+
+/// Where a mine's corrective walk aims, as `(goal, radius)` for
+/// [`FactorioRcon::move_player_timed`].
+///
+/// On top of ore: the target itself at [`approach_radius`], as it always was.
+/// **Beside** anything with a collision box: the annulus `(clearance, R]`
+/// handed to [`approach_annulus`], where `clearance` is the sum of the box's
+/// and the character's half-diagonals -- the same inner bound a `Place` walk
+/// carries -- and `R` is the reach plus the box's shorter half-side, the
+/// largest centre distance from which every point of the box is provably
+/// within reach. A disc centred on a rock asks the pathfinder for a point
+/// inside the rock, and `judge_path` refuses it before dispatch; that refusal
+/// halted bot 1 in every batch of the first two live runs to chop one.
+fn mining_approach(
+    world: &FactorioWorld,
+    here: &Position,
+    target: &Position,
+    reach: f64,
+) -> (Position, f64) {
+    match blocking_box_at(world, target) {
+        Some(rect) => {
+            let half_w = rect.width() / 2.;
+            let half_h = rect.height() / 2.;
+            let character = character_footprint(world, target);
+            let clearance =
+                half_w.hypot(half_h) + (character.width() / 2.).hypot(character.height() / 2.);
+            approach_annulus(target, clearance, reach + half_w.min(half_h), Some(here))
+        }
+        None => (target.clone(), approach_radius(reach)),
+    }
+}
+
+#[cfg(test)]
+mod mining_reach_tests {
+    use super::*;
+    use crate::test_utils::fixture_entity_prototypes;
+    use crate::types::{EntityType, FactorioEntity, FactorioEntityPrototype};
+
+    /// A character's reach in 2.1.17, as the game reports it.
+    const REACH: f64 = 2.7;
+
+    /// A world holding one `huge-rock` at (10, 10) with its live collision
+    /// box, 3 by 2.2 -- the shape that refused run-1788551693-66583 -- and
+    /// the fixture prototypes, so the character has a footprint.
+    fn world_with_a_huge_rock() -> Arc<FactorioWorld> {
+        let world = FactorioWorld::new();
+        let prototypes: Vec<FactorioEntityPrototype> = fixture_entity_prototypes()
+            .iter()
+            .map(|v| v.clone())
+            .collect();
+        world.update_entity_prototypes(prototypes).unwrap();
+        let rock = FactorioEntity {
+            name: "huge-rock".into(),
+            entity_type: EntityType::SimpleEntity.to_string(),
+            position: Position::new(10., 10.),
+            bounding_box: Rect::new(&Position::new(8.5, 8.9), &Position::new(11.5, 11.1)),
+            ..Default::default()
+        };
+        world.update_chunk_entities(vec![rock]).unwrap();
+        Arc::new(world)
+    }
+
+    #[test]
+    fn reach_to_a_rock_is_measured_to_its_box_not_its_centre() {
+        let world = world_with_a_huge_rock();
+        let rock = Position::new(10., 10.);
+        // 3.0 from the centre, 1.5 from the box: the game lets this mine.
+        let beside = Position::new(13., 10.);
+        assert!(
+            !within_resource_reach(&beside, &rock, REACH),
+            "control: the centre rule refuses it"
+        );
+        assert!(within_mining_reach(&world, &beside, &rock, REACH));
+        assert_eq!(mining_distance(&world, &beside, &rock), 1.5);
+        // And a target with no box -- ore -- is still the centre rule.
+        let ore = Position::new(40.5, 40.5);
+        assert!(!within_mining_reach(
+            &world,
+            &Position::new(43.5, 40.5),
+            &ore,
+            REACH
+        ));
+        assert!(within_mining_reach(
+            &world,
+            &Position::new(42.5, 40.5),
+            &ore,
+            REACH
+        ));
+    }
+
+    #[test]
+    fn a_mines_corrective_walk_aims_beside_a_rock_and_on_top_of_ore() {
+        let world = world_with_a_huge_rock();
+        let rock = Position::new(10., 10.);
+        // The box as the graph hands it back -- edges snapped to the game's
+        // 1/256 grid, so 8.9 is 8.8984375 -- not the numbers typed above.
+        let rect = blocking_box_at(&world, &rock).expect("the rock has a box");
+        let (half_w, half_h) = (rect.width() / 2., rect.height() / 2.);
+        let clearance = half_w.hypot(half_h) + 0.19921875f64.hypot(0.19921875);
+        let outer = REACH + half_w.min(half_h);
+        for here in [
+            Position::new(20., 10.),
+            Position::new(10., -5.),
+            Position::new(0., 0.),
+        ] {
+            let (goal, slack) = mining_approach(&world, &here, &rock, REACH);
+            let d = calculate_distance(&goal, &rock);
+            // `1e-9` on both bounds: far below the game's 1/256 position
+            // quantum, far above f64 rounding of `d - slack` at this scale.
+            assert!(
+                d - slack + 1e-9 >= clearance,
+                "the request reaches inside the rock: {} < {clearance}",
+                d - slack
+            );
+            assert!(
+                d + slack <= outer + 1e-9,
+                "the request may end out of reach: {} > {outer}",
+                d + slack
+            );
+            // Every point of the request is within the game's reach of the box.
+            assert!(distance_to_rect(&goal, &rect) + slack <= REACH + 1e-9);
+        }
+        let ore = Position::new(40.5, 40.5);
+        let (goal, slack) = mining_approach(&world, &Position::new(50., 50.), &ore, REACH);
+        assert_eq!(goal, ore, "ore is stood on, as it always was");
+        assert_eq!(slack, approach_radius(REACH));
+    }
+
+    #[test]
+    fn distance_to_a_rect_is_zero_inside_and_euclidean_outside() {
+        let rect = Rect::new(&Position::new(0., 0.), &Position::new(2., 2.));
+        assert_eq!(distance_to_rect(&Position::new(1., 1.), &rect), 0.);
+        assert_eq!(distance_to_rect(&Position::new(5., 1.), &rect), 3.);
+        assert_eq!(distance_to_rect(&Position::new(5., 6.), &rect), 5.);
+    }
+}
+
 /// The path radius to request when a walk must end within `bound` of a goal.
 ///
 /// Asking for `bound` itself is what the 2026-08-30 run did, and it left the
@@ -3095,15 +3296,15 @@ impl FactorioRcon {
         let resource_reach_distance = player.resource_reach_distance;
         let here = player.position.clone();
         drop(player); // wow, without this factorio (?) freezes (!)
-        if !within_resource_reach(&here, position, resource_reach_distance) {
+        if !within_mining_reach(world, &here, position, resource_reach_distance) {
             warn!("too far away, moving first!");
-            self.move_player_timed(
-                world,
-                player_id,
-                position,
-                Some(approach_radius(resource_reach_distance)),
-            )
-            .await?;
+            // Beside a rock, on top of ore: see `mining_approach`. Aiming this
+            // walk at the target's own centre with a plain disc is what
+            // `judge_path` refused in every batch of run-1788551693-66583 --
+            // the centre of a huge-rock is inside the huge-rock.
+            let (goal, slack) = mining_approach(world, &here, position, resource_reach_distance);
+            self.move_player_timed(world, player_id, &goal, Some(slack))
+                .await?;
             // Where the walk *ended*, not where it was aimed. The two differ by
             // about a tile, and that difference is the whole of this fault.
             let landed = world
@@ -3113,12 +3314,12 @@ impl FactorioRcon {
                 .ok_or_else(|| {
                     ActionFailure::not_dispatched(RconPlayerNotFound { player_id }.into())
                 })?;
-            if !within_resource_reach(&landed, position, resource_reach_distance) {
+            if !within_mining_reach(world, &landed, position, resource_reach_distance) {
                 return Err(ActionFailure::not_dispatched(
                     RconOutOfResourceReach {
                         target_x: position.x(),
                         target_y: position.y(),
-                        distance: calculate_distance(&landed, position),
+                        distance: mining_distance(world, &landed, position),
                         reach: resource_reach_distance,
                     }
                     .into(),

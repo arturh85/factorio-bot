@@ -734,6 +734,12 @@ export type FailureKind =
     | 'partial_transfer'
     | 'rejected'
     | 'timeout'
+    /**
+     * The bot had no character to act with: dead and waiting to respawn, in
+     * a cutscene, or under another controller. `ActionFailure.detail` carries
+     * the mod's `<why>` clause, e.g. `dead, respawns in 587 ticks`.
+     */
+    | 'no_character'
     | 'other';
 
 /**
@@ -777,6 +783,8 @@ export type WalkFailureKind =
     | 'stalled'
     /** No verdict ever arrived -- pairs with `status: 'lost'`. */
     | 'timeout'
+    /** The bot had no character to walk with. Says nothing about the map: no path was searched. */
+    | 'no_character'
     | 'other';
 
 /**
@@ -1135,6 +1143,47 @@ export type EventKind =
            *  wider than this window produces **no event**, so no events is
            *  not evidence that no bot was walled in. */
           searched_tiles: number;
+      }
+    | {
+          /**
+           * A bot lost its character: the game's `on_player_died`. Until the
+           * character respawns (`respawn_in` ticks, 600 by default) every
+           * action for this bot is refused with `failure.kind ===
+           * 'no_character'`; this is the line that says why.
+           */
+          kind: 'bot_died';
+          bot: number;
+          /** Where the character stood when it died. `null` when the mod could not read it. */
+          position: Position | null;
+          /** What killed it (`'medium-worm-turret'`), when the game named a cause. */
+          cause: string | null;
+          /** Its prototype type (`'turret'`, `'unit'`). `null` exactly when `cause` is. */
+          cause_type: string | null;
+          /** `ticks_to_respawn` the tick after death. `null` is "not readable", never "never". */
+          respawn_in: number | null;
+      }
+    | {
+          /** The character is back. Pairs with `bot_died` by `bot`. */
+          kind: 'bot_respawned';
+          bot: number;
+          /** Where the new character stands -- the spawn point, ordinarily. */
+          position: Position | null;
+      }
+    | {
+          /**
+           * The supervisor changed the roster it plans for: a bot absent
+           * past the bounded respawn wait was dropped, or one dropped earlier
+           * came back. Every later `plan_created.bots` shows the new roster;
+           * this is the line that says why it changed. Removals and returns
+           * only -- a bot the run did not start with is never added.
+           */
+          kind: 'roster_changed';
+          /** The roster from here on, ascending. */
+          bots: number[];
+          left: number[];
+          returned: number[];
+          /** The supervisor's own sentence for why. */
+          reason: string;
       }
     | {
           /**

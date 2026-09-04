@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::factorio::ticks::ActionOutcome;
-use crate::factorio::world::{FactorioWorld, TeleportEvent};
+use crate::factorio::world::{DeathEvent, FactorioWorld, RespawnEvent, TeleportEvent};
 // use crate::factorio::ws::{
 //     FactorioWebSocketServer, PlayerChangedMainInventoryMessage, PlayerChangedPositionMessage,
 //     PlayerDistanceChangedMessage, PlayerLeftMessage, ResearchCompletedMessage,
@@ -440,6 +440,51 @@ impl OutputParser {
                     );
                 }
             },
+            // A bot lost its character (`on_player_died` in
+            // `mods/BotBridge/control.lua`). Logged here so it is visible
+            // while the run happens, and queued on `self.world` for
+            // `crates/scripting_lua`'s `record.deaths()` to write into
+            // `events.jsonl` -- the same two-crate arrangement `teleport`
+            // above explains. The player is deliberately NOT removed from
+            // `world.players`: it is still connected and will respawn, and
+            // its last position is the only one anything has.
+            "player_died" => match serde_json::from_str::<DeathEvent>(rest) {
+                Ok(event) => {
+                    warn!(
+                        "<red>bot {} died</> at tick {}{}{}",
+                        event.player_id,
+                        tick,
+                        event
+                            .cause
+                            .as_deref()
+                            .map(|c| format!(", killed by {c}"))
+                            .unwrap_or_default(),
+                        event
+                            .respawn_in
+                            .map(|t| format!(", respawns in {t} ticks"))
+                            .unwrap_or_default(),
+                    );
+                    self.world.record_death(tick, event);
+                }
+                Err(err) => {
+                    error!(
+                        "<red>failed to deserialize player_died</>: {:?} '{}'",
+                        err, rest
+                    );
+                }
+            },
+            "player_respawned" => match serde_json::from_str::<RespawnEvent>(rest) {
+                Ok(event) => {
+                    info!("bot {} respawned at tick {}", event.player_id, tick);
+                    self.world.record_respawn(tick, event);
+                }
+                Err(err) => {
+                    error!(
+                        "<red>failed to deserialize player_respawned</>: {:?} '{}'",
+                        err, rest
+                    );
+                }
+            },
             _ => {
                 error!("<red>unexpected action</>: <bright-blue>{}</>", action);
             }
@@ -472,6 +517,95 @@ impl OutputParser {
 
     pub fn world(&self) -> Arc<FactorioWorld> {
         self.world.clone()
+    }
+}
+
+#[cfg(test)]
+mod death_tests {
+    use super::*;
+    use crate::factorio::world::BotLifeEvent;
+
+    /// The two writeouts `on_player_died` / `on_player_respawned`
+    /// (`mods/BotBridge/control.lua`) produce, in the exact shape
+    /// `helpers.table_to_json` renders them, land on the world's death queue
+    /// in the order they happened -- a death and then its respawn, never
+    /// reordered by being two kinds -- with the mod's tick, not the parse
+    /// order, on each.
+    #[test]
+    fn a_death_and_its_respawn_reach_the_queue_in_order_with_their_ticks() {
+        let mut parser = OutputParser::new();
+        parser
+            .parse(
+                1234,
+                "player_died",
+                r#"{"cause":"medium-worm-turret","cause_type":"turret","player_id":2,"position":{"x":12.5,"y":-3},"respawn_in":587}"#,
+            )
+            .expect("a death parses");
+        parser
+            .parse(
+                1900,
+                "player_respawned",
+                r#"{"player_id":2,"position":{"x":0,"y":0}}"#,
+            )
+            .expect("a respawn parses");
+        let drained = parser.world().drain_deaths();
+        assert_eq!(drained.len(), 2);
+        let (tick, died) = &drained[0];
+        assert_eq!(*tick, 1234);
+        match died {
+            BotLifeEvent::Died(d) => {
+                assert_eq!(d.player_id, 2);
+                assert_eq!(d.cause.as_deref(), Some("medium-worm-turret"));
+                assert_eq!(d.cause_type.as_deref(), Some("turret"));
+                assert_eq!(d.respawn_in, Some(587));
+                assert_eq!(
+                    d.position.as_ref().map(|p| (p.x(), p.y())),
+                    Some((12.5, -3.0))
+                );
+            }
+            other => panic!("expected a death first, got {other:?}"),
+        }
+        let (tick, back) = &drained[1];
+        assert_eq!(*tick, 1900);
+        assert!(matches!(back, BotLifeEvent::Respawned(r) if r.player_id == 2));
+        assert!(
+            parser.world().drain_deaths().is_empty(),
+            "a drain takes everything"
+        );
+    }
+
+    /// A death the mod could not fully describe -- no cause, no readable
+    /// respawn timer, no position -- is still a death. Every optional field
+    /// is `None`, and `player_id` alone is enough to queue it.
+    #[test]
+    fn a_death_with_nothing_but_a_player_id_still_parses() {
+        let mut parser = OutputParser::new();
+        parser
+            .parse(7, "player_died", r#"{"player_id":3}"#)
+            .expect("a bare death parses");
+        let drained = parser.world().drain_deaths();
+        assert_eq!(drained.len(), 1);
+        match &drained[0].1 {
+            BotLifeEvent::Died(d) => {
+                assert_eq!(d.player_id, 3);
+                assert_eq!(d.cause, None);
+                assert_eq!(d.respawn_in, None);
+                assert_eq!(d.position, None);
+            }
+            other => panic!("expected a death, got {other:?}"),
+        }
+    }
+
+    /// A malformed line is logged and dropped, not raised: the parser task
+    /// reads every later line of the run, and one bad death must not take
+    /// them all down.
+    #[test]
+    fn a_malformed_death_line_is_dropped_rather_than_failing_the_parser() {
+        let mut parser = OutputParser::new();
+        parser
+            .parse(7, "player_died", "not json")
+            .expect("a malformed death does not raise");
+        assert!(parser.world().drain_deaths().is_empty());
     }
 }
 

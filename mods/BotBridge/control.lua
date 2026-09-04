@@ -2709,6 +2709,104 @@ function on_player_left_game(event)
 	writeout(event.tick, "on_player_left_game", player_idx)
 end
 
+-- A bot died. Say so on stdout, and fail whatever it was doing NOW.
+--
+-- Two things happen here, and each closes a silence of its own.
+--
+-- **The writeout** is the record's only source for a death.
+-- `output_parser.rs` queues it on `FactorioWorld` and `record.deaths()`
+-- (crates/scripting_lua) drains it into `events.jsonl` as `bot_died` -- the
+-- same road a teleport takes. `cause` is `event.cause`'s name when the game
+-- names one (a worm, a biter, a train), `respawn_in` is `ticks_to_respawn` as
+-- it stands the tick after death. Nothing in the 24 archived runs contains a
+-- death, so this event has never been produced by a real game; the field
+-- shapes are what the 2.1 runtime API documents.
+--
+-- **The failures** are what stop the executor waiting out its deadline. The
+-- per-tick walker and miner are gated on `player.character`, so a walk or a
+-- mine in flight when the character vanished is simply *skipped* -- no
+-- `action_completed`, no `action_failed` -- until either the respawned
+-- character resumes it from the spawn point with a stale path, or the
+-- executor's deadline lapses and records `lost`. Both are worse than the
+-- truth, which is that the action failed at this tick for this reason. Craft
+-- waiters go the same way: a dead character's queue does not finish.
+-- `ERROR:` rather than `Error:` because these are `action_failed` verdicts,
+-- not reply bodies, and that is the prefix the other verdicts use.
+function on_player_died(event)
+	local idx = event.player_index
+	local player = game.players[idx]
+	local cause, cause_type = nil, nil
+	if event.cause ~= nil and event.cause.valid then
+		cause = event.cause.name
+		cause_type = event.cause.type
+	end
+	local respawn_in = nil
+	if player ~= nil then
+		local ok, ticks = pcall(function() return player.ticks_to_respawn end)
+		if ok and type(ticks) == "number" then respawn_in = math.floor(ticks) end
+	end
+	local position = nil
+	if player ~= nil then
+		local ok, pos = pcall(function() return player.position end)
+		if ok and pos ~= nil then position = { x = pos.x, y = pos.y } end
+	end
+	writeout(event.tick, "player_died", helpers.table_to_json({
+		player_id = idx,
+		position = position,
+		cause = cause,
+		cause_type = cause_type,
+		respawn_in = respawn_in,
+	}))
+
+	local why = "ERROR: player " .. tostring(idx) .. " has no character: died at tick "
+		.. tostring(event.tick)
+	if cause ~= nil then why = why .. " killed by " .. tostring(cause) end
+	if respawn_in ~= nil then why = why .. ", respawns in " .. tostring(respawn_in) .. " ticks" end
+	print(why)
+
+	local p = storage.p[idx]
+	if p ~= nil then
+		if p.walking ~= nil then
+			if p.walking.action_id ~= nil then action_failed(event.tick, p.walking.action_id, why) end
+			p.walking = nil
+		end
+		if p.mining ~= nil then
+			if p.mining.action_id ~= nil then action_failed(event.tick, p.mining.action_id, why) end
+			p.mining = nil
+		end
+	end
+	-- Every craft this player was awaited on, then the whole bucket: if the
+	-- game also raises `on_player_cancelled_crafting` for the lost queue, it
+	-- must find nothing left to fail a second time.
+	local per_player = craft_actions()[idx]
+	if per_player ~= nil then
+		for _, waiting in pairs(per_player) do
+			for _, waiter in ipairs(waiting) do
+				action_failed(event.tick, waiter.id, why)
+			end
+		end
+		craft_actions()[idx] = nil
+	end
+end
+
+-- The character is back. Report it, and report where: the cached position on
+-- the Rust side is what `RconActuator::walk` steers from, and the last thing
+-- it heard was wherever the bot died.
+function on_player_respawned(event)
+	local idx = event.player_index
+	local player = game.players[idx]
+	local position = nil
+	if player ~= nil and player.character ~= nil then
+		local pos = player.character.position
+		position = { x = pos.x, y = pos.y }
+	end
+	writeout(event.tick, "player_respawned", helpers.table_to_json({
+		player_id = idx,
+		position = position,
+	}))
+	writeout_player_position(event.tick, idx, player)
+end
+
 function on_player_mined_item(event)
 --	name = event.item_stack.name
 --	count = event.item_stack.count
@@ -3015,6 +3113,8 @@ script.on_load(on_load)
 script.on_event(defines.events.on_tick, on_tick)
 script.on_event(defines.events.on_player_joined_game, on_player_joined_game)
 script.on_event(defines.events.on_player_left_game, on_player_left_game)
+script.on_event(defines.events.on_player_died, on_player_died)
+script.on_event(defines.events.on_player_respawned, on_player_respawned)
 script.on_event(defines.events.on_sector_scanned, on_sector_scanned)
 script.on_event(defines.events.on_chunk_generated, on_chunk_generated)
 script.on_event(defines.events.on_player_mined_item, on_player_mined_item)
@@ -3139,7 +3239,21 @@ end
 function rcon_place_entity(player_id, item_name, entity_position, direction)
 	local entproto = prototypes.item[item_name].place_result
 	local player = game.players[player_id]
-	local surface = game.players[player_id].surface
+	-- Refused before anything else is asked, and stamped like every other
+	-- exit. The sentence is outside the `can_place_entity said 'no'` family on
+	-- purpose: `note_placement_refusal` (crates/core/src/factorio/rcon.rs)
+	-- must not remember a dead bot as a fact about the ground.
+	if player == nil then
+		rcon.print("Error: no such player: " .. tostring(player_id))
+		stamp_tick()
+		return
+	end
+	if player.character == nil then
+		rcon.print(no_character_error(player_id, player))
+		stamp_tick()
+		return
+	end
+	local surface = player.surface
 
 	-- Every exit below stamps the tick, including the refusals.
 	--
@@ -3551,6 +3665,14 @@ end
 
 function rcon_insert_to_inventory(player_id, entity_name, entity_pos, inventory_type, items)
 	local player = game.players[player_id]
+	if player == nil then
+		rcon.print("Error: no such player: " .. tostring(player_id))
+		return
+	end
+	if player.character == nil then
+		rcon.print(no_character_error(player_id, player))
+		return
+	end
 	local entity = player.surface.find_entity(entity_name, entity_pos)
 	if entity == nil then
 		complain("cannot insert to inventory of nonexisting entity "..entity_name.." at "..pos_str(entity_pos))
@@ -3604,6 +3726,14 @@ end
 
 function rcon_remove_from_inventory(player_id, entity_name, entity_pos, inventory_type, items)
 	local player = game.players[player_id]
+	if player == nil then
+		rcon.print("Error: no such player: " .. tostring(player_id))
+		return
+	end
+	if player.character == nil then
+		rcon.print(no_character_error(player_id, player))
+		return
+	end
 	local entity = player.surface.find_entity(entity_name, entity_pos)
 	if entity == nil then
 		complain("cannot remove from inventory of nonexisting entity "..entity_name.." at "..pos_str(entity_pos))
@@ -3676,6 +3806,10 @@ function rcon_set_recipe(player_id, entity_name, entity_pos, recipe)
 	local player = game.players[player_id]
 	if player == nil then
 		rcon.print("Error: no such player: " .. tostring(player_id))
+		return
+	end
+	if player.character == nil then
+		rcon.print(no_character_error(player_id, player))
 		return
 	end
 	local known = player.force.recipes[recipe]
@@ -4213,6 +4347,13 @@ function rcon_action_start_crafting(action_id, player_id, recipe, count)
 		rcon.print("Error: no such player: " .. tostring(player_id))
 		return
 	end
+	-- A dead player has a crafting queue only until the character does, and
+	-- `begin_crafting` on none is a raise in the reply body rather than a
+	-- refusal. Same sentence `get_player` prints, for the same classifier.
+	if player.character == nil then
+		rcon.print(no_character_error(player_id, player))
+		return
+	end
 	local known = player.force.recipes[recipe]
 	if known == nil then
 		rcon.print("Error: no such recipe: " .. tostring(recipe))
@@ -4652,11 +4793,64 @@ function table_to_string(tbl)
 	return result.."}"
 end
 
+-- Why a connected player has no character right now, or nil when it has one.
+--
+-- Three causes, and they used to be one word. `get_player` answered `not
+-- connected` for a player whose `character` was nil, which is what a DEAD
+-- player looks like: Factorio keeps the `LuaPlayer`, drops the character,
+-- and respawns one after `ticks_to_respawn` (600 by default -- the
+-- character prototype's `respawn_time` of 10 s). So a bot killed by a worm
+-- was indistinguishable, in every reply the executor reads, from a client
+-- that never connected -- and neither the record nor `just analyse` could
+-- say a bot had died at all. `docs/superpowers/specs/2026-09-04-exploration-design.md`
+-- names this as the prerequisite for sending a bot past the nest-free radius.
+--
+-- The wording is load-bearing on the Rust side: `classify_failure` and
+-- `classify_walk_failure` (crates/scripting_lua/src/globals/record.rs) match
+-- `has no character` and read `respawns in <n> ticks` out of the detail, and
+-- a test there pins both strings. Change one, change the other.
+--
+-- Every read is under `pcall`: `ticks_to_respawn` is documented `uint32?`
+-- and a property read that raises inside a remote call would turn a precise
+-- refusal into a Lua traceback in the reply body.
+function character_missing_reason(player)
+	if player == nil or player.character ~= nil then
+		return nil
+	end
+	local ok, ticks = pcall(function() return player.ticks_to_respawn end)
+	if ok and type(ticks) == "number" then
+		return "dead, respawns in " .. tostring(math.floor(ticks)) .. " ticks"
+	end
+	local ok2, controller = pcall(function() return player.controller_type end)
+	if ok2 and controller == defines.controllers.cutscene then
+		return "in a cutscene"
+	end
+	if ok2 and controller ~= nil then
+		for name, value in pairs(defines.controllers) do
+			if value == controller then
+				return "controller '" .. tostring(name) .. "'"
+			end
+		end
+	end
+	return "no character, cause unknown"
+end
+
+-- The one sentence every entry point prints for a character-less player.
+-- Prefixed `Error:` like its siblings so the Rust side's "any reply is an
+-- error" rule reads it the same way; `has no character` is the substring the
+-- classifier keys on.
+function no_character_error(player_id, player)
+	return "Error: player " .. tostring(player_id) .. " has no character: "
+		.. tostring(character_missing_reason(player))
+end
+
 function get_player(player_id)
 	if storage.p[player_id] ~= nil then
 		local player = game.players[player_id]
-		if player == nil or not player.connected or not player.character then
+		if player == nil or not player.connected then
 			rcon.print("Error: player " .. tostring(player_id) .. " not connected")
+		elseif not player.character then
+			rcon.print(no_character_error(player_id, player))
 		else
 			return player
 		end

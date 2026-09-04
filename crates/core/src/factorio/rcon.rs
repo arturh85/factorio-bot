@@ -5704,6 +5704,8 @@ mod transfer_guarantee_tests {
             }}
             local entity = {{ get_inventory = function(t) return inventory end }}
             local player = {{
+                -- A live player has a character; the entry points refuse one without.
+                character = {{ type = "character", name = "character" }},
                 surface = {{ find_entity = function(name, pos) return entity end }},
                 get_item_count = function(name) return held end,
                 -- The player end of the move always cooperates, so a complaint
@@ -5877,6 +5879,8 @@ mod transfer_guarantee_tests {
                 find_entities_filtered = function(args) return characters end,
             }}
             local player = {{
+                -- A live player has a character; the entry points refuse one without.
+                character = {{ type = "character", name = "character" }},
                 name = "bot1",
                 position = {{ x = {player_x}, y = {player_y} }},
                 force = "player",
@@ -6429,6 +6433,8 @@ mod transfer_guarantee_tests {
                 get_tile = function(x, y) return {{ valid = true, name = "{tile}" }} end,
             }}
             local player = {{
+                -- A live player has a character; the entry points refuse one without.
+                character = {{ type = "character", name = "character" }},
                 name = "bot1",
                 position = {{ x = 0.5, y = 0.5 }},
                 force = "player",
@@ -6958,6 +6964,8 @@ mod transfer_guarantee_tests {
                 print = noop,
             }}
             local player = {{
+                -- A live player has a character; the entry points refuse one without.
+                character = {{ type = "character", name = "character" }},
                 index = 1,
                 name = "bot1",
                 force = force,

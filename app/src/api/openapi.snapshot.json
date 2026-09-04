@@ -967,6 +967,143 @@
             "type": "object"
           },
           {
+            "description": "A bot lost its character: the game's `on_player_died`, as the mod\nreported it.\n\nBefore this variant, nothing in the record could say a bot had died.\nA dead player keeps its `LuaPlayer` and loses its character, the mod's\nevery entry point answered `not connected` for it, and the roster --\nfixed at script start -- kept assigning it work. So a killed bot\ndegraded into an ordinary stream of failures with no distinguishing\nkind, the same silent roster degradation run 30 paid for from the\nother direction (`docs/superpowers/notes/2026-09-02-bot-one-idle.md`).\nThis event, [`FailureKind::NoCharacter`] and\n[`EventKind::RosterChanged`] are the three halves of the fix.\n\nWritten by `record.deaths()` (`crates/scripting_lua`), drained from\nthe queue `OutputParser` fills. **No archived run contains one**: the\nnearest charted enemy structure on the benchmark seed is 246 tiles\nout, so the first real instance of this event will be produced by the\nfirst run that goes there.",
+            "properties": {
+              "bot": {
+                "format": "int32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "cause": {
+                "description": "The entity that did it (`medium-worm-turret`, `small-biter`), when\nthe game named one. `None` is \"the game named nothing\", which it\ndoes for a death with no attacker.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "cause_type": {
+                "description": "Its prototype type (`turret`, `unit`). Null exactly when `cause` is.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "kind": {
+                "enum": [
+                  "bot_died"
+                ],
+                "type": "string"
+              },
+              "position": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/Position",
+                    "description": "Where the character stood when it died, as the mod read the\nghost's position. `None` when the mod could not read one."
+                  }
+                ]
+              },
+              "respawn_in": {
+                "description": "`ticks_to_respawn` as it stood the tick after death. The default\ncharacter prototype respawns after 600; `None` means the mod could\nnot read the timer, not that the bot will never respawn.",
+                "format": "int32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "bot",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The character is back: the game's `on_player_respawned`.\n\nPairs with [`EventKind::BotDied`] by `bot`; the gap between the two is\nthe stretch during which every action for that bot was refused with\n[`FailureKind::NoCharacter`].",
+            "properties": {
+              "bot": {
+                "format": "int32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "enum": [
+                  "bot_respawned"
+                ],
+                "type": "string"
+              },
+              "position": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/Position",
+                    "description": "Where the new character stands -- the spawn point, ordinarily,\nwhich is not where the walk in flight was going."
+                  }
+                ]
+              }
+            },
+            "required": [
+              "bot",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The supervisor changed the roster it plans for.\n\nThe roster used to be computed once at script start and never again.\n`scripts/supervisor.lua` now re-checks `rcon.players()` before every\nplan: a rostered bot that has had no character for longer than the\nbounded respawn wait is dropped, and one that was dropped and came\nback is picked up again. Written by `record.roster_changed()` from the\nsupervisor's `rerostered` transition, so the reader of a run whose\n`plan_created.bots` shrinks from four to three finds the line that\nsays why, rather than the silence run 30 left.\n\n**Only removals and returns, never additions.** A bot that was never\nin the roster this run started with is not picked up mid-run, because\n\"the first non-empty answer is the roster\" is the bug that froze run\n30 on `[2]`, and re-rostering must not reintroduce it.",
+            "properties": {
+              "bots": {
+                "description": "The roster from here on, ascending.",
+                "items": {
+                  "format": "int32",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              "kind": {
+                "enum": [
+                  "roster_changed"
+                ],
+                "type": "string"
+              },
+              "left": {
+                "description": "Bots that were in the roster and are not any more.",
+                "items": {
+                  "format": "int32",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              "reason": {
+                "description": "The supervisor's own sentence for why: which bots it waited for,\nfor how many checks, and what it found.",
+                "type": "string"
+              },
+              "returned": {
+                "description": "Bots that had been dropped earlier in this run and are back.",
+                "items": {
+                  "format": "int32",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "bots",
+              "left",
+              "returned",
+              "reason",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
             "description": "How much ground the world model was given, against how much ground a\nbot actually covered.\n\n# The cheat nobody had counted\n\nThe mod ingests every entity of every chunk the *engine generates*\n(`on_chunk_generated`, `mods/BotBridge/control.lua`) and never consults\nthe force's charted area. That is `force.chart` with extra steps: the\nmodel gains complete knowledge of ground no character has been near,\nincluding ore, water and nests, and it has been in every run this\nproject has ever made. In `run-1788532631-48030` the furthest any bot\nreached was **63.8 tiles** while the model that run produced held crude\noil at **380 and 505 tiles**, 559 uranium tiles and 36 biter spawners\nout to 500.\n\nThe repo's rule is that a final measured run must be as cheat-free as\nwe can get it, and that whatever is not must be *recorded*. This event\nis that record. It changes nothing and refuses nothing -- like\n[`EventKind::BatchProgress`] it states no verdict, because \"how much\nfree vision is too much\" is a judgement for the reader of a result and\nnot for the writer of a measurement. See\n`docs/superpowers/specs/2026-09-04-exploration-design.md`.\n\n# Why an event rather than `provenance.json` or the manifest\n\n[`provenance::Provenance`] is written once at run start and never\nrewritten, which is right for what a run was *launched* with and wrong\nfor a figure whose second half only exists once bots have moved.\n[`Manifest`] is written in [`RunRecorder::finish`] and so exists only\nfor runs that finished -- nine of the twenty-four runs archived when\nprovenance was added had no manifest at all, and they are the killed\nones. A run that was killed still got its free vision, so the\ndisclosure has to survive the kill.\n\nSo it is written into `events.jsonl`, which is flushed per line: once\nat the run's first recorded event (a baseline, before any bot has\nmoved), every [`VISION_MEASURE_INTERVAL_TICKS`] thereafter, and once\nmore at `finish` after the last samples are ingested. The **last** one\nin the log is the run's answer; the earlier ones show it growing.\n\n# What a reader sees when the measurement is short\n\nEvery field that can be unknown is `Option`, and each `None` has a\ncounter beside it that says why -- see `travelled_tiles` and\n`model_tiles`. A run with no travel data reports `null` and\n`bot_samples: 0`, never `0.0`: a bot that was never observed has not\nbeen observed at the origin.",
             "properties": {
               "bot_samples": {
@@ -1588,6 +1725,7 @@
           "partial_transfer",
           "rejected",
           "timeout",
+          "no_character",
           "other"
         ],
         "type": "string"
@@ -3263,6 +3401,7 @@
           "repath_limit",
           "stalled",
           "timeout",
+          "no_character",
           "other"
         ],
         "type": "string"

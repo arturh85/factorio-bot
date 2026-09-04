@@ -14,7 +14,7 @@
 //! issued and honestly `null` before there has been one.
 
 use super::position_from_lua;
-use factorio_bot_core::factorio::world::FactorioWorld;
+use factorio_bot_core::factorio::world::{BotLifeEvent, FactorioWorld};
 use factorio_bot_core::mlua::prelude::*;
 use factorio_bot_core::paris::{info, warn};
 use factorio_bot_core::parking_lot::Mutex;
@@ -369,6 +369,18 @@ fn classify_failure(error: &str) -> ActionFailure {
     }
     let kind = if error.contains("no action result received in time") {
         FailureKind::Timeout
+    } else if error.contains(NO_CHARACTER_WORDING) {
+        // Ahead of `Rejected`, which its outer wrapper (`game rejected the
+        // command: Unexpected Response: Error: player 2 has no character:
+        // ...`) would otherwise claim. The mod prints this sentence from
+        // `get_player` and from every entry point that reads
+        // `game.players[id]` directly, and `on_player_died` uses it as the
+        // verdict for the walk, mine or craft in flight at the moment of
+        // death. A test below generates it from the mod's own code rather
+        // than from a string typed here, so the two cannot drift apart
+        // silently -- which is how nineteen of twenty walk failures once
+        // archived as `other`.
+        FailureKind::NoCharacter
     } else if error.contains("no path to")
         || error.contains("tile arrival tolerance")
         || error.contains("tile resource reach")
@@ -400,11 +412,34 @@ fn classify_failure(error: &str) -> ActionFailure {
     // Anything else is left with no detail rather than a guess: `error`
     // beside this field already carries the whole message for a person to
     // read.
-    let detail = (kind == FailureKind::MissingItem)
-        .then(|| error.split('\'').nth(1))
-        .flatten()
-        .map(str::to_string);
+    let detail = match kind {
+        FailureKind::MissingItem => error.split('\'').nth(1).map(str::to_string),
+        FailureKind::NoCharacter => no_character_detail(error),
+        _ => None,
+    };
     ActionFailure { kind, detail }
+}
+
+/// The substring every character-less refusal from the mod carries, on both
+/// of its roads: the reply-body `Error: player <n> has no character: <why>`
+/// and the `on_player_died` verdict `ERROR: player <n> has no character: died
+/// at tick <t> ...`. Defined once because two classifiers match it.
+const NO_CHARACTER_WORDING: &str = "has no character";
+
+/// The `<why>` clause after `has no character: `, for
+/// [`FailureKind::NoCharacter`]'s detail -- `dead, respawns in 587 ticks`,
+/// `in a cutscene`, or `died at tick 1234 killed by medium-worm-turret,
+/// respawns in 587 ticks`.
+///
+/// Cut at the first quote, bracket or newline, because the sentence arrives
+/// inside whatever wrapper the road it took added: `action_start_mining`'s
+/// refusal is the reply lines' `Debug` rendering, `["Error: ..."]`, and the
+/// closing `"]` is not part of the reason.
+fn no_character_detail(error: &str) -> Option<String> {
+    let (_, tail) = error.split_once(&format!("{NO_CHARACTER_WORDING}: "))?;
+    let end = tail.find(['"', ']', '\n']).unwrap_or(tail.len());
+    let detail = tail[..end].trim().trim_end_matches(['.', ',']);
+    (!detail.is_empty()).then(|| detail.to_string())
 }
 
 /// One `(x/y)` pair out of the mod's own `coord()` formatting.
@@ -483,6 +518,12 @@ fn classify_walk_failure(error: &str) -> WalkFailure {
         || error.contains("no readable outcome")
     {
         WalkFailureKind::Timeout
+    } else if error.contains(NO_CHARACTER_WORDING) {
+        // Before every pathfinder arm, and it has to be: a dead bot's walk
+        // fails at the path request, and `player_path` hands that refusal
+        // back wrapped in words the `NoPath` arm below would match. Nothing
+        // was searched, so nothing about the map is claimed.
+        WalkFailureKind::NoCharacter
     } else if error.contains("try again later") {
         // **Ordering, and it is load-bearing.** `RconPathRequestFailed` renders
         // as `the game's pathfinder returned no path: <the mod's own words>`
@@ -603,6 +644,35 @@ fn roster_from_lua(bots: Option<LuaValue>) -> LuaResult<Option<Vec<u32>>> {
         ));
     }
     Ok(Some(roster.into_iter().collect()))
+}
+
+/// Reads one of `record.roster_changed`'s bot lists: a table of positive
+/// integers, deduplicated and ascending. Unlike [`roster_from_lua`] an empty
+/// table is a legitimate answer -- "nobody left" is a thing this event says --
+/// and `nil` is refused rather than read as empty, because a caller that
+/// forgot an argument should hear about it.
+fn bot_list_from_lua(name: &str, value: LuaValue) -> LuaResult<Vec<u32>> {
+    let LuaValue::Table(table) = value else {
+        return Err(record_error(format!(
+            "record.roster_changed: {name} must be a table of bot ids, got a {}",
+            value.type_name()
+        )));
+    };
+    let mut ids = BTreeSet::new();
+    for id in table.sequence_values::<LuaValue>() {
+        let id = id?;
+        let id = id
+            .as_integer()
+            .filter(|id| *id > 0)
+            .and_then(|id| u32::try_from(id).ok())
+            .ok_or_else(|| {
+                record_error(format!(
+                    "record.roster_changed: {name} must be a list of positive bot ids"
+                ))
+            })?;
+        ids.insert(id);
+    }
+    Ok(ids.into_iter().collect())
 }
 
 /// Reads `record.start`'s `video` option.
@@ -2002,6 +2072,135 @@ end
                     Ok(true)
                 }
             })?,
+        )?;
+    }
+
+    map_table.set(
+        "__doc_entry_deaths",
+        String::from(
+            r#"
+--- flushes the bot deaths and respawns the mod has reported since the last flush
+-- A bot that dies keeps its player and loses its character; the game
+-- respawns one after `ticks_to_respawn` (600 by default). In between, every
+-- action for it is refused with `player <n> has no character: ...`, which the
+-- record classifies as `no_character`. This is the event that says WHY those
+-- refusals happened: `bot_died` with the tick, where it stood, what killed it
+-- when the game names a cause, and the respawn timer; then `bot_respawned`
+-- when the character is back.
+--
+-- Call it once per loop iteration, alongside `record.actions`,
+-- `record.teleports`, `record.refusals` and `record.enclosures`, and once
+-- more after the loop. Each event is queued with the game tick it happened
+-- at, so calling late blurs when it is written, not when it happened.
+--
+-- Nothing acts on these. The roster reacts through `supervisor.new`'s
+-- `roster` option, which asks `rcon.players()` before every plan; see
+-- `record.roster_changed` for what it writes when the answer changed.
+-- @treturn number how many death and respawn events were written
+-- @raise if no recording is running
+function record.deaths()
+end
+    "#,
+        ),
+    )?;
+    {
+        let slot = slot.clone();
+        let world = world.clone();
+        map_table.set(
+            "deaths",
+            lua.create_function(move |_lua, ()| {
+                let mut guard = slot.lock();
+                let recorder = guard.as_mut().ok_or_else(|| {
+                    record_error("no recording is running -- call record.start() first")
+                })?;
+                let mut written = 0u32;
+                for (tick, event) in world.drain_deaths() {
+                    let tick = recorder.not_before(tick);
+                    let kind = match event {
+                        BotLifeEvent::Died(death) => EventKind::BotDied {
+                            bot: u32::from(death.player_id),
+                            position: death.position,
+                            cause: death.cause,
+                            cause_type: death.cause_type,
+                            respawn_in: death.respawn_in,
+                        },
+                        BotLifeEvent::Respawned(back) => EventKind::BotRespawned {
+                            bot: u32::from(back.player_id),
+                            position: back.position,
+                        },
+                    };
+                    recorder.record(tick, kind).map_err(record_error)?;
+                    written += 1;
+                }
+                Ok(written)
+            })?,
+        )?;
+    }
+
+    map_table.set(
+        "__doc_entry_roster_changed",
+        String::from(
+            r#"
+--- records that the supervisor changed the roster it plans for
+-- Written from the supervisor's `rerostered` transition: a bot that was in
+-- the roster and has had no character for longer than the bounded respawn
+-- wait has been dropped (`left`), or one dropped earlier has come back
+-- (`returned`). `bots` is the roster from here on. Every later
+-- `plan_created.bots` will show the new roster; this is the line that says
+-- why it changed.
+--
+-- The lists are read as bot ids and written ascending; `left` and `returned`
+-- may be empty but not both, and `bots` may not be empty -- a roster of
+-- nobody is not something this loop ever plans for, so recording one would be
+-- recording a bug.
+-- @tparam {number,...} bots the roster from now on
+-- @tparam {number,...} left bots dropped from the roster
+-- @tparam {number,...} returned bots picked back up
+-- @string reason the supervisor's own sentence for why
+-- @raise if no recording is running, or the lists do not describe a change
+function record.roster_changed(bots, left, returned, reason)
+end
+    "#,
+        ),
+    )?;
+    {
+        let slot = slot.clone();
+        let rcon = rcon.clone();
+        map_table.set(
+            "roster_changed",
+            lua.create_function(
+                move |_lua,
+                      (bots, left, returned, reason): (
+                    LuaValue,
+                    LuaValue,
+                    LuaValue,
+                    String,
+                )| {
+                    let bots = bot_list_from_lua("bots", bots)?;
+                    let left = bot_list_from_lua("left", left)?;
+                    let returned = bot_list_from_lua("returned", returned)?;
+                    if bots.is_empty() {
+                        return Err(record_error(
+                            "record.roster_changed: bots is empty; the supervisor never plans for nobody",
+                        ));
+                    }
+                    if left.is_empty() && returned.is_empty() {
+                        return Err(record_error(
+                            "record.roster_changed: neither left nor returned names a bot, so nothing changed",
+                        ));
+                    }
+                    record_live(
+                        &slot,
+                        &rcon,
+                        EventKind::RosterChanged {
+                            bots,
+                            left,
+                            returned,
+                            reason,
+                        },
+                    )
+                },
+            )?,
         )?;
     }
 
@@ -3636,6 +3835,360 @@ mod tests {
             !text.contains("already running"),
             "the option is read before the slot is even looked at: {text}"
         );
+    }
+
+    // -------------------------------------------------------- bot deaths
+
+    /// `mods/BotBridge/control.lua`, verbatim, so the wording tests below
+    /// generate the sentence from the mod's own code instead of from a string
+    /// typed here. A copy would pass against wording the mod no longer
+    /// prints -- which is how nineteen of twenty walk failures in
+    /// `run-1788432181-42528` came to be archived as `other`.
+    const BOTBRIDGE_CONTROL_LUA: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../mods/BotBridge/control.lua"
+    ));
+
+    /// Enough of the Factorio runtime for `control.lua` to load and for its
+    /// player-facing helpers to run: `defines` (any unknown key answers with
+    /// its own name, which is what event and inventory ids are used for at
+    /// load time), a `script`/`remote` that register nothing, a
+    /// `helpers.table_to_json` that renders sorted keys, and a `print`/`rcon`
+    /// that capture. Everything is captured into `__printed`.
+    const FACTORIO_STUB: &str = r#"
+        local any = setmetatable({}, { __index = function(_, k) return k end })
+        defines = {
+            events = any,
+            controllers = { character = 1, god = 2, cutscene = 3, ghost = 4,
+                            spectator = 5, editor = 6, remote = 7 },
+            inventory = any, direction = any, build_mode = any,
+            chunk_generated_status = any, entity_status = any,
+            rail_direction = any, wire_type = any, riding = any,
+        }
+        script = { on_init = function() end, on_load = function() end,
+                   on_event = function() end, on_nth_tick = function() end,
+                   on_configuration_changed = function() end }
+        remote = { add_interface = function() end, interfaces = {}, call = function() end }
+        helpers = {}
+        helpers.table_to_json = function(t)
+            local keys = {}
+            for k in pairs(t) do keys[#keys + 1] = tostring(k) end
+            table.sort(keys)
+            local parts = {}
+            for _, k in ipairs(keys) do
+                local v = t[k]
+                if type(v) == "table" then v = helpers.table_to_json(v)
+                elseif type(v) == "string" then v = '"' .. v .. '"'
+                else v = tostring(v) end
+                parts[#parts + 1] = '"' .. k .. '":' .. v
+            end
+            return "{" .. table.concat(parts, ",") .. "}"
+        end
+        __printed = {}
+        print = function(...) __printed[#__printed + 1] = table.concat({...}, " ") end
+        rcon = { print = function(s) __printed[#__printed + 1] = "RCON:" .. s end }
+        prototypes = { item = any, entity = any }
+        storage = { p = {} }
+        require = function() end
+        game = { players = {}, forces = { player = { print = function() end } },
+                 surfaces = {}, tick = 0, connected_players = {} }
+    "#;
+
+    /// The real mod, loaded into the sandbox under the stub above.
+    fn mod_lua() -> Lua {
+        let lua = crate::sandbox::new_sandboxed_lua().expect("sandbox");
+        lua.load(FACTORIO_STUB).exec().expect("stub installs");
+        lua.load(BOTBRIDGE_CONTROL_LUA)
+            .exec()
+            .expect("mods/BotBridge/control.lua loads under the stub");
+        lua
+    }
+
+    /// **The wording is pinned from both ends.** The mod's `get_player`
+    /// prints it for a dead bot; `classify_failure` reads it back as
+    /// `NoCharacter` with the respawn timer in the detail. The sentence is
+    /// produced by the mod's own code here, not typed twice.
+    #[test]
+    fn the_mods_own_no_character_refusal_classifies_as_no_character() {
+        let lua = mod_lua();
+        let refusal: String = lua
+            .load(
+                r#"
+                local dead = { connected = true, character = nil, ticks_to_respawn = 587,
+                               controller_type = defines.controllers.ghost, index = 2 }
+                game.players[2] = dead
+                storage.p[2] = {}
+                assert(get_player(2) == nil, "a dead player is refused")
+                return __printed[#__printed]
+                "#,
+            )
+            .eval()
+            .expect("get_player runs");
+        assert_eq!(
+            refusal, "RCON:Error: player 2 has no character: dead, respawns in 587 ticks",
+            "the exact reply body a dead bot's dispatch gets"
+        );
+        // As it reaches the record: wrapped by `RconError` and then by
+        // `ActuatorError::Rejected`, the way a refused `action_start_*`
+        // travels.
+        let as_recorded = format!(
+            "game rejected the command: Unexpected Response: {}",
+            refusal.trim_start_matches("RCON:")
+        );
+        assert_eq!(
+            classify_failure(&as_recorded),
+            ActionFailure {
+                kind: FailureKind::NoCharacter,
+                detail: Some("dead, respawns in 587 ticks".to_string()),
+            }
+        );
+        // And on the mining road, where the reply lines arrive `Debug`-rendered.
+        let mining = format!(
+            "game rejected the command: Unexpected Response: [\"{}\"]",
+            refusal.trim_start_matches("RCON:")
+        );
+        assert_eq!(
+            classify_failure(&mining).detail.as_deref(),
+            Some("dead, respawns in 587 ticks"),
+            "the closing quote and bracket are the wrapper's, not the reason's"
+        );
+    }
+
+    /// The other two causes of a missing character keep their own detail, so
+    /// a reader can tell a respawn wait from the crash-site cutscene.
+    #[test]
+    fn a_cutscene_and_an_unknown_controller_are_named_in_the_detail() {
+        let lua = mod_lua();
+        let (cutscene, god): (String, String) = lua
+            .load(
+                r#"
+                local cut = { connected = true, character = nil,
+                              controller_type = defines.controllers.cutscene }
+                local god = { connected = true, character = nil,
+                              controller_type = defines.controllers.god }
+                return no_character_error(1, cut), no_character_error(3, god)
+                "#,
+            )
+            .eval()
+            .expect("no_character_error runs");
+        assert_eq!(cutscene, "Error: player 1 has no character: in a cutscene");
+        assert_eq!(god, "Error: player 3 has no character: controller 'god'");
+        assert_eq!(
+            classify_failure(&cutscene).detail.as_deref(),
+            Some("in a cutscene")
+        );
+        assert_eq!(classify_failure(&god).kind, FailureKind::NoCharacter);
+        let alive: bool = lua
+            .load("return character_missing_reason({ character = {} }) == nil")
+            .eval()
+            .expect("runs");
+        assert!(alive, "a player with a character has no missing reason");
+    }
+
+    /// `on_player_died` fails the walk, the mine and every craft in flight
+    /// with a verdict carrying the same wording, at the death tick, and
+    /// writes the `player_died` line `OutputParser` reads. Both halves are
+    /// checked against the classifiers here, and the writeout's shape is
+    /// the one `death_tests` in `output_parser.rs` parses.
+    #[test]
+    fn a_death_fails_everything_in_flight_with_the_no_character_wording() {
+        let lua = mod_lua();
+        let printed: Vec<String> = lua
+            .load(
+                r#"
+                local dead = { connected = true, character = nil, ticks_to_respawn = 587,
+                               controller_type = defines.controllers.ghost,
+                               position = { x = 12.5, y = -3 }, index = 2 }
+                game.players[2] = dead
+                storage.p[2] = { walking = { action_id = 41 }, mining = { action_id = 42 } }
+                storage.craft_actions = { [2] = { ["iron-gear-wheel"] = { { id = 43, remaining = 2 } } } }
+                __printed = {}
+                on_player_died({ tick = 1234, player_index = 2,
+                                 cause = { valid = true, name = "medium-worm-turret", type = "turret" } })
+                assert(storage.p[2].walking == nil, "the walk is cleared")
+                assert(storage.p[2].mining == nil, "the mine is cleared")
+                assert(storage.craft_actions[2] == nil, "the craft bucket is cleared")
+                return __printed
+                "#,
+            )
+            .eval()
+            .expect("on_player_died runs");
+        assert_eq!(
+            printed[0],
+            r#"§1234§player_died§{"cause":"medium-worm-turret","cause_type":"turret","player_id":2,"position":{"x":12.5,"y":-3},"respawn_in":587}"#
+        );
+        let verdict = "ERROR: player 2 has no character: died at tick 1234 killed by medium-worm-turret, respawns in 587 ticks";
+        assert_eq!(printed[1], verdict, "the narration line");
+        assert_eq!(
+            printed[2],
+            format!("§1234§action_completed§fail 41 {verdict}")
+        );
+        assert_eq!(
+            printed[3],
+            format!("§1234§action_completed§fail 42 {verdict}")
+        );
+        assert_eq!(
+            printed[4],
+            format!("§1234§action_completed§fail 43 {verdict}")
+        );
+        assert_eq!(printed.len(), 5);
+        // A walk failed this way is `no_character`, never `no_path`: the
+        // wording says nothing about the map.
+        assert_eq!(
+            classify_walk_failure(&format!("game rejected the command: {verdict}")).kind,
+            WalkFailureKind::NoCharacter
+        );
+        assert_eq!(
+            classify_failure(verdict),
+            ActionFailure {
+                kind: FailureKind::NoCharacter,
+                detail: Some(
+                    "died at tick 1234 killed by medium-worm-turret, respawns in 587 ticks"
+                        .to_string()
+                ),
+            }
+        );
+    }
+
+    /// A dead bot's walk fails at the path request, and `player_path` hands
+    /// that back inside wording the `NoPath` arm matches. The
+    /// `has no character` arm is tested first, so the record says the bot
+    /// had no character rather than that the destination is unreachable.
+    #[test]
+    fn a_walk_refused_for_no_character_is_not_read_as_no_path() {
+        let error = "game rejected the command: the game's pathfinder returned no path: \
+                     Error: player 2 has no character: dead, respawns in 587 ticks";
+        let failure = classify_walk_failure(error);
+        assert_eq!(failure.kind, WalkFailureKind::NoCharacter);
+        assert_eq!(failure.from, None);
+        assert_eq!(failure.destination, None);
+    }
+
+    /// Drives the real mod->core->Lua road for a death, as
+    /// `teleport_writeout_reaches_events_jsonl_through_the_real_parser`
+    /// does for a teleport: the mod's line through `OutputParser` into a
+    /// world the recording sandbox shares, then `record.deaths()`.
+    #[test]
+    fn a_death_and_respawn_reach_events_jsonl_through_the_real_parser() {
+        let lua = crate::sandbox::new_sandboxed_lua().expect("sandbox");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let recorder = RunRecorder::start(tmp.path(), "run-1").expect("recorder starts");
+        let run_dir = recorder.dir().to_path_buf();
+        let slot: Slot = Arc::new(Mutex::new(Some(recorder)));
+        let world = Arc::new(FactorioWorld::new());
+
+        let table = create_lua_record_with_slot(
+            &lua,
+            Arc::new(FactorioRcon::new_empty()),
+            world.clone(),
+            tmp.path().join("scripts"),
+            vec![],
+            slot,
+        )
+        .expect("record table");
+        lua.globals().set("record", table).expect("install");
+
+        let mut parser = factorio_bot_core::process::output_parser::OutputParser::with_world(world);
+        parser
+            .parse(
+                1234,
+                "player_died",
+                r#"{"cause":"medium-worm-turret","cause_type":"turret","player_id":2,"position":{"x":12.5,"y":-3},"respawn_in":587}"#,
+            )
+            .expect("death parses");
+        parser
+            .parse(
+                1900,
+                "player_respawned",
+                r#"{"player_id":2,"position":{"x":0,"y":0}}"#,
+            )
+            .expect("respawn parses");
+
+        let written: u32 = lua
+            .load("return record.deaths()")
+            .eval()
+            .expect("record.deaths() runs");
+        assert_eq!(written, 2);
+        let events = read_events(&run_dir);
+        assert_eq!(events.len(), 2);
+        match &events[0] {
+            EventKind::BotDied {
+                bot,
+                position,
+                cause,
+                cause_type,
+                respawn_in,
+            } => {
+                assert_eq!(*bot, 2);
+                assert_eq!(
+                    position.as_ref().map(|p| (p.x(), p.y())),
+                    Some((12.5, -3.0))
+                );
+                assert_eq!(cause.as_deref(), Some("medium-worm-turret"));
+                assert_eq!(cause_type.as_deref(), Some("turret"));
+                assert_eq!(*respawn_in, Some(587));
+            }
+            other => panic!("expected bot_died, got {other:?}"),
+        }
+        match &events[1] {
+            EventKind::BotRespawned { bot, position } => {
+                assert_eq!(*bot, 2);
+                assert_eq!(position.as_ref().map(|p| (p.x(), p.y())), Some((0.0, 0.0)));
+            }
+            other => panic!("expected bot_respawned, got {other:?}"),
+        }
+        assert_eq!(read_event_ticks(&run_dir), vec![1234, 1900]);
+        let again: u32 = lua
+            .load("return record.deaths()")
+            .eval()
+            .expect("record.deaths() runs on an empty queue");
+        assert_eq!(again, 0);
+    }
+
+    // ---------------------------------------------------- roster_changed
+
+    #[test]
+    fn a_roster_change_is_written_with_its_lists_sorted_and_deduplicated() {
+        let (lua, _tmp, run_dir) = recording_lua();
+        lua.load(
+            r#"record.roster_changed({3, 1, 1}, {2}, {}, "bot(s) 2 had no character for 800 roster check(s)")"#,
+        )
+        .exec()
+        .expect("record.roster_changed runs");
+        let events = read_events(&run_dir);
+        assert_eq!(
+            events,
+            vec![EventKind::RosterChanged {
+                bots: vec![1, 3],
+                left: vec![2],
+                returned: vec![],
+                reason: "bot(s) 2 had no character for 800 roster check(s)".to_string(),
+            }]
+        );
+    }
+
+    /// A "change" that names nobody in `left` or `returned` is refused, and
+    /// so is a roster of nobody: both would put a line into the record that
+    /// says something happened when the supervisor never does either.
+    #[test]
+    fn a_roster_change_that_changes_nothing_is_refused() {
+        let (lua, _tmp, run_dir) = recording_lua();
+        let err = lua
+            .load(r#"record.roster_changed({1, 2}, {}, {}, "nothing")"#)
+            .exec()
+            .expect_err("no change is refused");
+        assert!(err.to_string().contains("nothing changed"), "{err}");
+        let err = lua
+            .load(r#"record.roster_changed({}, {1}, {}, "everyone left")"#)
+            .exec()
+            .expect_err("an empty roster is refused");
+        assert!(err.to_string().contains("bots is empty"), "{err}");
+        let err = lua
+            .load(r#"record.roster_changed({1}, nil, {}, "forgot")"#)
+            .exec()
+            .expect_err("a nil list is refused rather than read as empty");
+        assert!(err.to_string().contains("must be a table"), "{err}");
+        assert!(read_events(&run_dir).is_empty());
     }
 
     // --------------------------------------------------------------- walks

@@ -769,42 +769,49 @@ known to be powered and unused** (`31c8d579`), which is where it would go.
 
 Until then, **"produces 6/min" should not be quoted for red or green.**
 
-## THE BENCHMARK WAS WRONG ALL DAY — this is Space Age
+## THE BENCHMARK, SETTLED — 6:12 is the bar, 9:12 is a strategy
 
-`workspace/factorio-space-age_linux_2.1.17.tar.xz`, and the data directory
-carries `elevated-rails`. **We run Space Age**, so the comparison is the Space
-Age record, not the pre-Space-Age one.
+We run **Space Age** (`factorio-space-age_linux_2.1.17.tar.xz`, `elevated-rails`
+in the data directory). But **nothing in the automation chain changed**, verified
+against our own recipe table:
 
-| | automation | whole game |
-|---|---|---|
-| **Space Age WR** (owner) | **9:12** | 3h17m |
-| pre-Space-Age WR — *the wrong benchmark, used all day* | 6:12 | ~1h |
-| **ours, benchmark seed `31337`** | **8:17** | — |
-| ours, old unidentified map | 8:41 / 8:43 | — |
+| | |
+|---|---|
+| `automation-science-pack` | 1 copper-plate + 1 iron-gear-wheel, 5 s |
+| `iron-gear-wheel` | 2 iron-plate, 0.5 s |
+| plate smelt | 3.2 s |
+| `lab` | 10 gears + 10 circuits + 4 belts |
+| boiler · steam-engine · offshore-pump · circuit · pole | unchanged |
 
-**We are ahead of the single-player Space Age record on automation.** Every
-"still short of the target" note earlier in this document was measured against
-a benchmark from a different game.
+So the Space Age run's **9:12 is not a speed limit** — that run front-loads
+infrastructure for a 3h17m game and spends more here on purpose. **6:12 is the
+demonstrated-achievable bar**, and it stands.
 
-### Three ways the comparison flatters us, and they are not small
+| | automation |
+|---|---|
+| demonstrated achievable (pre-SA WR, same recipes) | **6:12** |
+| Space Age WR split (a strategy, not a ceiling) | 9:12 |
+| **ours, seed `31337`** | **8:17** |
+| ours, old unidentified map | 8:41 / 8:43 |
 
-1. **Four bots against one human.**
-2. **The map was chosen for short walks.** Seed `31337` puts iron 18.4 tiles
-   from spawn and was selected for that — the justfile's own warning that
-   optimising the seed "stops being comparable" applies exactly here.
-3. **We do only automation.** The runner is en route to a rocket over 3h17m and
-   is not optimising this milestone in isolation; much of what they do by
-   minute 9 is groundwork for hour two.
+**We are about two minutes behind achievable**, not ahead of anything.
 
-**The honest claim: four bots on a favourable map beat one human's split in the
-same game version.** Not "we beat the world record."
+### I got this wrong twice in one turn, in opposite directions
 
-### What it changes
+First measuring against 6:12 without checking which game we ran; then swinging
+to 9:12 as though it were a speed bar because it was the Space Age number. The
+resolution is neither: **the version differs, the recipes do not, so the older
+record's time is still the thing to beat.**
 
-The 9-minute target is met and was met earlier than realised. The interesting
-horizon is no longer automation but **3h17m for a rocket** — which makes the
-open capability gaps (exploration, fluids, steel, multi-output recipes) the
-things that matter, not another minute off rung one.
+And the flattery in our own number is unchanged and still real: **four bots
+against one human, on a map chosen for short walks, doing only automation.**
+
+### What it means for the horizon
+
+3h17m for a rocket remains the long-range target, and the capability gaps —
+**exploration** (nothing here ever charts, so oil is invisible), **fluids**,
+**steel**, **multi-output recipes** — are what stand between us and it. Another
+minute off rung one is not.
 
 ## WHERE THIS STANDS (read this first)
 

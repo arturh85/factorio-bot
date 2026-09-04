@@ -628,6 +628,54 @@ actually reassigns the work. A chain owner may pin the same bot, in which case
 rule 4 fires on the first repeat and we are back to today's behaviour — safe,
 but worth nothing.
 
+## ✅ RED SCIENCE PRODUCES AT A RATE — and recovery fired for the first time ever
+
+`run-1788528493-60555`, seed `31337`, `factory_stage2.lua`.
+
+```
+WITNESSED: automation-science-pack in 1 watched machine(s)
+went 0 -> 5 (+5, wanted 5) in 3240 of 5400 ticks, 3134 polls
+```
+
+**Five packs in 3,240 ticks — 54 seconds, about 5.5/min against a 6/min
+claim.** This is the first evidence in the project's history that a bot-built
+cell *sustains* production. The six previous witnesses each proved a single
+pack inside 780 ticks and could prove no more, because the terminal was a
+machine slot that jammed at four.
+
+| milestone | game time |
+|---|---|
+| 1 — `researched("automation")` | **8.28 min** |
+| 2 — red cell producing 6/min | 15.97 min |
+| 3 — **rate witness** | **16.88 min** |
+
+5 plans · **8 furnaces** (42 → 21 → 19 → **8** across four runs, as reuse and
+the capacity work landed) · 5 failed actions.
+
+### Recovery ran live for the first time
+
+```
+planned 77 steps (best 199) -- recovered: rescheduled 1
+```
+
+`obs:recover()` had **never executed in a live run** before this. The tiers
+have existed since `66404580` and the supervisor never called them. A failed
+plan was recovered into a 77-step remainder instead of discarding 199 steps and
+re-deciding the layout.
+
+### What this settles, and what it does not
+
+- **Settled:** a cell the bots built assembles science packs continuously, and
+  the milestone that claims it is now backed by a rate rather than a single
+  observation. My earlier "red science works" was true of one pack and
+  overstated for a rate; it is now true as stated.
+- **Not settled:** 5.5/min is *below* the 6/min the rung claims. The witness
+  floor (5 in 5,400 ticks) is deliberately weaker than the goal, so the goal's
+  own number remains unverified.
+- **Not settled:** green. The capacity defect — a furnace output slot holding
+  one stack — is **designed (`97922af5`) and not implemented**, and it is what
+  stops green.
+
 ## The cell now has an output path, and the witness is a rate claim (`2aca0f10`, `911ec3c4`)
 
 **Measured on the bench, which settles it rather than arguing it.** Two

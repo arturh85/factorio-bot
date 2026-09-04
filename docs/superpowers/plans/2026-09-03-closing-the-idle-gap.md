@@ -872,10 +872,19 @@ minute off rung one is not.
    for this milestone. **Record the caveat, not a doubt**; do not mark past
    numbers provisional.
 
-## ⚠ WE HAVE BEEN CHEATING WITHOUT KNOWING IT
+## The world model gets free vision — a disclosure item, not an incident
 
-`918f0d6d`, and it bears directly on the owner's rule that final measured runs
-must be cheat-free.
+`918f0d6d`. **Owner's calibration (2026-09-04): do not over-weight this.**
+Cheating during exploration and development is fine and carries no penalty;
+only the **"real" runs** need to achieve everything as honestly as we can. So
+this is something to *disclose and eventually flip*, not something to stop for.
+
+**And it cuts the other way, usefully:** because cheats are fine in
+development, a capability can be built and tested *before* its honest
+prerequisite exists. **Oil does not have to wait for exploration** — cheat oil
+into view, develop and test the whole oil chain against it, and require the
+legitimate route only when a run is being measured. That decouples the two
+biggest items on the rocket path from each other.
 
 **`on_chunk_generated` ingest — what this project does today — is
 `force.chart` with extra steps.** In `run-1788532631-48030` the **furthest any

@@ -172,6 +172,60 @@ Two structural facts explain why nothing fills the idle:
   variant (`Have`, `Researched`, `Produced`, `Producing`, `All`) is
   demand-driven.
 
+## THE STARTER FACTORY: red witnessed again, green wants a second plant
+
+`run-1788504490-09380`, `scripts/factory_starter.lua`, roster `[1,2,3,4]` —
+red and green science in one run, four rungs.
+
+| rung | result |
+|---|---|
+| 1 — red cell producing 6/min | **satisfied, 13.63 min** |
+| 2 — red witness | **WITNESSED, 13.85 min** |
+| 3 — green cell producing 6/min | **`stuck`**, 1 iteration, best 736 steps |
+| 4 — green witness | not reached |
+
+**Red's witness reproduced.** Same line as `run-1788489532-62404`:
+`automation-science-pack … went 0 -> 1 (+1, wanted 1) in 780 of 3600 ticks`.
+Twice now, on two different runs. It is not a fluke.
+
+Red built a complete working plant on the way: **1 offshore-pump, 1 boiler, 1
+steam-engine, 3 pipe, 1 lab, 2 assembling-machine-1, 4 poles, 3 inserters, 2
+iron-chests, 1 drill**, plus 21 furnaces and 5 wooden chests.
+
+### Why one script rather than two runs — measured
+
+| goal | planned |
+|---|---|
+| red alone | 30,077 ticks |
+| green alone | 191,105 |
+| **both** | **190,654** |
+
+The pair is **cheaper than green by itself**: red's cell is nearly free once
+green's power plant, lab and research have to exist anyway.
+
+### Green's refusal
+
+```
+a power plant needs water, and the plan can see none within 128 tiles
+```
+
+The rung's own name is *"on the plant red already stood up"* — the intent is
+**reuse**. Green asked for a **new** plant instead. That is the defect to
+explain, and the water is a symptom of wherever it decided to put one: this map
+has water **46.7 tiles** from spawn, and green plans fine at t=0.
+
+Two candidate causes needing opposite fixes, which the error text cannot tell
+apart: the search origin moved (green's cells are sited from resource patches,
+not spawn), or the shoreline red's pump now occupies stopped counting.
+
+### The savepoints paid for themselves here
+
+`savepoints/milestone-2.zip` **is the world at the moment red was witnessed** —
+exactly the state green failed from. With `--resume-from` and `dump_map.lua`,
+that world can be dumped and planned against **offline in ~4 seconds**. Every
+previous failure of this kind had to be reproduced by paying for the whole
+prelude again. Under investigation that way now.
+
 ## There was no bank of 34 (`3ba0d441`)
 
 **My brief was wrong about the central fact.** The 34 furnaces in plan 2 are

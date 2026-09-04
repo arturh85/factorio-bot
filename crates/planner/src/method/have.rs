@@ -1620,8 +1620,8 @@ fn smelt_steps(
         place_ids[index] = place_id;
         let Some(supplier) = suppliers[index] else {
             // The taker's own furnace, inline in the enclosing chain. Its fuel
-            // load is emitted after the ore inserts, exactly where it always
-            // was — a bot handing a furnace to itself is not a handover.
+            // load is emitted further down, ahead of its ore inserts — a bot
+            // handing a furnace to itself is not a handover.
             if let Some(place_id) = place_id {
                 steps.push(Step::Act(Box::new(place_action(
                     place_id,
@@ -1693,6 +1693,40 @@ fn smelt_steps(
         });
     }
 
+    // One fuel load per load of each furnace the taker kept. The bank's coal
+    // was divided by `bank_coal`, which rounds each share up to a whole coal —
+    // the reason `bank_size` charges the split's extra coal rather than
+    // discovering it. A handed furnace was fuelled in its supplier's block
+    // above.
+    //
+    // Emitted **ahead of the ore inserts** since 2026-09-04, so the fuel takes
+    // the lower `ActionId` and wins the scheduler's tie-break where the two
+    // would otherwise end in the same tick. That is all emission order does
+    // here -- there is no serial edge between consecutive acts of a chain --
+    // and the edge that really orders them is stated after the ore inserts.
+    //
+    // Sized per load and not per furnace because **a fuel slot holds one
+    // stack**: `runs_per_load`'s third bound is exactly "how many runs one
+    // stack of coal is worth", so `load.coal` is within the cap by
+    // construction and this needs no split of its own.
+    for (index, furnace_slot) in bank.iter().enumerate() {
+        if suppliers[index].is_some() {
+            continue;
+        }
+        for (load, one_load) in furnace_slot.loads.iter().enumerate() {
+            let fuel_id = ctx.ids.next();
+            fuel_ids[index][load] = Some(fuel_id);
+            insert_ids[index][load].push(fuel_id);
+            steps.push(Step::Act(Box::new(fuel_action(
+                fuel_id,
+                &furnace_entity,
+                &furnace_slot.pos,
+                one_load.coal,
+                reach,
+            ))));
+        }
+    }
+
     for (ingredient, amount) in &ingredients {
         if shared.as_ref().is_some_and(|s| s.ore == *ingredient) {
             continue;
@@ -1754,31 +1788,52 @@ fn smelt_steps(
         }
     }
 
-    // One fuel load per load of each furnace the taker kept. The bank's coal
-    // was divided by `bank_coal`, which rounds each share up to a whole coal —
-    // the reason `bank_size` charges the split's extra coal rather than
-    // discovering it. A handed furnace was fuelled in its supplier's block
-    // above.
+    // **The taker's fuel lands before its own ore.** A furnace with fuel and
+    // no ore idles for free; a furnace with ore and no fuel wastes the whole
+    // ore lag. Both inserts are the taker's, on one timeline, and nothing in
+    // the network orders them: neither satisfies a precondition of the other,
+    // so `infer_edges` pairs nothing, and the scheduler's key is `(end,
+    // ActionId)` -- emission order only ever breaks a tie of equal `end`.
+    // This edge is what actually states it.
     //
-    // Sized per load and not per furnace because **a fuel slot holds one
-    // stack**: `runs_per_load`'s third bound is exactly "how many runs one
-    // stack of coal is worth", so `load.coal` is within the cap by
-    // construction and this needs no split of its own.
-    for (index, furnace_slot) in bank.iter().enumerate() {
+    // Measured 2026-09-04 before believing it would move anything, and it
+    // did not: `researched:automation` 28,918, `producing:automation-
+    // science-pack:6` 43,871 and `producing:logistic-science-pack:6` 216,322
+    // on the baseline map are identical with and without it, and
+    // `red_science::more_bots_finish_sooner` stays at 2,682. The take fires at
+    // `max(ore, fuel) + lag` whichever lands last, and on every one of those
+    // plans the *last* of the two is the same action either way; what this
+    // edge changes is that the bot no longer walks to the furnace with ore
+    // alone, which took ten ticks off two non-critical takes on that fixture.
+    // It is kept for the shape rather than the number: at run time the
+    // executor follows these edges, and a furnace loaded by one bot never
+    // sits holding ore and waiting for that same bot's coal.
+    //
+    // **Only the taker's own inserts**, never a shared supplier's. A cross-bot
+    // edge from the taker's fuel to a supplier's insert was measured on the
+    // same plans: makespan identical, and every shared insert 10--30 ticks
+    // later with the supplier standing at the furnace for them -- the fuel
+    // already lands first on those plans, so the edge buys nothing and
+    // serialises two bots for it. Where the shared insert lands first the
+    // fuel's own lag edge (below) already prices the wait exactly.
+    //
+    // Emitted here, before the shared-ore block fills `ore_insert_ids` with
+    // the suppliers' inserts, so the loop cannot reach them by construction.
+    for (index, per_load) in ore_insert_ids.iter().enumerate() {
         if suppliers[index].is_some() {
             continue;
         }
-        for (load, one_load) in furnace_slot.loads.iter().enumerate() {
-            let fuel_id = ctx.ids.next();
-            fuel_ids[index][load] = Some(fuel_id);
-            insert_ids[index][load].push(fuel_id);
-            steps.push(Step::Act(Box::new(fuel_action(
-                fuel_id,
-                &furnace_entity,
-                &furnace_slot.pos,
-                one_load.coal,
-                reach,
-            ))));
+        for (load, ids) in per_load.iter().enumerate() {
+            let Some(fuel_id) = fuel_ids[index][load] else {
+                continue;
+            };
+            for id in ids {
+                steps.push(Step::Link {
+                    from: fuel_id,
+                    to: *id,
+                    lag: 0,
+                });
+            }
         }
     }
 
@@ -7542,6 +7597,46 @@ mod tests {
         );
     }
 
+    /// The taker's own fuel is stated ahead of its own ore: emitted first,
+    /// so it holds the lower id, and linked to the ore insert at lag zero.
+    /// Neither insert satisfies a precondition of the other, so nothing but
+    /// this statement orders them -- see the link's comment in `smelt_steps`
+    /// for the measurement that says the edge is kept for its shape.
+    #[test]
+    fn the_takers_own_fuel_is_stated_ahead_of_its_ore() {
+        let mut s = state(&[BotId(1)]);
+        s.gain(BotId(1), "stone-furnace", 1);
+        let net = expand(
+            &[Goal::Have {
+                item: "iron-plate".into(),
+                count: 2,
+                whose: Holder::Anyone,
+            }],
+            &s,
+            &default_registry(),
+            BotId(1),
+        )
+        .unwrap();
+        let find = |item: &str| {
+            net.actions()
+                .find(|a| matches!(&a.kind, ActionKind::Insert { item: i, .. } if i == item))
+                .unwrap_or_else(|| panic!("expected an insert of {}", item))
+        };
+        let fuel = find("coal");
+        let ore = find("iron-ore");
+        assert!(
+            fuel.id < ore.id,
+            "the fuel load is emitted before the ore insert: {:?} vs {:?}",
+            fuel.id,
+            ore.id
+        );
+        assert!(
+            net.preds(ore.id).contains(&(fuel.id, 0)),
+            "the ore insert waits on the fuel load at lag zero: {:?}",
+            net.preds(ore.id)
+        );
+    }
+
     #[test]
     fn smelting_without_a_furnace_crafts_one_first() {
         let s = state(&[BotId(1)]);
@@ -12474,6 +12569,48 @@ mod owned_gathering {
         assert!(
             checked > 0,
             "no handed fuel load reached a take; this test stopped testing anything"
+        );
+    }
+
+    /// The fuel-before-ore edge never crosses bots. A shared supplier's
+    /// insert is on its own chain; gating it on the taker's fuel was measured
+    /// to move every such insert 10--30 ticks later for no makespan at all
+    /// (see the edge's comment in `smelt_steps`), so the only ore inserts a
+    /// fuel load gates are the ones on the fuel's own chain.
+    #[test]
+    fn a_fuel_load_gates_no_ore_insert_on_another_chain() {
+        let bots = [BotId(1), BotId(2), BotId(3), BotId(4)];
+        let (_, net, _) = rung_one_plan(&bots);
+        let fuels: BTreeSet<ActionId> = net
+            .actions()
+            .filter(|a| a.label.starts_with("fuel the furnace"))
+            .map(|a| a.id)
+            .collect();
+        let mut gated = 0usize;
+        let mut chains_seen = BTreeSet::new();
+        for insert in net
+            .actions()
+            .filter(|a| matches!(&a.kind, ActionKind::Insert { item, .. } if item != "coal"))
+        {
+            chains_seen.insert(net.chain_of(insert.id));
+            for (from, _) in net.preds(insert.id) {
+                if !fuels.contains(&from) {
+                    continue;
+                }
+                assert_eq!(
+                    net.chain_of(from),
+                    net.chain_of(insert.id),
+                    "`{}` is gated by a fuel load on another chain",
+                    insert.label
+                );
+                gated += 1;
+            }
+        }
+        assert!(gated > 0, "no ore insert is gated by a fuel load at all");
+        assert!(
+            chains_seen.len() > 1,
+            "every ore insert sits on one chain; this test cannot tell a \
+             cross-chain edge from a same-chain one"
         );
     }
 }

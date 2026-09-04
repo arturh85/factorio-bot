@@ -114,8 +114,48 @@ impl ActionNetwork {
     ///
     /// A producer is linked to a consumer when any of the producer's effects
     /// `satisfies` any of the consumer's preconditions, unless the edge would
-    /// close a cycle. Candidates are considered in ascending
-    /// `(producer, consumer)` order, so the result is deterministic.
+    /// close a cycle. Candidates are considered in **two passes** — every
+    /// world-scoped pairing first, then every inventory-scoped one — and
+    /// within a pass in ascending `(consumer, producer)` order, so the result
+    /// is deterministic.
+    ///
+    /// # Why the passes, and not one loop
+    ///
+    /// A cycle means the network states both `a` before `b` and `b` before
+    /// `a`, so one of the two edges has to go. Which one is not arbitrary, and
+    /// a single loop got it wrong by construction: it kept whichever edge it
+    /// happened to reach first and dropped the one that closed the loop, which
+    /// is a fact about iteration order rather than about the plan.
+    ///
+    /// The two classes are not equally load-bearing:
+    ///
+    /// * A **world-scoped** edge (`EntityAt`, `Feeds`, `Researched`,
+    ///   `BufferHas`, ...) states something only its producer can make true.
+    ///   Nothing re-derives it and no other action can stand in: drop the edge
+    ///   from `place burner-mining-drill at p` to `fuel the drill at p` and
+    ///   the fuel action becomes *ready* at tick zero and infeasible forever,
+    ///   because no bot can fuel a machine that is not there.
+    /// * An **item** edge is an over-approximation to begin with. Matching is
+    ///   by name and ignores counts (see below), so it orders a consumer after
+    ///   every producer of that item rather than after the ones it was
+    ///   actually sized against. Dropping one may cost ordering the plan did
+    ///   not need, and the stock the consumer was really sized against is
+    ///   still in the inventory the scheduler checks.
+    ///
+    /// So world-scoped edges are laid down while the graph is still free of
+    /// item ordering, and only an item edge can ever be the one a cycle costs.
+    ///
+    /// This is not hypothetical. `researched:logistic-science-pack` on
+    /// `workspace/scripts/map.json` builds a drill-and-furnace cell for its
+    /// 150 iron plates and hand-crafts the drill it needs out of plates it
+    /// gathered *before* the cell existed. Inference cannot see that the
+    /// craft's three plates are not the cell's hundred and fifty, so it linked
+    /// `take 150 iron-plate from the cell` -> `craft 1 burner-mining-drill`,
+    /// and the real `place drill` -> `fuel drill` edge then closed a cycle and
+    /// was dropped. The plan scheduled 297 of its 313 actions and then refused
+    /// with `burner-mining-drill at [-44, -11] does not hold there` — an
+    /// entity nothing had placed, blamed on the chain owner because the owner
+    /// left the action a single candidate.
     ///
     /// Item matching is by name only — both the produced and the required
     /// counts are ignored — so a consumer needing four plates is ordered after
@@ -173,57 +213,68 @@ impl ActionNetwork {
     /// the ground is not made by an action.
     ///
     /// Cost is O(n² · (V+E)): every candidate edge runs a full `validate()`,
-    /// which rebuilds the graph and topologically sorts it. Networks here are
+    /// which rebuilds the graph and topologically sorts it. The second pass
+    /// doubles the pair scan and not the `validate()` count — a pair is only
+    /// linked in the pass its own scope names, and the `validate()` is what
+    /// dominates. Networks here are
     /// expected in the hundreds of actions at most, and inference runs once at
     /// planning time, not per tick. If that stops holding, replace the
     /// validate-and-rollback with a DFS reachability check from `to` to `from`
     /// before pushing the edge.
     pub fn infer_edges(&mut self) {
         let ids: Vec<ActionId> = self.actions.keys().copied().collect();
-        for consumer in &ids {
-            for producer in &ids {
-                if producer == consumer {
-                    continue;
-                }
-                let produces = self.actions[consumer]
-                    .pre
-                    .iter()
-                    .any(|cond| self.actions[producer].eff.iter().any(|e| e.satisfies(cond)));
-                if !produces {
-                    continue;
-                }
-                // Only inventory-scoped, role-scoped pairings may be dropped
-                // across chains: a `HasItem { who: Role }` is re-derived by the
-                // scheduler's per-bot feasibility check, a world-state
-                // condition is not — and neither is a
-                // `HasItem { who: Bound(b) }`, which any bot can satisfy out of
-                // `b`'s inventory and so does not pull the consumer onto the
-                // producer's runner.
-                let world_scoped = self.actions[consumer].pre.iter().any(|cond| {
-                    !matches!(
-                        cond,
-                        Condition::HasItem {
-                            who: Actor::Role,
-                            ..
-                        }
-                    ) && self.actions[producer].eff.iter().any(|e| e.satisfies(cond))
-                });
-                if !world_scoped
-                    && let (Some(p), Some(c)) = (self.chain_of(*producer), self.chain_of(*consumer))
-                    && p != c
-                {
-                    continue;
-                }
-                if self
-                    .edges
-                    .iter()
-                    .any(|e| e.from == *producer && e.to == *consumer)
-                {
-                    continue;
-                }
-                self.link(*producer, *consumer, 0);
-                if self.validate().is_err() {
-                    self.edges.pop();
+        // World-scoped pairings first, then the rest. See this method's doc
+        // for why the order decides which edge a cycle costs.
+        for world_pass in [true, false] {
+            for consumer in &ids {
+                for producer in &ids {
+                    if producer == consumer {
+                        continue;
+                    }
+                    let produces = self.actions[consumer]
+                        .pre
+                        .iter()
+                        .any(|cond| self.actions[producer].eff.iter().any(|e| e.satisfies(cond)));
+                    if !produces {
+                        continue;
+                    }
+                    // Only inventory-scoped, role-scoped pairings may be dropped
+                    // across chains: a `HasItem { who: Role }` is re-derived by the
+                    // scheduler's per-bot feasibility check, a world-state
+                    // condition is not — and neither is a
+                    // `HasItem { who: Bound(b) }`, which any bot can satisfy out of
+                    // `b`'s inventory and so does not pull the consumer onto the
+                    // producer's runner.
+                    let world_scoped = self.actions[consumer].pre.iter().any(|cond| {
+                        !matches!(
+                            cond,
+                            Condition::HasItem {
+                                who: Actor::Role,
+                                ..
+                            }
+                        ) && self.actions[producer].eff.iter().any(|e| e.satisfies(cond))
+                    });
+                    if world_scoped != world_pass {
+                        continue;
+                    }
+                    if !world_scoped
+                        && let (Some(p), Some(c)) =
+                            (self.chain_of(*producer), self.chain_of(*consumer))
+                        && p != c
+                    {
+                        continue;
+                    }
+                    if self
+                        .edges
+                        .iter()
+                        .any(|e| e.from == *producer && e.to == *consumer)
+                    {
+                        continue;
+                    }
+                    self.link(*producer, *consumer, 0);
+                    if self.validate().is_err() {
+                        self.edges.pop();
+                    }
                 }
             }
         }
@@ -459,6 +510,99 @@ mod tests {
         net.link(a, b, 0);
         net.link(b, a, 0);
         assert!(net.validate().is_err());
+    }
+
+    /// A cycle costs an **item** edge, never a world-scoped one.
+    ///
+    /// The shape is `researched:logistic-science-pack`'s, reduced to four
+    /// actions. A drill-and-furnace cell yields 150 iron plates; the drill it
+    /// needs is hand-crafted out of three plates the bot gathered before the
+    /// cell existed. Inference matches items by name and ignores counts, so it
+    /// cannot tell those three plates from the cell's hundred and fifty and
+    /// offers `take` -> `craft` — which, with `place` -> `craft` -> ... already
+    /// standing, makes the real `place drill` -> `fuel drill` edge a cycle.
+    ///
+    /// Ids are chosen so a single ascending pass reaches the item edge first,
+    /// which is exactly how the live plan lost the placement edge: `fuel the
+    /// burner-mining-drill` came back *ready* with no predecessors, was
+    /// infeasible for every bot, and the plan refused with `burner-mining-drill
+    /// at [-44, -11] does not hold there` — an entity nothing had placed.
+    #[test]
+    fn a_cycle_costs_the_item_edge_and_not_the_placement() {
+        let mut id_gen = ActionIdGen::new();
+        let mut net = ActionNetwork::new();
+        let pos = Position::new(-44., -11.);
+        let drill = FactorioEntity {
+            name: "burner-mining-drill".into(),
+            entity_type: "mining-drill".into(),
+            position: pos.clone(),
+            ..Default::default()
+        };
+
+        let craft_drill = net.add(craft(&mut id_gen, "iron-plate", 3, "burner-mining-drill"));
+        let place_drill = net.add(Action {
+            id: id_gen.next(),
+            kind: ActionKind::Place {
+                entity: Box::new(drill.clone()),
+            },
+            pre: vec![Condition::HasItem {
+                who: Actor::Role,
+                item: "burner-mining-drill".into(),
+                count: 1,
+            }],
+            eff: vec![Effect::CreateEntity(Box::new(drill))],
+            duration: 30,
+            pinned: None,
+            label: "place burner-mining-drill".into(),
+        });
+        let fuel_drill = net.add(Action {
+            id: id_gen.next(),
+            kind: ActionKind::Insert {
+                pos: pos.clone(),
+                entity: "burner-mining-drill".into(),
+                slot: crate::action::InventorySlot::Fuel,
+                item: "coal".into(),
+                count: 23,
+            },
+            pre: vec![Condition::EntityAt {
+                pos,
+                name: "burner-mining-drill".into(),
+            }],
+            eff: vec![],
+            duration: 10,
+            pinned: None,
+            label: "fuel the burner-mining-drill".into(),
+        });
+        let take_plates = net.add(mine(&mut id_gen, "iron-plate", 150));
+        // The cell cannot yield until it burns, exactly as `Step::Link` states
+        // it in `produce.rs`.
+        net.link(fuel_drill, take_plates, 0);
+
+        net.infer_edges();
+
+        assert!(
+            net.preds(fuel_drill).iter().any(|(p, _)| *p == place_drill),
+            "the placement that creates the drill must order the fuelling: \
+             nothing else can make `EntityAt` true, and without the edge the \
+             fuelling is ready at tick zero and infeasible forever"
+        );
+        // One of the four edges had to go — that is what a cycle means. Which
+        // of the two item edges pays is not asserted: both are the same
+        // over-approximation (matching ignores counts, so neither can tell the
+        // craft's three plates from the cell's hundred and fifty), and both
+        // are re-derived at scheduling time, where `HasItem { who: Role }` is
+        // re-checked against the running bot's simulated inventory. What
+        // matters is that the edge nothing re-derives is not the one that
+        // paid.
+        let item_edges_kept = [(take_plates, craft_drill), (craft_drill, place_drill)]
+            .into_iter()
+            .filter(|(from, to)| net.preds(*to).iter().any(|(p, _)| p == from))
+            .count();
+        assert_eq!(
+            item_edges_kept, 1,
+            "the cycle had to cost exactly one edge, and it had to be an item one"
+        );
+        assert!(net.validate().is_ok(), "the result is still acyclic");
     }
 
     #[test]

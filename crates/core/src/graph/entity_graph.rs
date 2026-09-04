@@ -496,6 +496,13 @@ impl EntityGraph {
     /// Every enemy structure the model knows of, nearest first, as
     /// `(name, position, distance)` measured from `from`.
     ///
+    /// **Euclidean**, via [`calculate_distance`] — deliberately not
+    /// [`Position::manhattan_distance`], which is what this used at first. A
+    /// nest 200 tiles away diagonally reads as 283 under Manhattan, i.e.
+    /// **further than it is**, and callers use this to decide whether
+    /// somewhere is safe to walk to. That is the dangerous direction to be
+    /// wrong in.
+    ///
     /// Ordered by distance and then by `(x, y)`, never by the backing
     /// `DashMap`'s iteration order, for the same reason
     /// [`EntityGraph::minables_yielding`] sorts: a hash seed must not reach a
@@ -516,7 +523,7 @@ impl EntityGraph {
                 entry
                     .value()
                     .values()
-                    .map(|pos| (name.clone(), pos.clone(), from.distance(pos)))
+                    .map(|pos| (name.clone(), pos.clone(), calculate_distance(from, pos)))
                     .collect::<Vec<_>>()
             })
             .collect();
@@ -4323,7 +4330,7 @@ mod tests {
             extent.tiles
         );
         assert!(
-            extent.tiles < Position::new(0., 0.).distance(&Position::new(-300.5, 400.5)),
+            extent.tiles < Position::new(0., 0.).manhattan_distance(&Position::new(-300.5, 400.5)),
             "Manhattan is strictly larger off the axes, and this must not be it"
         );
     }
@@ -4423,8 +4430,17 @@ mod tests {
         assert_eq!(name, "spitter-spawner");
         assert_eq!(at, near);
         assert!(
-            (distance - from.distance(&near)).abs() < f64::EPSILON,
-            "the distance reported is the distance from the point asked about"
+            (distance - calculate_distance(&from, &near)).abs() < f64::EPSILON,
+            "the distance reported is the EUCLIDEAN distance from the point asked about"
+        );
+        // And specifically not Manhattan. `near` is diagonal, so the two
+        // metrics disagree (11.07 against 14.0) -- which is what makes this
+        // assertion able to catch a revert. Manhattan over-reports a diagonal
+        // by up to 41%, so a nest would read as further away than it is, and
+        // callers use this to decide whether somewhere is safe to walk to.
+        assert!(
+            (distance - from.manhattan_distance(&near)).abs() > 1.0,
+            "a Manhattan answer here would say a nest is further than it is"
         );
     }
 

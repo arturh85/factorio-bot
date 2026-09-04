@@ -509,7 +509,12 @@ pub struct Position {
 }
 
 impl Position {
-    pub fn distance(&self, other: &Position) -> f64 {
+    /// **Manhattan** distance, `|dx| + |dy|` — not Euclidean.
+    ///
+    /// Named explicitly because the old name `distance` was misread twice in
+    /// one day: it made a power pole invisible at 196 tiles (`f5af71bc`) and
+    /// it made every charted nest read as further away than it is.
+    pub fn manhattan_distance(&self, other: &Position) -> f64 {
         self.x.sub(other.x).abs() + self.y.sub(other.y).abs()
     }
 }
@@ -529,7 +534,9 @@ impl std::fmt::Display for Position {
 pub struct Pos(pub i32, pub i32);
 
 impl Pos {
-    pub fn distance(&self, other: &Pos) -> u32 {
+    /// **Manhattan** distance, `|dx| + |dy|` — not Euclidean. See
+    /// [`Position::manhattan_distance`].
+    pub fn manhattan_distance(&self, other: &Pos) -> u32 {
         self.0.abs_diff(other.0) + self.1.abs_diff(other.1)
     }
 }

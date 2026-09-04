@@ -218,7 +218,7 @@ fn a_placement_that_closes_the_last_gap_around_bot_3_is_caught() {
             // that is trapping it.
             let clear_of_wall = west
                 .iter()
-                .all(|tree| tree.position.distance(&evacuation.to) > 0.5);
+                .all(|tree| tree.position.manhattan_distance(&evacuation.to) > 0.5);
             assert!(
                 clear_of_wall,
                 "the escape target {:?} must not sit on the wall that closed the gap",

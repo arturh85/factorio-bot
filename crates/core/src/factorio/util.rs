@@ -383,7 +383,7 @@ pub fn build_entity_path(
         move |(last_last_pos, last_pos, current_pos)| {
             let mut options: Vec<((Pos, Pos, Pos), i32)> = vec![];
             let current_direction = relative_direction(last_pos, current_pos);
-            let last_dist = last_pos.distance(last_last_pos);
+            let last_dist = last_pos.manhattan_distance(last_last_pos);
             for direction in Direction::orthogonal() {
                 // we cannot move in the opposite direction after we have moved
                 if current_pos != last_pos && direction == current_direction.opposite() {
@@ -419,7 +419,7 @@ pub fn build_entity_path(
             }
             options
         },
-        |(_, _, pos)| (pos.distance(&to_position) / 3) as i32,
+        |(_, _, pos)| (pos.manhattan_distance(&to_position) / 3) as i32,
         |(_, _, pos)| *pos == to_position,
     );
     // info!("finished pathfinding");
@@ -443,7 +443,7 @@ pub fn build_entity_path(
                 };
 
                 let distance = if last_pos != pos {
-                    pos.distance(last_pos)
+                    pos.manhattan_distance(last_pos)
                 } else {
                     1
                 };

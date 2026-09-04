@@ -110,6 +110,23 @@ use std::sync::Arc;
 /// `free_area_near` beside an ore patch, not chests found lying about.
 pub const BUFFER_ENTITIES: [&str; 2] = ["stone-furnace", "wooden-chest"];
 
+/// Burner machines whose **fuel slot** is read on every refresh, so a plan
+/// can top a standing machine up for what it asks of it rather than pay for
+/// its coal twice.
+///
+/// Not buffers: nothing is ever withdrawn from one of these, and
+/// `PlanState::from_world` keeps the reading only through `withdraw_slot`,
+/// which has no entry for a mining drill, so listing the drill here can never
+/// make its contents a `Withdraw` candidate. The furnace is in both lists,
+/// for both halves of the same reading.
+///
+/// Measured before this existed, on `run-1788552801-73005`: every drill the
+/// run stood had burned its ten coal within ~16,000 ticks and was `no_fuel`
+/// at every replan after, while the plan built a fresh cell beside it. What
+/// a replan needs to know about a standing cell is what is in its slots, and
+/// the drill's was the one slot nobody asked about.
+pub const FUELLED_ENTITIES: [&str; 2] = ["burner-mining-drill", "stone-furnace"];
+
 pub struct Planner {
     pub rcon: Option<Arc<FactorioRcon>>,
     pub real_world: Arc<FactorioWorld>,
@@ -163,8 +180,9 @@ impl Planner {
     /// dispatch delay rather than by an event that may never come.
     ///
     /// One RCON round trip per call, naming only the entities in
-    /// [`BUFFER_ENTITIES`] that the entity graph already knows about --
-    /// typically a few dozen furnaces over a whole run.
+    /// [`BUFFER_ENTITIES`] and [`FUELLED_ENTITIES`] that the entity graph
+    /// already knows about -- typically a few dozen furnaces and drills over
+    /// a whole run.
     ///
     /// # Staleness is not eliminated, and is not pretended away
     ///
@@ -206,7 +224,8 @@ impl Planner {
         // difference show up somewhere else later.
         let mut wanted: BTreeMap<Pos, RequestEntity> = BTreeMap::new();
         for node in self.real_world.entity_graph.inner_graph().node_weights() {
-            if !BUFFER_ENTITIES.contains(&node.entity_name.as_str()) {
+            let name = node.entity_name.as_str();
+            if !BUFFER_ENTITIES.contains(&name) && !FUELLED_ENTITIES.contains(&name) {
                 continue;
             }
             wanted.insert(

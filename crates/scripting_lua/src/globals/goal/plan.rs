@@ -1343,6 +1343,7 @@ mod tests {
             &state,
             &factorio_bot_core::types::Position::new(0., 0.),
             &spec,
+            1,
         )
         .expect("the fixture has iron ore");
         for (name, position, facing) in [

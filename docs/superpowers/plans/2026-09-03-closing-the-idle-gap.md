@@ -11,6 +11,75 @@ four bots.
 
 ---
 
+## A cell an earlier plan left standing is topped up and drained, not rebuilt
+
+The open end from `bdec88af` — "cells standing from an earlier plan are not
+drained across replans" — root-caused on `run-1788552801-73005` and closed.
+
+**What the record says.** The run stood five cells (drills at `[-10,-33]`,
+`[-14,-34]`, `[-8,-30]`, `[21,-53]`, `[21,-56]`), in plans 1 and 3. Each was
+fuelled with 8–11 coal and every one had **burned it out within ~16,000
+ticks**: at every replan that followed (ticks 141,930; 211,986; 232,935;
+243,921) the standing drills read `no_fuel` — one `no_minable_resources`
+with 3 coal left, the rim cell — and their furnaces `no_ingredients`,
+holding 2, 5, 7 and 2 plates. Plans 5 and 6 then each **hand-mined 44 and 30
+iron ore (27,360 and 24,720 planned mining ticks) and stood one more cell**,
+beside two iron cells standing over roughly 77 and 166 ore (the live world
+reads 143 and 232 under those sites before their takes). The furnace
+leftovers *were* taken — plan 5 opens with `take 5 iron-plate from the
+stone-furnace` and `take 2` — so the `Withdraw` half already worked; what
+nobody did was put ten coal back in the drill. The live run
+(`run-1788559688-08406`) shows the same shape at tick 135,000: two of its
+three drills already `no_fuel`, plus drill 16 at `[-13,-14]` from the red
+prelude, fuelless since the savepoint and ignored by every green plan.
+
+**What in the brief was wrong.** The brief asked for a *renewing source*:
+"count on its future output at the drill's rate for as long as its fuel and
+ore last". At every replan in the data that number is **zero** — the fuel
+is gone long before the batch ends. And "a cell with no fuel is not
+counted" would have excluded every standing cell there was. A standing cell
+is not a source; it is a **placed, unfuelled machine over ore**, worth
+exactly one fuel visit. The other half, "take what its furnace holds now",
+was already in the plan.
+
+**The fix** (`crates/planner/src/method/produce.rs`, `state.rs`,
+`crates/core/src/plan/planner.rs`). `cell_ledger` now admits a drill-on-ore
+feeding a furnace with **no queue entry** — an earlier plan's cell — as a
+live cell with nothing queued and `started_by: None`, provided no tile
+under it is claimed by a hand and no hand-smelt has committed its furnace.
+`drain_steps` tops it up and takes from it exactly as it would a cell this
+plan stood, timing every take from **this plan's own first fuel visit** to
+the drill. The top-up is sized for the job **net of the coal last read in
+each slot** (`PlanState::fuelled`, the `fuel` half of the readings
+`refresh_buffers` already brought back for furnaces; `FUELLED_ENTITIES`
+adds the drill to the query), never less than one coal per machine, because
+the visit is the anchor. Bounds: the ore under the drill
+(`cell_yield`; a dry cell is not in the ledger); fuel is a credit, never a
+count. Offline and for any machine nobody asked about the credit is zero
+and the cell is fuelled in full — the safe direction. The chest-role lesson
+does not arise: a stage-1 cell has no feed chest.
+
+| solo `Have iron-plate N`, fixture with a standing fuelless cell | before | after |
+|---|---|---|
+| 20 | 8 actions / 8,065 (hand-smelt) | **4 / 5,924** (one top-up, one take) |
+| 50 | 21 / 17,687, 1 drill placed | **4 / 13,124**, 0 drills |
+| 100 | 22 / 30,047, 1 drill placed | **5 / 25,497**, 0 drills |
+
+The three baseline goals on the t=0 dump are **unchanged** (136 / 28,023;
+300 / 46,089; 402 / 217,749): a fresh map has no standing cell, and within
+one plan the ledger already worked. Live, the effect lands at the **second
+plan of a milestone and every replan after**: on run 3's shape, plans 5 and
+6 would have refuelled two iron cells for ~20 coal instead of hand-mining
+74 ore and crafting two drills and two furnaces. Not yet measured live.
+
+Two things this does not fix, named: `cells_standing` (the `Producing`
+rate predicate) still counts a fuelless cell as producing; and a standing
+drill's `room` is read off the tile amounts as of chunk delivery, so a cell
+that mined since is over-counted by what it dug — the short take fails
+honestly, as before. Also fixed on the way: `scripting_lua`'s
+`plan_cell` call was one argument behind `bdec88af` and failed
+`--all-targets` clippy on master.
+
 ## The walled-in bot, root-caused: the stand-point is chosen blind, and the fill was too fine (`79f3f9d3`)
 
 Bot 1 walked to place `assembling-machine-1 [31.5, -4.5]` arriving from the

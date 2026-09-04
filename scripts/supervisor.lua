@@ -351,9 +351,45 @@ function supervisor.new(source, opts)
         error("supervisor.new: source must be a function(history) -> goal | nil")
     end
     opts = opts or {}
+    if opts.roster ~= nil and type(opts.roster) ~= "function" then
+        error("supervisor.new: roster must be a function() -> {bot ids}, or nil")
+    end
     return setmetatable({
         source = source,
         bots = opts.bots,
+        -- Who the game has RIGHT NOW, asked before every plan. `nil` keeps
+        -- the roster fixed for the whole run, which is what every caller did
+        -- before this existed and what a test with no game still does.
+        --
+        -- The roster used to be computed once, at construction, and never
+        -- again. A bot that dies keeps its `LuaPlayer` and loses its
+        -- character; `rcon.players()` stops listing it; and every plan made
+        -- for it from then on dispatched work to a bot the game refused,
+        -- action by action, with nothing in the record saying why. That is
+        -- the failure `docs/superpowers/specs/2026-09-04-exploration-design.md`
+        -- names as the prerequisite for sending a bot anywhere near a nest.
+        --
+        -- The function is the driver's, not this loop's, because it is the
+        -- driver that has `rcon` -- and because it may PACE: each call is one
+        -- poll, and a driver whose poll costs a game tick gets the bound
+        -- below in ticks.
+        roster = opts.roster,
+        -- How many polls of `roster` a rostered bot may be missing from
+        -- before it is dropped. Polls, not ticks: this loop has no clock.
+        -- Each poll is at least one RCON round trip, which the game answers
+        -- on a tick, so 800 polls is at least 800 ticks -- past the 600 a
+        -- default character takes to respawn (`respawn_time = 10` s in the
+        -- prototype). A bot back within the bound costs the wait and nothing
+        -- else; one still absent after it is dropped from the roster, with
+        -- `left`/`reason` on the `rerostered` transition saying so.
+        roster_patience = opts.roster_patience or 800,
+        -- The roster this run STARTED with. The only ids a re-roster may ever
+        -- add back: a bot that returns is one that was here, and a client
+        -- that appears mid-run is not picked up, because "the first non-empty
+        -- answer is the roster" is the bug that froze run 30 on `[2]`
+        -- (`docs/superpowers/notes/2026-09-02-bot-one-idle.md`) and this
+        -- must not be a second road to it.
+        _roster_origin = (type(opts.bots) == "table") and { table.unpack(opts.bots) } or nil,
         stall_limit = opts.stall_limit or 3,
         max_iterations = opts.max_iterations or 50,
         -- How many tier-1 recoveries one plan LINEAGE may have before the loop
@@ -452,6 +488,88 @@ end
 
 function Sup:finished()
     return TERMINAL[self.state] == true
+end
+
+-- Which of `wanted` are not in `ids`.
+local function missing_from(ids, wanted)
+    local have = {}
+    for _, id in ipairs(ids) do have[id] = true end
+    local missing = {}
+    for _, id in ipairs(wanted) do
+        if not have[id] then missing[#missing + 1] = id end
+    end
+    return missing
+end
+
+--- Ask the game who it has, and change `self.bots` to match -- within rules.
+--
+-- Returns a change record `{ bots, left, returned, reason }` when the roster
+-- changed, or nil when it did not (or could not be checked). Called before
+-- every plan, and before a tier-1 recovery is accepted, because a schedule
+-- made for a bot that has no character is work the game will refuse step by
+-- step.
+--
+-- Three rules, and each one is a run this project has already lost:
+--
+--   * **Only REMOVE a bot that was rostered and is absent past the bound.**
+--     A death is transient -- the character respawns in 600 ticks -- so an
+--     absent bot is polled `roster_patience` times before it is dropped. A
+--     roster that shrank on one unlucky poll would plan a milestone for three
+--     bots while the fourth stood at spawn ten seconds later.
+--   * **Only RE-ADD a bot that this run started with.** A returning bot is
+--     picked up on the first poll that shows it; a bot that was never in
+--     `_roster_origin` is never added, however many polls list it. See
+--     `_roster_origin`.
+--   * **An empty answer decides nothing.** `rcon.players()` answering `{}`
+--     is every bot dead at once, or the game not answering -- and planning
+--     for nobody is not a plan. The roster is kept and nothing is recorded,
+--     which is the same as before this function existed.
+function Sup:_reroster()
+    if type(self.roster) ~= "function" or type(self.bots) ~= "table" then return nil end
+    local origin = self._roster_origin or self.bots
+    local latest, missing, polls = nil, {}, 0
+    for attempt = 1, math.max(1, self.roster_patience) do
+        polls = attempt
+        local ok, ids = pcall(self.roster)
+        -- By type and by length: a nil crossing the Rust bridge is mlua's
+        -- null sentinel, which is truthy, and an empty list is inconclusive.
+        if ok and type(ids) == "table" and #ids > 0 then
+            latest = ids
+            missing = missing_from(ids, self.bots)
+            if #missing == 0 then break end
+        end
+    end
+    if latest == nil then return nil end
+    local have = {}
+    for _, id in ipairs(latest) do have[id] = true end
+    local kept, left, returned = {}, {}, {}
+    for _, id in ipairs(self.bots) do
+        if have[id] then kept[#kept + 1] = id else left[#left + 1] = id end
+    end
+    local rostered = {}
+    for _, id in ipairs(self.bots) do rostered[id] = true end
+    for _, id in ipairs(origin) do
+        if have[id] and not rostered[id] then returned[#returned + 1] = id end
+    end
+    if #left == 0 and #returned == 0 then return nil end
+    local bots = {}
+    for _, id in ipairs(kept) do bots[#bots + 1] = id end
+    for _, id in ipairs(returned) do bots[#bots + 1] = id end
+    table.sort(bots)
+    -- Never plan for nobody: a roster that would empty stays as it is, and
+    -- the planner's own refusal is the one that names the situation.
+    if #bots == 0 then return nil end
+    local parts = {}
+    if #left > 0 then
+        parts[#parts + 1] = "bot(s) " .. table.concat(left, ", ")
+            .. " had no character for " .. tostring(polls) .. " roster check(s)"
+    end
+    if #returned > 0 then
+        parts[#parts + 1] = "bot(s) " .. table.concat(returned, ", ") .. " came back"
+    end
+    self.bots = bots
+    return { bots = bots, left = left, returned = returned,
+             reason = table.concat(parts, "; ") }
 end
 
 function Sup:history()
@@ -787,6 +905,20 @@ function Sup:step()
     -- No `goal.plan`, no `tracker.observe`, no iteration: this is the same
     -- plan, narrowed.
     if self.state == "recovering" then
+        -- A proposal was made for the roster the plan was made for. If a bot
+        -- has left it since, the remainder would hand that bot its share
+        -- again; drop the proposal and let the planning branch below expand
+        -- against who is actually there. The transition is the roster's, and
+        -- the fresh plan follows on the next step.
+        local change = self:_reroster()
+        if change ~= nil then
+            self._recovery = nil
+            self.state = "planning"
+            return { action = "rerostered", state = "planning",
+                     milestone_index = self.index, bots = change.bots,
+                     left = change.left, returned = change.returned,
+                     reason = change.reason }
+        end
         local proposal = self._recovery
         self._recovery = nil
         self.plan = proposal.plan
@@ -819,6 +951,20 @@ function Sup:step()
         -- different plans from one without.
         if supervisor.is_witness(self.milestone) then
             return self:_witness(self.milestone)
+        end
+
+        -- Who is there to plan for, asked NOW rather than remembered from
+        -- construction. A change is its own transition -- `rerostered`, with
+        -- `bots`/`left`/`returned`/`reason` for `record.roster_changed` -- and
+        -- the plan against the new roster is the next step's. A driver that
+        -- has never heard the word skips it and still gets a plan whose
+        -- `t.bots` says who it was made for.
+        local change = self:_reroster()
+        if change ~= nil then
+            return { action = "rerostered", state = "planning",
+                     milestone_index = self.index, bots = change.bots,
+                     left = change.left, returned = change.returned,
+                     reason = change.reason }
         end
 
         -- Wrapped, and only just: `goal.plan` raises for two different reasons

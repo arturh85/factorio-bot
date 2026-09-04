@@ -782,6 +782,7 @@ def analyse(run_dir: str, freeze_ticks: int = DEFAULT_FREEZE_TICKS) -> dict:
         )
 
     result["vision"] = free_vision(events)
+    result["deaths"] = bot_deaths(events)
 
     placed = load_jsonl(os.path.join(run_dir, "map.jsonl"))
     result["map_present"] = placed.present
@@ -842,6 +843,83 @@ def free_vision(events: list[dict]) -> dict:
         "travelled_at_tick": last.get("travelled_at_tick"),
         "bot_samples": last.get("bot_samples"),
         "unearned_ratio": last.get("unearned_ratio"),
+    }
+
+
+def bot_deaths(events: list[dict]) -> dict:
+    """Every ``bot_died`` / ``bot_respawned`` / ``roster_changed`` in the log.
+
+    Three events, one story: a bot lost its character, got it back, and what
+    the supervisor did about it. Before these existed (2026-09-04) a dead bot
+    was an ordinary stream of failures with no distinguishing kind, and the
+    roster -- computed once at script start -- kept assigning it work.
+
+    Absence is reported as absence. ``present`` is False for a run whose
+    build predates the events, which is **every run archived before
+    2026-09-04**; that is "could not have said", not "nobody died". A run on
+    this build with zero deaths has ``present`` True and empty lists, which is
+    the only reading that actually means no bot died.
+
+    ``no_character`` counts the ``action_settled`` / ``walk_settled`` failures
+    classified as a missing character -- the failures a death explains. It is
+    counted here rather than read off ``deaths`` so the two can disagree: a
+    ``no_character`` refusal with no ``bot_died`` beside it is a bot that had
+    no character for some other reason (the crash-site cutscene, a
+    controller switch), and that is a finding.
+    """
+    deaths = [e for e in events if e.get("kind") == "bot_died"]
+    respawns = [e for e in events if e.get("kind") == "bot_respawned"]
+    changes = [e for e in events if e.get("kind") == "roster_changed"]
+    no_character = 0
+    for e in events:
+        if e.get("kind") in ("action_settled", "walk_settled"):
+            if (e.get("failure") or {}).get("kind") == "no_character":
+                no_character += 1
+    # Pair each death with the next respawn of the same bot, so the stretch
+    # without a character is a number rather than two ticks to subtract.
+    rows: list[dict] = []
+    pending: dict[int, dict] = {}
+    for e in events:
+        kind = e.get("kind")
+        if kind == "bot_died":
+            row = {
+                "bot": e.get("bot"),
+                "died_tick": e.get("tick"),
+                "position": e.get("position"),
+                "cause": e.get("cause"),
+                "cause_type": e.get("cause_type"),
+                "respawn_in": e.get("respawn_in"),
+                "respawned_tick": None,
+                "dead_ticks": None,
+            }
+            rows.append(row)
+            pending[e.get("bot")] = row
+        elif kind == "bot_respawned":
+            row = pending.pop(e.get("bot"), None)
+            if row is not None:
+                row["respawned_tick"] = e.get("tick")
+                row["dead_ticks"] = e.get("tick") - row["died_tick"]
+    # `present` is "at least one of the three events is in the log", and it
+    # is deliberately NOT inferred from anything else: nothing in a record
+    # says which build wrote it, so a run with none of these events is
+    # either a run on which nobody died or a run on a build that could not
+    # have said so, and this tool cannot tell those apart. It says so.
+    present = bool(deaths or respawns or changes)
+    return {
+        "present": present,
+        "deaths": rows,
+        "respawns": len(respawns),
+        "roster_changes": [
+            {
+                "tick": e.get("tick"),
+                "bots": e.get("bots"),
+                "left": e.get("left"),
+                "returned": e.get("returned"),
+                "reason": e.get("reason"),
+            }
+            for e in changes
+        ],
+        "no_character_failures": no_character,
     }
 
 
@@ -1729,6 +1807,39 @@ def report(a: dict, out=sys.stdout, top: int = 12) -> None:
             p("                  decides how big an asterisk it is.")
         p(f"    ({v.get('beats')} measurement(s) in the log; this is the last one)")
 
+    p(hr("  BOT DEATHS AND ROSTER CHANGES"))
+    d = a.get("deaths") or {}
+    if not d.get("present"):
+        nc = d.get("no_character_failures", 0)
+        p("    none recorded. Either no bot died, or this run's build predates the")
+        p("    bot_died / bot_respawned / roster_changed events (2026-09-04) -- and the")
+        p("    record does not say which. On the older build a dead bot was an ordinary")
+        p("    stream of failures with no distinguishing kind, and the roster never")
+        p("    noticed, so absence here is NOT evidence that no bot died.")
+        if nc:
+            p(f"    {nc} failure(s) ARE classified no_character, so this build knows the")
+            p("    wording; a missing character with no death recorded is a cutscene, a")
+            p("    controller switch, or a death the mod did not see.")
+    else:
+        for r in d["deaths"]:
+            pos = r.get("position") or {}
+            where = f"[{pos.get('x')}, {pos.get('y')}]" if pos else "position unrecorded"
+            cause = f"killed by {r['cause']}" if r.get("cause") else "no cause named by the game"
+            back = (f"respawned at tick {r['respawned_tick']} ({r['dead_ticks']} ticks without a character)"
+                    if r.get("respawned_tick") is not None
+                    else "NO RESPAWN RECORDED (still dead at the end, or the run stopped first)")
+            p(f"    bot {r['bot']}  died at tick {r['died_tick']} at {where}, {cause}; "
+              f"respawn_in={r.get('respawn_in')}; {back}")
+        for c in d["roster_changes"]:
+            p(f"    tick {c['tick']:>7}  ROSTER -> {c['bots']}  left={c['left']} returned={c['returned']}")
+            p(f"                  {c['reason']}")
+        nc = d.get("no_character_failures", 0)
+        if nc:
+            p(f"    {nc} action/walk failure(s) classified no_character")
+            if not d["deaths"]:
+                p("    ... with NO death recorded: a character missing for some other reason")
+                p("        (cutscene, controller switch), or a death the mod did not see.")
+
     p(hr("  MILESTONES"))
     if not a["milestones"]:
         p("    none recorded")
@@ -2039,6 +2150,15 @@ def summary_line(a: dict) -> str:
     # how a whole archive gets scanned, and a run's number should not be read
     # off a list without it. `vision=?` is a run that never measured, which is
     # every run before 2026-09-04 -- unknown, not zero.
+    # Deaths in the one-line form: `deaths=N` only when there were any, and
+    # `!roster-changed` when the supervisor dropped or re-added a bot -- a run
+    # whose roster shrank is not comparable to one whose did not, and this is
+    # where somebody scanning the archive would otherwise not see it.
+    d = a.get("deaths") or {}
+    if d.get("deaths"):
+        parts.append(f"deaths={len(d['deaths'])}")
+    if d.get("roster_changes"):
+        parts.append("!roster-changed")
     v = a.get("vision") or {}
     if not v.get("present"):
         parts.append("vision=?")

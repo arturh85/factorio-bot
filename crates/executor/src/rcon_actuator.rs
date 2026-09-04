@@ -179,13 +179,25 @@ impl RconActuator {
         rcon: Arc<FactorioRcon>,
         world: Arc<FactorioWorld>,
     ) -> Result<Self, ActuatorError> {
-        let connected: BTreeSet<PlayerId> = rcon
+        let mut connected: BTreeSet<PlayerId> = rcon
             .connected_players()
             .await
             .map_err(|e| ActuatorError::Rejected(e.to_string()))?
             .into_iter()
             .map(|p| p.player_id)
             .collect();
+        // Plus every player the world has heard from. `connected_players()`
+        // is the mod's `rcon_players`, which lists only players **with a
+        // character** -- so a bot that is dead at the moment a run starts is
+        // absent from it, every one of its actions would fail here as
+        // `UnknownBot` ("has no mapped Factorio player"), and the mod, the
+        // one party that knows *why*, would never be asked. `world.players`
+        // holds every player that has reported a position and loses one on
+        // `on_player_left_game`, which is exactly "connected, with or without
+        // a character". The membership check still refuses a bot the game
+        // has never seen; a dead one goes through to `get_player`'s
+        // `has no character` refusal and is classified as such.
+        connected.extend(world.players.iter().map(|p| *p.key()));
         if connected.is_empty() {
             return Err(ActuatorError::Rejected("no connected players".to_string()));
         }

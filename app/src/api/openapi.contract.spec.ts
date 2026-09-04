@@ -851,6 +851,23 @@ const SCHEMAS: Record<string, SchemaContract> = {
             pocket_tiles: {required: true, type: 'number'},
             searched_tiles: {required: true, type: 'number'}
         },
+        bot_died: {
+            bot: {required: true, type: 'integer'},
+            position: {required: false, ref: 'Position', nullable: true},
+            cause: {required: false, type: 'string', nullable: true},
+            cause_type: {required: false, type: 'string', nullable: true},
+            respawn_in: {required: false, type: 'integer', nullable: true}
+        },
+        bot_respawned: {
+            bot: {required: true, type: 'integer'},
+            position: {required: false, ref: 'Position', nullable: true}
+        },
+        roster_changed: {
+            bots: {required: true, type: 'array'},
+            left: {required: true, type: 'array'},
+            returned: {required: true, type: 'array'},
+            reason: {required: true, type: 'string'}
+        },
         // The free-vision disclosure. Every "unknown" here is nullable and
         // has a counter beside it (`bot_samples`, `model_resource_tiles`)
         // that says which kind of unknown it is -- a null distance with a
@@ -911,6 +928,7 @@ const SCHEMAS: Record<string, SchemaContract> = {
         partial_transfer: true,
         rejected: true,
         timeout: true,
+        no_character: true,
         other: true
     }),
     ActionFailure: objectContract<ActionFailure>({
@@ -928,6 +946,7 @@ const SCHEMAS: Record<string, SchemaContract> = {
         repath_limit: true,
         stalled: true,
         timeout: true,
+        no_character: true,
         other: true
     }),
     WalkFailure: objectContract<WalkFailure>({

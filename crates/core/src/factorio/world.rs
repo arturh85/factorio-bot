@@ -47,6 +47,61 @@ pub struct TeleportEvent {
     pub action_id: Option<ActionId>,
 }
 
+/// The payload of a `"player_died"` writeout: `mods/BotBridge/control.lua`'s
+/// `on_player_died` handler, fired by the game's `on_player_died` event.
+///
+/// A dead player keeps its `LuaPlayer` and loses its `character`; the game
+/// respawns one after `ticks_to_respawn` (600 by default) unless a scenario
+/// says otherwise. Until this event existed nothing on this side could tell a
+/// dead bot from a client that never connected: `get_player` in the mod said
+/// `not connected` for both, and the roster -- computed once at script start --
+/// went on assigning work to a character that was not there. See
+/// `docs/superpowers/specs/2026-09-04-exploration-design.md`, "Enemies".
+///
+/// Every field but `player_id` is optional on the wire, because each is read
+/// under `pcall` in the mod: a death whose cause the game did not name, or
+/// whose respawn timer was not readable, is still a death.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct DeathEvent {
+    pub player_id: PlayerId,
+    /// Where the player was when it died -- the ghost's position, which is
+    /// where the character stood. `None` when the mod could not read one.
+    #[serde(default)]
+    pub position: Option<Position>,
+    /// The name of the entity that killed the player (`medium-worm-turret`,
+    /// `small-biter`, ...), when the game named one.
+    #[serde(default)]
+    pub cause: Option<String>,
+    /// Its prototype type (`turret`, `unit`, ...), when the game named one.
+    #[serde(default)]
+    pub cause_type: Option<String>,
+    /// `LuaPlayer::ticks_to_respawn` as read in the death handler, when the
+    /// game had already set it. `None` is "not readable", never "never".
+    #[serde(default)]
+    pub respawn_in: Option<u32>,
+}
+
+/// The payload of a `"player_respawned"` writeout: the character is back.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct RespawnEvent {
+    pub player_id: PlayerId,
+    /// Where the new character stands. `None` if the mod could not read it.
+    #[serde(default)]
+    pub position: Option<Position>,
+}
+
+/// One entry of the death queue: a bot lost its character, or got one back.
+///
+/// One queue for both rather than two, because the reader
+/// (`record.deaths()`, `crates/scripting_lua`) wants them in the order they
+/// happened, and a bot that died and respawned between two flushes must be
+/// written as a death *then* a respawn.
+#[derive(Debug, Clone, PartialEq)]
+pub enum BotLifeEvent {
+    Died(DeathEvent),
+    Respawned(RespawnEvent),
+}
+
 /// A build the game refused with no cause it was willing to name.
 ///
 /// `mods/BotBridge/control.lua`'s `rcon_place_entity` asks
@@ -626,6 +681,11 @@ pub struct FactorioWorld {
     /// rather than as a direct call, the same shape `actions` already uses
     /// for `action_completed`.
     pub teleports: SyncMutex<Vec<(u64, TeleportEvent)>>,
+    /// Deaths and respawns the mod has reported since the last
+    /// [`FactorioWorld::drain_deaths`], each tagged with the game tick the
+    /// mod stamped on its `writeout` line. Same shape and same reason as
+    /// `teleports`: `OutputParser` pushes, `record.deaths()` drains.
+    pub deaths: SyncMutex<Vec<(u64, BotLifeEvent)>>,
     /// Sites the game has refused a build at, for the life of this world.
     ///
     /// Two readers, which is why it sits here rather than in either of them.
@@ -1026,6 +1086,7 @@ impl FactorioWorld {
             entity_graph,
             flow_graph,
             teleports: SyncMutex::new(Vec::new()),
+            deaths: SyncMutex::new(Vec::new()),
             inventories: DashMap::new(),
             placement_refusals: SyncMutex::new(PlacementRefusals::default()),
             walk_refusals: SyncMutex::new(WalkRefusals::default()),
@@ -1042,6 +1103,26 @@ impl FactorioWorld {
     /// Takes every teleport queued since the last drain, oldest first.
     pub fn drain_teleports(&self) -> Vec<(u64, TeleportEvent)> {
         std::mem::take(&mut *self.teleports.lock())
+    }
+
+    /// Queues a death `OutputParser` just parsed, for
+    /// [`FactorioWorld::drain_deaths`] to pick up.
+    pub fn record_death(&self, tick: u64, event: DeathEvent) {
+        self.deaths.lock().push((tick, BotLifeEvent::Died(event)));
+    }
+
+    /// Queues a respawn `OutputParser` just parsed, behind whatever death
+    /// preceded it.
+    pub fn record_respawn(&self, tick: u64, event: RespawnEvent) {
+        self.deaths
+            .lock()
+            .push((tick, BotLifeEvent::Respawned(event)));
+    }
+
+    /// Takes every death and respawn queued since the last drain, oldest
+    /// first.
+    pub fn drain_deaths(&self) -> Vec<(u64, BotLifeEvent)> {
+        std::mem::take(&mut *self.deaths.lock())
     }
 
     /// Remembers a build the game refused. Returns whether the site was new.
@@ -1442,6 +1523,7 @@ impl<'de> Deserialize<'de> for FactorioWorld {
                     entity_graph,
                     flow_graph,
                     teleports: Default::default(),
+                    deaths: Default::default(),
                     inventories,
                     placement_refusals: SyncMutex::new(placement_refusals),
                     walk_refusals: SyncMutex::new(walk_refusals),
@@ -1491,6 +1573,7 @@ impl Clone for FactorioWorld {
             // empty queue rather than duplicating in-flight teleports across
             // two independent recorders.
             teleports: SyncMutex::new(Vec::new()),
+            deaths: SyncMutex::new(Vec::new()),
             // Knowledge, like `placement_refusals` below and for the same
             // reason: what a chest was last seen holding does not stop being
             // our best reading because the world was cloned. Stale in exactly
@@ -1548,6 +1631,7 @@ mod tests {
             path_requests: Default::default(),
             next_action_id: Default::default(),
             teleports: Default::default(),
+            deaths: Default::default(),
             inventories: Default::default(),
             placement_refusals: Default::default(),
             walk_refusals: Default::default(),

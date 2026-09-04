@@ -667,6 +667,77 @@ pub enum EventKind {
         /// number that was actually used.
         searched_tiles: f64,
     },
+    /// A bot lost its character: the game's `on_player_died`, as the mod
+    /// reported it.
+    ///
+    /// Before this variant, nothing in the record could say a bot had died.
+    /// A dead player keeps its `LuaPlayer` and loses its character, the mod's
+    /// every entry point answered `not connected` for it, and the roster --
+    /// fixed at script start -- kept assigning it work. So a killed bot
+    /// degraded into an ordinary stream of failures with no distinguishing
+    /// kind, the same silent roster degradation run 30 paid for from the
+    /// other direction (`docs/superpowers/notes/2026-09-02-bot-one-idle.md`).
+    /// This event, [`FailureKind::NoCharacter`] and
+    /// [`EventKind::RosterChanged`] are the three halves of the fix.
+    ///
+    /// Written by `record.deaths()` (`crates/scripting_lua`), drained from
+    /// the queue `OutputParser` fills. **No archived run contains one**: the
+    /// nearest charted enemy structure on the benchmark seed is 246 tiles
+    /// out, so the first real instance of this event will be produced by the
+    /// first run that goes there.
+    BotDied {
+        bot: u32,
+        /// Where the character stood when it died, as the mod read the
+        /// ghost's position. `None` when the mod could not read one.
+        position: Option<Position>,
+        /// The entity that did it (`medium-worm-turret`, `small-biter`), when
+        /// the game named one. `None` is "the game named nothing", which it
+        /// does for a death with no attacker.
+        cause: Option<String>,
+        /// Its prototype type (`turret`, `unit`). Null exactly when `cause` is.
+        cause_type: Option<String>,
+        /// `ticks_to_respawn` as it stood the tick after death. The default
+        /// character prototype respawns after 600; `None` means the mod could
+        /// not read the timer, not that the bot will never respawn.
+        respawn_in: Option<u32>,
+    },
+    /// The character is back: the game's `on_player_respawned`.
+    ///
+    /// Pairs with [`EventKind::BotDied`] by `bot`; the gap between the two is
+    /// the stretch during which every action for that bot was refused with
+    /// [`FailureKind::NoCharacter`].
+    BotRespawned {
+        bot: u32,
+        /// Where the new character stands -- the spawn point, ordinarily,
+        /// which is not where the walk in flight was going.
+        position: Option<Position>,
+    },
+    /// The supervisor changed the roster it plans for.
+    ///
+    /// The roster used to be computed once at script start and never again.
+    /// `scripts/supervisor.lua` now re-checks `rcon.players()` before every
+    /// plan: a rostered bot that has had no character for longer than the
+    /// bounded respawn wait is dropped, and one that was dropped and came
+    /// back is picked up again. Written by `record.roster_changed()` from the
+    /// supervisor's `rerostered` transition, so the reader of a run whose
+    /// `plan_created.bots` shrinks from four to three finds the line that
+    /// says why, rather than the silence run 30 left.
+    ///
+    /// **Only removals and returns, never additions.** A bot that was never
+    /// in the roster this run started with is not picked up mid-run, because
+    /// "the first non-empty answer is the roster" is the bug that froze run
+    /// 30 on `[2]`, and re-rostering must not reintroduce it.
+    RosterChanged {
+        /// The roster from here on, ascending.
+        bots: Vec<u32>,
+        /// Bots that were in the roster and are not any more.
+        left: Vec<u32>,
+        /// Bots that had been dropped earlier in this run and are back.
+        returned: Vec<u32>,
+        /// The supervisor's own sentence for why: which bots it waited for,
+        /// for how many checks, and what it found.
+        reason: String,
+    },
     /// How much ground the world model was given, against how much ground a
     /// bot actually covered.
     ///
@@ -1013,6 +1084,21 @@ pub enum FailureKind {
     PartialTransfer,
     Rejected,
     Timeout,
+    /// The bot had no character to act with: dead and waiting to respawn,
+    /// in a cutscene, or under some other controller.
+    ///
+    /// The mod's wording is `player <n> has no character: <why>`, printed by
+    /// `get_player` and the entry points that do not go through it
+    /// (`mods/BotBridge/control.lua`), and by `on_player_died` for the walk,
+    /// mine or craft that was in flight when the character vanished. Until
+    /// it existed a dead bot read as `not connected` -- the wording for a
+    /// client that never joined -- and every one of its failures classified
+    /// as [`FailureKind::Rejected`] or [`FailureKind::Other`].
+    ///
+    /// [`ActionFailure::detail`] carries the `<why>` clause, e.g. `dead,
+    /// respawns in 587 ticks`, so a reader can tell a transient death from a
+    /// cutscene without re-parsing `error`.
+    NoCharacter,
     /// A kind this build does not know, or one not worth a variant yet.
     #[serde(other)]
     Other,
@@ -1103,6 +1189,12 @@ pub enum WalkFailureKind {
     /// `status: "lost"`, and is the one kind here that says nothing at all
     /// about the walk itself.
     Timeout,
+    /// The bot had no character to walk with -- dead and waiting to respawn,
+    /// or otherwise character-less. The mod's `has no character` wording,
+    /// which reaches a walk either from the path request `get_player`
+    /// refused before dispatch, or from `on_player_died` failing the leg in
+    /// flight. Says nothing about the map: no path was searched.
+    NoCharacter,
     /// A kind this build does not know, or one not worth a variant yet.
     #[serde(other)]
     Other,

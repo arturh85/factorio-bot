@@ -2260,4 +2260,248 @@ mod tests {
         assert_eq!(plans, 3);
         assert_eq!(runs, 2);
     }
+
+    // ---- Re-rostering: a bot that died leaves the roster, and comes back --
+
+    /// A harness whose `roster` option answers a scripted sequence of
+    /// `rcon.players()` replies, one per poll. `__roster_polls` counts the
+    /// polls, so a test can see the bounded wait happen rather than infer it.
+    /// Once the sequence is exhausted the last answer repeats, which is what
+    /// a game whose state has settled looks like.
+    fn roster_driver(lua: &Lua, answers: &str, patience: i64) -> (String, i64) {
+        let driver = r#"
+            __roster_answers = ANSWERS
+            __roster_polls = 0
+            local function roster()
+                __roster_polls = __roster_polls + 1
+                return __roster_answers[math.min(__roster_polls, #__roster_answers)]
+            end
+            local sup = supervisor.new(supervisor.list {"a"},
+                { bots = {1, 2, 3, 4}, roster = roster, roster_patience = PATIENCE })
+            local out, guard = {}, 0
+            repeat
+                local t = sup:step()
+                local line = t.action
+                if t.action == "planned" then
+                    line = line .. "(" .. tostring(t.steps) .. ")"
+                elseif t.action == "rerostered" then
+                    line = line .. "{" .. table.concat(t.bots, ",") .. "|left "
+                        .. table.concat(t.left, ",") .. "|back "
+                        .. table.concat(t.returned, ",") .. "}"
+                end
+                out[#out + 1] = line
+                guard = guard + 1
+                if guard > 200 then error("did not terminate") end
+            until sup:finished()
+            __trace = table.concat(out, " ")
+            __bots = table.concat(sup.bots, ",")
+        "#
+        .replace("ANSWERS", answers)
+        .replace("PATIENCE", &patience.to_string());
+        lua.load(&driver).exec().expect("driver runs");
+        let g = lua.globals();
+        (
+            g.get::<String>("__trace").unwrap(),
+            g.get::<i64>("__roster_polls").unwrap(),
+        )
+    }
+
+    /// The default: no `roster` option, and the roster is exactly what it
+    /// was before this existed -- fixed for the run, never asked about.
+    #[test]
+    fn without_a_roster_function_the_roster_is_never_re_checked() {
+        let lua = harness("{10, 0}", "{{success=10}}");
+        let (trace, plans, runs) = drive(&lua, "{bots = {1, 2, 3, 4}}");
+        assert_eq!(trace, "done");
+        assert_eq!((plans, runs), (2, 1));
+    }
+
+    /// **A dead bot is dropped, but only after the bound.** Bot 3 is absent
+    /// from every poll; the loop polls `roster_patience` times before the
+    /// first plan, then plans for `{1, 2, 4}`, and the `rerostered`
+    /// transition names who left. Every later plan is asked once and finds
+    /// nothing to wait for.
+    #[test]
+    fn a_bot_absent_past_the_bound_is_dropped_and_the_transition_says_so() {
+        let lua = harness("{10, 0}", "{{success=10}}");
+        let (trace, polls) = roster_driver(&lua, "{ {1, 2, 4} }", 5);
+        assert_eq!(
+            trace,
+            "acquired rerostered{1,2,4|left 3|back } planned(10) ran satisfied finished"
+        );
+        // 5 polls for the first plan's wait, 1 each for the plan after the
+        // re-roster and the closing empty re-plan.
+        assert_eq!(polls, 5 + 1 + 1);
+        let bots: String = lua.globals().get("__bots").unwrap();
+        assert_eq!(bots, "1,2,4");
+    }
+
+    /// **A bot back within the bound costs the wait and nothing else.** Bot 3
+    /// is missing for two polls and back on the third: no transition, the
+    /// roster is unchanged, and the plan is for all four.
+    #[test]
+    fn a_bot_back_within_the_bound_is_waited_for_and_kept() {
+        let lua = harness("{10, 0}", "{{success=10}}");
+        let (trace, polls) = roster_driver(&lua, "{ {1, 2, 4}, {1, 2, 4}, {1, 2, 3, 4} }", 800);
+        assert_eq!(trace, "acquired planned(10) ran satisfied finished");
+        assert_eq!(
+            polls,
+            3 + 1,
+            "two misses, one hit, one check before the closing re-plan"
+        );
+        let bots: String = lua.globals().get("__bots").unwrap();
+        assert_eq!(bots, "1,2,3,4");
+    }
+
+    /// **A dropped bot that respawns is picked up on the first poll that
+    /// lists it**, and the transition names it under `returned`.
+    #[test]
+    fn a_bot_that_returns_is_re_added_on_the_next_plan() {
+        // Plan 1: bot 3 absent for the whole bound -> dropped. Plan 2 (the
+        // replan after a failed run): bot 3 is back -> re-added.
+        let lua = harness("{10, 6, 0}", "{{failed=1, success=9}, {success=6}}");
+        let (trace, _polls) = roster_driver(
+            &lua,
+            // Absent for the bound (polls 1-3) and for the check before the
+            // first plan (poll 4); back from the check before the second.
+            "{ {1, 2, 4}, {1, 2, 4}, {1, 2, 4}, {1, 2, 4}, {1, 2, 3, 4} }",
+            3,
+        );
+        assert_eq!(
+            trace,
+            "acquired rerostered{1,2,4|left 3|back } planned(10) ran \
+             rerostered{1,2,3,4|left |back 3} planned(6) ran satisfied finished"
+        );
+        let bots: String = lua.globals().get("__bots").unwrap();
+        assert_eq!(bots, "1,2,3,4");
+    }
+
+    /// **A bot that was never rostered is never added.** Player 5 appears in
+    /// every answer; the roster started as `{1, 2, 3, 4}` and stays so, with
+    /// no transition -- "the first non-empty answer is the roster" is the bug
+    /// that froze run 30, and this is the rule that keeps re-rostering from
+    /// being a second road to it.
+    #[test]
+    fn a_bot_the_run_did_not_start_with_is_never_picked_up() {
+        let lua = harness("{10, 0}", "{{success=10}}");
+        let (trace, _polls) = roster_driver(&lua, "{ {1, 2, 3, 4, 5} }", 5);
+        assert_eq!(trace, "acquired planned(10) ran satisfied finished");
+        let bots: String = lua.globals().get("__bots").unwrap();
+        assert_eq!(bots, "1,2,3,4");
+    }
+
+    /// **An empty answer decides nothing.** Every poll answers `{}` -- the
+    /// game not answering, or every bot dead at once -- and the roster is
+    /// kept rather than emptied: planning for nobody is not a plan, and
+    /// dropping four bots on a silence would be run 30 in reverse.
+    #[test]
+    fn an_empty_roster_answer_keeps_the_roster_and_records_nothing() {
+        let lua = harness("{10, 0}", "{{success=10}}");
+        let (trace, polls) = roster_driver(&lua, "{ {} }", 4);
+        assert_eq!(trace, "acquired planned(10) ran satisfied finished");
+        assert_eq!(
+            polls,
+            4 + 4,
+            "the bound is spent on every plan, and nothing is concluded"
+        );
+        let bots: String = lua.globals().get("__bots").unwrap();
+        assert_eq!(bots, "1,2,3,4");
+    }
+
+    /// A roster function that raises is the same as one that answers
+    /// nothing: the roster is kept.
+    #[test]
+    fn a_roster_function_that_raises_keeps_the_roster() {
+        let lua = harness("{10, 0}", "{{success=10}}");
+        let driver = r#"
+            local sup = supervisor.new(supervisor.list {"a"},
+                { bots = {1, 2}, roster = function() error("rcon is down") end,
+                  roster_patience = 2 })
+            repeat sup:step() until sup:finished()
+            __bots = table.concat(sup.bots, ",")
+            __state = sup.state
+        "#;
+        lua.load(driver).exec().expect("driver runs");
+        let bots: String = lua.globals().get("__bots").unwrap();
+        assert_eq!(bots, "1,2");
+        assert_eq!(lua.globals().get::<String>("__state").unwrap(), "done");
+    }
+
+    /// **A recovery is not accepted for a roster that has lost a bot.** The
+    /// tier-1 proposal was made for `{1, 2}`; bot 2 is gone by the time the
+    /// loop would replay it, so the proposal is dropped, the change is
+    /// reported, and the planner is asked again for `{1}` -- rather than the
+    /// remainder handing bot 2 its share of a plan the game would refuse
+    /// step by step.
+    #[test]
+    fn a_recovery_is_dropped_when_the_roster_changed_under_it() {
+        let lua = harness(
+            "{10, 4, 0}",
+            "{{failed=1, success=5, pending=4, recover={why='rescheduled', steps=4}},
+              {success=4}}",
+        );
+        let driver = r#"
+            __roster_polls = 0
+            local answers = { {1, 2}, {1} }
+            local function roster()
+                __roster_polls = __roster_polls + 1
+                -- Present for the first plan's check; gone from the second
+                -- poll on, i.e. by the time the recovery would be replayed.
+                return answers[math.min(__roster_polls, #answers)]
+            end
+            local sup = supervisor.new(supervisor.list {"a"},
+                { bots = {1, 2}, roster = roster, roster_patience = 2 })
+            local out, guard = {}, 0
+            repeat
+                local t = sup:step()
+                local line = t.action
+                if t.action == "planned" then
+                    line = line .. "(" .. tostring(t.steps)
+                        .. (t.recovery and (" " .. t.recovery) or "") .. ")"
+                elseif t.action == "ran" then
+                    line = line .. "(" .. tostring(t.state) .. ")"
+                elseif t.action == "rerostered" then
+                    line = line .. "{" .. table.concat(t.bots, ",") .. "}"
+                end
+                out[#out + 1] = line
+                guard = guard + 1
+                if guard > 200 then error("did not terminate") end
+            until sup:finished()
+            __trace = table.concat(out, " ")
+        "#;
+        lua.load(driver).exec().expect("driver runs");
+        let trace: String = lua.globals().get("__trace").unwrap();
+        assert_eq!(
+            trace,
+            "acquired planned(10) ran(recovering) rerostered{1} planned(4) ran(planning) \
+             satisfied finished"
+        );
+        let plans: i64 = lua.globals().get("__plan_calls").unwrap();
+        assert_eq!(
+            plans, 3,
+            "the recovery was replaced by a real plan for the new roster"
+        );
+        let asks: String = lua
+            .load("return table.concat(__recover_calls, ',')")
+            .eval()
+            .unwrap();
+        assert_eq!(
+            asks, "rescheduled",
+            "the ask was made; its answer was dropped"
+        );
+    }
+
+    /// The roster option is checked at construction, like the source.
+    #[test]
+    fn a_roster_that_is_not_a_function_is_refused_at_construction() {
+        let lua = harness("{}", "{}");
+        let err = lua
+            .load(r#"supervisor.new(supervisor.list {"a"}, { bots = {1}, roster = {1, 2} })"#)
+            .exec()
+            .expect_err("a table is not a roster function");
+        assert!(
+            err.to_string().contains("roster must be a function"),
+            "{err}"
+        );
+    }
 }

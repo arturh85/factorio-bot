@@ -250,8 +250,24 @@ local names = {
     "witness: 5 green packs reach the output chest in 90 s with every bot idle",
 }
 
+-- One poll of who the game has, for the supervisor's re-roster before every
+-- plan. `rcon.players()` lists players WITH a character, so a bot that has
+-- died is absent from it until it respawns (600 ticks by default), and one
+-- that never connected is absent for good. The supervisor tells the two
+-- apart by patience, not by this function: it polls up to `roster_patience`
+-- times before dropping a bot, and each poll here costs the same pacing call
+-- `wait_for_roster` uses, so the bound is in game ticks rather than in how
+-- fast RCON answers. A bot that is back is picked up on the first poll that
+-- lists it -- but only one this run started with; see `supervisor.new`.
+local function current_roster()
+    local ok, ids = pcall(function() return rcon.players() end)
+    pcall(function() rcon.inventory_contents_at({}) end)
+    if ok and type(ids) == "table" then return ids end
+    return nil
+end
+
 local sup = supervisor.new(supervisor.list(goals),
-    { bots = BOTS, stall_limit = 3, max_iterations = 25 })
+    { bots = BOTS, stall_limit = 3, max_iterations = 25, roster = current_roster })
 
 -- The loop is wrapped so a raise still closes the recording. A run that died
 -- part-way is the one most worth opening, and it is no use if it never got a
@@ -279,6 +295,21 @@ repeat
     if t.action == "acquired" then
         record.milestone_started(t.milestone_index, names[t.milestone_index] or "?")
         print("-> " .. (names[t.milestone_index] or "?"))
+    elseif t.action == "rerostered" then
+        -- The roster changed under the run: a bot has had no character past
+        -- the supervisor's respawn wait and was dropped, or one dropped
+        -- earlier is back. Recorded before the plan that follows, so the
+        -- `plan_created.bots` that shrinks has the line explaining it right
+        -- above. Deaths themselves are flushed on the "ran" transition below
+        -- and here too, because the death that caused this re-roster happened
+        -- during the previous batch and may not have been drained yet.
+        local nd = record.deaths()
+        record.roster_changed(t.bots, t.left, t.returned, t.reason)
+        print("   ROSTER CHANGED: now {" .. table.concat(t.bots, ", ") .. "}"
+            .. (#t.left > 0 and (" left: " .. table.concat(t.left, ", ")) or "")
+            .. (#t.returned > 0 and (" returned: " .. table.concat(t.returned, ", ")) or "")
+            .. " -- " .. tostring(t.reason)
+            .. (nd > 0 and (" (+" .. nd .. " death/respawn events)") or ""))
     elseif t.action == "planned" then
         -- `t.recovery` is present when this "plan" is not a plan at all but a
         -- tier-1 recovery of the one before it: the same plan minus what
@@ -326,6 +357,12 @@ repeat
         -- hand.
         local ne = record.enclosures()
         if ne > 0 then print("   WALLED IN: " .. ne .. " bot(s) can no longer reach open ground") end
+        -- The bots that died (and respawned) during this batch. Same cadence
+        -- as the flushes above. A death is what turns a batch's `failed`
+        -- column into a run of `no_character` refusals, and it is the reader
+        -- of the record who needs to see the death beside them.
+        local nd = record.deaths()
+        if nd > 0 then print("   DIED/RESPAWNED: " .. nd .. " bot life event(s) this batch") end
         -- Grouped, because the four trouble counts are two axes and a flat
         -- list of four `x=n` pairs invites exactly the misreading this line
         -- used to produce: `failed` and `lost` name the same distinction for
@@ -396,6 +433,9 @@ record.refusals()
 -- bot unable to move is precisely the run whose frozen bot someone will want to
 -- look up.
 record.enclosures()
+-- And a death: a run that ended because a bot walked into a worm is the run
+-- this event was made for.
+record.deaths()
 
 local id = record.finish(ok and sup.state or "crashed")
 print("RUN FINISHED state=" .. (ok and sup.state or "crashed") .. " id=" .. id)

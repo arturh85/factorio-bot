@@ -104,6 +104,52 @@ Two structural facts explain why nothing fills the idle:
   variant (`Have`, `Researched`, `Produced`, `Producing`, `All`) is
   demand-driven.
 
+## SINGLE-GOAL RUN: 10.52 min, and one collision is the whole remaining gap
+
+`run-1788481380-80843`, roster `[1,2,3,4]`, `automation_speedrun.lua` (one
+goal). **10.52 min game time (37,854 ticks).**
+
+Progression tonight: **21.34 -> 13.76 -> 10.52 min.**
+
+| | tick | makespan |
+|---|---|---|
+| run start | 3,511 | |
+| first plan | 3,797 | **30,268** -> would finish 34,065 = **8.49 min** |
+| forced replan | 15,763 | 25,291 -> finished 41,365 = 10.52 min |
+
+**The ladder hypothesis is confirmed.** The single-goal plan came out at 30,268
+against the offline prediction of 30,077 — a 0.6% match — versus ~45,984 for
+the seven-rung ladder.
+
+### One placement collision cost the target
+
+```
+cannot place item 'stone-furnace' because a character is standing in the
+footprint
+```
+
+A bot stood where another needed to build. The failure forced a replan at tick
+15,763 that **discarded 11,966 ticks of completed progress**.
+
+But for it, the run was on course for **8.49 min planned**; at the 4.6-7.2%
+execution overhead measured on the previous run, that lands around
+**8.9-9.1 min** — at or just under target. **This single defect is the
+difference between meeting the goal and missing it**, which is why it is now
+the top open item rather than a footnote.
+
+A full replan is a disproportionate response to a transient collision, and
+CLAUDE.md already flags a related concern about `run.rs:258` abandoning a
+bot's whole chain on a transient refusal.
+
+### What is now established about where the time goes
+
+- **Execution tracks the plan** (~7%, and 0.6% on the plan/offline comparison).
+  Not the bottleneck.
+- **Planning structure was worth 53%** — fixed by planning one goal.
+- **Transient failures that force replans are expensive** — a mid-run replan
+  discards everything done so far and re-plans from the current world. One cost
+  ~2 minutes.
+
 ## FIRST MEASURED RUN: 13.76 min, and the executor is no longer the problem
 
 `run-1788479942-45523`, roster `[1,2,3,4]` confirmed, all seven rungs

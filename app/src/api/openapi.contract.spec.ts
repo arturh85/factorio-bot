@@ -70,6 +70,7 @@ import type {
     MapKind,
     MapRecord,
     PlannedStep,
+    WaitingStep,
     Position,
     MachineSample,
     NetworkPower,
@@ -770,10 +771,14 @@ const SCHEMAS: Record<string, SchemaContract> = {
             plan: {required: false, arrayOf: 'PlannedStep'}
         },
         // The heartbeat a batch in flight writes, and the only event the
-        // record produces while a plan is executing. Every field is required:
-        // it is written live, so there is no "we did not observe this" case
-        // for any of them -- a counter that could not be read would mean the
-        // log itself could not be read.
+        // record produces while a plan is executing. Every counter is
+        // required: it is written live, so there is no "we did not observe
+        // this" case for any of them -- a counter that could not be read would
+        // mean the log itself could not be read.
+        //
+        // `waiting`/`waiting_total` are the exception, and only because they
+        // are `#[serde(default)]` so a run recorded before they existed still
+        // opens. A live writer always fills them.
         batch_progress: {
             elapsed_ms: {required: true, type: 'integer'},
             total: {required: true, type: 'integer'},
@@ -785,7 +790,9 @@ const SCHEMAS: Record<string, SchemaContract> = {
             walks_dispatched: {required: true, type: 'integer'},
             walks_settled: {required: true, type: 'integer'},
             since_last_dispatch_ms: {required: true, type: 'integer'},
-            bots_in_flight: {required: true, type: 'array'}
+            bots_in_flight: {required: true, type: 'array'},
+            waiting: {required: false, arrayOf: 'WaitingStep'},
+            waiting_total: {required: false, type: 'integer'}
         },
         action_dispatched: {
             id: {required: true, type: 'integer'},
@@ -859,6 +866,21 @@ const SCHEMAS: Record<string, SchemaContract> = {
         deps: {required: true, type: 'array'},
         planned_start: {required: true, type: 'integer'},
         planned_duration: {required: true, type: 'integer'}
+    }),
+    // What the counters cannot say: which step is waiting, for what, and for
+    // how long. `id` and `step_index` are nullable in opposite directions --
+    // an action has the first, a walk the second -- so neither may be read as
+    // "we failed to look it up".
+    WaitingStep: objectContract<WaitingStep>({
+        id: {required: false, type: 'integer', nullable: true},
+        step_index: {required: false, type: 'integer', nullable: true},
+        bot: {required: true, type: 'integer'},
+        action: {required: true, type: 'string'},
+        target: {required: false, ref: 'Position', nullable: true},
+        waiting_on: {required: true, type: 'string'},
+        blocked_by: {required: false, type: 'integer', nullable: true},
+        deadline_tick: {required: false, type: 'integer', nullable: true},
+        waiting_ms: {required: true, type: 'integer'}
     }),
     SatisfiedReason: enumContract<SatisfiedReason>({
         already_satisfied: true,

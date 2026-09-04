@@ -649,6 +649,64 @@ export interface PlannedStep {
 }
 
 /**
+ * One step that is waiting rather than working -- carried on `EventKind`'s
+ * `batch_progress` variant.
+ *
+ * The counters on that event name a bot and never the work. One run had an
+ * action in flight for eleven minutes and the record could show frozen
+ * counters, a bot id and `lost: 0`; identifying the action took a live rcon
+ * query against the running game, which a run that dies mid-batch does not
+ * offer. Nor could the record be joined to find it: a batch's
+ * `action_dispatched` lines are written only after the batch finishes.
+ *
+ * The identity half (`id`, `bot`, `action`, `target`) is deliberately the
+ * same as `action_dispatched`'s, so the two join on `id` with no second
+ * vocabulary to learn.
+ */
+export interface WaitingStep {
+    /** The action id, joinable to `action_dispatched.id` and
+     *  `PlannedStep.id`. `null` for a walk, which has no action id at all --
+     *  a true absence, identified by `bot` + `step_index` instead. */
+    id: number | null;
+    /** Which walk this is in this bot's own slice of the schedule -- the same
+     *  key `walk_dispatched.step_index` uses, and **not** an action id or an
+     *  index into `plan_created.plan`. `null` for an action. */
+    step_index: number | null;
+    bot: number;
+    /** The plan's own label, verbatim -- the same string
+     *  `action_dispatched.action` and `PlannedStep.action` carry. For a walk,
+     *  a description of the walk, since a walk has no label. */
+    action: string;
+    /** The planner's intent, with the same caveats as
+     *  `action_dispatched.target`. `null` for a craft/research. */
+    target: Position | null;
+    /** What it is waiting for: `predecessor`, `background_conflict`,
+     *  `lag_deadline`, `research`, `reply` or `walk`. The three that used to
+     *  be indistinguishable are `predecessor` (blocked on another step),
+     *  `lag_deadline` (serving machine time the plan asked for -- **not a
+     *  fault**, however long) and `reply` (dispatched, and the game has not
+     *  answered).
+     *
+     *  A `reply` past ~360,000 ms is a finding on its own: the RCON layer
+     *  gives a dispatched action 360 seconds and then reports it lost, so a
+     *  longer one means the time went into a path request, an out-of-reach
+     *  move, or the placement retry loop inside the same call. */
+    waiting_on: string;
+    /** The step blocking this one, for `predecessor` and
+     *  `background_conflict`. `null` for the rest. */
+    blocked_by: number | null;
+    /** For `lag_deadline`, the absolute `game.tick` the wait runs until, when
+     *  a predecessor supplied a tick to anchor it to. Compare it to the
+     *  event's own `tick` to see how much of the wait is left. */
+    deadline_tick: number | null;
+    /** Wall-clock milliseconds in this state, measured by the executor when
+     *  it entered the state -- not the beat interval rounded, and not "since
+     *  a heartbeat first noticed it". The clock restarts when the state
+     *  changes. */
+    waiting_ms: number;
+}
+
+/**
  * Why a milestone needed no work -- carried on `EventKind`'s
  * `milestone_satisfied` variant.
  *
@@ -893,6 +951,19 @@ export type EventKind =
           /** Which bots have an action in flight, ascending. Empty is not by
            *  itself a problem -- see `walks_dispatched`. */
           bots_in_flight: number[];
+          /** What each waiting step is waiting for, longest wait first and
+           *  capped at 8 entries. The counters above name a bot; this names
+           *  the work, which is what an eleven-minute silence needed and did
+           *  not have.
+           *
+           *  An empty list means nothing is waiting -- and is **contradicted**
+           *  by `in_flight > 0`, since a dispatched action is by definition
+           *  waiting for its reply. The two come from different writers, so
+           *  that disagreement is a broken reporter rather than a quiet run. */
+          waiting: WaitingStep[];
+          /** How many were waiting before the list was capped. Equal to
+           *  `waiting.length` when nothing was dropped. */
+          waiting_total: number;
       }
     | {
           kind: 'action_dispatched';

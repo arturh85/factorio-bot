@@ -6,7 +6,7 @@
 //! signal per action.
 
 use crate::actuator::{ActionTicks, Actuator, ActuatorError, ActuatorFailure};
-use crate::log::{ExecutionLog, Status};
+use crate::log::{ExecutionLog, Status, WaitKey, WaitKind};
 use crate::occupancy::{Occupancy, inventory_footprint, occupancy, shares_inventory};
 use factorio_bot_core::petgraph::algo::toposort;
 use factorio_bot_core::petgraph::graph::{DiGraph, NodeIndex};
@@ -314,10 +314,27 @@ async fn run_bot_signalled<'a>(
         // action is about to change, and `crates/planner` reasons about that
         // inventory by walking the bot's steps *in order* — see
         // `crate::occupancy` for the two mechanisms that rely on it.
+        //
+        // This is the one wait that is not a plan edge, and the one that makes
+        // a bot look most idle: it has dispatched everything the plan allowed
+        // and is queued behind its own background craft. Recorded against the
+        // step that is blocked, naming the queued action that is blocking it.
+        let conflict = flight
+            .iter()
+            .find(|queued| shares_inventory(&queued.footprint, &footprint))
+            .map(|queued| {
+                WaitGuard::enter(
+                    log,
+                    act_id(step).map_or(WaitKey::Walk(bot, i), WaitKey::Action),
+                    bot,
+                    WaitKind::BackgroundConflict { on: queued.action },
+                )
+            });
         let clear = settle_background(&mut flight, |queued| {
             shares_inventory(&queued.footprint, &footprint)
         })
         .await;
+        drop(conflict);
         if let Err(stop) = clear {
             halt(&mine, stop, &mut flight, senders);
             return;
@@ -563,7 +580,21 @@ async fn run_walk(
         return Ok(());
     };
     lock(log).start_walk(bot, index, to.clone(), step.start, step.end);
-    match act.walk(bot, to.clone(), *min_radius, *radius).await {
+    // Walking is most of the wall clock in these plans, and a bot that is
+    // walking has nothing in flight -- which is the misreading
+    // `EventKind::BatchProgress` already warns about. Naming the destination
+    // here is what turns "in_flight: 0" from a symptom into an answer.
+    let walking = WaitGuard::enter(
+        log,
+        WaitKey::Walk(bot, index),
+        bot,
+        WaitKind::Walk { to: to.clone() },
+    );
+    let outcome = act.walk(bot, to.clone(), *min_radius, *radius).await;
+    // Left before the verdict is written, so nothing can read a settled walk
+    // that is still listed as walking.
+    drop(walking);
+    match outcome {
         Ok(ticks) => {
             // Same order and same reasoning as the action arm: the
             // observation, then the outcome.
@@ -617,7 +648,7 @@ async fn run_action(
     let Some(action) = act_id(step) else {
         return Ok(());
     };
-    if let PredOutcome::Abandoned = await_preds(act, net, action, log, receivers).await {
+    if let PredOutcome::Abandoned = await_preds(act, bot, net, action, log, receivers).await {
         return Err(Halt::ThisStep);
     }
     lock(log).start(action, step.start);
@@ -627,7 +658,20 @@ async fn run_action(
     };
     // `perform` awaits, so the guard is taken and dropped around it, never
     // held across it.
-    match perform(act, bot, &a.kind).await {
+    //
+    // The scope around the dispatch is the one unbounded wait in this file:
+    // nothing here times out a command the game has acknowledged, so an RCON
+    // reply that never comes back looks from outside exactly like an action
+    // that is legitimately taking a long time. `WaitKind::Reply` is what lets
+    // a reader tell "dispatched N minutes ago and still nothing" apart from
+    // "not dispatched yet" -- both of which used to be a frozen counter and a
+    // bot id. The guard is dropped *before* the outcome is written so a
+    // settled action can never be listed as still awaiting its reply.
+    let dispatched = {
+        let _awaiting_reply = WaitGuard::enter(log, WaitKey::Action(action), bot, WaitKind::Reply);
+        perform(act, bot, &a.kind).await
+    };
+    match dispatched {
         Ok(ticks) => {
             // Observation first, then the plan-side outcome: both writes are
             // under the same guard as far as any reader is concerned, and
@@ -710,6 +754,42 @@ fn lock(log: &Mutex<ExecutionLog>) -> std::sync::MutexGuard<'_, ExecutionLog> {
     log.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Holds one [`WaitKind`] open in the log for exactly as long as the executor
+/// is in that state.
+///
+/// # Why a guard and not a pair of calls
+///
+/// Every wait in this file is entered immediately before an `.await` that can
+/// be **cancelled**: `halt` drops whatever is still queued, `drive` drops a
+/// background future the moment the bot stops, and `run_into`'s own future can
+/// be dropped by a cancelled script. A `leave_wait` written after the await
+/// runs on exactly the paths where nothing went wrong -- which would leave the
+/// registry claiming a bot is blocked on a predecessor forever, and a stale
+/// wait is worse than no wait at all. The whole point of this registry is that
+/// a reader can believe it.
+///
+/// `Drop` takes the log guard, which is safe for the same reason
+/// [`LoseTrackOnDrop`]'s is: `leave_wait` is one map removal with no await in
+/// it, and `lock` recovers a poisoned mutex rather than panicking again while
+/// unwinding.
+struct WaitGuard<'a> {
+    log: &'a Mutex<ExecutionLog>,
+    key: WaitKey,
+}
+
+impl<'a> WaitGuard<'a> {
+    fn enter(log: &'a Mutex<ExecutionLog>, key: WaitKey, bot: BotId, kind: WaitKind) -> Self {
+        lock(log).enter_wait(key, bot, kind);
+        WaitGuard { log, key }
+    }
+}
+
+impl Drop for WaitGuard<'_> {
+    fn drop(&mut self) {
+        lock(self.log).leave_wait(self.key);
+    }
+}
+
 /// Publish `Failed` for every action this bot will now never reach, skipping
 /// the ones in `except`.
 ///
@@ -757,17 +837,24 @@ fn publish(senders: &BTreeMap<ActionId, watch::Sender<Status>>, id: ActionId, st
 
 async fn await_preds(
     act: &dyn Actuator,
+    bot: BotId,
     net: &ActionNetwork,
     id: ActionId,
     log: &Mutex<ExecutionLog>,
     receivers: &BTreeMap<ActionId, watch::Receiver<Status>>,
 ) -> PredOutcome {
+    let key = WaitKey::Action(id);
     let mut wait = LagWait::default();
     for (pred, lag) in net.preds(id) {
         let Some(rx) = receivers.get(&pred) else {
             continue;
         };
         let mut rx = rx.clone();
+        // Entered only when we are actually about to block. A predecessor that
+        // has already succeeded costs no entry at all, so the registry lists
+        // waits rather than intentions -- an action that reports nothing here
+        // really is not waiting for anything.
+        let mut blocked: Option<WaitGuard> = None;
         loop {
             // Bind by value so the watch borrow is dropped before the await.
             let status = *rx.borrow_and_update();
@@ -780,10 +867,21 @@ async fn await_preds(
                 Status::Failed | Status::Lost => return PredOutcome::Abandoned,
                 Status::Pending | Status::Running => {}
             }
+            if blocked.is_none() {
+                blocked = Some(WaitGuard::enter(
+                    log,
+                    key,
+                    bot,
+                    WaitKind::Predecessor { on: pred },
+                ));
+            }
             if rx.changed().await.is_err() {
                 return PredOutcome::Abandoned;
             }
         }
+        // Left before the next predecessor is considered, so one key never
+        // holds two waits and the clock restarts on each state it enters.
+        drop(blocked);
         // Read *after* the signal, never before: the settle path writes the
         // observation into the log and only then publishes `Success`, so a
         // waiter that has seen `Success` is guaranteed to find the finish tick
@@ -798,11 +896,25 @@ async fn await_preds(
     // predecessor's own completion signal does not cover that wait, so honour
     // the lag once every predecessor has succeeded.
     if wait.owes_anything() {
+        // The wait the plan asked for, and the one most likely to be
+        // misdiagnosed: a bot serving a 12,240-tick smelt is doing exactly what
+        // it was told, and reads from outside as a bot that has stopped. The
+        // deadline is carried so a reader can see how much of it is left
+        // instead of inferring it.
+        let _lagging = WaitGuard::enter(
+            log,
+            key,
+            bot,
+            WaitKind::LagDeadline {
+                deadline_tick: wait.deadline,
+                largest_lag: wait.largest,
+            },
+        );
         wait_out_lag(act, wait).await;
     }
     // A predecessor's success is not the same fact as its *effect* having
     // landed. See `await_research`.
-    await_research(act, net, id).await;
+    await_research(act, bot, net, id, log).await;
     PredOutcome::Ready
 }
 
@@ -923,7 +1035,13 @@ const RESEARCH_POLL: Duration = Duration::from_millis(100);
 /// dispatches anyway — the action's own verdict is then the report, which is a
 /// far better failure than a bot that never moves again. Same trade, and the
 /// same wording, as [`LAG_CHASE_BUDGET`].
-async fn await_research(act: &dyn Actuator, net: &ActionNetwork, id: ActionId) {
+async fn await_research(
+    act: &dyn Actuator,
+    bot: BotId,
+    net: &ActionNetwork,
+    id: ActionId,
+    log: &Mutex<ExecutionLog>,
+) {
     let Some(action) = net.action(id) else {
         return;
     };
@@ -932,6 +1050,11 @@ async fn await_research(act: &dyn Actuator, net: &ActionNetwork, id: ActionId) {
         _ => None,
     }) {
         let deadline = tokio::time::Instant::now() + RESEARCH_SETTLE_BUDGET;
+        // Lazily, exactly as in `await_preds`: a technology the game already
+        // has costs one question and no entry. This wait is bounded by
+        // `RESEARCH_SETTLE_BUDGET` and so can never be a long silence -- which
+        // is why being able to *rule it out* is what it is worth.
+        let mut waiting: Option<WaitGuard> = None;
         loop {
             match act.technology_researched(tech).await {
                 // Researched, or nobody can say. Neither is a reason to wait:
@@ -943,6 +1066,16 @@ async fn await_research(act: &dyn Actuator, net: &ActionNetwork, id: ActionId) {
             }
             if tokio::time::Instant::now() >= deadline {
                 break;
+            }
+            if waiting.is_none() {
+                waiting = Some(WaitGuard::enter(
+                    log,
+                    WaitKey::Action(id),
+                    bot,
+                    WaitKind::Research {
+                        tech: tech.to_string(),
+                    },
+                ));
             }
             tokio::time::sleep(RESEARCH_POLL).await;
         }
@@ -3761,5 +3894,270 @@ mod tests {
             "the craft was queued once the copper mine finished, and settles a \
              full craft later",
         );
+    }
+
+    // ------------------------------------------------- what a bot is waiting on
+    //
+    // The registry exists because three different silences used to look
+    // identical from outside: a bot blocked on another bot, a bot serving a lag
+    // deadline the plan asked for, and a bot holding a dispatch the game never
+    // answered. In the run that prompted this, one action sat in the third
+    // state for eleven minutes and the record could show frozen counters and a
+    // bot id -- nothing that named the action or said what it was on.
+    //
+    // Every test below asserts a *named* state, never merely that something is
+    // reported: "a field that is always absent" and "a field that is always
+    // `Reply`" are the same defect, and only naming the state catches the
+    // second.
+
+    /// One wait for `key`, or a failure message listing what was actually
+    /// there -- so a broken registry reports what it said instead of a bare
+    /// `unwrap` on `None`.
+    fn wait_for(log: &Mutex<ExecutionLog>, key: WaitKey) -> crate::log::Wait {
+        let waiting = lock(log).waiting();
+        waiting
+            .iter()
+            .find(|w| w.key == key)
+            .cloned()
+            .unwrap_or_else(|| {
+                panic!("no wait recorded for {key:?}; the registry holds {waiting:#?}")
+            })
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_bot_blocked_on_another_bots_action_names_the_action_and_the_bot() {
+        // Bot 0 is mining iron slowly; bot 1's copper mine has an edge from it
+        // and cannot start. Before this registry both bots reported the same
+        // nothing: bot 1's action was `Pending`, which is also what an action
+        // nobody has reached says.
+        let mut script = Script::default();
+        script.mine_delay_ms.insert("iron-ore".to_string(), 1_000);
+        let act = RecordingAct::new(script);
+        let (net, sched) = cross_bot_fixture(0);
+
+        let progress = Mutex::new(ExecutionLog::default());
+        let running = run_into(&act, &sched, &net, &progress);
+        tokio::pin!(running);
+        let stalled = tokio::time::timeout(Duration::from_millis(500), &mut running).await;
+        assert!(stalled.is_err(), "the run should still be in progress");
+
+        let blocked = wait_for(&progress, WaitKey::Action(second_action_id()));
+        assert_eq!(
+            blocked.bot,
+            BotId(1),
+            "the bot that is stuck, not the one it waits for"
+        );
+        assert_eq!(
+            blocked.kind,
+            WaitKind::Predecessor {
+                on: first_action_id()
+            },
+            "the whole point is naming what it is waiting for"
+        );
+        assert_eq!(blocked.kind.name(), "predecessor");
+
+        // And the bot that *is* working is reported as working, on the one
+        // state that is unbounded. Asserting both in one test is deliberate:
+        // a registry that reported everything as `Reply` would satisfy either
+        // half alone.
+        let working = wait_for(&progress, WaitKey::Action(first_action_id()));
+        assert_eq!(working.bot, BotId(0));
+        assert_eq!(working.kind, WaitKind::Reply);
+        assert!(
+            working.elapsed >= Duration::from_millis(400),
+            "the elapsed is measured from the dispatch, not from whenever a \
+             heartbeat first noticed it: got {:?}",
+            working.elapsed
+        );
+
+        within_deadline(running)
+            .await
+            .expect("the run should have started");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_bot_serving_a_lag_edge_says_so_rather_than_looking_like_a_lost_reply() {
+        // The distinction that decides whether a run is stuck or obedient. A
+        // 600-tick lag at 60 ticks/second is ten seconds during which bot 1
+        // dispatches nothing and settles nothing -- exactly the shape of the
+        // eleven-minute silence, and completely different in cause.
+        let act = RecordingAct::new(Script::default());
+        let (net, sched) = cross_bot_fixture(600);
+
+        let progress = Mutex::new(ExecutionLog::default());
+        let running = run_into(&act, &sched, &net, &progress);
+        tokio::pin!(running);
+        let stalled = tokio::time::timeout(Duration::from_millis(500), &mut running).await;
+        assert!(stalled.is_err(), "the lag wait should still be running");
+
+        let lagging = wait_for(&progress, WaitKey::Action(second_action_id()));
+        assert_eq!(lagging.bot, BotId(1));
+        assert_eq!(lagging.kind.name(), "lag_deadline");
+        let WaitKind::LagDeadline { largest_lag, .. } = lagging.kind else {
+            panic!("expected a lag deadline, got {:?}", lagging.kind);
+        };
+        assert_eq!(
+            largest_lag, 600,
+            "the size of the wait the plan asked for, so a reader can see how \
+             much of it is left"
+        );
+
+        within_deadline(running)
+            .await
+            .expect("the run should have started");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_bot_queued_behind_its_own_background_craft_says_which_craft() {
+        // The state that looks most like an idle bot: everything the plan
+        // allowed has been dispatched, and the next step shares an item with a
+        // craft the bot walked away from. It is not a plan edge, so nothing in
+        // the network explains it either.
+        let (net, sched) = craft_then_mine_fixture("stone-furnace", "stone", "stone", false);
+        let act = RecordingAct::new(background_script());
+
+        let progress = Mutex::new(ExecutionLog::default());
+        let running = run_into(&act, &sched, &net, &progress);
+        tokio::pin!(running);
+        let stalled = tokio::time::timeout(Duration::from_millis(500), &mut running).await;
+        assert!(stalled.is_err(), "the craft should still be in flight");
+
+        let blocked = wait_for(&progress, WaitKey::Action(second_action_id()));
+        assert_eq!(
+            blocked.kind,
+            WaitKind::BackgroundConflict {
+                on: first_action_id()
+            },
+            "named as the bot waiting on itself, not as a plan edge"
+        );
+
+        within_deadline(running)
+            .await
+            .expect("the run should have started");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_walking_bot_is_reported_as_walking_and_names_where() {
+        // `EventKind::BatchProgress` already warns that a batch whose every bot
+        // is walking reports `in_flight: 0` and reads as four idle bots. This
+        // is the entry that answers it.
+        let mut script = Script::default();
+        script.walk_delay_ms.insert(BotId(0), 1_000);
+        let act = RecordingAct::new(script);
+        let (net, sched) = walk_then_mine_fixture();
+
+        let progress = Mutex::new(ExecutionLog::default());
+        let running = run_into(&act, &sched, &net, &progress);
+        tokio::pin!(running);
+        let stalled = tokio::time::timeout(Duration::from_millis(500), &mut running).await;
+        assert!(stalled.is_err(), "the walk should still be running");
+
+        let walking = wait_for(&progress, WaitKey::Walk(BotId(0), 0));
+        assert_eq!(walking.bot, BotId(0));
+        assert_eq!(walking.kind.name(), "walk");
+        let WaitKind::Walk { to } = &walking.kind else {
+            panic!("expected a walk, got {:?}", walking.kind);
+        };
+        assert_eq!(*to, Position::new(10., 10.));
+
+        within_deadline(running)
+            .await
+            .expect("the run should have started");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_finished_run_leaves_nothing_waiting() {
+        // A stale entry is worse than no entry: it would report a bot as
+        // blocked on a predecessor for as long as the log survives, and a
+        // reader who believed it would diagnose a finished run as a stuck one.
+        let act = RecordingAct::new(Script::default());
+        let (net, sched) = cross_bot_fixture(0);
+        let log = within_deadline(run(&act, &sched, &net))
+            .await
+            .expect("the run should have started");
+        assert!(
+            log.waiting().is_empty(),
+            "the run is over, so nothing is waiting: {:#?}",
+            log.waiting()
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_run_dropped_mid_dispatch_leaves_nothing_waiting() {
+        // The cancellation half, and the reason every wait is held by a guard
+        // rather than by a `leave_wait` after the await. The same fixture as
+        // `a_run_dropped_mid_dispatch_stops_reporting_its_actions_as_running`,
+        // asking the same question of the registry that that one asks of the
+        // statuses.
+        let mut script = Script::default();
+        script.mine_delay_ms.insert("copper-ore".to_string(), 1_000);
+        let act = RecordingAct::new(script);
+        let (net, sched) = cross_bot_fixture(0);
+
+        let progress = Mutex::new(ExecutionLog::default());
+        {
+            let running = run_into(&act, &sched, &net, &progress);
+            tokio::pin!(running);
+            let stalled = tokio::time::timeout(Duration::from_millis(500), &mut running).await;
+            assert!(stalled.is_err(), "the run should still be in progress");
+            assert!(
+                !lock(&progress).waiting().is_empty(),
+                "while the run is alive something really is waiting, or this \
+                 test proves nothing"
+            );
+        }
+        assert!(
+            lock(&progress).waiting().is_empty(),
+            "nobody is following this run any more, so nothing is waiting on \
+             anything: {:#?}",
+            lock(&progress).waiting()
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_registry_and_the_statuses_cannot_disagree_about_what_is_in_flight() {
+        // The cross-check that makes a broken registry detectable rather than
+        // merely wrong. `Status::Running` and a `reply` wait are written by
+        // different code paths for the same fact; a run where the counts
+        // diverge is one where this stopped being maintained, which is how
+        // every other observability hole in this project has failed.
+        let mut script = Script::default();
+        script.mine_delay_ms.insert("iron-ore".to_string(), 1_000);
+        script.mine_delay_ms.insert("copper-ore".to_string(), 1_000);
+        let act = RecordingAct::new(script);
+        let (net, sched) = cross_bot_fixture(0);
+
+        let progress = Mutex::new(ExecutionLog::default());
+        let running = run_into(&act, &sched, &net, &progress);
+        tokio::pin!(running);
+        let stalled = tokio::time::timeout(Duration::from_millis(500), &mut running).await;
+        assert!(stalled.is_err(), "the run should still be in progress");
+
+        // Both counts read under one guard, which is then released before the
+        // run is awaited again -- a `MutexGuard` may not be held across an
+        // await, and this is the same `std::sync::Mutex` the executor writes
+        // into from four bot futures at a time.
+        let (in_flight, replies) = {
+            let seen = lock(&progress);
+            let in_flight = net
+                .actions()
+                .filter(|a| seen.status(a.id) == Status::Running)
+                .count();
+            let replies = seen
+                .waiting()
+                .iter()
+                .filter(|w| w.kind == WaitKind::Reply)
+                .count();
+            (in_flight, replies)
+        };
+        assert_eq!(in_flight, 1, "exactly one action is dispatched here");
+        assert_eq!(
+            replies, in_flight,
+            "every dispatched action must have a reply wait and vice versa"
+        );
+
+        within_deadline(running)
+            .await
+            .expect("the run should have started");
     }
 }

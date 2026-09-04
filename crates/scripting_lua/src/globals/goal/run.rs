@@ -17,10 +17,10 @@ use super::{ActuatorFactory, goal_error, lock};
 use crate::globals::record::LiveRecord;
 use crate::lua_runner::{PendingWork, ReplaySink};
 use factorio_bot_core::mlua::prelude::*;
-use factorio_bot_core::record::EventKind;
 use factorio_bot_core::record::map::{EntitySnapshot, Placement};
+use factorio_bot_core::record::{EventKind, MAX_WAITING_REPORTED, WaitingStep};
 use factorio_bot_core::tokio::sync::watch;
-use factorio_bot_executor::{Actuator, ExecutionLog, Replay, Status, run_into};
+use factorio_bot_executor::{Actuator, ExecutionLog, Replay, Status, WaitKey, WaitKind, run_into};
 use factorio_bot_planner::{ActionNetwork, Schedule, StepKind};
 use factorio_bot_scripting::OutputSink;
 use std::sync::{Arc, Mutex};
@@ -557,6 +557,98 @@ struct BatchSnapshot {
     walks_dispatched: u32,
     walks_settled: u32,
     bots_in_flight: Vec<u32>,
+    /// See [`WaitingStep`]. Longest wait first, capped at
+    /// [`MAX_WAITING_REPORTED`].
+    waiting: Vec<WaitingStep>,
+    /// The count before the cap was applied.
+    waiting_total: u32,
+}
+
+/// Turns the executor's wait registry into the record's [`WaitingStep`]s.
+///
+/// # Why the label comes from the network and the bot from the registry
+///
+/// An `Action` says what to do and knows nothing about who does it; the
+/// scheduler is the only thing that assigns work to a bot, and the executor
+/// wrote the bot down when it entered the wait. So the two halves of a step's
+/// identity come from two different places, exactly as they do in
+/// [`BatchSnapshot::read`]'s `bots_in_flight`.
+///
+/// # An action the network does not hold still gets an entry
+///
+/// It is about to be failed by `run_action` as "action not in network", and a
+/// row with an empty label still names the id, the bot and the state -- which
+/// is strictly more than the counters said. Dropping it would make the one
+/// broken step the only invisible one.
+fn waiting_steps(net: &ActionNetwork, log: &ExecutionLog) -> (Vec<WaitingStep>, u32) {
+    let mut all: Vec<WaitingStep> = log
+        .waiting()
+        .into_iter()
+        .map(|wait| {
+            let (id, step_index, action, target) = match wait.key {
+                WaitKey::Action(id) => {
+                    let held = net.action(id);
+                    (
+                        Some(id.0),
+                        None,
+                        held.map(|a| a.label.clone()).unwrap_or_default(),
+                        held.and_then(|a| a.kind.target_position()),
+                    )
+                }
+                // A walk has no label of its own -- the scheduler emits it,
+                // not the planner -- so one is written here. It names the
+                // destination because that is the only thing a walk is.
+                WaitKey::Walk(_, index) => {
+                    let to = match &wait.kind {
+                        WaitKind::Walk { to } => Some(to.clone()),
+                        _ => None,
+                    };
+                    (
+                        None,
+                        u32::try_from(index).ok(),
+                        match &to {
+                            Some(to) => format!("walk to {to}"),
+                            None => "walk".to_string(),
+                        },
+                        to,
+                    )
+                }
+            };
+            WaitingStep {
+                id,
+                step_index,
+                bot: u32::from(wait.bot.0),
+                action,
+                target,
+                waiting_on: wait.kind.name().to_string(),
+                blocked_by: match &wait.kind {
+                    WaitKind::Predecessor { on } | WaitKind::BackgroundConflict { on } => {
+                        Some(on.0)
+                    }
+                    _ => None,
+                },
+                deadline_tick: match &wait.kind {
+                    WaitKind::LagDeadline { deadline_tick, .. } => *deadline_tick,
+                    _ => None,
+                },
+                waiting_ms: u64::try_from(wait.elapsed.as_millis()).unwrap_or(u64::MAX),
+            }
+        })
+        .collect();
+    let total = u32::try_from(all.len()).unwrap_or(u32::MAX);
+    // Longest first, so the entry a reader is hunting for is the one that
+    // survives the cap. The tie-break is on the identity rather than left to
+    // the sort, so two heartbeats of the same instant order the same way and a
+    // diff between them shows what changed rather than what got shuffled.
+    all.sort_by(|a, b| {
+        b.waiting_ms
+            .cmp(&a.waiting_ms)
+            .then(a.id.cmp(&b.id))
+            .then(a.bot.cmp(&b.bot))
+            .then(a.step_index.cmp(&b.step_index))
+    });
+    all.truncate(MAX_WAITING_REPORTED);
+    (all, total)
 }
 
 impl BatchSnapshot {
@@ -581,6 +673,8 @@ impl BatchSnapshot {
             walks_dispatched: 0,
             walks_settled: 0,
             bots_in_flight: Vec::new(),
+            waiting: Vec::new(),
+            waiting_total: 0,
         };
         let mut in_flight: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
         for action in net.actions() {
@@ -614,6 +708,7 @@ impl BatchSnapshot {
             }
         }
         snap.bots_in_flight = in_flight.into_iter().collect();
+        (snap.waiting, snap.waiting_total) = waiting_steps(net, &log);
         for (_bot, _step, walk) in log.walks() {
             snap.walks_dispatched = snap.walks_dispatched.saturating_add(1);
             if !matches!(walk.status, Status::Pending | Status::Running) {
@@ -703,17 +798,38 @@ async fn beat_batch_progress(
         // run that is not are exactly the two things a watcher cannot tell
         // apart, and printing only one of them would leave the other silent
         // again.
+        // Narrated as well as recorded, because the record is read afterwards
+        // and this is read while it happens -- and "which action, and for how
+        // long" is the question a watcher asks first. It is a description, not
+        // a judgement: `waiting on a predecessor for 40s` and `awaiting a reply
+        // for 40s` are printed identically, and which of them is a problem is
+        // left to the person reading.
+        let longest = snap.waiting.first().map(|w| {
+            format!(
+                " -- longest wait: bot {} {} on {} for {}s",
+                w.bot,
+                if w.action.is_empty() {
+                    "step".to_string()
+                } else {
+                    w.action.clone()
+                },
+                w.waiting_on,
+                w.waiting_ms / 1000,
+            )
+        });
+        let longest = longest.unwrap_or_default();
         if snap.dispatched == 0 {
             factorio_bot_core::paris::warn!(
-                "<bright-red>nothing dispatched</> after {}s: {} planned steps, 0 dispatched, {} walks",
+                "<bright-red>nothing dispatched</> after {}s: {} planned steps, 0 dispatched, {} walks{}",
                 elapsed_ms / 1000,
                 snap.total,
                 snap.walks_dispatched,
+                longest,
             );
         } else {
             factorio_bot_core::paris::info!(
                 "executing: <bright-blue>{}/{}</> dispatched, {} settled ({} failed, {} lost), \
-                 {} in flight, {} walks -- {}s in",
+                 {} in flight, {} walks -- {}s in{}",
                 snap.dispatched,
                 snap.total,
                 snap.settled,
@@ -722,6 +838,7 @@ async fn beat_batch_progress(
                 snap.in_flight,
                 snap.walks_dispatched,
                 elapsed_ms / 1000,
+                longest,
             );
         }
         live.record(EventKind::BatchProgress {
@@ -736,6 +853,8 @@ async fn beat_batch_progress(
             walks_settled: snap.walks_settled,
             since_last_dispatch_ms,
             bots_in_flight: snap.bots_in_flight,
+            waiting: snap.waiting,
+            waiting_total: snap.waiting_total,
         });
     }
 }
@@ -2722,6 +2841,95 @@ mod tests {
         assert!(
             beat["elapsed_ms"].as_u64().unwrap_or(0) >= 30_000,
             "elapsed_ms is wall clock since the batch began: {beat}"
+        );
+
+        gate_tx.send(true).expect("gate has a receiver");
+        join.await.expect("the run's task finished");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_heartbeat_names_the_work_that_is_in_flight_not_only_the_bot() {
+        // The gap this closes. On 2026-09-04 an action sat in flight for
+        // eleven minutes and the record could show frozen counters, a bot id
+        // and `lost: 0` -- and no way at all to say *which* action, because a
+        // batch's `action_dispatched` lines are not written until `goal.run`
+        // returns. Identifying it took a live rcon query against the running
+        // game, which a run that dies mid-batch does not offer.
+        let (live, _tmp, run_dir) = live_record();
+        let (gate_tx, gate_rx) = watch::channel(false);
+        let (entered_tx, mut entered_rx) = mpsc::unbounded_channel();
+        let stub = StubActuator {
+            entered: Some(entered_tx),
+            gate: Some(gate_rx),
+            ..StubActuator::new(Failure::Never)
+        };
+        let (net, sched) = mining_plan();
+        let (_run, join) = spawn(
+            Arc::new(stub),
+            sched,
+            net,
+            ExecutionLog::default(),
+            None,
+            None,
+            Some(live),
+        );
+
+        entered_rx.recv().await.expect("an action was dispatched");
+        factorio_bot_core::tokio::time::sleep(BATCH_PROGRESS_INTERVAL + Duration::from_secs(5))
+            .await;
+
+        let beats = batch_progress_lines(&run_dir);
+        let beat = beats.first().expect("one heartbeat");
+        let waiting = beat["waiting"]
+            .as_array()
+            .expect("waiting is an array")
+            .clone();
+        // The failure mode this assertion exists for is a field that is always
+        // empty -- which is exactly how four earlier checks in this project
+        // reported nothing while broken.
+        assert!(
+            !waiting.is_empty(),
+            "something is in flight, so something must be reported as waiting: {beat}"
+        );
+        assert_eq!(
+            beat["waiting_total"].as_u64(),
+            Some(waiting.len() as u64),
+            "nothing was truncated here, so the count must match: {beat}"
+        );
+        let reply = waiting
+            .iter()
+            .find(|w| w["waiting_on"].as_str() == Some("reply"))
+            .unwrap_or_else(|| panic!("a dispatched action awaits its reply: {beat}"));
+        assert!(
+            reply["id"].as_u64().is_some(),
+            "the action is named by id, which is what joins it to the plan: {reply}"
+        );
+        assert!(
+            reply["bot"].as_u64().is_some(),
+            "and to the bot holding it: {reply}"
+        );
+        let label = reply["action"].as_str().unwrap_or_default();
+        assert!(
+            !label.is_empty(),
+            "the plan's own label is what makes this readable without a join: {reply}"
+        );
+        assert!(
+            reply["waiting_ms"].as_u64().unwrap_or(0) >= 30_000,
+            "how long it has been outstanding, measured by the executor rather              than inferred from the beat interval: {reply}"
+        );
+        // Not a verdict: nothing in the writer decided this was too long, and
+        // the entry says which state it is in rather than whether it is stuck.
+        assert_eq!(reply["waiting_on"].as_str(), Some("reply"));
+
+        // The cross-check the record can now make on itself.
+        let in_flight = beat["in_flight"].as_u64().unwrap_or(0);
+        let replies = waiting
+            .iter()
+            .filter(|w| w["waiting_on"].as_str() == Some("reply"))
+            .count() as u64;
+        assert_eq!(
+            replies, in_flight,
+            "`in_flight` and the `reply` waits come from different writers; a              disagreement between them is a broken reporter, not a quiet run: {beat}"
         );
 
         gate_tx.send(true).expect("gate has a receiver");

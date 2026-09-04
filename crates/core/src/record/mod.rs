@@ -275,6 +275,58 @@ pub enum EventKind {
         /// Which bots have an action in flight, ascending. Empty is not by
         /// itself a problem -- see `walks_dispatched`.
         bots_in_flight: Vec<u32>,
+        /// **What each waiting step is waiting for**, longest wait first.
+        ///
+        /// # The counters name a bot; this names the work
+        ///
+        /// Every field above is a number or a bot id, and that was enough to
+        /// prove a run was alive and not enough to say what it was doing. On
+        /// `2026-09-04` one action sat in flight for **eleven minutes**: the
+        /// heartbeats showed frozen counters, `bots_in_flight: [n]`, `lost: 0`,
+        /// and nothing else. Identifying which action it was needed a live
+        /// `factorio-bot rcon -s localhost` query against the running game,
+        /// and even then only by inference -- and a run that dies mid-batch
+        /// cannot be queried at all, so the action would never have been
+        /// identified. That is not a hypothetical: **a batch's
+        /// `action_dispatched` lines are written only after `goal.run`
+        /// returns**, so while a batch is in flight the dispatches are not in
+        /// the file yet. In that run the newest recorded dispatch was tick
+        /// 258,893 while the record's own latest tick was 260,531.
+        ///
+        /// So each entry names the step (id, bot, the plan's own label, the
+        /// target), the state it is in, and how long it has been in it -- all
+        /// read from `factorio_bot_executor::ExecutionLog`'s wait registry,
+        /// which the executor maintains as it enters and leaves each state.
+        ///
+        /// # Still no verdict
+        ///
+        /// `waiting_ms` is a measurement and nothing here compares it against
+        /// anything. A 12,000-tick smelt and a reply that will never come both
+        /// appear as a growing number; what separates them is
+        /// [`WaitingStep::waiting_on`], not a threshold this writer applied.
+        ///
+        /// # Bounded, and it says when it truncated
+        ///
+        /// At most [`MAX_WAITING_REPORTED`] entries, longest wait first, with
+        /// `waiting_total` giving the true count. The longest wait is
+        /// therefore always present, which is the one a reader is looking for.
+        ///
+        /// # An empty list is a claim, and a checkable one
+        ///
+        /// Empty means nothing is waiting. It is **contradicted** by
+        /// `in_flight > 0`, because a dispatched action is by definition
+        /// waiting for its reply, and those two numbers come from different
+        /// writers -- the statuses and the wait registry. A heartbeat with
+        /// `in_flight: 3` and an empty `waiting` is not a quiet run, it is a
+        /// broken reporter, and it is the one shape of failure this project
+        /// has hit four separate times.
+        #[serde(default)]
+        waiting: Vec<WaitingStep>,
+        /// How many steps were waiting in total, before the list above was
+        /// truncated to [`MAX_WAITING_REPORTED`]. Equal to `waiting.len()`
+        /// whenever nothing was dropped.
+        #[serde(default)]
+        waiting_total: u32,
     },
     ActionDispatched {
         id: u32,
@@ -641,6 +693,100 @@ pub struct PlannedStep {
     /// already absolute.
     pub planned_start: u64,
     pub planned_duration: u64,
+}
+
+/// How many [`WaitingStep`]s one [`EventKind::BatchProgress`] carries at most.
+///
+/// A batch has one exclusive step per bot plus whatever background work each
+/// bot queued, so a four-bot plan waits on a handful of things at once; eight
+/// covers that with room to spare. The cap exists because this event beats
+/// every thirty seconds into a file that is already the largest thing a run
+/// writes, and because a plan with 152 steps blocked behind one predecessor
+/// would otherwise put 151 near-identical entries on every line.
+///
+/// Truncation is never silent: `waiting_total` carries the real count, and the
+/// list is sorted longest-wait-first so the entry a reader is looking for is
+/// the one that survives.
+pub const MAX_WAITING_REPORTED: usize = 8;
+
+/// One step that is waiting rather than working, carried on
+/// [`EventKind::BatchProgress`].
+///
+/// The identity half is deliberately the same three fields
+/// [`EventKind::ActionDispatched`] carries -- `id`, `bot`, `action`, `target`
+/// -- so a reader who finds a step here and later finds its dispatch line is
+/// looking at the same names, and can join on `id` without a second vocabulary
+/// to learn.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct WaitingStep {
+    /// The action's `ActionId`, joinable to [`EventKind::ActionDispatched`]'s
+    /// `id` and to [`PlannedStep::id`].
+    ///
+    /// `None` for a **walk**, which has no `ActionId` at all -- the scheduler
+    /// emits it as its own step kind. A true absence, exactly as in
+    /// [`EventKind::WalkDispatched`], and not a failure to look it up. A walk
+    /// is identified by `bot` plus `step_index` instead.
+    pub id: Option<u32>,
+    /// Which walk this is, in this bot's own slice of the schedule -- the same
+    /// key [`EventKind::WalkDispatched::step_index`] uses, and subject to the
+    /// same warning: **it is not an `ActionId` and not an index into
+    /// [`EventKind::PlanCreated`]'s `plan`.** `None` for an action.
+    pub step_index: Option<u32>,
+    /// The bot whose step this is, from the schedule -- the only thing that
+    /// knows, since an action does not carry its bot.
+    pub bot: u32,
+    /// What the plan called it, verbatim: `Action::label`, the same string
+    /// [`EventKind::ActionDispatched::action`] and [`PlannedStep::action`]
+    /// carry. For a walk, a description of the walk, because a walk has no
+    /// label of its own.
+    pub action: String,
+    /// Where the plan sent it, when it sends it anywhere. Same meaning and
+    /// same caveats as [`EventKind::ActionDispatched::target`]: the planner's
+    /// intent, `None` for a `craft`/`research`, and the walk's destination for
+    /// a walk.
+    pub target: Option<Position>,
+    /// **What it is waiting for.** One of `predecessor`,
+    /// `background_conflict`, `lag_deadline`, `research`, `reply` or `walk` --
+    /// `factorio_bot_executor::WaitKind::name`, which is a stable string
+    /// rather than a `Debug` rendering so archived runs keep grouping with new
+    /// ones.
+    ///
+    /// The three that used to be indistinguishable are `predecessor` (blocked
+    /// on another step, possibly another bot's), `lag_deadline` (serving
+    /// machine time the plan asked for -- **not a fault**, however long) and
+    /// `reply` (dispatched, and the game has not answered).
+    ///
+    /// A `reply` whose `waiting_ms` is past ~360,000 is a finding on its own:
+    /// the RCON layer gives a dispatched action 360 wall-clock seconds and
+    /// then reports it lost, so a longer one means the time went into a path
+    /// request, an out-of-reach `move_player` or the placement retry loop --
+    /// all of which happen inside the same call. This is why the run that
+    /// prompted the field reported `lost: 0` through an eleven-minute silence
+    /// and was **right** to.
+    pub waiting_on: String,
+    /// The step this one is blocked by, for `predecessor` and
+    /// `background_conflict`. `None` for the others, which are not waiting on
+    /// another step at all.
+    pub blocked_by: Option<u32>,
+    /// For `lag_deadline`, the absolute `game.tick` the wait runs until when a
+    /// predecessor supplied a finish tick to anchor it to. A reader compares
+    /// it to the event's own `tick` to see how much of the wait is left --
+    /// which is the difference between "obediently smelting" and "stuck".
+    /// `None` for every other state, and also for a lag nothing could anchor.
+    pub deadline_tick: Option<u64>,
+    /// How long this step has been in this state, in wall-clock milliseconds,
+    /// measured by the executor from the moment it entered the state.
+    ///
+    /// **Not** the interval rounded, and not "since a heartbeat first noticed
+    /// it": a wait that began between two beats reports its true age on the
+    /// first beat that sees it. Wall clock rather than ticks for the same
+    /// reason `elapsed_ms` is -- a stopped game is exactly the case the tick
+    /// clock cannot answer.
+    ///
+    /// The clock restarts when the state changes, so a step that waited on a
+    /// predecessor and then served that predecessor's lag reports the age of
+    /// the lag wait, not of both together.
+    pub waiting_ms: u64,
 }
 
 /// Why a milestone needed no work -- carried on

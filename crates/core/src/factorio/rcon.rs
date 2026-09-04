@@ -510,6 +510,140 @@ const FOOTPRINT_CLEAR_ATTEMPTS: u32 = 4;
 /// is received.
 const FOOTPRINT_CLEAR_BACKOFF: Duration = Duration::from_millis(600);
 
+/// What a placement's retries cost, measured while they happen.
+///
+/// # The zero this exists to stop reporting
+///
+/// A placement is synchronous, so [`ActionTicks::at`] is the right shape for
+/// one dispatch: the game receives the command and answers inside the same
+/// tick, and both ends of the measurement genuinely are that one number. The
+/// retry loop above turns *one action* into up to
+/// [`FOOTPRINT_CLEAR_ATTEMPTS`] dispatches spread over
+/// `3 x FOOTPRINT_CLEAR_BACKOFF`, and reporting the last dispatch's tick on
+/// both ends throws every one of those ticks away: the settle arrives at
+/// `elapsed_ticks: 0`, byte-identical to a placement that was refused on the
+/// spot.
+///
+/// That is not academic. [`FOOTPRINT_CLEAR_BACKOFF`] was sized at twice a
+/// single 53-tick observation, a second case later turned out to need >= 480
+/// ticks, and **no run record could say how long the retries had actually
+/// taken** -- the number the constant is meant to be sized from was the one
+/// number the record did not have.
+///
+/// So the span is kept honestly: `dispatched` is the tick the game stamped on
+/// the **first** dispatch, `replied` the tick it stamped on the one that
+/// settled the action. A placement that never retried is unaffected -- its
+/// first dispatch *is* its last, so both ends are the same number exactly as
+/// before, and `elapsed_ticks: 0` still means "synchronous, first try".
+///
+/// # An absent first stamp stays absent
+///
+/// `first_dispatch` is `None` when the game did not stamp the first reply,
+/// under the same rule as everything else in [`ActionTicks`]: a missing
+/// measurement is a value, and substituting the *last* attempt's tick for it
+/// would report a retried placement as instantaneous while looking measured.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct PlacementAttempts {
+    /// `game.tick` stamped on the first dispatch, when the game stamped one.
+    first_dispatch: Option<u64>,
+    /// How many dispatches have gone out, counting the first. Saturating for
+    /// the same reason `Attempt::number` is: a count that wraps to zero would
+    /// report a placement that was retried into the ground as never tried.
+    ///
+    /// This counts **dispatches**, not trips round the retry loop, so the
+    /// extra `place_entity` the step-aside branch issues from the actor's new
+    /// position is in here. It is deliberately not the loop's own budget
+    /// counter -- that one governs behaviour and is left exactly as it was.
+    made: u32,
+    /// How long this side has slept between dispatches, accumulated as it
+    /// sleeps rather than inferred from `made`. The two disagree by exactly
+    /// the step-aside dispatch, which costs a dispatch and no backoff.
+    waited: Duration,
+}
+
+impl PlacementAttempts {
+    /// Called immediately after each `place_entity` RPC answers, with whatever
+    /// tick it stamped.
+    fn dispatched(&mut self, tick: Option<u64>) {
+        if self.made == 0 {
+            self.first_dispatch = tick;
+        }
+        self.made = self.made.saturating_add(1);
+    }
+
+    /// The span to report for an outcome the game answered at `replied`.
+    ///
+    /// Used on **both** the success and the failure returns: a placement that
+    /// was retried three times and then refused took just as long as one that
+    /// was retried three times and then built, and the record has to be able
+    /// to say so about the failure -- which is the row it could not say it
+    /// about before.
+    fn ticks(&self, replied: Option<u64>) -> ActionTicks {
+        ActionTicks::new(self.first_dispatch, replied)
+    }
+
+    /// Records one [`FOOTPRINT_CLEAR_BACKOFF`] wait. Called where the sleep
+    /// is, so the number reported is the wait that was actually taken.
+    fn backed_off(&mut self) {
+        self.waited = self.waited.saturating_add(FOOTPRINT_CLEAR_BACKOFF);
+    }
+
+    /// Whether the loop went round at all.
+    fn retried(&self) -> bool {
+        self.made > 1
+    }
+
+    /// The retry history, in words, for an outcome the game answered at
+    /// `replied` -- `None` when there was no retry to describe.
+    ///
+    /// Appended to the failure the game gave rather than replacing it, so
+    /// `classify_failure` (`crates/scripting_lua/src/globals/record.rs`) still
+    /// sees the mod's own wording and still answers `FailureKind::Blocked`.
+    /// **It contains no apostrophe on purpose**: that classifier reads a
+    /// `MissingItem`'s item name out of the first pair of single quotes in the
+    /// message, and a quote in here would hand it this sentence instead.
+    fn describe(&self, replied: Option<u64>) -> Option<String> {
+        if !self.retried() {
+            return None;
+        }
+        let waited = self.waited.as_secs_f64();
+        let spanned = match (self.first_dispatch, replied) {
+            (Some(first), Some(last)) if last >= first => {
+                format!("{} game ticks", last.saturating_sub(first))
+            }
+            // Absent, not zero. The game did not stamp both ends, so the only
+            // honest span left is the one this side slept for.
+            _ => "an unmeasured number of game ticks".to_string(),
+        };
+        Some(format!(
+            "dispatched {made} times over {spanned} \
+             ({waited:.1}s of waiting between attempts) and refused every time",
+            made = self.made,
+        ))
+    }
+
+    /// The game`s own refusal, with the retry history appended when there was
+    /// one.
+    ///
+    /// Appended, never substituted: `line` is what the mod said and is what
+    /// both `classify_failure` and a person read. This only adds the fact
+    /// nothing in the record could otherwise supply -- that the refusal
+    /// survived N dispatches rather than being the first answer.
+    ///
+    /// There is deliberately no counterpart on the success path. A placement
+    /// that was retried and then *worked* says so through its ticks alone: a
+    /// first-try placement settles at `elapsed_ticks: 0` because it is
+    /// synchronous, so a non-zero elapsed on a `place` is a retried one. The
+    /// failure path needs the words because the alternative there is inferring
+    /// a count from a duration.
+    fn explain(&self, line: &str, replied: Option<u64>) -> String {
+        match self.describe(replied) {
+            Some(note) => format!("{line}; {note}"),
+            None => line.to_string(),
+        }
+    }
+}
+
 /// Remembers `line` as a refused site, if it is one.
 ///
 /// Called on both arms that turn an unrecognised reply into an error: the
@@ -3266,10 +3400,21 @@ impl FactorioRcon {
     /// alongside the entity it created.
     ///
     /// Placement is synchronous -- `surface.create_entity` returns within the
-    /// tick the command was received -- so both ends of [`ActionTicks`] are the
-    /// same number. On the `§player_blocks_placement§` path the placement is
-    /// retried after a walk, and the tick reported is the *retry's*, because
-    /// that is the dispatch that actually placed the entity.
+    /// tick the command was received -- so a placement that goes out **once**
+    /// reports the same number on both ends of [`ActionTicks`], and its settle
+    /// reads `elapsed_ticks: 0`.
+    ///
+    /// **A retried placement spans its retries instead.** Both the
+    /// `§player_blocks_placement§` walk-and-reissue path and the
+    /// [`FOOTPRINT_CLEAR_ATTEMPTS`] loop turn one action into several
+    /// dispatches, and the pair reported is then `(first dispatch, settling
+    /// reply)`: the reply end is the dispatch that actually built or was
+    /// finally refused, and the dispatch end is where the attempt began.
+    /// Reporting the last dispatch on both ends -- which is what this used to
+    /// do -- threw the whole retry window away and made "refused four times
+    /// over 1.8s" byte-identical to "refused instantly". See
+    /// [`PlacementAttempts`], which owns the measurement and is tested without
+    /// a game.
     pub async fn place_entity_timed(
         &self,
         player_id: PlayerId,
@@ -3333,6 +3478,12 @@ impl FactorioRcon {
         // which is why the recovery has to be here, where the game's own
         // refusal is still a line.
         let mut attempt: u32 = 0;
+        // Purely observational, and deliberately separate from `attempt`:
+        // `attempt` is the budget that decides whether to go round again,
+        // `attempts` is the measurement that reaches the run record. Keeping
+        // them apart is what makes this whole change unable to alter what the
+        // loop does. See `PlacementAttempts`.
+        let mut attempts = PlacementAttempts::default();
         // Labelled because the actor-blocks branch nested inside also needs to
         // come back here -- see `continue 'place` in it.
         'place: loop {
@@ -3347,12 +3498,15 @@ impl FactorioRcon {
                     ],
                 )
                 .await?;
+            attempts.dispatched(tick);
             // Past this point the game has answered the RPC, so every failure
             // below is a verdict the game gave and carries the tick it gave it
-            // at. On the blocked-and-retry path that stays true: `refused_at`
-            // is re-bound to the retry's stamp, which is the dispatch the
-            // outcome belongs to.
-            let refused_at = ActionTicks::at(tick);
+            // at. On the blocked-and-retry path the *reply* end is re-bound to
+            // the retry's stamp -- that is the dispatch the outcome belongs to
+            // -- while the *dispatch* end stays on the first attempt, so the
+            // span covers the retries instead of collapsing to zero. See
+            // `PlacementAttempts`.
+            let refused_at = attempts.ticks(tick);
             let Some(lines) = lines else {
                 return Err(ActionFailure::refused(
                     RconUnexpectedEmptyResponse {}.into(),
@@ -3378,7 +3532,7 @@ impl FactorioRcon {
                 return Ok((
                     parse_reply("place_entity", line)
                         .map_err(|e| ActionFailure::refused(e, refused_at))?,
-                    ActionTicks::at(tick),
+                    attempts.ticks(tick),
                 ));
             }
             if &line[..] == "§player_blocks_placement§" {
@@ -3413,7 +3567,8 @@ impl FactorioRcon {
                                 ],
                             )
                             .await?;
-                        let refused_at = ActionTicks::at(tick);
+                        attempts.dispatched(tick);
+                        let refused_at = attempts.ticks(tick);
                         return if let Some(lines) = lines {
                             if lines.len() != 1 {
                                 return Err(ActionFailure::refused(
@@ -3429,7 +3584,7 @@ impl FactorioRcon {
                                 Ok((
                                     parse_reply("place_entity", line)
                                         .map_err(|e| ActionFailure::refused(e, refused_at))?,
-                                    ActionTicks::at(tick),
+                                    attempts.ticks(tick),
                                 ))
                             } else if &line[..] == "§player_blocks_placement§" {
                                 Err(ActionFailure::refused(
@@ -3450,6 +3605,7 @@ impl FactorioRcon {
                                 // and gives the step-aside walk the mod has just
                                 // dispatched time to land.
                                 attempt += 1;
+                                attempts.backed_off();
                                 sleep(FOOTPRINT_CLEAR_BACKOFF).await;
                                 continue 'place;
                             } else {
@@ -3462,7 +3618,7 @@ impl FactorioRcon {
                                 );
                                 Err(ActionFailure::refused(
                                     RconError {
-                                        message: line.clone(),
+                                        message: attempts.explain(line, tick),
                                     }
                                     .into(),
                                     refused_at,
@@ -3486,13 +3642,14 @@ impl FactorioRcon {
             if line.contains(FOOTPRINT_CHARACTER_REFUSAL) && attempt + 1 < FOOTPRINT_CLEAR_ATTEMPTS
             {
                 attempt += 1;
+                attempts.backed_off();
                 sleep(FOOTPRINT_CLEAR_BACKOFF).await;
                 continue;
             }
             note_placement_refusal(world, tick, line, &item_name, &entity_position);
             return Err(ActionFailure::refused(
                 RconError {
-                    message: line.clone(),
+                    message: attempts.explain(line, tick),
                 }
                 .into(),
                 refused_at,
@@ -7697,5 +7854,130 @@ mod approach_annulus_tests {
         let (goal, slack) = approach_annulus(&target, 2.0, 3.0, Some(&here));
         assert_eq!(slack, 0.5, "half the annulus's width, not a whole tile");
         assert_eq!(goal, Position::new(2.5, 0.));
+    }
+}
+
+/// What a retried placement is allowed to claim about itself.
+///
+/// The loop in [`FactorioRcon::place_entity_timed`] needs a live game to
+/// exercise, so the measurement it carries is a separate value with no I/O in
+/// it and these pin that value directly. Every number below is the shape the
+/// motivating run produced: a placement refused because a character stood in
+/// the footprint, re-issued while the mod walked that character aside.
+#[cfg(test)]
+mod placement_retry_measurement_tests {
+    use super::*;
+
+    #[test]
+    fn a_placement_that_never_retried_still_reports_one_tick_on_both_ends() {
+        // The regression guard for the whole change. A `place` is synchronous,
+        // so a first-try placement must keep reporting `elapsed_ticks: 0` --
+        // if this drifts, every placement in every archived run starts
+        // claiming a duration nobody measured.
+        let mut attempts = PlacementAttempts::default();
+        attempts.dispatched(Some(15_727));
+        assert_eq!(attempts.ticks(Some(15_727)), ActionTicks::at(Some(15_727)));
+        assert!(!attempts.retried());
+        assert_eq!(
+            attempts.describe(Some(15_727)),
+            None,
+            "there is no retry history to report, so nothing may be appended"
+        );
+    }
+
+    #[test]
+    fn a_retried_placement_spans_from_the_first_dispatch_to_the_last_reply() {
+        // The failure this exists to stop: three dispatches over 110 ticks
+        // reported as `elapsed_ticks: 0`, indistinguishable from an instant
+        // refusal.
+        let mut attempts = PlacementAttempts::default();
+        attempts.dispatched(Some(15_727));
+        attempts.backed_off();
+        attempts.dispatched(Some(15_780));
+        attempts.backed_off();
+        attempts.dispatched(Some(15_837));
+        let ticks = attempts.ticks(Some(15_837));
+        assert_eq!(ticks, ActionTicks::new(Some(15_727), Some(15_837)));
+        assert_eq!(
+            ticks
+                .replied
+                .zip(ticks.dispatched)
+                .map(|(end, start)| end - start),
+            Some(110),
+            "the elapsed a settle reports must be the whole retry window, not zero"
+        );
+    }
+
+    #[test]
+    fn the_refusal_says_how_many_dispatches_it_survived() {
+        let mut attempts = PlacementAttempts::default();
+        attempts.dispatched(Some(15_727));
+        attempts.backed_off();
+        attempts.dispatched(Some(15_780));
+        attempts.backed_off();
+        attempts.dispatched(Some(15_837));
+        let refusal = "cannot place stone-furnace: a character is standing in the footprint";
+        let explained = attempts.explain(refusal, Some(15_837));
+        assert!(
+            explained.starts_with(refusal),
+            "the mod's own wording leads, so `classify_failure` still reads it: {explained}"
+        );
+        assert!(explained.contains("dispatched 3 times"), "{explained}");
+        assert!(explained.contains("110 game ticks"), "{explained}");
+        assert!(explained.contains("1.2s"), "{explained}");
+        assert_ne!(
+            explained,
+            attempts.explain(refusal, None),
+            "an unmeasured span and a measured one may not read the same"
+        );
+    }
+
+    #[test]
+    fn the_appended_note_carries_no_single_quote() {
+        // `classify_failure` reads a `MissingItem`'s item name out of the first
+        // pair of single quotes in the message. A quote in this sentence would
+        // hand it a fragment of this sentence as an item name -- a wrong answer
+        // that looks like a right one, which is the whole family of bug this
+        // work is about.
+        let mut attempts = PlacementAttempts::default();
+        attempts.dispatched(Some(1));
+        attempts.backed_off();
+        attempts.dispatched(Some(2));
+        let note = attempts.describe(Some(2)).expect("a retry happened");
+        assert!(!note.contains('\''), "{note}");
+    }
+
+    #[test]
+    fn a_first_dispatch_the_game_did_not_stamp_stays_absent() {
+        // Absent is not zero and is not the last attempt's tick. Substituting
+        // the retry's stamp here would report a placement that took 1.2s as
+        // instantaneous while looking measured.
+        let mut attempts = PlacementAttempts::default();
+        attempts.dispatched(None);
+        attempts.backed_off();
+        attempts.dispatched(Some(15_837));
+        assert_eq!(attempts.ticks(Some(15_837)).dispatched, None);
+        let note = attempts.describe(Some(15_837)).expect("a retry happened");
+        assert!(
+            note.contains("unmeasured"),
+            "a span with a missing end says so rather than inventing one: {note}"
+        );
+        assert!(
+            note.contains("0.6s"),
+            "the wait itself was still measured: {note}"
+        );
+    }
+
+    #[test]
+    fn the_step_aside_dispatch_counts_as_a_dispatch_and_costs_no_backoff() {
+        // The one place the dispatch count and the backoff count disagree: the
+        // actor-blocks branch re-issues the placement from the actor's new
+        // position without sleeping first.
+        let mut attempts = PlacementAttempts::default();
+        attempts.dispatched(Some(10));
+        attempts.dispatched(Some(12));
+        let note = attempts.describe(Some(12)).expect("a retry happened");
+        assert!(note.contains("dispatched 2 times"), "{note}");
+        assert!(note.contains("0.0s"), "{note}");
     }
 }

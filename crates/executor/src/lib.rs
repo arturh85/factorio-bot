@@ -8,7 +8,7 @@ pub mod run;
 pub mod walk_memory;
 
 pub use actuator::{ActionTicks, Actuator, ActuatorError, ActuatorFailure};
-pub use log::{Attempt, ExecutionLog, Status, WalkObservation};
+pub use log::{Attempt, ExecutionLog, Status, Wait, WaitKey, WaitKind, WalkObservation};
 pub use occupancy::{Occupancy, inventory_footprint, kind_occupancy, occupancy, shares_inventory};
 pub use rcon_actuator::{DEFINES_QUERY, InventoryDefines, RconActuator};
 pub use recover::{Recovery, recover};

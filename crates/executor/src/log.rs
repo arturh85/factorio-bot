@@ -4,6 +4,8 @@ use factorio_bot_core::types::Position;
 use factorio_bot_planner::{ActionId, BotId, Ticks};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::time::Duration;
+use tokio::time::Instant;
 
 /// Narrows a game tick to the planner's [`Ticks`].
 ///
@@ -288,6 +290,155 @@ pub struct WalkObservation {
     pub error: Option<String>,
 }
 
+/// What a step is doing while it is not dispatching anything.
+///
+/// # The three silences this separates
+///
+/// A bot with nothing in flight looks exactly the same from outside whether it
+/// is waiting on another bot, serving a lag deadline the plan asked for, or
+/// holding a dispatch the game never answered. In `run-1788550000`-era records
+/// they were literally indistinguishable: [`crate::ExecutionLog`] said
+/// `Pending` for the first two and `Running` for the third, and `Running` is
+/// also what a perfectly healthy in-flight action says. One action sat that
+/// way for **eleven minutes** and the record could show frozen counters, a bot
+/// id, and nothing else -- identifying it needed a live `rcon` query against
+/// the running game, which is not available at all once the run is over.
+///
+/// These are not verdicts and nothing here decides that any of them is too
+/// long. They are the answer to "waiting for what", which nobody could ask.
+///
+/// # Why it lives in the log rather than beside it
+///
+/// The log is already the one shared, lock-guarded thing the executor writes
+/// and an outside watcher reads -- `run:progress()` and the batch heartbeat
+/// both go through it. A second channel would mean threading a reporter
+/// through `run_into`, which is exactly what `beat_batch_progress`
+/// (`crates/scripting_lua/src/globals/goal/run.rs`) declined to do for the
+/// recorder.
+///
+/// It is deliberately **not** part of the log as a record: see
+/// [`ExecutionLog`]'s own docs for why it is skipped by serde and excluded
+/// from equality. A wait is true right now and false a moment later; the
+/// durable facts are the attempts.
+#[derive(Debug, Clone, PartialEq)]
+pub enum WaitKind {
+    /// Blocked in `await_preds` on a predecessor that has not settled.
+    ///
+    /// The dependent has not been dispatched and will not be until `on`
+    /// publishes a verdict. `on` may belong to another bot entirely, which is
+    /// the case a reader cannot reconstruct from the log alone: the blocked
+    /// action has no attempt, so nothing in `attempts` mentions it.
+    Predecessor { on: ActionId },
+    /// Blocked in `run_bot_signalled` on a **background** action this same bot
+    /// queued earlier, because the two touch the same items.
+    ///
+    /// Distinct from `Predecessor` because it is not a plan edge: the plan
+    /// permits these in either order and the executor serialises them anyway
+    /// to protect the inventory arithmetic (see [`crate::occupancy`]). A bot
+    /// stopped here has dispatched everything the plan let it and is waiting
+    /// on itself.
+    BackgroundConflict { on: ActionId },
+    /// Serving a lag edge in `wait_out_lag`: machine time the plan modelled,
+    /// which the predecessor's own completion does not cover.
+    ///
+    /// **This is a wait the plan asked for, and a long one here is not by
+    /// itself a fault** -- a smelt is thousands of ticks. It is separated from
+    /// the others precisely so that "the run is doing what it was told" stops
+    /// looking like "the run is stuck".
+    LagDeadline {
+        /// The absolute `game.tick` the wait is being served until, when a
+        /// predecessor supplied a finish tick to anchor it to. `None` when
+        /// none did and the wait can only run from now -- see
+        /// `run::LagWait`.
+        deadline_tick: Option<u64>,
+        /// The largest lag any predecessor imposed, in game ticks. The
+        /// upper bound on what this wait can cost.
+        largest_lag: Ticks,
+    },
+    /// Polling `technology_researched` for a technology this plan's own
+    /// earlier steps unlock. Bounded by `RESEARCH_SETTLE_BUDGET`, so it cannot
+    /// be the cause of a long silence -- which is exactly why it is worth
+    /// being able to rule out.
+    Research { tech: String },
+    /// **Dispatched, and the game has not answered.**
+    ///
+    /// # A `reply` older than six minutes is a finding in itself
+    ///
+    /// Nothing in *this crate* times out a dispatch, but the layer below does:
+    /// `ACTION_RESULT_DEADLINE` (`crates/core/src/factorio/rcon.rs`) gives a
+    /// dispatched action 360 wall-clock seconds to produce a verdict and then
+    /// reports `Dispatch::NoVerdict`, which arrives here as [`Status::Lost`].
+    ///
+    /// So a `reply` wait past ~360s **cannot** be an action sitting in
+    /// `sleep_for_action_result`, and the time has gone somewhere else inside
+    /// the same call: a path request, the `move_player` a mine or a placement
+    /// does when the bot is out of reach, or the placement retry loop. Each of
+    /// those is its own bounded wait, and a chain of them is unbounded.
+    ///
+    /// This is what settles the question the eleven-minute silence raised.
+    /// `lost` stayed `0` and that was **correct**, not a miscount: no single
+    /// dispatch had gone 360s unanswered. Splitting `reply` further would mean
+    /// instrumenting the RPC helpers themselves, which is a change to
+    /// `crates/core` rather than to this registry.
+    Reply,
+    /// Walking. Has no `ActionId` of its own, like every walk.
+    Walk { to: Position },
+}
+
+impl WaitKind {
+    /// A short, stable name for this state, for a record consumer to group by.
+    ///
+    /// Deliberately not the `Debug` rendering: that would change whenever a
+    /// field is added, and archived runs would stop grouping with new ones.
+    pub fn name(&self) -> &'static str {
+        match self {
+            WaitKind::Predecessor { .. } => "predecessor",
+            WaitKind::BackgroundConflict { .. } => "background_conflict",
+            WaitKind::LagDeadline { .. } => "lag_deadline",
+            WaitKind::Research { .. } => "research",
+            WaitKind::Reply => "reply",
+            WaitKind::Walk { .. } => "walk",
+        }
+    }
+}
+
+/// What a [`WaitKind`] is recorded against.
+///
+/// Two key spaces because the executor has two: an action has an `ActionId`, a
+/// walk has only `(bot, step_index)` -- the same split [`WalkObservation`]
+/// documents, and for the same reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum WaitKey {
+    Action(ActionId),
+    Walk(BotId, usize),
+}
+
+/// One entry of [`ExecutionLog::waiting`]: who is waiting, for what, and for
+/// how long.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Wait {
+    pub key: WaitKey,
+    /// The bot the step belongs to. Read from the *schedule* at the moment the
+    /// wait was entered, because neither an `Action` nor an `Attempt` knows it
+    /// -- assigning work to a bot is the scheduler's job alone.
+    pub bot: BotId,
+    pub kind: WaitKind,
+    /// How long this state has held, measured from the moment the executor
+    /// entered it. **A measurement, not an estimate**: it is not the beat
+    /// interval rounded, and it is not inferred from the first heartbeat that
+    /// noticed the wait.
+    pub elapsed: Duration,
+}
+
+/// The private half of [`Wait`]: the same facts with the start instant instead
+/// of the elapsed time.
+#[derive(Debug, Clone)]
+struct WaitEntry {
+    bot: BotId,
+    kind: WaitKind,
+    since: Instant,
+}
+
 /// Execution state, keyed by action.
 ///
 /// Deliberately separate from `Schedule`: the schedule is an immutable plan
@@ -311,13 +462,45 @@ pub struct WalkObservation {
 /// equality is not an equivalence relation, so `Eq` would be a false claim.
 /// `PartialEq` — which is all any caller and every `assert_eq!` needs — is
 /// kept.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+///
+/// # `waiting` is a live view, not a record, and is excluded from both
+///
+/// [`WaitKind`] says what a step is doing *right now*. It is `#[serde(skip)]`
+/// and left out of the hand-written [`PartialEq`] below, for three reasons
+/// that all point the same way:
+///
+/// - it holds an [`Instant`], which has no meaning outside the process that
+///   read it and no serialized form at all;
+/// - two logs of the same run are the same log, and a difference in what each
+///   happened to be waiting for at the instant it was cloned is not a
+///   difference in what the run did — `the_final_log_is_the_same_whichever_bot_finishes_first`
+///   asks that question and must keep getting the old answer;
+/// - a wait is entered and left within one `run_into`, so a log that outlives
+///   the run (a seed for a recovery, a replay) has nothing true to say here
+///   anyway.
+///
+/// The durable record of a wait is the attempt's ticks. This is the answer to
+/// "what is happening at this moment", which nothing else could give.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ExecutionLog {
     attempts: BTreeMap<ActionId, Attempt>,
     /// `bot -> step_index -> observation`. Both levels are `BTreeMap` for the
     /// same reason `attempts` is: iteration order is part of the contract, so
     /// `walks()` yields the same sequence on any two runs of the same log.
     walks: BTreeMap<BotId, BTreeMap<usize, WalkObservation>>,
+    /// What each step that is waiting is waiting for. `BTreeMap` so
+    /// [`ExecutionLog::waiting`] answers in a stable order; see the type docs
+    /// for why it is skipped by serde and by equality.
+    #[serde(skip)]
+    waiting: BTreeMap<WaitKey, WaitEntry>,
+}
+
+/// Hand-written so `waiting` is excluded — see [`ExecutionLog`]'s docs. Every
+/// other field is compared exactly as the derive did.
+impl PartialEq for ExecutionLog {
+    fn eq(&self, other: &Self) -> bool {
+        self.attempts == other.attempts && self.walks == other.walks
+    }
 }
 
 impl ExecutionLog {
@@ -596,7 +779,16 @@ impl ExecutionLog {
     /// followed, so there is nothing to lose track of.
     ///
     /// Calling it twice is harmless: the second call finds nothing running.
+    ///
+    /// It also clears [`ExecutionLog::waiting`], because nothing is waiting
+    /// any more — nobody is following any of it. The RAII guards in `run.rs`
+    /// normally do this as the bot futures unwind and this finds an empty map;
+    /// it is repeated here so that a log which somehow outlives its guards
+    /// cannot go on reporting a bot as blocked on a predecessor for the rest
+    /// of the process's life. A stale wait would be exactly the kind of
+    /// confident-but-wrong report the registry exists to replace.
     pub fn lose_track_of_outstanding(&mut self, why: &str) -> usize {
+        self.waiting.clear();
         let mut lost = 0;
         for a in self.attempts.values_mut() {
             if a.status == Status::Running {
@@ -749,6 +941,63 @@ impl ExecutionLog {
     pub fn observed_walk_duration(&self, bot: BotId, step_index: usize) -> Option<Ticks> {
         let w = self.walk(bot, step_index)?;
         w.replied_tick?.checked_sub(w.dispatched_tick?)
+    }
+
+    /// Records that `key` has entered a wait, replacing any wait it was
+    /// already in and **restarting its clock**.
+    ///
+    /// Restarting is the point: a step that moves from waiting on a
+    /// predecessor to serving that predecessor's lag edge has genuinely
+    /// entered a different state, and reporting the two as one span would say
+    /// a bot had been "waiting on a reply" since before it was dispatched.
+    /// [`Wait::elapsed`] therefore always answers "how long in *this* state".
+    pub fn enter_wait(&mut self, key: WaitKey, bot: BotId, kind: WaitKind) {
+        self.waiting.insert(
+            key,
+            WaitEntry {
+                bot,
+                kind,
+                since: Instant::now(),
+            },
+        );
+    }
+
+    /// Records that `key` is no longer waiting. Idempotent: leaving a wait
+    /// nobody entered is a no-op, which is what makes it safe to call from a
+    /// `Drop`.
+    pub fn leave_wait(&mut self, key: WaitKey) {
+        self.waiting.remove(&key);
+    }
+
+    /// Every step currently waiting, ascending by key, longest wait first is
+    /// **not** the order — the caller sorts, because different readers want
+    /// different orders and a stable key order is the one property this can
+    /// promise.
+    ///
+    /// `elapsed` is computed against `Instant::now()` at the moment of the
+    /// call, so two entries in one answer are consistent with each other to
+    /// within the time it takes to walk a `BTreeMap`.
+    ///
+    /// # What an empty answer means
+    ///
+    /// Nothing is waiting: every bot is either dispatching, between steps, or
+    /// finished. It does **not** mean "nothing is known" — a run with
+    /// `in_flight` greater than zero and no `reply` entry here is a
+    /// contradiction, and one worth acting on, because it means this registry
+    /// has stopped being maintained. That is the failure mode every other
+    /// observability hole in this project has had, and it is detectable
+    /// precisely because the two numbers come from different writers.
+    pub fn waiting(&self) -> Vec<Wait> {
+        let now = Instant::now();
+        self.waiting
+            .iter()
+            .map(|(key, entry)| Wait {
+                key: *key,
+                bot: entry.bot,
+                kind: entry.kind.clone(),
+                elapsed: now.saturating_duration_since(entry.since),
+            })
+            .collect()
     }
 
     /// Failed action ids, in ascending id order.

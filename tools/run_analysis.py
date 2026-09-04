@@ -874,6 +874,56 @@ def batch_execution(events: list[dict]) -> list[dict]:
     return plans
 
 
+def waiting_lines(beat: dict, limit: int = 4) -> list[str]:
+    """What the last heartbeat said each step was waiting for.
+
+    This is the half of ``batch_progress`` that names the *work* rather than a
+    bot. Without it a killed-mid-batch run reports frozen counters and a bot
+    id, and identifying the action needs a live rcon query against a game that
+    is, by then, gone. One run had an action in flight for eleven minutes and
+    could never say which one.
+
+    Nothing here is a verdict. ``lag_deadline`` for twenty minutes is a plan
+    doing exactly what it was told; ``reply`` for twenty minutes is a
+    completion that went missing. The state is printed, the reader decides.
+
+    A run recorded before this field existed has no ``waiting`` key at all, and
+    gets a line saying so rather than an empty list -- absence of the field and
+    absence of waiters are not the same fact.
+    """
+    if "waiting" not in beat:
+        return ["                          (this run predates the per-step waiting detail)"]
+    waiting = beat.get("waiting") or []
+    total = beat.get("waiting_total", len(waiting))
+    if not waiting:
+        if (beat.get("in_flight") or 0) > 0:
+            return [
+                "                          NOTHING listed as waiting while "
+                f"{beat.get('in_flight')} action(s) are in flight -- those two counts",
+                "                          come from different writers, so this is a broken "
+                "reporter, not a quiet run",
+            ]
+        return ["                          nothing was waiting"]
+    out = [f"                          waiting ({total} step(s), longest first):"]
+    for w in waiting[:limit]:
+        who = f"bot {w.get('bot')}"
+        what = w.get("action") or (
+            f"action {w.get('id')}" if w.get("id") is not None else f"walk {w.get('step_index')}"
+        )
+        extra = ""
+        if w.get("blocked_by") is not None:
+            extra = f" (blocked by action {w['blocked_by']})"
+        elif w.get("deadline_tick") is not None:
+            extra = f" (until tick {w['deadline_tick']})"
+        out.append(
+            f"                            {w.get('waiting_ms', 0) / 1000:7.0f}s  "
+            f"{w.get('waiting_on', '?'):<20} {who}  {what}{extra}"
+        )
+    if total > len(waiting):
+        out.append(f"                            ... and {total - len(waiting)} more not reported")
+    return out
+
+
 def sample_coverage(samples: list[dict], lo: int, hi: int, present: bool) -> dict:
     """Does the sample stream span the run the events describe?
 
@@ -1624,6 +1674,10 @@ def report(a: dict, out=sys.stdout, top: int = 12) -> None:
             p(f"        executed:         NO -- {ex['beats']} heartbeat(s) over "
               f"{beat.get('elapsed_ms', 0) / 1000:.0f}s and NOTHING was ever dispatched "
               f"from this plan")
+            # Why nothing dispatched is a different question from whether it
+            # did, and this is the only place the record answers it.
+            for line in waiting_lines(beat):
+                p(line)
         elif verdict == "cut_short":
             p(f"        executed:         started, then the record stops -- last heartbeat "
               f"{beat.get('elapsed_ms', 0) / 1000:.0f}s in had "
@@ -1632,6 +1686,10 @@ def report(a: dict, out=sys.stdout, top: int = 12) -> None:
               f"(bots {beat.get('bots_in_flight')}), {beat.get('walks_dispatched')} walk(s)")
             p("                          the batch was running when the run stopped; "
               "its per-action lines are only written when it finishes")
+            # The identities the counters above cannot carry. For a run that
+            # died mid-batch this is the only record of what it was on.
+            for line in waiting_lines(beat):
+                p(line)
         else:
             p("        executed:         UNKNOWN -- no dispatches and no heartbeat. "
               "Either this build")

@@ -856,6 +856,65 @@ against one human, on a map chosen for short walks, doing only automation.**
 **steel**, **multi-output recipes** — are what stand between us and it. Another
 minute off rung one is not.
 
+## Capacity finished (`edf6d6fa`) — and it probably does NOT unblock green
+
+A furnace is a slot, so a long smelt is now a **sequence of visits**:
+`runs_per_load()` takes the minimum across input, output and fuel, and
+`BankFurnace` emits one (insert, fuel, take) cycle per load, each load ordered
+behind the take that emptied the slot. Fuel splits into stack-sized visits
+chained by burn time, timed from the **first** visit — the machine starts there
+and runs across refuels.
+
+`have:steel-plate:150` now plans entirely within capacity: `insert 750` → 7×110
+(cap 120), `take 150 steel-plate` → 7×22 (cap 100), `fuel …113 coal` →
+50/50/13 (cap 50).
+
+**All three bounds bind, and the input is tightest for iron** — capping output
+at one stack of 100 plates still asks 100 ore into a source slot that takes 70.
+**An output-only cap would have looked correct and fixed nothing.**
+
+### Red did not move, and my brief was wrong to expect it to
+
+`score-map` identical at **136 / 28,897 / `dfac0f4caa0a7500`**;
+`producing:automation-science-pack:6` identical at 299 / 43,797; green's
+`--steps` **byte-identical**. Reason rather than luck: every transfer either
+plan makes is already inside its cap, so every `loads` and `fuel_visits` vector
+has length one and the ids, lags and emission order are the ones that were
+always there.
+
+### The correction that matters: green may not have been blocked on this
+
+**Green's offline plan was already entirely within capacity before this
+change** — max take 100, insert 12, fuel 23 — and is byte-identical after it.
+`735efeba` had already fixed the one site green hits.
+
+So **"5 of green's 11 failures are divergence from these sites" is
+unsupported.** Those failures came from a **mid-run replan against a different
+world**, not from the baseline plan, and that cannot be verified without a run.
+**The next action is to run green, not to assume it is fixed.**
+
+### Three more corrections
+
+- **"Seven fuel sites" is five.** Two of the design's are inside `#[cfg(test)]`
+  and one is not a fuel insert. Of the five real ones, **only two were
+  genuinely unbounded**; the rest were already bounded by construction or
+  arithmetic. All five now route through `slot_capacity` anyway, so a future
+  constant bump cannot reintroduce it silently.
+- **The shared-ore excess branch is unreachable in practice** — measured, not
+  assumed: it fires on none of the four baseline plans and none of ~600 tests.
+- The design's `have.rs` line numbers no longer resolve; the sites are
+  `smelt_steps`' ingredient, shared-ore and take loops.
+
+### `SlotOverflow` deliberately not shipped
+
+One thing can still trip it: **`Researched`'s lab insert**, sized from the
+technology's unit count against a slot holding one stack per science type.
+Splitting it needs a lag for "when has the lab consumed a stack", and research
+is a single modelled duration a bot is bound to — later inserts would schedule
+*after* the research, which is useless. **That is a scheduler change, not a
+sizing one.** Shipping the refusal now would turn a latent mis-size into a loud
+refusal of any research over 200 packs.
+
 ## Rocks: automation's planned makespan drops to 8:01 (`130b3bde`)
 
 Your speedrun trick, implemented. **A `huge-rock` gives 24 coal AND 24 stone in

@@ -628,6 +628,60 @@ actually reassigns the work. A chain owner may pin the same bot, in which case
 rule 4 fires on the first repeat and we are back to today's behaviour — safe,
 but worth nothing.
 
+## The cell now has an output path, and the witness is a rate claim (`2aca0f10`, `911ec3c4`)
+
+**Measured on the bench, which settles it rather than arguing it.** Two
+identical assembling machines, same recipe, same chest-and-inserter feed, one
+drained and one not, after 17,130 ticks:
+
+| | drained | undrained |
+|---|---|---|
+| `products_finished` | **28** | **4** |
+| `status` | `working` | **`full_output`** |
+
+28 crafts in 17,130 ticks is **exactly nameplate** (600 ticks/pack). The
+undrained machine reproduces the reference run's jam precisely.
+
+The cell gains `Role::OutputInserter` at `(-2, 3)` facing east and
+`Role::OutputChest` at `(-3, 3)`, appended so the plan is the old sequence plus
+two placements rather than a renumbering.
+
+### Three consequences worth stating
+
+1. **`cells_standing` now requires the drain.** Existing standing cells stop
+   counting and a replan builds a new one. Deliberate — over-build rather than
+   over-claim — and the alternative is a predicate that keeps returning `true`
+   for exactly the arrangement being fixed. Tested through
+   `update_chunk_entities`, not only the overlay.
+2. **The fix broke the old witness, which had to be fixed with it.** Rung 3
+   read the *machine's* `output_inventory`; with a drain attached that slot
+   sits at zero (bench: 94 packs made, output slot 0, `working`), so the old
+   witness would have **halted a healthy cell**. It now watches the output
+   chest.
+3. **A rate assertion became possible for free, and only now.** `at_least = 1`
+   was the strongest claim *possible* while the terminal was a machine slot
+   capped at four items — that is why six witnesses all fired inside 780 ticks.
+   A chest accumulates monotonically, so rung 3 is now **5 packs in 5,400
+   ticks**: one more than the four crafts an undrained machine manages, making
+   it specifically a claim **the defective cell could not satisfy however long
+   it waited**.
+
+### Red
+
+`researched:automation` **identical** (it builds no cell).
+`producing:...:6` goes 369 → **372 actions**, 47,330 → **43,288 ticks**. The +3
+is the intended change; **the −4,042 is not claimed as an improvement** — the
+extra bill perturbs the crafting subgoals and the critical path happened to
+land shorter.
+
+### The queued long-inserter item's premise has expired
+
+`31c8d579` established that a three-ingredient *product* costs no second pole,
+because the `(-2, 3)` mouth was powered and unused. **That mouth is now the
+output path.** The test was renamed and deliberately inverted on those two
+tiles rather than quietly updated. Anyone reaching for a three-ingredient
+product must now find a different opening or pay for a pole.
+
 ## ⚠ STAGE 2 HAS ARGUABLY NEVER PRODUCED AT A RATE
 
 Found while designing the capacity fix (`97922af5`), and it is the most

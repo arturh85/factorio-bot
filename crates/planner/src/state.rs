@@ -2486,19 +2486,25 @@ impl PlanState {
     /// # What "can name" excludes, and why it matters here
     ///
     /// `EntityGraph::add` only inserts a **whitelist** of entity types into
-    /// its entity tree (`crates/core/src/graph/entity_graph.rs`), and
-    /// `electric-pole` and `generator` are not on it. So a steam engine or a
-    /// pole that a *live* world already contains is invisible to this: it
-    /// reaches `blocked_tree` and therefore blocks placements, but nothing
-    /// here can read its name. Entities this plan places itself go through
+    /// its entity tree (`crates/core/src/graph/entity_graph.rs`): trees,
+    /// cliffs, small rocks and units are not on it and never reach this at
+    /// all, though they do reach `blocked_tree` and so still refuse
+    /// placements. Entities this plan places itself go through
     /// [`PlanState::create_entity`] and are visible immediately.
     ///
-    /// That is a gap in `crates/core`, not in the model above it, and it is
-    /// deliberately not worked around here: adding two variants to that
-    /// whitelist is a one-line change in a crate this work does not own. Until
-    /// it lands, [`PlanState::electric_supply_kw`] under-reports a hand-built
-    /// power plant to zero — which refuses a plan that could have run, the
-    /// conservative direction, rather than planning one that cannot.
+    /// `electric-pole` and `generator` **used** to be missing from that
+    /// whitelist too, which made [`PlanState::electric_supply_kw`] score every
+    /// hand-built power plant 0 kW. They were added on 2026-09-02; this doc
+    /// still said otherwise on 2026-09-04 and sent a diagnosis of exactly that
+    /// failure looking in the wrong crate. The real cause was
+    /// [`EntityGraph::find_entities_in_radius`]'s radius filter, which was
+    /// Manhattan while the `self.added` loop below is Euclidean — so one
+    /// function returned a disc for the entities this plan had placed and an
+    /// L1 diamond for the ones the world already had, and a pole 196 tiles
+    /// away on the diagonal fell outside the diamond of radius 256. Both
+    /// halves are Euclidean now.
+    ///
+    /// [`EntityGraph::find_entities_in_radius`]: factorio_bot_core::graph::entity_graph::EntityGraph::find_entities_in_radius
     pub fn entities_within(&self, centre: &Position, radius: f64) -> Vec<FactorioEntity> {
         let mut out: Vec<FactorioEntity> = Vec::new();
         let mut seen: BTreeSet<Pos> = BTreeSet::new();

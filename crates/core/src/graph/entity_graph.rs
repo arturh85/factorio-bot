@@ -446,7 +446,35 @@ impl EntityGraph {
             {
                 continue;
             }
-            if entity.position.distance(&search_center) > radius {
+            // Euclidean, via `calculate_distance`. `Position::distance` is
+            // **Manhattan** despite the name -- `|dx| + |dy|` -- and this line
+            // called it until 2026-09-04, so "radius" here meant an L1 diamond
+            // while the name, this function's Lua doc ("searches in circular
+            // radius"), every planner caller and the game's own
+            // `find_entities_filtered` all mean a disc. The diamond reaches
+            // the full radius along the axes and only `radius / sqrt(2)`
+            // diagonally.
+            //
+            // Run `run-1788504490-09380` is what that cost. Rung 3 asked for a
+            // green cell "on the plant red already stood up";
+            // `method::power::supply_for` looks for a standing pole within
+            // `PLANT_ADOPT_RADIUS` (256) before it will build a second plant,
+            // and the bot it expanded from stood at [142.3, -187.3] with the
+            // plant's pole at [10.5, -41.5] -- 196.5 tiles away, comfortably
+            // inside 256, but `131.8 + 145.8 = 277.6` outside the diamond. The
+            // pole was therefore invisible, adoption answered `None` at both
+            // tiers, and `plan_plant` refused from the bot's own position with
+            // `PowerPlantNeedsWater` -- an error naming water, on a map whose
+            // water is 46.7 tiles from spawn and already had a working plant
+            // on it.
+            //
+            // The same mismatch made `PlanState::entities_within` disagree with
+            // itself (it filters its own overlay with `calculate_distance`, so
+            // plan-placed entities got a disc and world entities a diamond),
+            // and invalidated `PlanState::is_area_clear_of`'s stated safety
+            // argument, which reasons "by the triangle inequality for the
+            // Euclidean norm" about a radius this line was narrowing.
+            if calculate_distance(&entity.position, &search_center) > radius {
                 continue;
             }
             entities.push(entity.clone())
@@ -619,8 +647,13 @@ impl EntityGraph {
     /// * **Distance is Euclidean**, via
     ///   [`calculate_distance`](crate::factorio::util::calculate_distance).
     ///   `Position::distance` is *Manhattan* despite the name -- it is
-    ///   `|dx| + |dy|` -- and `find_entities_in_radius` uses it, so two
-    ///   "radius" arguments in this file do not mean the same thing.
+    ///   `|dx| + |dy|`. This note used to add that
+    ///   [`Self::find_entities_in_radius`] used it too, so that two "radius"
+    ///   arguments in this file did not mean the same thing; that stopped
+    ///   being true on 2026-09-04, when the L1 filter there was found refusing
+    ///   to adopt a standing power plant 196 tiles away on the diagonal. Both
+    ///   radii are now discs. `Position::distance` itself is still Manhattan
+    ///   and is still the wrong function to reach for by name.
     /// * **Distance is measured to the tile's centre**, `position + (0.5,
     ///   0.5)`, because `FactorioTile::position` is the tile's top-left
     ///   *corner* -- that is what the game reports and what `add_tiles`
@@ -2384,6 +2417,68 @@ mod tests {
                 "generator".to_string(),
                 "solar-panel".to_string(),
             ]
+        );
+    }
+
+    /// `radius` is a **disc**, not an L1 diamond.
+    ///
+    /// The pole sits on the diagonal at `(90.5, 90.5)`, so it is 127.99 tiles
+    /// from the origin by the Euclidean norm and 181 by `|dx| + |dy|`. A
+    /// search at radius 128 must find it; a search at radius 127 must not.
+    ///
+    /// Until 2026-09-04 [`EntityGraph::find_entities_in_radius`] filtered with
+    /// `Position::distance`, which is Manhattan despite its name, so the
+    /// reachable region was a diamond: full radius along the axes and only
+    /// `radius / sqrt(2)` diagonally. Run `run-1788504490-09380` is what that
+    /// cost -- `method::power::supply_for` could not see a standing power
+    /// plant 196.5 tiles away on the diagonal, inside its 256-tile adoption
+    /// radius, and planned a second plant instead; the refusal it produced
+    /// named *water*, three levels away from the cause.
+    ///
+    /// The axis case is asserted alongside it because it passed under the old
+    /// filter too: a test that only checked the axis would have gone green on
+    /// the bug.
+    #[test]
+    fn a_radius_is_a_disc_and_not_a_diamond() {
+        fn pole_at(position: Position) -> FactorioEntity {
+            FactorioEntity {
+                name: "small-electric-pole".into(),
+                entity_type: "electric-pole".into(),
+                bounding_box: add_to_rect(&Rect::from_wh(0.296_875, 0.296_875), &position),
+                position,
+                ..Default::default()
+            }
+        }
+        let diagonal = Position::new(90.5, 90.5);
+        let axis = Position::new(127.5, 0.5);
+        let graph = entity_graph_from(vec![pole_at(diagonal.clone()), pole_at(axis.clone())])
+            .expect("adding must not fail");
+        let origin = Position::new(0.5, 0.5);
+        let found = |radius: f64| -> Vec<Position> {
+            let mut positions: Vec<Position> = graph
+                .find_entities_in_radius(origin.clone(), radius, None, None)
+                .into_iter()
+                .map(|entity| entity.position)
+                .collect();
+            positions.sort_by(|a, b| a.x.total_cmp(&b.x));
+            positions
+        };
+        // 127.28 and 127.0 away respectively: both inside a disc of 128.
+        assert_eq!(
+            found(128.),
+            vec![diagonal.clone(), axis.clone()],
+            "a disc of radius 128 holds both; the L1 diamond held only the \
+             one on the axis"
+        );
+        // The diagonal one leaves the disc first, at 127.28.
+        assert_eq!(
+            found(127.),
+            vec![axis],
+            "shrinking the radius past the diagonal pole must drop it"
+        );
+        assert!(
+            found(126.).is_empty(),
+            "and past the axis pole must drop both"
         );
     }
 

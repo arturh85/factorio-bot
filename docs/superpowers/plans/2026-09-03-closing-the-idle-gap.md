@@ -856,6 +856,68 @@ against one human, on a map chosen for short walks, doing only automation.**
 **steel**, **multi-output recipes** — are what stand between us and it. Another
 minute off rung one is not.
 
+## Rocks: automation's planned makespan drops to 8:01 (`130b3bde`)
+
+Your speedrun trick, implemented. **A `huge-rock` gives 24 coal AND 24 stone in
+360 ticks; hand-mining is 120 ticks per unit.**
+
+| goal | before | after |
+|---|---|---|
+| `researched:automation` | 202 acts / 30,085 (8:21) | **136 acts / 28,897 (8:01)** |
+| `producing:automation-science-pack:6` | 372 / 43,288 | **299 / 43,797** |
+
+Red loses **40 hand-mined stone and 24 of 28 coal**. The sharpest pin:
+`the_whole_of_stage_one_costs_this_much` **11,025 → 5,773 ticks (−48%)** —
+"mine 37 coal" was 4,440 of them.
+
+### It was a method-ordering bug, not a missing capability
+
+**Everything already existed.** `EntityGraph::minables` is filled by `add` for
+any minable entity, `minables_yielding` reads `mine_result`, `perform` routes
+`Chop` through `act.mine`, and a live test already asserted a `big-rock` yields
+20 stone. **`Chop` simply sat *after* `Mine` in the registry**, so mining always
+claimed the goal first. Its guard was its position in a list; it is now an
+explicit tick comparison, `chop_beats_mining`.
+
+### Two decisions worth keeping
+
+- **The two-item yield**: one `Effect::GainItem` per bill entry, applied to
+  `ctx.state` as steps are emitted — so a swing taken for coal credits its
+  stone and the next `Have{stone}` is `AlreadySatisfied`. **Surplus is
+  credited, never aimed at.**
+- **The range**: `products_to_dict` already resolves `24-50` to `amount_min`,
+  so `mine_result` is the **floor** of reality. Sized on the average you are
+  short on half of all swings and a short delivery forces a replan; on the
+  floor you are never short and pay at most one extra swing.
+
+### Three things it corrected
+
+1. **Rock counts** — nearest `big-rock` is **22.6** tiles, not 17.8; nearest
+   `huge-rock` is **63.5** tiles, so *coal* costs a real walk.
+2. **Two sites still use Factorio-1.1 rock names** (`rock-big`, `rock-huge`)
+   and are dead code on 2.x. They are dead on *both* sides of the keyframe
+   comparison so they cancel — **but that is luck, not design.**
+3. `spawn_rocks` in `test_utils` has an off-by-population bug.
+
+### Two guards caught their own decay, and one inverted
+
+`every_expansion_replays_in_time_order` found its cross-chain edges gone — a
+bot holding a rock's surplus is short of nothing, so `worth_handing_a_furnace_over`
+correctly refuses.
+
+More importantly, **`the_chest_makes_the_plan_shorter_than_it_is_without_one`
+INVERTED**: 30,136 with the chest against 28,951 without, where it used to save
+5,338. **The `Stockpile` cost model is now questionable** — the chest is built
+for iron ore, which no rock yields. Rocks exposed it rather than caused it, and
+the test now bounds the cost at 5% and asserts neither sign.
+
+### One genuine regression
+
+Bot 1 runs **106 of 142 steps** (was 90 of 173). A goal claimed by one chain
+takes its welded crafts with it, and **a rock is indivisible**. The plan is 29%
+faster and every bot's absolute load fell, but the roster is used less evenly.
+`Chop` behind `Stockpile` was measured as the alternative and is much worse.
+
 ## The oil chain, measured on a bench — and I got it wrong first
 
 **Owner challenged the claim and was right.** I said crude oil is hand-minable,
@@ -1028,7 +1090,7 @@ infrastructure for a 3h17m game, not a harder milestone.
 
 | goal | before | now |
 |---|---|---|
-| `researched("automation")` | 21.34 min | **8:17** on seed `31337` (8:41 / 8:43 on the old map) |
+| `researched("automation")` | 21.34 min | **8:17** measured on seed `31337`; **planned 8:01** since rocks (`130b3bde`) |
 | red science cell standing | never satisfied, `stuck_silent` | satisfied in 1 iteration |
 | red science producing **once** | never observed | witnessed six times, all inside 780 ticks |
 | red science producing **at a rate** | impossible to claim | **5 packs in 3,240 ticks (~5.5/min)**, twice |

@@ -10196,7 +10196,9 @@ mod tests {
              whole plan {per_bot:?}"
         );
         assert_eq!(
-            plan.makespan, 10011,
+            // Moved by the lookahead scheduling key (51c7f695): a bound over the bot's other ready work replaces (end, id) as the primary key, and the plan overlaps the longer smelt under the shorter one.
+            plan.makespan,
+            9965,
             "15866 with the subtree on one bot, 12403 once the ore converged, \
              and 10011 once the furnaces themselves became other bots' \
              errands; {per_bot:?}"
@@ -10282,7 +10284,9 @@ mod tests {
             "every bot the front can seat should be supplying it: {unlock_owners:?}"
         );
         assert_eq!(
-            plan.makespan, 10053,
+            // Moved by the lookahead scheduling key (51c7f695): a bound over the bot's other ready work replaces (end, id) as the primary key, and the plan overlaps the longer smelt under the shorter one.
+            plan.makespan,
+            9987,
             "17122 before time-aware claims, 12428 after them, and 10053 once \
              R3 made a furnace somebody else's errand -- 42 ticks off the \
              narrow fixture's 10011: {per_bot:?}"
@@ -12479,7 +12483,8 @@ mod owned_gathering {
     fn the_single_bot_rung_one_plan_is_untouched() {
         let (_, net, plan) = rung_one_plan(&[BotId(1)]);
         assert_eq!(net.len(), 82, "one bot's rung-1 action count");
-        assert_eq!(plan.makespan, 34611, "one bot's rung-1 makespan");
+        // Moved by the lookahead scheduling key (51c7f695): a bound over the bot's other ready work replaces (end, id) as the primary key, and the plan overlaps the longer smelt under the shorter one.
+        assert_eq!(plan.makespan, 31482, "one bot's rung-1 makespan");
         assert!(
             net.actions().all(|a| net
                 .chain_of(a.id)

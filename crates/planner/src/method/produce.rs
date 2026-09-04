@@ -2965,7 +2965,8 @@ mod tests {
         let sched = crate::schedule::schedule(&net, &s, &bots).expect("it schedules");
         // 5,800 -> 5,810 when the fuel load started carrying the smelting lag
         // (`have::every_fuel_load_gates_the_take_by_the_whole_smelting_time`).
-        assert_eq!(sched.makespan, 5_810, "ticks for one bot to build one cell");
+        // Moved by the lookahead scheduling key (51c7f695): a bound over the bot's other ready work replaces (end, id) as the primary key, and the plan overlaps the longer smelt under the shorter one.
+        assert_eq!(sched.makespan, 5466, "ticks for one bot to build one cell");
     }
 
     #[test]

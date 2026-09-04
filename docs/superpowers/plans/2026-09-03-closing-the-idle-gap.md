@@ -104,6 +104,55 @@ Two structural facts explain why nothing fills the idle:
   variant (`Have`, `Researched`, `Produced`, `Producing`, `All`) is
   demand-driven.
 
+## TARGET MET ON A LIVE RUN: 8.69 min
+
+`run-1788483599-83227`, roster `[1,2,3,4]`, `automation_speedrun.lua`.
+
+```
+run_started              @6,944
+plan                     @7,173   194 steps, makespan 30,268
+milestone 1 satisfied    @38,239
+RUN START -> SATISFIED:  31,295 ticks = 8.69 min GAME TIME   (target: under 9.00)
+```
+
+**One plan. One iteration. `failed=0 lost=0` on both actions and walks, zero
+refusals.** Execution came in **2.6% over plan** (31,066 against 30,268).
+
+### Tonight's progression
+
+| run | time | what changed |
+|---|---|---|
+| reference (`…465258`) | **21.34 min** | before any of tonight's work |
+| ladder (`…479942`) | **13.76 min** | + lag clock (F), concurrency (C), chest (B), savepoints (G) |
+| single goal (`…481380`) | **10.52 min** | + one goal instead of seven rungs |
+| **verified (`…483599`)** | **8.69 min** | + placement retry (`c2b2698a`) |
+
+**A 59% reduction**, and each step is attributable to a named change rather
+than to variance.
+
+### What each fix was actually worth
+
+- **F, C, B, G together**: 21.34 -> 13.76 (−35%). Execution stopped diverging
+  from the plan; the chest moved a lag's start earlier so it overlapped.
+- **Single goal instead of a ladder**: 13.76 -> 10.52 (−24%). Seven
+  independently-planned rungs cannot overlap.
+- **Retrying a placement whose footprint a bot stands in**: 10.52 -> 8.69
+  (−17%). One collision had been discarding 11,966 ticks of progress.
+
+### Caveats, stated rather than buried
+
+- **This is one run.** A confirmation is in flight; 0.31 min of margin is 3.4%,
+  thin enough that a second sample matters.
+- **The map is the known-good one and is unidentified** — it predates the
+  `--seed` fix, so no seed reproduces it. It survives as
+  `workspace/known-good-map/level.zip`. A number from this map is not
+  comparable to one from another.
+- **The owner's ~9-minute manual solo baseline was set on a random map**, and
+  the justfile already notes that optimising ours would make our numbers less
+  comparable to it. This run did not optimise the map — it used what was there.
+- **`researched("automation")` only.** Red and green science are a different
+  and larger problem.
+
 ## The collision, diagnosed and fixed (`c2b2698a`)
 
 **The blocker was another bot, parked and idle — not the placing bot.**

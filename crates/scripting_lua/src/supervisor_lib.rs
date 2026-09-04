@@ -53,6 +53,27 @@ mod tests {
             __plan_calls = 0
             __run_calls = 0
             __keyframe_calls = 0
+            -- The `why` of every `obs:recover()` ask, in order. A test reads
+            -- this to see which asks were made at all -- a rule that refuses
+            -- *before* asking (a lost action) is a different fact from one
+            -- that asks and declines the answer (a re-expansion).
+            __recover_calls = {}
+            -- The steps of a plan of `n`, in the shape `PlanValue.steps` hands
+            -- back. Shared by `goal.plan` and the `obs:recover()` stub, so a
+            -- recovered plan is the same kind of thing a planned one is --
+            -- which is exactly what `PlanValue::from_recovery` guarantees on
+            -- the Rust side.
+            function __make_steps(n)
+                local steps = {}
+                for i = 1, n do
+                    steps[i] = {
+                        id = i, bot = 1, label = "step " .. i,
+                        start = (i - 1) * 10, finish = i * 10,
+                        deps = (i > 1) and { i - 1 } or {},
+                    }
+                end
+                return steps
+            end
             -- Present in every test here, the way `record` is only installed
             -- alongside a live game connection in production: proves the
             -- milestone-boundary call happens when recording is available,
@@ -98,25 +119,37 @@ mod tests {
                 __last_raise_was_a_refusal = false
                 if n == nil then error("stub: no scripted plan #" .. __plan_calls) end
                 if n == "raise" then error("stub: unknown item") end
-                local steps = {}
-                for i = 1, n do
-                    steps[i] = {
-                        id = i, bot = 1, label = "step " .. i,
-                        start = (i - 1) * 10, finish = i * 10,
-                        deps = (i > 1) and { i - 1 } or {},
-                    }
-                end
-                return { steps = steps }
+                return { steps = __make_steps(n) }
             end
             goal.run = function(_plan)
                 __run_calls = __run_calls + 1
                 local o = __run_obs[__run_calls] or {}
-                return { failed = o.failed or 0, lost = o.lost or 0,
+                local obs = { failed = o.failed or 0, lost = o.lost or 0,
                          walks_failed = o.walks_failed or 0,
                          walks_lost = o.walks_lost or 0,
                          pending = o.pending or 0, success = o.success or 0,
                          running = 0, done = true,
-                         first_error = o.first_error }
+                         first_error = o.first_error,
+                         actions = o.actions or {},
+                         walks = o.walks }
+                -- `obs:recover()`, installed only when the scripted
+                -- observation asks for it -- because "this binding has no
+                -- `recover`" is itself a case the loop has to survive, and it
+                -- is the case every other test in this file is in.
+                if o.recover ~= nil then
+                    local r = o.recover
+                    obs.recover = function(_self)
+                        table.insert(__recover_calls, r.why)
+                        if r.why == "raise" then error("stub: recover raised", 0) end
+                        if r.steps == nil then return nil, r.why end
+                        -- `bots` is the roster the proposal was made against.
+                        -- A real `PlanValue` always has one, and it is what
+                        -- `record.plan_created` writes, so a test asserts it
+                        -- survives onto the transition.
+                        return { steps = __make_steps(r.steps), bots = {1, 2} }, r.why
+                    end
+                end
+                return obs
             end
         "#
         .replace("PLAN_STEPS", plan_steps)
@@ -1702,5 +1735,529 @@ mod tests {
             2,
             "two milestones closed, two keyframes"
         );
+    }
+
+    // ---- Layer 7: recovery -- continuing a plan instead of discarding it --
+    //
+    // `docs/superpowers/specs/2026-09-04-recovery-instead-of-replan-design.md`,
+    // S1. Every test here drives the real `supervisor.lua` against a scripted
+    // `obs:recover()`; no live run has ever reached the recovery tiers, so
+    // these are the only proof the four rules hold.
+
+    /// Drives one milestone to a terminal state and returns a trace of the
+    /// transitions, `(trace, plan_calls, run_calls, recover_asks)`.
+    ///
+    /// The trace is what a driver sees, in order, because that is the only
+    /// channel the loop has: a recovery is an ordinary `planned` transition
+    /// carrying `t.recovery`, and a run that is about to be continued is an
+    /// ordinary `ran` transition whose `state` says `recovering`.
+    fn trace(lua: &Lua, opts: &str) -> (String, i64, i64, String) {
+        let driver = r#"
+            local sup = supervisor.new(supervisor.list {"a"}, OPTS)
+            local out, guard = {}, 0
+            repeat
+                local t = sup:step()
+                local line = t.action
+                if t.action == "planned" then
+                    line = line .. "(" .. tostring(t.steps)
+                        .. (t.recovery and (" " .. t.recovery) or "") .. ")"
+                elseif t.action == "ran" then
+                    line = line .. "(" .. tostring(t.state) .. ")"
+                end
+                out[#out + 1] = line
+                guard = guard + 1
+                if guard > 200 then error("did not terminate") end
+            until sup:finished()
+            __trace = table.concat(out, " ")
+            __state = sup.state
+        "#
+        .replace("OPTS", opts);
+        lua.load(&driver).exec().expect("driver runs");
+        let g = lua.globals();
+        (
+            g.get::<String>("__trace").unwrap(),
+            g.get::<i64>("__plan_calls").unwrap(),
+            g.get::<i64>("__run_calls").unwrap(),
+            lua.load("return table.concat(__recover_calls, ',')")
+                .eval::<String>()
+                .unwrap(),
+        )
+    }
+
+    /// **The case S1 exists for**, in the shape `run-1788481380-80843` had it:
+    /// 194 steps planned, most of them done, one placement refused because a
+    /// character was standing in the footprint -- a transient that cleared 53
+    /// ticks later. The loop used to answer that by throwing the plan away and
+    /// re-siting the power plant 65 tiles from a pole it had already built.
+    ///
+    /// It now runs the remainder instead, and -- the assertion that matters --
+    /// **without calling the planner**: `plan_calls` counts the first plan and
+    /// the closing empty re-plan, and nothing in between.
+    #[test]
+    fn a_transient_failure_continues_the_plan_instead_of_replanning_it() {
+        let lua = harness(
+            "{10, 0}",
+            "{{failed=1, success=5, pending=4,
+               first_error='cannot place item stone-furnace because a character is standing in the footprint',
+               recover={why='rescheduled', steps=4}},
+              {success=9}}",
+        );
+        let (trace, plans, runs, asks) = trace(&lua, "{}");
+        assert_eq!(
+            trace,
+            "acquired planned(10) ran(recovering) planned(4 rescheduled) \
+             ran(planning) satisfied finished"
+        );
+        assert_eq!(asks, "rescheduled");
+        assert_eq!(
+            plans, 2,
+            "the recovery cost no expansion: one plan, one closing re-plan"
+        );
+        assert_eq!(runs, 2, "and the remainder was actually run");
+        assert_eq!(lua.globals().get::<String>("__state").unwrap(), "done");
+    }
+
+    /// **Rule 1: tier 2 is refused.**
+    ///
+    /// `Reexpanded` is a replan by another name -- a new network numbered from
+    /// zero, run against a fresh log -- and taking it here would bypass
+    /// `iterations` and the stall, which already handle replanning correctly,
+    /// while claiming in the record to be a continuation. The ask is still
+    /// made (the tier is only knowable from the answer); the answer is
+    /// declined.
+    #[test]
+    fn a_reexpansion_is_declined_and_the_loop_replans_instead() {
+        let lua = harness(
+            "{10, 0}",
+            "{{failed=1, success=5, recover={why='reexpanded', steps=4}}}",
+        );
+        let (trace, plans, runs, asks) = trace(&lua, "{}");
+        assert_eq!(
+            trace, "acquired planned(10) ran(planning) satisfied finished",
+            "a re-expansion must leave the loop in exactly the state it was in \
+             before recovery existed"
+        );
+        assert_eq!(
+            asks, "reexpanded",
+            "the ask was made and the answer refused"
+        );
+        assert_eq!(plans, 2);
+        assert_eq!(runs, 1, "the re-expanded plan must not be run from here");
+    }
+
+    /// **Rule 2: a run with a lost action is never recovered -- and never even
+    /// asked about.**
+    ///
+    /// `Lost` means "dispatched, no verdict", not "did not happen".
+    /// `recover()` retires an action only on `Success`, so a lost one comes
+    /// back in the proposal and is dispatched a second time; `Insert`, `Remove`
+    /// and `Place` are not idempotent, and `run-1788517971-48257` lost a
+    /// `take 13 coal from the wooden-chest`, which would empty the chest twice.
+    ///
+    /// Asserted on the ask rather than on the answer: refusing before asking is
+    /// a different and stronger fact than asking and declining, and it is the
+    /// one the double-execution hazard requires.
+    #[test]
+    fn a_run_with_a_lost_action_is_replanned_without_asking_for_a_recovery() {
+        let lua = harness(
+            "{10, 0}",
+            "{{failed=1, lost=1, success=5,
+               first_error='no action result received in time',
+               recover={why='rescheduled', steps=4}}}",
+        );
+        let (trace, plans, runs, asks) = trace(&lua, "{}");
+        assert_eq!(
+            trace,
+            "acquired planned(10) ran(planning) satisfied finished"
+        );
+        assert_eq!(
+            asks, "",
+            "a lost action must not even be offered to `recover`: the proposal \
+             it would make re-dispatches the action nobody has a verdict for"
+        );
+        assert_eq!(plans, 2);
+        assert_eq!(runs, 1);
+    }
+
+    /// **Rule 3: at most `recovery_limit` recoveries per plan lineage.**
+    ///
+    /// Every run here makes progress, so the progress rule never fires and the
+    /// cap is the only thing that can stop it. Tier 2 has no budget and cannot
+    /// have one -- it is pure -- so `recover.rs` hands the duty to its caller,
+    /// and this is the caller.
+    #[test]
+    fn a_lineage_gets_at_most_two_recoveries_even_while_it_is_progressing() {
+        let lua = harness(
+            "{10, 0}",
+            "{{failed=1, success=1, recover={why='rescheduled', steps=8}},
+              {failed=1, success=2, recover={why='rescheduled', steps=6}},
+              {failed=1, success=3, recover={why='rescheduled', steps=4}}}",
+        );
+        let (trace, plans, runs, asks) = trace(&lua, "{}");
+        assert_eq!(
+            trace,
+            "acquired planned(10) ran(recovering) planned(8 rescheduled) \
+             ran(recovering) planned(6 rescheduled) ran(planning) satisfied finished"
+        );
+        assert_eq!(
+            asks, "rescheduled,rescheduled",
+            "the third run is past the budget and must not ask at all"
+        );
+        assert_eq!(runs, 3, "one plan, executed three times, then a re-plan");
+        assert_eq!(plans, 2);
+    }
+
+    /// The budget is per LINEAGE, not per milestone: a fresh `goal.plan` result
+    /// is a fresh plan, a fresh log and a fresh budget.
+    ///
+    /// Without the reset, a milestone that recovered twice early would spend
+    /// the rest of its iterations unable to recover at all -- and the reason
+    /// would be invisible, because nothing would be asked.
+    #[test]
+    fn a_fresh_plan_restores_the_recovery_budget() {
+        let lua = harness(
+            "{10, 10, 0}",
+            "{{failed=1, success=1, recover={why='rescheduled', steps=8}},
+              {failed=1, success=2, recover={why='rescheduled', steps=6}},
+              {failed=1, success=3, recover={why='rescheduled', steps=4}},
+              {failed=1, success=1, recover={why='rescheduled', steps=7}},
+              {success=9}}",
+        );
+        let (_trace, plans, runs, asks) = trace(&lua, "{}");
+        assert_eq!(
+            asks, "rescheduled,rescheduled,rescheduled",
+            "two on the first lineage, then one on the second"
+        );
+        assert_eq!(plans, 3, "two real plans and the closing empty one");
+        assert_eq!(runs, 5);
+    }
+
+    /// **Rule 4: a recovery that adds no successes is not a recovery.**
+    ///
+    /// This is the loop breaker, and it is the one the tiers cannot supply.
+    /// A failed walk halts its bot; `abandon_rest` publishes `Failed` on the
+    /// watch channels and writes **nothing to the log**, so every abandoned
+    /// action stays `Pending`. `exhausted_tier_one` looks for `Failed` with
+    /// `attempts >= 3` and no attempt count ever rises, so `recover()` proposes
+    /// `Rescheduled` **forever** -- its budget is denominated in a unit this
+    /// failure never produces. A walk is also the dominant failure: 76 failed
+    /// walks against 28 failed/lost actions across 21 archived runs.
+    ///
+    /// `recovery_limit = 5` so that the cap cannot be what stops it. Only the
+    /// progress rule can, and the second run is where it fires -- the first
+    /// repetition, not the fifth.
+    #[test]
+    fn a_recovery_that_makes_no_new_progress_is_abandoned_on_the_first_repeat() {
+        let lua = harness(
+            "{10, 0}",
+            "{{walks_failed=1, pending=10, success=0,
+               first_error='the pathfinder returned no path',
+               recover={why='rescheduled', steps=10}},
+              {walks_failed=1, pending=10, success=0,
+               first_error='the pathfinder returned no path',
+               recover={why='rescheduled', steps=10}}}",
+        );
+        let (trace, plans, runs, asks) = trace(&lua, "{recovery_limit = 5}");
+        assert_eq!(
+            trace,
+            "acquired planned(10) ran(recovering) planned(10 rescheduled) \
+             ran(planning) satisfied finished"
+        );
+        assert_eq!(
+            asks, "rescheduled",
+            "the second run repeated the first exactly, so there is nothing to \
+             continue and the loop must stop asking"
+        );
+        assert_eq!(runs, 2);
+        assert_eq!(plans, 2);
+    }
+
+    /// The other side of rule 4, and the reason it is a delta rather than
+    /// `success > 0`: a run whose very first walk failed has `success == 0`
+    /// and is **exactly** the case tier 1 is for -- the reschedule demotes the
+    /// refused `(bot, destination)` pair and another bot usually takes the
+    /// work. A rule reading the absolute would refuse the whole failure class
+    /// it was written for.
+    #[test]
+    fn a_first_run_that_succeeded_at_nothing_is_still_offered_a_recovery() {
+        let lua = harness(
+            "{10, 0}",
+            "{{walks_failed=1, pending=10, success=0,
+               recover={why='rescheduled', steps=10}},
+              {success=10}}",
+        );
+        let (_trace, _plans, runs, asks) = trace(&lua, "{}");
+        assert_eq!(asks, "rescheduled");
+        assert_eq!(runs, 2, "and the retry is what got the work done");
+    }
+
+    /// **A recovery does not touch the tracker, the iteration count or the
+    /// step-count history.**
+    ///
+    /// A tier-1 proposal's step count is the REMAINDER -- 4 where the plan had
+    /// 10 -- so `tracker.observe`ing it would read as a huge improvement and
+    /// reset `stall`, hiding a genuine stall behind the loop's own retries.
+    /// The transition still reports the tracker's numbers, so a driver printing
+    /// "best N" prints the plan's best rather than the remainder's.
+    ///
+    /// This also pins the transition's shape, which is what a driver records:
+    /// `action = "planned"` (so `record.plan_created` fires in a driver that
+    /// has never heard of recovery), a `plan` table of the remainder, and the
+    /// roster the proposal was made against.
+    #[test]
+    fn a_recovery_leaves_the_tracker_the_iterations_and_the_step_counts_alone() {
+        let lua = harness(
+            "{10, 0}",
+            "{{failed=1, success=5, recover={why='rescheduled', steps=4}}, {success=9}}",
+        );
+        lua.load(
+            r#"
+            local sup = supervisor.new(supervisor.list {"a"}, {})
+            sup:step()            -- acquired
+            sup:step()            -- planned, 10 steps
+            sup:step()            -- ran, and accepts the proposal
+            local t = sup:step()  -- the recovery, as a plan
+            __best, __stall = sup.tracker.best, sup.tracker.stall
+            __iterations, __counts = sup.iterations, #sup.step_counts
+            __action, __steps, __why = t.action, t.steps, t.recovery
+            __best_on_t, __iteration_on_t = t.best, t.iteration
+            __plan_len = #t.plan
+            __bots = table.concat(t.bots, ",")
+            __recoveries = t.recoveries
+            "#,
+        )
+        .exec()
+        .expect("driver runs");
+        let g = lua.globals();
+        assert_eq!(
+            g.get::<i64>("__best").unwrap(),
+            10,
+            "the remainder is not a better plan; it is the same plan, partly done"
+        );
+        assert_eq!(g.get::<i64>("__stall").unwrap(), 0);
+        assert_eq!(
+            g.get::<i64>("__iterations").unwrap(),
+            1,
+            "one plan was made for this milestone, and a recovery is not another"
+        );
+        assert_eq!(g.get::<i64>("__counts").unwrap(), 1);
+        assert_eq!(g.get::<String>("__action").unwrap(), "planned");
+        assert_eq!(g.get::<i64>("__steps").unwrap(), 4);
+        assert_eq!(g.get::<String>("__why").unwrap(), "rescheduled");
+        assert_eq!(g.get::<i64>("__recoveries").unwrap(), 1);
+        assert_eq!(
+            g.get::<i64>("__best_on_t").unwrap(),
+            10,
+            "the transition reports the tracker's number, not the remainder's"
+        );
+        assert_eq!(g.get::<i64>("__iteration_on_t").unwrap(), 1);
+        assert_eq!(
+            g.get::<i64>("__plan_len").unwrap(),
+            4,
+            "shaped for `record.plan_created` exactly as a planned plan is"
+        );
+        assert_eq!(
+            g.get::<String>("__bots").unwrap(),
+            "1,2",
+            "the roster the proposal was made against, which is what the record \
+             writes and what nothing downstream can work out for itself"
+        );
+    }
+
+    /// **A carried-forward log re-offers the previous run's walks.**
+    ///
+    /// `build_observation` iterates `log.walks()`, and a tier-1 proposal runs
+    /// against the log of the run it recovers, while `start_walk` only
+    /// overwrites the `(bot, step_index)` keys the narrower schedule reaches.
+    /// So the survivors come back -- and `record.walks` writes
+    /// `walk_dispatched` at the walk's own dispatch tick, which for a survivor
+    /// is **earlier than the record's current position**. That is a broken
+    /// monotonicity and a double count in `just analyse`.
+    ///
+    /// The loop therefore hands each walk to a driver exactly once per lineage,
+    /// keyed by `(bot, step_index, dispatched_tick)` -- so a genuine re-walk of
+    /// the same slot, which arrives with a new dispatch tick, is still offered.
+    #[test]
+    fn a_walk_already_handed_to_a_driver_is_not_offered_again_by_a_recovery() {
+        let lua = harness(
+            "{10, 0}",
+            "{{pending=10, success=1,
+               walks={{bot=1, step_index=0, dispatched_tick=100, status='failed',
+                       to={x=1,y=2}, error='the pathfinder returned no path'}},
+               recover={why='rescheduled', steps=4}},
+              {success=5,
+               walks={{bot=1, step_index=0, dispatched_tick=100, status='failed',
+                       to={x=1,y=2}, error='the pathfinder returned no path'},
+                      {bot=2, step_index=0, dispatched_tick=200, status='success',
+                       to={x=3,y=4}}}}}",
+        );
+        lua.load(
+            r#"
+            local sup = supervisor.new(supervisor.list {"a"}, {})
+            __offered, __failed_counts, __bots = {}, {}, {}
+            repeat
+                local t = sup:step()
+                if t.action == "ran" then
+                    __offered[#__offered + 1] = #t.walks
+                    __failed_counts[#__failed_counts + 1] = t.walks_failed
+                    local names = {}
+                    for _, w in ipairs(t.walks) do names[#names + 1] = w.bot end
+                    __bots[#__bots + 1] = table.concat(names, "+")
+                end
+            until sup:finished()
+            __offered = table.concat(__offered, ",")
+            __failed_counts = table.concat(__failed_counts, ",")
+            __bots = table.concat(__bots, " ")
+            "#,
+        )
+        .exec()
+        .expect("driver runs");
+        let g = lua.globals();
+        assert_eq!(
+            g.get::<String>("__offered").unwrap(),
+            "1,1",
+            "the recovery's observation lists two walks and only one of them is new"
+        );
+        assert_eq!(
+            g.get::<String>("__bots").unwrap(),
+            "1 2",
+            "and the new one is the walk the recovery actually made"
+        );
+        assert_eq!(
+            g.get::<String>("__failed_counts").unwrap(),
+            "1,0",
+            "the failed walk belongs to the run that made it; counting it again \
+             would report a clean recovery as having failed the walk that \
+             provoked it"
+        );
+    }
+
+    /// The counts a driver prints are this run's own, derived from the walks it
+    /// is being handed, and on a fresh log that is the whole log -- so nothing
+    /// about an ordinary run changes.
+    #[test]
+    fn a_fresh_runs_walk_counts_are_unchanged_by_the_de_cumulation() {
+        let lua = harness(
+            "{5, 0}",
+            "{{pending=5,
+               walks={{bot=1, step_index=0, dispatched_tick=100, status='failed', to={x=1,y=2}},
+                      {bot=2, step_index=1, dispatched_tick=110, status='lost', to={x=3,y=4}},
+                      {bot=3, step_index=2, dispatched_tick=120, status='success', to={x=5,y=6}}}}}",
+        );
+        lua.load(
+            r#"
+            local sup = supervisor.new(supervisor.list {"a"}, {})
+            local seen
+            repeat
+                local t = sup:step()
+                if t.action == "ran" then seen = t end
+            until sup:finished()
+            __walks, __failed, __lost = #seen.walks, seen.walks_failed, seen.walks_lost
+            "#,
+        )
+        .exec()
+        .expect("driver runs");
+        let g = lua.globals();
+        assert_eq!(g.get::<i64>("__walks").unwrap(), 3);
+        assert_eq!(g.get::<i64>("__failed").unwrap(), 1);
+        assert_eq!(g.get::<i64>("__lost").unwrap(), 1);
+    }
+
+    /// An observation with no `recover` at all -- an older binding, or any of
+    /// the stubs above -- replans, exactly as the loop did before S1. "Cannot
+    /// ask" must never come out as "carry on", and here the safe reading of it
+    /// is the behaviour that existed before the question did.
+    #[test]
+    fn an_observation_with_no_recover_at_all_is_replanned() {
+        let lua = harness("{10, 0}", "{{failed=1, success=5}}");
+        let (trace, plans, runs, asks) = trace(&lua, "{}");
+        assert_eq!(
+            trace,
+            "acquired planned(10) ran(planning) satisfied finished"
+        );
+        assert_eq!(asks, "");
+        assert_eq!(plans, 2);
+        assert_eq!(runs, 1);
+    }
+
+    /// `recovery_limit = 0` turns the whole thing off and restores the previous
+    /// behaviour byte for byte. This is the escape hatch a run wants when a
+    /// recovery is suspected of hiding something -- and, until `S0` puts a
+    /// `cause` on `PlanCreated`, it is also how a measured run gets its
+    /// control.
+    #[test]
+    fn a_recovery_limit_of_zero_never_asks() {
+        let lua = harness(
+            "{10, 0}",
+            "{{failed=1, success=5, recover={why='rescheduled', steps=4}}}",
+        );
+        let (trace, plans, runs, asks) = trace(&lua, "{recovery_limit = 0}");
+        assert_eq!(
+            trace,
+            "acquired planned(10) ran(planning) satisfied finished"
+        );
+        assert_eq!(asks, "");
+        assert_eq!(plans, 2);
+        assert_eq!(runs, 1);
+    }
+
+    /// `recover` raises for a run that is not finished and for a roster that
+    /// has lost a bot since the plan was made. Neither is a reason to end the
+    /// run: both mean "replan", which is what this loop does anyway. A raise
+    /// here must not escape, and must not be mistaken for a proposal.
+    #[test]
+    fn a_recover_that_raises_falls_back_to_replanning() {
+        let lua = harness("{10, 0}", "{{failed=1, success=5, recover={why='raise'}}}");
+        let (trace, plans, runs, asks) = trace(&lua, "{}");
+        assert_eq!(
+            trace,
+            "acquired planned(10) ran(planning) satisfied finished"
+        );
+        assert_eq!(asks, "raise", "the ask was made and it blew up");
+        assert_eq!(plans, 2);
+        assert_eq!(runs, 1);
+    }
+
+    /// Tier 0 and tier 3 both answer with no plan -- "the work is done" and
+    /// "nothing mechanical is left" -- and both mean the same thing to this
+    /// loop: there is nothing to continue, so replan and let the stall and the
+    /// cap do their job.
+    #[test]
+    fn a_recovery_that_proposes_no_plan_replans() {
+        for why in ["complete", "surfaced"] {
+            let lua = harness(
+                "{10, 0}",
+                &format!("{{{{failed=1, success=5, recover={{why='{why}'}}}}}}"),
+            );
+            let (trace, plans, runs, asks) = trace(&lua, "{}");
+            assert_eq!(
+                trace,
+                "acquired planned(10) ran(planning) satisfied finished"
+            );
+            assert_eq!(asks, why);
+            assert_eq!(plans, 2);
+            assert_eq!(runs, 1);
+        }
+    }
+
+    /// A run that finished its plan cleanly is never asked. `recover()` would
+    /// answer `Complete`, and the ask is not free: it builds a whole
+    /// `PlanState` from the world. 8 of the archive's 57 replans are this case
+    /// -- the plan ran to completion and the goal still did not hold -- and
+    /// recovery buys them nothing.
+    #[test]
+    fn a_clean_run_is_never_asked_for_a_recovery() {
+        let lua = harness(
+            "{10, 6, 0}",
+            "{{success=10, recover={why='rescheduled', steps=4}},
+              {success=6, recover={why='rescheduled', steps=2}}}",
+        );
+        let (_trace, plans, runs, asks) = trace(&lua, "{}");
+        assert_eq!(
+            asks, "",
+            "nothing failed and nothing is pending, so there is nothing to recover"
+        );
+        assert_eq!(plans, 3);
+        assert_eq!(runs, 2);
     }
 }

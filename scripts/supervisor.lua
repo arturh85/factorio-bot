@@ -356,6 +356,17 @@ function supervisor.new(source, opts)
         bots = opts.bots,
         stall_limit = opts.stall_limit or 3,
         max_iterations = opts.max_iterations or 50,
+        -- How many tier-1 recoveries one plan LINEAGE may have before the loop
+        -- gives up and re-plans. Two, so a plan is executed at most three
+        -- times. `0` turns recovery off and restores the pre-recovery
+        -- behaviour exactly, which is the escape hatch a run wants when a
+        -- recovery is suspected of hiding something.
+        --
+        -- The cap is the supervisor's duty and cannot be moved inside
+        -- `recover()`: that function is pure and has no memory of having been
+        -- asked before, and `crates/executor/src/recover.rs` says so in as many
+        -- words.
+        recovery_limit = opts.recovery_limit or 2,
         state = "acquiring",
         index = 0,
         _history = {},
@@ -367,7 +378,76 @@ function supervisor.new(source, opts)
         any_failures = false,
         first_error = nil,
         refusal = nil,
+        -- The three fields below belong to a plan LINEAGE -- one plan plus the
+        -- tier-1 proposals descended from it -- not to a milestone, and are
+        -- reset by `_new_lineage` for every fresh `goal.plan` result.
+        recoveries = 0,
+        -- `obs.success` as it stood when the last recovery was accepted, or
+        -- `nil` while this lineage has not recovered yet. The counter is
+        -- CUMULATIVE across a chain -- `build_observation` iterates the
+        -- handed-in log, and a tier-1 proposal carries the previous log
+        -- forward -- so "did this recovery achieve anything" is a delta
+        -- against this baseline and can never be an absolute.
+        chain_success = nil,
+        -- The `(bot, step_index, dispatched_tick)` of every walk already handed
+        -- to a driver for this lineage. Same cause as `chain_success`: the
+        -- carried log keeps the walks the narrower recovery schedule never
+        -- re-walked, `obs.walks` re-offers them, and `record.walks` would write
+        -- them a second time at a tick earlier than the record's position.
+        _walks_seen = nil,
+        -- The proposal accepted by a "ran" transition and replayed by the one
+        -- after it. Held rather than acted on in place so the run that produced
+        -- it still reports itself as a run: a driver records `record.actions`
+        -- and `record.walks` on `t.action == "ran"` and `record.plan_created`
+        -- on `t.action == "planned"`, and one transition cannot be both, so
+        -- collapsing the two would drop one of the recordings on the floor.
+        _recovery = nil,
     }, Sup)
+end
+
+--- Reset everything that belongs to a plan lineage rather than to a milestone.
+-- A recovery budget must never be inherited by a plan that did not spend it,
+-- and a walk of the previous plan must never suppress a walk of the next one.
+function Sup:_new_lineage()
+    self.recoveries = 0
+    self.chain_success = nil
+    self._walks_seen = {}
+    self._recovery = nil
+end
+
+--- The walks of `list` this lineage has not already handed to a driver, plus
+--- how many of those failed and how many were lost.
+--
+-- Pure apart from marking `seen`. The identity is `(bot, step_index,
+-- dispatched_tick)`: `ExecutionLog::start_walk` keys walks by the first two and
+-- overwrites, so a re-walk of the same slot arrives with a new dispatch tick
+-- and is correctly new, while a survivor of the previous run arrives identical
+-- and is correctly old.
+--
+-- The two counts are DERIVED from this list rather than read off
+-- `obs.walks_failed` / `obs.walks_lost`, which count the whole carried log.
+-- Deriving them is also the reading that does not depend on the
+-- cumulative-counter argument being right: on a fresh log the list is the whole
+-- log and the two agree exactly.
+local function unseen_walks(seen, list)
+    local out, failed, lost = {}, 0, 0
+    if type(list) ~= "table" then return out, failed, lost end
+    for _, w in ipairs(list) do
+        if type(w) == "table" then
+            local key = tostring(w.bot) .. "/" .. tostring(w.step_index)
+                .. "@" .. tostring(w.dispatched_tick)
+            if seen[key] == nil then
+                seen[key] = true
+                out[#out + 1] = w
+                if w.status == "failed" then
+                    failed = failed + 1
+                elseif w.status == "lost" then
+                    lost = lost + 1
+                end
+            end
+        end
+    end
+    return out, failed, lost
 end
 
 function Sup:finished()
@@ -585,6 +665,87 @@ function Sup:_witness(w)
         observation(before, after, now - t0, polls, #watched, missing))
 end
 
+-- ---------------------------------------------------------------------------
+-- Recovery: continuing a plan instead of throwing it away
+-- ---------------------------------------------------------------------------
+--
+-- A replan is not only a recomputation, it is a **re-decision of layout**, and
+-- half the layout is already built. `run-1788481380-80843` planned 194 steps,
+-- succeeded at 154 of them, failed **one** placement on a character that moved
+-- 53 ticks later, and replanned: 11,966 ticks of execution discarded and the
+-- whole power plant re-sited 65 tiles from a pole that was already standing and
+-- is now garbage nothing in the system knows about. Across 21 archived runs,
+-- **38 of 57 replans had a trigger tier 1 is designed for**.
+--
+-- So: when a run does not finish its plan, ask `obs:recover()` first, and take
+-- the answer only when it is tier 1 (`"rescheduled"`) -- the same actions minus
+-- the succeeded ones, re-scheduled against the world as it is now, with every
+-- retained action's preconditions re-checked. See
+-- `docs/superpowers/specs/2026-09-04-recovery-instead-of-replan-design.md`.
+--
+-- Four refusals, and none of them is decoration:
+--
+--   * **`"reexpanded"` is refused.** Tier 2 is a replan by another name -- a
+--     new network numbered from zero against a fresh log -- and taking it here
+--     would bypass the `iterations` cap and the stall that already handle
+--     replanning correctly, while pretending in the record to be a
+--     continuation.
+--   * **Any run with a LOST action is refused.** `recover()` retires an action
+--     only on `Success`, so a `Lost` one comes back in the proposal and gets
+--     re-dispatched -- and `Lost` means "dispatched, no verdict", not
+--     "did not happen". `Insert`, `Remove` and `Place` are not idempotent:
+--     re-taking a `take 13 coal` that actually landed empties the chest twice.
+--     `recover.rs` states plainly that a caller who cannot tolerate that must
+--     check the log itself. This is that check, and it costs 3 of 57 archived
+--     replans' worth of benefit.
+--   * **At most `recovery_limit` recoveries per lineage.**
+--   * **A recovery that adds no successes is not a recovery.** This is the
+--     loop breaker, and without it the FIRST walk-only failure spins forever.
+--     A failed walk halts its bot and `abandon_rest` publishes `Failed` on the
+--     watch channels while writing **nothing to the log**, so the abandoned
+--     actions stay `Pending` and no action is ever dispatched again;
+--     `exhausted_tier_one` looks for `Failed` with `attempts >= 3`, so its
+--     budget is denominated in a unit this failure never produces and
+--     `recover()` proposes `Rescheduled` forever. A walk is also the DOMINANT
+--     failure -- 76 failed walks against 28 failed/lost actions, and 28 of 57
+--     replans had no action failure at all -- so this is the common path, not
+--     the corner.
+--
+-- Three things a recovery deliberately does NOT touch:
+--
+--   * `tracker`, `iterations` and `step_counts`. A tier-1 proposal's step count
+--     is the REMAINDER -- 39 where the plan had 194 -- and feeding that to
+--     `tracker.observe` reads as an enormous improvement and resets `stall`,
+--     hiding a genuine one.
+--   * `obs.walks`, beyond filtering it (`unseen_walks`).
+--   * the `goal.plan` call. A recovery costs no planner expansion, which is the
+--     whole point.
+
+--- May this observation be recovered rather than replanned?
+-- `trouble` is this run's own trouble count, already de-cumulated.
+function Sup:_may_recover(obs, trouble)
+    if (self.recovery_limit or 0) <= 0 then return false end
+    -- Absent rather than failing: every live `goal.run` installs `recover` on
+    -- its observation, so this is a stub or an older binding, and the honest
+    -- answer for "cannot ask" is the behaviour that existed before the question
+    -- did -- replan.
+    if type(obs) ~= "table" or type(obs.recover) ~= "function" then return false end
+    -- Nothing outstanding: `recover()` would answer `Complete` and we would
+    -- have paid a `PlanState::from_world` to be told what we already know.
+    if trouble <= 0 and (obs.pending or 0) <= 0 then return false end
+    if (obs.lost or 0) > 0 then return false end
+    if self.recoveries >= self.recovery_limit then return false end
+    -- `nil` means this lineage has not recovered yet, so there is no previous
+    -- recovery to have failed to make progress. The rule is about a recovery
+    -- that achieved nothing, not about a first run that achieved nothing --
+    -- a run whose opening walk failed has `success == 0` and is exactly the
+    -- case tier 1 exists for.
+    if self.chain_success ~= nil and (obs.success or 0) <= self.chain_success then
+        return false
+    end
+    return true
+end
+
 --- Perform exactly one action and return a transition record.
 function Sup:step()
     if self:finished() then
@@ -607,8 +768,46 @@ function Sup:step()
         self.any_failures = false
         self.first_error = nil
         self.refusal = nil
+        self:_new_lineage()
         self.state = "planning"
         return { action = "acquired", state = "planning", milestone_index = self.index }
+    end
+
+    -- The proposal the previous "ran" transition accepted, replayed as an
+    -- ordinary plan.
+    --
+    -- It is `action = "planned"` on purpose: every driver already records
+    -- `record.plan_created(t.milestone_index, t.plan, t.bots)` for that word,
+    -- so **a driver that has never heard of recovery records the recovered plan
+    -- correctly**, and `t.recovery` is there for one that has. The alternative
+    -- -- folding the recovery into the "ran" transition -- would have silently
+    -- cost that run its `record.actions` / `record.walks` call, because a
+    -- driver's branch chain answers one word per transition.
+    --
+    -- No `goal.plan`, no `tracker.observe`, no iteration: this is the same
+    -- plan, narrowed.
+    if self.state == "recovering" then
+        local proposal = self._recovery
+        self._recovery = nil
+        self.plan = proposal.plan
+        self.recoveries = self.recoveries + 1
+        self.state = "running"
+        return { action = "planned", state = "running",
+                 milestone_index = self.index, steps = #proposal.steps,
+                 -- The tracker's own numbers, unchanged and re-reported, so a
+                 -- driver printing "best N" prints the plan's best rather than
+                 -- the remainder's.
+                 best = self.tracker.best, stall = self.tracker.stall,
+                 iteration = self.iterations,
+                 plan = plan_for_record(proposal.steps),
+                 bots = proposal.plan.bots,
+                 -- Which tier answered, and how far into the budget we are.
+                 -- Nothing downstream requires either yet -- until `S0` puts a
+                 -- `cause` on `PlanCreated` there is no field in the record to
+                 -- carry them -- but a driver can print them, and a run whose
+                 -- log says "planned 39 steps" twice with no planner call
+                 -- between is otherwise unreadable.
+                 recovery = proposal.why, recoveries = self.recoveries }
     end
 
     if self.state == "planning" then
@@ -789,6 +988,9 @@ function Sup:step()
         end
 
         self.plan = plan
+        -- A fresh plan is a fresh log, a fresh recovery budget and a fresh set
+        -- of walks. Everything a lineage accumulated stops here.
+        self:_new_lineage()
         self.iterations = self.iterations + 1
         table.insert(self.step_counts, steps)
         self.tracker = tracker.observe(self.tracker, steps)
@@ -861,15 +1063,55 @@ function Sup:step()
     -- single lost action printed `failed=1 lost=1`, which reads as two
     -- problems, is one, and misdirected a live diagnosis. A name that means
     -- "the game said no" must never carry a total.
-    local trouble = (obs.failed or 0) + (obs.lost or 0)
-        + (obs.walks_failed or 0) + (obs.walks_lost or 0)
+    --
+    -- The two walk terms are **this run's own**, not `obs.walks_failed` and
+    -- `obs.walks_lost`. Those count the whole log, and a tier-1 proposal runs
+    -- against the log of the run it recovers, so on a recovery they include the
+    -- previous run's failed walks and would report a clean recovery as having
+    -- failed the walks that provoked it. `unseen_walks` de-cumulates both the
+    -- list and the counts in one pass; on a fresh log it changes nothing,
+    -- because there is nothing to have seen before.
+    local walks, walks_failed, walks_lost = unseen_walks(self._walks_seen, obs.walks)
+    if type(obs.walks) ~= "table" then
+        -- No walk list to derive from (a stub, or a binding older than
+        -- `obs.walks`). Fall back to the counters, and leave `t.walks` absent
+        -- rather than substituting an empty table -- a driver reads `t.walks`
+        -- by type and would otherwise be asked to record nothing at all.
+        walks, walks_failed, walks_lost = nil, obs.walks_failed or 0, obs.walks_lost or 0
+    end
+    local trouble = (obs.failed or 0) + (obs.lost or 0) + walks_failed + walks_lost
     if trouble > 0 then
         self.any_failures = true
         if self.first_error == nil then
             self.first_error = obs.first_error
         end
     end
+
+    -- Recover, or replan. `pcall` because `recover` raises rather than
+    -- answering for a run that is not finished and for a roster that has lost
+    -- a bot since the plan was made, and neither is a reason to end the run:
+    -- both mean "replan", which is what the loop did before this branch
+    -- existed.
     self.state = "planning"
+    local recovery = nil
+    if self:_may_recover(obs, trouble) then
+        local ok, next_plan, why = pcall(obs.recover, obs)
+        if ok and next_plan ~= nil and why == "rescheduled" then
+            -- Read once: `PlanValue.steps` rebuilds the whole array per read.
+            local next_steps = next_plan.steps
+            if type(next_steps) == "table" and #next_steps > 0 then
+                recovery = { plan = next_plan, steps = next_steps, why = why }
+            end
+        end
+    end
+    if recovery ~= nil then
+        self._recovery = recovery
+        -- The baseline the NEXT run has to beat. Set here rather than on every
+        -- run so that it is what it says it is: the successes standing when
+        -- this lineage last chose to continue.
+        self.chain_success = obs.success or 0
+        self.state = "recovering"
+    end
     -- `steps` and `actions` ride along so a caller can record what each bot
     -- actually did: the plan knows which bot owns an action and what it is
     -- called, the observation knows when the game ran it and how it ended, and
@@ -890,15 +1132,20 @@ function Sup:step()
     -- The four trouble counts are normalised to numbers rather than passed
     -- through: a driver prints these, and `nil` printed as "nil" reads as
     -- "unknown" where "none" is what happened.
-    return { action = "ran", state = "planning", milestone_index = self.index,
+    return { action = "ran", state = self.state, milestone_index = self.index,
              failed = obs.failed or 0, lost = obs.lost or 0,
-             walks_failed = obs.walks_failed or 0,
-             walks_lost = obs.walks_lost or 0,
+             walks_failed = walks_failed,
+             walks_lost = walks_lost,
              first_error = obs.first_error,
              iteration = self.iterations,
              done = obs.done, pending = obs.pending, running = obs.running,
              success = obs.success,
-             steps = steps, actions = obs.actions, walks = obs.walks }
+             -- Set when this run is about to be continued rather than
+             -- replanned, so a driver can say which of two consecutive "ran"
+             -- lines belong to one plan. The plan itself arrives on the next
+             -- transition.
+             recovering = recovery ~= nil and recovery.why or nil,
+             steps = steps, actions = obs.actions, walks = walks }
 end
 
 --- Human-readable summary of everything closed so far.

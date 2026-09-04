@@ -321,7 +321,15 @@ repeat
         record.milestone_started(t.milestone_index, names[t.milestone_index] or "?")
         print("-> " .. (names[t.milestone_index] or "?"))
     elseif t.action == "planned" then
-        print("   planned " .. t.steps .. " steps (best " .. tostring(t.best) .. ")")
+        -- `t.recovery` is present when this "plan" is not a plan at all but a
+        -- tier-1 recovery of the one before it: the same plan minus what
+        -- already succeeded, re-scheduled against the world as it now is, with
+        -- no expansion done and the tracker deliberately untouched. Printed
+        -- because until `PlanCreated` carries a cause, this line is the only
+        -- place a reader can tell two consecutive plans of one milestone apart.
+        print("   planned " .. t.steps .. " steps (best " .. tostring(t.best) .. ")"
+            .. (t.recovery and (" -- recovered: " .. t.recovery
+                .. " " .. tostring(t.recoveries)) or ""))
     elseif t.action == "ran" then
         local n = 0
         if t.steps ~= nil and t.actions ~= nil then n = record.actions(t.steps, t.actions) end

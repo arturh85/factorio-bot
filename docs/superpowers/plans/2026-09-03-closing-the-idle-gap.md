@@ -104,7 +104,19 @@ Two structural facts explain why nothing fills the idle:
   variant (`Have`, `Researched`, `Produced`, `Producing`, `All`) is
   demand-driven.
 
-## TARGET MET ON A LIVE RUN: 8.69 min
+## TARGET MET AND CONFIRMED: 8.69 and 8.72 min
+
+**Two runs, both under target, 0.3% apart.**
+
+| run | ticks | game time | plan |
+|---|---|---|---|
+| `run-1788483599-83227` | 31,295 | **8.69 min** | 194 steps, makespan 30,268 |
+| `run-1788484671-91355` | 31,406 | **8.72 min** | 194 steps, makespan 30,268 |
+
+Identical plans, so planning is deterministic on a live world as well as
+offline. Both: one plan, one iteration, no replan, `failed=0 lost=0`.
+
+
 
 `run-1788483599-83227`, roster `[1,2,3,4]`, `automation_speedrun.lua`.
 
@@ -141,8 +153,9 @@ than to variance.
 
 ### Caveats, stated rather than buried
 
-- **This is one run.** A confirmation is in flight; 0.31 min of margin is 3.4%,
-  thin enough that a second sample matters.
+- **Two runs, not one** — 8.69 and 8.72, a 0.3% spread. The margin to 9.00 is
+  ~3.3%, so this is met but not comfortably; a slower map or a worse roll would
+  eat it.
 - **The map is the known-good one and is unidentified** — it predates the
   `--seed` fix, so no seed reproduces it. It survives as
   `workspace/known-good-map/level.zip`. A number from this map is not

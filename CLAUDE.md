@@ -626,8 +626,25 @@ entry over a log line:
   message. Land one, then the other -- or hand over a patch. Two agents have
   had to stop for this.
 - **Develop in a throwaway worktree** (`git worktree add /tmp/x HEAD`) when a
-  live run holds `target/debug/factorio-bot`; cargo cannot write a running
-  binary (`Text file busy`).
+  live run holds `target/debug/factorio-bot`.
+
+  **Be precise about why, because the obvious statement of it is wrong.**
+  Linux does not lock a running binary the way Windows does -- you can
+  `unlink` it or `rename` over it while it executes, and that succeeds. What
+  fails is an **in-place write** to a running ELF image: `ETXTBSY`, reported
+  as `Text file busy`. Verified here rather than assumed:
+
+  ```
+  cp $(command -v python3) ./t && chmod 755 ./t
+  ./t -c 'import time; time.sleep(20)' &
+  cp $(command -v python3) ./t   # cp: cannot create regular file './t': Text file busy
+  mv other ./t                   # succeeds
+  ```
+
+  So a build that links straight to the output path trips over a live run,
+  and one that writes a temp and renames does not. Copying the binary aside
+  and running the copy sidesteps it either way -- `tools/seed_search.sh`
+  honours a `BIN` override for exactly that.
 - **A worktree run redirects `workspace/mods/BotBridge` at that worktree's
   copy.** A run launched from `/tmp/x` loaded `/tmp/x/mods/BotBridge` and
   produced no machine samples even though the feature had landed in the main

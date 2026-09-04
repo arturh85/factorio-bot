@@ -11,6 +11,66 @@ four bots.
 
 ---
 
+## A stalled walk now names what blocked it (`52d35716`) — and the message was lying
+
+The mod probes at the instant the leg gives up and appends the cause:
+
+```
+ERROR: stuck while walking, leg 9 of 10 made no progress for 61 ticks
+from (-9.90625/-18.171875) to (-10.5/-18.5), moved 0.02 tiles,
+blocked at (-10.437/-18.702) by character #3 (mining) on tile 'grass-1'
+```
+
+Causes: `character #N (walking|mining|idle)`, `entity '<name>' (ours|theirs)`,
+`tree`, `rock`, `cliff`, `nothing findable`, and
+`blocker unknown (probe failed: <err>)` — it runs under `pcall` inside
+`on_tick` and **says when the probe itself failed** rather than falling back to
+something that reads like the old message. The Rust side distinguishes three
+answers where two would hide a regression: **no clause** (older mod),
+**`Nothing`** (looked, tile clear), **`Unknown`** (a wording this build does
+not know, carrying the mod's own words).
+
+Two deliberate refusals: it never names a **resource** — a bot stuck on ore
+stands in a solid block of them, so that would be a confident wrong answer on
+the most common terrain — and it does not widen the box until something is
+always found. **`nothing findable` is a real answer.**
+
+### `"made no progress"` has never measured progress
+
+The check is `event.tick - w.idx_tick > w.leg_timeout` **and nothing else** — a
+leg **timeout**. It fires just as readily for a leg walked *slowly* as for one
+that is wedged. **The record has been asserting the stronger claim for both.**
+The wording could not be renamed (three consumers, and every archived run
+matches that string), so the mod now stamps the leg's origin and reports
+`moved <d> tiles` beside it. Without that number `nothing findable` is
+unreadable: **0.00 tiles is a pathfinder problem, 3.40 tiles means
+`walk_leg_timeout_ticks` is wrong.**
+
+### Stalls are invisible to the record
+
+`grep -rl "made no progress" workspace/runs/` returns **zero of 22 runs**,
+while the most recent run's *log* contains one. A stall that recovers via a
+fresh path settles the walk `success`, so the error never reaches
+`events.jsonl` — the whole class exists only in stderr and has never been
+analysable. This is the fifth mechanism found here reporting nothing while
+working.
+
+### Corrections to my brief
+
+- **`classify_walk_failure` is in `crates/scripting_lua/src/globals/record.rs`**,
+  not `rcon.rs` as I said.
+- **The structured record field is not done** — `WalkFailure` lives in
+  `crates/core/src/record/`, which was another agent's territory. The cause
+  reaches `events.jsonl` verbatim inside `WalkSettled.error`, but there is no
+  `blocked_by` column. Adoption is two lines and `WalkBlocker` already derives
+  `Serialize`/`Deserialize` for it.
+
+**Untested geometry:** Factorio has never loaded this `control.lua`. Whether
+0.75 tiles ahead with a 0.35 half-box is where a wedged character's obstruction
+sits is a guess sized from the character's 0.2 half-width. If wrong, the
+symptom is a flood of `nothing findable` with `moved 0.00 tiles` — legible
+rather than silent.
+
 ## The divergence bug is a container capacity limit — found on a bench in minutes
 
 The owner suggested checking *"if you can pick up more than 1 stack size at

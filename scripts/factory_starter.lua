@@ -107,18 +107,17 @@
 -- `automation-science-pack` rose. Because no bot acted in between, a pack that
 -- appeared can only have been assembled there.
 --
--- WHICH MACHINE THE WITNESS WATCHES, AND WHY THAT NEEDED NO NEW MACHINERY.
--- `supervisor.witness` takes `from`/`into` -- the two ends of ONE
--- machine-to-machine link -- and red science is a chain: chest, inserter, gear
--- machine, inserter, pack machine. `from = "inserter"` and
--- `into = "assembling-machine-1"` therefore watches BOTH machines, because an
--- inserter drops into each. That is not a fudge and it is not a generalisation
--- either: the terminal is chosen by the ITEM. The gear machine's output holds
--- gears, never packs, so it contributes zero to both readings and the delta is
--- the pack machine's alone. A chain whose terminal made the same item as an
--- earlier stage would need `from`/`into` to name positions rather than kinds;
--- this one does not, and inventing that without a chain to check it against
--- would be inventing it.
+-- WHAT THE WITNESS WATCHES, AND WHY IT MOVED.
+-- It watches the cell's OUTPUT CHEST (`into = "iron-chest"`), not the
+-- assembling machine. It used to watch the machine, and `2aca0f10` broke that
+-- by giving the cell an output inserter: with a drain attached the machine's
+-- output slot sits at ZERO while it runs happily, so the old witness would
+-- have halted a healthy cell. Measured on a bench -- 94 packs made, output
+-- slot 0, status `working`.
+--
+-- The terminal is still chosen by the ITEM, so the feed and supply chests
+-- contribute nothing: they are hand-filled with ingredients and no inserter
+-- drops a pack into them.
 --
 -- HOW LONG THE WITNESS WAITS. The planner's own arithmetic for this cell
 -- (`crates/planner/src/method/assemble.rs`) is
@@ -133,7 +132,16 @@
 -- the two numbers above are a MODEL, read off prototypes, and the whole point
 -- of witnessing a cell is that the model can be optimistic.
 --
--- The cost is asymmetric on purpose. `at_least = 1` with a 3600-tick window
+-- THIS IS A RATE CLAIM, AND IT COULD NOT HAVE BEEN ONE BEFORE.
+-- `at_least = 1` was the strongest claim POSSIBLE while the terminal was a
+-- machine output slot, because an assembler jams at three or four items -- and
+-- that is why six consecutive witnesses all fired inside 780 ticks and none of
+-- them said anything about a rate. A chest accumulates monotonically, so
+-- 5 packs in 5400 ticks is now a real floor, chosen as one MORE than the four
+-- crafts an undrained machine manages: a cell without a drain cannot satisfy
+-- it however long it waits.
+--
+-- The cost is asymmetric on purpose. A window
 -- means a working cell stops the wait at about 700 ticks (twelve seconds),
 -- while only a dead one pays the whole minute.
 --
@@ -257,6 +265,7 @@ print("recording run " .. run_id)
 -- since 2026-09-02, so a plant a previous milestone built is readable rather
 -- than invisible. Before that whitelist widened, this ladder would have built
 -- a second power plant on rung 2 and said nothing about it.
+local WITNESS_AT_LEAST = 5
 local WITNESS_WITHIN_TICKS = 3600
 
 local goals = {
@@ -264,20 +273,20 @@ local goals = {
     supervisor.witness {
         item = "automation-science-pack",
         from = "inserter",
-        into = "assembling-machine-1",
+        into = "iron-chest",
         near = { x = 0, y = 0 },
         radius = 300,
-        at_least = 1,
+        at_least = WITNESS_AT_LEAST,
         within_ticks = WITNESS_WITHIN_TICKS,
     },
     goal.producing("logistic-science-pack", 6),
     supervisor.witness {
         item = "logistic-science-pack",
         from = "inserter",
-        into = "assembling-machine-1",
+        into = "iron-chest",
         near = { x = 0, y = 0 },
         radius = 300,
-        at_least = 1,
+        at_least = WITNESS_AT_LEAST,
         within_ticks = WITNESS_WITHIN_TICKS,
     },
 }
@@ -286,9 +295,9 @@ local goals = {
 -- with the wrong step.
 local names = {
     "a red-science cell producing 6/min",
-    "witness: red packs appear in the assembler while every bot stands still",
+    "witness: 5 red packs reach the output chest in 90 s with every bot idle",
     "a green-science cell producing 6/min, on the plant red already stood up",
-    "witness: green packs appear in the assembler while every bot stands still",
+    "witness: 5 green packs reach the output chest in 90 s with every bot idle",
 }
 
 local sup = supervisor.new(supervisor.list(goals),

@@ -47,6 +47,7 @@ So: if you add a fixture, add a row here. If you refresh one, change its row.
 | `live-2.1.17-entities-resources.json` | 2.1.17 (build 87315, linux64, space-age) | 2026-08-30 | `remote.call('botbridge', 'find_entities_filtered', {area={{-56,-60},{-40,-44}}})` | `live_2_1_payloads.rs` |
 | `live-2.1.17-inventory-contents-at.json` | 2.1.17 (build 87315, linux64, space-age) | 2026-08-30 | `remote.call('botbridge', 'inventory_contents_at', {{name='crash-site-spaceship', position={x=-5,y=-6}}})` | `live_2_1_payloads.rs` |
 | `run-1788432181-42528-frozen-bots.json` | 2.1.17 (build 87315, linux64, space-age) | 2026-09-03 | that run's own `samples.jsonl` and `map.jsonl` (see below) | `enclosure_run13.rs` |
+| `run-1788552801-73005-walled-in.json` | 2.1.17 (build 87315, linux64, space-age) | 2026-09-04 | that run's own `samples.jsonl` (bot 1's frozen position) and the `game` array of its last `map.jsonl` keyframe, the 42 entities within `x 26..48, y -13..3` | `enclosure_run73005.rs` |
 | `recipes-fixtures.json` | **1.1 (stale)** | 2022-06-27 (`21cebd70`) | unrecorded | `src/test_utils.rs::fixture_recipes` |
 | `item-prototype-fixtures.json` | **1.1 (stale)** | 2022-06-27 (`21cebd70`) | unrecorded | `src/test_utils.rs::fixture_item_prototypes` |
 | `entity-prototype-fixtures.json` | **1.1 (stale)** | 2022-06-27 (`21cebd70`) | unrecorded | `src/test_utils.rs::fixture_entity_prototypes` |

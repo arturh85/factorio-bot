@@ -19,10 +19,11 @@ const TICKS_PER_SECOND: f64 = 60.0;
 ///
 /// Kept equal to `crates/executor::run::EVACUATE_RADIUS` by convention, not by
 /// a shared constant -- the two crates do not share code across the
-/// planner/executor boundary for anything else in this enum either. Generous
-/// relative to `crate::enclosure::CELL` on purpose: the tile was proven safe
-/// at that resolution, but the game's own pathing does not promise to land a
-/// character on an exact float.
+/// planner/executor boundary for anything else in this enum either. Half a
+/// tile: the escape target is a tile centre on the pathfinder's own grid
+/// (`crate::enclosure::CELL` is one tile), so anywhere inside that tile is
+/// the tile that was proven safe, and the game's own pathing does not promise
+/// to land a character on an exact float.
 pub(crate) const EVACUATION_RADIUS: f64 = 0.5;
 
 /// One [`Step::Act`] that walks `evacuation.bot` clear of a footprint before

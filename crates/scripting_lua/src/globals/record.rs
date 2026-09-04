@@ -1879,23 +1879,34 @@ end
         "__doc_entry_enclosures",
         String::from(
             r#"
---- flushes the bots found walled in since the last flush
+--- flushes the bots found walled in, and those walked clear of it, since the last flush
 -- A bot is "walled in" when a flood fill over the occupancy model, started
 -- where it stands, closes without reaching open ground -- every placement
--- around it was individually legal and the *set* formed a wall. The check runs
--- when the game's own pathfinder has already refused that bot a route from
--- that spot, so each event sits beside a failed walk and explains it.
+-- around it was individually legal and the *set* formed a wall. The fill is
+-- run on the game's own pathfinding grid (one cell per tile, the character's
+-- box tested at each tile's centre), because that is the grid that decides
+-- whether a walk is refused: a crack a character fits through but the
+-- pathfinder will not use is a wall. The check runs when the game's
+-- pathfinder has already refused that bot a route from that spot, so each
+-- `bot_enclosed` event sits beside a failed walk and explains it.
+--
+-- The same fill runs *before* every placement, from where the placing bot
+-- stands, with the footprint added: when it would close, the executor walks
+-- the bot to the nearest tile that stays open first and this writes a
+-- `bot_stepped_aside` event saying so -- the enclosure that did not happen,
+-- and the reason a `place` was preceded by a walk the plan has no step for.
 --
 -- Call it once per loop iteration, alongside `record.actions`,
--- `record.teleports` and `record.refusals`. Nothing acts on these: they change
--- no plan and move no bot. They exist because `run-1788432181-42528` ran its
--- whole budget with two of four bots frozen for 77% of it and no artefact said
--- so.
+-- `record.teleports` and `record.refusals`. Nothing here changes a plan.
+-- These exist because `run-1788432181-42528` ran its whole budget with two of
+-- four bots frozen for 77% of it and no artefact said so, and because
+-- `run-1788552801-73005` walled its own bot 1 in with a placement and this
+-- function, on the finer grid it then used, wrote nothing.
 --
--- Each event carries `searched_tiles`, the radius the fill was allowed. An
--- enclosure wider than that window produces no event, so no events is not
--- evidence that no bot was walled in.
--- @treturn number how many enclosure events were written
+-- Each `bot_enclosed` event carries `searched_tiles`, the radius the fill was
+-- allowed. An enclosure wider than that window produces no event, so no
+-- events is not evidence that no bot was walled in.
+-- @treturn number how many events were written
 -- @raise if no recording is running
 function record.enclosures()
 end
@@ -1931,6 +1942,27 @@ end
                                 position: found.at,
                                 pocket_tiles: found.pocket_tiles,
                                 searched_tiles: found.searched_tiles,
+                            },
+                        )
+                        .map_err(record_error)?;
+                    written += 1;
+                }
+                for step in world.drain_step_asides() {
+                    // Stamped by the step-aside walk's own reply when the game
+                    // gave one; otherwise the record's high-water mark, as
+                    // above.
+                    let tick = recorder
+                        .not_before(step.tick.unwrap_or_else(|| rcon.last_tick().unwrap_or(0)));
+                    recorder
+                        .record(
+                            tick,
+                            EventKind::BotSteppedAside {
+                                bot: u32::from(step.player),
+                                from: step.from,
+                                to: step.to,
+                                placing: step.placing,
+                                site: step.site,
+                                pocket_tiles: step.pocket_tiles,
                             },
                         )
                         .map_err(record_error)?;
@@ -4021,6 +4053,34 @@ mod tests {
                 ),
             }
         );
+    }
+
+    /// A pre-dispatch refusal now names where the character stood and what
+    /// goal the game was asked for, in the wording `walk_endpoints` reads.
+    ///
+    /// The exact line `run-1788552801-73005` archived three times, from one
+    /// spot, as `no_path` from nowhere to nowhere -- plus the suffix
+    /// `RconActuator::walk` appends when it holds the character's position.
+    /// The numbers are the run's own: bot 1 at `(34.41796875, -4.62890625)`,
+    /// the first refused goal `(43.5, -0.5)`.
+    #[test]
+    fn a_pre_dispatch_refusal_carries_the_origin_and_the_goal_it_asked_for() {
+        let archived = "game rejected the command: the game's pathfinder returned no path: \
+                        Error: failed to path find";
+        let bare = classify_walk_failure(archived);
+        assert_eq!(bare.kind, WalkFailureKind::NoPath);
+        assert_eq!(
+            (bare.from, bare.destination),
+            (None, None),
+            "the archived shape"
+        );
+
+        let now =
+            format!("{archived} -- found no path from (34.41796875/-4.62890625) to (43.5/-0.5)");
+        let failure = classify_walk_failure(&now);
+        assert_eq!(failure.kind, WalkFailureKind::NoPath);
+        assert_eq!(failure.from, Some(Position::new(34.41796875, -4.62890625)));
+        assert_eq!(failure.destination, Some(Position::new(43.5, -0.5)));
     }
 
     /// A dead bot's walk fails at the path request, and `player_path` hands

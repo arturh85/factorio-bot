@@ -1,19 +1,25 @@
 //! "Would this placement wall a bot in?" -- asked before the wall exists.
 //!
-//! # Why this is a second implementation of `crates/core::graph::enclosure`
+//! # What this shares with `crates/core::graph::enclosure`, and what it adds
 //!
-//! That module answers the same question about the *real*, already-built
-//! world, from an `EntityGraph` the executor can read straight off the game.
-//! This one has to answer it about a world that does not exist yet: a
-//! candidate cell or power plant is only ever a handful of `FactorioEntity`s
-//! sitting in a forked [`crate::state::PlanState`]'s own `added` map, never
-//! reported to the game and never in any `EntityGraph`. `crates/planner`
-//! cannot pull `crates/core::graph::enclosure` in and hand it that fork --
-//! not because of an async/IO boundary (the function is already synchronous
-//! and pure) but because it is typed against `EntityGraph` specifically and
-//! has no notion of a plan's own tentative placements at all. The one thing
-//! actually shared is the algorithm, which is reimplemented here against
-//! [`PlanState`]'s own occupancy instead.
+//! That module answers the question about the *real*, already-built world,
+//! from an `EntityGraph` the executor can read straight off the game. This
+//! one asks it about a world that does not exist yet: a candidate cell or
+//! power plant is only ever a handful of `FactorioEntity`s sitting in a
+//! forked [`crate::state::PlanState`]'s own `added` map, never reported to
+//! the game and never in any `EntityGraph`. What differs is therefore only
+//! *where the obstacles come from* -- [`PlanState`]'s own occupancy here, the
+//! graph's `blocked_tree` there. The grid, the rasteriser and the fills are
+//! `crates/core`'s, called through the thin wrappers at the bottom of this
+//! file, and the constants are re-exported rather than restated.
+//!
+//! One implementation on purpose. This file used to carry its own copy of
+//! the algorithm, and a copy is a place for the two to disagree about what
+//! a wall is: a placement that passed prevention here would then be found
+//! enclosed by detection there, or the other way round, for no reason but
+//! the two grids differing. Run `run-1788552801-73005` showed that the grid
+//! *itself* was wrong -- finer than the game's pathfinder, so it found exits
+//! the game refuses -- and one fix landing in one place is the point.
 //!
 //! # What counts as an obstacle, and what deliberately does not
 //!
@@ -64,7 +70,6 @@
 use crate::ids::BotId;
 use crate::state::PlanState;
 use factorio_bot_core::types::{Position, Rect};
-use std::collections::VecDeque;
 
 /// How far from the point being asked about the search looks, in tiles, on
 /// each axis. Identical to `crates/core::graph::enclosure::SEARCH_RADIUS`,
@@ -73,17 +78,17 @@ use std::collections::VecDeque;
 /// window than the detection check that inspired it would let a bot pass
 /// prevention and still be found enclosed by detection a moment later, or the
 /// other way round, for no reason but the two numbers disagreeing.
-pub const SEARCH_RADIUS: f64 = 24.0;
+pub const SEARCH_RADIUS: f64 = factorio_bot_core::graph::enclosure::SEARCH_RADIUS;
 
-/// The side of one fill cell, in tiles. Identical to
-/// `crates/core::graph::enclosure::CELL` and argued the same way there: fine
-/// enough that no wall the character's own half-box would block can leak
-/// through it, coarse enough that the grid stays a few hundred thousand
-/// cells rather than tens of millions.
-pub const CELL: f64 = 0.125;
+/// The side of one fill cell, in tiles: one tile, the game's own pathfinding
+/// grid. See `crates/core::graph::enclosure::CELL` for the argument, which
+/// is the game's and not ours.
+pub const CELL: f64 = factorio_bot_core::graph::enclosure::CELL;
 
-/// Cells per axis in the searched window.
-const GRID: usize = (2. * SEARCH_RADIUS / CELL) as usize;
+/// Cells per axis in the searched window. Only the tests below size a grid
+/// by hand; everything else reads it through `crates/core`.
+#[cfg(test)]
+const GRID: usize = factorio_bot_core::graph::enclosure::GRID;
 
 /// What a bounded escape search found. See the module docs for how this
 /// differs from `crates/core::graph::enclosure::Escape`, which it otherwise
@@ -92,8 +97,8 @@ const GRID: usize = (2. * SEARCH_RADIUS / CELL) as usize;
 pub enum Escape {
     /// The free region reaches the edge of the searched window.
     Open,
-    /// The free region closes inside the window, at this many square tiles of
-    /// configuration space.
+    /// The free region closes inside the window, at this many whole tiles of
+    /// the pathfinder's grid.
     Enclosed { pocket_tiles: f64 },
     /// The window is not entirely inside the region `blocked_tree` covers, so
     /// a query for it would come back short. Never folded into `Open`: an
@@ -190,176 +195,74 @@ pub fn check(state: &PlanState, trial: &PlanState, origin: &Position) -> Enclosu
     }
 }
 
-/// The window `SEARCH_RADIUS` tiles around `from` on every axis, and the
-/// grid's own origin corner (its bottom-left, in the same coordinate frame as
-/// `from`).
+/// The window `SEARCH_RADIUS` tiles around `from` on every axis, anchored to
+/// the tile grid, and the grid's own origin corner. One implementation, in
+/// `crates/core` -- see the module docs for why the two crates must not each
+/// have their own.
 pub(crate) fn window(from: &Position) -> (Rect, (f64, f64)) {
-    let origin = (from.x() - SEARCH_RADIUS, from.y() - SEARCH_RADIUS);
-    (
-        Rect::new(
-            &Position::new(origin.0, origin.1),
-            &Position::new(from.x() + SEARCH_RADIUS, from.y() + SEARCH_RADIUS),
-        ),
-        origin,
-    )
+    factorio_bot_core::graph::enclosure::window(from)
 }
 
 pub(crate) fn cell_index(x: usize, y: usize) -> usize {
-    y * GRID + x
+    factorio_bot_core::graph::enclosure::cell_index(x, y)
 }
 
-/// The half-open range of cell indices whose centres fall in `[lo, hi]`,
-/// measured in tiles from the window's own left/top edge, clipped to the
-/// grid. Ported unchanged from `crates/core::graph::enclosure::cells_covering`
-/// -- see that function's doc for why the range can come back empty.
-fn cells_covering(lo: f64, hi: f64) -> Option<std::ops::Range<usize>> {
-    let first = (lo / CELL - 0.5).ceil();
-    let last = (hi / CELL - 0.5).floor();
-    let first = first.max(0.) as usize;
-    let last = last.min(GRID as f64 - 1.);
-    if last < 0. {
-        return None;
-    }
-    let end = last as usize + 1;
-    (first < end).then_some(first..end)
-}
-
-/// Rasterise `obstacles` into a `GRID x GRID` blocked mask over the window
-/// whose bottom-left corner is `origin`, growing every box by `half_box` on
-/// each axis first -- configuration space, exactly as
-/// `crates/core::graph::enclosure::escape_from` builds it.
+/// Rasterise `obstacles` into a blocked mask over the window whose origin
+/// corner is `origin`, growing every box by `half_box` on each axis first --
+/// the game's own tile-centre test, as `crates/core` implements it.
 pub(crate) fn rasterize(
     obstacles: impl Iterator<Item = Rect>,
     origin: (f64, f64),
     half_box: (f64, f64),
 ) -> Vec<bool> {
-    let mut blocked = vec![false; GRID * GRID];
-    for box_ in obstacles {
-        let Some(xs) = cells_covering(
-            box_.left_top.x() - half_box.0 - origin.0,
-            box_.right_bottom.x() + half_box.0 - origin.0,
-        ) else {
-            continue;
-        };
-        let Some(ys) = cells_covering(
-            box_.left_top.y() - half_box.1 - origin.1,
-            box_.right_bottom.y() + half_box.1 - origin.1,
-        ) else {
-            continue;
-        };
-        for y in ys {
-            let row = y * GRID;
-            blocked[row + xs.start..row + xs.end].fill(true);
-        }
-    }
-    blocked
-}
-
-/// The four axis neighbours of `(x, y)`, each still inside the grid.
-fn neighbours(x: usize, y: usize) -> impl Iterator<Item = (usize, usize)> {
-    [
-        (x + 1, y),
-        (x.wrapping_sub(1), y),
-        (x, y + 1),
-        (x, y.wrapping_sub(1)),
-    ]
-    .into_iter()
-    .filter(|&(nx, ny)| nx < GRID && ny < GRID)
+    factorio_bot_core::graph::enclosure::rasterize(obstacles, origin, half_box)
 }
 
 /// Flood fill from the centre cell, admitted free whatever `blocked` says
-/// there -- the character's own ground is real ground, occupancy model or
-/// not. Mirrors `crates/core::graph::enclosure::escape_from`'s own fill
-/// exactly.
+/// there, translated into this crate's own [`Escape`].
 pub(crate) fn fill_from_center(blocked: &[bool]) -> Escape {
-    let start = (GRID / 2, GRID / 2);
-    let mut seen = vec![false; GRID * GRID];
-    let mut stack = vec![start];
-    seen[cell_index(start.0, start.1)] = true;
-    let mut reached = 0u32;
-    while let Some((x, y)) = stack.pop() {
-        reached += 1;
-        if x == 0 || y == 0 || x == GRID - 1 || y == GRID - 1 {
-            return Escape::Open;
+    match factorio_bot_core::graph::enclosure::fill_from_center(blocked) {
+        factorio_bot_core::graph::enclosure::Escape::Open => Escape::Open,
+        factorio_bot_core::graph::enclosure::Escape::Enclosed { pocket_tiles } => {
+            Escape::Enclosed { pocket_tiles }
         }
-        for (nx, ny) in neighbours(x, y) {
-            let index = cell_index(nx, ny);
-            if seen[index] || blocked[index] {
-                continue;
-            }
-            seen[index] = true;
-            stack.push((nx, ny));
-        }
-    }
-    Escape::Enclosed {
-        pocket_tiles: f64::from(reached) * CELL * CELL,
+        factorio_bot_core::graph::enclosure::Escape::Unknown(_) => Escape::Unknown,
     }
 }
 
-/// Every cell reachable from the centre, admitted free there whatever
-/// `blocked` says, in breadth-first (nearest-first) order.
+/// Every cell reachable from the centre, nearest first.
 pub(crate) fn bfs_order_from_center(blocked: &[bool]) -> Vec<(usize, usize)> {
-    let start = (GRID / 2, GRID / 2);
-    let mut seen = vec![false; GRID * GRID];
-    let mut queue = VecDeque::from([start]);
-    seen[cell_index(start.0, start.1)] = true;
-    let mut order = Vec::new();
-    while let Some((x, y)) = queue.pop_front() {
-        order.push((x, y));
-        for (nx, ny) in neighbours(x, y) {
-            let index = cell_index(nx, ny);
-            if seen[index] || blocked[index] {
-                continue;
-            }
-            seen[index] = true;
-            queue.push_back((nx, ny));
-        }
-    }
-    order
+    factorio_bot_core::graph::enclosure::bfs_order_from_center(blocked)
 }
 
-/// Every free cell still connected to the window's own edge -- seeded from
-/// every free cell on the boundary at once, rather than from the centre, so a
-/// pocket that has sealed the centre off can still be told apart from ground
-/// that stays open at the rim.
+/// Every free cell still connected to the window's own edge.
 pub(crate) fn reachable_from_boundary(blocked: &[bool]) -> Vec<bool> {
-    let mut seen = vec![false; GRID * GRID];
-    let mut queue = VecDeque::new();
-    for i in 0..GRID {
-        for (x, y) in [(i, 0), (i, GRID - 1), (0, i), (GRID - 1, i)] {
-            let index = cell_index(x, y);
-            if !blocked[index] && !seen[index] {
-                seen[index] = true;
-                queue.push_back((x, y));
-            }
-        }
-    }
-    while let Some((x, y)) = queue.pop_front() {
-        for (nx, ny) in neighbours(x, y) {
-            let index = cell_index(nx, ny);
-            if seen[index] || blocked[index] {
-                continue;
-            }
-            seen[index] = true;
-            queue.push_back((nx, ny));
-        }
-    }
-    seen
+    factorio_bot_core::graph::enclosure::reachable_from_boundary(blocked)
 }
 
-/// The tile centre `(x, y)` names, in the window whose bottom-left corner is
+/// The tile centre `(x, y)` names, in the window whose origin corner is
 /// `origin`.
 pub(crate) fn cell_to_position(origin: (f64, f64), cell: (usize, usize)) -> Position {
-    Position::new(
-        origin.0 + (cell.0 as f64 + 0.5) * CELL,
-        origin.1 + (cell.1 as f64 + 0.5) * CELL,
-    )
+    factorio_bot_core::graph::enclosure::cell_to_position(origin, cell)
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    /// The one fact this file has to keep true on its own: its answers are
+    /// the same answers `crates/core` gives, cell for cell, so a placement
+    /// that passes prevention here is not found enclosed by detection there.
+    #[test]
+    fn prevention_and_detection_share_one_grid() {
+        assert_eq!(
+            SEARCH_RADIUS,
+            factorio_bot_core::graph::enclosure::SEARCH_RADIUS
+        );
+        assert_eq!(CELL, factorio_bot_core::graph::enclosure::CELL);
+        assert_eq!(GRID, factorio_bot_core::graph::enclosure::GRID);
+    }
 
     #[test]
     fn an_empty_grid_is_open() {
@@ -371,9 +274,7 @@ mod tests {
     fn a_closed_ring_encloses() {
         let mut blocked = vec![false; GRID * GRID];
         let (cx, cy) = (GRID / 2, GRID / 2);
-        // A ring of blocked cells a few cells out on every side, thick enough
-        // that a 4-connected fill cannot leak through it.
-        let r = 4usize;
+        let r = 2usize;
         for y in cy - r..=cy + r {
             for x in cx - r..=cx + r {
                 if x == cx - r || x == cx + r || y == cy - r || y == cy + r {
@@ -381,58 +282,10 @@ mod tests {
                 }
             }
         }
-        match fill_from_center(&blocked) {
-            Escape::Enclosed { pocket_tiles } => assert!(pocket_tiles > 0.),
-            other => panic!("expected an enclosure, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn boundary_and_center_fills_agree_on_an_open_grid() {
-        let blocked = vec![false; GRID * GRID];
-        let safe = reachable_from_boundary(&blocked);
-        // Every cell the centre-seeded fill can reach on an open grid is a
-        // cell the boundary fill reaches too, and vice versa: with nothing
-        // blocked the two are the same connected region.
-        assert!(safe.iter().all(|&s| s));
-        let order = bfs_order_from_center(&blocked);
-        assert_eq!(order.len(), GRID * GRID);
-    }
-
-    #[test]
-    fn a_sealed_pocket_is_unreachable_from_the_boundary() {
-        let mut blocked = vec![false; GRID * GRID];
-        let (cx, cy) = (GRID / 2, GRID / 2);
-        let r = 4usize;
-        for y in cy - r..=cy + r {
-            for x in cx - r..=cx + r {
-                if x == cx - r || x == cx + r || y == cy - r || y == cy + r {
-                    blocked[cell_index(x, y)] = true;
-                }
-            }
-        }
-        let safe = reachable_from_boundary(&blocked);
-        assert!(
-            !safe[cell_index(cx, cy)],
-            "the centre is sealed inside the ring and must not read as connected to the edge"
+        // Two tiles out on every side leaves a 3x3 interior, whole tiles.
+        assert_eq!(
+            fill_from_center(&blocked),
+            Escape::Enclosed { pocket_tiles: 9. }
         );
-        // A cell just outside the ring is still connected to the boundary.
-        assert!(safe[cell_index(cx + r + 1, cy)]);
-    }
-
-    #[test]
-    fn bfs_order_is_nearest_first() {
-        let blocked = vec![false; GRID * GRID];
-        let order = bfs_order_from_center(&blocked);
-        let (cx, cy) = (GRID / 2, GRID / 2);
-        let dist = |(x, y): (usize, usize)| -> i64 {
-            (x as i64 - cx as i64).abs() + (y as i64 - cy as i64).abs()
-        };
-        let mut last = 0;
-        for cell in order {
-            let d = dist(cell);
-            assert!(d >= last, "bfs order must be non-decreasing in distance");
-            last = d;
-        }
     }
 }

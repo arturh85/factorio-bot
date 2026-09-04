@@ -1,0 +1,351 @@
+{
+ "bot": {
+  "id": 1,
+  "position": {
+   "x": 34.41796875,
+   "y": -4.62890625
+  }
+ },
+ "before_the_walk": {
+  "x": 32.75,
+  "y": -1.828125
+ },
+ "entities": [
+  {
+   "name": "lab",
+   "position": {
+    "x": 36.5,
+    "y": -9.5
+   },
+   "direction": 0
+  },
+  {
+   "name": "iron-chest",
+   "position": {
+    "x": 28.5,
+    "y": -8.5
+   },
+   "direction": 0
+  },
+  {
+   "name": "inserter",
+   "position": {
+    "x": 29.5,
+    "y": -8.5
+   },
+   "direction": 12
+  },
+  {
+   "name": "assembling-machine-1",
+   "position": {
+    "x": 31.5,
+    "y": -8.5
+   },
+   "direction": 0
+  },
+  {
+   "name": "pipe",
+   "position": {
+    "x": 45.5,
+    "y": -8.5
+   },
+   "direction": 0
+  },
+  {
+   "name": "offshore-pump",
+   "position": {
+    "x": 46.5,
+    "y": -8.5
+   },
+   "direction": 4
+  },
+  {
+   "name": "iron-chest",
+   "position": {
+    "x": 28.5,
+    "y": -7.5
+   },
+   "direction": 0
+  },
+  {
+   "name": "inserter",
+   "position": {
+    "x": 29.5,
+    "y": -7.5
+   },
+   "direction": 12
+  },
+  {
+   "name": "small-electric-pole",
+   "position": {
+    "x": 38.5,
+    "y": -7.5
+   },
+   "direction": 0
+  },
+  {
+   "name": "pipe",
+   "position": {
+    "x": 45.5,
+    "y": -7.5
+   },
+   "direction": 0
+  },
+  {
+   "name": "small-electric-pole",
+   "position": {
+    "x": 30.5,
+    "y": -6.5
+   },
+   "direction": 0
+  },
+  {
+   "name": "inserter",
+   "position": {
+    "x": 31.5,
+    "y": -6.5
+   },
+   "direction": 0
+  },
+  {
+   "name": "iron-chest",
+   "position": {
+    "x": 33.5,
+    "y": -6.5
+   },
+   "direction": 0
+  },
+  {
+   "name": "inserter",
+   "position": {
+    "x": 34.5,
+    "y": -6.5
+   },
+   "direction": 12
+  },
+  {
+   "name": "assembling-machine-1",
+   "position": {
+    "x": 36.5,
+    "y": -6.5
+   },
+   "direction": 0
+  },
+  {
+   "name": "iron-chest",
+   "position": {
+    "x": 28.5,
+    "y": -5.5
+   },
+   "direction": 0
+  },
+  {
+   "name": "inserter",
+   "position": {
+    "x": 29.5,
+    "y": -5.5
+   },
+   "direction": 4
+  },
+  {
+   "name": "steam-engine",
+   "position": {
+    "x": 40.5,
+    "y": -5.5
+   },
+   "direction": 4
+  },
+  {
+   "name": "pipe",
+   "position": {
+    "x": 43.5,
+    "y": -5.5
+   },
+   "direction": 0
+  },
+  {
+   "name": "boiler",
+   "position": {
+    "x": 45.0,
+    "y": -5.5
+   },
+   "direction": 12
+  },
+  {
+   "name": "iron-chest",
+   "position": {
+    "x": 28.5,
+    "y": -4.5
+   },
+   "direction": 0
+  },
+  {
+   "name": "inserter",
+   "position": {
+    "x": 29.5,
+    "y": -4.5
+   },
+   "direction": 12
+  },
+  {
+   "name": "assembling-machine-1",
+   "position": {
+    "x": 31.5,
+    "y": -4.5
+   },
+   "direction": 0
+  },
+  {
+   "name": "small-electric-pole",
+   "position": {
+    "x": 35.5,
+    "y": -4.5
+   },
+   "direction": 0
+  },
+  {
+   "name": "inserter",
+   "position": {
+    "x": 36.5,
+    "y": -4.5
+   },
+   "direction": 0
+  },
+  {
+   "name": "iron-chest",
+   "position": {
+    "x": 33.5,
+    "y": -3.5
+   },
+   "direction": 0
+  },
+  {
+   "name": "inserter",
+   "position": {
+    "x": 34.5,
+    "y": -3.5
+   },
+   "direction": 4
+  },
+  {
+   "name": "iron-chest",
+   "position": {
+    "x": 33.5,
+    "y": -2.5
+   },
+   "direction": 0
+  },
+  {
+   "name": "inserter",
+   "position": {
+    "x": 34.5,
+    "y": -2.5
+   },
+   "direction": 12
+  },
+  {
+   "name": "assembling-machine-1",
+   "position": {
+    "x": 36.5,
+    "y": -2.5
+   },
+   "direction": 0
+  },
+  {
+   "name": "assembling-machine-1",
+   "position": {
+    "x": 39.5,
+    "y": -2.5
+   },
+   "direction": 0
+  },
+  {
+   "name": "inserter",
+   "position": {
+    "x": 41.5,
+    "y": -2.5
+   },
+   "direction": 12
+  },
+  {
+   "name": "assembling-machine-1",
+   "position": {
+    "x": 43.5,
+    "y": -2.5
+   },
+   "direction": 0
+  },
+  {
+   "name": "small-electric-pole",
+   "position": {
+    "x": 41.5,
+    "y": -1.5
+   },
+   "direction": 0
+  },
+  {
+   "name": "inserter",
+   "position": {
+    "x": 39.5,
+    "y": -0.5
+   },
+   "direction": 8
+  },
+  {
+   "name": "inserter",
+   "position": {
+    "x": 40.5,
+    "y": -0.5
+   },
+   "direction": 8
+  },
+  {
+   "name": "inserter",
+   "position": {
+    "x": 42.5,
+    "y": -0.5
+   },
+   "direction": 0
+  },
+  {
+   "name": "inserter",
+   "position": {
+    "x": 43.5,
+    "y": -0.5
+   },
+   "direction": 8
+  },
+  {
+   "name": "iron-chest",
+   "position": {
+    "x": 39.5,
+    "y": 0.5
+   },
+   "direction": 0
+  },
+  {
+   "name": "iron-chest",
+   "position": {
+    "x": 40.5,
+    "y": 0.5
+   },
+   "direction": 0
+  },
+  {
+   "name": "iron-chest",
+   "position": {
+    "x": 42.5,
+    "y": 0.5
+   },
+   "direction": 0
+  },
+  {
+   "name": "iron-chest",
+   "position": {
+    "x": 43.5,
+    "y": 0.5
+   },
+   "direction": 0
+  }
+ ]
+}

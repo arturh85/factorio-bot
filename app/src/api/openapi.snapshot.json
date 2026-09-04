@@ -943,7 +943,7 @@
                 "type": "string"
               },
               "pocket_tiles": {
-                "description": "How much ground is still reachable, in square tiles of\n**configuration space** -- obstacles grown by the character's own\ncollision box, so this is where the character's centre may go, not\nthe floor area a person would measure by eye. It is smaller than\nthe latter, always. Reported because \"boxed into 3 square tiles\"\nand \"boxed into 300\" are different situations.",
+                "description": "How much ground is still reachable, in whole tiles of the game's\nown pathfinding grid -- a tile counts when the character's box\ncentred on it is clear, which is the test `request_path` makes.\nThe tile the character stands on is always one of them. Reported\nbecause \"boxed into 4 tiles\" and \"boxed into 300\" are different\nsituations.",
                 "format": "double",
                 "type": "number"
               },
@@ -962,6 +962,53 @@
               "position",
               "pocket_tiles",
               "searched_tiles",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A bot was walked clear of a placement that would otherwise have sealed\nit in -- the [`EventKind::BotEnclosed`] that did not happen.\n\nWritten by `record.enclosures()` from the queue `crates/executor`'s\npre-place check fills (`FactorioWorld::step_asides`). The check runs\nbefore every placement: with the footprint added to the occupancy\nmodel, would the fill around the character about to build it close?\nIn `run-1788552801-73005` it would have, and did -- bot 1 placed an\n`assembling-machine-1` from the one patch of ground whose every exit\ncrossed it, and stood there for 40 000 ticks.\n\nThis is a bot doing something the plan did not ask for. It is in the\nrecord so that a reader comparing the plan to what happened can see\nwhy a `place` was preceded by a walk the schedule has no step for.",
+            "properties": {
+              "bot": {
+                "format": "int32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "from": {
+                "$ref": "#/components/schemas/Position",
+                "description": "Where the character stood when it was about to place. Observed."
+              },
+              "kind": {
+                "enum": [
+                  "bot_stepped_aside"
+                ],
+                "type": "string"
+              },
+              "placing": {
+                "description": "The entity that was about to be placed.",
+                "type": "string"
+              },
+              "pocket_tiles": {
+                "description": "How many tiles the character would have been left with, had it\nstayed -- the same count [`EventKind::BotEnclosed`] reports.",
+                "format": "double",
+                "type": "number"
+              },
+              "site": {
+                "$ref": "#/components/schemas/Position",
+                "description": "Where it was about to be placed."
+              },
+              "to": {
+                "$ref": "#/components/schemas/Position",
+                "description": "The tile centre it was walked to: the nearest tile reachable from\n`from` that stays connected to open ground once the placement\nstands and is still within building reach of `site`."
+              }
+            },
+            "required": [
+              "bot",
+              "from",
+              "to",
+              "placing",
+              "site",
+              "pocket_tiles",
               "kind"
             ],
             "type": "object"

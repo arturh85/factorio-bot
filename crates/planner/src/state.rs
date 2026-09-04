@@ -3705,13 +3705,21 @@ impl PlanState {
     ///   crash-site-spaceship-wreck-...` until the mod's own timeout fires
     ///   (`workspace/runs/run-1788317597-64759`, rung 4).
     ///
-    ///   This source is wider than its name suggests, and that is why the
-    ///   *previous* plan's drill needs nothing further: `EntityGraph::add`
+    ///   This source is wider than its name suggests, and it is what keeps
+    ///   the *previous* plan's drill out of selection: `EntityGraph::add`
     ///   files every entity with a non-zero collision box into `blocked_tree`
     ///   except resources and rails, machines included, so a cell that really
-    ///   got built is already out of selection for the next milestone. Only
-    ///   the plan's own not-yet-built overlay was missing, which is why the
-    ///   first source above is the whole of the fix. There is a test.
+    ///   got built is out of selection for the next milestone -- **for as
+    ///   long as the graph keeps the box.** It did not always: until
+    ///   `EntityGraph::remove` learned which box is an entity's own, a drill
+    ///   emptying one of the tiles under itself made the mod report that
+    ///   tile deleted, and the removal swept the drill's box out with the
+    ///   ore's. `run-1788559688-08406` lost six of its seven plan-1 drills
+    ///   from this tree that way and plan 2 hand-mined under two of them.
+    ///   The rule stays here and reads the graph rather than growing a third
+    ///   source over `entity_tree`: the graph is the one place that knows
+    ///   both what stands and where, and a second reading here would only
+    ///   have hidden the graph's forgetting. Both halves have tests.
     ///
     /// The ore itself is not gone — `add` never removes a resource entity
     /// because something else was placed over it, and this does not touch

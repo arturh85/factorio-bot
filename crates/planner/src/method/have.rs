@@ -13290,4 +13290,131 @@ mod stockpiling {
             "a different chest is a different buffer claim"
         );
     }
+
+    /// A hand-mine goal on a patch whose nearest tile is under a drill an
+    /// earlier plan built is sent to the next free tile, not to the drill
+    /// (`run-1788559688-08406`, plan 2: `expected iron-ore at (-7.5/-29.5),
+    /// found burner-mining-drill`). The drill covers the four tiles nearest
+    /// the bot, so a selector that ignored it would pick one of them.
+    #[test]
+    fn a_hand_mine_goal_walks_past_a_tile_under_a_standing_drill() {
+        use factorio_bot_core::factorio::util::add_to_rect;
+        use factorio_bot_core::test_utils::fixture_world;
+        use factorio_bot_core::types::{FactorioEntity, Position};
+
+        let world = fixture_world();
+        let drill_at = Position::new(-35., 36.);
+        let collision = world
+            .entity_prototypes
+            .get("burner-mining-drill")
+            .map(|proto| proto.collision_box.clone())
+            .expect("the fixture has a drill prototype");
+        world
+            .on_some_entity_created(FactorioEntity {
+                name: "burner-mining-drill".into(),
+                entity_type: "mining-drill".into(),
+                bounding_box: add_to_rect(&collision, &drill_at),
+                position: drill_at.clone(),
+                ..Default::default()
+            })
+            .expect("the drill stands");
+        let s = PlanState::from_world(Arc::new(world), &[BotId(1)]);
+        let covered = s
+            .collision_area("burner-mining-drill", &drill_at)
+            .expect("the fixture has a drill prototype");
+        assert!(
+            covered.contains(&Position::new(-34.5, 35.5)),
+            "the drill must cover the tile nearest the origin for this test to bite"
+        );
+
+        let net = expand(
+            &[Goal::Have {
+                item: "iron-ore".into(),
+                count: 5,
+                whose: Holder::Anyone,
+            }],
+            &s,
+            &crate::method::have::default_registry(),
+            BotId(1),
+        )
+        .expect("five ore plan");
+        let mined: Vec<Position> = net
+            .actions()
+            .filter_map(|a| match &a.kind {
+                ActionKind::Mine { pos, .. } => Some(pos.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(!mined.is_empty(), "the goal is met by hand mining");
+        for pos in &mined {
+            assert!(
+                !covered.contains(pos),
+                "mine at {pos} is under the standing drill at {drill_at}"
+            );
+        }
+    }
+
+    /// The other direction, within one plan: a drill this plan places on ore
+    /// keeps hand mining off its tiles for the rest of the plan, whichever
+    /// of the two goals expands first. The plate goal stands a drill cell on
+    /// the iron patch; the ore goal hand-mines the same patch.
+    #[test]
+    fn a_drill_placed_by_this_plan_keeps_hand_mining_off_its_tiles() {
+        use factorio_bot_core::num_traits::FromPrimitive;
+        use factorio_bot_core::types::Position;
+
+        let plates = Goal::Have {
+            item: "iron-plate".into(),
+            count: 50,
+            whose: Holder::Anyone,
+        };
+        let ore = Goal::Have {
+            item: "iron-ore".into(),
+            count: 5,
+            whose: Holder::Anyone,
+        };
+        for goals in [vec![plates.clone(), ore.clone()], vec![ore, plates]] {
+            let s = PlanState::from_world(
+                Arc::new(factorio_bot_core::test_utils::fixture_world()),
+                &[BotId(1)],
+            );
+            let net = expand(
+                &goals,
+                &s,
+                &crate::method::have::default_registry(),
+                BotId(1),
+            )
+            .expect("both goals plan");
+            let drills: Vec<factorio_bot_core::types::Rect> = net
+                .actions()
+                .filter_map(|a| match &a.kind {
+                    ActionKind::Place { entity } if entity.name == "burner-mining-drill" => {
+                        Some(entity.clone())
+                    }
+                    _ => None,
+                })
+                .map(|entity| {
+                    let facing = factorio_bot_core::types::Direction::from_u8(entity.direction)
+                        .expect("a cardinal");
+                    s.collision_area_facing("burner-mining-drill", &entity.position, facing)
+                        .expect("the fixture has a drill prototype")
+                })
+                .collect();
+            assert!(!drills.is_empty(), "the plate goal stands a drill");
+            let mined: Vec<Position> = net
+                .actions()
+                .filter_map(|a| match &a.kind {
+                    ActionKind::Mine { pos, item, .. } if item == "iron-ore" => Some(pos.clone()),
+                    _ => None,
+                })
+                .collect();
+            assert!(!mined.is_empty(), "the ore goal hand-mines");
+            for pos in &mined {
+                assert!(
+                    drills.iter().all(|d| !d.contains(pos)),
+                    "mine at {pos} is under a drill this plan places: {drills:?}"
+                );
+            }
+        }
+    }
 }

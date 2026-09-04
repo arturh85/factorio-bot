@@ -104,6 +104,63 @@ Two structural facts explain why nothing fills the idle:
   variant (`Have`, `Researched`, `Produced`, `Producing`, `All`) is
   demand-driven.
 
+## The collision, diagnosed and fixed (`c2b2698a`)
+
+**The blocker was another bot, parked and idle — not the placing bot.**
+
+At tick 15,727 bot 1 was refused `place stone-furnace at [-39, -12]` while
+standing at `(-35.27, -17.5)`, nowhere near it. **Bot 4** was at
+`(-38.25, -11.2)`, overlapping the furnace's collision box by about a third of
+a tile — and had been **motionless there since tick 11,760, for 4,000 ticks**.
+It had walked toward `(-38, -16)` to load a furnace bot 1 had not built yet,
+stopped ~4.8 tiles short (inside build reach), and waited.
+
+**The mod already handled the hard half and nothing used it.**
+`rcon_place_entity` classifies this apart from the `can_place_entity` family
+(so nothing durable is learned) and `step_aside_from_footprint` dispatches a
+legitimate walk for the blocker. Its own comment says "by the time anything
+asks again, the blocker is somewhere else". **Nothing asked again.** Bot 4 was
+clear **53 ticks later** — by which time bot 1's chain was abandoned (39 of 194
+steps never dispatched) and the milestone re-planned from scratch.
+
+The fix re-issues such a placement up to 4 times over 1.8 s. No planner change,
+so the offline makespan is unmoved at 30,077.
+
+### Two reporting defects found alongside it
+
+- The run recorded this as `kind: "rejected", detail: null` — indistinguishable
+  from a full chest. Now `FailureKind::Blocked`.
+- **`tools/run_analysis.py` matched `another character is standing`, which is
+  the *mining* refusal's wording.** It derived `rejected` and agreed with the
+  record **for the wrong reason** — the fourth instance in this project of a
+  classifier silently missing wording it did not recognise.
+
+### The larger lever, deliberately untouched: recovery is never invoked
+
+**`scripts/supervisor.lua` never calls `obs:recover()`.** The recovery tiers in
+`crates/executor/src/recover.rs` exist and are correct, but no live run reaches
+them — after every run the supervisor sets `state = "planning"` and calls
+`goal.plan` fresh. Proven from the record: the two `plan_created` events share
+**zero id+action pairs** among their 102 common ids, and the whole power plant
+relocated from `[9.5, -45.5]` to `[-5.5, -57.5]`.
+
+So the replan was not a decision made *about* this failure — **it is what the
+supervisor always does**, and it discards every completed step. That is a
+bigger lever on the 9-minute target than the collision was, and it changes
+behaviour well beyond this defect, so it is its own workstream.
+
+### Corrections to the brief I wrote
+
+- **The planner already avoids characters.** `PlanState::is_area_free`
+  (`state.rs:2210`) refuses any site overlapping a character's box, roster bots
+  included. It could not have helped: at plan time bot 4 was ~40 tiles and
+  ~12,000 ticks away from where it would eventually stand. Planner-side
+  avoidance is not the fix.
+- **`min_radius` is not involved.** The blocked tile was not the placement's
+  approach position; it was where a *different* action's walk left a bot. **The
+  real gap is that nothing checks a walk's landing spot against footprints the
+  plan will need later** — a genuine defect, and a separate one.
+
 ## SINGLE-GOAL RUN: 10.52 min, and one collision is the whole remaining gap
 
 `run-1788481380-80843`, roster `[1,2,3,4]`, `automation_speedrun.lua` (one

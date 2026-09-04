@@ -455,6 +455,71 @@ mod tests {
     assert!(parse_roster("one").is_err());
   }
 
+  /// A dump of the same world with a furnace holding plates in it.
+  ///
+  /// Sited clear of the fixture's iron patch, the same tile
+  /// `crates/planner/tests/world_round_trip.rs` and `tests/buffers.rs` use.
+  fn dumped_world_with_a_full_furnace(dir: &tempfile::TempDir) -> PathBuf {
+    use factorio_bot_core::types::{
+      Direction, FactorioEntity, InventoryItemWithQuality, InventoryResponse, Position,
+    };
+    let at = Position::new(-34.0, 40.0);
+    let world = fixture_world();
+    world
+      .on_some_entity_created(FactorioEntity::new_stone_furnace(&at, Direction::North))
+      .expect("the furnace is placed");
+    world.observe_inventories(vec![InventoryResponse {
+      name: "stone-furnace".into(),
+      position: at,
+      output_inventory: Box::new(Some(vec![InventoryItemWithQuality {
+        name: "iron-plate".into(),
+        quality: "normal".into(),
+        count: 40,
+      }])),
+      fuel_inventory: Box::new(None),
+    }]);
+    let path = dir.path().join("full.json");
+    world.dump_to(&path).expect("a dump is written");
+    path
+  }
+
+  /// **A dump that carries container contents plans withdrawals from them.**
+  ///
+  /// The other end of the seam `world.dump` closes. Until the dump asked the
+  /// game what was in its buffers, `inventories` came out `[]` for every
+  /// script that had not also planned, and so the entire `Withdraw` path --
+  /// furnaces and chests handing their contents over -- was unreachable from
+  /// this command, which is the loop planner changes are evaluated in. A
+  /// defect living there would have read as absent.
+  ///
+  /// The negative half is the point: the *same* fixture with no reading must
+  /// not take anything, or a `take` line would prove nothing about the file.
+  #[test]
+  fn a_dump_carrying_buffer_contents_plans_to_withdraw_them() {
+    let dir = tempfile::tempdir().expect("a directory");
+    let goal = ["have:iron-plate:8".to_string()];
+
+    let full = dumped_world_with_a_full_furnace(&dir);
+    let (_, _, listing) =
+      plan_from_dump(&full, &goal, &[], Some("1"), true).expect("plans from a full furnace");
+    assert!(
+      listing
+        .iter()
+        .any(|line| line.contains("from the stone-furnace")),
+      "the dump carried a furnace holding 40 plates and the plan smelted its own: {listing:?}"
+    );
+
+    let empty = dumped_world(&dir);
+    let (_, _, bare) =
+      plan_from_dump(&empty, &goal, &[], Some("1"), true).expect("plans from a bare map");
+    assert!(
+      !bare
+        .iter()
+        .any(|line| line.contains("from the stone-furnace")),
+      "the bare map withdrew too, so the assertion above is not about the file: {bare:?}"
+    );
+  }
+
   /// The headline: a file in, a plan out, no game anywhere.
   #[test]
   fn a_dump_and_a_goal_produce_a_plan() {

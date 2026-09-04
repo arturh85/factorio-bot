@@ -70,8 +70,32 @@ use std::sync::Arc;
 /// **Not `iron-chest`**, which an earlier draft of this comment expected. The
 /// chest handover landed on wooden chests instead: two wood off one dead tree
 /// against eight iron plates, measured on the reference map at 372 planned
-/// ticks against 2,965. Add it the day something places one, and nothing else
-/// without saying why.
+/// ticks against 2,965. That draft closed with "add it the day something
+/// places one", and something now does -- so this is the answer to that,
+/// written down so nobody has to derive it twice.
+///
+/// `method::assemble::plan_cell` places **three** iron chests per cell, and
+/// **none of them is a store**. Read `Role`: `FeedChest(0..MAX_FEED)` "holds
+/// one of the things the intermediate machine eats" and `SupplyChest` "holds
+/// the ingredient nothing in the cell makes". All three are *inputs*, filled
+/// by hand with `CELL_CHARGE_TICKS` worth of ingredients before the cell is
+/// switched on; the cell's product never enters a chest at all, it sits in the
+/// assembling machine's output slot, which `withdraw_slot` already reaches
+/// under `assembling-machine`.
+///
+/// So adding the name here would not recover stranded items, it would let a
+/// replan **drain a running cell** -- and quietly, because `plan_cell`'s own
+/// doc records that nothing detects a cell running out ("After it runs out,
+/// nothing detects it"), so the plan that emptied it would not put the charge
+/// back. That is the whitelist's stated policy failing, not passing: the rule
+/// is *entities this planner builds **and unloads itself***, and the planner
+/// builds iron chests and never unloads one.
+///
+/// Making a cell's chests visible therefore needs something this list cannot
+/// say. The list is keyed by entity name; the distinction that matters is
+/// *what a particular chest is for*, which is a property of the tile and of
+/// the plan that sited it. Withdrawing from a stage-2 chest is a separate
+/// change with that distinction in it, not a third string here.
 ///
 /// A wooden chest is more ambiguous than a furnace result slot -- a person
 /// could put something in one -- and that is accepted for the same reason the

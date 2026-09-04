@@ -43,7 +43,13 @@ pub(crate) fn binding_tables(
     let stderr = Arc::new(Mutex::new(String::new()));
     let planner = Planner::new(world, None);
     let cwd = cwd.to_path_buf();
-    let world_table = create_lua_world(lua, planner.plan_world.clone(), cwd.clone(), cwd.clone())?;
+    let world_table = create_lua_world(
+        lua,
+        planner.plan_world.clone(),
+        cwd.clone(),
+        cwd.clone(),
+        None,
+    )?;
     let goal_table = create_lua_goal(
         lua,
         planner.plan_world.clone(),

@@ -185,6 +185,7 @@ pub async fn run_lua(
                     real_world.clone(),
                     scripts_root.clone(),
                     script_dir.clone(),
+                    rcon.clone(),
                 )?;
                 let goal = create_lua_goal(
                     &lua,

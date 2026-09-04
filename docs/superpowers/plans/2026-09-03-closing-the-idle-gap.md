@@ -11,6 +11,60 @@ four bots.
 
 ---
 
+## The divergence bug is a container capacity limit — found on a bench in minutes
+
+The owner suggested checking *"if you can pick up more than 1 stack size at
+once"*. That was the answer.
+
+### Measured live, on a scratch instance
+
+```
+stone-furnace  output slots=1   accepted 100 iron-plate   (stack 100)
+stone-furnace  fuel   slots=1   accepted  50 coal         (stack  50)
+stone-furnace  input  slots=1   accepted  70 iron-ore     (stack  50)
+iron-chest            slots=32  accepted 300 iron-plate
+```
+
+**`tried to remove 141 iron-plate but removed 100` is a furnace output slot
+holding exactly one stack.** Not staleness, not double-counting — **a furnace
+cannot hold 141 plates and never could at any moment**. A raw
+`remove_item{count=141}` from a chest holding 300 removes 141 correctly, so it
+is not a cap on the transfer either.
+
+**And a furnace whose output slot is full stops smelting**, which is where the
+`full_output` machine status in archived samples comes from. An over-sized
+batch does not merely fail at the take — it stalls the furnace partway and
+wastes the whole wait.
+
+### The planner has no notion of stack size anywhere
+
+Nothing in `have.rs` or `state.rs` mentions it. `withdraw_slot` knows *which*
+slot to draw from and never *how much fits in it*.
+
+| item | stack |
+|---|---|
+| iron-plate, copper-plate, iron-gear-wheel, transport-belt | 100 |
+| electronic-circuit | 200 |
+| stone, coal, iron-ore, copper-ore, inserter, stone-furnace | **50** |
+
+### The naive fix would be wrong, which is why this was worth measuring
+
+**The input slot is not one stack** — it took **70** ore where the stack is 50.
+Factorio lets a machine's ingredient slot exceed a stack by a recipe-derived
+margin, while output and fuel are exactly one. So "bound every transfer by
+`stack_size`" **under-fills the input** and is right for the other two only by
+coincidence. **70 must not be hardcoded either** — it is one measurement of one
+recipe on one machine, and the rule behind it is unknown. Ask the game.
+
+### What this says about method
+
+This took **four minutes on a bench instance** and pre-empted an hour of design
+work aimed at "staleness versus accounting" — neither of which it was. The
+capability that made it possible is `factorio-bot rcon -s localhost`, which
+already existed and which nothing documented until today. **A scratch instance
+where cheating is allowed is a different tool from a measured run**, and the
+questions it answers cheaply are exactly the ones that have cost whole runs.
+
 ## Dumps now carry container contents (`8d07af4b`) — and `iron-chest` must NOT be whitelisted
 
 `world.dump` asks the game what is in the containers before writing the file.

@@ -14,14 +14,20 @@
 //!   network has to have the capacity *left*. Coverage is not capacity;
 //! * **an assembling machine needs a recipe on it.** A placed machine with no
 //!   recipe costs materials, occupies ground, reads as built by every
-//!   geometry check, and produces nothing at all.
+//!   geometry check, and produces nothing at all;
+//! * **and something has to take the product away.** An assembling machine
+//!   stops when its own output slot backs up, and for a machine making one
+//!   item per craft that is *three or four items* -- not a stack, and not a
+//!   minute's work. See [`Role::OutputInserter`].
 //!
 //! # The shape, and what it is general over
 //!
 //! ```text
 //!            feed chest  -> inserter ->
 //!                                       [intermediate] -> inserter -> [product] <- inserter <- supply chest
-//!           [feed chest  -> inserter ->]
+//!           [feed chest  -> inserter ->]                                  |
+//!                                                                         v
+//!                                                        output chest <- inserter
 //! ```
 //!
 //! Red science is one copper plate and one iron gear wheel. The gear is
@@ -50,19 +56,20 @@
 //! the inserters. That is a first green cell, not a green factory, and
 //! [`CELL_CHARGE_TICKS`] is how long it runs before somebody fills it again.
 //!
-//! **Do not read that as "this cell cannot reach a three-ingredient item".**
-//! The bound is on the *intermediate* machine and not on the cell, and the two
-//! sides are not symmetric: the product machine has a second powered mouth the
-//! layout does not use, at north-frame `(-2, 3)`, drawing from free ground at
-//! `(-3, 3)` that the existing lane already services. So a product with three
-//! ingredients -- one made by the intermediate, two arriving in chests --
-//! costs no second pole, where a third *feed* chest does.
-//! `tests::the_pole_lights_a_third_product_mouth_but_no_third_feed_row` pins
-//! both halves at all four facings, because the difference has already been
+//! The two sides are not symmetric, and the asymmetry has since been spent.
+//! The product machine has a **third** powered mouth at north-frame `(-2, 3)`,
+//! drawing from free ground at `(-3, 3)` that the existing lane already
+//! services, which the layout used to leave empty. **The output inserter and
+//! its chest stand there now**, so the third mouth is no longer spare and
+//! "a three-ingredient product costs no second pole" is **no longer true**:
+//! a second supply chest and the output path want the same tile, and the
+//! output path is not optional.
+//! `tests::the_pole_lights_the_output_mouth_but_no_third_feed_row` pins both
+//! halves at all four facings, because the difference has already been
 //! misread once: an `inserter`-producing cell composed onto this one was
 //! proposed as a way to "avoid the pole geometry entirely", and it does not --
 //! it moves the third ingredient from the intermediate to the product, which
-//! is the half that has room.
+//! used to be the half with room.
 //!
 //! What such a composition would *not* buy is worth writing down beside it.
 //! An inserter cell's own three inputs are hand-filled chests, so it converts
@@ -80,8 +87,16 @@
 //! network with the capacity to spare — and **the supervisor answers
 //! duration**, by witnessing packs appear while every bot stands still. A
 //! structurally satisfied cell can still be a cell whose chests have run out
-//! (this crate reads no container contents), whose boiler has run dry
-//! (`electric_supply_kw` counts nameplate), or whose output has backed up.
+//! (this crate reads no container contents) or whose boiler has run dry
+//! (`electric_supply_kw` counts nameplate).
+//!
+//! **"Whose output has backed up" used to be on that list, and it should never
+//! have been.** A backed-up output is not a state a cell drifts into after a
+//! while; it is where a cell with no output inserter arrives after four crafts
+//! and stays. That is structure, not duration, so it is answered here -- by
+//! the [`Role::OutputInserter`] every cell now places and by the drain clause
+//! [`cells_standing`] now requires -- rather than deferred to a witness that
+//! cannot see it either.
 //!
 //! And one more, stated plainly because the goal's name invites the opposite
 //! reading: **the chests are filled by hand.** The cell is charged with
@@ -141,11 +156,18 @@ pub const INSERTER: &str = "inserter";
 /// takes three ingredients, is not an intermediate this cell can build.
 ///
 /// **This is a bound on the feed side alone.** The product machine's west face
-/// has a second mouth inside the same pole's area, at `(-2, 3)`, which the
-/// layout leaves empty -- so the same pole that refuses a third feed chest
-/// would light a second *supply* chest. Both facts are checked together in
-/// `tests::the_pole_lights_a_third_product_mouth_but_no_third_feed_row`, so a
+/// has a third mouth inside the same pole's area, at `(-2, 3)`, which the
+/// layout left empty until the cell grew an output path -- so the same pole
+/// that refuses a third feed chest lights [`Role::OutputInserter`]. Both facts
+/// are checked together in
+/// `tests::the_pole_lights_the_output_mouth_but_no_third_feed_row`, so a
 /// change to [`POLE_OFFSET`] cannot quietly make either of them wrong.
+///
+/// That mouth is now **taken**. A three-ingredient product -- one made by the
+/// intermediate, two arriving in chests -- would want it for a second supply
+/// chest, and it cannot have it: an unremoved product jams the machine after
+/// four crafts, so the output path outranks a second supply chest for the one
+/// tile they both need.
 pub const MAX_FEED: usize = 2;
 
 /// What the cell's inputs sit in.
@@ -462,12 +484,41 @@ pub enum Role {
     FeedChest(u8),
     /// Holds the ingredient nothing in the cell makes.
     SupplyChest,
+    /// Holds what the cell has made, so the product machine keeps running.
+    ///
+    /// **It is a buffer, not a store, and it cannot fill inside one charge.**
+    /// A [`CHEST`] is 32 slots and a science pack stacks to 200, so it holds
+    /// thousands where [`CELL_CHARGE_TICKS`] is sized for fifteen. Whoever
+    /// empties it is whoever refills the feed chests -- the same hand, on the
+    /// same visit -- so this does not add an unattended-time budget to the one
+    /// [`CELL_CHARGE_TICKS`] already states. What it does *not* solve is
+    /// stated there in full: the cell still stops when its inputs run out, and
+    /// nothing in this crate detects that.
+    OutputChest,
     /// Feed chest `n` -> intermediate machine.
     FeedInserter(u8),
     /// Intermediate machine -> product machine.
     LinkInserter,
     /// Supply chest -> product machine.
     SupplyInserter,
+    /// Product machine -> output chest.
+    ///
+    /// **The part whose absence made every rate claim of this stage false.**
+    /// An assembling machine holds its finished items in one output slot and
+    /// halts on `full_output` when it backs up; for a one-item-per-craft
+    /// recipe that is three or four items. A cell without this inserter runs
+    /// four crafts and then stands `working`-shaped and dead: every building
+    /// present, every recipe set, every input link live, every geometry check
+    /// green, and a `Goal::Producing` rate that has never been achieved and
+    /// cannot be.
+    ///
+    /// It faces **east** in the north frame, because an inserter's direction
+    /// names the side it *picks up* from and the machine is east of it. That
+    /// is the one inserter in the cell whose direction is not shared with any
+    /// other, and it is the one the "backwards places 100 % and moves nothing"
+    /// rule is most likely to catch -- [`fit`] checks it with `delivers_into`
+    /// like every other link.
+    OutputInserter,
 }
 
 impl Role {
@@ -476,8 +527,11 @@ impl Role {
         match self {
             Role::Pole => POLE,
             Role::Intermediate | Role::Product => MACHINE,
-            Role::FeedChest(_) | Role::SupplyChest => CHEST,
-            Role::FeedInserter(_) | Role::LinkInserter | Role::SupplyInserter => INSERTER,
+            Role::FeedChest(_) | Role::SupplyChest | Role::OutputChest => CHEST,
+            Role::FeedInserter(_)
+            | Role::LinkInserter
+            | Role::SupplyInserter
+            | Role::OutputInserter => INSERTER,
         }
     }
 }
@@ -512,18 +566,24 @@ pub struct CellPart {
 ///   y  0:  C   >   .  ###
 ///      1: [C] [>]  .  ###
 ///      2:  .   .   P   v
-///      3:  .   .   .  ###
+///      3:  O   <   .  ###
 ///      4:  C   >   .  ###
 /// ```
 ///
 /// (The machines are three tiles wide and centred on `x = 0`, so they occupy
 /// `x = -1 .. 1`; the pole `P` at `(-1, 2)` sits in the one-tile gap between
 /// them, where a 5x5 supply area reaches every consumer in the cell —
-/// including both feed rows, which is what [`MAX_FEED`] is two for.)
+/// including both feed rows, which is what [`MAX_FEED`] is two for.
+/// `O` is the output chest and `<` the [`Role::OutputInserter`] that fills it:
+/// it is the one inserter in the picture pointing the *other* way, because it
+/// picks up from the machine to its east rather than from a chest to its
+/// west.)
 ///
-/// **A one-feed cell comes out of this in exactly the order the fixed table it
-/// replaced had**, which is why widening it moved no red-science plan: the
-/// build order, and therefore every action id in the plan, is this sequence.
+/// **The output pair is appended after the parts that were here before it**,
+/// so a plan's action ids are the old sequence with two placements on the end
+/// rather than the old sequence renumbered. The plan still moves — it has two
+/// more buildings in it and a longer bill — but the diff is an addition rather
+/// than a permutation.
 fn layout_table(feeds: usize) -> Vec<(Role, (f64, f64), Direction)> {
     let feeds = feeds.min(MAX_FEED);
     let mut out = vec![
@@ -541,8 +601,25 @@ fn layout_table(feeds: usize) -> Vec<(Role, (f64, f64), Direction)> {
     }
     out.push((Role::LinkInserter, (0., 2.), Direction::North));
     out.push((Role::SupplyInserter, (-2., 4.), Direction::West));
+    out.push((Role::OutputChest, OUTPUT_CHEST_OFFSET, Direction::North));
+    out.push((
+        Role::OutputInserter,
+        OUTPUT_INSERTER_OFFSET,
+        Direction::East,
+    ));
     out
 }
+
+/// Where the product machine's output goes, in the north frame.
+///
+/// The mouth at `(-2, 3)` and the ground at `(-3, 3)` — the pair
+/// `31c8d579` measured as powered-and-free at all four facings with
+/// `pole_would_supply`, the game's own overlap rule. Using it is what makes
+/// the output path cost **no second pole**: it is inside the supply area of
+/// the pole at [`POLE_OFFSET`] that the cell was going to place anyway, and
+/// the chest is serviced by a [`LANE`] tile that already exists.
+const OUTPUT_INSERTER_OFFSET: (f64, f64) = (-2., 3.);
+const OUTPUT_CHEST_OFFSET: (f64, f64) = (-3., 3.);
 
 /// The rows a feed chest and its inserter stand on, in chest-index order.
 ///
@@ -556,7 +633,7 @@ const FEED_ROWS: [f64; MAX_FEED] = [0., 1.];
 /// Where the cell puts a pole of its **own**, when it has to bring one.
 ///
 /// The one-tile gap between the two machines, from which a 5x5 supply area
-/// reaches all five consumers -- which is the whole reason the layout is an L
+/// reaches all six consumers -- which is the whole reason the layout is an L
 /// and not a row (`tests::the_cells_own_pole_covers_every_consumer_in_it`).
 ///
 /// **It is not in [`LAYOUT`], and that is the point.** A small electric pole
@@ -675,7 +752,7 @@ fn compose(direction: Direction, by: Direction) -> Option<Direction> {
 /// A rigid body rotated about the origin, which is a **tile centre**: every
 /// part of this cell is one or three tiles across — odd on both axes — so
 /// every one of them belongs on tile centres, and a quarter turn about a tile
-/// centre takes tile centres to tile centres. That is what keeps all eight on
+/// centre takes tile centres to tile centres. That is what keeps all ten on
 /// their own build grid at all four facings, and it is
 /// `tests::every_facing_puts_every_building_on_its_own_grid` rather than a
 /// comment.
@@ -756,6 +833,13 @@ fn links(cell: &Cell) -> Option<Vec<(Position, Position)>> {
     out.push((p(Role::LinkInserter)?, p(Role::Product)?));
     out.push((p(Role::SupplyChest)?, p(Role::SupplyInserter)?));
     out.push((p(Role::SupplyInserter)?, p(Role::Product)?));
+    // Out of the machine, not into it: the last link of the cell and the only
+    // one that runs the other way. `delivers_into` answers it through its
+    // *pull* disjunct — the inserter's pickup tile is one the machine covers —
+    // so an output inserter turned round fails here exactly as a feed one
+    // does.
+    out.push((p(Role::Product)?, p(Role::OutputInserter)?));
+    out.push((p(Role::OutputInserter)?, p(Role::OutputChest)?));
     Some(out)
 }
 
@@ -784,7 +868,7 @@ fn consumers(state: &PlanState, cell: &Cell) -> Vec<(Position, &'static str, f64
 ///
 /// 1. every building's ground is clear, and so is every tile of the servicing
 ///    lane — a cell nobody can reach to charge is a cell that runs once;
-/// 2. with all eight standing, every one of the six links really delivers.
+/// 2. with all ten standing, every one of the eight links really delivers.
 ///    Asked of a fork with the cell placed, so it is the same predicate
 ///    [`Condition::Feeds`] will be checked with rather than a restatement of
 ///    it — and it is what refuses an inserter turned round, which places 100 %
@@ -877,8 +961,14 @@ fn cell_demand_kw(state: &PlanState, spec: &AssemblySpec) -> f64 {
 }
 
 /// How many inserters a cell for `spec` has: one per feed chest, one link, one
-/// supply.
+/// supply, one output.
 fn inserter_count(spec: &AssemblySpec) -> u32 {
+    u32::try_from(spec.intermediate.ingredients.len()).unwrap_or(1) + 3
+}
+
+/// How many chests a cell for `spec` has: one per feed chest, one supply, one
+/// output.
+fn chest_count(spec: &AssemblySpec) -> u32 {
     u32::try_from(spec.intermediate.ingredients.len()).unwrap_or(1) + 2
 }
 
@@ -995,7 +1085,26 @@ const CELL_SCAN_RADIUS: f64 = 512.0;
 /// * *each of those inserters is itself fed*, which is what makes this a claim
 ///   about the whole chain rather than about the last link of it. The
 ///   intermediate machine is counted by this clause and not by name — see
-///   [`is_supplied`], which is where the recursion into it happens.
+///   [`is_supplied`], which is where the recursion into it happens;
+/// * and *something takes the product away* — see [`is_drained`]. This is the
+///   fifth clause and the newest, and it is the one whose absence made the
+///   other four add up to a false claim: a cell satisfying all of them still
+///   halts on `full_output` after four crafts, and `Goal::Producing` names a
+///   **rate**.
+///
+/// # Adding the drain clause stops old cells counting, on purpose
+///
+/// A cell built before the output path existed now reads as not standing, so a
+/// replan builds another one rather than adopting it. That is the direction
+/// this crate chooses everywhere (see [`CELL_SCAN_RADIUS`]): **over-build
+/// rather than over-claim.** The alternative is a predicate that keeps
+/// answering `true` for the exact arrangement this clause was written for,
+/// which is the defect and not a mitigation of it.
+///
+/// It is genuinely a whole extra cell rather than a two-part repair, because
+/// nothing here plans repairs: a cell is planned as a unit. The honest cost is
+/// two machines, three chests and four inserters wasted once, against a goal
+/// that would otherwise never be met at all.
 ///
 /// Order-independent by construction: it counts, and it dedupes by tile
 /// through the `(x, y, name)` order `entities_within` already imposes.
@@ -1022,11 +1131,47 @@ pub fn cells_standing(state: &PlanState, spec: &AssemblySpec) -> u32 {
         {
             continue;
         }
+        if !is_drained(state, &nearby, machine) {
+            continue;
+        }
         if loaded_feeders(state, &nearby, machine, CHAIN_DEPTH) >= ingredients {
             count += 1;
         }
     }
     count
+}
+
+/// Does anything take `machine`'s product away?
+///
+/// An inserter whose **pickup** tile the machine covers, and which delivers
+/// into something that is neither itself nor the machine. The asymmetry with
+/// [`loaded_feeders`] is the whole content: a feeder is an inserter that
+/// `delivers_into` the machine, a drain is an inserter the *machine*
+/// `delivers_into` — which `PlanState::delivers_into` answers through its pull
+/// disjunct, since an assembling machine has no drop point of its own and only
+/// an inserter has a pickup one.
+///
+/// That disjunct is also what keeps the cell's own feed and supply inserters
+/// from answering this. Their pickup tiles are chests, not the machine, so
+/// `delivers_into(machine, feeder)` is false — the direction of an inserter is
+/// load-bearing here exactly as it is everywhere else in this module.
+///
+/// The sink is taken on trust and is deliberately not named: a chest is what
+/// this module builds, but a belt, a second machine or anything else the
+/// entity graph reports counts too, because the claim is "the output has
+/// somewhere to go", not "the output goes where I would have put it".
+fn is_drained(state: &PlanState, nearby: &[FactorioEntity], machine: &FactorioEntity) -> bool {
+    nearby
+        .iter()
+        .filter(|inserter| inserter.name == INSERTER)
+        .filter(|inserter| state.delivers_into(&machine.position, &inserter.position))
+        .any(|inserter| {
+            nearby.iter().any(|sink| {
+                sink.position != inserter.position
+                    && sink.position != machine.position
+                    && state.delivers_into(&inserter.position, &sink.position)
+            })
+        })
 }
 
 /// How deep [`loaded_feeders`] follows the chain back from the product
@@ -1150,10 +1295,7 @@ fn bill(spec: &AssemblySpec, count: u32, poles: u32, coal: u32) -> Vec<(ItemId, 
     let mut out = vec![
         (MACHINE.to_string(), 2 * count),
         (INSERTER.to_string(), inserter_count(spec) * count),
-        (
-            CHEST.to_string(),
-            (u32::try_from(spec.intermediate.ingredients.len()).unwrap_or(1) + 1) * count,
-        ),
+        (CHEST.to_string(), chest_count(spec) * count),
     ];
     for (item, amount) in spec.feed_charges() {
         out.push((item, amount.saturating_mul(count)));
@@ -1296,10 +1438,12 @@ fn place_step(ctx: &mut ExpansionCtx, part: &CellPart) -> Step {
 /// placed-but-dead machine in its stage-2 form.
 ///
 /// The split between the charge inserts is by *branch*: each feed chest's
-/// insert asserts the four-link chain from that chest through the intermediate
-/// machine, and the supply chest's asserts the two-link one. All of them name
-/// the product machine and its recipe, because all of them are claims about
-/// it.
+/// insert asserts the chain from that chest through the intermediate machine,
+/// and the supply chest's asserts the short one. All of them name the product
+/// machine and its recipe, because all of them are claims about it — and all
+/// of them carry the **output tail** as well, because a charge poured into a
+/// machine that cannot empty itself buys four crafts. A branch is the whole
+/// path an item takes, chest to chest.
 fn cell_steps(
     ctx: &mut ExpansionCtx,
     spec: &AssemblySpec,
@@ -1482,6 +1626,8 @@ fn cell_steps(
                     Role::Intermediate,
                     Role::LinkInserter,
                     Role::Product,
+                    Role::OutputInserter,
+                    Role::OutputChest,
                 ],
             ));
         }
@@ -1489,7 +1635,12 @@ fn cell_steps(
             Role::SupplyChest,
             spec.supplied.0.clone(),
             spec.supply_charge(),
-            vec![Role::SupplyInserter, Role::Product],
+            vec![
+                Role::SupplyInserter,
+                Role::Product,
+                Role::OutputInserter,
+                Role::OutputChest,
+            ],
         ));
         for (chest_role, item, amount, branch) in branches {
             let Some(chest) = cell.at(chest_role) else {
@@ -1647,7 +1798,7 @@ impl Method for BuildAssemblyCell {
 
     /// One bot builds one plan's worth of cells.
     ///
-    /// Eight buildings, two recipes and two chest charges have to meet in one
+    /// Ten buildings, two recipes and two chest charges have to meet in one
     /// pair of hands: three parts of a cell arriving on three bots is a cell
     /// nobody can assemble.
     fn converges(&self, _goal: &Goal, _state: &PlanState) -> bool {
@@ -2186,11 +2337,16 @@ mod tests {
 
     /// **The inserter-direction claim, at all four facings.**
     ///
-    /// Six links for a one-feed cell and eight for a two-feed one, and every
+    /// Eight links for a one-feed cell and ten for a two-feed one, and every
     /// one of them a chance for a rotation that is wrong by a quarter turn to
     /// place perfectly and move nothing. Asked of a fork with the cell
     /// standing, so it is the same `delivers_into` the `Condition::Feeds` on
     /// the charge inserts is checked with.
+    ///
+    /// The last two are the output pair, and they are the ones this test would
+    /// most like to catch: `Role::OutputInserter` is the only inserter in the
+    /// cell that runs *out* of a machine, and `delivers_into` reaches it
+    /// through a different disjunct than every other link here.
     #[test]
     fn every_link_of_the_chain_delivers_at_every_facing() {
         for feeds in 1..=MAX_FEED {
@@ -2209,7 +2365,11 @@ mod tests {
                     trial.create_entity(entity_for(&s, part));
                 }
                 let chain = links(&cell).unwrap();
-                assert_eq!(chain.len(), 4 + 2 * feeds, "two links per chest");
+                assert_eq!(
+                    chain.len(),
+                    6 + 2 * feeds,
+                    "two links per chest, plus the output pair"
+                );
                 for (from, to) in chain {
                     assert!(
                         trial.delivers_into(&from, &to),
@@ -2233,7 +2393,11 @@ mod tests {
                 #[allow(clippy::cast_possible_truncation)]
                 Role::FeedInserter(index as u8)
             })
-            .chain([Role::LinkInserter, Role::SupplyInserter]);
+            .chain([
+                Role::LinkInserter,
+                Role::SupplyInserter,
+                Role::OutputInserter,
+            ]);
         for role in roles {
             let s = bare(&[BotId(1)]);
             let origin = Position::new(10.5, 10.5);
@@ -2375,11 +2539,7 @@ mod tests {
             !cell.brings_pole(),
             "an existing pole covers this cell; bringing another spends a wood to duplicate it"
         );
-        assert_eq!(
-            cell.parts.len(),
-            7,
-            "the eight-building cell minus the pole"
-        );
+        assert_eq!(cell.parts.len(), 9, "the ten-building cell minus the pole");
 
         // ...and it is genuinely powered, so this is adoption rather than the
         // check being skipped.
@@ -2437,7 +2597,7 @@ mod tests {
         let cell = plan_cell(&powered(&[BotId(1)]), &Position::new(10.5, 10.5), &spec())
             .expect("the fixture has room for a cell that carries its own pole");
         assert!(cell.brings_pole());
-        assert_eq!(cell.parts.len(), 8);
+        assert_eq!(cell.parts.len(), 10);
     }
 
     /// One pole, and it reaches every consumer in the cell.
@@ -2459,8 +2619,8 @@ mod tests {
                 .filter(|p| s.consumer_draw_kw(p.role.name()).is_some());
             assert_eq!(
                 consumers.clone().count(),
-                4 + feeds,
-                "two machines, one inserter per feed chest, a link and a supply"
+                5 + feeds,
+                "two machines, one inserter per feed chest, a link, a supply and an output"
             );
             for part in consumers {
                 let area = s
@@ -2476,28 +2636,34 @@ mod tests {
     }
 
     /// The other half of the claim above: what the cell's own pole does
-    /// **not** reach, and the one spare mouth it does.
+    /// **not** reach, and the mouth it does — which the output path now
+    /// stands in.
     ///
     /// [`MAX_FEED`] is two because the pole cannot light a third feed row, and
-    /// until now that was a comment rather than a check -- so a change to
+    /// that was a comment rather than a check -- so a change to
     /// [`POLE_OFFSET`] could have made it wrong in either direction with
     /// nothing failing. Both directions are pinned here, at all four facings:
     ///
     /// * the intermediate machine's third west tile, `y = -1`, is **dark**.
     ///   A third feed chest costs a second pole, which is what forecloses an
     ///   `inserter` intermediate;
-    /// * the product machine's west tile at `y = 3` is **lit**, and the chest
-    ///   tile west of it at `x = -3` is empty ground the existing lane at
-    ///   `x = -4` already services.
+    /// * the product machine's west tile at `y = 3` is **lit**, and the tile
+    ///   west of it at `x = -3` is serviced by the existing lane at `x = -4`.
     ///
-    /// **The asymmetry is the point.** A third ingredient on the *product*
-    /// machine costs nothing; a third on the *intermediate* costs a pole. A
-    /// reader who takes the module doc's "one chest more than one small pole
-    /// can light" as a fact about cells in general concludes that a cell for a
-    /// three-ingredient item is out of reach, and that is only true of the
-    /// intermediate half.
+    /// **This is the assertion that changed, and it is worth saying how.** It
+    /// used to close by requiring both tiles to be *empty* -- the measurement
+    /// `31c8d579` recorded, which established the opening this cell's output
+    /// path was then built into. So the same two offsets are still checked,
+    /// and the check is now the opposite one: `Role::OutputInserter` and
+    /// `Role::OutputChest` stand exactly there. The powered-and-serviced half
+    /// is unchanged and is what makes an output path cost no second pole; the
+    /// empty half was the *opening*, and it has been spent.
+    ///
+    /// The asymmetry it recorded therefore no longer buys a third ingredient
+    /// on the product machine: that mouth is taken, and by the part that keeps
+    /// the machine from halting at four crafts. See [`MAX_FEED`].
     #[test]
-    fn the_pole_lights_a_third_product_mouth_but_no_third_feed_row() {
+    fn the_pole_lights_the_output_mouth_but_no_third_feed_row() {
         let s = bare(&[BotId(1)]);
         let origin = Position::new(10.5, 10.5);
         for facing in Direction::orthogonal() {
@@ -2518,18 +2684,32 @@ mod tests {
                  MAX_FEED is two"
             );
             assert!(
-                lit((-2., 3.)),
-                "the product machine's second supply mouth is lit at {facing:?}"
+                lit(OUTPUT_INSERTER_OFFSET),
+                "the product machine's output mouth is lit at {facing:?}"
             );
-            // And the ground it would draw from is free, at every facing: no
-            // part of the cell stands on the chest tile or on the mouth.
-            for offset in [(-2., 3.), (-3., 3.)] {
+            // And the cell spends it: the two tiles `31c8d579` measured as
+            // powered and free are the two the output path stands on.
+            for (offset, role) in [
+                (OUTPUT_INSERTER_OFFSET, Role::OutputInserter),
+                (OUTPUT_CHEST_OFFSET, Role::OutputChest),
+            ] {
                 let tile = at(offset);
-                assert!(
-                    parts.iter().all(|part| part.position != tile),
-                    "{offset:?} is occupied at {facing:?}"
+                assert_eq!(
+                    parts
+                        .iter()
+                        .find(|part| part.position == tile)
+                        .map(|part| part.role),
+                    Some(role),
+                    "{offset:?} does not carry the {role:?} at {facing:?}"
                 );
             }
+            // The lane still services the output chest, so a bot can empty it
+            // on the same visit it refills the feed chests.
+            let lane = lane(&origin, facing).unwrap();
+            assert!(
+                lane.contains(&at((-4., 3.))),
+                "no lane tile beside the output chest at {facing:?}"
+            );
         }
     }
 
@@ -2616,7 +2796,7 @@ mod tests {
         s.remove_entity(&Position::new(12.5, 10.5));
         assert!(
             !holds_assembling(&s, PACK, 6),
-            "with the engine gone the cell is eight buildings on a dead wire"
+            "with the engine gone the cell is ten buildings on a dead wire"
         );
         // ...and the cell itself is untouched, so this is about power and not
         // about the buildings.
@@ -2649,8 +2829,8 @@ mod tests {
             }
         }
         assert_eq!(
-            seen, 6,
-            "the feed branch states four consumers and the supply branch two"
+            seen, 8,
+            "the feed branch states five consumers and the supply branch three -- both              tails now run through the output inserter"
         );
     }
 
@@ -2672,8 +2852,8 @@ mod tests {
             .filter(|c| matches!(c, Condition::Feeds { .. }))
             .count();
         assert_eq!(
-            feeds, 6,
-            "four links on the feed branch and two on the supply branch"
+            feeds, 10,
+            "six links on the feed branch and four on the supply branch -- each branch              is the whole path an item takes, and both end at the output chest"
         );
         let recipes: usize = charge
             .iter()
@@ -2827,6 +3007,75 @@ mod tests {
         }
     }
 
+    /// **The defect that made this stage's rate claim false, in the overlay.**
+    ///
+    /// A cell missing only its output path stands complete by every other
+    /// measure: both machines placed and set to their recipes, powered with
+    /// headroom, one loaded feeder per ingredient, every inserter turned the
+    /// right way. It runs four crafts and halts on `full_output` forever --
+    /// measured on the bench at 17,130 ticks, `finished=4`, against
+    /// `finished=28` and `status=working` for the identical machine with an
+    /// output inserter beside it.
+    ///
+    /// Both halves of the path are required, and separately: an inserter that
+    /// swings into thin air empties nothing, and a chest nothing reaches is
+    /// furniture.
+    #[test]
+    fn a_product_machine_nothing_empties_does_not_count() {
+        for missing in [Role::OutputInserter, Role::OutputChest] {
+            let mut s = powered(&[BotId(1)]);
+            let cell = stand_a_cell(&mut s);
+            assert!(holds_assembling(&s, PACK, 6), "the whole cell holds first");
+            s.remove_entity(&cell.at(missing).unwrap().position);
+            assert!(
+                !holds_assembling(&s, PACK, 6),
+                "with no {missing:?} the pack machine fills its output slot and stops; \
+                 `producing` would be claiming a rate it reaches for four crafts"
+            );
+        }
+    }
+
+    /// The feed and supply inserters are **not** a drain, and the output
+    /// inserter is **not** a feeder.
+    ///
+    /// Both directions of the same mistake, and the reason neither is a
+    /// separate predicate: `delivers_into` is asymmetric, so "an inserter the
+    /// machine delivers into" and "an inserter that delivers into the machine"
+    /// are disjoint sets for a cell whose inserters are all turned correctly.
+    /// If they were not, a cell with three inserters pointing *in* would read
+    /// as drained, and the whole clause would be decoration.
+    #[test]
+    fn the_drain_and_the_feeders_are_told_apart_by_direction_alone() {
+        let mut s = powered(&[BotId(1)]);
+        let cell = stand_a_cell(&mut s);
+        let product = cell.at(Role::Product).unwrap().position.clone();
+        let nearby = s.entities_within(&Position::new(0., 0.), CELL_SCAN_RADIUS);
+        let machine = nearby
+            .iter()
+            .find(|e| e.position == product)
+            .expect("the product machine is in range");
+
+        assert!(is_drained(&s, &nearby, machine));
+        assert_eq!(
+            loaded_feeders(&s, &nearby, machine, CHAIN_DEPTH),
+            2,
+            "the output inserter must not be counted as a third feeder"
+        );
+
+        // Take the drain away and the feeders are unchanged: the two clauses
+        // read the same cell and answer about different halves of it.
+        let mut without = powered(&[BotId(1)]);
+        let same = stand_a_cell(&mut without);
+        without.remove_entity(&same.at(Role::OutputInserter).unwrap().position);
+        let nearby = without.entities_within(&Position::new(0., 0.), CELL_SCAN_RADIUS);
+        let machine = nearby
+            .iter()
+            .find(|e| e.position == product)
+            .expect("the product machine is still in range");
+        assert!(!is_drained(&without, &nearby, machine));
+        assert_eq!(loaded_feeders(&without, &nearby, machine, CHAIN_DEPTH), 2);
+    }
+
     /// **The same cell, arriving from the world instead of from this plan.**
     ///
     /// Every other test here stands its cell with `PlanState::create_entity`
@@ -2948,6 +3197,56 @@ mod tests {
         PlanState::from_world(Arc::new(world), bots)
     }
 
+    /// **The drain clause at the seam**, which is the only place it counts.
+    ///
+    /// The overlay test above proves the predicate; this proves it against the
+    /// door the mod's entity events actually use. That distinction is not
+    /// theoretical here: `30b28846` was three complete cells producing science
+    /// while `cells_standing` read zero, because a recipe set over RCON had no
+    /// route into the entity graph, and every test that missed it stood its
+    /// cell through the overlay. A new clause on the same predicate gets the
+    /// same treatment or it is untested where it matters.
+    ///
+    /// Two claims. A whole cell the world reports still holds -- so the drain
+    /// clause has not simply refused everything, which is how a clause of this
+    /// shape fails silently in the *other* direction, over-building forever. A
+    /// cell the world reports with no output inserter does not -- and that is
+    /// the arrangement six runs stood on while `producing` claimed six packs a
+    /// minute.
+    #[test]
+    fn a_cell_the_world_reports_with_no_drain_does_not_hold() {
+        let bots = [BotId(1)];
+        let spec = spec();
+        let mut planned = powered(&bots);
+        let cell = stand_a_cell(&mut planned);
+        let recipes = cell_recipes(&cell, &spec);
+
+        assert!(
+            holds_assembling(
+                &observed_world(&planned, &cell.parts, &recipes, &bots),
+                PACK,
+                6
+            ),
+            "the control: a whole cell the world reports holds, or the drain clause is \
+             refusing every cell rather than the jammed ones"
+        );
+
+        for missing in [Role::OutputInserter, Role::OutputChest] {
+            let jammed: Vec<CellPart> = cell
+                .parts
+                .iter()
+                .filter(|part| part.role != missing)
+                .cloned()
+                .collect();
+            assert_eq!(jammed.len(), cell.parts.len() - 1);
+            assert!(
+                !holds_assembling(&observed_world(&planned, &jammed, &recipes, &bots), PACK, 6),
+                "a cell the world reports with no {missing:?} halts on full_output after \
+                 four crafts; a replan must build one that does not"
+            );
+        }
+    }
+
     /// **The same seam, for the shape green science added**: a cell whose
     /// intermediate machine has two mouths.
     ///
@@ -3029,10 +3328,19 @@ mod tests {
             .collect();
         let count = |name: &str| placed.iter().filter(|n| **n == name).count();
         assert_eq!(count(MACHINE), 2, "an intermediate and a product machine");
-        assert_eq!(count(CHEST), 3, "two feed chests and one supply chest");
-        assert_eq!(count(INSERTER), 4, "two feed, one link, one supply");
+        assert_eq!(
+            count(CHEST),
+            4,
+            "two feed chests, one supply chest and one output chest"
+        );
+        assert_eq!(
+            count(INSERTER),
+            5,
+            "two feed, one link, one supply, one output"
+        );
 
-        // Three charges, one per chest, and the supply chest's is inserters.
+        // Three charges -- one per *input* chest. The output chest is charged
+        // with nothing, because the cell fills it.
         let charges: Vec<(String, u32)> = net
             .actions()
             .filter_map(|action| match &action.kind {

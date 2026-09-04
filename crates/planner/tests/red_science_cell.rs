@@ -253,10 +253,15 @@ fn plan(per_minute: u32) -> Result<ActionNetwork, factorio_bot_planner::error::P
 
 /// The headline: red science is planned as a cell of machines, not hand-crafted.
 ///
-/// Two assembling machines, three inserters, two chests and a pole get placed;
-/// two recipes get set; and the chests get charged. Every one of those counts
-/// is a decision the layout made, so all of them are asserted rather than "a
-/// plan came back".
+/// Two assembling machines, four inserters, three chests and a pole get
+/// placed; two recipes get set; and the two input chests get charged. Every one
+/// of those counts is a decision the layout made, so all of them are asserted
+/// rather than "a plan came back".
+///
+/// The fourth inserter and the third chest are the **output path**. Without
+/// them the pack machine halts on `full_output` after four crafts, which is
+/// what the reference run measured and what made this goal's *rate* a claim
+/// nothing had achieved.
 #[test]
 fn a_producing_goal_for_red_science_builds_an_assembly_cell() {
     let net = plan(6).expect("a powered world can build a red-science cell");
@@ -276,13 +281,13 @@ fn a_producing_goal_for_red_science_builds_an_assembly_cell() {
     );
     assert_eq!(
         count("inserter"),
-        3,
-        "chest->gears, gears->packs, chest->packs"
+        4,
+        "chest->gears, gears->packs, chest->packs, packs->chest"
     );
     assert_eq!(
         count("iron-chest"),
-        2,
-        "one for iron plates, one for copper"
+        3,
+        "one for iron plates, one for copper, one for the packs to go into"
     );
     assert_eq!(
         count("small-electric-pole"),
@@ -667,8 +672,8 @@ fn the_live_four_bot_run_adopts_the_plant_it_already_built() {
     // And what it *does* plan is the cell, on the standing plant's network.
     let count = |name: &str| placed.iter().filter(|n| n.as_str() == name).count();
     assert_eq!(count("assembling-machine-1"), 2, "one cell: {placed:?}");
-    assert_eq!(count("inserter"), 3, "{placed:?}");
-    assert_eq!(count("iron-chest"), 2, "{placed:?}");
+    assert_eq!(count("inserter"), 4, "{placed:?}");
+    assert_eq!(count("iron-chest"), 3, "{placed:?}");
     assert_eq!(
         count("small-electric-pole"),
         0,

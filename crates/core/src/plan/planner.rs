@@ -74,22 +74,29 @@ use std::sync::Arc;
 /// places one", and something now does -- so this is the answer to that,
 /// written down so nobody has to derive it twice.
 ///
-/// `method::assemble::plan_cell` places **three** iron chests per cell, and
-/// **none of them is a store**. Read `Role`: `FeedChest(0..MAX_FEED)` "holds
-/// one of the things the intermediate machine eats" and `SupplyChest` "holds
-/// the ingredient nothing in the cell makes". All three are *inputs*, filled
-/// by hand with `CELL_CHARGE_TICKS` worth of ingredients before the cell is
-/// switched on; the cell's product never enters a chest at all, it sits in the
-/// assembling machine's output slot, which `withdraw_slot` already reaches
+/// `method::assemble::plan_cell` places **four** iron chests per cell, and
+/// three of them are *inputs*. Read `Role`: `FeedChest(0..MAX_FEED)` "holds one
+/// of the things the intermediate machine eats" and `SupplyChest` "holds the
+/// ingredient nothing in the cell makes"; both are filled by hand with
+/// `CELL_CHARGE_TICKS` worth of ingredients before the cell is switched on.
+///
+/// The fourth, `OutputChest`, **is** a store, and it is where the cell's
+/// product ends up. It was added because without it the product machine halts
+/// on `full_output` after four crafts; before that the product sat in the
+/// assembling machine's own output slot, which `withdraw_slot` already reaches
 /// under `assembling-machine`.
 ///
-/// So adding the name here would not recover stranded items, it would let a
-/// replan **drain a running cell** -- and quietly, because `plan_cell`'s own
-/// doc records that nothing detects a cell running out ("After it runs out,
-/// nothing detects it"), so the plan that emptied it would not put the charge
-/// back. That is the whitelist's stated policy failing, not passing: the rule
-/// is *entities this planner builds **and unloads itself***, and the planner
-/// builds iron chests and never unloads one.
+/// That does not change the answer here, and it is worth saying why rather
+/// than leaving it to be re-derived. This list is keyed by **entity name**,
+/// and all four chests are `iron-chest`. Adding the name would make the one
+/// store visible at the price of making the three inputs visible too — so a
+/// replan would **drain a running cell**, and quietly, because
+/// `plan_cell`'s own doc records that nothing detects a cell running out
+/// ("After it runs out, nothing detects it"), so the plan that emptied it
+/// would not put the charge back. That is the whitelist's stated policy
+/// failing, not passing: the rule is *entities this planner builds **and
+/// unloads itself***, and the planner builds iron chests and never unloads
+/// one.
 ///
 /// Making a cell's chests visible therefore needs something this list cannot
 /// say. The list is keyed by entity name; the distinction that matters is

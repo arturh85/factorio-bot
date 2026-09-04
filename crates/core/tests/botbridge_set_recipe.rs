@@ -182,6 +182,8 @@ fn stub_game(recipes: &[(&str, bool)], kind: &Machine, player_capacity: u32) -> 
             end,
         }}
         local the_player = {{
+            connected = true,
+            character = {{}},
             index = 1,
             name = "bot1",
             force = force,

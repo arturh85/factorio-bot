@@ -186,6 +186,8 @@ fn stub_place(create_ok: bool, removes: i64) -> String {
         }}
         local player = {{
             name = "bot1",
+            connected = true,
+            character = {{}},
             position = {{ x = 38.3046875, y = 16.4765625 }},
             force = "player",
             surface = surface,
@@ -496,6 +498,8 @@ fn stub_refused_place(player_position: (f64, f64), occupants: &str) -> String {
         local player = {{
             index = 1,
             name = "bot4",
+            connected = true,
+            character = {{}},
             position = {{ x = {px}, y = {py} }},
             force = "player",
             surface = surface,

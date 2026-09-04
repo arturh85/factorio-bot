@@ -11,6 +11,44 @@ four bots.
 
 ---
 
+## Divergence is now the dominant failure class
+
+`run-1788517971-48257`, seed `31337`, with furnace reuse:
+
+| | |
+|---|---|
+| red cell satisfied | 18.53 min |
+| red witness | **18.75 min** — sixth witness |
+| green | **`stuck`, 6 iterations, best 92 steps** |
+| furnaces placed | **19** (42 → 21 → 19 across three runs) |
+| plans | 7 |
+
+```
+last error: tried to remove 141 iron-plate but removed 100
+```
+
+**4 of 5 action failures are world-model divergence** (`removed N of M`). The
+planner believed a container held 141 iron plates; the game had 100.
+
+This is the gap that was deliberately held back as "only ever found by
+accident" — it is now the thing stopping green, and it is the same class as
+`cells_standing` reading three producing cells as zero. The recovery design
+independently found it at **7 of 28 action failures across 21 runs** and noted
+that retrying "issues the identical command to the identical container", so
+tier-1 recovery would not help without a `divergence_observed` predicate.
+
+### Furnace reuse: the trade shows up in execution
+
+**Red took 18.53 min here against 13.63 in the previous `31337` run**, while
+its *planned* makespan moved only +8 ticks. Fewer furnaces means more
+serialisation, and the reuse agent said so — *"the saving is ground and stone,
+not time"*. The runs differ in collision history so this is not a clean
+before/after, but **it is the first sign that the trade has a real execution
+cost**, and it deserves a controlled comparison rather than an assumption.
+
+Green did converge much further than before (6 iterations, best 92 steps,
+against 1 iteration last run), and 19 furnaces left room for the ore cell.
+
 ## Self-sustaining green: composition rejected, and the target was 0.44% (`31c8d579`)
 
 **Both load-bearing premises of my brief were wrong.**

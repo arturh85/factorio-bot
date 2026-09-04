@@ -74,7 +74,11 @@ mkdir -p "$OUT"
 # build, so an edit to mods/BotBridge is what the next run loads; a release
 # build embeds a snapshot at compile time. Nothing here is timed, so there is
 # no reason to pay for --release.
-BIN="$REPO/target/debug/factorio-bot"
+# Overridable so a search can run against a COPY of the binary while another
+# agent is still building in this checkout. cargo cannot write a running
+# binary ("Text file busy"), so a search holding target/debug hostage for ten
+# minutes breaks whoever is compiling. Copy it aside and point BIN at the copy.
+BIN="${BIN:-$REPO/target/debug/factorio-bot}"
 if [ ! -x "$BIN" ]; then
   echo "building $BIN" >&2
   nix develop -c cargo build --no-default-features --features cli,lua

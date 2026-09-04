@@ -1281,11 +1281,12 @@ async fn perform<A: Actuator + ?Sized>(
 /// How close to the chosen escape tile counts as "there", for
 /// [`ActionKind::Evacuate`]'s own re-confirmation walk.
 ///
-/// Generous relative to `crate::enclosure::CELL` on purpose: the tile itself
-/// was proven safe at that resolution, but the game's own pathing does not
-/// promise to land a character on an exact float, and asking for tighter than
-/// this would risk the walk itself being refused over noise smaller than a
-/// character's own collision box.
+/// Half a tile: the escape target is a tile centre on the pathfinder's own
+/// grid (`factorio_bot_core::graph::enclosure::CELL` is one tile), so anywhere
+/// inside that tile is the tile that was proven safe. The game's own pathing
+/// does not promise to land a character on an exact float, and asking for
+/// tighter than this would risk the walk itself being refused over noise
+/// smaller than a character's own collision box.
 const EVACUATE_RADIUS: f64 = 0.5;
 
 #[cfg(test)]

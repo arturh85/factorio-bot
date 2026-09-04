@@ -89,10 +89,10 @@ fn a_dense_map_does_not_make_the_search_expensive() {
 /// does not change that.
 ///
 /// This is the false-positive guard at its tightest. The channel is one tile
-/// wide; the character's collision box is 0.398 tiles across, so after growing
-/// the water by the character's half-box the free corridor is 0.602 tiles wide
-/// -- a real passage, and the check must find it rather than report the bot
-/// penned in by a lake it can walk between.
+/// wide, on the tile grid; the character's box centred on each of its tiles
+/// clears the water on both sides by 0.3 of a tile, so the game's pathfinder
+/// routes along it and so must this. A crack *narrower* than a tile is a
+/// different case, and the opposite answer -- see `enclosure_run73005.rs`.
 #[test]
 fn a_gap_a_character_fits_through_is_not_an_enclosure() {
     let graph = empty_graph();
@@ -118,8 +118,8 @@ fn closing_the_last_gap_is_what_makes_it_an_enclosure() {
     match escape_from(&graph, &Position::new(0.5, 0.5)) {
         Escape::Enclosed { pocket_tiles } => {
             assert!(
-                pocket_tiles > 0. && pocket_tiles < 20.,
-                "a 1x11 corridor, minus the character's own width: {pocket_tiles}"
+                pocket_tiles == 11.,
+                "a 1x11 corridor of whole tiles: {pocket_tiles}"
             );
         }
         other => panic!("the channel is plugged at both ends, got {other:?}"),
@@ -167,24 +167,30 @@ fn a_window_off_the_edge_of_the_model_is_unknown_not_open() {
 ///
 /// The mod teleports a character clear of a ghost it is standing in, so this is
 /// a state the game really produces. Refusing to seed the fill there would
-/// answer "unknown" for the case most likely to be stuck; instead the character
-/// is admitted as free where it stands and the pocket comes back a single cell.
+/// answer "unknown" for the case most likely to be stuck; instead the
+/// character is admitted as free on its own tile, and when every neighbouring
+/// tile is under the same machine the pocket comes back as exactly that one
+/// tile -- one whole tile, because the grid is the pathfinder's.
 #[test]
-fn a_character_wedged_inside_a_box_is_enclosed_in_one_cell() {
-    let graph = empty_graph();
-    graph
-        .add(
-            vec![FactorioEntity::new_stone_furnace(
-                &Position::new(0., 0.),
-                factorio_bot_core::types::Direction::North,
-            )],
-            None,
-        )
-        .expect("the furnace loads");
-    match escape_from(&graph, &Position::new(0., 0.)) {
+fn a_character_wedged_inside_a_box_is_enclosed_in_one_tile() {
+    let prototypes = Arc::new(fixture_entity_prototypes());
+    let graph = EntityGraph::new(prototypes.clone(), Arc::new(fixture_recipes()));
+    // A 3x3 machine on tiles [-1, 2) x [-1, 2); the character on its centre
+    // tile has the machine on all four sides.
+    let machine = FactorioEntity::from_prototype(
+        "assembling-machine-1",
+        Position::new(0.5, 0.5),
+        None,
+        None,
+        None,
+        prototypes,
+    )
+    .expect("from_prototype does not fail");
+    graph.add(vec![machine], None).expect("the machine loads");
+    match escape_from(&graph, &Position::new(0.5, 0.5)) {
         Escape::Enclosed { pocket_tiles } => {
-            assert!(pocket_tiles < 0.1, "one cell, not a pocket: {pocket_tiles}");
+            assert_eq!(pocket_tiles, 1., "its own tile, not a pocket");
         }
-        other => panic!("the character is inside the furnace's box, got {other:?}"),
+        other => panic!("the character is inside the machine's box, got {other:?}"),
     }
 }

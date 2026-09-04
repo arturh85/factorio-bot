@@ -467,9 +467,9 @@ impl WalkRefusals {
 /// A flood fill over the occupancy model
 /// ([`crate::graph::enclosure::escape_from`]) started at `at` and closed
 /// without reaching the edge of a window `searched_tiles` across. So: every
-/// point this character can walk to is inside `pocket_tiles` square tiles of
-/// configuration space, and it gets out only by mining, by being moved, or by
-/// something in the way being removed.
+/// tile the game's pathfinder would route this character to is inside a
+/// pocket of `pocket_tiles` whole tiles, and it gets out only by mining, by
+/// being moved, or by something in the way being removed.
 ///
 /// It is a fact about a **position**, not about a bot. A bot teleported clear,
 /// or one whose wall is mined away, is no longer enclosed and this row says
@@ -578,6 +578,44 @@ impl Enclosures {
         self.found.push(found);
         true
     }
+}
+
+/// A character that was walked clear of a placement which would otherwise
+/// have sealed it in -- the enclosure that did *not* happen.
+///
+/// # Why it is a record entry and not a log line
+///
+/// Run `run-1788552801-73005` is the case. Bot 1 walked to the east side of
+/// the site it was about to build `assembling-machine-1 [31.5, -4.5]` on --
+/// a two-by-two patch of ground between an older cell's chest column and its
+/// pole, every exit from which crossed the footprint -- placed it four ticks
+/// after arriving, and never moved again: 40 000 ticks, three refused walks,
+/// no event. The executor now asks, before every placement, whether the
+/// footprint would close the fill around the character that is about to
+/// build it (`crates/core::graph::enclosure::escape_with`), and walks it to
+/// the nearest tile that stays open first. That walk is a bot doing
+/// something the plan did not ask for, and a reader comparing the plan
+/// against the record has to be able to see why -- the same reason a
+/// teleport or a refusal is written rather than logged.
+///
+/// Ephemeral, like [`FactorioWorld::teleports`]: this is an event that
+/// happened, not knowledge the next plan needs, so it is queued for
+/// `record.enclosures()` to drain and is never serialised with the world.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StepAside {
+    /// The `game.tick` the step-aside walk settled at, or `None` if the game
+    /// never stamped it.
+    pub tick: Option<u64>,
+    pub player: PlayerId,
+    /// Where the character stood when the placement was about to be made.
+    pub from: Position,
+    /// The tile centre it was walked to instead.
+    pub to: Position,
+    /// The placement that would have sealed it in, as `name` and position.
+    pub placing: String,
+    pub site: Position,
+    /// How many tiles the character would have been left with, had it stayed.
+    pub pocket_tiles: f64,
 }
 
 /// What a container or machine was last observed to be holding.
@@ -762,6 +800,10 @@ pub struct FactorioWorld {
     /// bot before a build, or mining a way out), and neither can be reasoned
     /// about before a run record says when it happens.
     pub enclosures: SyncMutex<Enclosures>,
+    /// Characters walked clear of a placement that would have sealed them in,
+    /// since the last [`FactorioWorld::drain_step_asides`]. A queue, not
+    /// knowledge -- see [`StepAside`].
+    pub step_asides: SyncMutex<Vec<StepAside>>,
 }
 
 impl FactorioWorld {
@@ -1091,6 +1133,7 @@ impl FactorioWorld {
             placement_refusals: SyncMutex::new(PlacementRefusals::default()),
             walk_refusals: SyncMutex::new(WalkRefusals::default()),
             enclosures: SyncMutex::new(Enclosures::default()),
+            step_asides: SyncMutex::new(Vec::new()),
         }
     }
 
@@ -1169,6 +1212,17 @@ impl FactorioWorld {
     /// something is wrong.
     pub fn record_enclosure(&self, found: Enclosure) -> bool {
         self.enclosures.lock().note(found)
+    }
+
+    /// Queues a step-aside the executor just made, for
+    /// [`FactorioWorld::drain_step_asides`] to pick up.
+    pub fn record_step_aside(&self, step: StepAside) {
+        self.step_asides.lock().push(step);
+    }
+
+    /// Takes every step-aside queued since the last drain, oldest first.
+    pub fn drain_step_asides(&self) -> Vec<StepAside> {
+        std::mem::take(&mut *self.step_asides.lock())
     }
 
     /// Every enclosure observed, oldest first. Non-destructive.
@@ -1528,6 +1582,7 @@ impl<'de> Deserialize<'de> for FactorioWorld {
                     placement_refusals: SyncMutex::new(placement_refusals),
                     walk_refusals: SyncMutex::new(walk_refusals),
                     enclosures: SyncMutex::new(enclosures),
+                    step_asides: Default::default(),
                 })
             }
         }
@@ -1603,6 +1658,8 @@ impl Clone for FactorioWorld {
                 found: self.enclosures.lock().found.clone(),
                 reported: 0,
             }),
+            // Ephemeral, like `teleports` above: an event, not knowledge.
+            step_asides: SyncMutex::new(Vec::new()),
             flow_graph: Arc::new(FlowGraph::new(_entity_graph)),
         }
     }
@@ -1636,6 +1693,7 @@ mod tests {
             placement_refusals: Default::default(),
             walk_refusals: Default::default(),
             enclosures: Default::default(),
+            step_asides: Default::default(),
             entity_graph: Arc::new(EntityGraph::new(
                 Arc::new(DashMap::new()),
                 Arc::new(DashMap::new()),

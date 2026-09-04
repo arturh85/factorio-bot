@@ -1135,14 +1135,35 @@ export type EventKind =
           bot: number;
           /** Where the character stood -- *observed*, unlike a walk's `to`. */
           position: Position;
-          /** Reachable ground in square tiles of configuration space
-           *  (obstacles grown by the character's own box), so smaller than
-           *  the floor area a person would measure by eye. */
+          /** Reachable ground in whole tiles of the game's own pathfinding
+           *  grid; the tile the character stands on is always one of them. */
           pocket_tiles: number;
           /** How far the fill was allowed to look, in tiles. An enclosure
            *  wider than this window produces **no event**, so no events is
            *  not evidence that no bot was walled in. */
           searched_tiles: number;
+      }
+    | {
+          /**
+           * A bot was walked clear of a placement that would otherwise have
+           * sealed it in -- the `bot_enclosed` that did not happen. The
+           * executor asks before every placement whether the footprint would
+           * close the fill around the character about to build it, and walks
+           * it to the nearest tile that stays open first; this is why a
+           * `place` can be preceded by a walk the plan has no step for.
+           */
+          kind: 'bot_stepped_aside';
+          bot: number;
+          /** Where the character stood when it was about to place. Observed. */
+          from: Position;
+          /** The tile centre it was walked to instead. */
+          to: Position;
+          /** The entity that was about to be placed. */
+          placing: string;
+          /** Where it was about to be placed. */
+          site: Position;
+          /** How many tiles the character would have been left with. */
+          pocket_tiles: number;
       }
     | {
           /**

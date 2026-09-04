@@ -649,12 +649,12 @@ pub enum EventKind {
         /// and unlike a walk's `to`, it is *observed*: the world reported it
         /// at the instant the path was refused.
         position: Position,
-        /// How much ground is still reachable, in square tiles of
-        /// **configuration space** -- obstacles grown by the character's own
-        /// collision box, so this is where the character's centre may go, not
-        /// the floor area a person would measure by eye. It is smaller than
-        /// the latter, always. Reported because "boxed into 3 square tiles"
-        /// and "boxed into 300" are different situations.
+        /// How much ground is still reachable, in whole tiles of the game's
+        /// own pathfinding grid -- a tile counts when the character's box
+        /// centred on it is clear, which is the test `request_path` makes.
+        /// The tile the character stands on is always one of them. Reported
+        /// because "boxed into 4 tiles" and "boxed into 300" are different
+        /// situations.
         pocket_tiles: f64,
         /// How far the fill was allowed to look, in tiles.
         ///
@@ -666,6 +666,36 @@ pub enum EventKind {
         /// comparing two runs whose builds disagree about the radius needs the
         /// number that was actually used.
         searched_tiles: f64,
+    },
+    /// A bot was walked clear of a placement that would otherwise have sealed
+    /// it in -- the [`EventKind::BotEnclosed`] that did not happen.
+    ///
+    /// Written by `record.enclosures()` from the queue `crates/executor`'s
+    /// pre-place check fills (`FactorioWorld::step_asides`). The check runs
+    /// before every placement: with the footprint added to the occupancy
+    /// model, would the fill around the character about to build it close?
+    /// In `run-1788552801-73005` it would have, and did -- bot 1 placed an
+    /// `assembling-machine-1` from the one patch of ground whose every exit
+    /// crossed it, and stood there for 40 000 ticks.
+    ///
+    /// This is a bot doing something the plan did not ask for. It is in the
+    /// record so that a reader comparing the plan to what happened can see
+    /// why a `place` was preceded by a walk the schedule has no step for.
+    BotSteppedAside {
+        bot: u32,
+        /// Where the character stood when it was about to place. Observed.
+        from: Position,
+        /// The tile centre it was walked to: the nearest tile reachable from
+        /// `from` that stays connected to open ground once the placement
+        /// stands and is still within building reach of `site`.
+        to: Position,
+        /// The entity that was about to be placed.
+        placing: String,
+        /// Where it was about to be placed.
+        site: Position,
+        /// How many tiles the character would have been left with, had it
+        /// stayed -- the same count [`EventKind::BotEnclosed`] reports.
+        pocket_tiles: f64,
     },
     /// A bot lost its character: the game's `on_player_died`, as the mod
     /// reported it.

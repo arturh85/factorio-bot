@@ -1,11 +1,12 @@
 use crate::actuator::{ActionTicks, Actuator, ActuatorError, ActuatorFailure};
-use crate::walk_memory::note_walk_refusal;
+use crate::pre_place::{PrePlace, STEP_ASIDE_RADIUS, judge_placement};
+use crate::walk_memory::{note_walk_refusal, pathfinder_found_nothing};
 use async_trait::async_trait;
 use factorio_bot_core::constants::BOT_FORCE;
 use factorio_bot_core::factorio::rcon::{
     ActionFailure, DestinationFull, Dispatch, FactorioRcon, approach_annulus,
 };
-use factorio_bot_core::factorio::world::FactorioWorld;
+use factorio_bot_core::factorio::world::{FactorioWorld, StepAside};
 use factorio_bot_core::record::map::{EntitySnapshot, Placement, drift_between};
 use factorio_bot_core::types::{PlayerId, Position};
 use factorio_bot_planner::{BotId, InventorySlot};
@@ -341,7 +342,39 @@ impl Actuator for RconActuator {
                 // not the first. See `walk_memory` for what is remembered and
                 // what is deliberately not.
                 note_walk_refusal(&self.world, p, here.as_ref(), &to, &failure);
-                classify(failure)
+                // And the record gets both halves too. A pre-dispatch
+                // refusal carries no position of its own -- the mod answers
+                // `failed to path find` and nothing else -- so the run
+                // record used to archive it as `no_path` from nowhere to
+                // nowhere, which cannot be analysed: run
+                // `run-1788552801-73005`'s three refusals from one spot
+                // read as three unrelated failures. The wording is the one
+                // `classify_walk_failure`'s `walk_endpoints` already reads
+                // (`found no path from (x/y) to (x/y)`); `from` is the
+                // world's reading of the character, `to` is the goal the
+                // game was actually asked for, which `approach_annulus` has
+                // moved off the plan's `to` by the annulus.
+                let refused_from = here
+                    .as_ref()
+                    .filter(|_| pathfinder_found_nothing(&failure.error))
+                    .cloned();
+                let failure = classify(failure);
+                match (refused_from, failure.error) {
+                    (Some(from), ActuatorError::Rejected(message)) => ActuatorFailure {
+                        error: ActuatorError::Rejected(format!(
+                            "{message} -- found no path from ({}/{}) to ({}/{})",
+                            from.x(),
+                            from.y(),
+                            goal.x(),
+                            goal.y()
+                        )),
+                        ticks: failure.ticks,
+                    },
+                    (_, error) => ActuatorFailure {
+                        error,
+                        ticks: failure.ticks,
+                    },
+                }
             })
     }
 
@@ -380,6 +413,51 @@ impl Actuator for RconActuator {
         direction: u8,
     ) -> Result<ActionTicks, ActuatorFailure> {
         let p = self.player(bot)?;
+        // Before anything is built: would this footprint seal in the
+        // character about to build it? See `pre_place` for the run that
+        // answered yes, and for why this layer and no other can ask.
+        match judge_placement(&self.world, p, item, &at, direction) {
+            PrePlace::Proceed => {}
+            PrePlace::StepAside {
+                from,
+                to,
+                pocket_tiles,
+            } => {
+                let ticks = self
+                    .rcon
+                    .move_player_timed(&self.world, p, &to, Some(STEP_ASIDE_RADIUS))
+                    .await
+                    .map_err(|failure| {
+                        let failure = classify(failure);
+                        ActuatorFailure {
+                            error: ActuatorError::Rejected(format!(
+                                "stepping aside to {to} before placing {item} at {at} -- from \
+                                 {from} the placement would wall the character into \
+                                 {pocket_tiles} tiles -- and the walk failed: {}",
+                                failure.error
+                            )),
+                            ticks: failure.ticks,
+                        }
+                    })?;
+                self.world.record_step_aside(StepAside {
+                    tick: ticks.replied,
+                    player: p,
+                    from,
+                    to,
+                    placing: item.to_string(),
+                    site: at.clone(),
+                    pocket_tiles,
+                });
+            }
+            PrePlace::Refuse { from, pocket_tiles } => {
+                return Err(ActuatorError::Rejected(format!(
+                    "refused to place {item} at {at}: from {from} it would wall the \
+                     placing character into {pocket_tiles} tiles, and no reachable tile \
+                     within building reach stays open once it stands"
+                ))
+                .at(ActionTicks::UNKNOWN));
+            }
+        }
         // `place_entity` returns the FactorioEntity the game actually created,
         // which is the truth half of a placement; `item`/`at`/`direction` are
         // the intent half, captured before `at` is moved into the call below.

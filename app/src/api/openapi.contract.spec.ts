@@ -851,6 +851,14 @@ const SCHEMAS: Record<string, SchemaContract> = {
             pocket_tiles: {required: true, type: 'number'},
             searched_tiles: {required: true, type: 'number'}
         },
+        bot_stepped_aside: {
+            bot: {required: true, type: 'integer'},
+            from: {required: true, ref: 'Position'},
+            to: {required: true, ref: 'Position'},
+            placing: {required: true, type: 'string'},
+            site: {required: true, ref: 'Position'},
+            pocket_tiles: {required: true, type: 'number'}
+        },
         bot_died: {
             bot: {required: true, type: 'integer'},
             position: {required: false, ref: 'Position', nullable: true},

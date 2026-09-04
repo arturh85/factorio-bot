@@ -104,6 +104,57 @@ Two structural facts explain why nothing fills the idle:
   variant (`Have`, `Researched`, `Produced`, `Producing`, `All`) is
   demand-driven.
 
+## FIRST MEASURED RUN: 13.76 min, and the executor is no longer the problem
+
+`run-1788479942-45523`, roster `[1,2,3,4]` confirmed, all seven rungs
+satisfied including `researched("automation")`. Carries F, C, B and G.
+
+**13.76 min game time (49,541 ticks) from run start to the last milestone**,
+against 21.34 min for the reference run. Over the 9-minute target.
+
+### Execution now tracks the plan to within 7.2%
+
+| milestone | planned | actual | over |
+|---|---|---|---|
+| 6 (science packs x10) | 16,894 | 17,700 | 4.8% |
+| 7 (research automation) | 17,307 | 18,104 | 4.6% |
+| all seven | ~45,984 | 49,541 | **7.2%** |
+
+**This is F and C validated live.** Before them, the executor's dispatch
+condition could diverge from the plan by the entire span a bot spent doing
+other work; a 3.6-minute single gap was one instance. It now tracks within
+7%, so **execution slack is no longer where the minutes are**.
+
+### The remaining gap is planning structure, not execution
+
+`research_run.lua` climbs **seven rungs** (`have(iron-ore,20)` … `have
+(automation-science-pack,10)`, then `researched(automation)`). Each rung is
+planned independently and **cannot overlap the next**. The ladder plans
+~45,984 ticks; the same end state as a **single** goal plans at **30,077**.
+The ladder pays roughly **53%** for its legibility.
+
+That legibility is deliberate and worth keeping — the script's own comment
+explains that a failure should name which step broke rather than "research did
+not happen". So the ladder is the right shape for diagnosis and the wrong
+shape for a stopwatch. `scripts/automation_speedrun.lua` is the timed variant:
+identical machinery, one goal.
+
+### Milestone savepoints paid off within the hour
+
+Every rung wrote one, 222-641 ms each. `milestone-7.zip` (3,518,669 bytes) **is
+a world with automation researched** — exactly the starting point red and green
+science need, so those experiments need not re-derive this run. `session_reset`
+was confirmed live (`{"walking":0,"mining":0,"crafts":0,"research":0}`).
+
+Also established: **`workspace/server/saves/level.zip` is byte-identical before
+and after a run.** Runs do not write back to it, so the map is pristine and
+repeatable, and the "accumulated world" worry was unfounded.
+
+### One real error in the run
+
+Milestone 3 needed two iterations: `tried to remove 5 iron-plate but removed
+0`. Every other rung was satisfied first time.
+
 ## TARGET MET OFFLINE: 30,077 ticks (8:21)
 
 Workstream B landed as `0069b41c`. Verified independently, and **byte-identical

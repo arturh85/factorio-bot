@@ -11,6 +11,48 @@ four bots.
 
 ---
 
+## Run 4 died with the disk, and the drills work landed (`b98fe587`)
+
+`run-1788556703-31339` (same savepoint, master with recovery, deadline and
+reach fixes): batch 1 went 269 of 306 with one partial transfer, then every
+player vanished — `player not found (id 1)`, then the planner's refusal
+*"bots 1–4 are not connected players in this world; refusing to plan against
+a fabricated inventory"*. **The root filesystem had hit 100%**: `target/` had
+grown to 371 GB across sessions and this session's eight agent worktrees
+added 86 GB. An environment failure, not a code one; the refusal is the right
+behaviour. `target/debug` and `target/release` were removed and rebuilt,
+merged worktrees removed, 439 GB free after. Memory written so the next
+session checks `df` before a run.
+
+### Drills over hands (`bdec88af`), measured and merged
+
+| goal | before | after |
+|---|---|---|
+| `researched:automation` | 136 / 28,918 | 136 / **28,023** (−3%) |
+| `producing:automation-science-pack:6` | 299 / 43,871 | 300 / 46,089 (**+5%**) |
+| `producing:logistic-science-pack:6` | 443 / 216,322, mine 101 / 42,000 ticks | 402 / 217,749, mine **73 / 19,560** |
+| ladder `producing:iron-plate:60` → automation | — | 151 / 41,111, 4 drills, **128 plates by tick 36,000** (was 101) |
+
+What landed: **yield-aware siting** — a cell is sited where the drill's 2×2
+holds the ore its takes will draw (the `removed 40 of 64` root cause; pinned
+on a thin-rim fixture), takes consume the drill's tiles; **drains** — later
+fragments of the same plan are served from the least-backlogged live cell;
+**rock-priced gate** (crossover 50 → ~32 plates); and **stated supply edges**
+in `run_steps`, because `infer_edges` dropped the real producer→consumer edge
+once drains existed. Rejected with numbers: opening cells on backlog within
+one goal took red 43,871 → 78,240 — on a roster 15–35% busy, wall-clock is
+the scarce resource and one cell at 240 ticks/plate loses to four hands.
+**Count ahead of demand is a ladder decision**, which is why the WR lesson
+shows up as a rate rung (`producing:iron-plate:60`) and not inside
+`researched:automation`.
+
+**Corrections to the brief:** `PlaceDrill` never claims ore goals — it claims
+plate goals, and the `mine` actions are `Smelt` decomposing plates in ~4-ore
+fragments, so no per-goal gate could ever see the aggregate demand; and the
+baseline dump's chosen sites hold 154–570 ore, so siting was not the blocker
+*offline* — the dry cell came from a world the dump does not describe.
+**Open:** cells standing from an earlier plan are not drained across replans.
+
 ## Run 3 finished `stuck` at 50 game-minutes — and its four failure classes are all named
 
 `run-1788552801-73005` (green, seed 31337, resumed from the red witness, first

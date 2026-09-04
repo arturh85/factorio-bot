@@ -104,7 +104,77 @@ Two structural facts explain why nothing fills the idle:
   variant (`Have`, `Researched`, `Produced`, `Producing`, `All`) is
   demand-driven.
 
-## NEXT PHASE: red science. Rung 1 passes, rung 2 is stuck_silent
+## THE CELLS WERE WORKING ALL ALONG (`30b28846`)
+
+**"No cell has ever produced anything" was false.** The run record shows three
+complete cells, all on `network: 1`, **two of them `full_output` with
+`products_finished: 4` and `7`**. Red science was being assembled. The world
+model read zero and the supervisor kept building more cells.
+
+### The defect: a predicate checked against a field nothing writes
+
+`Goal::Producing` is answered by `assemble::cells_standing`, whose second
+clause is `machine.recipe.as_deref() == Some(spec.recipe.name)`. **That field
+is `None` on every assembling machine in the live world, always:**
+
+- A machine is **built empty** and given its recipe by a *separate* RCON call,
+  so `on_some_entity_created` — the only event that puts an entity into
+  `EntityGraph` — carries `recipe: None`.
+- `EntityGraph::add` **refuses a tile something already stands on**, so a later
+  re-observation cannot correct it.
+- `FactorioWorld::on_some_entity_updated` is an explicit no-op, and the mod
+  raises it only from `on_player_rotated_entity` anyway.
+
+The recipe therefore lived only in that iteration's `PlanState` overlay and
+died with it. **Rung 1 satisfied on its first replan because research *is*
+recorded in the world model — that contrast is the whole defect.**
+
+### What the record shows, at 400-tick resolution
+
+| tick | event |
+|---|---|
+| 56,700 | cell 1's science machine **has its recipe**, per the game |
+| 57,102 | supervisor replans → **builds a second complete cell elsewhere** |
+| 57,600 | cell 1 finishes its first `automation-science-pack` |
+| 81,900 | cell 2's machine has its recipe |
+| 82,047 | replan → **a third cell** |
+| 105,300 | cell 3's machine has its recipe |
+| 105,577 | `stuck_silent`, 4 iterations, zero failures |
+
+The plans were not diverging — they were **repeating**, each building a whole
+new cell at a fresh site.
+
+### The fix, and the test that was missing
+
+`EntityGraph::set_recipe` records the recipe after a successful RCON reply.
+Not an assumption: `rcon_set_recipe` reads `get_recipe()` back and refuses in
+the reply body unless it names the recipe asked for, so a refusal never reaches
+the write-back.
+
+**Every existing `holds_assembling` test stood its cell through the overlay**
+(`create_entity` + `PlanState::set_recipe`) — which a replan never has. The new
+test pushes the same cell through `update_chunk_entities`, the door the mod's
+events actually use, and asserts `false` without recipes (the state every
+replan saw) and `true` with them.
+
+### A second gap, found and deliberately not fixed
+
+`BUFFER_ENTITIES` is `["stone-furnace", "wooden-chest"]`, and its own doc says
+*"Not `iron-chest` … Add it the day something places one."* **Stage 2 places
+two per cell.** So the planner can never see what a cell's supply chests hold —
+exactly the "ran dry vs. broken" case the mod cites. It was left alone because
+it changes planning behaviour that cannot be verified offline.
+
+### Corrections to my own framing
+
+- **"The planner produces a plan whose successful execution does not satisfy
+  the goal" was half right.** The plan was fine and the *world* satisfied the
+  goal after iteration 1. What failed was the model's *reading* of the world.
+- **The 4-second offline loop could not reproduce this**, and in the opposite
+  direction to the obvious guess: a t=0 world has no cell to mis-read. The
+  diagnosis came from `samples.jsonl` plus a code trace.
+
+
 
 `run-1788485718-45723` (`scripts/factory_stage2.lua`, roster `[1,2,3,4]`):
 

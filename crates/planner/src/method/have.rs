@@ -44,7 +44,7 @@ use crate::action::{Action, ActionKind, Actor, Condition, Effect, InventorySlot}
 use crate::error::PlannerError;
 use crate::goal::{Goal, Holder};
 use crate::ids::{ActionId, BotId, Ticks};
-use crate::method::power::{Supply, plant_steps, supply_for};
+use crate::method::power::{POLE, Supply, plant_steps, supply_for};
 use crate::method::util::{
     CRAFTING_CATEGORY, FREE_TILE_SEARCH_RADIUS, RecipeGate, SMELTING_CATEGORY, free_area_near,
     free_area_near_where, ingredients_of, mining_ticks, nearest_resource_tile, output_per_craft,
@@ -2320,6 +2320,14 @@ struct LabSite {
     /// `Place` is emitted, so the reuse works within one plan as well as
     /// across runs.
     needs_placing: bool,
+    /// Where a pole of the lab's **own** has to go, when every tile an
+    /// existing supply area reaches is already built on.
+    ///
+    /// `None` in the ordinary case, and that is the case every red-science
+    /// plan takes: [`lab_site`] asks for ground inside a supply area that
+    /// already exists first, and only widens to this when there is none. See
+    /// [`pole_for_lab`].
+    pole: Option<Position>,
 }
 
 /// Why there was nowhere to put the lab, counted rather than asserted.
@@ -2329,6 +2337,12 @@ struct LabSite {
 /// technology is out of reach in this world" when the truth is "the ground and
 /// the power are in different places". So the two ways a candidate site failed
 /// are counted separately: see [`PlannerError::ResearchNeedsRoom`].
+///
+/// **`free_unpowered` is a count, not an instruction.** It used to be both:
+/// free-but-unlit ground was something only the reader could act on. Since
+/// [`lab_site_with_pole`], the planner tries that itself and this error is
+/// only reached once *it* has failed, so a large `free_unpowered` now means
+/// "and none of that ground could be wired to a generator either".
 ///
 /// The sweep repeats the one [`free_area_near_where`] just did, which is the
 /// cost of only paying for it on the failing path. It runs once, at the point
@@ -2366,6 +2380,122 @@ fn lab_has_no_room(state: &PlanState, anchor: &Position, technology: &str) -> Pl
     }
 }
 
+/// The `FactorioEntity` a small electric pole placed at `position` is.
+///
+/// `entity_type` is read from the prototype rather than guessed, for the same
+/// reason `crate::method::assemble::entity_for` reads it: a small pole's type
+/// is `electric-pole`, which is not its name, and `EntityGraph::add`'s
+/// whitelist is keyed on the type.
+fn pole_entity(state: &PlanState, position: &Position) -> FactorioEntity {
+    FactorioEntity {
+        name: POLE.to_string(),
+        entity_type: state
+            .base()
+            .entity_prototypes
+            .get(POLE)
+            .map(|proto| proto.entity_type.clone())
+            .unwrap_or_else(|| POLE.to_string()),
+        position: position.clone(),
+        ..Default::default()
+    }
+}
+
+/// Where a pole would have to stand to run a lab centred at `pos`, if
+/// anywhere.
+///
+/// Three questions, asked in cost order so the expensive one is only reached
+/// by a candidate that has already earned it:
+///
+/// 1. **would a pole there even reach the lab.** Pure box arithmetic, and
+///    asked through [`PlanState::pole_would_supply`] rather than restated
+///    here — a second copy of a pole's supply area is exactly the drift that
+///    predicate exists to prevent. It also means this search's ring bound only
+///    has to be an over-estimate, which is why it borrows the lab's own;
+/// 2. **is the ground free**, asked of a fork the lab is already standing in,
+///    so the pole cannot be sited on the very building it is meant to power;
+/// 3. **does the lab then actually have 60 kW of uncommitted capacity**, which
+///    is [`Condition::Powered`] — the same predicate the scheduler re-checks,
+///    so this cannot accept what that will later refuse. It is also what makes
+///    the wire reach unnecessary to state: `electric_network`'s union-find
+///    answers "is this new pole joined to a generator", and a pole standing
+///    alone in a field supplies coverage and no capacity, which fails here.
+fn pole_for_lab(state: &PlanState, pos: &Position) -> Option<Position> {
+    let area = state.collision_area(LAB, pos)?;
+    let mut trial = state.fork();
+    trial.create_entity(FactorioEntity {
+        name: LAB.to_string(),
+        entity_type: LAB.to_string(),
+        position: pos.clone(),
+        ..Default::default()
+    });
+    let (offset_x, offset_y) = crate::method::util::tile_alignment(state, POLE);
+    let radius = FREE_TILE_SEARCH_RADIUS;
+    let base_x = pos.x.floor() as i32;
+    let base_y = pos.y.floor() as i32;
+    for dy in -radius..=radius {
+        for dx in -radius..=radius {
+            let candidate = Position::new(
+                f64::from(base_x + dx) + offset_x,
+                f64::from(base_y + dy) + offset_y,
+            );
+            if !state.pole_would_supply(POLE, &candidate, &area) {
+                continue;
+            }
+            if !trial.is_area_free(POLE, &candidate) {
+                continue;
+            }
+            let mut wired = trial.fork();
+            wired.create_entity(pole_entity(state, &candidate));
+            if (Condition::Powered {
+                pos: pos.clone(),
+                entity: LAB.to_string(),
+                kw: LAB_POWER_KW,
+            })
+            .holds(&wired, BotId(0))
+            {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+/// A lab site that comes with a pole of its own, for when every tile an
+/// existing supply area reaches is built on.
+///
+/// **A direct mirror of what `crate::method::assemble::plan_cell` already
+/// does**: ask for ground inside a supply area that already exists, and only
+/// bring a pole when there is none. The cell has done it since it was written;
+/// the lab did not, and the asymmetry is what refused a green factory. The
+/// cell is sited *inline*, before the research it unlocks is expanded, and its
+/// own pole is what brings power to the ground the lab then wants — so the lab
+/// cannot be sited first, and the cell cannot leave a hole it has no way to
+/// know the shape of. See [`PlannerError::ResearchNeedsRoom`].
+///
+/// **What a pole costs is no longer what it cost when the cell's own
+/// `POLE_OFFSET` was written.** That comment says this planner cannot make
+/// wood, so the four a roster starts with are all there will ever be. `Chop`
+/// has since made wood renewable — `have:small-electric-pole:4` on the real
+/// map chops a dead trunk for two more — so a pole here is priced like any
+/// other craft, and it is spent only on a plan that would otherwise be
+/// refused outright.
+///
+/// The lab's ring order is [`free_area_near_where`]'s, unchanged, so a world
+/// where a powered site does exist never reaches this at all and no plan that
+/// already worked can move.
+fn lab_site_with_pole(state: &PlanState, anchor: &Position) -> Option<(Position, Position)> {
+    // `pole_for_lab` runs twice for the site that wins: once as the predicate
+    // and once for its answer. That is the cost of keeping one ring order --
+    // `free_area_near_where`'s -- rather than writing a second one here that
+    // could disagree with it, and it is paid only on a path that was about to
+    // refuse the plan.
+    let pos = free_area_near_where(state, anchor, LAB, |candidate| {
+        pole_for_lab(state, candidate).is_some()
+    })?;
+    let pole = pole_for_lab(state, &pos)?;
+    Some((pos, pole))
+}
+
 /// Is a lab centred at `pos` supplied with enough power to research?
 fn lab_is_powered(state: &PlanState, pos: &Position) -> bool {
     match state.collision_area(LAB, pos) {
@@ -2396,6 +2526,7 @@ fn lab_site(state: &PlanState, from: &Position, technology: &str) -> Result<LabS
         return Ok(LabSite {
             pos: existing.position,
             needs_placing: false,
+            pole: None,
         });
     }
 
@@ -2411,13 +2542,26 @@ fn lab_site(state: &PlanState, from: &Position, technology: &str) -> Result<LabS
     // inside walking distance. The candidate grid is the lab's own -- a lab
     // covers three tiles on each axis, so its centre belongs at `n + 0.5`,
     // which `free_area_near_where` takes from the prototype.
-    let pos = free_area_near_where(state, &anchor, LAB, |candidate| {
+    if let Some(pos) = free_area_near_where(state, &anchor, LAB, |candidate| {
         lab_is_powered(state, candidate)
-    })
-    .ok_or_else(|| lab_has_no_room(state, &anchor, technology))?;
+    }) {
+        return Ok(LabSite {
+            pos,
+            needs_placing: true,
+            pole: None,
+        });
+    }
+    // Nothing an existing supply area reaches is free. Widen to ground that is
+    // free but unlit, and bring the pole that lights it -- the second tier
+    // `plan_cell` has always had and this did not. Asked *after* the free-and-
+    // powered pass and never before it, so a plan that already had somewhere
+    // to put a lab keeps that site and spends nothing.
+    let (pos, pole) = lab_site_with_pole(state, &anchor)
+        .ok_or_else(|| lab_has_no_room(state, &anchor, technology))?;
     Ok(LabSite {
         pos,
         needs_placing: true,
+        pole: Some(pole),
     })
 }
 
@@ -2616,6 +2760,64 @@ impl Method for Researched {
             .bot(ctx.chain_actor)
             .map(|b| b.reach_distance)
             .unwrap_or(10.0);
+
+        // A pole of the lab's own, when `lab_site` had to reach past every
+        // supply area that already stood -- see [`lab_site_with_pole`]. Its id
+        // joins `power_links` rather than ordering anything by itself: the
+        // research carries `Condition::Powered`, which no effect satisfies, so
+        // the edge from the thing that brings the power has to be stated. It
+        // is the same edge `plant_steps` returns for the plant's own parts.
+        if let Some(pole) = &site.pole {
+            steps.push(Step::Subgoal(Goal::Have {
+                item: POLE.into(),
+                count: 1,
+                whose: Holder::Share(ctx.chain_actor),
+            }));
+            let entity = pole_entity(&ctx.state, pole);
+            let min_radius = ctx.state.placement_clearance(POLE).unwrap_or(0.0);
+            let id = ctx.ids.next();
+            power_links.push(id);
+            steps.push(Step::Act(Box::new(Action {
+                id,
+                kind: ActionKind::Place {
+                    entity: Box::new(entity.clone()),
+                },
+                pre: vec![
+                    Condition::AtPosition {
+                        who: Actor::Role,
+                        pos: pole.clone(),
+                        radius: build,
+                        min_radius,
+                    },
+                    Condition::AreaFree {
+                        pos: pole.clone(),
+                        entity: POLE.into(),
+                        direction: 0,
+                    },
+                    Condition::HasItem {
+                        who: Actor::Role,
+                        item: POLE.into(),
+                        count: 1,
+                    },
+                ],
+                eff: vec![
+                    Effect::LoseItem {
+                        who: Actor::Role,
+                        item: POLE.into(),
+                        count: 1,
+                    },
+                    Effect::CreateEntity(Box::new(entity.clone())),
+                ],
+                duration: PLACE_TICKS,
+                pinned: None,
+                label: format!("place {} at {}", POLE, pole),
+            })));
+            // Taken now, for the same reason the lab's site is taken now: every
+            // placement later in this plan -- including the labs of this
+            // technology's own prerequisites -- reads `ctx.state`, and ground
+            // that is not recorded as spoken for is chosen twice.
+            ctx.state.create_entity(entity);
+        }
 
         if site.needs_placing {
             // `Holder::Share` for the same reason the packs below use it: the
@@ -4277,15 +4479,19 @@ mod tests {
     /// world where the plan has to *build* its power rather than read it.
     ///
     /// The wood is not decoration. `small-electric-pole` is `wood 1 +
-    /// copper-cable 2`, the planner **cannot make wood** — `Mine` sources only
-    /// `EntityGraph::resources`, which `add` fills for `entity_type ==
-    /// "resource"`, and trees are obstacles — and every bot the Lua runner
-    /// starts carries exactly one, confirmed across all 22 archived runs'
-    /// `samples.jsonl` and in `crates/core/tests/live-2.1.17-players.json`.
-    /// The shared fixture has no players at all, so its bots start empty and
-    /// the one wood has to be put there for the fixture to model a real
-    /// roster. That single item is also the **hard lifetime cap**: four bots,
-    /// four wood, eight poles ever.
+    /// copper-cable 2`, and every bot the Lua runner starts carries exactly
+    /// one wood, confirmed across all 22 archived runs' `samples.jsonl` and in
+    /// `crates/core/tests/live-2.1.17-players.json`. The shared fixture has no
+    /// players at all, so its bots start empty and the one wood has to be put
+    /// there for the fixture to model a real roster.
+    ///
+    /// **It is no longer a lifetime cap.** This comment used to end "four
+    /// bots, four wood, eight poles ever", because `Mine` sources only
+    /// `EntityGraph::resources` and a tree is not one. [`Chop`] closed that:
+    /// wood comes off trees now, and `have:small-electric-pole:4` on the real
+    /// map chops a dead trunk for the second one. The seeded wood keeps this
+    /// fixture modelling a real roster; it no longer bounds what the plan may
+    /// spend.
     fn unpowered_lakeside_state(bots: &[BotId]) -> PlanState {
         let mut state =
             PlanState::from_world(Arc::new(crate::test_world::world_with_technologies()), bots);
@@ -4995,18 +5201,29 @@ mod tests {
     /// the cell takes the ground and the lab is refused. A red-science cell is
     /// one row narrower and leaves a lab-sized hole, which is why nothing had
     /// hit this before.
+    ///
+    /// **The refusal is a stronger statement than it was.** `lab_site` now
+    /// answers free-but-unpowered ground by bringing a pole
+    /// ([`lab_site_with_pole`]), so blocking the *supply area* alone no longer
+    /// refuses anything -- it is the case the next test covers. To still reach
+    /// this error the world has to leave a new pole nowhere to join from
+    /// either, which is why the built-over square is the pole's **wire
+    /// reach** and not its supply area.
     #[test]
-    fn a_lab_with_power_but_no_ground_refuses_by_name() {
+    fn a_lab_with_power_but_no_ground_and_no_wire_refuses_by_name() {
         let bots = [BotId(1)];
         let mut s = PlanState::from_world(
             Arc::new(crate::test_world::world_with_technologies()),
             &bots,
         );
         crate::test_world::with_steam_power(&mut s);
-        // Build over every tile the pole at (10.5, 10.5) lights. A chest is
-        // one tile, so this is exhaustive rather than approximately so.
-        for x in 7..=14 {
-            for y in 7..=14 {
+        // Build over every tile within the wire reach of the pole at
+        // (10.5, 10.5) -- 7.5 tiles, so the square 3..=18 covers the whole
+        // disc. A chest is one tile, so this is exhaustive rather than
+        // approximately so: it takes every tile the pole lights *and* every
+        // tile a second pole could stand on and still reach it.
+        for x in 3..=18 {
+            for y in 3..=18 {
                 let position = Position::new(f64::from(x) + 0.5, f64::from(y) + 0.5);
                 if !s.is_position_free(&position) {
                     continue;
@@ -5039,6 +5256,166 @@ mod tests {
         assert!(
             *free_unpowered > 0,
             "there is plenty of free ground; none of it has supply"
+        );
+    }
+
+    /// A world whose only supply area is built on, with the wire reach around
+    /// it left clear.
+    ///
+    /// The green-factory case reduced to a fixture: a two-feed assembly cell
+    /// fills the 5x5 a small pole lights, and the research that unlocks the
+    /// cell's own recipe is expanded afterwards, so the lab arrives to find
+    /// every powered tile taken. What is *not* taken is the ground beside it.
+    fn a_full_supply_area(bots: &[BotId]) -> PlanState {
+        let mut s =
+            PlanState::from_world(Arc::new(crate::test_world::world_with_technologies()), bots);
+        crate::test_world::with_steam_power(&mut s);
+        for x in 7..=14 {
+            for y in 7..=14 {
+                let position = Position::new(f64::from(x) + 0.5, f64::from(y) + 0.5);
+                if !s.is_position_free(&position) {
+                    continue;
+                }
+                s.create_entity(FactorioEntity {
+                    name: "iron-chest".into(),
+                    entity_type: "container".into(),
+                    position,
+                    ..Default::default()
+                });
+            }
+        }
+        s
+    }
+
+    /// **Free-but-unpowered ground is answered by a pole, not by a refusal.**
+    ///
+    /// The asymmetry this closes: `crate::method::assemble::plan_cell` has
+    /// always asked for ground inside an existing supply area first and
+    /// brought a pole when there was none, and `lab_site` only ever asked the
+    /// first half. A green factory is what made the difference visible -- the
+    /// cell is sited inline and its own pole is what brings power to the
+    /// ground the lab then wants, so the lab cannot be sited first and the
+    /// cell cannot leave a hole whose shape it has no way to know.
+    ///
+    /// Every clause is asserted against the state the plan will actually be
+    /// checked in, rather than against the search that chose it: the pole
+    /// stands on free ground, it is not standing on the lab, and with it
+    /// placed the lab really does read as powered.
+    #[test]
+    fn a_lab_with_no_powered_ground_brings_a_pole_of_its_own() {
+        let bots = [BotId(1)];
+        let s = a_full_supply_area(&bots);
+        let site = lab_site(&s, &Position::new(0., 0.), "automation")
+            .expect("free ground beside the supply area, and a pole for it");
+        let pole = site.pole.clone().unwrap_or_else(|| {
+            panic!("every tile with supply is built on, so the lab has to bring a pole")
+        });
+        assert!(
+            !lab_is_powered(&s, &site.pos),
+            "the site was chosen because nothing already supplies it: {}",
+            site.pos
+        );
+        assert!(
+            s.is_area_free(POLE, &pole),
+            "the pole at {pole} has to stand on free ground"
+        );
+        let mut with_both = s.fork();
+        with_both.create_entity(FactorioEntity {
+            name: LAB.into(),
+            entity_type: LAB.into(),
+            position: site.pos.clone(),
+            ..Default::default()
+        });
+        assert!(
+            with_both.is_area_free(POLE, &pole),
+            "and not on the lab it is meant to power: pole {pole}, lab {}",
+            site.pos
+        );
+        with_both.create_entity(pole_entity(&s, &pole));
+        assert!(
+            lab_is_powered(&with_both, &site.pos),
+            "with the pole standing, the lab at {} has to have 60 kW",
+            site.pos
+        );
+    }
+
+    /// A pole that lights the lab and reaches no generator is not power.
+    ///
+    /// The *coverage is not capacity* trap, one level down from the network
+    /// budget: a pole standing alone in a field gives a lab a full supply
+    /// area and nothing to draw from, and a search that stopped at
+    /// `pole_would_supply` would accept it. `pole_for_lab` asks
+    /// `Condition::Powered` instead -- the same predicate the scheduler
+    /// re-checks -- so the wire reach is enforced without being restated here.
+    #[test]
+    fn the_pole_a_lab_brings_has_to_reach_the_generator() {
+        let bots = [BotId(1)];
+        let s = a_full_supply_area(&bots);
+        let site = lab_site(&s, &Position::new(0., 0.), "automation").expect("a site with a pole");
+        let pole = site.pole.clone().expect("a pole of its own");
+        // Every pole in this world is one small pole's wire reach of the next,
+        // or the lab draws from nothing. The fixture's only other pole is the
+        // one `with_steam_power` put at (10.5, 10.5).
+        assert!(
+            calculate_distance(&pole, &Position::new(10.5, 10.5)) <= 7.5,
+            "the pole at {pole} is out of wire reach of the network it has to join"
+        );
+        // And the same question asked the way the plan will ask it: a fork
+        // with only the new pole in it, minus the generator's own pole, must
+        // *not* power the lab.
+        let mut orphaned = PlanState::from_world(
+            Arc::new(crate::test_world::world_with_technologies()),
+            &bots,
+        );
+        orphaned.create_entity(pole_entity(&s, &pole));
+        assert!(
+            !lab_is_powered(&orphaned, &site.pos),
+            "a pole with no generator behind it must not read as power"
+        );
+    }
+
+    /// The site is chosen, and then it has to be **built**.
+    ///
+    /// A pole `lab_site` picked and `expand` never placed would leave a plan
+    /// whose research carries `Condition::Powered` against ground nothing
+    /// supplies -- refused by the scheduler, far from the method that caused
+    /// it. So the emission is asserted whole: the item is asked for, the pole
+    /// is placed, and the research is ordered after that placement.
+    ///
+    /// That last edge has to be *stated*. `Condition::Powered` is satisfied by
+    /// no effect, so inference draws nothing from the pole to the research --
+    /// the same reason `plant_steps` hands its ids back for the plant.
+    #[test]
+    fn the_pole_a_lab_brings_is_placed_and_the_research_waits_for_it() {
+        let bots = [BotId(1)];
+        let s = a_full_supply_area(&bots);
+        let steps = research_steps(&s, "automation");
+        assert!(
+            subgoals(&steps).contains(&Goal::Have {
+                item: POLE.into(),
+                count: 1,
+                whose: Holder::Share(BotId(1)),
+            }),
+            "the bot that places the pole has to be asked to hold one: {:?}",
+            subgoals(&steps)
+        );
+        let place = steps
+            .iter()
+            .find_map(|step| match step {
+                Step::Act(action) => match &action.kind {
+                    ActionKind::Place { entity } if entity.name == POLE => Some(&**action),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no pole placement among {steps:?}"));
+        let research = research_step(&steps);
+        assert!(
+            steps.iter().any(|step| matches!(
+                step,
+                Step::Link { from, to, .. } if *from == place.id && *to == research.id
+            )),
+            "the research must wait for the pole that powers its lab"
         );
     }
 

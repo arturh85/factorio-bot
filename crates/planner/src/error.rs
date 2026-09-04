@@ -267,16 +267,26 @@ pub enum PlannerError {
     /// failed, counted separately, because they call for opposite fixes:
     /// blocked-but-powered ground says "build somewhere else or clear it",
     /// free-but-unpowered ground says "bring a pole".
+    ///
+    /// **The second of those fixes is one the planner now applies itself.**
+    /// `lab_site_with_pole` widens the search to free-but-unlit ground and
+    /// brings the pole that lights it, so reaching this error means *that*
+    /// failed too — every free tile in range is either out of a pole's supply
+    /// area of anything, or the pole it would need is itself out of wire reach
+    /// of a generator. `free_unpowered` is therefore no longer a suggestion to
+    /// the reader; it is how much ground was tried and rejected.
     #[error(
         "{technology} needs a lab, and no ground within {radius} tiles of [{anchor_x}, {anchor_y}] is \
-         both free and inside a supply area ({powered_blocked} powered tiles are built on, \
+         both free and inside a supply area — nor can any free ground there be given a pole that \
+         reaches a generator ({powered_blocked} powered tiles are built on, \
          {free_unpowered} free ones have no supply)"
     )]
     #[diagnostic(
         code(planner::research_needs_room),
         help(
-            "the plan has power and space but not both in one place; a pole's supply area is \
-             5x5 and whatever this plan sited first has taken it"
+            "the plan has power and space but not both in one place, and extending the network \
+             to the space does not reach either; a pole's supply area is 5x5 and its wire reach \
+             7.5 tiles, and whatever this plan sited first has taken the ground inside both"
         )
     )]
     ResearchNeedsRoom {

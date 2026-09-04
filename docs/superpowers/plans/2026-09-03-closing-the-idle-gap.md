@@ -856,6 +856,66 @@ against one human, on a map chosen for short walks, doing only automation.**
 **steel**, **multi-output recipes** — are what stand between us and it. Another
 minute off rung one is not.
 
+## The oil chain, measured on a bench — and I got it wrong first
+
+**Owner challenged the claim and was right.** I said crude oil is hand-minable,
+reading `mineable_properties.minable = true`. That flag is what a **pumpjack**
+uses. Tested directly:
+
+```
+character.mine_entity(crude-oil) -> false      wells remaining: 5 (unchanged)
+```
+
+**A character cannot mine crude oil.** I asserted a surprising thing from a
+prototype field instead of doing it, and it took one query to disprove.
+
+### The actual chain
+
+```
+fluid-handling    50 x (red+green)   prereq automation-2, engine  -> storage-tank, pump, barrels
+      |
+oil-gathering    100 x (red+green)                                -> pumpjack
+      |
+oil-processing   trigger: mine-entity crude-oil, i.e. a PUMPJACK  -> oil-refinery, chemical-plant,
+                 extracting; 0 science                               basic-oil-processing
+```
+
+**Oil is gated behind GREEN SCIENCE — 150 green packs before a pumpjack
+exists.** So "green and oil in parallel" was wrong as stated: the *tech* path
+depends on green. Oil **infrastructure** work can still proceed in parallel
+using cheated techs, which is the accelerant; the honest path cannot.
+
+**And the exploration agent was right where I overruled it.** It flagged that
+the planner will plan hand-mining crude oil as *a trap now reachable*. I
+reframed that as "the required mechanism". It is a trap: the action is
+impossible, and `Mine::applicable` gating only on `has_resource_patches` will
+emit it.
+
+### Space Age gates early recipes behind trigger technologies
+
+On a fresh world, `pipe`, `boiler`, `offshore-pump`, `lab` and `inserter` are
+**all disabled**, while `iron-gear-wheel`, `stone-furnace` and `transport-belt`
+are enabled. The early progression is trigger-driven:
+
+| tech | trigger |
+|---|---|
+| `steam-power` | craft **50 iron plates** -> boiler, pipe, offshore pump |
+| `electronics` | craft **10 copper plates** |
+| `automation-science-pack` | craft **1 lab** |
+| `steel-axe` | craft 50 steel plates |
+| `oil-processing`, `uranium-processing`, `calcite-processing`, … | mine a named entity |
+
+**Our runs trip these incidentally and the planner models none of them.** That
+is why a fresh world shows the recipes disabled and our runs still work.
+
+### The development accelerant is proven
+
+On a bench: cheating `oil-gathering` / `oil-processing` / `fluid-handling`
+enables pumpjack, refinery, chemical plant and storage tank; five crude-oil
+wells created; **a pumpjack placed successfully**. So the oil chain can be
+built and tested now, against cheated tech and cheated oil, with the honest
+path required only for a measured run.
+
 ## Owner decisions (2026-09-04, on the chunk-ingest finding)
 
 1. **Measure the free vision now, flip the default later.** Record how much

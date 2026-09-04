@@ -11,6 +11,48 @@ four bots.
 
 ---
 
+## AFTER GREEN: oil, and why exploration comes first
+
+The owner asked whether oil processing is the next hard milestone and whether
+we are ready for it. **We are not, and the first blocker is exploration** —
+their own suggestion, confirmed by evidence in seconds rather than by a run.
+
+### The planner cannot see oil, and never will as things stand
+
+Resource kinds visible on the reference map:
+
+```
+coal, copper-ore, iron-ore, stone
+```
+
+**No crude oil.** `force.chart`, `chart_area` and `request_to_generate` appear
+**zero times** in `mods/BotBridge/control.lua`. The mod replays the chunks that
+already exist once at `whoami("server")` and thereafter only reacts to
+`on_chunk_generated` — measured at **418 chunks, tiles `[-320, 320)`** — with a
+hard drop beyond ±512 at `control.lua:1311`. **Nothing in this system ever asks
+the game to reveal new ground.** Crude oil is normally further out than that.
+
+### The gaps, in order
+
+| gap | why it blocks |
+|---|---|
+| **Exploration / charting** | Oil is invisible, so nothing downstream can be planned at all. |
+| **Fluids** | `basic-oil-processing` takes **100 crude-oil**, a fluid. The cell model moves *items* with inserters; the only fluid handling anywhere is the fixed pump→boiler→engine chain. Pumpjack→pipe→refinery is a different shape. |
+| **Steel** | Refinery 15, pumpjack 5, chemical plant 5. `steel-plate` (5 iron → 1) is in no ladder. |
+| **Power** | A refinery is ~420 kW against one steam engine's 900, before pumpjack and chemical plant. |
+
+**One gap that does *not* apply yet:** `basic-oil-processing` is
+**single-output** in 2.0 (100 crude → 45 petroleum-gas), so the multi-output
+problem that would break `assembly_spec` outright waits for *advanced* oil
+processing.
+
+### Exploration deserves to be its own milestone
+
+It is independently valuable before oil is even considered: better ore patches,
+more furnace ground, and an escape from the crowding that halted the first
+green run — `3ba0d441` reserves cell sites on a patch, but a bot that can reach
+a *second* patch does not need the reservation.
+
 ## WHERE THIS STANDS (read this first)
 
 **Sections below are reverse-chronological — newest first.** The plan began as

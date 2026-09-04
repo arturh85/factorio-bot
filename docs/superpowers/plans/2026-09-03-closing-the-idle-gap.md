@@ -864,13 +864,43 @@ as a plan.
 
 ### Results
 
+**Benchmark: 6:12** — the demonstrated-achievable automation time. We run Space
+Age, but **the automation chain's recipes are unchanged** (verified against our
+own table), so the Space Age record's 9:12 reflects that run front-loading
+infrastructure for a 3h17m game, not a harder milestone.
+
 | goal | before | now |
 |---|---|---|
-| `researched("automation")` | 21.34 min | **8.69 / 8.72 min** (two runs, target was under 9) |
-| red science cell standing | never satisfied, `stuck_silent` | **satisfied in 1 iteration** |
-| red science **producing** | never observed in this project | **WITNESSED** (`run-1788489532-62404`) |
-| green science, planning | did not expand at all | **730 actions, 53:05** — plans end to end |
-| green science, live | never run | **ran 29.6 min**, halted on a 34-furnace bank |
+| `researched("automation")` | 21.34 min | **8:17** on seed `31337` (8:41 / 8:43 on the old map) |
+| red science cell standing | never satisfied, `stuck_silent` | satisfied in 1 iteration |
+| red science producing **once** | never observed | witnessed six times, all inside 780 ticks |
+| red science producing **at a rate** | impossible to claim | **5 packs in 3,240 ticks (~5.5/min)**, twice |
+| green science, planning | did not expand at all | plans end to end |
+| green science, live | never run | **executes, `exhausted` at best 200 steps** |
+| furnaces per run | 42 | **8** |
+| recovery (`obs:recover`) | never executed in any run | **fires live** |
+
+**We are ~2 minutes behind achievable**, and the comparison flatters us three
+ways: four bots against one human, a map picked for short walks, and a run that
+does only automation.
+
+### The two claims that were overstated and are now correct
+
+- **"Red science works"** was true of *one pack*. The cell had **no output
+  path**, so its assembler jammed at four items and every witness fired in the
+  same 780-tick window before the jam. Fixed (`2aca0f10`); the witness is now a
+  rate claim the defective cell could not have satisfied.
+- **"Green converges"** — it does not. Step counts oscillate: `406, 295, 219,
+  264, 231, 210, 134, 213, 172, 136, 189, 114`. Downward overall, with repeated
+  regressions.
+
+### What blocks green now
+
+**Capacity.** A furnace's output slot holds exactly one stack, and the planner
+sizes transfers from demand. `735efeba` bounded `PlaceDrill`'s take only; the
+smelt bank, the ore insert and seven fuel sites remain unbounded, and **5 of
+green's 11 failures are still divergence.** Already specified in
+`docs/superpowers/specs/2026-09-04-world-model-divergence-design.md`.
 
 ### Landed
 

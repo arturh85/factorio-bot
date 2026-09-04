@@ -172,6 +172,75 @@ Two structural facts explain why nothing fills the idle:
   variant (`Have`, `Researched`, `Produced`, `Producing`, `All`) is
   demand-driven.
 
+## There was no bank of 34 (`3ba0d441`)
+
+**My brief was wrong about the central fact.** The 34 furnaces in plan 2 are
+**6 cell furnaces plus 28 independent hand-smelts, each exactly one furnace
+wide** — several smelting as little as **one ore** (`insert 1 copper-ore` /
+`take 1 copper-plate`). 276 iron ore and 46 copper, across 28 furnaces.
+
+**`bank_size` is not implicated, and it is in `have.rs`, not `produce.rs`
+where I sent the investigation.** It computes
+`widest = runs.min(MAX_BANK).min(standing).max(1)`, so with nothing standing it
+returns 1 and never builds for lag. **The `bdbde0c9` verdict — that building
+furnaces for the lag loses — is intact and already enforced in code.** My
+suspicion that a 34-furnace bank was a costing defect was unfounded.
+
+### The real mechanism: a reuse gap, and a perimeter collision
+
+`smelt_steps` calls `commit_machine` on whatever furnace it uses,
+`adoptable_furnaces` refuses a committed machine, and **a commitment is never
+released** — so a plan needs as many furnaces as it has `Smelt` goals.
+Cross-plan reuse does work (plan 3 had 47 smelts and only 13 new furnaces); it
+just adds ~13 every epoch, forever.
+
+Those furnaces land on the **patch perimeter**, because ore is the one thing a
+furnace may not stand on and `free_area_near` searches outward from the nearest
+resource tile. That perimeter ring is *exactly* where a cell's furnace must go
+— two tiles ahead of a drill standing on the ore. Measured on the run's own
+world:
+
+| iron patch | cells that pack at once |
+|---|---|
+| clean | **15** |
+| + the run's 44 standing furnaces | **7** |
+
+About **0.6 cell sites destroyed per hand-smelt furnace, monotonically.**
+
+### The fix reserves ground, and treats the symptom by design
+
+`smelt_steps` gains a tier: while the patch has room to spare
+(`CELL_SITES_RESERVED = 6`), siting is unchanged; once it does not, the search
+steps around ground where a cell really fits *now*, with the old unguarded
+search still the fallback so nothing becomes a refusal.
+
+Six, not `MAX_CELLS` (12): 12 was tried first and **moved red** by one copper
+furnace, because this map's copper patch packs 12-16.
+
+Paving the map one furnace at a time, cell count decays
+`15, 11, 10, 8, 6, 4, 3, 2, 1` without the reserve and
+`15, 11, 10, 8, 6, 5, 5, 5, 5` with it — **a floor of five, against the four
+green asks for and the zero the run reached.**
+
+Red byte-identical (290-line `--steps` listing, `diff -q` clean). 72 suites,
+1,977 tests.
+
+### Two limitations, and one disease left untreated
+
+- **The exact refusal was not reproduced offline.** Reconstructing the halt
+  world from `map.json` plus the 44 recorded furnace positions and expanding
+  green there **succeeds** (832 actions) — the live epoch-7 state carries more
+  than those furnaces. So the fix is proven to arrest the erosion, **not proven
+  to make that run finish.**
+- **Green's t=0 plan is byte-identical after the fix** — a fresh patch has room
+  to spare and the gate never opens. It engages only on the crowded worlds a
+  *replan* meets, which is where the run died.
+- **The reuse gap itself is untouched.** 28 furnaces for 276 ore is the
+  disease; this treats the symptom that halts runs. Closing it means letting a
+  later smelt adopt a furnace an earlier smelt committed, which needs an
+  ordering edge plus a serialisation lag — a scheduler change that would
+  certainly move red.
+
 ## Green science ran live and halted on a 34-furnace bank
 
 `run-1788497495-79997` (`scripts/factory_stage3.lua`), 29.6 min game time:

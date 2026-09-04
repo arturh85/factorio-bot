@@ -162,6 +162,53 @@ Two structural facts explain why nothing fills the idle:
   variant (`Have`, `Researched`, `Produced`, `Producing`, `All`) is
   demand-driven.
 
+## Green science ran live and halted on a 34-furnace bank
+
+`run-1788497495-79997` (`scripts/factory_stage3.lua`), 29.6 min game time:
+
+```
+HALTED: stuck -- refused: no room for a iron-ore cell within 12 tiles of the
+patch: a drill needs to stand on the ore with a furnace two tiles ahead of it
+standing off it
+```
+
+### What the record shows
+
+| | |
+|---|---|
+| plans | 6 |
+| **`stone-furnace` placed** | **44, all at distinct tiles** |
+| `burner-mining-drill` placed | **0** |
+| furnaces per iteration | **iteration 2 placed 34**, iteration 6 placed 10 |
+
+**A single plan wanted a bank of 34 furnaces.** This is not replan
+accumulation — every furnace is at its own tile, nothing was rebuilt on top of
+itself, and the step counts were *falling* (637 → 475 → 472 → 454), so progress
+was being kept. The bank then occupies the ground around the ore patch, and the
+drill+furnace ore cell that must stand **on** the ore has nowhere left to go.
+
+**Same shape as the lab conflict fixed in `38869772`**: something sited inline,
+and a subgoal expanded afterwards finds the ground taken.
+
+### The refusal was named, not silent
+
+This project has four separate mechanisms on record that reported nothing while
+broken. This one stopped, said which cell, which patch, and the exact geometric
+requirement it could not meet. That is the "silence is not success" discipline
+paying off — the failure took one run to localise instead of several.
+
+### The open question, and a prior measurement that bears on it
+
+Is 34 a sensible answer to green's plate demand, or a runaway? Green's cell
+chest-feeds **12 hand-crafted inserters per cell per charge** across two cells,
+each dragging a circuit, gear and plate behind it, so demand is genuinely
+large. But `bdbde0c9` measured *building extra furnaces to cover smelting lag*
+and found it **lost** — 126 actions / 49,743 ticks against 110 / 46,164 — with
+only reuse of standing furnaces paying. If that verdict still holds, a bank of
+34 is a **costing** defect wearing a spatial failure's clothes.
+
+Under investigation.
+
 ## The chain-owner error was a bystander (`374d7aa3`)
 
 Green science now plans as **research**: 313 actions, makespan **122,356

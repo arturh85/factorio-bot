@@ -11,6 +11,56 @@ four bots.
 
 ---
 
+## Dumps now carry container contents (`8d07af4b`) — and `iron-chest` must NOT be whitelisted
+
+`world.dump` asks the game what is in the containers before writing the file.
+Chosen over "the caller refreshes" for one reason: contents are **pulled, never
+pushed**, so a dump that writes `inventories: []` is **byte-identical to one
+that says nobody looked**. That file then misleads every offline plan made from
+it, possibly days later. The side effect is narrated on stdout, skipped with no
+RCON (`--clients 0`), and non-fatal — a failed read still writes the file,
+since a dump is usually taken at a milestone you cannot reproduce without
+repeating the run. The path is resolved **before** the read, so an escaping
+path never reaches the game.
+
+### My instruction to add `iron-chest` was wrong, and following it would have broken stage 2
+
+I read `BUFFER_ENTITIES`' comment — *"add it the day something places one"* —
+as a standing instruction whose day had come. It had not.
+
+**`plan_cell` places three iron chests per cell and none of them is a store.**
+`FeedChest` "holds one of the things the intermediate machine eats";
+`SupplyChest` "holds the ingredient nothing in the cell makes". All three are
+**inputs**, hand-filled with `CELL_CHARGE_TICKS` of ingredients before the cell
+is switched on. The product never enters a chest — it sits in the assembler's
+output slot, which `withdraw_slot` already reaches.
+
+So whitelisting the name would not recover stranded items; **it would let a
+replan drain a running cell**, and quietly, because `plan_cell`'s own doc
+records that *"After it runs out, nothing detects it."* The whitelist's rule is
+"entities this planner builds **and unloads itself**" — the planner builds iron
+chests and never unloads one. The distinction needed is *what a particular
+chest is for*, which a name-keyed list cannot express. Now written into the
+`BUFFER_ENTITIES` comment so nobody derives it a third time.
+
+### A correction to how I stated the gap
+
+*"A dump's `inventories` is `[]`"* is **not unconditional**. `goal.plan`
+refreshes into the same world the dump binding holds, so a script that plans
+and *then* dumps was already carrying contents. The failing case is a dump
+taken **before the first plan** — which is exactly `dump_map.lua`, the script
+that produces every map this project measures against. The conclusion stood;
+the mechanism was narrower than I described.
+
+### What this unlocks
+
+**The `Withdraw` path is now reachable offline.** The divergence failure that
+just stopped green (`tried to remove 141 iron-plate but removed 100`) may now
+be reproducible in seconds rather than by paying for a 19-minute prelude.
+
+Red verified byte-identical the strong way: binaries built with and without the
+change, `--steps` listings diffed — **281 lines identical**.
+
 ## Divergence is now the dominant failure class
 
 `run-1788517971-48257`, seed `31337`, with furnace reuse:

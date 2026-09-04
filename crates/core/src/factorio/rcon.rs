@@ -1269,111 +1269,6 @@ fn mining_approach(
     }
 }
 
-#[cfg(test)]
-mod mining_reach_tests {
-    use super::*;
-    use crate::test_utils::fixture_entity_prototypes;
-    use crate::types::{EntityType, FactorioEntity, FactorioEntityPrototype};
-
-    /// A character's reach in 2.1.17, as the game reports it.
-    const REACH: f64 = 2.7;
-
-    /// A world holding one `huge-rock` at (10, 10) with its live collision
-    /// box, 3 by 2.2 -- the shape that refused run-1788551693-66583 -- and
-    /// the fixture prototypes, so the character has a footprint.
-    fn world_with_a_huge_rock() -> Arc<FactorioWorld> {
-        let world = FactorioWorld::new();
-        let prototypes: Vec<FactorioEntityPrototype> = fixture_entity_prototypes()
-            .iter()
-            .map(|v| v.clone())
-            .collect();
-        world.update_entity_prototypes(prototypes).unwrap();
-        let rock = FactorioEntity {
-            name: "huge-rock".into(),
-            entity_type: EntityType::SimpleEntity.to_string(),
-            position: Position::new(10., 10.),
-            bounding_box: Rect::new(&Position::new(8.5, 8.9), &Position::new(11.5, 11.1)),
-            ..Default::default()
-        };
-        world.update_chunk_entities(vec![rock]).unwrap();
-        Arc::new(world)
-    }
-
-    #[test]
-    fn reach_to_a_rock_is_measured_to_its_box_not_its_centre() {
-        let world = world_with_a_huge_rock();
-        let rock = Position::new(10., 10.);
-        // 3.0 from the centre, 1.5 from the box: the game lets this mine.
-        let beside = Position::new(13., 10.);
-        assert!(
-            !within_resource_reach(&beside, &rock, REACH),
-            "control: the centre rule refuses it"
-        );
-        assert!(within_mining_reach(&world, &beside, &rock, REACH));
-        assert_eq!(mining_distance(&world, &beside, &rock), 1.5);
-        // And a target with no box -- ore -- is still the centre rule.
-        let ore = Position::new(40.5, 40.5);
-        assert!(!within_mining_reach(
-            &world,
-            &Position::new(43.5, 40.5),
-            &ore,
-            REACH
-        ));
-        assert!(within_mining_reach(
-            &world,
-            &Position::new(42.5, 40.5),
-            &ore,
-            REACH
-        ));
-    }
-
-    #[test]
-    fn a_mines_corrective_walk_aims_beside_a_rock_and_on_top_of_ore() {
-        let world = world_with_a_huge_rock();
-        let rock = Position::new(10., 10.);
-        // The box as the graph hands it back -- edges snapped to the game's
-        // 1/256 grid, so 8.9 is 8.8984375 -- not the numbers typed above.
-        let rect = blocking_box_at(&world, &rock).expect("the rock has a box");
-        let (half_w, half_h) = (rect.width() / 2., rect.height() / 2.);
-        let clearance = half_w.hypot(half_h) + 0.19921875f64.hypot(0.19921875);
-        let outer = REACH + half_w.min(half_h);
-        for here in [
-            Position::new(20., 10.),
-            Position::new(10., -5.),
-            Position::new(0., 0.),
-        ] {
-            let (goal, slack) = mining_approach(&world, &here, &rock, REACH);
-            let d = calculate_distance(&goal, &rock);
-            // `1e-9` on both bounds: far below the game's 1/256 position
-            // quantum, far above f64 rounding of `d - slack` at this scale.
-            assert!(
-                d - slack + 1e-9 >= clearance,
-                "the request reaches inside the rock: {} < {clearance}",
-                d - slack
-            );
-            assert!(
-                d + slack <= outer + 1e-9,
-                "the request may end out of reach: {} > {outer}",
-                d + slack
-            );
-            // Every point of the request is within the game's reach of the box.
-            assert!(distance_to_rect(&goal, &rect) + slack <= REACH + 1e-9);
-        }
-        let ore = Position::new(40.5, 40.5);
-        let (goal, slack) = mining_approach(&world, &Position::new(50., 50.), &ore, REACH);
-        assert_eq!(goal, ore, "ore is stood on, as it always was");
-        assert_eq!(slack, approach_radius(REACH));
-    }
-
-    #[test]
-    fn distance_to_a_rect_is_zero_inside_and_euclidean_outside() {
-        let rect = Rect::new(&Position::new(0., 0.), &Position::new(2., 2.));
-        assert_eq!(distance_to_rect(&Position::new(1., 1.), &rect), 0.);
-        assert_eq!(distance_to_rect(&Position::new(5., 1.), &rect), 3.);
-        assert_eq!(distance_to_rect(&Position::new(5., 6.), &rect), 5.);
-    }
-}
-
 /// The path radius to request when a walk must end within `bound` of a goal.
 ///
 /// Asking for `bound` itself is what the 2026-08-30 run did, and it left the
@@ -8188,5 +8083,110 @@ mod placement_retry_measurement_tests {
         let note = attempts.describe(Some(12)).expect("a retry happened");
         assert!(note.contains("dispatched 2 times"), "{note}");
         assert!(note.contains("0.0s"), "{note}");
+    }
+}
+
+#[cfg(test)]
+mod mining_reach_tests {
+    use super::*;
+    use crate::test_utils::fixture_entity_prototypes;
+    use crate::types::{EntityType, FactorioEntity, FactorioEntityPrototype};
+
+    /// A character's reach in 2.1.17, as the game reports it.
+    const REACH: f64 = 2.7;
+
+    /// A world holding one `huge-rock` at (10, 10) with its live collision
+    /// box, 3 by 2.2 -- the shape that refused run-1788551693-66583 -- and
+    /// the fixture prototypes, so the character has a footprint.
+    fn world_with_a_huge_rock() -> Arc<FactorioWorld> {
+        let world = FactorioWorld::new();
+        let prototypes: Vec<FactorioEntityPrototype> = fixture_entity_prototypes()
+            .iter()
+            .map(|v| v.clone())
+            .collect();
+        world.update_entity_prototypes(prototypes).unwrap();
+        let rock = FactorioEntity {
+            name: "huge-rock".into(),
+            entity_type: EntityType::SimpleEntity.to_string(),
+            position: Position::new(10., 10.),
+            bounding_box: Rect::new(&Position::new(8.5, 8.9), &Position::new(11.5, 11.1)),
+            ..Default::default()
+        };
+        world.update_chunk_entities(vec![rock]).unwrap();
+        Arc::new(world)
+    }
+
+    #[test]
+    fn reach_to_a_rock_is_measured_to_its_box_not_its_centre() {
+        let world = world_with_a_huge_rock();
+        let rock = Position::new(10., 10.);
+        // 3.0 from the centre, 1.5 from the box: the game lets this mine.
+        let beside = Position::new(13., 10.);
+        assert!(
+            !within_resource_reach(&beside, &rock, REACH),
+            "control: the centre rule refuses it"
+        );
+        assert!(within_mining_reach(&world, &beside, &rock, REACH));
+        assert_eq!(mining_distance(&world, &beside, &rock), 1.5);
+        // And a target with no box -- ore -- is still the centre rule.
+        let ore = Position::new(40.5, 40.5);
+        assert!(!within_mining_reach(
+            &world,
+            &Position::new(43.5, 40.5),
+            &ore,
+            REACH
+        ));
+        assert!(within_mining_reach(
+            &world,
+            &Position::new(42.5, 40.5),
+            &ore,
+            REACH
+        ));
+    }
+
+    #[test]
+    fn a_mines_corrective_walk_aims_beside_a_rock_and_on_top_of_ore() {
+        let world = world_with_a_huge_rock();
+        let rock = Position::new(10., 10.);
+        // The box as the graph hands it back -- edges snapped to the game's
+        // 1/256 grid, so 8.9 is 8.8984375 -- not the numbers typed above.
+        let rect = blocking_box_at(&world, &rock).expect("the rock has a box");
+        let (half_w, half_h) = (rect.width() / 2., rect.height() / 2.);
+        let clearance = half_w.hypot(half_h) + 0.19921875f64.hypot(0.19921875);
+        let outer = REACH + half_w.min(half_h);
+        for here in [
+            Position::new(20., 10.),
+            Position::new(10., -5.),
+            Position::new(0., 0.),
+        ] {
+            let (goal, slack) = mining_approach(&world, &here, &rock, REACH);
+            let d = calculate_distance(&goal, &rock);
+            // `1e-9` on both bounds: far below the game's 1/256 position
+            // quantum, far above f64 rounding of `d - slack` at this scale.
+            assert!(
+                d - slack + 1e-9 >= clearance,
+                "the request reaches inside the rock: {} < {clearance}",
+                d - slack
+            );
+            assert!(
+                d + slack <= outer + 1e-9,
+                "the request may end out of reach: {} > {outer}",
+                d + slack
+            );
+            // Every point of the request is within the game's reach of the box.
+            assert!(distance_to_rect(&goal, &rect) + slack <= REACH + 1e-9);
+        }
+        let ore = Position::new(40.5, 40.5);
+        let (goal, slack) = mining_approach(&world, &Position::new(50., 50.), &ore, REACH);
+        assert_eq!(goal, ore, "ore is stood on, as it always was");
+        assert_eq!(slack, approach_radius(REACH));
+    }
+
+    #[test]
+    fn distance_to_a_rect_is_zero_inside_and_euclidean_outside() {
+        let rect = Rect::new(&Position::new(0., 0.), &Position::new(2., 2.));
+        assert_eq!(distance_to_rect(&Position::new(1., 1.), &rect), 0.);
+        assert_eq!(distance_to_rect(&Position::new(5., 1.), &rect), 3.);
+        assert_eq!(distance_to_rect(&Position::new(5., 6.), &rect), 5.);
     }
 }

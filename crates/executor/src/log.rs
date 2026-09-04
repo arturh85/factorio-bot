@@ -226,6 +226,31 @@ pub struct Attempt {
     pub placed: Option<Placement>,
 }
 
+impl Attempt {
+    /// The world-model divergence this attempt's verdict reports, if it is one.
+    ///
+    /// `Some` only for a [`Status::Failed`] attempt whose `error` is one of the
+    /// mod's short-transfer complaints (see [`crate::divergence`]): the plan
+    /// believed a container held `asked` of an item and the game moved `moved`.
+    /// A `Success` carrying a full-destination note is not a divergence -- the
+    /// bot delivered everything it had and the world is as the plan believed
+    /// -- and a `Lost` attempt has no verdict to read one off.
+    ///
+    /// This is the failure *class* the log used to carry only as text. The
+    /// record's classifier (`crates/scripting_lua/src/globals/record.rs`)
+    /// reads the same text into `FailureKind::PartialTransfer`; `recover`
+    /// reads it here, because it cannot see the record and must not retry
+    /// what this names.
+    pub fn divergence(&self) -> Option<crate::divergence::Divergence> {
+        if self.status != Status::Failed {
+            return None;
+        }
+        self.error
+            .as_deref()
+            .and_then(crate::divergence::divergence)
+    }
+}
+
 /// One walk step, as the run observed it.
 ///
 /// # Why walks are recorded at all, and why they need no `ActionId`

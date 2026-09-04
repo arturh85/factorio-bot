@@ -6,7 +6,7 @@
 //! interesting behaviour, and they are only testable if deciding is separable
 //! from acting.
 
-use crate::log::{ExecutionLog, Status};
+use crate::log::{Attempt, ExecutionLog, Status};
 use factorio_bot_planner::{
     ActionId, ActionKind, ActionNetwork, BotId, Goal, PlanState, Schedule, expand,
     pick_chain_actor, registry_for, schedule,
@@ -232,6 +232,51 @@ fn refused_by_the_game(net: &ActionNetwork, log: &ExecutionLog, state: &PlanStat
     })
 }
 
+/// Whether some failed transfer moved fewer items than the plan believed the
+/// container held.
+///
+/// The other failure tier 1 must not retry, and for the same reason as a
+/// refused placement: it is a verdict about the world, not a circumstance.
+/// `run-1788552801-73005` (green, seed 31337), batch 3, is the measurement:
+///
+/// ```text
+/// first error: game rejected the command: Unexpected Response: ["tried to remove 64 iron-plate but removed 40"]
+/// planned 79 steps (best 302) -- recovered: rescheduled 1
+/// first error: game rejected the command: Unexpected Response: ["tried to remove 64 iron-plate but removed 0"]
+/// ```
+///
+/// Bot 1's `take 64 iron-plate from the cell`, after a legitimate lag wait,
+/// found 40. The game *handed over* the 40 -- they are in the bot's inventory
+/// -- and the action was recorded `Failed` (a transfer's `Success` means the
+/// full count moved; see `Status`). Tier 1 then re-issued the identical take
+/// against the now-empty cell, which could only answer `removed 0`, and a
+/// whole recovery was spent learning that. The recovery design predicted it
+/// in as many words (`docs/superpowers/specs/2026-09-04-recovery-instead-of-replan-design.md`
+/// §5.2: a retry "issues the identical command to the identical container"),
+/// and it is not a corner: 7 of 28 action failures across 21 archived runs
+/// are `removed N of M`, and 4 of 5 in `run-1788517971-48257`.
+///
+/// Declining tier 1 here sends the decision to tier 2, and that is the right
+/// answer rather than a resized take. A re-expansion re-reads the world: the
+/// 40 plates in the bot's inventory, the cell's real contents, and everything
+/// downstream that was sized for 64. Shrinking the take in place would keep
+/// the action's `GainItem` effect and every consumer that expected 64 -- a
+/// replan pretending to be a reschedule.
+///
+/// Read off the verdict's text, via [`Attempt::divergence`], because that is
+/// what the log has: the class is derived from the same three mod wordings
+/// the record classifies as `partial_transfer`, in one shared parser
+/// (`crate::divergence`). Only `Failed` attempts count. A `Success` carrying a
+/// full-destination note is retired by `unfinished` before this is asked, and
+/// a `Lost` one has no verdict to read.
+fn diverged_from_the_world(net: &ActionNetwork, log: &ExecutionLog) -> bool {
+    net.actions().any(|action| {
+        log.attempt(action.id)
+            .and_then(Attempt::divergence)
+            .is_some()
+    })
+}
+
 /// `keep`, plus every succeeded action that a kept action depends on.
 ///
 /// Those extra nodes are not work — the schedule never assigns them — they are
@@ -303,7 +348,14 @@ pub fn recover(
     // Tier 1 — the same plan, minus what is already done. Skipped once an
     // action has burned through its attempts: proposing the same plan again is
     // the loop `MAX_TIER_ONE_ATTEMPTS` exists to break.
-    if !exhausted_tier_one(net, log) && !refused_by_the_game(net, log, state) {
+    // Two more refusals, both verdicts about the world rather than about
+    // circumstance: a site the game turned down, and a transfer that found
+    // less than the plan believed was there. Re-dispatching either verbatim
+    // asks the same question of the same world.
+    if !exhausted_tier_one(net, log)
+        && !refused_by_the_game(net, log, state)
+        && !diverged_from_the_world(net, log)
+    {
         // Two different networks, on purpose.
         //
         // `schedule` runs over the strictly unfinished actions, so nothing that
@@ -673,6 +725,102 @@ mod tests {
             ),
             "re-running a command the game has already refused is not recovery"
         );
+    }
+
+    /// `take 64 iron-plate from the cell`, in the shape `run-1788552801-73005`
+    /// had it. The chest is standing, so the precondition holds and tier 1
+    /// *would* answer -- the placement test's control -- but the verdict says
+    /// the plan's model of that chest is wrong, and a reschedule would issue
+    /// the identical take against it.
+    fn take_from_chest(id_gen: &mut ActionIdGen, site: &Position, count: u32) -> Action {
+        Action {
+            id: id_gen.next(),
+            kind: ActionKind::Remove {
+                pos: site.clone(),
+                entity: "wooden-chest".into(),
+                slot: InventorySlot::Chest,
+                item: "iron-plate".into(),
+                count,
+            },
+            pre: vec![Condition::EntityAt {
+                pos: site.clone(),
+                name: "wooden-chest".into(),
+            }],
+            eff: vec![Effect::GainItem {
+                who: Actor::Role,
+                item: "iron-plate".into(),
+                count,
+            }],
+            duration: 10,
+            pinned: None,
+            label: format!("take {count} iron-plate from the cell"),
+        }
+    }
+
+    /// Tier 1 does not retry a transfer that found less than the plan
+    /// believed was there.
+    ///
+    /// The log of `run-1788552801-73005`, batch 3: the take moved 40 of 64,
+    /// tier 1 rescheduled the identical take, and it moved 0 of 64. Both
+    /// verdicts are asserted, because the second is the one a naive rule
+    /// ("something moved") would let through -- and it is precisely the
+    /// retry that must never have been dispatched.
+    #[test]
+    fn a_take_that_found_less_than_the_plan_believed_is_not_rescheduled() {
+        let site = Position::new(3., 3.);
+        let mut id_gen = ActionIdGen::new();
+        let mut net = ActionNetwork::new();
+        let take = net.add(take_from_chest(&mut id_gen, &site, 64));
+
+        // The chest is there: the precondition holds, and what decides the
+        // tier is the verdict alone.
+        let mut state = PlanState::from_world(Arc::new(fixture_world()), &BOTS);
+        state.create_entity(factorio_bot_core::types::FactorioEntity {
+            name: "wooden-chest".into(),
+            entity_type: "container".into(),
+            position: site.clone(),
+            ..Default::default()
+        });
+
+        // The control: an ordinary refusal of the same take is what tier 1
+        // is for, and it comes back rescheduled *containing* the take.
+        let mut ordinary = ExecutionLog::default();
+        ordinary.start(take, 0);
+        ordinary.fail(take, 10, "game rejected the command: Unexpected Response: [\"cannot remove from inventory of nonexisting entity wooden-chest at [3,3]\"]".to_string());
+        match recover(&ore_goal(1), &net, &state, &BOTS, &ordinary) {
+            Recovery::Rescheduled { net: again, .. } => {
+                assert!(
+                    again.actions().any(|a| a.id == take),
+                    "the control reschedules the take itself"
+                );
+            }
+            other => panic!("an ordinary refusal is an ordinary retry, got {other:?}"),
+        }
+
+        for verdict in [
+            "game rejected the command: Unexpected Response: [\"tried to remove 64 iron-plate but removed 40\"]",
+            "game rejected the command: Unexpected Response: [\"tried to remove 64 iron-plate but removed 0\"]",
+        ] {
+            let mut log = ExecutionLog::default();
+            log.start(take, 0);
+            log.fail(take, 10, verdict.to_string());
+            assert!(
+                log.attempt(take).and_then(Attempt::divergence).is_some(),
+                "the log can read the class off {verdict:?}"
+            );
+            let answer = recover(&ore_goal(1), &net, &state, &BOTS, &log);
+            if let Recovery::Rescheduled { net: again, .. } = &answer {
+                assert!(
+                    !again.actions().any(|a| a.id == take),
+                    "the identical take must not come back for re-dispatch: {verdict}"
+                );
+            }
+            assert!(
+                !matches!(answer, Recovery::Rescheduled { .. }),
+                "a diverged transfer escalates past tier 1 on its first failure, \
+                 not its third: {verdict}"
+            );
+        }
     }
 
     #[test]

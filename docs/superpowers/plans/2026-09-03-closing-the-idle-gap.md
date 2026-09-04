@@ -80,6 +80,29 @@ honestly, as before. Also fixed on the way: `scripting_lua`'s
 `plan_cell` call was one argument behind `bdec88af` and failed
 `--all-targets` clippy on master.
 
+## Run 5, first batch: 293 of 301, no rock, no siting, no divergence — and two new classes
+
+`run-1788559688-08406` (green, same savepoint, drills + reach + recovery +
+deadline + bot-death in the binary; enclosure, drain and scheduler landed on
+master after it started). First batch: **293 successes, 0 failed, 0 walk
+failures**, 57 game-minutes; the 64-plate and 100-plate cell takes both
+succeeded where run 3 got 40 of 64. The one loss was `research
+logistic-science-pack` — 75 units × 5 s in one lab = 375 s against the flat
+360 s deadline, the same defect as the craft, one action kind over. Fixed at
+the general layer (`fdbf8d8c`): `Actuator::research` takes the plan's own
+duration and both crafts and research now wait `sized_deadline(ticks)`.
+
+Second batch, 96 of 301, two failures of a class no run had shown:
+
+```
+could not start mining for 301 ticks: expected iron-ore at (-7.5/-29.5), found burner-mining-drill
+```
+
+A hand-mine aimed at an ore tile under a **drill an earlier plan placed**.
+Within a plan `bdec88af` claims a drill's tiles; across plans the world
+model's resource tiles do not know an entity stands on them. RCA agent
+dispatched (`ore-under-entities`).
+
 ## The scheduler learns to look one step ahead — automation planned at 7:17 (`51c7f695`)
 
 The greedy list scheduler's key was `(end, action, bot)`: whatever finishes

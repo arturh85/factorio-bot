@@ -851,6 +851,23 @@ const SCHEMAS: Record<string, SchemaContract> = {
             pocket_tiles: {required: true, type: 'number'},
             searched_tiles: {required: true, type: 'number'}
         },
+        // The free-vision disclosure. Every "unknown" here is nullable and
+        // has a counter beside it (`bot_samples`, `model_resource_tiles`)
+        // that says which kind of unknown it is -- a null distance with a
+        // zero count is "nothing looked", and a null distance with a non-zero
+        // count would be a broken writer.
+        vision_measured: {
+            travelled_tiles: {required: false, type: 'number', nullable: true},
+            travelled_bot: {required: false, type: 'integer', nullable: true},
+            travelled_at_tick: {required: false, type: 'integer', nullable: true},
+            bot_samples: {required: true, type: 'integer'},
+            model_tiles: {required: false, type: 'number', nullable: true},
+            model_furthest: {required: false, type: 'string', nullable: true},
+            model_furthest_position: {required: false, ref: 'Position', nullable: true},
+            model_resource_tiles: {required: true, type: 'integer'},
+            model_enemy_structures: {required: true, type: 'integer'},
+            unearned_ratio: {required: false, type: 'number', nullable: true}
+        },
         run_finished: {
             outcome: {required: true, type: 'string'},
             elapsed_ticks: {required: true, type: 'integer'}

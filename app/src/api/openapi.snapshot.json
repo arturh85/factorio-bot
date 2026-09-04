@@ -967,6 +967,102 @@
             "type": "object"
           },
           {
+            "description": "How much ground the world model was given, against how much ground a\nbot actually covered.\n\n# The cheat nobody had counted\n\nThe mod ingests every entity of every chunk the *engine generates*\n(`on_chunk_generated`, `mods/BotBridge/control.lua`) and never consults\nthe force's charted area. That is `force.chart` with extra steps: the\nmodel gains complete knowledge of ground no character has been near,\nincluding ore, water and nests, and it has been in every run this\nproject has ever made. In `run-1788532631-48030` the furthest any bot\nreached was **63.8 tiles** while the model that run produced held crude\noil at **380 and 505 tiles**, 559 uranium tiles and 36 biter spawners\nout to 500.\n\nThe repo's rule is that a final measured run must be as cheat-free as\nwe can get it, and that whatever is not must be *recorded*. This event\nis that record. It changes nothing and refuses nothing -- like\n[`EventKind::BatchProgress`] it states no verdict, because \"how much\nfree vision is too much\" is a judgement for the reader of a result and\nnot for the writer of a measurement. See\n`docs/superpowers/specs/2026-09-04-exploration-design.md`.\n\n# Why an event rather than `provenance.json` or the manifest\n\n[`provenance::Provenance`] is written once at run start and never\nrewritten, which is right for what a run was *launched* with and wrong\nfor a figure whose second half only exists once bots have moved.\n[`Manifest`] is written in [`RunRecorder::finish`] and so exists only\nfor runs that finished -- nine of the twenty-four runs archived when\nprovenance was added had no manifest at all, and they are the killed\nones. A run that was killed still got its free vision, so the\ndisclosure has to survive the kill.\n\nSo it is written into `events.jsonl`, which is flushed per line: once\nat the run's first recorded event (a baseline, before any bot has\nmoved), every [`VISION_MEASURE_INTERVAL_TICKS`] thereafter, and once\nmore at `finish` after the last samples are ingested. The **last** one\nin the log is the run's answer; the earlier ones show it growing.\n\n# What a reader sees when the measurement is short\n\nEvery field that can be unknown is `Option`, and each `None` has a\ncounter beside it that says why -- see `travelled_tiles` and\n`model_tiles`. A run with no travel data reports `null` and\n`bot_samples: 0`, never `0.0`: a bot that was never observed has not\nbeen observed at the origin.",
+            "properties": {
+              "bot_samples": {
+                "description": "How many bot positions this run has archived so far -- the\ndenominator behind `travelled_tiles`. Zero beside a null distance\nmeans the instrument said nothing; non-zero beside a null distance\nwould mean the instrument spoke and this writer dropped it, which\nis a defect and is visible here rather than invisible.",
+                "format": "int32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "enum": [
+                  "vision_measured"
+                ],
+                "type": "string"
+              },
+              "model_enemy_structures": {
+                "description": "How many enemy structures the model holds. Counted apart from the\nresource tiles because a nest 500 tiles out and an ore tile 500\ntiles out are the same disclosure but not the same finding.",
+                "format": "int32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "model_furthest": {
+                "description": "What that furthest thing is: an entity name such as `\"crude-oil\"`\nor `\"biter-spawner\"`. A distance alone reads as an abstraction;\nthe name is what makes a reader look. Null exactly when\n`model_tiles` is.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "model_furthest_position": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/Position",
+                    "description": "Where it is. Null exactly when `model_tiles` is."
+                  }
+                ]
+              },
+              "model_resource_tiles": {
+                "description": "How many resource tiles the model holds -- the census behind\n`model_tiles`. Zero beside a null `model_tiles` is a consistent\n\"nothing has been read\"; non-zero beside a null would be the same\ndefect `bot_samples` guards against.",
+                "format": "int32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "model_tiles": {
+                "description": "The furthest resource tile or enemy structure the world model\nholds, measured from the map origin, in tiles. `None` when the model holds no resource tile and no enemy\nstructure at all -- a world nothing has read yet, which is not a\nmodel that reaches zero tiles.\n\n**Bounded by the mod, not by the map.** `on_chunk_generated` drops\nevery chunk outside a +/-512-tile box (`control.lua`, unexplained\nsince the mod's first commit in 2021), so this can never exceed\n`hypot(512, 512)` = 724 and a value near that is the model sitting\nagainst the mod's wall rather than the edge of what exists. A run\nwhose figure is at the wall has no idea how much more it was not\nshown.",
+                "format": "double",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "travelled_at_tick": {
+                "description": "The tick that bot was seen there. Null exactly when\n`travelled_tiles` is. Not the tick of this event: the high-water\nmark is carried forward from whenever it was set.",
+                "format": "int64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "travelled_bot": {
+                "description": "Which bot was that far out. Null exactly when `travelled_tiles`\nis. A single distance for a whole run hides which bot earned it,\nand \"one bot went and three sat still\" is a finding this project\nhas already had to reconstruct by hand once.",
+                "format": "int32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "travelled_tiles": {
+                "description": "The furthest any bot has been observed from the map origin so far\nthis run, in tiles, Euclidean.\n\n**`None` is \"nobody has observed a bot position\", not \"no bot\nmoved\".** It comes from the archived sample stream, so it is null\nfor the whole of a run whose sampling never started, and null on\nthe baseline measurement of every run -- the first event is\nrecorded before the first sample is ingested. `bot_samples` is what\nseparates the two.",
+                "format": "double",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "unearned_ratio": {
+                "description": "`model_tiles / travelled_tiles`: how many times further the model\nsees than the furthest bot went.\n\nThe one number this event exists to produce, and `None` whenever\neither half is unknown or no bot has left the origin. It is\n**not** floored at 1: a value below 1 means the bots outran the\nmodel, which is a legitimate reading and not an error to clamp\naway.",
+                "format": "double",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "bot_samples",
+              "model_resource_tiles",
+              "model_enemy_structures",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
             "properties": {
               "elapsed_ticks": {
                 "format": "int64",

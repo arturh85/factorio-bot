@@ -982,6 +982,15 @@ end
                     // the archive current between milestone boundaries, which
                     // are as far apart as a milestone is long.
                     recorder.watch_samples(workspace.as_path());
+                    // The other half of the free-vision disclosure. The world
+                    // model is what `on_chunk_generated` feeds, and it holds
+                    // ground no bot has been near; `watch_samples` above is
+                    // where the "how far did a bot actually get" half comes
+                    // from. Turned on here rather than left to a supervisor
+                    // script to ask for, because a run that quietly omitted it
+                    // would be a run whose number carries an undisclosed
+                    // asterisk -- see `EventKind::VisionMeasured`.
+                    recorder.watch_model(world.entity_graph.clone());
 
                     // Provenance, written before the first event and before
                     // anything below can fail.

@@ -11,6 +11,7 @@ use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
+use crate::graph::entity_graph::radius_from_origin;
 use crate::types::Position;
 
 /// The sample shape this build understands.
@@ -371,8 +372,40 @@ pub fn read_samples(path: &Path) -> io::Result<ReadSamples> {
     Ok(ReadSamples { samples, skipped })
 }
 
+/// The furthest a bot was observed from the map origin, and which bot it was.
+///
+/// # Why the archive computes this and nothing else does
+///
+/// "How far did a bot actually get" is the honest half of the free-vision
+/// disclosure (see [`crate::graph::entity_graph::VisionExtent`]), and the only
+/// record that holds a bot's position over the whole run is this sample
+/// stream. Reading it back later means re-parsing every sample line; the
+/// ingest already parses each line exactly once on its way into the archive,
+/// so the high-water mark is taken there and carried on
+/// [`crate::record::RunRecorder`].
+///
+/// Distance is **Euclidean from the map origin**, via
+/// [`crate::graph::entity_graph::radius_from_origin`] -- deliberately not
+/// [`Position::distance`], which is Manhattan and would report a bot 45 tiles
+/// out diagonally as 63.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TravelObservation {
+    /// Euclidean distance from `(0, 0)`, in tiles.
+    pub tiles: f64,
+    /// Which bot was that far out. A single number for a whole run hides
+    /// which bot earned it, and "one bot went and three sat still" is a
+    /// finding this project has already had to reconstruct by hand once.
+    pub bot: u32,
+    /// The tick of the sample this came from.
+    pub tick: u64,
+}
+
 /// What one call to [`ingest_samples_incremental`] found and consumed.
-#[derive(Debug, PartialEq, Eq)]
+///
+/// Not `Eq`: [`IngestProgress::travel`] carries a distance in tiles, and a
+/// float has no total equality. `PartialEq` is what the tests compare with and
+/// all any caller has ever needed.
+#[derive(Debug, PartialEq)]
 pub struct IngestProgress {
     /// Byte offset into the *source* file this call read up to. The next
     /// call should resume from here, not from 0 -- that is what makes
@@ -388,6 +421,24 @@ pub struct IngestProgress {
     /// learn it -- and it is what tells a run whether its sample stream
     /// actually reached the end of the run.
     pub high_tick: Option<u64>,
+    /// The furthest any bot in the lines this call *appended* stood from the
+    /// map origin.
+    ///
+    /// `None` when this call appended no bot position at all -- which is the
+    /// ordinary case for a call that appended only `force` and `machines`
+    /// lines, and is **not** a claim that no bot moved. The caller keeps the
+    /// high-water mark across calls; see [`crate::record::RunRecorder`].
+    pub travel: Option<TravelObservation>,
+    /// How many [`SampleKind::Bots`] entries this call appended a position
+    /// from -- the denominator behind `travel`.
+    ///
+    /// Reported because a null `travel` has two very different causes: no bot
+    /// sample was read at all (this is zero, and the run's travel is genuinely
+    /// unknown), or bot samples were read and none of them is further out than
+    /// what a previous call already saw. Without the count the two are
+    /// indistinguishable, and the first is a broken instrument while the
+    /// second is a quiet run.
+    pub bot_positions: usize,
 }
 
 /// Copies whatever is new in the run's samples source since `offset`,
@@ -443,6 +494,8 @@ pub fn ingest_samples_incremental(
             appended: 0,
             skipped: 0,
             high_tick: None,
+            travel: None,
+            bot_positions: 0,
         });
     }
 
@@ -471,6 +524,8 @@ pub fn ingest_samples_incremental(
             appended: 0,
             skipped: 0,
             high_tick: None,
+            travel: None,
+            bot_positions: 0,
         });
     }
 
@@ -521,6 +576,12 @@ pub fn ingest_samples_incremental(
         .open(run_dir.join("samples.jsonl"))?;
     let mut appended = 0usize;
     let mut high_tick: Option<u64> = None;
+    // Measured over the lines that are actually archived, never over `parsed`:
+    // a line belonging to another run is excluded from the archive and must be
+    // excluded from this run's travel too, for exactly the reason the run-id
+    // filter exists at all.
+    let mut travel: Option<TravelObservation> = None;
+    let mut bot_positions = 0usize;
     for sample in parsed.iter().filter(|s| match &s.run {
         Some(run) => run == run_id,
         None => s.tick >= not_before,
@@ -528,6 +589,28 @@ pub fn ingest_samples_incremental(
         writeln!(out, "{}", serde_json::to_string(sample)?)?;
         appended += 1;
         high_tick = Some(high_tick.map_or(sample.tick, |t: u64| t.max(sample.tick)));
+        if let SampleKind::Bots { bots } = &sample.kind {
+            for bot in bots {
+                bot_positions += 1;
+                let tiles = radius_from_origin(&bot.position);
+                // Ties broken on the bot id so a run reports the same bot each
+                // time two are the same distance out; nothing about the sample
+                // order is stable enough to rely on.
+                let better = travel.as_ref().is_none_or(|best| {
+                    matches!(
+                        tiles.total_cmp(&best.tiles).then(bot.id.cmp(&best.bot)),
+                        std::cmp::Ordering::Greater
+                    )
+                });
+                if better {
+                    travel = Some(TravelObservation {
+                        tiles,
+                        bot: bot.id,
+                        tick: sample.tick,
+                    });
+                }
+            }
+        }
     }
 
     Ok(IngestProgress {
@@ -535,6 +618,8 @@ pub fn ingest_samples_incremental(
         appended,
         skipped,
         high_tick,
+        travel,
+        bot_positions,
     })
 }
 
@@ -828,6 +913,96 @@ mod tests {
             progress.appended, 1,
             "a line naming this run is kept regardless of tick"
         );
+    }
+
+    #[test]
+    fn ingestion_reports_the_furthest_bot_and_counts_the_positions_behind_it() {
+        // The travel half of the free-vision disclosure, taken on the way past
+        // rather than by re-parsing the archive later.
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path().join("workspace");
+        let out = workspace.join("server/script-output/botbridge");
+        std::fs::create_dir_all(&out).unwrap();
+        write(
+            &out,
+            &[
+                r#"{"kind":"bots","schema":2,"tick":100,"run":"ours","bots":[{"id":1,"position":{"x":-3.5,"y":4.5},"inventory":{},"crafting_queue":0,"mining":null},{"id":2,"position":{"x":30.5,"y":40.5},"inventory":{},"crafting_queue":0,"mining":null}]}"#,
+                r#"{"kind":"force","schema":2,"tick":100,"run":"ours","research":null,"techs_unlocked":1,"production":{"made":{},"consumed":{}},"power":{"generated_kw":0.0,"consumed_kw":0.0,"satisfaction":1.0}}"#,
+            ],
+        );
+        let run_dir = tmp.path().join("run");
+        std::fs::create_dir_all(&run_dir).unwrap();
+
+        let progress = ingest_samples_incremental(&workspace, &run_dir, "ours", 0, 0).unwrap();
+
+        let travel = progress.travel.expect("a bot position was archived");
+        assert_eq!(travel.bot, 2, "the furthest one, not the last one read");
+        assert_eq!(travel.tick, 100);
+        assert!(
+            (travel.tiles - 30.5f64.hypot(40.5)).abs() < 1e-9,
+            "Euclidean from the origin, got {}",
+            travel.tiles
+        );
+        assert_eq!(
+            progress.bot_positions, 2,
+            "both bots counted; the force line contributes none"
+        );
+    }
+
+    /// **A call that archived no bot position says so with a zero, not with a
+    /// distance of zero.**
+    ///
+    /// The two are opposite facts -- "nothing looked" and "a bot was at the
+    /// origin" -- and this project has already shipped four instruments that
+    /// reported the second while meaning the first.
+    #[test]
+    fn ingestion_reports_no_travel_at_all_rather_than_a_travel_of_zero() {
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path().join("workspace");
+        let out = workspace.join("server/script-output/botbridge");
+        std::fs::create_dir_all(&out).unwrap();
+        write(
+            &out,
+            &[
+                r#"{"kind":"force","schema":2,"tick":100,"run":"ours","research":null,"techs_unlocked":1,"production":{"made":{},"consumed":{}},"power":{"generated_kw":0.0,"consumed_kw":0.0,"satisfaction":1.0}}"#,
+            ],
+        );
+        let run_dir = tmp.path().join("run");
+        std::fs::create_dir_all(&run_dir).unwrap();
+
+        let progress = ingest_samples_incremental(&workspace, &run_dir, "ours", 0, 0).unwrap();
+        assert_eq!(progress.appended, 1);
+        assert!(progress.travel.is_none());
+        assert_eq!(progress.bot_positions, 0);
+    }
+
+    #[test]
+    fn a_bot_position_from_another_run_does_not_count_as_this_run_s_travel() {
+        // The run-id filter that keeps a stale line out of the archive has to
+        // keep it out of the measurement too, or a previous run's expedition
+        // is disclosed as this run's.
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path().join("workspace");
+        let out = workspace.join("server/script-output/botbridge");
+        std::fs::create_dir_all(&out).unwrap();
+        write(
+            &out,
+            &[
+                r#"{"kind":"bots","schema":2,"tick":100,"run":"STALE-RUN","bots":[{"id":1,"position":{"x":300.5,"y":400.5},"inventory":{},"crafting_queue":0,"mining":null}]}"#,
+                r#"{"kind":"bots","schema":2,"tick":101,"run":"ours","bots":[{"id":1,"position":{"x":3.5,"y":4.5},"inventory":{},"crafting_queue":0,"mining":null}]}"#,
+            ],
+        );
+        let run_dir = tmp.path().join("run");
+        std::fs::create_dir_all(&run_dir).unwrap();
+
+        let progress = ingest_samples_incremental(&workspace, &run_dir, "ours", 0, 0).unwrap();
+        let travel = progress.travel.expect("our own line was archived");
+        assert!(
+            (travel.tiles - 3.5f64.hypot(4.5)).abs() < 1e-9,
+            "the stale run's 500-tile expedition must not be ours: {}",
+            travel.tiles
+        );
+        assert_eq!(progress.bot_positions, 1);
     }
 
     #[test]

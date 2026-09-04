@@ -14,7 +14,9 @@ use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::graph::entity_graph::EntityGraph;
 use crate::types::Position;
+use std::sync::Arc;
 
 pub mod lanes;
 pub mod map;
@@ -29,7 +31,8 @@ pub use provenance::{GitProvenance, PROVENANCE_FILE, Provenance, git_provenance,
 pub use retention::{DEFAULT_KEEP, KEEP_MARKER, Reaped, reap};
 pub use samples::{
     BotSample, IngestProgress, MachineSample, NetworkPower, PowerSample, ProductionSample,
-    ReadSamples, ResearchSample, Sample, SampleKind, ingest_samples_incremental, read_samples,
+    ReadSamples, ResearchSample, Sample, SampleKind, TravelObservation, ingest_samples_incremental,
+    read_samples,
 };
 pub use savepoint::{
     ModCheck, ModFingerprint, SAVEPOINT_SCHEMA, Savepoint, SavepointError, check_mods,
@@ -664,6 +667,118 @@ pub enum EventKind {
         /// number that was actually used.
         searched_tiles: f64,
     },
+    /// How much ground the world model was given, against how much ground a
+    /// bot actually covered.
+    ///
+    /// # The cheat nobody had counted
+    ///
+    /// The mod ingests every entity of every chunk the *engine generates*
+    /// (`on_chunk_generated`, `mods/BotBridge/control.lua`) and never consults
+    /// the force's charted area. That is `force.chart` with extra steps: the
+    /// model gains complete knowledge of ground no character has been near,
+    /// including ore, water and nests, and it has been in every run this
+    /// project has ever made. In `run-1788532631-48030` the furthest any bot
+    /// reached was **63.8 tiles** while the model that run produced held crude
+    /// oil at **380 and 505 tiles**, 559 uranium tiles and 36 biter spawners
+    /// out to 500.
+    ///
+    /// The repo's rule is that a final measured run must be as cheat-free as
+    /// we can get it, and that whatever is not must be *recorded*. This event
+    /// is that record. It changes nothing and refuses nothing -- like
+    /// [`EventKind::BatchProgress`] it states no verdict, because "how much
+    /// free vision is too much" is a judgement for the reader of a result and
+    /// not for the writer of a measurement. See
+    /// `docs/superpowers/specs/2026-09-04-exploration-design.md`.
+    ///
+    /// # Why an event rather than `provenance.json` or the manifest
+    ///
+    /// [`provenance::Provenance`] is written once at run start and never
+    /// rewritten, which is right for what a run was *launched* with and wrong
+    /// for a figure whose second half only exists once bots have moved.
+    /// [`Manifest`] is written in [`RunRecorder::finish`] and so exists only
+    /// for runs that finished -- nine of the twenty-four runs archived when
+    /// provenance was added had no manifest at all, and they are the killed
+    /// ones. A run that was killed still got its free vision, so the
+    /// disclosure has to survive the kill.
+    ///
+    /// So it is written into `events.jsonl`, which is flushed per line: once
+    /// at the run's first recorded event (a baseline, before any bot has
+    /// moved), every [`VISION_MEASURE_INTERVAL_TICKS`] thereafter, and once
+    /// more at `finish` after the last samples are ingested. The **last** one
+    /// in the log is the run's answer; the earlier ones show it growing.
+    ///
+    /// # What a reader sees when the measurement is short
+    ///
+    /// Every field that can be unknown is `Option`, and each `None` has a
+    /// counter beside it that says why -- see `travelled_tiles` and
+    /// `model_tiles`. A run with no travel data reports `null` and
+    /// `bot_samples: 0`, never `0.0`: a bot that was never observed has not
+    /// been observed at the origin.
+    VisionMeasured {
+        /// The furthest any bot has been observed from the map origin so far
+        /// this run, in tiles, Euclidean.
+        ///
+        /// **`None` is "nobody has observed a bot position", not "no bot
+        /// moved".** It comes from the archived sample stream, so it is null
+        /// for the whole of a run whose sampling never started, and null on
+        /// the baseline measurement of every run -- the first event is
+        /// recorded before the first sample is ingested. `bot_samples` is what
+        /// separates the two.
+        travelled_tiles: Option<f64>,
+        /// Which bot was that far out. Null exactly when `travelled_tiles`
+        /// is. A single distance for a whole run hides which bot earned it,
+        /// and "one bot went and three sat still" is a finding this project
+        /// has already had to reconstruct by hand once.
+        travelled_bot: Option<u32>,
+        /// The tick that bot was seen there. Null exactly when
+        /// `travelled_tiles` is. Not the tick of this event: the high-water
+        /// mark is carried forward from whenever it was set.
+        travelled_at_tick: Option<u64>,
+        /// How many bot positions this run has archived so far -- the
+        /// denominator behind `travelled_tiles`. Zero beside a null distance
+        /// means the instrument said nothing; non-zero beside a null distance
+        /// would mean the instrument spoke and this writer dropped it, which
+        /// is a defect and is visible here rather than invisible.
+        bot_samples: u32,
+        /// The furthest resource tile or enemy structure the world model
+        /// holds, measured from the map origin, in tiles. `None` when the model holds no resource tile and no enemy
+        /// structure at all -- a world nothing has read yet, which is not a
+        /// model that reaches zero tiles.
+        ///
+        /// **Bounded by the mod, not by the map.** `on_chunk_generated` drops
+        /// every chunk outside a +/-512-tile box (`control.lua`, unexplained
+        /// since the mod's first commit in 2021), so this can never exceed
+        /// `hypot(512, 512)` = 724 and a value near that is the model sitting
+        /// against the mod's wall rather than the edge of what exists. A run
+        /// whose figure is at the wall has no idea how much more it was not
+        /// shown.
+        model_tiles: Option<f64>,
+        /// What that furthest thing is: an entity name such as `"crude-oil"`
+        /// or `"biter-spawner"`. A distance alone reads as an abstraction;
+        /// the name is what makes a reader look. Null exactly when
+        /// `model_tiles` is.
+        model_furthest: Option<String>,
+        /// Where it is. Null exactly when `model_tiles` is.
+        model_furthest_position: Option<Position>,
+        /// How many resource tiles the model holds -- the census behind
+        /// `model_tiles`. Zero beside a null `model_tiles` is a consistent
+        /// "nothing has been read"; non-zero beside a null would be the same
+        /// defect `bot_samples` guards against.
+        model_resource_tiles: u32,
+        /// How many enemy structures the model holds. Counted apart from the
+        /// resource tiles because a nest 500 tiles out and an ore tile 500
+        /// tiles out are the same disclosure but not the same finding.
+        model_enemy_structures: u32,
+        /// `model_tiles / travelled_tiles`: how many times further the model
+        /// sees than the furthest bot went.
+        ///
+        /// The one number this event exists to produce, and `None` whenever
+        /// either half is unknown or no bot has left the origin. It is
+        /// **not** floored at 1: a value below 1 means the bots outran the
+        /// model, which is a legitimate reading and not an error to clamp
+        /// away.
+        unearned_ratio: Option<f64>,
+    },
     RunFinished {
         outcome: String,
         elapsed_ticks: u64,
@@ -1135,6 +1250,22 @@ pub struct Manifest {
 /// is more of those seeks.
 pub const SAMPLE_INGEST_INTERVAL_TICKS: u64 = 1800;
 
+/// How often [`EventKind::VisionMeasured`] is written while a run is going, in
+/// game ticks (5 minutes at 60 UPS).
+///
+/// Longer than [`SAMPLE_INGEST_INTERVAL_TICKS`] on purpose: what this measures
+/// moves slowly. The model's extent only changes when the engine generates a
+/// chunk nobody has been to, and a bot's furthest point only changes when a
+/// bot walks further than it ever has. A 5-minute beat puts a dozen or so
+/// lines in a long run's log -- enough to see the two numbers diverge, few
+/// enough that nobody scrolls past them.
+///
+/// The interval decides the *resolution* of the answer, never its
+/// correctness, exactly as [`EventKind::BatchProgress`]'s does: the closing
+/// measurement at `finish` is unconditional, so a run shorter than one
+/// interval still states its figure.
+pub const VISION_MEASURE_INTERVAL_TICKS: u64 = 18_000;
+
 /// Writes a run's event log.
 pub struct RunRecorder {
     dir: PathBuf,
@@ -1192,6 +1323,31 @@ pub struct RunRecorder {
     /// `finish`, for the same reason `samples_count` is, and used for exactly
     /// one thing: [`Manifest::samples_lag_ticks`].
     samples_high_tick: Option<u64>,
+    /// The furthest any bot has been observed from the map origin this run,
+    /// taken from the sample lines as they are archived (see
+    /// [`samples::TravelObservation`]).
+    ///
+    /// `None` means no bot position has ever been archived -- not that no bot
+    /// moved. A recorder that has never seen a sample must be able to say so;
+    /// see [`EventKind::VisionMeasured`].
+    travel: Option<TravelObservation>,
+    /// How many bot positions have been archived, the denominator behind
+    /// `travel`.
+    bot_samples: usize,
+    /// The world model this run's vision is measured against, once a caller
+    /// has named it via [`RunRecorder::watch_model`].
+    ///
+    /// Held rather than passed for the same reason `samples_workspace` is: the
+    /// measurement is driven from [`RunRecorder::record`], which is called
+    /// from everywhere. `None` writes no [`EventKind::VisionMeasured`] at all,
+    /// which is the behaviour of every caller that has not opted in -- and is
+    /// visible as the *absence* of the event, never as a measurement of zero.
+    model: Option<Arc<EntityGraph>>,
+    /// The tick the vision measurement last ran at, or `None` when it never
+    /// has. `None` rather than `0` so the first recorded event of a run always
+    /// writes a baseline, whatever tick the run opens at -- a run opening at
+    /// tick 3,658 would otherwise write nothing until tick 18,000.
+    vision_measured_at: Option<u64>,
     /// The run's video recorder, when one was asked for.
     ///
     /// Held here rather than beside the run in the caller so that the two
@@ -1228,6 +1384,10 @@ impl RunRecorder {
             samples_workspace: None,
             samples_ingested_at: 0,
             samples_high_tick: None,
+            travel: None,
+            bot_samples: 0,
+            model: None,
+            vision_measured_at: None,
             video: None,
             started_unix: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -1252,6 +1412,22 @@ impl RunRecorder {
     /// samples the mod had already written.
     pub fn watch_samples(&mut self, workspace: impl Into<PathBuf>) {
         self.samples_workspace = Some(workspace.into());
+    }
+
+    /// Names the world model whose extent this run's free vision is measured
+    /// against, turning [`EventKind::VisionMeasured`] on for this run.
+    ///
+    /// Call this immediately after [`RunRecorder::start`], beside
+    /// [`RunRecorder::watch_samples`] -- the two halves of the measurement come
+    /// from the two of them, and a run with only one gets an event with the
+    /// other half null rather than no event at all.
+    ///
+    /// Opt-in rather than required, because a recorder is also driven by tests
+    /// and by tools that have no world. What it must never do is report a
+    /// model it was not given as an empty one, so a recorder with no model
+    /// writes no measurement; see the field.
+    pub fn watch_model(&mut self, model: Arc<EntityGraph>) {
+        self.model = Some(model);
     }
 
     /// Writes `provenance.json` -- what this run was launched with.
@@ -1355,6 +1531,25 @@ impl RunRecorder {
     /// record, and these are hundreds of events over minutes, not millions,
     /// so buffering buys nothing worth the loss.
     pub fn record(&mut self, tick: u64, kind: EventKind) -> io::Result<()> {
+        self.write_event(tick, kind)?;
+        // After the event is on disk, never before: sample ingestion is a
+        // convenience this call performs on the way past, and the event is the
+        // thing it was asked to do.
+        self.ingest_samples_if_due(tick);
+        // After ingestion, so a measurement written on this beat counts the
+        // samples this beat just archived rather than last beat's.
+        self.measure_vision_if_due(tick);
+        Ok(())
+    }
+
+    /// Writes one event and nothing else.
+    ///
+    /// The half of [`RunRecorder::record`] that only appends. Split out so
+    /// that the periodic ingest and measurement `record` performs on the way
+    /// past can write their own events without re-entering the call that
+    /// triggered them -- an event written from inside `record` must not start
+    /// another round of ingest-and-measure.
+    fn write_event(&mut self, tick: u64, kind: EventKind) -> io::Result<()> {
         let event = Event { tick, kind };
         if self.start_tick.is_none() {
             self.start_tick = Some(tick);
@@ -1364,11 +1559,80 @@ impl RunRecorder {
         line.push('\n');
         self.events.write_all(line.as_bytes())?;
         self.events.flush()?;
-        // After the event is on disk, never before: sample ingestion is a
-        // convenience this call performs on the way past, and the event is the
-        // thing it was asked to do.
-        self.ingest_samples_if_due(tick);
         Ok(())
+    }
+
+    /// Writes [`EventKind::VisionMeasured`] if the run has advanced far enough
+    /// since the last one, and swallows -- after logging -- a failed write.
+    ///
+    /// Not fallible to its caller, for the same reason
+    /// [`RunRecorder::ingest_samples_if_due`] is not: this runs inside
+    /// `record`, whose job is to get *that* event on disk, and a disclosure
+    /// that could abort the event log would be worse than the thing it
+    /// discloses.
+    fn measure_vision_if_due(&mut self, tick: u64) {
+        if self.model.is_none() {
+            return;
+        }
+        if let Some(last) = self.vision_measured_at
+            && tick.saturating_sub(last) < VISION_MEASURE_INTERVAL_TICKS
+        {
+            return;
+        }
+        if let Err(error) = self.measure_vision(tick) {
+            tracing::warn!(
+                %error,
+                "could not record this run's vision measurement; how much ground \
+                 the model was given without visiting it will be missing from \
+                 this beat"
+            );
+        }
+    }
+
+    /// Writes one [`EventKind::VisionMeasured`] now, whatever the interval
+    /// says. A no-op for a recorder with no model (see
+    /// [`RunRecorder::watch_model`]).
+    ///
+    /// Public so `finish` -- and a caller that wants a measurement at a
+    /// milestone boundary -- can take one at a moment that matters rather than
+    /// waiting for the next beat.
+    ///
+    /// Answers whether an event was actually written, so that a caller
+    /// counting the log (which is what [`Manifest::events`] is) cannot
+    /// disagree with the file. A manifest that undercounts its own log by one
+    /// is the sort of quiet inconsistency that makes every other number in it
+    /// suspect.
+    pub fn measure_vision(&mut self, tick: u64) -> io::Result<bool> {
+        let Some(model) = self.model.clone() else {
+            return Ok(false);
+        };
+        self.vision_measured_at = Some(tick);
+        let extent = model.vision_extent();
+        let travelled_tiles = self.travel.as_ref().map(|t| t.tiles);
+        let model_tiles = extent.as_ref().map(|e| e.tiles);
+        // Both halves known, and a bot that actually left the origin. A ratio
+        // against zero travel is not "infinitely unearned", it is undefined,
+        // and a reader must be handed the null rather than a large number.
+        let unearned_ratio = match (model_tiles, travelled_tiles) {
+            (Some(model), Some(travelled)) if travelled > 0.0 => Some(model / travelled),
+            _ => None,
+        };
+        self.write_event(
+            tick,
+            EventKind::VisionMeasured {
+                travelled_tiles,
+                travelled_bot: self.travel.as_ref().map(|t| t.bot),
+                travelled_at_tick: self.travel.as_ref().map(|t| t.tick),
+                bot_samples: self.bot_samples as u32,
+                model_tiles,
+                model_furthest: extent.as_ref().map(|e| e.name.clone()),
+                model_furthest_position: extent.as_ref().map(|e| e.position.clone()),
+                model_resource_tiles: extent.as_ref().map_or(0, |e| e.resource_tiles as u32),
+                model_enemy_structures: extent.as_ref().map_or(0, |e| e.enemy_structures as u32),
+                unearned_ratio,
+            },
+        )?;
+        Ok(true)
     }
 
     /// Appends one line to `map.jsonl` and flushes it, for the same reason
@@ -1463,6 +1727,17 @@ impl RunRecorder {
         self.samples_count += progress.appended;
         if let Some(high) = progress.high_tick {
             self.samples_high_tick = Some(self.samples_high_tick.map_or(high, |t| t.max(high)));
+        }
+        self.bot_samples += progress.bot_positions;
+        // A high-water mark, so a bot walking back does not shrink it: the
+        // question is how far a bot ever got, not where it is now.
+        if let Some(seen) = progress.travel
+            && self
+                .travel
+                .as_ref()
+                .is_none_or(|best| seen.tiles > best.tiles)
+        {
+            self.travel = Some(seen);
         }
         Ok(progress.appended)
     }
@@ -1562,6 +1837,32 @@ impl RunRecorder {
         self.ingest_samples(workspace)?;
         let samples = self.samples_count;
 
+        // The closing disclosure, unconditional and after the last ingest, so
+        // it counts every bot position this run ever archived. It lands *after*
+        // `run_finished` in the log on purpose: the finishing event is written
+        // first so that a crash during archiving still leaves a log that says
+        // how the run ended, and nothing here is allowed to come between that
+        // event and the crash. A reader takes the LAST `vision_measured` in the
+        // file, not the last line.
+        //
+        // Never fatal: a run that could not state its free vision is still a
+        // run worth finishing, and the missing event is itself the honest
+        // report -- an absent measurement is unknown, and no reader may take it
+        // for zero.
+        //
+        // Counted into the manifest below, because it is written *after* the
+        // log was read for that count: a manifest saying 240 events over a
+        // file holding 241 would make a reader doubt every other number in it.
+        let mut events_written = read.events.len();
+        match self.measure_vision(tick) {
+            Ok(true) => events_written += 1,
+            Ok(false) => {}
+            Err(error) => tracing::warn!(
+                %error,
+                "could not record this run's closing vision measurement"
+            ),
+        }
+
         // Does the sample stream actually cover the run it belongs to?
         //
         // Asked here because this is the only place both numbers are known for
@@ -1608,7 +1909,7 @@ impl RunRecorder {
             ),
             outcome: Some(outcome.to_string()),
             elapsed_ticks: Some(self.elapsed_at(tick)),
-            events: read.events.len(),
+            events: events_written,
             splits: splits.len(),
             samples,
             map: self.map_count,
@@ -2636,5 +2937,286 @@ mod map_tests {
                 bottom: 20.0 + 16.0,
             })
         );
+    }
+}
+
+/// The free-vision disclosure: how much ground the model was given against how
+/// much ground a bot covered. See [`EventKind::VisionMeasured`].
+#[cfg(test)]
+mod vision_tests {
+    use super::*;
+    use crate::test_utils::entity_graph_from;
+    use crate::types::{Direction, FactorioEntity};
+
+    /// A model holding one crude-oil tile 500.7 tiles from the origin -- the
+    /// shape of `run-1788532631-48030`, whose bots never left 63.8.
+    fn model_with_oil_far_out() -> Arc<EntityGraph> {
+        Arc::new(
+            entity_graph_from(vec![FactorioEntity::new_resource(
+                &Position::new(300.5, 400.5),
+                Direction::North,
+                "crude-oil",
+            )])
+            .expect("adding must not fail"),
+        )
+    }
+
+    fn vision_events(rec: &RunRecorder) -> Vec<EventKind> {
+        read_events(&rec.dir().join("events.jsonl"))
+            .unwrap()
+            .events
+            .into_iter()
+            .map(|e| e.kind)
+            .filter(|k| matches!(k, EventKind::VisionMeasured { .. }))
+            .collect()
+    }
+
+    fn workspace_with_bot_at(root: &Path, tick: u64, run: &str, x: f64, y: f64) -> PathBuf {
+        let workspace = root.join("workspace");
+        let out = workspace.join("server/script-output/botbridge");
+        fs::create_dir_all(&out).unwrap();
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(out.join("samples.jsonl"))
+            .unwrap();
+        writeln!(
+            file,
+            r#"{{"kind":"bots","schema":2,"tick":{tick},"run":"{run}","bots":[{{"id":1,"position":{{"x":{x},"y":{y}}},"inventory":{{}},"crafting_queue":0,"mining":null}}]}}"#
+        )
+        .unwrap();
+        workspace
+    }
+
+    /// **The disclosure exists from the run's first event, not from its last.**
+    ///
+    /// `provenance.json` is written at start and never rewritten, and
+    /// `manifest.json` only exists for runs that finished -- nine of the
+    /// twenty-four runs archived when provenance was added had none, and they
+    /// are the killed ones. A killed run still got its free vision, so this
+    /// has to be in the append-only log and it has to be there early.
+    #[test]
+    fn a_run_discloses_its_free_vision_from_its_first_event() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut rec = RunRecorder::start(&tmp.path().join("runs"), "run-v1").unwrap();
+        rec.watch_model(model_with_oil_far_out());
+        rec.record(
+            3658,
+            EventKind::MilestoneStarted {
+                index: 0,
+                goal: "g".into(),
+            },
+        )
+        .unwrap();
+
+        let events = vision_events(&rec);
+        assert_eq!(
+            events.len(),
+            1,
+            "one baseline, written on the run's first recorded event whatever \
+             tick the run opened at"
+        );
+        let EventKind::VisionMeasured {
+            model_tiles,
+            model_furthest,
+            model_resource_tiles,
+            ..
+        } = &events[0]
+        else {
+            unreachable!()
+        };
+        assert_eq!(model_furthest.as_deref(), Some("crude-oil"));
+        assert_eq!(*model_resource_tiles, 1);
+        assert!((model_tiles.unwrap() - 300.5f64.hypot(400.5)).abs() < 1e-9);
+    }
+
+    /// **A run with no travel data says so; it does not report zero.**
+    ///
+    /// A bot that was never observed has not been observed at the origin, and
+    /// a ratio computed against it would be an invention. `bot_samples: 0` is
+    /// what tells a reader which of the two the null means.
+    #[test]
+    fn missing_travel_data_reads_as_unknown_and_never_as_no_travel() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut rec = RunRecorder::start(&tmp.path().join("runs"), "run-v2").unwrap();
+        rec.watch_model(model_with_oil_far_out());
+        rec.record(
+            10,
+            EventKind::MilestoneStarted {
+                index: 0,
+                goal: "g".into(),
+            },
+        )
+        .unwrap();
+
+        let text = fs::read_to_string(rec.dir().join("events.jsonl")).unwrap();
+        assert!(
+            text.contains(r#""travelled_tiles":null"#),
+            "present-and-null, so a reader can tell we looked: {text}"
+        );
+        assert!(text.contains(r#""bot_samples":0"#));
+        assert!(
+            text.contains(r#""unearned_ratio":null"#),
+            "no ratio can be computed against a travel nobody observed: {text}"
+        );
+    }
+
+    /// The number the whole event exists for: the model sees N times further
+    /// than the furthest bot got.
+    #[test]
+    fn the_ratio_is_the_model_s_reach_over_the_furthest_bot_s() {
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = workspace_with_bot_at(tmp.path(), 900, "run-v3", 30.0, 40.0);
+        let mut rec = RunRecorder::start(&tmp.path().join("runs"), "run-v3").unwrap();
+        rec.watch_model(model_with_oil_far_out());
+        rec.record(
+            800,
+            EventKind::MilestoneStarted {
+                index: 0,
+                goal: "g".into(),
+            },
+        )
+        .unwrap();
+        let (manifest, _) = rec
+            .finish(1000, "done", Some(&workspace), DEFAULT_KEEP)
+            .unwrap();
+        // The closing measurement is written after the log is read for the
+        // manifest's count, so the count has to include it explicitly. A
+        // manifest that undercounts its own log makes every number in it
+        // suspect.
+        assert_eq!(
+            manifest.events,
+            read_events(&rec.dir().join("events.jsonl"))
+                .unwrap()
+                .events
+                .len(),
+            "the manifest must count every line in the log it summarises"
+        );
+
+        let events = vision_events(&rec);
+        let EventKind::VisionMeasured {
+            travelled_tiles,
+            travelled_bot,
+            bot_samples,
+            unearned_ratio,
+            ..
+        } = events.last().expect("a closing measurement")
+        else {
+            unreachable!()
+        };
+        assert_eq!(*travelled_bot, Some(1));
+        assert_eq!(*bot_samples, 1);
+        assert!((travelled_tiles.unwrap() - 50.0).abs() < 1e-9, "3-4-5");
+        assert!(
+            (unearned_ratio.unwrap() - 300.5f64.hypot(400.5) / 50.0).abs() < 1e-9,
+            "the model reaches 10x further than the bot ever went"
+        );
+    }
+
+    /// Travel is a high-water mark: the question is how far a bot *ever* got,
+    /// not where it is standing now, so a bot walking home must not shrink it.
+    #[test]
+    fn travel_is_a_high_water_mark_and_walking_back_does_not_shrink_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = workspace_with_bot_at(tmp.path(), 900, "run-v4", 30.0, 40.0);
+        let mut rec = RunRecorder::start(&tmp.path().join("runs"), "run-v4").unwrap();
+        rec.watch_model(model_with_oil_far_out());
+        rec.record(
+            800,
+            EventKind::MilestoneStarted {
+                index: 0,
+                goal: "g".into(),
+            },
+        )
+        .unwrap();
+        rec.ingest_samples(Some(&workspace)).unwrap();
+        // The bot comes home.
+        workspace_with_bot_at(tmp.path(), 950, "run-v4", 0.5, 0.5);
+        rec.finish(1000, "done", Some(&workspace), DEFAULT_KEEP)
+            .unwrap();
+
+        let events = vision_events(&rec);
+        let EventKind::VisionMeasured {
+            travelled_tiles,
+            travelled_at_tick,
+            bot_samples,
+            ..
+        } = events.last().expect("a closing measurement")
+        else {
+            unreachable!()
+        };
+        assert!((travelled_tiles.unwrap() - 50.0).abs() < 1e-9);
+        assert_eq!(*travelled_at_tick, Some(900), "the tick it was furthest at");
+        assert_eq!(*bot_samples, 2, "both positions were read");
+    }
+
+    /// **A recorder with no model writes no measurement.**
+    ///
+    /// The alternative -- reporting a model nobody handed us as one reaching
+    /// zero tiles -- would be a run claiming it cheated by nothing, asserted by
+    /// an instrument that never looked. An absent event is unknown; a zero is
+    /// a claim.
+    #[test]
+    fn a_recorder_with_no_model_discloses_nothing_rather_than_zero() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut rec = RunRecorder::start(&tmp.path().join("runs"), "run-v5").unwrap();
+        rec.record(
+            10,
+            EventKind::MilestoneStarted {
+                index: 0,
+                goal: "g".into(),
+            },
+        )
+        .unwrap();
+        rec.finish(20, "done", None, DEFAULT_KEEP).unwrap();
+        assert!(vision_events(&rec).is_empty());
+    }
+
+    /// Periodic, on [`VISION_MEASURE_INTERVAL_TICKS`]: a run that goes long
+    /// enough to be killed still shows the two numbers diverging over time.
+    #[test]
+    fn measurements_beat_on_the_interval_and_close_unconditionally() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut rec = RunRecorder::start(&tmp.path().join("runs"), "run-v6").unwrap();
+        rec.watch_model(model_with_oil_far_out());
+        for tick in [100, 200, VISION_MEASURE_INTERVAL_TICKS + 100] {
+            rec.record(
+                tick,
+                EventKind::MilestoneStarted {
+                    index: 0,
+                    goal: "g".into(),
+                },
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            vision_events(&rec).len(),
+            2,
+            "the baseline, then one beat -- tick 200 is inside the interval"
+        );
+
+        // The closing one ignores the interval entirely, so a run shorter than
+        // one beat still states its figure.
+        rec.finish(
+            VISION_MEASURE_INTERVAL_TICKS + 200,
+            "done",
+            None,
+            DEFAULT_KEEP,
+        )
+        .unwrap();
+        assert_eq!(vision_events(&rec).len(), 3);
+
+        // ...and it lands after `run_finished`, which is written first so that
+        // a crash during archiving still leaves a log saying how the run
+        // ended. A reader takes the last `vision_measured`, not the last line.
+        let events = read_events(&rec.dir().join("events.jsonl")).unwrap().events;
+        assert!(matches!(
+            events[events.len() - 2].kind,
+            EventKind::RunFinished { .. }
+        ));
+        assert!(matches!(
+            events[events.len() - 1].kind,
+            EventKind::VisionMeasured { .. }
+        ));
     }
 }

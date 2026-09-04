@@ -1136,6 +1136,59 @@ export type EventKind =
            *  not evidence that no bot was walled in. */
           searched_tiles: number;
       }
+    | {
+          /**
+           * How much ground the world model was given, against how much
+           * ground a bot actually covered.
+           *
+           * The mod ingests every entity of every chunk the *engine
+           * generates* and never consults the force's charted area, so the
+           * model knows about ground no character has been near -- ore, water
+           * and nests alike. `run-1788532631-48030`'s furthest bot reached
+           * 63.8 tiles while the model it produced held crude oil at 380 and
+           * 505. This event is the disclosure of that; it states no verdict.
+           *
+           * Written into the append-only event log rather than into
+           * `provenance.json` (start-only) or the manifest (finish-only):
+           * a killed run still got its free vision. One baseline at the run's
+           * first event, a beat every 18,000 ticks, and one more at finish.
+           * **The last one in the log is the run's answer.**
+           */
+          kind: 'vision_measured';
+          /** The furthest any bot has been observed from the map origin, in
+           *  tiles, Euclidean. `null` is "nobody has observed a bot
+           *  position", **not** "no bot moved" -- `bot_samples` separates the
+           *  two, and it is `null` on every run's baseline measurement. */
+          travelled_tiles: number | null;
+          /** Which bot was that far out. `null` exactly when
+           *  `travelled_tiles` is. */
+          travelled_bot: number | null;
+          /** The tick that bot was seen there -- not this event's tick. */
+          travelled_at_tick: number | null;
+          /** How many bot positions this run has archived, the denominator
+           *  behind `travelled_tiles`. Zero beside a null distance means the
+           *  instrument said nothing. */
+          bot_samples: number;
+          /** The furthest thing the world model holds from the map origin, in
+           *  tiles. `null` when the model holds nothing at all -- a world
+           *  nothing has read yet, not a model reaching zero tiles. */
+          model_tiles: number | null;
+          /** What is out there, e.g. `'crude-oil'`. A distance alone reads as
+           *  an abstraction. `null` exactly when `model_tiles` is. */
+          model_furthest: string | null;
+          model_furthest_position: Position | null;
+          /** The census behind `model_tiles`. */
+          model_resource_tiles: number;
+          /** Counted apart from the resource tiles: a nest 500 tiles out and
+           *  an ore tile 500 tiles out are the same disclosure but not the
+           *  same finding. */
+          model_enemy_structures: number;
+          /** `model_tiles / travelled_tiles` -- how many times further the
+           *  model sees than the furthest bot went. `null` whenever either
+           *  half is unknown or no bot has left the origin, and **not**
+           *  floored at 1. */
+          unearned_ratio: number | null;
+      }
     | {kind: 'run_finished'; outcome: string; elapsed_ticks: number}
     /** A kind this build does not know. The server never emits it, but a
      *  future variant decodes to this rather than failing to parse. */

@@ -781,6 +781,8 @@ def analyse(run_dir: str, freeze_ticks: int = DEFAULT_FREEZE_TICKS) -> dict:
             }
         )
 
+    result["vision"] = free_vision(events)
+
     placed = load_jsonl(os.path.join(run_dir, "map.jsonl"))
     result["map_present"] = placed.present
 
@@ -800,6 +802,47 @@ def analyse(run_dir: str, freeze_ticks: int = DEFAULT_FREEZE_TICKS) -> dict:
         result["production"] = None
         result["machines"] = None
     return result
+
+
+def free_vision(events: list[dict]) -> dict:
+    """How much ground the model was given without a bot visiting it.
+
+    The mod ingests every entity of every chunk the *engine generates*
+    (``on_chunk_generated``) and never consults the force's charted area, so
+    the world model knows about ore, water and nests no character has been
+    near. In ``run-1788532631-48030`` the furthest bot reached 63.8 tiles
+    while the model that run produced held crude oil at 380 and 505.
+
+    ``vision_measured`` is the run's own disclosure of that (see
+    ``EventKind::VisionMeasured``). This reads the **last** one in the log:
+    the closing measurement is written after ``run_finished``, and the earlier
+    beats show the figure growing rather than replacing it.
+
+    Everything here can be absent, and absence is reported as absence. A run
+    with no ``vision_measured`` at all is a run whose free vision is
+    **unknown** -- every run archived before 2026-09-04, plus any run whose
+    recorder was never given a world model -- and that is not the same fact as
+    a run that was given none.
+    """
+    beats = [e for e in events if e.get("kind") == "vision_measured"]
+    if not beats:
+        return {"present": False, "beats": 0}
+    last = beats[-1]
+    return {
+        "present": True,
+        "beats": len(beats),
+        "tick": last.get("tick"),
+        "model_tiles": last.get("model_tiles"),
+        "model_furthest": last.get("model_furthest"),
+        "model_furthest_position": last.get("model_furthest_position"),
+        "model_resource_tiles": last.get("model_resource_tiles"),
+        "model_enemy_structures": last.get("model_enemy_structures"),
+        "travelled_tiles": last.get("travelled_tiles"),
+        "travelled_bot": last.get("travelled_bot"),
+        "travelled_at_tick": last.get("travelled_at_tick"),
+        "bot_samples": last.get("bot_samples"),
+        "unearned_ratio": last.get("unearned_ratio"),
+    }
 
 
 def batch_execution(events: list[dict]) -> list[dict]:
@@ -1647,6 +1690,45 @@ def report(a: dict, out=sys.stdout, top: int = 12) -> None:
               "sampled or never archived;")
             p("      nothing below that reads samples describes them")
 
+    p(hr("  FREE VISION  (ground the model was given without a bot going there)"))
+    v = a.get("vision") or {}
+    if not v.get("present"):
+        p("    UNKNOWN -- this run recorded no vision_measured event.")
+        p("    Every run before 2026-09-04 is in this state, as is any run whose recorder")
+        p("    was never handed a world model. It is NOT evidence that the run had no free")
+        p("    vision: on_chunk_generated ingest has been in every run this project has made.")
+    else:
+        model = v.get("model_tiles")
+        if model is None:
+            p("    model reach:  NOTHING READ -- the world model held no resource tile and no")
+            p(f"                  enemy structure at the last measurement (tick {v.get('tick')}).")
+        else:
+            at = v.get("model_furthest_position") or {}
+            where = f"[{at.get('x')}, {at.get('y')}]" if at else "position unrecorded"
+            p(f"    model reach:  {model:8.1f} tiles  ({v.get('model_furthest')} at {where})")
+            p(f"                  {v.get('model_resource_tiles')} resource tile(s), "
+              f"{v.get('model_enemy_structures')} enemy structure(s) known")
+        travelled = v.get("travelled_tiles")
+        if travelled is None:
+            samples = v.get("bot_samples") or 0
+            p(f"    bot travel:   UNKNOWN -- {samples} bot position(s) archived.")
+            p("                  This is NOT 'no bot moved': it is 'nothing observed one'.")
+            p("                  Travel comes from samples.jsonl, so a run whose sampling")
+            p("                  never started reports null here for its whole length.")
+        else:
+            p(f"    bot travel:   {travelled:8.1f} tiles  (bot {v.get('travelled_bot')} at tick "
+              f"{v.get('travelled_at_tick')}, from {v.get('bot_samples')} bot position(s))")
+        ratio = v.get("unearned_ratio")
+        if ratio is None:
+            p("    ratio:        n/a -- one half is unknown, or no bot left the origin.")
+        else:
+            p(f"    ratio:        {ratio:8.1f}x -- the model saw {ratio:.1f} times further than "
+              f"the furthest bot went.")
+            p("                  Ore, water and nests out there were free. A run quoted as a")
+            p("                  measured result carries this as an asterisk; nothing here")
+            p("                  decides how big an asterisk it is.")
+        p(f"    ({v.get('beats')} measurement(s) in the log; this is the last one)")
+
     p(hr("  MILESTONES"))
     if not a["milestones"]:
         p("    none recorded")
@@ -1953,6 +2035,17 @@ def summary_line(a: dict) -> str:
             parts.append("!killed-mid-batch")
         elif verdict == "unknown":
             parts.append("?ends-on-a-plan")
+    # The free-vision asterisk, in the one-line form too: `--all --summary` is
+    # how a whole archive gets scanned, and a run's number should not be read
+    # off a list without it. `vision=?` is a run that never measured, which is
+    # every run before 2026-09-04 -- unknown, not zero.
+    v = a.get("vision") or {}
+    if not v.get("present"):
+        parts.append("vision=?")
+    elif v.get("unearned_ratio") is not None:
+        parts.append(f"vision={v['unearned_ratio']:.0f}x")
+    else:
+        parts.append("vision=n/a")
     cov = a.get("samples_coverage") or {}
     if cov.get("verdict") == "no_samples":
         parts.append("!nosamples")

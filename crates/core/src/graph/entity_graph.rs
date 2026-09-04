@@ -69,6 +69,81 @@ pub struct ResourceFingerprint {
     pub tiles: BTreeMap<String, usize>,
 }
 
+/// How far the world model's knowledge reaches from the map origin, and what
+/// is out there at that range.
+///
+/// # What this is for
+///
+/// The model is fed by `on_chunk_generated` (`mods/BotBridge/control.lua`),
+/// which fires when the *engine* creates a chunk and never consults the
+/// force's charted area. So the model learns about ground no character has
+/// ever been near, for free -- in `run-1788532631-48030` the furthest any bot
+/// reached was 63.8 tiles while the model it handed on held crude oil at 380
+/// and 505 tiles, 559 uranium tiles and 36 biter spawners out to 500.
+///
+/// That is vision no player could have paid for, and until
+/// [`crate::record::EventKind::VisionMeasured`] existed no run said so. This
+/// is the model's half of that disclosure; the bot's half comes from the
+/// sample stream. See `docs/superpowers/specs/2026-09-04-exploration-design.md`.
+///
+/// # What it is measured over
+///
+/// **Resource tiles and enemy structures**, the two things the model keys by
+/// position in an ordered map. Water, terrain and built entities live in
+/// quadtrees, which have no cheap extent and no stable iteration order, and
+/// they would not change the answer: on the measured workspace the furthest
+/// things known are oil at 505 tiles and nests at 500, both in these two maps.
+/// A reader must still take this as a *lower bound* on what the model was
+/// given rather than as the whole of it.
+///
+/// # It measures the model, not the force
+///
+/// **This is not the charted area.** Nothing in this process knows what the
+/// force has charted -- `force.is_chunk_charted` appears nowhere in this repo
+/// -- so this reports the extent of what *we were told*, which is the number
+/// the disclosure is about. When the ingest becomes charted-only, this number
+/// falls to the charted extent by itself and needs no change here.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VisionExtent {
+    /// Euclidean distance from the map origin `(0, 0)` to the furthest
+    /// resource tile or enemy structure the model holds, in tiles.
+    ///
+    /// Euclidean, and computed here rather than through
+    /// [`Position::distance`], which is **Manhattan** despite its name and
+    /// would overstate a diagonal by up to 41%. A radius is the quantity a
+    /// reader means by "how far out does this reach".
+    ///
+    /// From the origin rather than from spawn: spawn is within a tile or two
+    /// of the origin on every freeplay map this project runs, and no run
+    /// record states a spawn position, so the origin is the one datum both
+    /// halves of the comparison can agree on without inventing anything.
+    pub tiles: f64,
+    /// What is out there -- an entity name such as `"crude-oil"` or
+    /// `"biter-spawner"`. A distance alone reads as an abstraction; the name
+    /// is what makes a reader look.
+    pub name: String,
+    /// Where it is, as the model holds it (resource keys have their half-tile
+    /// centre restored, see [`resource_position_from_pos`]).
+    pub position: Position,
+    /// How many resource tiles the model holds in total.
+    pub resource_tiles: usize,
+    /// How many enemy structures the model holds in total. Counted apart from
+    /// the resource tiles because a nest 500 tiles out and an ore tile 500
+    /// tiles out are the same disclosure but not the same finding.
+    pub enemy_structures: usize,
+}
+
+/// Euclidean distance from the map origin `(0, 0)`, in tiles.
+///
+/// Written out rather than taken from [`Position::distance`], which is
+/// **Manhattan** -- `|dx| + |dy|` -- despite the name. That is the right
+/// metric for the walking cost it was written for and the wrong one for a
+/// radius: it reports a point 300 tiles diagonally out as 424 tiles away.
+/// Every number this module reports as a *reach* uses this.
+pub fn radius_from_origin(position: &Position) -> f64 {
+    position.x().hypot(position.y())
+}
+
 pub struct EntityGraph {
     entity_graph: RwLock<EntityGraphInner>,
     blocked_tree: RwLock<BlockedQuadTree>,
@@ -473,6 +548,62 @@ impl EntityGraph {
             .filter(|entry| !entry.value().is_empty())
             .map(|entry| (entry.key().clone(), entry.value().len()))
             .collect()
+    }
+
+    /// How far out the model's knowledge reaches. See [`VisionExtent`].
+    ///
+    /// `None` when the model holds neither a resource tile nor an enemy
+    /// structure -- a world nobody has read yet, which is a different fact
+    /// from a model that reaches zero tiles. Callers must keep the two apart;
+    /// reporting an unread model as `0.0` would say a run was given no free
+    /// vision when nothing had looked.
+    ///
+    /// Deterministic: the backing maps are `DashMap`s, whose iteration order
+    /// is seeded per process, so ties are broken on position and then name
+    /// rather than on whichever entry came out first. Two runs on one map
+    /// therefore report the same extent, which is the whole point of a number
+    /// meant to be compared.
+    pub fn vision_extent(&self) -> Option<VisionExtent> {
+        let mut resource_tiles = 0usize;
+        let mut enemy_structures = 0usize;
+        let mut furthest: Option<(f64, Position, String)> = None;
+        let mut consider = |tiles: f64, position: Position, name: &str| {
+            let better = match &furthest {
+                None => true,
+                Some((best, best_pos, best_name)) => matches!(
+                    tiles
+                        .total_cmp(best)
+                        .then(position.x().total_cmp(&best_pos.x()))
+                        .then(position.y().total_cmp(&best_pos.y()))
+                        .then(name.cmp(best_name.as_str())),
+                    std::cmp::Ordering::Greater
+                ),
+            };
+            if better {
+                furthest = Some((tiles, position, name.to_string()));
+            }
+        };
+        for entry in self.resources.iter() {
+            resource_tiles += entry.value().len();
+            for pos in entry.value().keys() {
+                let position = resource_position_from_pos(pos.clone());
+                consider(radius_from_origin(&position), position, entry.key());
+            }
+        }
+        for entry in self.threats.iter() {
+            enemy_structures += entry.value().len();
+            for position in entry.value().values() {
+                consider(radius_from_origin(position), position.clone(), entry.key());
+            }
+        }
+        let (tiles, position, name) = furthest?;
+        Some(VisionExtent {
+            tiles,
+            name,
+            position,
+            resource_tiles,
+            enemy_structures,
+        })
     }
 
     /// Takes one mined-out tree or rock out of the model. Answers whether
@@ -4149,6 +4280,122 @@ mod tests {
             .into_iter()
             .collect::<BTreeMap<String, usize>>(),
             "the two structures are remembered; the biter walks, so it is not"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Vision extent: the free ground the model was given
+    // -----------------------------------------------------------------------
+
+    /// The shape of the finding itself: ore near spawn, a nest far out, and
+    /// the extent has to report the far one and name it.
+    ///
+    /// The census is checked alongside, because the distance on its own cannot
+    /// be told apart from a single stray entity 500 tiles away -- and a reader
+    /// deciding whether a run's number carries an asterisk needs to know
+    /// whether the model holds one thing out there or a thousand.
+    #[test]
+    fn vision_extent_reports_the_furthest_thing_the_model_holds_and_names_it() {
+        let mut entities = vec![];
+        spawn_ore(
+            &mut entities,
+            Rect::new(&Position::new(-2., -2.), &Position::new(0., 0.)),
+            "iron-ore",
+        );
+        entities.push(enemy_at(
+            "biter-spawner",
+            "unit-spawner",
+            Position::new(-300.5, 400.5),
+            4.4,
+        ));
+        let graph = entity_graph_from(entities).expect("adding must not fail");
+
+        let extent = graph.vision_extent().expect("the model holds something");
+        assert_eq!(extent.name, "biter-spawner");
+        assert_eq!(extent.position, Position::new(-300.5, 400.5));
+        assert_eq!(extent.enemy_structures, 1);
+        assert_eq!(extent.resource_tiles, 9, "a 3x3 of ore tiles");
+        // Euclidean, not Manhattan. `Position::distance` is Manhattan despite
+        // its name and would answer 701 for this point; the radius is 500.7.
+        assert!(
+            (extent.tiles - 300.5f64.hypot(400.5)).abs() < 1e-9,
+            "expected the radius, got {}",
+            extent.tiles
+        );
+        assert!(
+            extent.tiles < Position::new(0., 0.).distance(&Position::new(-300.5, 400.5)),
+            "Manhattan is strictly larger off the axes, and this must not be it"
+        );
+    }
+
+    /// The half-tile that has bitten this project twice: resource keys are
+    /// floored, and a reach read back out of the map must add the centre back
+    /// or every resource reads 0.5 short.
+    #[test]
+    fn vision_extent_restores_the_half_tile_a_resource_key_floors_away() {
+        let mut entities = vec![];
+        spawn_ore(
+            &mut entities,
+            Rect::new(&Position::new(100., 0.), &Position::new(100., 0.)),
+            "crude-oil",
+        );
+        let graph = entity_graph_from(entities).expect("adding must not fail");
+
+        let extent = graph.vision_extent().expect("the model holds something");
+        assert_eq!(extent.name, "crude-oil");
+        assert_eq!(
+            extent.position,
+            Position::new(100.5, 0.5),
+            "the tile centre, exactly as `resource_position_from_pos` restores it"
+        );
+    }
+
+    /// **`None` is "nothing has been read", never "the model reaches zero".**
+    ///
+    /// A run whose world model was never fed would otherwise disclose a free
+    /// vision of 0.0 tiles -- a confident claim that it cheated by nothing,
+    /// made by an instrument that had not looked. That is the exact failure
+    /// shape this project has hit four times, so it is pinned here.
+    #[test]
+    fn vision_extent_is_none_for_a_model_nothing_has_been_read_into() {
+        let graph = entity_graph_from(vec![]).expect("adding must not fail");
+        assert!(
+            graph.vision_extent().is_none(),
+            "an unread model has no extent; it does not have an extent of zero"
+        );
+    }
+
+    /// Two things at the same range must not swap places between processes.
+    /// `resources` and `threats` are `DashMap`s, whose iteration order is
+    /// seeded per process, so a run comparing its extent against yesterday's
+    /// would otherwise see the name change for no reason.
+    #[test]
+    fn vision_extent_breaks_ties_deterministically() {
+        let mut names = std::collections::BTreeSet::new();
+        for _ in 0..8 {
+            let graph = entity_graph_from(vec![
+                enemy_at(
+                    "biter-spawner",
+                    "unit-spawner",
+                    Position::new(300.0, 400.0),
+                    4.4,
+                ),
+                enemy_at(
+                    "spitter-spawner",
+                    "unit-spawner",
+                    Position::new(-300.0, 400.0),
+                    4.4,
+                ),
+            ])
+            .expect("adding must not fail");
+            let extent = graph.vision_extent().expect("the model holds something");
+            assert!((extent.tiles - 500.0).abs() < 1e-9);
+            names.insert(extent.name);
+        }
+        assert_eq!(
+            names.len(),
+            1,
+            "one answer across every iteration order, got {names:?}"
         );
     }
 

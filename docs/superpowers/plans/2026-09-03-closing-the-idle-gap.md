@@ -104,6 +104,48 @@ Two structural facts explain why nothing fills the idle:
   variant (`Have`, `Researched`, `Produced`, `Producing`, `All`) is
   demand-driven.
 
+## STAGE 2 IS DONE — THE FIRST WITNESS IN THIS PROJECT'S HISTORY
+
+`run-1788489532-62404`, roster `[1,2,3,4]`, `scripts/factory_stage2.lua`.
+Verbatim:
+
+```
+WITNESSED: automation-science-pack in 2 watched machine(s) went 0 -> 1
+(+1, wanted 1) in 780 of 3600 ticks, 756 polls
+```
+
+| rung | satisfied | game time from run start |
+|---|---|---|
+| 1 — `researched("automation")` | 1 iteration, 263 steps | **8.73 min** |
+| 2 — `producing("automation-science-pack", 6)` | **1 iteration**, 290 steps | **14.78 min** |
+| 3 — **the witness** | 0 iterations (dispatches nothing) | **15.00 min** |
+
+**Rung 2 went from `stuck_silent` after 4 iterations to satisfied on the
+first**, on the strength of `30b28846` alone — one field the world model never
+wrote.
+
+### Why this is evidence and not another "it stands"
+
+The witness **dispatches no actions**. It reads the fed machines' output
+inventories, waits, reads again, and asserts the count rose while every bot
+stood still. A pack that appears under those conditions can only have been
+assembled by the machine. Every earlier claim about this cell was structural —
+"nine actions succeeded", "both recipes set", "the cell stands" — and the
+project's own notes were careful to say **standing is not producing**. This is
+the first time the distinction has been settled in the right direction.
+
+It took 780 of its 3,600-tick budget, so the machine was working comfortably
+inside the window rather than scraping it.
+
+### The whole night, end to end
+
+| | |
+|---|---|
+| automation, first measured | 21.34 min |
+| automation, now | **8.69 / 8.72 min** (two runs) |
+| red science cell, before | never satisfied; `stuck_silent` |
+| red science cell, now | **satisfied in 1 iteration, witnessed producing** |
+
 ## THE CELLS WERE WORKING ALL ALONG (`30b28846`)
 
 **"No cell has ever produced anything" was false.** The run record shows three

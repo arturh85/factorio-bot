@@ -24,7 +24,8 @@ as a plan.
 | `researched("automation")` | 21.34 min | **8.69 / 8.72 min** (two runs, target was under 9) |
 | red science cell standing | never satisfied, `stuck_silent` | **satisfied in 1 iteration** |
 | red science **producing** | never observed in this project | **WITNESSED** (`run-1788489532-62404`) |
-| green science | — | **does not plan at all**; capability gap, in design |
+| green science, planning | did not expand at all | **730 actions, 53:05** — plans end to end |
+| green science, live | never run | **ran 29.6 min**, halted on a 34-furnace bank |
 
 ### Landed
 
@@ -40,6 +41,10 @@ as a plan.
 | **A recipe set over RCON reaches the world model** | `30b28846` |
 | Run provenance, `--seed` fix, `--compare` | `61ec7364`, `ccaf562f`, `a1c1316a` |
 | Furnace handover (R3) | `c0c3bc5c` |
+| Cell intermediate with two mouths (green) | `240d3efb` |
+| A cycle costs an item edge, never a placement | `374d7aa3` |
+| A lab brings its own pole | `38869772` |
+| `automation_speedrun.lua`, `factory_stage3.lua` | `c6620b24`, `abae10ab` |
 
 ### The tools that made the difference
 
@@ -68,6 +73,11 @@ as a plan.
   `workspace/known-good-map/level.zip`.
 - **The flaky determinism test** never reproduced in 18 attempts and no error
   text was ever captured.
+- **The 34-furnace bank** crowds out the ore cell that feeds it. Under
+  investigation; may be a costing defect rather than a spatial one.
+- **Nothing checks a cell's servicing lane when siting the lab**, and
+  `enclosure::check` runs for cells and plants but not for the lab. Does not
+  bite on this map; the check simply does not exist.
 
 ## Owner decisions (2026-09-03, before an unattended night)
 

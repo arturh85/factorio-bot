@@ -148,7 +148,63 @@ pub struct EntityGraph {
     /// done rather than sending a bot at a tree that is not there -- the
     /// conservative direction, and the same one `resources` takes.
     minables: DashMap<String, BTreeMap<Pos, Position>>,
+    /// Every standing enemy *structure* the model has been told about, by
+    /// entity name, by the tile it stands on, holding the position the game
+    /// reported. The sibling of `minables`, stored the same way for the same
+    /// reasons.
+    ///
+    /// # Why this map exists at all
+    ///
+    /// The mod has always sent these. `writeout_entities` filters only on
+    /// `ent.type ~= "character"`, so a chunk holding a nest writes out its
+    /// `biter-spawner` and `small-worm-turret` records exactly like its ore.
+    /// One measured run's `workspace/server-log.txt` carried **36 spawners
+    /// and 28 worm turrets**, the nearest at `(-237.5, 66.5)` -- 246.6 tiles
+    /// from spawn.
+    ///
+    /// They then died at the door. [`EntityType`] has no `unit-spawner`,
+    /// `turret` or `unit` variant, so `EntityType::from_str` is `Err` for all
+    /// three and [`EntityGraph::add`]'s whitelist is never consulted. What
+    /// survived was one anonymous rectangle in `blocked_tree`, which can say
+    /// "something is in the way" and cannot say *what*, *whose*, or where its
+    /// centre is. So nothing above this layer could tell a map with no nests
+    /// apart from a map whose nests were discarded on arrival -- and those two
+    /// have opposite consequences for a bot sent to walk somewhere.
+    ///
+    /// # Structures only, deliberately
+    ///
+    /// Keyed on the *entity type* the mod reports, and only `"unit-spawner"`
+    /// (`biter-spawner`, `spitter-spawner`) and `"turret"` (the worm turrets)
+    /// are admitted. In vanilla those two types are exactly the immobile
+    /// enemy buildings: a player's own turrets are `ammo-turret` /
+    /// `electric-turret` / `fluid-turret` and do not match.
+    ///
+    /// `"unit"` -- a live biter -- is deliberately **not** stored. A unit
+    /// walks, so its position is true for the tick it was serialised in and a
+    /// lie thereafter, and a chunk is written out once. Recording one would
+    /// leave a permanent phantom on a tile nothing is standing on, which is
+    /// the failure `retire_minable` exists to undo for stumps. A nest does not
+    /// move, and a nest is what a route has to give room to anyway.
+    ///
+    /// # This is a lower bound, and the bound is not small
+    ///
+    /// It holds what the model has been shown, which today means what the game
+    /// happened to generate -- see
+    /// `docs/superpowers/specs/2026-09-04-exploration-design.md`. A nest in
+    /// ground nobody has looked at is absent from this map, and absence here is
+    /// never evidence of safety.
+    threats: DashMap<String, BTreeMap<Pos, Position>>,
 }
+
+/// The entity types [`EntityGraph::add`] records as enemy structures.
+///
+/// A `&[&str]` of the mod's own `entity.type` spellings rather than
+/// [`EntityType`] variants, because the point is to catch types this crate
+/// deliberately does *not* model as buildings -- admitting them to
+/// [`EntityType`] would put them in `entity_tree`, the petgraph and
+/// `snapshot_within`'s keyframes, which is a much larger claim than "remember
+/// where the nests are".
+pub const ENEMY_STRUCTURE_TYPES: [&str; 2] = ["unit-spawner", "turret"];
 
 impl EntityGraph {
     #[allow(clippy::new_without_default)]
@@ -168,6 +224,7 @@ impl EntityGraph {
             entity_nodes: DashMap::new(),
             resources: DashMap::new(),
             minables: DashMap::new(),
+            threats: DashMap::new(),
         }
     }
     pub fn inner_graph(&self) -> RwLockReadGuard<'_, EntityGraphInner> {
@@ -359,6 +416,63 @@ impl EntityGraph {
             .collect();
         out.sort_unstable();
         out
+    }
+
+    /// Every enemy structure the model knows of, nearest first, as
+    /// `(name, position, distance)` measured from `from`.
+    ///
+    /// Ordered by distance and then by `(x, y)`, never by the backing
+    /// `DashMap`'s iteration order, for the same reason
+    /// [`EntityGraph::minables_yielding`] sorts: a hash seed must not reach a
+    /// planner whose output has to be byte-identical across runs. Floats are
+    /// compared with `total_cmp`.
+    ///
+    /// # An empty answer means "none charted", not "none there"
+    ///
+    /// This reads the model, and the model holds what it has been shown.
+    /// Callers deciding whether somewhere is safe to walk to must treat an
+    /// empty result as *unknown*; see the `threats` field's own docs.
+    pub fn threats_from(&self, from: &Position) -> Vec<(String, Position, f64)> {
+        let mut out: Vec<(String, Position, f64)> = self
+            .threats
+            .iter()
+            .flat_map(|entry| {
+                let name = entry.key().clone();
+                entry
+                    .value()
+                    .values()
+                    .map(|pos| (name.clone(), pos.clone(), from.distance(pos)))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        out.sort_by(|a, b| {
+            a.2.total_cmp(&b.2)
+                .then(a.1.x().total_cmp(&b.1.x()))
+                .then(a.1.y().total_cmp(&b.1.y()))
+                .then(a.0.cmp(&b.0))
+        });
+        out
+    }
+
+    /// The nearest charted enemy structure to `from`, or `None` when the model
+    /// holds none. See [`EntityGraph::threats_from`] for what `None` does and
+    /// does not establish.
+    pub fn nearest_threat(&self, from: &Position) -> Option<(String, Position, f64)> {
+        self.threats_from(from).into_iter().next()
+    }
+
+    /// How many enemy structures of each name the model holds, in name order.
+    ///
+    /// The census half, the counterpart of
+    /// [`ResourceFingerprint::tiles`]: "this map has nests and that one does
+    /// not" is the sentence a person reads, and nothing else in a run record
+    /// says it.
+    pub fn threat_census(&self) -> BTreeMap<String, usize> {
+        self.threats
+            .iter()
+            .filter(|entry| !entry.value().is_empty())
+            .map(|entry| (entry.key().clone(), entry.value().len()))
+            .collect()
     }
 
     /// Takes one mined-out tree or rock out of the model. Answers whether
@@ -1057,6 +1171,18 @@ impl EntityGraph {
                         .or_default()
                         .insert((&entity.position).into(), entity.position.clone());
                 }
+                // Recorded here rather than in the `EntityType::from_str`
+                // whitelist below, because the whole point is that these
+                // types are not in `EntityType` and must not be: see
+                // `ENEMY_STRUCTURE_TYPES`. Like `minables` this is keyed by
+                // the floored tile and holds the game's own position, so a
+                // caller can hand the position straight back to the mod.
+                if ENEMY_STRUCTURE_TYPES.contains(&entity.entity_type.as_str()) {
+                    self.threats
+                        .entry(entity.name.clone())
+                        .or_default()
+                        .insert((&entity.position).into(), entity.position.clone());
+                }
             }
             if entity.name == EntityName::Pumpjack.to_string() {
                 // for some reason pumpjacks report their drop position at their position so we fix it
@@ -1433,6 +1559,13 @@ impl EntityGraph {
         // check, and a name that is in `minables` is by construction one that
         // `add` put there.
         if let Some(mut tiles) = self.minables.get_mut(&entity.name) {
+            tiles.remove(&(&entity.position).into());
+        }
+        // Same shape, same reason. Nothing in this workspace kills a nest
+        // today, but `remove` is the one door an entity leaves by, and a map
+        // that only ever grows would keep refusing routes past a spawner that
+        // is no longer there.
+        if let Some(mut tiles) = self.threats.get_mut(&entity.name) {
             tiles.remove(&(&entity.position).into());
         }
 
@@ -1886,7 +2019,7 @@ impl Serialize for EntityGraph {
     where
         S: Serializer,
     {
-        let mut state = serializer.serialize_struct("EntityGraph", 10)?;
+        let mut state = serializer.serialize_struct("EntityGraph", 11)?;
         state.serialize_field("entity_graph", &*self.entity_graph.read())?;
         state.serialize_field("blocked_tree", &*self.blocked_tree.read())?;
         state.serialize_field("entity_tree", &*self.entity_tree.read())?;
@@ -1897,6 +2030,7 @@ impl Serialize for EntityGraph {
         state.serialize_field("resources", &TileMaps(&self.resources))?;
         state.serialize_field("resource_tree", &*self.resource_tree.read())?;
         state.serialize_field("minables", &TileMaps(&self.minables))?;
+        state.serialize_field("threats", &TileMaps(&self.threats))?;
         state.end()
     }
 }
@@ -1917,6 +2051,7 @@ impl<'de> Deserialize<'de> for EntityGraph {
             Resources,
             ResourceTree,
             Minables,
+            Threats,
         }
 
         // This part could also be generated independently by:
@@ -1953,6 +2088,7 @@ impl<'de> Deserialize<'de> for EntityGraph {
                             "resources" => Ok(Field::Resources),
                             "resource_tree" => Ok(Field::ResourceTree),
                             "minables" => Ok(Field::Minables),
+                            "threats" => Ok(Field::Threats),
                             _ => Err(de::Error::unknown_field(value, FIELDS)),
                         }
                     }
@@ -1985,6 +2121,7 @@ impl<'de> Deserialize<'de> for EntityGraph {
                 let mut resources: Option<WireTileMaps<Option<u32>>> = None;
                 let mut resource_tree = None;
                 let mut minables: Option<WireTileMaps<Position>> = None;
+                let mut threats: Option<WireTileMaps<Position>> = None;
 
                 while let Some(key) = map.next_key()? {
                     match key {
@@ -2048,6 +2185,12 @@ impl<'de> Deserialize<'de> for EntityGraph {
                             }
                             minables = Some(map.next_value()?);
                         }
+                        Field::Threats => {
+                            if threats.is_some() {
+                                return Err(de::Error::duplicate_field("threats"));
+                            }
+                            threats = Some(map.next_value()?);
+                        }
                     }
                 }
                 let entity_graph =
@@ -2072,6 +2215,10 @@ impl<'de> Deserialize<'de> for EntityGraph {
                 // load one would turn a new planner capability into a failure
                 // to read yesterday's snapshot.
                 let minables = tile_maps_from(minables.unwrap_or_default());
+                // Defaulted for the same reason `minables` is: every graph
+                // serialised before this map existed is a valid graph that
+                // knows of no nests.
+                let threats = tile_maps_from(threats.unwrap_or_default());
 
                 Ok(EntityGraph {
                     entity_graph: RwLock::new(entity_graph),
@@ -2084,6 +2231,7 @@ impl<'de> Deserialize<'de> for EntityGraph {
                     resources,
                     resource_tree: RwLock::new(resource_tree),
                     minables,
+                    threats,
                 })
             }
         }
@@ -2099,6 +2247,7 @@ impl<'de> Deserialize<'de> for EntityGraph {
             "resources",
             "resource_tree",
             "minables",
+            "threats",
         ];
         deserializer.deserialize_struct("EntityGraph", FIELDS, EntityGraphVisitor)
     }
@@ -2117,6 +2266,7 @@ impl Clone for EntityGraph {
             resources: self.resources.clone(),
             resource_tree: RwLock::new(self.resource_tree.read().clone()),
             minables: self.minables.clone(),
+            threats: self.threats.clone(),
         }
     }
 
@@ -2131,6 +2281,7 @@ impl Clone for EntityGraph {
         self.resources = source.resources.clone();
         self.resource_tree = RwLock::new(source.resource_tree.read().clone());
         self.minables = source.minables.clone();
+        self.threats = source.threats.clone();
     }
 }
 
@@ -3935,6 +4086,161 @@ mod tests {
                 .and_then(|id| graph.entity_by_id(id))
                 .and_then(|e| e.recipe),
             Some("automation-science-pack".to_string())
+        );
+    }
+    // -----------------------------------------------------------------------
+    // Threats: the enemy structures the mod has always been sending
+    // -----------------------------------------------------------------------
+
+    /// Built the way `serialize_entity` builds them, copied from a real
+    /// `workspace/server-log.txt` line rather than invented: a spawner reports
+    /// `entity_type: "unit-spawner"` with a ~4.4-tile box, a worm reports
+    /// `"turret"`, a live biter reports `"unit"`.
+    fn enemy_at(name: &str, entity_type: &str, position: Position, size: f64) -> FactorioEntity {
+        FactorioEntity {
+            name: name.into(),
+            entity_type: entity_type.into(),
+            bounding_box: crate::factorio::util::add_to_rect(&Rect::from_wh(size, size), &position),
+            position,
+            ..Default::default()
+        }
+    }
+
+    /// The regression this whole map exists for.
+    ///
+    /// `EntityType::from_str` is `Err` for all three of these spellings, and
+    /// before `threats` existed that meant an arriving nest left nothing
+    /// behind but an anonymous rectangle in `blocked_tree`. The assertion on
+    /// `from_str` is deliberate: it pins *why* the separate map is needed, so
+    /// that anyone who later adds a `UnitSpawner` variant to `EntityType`
+    /// finds this test rather than a silent duplicate.
+    #[test]
+    fn an_enemy_structure_is_remembered_by_name_and_a_biter_is_not() {
+        for spelling in ["unit-spawner", "turret", "unit"] {
+            assert!(
+                EntityType::from_str(spelling).is_err(),
+                "{spelling} is not an EntityType, which is why `threats` is a separate map"
+            );
+        }
+
+        let graph = entity_graph_from(vec![
+            enemy_at(
+                "biter-spawner",
+                "unit-spawner",
+                Position::new(-237.5, 66.5),
+                4.4,
+            ),
+            enemy_at(
+                "small-worm-turret",
+                "turret",
+                Position::new(-242.1, 66.1),
+                1.6,
+            ),
+            enemy_at("small-biter", "unit", Position::new(-240.0, 66.0), 0.4),
+        ])
+        .expect("adding must not fail");
+
+        assert_eq!(
+            graph.threat_census(),
+            [
+                ("biter-spawner".to_string(), 1),
+                ("small-worm-turret".to_string(), 1)
+            ]
+            .into_iter()
+            .collect::<BTreeMap<String, usize>>(),
+            "the two structures are remembered; the biter walks, so it is not"
+        );
+    }
+
+    /// Nearest-first, and the position handed back is the game's own -- the
+    /// half-tile lesson `minables` learned, which matters here for the same
+    /// reason: a caller asking the mod about a nest matches on that position.
+    #[test]
+    fn threats_come_back_nearest_first_with_the_reported_position() {
+        let far = Position::new(-237.5, 66.5);
+        let near = Position::new(10.5, -3.5);
+        let graph = entity_graph_from(vec![
+            enemy_at("biter-spawner", "unit-spawner", far.clone(), 4.4),
+            enemy_at("spitter-spawner", "unit-spawner", near.clone(), 4.4),
+        ])
+        .expect("adding must not fail");
+
+        let from = Position::new(0., 0.);
+        let ordered = graph.threats_from(&from);
+        assert_eq!(ordered.len(), 2);
+        assert_eq!(ordered[0].0, "spitter-spawner");
+        assert_eq!(ordered[0].1, near, "the position the game reported");
+        assert_eq!(ordered[1].0, "biter-spawner");
+
+        let (name, at, distance) = graph.nearest_threat(&from).expect("one is charted");
+        assert_eq!(name, "spitter-spawner");
+        assert_eq!(at, near);
+        assert!(
+            (distance - from.distance(&near)).abs() < f64::EPSILON,
+            "the distance reported is the distance from the point asked about"
+        );
+    }
+
+    /// An empty model answers `None`, and that answer is "nothing charted".
+    /// It is asserted here so the distinction stays written down where the
+    /// query lives: a caller that reads it as "safe" has misused it.
+    #[test]
+    fn no_charted_threat_is_not_a_claim_of_safety() {
+        let graph = entity_graph_from(vec![]).expect("adding must not fail");
+        assert!(graph.nearest_threat(&Position::new(0., 0.)).is_none());
+        assert!(graph.threat_census().is_empty());
+    }
+
+    /// Killing a nest takes it out, so the model does not keep refusing a
+    /// route past something that is gone.
+    #[test]
+    fn removing_an_enemy_structure_forgets_it() {
+        let at = Position::new(-237.5, 66.5);
+        let spawner = enemy_at("biter-spawner", "unit-spawner", at.clone(), 4.4);
+        let graph = entity_graph_from(vec![spawner.clone()]).expect("adding must not fail");
+        assert!(graph.nearest_threat(&at).is_some());
+        graph.remove(&spawner).expect("removing must not fail");
+        assert!(
+            graph.nearest_threat(&at).is_none(),
+            "the nest is gone from the model as well as from the map"
+        );
+    }
+
+    /// Threats survive a clone and a serde round trip, and a graph serialised
+    /// before this map existed still loads -- the same contract `minables`
+    /// has, checked the same way, because a new field that broke yesterday's
+    /// world dumps would be a worse bug than the one it fixes.
+    #[test]
+    fn threats_survive_cloning_and_a_round_trip_and_old_dumps_still_load() {
+        let at = Position::new(-237.5, 66.5);
+        let graph = entity_graph_from(vec![enemy_at(
+            "biter-spawner",
+            "unit-spawner",
+            at.clone(),
+            4.4,
+        )])
+        .expect("adding must not fail");
+
+        let copy = graph.clone();
+        assert_eq!(copy.threat_census(), graph.threat_census());
+
+        let json = serde_json::to_string(&graph).expect("serialising must not fail");
+        let back: EntityGraph = serde_json::from_str(&json).expect("deserialising must not fail");
+        assert_eq!(back.threat_census(), graph.threat_census());
+        assert_eq!(back.nearest_threat(&at).map(|t| t.1), Some(at));
+
+        let mut older: serde_json::Value =
+            serde_json::from_str(&json).expect("reparsing must not fail");
+        older
+            .as_object_mut()
+            .expect("the graph serialises as an object")
+            .remove("threats")
+            .expect("the field was there to remove");
+        let older: EntityGraph =
+            serde_json::from_value(older).expect("a dump without `threats` must still load");
+        assert!(
+            older.threat_census().is_empty(),
+            "it knows of no nests, which is not the same as asserting there are none"
         );
     }
 }

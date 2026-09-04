@@ -136,6 +136,11 @@ fn stub_game(recipes: &[&str], started: Option<u32>) -> String {
                 index = idx,
                 name = "bot" .. idx,
                 force = force,
+                -- A live player has a character; without one the mod now
+                -- refuses to craft ("player N has no character"), which is
+                -- the bot-death guard doing its job, not what these tests ask.
+                connected = true,
+                character = {{ valid = true, position = {{ x = 0, y = 0 }} }},
                 begin_crafting = function(spec)
                     _started[#_started + 1] = spec.recipe .. " x" .. spec.count
                     return {started}

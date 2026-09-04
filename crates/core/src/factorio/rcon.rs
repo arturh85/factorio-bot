@@ -2855,6 +2855,21 @@ impl FactorioRcon {
             .await
     }
 
+    /// How long to wait for a hand craft's verdict.
+    ///
+    /// `energy` is the recipe's own seconds per craft; the queue also crafts every
+    /// missing intermediate, which vanilla's early recipes make at most a few
+    /// times the product's own time (a science pack is 5 s and its gear 0.5 s;
+    /// an inserter is 0.5 s over ~2.5 s of parts). Three times the product's
+    /// time, plus a minute, covers that tree and a game running slower than the
+    /// clock; and it is never *less* than [`ACTION_RESULT_DEADLINE`], so a short
+    /// craft keeps the deadline every other action has. Wall clock, not ticks:
+    /// the wait is measured with `Instant`.
+    fn craft_deadline(energy: f64, count: u32) -> Duration {
+        let expected = Duration::from_secs_f64((energy.max(0.0) * f64::from(count) * 3.0) + 60.0);
+        expected.max(ACTION_RESULT_DEADLINE)
+    }
+
     /// [`FactorioRcon::sleep_for_action_result`] with the deadline named, so a
     /// test can reach the timeout branch without waiting six minutes for it.
     /// Nothing else about the two differs.
@@ -3336,8 +3351,24 @@ impl FactorioRcon {
                 ActionTicks::at(dispatched),
             ));
         }
-        self.sleep_for_action_result(world, action_id, dispatched)
-            .await
+        // A craft's honest duration is known before it is queued, so the
+        // deadline is sized from it rather than from the flat six minutes:
+        // `craft 75 automation-science-pack` is 75 x 5 s of packs plus the
+        // gears the queue crafts on the way, and run-1788552801-73005 declared
+        // it lost at 360 s while the character was still crafting (queue 1 on
+        // the live game), then replanned around a craft that finished anyway.
+        let energy = world
+            .recipes
+            .get(recipe)
+            .map(|r| f64::from(*r.energy))
+            .unwrap_or(0.0);
+        self.sleep_for_action_result_until(
+            world,
+            action_id,
+            dispatched,
+            Self::craft_deadline(energy, count),
+        )
+        .await
     }
 
     pub async fn inventory_contents_at(
@@ -8188,5 +8219,32 @@ mod mining_reach_tests {
         assert_eq!(distance_to_rect(&Position::new(1., 1.), &rect), 0.);
         assert_eq!(distance_to_rect(&Position::new(5., 1.), &rect), 3.);
         assert_eq!(distance_to_rect(&Position::new(5., 6.), &rect), 5.);
+    }
+}
+
+#[cfg(test)]
+mod craft_deadline_tests {
+    use super::*;
+
+    /// The craft that was declared lost: 75 packs at 5 s each. The old flat
+    /// deadline was 360 s; the packs alone are 375 s before their gears.
+    #[test]
+    fn a_long_craft_gets_a_deadline_sized_from_its_recipe() {
+        let d = FactorioRcon::craft_deadline(5.0, 75);
+        assert!(
+            d > Duration::from_secs(375),
+            "packs alone take 375 s: {d:?}"
+        );
+        assert_eq!(d, Duration::from_secs_f64(5.0 * 75.0 * 3.0 + 60.0));
+    }
+
+    /// A short craft keeps the deadline every other action has.
+    #[test]
+    fn a_short_craft_keeps_the_flat_deadline() {
+        assert_eq!(FactorioRcon::craft_deadline(0.5, 1), ACTION_RESULT_DEADLINE);
+        assert_eq!(
+            FactorioRcon::craft_deadline(0.0, 100),
+            ACTION_RESULT_DEADLINE
+        );
     }
 }

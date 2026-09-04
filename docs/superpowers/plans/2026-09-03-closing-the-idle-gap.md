@@ -104,6 +104,48 @@ Two structural facts explain why nothing fills the idle:
   variant (`Have`, `Researched`, `Produced`, `Producing`, `All`) is
   demand-driven.
 
+## NEXT PHASE: red science. Rung 1 passes, rung 2 is stuck_silent
+
+`run-1788485718-45723` (`scripts/factory_stage2.lua`, roster `[1,2,3,4]`):
+
+- **Rung 1** `researched("automation")` — **satisfied**, 1 iteration, 263 steps.
+- **Rung 2** `producing("automation-science-pack", 6)` — **`stuck_silent`
+  after 4 iterations**, best 290 steps.
+
+### The symptom is now as sharp as it has ever been
+
+Each of the four iterations reported:
+
+```
+ran: success=194 pending=0 actions(failed=0 lost=0) walks(failed=0 lost=0)
+ran: success=216 pending=0 actions(failed=0 lost=0) walks(failed=0 lost=0)
+ran: success=243 pending=0 actions(failed=0 lost=0) walks(failed=0 lost=0)
+ran: success=231 pending=0 actions(failed=0 lost=0) walks(failed=0 lost=0)
+```
+
+**Every action succeeded. Nothing failed, nothing was lost. The goal was never
+satisfied.** So this is not an execution defect: **the planner produces a plan
+whose fully successful execution does not satisfy the goal it was made for.**
+
+That is a much better-posed question than "no cell has ever produced anything",
+which is where this stood at the start of the night. Tonight's fixes removed
+the execution failures that used to mask it — the lag clock, per-bot
+serialisation and the placement collision — and rung 1 now completes in 8.7
+minutes with zero failures.
+
+Note the step counts do **not** converge: 194, 216, 243, 231. Combined with the
+finding that `supervisor.lua` never calls `obs:recover()` and re-plans from
+scratch every iteration, each pass may be rebuilding rather than continuing —
+and `BUFFER_ENTITIES` decides what a replan can even see.
+
+Under investigation offline, where it reproduces in **4 seconds** rather than a
+20-minute run:
+
+```
+factorio-bot plan --world workspace/scripts/map.json \
+    --goal producing:automation-science-pack:6 --bots 1,2,3,4 --steps
+```
+
 ## TARGET MET AND CONFIRMED: 8.69 and 8.72 min
 
 **Two runs, both under target, 0.3% apart.**

@@ -354,6 +354,250 @@ function walk_leg_timeout_ticks(player, from_pos, to_pos)
 	return math.max(60, math.ceil((leg_length / speed) * 3))
 end
 
+-- A copy of where a character stands as a leg begins, or nil if it has no
+-- character to ask. Copied rather than referenced: `player.character.position`
+-- is read fresh every time, so holding the table would hold the *current*
+-- position and measure a distance of zero from itself.
+function walk_leg_origin(player)
+	local character = player.character
+	if character == nil then return nil end
+	local pos = character.position
+	return { x = pos.x, y = pos.y }
+end
+
+-- How far ahead of a stalled character to look for whatever it is pressed
+-- against, and how wide a box to look in.
+--
+-- The follower steers one axis-aligned step at a time, so at the instant a leg
+-- gives up the character is leaning into the *next* tile, not standing in it.
+-- 0.75 tiles ahead of `player.character.position` is past a character's own
+-- 0.2-tile half-width and into the thing it cannot get past; the 0.35 half-box
+-- is a little wider than the character so a blocker it is pressed against
+-- corner-first is still inside it.
+--
+-- These are deliberately small. A generous box would name a furnace two tiles
+-- to the side and read exactly like a furnace in the way, which is worse than
+-- saying nothing -- see `walk_stall_cause` for why "nothing findable" is a
+-- real answer here rather than a failure to look hard enough.
+WALK_STALL_PROBE_AHEAD = 0.75
+WALK_STALL_PROBE_HALF = 0.35
+
+-- Entity types that exist on the ground and are **not** in a character's way.
+--
+-- The trap this list exists for: `find_entities_filtered{area=...}` returns
+-- resources, and a bot stuck on an ore patch is standing in a solid block of
+-- them. Reporting `iron-ore` as the blocker would be a confident wrong answer
+-- on the single most common terrain a bot walks over -- resources collide on
+-- the resource layer only, which is why a character walks straight through
+-- them. Items on the ground, corpses, ghosts and flying robots are the same
+-- shape of mistake.
+--
+-- This is the fallible half of the probe: a type absent from this list and
+-- absent from a character's collision layers would be named as a blocker when
+-- it is not. `walk_stall_collides` below covers the general case (a prototype
+-- with no collision box at all cannot block anything); the list covers the
+-- ones that *have* a box and still do not collide with a character.
+WALK_STALL_PASSABLE_TYPES = {
+	["resource"] = true,
+	["item-entity"] = true,
+	["corpse"] = true,
+	["character-corpse"] = true,
+	["entity-ghost"] = true,
+	["tile-ghost"] = true,
+	["item-request-proxy"] = true,
+	["logistic-robot"] = true,
+	["construction-robot"] = true,
+	["combat-robot"] = true,
+	["smoke"] = true,
+	["smoke-with-trigger"] = true,
+	["particle-source"] = true,
+	["flying-text"] = true,
+	["highlight-box"] = true,
+	["arrow"] = true,
+	["explosion"] = true,
+	["projectile"] = true,
+	["beam"] = true,
+	["sticker"] = true,
+	["stream"] = true,
+	["speech-bubble"] = true,
+	["rocket-silo-rocket"] = true,
+	["rocket-silo-rocket-shadow"] = true,
+}
+
+-- Whether an entity has a footprint at all.
+--
+-- The general half of the passability test: a prototype whose collision box is
+-- empty in either axis occupies no space and can block nothing, whatever its
+-- type is. Catches the types `WALK_STALL_PASSABLE_TYPES` has never heard of,
+-- which is most of what a modded game would put on the ground.
+function walk_stall_collides(entity)
+	local box = entity.prototype.collision_box
+	if box == nil then return false end
+	return (box.right_bottom.x - box.left_top.x) > 0
+		and (box.right_bottom.y - box.left_top.y) > 0
+end
+
+-- Which of several things found in the probe box is the one to name.
+--
+-- A character first, and not because it is the likeliest -- it is the one
+-- blocker that **moves on its own**, so it is the only one whose presence
+-- changes what the caller should do next. A run lost a nine-minute plan to a
+-- bot parked in a footprint while mining, and the record it left named the
+-- ground. Everything below it is ranked by how specific an answer it is: a
+-- cliff and a built entity are facts about that tile, a rock or a tree is
+-- scenery that anything with a pickaxe can clear.
+function walk_stall_rank(entity)
+	local t = entity.type
+	if t == "character" then return 1 end
+	if t == "cliff" then return 2 end
+	if t == "tree" then return 5 end
+	if t == "simple-entity" then return 4 end
+	return 3
+end
+
+-- What to call one blocker, in the wording `crates/core/src/factorio/rcon.rs`
+-- parses (`walk_blocker`). The leading word is the class and everything up to
+-- ` on tile '` is the detail; both sides are pinned by
+-- `a_stalls_cause_is_read_from_the_mods_own_wording` in that file, which runs
+-- THIS function against a stub game and parses what it really produced --
+-- rather than asserting that some substring appears in this file, which cannot
+-- see a word that moved to a different place in the sentence.
+function walk_stall_describe(entity, acting_player)
+	local t = entity.type
+	if t == "character" then
+		-- `LuaEntity.player` is nil for a character nobody is driving. That is
+		-- not a hypothetical here: a disconnected bot leaves its character
+		-- standing exactly where it was, and it is still solid.
+		local blocker = entity.player
+		if blocker == nil then return "character (no player)" end
+		-- **What it is doing is the point of naming it.** `step_aside_from_footprint`
+		-- steers only a blocker that is neither walking nor mining, so a
+		-- blocker reported `(mining)` is one nothing is going to move, and a
+		-- caller waiting for it to wander off is waiting for nothing.
+		local state = storage.p[blocker.index]
+		local doing = "idle"
+		if state ~= nil then
+			if state.walking ~= nil then
+				doing = "walking"
+			elseif state.mining ~= nil then
+				doing = "mining"
+			end
+		end
+		return "character #" .. blocker.index .. " (" .. doing .. ")"
+	elseif t == "tree" then
+		return "tree '" .. entity.name .. "'"
+	elseif t == "simple-entity" then
+		-- Rocks are the only `simple-entity` vanilla puts on a map with a
+		-- collision box, and they are what this always is in practice.
+		return "rock '" .. entity.name .. "'"
+	elseif t == "cliff" then
+		return "cliff '" .. entity.name .. "'"
+	end
+	-- **"did we build it" is a different question from "what is it".** A
+	-- stone-furnace across the route is our own plan contradicting itself; a
+	-- biter nest is the map. Force names are compared rather than force
+	-- objects because a stub and a live game agree on the former only.
+	local ours = "theirs"
+	local mine = acting_player.force
+	if type(mine) == "table" then mine = mine.name end
+	local theirs = entity.force
+	if type(theirs) == "table" then theirs = theirs.name end
+	if mine ~= nil and mine == theirs then ours = "ours" end
+	return "entity '" .. entity.name .. "' (" .. ours .. ")"
+end
+
+-- **What was in the way**, asked of the game at the instant a leg gives up.
+--
+-- Before this existed a stalled walk reported where the bot was and where it
+-- was going and nothing about why it stopped, so the cause was never
+-- established: the Rust side asks for a fresh path, the fresh path usually
+-- works, and the same class of stall comes back next run. A placement
+-- collision that took a whole run plus a reconstruction from sampled positions
+-- to pin down was a bot parked in a footprint *while mining*; one line here
+-- would have said so at the time.
+--
+-- Returns the clause appended to `w.stuck`, in this grammar:
+--
+--     blocked at (<x>/<y>) by <class> <detail> on tile '<name>'
+--
+-- appended to the stall wording after `, moved <d> tiles, ` -- after both
+-- coordinates, so `walk_reports_stalled_leg` still fires and `walk_endpoints`
+-- (crates/scripting_lua/src/globals/record.rs) still reads `from` and
+-- `destination` out of the same string.
+--
+-- `on tile` is present whenever the game answered `get_tile`, blocker or not,
+-- because the ground is the answer when nothing is standing on it -- a leg
+-- steered into water finds no entity at all. `(+N more)` follows when the box
+-- held more than the one named.
+--
+-- **"nothing findable" is a real answer and must stay one.** It says the probe
+-- looked and the tile ahead is clear, which points at the pathfinder or at a
+-- character that had already moved -- a different bug from any of the ones
+-- above it. Widening the box until something is always found would turn that
+-- answer into a plausible wrong one.
+function walk_stall_cause(player, pos, dest, dx, dy)
+	-- The follower reduced dx/dy to signs before this is reached, so they are
+	-- the step it was trying to take. Both zero cannot happen with a live
+	-- waypoint -- the arrival branch would have claimed it -- but a probe must
+	-- not divide by zero over a case it merely believes impossible.
+	local sx, sy = dx, dy
+	if sx == 0 and sy == 0 then
+		sx = dest.x - pos.x
+		sy = dest.y - pos.y
+	end
+	local len = math.sqrt(sx * sx + sy * sy)
+	local cx, cy = pos.x, pos.y
+	if len > 0 then
+		-- Rounded to a thousandth of a tile, and rounded *before* the box is
+		-- built so the coordinate in the message is the one that was really
+		-- queried. Unlike the positions either side of it in this message,
+		-- this one is not observed -- it is `pos` plus a constant along a unit
+		-- step -- so a diagonal produces fourteen significant digits of
+		-- arithmetic noise in a line somebody has to read. A thousandth of a
+		-- tile is four orders of magnitude finer than anything here collides
+		-- at.
+		cx = math.floor((pos.x + (sx / len) * WALK_STALL_PROBE_AHEAD) * 1000 + 0.5) / 1000
+		cy = math.floor((pos.y + (sy / len) * WALK_STALL_PROBE_AHEAD) * 1000 + 0.5) / 1000
+	end
+
+	local surface = player.surface
+	local half = WALK_STALL_PROBE_HALF
+	local area = {
+		left_top = { x = cx - half, y = cy - half },
+		right_bottom = { x = cx + half, y = cy + half },
+	}
+	local best = nil
+	local best_rank = nil
+	local found = 0
+	local self_character = player.character
+	for _, entity in pairs(surface.find_entities_filtered{ area = area }) do
+		if entity.valid ~= false
+			and entity ~= self_character
+			and not WALK_STALL_PASSABLE_TYPES[entity.type]
+			and walk_stall_collides(entity)
+		then
+			found = found + 1
+			local rank = walk_stall_rank(entity)
+			if best_rank == nil or rank < best_rank then
+				best_rank = rank
+				best = entity
+			end
+		end
+	end
+
+	local cause = "nothing findable"
+	if best ~= nil then cause = walk_stall_describe(best, player) end
+	local msg = "blocked at " .. coord({ x = cx, y = cy }) .. " by " .. cause
+	local tile = surface.get_tile(cx, cy)
+	if tile ~= nil and tile.valid ~= false and tile.name ~= nil then
+		msg = msg .. " on tile '" .. tile.name .. "'"
+	end
+	if found > 1 then
+		msg = msg .. " (+" .. (found - 1) .. " more)"
+	end
+	return msg
+end
+
 --- Where a bot standing in a refused footprint is asked to stand instead, and
 --- how hard the game is asked to find it somewhere.
 ---
@@ -926,6 +1170,7 @@ function on_tick(event)
 					if (math.abs(dx) < 0.3 and math.abs(dy) < 0.3) then
 						w.idx = w.idx + 1
 						w.idx_tick = event.tick
+						w.idx_pos = { x = pos.x, y = pos.y }
 						if w.idx > #w.waypoints then
 							player.walking_state = {walking=false}
 							action_completed(event.tick, w.action_id)
@@ -1010,10 +1255,44 @@ function on_tick(event)
 						-- is exactly the leg whose failure the planner most needs to be
 						-- honest about.
 						print("Player is stuck on leg "..w.idx.." of "..#w.waypoints.." at "..coord(pos)..", failing the walk")
+						-- **Ask the game what is there, now, while it still is.**
+						-- This is the only instant at which the cause of a stall
+						-- can be observed: the Rust side answers a stall by asking
+						-- for a fresh path, which usually works, so by the time
+						-- anything else looks the obstruction is behind a bot that
+						-- walked around it.
+						--
+						-- Under `pcall` because it runs inside `on_tick`: an error
+						-- raised here would take the whole handler down for every
+						-- bot on the surface, and this is an observation, not a
+						-- part of walking. A probe that raises reports itself --
+						-- `blocker unknown (probe failed: ...)` -- rather than
+						-- leaving the message looking like the old one.
+						local probed, cause = pcall(walk_stall_cause, player, pos, dest, dx, dy)
+						if not probed then
+							cause = "blocker unknown (probe failed: " .. tostring(cause) .. ")"
+						end
+						-- **`made no progress` is measured as a leg TIMEOUT, not as a
+						-- position delta**, and it has said so since long before this
+						-- probe existed: the check above is `event.tick - w.idx_tick >
+						-- w.leg_timeout`, which fires just as readily for a leg that
+						-- was walked slowly as for one that was wedged. Those are
+						-- different bugs -- a wrong `walk_leg_timeout_ticks` estimate
+						-- against something solid in the way -- and the wording alone
+						-- cannot tell them apart. The distance actually covered can,
+						-- and it is the number that makes `nothing findable` readable:
+						-- nothing in the way and nothing moved is the pathfinder's
+						-- problem, nothing in the way and three tiles covered is this
+						-- timeout's.
+						local moved = "unknown"
+						if w.idx_pos ~= nil then
+							moved = string.format("%.2f", distance(w.idx_pos, pos))
+						end
 						w.stuck = "ERROR: stuck while walking, leg " .. w.idx .. " of "
 							.. #w.waypoints .. " made no progress for "
 							.. (event.tick - w.idx_tick) .. " ticks from "
 							.. coord(pos) .. " to " .. coord(dest)
+							.. ", moved " .. moved .. " tiles, " .. cause
 						-- Nil the waypoint being steered at rather than advancing past
 						-- it: the `dest == nil` arm above then clears `walking` and
 						-- reports `w.stuck` on the next tick, which is the one exit a
@@ -2823,6 +3102,10 @@ function start_walk_waypoints(action_id, player_id, waypoints, step_aside)
 		waypoints = tmp,
 		action_id = action_id,
 		idx_tick = game.tick,
+		-- Where this leg started, so a stall can say how far the character
+		-- actually got. See `walk_stall_cause` for why the answer is not
+		-- already in the message.
+		idx_pos = walk_leg_origin(player),
 		leg_timeout = leg_timeout,
 		step_aside = step_aside,
 	}

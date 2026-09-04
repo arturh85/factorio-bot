@@ -22,7 +22,7 @@ use crate::types::{
 use miette::{Context, IntoDiagnostic, Report, Result, miette};
 use parking_lot::RwLock;
 use rcon::Connection;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::ops::Add;
@@ -1297,6 +1297,344 @@ pub fn walk_reports_stalled_leg(message: &str) -> bool {
     message.contains(WALK_STUCK) && message.contains(WALK_LEG_STALLED)
 }
 
+/// The clause BotBridge appends to a stalled walk, naming **what was in the
+/// way** at the instant the leg gave up.
+///
+/// # Why the mod has to be the one to look
+///
+/// A stall used to report where the bot stood and where it was steering and
+/// nothing at all about why it stopped, so the cause was never established:
+/// [`FactorioRcon::move_player_timed`] answers a stall by asking for a fresh
+/// path, the fresh path usually works, and the bot walks around whatever it
+/// was. By the time anything else could look, the obstruction is behind it.
+/// The same class of stall then recurs run after run with no record of a
+/// single cause. `control.lua`'s `walk_stall_cause` runs one
+/// `find_entities_filtered` at the moment of the stall, which is the only
+/// moment the answer exists.
+///
+/// # The grammar
+///
+/// ```text
+/// ... to (-10.5/-18.5), moved 0.02 tiles, blocked at (-10.437/-18.702)
+///     by <cause> on tile '<name>'
+/// ```
+///
+/// with `(+N more)` when the probe box held more than the one thing it named,
+/// and `blocker unknown (probe failed: <lua error>)` in place of `blocked at`
+/// when the probe itself raised. `<cause>` is one of `character #3 (mining)`,
+/// `character (no player)`, `entity 'stone-furnace' (ours)`, `tree 'tree-02'`,
+/// `rock 'rock-huge'`, `cliff 'cliff'` or `nothing findable`.
+///
+/// **The whole clause sits after both coordinates**, so
+/// [`walk_reports_stalled_leg`] still matches and `walk_endpoints`
+/// (`crates/scripting_lua/src/globals/record.rs`) still reads `from` and
+/// `destination` off the same string. The cause therefore reaches
+/// `events.jsonl` for free, inside `EventKind::WalkSettled`'s `error` --
+/// `WalkFailure` has no structured field for it yet, and giving it one is a
+/// one-line change in `crates/core/src/record/mod.rs` plus a one-line change
+/// in `classify_walk_failure`; `tools/run_analysis.py` reads it out of the
+/// text in the meantime.
+///
+/// Both halves are pinned by `a_stalls_cause_is_read_from_the_mods_own_wording`
+/// below, which runs the mod's own function against a stub game and parses its
+/// real output with this parser -- the same reason
+/// [`walk_reports_stalled_leg`]'s wording is read out of `control.lua` rather
+/// than described.
+const WALK_BLOCKED_AT: &str = "blocked at ";
+const WALK_BLOCKED_BY: &str = " by ";
+const WALK_ON_TILE: &str = " on tile '";
+const WALK_MOVED: &str = ", moved ";
+const WALK_MOVED_UNIT: &str = " tiles";
+const WALK_PROBE_FAILED: &str = "blocker unknown (probe failed: ";
+const WALK_NOTHING_FINDABLE: &str = "nothing findable";
+
+/// What kind of thing a stalled walk was pressed against.
+///
+/// **Four of these are not degrees of the same answer.**
+/// [`WalkBlockerKind::Character`] is the only blocker that moves on its own, so
+/// it is the only one where "wait and ask again" is a strategy rather than a
+/// hope -- and its `activity` decides even that, because
+/// `step_aside_from_footprint` steers only a blocker that is neither walking
+/// nor mining, so a `mining` blocker is one nothing is going to move.
+/// [`WalkBlockerKind::Nothing`] says the probe looked and the tile was clear,
+/// which points at the pathfinder rather than at the world.
+/// [`WalkBlockerKind::ProbeFailed`] says the game raised while being asked, and
+/// [`WalkBlockerKind::Unknown`] says *this build could not read what the mod
+/// said* -- deliberately distinct, because collapsing them is how a reworded
+/// mod turns into a silently empty column.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WalkBlockerKind {
+    /// Another bot's character. Transient: it may walk off on its own, and
+    /// `activity` says whether anything is going to ask it to.
+    Character,
+    /// A built entity -- `ours` says whether this run put it there, which is
+    /// the difference between the plan contradicting itself and the map.
+    Entity,
+    /// A tree. Scenery, and clearable.
+    Tree,
+    /// A rock (`simple-entity`). Scenery, and clearable.
+    Rock,
+    /// A cliff. Not clearable without explosives, and a fact about that tile.
+    Cliff,
+    /// The probe looked and found nothing solid. **An answer, not an absence**
+    /// -- it means the obstruction was already gone, or there never was one and
+    /// the path itself was the problem.
+    Nothing,
+    /// `walk_stall_cause` raised inside `on_tick` and the `pcall` caught it.
+    /// `detail` carries the Lua error.
+    ProbeFailed,
+    /// The mod said something this build's grammar does not cover. `detail`
+    /// carries it verbatim so a reader is never left with an empty answer.
+    Unknown,
+}
+
+/// What a stalled walk was pressed against, read out of the mod's own clause.
+///
+/// Carried *beside* the error string rather than instead of it, for the same
+/// reason `WalkFailure` is: the string is what a person reads, this is what a
+/// query groups by.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WalkBlocker {
+    pub kind: WalkBlockerKind,
+    /// The bot standing in the way. `None` for a character nobody is driving --
+    /// a disconnected bot leaves its character behind and it is still solid.
+    pub player: Option<PlayerId>,
+    /// What that bot was doing: `walking`, `mining` or `idle`.
+    pub activity: Option<String>,
+    /// The prototype name of the entity, tree, rock or cliff.
+    pub name: Option<String>,
+    /// Whether a blocking entity is on the acting bot's own force. `None` for
+    /// everything that is not [`WalkBlockerKind::Entity`].
+    pub ours: Option<bool>,
+    /// **Observed.** Where the probe looked: one step ahead of where the
+    /// character actually stood, not the waypoint it was steering to.
+    pub at: Option<Position>,
+    /// The tile under the probe. Present whether or not an entity was found,
+    /// because the ground is the answer when nothing is standing on it.
+    pub tile: Option<String>,
+    /// How many *other* blocking things shared the probe box.
+    pub others: u32,
+    /// **Observed.** How far the character actually travelled on the leg that
+    /// gave up.
+    ///
+    /// The reason this is not redundant with the wording next to it:
+    /// `made no progress for <t> ticks` is a **leg timeout**, measured as
+    /// `event.tick - w.idx_tick > w.leg_timeout` and nothing else, so it fires
+    /// as readily for a leg that was walked slowly as for one that was wedged.
+    /// It has always overstated what it measured. This is the measurement, and
+    /// it is what makes [`WalkBlockerKind::Nothing`] readable: nothing in the
+    /// way and nothing moved is a pathfinder problem, nothing in the way and
+    /// three tiles covered is `walk_leg_timeout_ticks` being wrong.
+    ///
+    /// `None` when the mod could not say -- a walk still in flight across a
+    /// save written by a build that did not stamp the leg's origin, the same
+    /// case the `w.stuck == true` fallback covers.
+    pub moved_tiles: Option<f64>,
+    /// The unparsed cause text, for [`WalkBlockerKind::ProbeFailed`] and
+    /// [`WalkBlockerKind::Unknown`].
+    pub detail: Option<String>,
+}
+
+impl WalkBlocker {
+    fn of(kind: WalkBlockerKind) -> Self {
+        Self {
+            kind,
+            player: None,
+            activity: None,
+            name: None,
+            ours: None,
+            at: None,
+            tile: None,
+            others: 0,
+            moved_tiles: None,
+            detail: None,
+        }
+    }
+
+    /// A short, stable rendering for a line somebody reads while the run is
+    /// happening. The full clause is still in the error string.
+    pub fn summary(&self) -> String {
+        match self.kind {
+            WalkBlockerKind::Character => match (self.player, self.activity.as_deref()) {
+                (Some(player), Some(activity)) => format!("bot #{player}, {activity}"),
+                (Some(player), None) => format!("bot #{player}"),
+                // The mod says `character (no player)` with no activity for a
+                // character nobody is driving, and `character #N (doing)`
+                // otherwise -- so an activity with no id means the id itself
+                // did not parse, which is a different thing and must not read
+                // as "nobody is driving it".
+                (None, Some(activity)) => format!("an unnamed character, {activity}"),
+                (None, None) => "an undriven character".to_string(),
+            },
+            WalkBlockerKind::Entity => match (self.name.as_deref(), self.ours) {
+                (Some(name), Some(true)) => format!("our own {name}"),
+                (Some(name), _) => name.to_string(),
+                (None, _) => "an entity".to_string(),
+            },
+            WalkBlockerKind::Tree | WalkBlockerKind::Rock | WalkBlockerKind::Cliff => self
+                .name
+                .clone()
+                .unwrap_or_else(|| format!("{:?}", self.kind).to_lowercase()),
+            WalkBlockerKind::Nothing => match (self.tile.as_deref(), self.moved_tiles) {
+                (Some(tile), Some(moved)) => format!("nothing, on {tile}, after {moved} tiles"),
+                (Some(tile), None) => format!("nothing, on {tile}"),
+                (None, Some(moved)) => format!("nothing, after {moved} tiles"),
+                (None, None) => "nothing".to_string(),
+            },
+            WalkBlockerKind::ProbeFailed => "unknown -- the probe raised".to_string(),
+            WalkBlockerKind::Unknown => {
+                self.detail.clone().unwrap_or_else(|| "unknown".to_string())
+            }
+        }
+    }
+}
+
+/// One `(x/y)` pair as the mod's `coord()` writes it.
+///
+/// Nothing here rounds. The mod already rounded this one -- to a thousandth of
+/// a tile, and *before* building the box it queried, so the number in the
+/// message is the number the game was asked about. Rounding again on this side
+/// would put the point somewhere the probe never looked, which is the same
+/// mistake `walk_endpoints` refuses to make with the two observed positions
+/// beside it.
+fn parse_probe_coord(text: &str) -> Option<Position> {
+    let text = text.trim();
+    let inner = text.strip_prefix('(')?.strip_suffix(')')?;
+    let (x, y) = inner.split_once('/')?;
+    Some(Position::new(
+        x.trim().parse().ok()?,
+        y.trim().parse().ok()?,
+    ))
+}
+
+/// The contents of the first `'...'` in `text`.
+fn parse_quoted(text: &str) -> Option<String> {
+    let (_, rest) = text.split_once('\'')?;
+    let (name, _) = rest.split_once('\'')?;
+    Some(name.to_string())
+}
+
+/// Reads BotBridge's blocker clause out of a stalled walk's error text.
+///
+/// `None` means **the message carries no clause at all** -- an archived run
+/// from a build before the probe existed, or a walk failure that is not a
+/// stall. It never means "there was nothing in the way": that is
+/// [`WalkBlockerKind::Nothing`], and it never means "this build cannot read
+/// it": that is [`WalkBlockerKind::Unknown`]. Three answers, because a reader
+/// who cannot tell them apart cannot tell a fixed run from a broken parser.
+pub fn walk_blocker(message: &str) -> Option<WalkBlocker> {
+    // Read before the branch: the mod emits it whether or not the probe
+    // itself got an answer, because it is measured by the follower rather
+    // than asked of the game.
+    let moved_tiles = parse_moved_tiles(message);
+    if let Some((_, why)) = message.split_once(WALK_PROBE_FAILED) {
+        let mut blocker = WalkBlocker::of(WalkBlockerKind::ProbeFailed);
+        blocker.detail = Some(why.trim_end().trim_end_matches(')').trim().to_string());
+        blocker.moved_tiles = moved_tiles;
+        return Some(blocker);
+    }
+    let (_, tail) = message.split_once(WALK_BLOCKED_AT)?;
+    let (at, tail) = tail.split_once(WALK_BLOCKED_BY)?;
+    let at = parse_probe_coord(at);
+    let (cause, tile) = match tail.split_once(WALK_ON_TILE) {
+        Some((cause, rest)) => (cause, rest.split_once('\'').map(|(t, _)| t.to_string())),
+        None => (tail, None),
+    };
+    // `(+N more)` trails the tile clause when the game answered `get_tile` and
+    // the cause otherwise, so it is read off the whole tail and taken off the
+    // cause either way.
+    let others = parse_more_suffix(tail);
+    let cause = cause.split(" (+").next().unwrap_or(cause).trim();
+
+    let mut blocker = if let Some(rest) = cause.strip_prefix("character") {
+        let rest = rest.trim();
+        let mut blocker = WalkBlocker::of(WalkBlockerKind::Character);
+        if rest != "(no player)" {
+            blocker.player = rest
+                .strip_prefix('#')
+                .map(|digits| digits.trim_start())
+                .map(|digits| {
+                    digits
+                        .split(|c: char| !c.is_ascii_digit())
+                        .next()
+                        .unwrap_or_default()
+                })
+                .and_then(|digits| digits.parse().ok());
+            blocker.activity = rest
+                .split_once('(')
+                .and_then(|(_, rest)| rest.split_once(')'))
+                .map(|(activity, _)| activity.trim().to_string());
+        }
+        blocker
+    } else if let Some(rest) = cause.strip_prefix("entity ") {
+        let mut blocker = WalkBlocker::of(WalkBlockerKind::Entity);
+        blocker.name = parse_quoted(rest);
+        blocker.ours = Some(rest.contains("(ours)"));
+        blocker
+    } else if let Some(rest) = cause.strip_prefix("tree ") {
+        let mut blocker = WalkBlocker::of(WalkBlockerKind::Tree);
+        blocker.name = parse_quoted(rest);
+        blocker
+    } else if let Some(rest) = cause.strip_prefix("rock ") {
+        let mut blocker = WalkBlocker::of(WalkBlockerKind::Rock);
+        blocker.name = parse_quoted(rest);
+        blocker
+    } else if let Some(rest) = cause.strip_prefix("cliff ") {
+        let mut blocker = WalkBlocker::of(WalkBlockerKind::Cliff);
+        blocker.name = parse_quoted(rest);
+        blocker
+    } else if cause.starts_with(WALK_NOTHING_FINDABLE) {
+        WalkBlocker::of(WalkBlockerKind::Nothing)
+    } else {
+        // **Not `None`.** The mod said something; this build does not know the
+        // word. Saying so, with the words, is the difference between a reader
+        // seeing a new wording and a reader seeing an empty column -- which is
+        // exactly how `classify_walk_failure` once lost 19 of 20 failures to
+        // `other`.
+        let mut blocker = WalkBlocker::of(WalkBlockerKind::Unknown);
+        blocker.detail = Some(cause.to_string());
+        blocker
+    };
+    blocker.at = at;
+    blocker.tile = tile;
+    blocker.others = others;
+    blocker.moved_tiles = moved_tiles;
+    Some(blocker)
+}
+
+/// `, moved <d> tiles` out of the stall wording.
+///
+/// `None` for the mod's own `moved unknown tiles` as well as for a message
+/// that has no such clause: both mean "not measured", and neither may be read
+/// as zero -- reporting a wedged bot for a leg nobody timed is the same class
+/// of confident wrong answer as naming ore as a blocker.
+fn parse_moved_tiles(message: &str) -> Option<f64> {
+    let (_, tail) = message.split_once(WALK_MOVED)?;
+    let (value, _) = tail.split_once(WALK_MOVED_UNIT)?;
+    value.trim().parse().ok()
+}
+
+/// The digits at the start of `text`, or zero. Used for the `(+N more)` count,
+/// where a missing or unreadable number means "no others named" rather than an
+/// error: the count is a hint about the probe box, not a fact anything branches
+/// on.
+fn parse_leading_u32(text: &str) -> u32 {
+    text.trim_start()
+        .split(|c: char| !c.is_ascii_digit())
+        .next()
+        .unwrap_or_default()
+        .parse()
+        .unwrap_or(0)
+}
+
+/// `(+N more)` wherever it sits in the clause.
+fn parse_more_suffix(tail: &str) -> u32 {
+    tail.split_once(" (+")
+        .map(|(_, rest)| parse_leading_u32(rest))
+        .unwrap_or(0)
+}
+
 /// [`walk_reports_stalled_leg`] against the failure a walk actually comes back
 /// with.
 ///
@@ -2458,11 +2796,31 @@ impl FactorioRcon {
             match outcome {
                 Err(failure) if attempts_left > 1 && is_stalled_walk(&failure) => {
                     attempts_left -= 1;
+                    // The cause first, in a fixed shape, because this line is
+                    // read while the run is happening and the interesting word
+                    // used to be buried mid-sentence in a message whose front
+                    // half never varies. The full clause is still in
+                    // `failure.error` behind it -- the summary is a lead, not a
+                    // replacement, and a message with no clause at all (an
+                    // older mod) simply has no lead.
+                    //
+                    // Read off the same `RconError::message` [`is_stalled_walk`]
+                    // matched on, not off `Report::to_string()`: the latter
+                    // renders only the outermost error, so a wrapper added
+                    // between here and the mod would silently take the cause
+                    // away while everything still compiled.
+                    let blocked_by = failure
+                        .error
+                        .downcast_ref::<RconError>()
+                        .and_then(|refused| walk_blocker(&refused.message))
+                        .map(|blocker| format!("blocked by {}, ", blocker.summary()))
+                        .unwrap_or_default();
                     warn!(
-                        "#{} stalled walking to {}/{} ({}), asking the game for a fresh path ({} attempts left)",
+                        "#{} stalled walking to {}/{} ({}{}), asking the game for a fresh path ({} attempts left)",
                         player_id,
                         goal.x(),
                         goal.y(),
+                        blocked_by,
                         failure.error,
                         attempts_left
                     );
@@ -5479,6 +5837,355 @@ mod transfer_guarantee_tests {
             !lines[0].contains(CAN_PLACE_REFUSAL),
             "a character is not a fact about the ground, and the refusal ledger \
              never expires; got {lines:?}"
+        );
+    }
+
+    /// Enough of the API for `walk_stall_cause` to run: a surface that reports
+    /// `entities` inside the probe box and `tile` under it, and a `storage.p`
+    /// saying what each bot is doing.
+    ///
+    /// The acting player stands at the origin steering east, so the probe point
+    /// is a fixed `(0.75/0.0)` and the coordinate in the clause is checkable
+    /// rather than incidental.
+    fn stub_walk_probe(entities: &str, tile: &str, storage_p: &str) -> String {
+        format!(
+            r#"
+            local function auto()
+                local t = {{}}
+                setmetatable(t, {{ __index = function(tbl, k)
+                    local v = auto(); rawset(tbl, k, v); return v
+                end }})
+                return t
+            end
+            defines = auto()
+            local function noop() end
+            local function nooptable()
+                return setmetatable({{}}, {{ __index = function() return noop end }})
+            end
+            script = nooptable()
+            remote = nooptable()
+            commands = nooptable()
+            helpers = nooptable()
+            require = function() return {{}} end
+            print = noop
+
+            _rcon_lines = {{}}
+            rcon = {{ print = function(s) _rcon_lines[#_rcon_lines + 1] = tostring(s) end }}
+
+            storage = {{ p = {storage_p} }}
+
+            local found = {entities}
+            local surface = {{
+                find_entities_filtered = function(args) return found end,
+                get_tile = function(x, y) return {tile} end,
+            }}
+            local character = {{ type = "character", name = "character" }}
+            local player = {{
+                index = 1,
+                name = "bot1",
+                position = {{ x = 0, y = 0 }},
+                character = character,
+                force = {{ name = "player" }},
+                surface = surface,
+            }}
+            game = {{
+                tick = {tick},
+                players = {{ player }},
+                forces = {{ player = {{ print = noop }} }},
+            }}
+        "#,
+            entities = entities,
+            tile = tile,
+            storage_p = storage_p,
+            tick = STUB_TICK,
+        )
+    }
+
+    /// A blocking entity of `kind`/`name`, with a real collision box so
+    /// `walk_stall_collides` keeps it.
+    fn blocker_entity(kind: &str, name: &str, extra: &str) -> String {
+        format!(
+            r#"{{ valid = true, type = "{kind}", name = "{name}", force = {{ name = "player" }},
+                  prototype = {{ collision_box = {{
+                      left_top = {{ x = -0.4, y = -0.4 }},
+                      right_bottom = {{ x = 0.4, y = 0.4 }} }} }},
+                  {extra} }}"#
+        )
+    }
+
+    /// Runs the mod's own probe and hands back the clause it produced.
+    fn probe(entities: &str, tile: &str, storage_p: &str) -> String {
+        let printed = run_handler(
+            stub_walk_probe(entities, tile, storage_p),
+            "rcon.print(walk_stall_cause(game.players[1], {x = 0, y = 0}, {x = 5, y = 0}, 1, 0))",
+        );
+        assert_eq!(
+            printed.len(),
+            1,
+            "the probe returns one clause; got {printed:?}"
+        );
+        printed[0].clone()
+    }
+
+    /// **The seam this whole feature hangs on**, driven from both ends: the
+    /// mod's real `walk_stall_cause` runs against a stub game, and
+    /// [`walk_blocker`] parses the string it actually produced.
+    ///
+    /// Pinned this way rather than by asserting a substring appears in
+    /// `control.lua`, because the two halves can disagree in ways a substring
+    /// cannot see -- a class word moved to a different position in the
+    /// sentence, a quote style changed, a coordinate rendered differently. The
+    /// failure mode being guarded against has already happened twice here:
+    /// `classify_walk_failure` lost 19 of 20 walk failures to `other` because
+    /// it did not know the wording the mod emitted, and `run_analysis.py`
+    /// matched the *mining* refusal's wording for a *placement* refusal and
+    /// agreed with the record for the wrong reason. Both were silent.
+    #[test]
+    fn a_stalls_cause_is_read_from_the_mods_own_wording() {
+        let grass = r#"{ valid = true, name = "grass-1" }"#;
+        let no_bots = "{}";
+
+        // A character, and **what it is doing**, which is the distinction the
+        // feature exists for: `step_aside_from_footprint` steers only a blocker
+        // that is neither walking nor mining, so a blocker reported `mining` is
+        // one nothing is going to move -- the exact case that cost a run.
+        let clause = probe(
+            &format!(
+                "{{ {} }}",
+                blocker_entity("character", "character", r#"player = { index = 3 }"#)
+            ),
+            grass,
+            "{ [3] = { mining = { action_id = 7 } } }",
+        );
+        let blocker = walk_blocker(&clause).unwrap_or_else(|| panic!("unparsed: {clause}"));
+        assert_eq!(blocker.kind, WalkBlockerKind::Character, "{clause}");
+        assert_eq!(blocker.player, Some(3), "{clause}");
+        assert_eq!(blocker.activity.as_deref(), Some("mining"), "{clause}");
+        assert_eq!(blocker.tile.as_deref(), Some("grass-1"), "{clause}");
+        assert_eq!(
+            blocker.at,
+            Some(Position::new(0.75, 0.0)),
+            "the probe looks one step ahead of where the character stands, not at \
+             the waypoint: {clause}"
+        );
+        assert_eq!(blocker.others, 0, "{clause}");
+
+        // The same character with nothing recorded against it is idle, not
+        // unknown.
+        let clause = probe(
+            &format!(
+                "{{ {} }}",
+                blocker_entity("character", "character", r#"player = { index = 3 }"#)
+            ),
+            grass,
+            no_bots,
+        );
+        assert_eq!(
+            walk_blocker(&clause).and_then(|b| b.activity),
+            Some("idle".to_string()),
+            "{clause}"
+        );
+
+        // A character nobody is driving is still solid, and must not be
+        // reported as a bot that could be asked to move.
+        let clause = probe(
+            &format!("{{ {} }}", blocker_entity("character", "character", "")),
+            grass,
+            no_bots,
+        );
+        let blocker = walk_blocker(&clause).unwrap_or_else(|| panic!("unparsed: {clause}"));
+        assert_eq!(blocker.kind, WalkBlockerKind::Character, "{clause}");
+        assert_eq!(blocker.player, None, "{clause}");
+
+        // Something we built. `ours` is the difference between the plan
+        // contradicting itself and the map being in the way.
+        let clause = probe(
+            &format!("{{ {} }}", blocker_entity("furnace", "stone-furnace", "")),
+            grass,
+            no_bots,
+        );
+        let blocker = walk_blocker(&clause).unwrap_or_else(|| panic!("unparsed: {clause}"));
+        assert_eq!(blocker.kind, WalkBlockerKind::Entity, "{clause}");
+        assert_eq!(blocker.name.as_deref(), Some("stone-furnace"), "{clause}");
+        assert_eq!(blocker.ours, Some(true), "{clause}");
+
+        // Scenery.
+        for (kind, name, expected) in [
+            ("tree", "tree-02", WalkBlockerKind::Tree),
+            ("simple-entity", "rock-huge", WalkBlockerKind::Rock),
+            ("cliff", "cliff", WalkBlockerKind::Cliff),
+        ] {
+            let clause = probe(
+                &format!("{{ {} }}", blocker_entity(kind, name, "")),
+                grass,
+                no_bots,
+            );
+            let blocker = walk_blocker(&clause).unwrap_or_else(|| panic!("unparsed: {clause}"));
+            assert_eq!(blocker.kind, expected, "{clause}");
+            assert_eq!(blocker.name.as_deref(), Some(name), "{clause}");
+            assert_eq!(
+                blocker.ours, None,
+                "only a built entity is ours or theirs: {clause}"
+            );
+        }
+
+        // **Nothing findable is an answer.** It says the tile ahead was clear,
+        // which points at the pathfinder rather than at the world -- and the
+        // tile is still named, because the ground is the answer when nothing
+        // is standing on it.
+        let clause = probe("{}", r#"{ valid = true, name = "water" }"#, no_bots);
+        let blocker = walk_blocker(&clause).unwrap_or_else(|| panic!("unparsed: {clause}"));
+        assert_eq!(blocker.kind, WalkBlockerKind::Nothing, "{clause}");
+        assert_eq!(blocker.tile.as_deref(), Some("water"), "{clause}");
+
+        // **Ore is not a blocker.** A bot stuck on an ore patch stands in a
+        // solid block of resource entities, and naming one would be a
+        // confident wrong answer on the most common terrain a bot walks over.
+        let clause = probe(
+            &format!("{{ {} }}", blocker_entity("resource", "iron-ore", "")),
+            grass,
+            no_bots,
+        );
+        assert_eq!(
+            walk_blocker(&clause).map(|b| b.kind),
+            Some(WalkBlockerKind::Nothing),
+            "resources collide on the resource layer only: {clause}"
+        );
+
+        // Neither is anything with no footprint, whatever its type -- the
+        // general half of the test, which covers types this list has never
+        // heard of.
+        let clause = probe(
+            r#"{ { valid = true, type = "some-mod-thing", name = "marker",
+                   prototype = { collision_box = {
+                       left_top = { x = 0, y = 0 },
+                       right_bottom = { x = 0, y = 0 } } } } }"#,
+            grass,
+            no_bots,
+        );
+        assert_eq!(
+            walk_blocker(&clause).map(|b| b.kind),
+            Some(WalkBlockerKind::Nothing),
+            "a prototype with an empty collision box occupies nothing: {clause}"
+        );
+
+        // A crowded box names the one that matters and says how many others
+        // there were, rather than picking one and hiding the rest. The
+        // character wins because it is the only blocker that moves on its own.
+        let clause = probe(
+            &format!(
+                "{{ {}, {} }}",
+                blocker_entity("tree", "tree-02", ""),
+                blocker_entity("character", "character", r#"player = { index = 4 }"#)
+            ),
+            grass,
+            "{ [4] = { walking = { idx = 1 } } }",
+        );
+        let blocker = walk_blocker(&clause).unwrap_or_else(|| panic!("unparsed: {clause}"));
+        assert_eq!(blocker.kind, WalkBlockerKind::Character, "{clause}");
+        assert_eq!(blocker.activity.as_deref(), Some("walking"), "{clause}");
+        assert_eq!(blocker.others, 1, "{clause}");
+    }
+
+    /// The clause is appended to the stall wording the retry already matches,
+    /// and appended **after** the two coordinates -- so
+    /// [`walk_reports_stalled_leg`] still fires and the archive's endpoint
+    /// parser (`walk_endpoints`, `crates/scripting_lua/src/globals/record.rs`)
+    /// still reads `from` and `destination` out of the same string.
+    ///
+    /// This is the regression that would otherwise be found in a run: a cause
+    /// bought at the price of the retry that made stalls survivable.
+    #[test]
+    fn the_cause_rides_on_the_stall_wording_without_displacing_it() {
+        let stall = "ERROR: stuck while walking, leg 9 of 10 made no progress for 61 ticks \
+                     from (-9.90625/-18.171875) to (-10.5/-18.5), moved 0.02 tiles, \
+                     blocked at (-10.65625/-18.5) by character #3 (mining) on tile 'grass-1'";
+        assert!(
+            walk_reports_stalled_leg(stall),
+            "the cause must not cost the retry"
+        );
+        let blocker = walk_blocker(stall).expect("the clause is there");
+        assert_eq!(blocker.kind, WalkBlockerKind::Character);
+        assert_eq!(blocker.summary(), "bot #3, mining");
+        assert_eq!(blocker.moved_tiles, Some(0.02));
+
+        // **The stall wording is a leg TIMEOUT and always has been**, so the
+        // distance is the only thing that says whether the character was
+        // wedged. A leg that covered three tiles and ran out of clock is not
+        // the same event as one that covered none, and before this the record
+        // called both "made no progress".
+        let slow = "ERROR: stuck while walking, leg 2 of 4 made no progress for 240 ticks \
+                    from (1.0/2.0) to (9.0/2.0), moved 3.40 tiles, blocked at (1.75/2.0) \
+                    by nothing findable on tile 'grass-1'";
+        let blocker = walk_blocker(slow).expect("the clause is there");
+        assert_eq!(blocker.kind, WalkBlockerKind::Nothing);
+        assert_eq!(blocker.moved_tiles, Some(3.4));
+        assert_eq!(blocker.summary(), "nothing, on grass-1, after 3.4 tiles");
+
+        // A walk crossing a save written by a build that did not stamp the
+        // leg's origin says `unknown`, and `unknown` is not zero.
+        let unmeasured = "... made no progress for 61 ticks from (1.0/2.0) to (9.0/2.0), \
+                          moved unknown tiles, blocked at (1.75/2.0) by nothing findable";
+        assert_eq!(
+            walk_blocker(unmeasured)
+                .expect("the clause is there")
+                .moved_tiles,
+            None,
+            "not measured must never read as `did not move`"
+        );
+
+        // And the mod really does append it: the follower's own source, not a
+        // description of it.
+        assert!(
+            CONTROL_LUA.contains(r#".. ", moved " .. moved .. " tiles, " .. cause"#),
+            "the stall no longer carries a cause clause and a distance"
+        );
+        assert!(
+            CONTROL_LUA.contains(WALK_PROBE_FAILED),
+            "a probe that raises must still say so, not fall back to the old \
+             message: {WALK_PROBE_FAILED:?}"
+        );
+    }
+
+    /// **Three answers, not two.** A message with no clause is an older build;
+    /// a clause this parser cannot read is a reworded mod; a clause saying
+    /// nothing was there is a fact about the world. A reader who cannot tell
+    /// them apart cannot tell a fixed run from a broken parser -- which is
+    /// exactly what "19 of 20 failures were `other`" looked like from outside.
+    #[test]
+    fn a_missing_cause_an_unreadable_one_and_an_empty_one_are_three_answers() {
+        assert_eq!(
+            walk_blocker(
+                "ERROR: stuck while walking, leg 3 of 12 made no progress for 187 ticks \
+                 from (6.9/30.1) to (-22.3/18.2)"
+            ),
+            None,
+            "an archived run from before the probe existed says nothing, and must \
+             not be read as saying nothing was there"
+        );
+        let unreadable = walk_blocker(
+            "... made no progress ..., blocked at (1.5/2.5) by hovercraft 'thing' on tile 'grass-1'",
+        )
+        .expect("a clause is present");
+        assert_eq!(unreadable.kind, WalkBlockerKind::Unknown);
+        assert_eq!(
+            unreadable.detail.as_deref(),
+            Some("hovercraft 'thing'"),
+            "the words the mod used survive, so a reader sees the new wording \
+             instead of an empty column"
+        );
+        assert_eq!(unreadable.tile.as_deref(), Some("grass-1"));
+
+        let raised = walk_blocker(
+            "... made no progress ..., blocker unknown (probe failed: control.lua:12: \
+             attempt to index a nil value)",
+        )
+        .expect("a clause is present");
+        assert_eq!(raised.kind, WalkBlockerKind::ProbeFailed);
+        assert_eq!(
+            raised.detail.as_deref(),
+            Some("control.lua:12: attempt to index a nil value"),
+            "the Lua error is the whole value of this case"
         );
     }
 

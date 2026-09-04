@@ -384,6 +384,67 @@ WALK_TEXT_RULES = (
     ("timeout", re.compile(r"timed? ?out|no reply", re.I)),
 )
 
+
+def walk_blocker(text: str | None) -> str | None:
+    """What BotBridge said was in the way when a leg stopped progressing.
+
+    The clause `control.lua`'s ``walk_stall_cause`` appends to a stall:
+
+        ... to (-10.5/-18.5), moved 0.02 tiles, blocked at (-10.437/-18.702)
+        by character #3 (mining) on tile 'grass-1' (+2 more)
+
+    Returns a label for the histogram, and ``None`` -- and only ``None`` --
+    when the message carries **no clause at all**, i.e. an archived run from
+    before the probe existed. A clause whose class word this reader does not
+    know comes back as the mod's own words rather than as a bucket: a reader
+    then sees the new wording in the histogram instead of an empty column,
+    which is the failure this file has already had twice (19 of 20 walk
+    failures sitting in ``other``, and the mining refusal's wording matched for
+    a placement refusal). ``"unreadable"`` is reserved for a clause that is
+    malformed rather than merely unfamiliar.
+
+    The bot id is dropped from the label on purpose -- *which* bot is in
+    ``error`` and in the per-bot table; what this histogram answers is how many
+    stalls were caused by a bot at all, and by one that was mining rather than
+    idle. ``step_aside_from_footprint`` only steers a blocker that is neither
+    walking nor mining, so ``character (mining)`` is a blocker nothing is going
+    to ask to move.
+    """
+    if not text:
+        return None
+    if "blocker unknown (probe failed:" in text:
+        return "probe failed"
+    marker = "blocked at "
+    i = text.find(marker)
+    if i < 0:
+        return None
+    rest = text[i + len(marker):]
+    j = rest.find(" by ")
+    if j < 0:
+        return "unreadable"
+    cause = rest[j + len(" by "):]
+    tile = None
+    k = cause.find(" on tile '")
+    if k >= 0:
+        tile = cause[k + len(" on tile '"):].split("'")[0]
+        cause = cause[:k]
+    cause = cause.split(" (+")[0].strip()
+    cause = re.sub(r"character #\d+", "character", cause)
+    if cause.startswith("nothing findable"):
+        # The ground IS the answer when nothing is standing on it, so a stall
+        # on water reads differently from one on grass -- and the distance
+        # covered separates the two bugs this bucket otherwise merges.
+        # `made no progress` is measured as a LEG TIMEOUT, never as a position
+        # delta, so a "stall" that covered three tiles is `walk_leg_timeout_ticks`
+        # being wrong and one that covered none is the pathfinder. Reported as
+        # the mod measured it, rounded to a tenth so they group; `?` is "not
+        # measured", which is not zero.
+        moved = re.search(r"\bmoved ([\d.]+) tiles", text)
+        moved = f"{float(moved.group(1)):.1f}" if moved else "?"
+        return f"nothing findable (on {tile or 'unknown tile'}, moved {moved} tiles)"
+    return cause or "unreadable"
+
+
 ACTION_TEXT_RULES = (
     # `character is standing` rather than `another character is standing`:
     # the mining refusal says "another", the placement refusal
@@ -925,6 +986,7 @@ def score_window(w: Window, events: list[dict], joined: list[dict], map_rows: li
     walk_fail_by_bot = collections.Counter()
     walk_lost_by_bot = collections.Counter()
     walk_failure_kinds = collections.Counter()
+    walk_stall_causes = collections.Counter()
     repeat_failures = collections.Counter()
     walk_dispatched = 0
     for e in events:
@@ -949,6 +1011,14 @@ def score_window(w: Window, events: list[dict], joined: list[dict], map_rows: li
         recorded = (e.get("failure") or {}).get("kind") or "none"
         derived = classify(e.get("error"), WALK_TEXT_RULES)
         walk_failure_kinds[(recorded, derived)] += 1
+        if derived == "stalled":
+            # Only stalls carry a cause: `no_path` and the pre-dispatch
+            # refusals never reached the follower, so counting them here would
+            # make the "no cause recorded" bucket say something it does not
+            # mean.
+            walk_stall_causes[
+                walk_blocker(e.get("error")) or "(no cause recorded -- mod predates the probe)"
+            ] += 1
         to = e.get("to") or {}
         repeat_failures[(bot, round(to.get("x", 0), 2), round(to.get("y", 0), 2))] += 1
 
@@ -1024,6 +1094,7 @@ def score_window(w: Window, events: list[dict], joined: list[dict], map_rows: li
             {"recorded_kind": r, "derived_from_text": d, "count": c}
             for (r, d), c in walk_failure_kinds.most_common()
         ],
+        "walk_stall_causes": dict(walk_stall_causes.most_common()),
         "repeated_walk_failures": [
             {"bot": b, "to": [x, y], "count": c}
             for (b, x, y), c in repeat_failures.most_common()
@@ -1626,6 +1697,10 @@ def report(a: dict, out=sys.stdout, top: int = 12) -> None:
                 flag = "   <- recorded before the classifier knew this wording (see 1f498593)"
             p(f"      walk failure: recorded={f['recorded_kind']:<18} "
               f"from-text={f['derived_from_text']:<18} n={f['count']}{flag}")
+        if w.get("walk_stall_causes"):
+            p("      what the mod found at the blocked tile (stalls only):")
+            for cause, n in w["walk_stall_causes"].items():
+                p(f"        {cause:<44} x{n}")
         if w["repeated_walk_failures"]:
             p("      repeated (bot, destination) failures -- the same site re-selected:")
             for r in w["repeated_walk_failures"]:

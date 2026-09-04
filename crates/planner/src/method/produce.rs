@@ -673,6 +673,84 @@ fn fuel_for(burn_ticks: Ticks) -> u32 {
     fuel_for_duration(CELL_FUELLED_TICKS, burn_ticks)
 }
 
+/// Load `coal` into one machine's fuel slot, in as many visits as that slot
+/// allows, and return the ids in order.
+///
+/// **A burner's fuel inventory is one slot holding exactly one stack**, so a
+/// bill sized from how long the job runs is a bill the machine cannot accept:
+/// `fuel the burner-mining-drill with 113 coal` puts 50 in and 63 nowhere.
+/// [`crate::method::have::fuel_visits`] divides it; this emits one `Insert`
+/// per visit and chains visit `j + 1` behind visit `j` by how long visit `j`
+/// burns, which is when the slot next has room.
+///
+/// **The first id is the one a caller links production to.** The machine
+/// starts when it is first fuelled and runs across the refuels — they keep it
+/// running rather than starting it — so a take that waited on the last visit
+/// would be waiting for a stack of coal that has not been *burned* yet. The
+/// refuel visits are bot errands on the critical path of nothing.
+fn fuel_steps(
+    ctx: &mut ExpansionCtx,
+    machine: &str,
+    position: &Position,
+    coal: u32,
+    burn_ticks: Ticks,
+    reach: f64,
+    extra_pre: &[Condition],
+) -> (Vec<Step>, Vec<crate::ids::ActionId>) {
+    let visits = crate::method::have::fuel_visits(&ctx.state, "coal", coal);
+    let mut steps: Vec<Step> = Vec::with_capacity(visits.len() * 2);
+    let mut ids: Vec<crate::ids::ActionId> = Vec::with_capacity(visits.len());
+    for &load in &visits {
+        let id = ctx.ids.next();
+        let mut pre = vec![
+            Condition::AtPosition {
+                who: Actor::Role,
+                pos: position.clone(),
+                radius: reach,
+                min_radius: 0.0,
+            },
+            Condition::EntityAt {
+                pos: position.clone(),
+                name: machine.into(),
+            },
+            Condition::HasItem {
+                who: Actor::Role,
+                item: "coal".into(),
+                count: load,
+            },
+        ];
+        pre.extend(extra_pre.iter().cloned());
+        steps.push(Step::Act(Box::new(Action {
+            id,
+            kind: ActionKind::Insert {
+                pos: position.clone(),
+                entity: machine.into(),
+                slot: InventorySlot::Fuel,
+                item: "coal".into(),
+                count: load,
+            },
+            pre,
+            eff: vec![Effect::LoseItem {
+                who: Actor::Role,
+                item: "coal".into(),
+                count: load,
+            }],
+            duration: TRANSFER_TICKS,
+            pinned: None,
+            label: format!("fuel the {} with {} coal", machine, load),
+        })));
+        ids.push(id);
+    }
+    for (pair, &load) in ids.windows(2).zip(visits.iter()) {
+        steps.push(Step::Link {
+            from: pair[0],
+            to: pair[1],
+            lag: load.saturating_mul(burn_ticks),
+        });
+    }
+    (steps, ids)
+}
+
 /// The steps that build `cells`.
 ///
 /// Every site is **reserved in `ctx.state` as its `Place` is emitted**, the
@@ -774,63 +852,54 @@ fn cell_steps(ctx: &mut ExpansionCtx, spec: &CellSpec, cells: &[Cell]) -> Vec<St
             ctx.state.create_entity(entity);
         }
 
-        for (machine_name, position, coal, feeds) in [
-            (DRILL, cell.drill.clone(), drill_coal, false),
-            (FURNACE, cell.furnace.clone(), furnace_coal, true),
+        for (machine_name, position, coal, burn_ticks, feeds) in [
+            (
+                DRILL,
+                cell.drill.clone(),
+                drill_coal,
+                DRILL_BURN_TICKS,
+                false,
+            ),
+            (
+                FURNACE,
+                cell.furnace.clone(),
+                furnace_coal,
+                COAL_BURN_TICKS,
+                true,
+            ),
         ] {
-            let id = ctx.ids.next();
-            let mut pre = vec![
-                Condition::AtPosition {
-                    who: Actor::Role,
-                    pos: position.clone(),
-                    radius: reach,
-                    min_radius: 0.0,
-                },
-                Condition::EntityAt {
-                    pos: position.clone(),
-                    name: machine_name.into(),
-                },
-                Condition::HasItem {
-                    who: Actor::Role,
-                    item: "coal".into(),
-                    count: coal,
-                },
-            ];
+            let mut extra_pre: Vec<Condition> = Vec::new();
             if feeds {
                 // Both ends named, so this action cannot be scheduled before
                 // either machine stands, and cannot be scheduled at all unless
                 // the drill really delivers into the furnace. Fuelling a
                 // furnace nothing feeds is the placed-but-dead machine this
                 // whole stage exists to make impossible.
-                pre.push(Condition::EntityAt {
+                extra_pre.push(Condition::EntityAt {
                     pos: cell.drill.clone(),
                     name: DRILL.into(),
                 });
-                pre.push(Condition::Feeds {
+                extra_pre.push(Condition::Feeds {
                     from: cell.drill.clone(),
                     to: cell.furnace.clone(),
                 });
-                pre.extend(research_pre.iter().cloned());
+                extra_pre.extend(research_pre.iter().cloned());
             }
-            steps.push(Step::Act(Box::new(Action {
-                id,
-                kind: ActionKind::Insert {
-                    pos: position.clone(),
-                    entity: machine_name.into(),
-                    slot: InventorySlot::Fuel,
-                    item: "coal".into(),
-                    count: coal,
-                },
-                pre,
-                eff: vec![Effect::LoseItem {
-                    who: Actor::Role,
-                    item: "coal".into(),
-                    count: coal,
-                }],
-                duration: TRANSFER_TICKS,
-                pinned: None,
-                label: format!("fuel the {} with {} coal", machine_name, coal),
-            })));
+            // One visit, always, at `CELL_FUELLED_TICKS`: 23 coal for the
+            // drill and 14 for the furnace, both well inside the 50 a fuel
+            // slot holds. Routed through `fuel_steps` anyway so that a change
+            // to `CELL_FUELLED_TICKS` cannot quietly reintroduce the defect
+            // it is bounded by rather than protected from.
+            let (fuel, _) = fuel_steps(
+                ctx,
+                machine_name,
+                &position,
+                coal,
+                burn_ticks,
+                reach,
+                &extra_pre,
+            );
+            steps.extend(fuel);
         }
     }
     steps
@@ -1232,60 +1301,51 @@ impl Method for PlaceDrill {
             ctx.state.create_entity(entity);
         }
 
+        // The first fuel visit of each machine, which is when that machine
+        // starts running and so what the takes below are timed from. A job
+        // longer than a stack of coal will burn adds refuel visits behind it
+        // -- `fuel_steps` chains those by burn time, and nothing waits on
+        // them.
         let mut fuel_ids: Vec<crate::ids::ActionId> = Vec::new();
-        for (machine_name, position, coal, feeds) in [
-            (DRILL, cell.drill.clone(), drill_coal, false),
-            (FURNACE, cell.furnace.clone(), furnace_coal, true),
+        for (machine_name, position, coal, burn_ticks, feeds) in [
+            (
+                DRILL,
+                cell.drill.clone(),
+                drill_coal,
+                DRILL_BURN_TICKS,
+                false,
+            ),
+            (
+                FURNACE,
+                cell.furnace.clone(),
+                furnace_coal,
+                COAL_BURN_TICKS,
+                true,
+            ),
         ] {
-            let id = ctx.ids.next();
-            fuel_ids.push(id);
-            let mut pre = vec![
-                Condition::AtPosition {
-                    who: Actor::Role,
-                    pos: position.clone(),
-                    radius: reach,
-                    min_radius: 0.0,
-                },
-                Condition::EntityAt {
-                    pos: position.clone(),
-                    name: machine_name.into(),
-                },
-                Condition::HasItem {
-                    who: Actor::Role,
-                    item: "coal".into(),
-                    count: coal,
-                },
-            ];
+            let mut extra_pre: Vec<Condition> = Vec::new();
             if feeds {
-                pre.push(Condition::EntityAt {
+                extra_pre.push(Condition::EntityAt {
                     pos: cell.drill.clone(),
                     name: DRILL.into(),
                 });
-                pre.push(Condition::Feeds {
+                extra_pre.push(Condition::Feeds {
                     from: cell.drill.clone(),
                     to: cell.furnace.clone(),
                 });
-                pre.extend(research_pre.iter().cloned());
+                extra_pre.extend(research_pre.iter().cloned());
             }
-            steps.push(Step::Act(Box::new(Action {
-                id,
-                kind: ActionKind::Insert {
-                    pos: position.clone(),
-                    entity: machine_name.into(),
-                    slot: InventorySlot::Fuel,
-                    item: "coal".into(),
-                    count: coal,
-                },
-                pre,
-                eff: vec![Effect::LoseItem {
-                    who: Actor::Role,
-                    item: "coal".into(),
-                    count: coal,
-                }],
-                duration: TRANSFER_TICKS,
-                pinned: None,
-                label: format!("fuel the {} with {} coal", machine_name, coal),
-            })));
+            let (fuel, visits) = fuel_steps(
+                ctx,
+                machine_name,
+                &position,
+                coal,
+                burn_ticks,
+                reach,
+                &extra_pre,
+            );
+            steps.extend(fuel);
+            fuel_ids.extend(visits.first().copied());
         }
 
         // The one step `BuildCell` never takes: pull `need` of the item back
@@ -2389,6 +2449,98 @@ mod tests {
         assert!(
             schedule(&net, &s, &bots).is_ok(),
             "the split plan must schedule, not merely construct"
+        );
+    }
+
+    /// **A fuel slot holds one stack, so a long job is refuelled rather than
+    /// over-loaded.**
+    ///
+    /// `fuel the burner-mining-drill with 113 coal` put 50 coal in and 63
+    /// nowhere, and the plan had no way to say the drill needed a second
+    /// visit. It says so now: stack-sized loads, chained by how long each one
+    /// burns, and nothing downstream waits on them -- the machine started at
+    /// the first.
+    #[test]
+    fn a_cell_that_outlasts_a_stack_of_coal_is_refuelled_rather_than_overloaded() {
+        let bots = vec![BotId(1)];
+        let s = state(&bots);
+        let net = expand(
+            &[Goal::Have {
+                item: "iron-plate".into(),
+                count: 600,
+                whose: Holder::Anyone,
+            }],
+            &s,
+            &crate::method::have::default_registry(),
+            BotId(1),
+        )
+        .expect("six hundred plates plan");
+
+        let cap = s
+            .slot_capacity(InventorySlot::Fuel, "coal")
+            .expect("the fixture carries coal");
+        let fuel: Vec<u32> = net
+            .actions()
+            .filter_map(|a| match &a.kind {
+                ActionKind::Insert {
+                    slot: InventorySlot::Fuel,
+                    count,
+                    ..
+                } => Some(*count),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            fuel.iter().all(|count| *count <= cap),
+            "a fuel slot takes {cap} and the plan asks {fuel:?}"
+        );
+        assert!(
+            fuel.contains(&cap),
+            "and this goal really is long enough to fill one, in {fuel:?} -- \
+             a test that never reaches the cap proves nothing about it"
+        );
+        assert!(
+            schedule(&net, &s, &bots).is_ok(),
+            "the refuelled plan must schedule, not merely construct"
+        );
+    }
+
+    /// The takes are timed from the **first** fuel visit, not the last.
+    ///
+    /// A machine starts when it is first fuelled and runs across the refuels.
+    /// Timing a take from the last visit would wait for a stack of coal that
+    /// has not been burned yet -- an off-by-a-whole-job error that would look
+    /// like a slower plan rather than like a bug.
+    #[test]
+    fn a_refuel_visit_is_on_the_critical_path_of_nothing() {
+        let bots = vec![BotId(1)];
+        let s = state(&bots);
+        let mut ctx = crate::method::ExpansionCtx::new(s.fork(), BotId(1));
+        let (steps, ids) = fuel_steps(
+            &mut ctx,
+            DRILL,
+            &Position::new(0., 0.),
+            113,
+            DRILL_BURN_TICKS,
+            10.,
+            &[],
+        );
+        assert_eq!(ids.len(), 3, "fifty, fifty and thirteen");
+        let links: Vec<(usize, Ticks)> = steps
+            .iter()
+            .filter_map(|step| match step {
+                Step::Link { from, to, lag } => ids.contains(to).then_some((
+                    ids.iter().position(|id| id == from).unwrap_or(usize::MAX),
+                    *lag,
+                )),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            links,
+            vec![(0, 50 * DRILL_BURN_TICKS), (1, 50 * DRILL_BURN_TICKS)],
+            "each visit follows the one before it by exactly how long that one \
+             burns -- which is when the slot next has room"
         );
     }
 }

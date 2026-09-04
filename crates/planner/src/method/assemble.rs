@@ -245,15 +245,17 @@ const BOILER_SEARCH_RADIUS: f64 = 16.0;
 /// these two constants. So the numbers are right and the reason given for
 /// hardcoding them was not.
 ///
-/// They are still constants, deliberately, and that is a scope decision rather
-/// than a claim about the data: `PlanState::stack_size` answers `None` for a
-/// world with no prototype for an item, and several fixtures in this crate are
-/// exactly that and pin their plans byte-for-byte, so reading these two would
-/// change plan arithmetic in the fixtures for no gain here. Replacing
-/// `COAL_STACK` with `slot_capacity(InventorySlot::Fuel, "coal")` and `COAL_KJ`
-/// with `fuel_value / 1000` belongs with the fuel-capping increment (§9.3 of
-/// `docs/superpowers/specs/2026-09-04-world-model-divergence-design.md`),
-/// which has to decide what an unknown fuel means anyway.
+/// `COAL_STACK` is now what [`boiler_coal`] falls back to rather than what it
+/// caps with: the cap comes from `slot_capacity(InventorySlot::Fuel, "coal")`,
+/// and the constant answers for a world with no coal prototype. That is
+/// deliberately *not* the "unknown means unbounded" rule the rest of the
+/// capacity work follows, and the reason is that this cap only ever makes the
+/// bill smaller -- a fixture that fell back to unbounded would ask a boiler
+/// for more coal than a slot holds, which is the defect, not the fallback.
+///
+/// `COAL_KJ` is still a constant. Replacing it with `fuel_value / 1000` needs
+/// an answer for an unknown fuel that changes plan *arithmetic* rather than
+/// bounding it, so it stays out of scope here.
 ///
 /// The precedent this comment used to invoke does not say what it was quoted
 /// as saying: `COAL_BURN_TICKS`' own doc names the machine's `energy_usage` as
@@ -1351,12 +1353,23 @@ fn bill(spec: &AssemblySpec, count: u32, poles: u32, coal: u32) -> Vec<(ItemId, 
 /// rounding it up to a whole kilowatt before dividing costs at most one coal
 /// and removes every float from the answer. Capped at one stack, because a
 /// boiler's fuel inventory is **one slot** and asking the game to accept 51
-/// coal puts one of them nowhere.
-fn boiler_coal(demand_kw: f64) -> u32 {
+/// coal puts one of them nowhere -- read from
+/// [`PlanState::slot_capacity`] rather than hardcoded, so this site is bound
+/// to the same measured table as every other fuel insert; see [`COAL_KJ`] for
+/// why the fallback is a constant and not "unbounded".
+///
+/// This is the one fuel site that was already bounded, and it is the reason
+/// the cap here is a `min` rather than a split into visits: a boiler burns
+/// this charge over `CELL_CHARGE_TICKS` and a cell that outlives its coal is
+/// [`CELL_CHARGE_TICKS`]' own residual, not this function's.
+fn boiler_coal(state: &PlanState, demand_kw: f64) -> u32 {
+    let cap = state
+        .slot_capacity(InventorySlot::Fuel, "coal")
+        .unwrap_or(COAL_STACK);
     let kw = demand_kw.max(0.).ceil().to_u64().unwrap_or(0);
     let kj = kw.saturating_mul(u64::from(CELL_CHARGE_TICKS)) / 60;
     let coal = kj.div_ceil(COAL_KJ);
-    u32::try_from(coal).unwrap_or(COAL_STACK).min(COAL_STACK)
+    u32::try_from(coal).unwrap_or(cap).min(cap)
 }
 
 /// The boiler this cell's power comes out of, if the plan can see one.
@@ -1923,7 +1936,7 @@ fn fuel_for(state: &PlanState, anchor: &Position, cells: &[Cell]) -> (u32, Optio
     let demand = trial.electric_demand_kw(&area, None);
     let boiler = boiler_near(state, anchor);
     match boiler {
-        Some(boiler) => (boiler_coal(demand), Some(boiler)),
+        Some(boiler) => (boiler_coal(state, demand), Some(boiler)),
         None => (0, None),
     }
 }
@@ -2916,11 +2929,12 @@ mod tests {
     /// The arithmetic on its own, including the stack bound a fuel slot is.
     #[test]
     fn the_coal_bill_is_bounded_by_the_one_slot_it_goes_in() {
-        assert_eq!(boiler_coal(0.), 0);
-        assert_eq!(boiler_coal(189.), 8);
-        assert_eq!(boiler_coal(900.), 34);
+        let s = bare(&[BotId(1)]);
+        assert_eq!(boiler_coal(&s, 0.), 0);
+        assert_eq!(boiler_coal(&s, 189.), 8);
+        assert_eq!(boiler_coal(&s, 900.), 34);
         assert_eq!(
-            boiler_coal(100_000.),
+            boiler_coal(&s, 100_000.),
             COAL_STACK,
             "a boiler's fuel inventory is one slot; the 51st coal goes nowhere"
         );

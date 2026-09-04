@@ -909,6 +909,29 @@ mod tests {
         PlanState::from_world(Arc::new(fixture_world()), &[BotId(1)])
     }
 
+    /// The plant's fuel load fits in the one slot it goes into.
+    ///
+    /// This site was already inside the cap and is the only fuel insert in the
+    /// crate that never needed splitting -- five coal against a slot of fifty.
+    /// It is asserted rather than assumed because [`PLANT_COAL`] is a number
+    /// somebody may raise: its own doc argues from "enough for the idle window
+    /// and one retry", which is an argument about *duration* and has nothing
+    /// in it that stops at a stack. A boiler that quietly takes 50 of a 60-coal
+    /// load and leaves 10 in the bot's pocket is the same defect the rest of
+    /// this increment is about, arrived at from the other direction.
+    #[test]
+    fn the_plants_fuel_load_fits_in_the_one_slot_it_goes_into() {
+        let s = state();
+        let cap = s
+            .slot_capacity(crate::action::InventorySlot::Fuel, "coal")
+            .expect("the fixture carries coal");
+        assert!(
+            PLANT_COAL <= cap,
+            "a boiler's fuel inventory is one slot holding {cap}, and the \
+             plant asks for {PLANT_COAL}"
+        );
+    }
+
     #[test]
     fn the_connection_table_matches_the_prototype_the_tests_plan_against() {
         // The fixture reports Factorio 1.x's reading of `positions` -- the

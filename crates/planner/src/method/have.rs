@@ -315,6 +315,46 @@ pub(crate) const TRANSFER_TICKS: Ticks = 10;
 /// Time to place an entity.
 pub(crate) const PLACE_TICKS: Ticks = 30;
 
+/// How a fuel bill divides into the visits one fuel slot can actually take.
+///
+/// **A burner's fuel inventory is one slot holding exactly one stack** —
+/// stone-furnace and burner-mining-drill both accept 50 coal and no more,
+/// measured on a live instance (see [`PlanState::slot_capacity`]). Sizing a
+/// fuel load from how long the job runs asks the game to put the 51st coal
+/// somewhere there is no room for, which is the *occupancy* half of the
+/// capacity family and shows up in the archive as
+/// `tried to insert 17x coal but inserted 3`.
+///
+/// Returns one count per visit, in order, each within the cap and summing to
+/// `coal`; empty for a bill of nothing. The caller chains visit `j + 1` behind
+/// visit `j` with a lag of `counts[j] * burn_ticks`, because **the slot has
+/// room again exactly when what is in it has burned**. Nothing downstream
+/// waits on a refuel — the machine is running across it, which is what the
+/// first load bought — so a refuel visit adds a bot errand and no critical
+/// path.
+///
+/// `None` from `slot_capacity` means the world carries no prototype for the
+/// fuel, which happens only in this crate's fixtures, and is deliberately
+/// **not** a guessed cap: it yields the single visit today's code emits, so a
+/// pinned fixture plans byte-for-byte as before.
+pub(crate) fn fuel_visits(state: &PlanState, fuel: &str, coal: u32) -> Vec<u32> {
+    if coal == 0 {
+        return Vec::new();
+    }
+    let cap = state
+        .slot_capacity(InventorySlot::Fuel, fuel)
+        .unwrap_or(coal)
+        .max(1);
+    let mut left = coal;
+    let mut visits = Vec::new();
+    while left > 0 {
+        let load = cap.min(left);
+        visits.push(load);
+        left -= load;
+    }
+    visits
+}
+
 // ---------------------------------------------------------------------------
 // The furnace bank
 // ---------------------------------------------------------------------------
@@ -376,6 +416,55 @@ fn bank_coal(recipe_run_ticks: Ticks, runs_per_furnace: &[u32]) -> Vec<u32> {
                 .max(1)
         })
         .collect()
+}
+
+/// How many runs of a recipe fit in **one furnace-load**.
+///
+/// This is a physical bound and not a scheduling choice: a furnace is loaded,
+/// left to run and emptied, and what one load can be is decided by the three
+/// slots involved. Beyond it a smelt is a *sequence of visits*, which is what
+/// [`smelt_steps`] emits.
+///
+/// Three bounds, and **all three really bind** — the input is the tightest of
+/// them for iron, so capping only the output still asks for 100 ore into a
+/// source slot that takes 70:
+///
+/// * *output* — `slot_capacity(FurnaceResult, item) / per_craft`
+/// * *input* — `slot_capacity(FurnaceSource, ingredient) / amount`, per
+///   ingredient, and the minimum across them
+/// * *fuel* — how many runs one stack of coal is worth,
+///   `cap * COAL_BURN_TICKS / recipe_run_ticks`. `recipe_run_ticks` and not
+///   the speed-divided `per_run`, for the reason [`bank_coal`] gives at
+///   length: coal is a quantity of energy, and a faster furnace does not burn
+///   less of it per run.
+///
+/// A `None` from `slot_capacity` (a fixture world with no `item_prototypes`,
+/// or a chest) is "unknown, therefore unbounded" and drops out of the minimum,
+/// so a fixture plans exactly as it did. Never less than one run: a single run
+/// that does not fit is a defect this function cannot fix by returning zero,
+/// and `PlannerError::SlotOverflow` is where it will be reported.
+fn runs_per_load(
+    state: &PlanState,
+    item: &str,
+    per_craft: u32,
+    ingredients: &[(String, u32)],
+    recipe_run_ticks: Ticks,
+) -> u32 {
+    let mut cap = u32::MAX;
+    if let Some(out) = state.slot_capacity(InventorySlot::FurnaceResult, item) {
+        cap = cap.min(out / per_craft.max(1));
+    }
+    for (ingredient, amount) in ingredients {
+        if let Some(input) = state.slot_capacity(InventorySlot::FurnaceSource, ingredient) {
+            cap = cap.min(input / (*amount).max(1));
+        }
+    }
+    if let Some(fuel) = state.slot_capacity(InventorySlot::Fuel, "coal") {
+        let runs = u64::from(fuel).saturating_mul(u64::from(COAL_BURN_TICKS))
+            / u64::from(recipe_run_ticks.max(1));
+        cap = cap.min(u32::try_from(runs).unwrap_or(u32::MAX));
+    }
+    cap.max(1)
 }
 
 /// Owner ticks one more *standing* furnace in a bank costs: the ore in, the
@@ -798,8 +887,24 @@ struct BankFurnace {
     /// Batches this furnace runs, which is what its own lag is built from.
     runs: u32,
     coal: u32,
-    /// Items the take pulls out of it. Sums to the goal's `need` across the
-    /// bank; capped per furnace by what that furnace actually makes.
+    /// The **visits** this furnace's share divides into, in order. See
+    /// [`runs_per_load`]: a furnace is loaded, left to run and emptied, and
+    /// one load is bounded by three slots at once. `runs` and `coal` above are
+    /// the sums of these, kept because the bank's *bill* is a property of the
+    /// furnace while its *actions* are a property of a load.
+    ///
+    /// Exactly one entry whenever the share fits in one load, which is every
+    /// smelt small enough to have been correct before this existed.
+    loads: Vec<FurnaceLoad>,
+}
+
+/// One load of one furnace of a bank: what goes in, what comes out.
+struct FurnaceLoad {
+    /// Batches this load runs, which is what its own lag is built from.
+    runs: u32,
+    coal: u32,
+    /// Items this load's take pulls out. Capped by what is still needed, so
+    /// the last load of the last furnace carries the remainder.
     take: u32,
 }
 
@@ -1112,7 +1217,11 @@ fn smelt_steps(
     }
     let k = slots.len() as u32;
     let runs_per_furnace = bank_runs(runs, k);
-    let coal_per_furnace = bank_coal(recipe_run_ticks, &runs_per_furnace);
+    // How many runs one furnace-load is. The bank divides the goal between
+    // *machines*; this divides one machine's share between *visits*, and the
+    // two are independent -- a bank of one still cycles, and a bank of eight
+    // whose members each overflow a slot cycles eight times over.
+    let runs_cap = runs_per_load(&ctx.state, item, per_craft, &ingredients, recipe_run_ticks);
 
     // Does this patch have cell sites nobody could ever claim? Asked once, of
     // the state before the bank is sited, because the answer is a property of
@@ -1131,11 +1240,7 @@ fn smelt_steps(
     let mut trial = ctx.state.fork();
     let mut bank: Vec<BankFurnace> = Vec::new();
     let mut need_left = need;
-    for (index, (&furnace_runs, &furnace_coal)) in runs_per_furnace
-        .iter()
-        .zip(coal_per_furnace.iter())
-        .enumerate()
-    {
+    for (index, &furnace_runs) in runs_per_furnace.iter().enumerate() {
         let (pos, adopted, wait_for) = match slots.get(index).and_then(|slot| slot.as_ref()) {
             Some(reuse) => (reuse.position().clone(), true, reuse.release()),
             None => {
@@ -1175,8 +1280,38 @@ fn smelt_steps(
         // goal's own `need` bounds the bank. `runs` is `need.div_ceil(
         // per_craft)`, so the bank's output covers `need` and the last furnace
         // takes the remainder.
-        let take = furnace_runs.saturating_mul(per_craft).min(need_left);
-        need_left = need_left.saturating_sub(take);
+        //
+        // Divided again, into **loads**: a furnace holds one slot of ore, one
+        // slot of coal and one slot of plates, so a share larger than
+        // `runs_cap` is a sequence of visits and not one visit. One load
+        // whenever the share already fitted, which is every smelt that was
+        // correct before this existed -- same action, same id, same lag.
+        //
+        // `bank_runs` deals the runs out as evenly as integers allow, the same
+        // way the bank itself is dealt: the last load of a split share is then
+        // the *small* one rather than a full load followed by a remainder of
+        // one, which keeps every load's wait within a run of every other's.
+        let load_runs = bank_runs(furnace_runs, furnace_runs.div_ceil(runs_cap).max(1));
+        let load_coal = bank_coal(recipe_run_ticks, &load_runs);
+        let mut loads: Vec<FurnaceLoad> = Vec::with_capacity(load_runs.len());
+        for (&one_load_runs, &one_load_coal) in load_runs.iter().zip(load_coal.iter()) {
+            // Each load's take is bounded by what that load makes and by what
+            // the goal still wants, exactly as the whole furnace's was.
+            let take = one_load_runs.saturating_mul(per_craft).min(need_left);
+            need_left = need_left.saturating_sub(take);
+            loads.push(FurnaceLoad {
+                runs: one_load_runs,
+                coal: one_load_coal,
+                take,
+            });
+        }
+        let take: u32 = loads.iter().map(|load| load.take).sum();
+        // **Splitting a share costs coal**, for the same rounding reason
+        // `bank_coal`'s doc gives for splitting a bank: each load rounds its
+        // own share up to a whole coal and never takes less than one. Summed
+        // here rather than taken from `coal_per_furnace`, so the bill the
+        // subgoal asks for is the bill the inserts actually put in.
+        let furnace_coal: u32 = loads.iter().map(|load| load.coal).sum();
         // Committed whether it was adopted, queued behind or sited, so no
         // later smelt treats it as idle. What a later smelt *may* still do is
         // queue behind this batch, which `queue_machine` below decides.
@@ -1198,7 +1333,7 @@ fn smelt_steps(
             drains: take == furnace_runs.saturating_mul(per_craft),
             runs: furnace_runs,
             coal: furnace_coal,
-            take,
+            loads,
         });
     }
     debug_assert_eq!(need_left, 0, "the bank's output has to cover the goal");
@@ -1433,23 +1568,34 @@ fn smelt_steps(
         }
     }
 
-    // Every insert into each furnace of the bank, indexed by bank slot: each
-    // one gates that furnace's own take, and nothing else's.
-    let mut insert_ids: Vec<Vec<ActionId>> = vec![Vec::new(); bank.len()];
+    // Every insert into each furnace of the bank, indexed by bank slot and
+    // then by **load**: each one gates its own load's take, and nothing
+    // else's. Indexed twice rather than once because a furnace with two loads
+    // has two independent (fill, wait, empty) cycles in it, and an insert of
+    // the second load linked to the take of the first would schedule ore into
+    // a slot the first batch has not left yet.
+    let mut insert_ids: Vec<Vec<Vec<ActionId>>> = bank
+        .iter()
+        .map(|f| vec![Vec::new(); f.loads.len()])
+        .collect();
     // The ore inserts specifically, which need an edge from the place that
-    // the other inserts get by sitting in the same chain as it. Per furnace,
-    // because a place only orders the inserts into the furnace it built.
-    let mut ore_insert_ids: Vec<Vec<ActionId>> = vec![Vec::new(); bank.len()];
+    // the other inserts get by sitting in the same chain as it. Per furnace
+    // and load, for the same reason as above.
+    let mut ore_insert_ids: Vec<Vec<Vec<ActionId>>> = bank
+        .iter()
+        .map(|f| vec![Vec::new(); f.loads.len()])
+        .collect();
     // One placement per furnace this smelt has to build, in bank order, and
     // none for the ones it adopted. `place_ids` is parallel to `bank` so a
     // furnace's own place can be linked to its own inserts; an adopted
     // furnace has `None` and needs no edge, since it stands before the plan
     // begins.
     let mut place_ids: Vec<Option<ActionId>> = vec![None; bank.len()];
-    // The one fuel load per furnace, parallel to `bank` for the same reason.
-    // Always `Some` by the end of this function: every furnace of a bank is
-    // fuelled, by the taker or by its supplier.
-    let mut fuel_ids: Vec<Option<ActionId>> = vec![None; bank.len()];
+    // The one fuel load per furnace *load*, parallel to `insert_ids` for the
+    // same reason. Always `Some` by the end of this function: every load of
+    // every furnace is fuelled, by the taker or by its supplier.
+    let mut fuel_ids: Vec<Vec<Option<ActionId>>> =
+        bank.iter().map(|f| vec![None; f.loads.len()]).collect();
 
     // The furnaces somebody else builds and fuels.
     //
@@ -1487,9 +1633,21 @@ fn smelt_steps(
             }
             continue;
         };
-        let fuel_id = ctx.ids.next();
-        fuel_ids[index] = Some(fuel_id);
-        insert_ids[index].push(fuel_id);
+        // One fuel load per *load*, because a fuel slot holds one stack and
+        // `runs_per_load` has already bounded a load's coal by exactly that.
+        // A supplier that hands over a furnace running three loads comes back
+        // twice; the edges below put each visit where the slot has room.
+        let supplier_fuel_ids: Vec<ActionId> = furnace_slot
+            .loads
+            .iter()
+            .enumerate()
+            .map(|(load, _)| {
+                let fuel_id = ctx.ids.next();
+                fuel_ids[index][load] = Some(fuel_id);
+                insert_ids[index][load].push(fuel_id);
+                fuel_id
+            })
+            .collect();
         let supplier_reach = ctx
             .state
             .bot(supplier)
@@ -1520,13 +1678,15 @@ fn smelt_steps(
                 min_radius,
             ))));
         }
-        block.push(Step::Act(Box::new(fuel_action(
-            fuel_id,
-            &furnace_entity,
-            &pos,
-            furnace_slot.coal,
-            supplier_reach,
-        ))));
+        for (fuel_id, load) in supplier_fuel_ids.iter().zip(furnace_slot.loads.iter()) {
+            block.push(Step::Act(Box::new(fuel_action(
+                *fuel_id,
+                &furnace_entity,
+                &pos,
+                load.coal,
+                supplier_reach,
+            ))));
+        }
         steps.push(Step::Owned {
             whose: Holder::Share(supplier),
             steps: block,
@@ -1537,79 +1697,89 @@ fn smelt_steps(
         if shared.as_ref().is_some_and(|s| s.ore == *ingredient) {
             continue;
         }
-        // Per furnace, sized by that furnace's own share of the runs — the
-        // whole bill still, just dealt out. `bank_runs` sums to `runs`, so
-        // this loop inserts exactly what the single-furnace path did.
+        // Per furnace and per load, sized by that load's own share of the runs
+        // — the whole bill still, just dealt out twice. `bank_runs` sums to
+        // `runs` at both levels, so a bank whose shares each fit in one load
+        // inserts exactly what the single-insert path did.
         for (index, furnace_slot) in bank.iter().enumerate() {
-            let total = amount.saturating_mul(furnace_slot.runs);
-            if total == 0 {
-                continue;
+            for (load, one_load) in furnace_slot.loads.iter().enumerate() {
+                let total = amount.saturating_mul(one_load.runs);
+                if total == 0 {
+                    continue;
+                }
+                let pos = furnace_slot.pos.clone();
+                let id = ctx.ids.next();
+                insert_ids[index][load].push(id);
+                ore_insert_ids[index][load].push(id);
+                steps.push(Step::Act(Box::new(Action {
+                    id,
+                    kind: ActionKind::Insert {
+                        pos: pos.clone(),
+                        entity: furnace_entity.clone(),
+                        slot: InventorySlot::FurnaceSource,
+                        item: ingredient.clone(),
+                        count: total,
+                    },
+                    pre: {
+                        let mut pre = vec![
+                            Condition::AtPosition {
+                                who: Actor::Role,
+                                pos: pos.clone(),
+                                radius: reach,
+                                min_radius: 0.0,
+                            },
+                            Condition::EntityAt {
+                                pos: pos.clone(),
+                                name: "stone-furnace".into(),
+                            },
+                            Condition::HasItem {
+                                who: Actor::Role,
+                                item: ingredient.clone(),
+                                count: total,
+                            },
+                        ];
+                        pre.extend(research_pre.iter().cloned());
+                        pre
+                    },
+                    eff: vec![Effect::LoseItem {
+                        who: Actor::Role,
+                        item: ingredient.clone(),
+                        count: total,
+                    }],
+                    duration: TRANSFER_TICKS,
+                    pinned: None,
+                    label: format!("insert {} {}", total, ingredient),
+                })));
             }
-            let pos = furnace_slot.pos.clone();
-            let id = ctx.ids.next();
-            insert_ids[index].push(id);
-            ore_insert_ids[index].push(id);
-            steps.push(Step::Act(Box::new(Action {
-                id,
-                kind: ActionKind::Insert {
-                    pos: pos.clone(),
-                    entity: furnace_entity.clone(),
-                    slot: InventorySlot::FurnaceSource,
-                    item: ingredient.clone(),
-                    count: total,
-                },
-                pre: {
-                    let mut pre = vec![
-                        Condition::AtPosition {
-                            who: Actor::Role,
-                            pos: pos.clone(),
-                            radius: reach,
-                            min_radius: 0.0,
-                        },
-                        Condition::EntityAt {
-                            pos: pos.clone(),
-                            name: "stone-furnace".into(),
-                        },
-                        Condition::HasItem {
-                            who: Actor::Role,
-                            item: ingredient.clone(),
-                            count: total,
-                        },
-                    ];
-                    pre.extend(research_pre.iter().cloned());
-                    pre
-                },
-                eff: vec![Effect::LoseItem {
-                    who: Actor::Role,
-                    item: ingredient.clone(),
-                    count: total,
-                }],
-                duration: TRANSFER_TICKS,
-                pinned: None,
-                label: format!("insert {} {}", total, ingredient),
-            })));
         }
     }
 
-    // One fuel load per furnace the taker kept. The bank's coal was divided by
-    // `bank_coal`, which rounds each furnace's share up to a whole coal — the
-    // reason `bank_size` charges the split's extra coal rather than
+    // One fuel load per load of each furnace the taker kept. The bank's coal
+    // was divided by `bank_coal`, which rounds each share up to a whole coal —
+    // the reason `bank_size` charges the split's extra coal rather than
     // discovering it. A handed furnace was fuelled in its supplier's block
     // above.
+    //
+    // Sized per load and not per furnace because **a fuel slot holds one
+    // stack**: `runs_per_load`'s third bound is exactly "how many runs one
+    // stack of coal is worth", so `load.coal` is within the cap by
+    // construction and this needs no split of its own.
     for (index, furnace_slot) in bank.iter().enumerate() {
         if suppliers[index].is_some() {
             continue;
         }
-        let fuel_id = ctx.ids.next();
-        fuel_ids[index] = Some(fuel_id);
-        insert_ids[index].push(fuel_id);
-        steps.push(Step::Act(Box::new(fuel_action(
-            fuel_id,
-            &furnace_entity,
-            &furnace_slot.pos,
-            furnace_slot.coal,
-            reach,
-        ))));
+        for (load, one_load) in furnace_slot.loads.iter().enumerate() {
+            let fuel_id = ctx.ids.next();
+            fuel_ids[index][load] = Some(fuel_id);
+            insert_ids[index][load].push(fuel_id);
+            steps.push(Step::Act(Box::new(fuel_action(
+                fuel_id,
+                &furnace_entity,
+                &furnace_slot.pos,
+                one_load.coal,
+                reach,
+            ))));
+        }
     }
 
     // The ore, loaded by whoever mined it.
@@ -1641,18 +1811,29 @@ fn smelt_steps(
             participants.push((*taker, 0));
             participants.sort_unstable();
         }
-        // How much ore each furnace of the bank still has room for, in bank
-        // order. A supplier's load is dealt into these in order and spills to
-        // the next furnace when one is full, so the furnaces fill in a fixed
-        // sequence whatever the shares happen to be and a supplier is split
-        // across two furnaces only when its own share straddles a boundary.
+        // How much ore each **load** of each furnace of the bank still has
+        // room for, in bank order and then in load order. A supplier's ore is
+        // dealt into these in order and spills to the next when one is full,
+        // so the bank fills in a fixed sequence whatever the shares happen to
+        // be and a supplier is split across two only when its own share
+        // straddles a boundary.
+        //
+        // Per load and not per furnace, because that is what "room" means: a
+        // source slot takes `stack_size + INPUT_OVERLOAD` and no more, so the
+        // ore for a furnace's second visit has nowhere to be until its first
+        // batch has smelted.
         let ore_per_run = ingredients
             .iter()
             .find(|(name, _)| name == ore)
             .map_or(1, |(_, amount)| *amount);
-        let mut room: Vec<u32> = bank
+        let cells: Vec<(usize, usize)> = bank
             .iter()
-            .map(|f| ore_per_run.saturating_mul(f.runs))
+            .enumerate()
+            .flat_map(|(index, f)| (0..f.loads.len()).map(move |load| (index, load)))
+            .collect();
+        let mut room: Vec<u32> = cells
+            .iter()
+            .map(|&(index, load)| ore_per_run.saturating_mul(bank[index].loads[load].runs))
             .collect();
         for (bot, work_b) in participants {
             let spare = ctx.state.available(&Holder::Share(bot), ore);
@@ -1676,32 +1857,37 @@ fn smelt_steps(
                 whose: Holder::Share(bot),
             })];
             let mut left = load;
-            for index in 0..bank.len() {
+            for (slot, &(index, load_index)) in cells.iter().enumerate() {
                 if left == 0 {
                     break;
                 }
-                // The last furnace absorbs any excess: `sum(shares) + held`
-                // is meant to equal the bank's whole bill, and a supplier
-                // whose ore outruns the rooms left must still put it down
-                // somewhere rather than have the plan quietly drop it.
-                let last = index + 1 == bank.len();
-                let put = if last { left } else { left.min(room[index]) };
+                // **The last slot no longer absorbs the excess.** It used
+                // to: `sum(shares) + held` is meant to equal the bank's whole
+                // bill, and a supplier whose ore outran the rooms left put the
+                // remainder into the last furnace anyway rather than have the
+                // plan drop it. But a source slot takes `stack_size +
+                // INPUT_OVERLOAD` and no more, so "put it down anyway" is a
+                // request the game refuses — and the ore is not dropped by
+                // capping, it stays in the supplier's pocket, where it is
+                // available to the next plan.
+                //
+                // Reachability, measured rather than assumed: this branch
+                // fired on none of `researched:automation`,
+                // `producing:automation-science-pack:6`,
+                // `producing:logistic-science-pack:6` or `have:steel-plate:150`
+                // against the baseline map, and on none of this crate's ~600
+                // tests. It is a guard against the shares and the bill
+                // disagreeing, which they currently never do.
+                let put = left.min(room[slot]);
                 if put == 0 {
                     continue;
                 }
-                // Ore this furnace has no room for is ore that will still be
-                // sitting in its source slot when the take fires, so nothing
-                // may queue behind it. The excess is still put down — see the
-                // comment above — it is only the *reuse* that is refused.
-                if put > room[index] {
-                    bank[index].drains = false;
-                }
-                room[index] = room[index].saturating_sub(put);
+                room[slot] = room[slot].saturating_sub(put);
                 left -= put;
                 let pos = bank[index].pos.clone();
                 let id = ctx.ids.next();
-                insert_ids[index].push(id);
-                ore_insert_ids[index].push(id);
+                insert_ids[index][load_index].push(id);
+                ore_insert_ids[index][load_index].push(id);
                 block.push(Step::Act(Box::new(Action {
                     id,
                     kind: ActionKind::Insert {
@@ -1742,6 +1928,23 @@ fn smelt_steps(
                     label: format!("insert {} {}", put, ore),
                 })));
             }
+            // Ore the bank had no room for. It stays where it is, and the
+            // furnace it would have gone into is refused as a reuse target,
+            // exactly as an over-filled one used to be. **Said out loud**:
+            // this is the shares disagreeing with the bill, and a silent
+            // capping is how a mis-sizing survives a run without anybody
+            // reading a number.
+            if left > 0 {
+                factorio_bot_core::tracing::warn!(
+                    ore = %ore,
+                    bot = ?bot,
+                    left,
+                    "more ore than the bank has room for; the surplus stays in the bot's hands"
+                );
+                if let Some(&(index, _)) = cells.last() {
+                    bank[index].drains = false;
+                }
+            }
             if bot == *taker {
                 steps.extend(block);
             } else {
@@ -1756,9 +1959,9 @@ fn smelt_steps(
         // the slot is not drained either. Same treatment as an over-filled
         // one: the smelt is emitted as it always was, and only reuse is
         // refused.
-        for (index, left) in room.iter().enumerate() {
+        for (slot, left) in room.iter().enumerate() {
             if *left > 0 {
-                bank[index].drains = false;
+                bank[cells[slot].0].drains = false;
             }
         }
         // `Condition::EntityAt` is world-scoped, so `infer_edges` would keep
@@ -1774,11 +1977,11 @@ fn smelt_steps(
         //
         // A furnace the bank *adopted* has no place to link from — it stands
         // before the plan starts, so there is no edge to state.
-        for (index, ids) in ore_insert_ids.iter().enumerate() {
+        for (index, per_load) in ore_insert_ids.iter().enumerate() {
             let Some(place_id) = place_ids[index] else {
                 continue;
             };
-            for id in ids {
+            for id in per_load.iter().flatten() {
                 steps.push(Step::Link {
                     from: place_id,
                     to: *id,
@@ -1803,7 +2006,7 @@ fn smelt_steps(
         let Some(place_id) = place_ids[index] else {
             continue;
         };
-        for id in &insert_ids[index] {
+        for id in insert_ids[index].iter().flatten() {
             steps.push(Step::Link {
                 from: place_id,
                 to: *id,
@@ -1879,7 +2082,7 @@ fn smelt_steps(
         let Some(release) = furnace_slot.wait_for else {
             continue;
         };
-        for id in &insert_ids[index] {
+        for id in insert_ids[index].iter().flatten() {
             steps.push(Step::Link {
                 from: release,
                 to: *id,
@@ -1888,93 +2091,130 @@ fn smelt_steps(
         }
     }
 
+    // One take per **load**, and the lag that precedes it.
+    //
+    // A furnace's output is one slot holding one stack, and a furnace whose
+    // output slot fills reports `full_output` and **stops smelting**. So a
+    // share larger than one load is emptied in visits, and each visit's take
+    // is timed to when that visit's own batch is done rather than to the end
+    // of the whole share -- which is what keeps the machine running across the
+    // wait instead of standing dead in it.
     let mut last_remove = 0usize;
     for (index, furnace_slot) in bank.iter().enumerate() {
-        let pos = furnace_slot.pos.clone();
-        let take = furnace_slot.take;
-        let remove_id = ctx.ids.next();
-        last_remove = steps.len();
-        steps.push(Step::Act(Box::new(Action {
-            id: remove_id,
-            kind: ActionKind::Remove {
-                pos: pos.clone(),
-                entity: furnace_entity.clone(),
-                slot: InventorySlot::FurnaceResult,
-                item: item.clone(),
-                count: take,
-            },
-            pre: {
-                let mut pre = vec![
-                    Condition::AtPosition {
-                        who: Actor::Role,
-                        pos: pos.clone(),
-                        radius: reach,
-                        min_radius: 0.0,
-                    },
-                    Condition::EntityAt {
-                        pos: pos.clone(),
-                        name: "stone-furnace".into(),
-                    },
-                ];
-                pre.extend(research_pre.iter().cloned());
-                pre
-            },
-            eff: vec![Effect::GainItem {
-                who: Actor::Role,
-                item: item.clone(),
-                count: take,
-            }],
-            duration: TRANSFER_TICKS,
-            pinned: None,
-            label: format!("take {} {} from the furnace", take, item),
-        })));
+        // The take that emptied the previous load, which every insert of this
+        // one has to follow: the ore for a second visit has nowhere to go
+        // until the first batch has smelted and been carried away.
+        let mut previous_take: Option<ActionId> = None;
+        for (load_index, one_load) in furnace_slot.loads.iter().enumerate() {
+            let pos = furnace_slot.pos.clone();
+            let take = one_load.take;
+            let remove_id = ctx.ids.next();
+            last_remove = steps.len();
+            steps.push(Step::Act(Box::new(Action {
+                id: remove_id,
+                kind: ActionKind::Remove {
+                    pos: pos.clone(),
+                    entity: furnace_entity.clone(),
+                    slot: InventorySlot::FurnaceResult,
+                    item: item.clone(),
+                    count: take,
+                },
+                pre: {
+                    let mut pre = vec![
+                        Condition::AtPosition {
+                            who: Actor::Role,
+                            pos: pos.clone(),
+                            radius: reach,
+                            min_radius: 0.0,
+                        },
+                        Condition::EntityAt {
+                            pos: pos.clone(),
+                            name: "stone-furnace".into(),
+                        },
+                    ];
+                    pre.extend(research_pre.iter().cloned());
+                    pre
+                },
+                eff: vec![Effect::GainItem {
+                    who: Actor::Role,
+                    item: item.clone(),
+                    count: take,
+                }],
+                duration: TRANSFER_TICKS,
+                pinned: None,
+                label: format!("take {} {} from the furnace", take, item),
+            })));
 
-        let smelt_lag = per_run
-            .saturating_mul(furnace_slot.runs)
-            .saturating_add(per_run);
-        for id in &insert_ids[index] {
-            // **A furnace starts when the last of its ore and its fuel lands,
-            // and only the taker's own fuel is provably the earlier of the
-            // two.** In the taker's chain the fuel load sits one action after
-            // the ore insert on one serial timeline, so charging it no lag
-            // understates the wait by a single transfer, which the take's
-            // one-cycle headroom above already covers.
+            let smelt_lag = per_run
+                .saturating_mul(one_load.runs)
+                .saturating_add(per_run);
+            for id in &insert_ids[index][load_index] {
+                // **A furnace starts when the last of its ore and its fuel lands,
+                // and only the taker's own fuel is provably the earlier of the
+                // two.** In the taker's chain the fuel load sits one action after
+                // the ore insert on one serial timeline, so charging it no lag
+                // understates the wait by a single transfer, which the take's
+                // one-cycle headroom above already covers.
+                //
+                // A *handed* fuel is a different bot's errand in a different
+                // chain, and nothing bounds how far behind the ore it lands. Give
+                // it the zero lag and the plan schedules the take against an
+                // insert the furnace had not yet begun to consume — the
+                // "nine plates out of ten" failure recorded above, arrived at
+                // through the new door. This is the cross-chain edge R3's design
+                // predicted would be found; it is stated rather than inferred
+                // because `infer_edges` has no way to see a *lag*.
+                let lag = if fuel_ids[index][load_index] == Some(*id) && suppliers[index].is_none()
+                {
+                    0
+                } else {
+                    smelt_lag
+                };
+                steps.push(Step::Link {
+                    from: *id,
+                    to: remove_id,
+                    lag,
+                });
+            }
+
+            // The slot is emptied before it is filled again. Stated rather than
+            // left to the lags: the ordering is physical, and `infer_edges` cannot
+            // see it -- a take's effect is `GainItem`, which satisfies no
+            // precondition of an insert, and no condition anywhere says "this
+            // machine is empty". It is the same edge `queue_machine` states
+            // between two *smelts* sharing a furnace, applied between two loads of
+            // one smelt.
+            if let Some(previous) = previous_take {
+                for id in &insert_ids[index][load_index] {
+                    steps.push(Step::Link {
+                        from: previous,
+                        to: *id,
+                        lag: 0,
+                    });
+                }
+            }
+            previous_take = Some(remove_id);
+
+            // Hand the furnace on. A later smelt of the same item may queue behind
+            // this take — and only behind *this* take, since it is the newest batch
+            // in the machine.
             //
-            // A *handed* fuel is a different bot's errand in a different
-            // chain, and nothing bounds how far behind the ore it lands. Give
-            // it the zero lag and the plan schedules the take against an
-            // insert the furnace had not yet begun to consume — the
-            // "nine plates out of ten" failure recorded above, arrived at
-            // through the new door. This is the cross-chain edge R3's design
-            // predicted would be found; it is stated rather than inferred
-            // because `infer_edges` has no way to see a *lag*.
-            let lag = if fuel_ids[index] == Some(*id) && suppliers[index].is_none() {
-                0
-            } else {
-                smelt_lag
-            };
-            steps.push(Step::Link {
-                from: *id,
-                to: remove_id,
-                lag,
-            });
-        }
-
-        // Hand the furnace on. A later smelt of the same item may queue behind
-        // this take — and only behind *this* take, since it is the newest batch
-        // in the machine.
-        //
-        // The machine time recorded is `per_run * runs` and not `smelt_lag`:
-        // the extra cycle in the lag is schedule headroom against a start that
-        // misses a craft boundary, not time the furnace is busy, and this
-        // number exists only to be compared with another furnace's.
-        if furnace_slot.drains {
-            ctx.state.queue_machine(
-                &furnace_slot.pos,
-                item,
-                remove_id,
-                per_run.saturating_mul(furnace_slot.runs),
-            );
+            // The machine time recorded is `per_run * runs` and not `smelt_lag`:
+            // the extra cycle in the lag is schedule headroom against a start that
+            // misses a craft boundary, not time the furnace is busy, and this
+            // number exists only to be compared with another furnace's.
+            //
+            // The **last** load, because that is the batch a later smelt would be
+            // queueing behind; an earlier load's take is not the newest thing in
+            // the machine.
+            if furnace_slot.drains && load_index + 1 == furnace_slot.loads.len() {
+                ctx.state.queue_machine(
+                    &furnace_slot.pos,
+                    item,
+                    remove_id,
+                    per_run.saturating_mul(furnace_slot.runs),
+                );
+            }
         }
     }
 
@@ -11151,6 +11391,211 @@ mod tests {
             ),
             "and the pole is crafted from it"
         );
+    }
+
+    // ---- capacity: a furnace is a slot, not a bucket -----------------------
+
+    /// The three slots that bound one furnace-load, and **which of them
+    /// binds**.
+    ///
+    /// For iron the input is the tightest of the three, which is the whole
+    /// reason this is a minimum rather than the output rule alone: capping a
+    /// batch at a stack of 100 plates still asks for 100 ore into a source
+    /// slot that takes 70.
+    #[test]
+    fn a_furnace_load_is_bounded_by_whichever_of_its_three_slots_is_tightest() {
+        let s = state(&[BotId(1)]);
+        assert_eq!(
+            runs_per_load(&s, "iron-plate", 1, &[("iron-ore".into(), 1)], 192),
+            70,
+            "the source slot takes stack + overload = 70 ore, where the output \
+             would have allowed a hundred plates"
+        );
+        assert_eq!(
+            runs_per_load(&s, "steel-plate", 1, &[("iron-plate".into(), 5)], 960),
+            24,
+            "five plates a run into a slot that takes 120 is 24 runs -- the \
+             input binds harder still when a run costs more than one item"
+        );
+        assert_eq!(
+            runs_per_load(&s, "iron-plate", 1, &[("iron-ore".into(), 1)], 200_000),
+            1,
+            "a run longer than a whole stack of coal burns is still one run: \
+             returning zero would refuse a goal rather than bound it"
+        );
+        assert_eq!(
+            runs_per_load(&s, "no-such-item", 1, &[("no-such-ore".into(), 1)], 192),
+            694,
+            "an item the world has no prototype for drops out of the minimum \
+             -- unknown is unbounded, never a guessed cap -- leaving the fuel \
+             bound, which is about coal and is still known"
+        );
+    }
+
+    /// A fuel bill divides into the visits one slot can take, and an unknown
+    /// fuel is not given a guessed cap.
+    #[test]
+    fn a_fuel_bill_divides_into_the_visits_one_slot_can_take() {
+        let s = state(&[BotId(1)]);
+        assert_eq!(fuel_visits(&s, "coal", 113), vec![50, 50, 13]);
+        assert_eq!(fuel_visits(&s, "coal", 50), vec![50], "exactly one slot");
+        assert_eq!(fuel_visits(&s, "coal", 0), Vec::<u32>::new());
+        assert_eq!(
+            fuel_visits(&s, "no-such-fuel", 113),
+            vec![113],
+            "unknown means unbounded, which is one visit and today's behaviour"
+        );
+    }
+
+    /// **A smelt larger than one furnace-load is a sequence of visits.**
+    ///
+    /// A furnace holds one slot of ore, one slot of coal and one slot of
+    /// plates. Sized from demand, a 150-plate smelt asked to put 150 ore into
+    /// a slot that takes 70 and to pull 150 plates out of one that holds 100 --
+    /// and a furnace whose output slot fills reports `full_output` and *stops
+    /// smelting*, so the oversized batch does not merely fail at the take, it
+    /// wastes the whole wait.
+    #[test]
+    fn a_smelt_larger_than_one_load_fills_the_furnace_more_than_once() {
+        let s = state(&[BotId(1)]);
+        let mut ctx = ExpansionCtx::new(s.fork(), BotId(1));
+        let steps = Smelt
+            .expand(&gather("iron-plate", 150), &mut ctx)
+            .expect("a hundred and fifty plates smelt");
+        let mut ore = Vec::new();
+        let mut coal = Vec::new();
+        let mut takes = Vec::new();
+        for step in &steps {
+            let Step::Act(action) = step else { continue };
+            match &action.kind {
+                ActionKind::Insert {
+                    slot: InventorySlot::FurnaceSource,
+                    count,
+                    ..
+                } => ore.push(*count),
+                ActionKind::Insert {
+                    slot: InventorySlot::Fuel,
+                    count,
+                    ..
+                } => coal.push(*count),
+                ActionKind::Remove {
+                    slot: InventorySlot::FurnaceResult,
+                    count,
+                    ..
+                } => takes.push(*count),
+                _ => {}
+            }
+        }
+        assert_eq!(
+            takes,
+            vec![50, 50, 50],
+            "three visits, dealt as evenly as integers allow"
+        );
+        assert_eq!(ore, vec![50, 50, 50], "and each load's own ore with it");
+        assert_eq!(
+            coal.len(),
+            3,
+            "one fuel load per visit, in {coal:?} -- a slot that has burned \
+             through is a slot that has room"
+        );
+        for (slot, counts) in [
+            (InventorySlot::FurnaceSource, &ore),
+            (InventorySlot::Fuel, &coal),
+            (InventorySlot::FurnaceResult, &takes),
+        ] {
+            let cap = s
+                .slot_capacity(
+                    slot,
+                    if slot == InventorySlot::Fuel {
+                        "coal"
+                    } else {
+                        "iron-ore"
+                    },
+                )
+                .expect("the fixture carries these prototypes");
+            assert!(
+                counts.iter().all(|count| *count <= cap),
+                "{slot:?} takes {cap} and the plan asks {counts:?}"
+            );
+        }
+        assert_eq!(
+            takes.iter().sum::<u32>(),
+            150,
+            "and the visits still add up to the goal"
+        );
+    }
+
+    /// The slot is emptied before it is filled again, and that is **stated**.
+    ///
+    /// `infer_edges` cannot see it: a take's effect is `GainItem`, which
+    /// satisfies no precondition of an insert, and no condition anywhere says
+    /// "this machine is empty". Without the edge the plan would load the
+    /// second batch into a furnace still holding the first.
+    #[test]
+    fn each_load_of_a_split_smelt_follows_the_take_that_emptied_the_last() {
+        let s = state(&[BotId(1)]);
+        let mut ctx = ExpansionCtx::new(s.fork(), BotId(1));
+        let steps = Smelt
+            .expand(&gather("iron-plate", 150), &mut ctx)
+            .expect("a hundred and fifty plates smelt");
+        let takes: Vec<ActionId> = steps
+            .iter()
+            .filter_map(|step| match step {
+                Step::Act(action)
+                    if matches!(
+                        &action.kind,
+                        ActionKind::Remove {
+                            slot: InventorySlot::FurnaceResult,
+                            ..
+                        }
+                    ) =>
+                {
+                    Some(action.id)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(takes.len(), 3, "the fixture really does split this smelt");
+        for take in &takes[..2] {
+            assert!(
+                steps.iter().any(|step| matches!(
+                    step,
+                    Step::Link { from, .. } if from == take
+                )),
+                "the take that empties one load has to order the next one's inserts"
+            );
+        }
+    }
+
+    /// A smelt that already fitted plans exactly as it did.
+    ///
+    /// This is the guard the whole change rests on: one load means one insert,
+    /// one fuel and one take, with the ids and the lag they always had, so
+    /// every pinned fixture and both science plans are byte-identical.
+    #[test]
+    fn a_smelt_inside_one_load_is_still_one_visit() {
+        let s = state(&[BotId(1)]);
+        let mut ctx = ExpansionCtx::new(s.fork(), BotId(1));
+        let steps = Smelt
+            .expand(&gather("iron-plate", 20), &mut ctx)
+            .expect("twenty plates smelt");
+        let takes = steps
+            .iter()
+            .filter(|step| {
+                matches!(
+                    step,
+                    Step::Act(action)
+                        if matches!(
+                            &action.kind,
+                            ActionKind::Remove {
+                                slot: InventorySlot::FurnaceResult,
+                                ..
+                            }
+                        )
+                )
+            })
+            .count();
+        assert_eq!(takes, 1, "twenty runs fit in one load of seventy");
     }
 }
 

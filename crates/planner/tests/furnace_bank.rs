@@ -26,7 +26,7 @@ mod common;
 
 use factorio_bot_core::test_utils::fixture_world;
 use factorio_bot_core::types::{Direction, FactorioEntity, Position};
-use factorio_bot_planner::action::ActionKind;
+use factorio_bot_planner::action::{ActionKind, Effect};
 use factorio_bot_planner::goal::{Goal, Holder};
 use factorio_bot_planner::method::expand;
 use factorio_bot_planner::method::have::registry_for;
@@ -87,11 +87,28 @@ fn furnaces_placed(net: &ActionNetwork) -> Vec<Position> {
         .collect()
 }
 
-fn stone_mined(net: &ActionNetwork) -> u32 {
+/// Stone the plan commits to gathering, by whichever verb gathers it.
+///
+/// **A rock counts.** This looked at `ActionKind::Mine` alone until
+/// 2026-09-04, when `Chop` moved ahead of `Mine` and the fixture's own
+/// `rock-huge` became the cheaper way to get five stone. A helper blind to
+/// that reads "no stone is owed" off a plan that is about to go and get
+/// twenty-four of it, which is the opposite of what every caller here means.
+/// A chop's yield is stated by its effects and never inferred from its
+/// `count`, which is a number of entities.
+fn stone_gathered(net: &ActionNetwork) -> u32 {
     net.actions()
-        .filter_map(|a| match &a.kind {
-            ActionKind::Mine { item, count, .. } if item == "stone" => Some(*count),
-            _ => None,
+        .map(|a| match &a.kind {
+            ActionKind::Mine { item, count, .. } if item == "stone" => *count,
+            ActionKind::Chop { .. } => a
+                .eff
+                .iter()
+                .filter_map(|e| match e {
+                    Effect::GainItem { item, count, .. } if item == "stone" => Some(*count),
+                    _ => None,
+                })
+                .sum(),
+            _ => 0,
         })
         .sum()
 }
@@ -149,7 +166,7 @@ fn a_second_plan_does_not_rebuild_what_the_first_one_placed() {
         "the second plan built furnaces beside the ones the first one left"
     );
     assert_eq!(
-        stone_mined(&second),
+        stone_gathered(&second),
         0,
         "no stone is owed for a furnace that already stands"
     );
@@ -163,10 +180,18 @@ fn a_standing_furnace_takes_the_stone_out_of_the_bill() {
     let (adopting, _) = plan_for(world_with_standing_furnaces(1), 20);
 
     assert_eq!(furnaces_placed(&bare).len(), 1);
-    assert_eq!(stone_mined(&bare), 5, "five stone makes one furnace");
+    // Twenty-four, not five: since 2026-09-04 the cheapest five stone on this
+    // fixture is one swing at a `rock-huge` (360 ticks against 5 * 120), and a
+    // rock is indivisible -- see `have::Chop`. What this test is about is the
+    // *adopting* plan owing nothing at all, and that is unchanged.
+    assert_eq!(
+        stone_gathered(&bare),
+        24,
+        "one rock is what a furnace's stone costs now"
+    );
 
     assert!(furnaces_placed(&adopting).is_empty());
-    assert_eq!(stone_mined(&adopting), 0);
+    assert_eq!(stone_gathered(&adopting), 0);
     assert!(
         !adopting
             .actions()
@@ -301,7 +326,22 @@ fn a_bank_loads_and_unloads_exactly_the_goal() {
         .sum();
     assert_eq!(loaded, 20, "one ore per plate, dealt over the bank");
     assert_eq!(taken, 20, "and every plate comes back out");
-    assert_eq!(stone_mined(&net), 0, "the bank was adopted, not built");
+    // **The claim is "no furnace was built", and it is now asserted as that.**
+    // It read `stone_gathered(&net) == 0` until 2026-09-04. Stone is no longer
+    // a proxy for a furnace: `Chop` swings at a `rock-huge` for this plan's
+    // *coal*, and the same swing hands over twenty-four stone the plan never
+    // asked for -- so the old spelling failed on a plan that adopts every
+    // furnace it uses, for a reason that has nothing to do with furnaces. See
+    // `have::Chop` on why the whole bill is credited.
+    assert!(
+        furnaces_placed(&net).is_empty(),
+        "the bank was adopted, not built"
+    );
+    assert!(
+        !net.actions()
+            .any(|a| matches!(&a.kind, ActionKind::Craft { item, .. } if item == "stone-furnace")),
+        "and nothing was crafted towards one"
+    );
 }
 
 /// A wider bank must be a shorter *schedule*, not only a shorter lag — the lag
@@ -345,7 +385,7 @@ fn the_single_bot_path_never_gets_more_work() {
              {bank_span} against {bare_span}"
         );
         assert!(
-            stone_mined(&bank) <= stone_mined(&bare),
+            stone_gathered(&bank) <= stone_gathered(&bare),
             "{plates} plates: a standing bank should never cost more stone"
         );
     }

@@ -1695,12 +1695,31 @@ mod tests {
     /// `reserve_chain_produce`.
     #[test]
     fn four_bots_do_not_re_mine_what_an_earlier_chain_of_theirs_produced() {
-        /// Every resource the plan commits to digging, by item.
+        /// Every raw unit the plan commits to gathering, by item.
+        ///
+        /// **`ActionKind::Chop` counts too, and its yield is read off its
+        /// effects.** This looked at `Mine` alone until 2026-09-04, when
+        /// `Chop` moved ahead of it and stone and coal started arriving off
+        /// rocks. A helper blind to that would have read "the fleet digs less
+        /// stone" off a plan that gathers exactly as much stone by a different
+        /// verb, which is the claim this whole test exists to refuse. A chop's
+        /// yield is never inferred from its `count`, which is a number of
+        /// entities -- see `ActionKind::Chop`.
         fn mined(net: &ActionNetwork) -> BTreeMap<ItemId, u32> {
             let mut out: BTreeMap<ItemId, u32> = BTreeMap::new();
             for action in net.actions() {
-                if let ActionKind::Mine { item, count, .. } = &action.kind {
-                    *out.entry(item.clone()).or_default() += count;
+                match &action.kind {
+                    ActionKind::Mine { item, count, .. } => {
+                        *out.entry(item.clone()).or_default() += count;
+                    }
+                    ActionKind::Chop { .. } => {
+                        for effect in &action.eff {
+                            if let crate::action::Effect::GainItem { item, count, .. } = effect {
+                                *out.entry(item.clone()).or_default() += count;
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
             out
@@ -1742,17 +1761,29 @@ mod tests {
         // is pinned rather than bounded for the reason above: the number going
         // *down* is the result, and only an exact pin can tell that from four
         // bots being made to look good by making one bot worse.
+        //
+        // **Both raw figures went up on 2026-09-04 -- 15 stone -> 24 and 29
+        // coal -> 33 -- and that is the change working rather than failing.**
+        // These are units *gathered*, and a rock is indivisible: one swing at
+        // a `rock-huge` hands over twenty-four coal and twenty-four stone
+        // whether the plan needed all of it or a third of it. The plan
+        // therefore ends up holding more raw material than before while
+        // spending far less time on it -- 92 actions -> 86, and 41,835 ticks
+        // -> 38,606 in `have::the_single_bot_rung_one_plan_is_untouched`,
+        // which schedules this same expansion. Units are the wrong currency
+        // for effort now; they are still the right one for *duplication*,
+        // which is what this test is about.
         assert_eq!(
             mined(&solo),
             BTreeMap::from([
-                ("coal".to_string(), 29),
+                ("coal".to_string(), 33),
                 ("copper-ore".to_string(), 29),
                 ("iron-ore".to_string(), 41),
-                ("stone".to_string(), 15),
+                ("stone".to_string(), 24),
             ]),
             "one bot's rung-1 bill"
         );
-        assert_eq!(solo.len(), 92, "one bot's rung-1 step count");
+        assert_eq!(solo.len(), 86, "one bot's rung-1 step count");
 
         // The defect, stated as the property it breaks. Four bots dig no more
         // than one bot does -- they may split it differently and they may
@@ -1792,15 +1823,16 @@ mod tests {
         assert_eq!(
             mined(&fleet),
             BTreeMap::from([
-                ("coal".to_string(), 29),
+                ("coal".to_string(), 33),
                 ("copper-ore".to_string(), 29),
                 ("iron-ore".to_string(), 41),
-                // Ten *above* the solo bill, and see the exemption above for
-                // why that is bought rather than wasted: four bots get four
-                // furnaces per ore patch and one bot gets one. Still far below
-                // the 35 this plan mined before in-plan reuse existed, and
-                // that number was itself already net of the three furnaces R3
-                // takes out of bots 2-4's starting inventory.
+                // **One** above the solo bill, not ten: see the exemption
+                // above for why any excess is bought rather than wasted, and
+                // note that rocks made the excess almost vanish. A rock hands
+                // over twenty-four stone whether the plan wanted twenty-four
+                // or fifteen, so the fleet's extra furnaces now come out of a
+                // surplus that was already on the ground rather than out of
+                // ten more units of digging.
                 ("stone".to_string(), 25),
             ]),
             "four bots' rung-1 bill"

@@ -48,6 +48,42 @@ fn world_without_furnaces(bots: &[BotId]) -> PlanState {
     state
 }
 
+/// `world_without_furnaces`, and with the fixture's rocks taken away as well.
+///
+/// **This is what keeps `every_expansion_replays_in_time_order` discriminating,
+/// and it was added on 2026-09-04 because that test caught its own decay.**
+/// `Chop` moved ahead of `Mine` that day, and `fixture_world` stands three
+/// `rock-huge` and one `rock-big` -- so the first chop in any of these plans
+/// hands the acting bot twenty-four coal *and* twenty-four stone at once. A bot
+/// holding that is short of nothing, `worth_handing_a_furnace_over` reads a
+/// saving of zero and refuses, and every cross-chain edge in this file
+/// vanished: the replay went back to checking a property nothing could break.
+/// The rocks did not break the handover -- they made it genuinely pointless on
+/// this fixture, which is a different thing and is why the fixture moves rather
+/// than the predicate.
+///
+/// Removed through `EntityGraph::retire_minable`, the same door the executor
+/// uses when a bot mines one, rather than by building a world without them:
+/// the population under test has to be one the live game can produce.
+fn world_without_furnaces_or_rocks(bots: &[BotId]) -> PlanState {
+    let world = fixture_world();
+    for name in ["rock-huge", "rock-big", "sand-rock-big"] {
+        for position in world.entity_graph.minable_positions(name) {
+            world.entity_graph.retire_minable(name, &position);
+        }
+    }
+    assert!(
+        world.entity_graph.minables_yielding("stone").is_empty(),
+        "control: no standing entity may still yield stone, or this fixture is \
+         the same as the one above"
+    );
+    let mut state = PlanState::from_world(Arc::new(world), bots);
+    if bots.contains(&BotId(2)) {
+        state.set_position(BotId(2), Position::new(30., 0.));
+    }
+    state
+}
+
 fn goal(count: u32) -> Goal {
     Goal::Have {
         item: "automation-science-pack".into(),
@@ -233,12 +269,19 @@ fn the_plan_renders_as_a_gantt_chart() {
 /// smelting lag, which `infer_edges` could not supply even if it kept the
 /// pairing.
 ///
-/// So the loop runs over **two** fixtures. `world_with_furnaces` is the one
+/// So the loop runs over **three** fixtures. `world_with_furnaces` is the one
 /// that has always been here, and it still hands nothing over: every bot is
 /// carrying two stone furnaces, so moving a placement saves the taker nothing
 /// and `worth_handing_a_furnace_over` refuses. `world_without_furnaces` is the
-/// same world with empty pockets, which is what makes the handover pay and
-/// what puts a real cross-chain dependency in front of this replay.
+/// same world with empty pockets, which used to be what made the handover pay.
+///
+/// **It stopped paying on 2026-09-04 and this guard is what said so.** `Chop`
+/// moved ahead of `Mine`, one swing at the fixture's `rock-huge` now hands a
+/// bot twenty-four coal and twenty-four stone, and a bot holding that is short
+/// of nothing for a furnace to save it -- so `world_without_furnaces` produced
+/// zero cross-chain edges and this test failed on its own discrimination check
+/// rather than on any assertion about a plan. `world_without_furnaces_or_rocks`
+/// is the third fixture, added for that reason; see its own doc.
 #[test]
 fn every_expansion_replays_in_time_order() {
     let mut cross_chain_edges = 0usize;
@@ -252,6 +295,10 @@ fn every_expansion_replays_in_time_order() {
             for (name, state) in [
                 ("with furnaces", world_with_furnaces(bots)),
                 ("without furnaces", world_without_furnaces(bots)),
+                (
+                    "without furnaces or rocks",
+                    world_without_furnaces_or_rocks(bots),
+                ),
             ] {
                 let net = expand(&[goal(count)], &state, &registry_for(bots), BotId(1))
                     .unwrap_or_else(|e| {

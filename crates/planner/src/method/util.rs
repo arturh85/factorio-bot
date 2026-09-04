@@ -10,6 +10,7 @@ use factorio_bot_core::num_traits::ToPrimitive;
 use factorio_bot_core::types::{
     Direction, FactorioRecipe, FactorioTechnology, Position, Rect, ResearchTrigger,
 };
+use std::collections::BTreeMap;
 
 const TICKS_PER_SECOND: f64 = 60.0;
 
@@ -154,6 +155,55 @@ pub fn mining_ticks(state: &PlanState, item: &str) -> Ticks {
         .and_then(|p| p.mining_time)
         .unwrap_or(1.0);
     seconds_to_ticks(seconds / character_mining_speed(state))
+}
+
+/// The **whole** bill one swing at the standing entity `entity` yields, in
+/// item order.
+///
+/// [`mining_ticks`]'s sibling, and read off the same prototype: `mine_result`
+/// is the game's own answer to "what does mining this give you".
+/// `EntityGraph::minables_yielding` answers the same question from the other
+/// side — it is asked about an *item* and reports only that item's share — and
+/// that half-answer is exactly what a caller must not act on for a rock. A
+/// `huge-rock` yields `{coal, stone}`, and a method that credits only the item
+/// it went there for leaves the other half of a real delivery out of the plan,
+/// which then goes and fetches it again.
+///
+/// # The numbers here are the game's *minimum*, not its average
+///
+/// Vanilla rocks yield a **range**: `huge-rock` is 24–50 of each of coal and
+/// stone, `big-sand-rock` 19–25 of stone. Nothing in this crate can sample a
+/// range and stay deterministic, so the decision is made upstream and this is
+/// where to read about it: `products_to_dict` (`mods/BotBridge/control.lua`)
+/// takes `product.amount` when the prototype states one and
+/// `product.amount_min` when it states a range, so what reaches
+/// `FactorioEntityPrototype::mine_result` — and therefore this function, and
+/// therefore every `Effect::GainItem` sized from it — is the **floor** of what
+/// the game will actually hand over.
+///
+/// That is the safe direction and it was worth keeping. A plan sized on the
+/// average would be right on average and short on roughly half of all swings,
+/// and a short delivery is a goal that fails its own `HasItem` and forces a
+/// replan; a plan sized on the floor is never short, and its cost is at most
+/// one extra swing (three seconds on a `huge-rock`) that the run does not
+/// need. Over-mining is a rounding error against a replan.
+///
+/// It does mean the numbers here are a *lower bound on reality* rather than a
+/// prediction, so a bot that mined two `huge-rock`s for the 48 coal the plan
+/// asked for may walk away with 100. Nothing downstream is harmed by arriving
+/// with more than it planned for; every reader of an inventory reads the real
+/// one.
+///
+/// An entity with no prototype, or a prototype with no `mine_result`, yields
+/// nothing — which refuses the work rather than guessing a bill, exactly as
+/// `minables_yielding` does.
+pub fn mine_bill(state: &PlanState, entity: &str) -> BTreeMap<String, u32> {
+    state
+        .base()
+        .entity_prototypes
+        .get(entity)
+        .and_then(|proto| proto.mine_result.clone())
+        .unwrap_or_default()
 }
 
 /// The tile of `item` nearest `from` that still holds at least `need` and has

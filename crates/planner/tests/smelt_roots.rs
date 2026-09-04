@@ -11,7 +11,7 @@
 
 use factorio_bot_core::test_utils::fixture_world;
 use factorio_bot_core::types::Position;
-use factorio_bot_planner::action::{ActionKind, InventorySlot};
+use factorio_bot_planner::action::{ActionKind, Effect, InventorySlot};
 use factorio_bot_planner::goal::{Goal, Holder};
 use factorio_bot_planner::ids::ActionId;
 use factorio_bot_planner::method::expand;
@@ -237,22 +237,39 @@ fn no_bot_loads_a_furnace_with_ore_another_bot_dug() {
             unreachable!("filtered above")
         };
         let action = net.action(*action).expect("scheduled action is in the net");
-        let (item, delta) = match &action.kind {
-            ActionKind::Mine { item, count, .. } => (item.clone(), i64::from(*count)),
-            ActionKind::Insert { item, count, .. } => (item.clone(), -i64::from(*count)),
+        // **A chop is a gather too, and it gathers more than one item.** This
+        // read `ActionKind::Mine` alone until 2026-09-04; `Chop` then moved
+        // ahead of `Mine` and a bot's coal started arriving off a `rock-huge`
+        // -- twenty-four coal and twenty-four stone in one action -- so the
+        // ledger saw the insert and not the gather and reported a bot loading
+        // a furnace out of nothing. The yield is read off the action's effects,
+        // never from its `count`, which is a number of entities.
+        let deltas: Vec<(String, i64)> = match &action.kind {
+            ActionKind::Mine { item, count, .. } => vec![(item.clone(), i64::from(*count))],
+            ActionKind::Chop { .. } => action
+                .eff
+                .iter()
+                .filter_map(|e| match e {
+                    Effect::GainItem { item, count, .. } => Some((item.clone(), i64::from(*count))),
+                    _ => None,
+                })
+                .collect(),
+            ActionKind::Insert { item, count, .. } => vec![(item.clone(), -i64::from(*count))],
             _ => continue,
         };
-        let Some(running) = held.get_mut(&(step.bot, item.clone())) else {
-            continue;
-        };
-        *running += delta;
-        assert!(
-            *running >= 0,
-            "{} put {item} into a furnace that it never dug and was never given: \
-             running total {running} after `{}`",
-            step.bot,
-            action.label
-        );
+        for (item, delta) in deltas {
+            let Some(running) = held.get_mut(&(step.bot, item.clone())) else {
+                continue;
+            };
+            *running += delta;
+            assert!(
+                *running >= 0,
+                "{} put {item} into a furnace that it never dug and was never given: \
+                 running total {running} after `{}`",
+                step.bot,
+                action.label
+            );
+        }
     }
 }
 

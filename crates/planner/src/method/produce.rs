@@ -2135,17 +2135,24 @@ mod tests {
     /// 92 and 46,446 ticks -> 41,835. A bound that got both right would have
     /// to price bot idle time, which this crate cannot do -- `bank_size` says
     /// so at length and for the same reason.
+    ///
+    /// **21 actions and 5,773 ticks since 2026-09-04**, when `Chop` was
+    /// registered ahead of `Mine`. This is the largest single movement any
+    /// pinned figure in the crate has taken -- 48% off the makespan -- and the
+    /// reason is in the summary at the top: **mine 37 coal**. Thirty-seven
+    /// units of hand mining is 4,440 ticks, and the fixture's `rock-huge`
+    /// hands over twenty-four coal *and* twenty-four stone for 360. The stone
+    /// that comes with it is what removes the other actions: the furnaces this
+    /// plan crafts no longer need their stone dug for separately. See
+    /// `have::Chop`.
     #[test]
     fn the_whole_of_stage_one_costs_this_much() {
         let bots = [BotId(1)];
         let s = state(&bots);
         let net = plan(15).expect("the fixture can build a cell");
-        assert_eq!(net.len(), 24, "actions in a one-cell plan");
+        assert_eq!(net.len(), 21, "actions in a one-cell plan");
         let sched = crate::schedule::schedule(&net, &s, &bots).expect("it schedules");
-        assert_eq!(
-            sched.makespan, 11_025,
-            "ticks for one bot to build one cell"
-        );
+        assert_eq!(sched.makespan, 5_773, "ticks for one bot to build one cell");
     }
 
     #[test]

@@ -11,6 +11,64 @@ four bots.
 
 ---
 
+## WHERE THIS STANDS (read this first)
+
+**Sections below are reverse-chronological — newest first.** The plan began as
+a set of workstreams; most are now landed and the document is as much a record
+as a plan.
+
+### Results
+
+| goal | before | now |
+|---|---|---|
+| `researched("automation")` | 21.34 min | **8.69 / 8.72 min** (two runs, target was under 9) |
+| red science cell standing | never satisfied, `stuck_silent` | **satisfied in 1 iteration** |
+| red science **producing** | never observed in this project | **WITNESSED** (`run-1788489532-62404`) |
+| green science | — | **does not plan at all**; capability gap, in design |
+
+### Landed
+
+| what | commit |
+|---|---|
+| Lag clock starts at the predecessor's finish (F) | `c8ef0d91` |
+| Per-bot concurrency for background actions (C) | `421de15c` |
+| Shared chest so gathering can move between bots (B) | `0069b41c` |
+| Offline planning from a dumped world (0) | `db612be9` |
+| Map scorer (0b) | `a5b31c80` |
+| Milestone savepoints and resume (G) | `a5dc71da`, `7e9fabc6` |
+| Retry a placement a bot is standing in | `c2b2698a` |
+| **A recipe set over RCON reaches the world model** | `30b28846` |
+| Run provenance, `--seed` fix, `--compare` | `61ec7364`, `ccaf562f`, `a1c1316a` |
+| Furnace handover (R3) | `c0c3bc5c` |
+
+### The tools that made the difference
+
+- **Offline planning in ~4 s** against a real world dump
+  (`workspace/scripts/map.json`), instead of a 20-minute run. It established
+  the green-science gap, the 13:05 ceiling, and B's whole result.
+- **`automation_speedrun.lua`** — one goal, for timing.
+  **`research_run.lua`** — seven rungs, for diagnosis. Both are worth keeping;
+  the ladder costs ~53% and buys a named failure.
+- **Milestone savepoints** — `milestone-7.zip` is a world with automation
+  already researched.
+
+### Open, and why each is not being rushed
+
+- **`BUFFER_ENTITIES` omits `iron-chest`**, which stage 2 places two of per
+  cell, so the planner cannot see what a cell's supply chests hold. Changes
+  planning behaviour that cannot be verified offline.
+- **`supervisor.lua` never calls `obs:recover()`** — the recovery tiers exist
+  and no live run has ever reached them; every iteration replans from scratch
+  and discards completed work. The single largest untouched lever.
+- **Nothing checks a walk's landing spot against footprints the plan needs
+  later** — the root of the collision fixed in `c2b2698a`, which was treated
+  at the retry end rather than the cause.
+- **Seed `20260903` has never been run or scored.** The map every result here
+  rests on is unidentified and survives only as
+  `workspace/known-good-map/level.zip`.
+- **The flaky determinism test** never reproduced in 18 attempts and no error
+  text was ever captured.
+
 ## Owner decisions (2026-09-03, before an unattended night)
 
 1. **Success is game time, from run start to milestone satisfied.** Not
@@ -1294,7 +1352,12 @@ That is the separate `Holder::Share` ceiling.
 
 ---
 
-## Sequencing
+## Sequencing (superseded — kept for the record)
+
+**Every workstream named below has landed.** The order it argued for was also
+wrong in two places, both corrected above: B required D rather than following
+it, and F — added later — was the largest single item rather than a footnote.
+What follows is the plan as written before any of it ran.
 
 **F first — it is a bug fix, not a capability, and it is the largest single
 item.** It is confined to `crates/executor` and blocks nothing else, so it

@@ -2149,31 +2149,29 @@ fn smelt_steps(
                 .saturating_mul(one_load.runs)
                 .saturating_add(per_run);
             for id in &insert_ids[index][load_index] {
-                // **A furnace starts when the last of its ore and its fuel lands,
-                // and only the taker's own fuel is provably the earlier of the
-                // two.** In the taker's chain the fuel load sits one action after
-                // the ore insert on one serial timeline, so charging it no lag
-                // understates the wait by a single transfer, which the take's
-                // one-cycle headroom above already covers.
+                // **A furnace starts when the last of its ore and its fuel
+                // lands**, and the executor's rule for a take's lag edges is
+                // `max over preds (finish(pred) + lag)`, so charging the whole
+                // smelting time on the ore inserts *and* the fuel load is exact
+                // whichever lands last. It cannot double-count: a max is not a
+                // sum.
                 //
-                // A *handed* fuel is a different bot's errand in a different
-                // chain, and nothing bounds how far behind the ore it lands. Give
-                // it the zero lag and the plan schedules the take against an
-                // insert the furnace had not yet begun to consume — the
-                // "nine plates out of ten" failure recorded above, arrived at
-                // through the new door. This is the cross-chain edge R3's design
-                // predicted would be found; it is stated rather than inferred
-                // because `infer_edges` has no way to see a *lag*.
-                let lag = if fuel_ids[index][load_index] == Some(*id) && suppliers[index].is_none()
-                {
-                    0
-                } else {
-                    smelt_lag
-                };
+                // The taker's own fuel used to carry zero, on the reasoning that
+                // it sits one action after the ore insert on one serial
+                // timeline and so understates the wait by a single transfer.
+                // That held only while the ore was the taker's too. In
+                // `run-1788552801-73005` bot 2 inserted 5 copper ore at tick
+                // 75,932 through the shared-ore path, bot 1's own fuel landed at
+                // 84,023 — after every rock it chopped for the coal — and the
+                // take fired 26 ticks later against a furnace that had made
+                // three plates on residual fuel and then gone cold:
+                // `tried to remove 5 copper-plate but removed 3`. The plan
+                // itself had the take 40 ticks after the fuel and 6,800 after
+                // the insert, which no furnace can do.
                 steps.push(Step::Link {
                     from: *id,
                     to: remove_id,
-                    lag,
+                    lag: smelt_lag,
                 });
             }
 
@@ -7532,8 +7530,16 @@ mod tests {
             576,
             "the ore insert carries the smelting time plus its start headroom"
         );
-        // Fuel must be in before the removal, but does not itself take smelting time.
-        assert_eq!(lag_from("coal"), 0, "the fuel insert carries no lag");
+        // The fuel carries the same lag: a furnace starts when the LAST of its
+        // ore and its fuel lands, and the executor takes `max(finish + lag)`
+        // over a take's predecessors, so this is exact whichever lands last.
+        // It carried zero until `run-1788552801-73005` fuelled a furnace 8,000
+        // ticks after a shared insert had fed it and took three plates of five.
+        assert_eq!(
+            lag_from("coal"),
+            576,
+            "the fuel insert carries the smelting time too"
+        );
     }
 
     #[test]
@@ -12357,11 +12363,15 @@ mod owned_gathering {
     /// placement clearance). The 14 ticks are the schedule's simulated
     /// arrival point moving off the rock's centre and the next walk starting
     /// from there; the old figure priced a stand-point the game refuses.
+    ///
+    /// **-> 38,680 the same evening**, when a furnace's fuel load started
+    /// carrying the smelting lag like its ore does: a take now waits for the
+    /// later of the two, which is what the furnace itself does.
     #[test]
     fn the_single_bot_rung_one_plan_is_untouched() {
         let (_, net, plan) = rung_one_plan(&[BotId(1)]);
         assert_eq!(net.len(), 86, "one bot's rung-1 action count");
-        assert_eq!(plan.makespan, 38620, "one bot's rung-1 makespan");
+        assert_eq!(plan.makespan, 38680, "one bot's rung-1 makespan");
         assert!(
             net.actions().all(|a| net
                 .chain_of(a.id)
@@ -12418,7 +12428,8 @@ mod owned_gathering {
         );
     }
 
-    /// **The dropped cross-chain edge this change had to find.**
+    /// **The dropped cross-chain edge this change had to find — and then the
+    /// same-chain one.**
     ///
     /// A furnace starts when the last of its ore and its fuel lands. While the
     /// fuel load sat one action behind the ore insert on one serial timeline,
@@ -12426,8 +12437,17 @@ mod owned_gathering {
     /// fuel to another bot and nothing bounds the gap at all, so the take has
     /// to wait `smelt_lag` from the fuel as well — `infer_edges` cannot supply
     /// this, because it infers *edges* and never a lag.
+    ///
+    /// **Since 2026-09-04 every fuel load carries the lag, same chain or
+    /// not.** The taker's own fuel is not one action behind the ore when the
+    /// ore was a *shared* insert by another bot: `run-1788552801-73005` had
+    /// the ore at tick 75,932, the taker's fuel at 84,023, and a take 26
+    /// ticks after that which found three plates where the plan promised
+    /// five. Under the executor's `max(finish + lag)` rule the lag on the
+    /// fuel edge is exact whichever lands last, so the test no longer skips
+    /// same-chain fuel.
     #[test]
-    fn a_handed_fuel_load_gates_the_take_by_the_whole_smelting_time() {
+    fn every_fuel_load_gates_the_take_by_the_whole_smelting_time() {
         let bots = [BotId(1), BotId(2), BotId(3), BotId(4)];
         let (_, net, _) = rung_one_plan(&bots);
 
@@ -12442,14 +12462,10 @@ mod owned_gathering {
                 if !fuels.contains(&from) {
                     continue;
                 }
-                let same_chain = net.chain_of(from) == net.chain_of(take.id);
-                if same_chain {
-                    continue;
-                }
                 assert!(
                     lag > 0,
-                    "the take `{}` waits on a fuel load in another chain with no \
-                     lag: the furnace had not begun to smelt",
+                    "the take `{}` waits on a fuel load with no lag: the furnace \
+                     had not begun to smelt",
                     take.label
                 );
                 checked += 1;

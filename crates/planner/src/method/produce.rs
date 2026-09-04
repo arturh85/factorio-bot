@@ -2218,7 +2218,9 @@ mod tests {
         let net = plan(15).expect("the fixture can build a cell");
         assert_eq!(net.len(), 21, "actions in a one-cell plan");
         let sched = crate::schedule::schedule(&net, &s, &bots).expect("it schedules");
-        assert_eq!(sched.makespan, 5_800, "ticks for one bot to build one cell");
+        // 5,800 -> 5,810 when the fuel load started carrying the smelting lag
+        // (`have::every_fuel_load_gates_the_take_by_the_whole_smelting_time`).
+        assert_eq!(sched.makespan, 5_810, "ticks for one bot to build one cell");
     }
 
     #[test]

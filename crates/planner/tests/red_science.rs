@@ -221,7 +221,18 @@ fn more_bots_finish_sooner() {
     // (12%) above it, the same margin the previous ceiling kept above 2100.
     // Retighten it whenever the measured figure drops again: a ceiling with
     // 74% headroom, which 3200 became, guards nothing.
-    assert!(many < 2310, "four bots regressed past 2310 ticks: {}", many);
+    //
+    // **Raised to 2950 on 2026-09-04, measured at 2682.** Not drift: a
+    // furnace's fuel load now carries the smelting lag like its ore does
+    // (`have::every_fuel_load_gates_the_take_by_the_whole_smelting_time`).
+    // On this fixture the fuel lands well after the ore insert -- the coal is
+    // mined after the ore -- so the old 2063 took plates from a furnace that
+    // had not yet started, which is exactly what `run-1788552801-73005` did
+    // live (`tried to remove 5 copper-plate but removed 3`). The 619 ticks
+    // are the furnace's real start; scheduling the coal ahead of the ore
+    // would win most of them back and is a planning improvement, not a
+    // correctness question.
+    assert!(many < 2950, "four bots regressed past 2950 ticks: {}", many);
 }
 
 #[test]

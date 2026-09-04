@@ -11,6 +11,44 @@ four bots.
 
 ---
 
+## The walled-in bot, root-caused: the stand-point is chosen blind, and the fill was too fine (`79f3f9d3`)
+
+Bot 1 walked to place `assembling-machine-1 [31.5, -4.5]` arriving from the
+east, so `approach_annulus` aimed the walk toward where it came from and it
+landed at **(34.418, -4.629)** — a 2 × 2 pocket inside an **older cell**: chest
+column at x = 33.5, inserters at x = 34.5, pole at [35.5, -4.5], machines at
+x = 36.5. Four ticks later it placed the new assembler (box x 30.3..32.7) on
+the ground it had walked in across. What was left were a 0.5-tile and a
+0.65-tile crack; Factorio's `request_path` at the mod's resolution is 1 × 1
+tiles centred on tile centres, and both neighbouring tiles are occupied at
+their centres. **Its own placement, from a stand-point the actuator chose
+blind.**
+
+**Why the enclosure record was silent:** not a precondition — the fill itself
+returned `Open`. Its eighth-tile configuration-space grid found the two cracks
+the game's one-tile grid cannot use. The module doc's "incomplete in the safe
+direction" was wrong in this direction. `crates/core/src/graph/enclosure.rs`
+now works on the game's grid (`CELL = 1`, tile-centre box test); the same
+fixture reads `Enclosed { 4 }` after the placement and `Open` before
+(`crates/core/tests/enclosure_run73005.rs`, with the run's entities as a JSON
+fixture). The planner's `enclosure::check` delegates to core so prevention and
+detection share one grid.
+
+**The system fix, executor side** (`crates/executor/src/pre_place.rs`):
+before every `place`, the same fill with the footprint added; if it would
+close, walk to the nearest reachable tile that stays open, is clear of the
+footprint and within build reach, place from there, and record
+`EventKind::BotSteppedAside`. Refuse by name only if no such tile exists. The
+planner is the wrong layer: it names an annulus, never a point, and its check
+correctly said Clear with the bot 50 tiles away at plan time. A lane
+reservation around cells would make this fire less often; not needed for
+correctness. No-path walk records now carry `from`/`to`
+(`-- found no path from (x/y) to (x/y)`).
+
+**Corrections to my brief:** every suspect I listed (pole, tree line, water,
+`judge_path`) was wrong; `record.enclosures()` *is* called by the drivers; and
+the fill was too *fine*, not too coarse. Offline plans unchanged.
+
 ## Run 4 died with the disk, and the drills work landed (`b98fe587`)
 
 `run-1788556703-31339` (same savepoint, master with recovery, deadline and

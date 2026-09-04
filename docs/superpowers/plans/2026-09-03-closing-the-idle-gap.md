@@ -24,7 +24,7 @@ The rocks are gone from the failure list for good. What remains:
 | `removed 40 of 64` — the cell's drill mined its tiles dry | 3 | drills agent: amount-aware siting (in flight) |
 | tier-1 re-issued the identical take | 1 | `c1c41412` — divergence is not rescheduled |
 | `craft 75 automation-science-pack` **lost** at the flat 360 s deadline while still crafting | 1 | `fffdb37e` — deadline sized from the recipe (packs alone are 375 s) |
-| `failed to path find`, bot 1, three different targets | 3 | **open** — no enclosure was recorded; needs the next run's world |
+| `failed to path find`, bot 1, three different targets | 3 | **open** — bot 1 stood at `(34.4, -4.6)` for all three, from tick 211,958 to 248,685, right after placing the green cell's `assembling-machine-1 [43.5, -2.5]`, `inserter [43.5, -0.5]` and `iron-chest [43.5, 0.5]`. It walled itself in with its own placements, 37,000 ticks frozen, and `record.enclosures()` recorded nothing. This is the "nothing checks a walk's landing spot against footprints the plan needs later" item from the open list, now with a position. Run 4 replays the same plan; the live world will be queried when it recurs. |
 
 The lost craft is the worst of these: the supervisor refuses to recover a run
 with a lost action, so it replanned around a craft the game finished anyway.

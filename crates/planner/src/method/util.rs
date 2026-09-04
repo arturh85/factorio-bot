@@ -939,9 +939,11 @@ mod tests {
     use super::*;
     use crate::ids::BotId;
     use crate::state::{ClaimRunner, DEFAULT_RESOURCE_PER_TILE, PlanState};
+    use factorio_bot_core::factorio::util::add_to_rect;
+    use factorio_bot_core::factorio::world::FactorioWorld;
     use factorio_bot_core::serde_json;
     use factorio_bot_core::test_utils::fixture_world;
-    use factorio_bot_core::types::{Direction, FactorioEntity, FactorioForce, Position};
+    use factorio_bot_core::types::{Direction, FactorioEntity, FactorioForce, Position, Rect};
     use std::sync::Arc;
 
     fn state() -> PlanState {
@@ -1878,6 +1880,146 @@ mod tests {
             30,
             "and the divisor, read from the world, agrees — which is why the \
              hand-craft path is left alone"
+        );
+    }
+
+    /// The fixture's iron patch is `rect_fields` over (-45, 35)..(-35, 45) --
+    /// integer positions, which key to tiles whose centres are a half-tile
+    /// east and south -- so the tile nearest a bot at the origin is this one.
+    const NEAREST_IRON: (f64, f64) = (-34.5, 35.5);
+
+    /// A machine an earlier plan left standing on the iron patch, reaching
+    /// the world through the same door the mod's `on_some_entity_created`
+    /// uses. `at` is the entity position; the box is the prototype's own.
+    fn world_with_standing(name: &str, entity_type: &str, at: Position) -> Arc<FactorioWorld> {
+        let world = fixture_world();
+        let collision = world
+            .entity_prototypes
+            .get(name)
+            .map(|proto| proto.collision_box.clone())
+            .unwrap_or_else(|| panic!("the fixture has no prototype for {name}"));
+        world
+            .on_some_entity_created(FactorioEntity {
+                name: name.into(),
+                entity_type: entity_type.into(),
+                bounding_box: add_to_rect(&collision, &at),
+                position: at,
+                ..Default::default()
+            })
+            .expect("the machine stands");
+        Arc::new(world)
+    }
+
+    /// A burner drill at (-35, 36) covers the four iron tiles nearest the
+    /// origin, `NEAREST_IRON` among them.
+    fn standing_drill() -> (Arc<FactorioWorld>, Position) {
+        let at = Position::new(-35., 36.);
+        (
+            world_with_standing("burner-mining-drill", "mining-drill", at.clone()),
+            at,
+        )
+    }
+
+    /// Every tile of `item` a hand-mine selector would offer from the origin
+    /// must be outside `covered`, and the nearest offered must not be the
+    /// covered nearest.
+    fn assert_selection_walks_past(s: &PlanState, covered: &Rect, covered_nearest: &Position) {
+        let origin = Position::new(0., 0.);
+        let tile = nearest_resource_tile(s, "iron-ore", &origin, 1).expect("iron remains");
+        assert_ne!(&tile, covered_nearest, "the covered tile must be skipped");
+        assert!(
+            !covered.contains(&tile),
+            "the nearest tile offered, {tile}, is under the machine at {covered:?}"
+        );
+        assert!(
+            s.resource_available(covered_nearest, "iron-ore") > 0,
+            "the ore under the machine is covered, not gone"
+        );
+        assert_eq!(
+            s.resource_unclaimed(covered_nearest, "iron-ore"),
+            0,
+            "but it is not offered to a new mining action"
+        );
+        let tiles = resource_tiles_for(s, "iron-ore", &origin, 6 * DEFAULT_RESOURCE_PER_TILE);
+        assert!(!tiles.is_empty());
+        assert!(
+            tiles.iter().all(|(t, _)| !covered.contains(t)),
+            "no covered tile appears in a selection: {tiles:?}"
+        );
+    }
+
+    /// The tile a character would be sent to is the one the game selects at
+    /// that position, and over a standing machine that is the machine --
+    /// `expected iron-ore at (-7.5/-29.5), found burner-mining-drill`
+    /// (`run-1788559688-08406`, plan 2). So a tile under a machine an
+    /// *earlier plan* built is not hand-minable, whatever the machine is.
+    #[test]
+    fn a_resource_tile_under_a_standing_machine_is_skipped_by_hand_mining() {
+        let nearest = Position::new(NEAREST_IRON.0, NEAREST_IRON.1);
+        for (name, entity_type, at) in [
+            (
+                "burner-mining-drill",
+                "mining-drill",
+                Position::new(-35., 36.),
+            ),
+            ("stone-furnace", "furnace", Position::new(-35., 36.)),
+            ("wooden-chest", "container", nearest.clone()),
+        ] {
+            let world = world_with_standing(name, entity_type, at.clone());
+            let s = PlanState::from_world(world, &[BotId(1)]);
+            let covered = s
+                .collision_area(name, &at)
+                .expect("the fixture has the prototype");
+            assert!(
+                covered.contains(&nearest),
+                "{name} at {at} must cover the nearest tile"
+            );
+            assert_selection_walks_past(&s, &covered, &nearest);
+        }
+    }
+
+    /// The shape the run actually had: the drill had been standing long
+    /// enough to empty one of its four tiles, and the mod's report of that
+    /// tile's deletion is what made the model forget the drill's ground.
+    /// The drill must still keep hand mining off its remaining three tiles
+    /// -- and still count them as its own for the cell ledger, since a drill
+    /// mines the tiles under itself.
+    #[test]
+    fn a_drill_that_emptied_a_tile_under_itself_still_covers_the_rest() {
+        let (world, at) = standing_drill();
+        let per_tile = {
+            let s = PlanState::from_world(world.clone(), &[BotId(1)]);
+            s.resource_available(&Position::new(-40.5, 40.5), "iron-ore")
+        };
+        assert!(per_tile > 0);
+        {
+            let s = PlanState::from_world(world.clone(), &[BotId(1)]);
+            assert_eq!(
+                crate::method::produce::cell_yield(&s, &at, Direction::North, "iron-ore"),
+                4 * per_tile,
+                "the drill's own view counts all four tiles under it"
+            );
+        }
+
+        // The mod's `on_resource_depleted` -> `on_some_entity_deleted`: the
+        // tile at (-34.5, 36.5), under the drill, with nothing left on it.
+        let mut emptied =
+            FactorioEntity::new_resource(&Position::new(-34.5, 36.5), Direction::North, "iron-ore");
+        emptied.amount = Some(0);
+        world
+            .on_some_entity_deleted(emptied)
+            .expect("the report lands");
+
+        let s = PlanState::from_world(world, &[BotId(1)]);
+        let covered = s
+            .collision_area("burner-mining-drill", &at)
+            .expect("the fixture has the prototype");
+        let nearest = Position::new(NEAREST_IRON.0, NEAREST_IRON.1);
+        assert_selection_walks_past(&s, &covered, &nearest);
+        assert_eq!(
+            crate::method::produce::cell_yield(&s, &at, Direction::North, "iron-ore"),
+            3 * per_tile,
+            "the drill still owns the three tiles it has not emptied"
         );
     }
 }

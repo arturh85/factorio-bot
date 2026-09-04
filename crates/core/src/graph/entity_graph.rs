@@ -1616,11 +1616,20 @@ impl EntityGraph {
         {
             return Ok(());
         }
+        let is_resource = entity.entity_type == EntityType::Resource.to_string();
         let mut nodes_to_remove: Vec<NodeIndex> = vec![];
         let mut edges_to_remove: Vec<EdgeIndex> = vec![];
         let mut entities_to_remove: Vec<ItemId> = vec![];
 
-        if let Some(entity_id) = self.entity_at(&entity.position) {
+        // A resource has no node: `add` admits only the named machine types
+        // into `entity_tree`, and `entity_at` is a point query on that tree.
+        // Asked at an ore tile's centre it answers with whatever machine
+        // stands *over* the ore -- a drill, on the tiles it is eating -- and
+        // the block below would then unhook that machine's node and edges
+        // from the graph while `entity_tree` kept the entity. The blocked-box
+        // sweep further down had the same shape and the same victim; see the
+        // comment there for the run that paid for it.
+        if !is_resource && let Some(entity_id) = self.entity_at(&entity.position) {
             if let Some(node_index) = self.entity_nodes.get(&entity_id) {
                 let inner = self.entity_graph.read();
                 for edge in inner.edges_directed(*node_index, petgraph::Direction::Incoming) {
@@ -1644,17 +1653,60 @@ impl EntityGraph {
             inner.remove_node(node);
         }
 
-        let mut blocked_item_ids_to_remove: Vec<ItemId> = vec![];
-        let blocked_tree = self.blocked_tree.read();
-        for (_, _, item_id) in blocked_tree.query(entity.bounding_box.clone().into()) {
-            blocked_item_ids_to_remove.push(item_id);
+        // Only the box `add` filed for *this* entity leaves `blocked_tree`.
+        //
+        // This used to drop every box the removed entity's bounds overlapped,
+        // which is a different set whenever the removed entity is *inside*
+        // another one -- and ore under a mining drill is exactly that. A
+        // burner drill stands on four ore tiles and eats them; when one runs
+        // dry the mod reports the tile deleted (`on_resource_depleted` ->
+        // `on_some_entity_deleted`, `amount: 0`), this ran with the ore's
+        // 0.2-tile bounding box, the quad tree answered with the drill's box
+        // around it, and the drill silently stopped blocking anything. It was
+        // still in `entity_tree` -- that sweep filters by name -- so the model
+        // knew the drill was there *by name* and had forgotten it *by ground*.
+        // `PlanState::resource_tile_blocked` reads the ground, so the next
+        // plan hand-mined the three tiles left under the drill and the game
+        // answered `expected iron-ore at (-7.5/-29.5), found
+        // burner-mining-drill` (`run-1788559688-08406`: six of seven drills
+        // from plan 1 had lost their box before plan 2 was made, and both of
+        // that plan's failures were this). `resource_mined` reaches the same
+        // sweep through `retire_resource`, so it was not only the mod's
+        // report that could do it.
+        //
+        // Two rules, both about which box is *the entity's own*:
+        //
+        // * A resource never had one. `add` keeps ore and rails out of
+        //   `blocked_tree` on purpose, so a resource removal has nothing to
+        //   take out of it and must not go looking.
+        // * Anything else owns the box whose centre lies inside its own
+        //   bounds. That is `add`'s box for the same entity under any
+        //   direction (`retire_minable` rebuilds a box from the prototype
+        //   without turning it, and a turned box still holds the centre), and
+        //   it is never a neighbour's: two standing entities do not overlap,
+        //   so no neighbour's centre can be inside these bounds. Matching the
+        //   rectangle exactly instead would leave a stump blocking for ever
+        //   the moment a rebuilt box differs by a rotation, which is the
+        //   failure `retire_minable` documents.
+        if !is_resource {
+            let mut blocked_item_ids_to_remove: Vec<ItemId> = vec![];
+            let blocked_tree = self.blocked_tree.read();
+            for (_, rect, item_id) in blocked_tree.query(entity.bounding_box.clone().into()) {
+                let centre = Position::new(
+                    (rect.origin.x + rect.size.width / 2.) as f64,
+                    (rect.origin.y + rect.size.height / 2.) as f64,
+                );
+                if entity.bounding_box.contains(&centre) {
+                    blocked_item_ids_to_remove.push(item_id);
+                }
+            }
+            drop(blocked_tree);
+            let mut blocked_tree = self.blocked_tree.write();
+            for item_id in blocked_item_ids_to_remove {
+                blocked_tree.remove(item_id);
+            }
+            drop(blocked_tree);
         }
-        drop(blocked_tree);
-        let mut blocked_tree = self.blocked_tree.write();
-        for item_id in blocked_item_ids_to_remove {
-            blocked_tree.remove(item_id);
-        }
-        drop(blocked_tree);
         let mut entity_item_ids_to_remove: Vec<ItemId> = vec![];
         let entity_tree = self.entity_tree.read();
         for (other_entity, _, item_id) in entity_tree.query(entity.bounding_box.clone().into()) {
@@ -4505,5 +4557,146 @@ mod tests {
             older.threat_census().is_empty(),
             "it knows of no nests, which is not the same as asserting there are none"
         );
+    }
+
+    /// A standing machine, built the way the mod reports one: the fixture
+    /// prototype's collision box around its position.
+    fn standing(name: &str, entity_type: EntityType, at: Position) -> FactorioEntity {
+        let collision = fixture_entity_prototypes()
+            .get(name)
+            .map(|proto| proto.collision_box.clone())
+            .unwrap_or_else(|| panic!("the fixture has no prototype for {name}"));
+        FactorioEntity {
+            name: name.into(),
+            entity_type: entity_type.to_string(),
+            bounding_box: crate::factorio::util::add_to_rect(&collision, &at),
+            position: at,
+            ..Default::default()
+        }
+    }
+
+    /// The four ore tiles a burner drill at `drill` stands on, each holding
+    /// `amount`. Real tile centres, half-tile offsets included.
+    fn ore_under(drill: &Position, name: &str, amount: u32) -> Vec<FactorioEntity> {
+        let mut out = Vec::new();
+        for dx in [-0.5, 0.5] {
+            for dy in [-0.5, 0.5] {
+                let mut ore = FactorioEntity::new_resource(
+                    &Position::new(drill.x() + dx, drill.y() + dy),
+                    Direction::North,
+                    name,
+                );
+                ore.amount = Some(amount);
+                out.push(ore);
+            }
+        }
+        out
+    }
+
+    /// The defect behind `run-1788559688-08406`'s two failed actions. A
+    /// burner drill eats the four tiles under itself; the moment one ran dry
+    /// the mod reported the tile deleted, `remove` swept `blocked_tree` with
+    /// the ore's bounding box, and the drill's own box -- the one around it
+    /// -- went with it. Six of the seven drills plan 1 had built were
+    /// unblocked this way before plan 2 was made, and plan 2 sent bots to
+    /// hand-mine the ore still under two of them: `expected iron-ore at
+    /// (-7.5/-29.5), found burner-mining-drill`.
+    ///
+    /// Both doors to `remove` are tried: the mod's `on_some_entity_deleted`
+    /// (an amount of 0) and the executor's own debit through
+    /// `resource_mined`. The drill's graph node is checked as well, because
+    /// `entity_at` on the ore's centre found the drill and unhooked it too.
+    #[test]
+    fn a_tile_running_dry_under_a_drill_does_not_unblock_the_drill() {
+        let iron = EntityName::IronOre.to_string();
+        let drill_at = Position::new(-7., -29.);
+        let mut entities = ore_under(&drill_at, &iron, 10);
+        entities.push(standing(
+            "burner-mining-drill",
+            EntityType::MiningDrill,
+            drill_at.clone(),
+        ));
+        let graph = entity_graph_from(entities).expect("adding must not fail");
+        let footprint = Rect::new(&Position::new(-8., -30.), &Position::new(-6., -28.));
+        assert_eq!(
+            graph.blocking_boxes_within(&footprint).len(),
+            1,
+            "the drill blocks the ground it stands on"
+        );
+        assert!(graph.node_at(&drill_at).is_some(), "and has a node");
+
+        // The mod's report for the tile the drill has just emptied.
+        let mut emptied =
+            FactorioEntity::new_resource(&Position::new(-6.5, -28.5), Direction::North, &iron);
+        emptied.amount = Some(0);
+        graph.remove(&emptied).expect("removing must not fail");
+        assert!(
+            !graph.resource_contains(&iron, Pos(-7, -29)),
+            "the emptied tile leaves the model"
+        );
+        assert_eq!(
+            graph.blocking_boxes_within(&footprint).len(),
+            1,
+            "the drill still blocks the ground it stands on"
+        );
+        assert!(
+            graph.entity_at(&drill_at).is_some() && graph.node_at(&drill_at).is_some(),
+            "and is still in the graph, by name and by node"
+        );
+
+        // The executor's own debit reaches `remove` through `retire_resource`.
+        assert_eq!(
+            graph.resource_mined(&iron, &Position::new(-7.5, -29.5), 10),
+            ResourceDepletion::Exhausted
+        );
+        assert_eq!(
+            graph.blocking_boxes_within(&footprint).len(),
+            1,
+            "a tile the model retires itself leaves the drill standing too"
+        );
+        assert!(graph.node_at(&drill_at).is_some());
+    }
+
+    /// The other half of the same rule: removing a machine still frees its
+    /// own ground -- the whole point of `retire_minable` -- and only its own.
+    /// A furnace touching its east edge and a chest touching its south edge
+    /// keep their boxes.
+    #[test]
+    fn removing_a_machine_frees_its_own_ground_and_no_neighbours() {
+        let drill_at = Position::new(-7., -29.);
+        let furnace_at = Position::new(-5., -29.);
+        let chest_at = Position::new(-7.5, -27.5);
+        let graph = entity_graph_from(vec![
+            standing(
+                "burner-mining-drill",
+                EntityType::MiningDrill,
+                drill_at.clone(),
+            ),
+            standing("stone-furnace", EntityType::Furnace, furnace_at.clone()),
+            standing("wooden-chest", EntityType::Container, chest_at.clone()),
+        ])
+        .expect("adding must not fail");
+        let around = Rect::new(&Position::new(-9., -31.), &Position::new(-3., -26.));
+        assert_eq!(graph.blocking_boxes_within(&around).len(), 3);
+
+        graph
+            .remove(&standing(
+                "burner-mining-drill",
+                EntityType::MiningDrill,
+                drill_at.clone(),
+            ))
+            .expect("removing must not fail");
+
+        let left = graph.blocking_boxes_within(&around);
+        assert_eq!(left.len(), 2, "one box gone, two kept: {left:?}");
+        assert!(
+            left.iter().all(|b| !b.contains(&drill_at)),
+            "the drill's own box is the one that went"
+        );
+        assert!(left.iter().any(|b| b.contains(&furnace_at)));
+        assert!(left.iter().any(|b| b.contains(&chest_at)));
+        assert!(graph.entity_at(&drill_at).is_none());
+        assert!(graph.entity_at(&furnace_at).is_some());
+        assert!(graph.entity_at(&chest_at).is_some());
     }
 }

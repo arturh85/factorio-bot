@@ -148,6 +148,69 @@ and a pipe that receives nothing reads as an empty result rather than as a
 broken command. When an analysis over run records comes back empty, check the
 command before concluding anything about the data.
 
+### Evaluate a planner change OFFLINE first -- seconds, not a 20-minute run
+
+Since `db612be9` a plan can be made against a **dumped world**, with no
+Factorio, RCON, workspace or settings file:
+
+```bash
+# in a live run, from Lua -- writes <scripts>/map.json
+world.dump("scripts/map.json")
+
+# then, offline, in ~4 seconds against an 864 MB dump
+factorio-bot plan --world workspace/scripts/map.json \
+    --goal researched:automation --bots 1,2,3,4 --steps
+factorio-bot score-map --world workspace/scripts/map.json --bots 1,2,3,4
+```
+
+`score-map` reports resource distances, a walk score, a verdict, and the full
+`PlanReport` -- actions, makespan, steps/acts/walks per bot, planned and idle
+ticks, roster utilisation. **This is the loop to iterate in.** It has caught a
+13:05 planning ceiling, a green-science capability gap and a whole workstream's
+result without spending a run.
+
+`workspace/scripts/map-t0-baseline.json` is the **t=0 reference dump**
+(fingerprint `dfac0f4caa0a7500`, `researched:automation` = 205 actions / 30,077
+ticks). Anything overwriting `workspace/scripts/map.json` -- a seed search, a
+`--resume-from` dump -- destroys the baseline unless you copy it aside first.
+That has already happened once.
+
+**Three blind spots, each of which has produced a wrong "the bug is absent":**
+
+- **`world.dump` never calls `Planner::refresh_buffers`**, so a dump's
+  `inventories` is `[]`, and the `plan` CLI does not refresh either (only the
+  Lua `goal.plan` path does). **The entire `Withdraw` path -- furnaces handing
+  their contents over -- is unreachable offline.** A real double-spend bug lived
+  exactly there and needed hand-injected inventories to reproduce.
+- **A dump is t=0-shaped unless you make it otherwise.** A `--resume-from`
+  savepoint restores *saved* inventories and positions, not the live ones at the
+  moment of failure. Two separate bugs needed the dump perturbed -- one with bot
+  positions, one with inventories -- before they appeared at all.
+- **A fresh map has charted almost nothing.** Distances read off an early dump
+  measure what has been *seen*, not what exists.
+
+### Action ids are PER-PLAN, not global
+
+A run replans, and ids are reused across plans: in `run-1788465258-49050`, id 38
+is `craft 2 iron-gear-wheel` in the first plan and `craft 1 offshore-pump` in
+the third. **44 of 147 ids collide in that one run.**
+
+So **never key an aggregate on `id`, and never join anything on `id` across a
+plan boundary.** Doing so once understated a bot's executing time by 8,067 ticks
+(it silently dropped 44 settles); doing it again invented three "blocker cleared
+in 10,000-40,000 ticks" measurements that were replan boundaries. Aggregate over
+**settle events**; identify actions by `(id, dispatch order)` or by position.
+
+### Milestone savepoints make a failure reproducible
+
+Every milestone writes `runs/<run>/savepoints/milestone-N.zip` plus a `.json`.
+`--resume-from <run>[:<milestone>]` starts a run on that world (`lua` and
+`start` both take it). A resumed run is marked in provenance and `--compare`
+refuses to compare it against a fresh one -- correct, and expected.
+
+This is what turned "reproduce the failure by paying for the whole 25-minute
+prelude again" into a short server start plus an offline plan.
+
 ## Architecture
 
 ```

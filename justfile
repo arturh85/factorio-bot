@@ -29,7 +29,7 @@ lua SCRIPT *ARGS:
 # the ~9 minute manual solo baseline, which was not run on an optimised map.
 # What benchmarking needs is a fixed, representative seed plus honesty about
 # which seed produced a number. This one is the date the discipline started.
-BENCHMARK_SEED := "20260903"
+BENCHMARK_SEED := "31337"
 
 # A reproducible benchmark run on BENCHMARK_SEED.
 #

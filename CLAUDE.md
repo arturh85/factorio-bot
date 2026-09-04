@@ -545,11 +545,11 @@ Factorio as `--map-gen-seed` on a `--create` invocation
 
 ```bash
 # WRONG. Prints nothing, generates nothing, runs on whatever map was there.
-factorio-bot lua factory_stage2.lua -c 4 --seed 20260903
+factorio-bot lua factory_stage2.lua -c 4 --seed 31337
 
 # RIGHT. --new deletes level.zip, so the seeded map is actually generated.
 # DESTRUCTIVE: the previous map, and everything built on it, is gone.
-factorio-bot lua factory_stage2.lua -c 4 --seed 20260903 --new
+factorio-bot lua factory_stage2.lua -c 4 --seed 31337 --new
 ```
 
 This is worse than not passing a seed, because the run *looks* controlled. It
@@ -560,14 +560,39 @@ gated on `silent` -- every CLI path sets `silent`, which is exactly how the
 Two further paths accept `--seed` and can never use it: `lua --connect` (never
 starts a server) and `--server <host>` (never sets one up).
 
-**The benchmark seed is `20260903`.** It is the date the discipline started, and
-it is deliberately **not** chosen for being a good map. Searching for a seed
-that scores well finds one with ore and water near spawn, after which every
-timing flatters us and stops being comparable to the ~9-minute manual solo
-baseline, which was not run on an optimised map. What benchmarking needs is a
-*fixed, representative* seed plus honesty about which seed produced a number.
-(`roll-seed` exists and is deliberately gated off -- `app/src-tauri/src/cli/
-roll_seed.rs` explains that reviving it needs a fitness function. Not the goal.)
+**The benchmark seed is `31337`**, chosen by an owner decision on 2026-09-04:
+*"lets do the seed search, like i said we don't need a perfect/optimal one,
+just a reasonable one where everything is close to the start."*
+
+It was picked by scanning **16 arbitrary seeds** (`20260903 20260904 1 2 3 42
+100 777 1234 4242 9001 12345 31337 65535 99999 123456`) with
+`factorio-bot score-map`. **All 16 were `Viable`**; `31337` won on both metrics
+at once.
+
+| | previously used (unidentified) | `20260903` | **`31337`** |
+|---|---|---|---|
+| iron ore | 40.4 | 26.3 | **18.4** |
+| copper ore | 58.3 | 44.1 | 54.9 |
+| coal | 54.0 | 44.5 | **32.1** |
+| stone | 32.7 | 35.4 | 33.3 |
+| water | 46.7 | 37.0 | 48.1 |
+| walk score | 1550 | 1250 | **1246** |
+| planned makespan | 30,077 | 31,764 | **29,000 (8:03)** |
+
+Fingerprint `c161fa3f437221d0`. `20260903` — the seed this file previously
+named, chosen for being a date rather than a map — came **9th of 16**.
+
+**The argument this file used to make against choosing a seed still stands, and
+is now a caveat rather than a policy.** A map with ore near spawn flatters every
+timing and makes it less comparable to the ~9-minute manual solo baseline, which
+was not run on an optimised map. So: quote the seed with every number, and do
+not read a `31337` time as beating a baseline set elsewhere. What changed is
+that a *reproducible* map is worth more than an unbiased one — every result
+before 2026-09-04 was measured on a map nobody can regenerate, because `--seed`
+was silently ignored until `61ec7364`.
+
+This was a scan, not a search: 16 seeds, ranked, first acceptable winner taken.
+It is not an optimum and no one should describe it as one.
 
 `just bench <script>` is that run. **It has not yet been executed once**, so the
 seed is unvalidated: a map whose nearest shoreline does not fit a pump/boiler/

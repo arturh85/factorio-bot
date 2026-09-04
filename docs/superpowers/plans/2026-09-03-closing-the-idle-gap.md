@@ -80,6 +80,23 @@ honestly, as before. Also fixed on the way: `scripting_lua`'s
 `plan_cell` call was one argument behind `bdec88af` and failed
 `--all-targets` clippy on master.
 
+## Ore under a standing drill: the graph forgot the drill's ground (`3c05e0a3`)
+
+My brief said the model does not know an entity stands on an ore tile. **Wrong:
+`PlanState::resource_tile_blocked` has read `blocking_boxes_within` since
+`6a6221b6`** and every "tile under a drill/furnace/chest is skipped" test
+passes on the old code. The mechanism was one level down. When a drill in run
+5 mined a tile under itself dry, the mod reported the ore entity deleted, and
+`EntityGraph::remove` swept `blocked_tree` with the removed entity's box,
+deleting **every overlapping box** — the ore's 0.2-tile box sits inside the
+drill's, so the drill's went too. Six of seven plan-1 drills had such a
+deletion before plan 2, which then hand-mined `(-7.5, -29.5)` and
+`(28.5, -47.5)` and found drills. Fix where it lives: a resource removal no
+longer touches `blocked_tree` (it never added to it), and any other removal
+takes only the box whose centre lies inside its own bounds. Two tests red on
+the old code, offline plans unchanged. Run 3 never hit it only because its
+plans 6–7 mined 88 tiles that happened to be clear.
+
 ## ✅ GREEN SCIENCE WITNESSED — the first time in this project's history
 
 `run-1788559688-08406`, seed `31337`, resumed from `run-1788528493-60555:3`

@@ -2322,6 +2322,50 @@ struct LabSite {
     needs_placing: bool,
 }
 
+/// Why there was nowhere to put the lab, counted rather than asserted.
+///
+/// A refusal a reader cannot act on costs as much as no refusal, and the one
+/// this replaced — `NoApplicableMethod { goal: "research X" }` — reads as "that
+/// technology is out of reach in this world" when the truth is "the ground and
+/// the power are in different places". So the two ways a candidate site failed
+/// are counted separately: see [`PlannerError::ResearchNeedsRoom`].
+///
+/// The sweep repeats the one [`free_area_near_where`] just did, which is the
+/// cost of only paying for it on the failing path. It runs once, at the point
+/// a plan is about to be refused.
+fn lab_has_no_room(state: &PlanState, anchor: &Position, technology: &str) -> PlannerError {
+    let radius = crate::method::util::FREE_TILE_SEARCH_RADIUS;
+    let (mut powered_blocked, mut free_unpowered) = (0u32, 0u32);
+    for dy in -radius..=radius {
+        for dx in -radius..=radius {
+            let candidate = Position::new(
+                anchor.x.floor() + f64::from(dx) + 0.5,
+                anchor.y.floor() + f64::from(dy) + 0.5,
+            );
+            match (
+                state.is_area_free(LAB, &candidate),
+                lab_is_powered(state, &candidate),
+            ) {
+                (true, false) => free_unpowered += 1,
+                (false, true) => powered_blocked += 1,
+                // Free *and* powered cannot reach here -- `free_area_near_where`
+                // would have returned that site rather than failing -- and a
+                // tile that is neither says nothing about which fix to reach
+                // for, so it is not counted.
+                _ => {}
+            }
+        }
+    }
+    PlannerError::ResearchNeedsRoom {
+        technology: technology.to_string(),
+        radius,
+        anchor_x: anchor.x(),
+        anchor_y: anchor.y(),
+        powered_blocked,
+        free_unpowered,
+    }
+}
+
 /// Is a lab centred at `pos` supplied with enough power to research?
 fn lab_is_powered(state: &PlanState, pos: &Position) -> bool {
     match state.collision_area(LAB, pos) {
@@ -2370,9 +2414,7 @@ fn lab_site(state: &PlanState, from: &Position, technology: &str) -> Result<LabS
     let pos = free_area_near_where(state, &anchor, LAB, |candidate| {
         lab_is_powered(state, candidate)
     })
-    .ok_or_else(|| PlannerError::NoApplicableMethod {
-        goal: format!("research {}", technology),
-    })?;
+    .ok_or_else(|| lab_has_no_room(state, &anchor, technology))?;
     Ok(LabSite {
         pos,
         needs_placing: true,
@@ -4934,6 +4976,69 @@ mod tests {
         assert!(
             matches!(err, PlannerError::ResearchNeedsPower { .. }),
             "got {err:?}"
+        );
+    }
+
+    /// **Power and ground, in different places.**
+    ///
+    /// The world has a generator and a pole and nothing whatever wrong with
+    /// it; every tile the pole lights is built on. That used to refuse as
+    /// `NoApplicableMethod { goal: "research automation" }`, which reads as
+    /// "this world offers no route to automation" and sent a reader looking at
+    /// ore patches. It is now named, and it carries the two counts that say
+    /// which way out there is: powered ground that is occupied wants clearing
+    /// or a different site, free ground that is unpowered wants a pole.
+    ///
+    /// Found on green science, which is why it is worth a test: a two-feed
+    /// assembly cell fills a small pole's 5x5 supply area, the cell is sited
+    /// inline and the research it unlocks is a subgoal expanded afterwards, so
+    /// the cell takes the ground and the lab is refused. A red-science cell is
+    /// one row narrower and leaves a lab-sized hole, which is why nothing had
+    /// hit this before.
+    #[test]
+    fn a_lab_with_power_but_no_ground_refuses_by_name() {
+        let bots = [BotId(1)];
+        let mut s = PlanState::from_world(
+            Arc::new(crate::test_world::world_with_technologies()),
+            &bots,
+        );
+        crate::test_world::with_steam_power(&mut s);
+        // Build over every tile the pole at (10.5, 10.5) lights. A chest is
+        // one tile, so this is exhaustive rather than approximately so.
+        for x in 7..=14 {
+            for y in 7..=14 {
+                let position = Position::new(f64::from(x) + 0.5, f64::from(y) + 0.5);
+                if !s.is_position_free(&position) {
+                    continue;
+                }
+                s.create_entity(FactorioEntity {
+                    name: "iron-chest".into(),
+                    entity_type: "container".into(),
+                    position,
+                    ..Default::default()
+                });
+            }
+        }
+        let err = lab_site(&s, &Position::new(0., 0.), "automation")
+            .err()
+            .expect("a lab has nowhere to stand");
+        let PlannerError::ResearchNeedsRoom {
+            technology,
+            powered_blocked,
+            free_unpowered,
+            ..
+        } = &err
+        else {
+            panic!("expected ResearchNeedsRoom, got {err:?}");
+        };
+        assert_eq!(technology, "automation");
+        assert!(
+            *powered_blocked > 0,
+            "the pole's own supply area is built on, and the refusal has to say so"
+        );
+        assert!(
+            *free_unpowered > 0,
+            "there is plenty of free ground; none of it has supply"
         );
     }
 

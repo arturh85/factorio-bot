@@ -19,16 +19,36 @@
 //! # The shape, and what it is general over
 //!
 //! ```text
-//!            feed chest  -> inserter -> [intermediate] -> inserter -> [product] <- inserter <- supply chest
+//!            feed chest  -> inserter ->
+//!                                       [intermediate] -> inserter -> [product] <- inserter <- supply chest
+//!           [feed chest  -> inserter ->]
 //! ```
 //!
 //! Red science is one copper plate and one iron gear wheel. The gear is
-//! *craftable from a single other item*, so the cell builds a machine for it;
-//! the copper plate is **smelted**, so no assembling machine makes one and it
-//! arrives in a chest. That is the rule [`assembly_spec`] applies, and it is
-//! stated over the world's recipes rather than over the name
-//! `automation-science-pack`: a two-ingredient crafting recipe, exactly one of
-//! whose ingredients has a one-ingredient crafting recipe of its own.
+//! *craftable*, so the cell builds a machine for it; the copper plate is
+//! **smelted**, so no assembling machine makes one and it arrives in a chest.
+//! That is the rule [`assembly_spec`] applies, and it is stated over the
+//! world's recipes rather than over the name `automation-science-pack`: a
+//! two-ingredient crafting recipe, exactly one of whose ingredients has a
+//! crafting recipe of its own with at most [`MAX_FEED`] ingredients.
+//!
+//! # One machine deep, and how wide
+//!
+//! The cell is **two machines and never three**. What changed for green
+//! science is only how wide the intermediate machine's mouth is: red's gear
+//! machine eats one item and green's transport-belt machine eats two, so the
+//! feed side of the layout carries one chest per ingredient rather than one
+//! chest. [`MAX_FEED`] is two, and it is the *pole* that says so.
+//!
+//! Green science is `transport-belt` + `inserter`, and **both** are craftable.
+//! Only the belt fits an intermediate machine (an inserter takes three
+//! ingredients, which is one chest more than one small pole can light), so the
+//! choice is forced rather than picked -- and the consequence is stated
+//! plainly: **the inserters green science eats arrive in a chest, hand-crafted
+//! by a bot, exactly as red's copper plates do.** A green cell automates the
+//! belts and the packs; it does not automate the inserters. That is a first
+//! green cell, not a green factory, and [`CELL_CHARGE_TICKS`] is how long it
+//! runs before somebody fills it again.
 //!
 //! # What this claims, and what it deliberately does not
 //!
@@ -81,6 +101,22 @@ pub const MACHINE: &str = "assembling-machine-1";
 /// behind `electronics`, which is a trigger technology (craft ten copper
 /// plates) the ladder passes long before it gets here.
 pub const INSERTER: &str = "inserter";
+
+/// How many ingredients the cell's intermediate machine may take, and so how
+/// many feed chests the cell has.
+///
+/// **Two, and the bound is the pole rather than a preference.** A cell has one
+/// small electric pole, at [`POLE_OFFSET`], whose supply area is 5x5; the
+/// intermediate machine is 3x3 and presents three tiles to the west, at
+/// `y = -1`, `0` and `1` in the north frame. The pole's area reaches
+/// `y = -0.5 ..= 4.5`, so it lights the inserters on two of those three rows
+/// and not the third. A third feed chest would therefore need a second pole,
+/// and a pole costs one wood out of the four a whole run has (see
+/// [`POLE_OFFSET`]).
+///
+/// What it forecloses is named in the module doc: an `inserter` machine, which
+/// takes three ingredients, is not an intermediate this cell can build.
+pub const MAX_FEED: usize = 2;
 
 /// What the cell's inputs sit in.
 ///
@@ -178,10 +214,14 @@ pub struct Intermediate {
     pub per_product: u32,
     /// How many [`Intermediate::item`] one run of its recipe yields.
     pub per_run: u32,
-    /// The single thing its recipe consumes, and how much of it per run.
+    /// What its recipe consumes, and how much of each **per run**, in the
+    /// recipe's own order.
     ///
-    /// This is what goes in the feed chest.
-    pub ingredient: (ItemId, u32),
+    /// One entry per feed chest, at least one and never more than
+    /// [`MAX_FEED`]. Ordered rather than a map, because the order is the
+    /// order the chests stand in and therefore the order the plan's steps
+    /// come out in.
+    pub ingredients: Vec<(ItemId, u32)>,
 }
 
 /// What a cell for one item is made of, resolved from the world's own recipes.
@@ -218,18 +258,30 @@ impl AssemblySpec {
         (CELL_CHARGE_TICKS / self.ticks_per_item.max(1)).max(1)
     }
 
-    /// How much goes in the feed chest for one charge.
+    /// How many runs of the intermediate's recipe one charge is sized for.
     ///
-    /// Integer end to end, and rounded **up** at the run boundary rather than
-    /// at the item one: a recipe yielding two per run needs `ceil(n / 2)` runs,
-    /// and each run eats its whole ingredient amount whether or not the last
-    /// one is fully used.
-    pub fn feed_charge(&self) -> u32 {
+    /// Rounded **up** at the run boundary rather than at the item one: a
+    /// recipe yielding two per run needs `ceil(n / 2)` runs, and each run eats
+    /// its whole ingredient amount whether or not the last one is fully used.
+    pub fn intermediate_runs(&self) -> u32 {
         let wanted = self
             .charge_products()
             .saturating_mul(self.intermediate.per_product);
-        let runs = wanted.div_ceil(self.intermediate.per_run.max(1));
-        runs.saturating_mul(self.intermediate.ingredient.1)
+        wanted.div_ceil(self.intermediate.per_run.max(1))
+    }
+
+    /// What goes in each feed chest for one charge, in chest order.
+    ///
+    /// Integer end to end, one entry per ingredient of the intermediate's
+    /// recipe, in that recipe's order -- which is the order
+    /// [`Role::FeedChest`]'s indices are assigned in.
+    pub fn feed_charges(&self) -> Vec<(ItemId, u32)> {
+        let runs = self.intermediate_runs();
+        self.intermediate
+            .ingredients
+            .iter()
+            .map(|(item, amount)| (item.clone(), runs.saturating_mul(*amount)))
+            .collect()
     }
 
     /// How much goes in the supply chest for one charge.
@@ -244,17 +296,37 @@ impl AssemblySpec {
 ///
 /// * the recipe is a **crafting** recipe, because an assembling machine runs
 ///   no other category and a stone furnace runs no crafting one;
-/// * it takes exactly **two** ingredients, because the cell has two input
-///   chests and there is nowhere to put a third;
-/// * exactly **one** of them is itself a crafting recipe taking a single
-///   ingredient — the intermediate, which the cell builds a machine for;
-/// * the other is not craftable at all, so it has to arrive in a chest. A
-///   second craftable ingredient would need a second intermediate machine and
-///   a layout this is not.
+/// * it takes exactly **two** ingredients, because the product machine is fed
+///   by one link inserter and one supply chest and there is nowhere to put a
+///   third;
+/// * **one** of them is the intermediate, which the cell builds a machine
+///   for. To be one, an ingredient needs a crafting recipe of its own with at
+///   most [`MAX_FEED`] ingredients — the width of the feed side;
+/// * the other arrives in a chest, hand-filled, whether or not the game could
+///   also craft it. There is no second intermediate machine: the cell is two
+///   machines deep by construction.
 ///
-/// In vanilla 2.1 red science is the case this exists for. `None` is not
-/// "impossible" — it is "no *cell of this shape* makes it", and
-/// [`Goal::Have`] still reaches it by hand.
+/// # When both halves could be the intermediate
+///
+/// The **shallower** recipe wins, and a tie is a refusal. Each ingredient of
+/// the intermediate is one more chest, one more inserter and one more thing
+/// the pole has to light, so the smaller machine is the one more likely to fit
+/// and the one with fewer ways to be half-fed; and refusing a tie is what
+/// keeps this function from silently choosing between two cells that are
+/// equally good on the only ground it can see.
+///
+/// **This ordering is why widening `MAX_FEED` from one to two changed no
+/// existing answer.** Every item that resolved when only single-ingredient
+/// intermediates counted has a candidate of length one, and length one is the
+/// shallowest there is — so it still wins, against candidates that could not
+/// even be considered before. `repair-pack` (gear + circuit) and
+/// `fast-transport-belt` (gear + belt) are the two reachable cases where the
+/// widening added a rival, and both still resolve to the gear.
+///
+/// In vanilla 2.1 red science is the case this exists for and green science is
+/// the case [`MAX_FEED`] was widened for. `None` is not "impossible" — it is
+/// "no *cell of this shape* makes it", and [`Goal::Have`] still reaches it by
+/// hand.
 pub fn assembly_spec(state: &PlanState, item: &str) -> Option<AssemblySpec> {
     let recipe = recipe_for(state, item)?;
     if recipe.category != CRAFTING_CATEGORY {
@@ -264,15 +336,22 @@ pub fn assembly_spec(state: &PlanState, item: &str) -> Option<AssemblySpec> {
     let [(a, a_amount), (b, b_amount)] = ingredients.as_slice() else {
         return None;
     };
-    // Which of the two the cell can make. Exactly one, or this is not the
-    // shape: none means both arrive in chests and no machine of the cell's
-    // does anything, and both means a third machine.
+    // Which of the two the cell builds a machine for. None means both arrive
+    // in chests and no machine of the cell's does anything; both is decided by
+    // depth, and a tie is a refusal -- see this function's own doc.
     let a_made = intermediate_for(state, a, *a_amount);
     let b_made = intermediate_for(state, b, *b_amount);
     let (intermediate, supplied) = match (a_made, b_made) {
         (Some(made), None) => (made, (b.clone(), *b_amount)),
         (None, Some(made)) => (made, (a.clone(), *a_amount)),
-        _ => return None,
+        (Some(from_a), Some(from_b)) => {
+            match from_a.ingredients.len().cmp(&from_b.ingredients.len()) {
+                std::cmp::Ordering::Less => (from_a, (b.clone(), *b_amount)),
+                std::cmp::Ordering::Greater => (from_b, (a.clone(), *a_amount)),
+                std::cmp::Ordering::Equal => return None,
+            }
+        }
+        (None, None) => return None,
     };
     // The product machine's own tempo, and the intermediate machine's
     // expressed in the same unit so the two are comparable. Both integer.
@@ -294,22 +373,34 @@ pub fn assembly_spec(state: &PlanState, item: &str) -> Option<AssemblySpec> {
     })
 }
 
-/// Is `item` something one assembling machine makes out of one other thing?
+/// Is `item` something one assembling machine makes out of things the cell can
+/// stand a chest in front of?
+///
+/// `None` for a recipe with more ingredients than [`MAX_FEED`]: that is not
+/// "the game cannot make it", it is "this cell has nowhere to put the chests",
+/// and the item then arrives in the *supply* chest instead — which is exactly
+/// what happens to green science's inserters.
 fn intermediate_for(state: &PlanState, item: &str, per_product: u32) -> Option<Intermediate> {
     let recipe = recipe_for(state, item)?;
     if recipe.category != CRAFTING_CATEGORY {
         return None;
     }
     let ingredients = ingredients_of(&recipe);
-    let [(ingredient, amount)] = ingredients.as_slice() else {
+    if ingredients.is_empty() || ingredients.len() > MAX_FEED {
         return None;
-    };
+    }
+    // A machine that eats what it makes has no chest arrangement that works,
+    // and would make `feed_charges` ask a bot to carry in the very thing the
+    // cell exists to produce.
+    if ingredients.iter().any(|(name, _)| name == item) {
+        return None;
+    }
     Some(Intermediate {
         item: item.to_string(),
         per_run: output_per_craft(&recipe, item).max(1),
         recipe,
         per_product,
-        ingredient: (ingredient.clone(), *amount),
+        ingredients,
     })
 }
 
@@ -331,12 +422,18 @@ pub enum Role {
     Intermediate,
     /// Makes the item the goal named.
     Product,
-    /// Holds what the intermediate machine eats.
-    FeedChest,
+    /// Holds one of the things the intermediate machine eats.
+    ///
+    /// Indexed by that ingredient's position in the intermediate's own recipe,
+    /// `0 .. MAX_FEED`. Named-and-indexed rather than positional for the same
+    /// reason the rest of this enum is named: a cell has one chest per
+    /// ingredient, and which chest gets which charge has to survive somebody
+    /// reordering [`layout_table`].
+    FeedChest(u8),
     /// Holds the ingredient nothing in the cell makes.
     SupplyChest,
-    /// Feed chest -> intermediate machine.
-    FeedInserter,
+    /// Feed chest `n` -> intermediate machine.
+    FeedInserter(u8),
     /// Intermediate machine -> product machine.
     LinkInserter,
     /// Supply chest -> product machine.
@@ -349,8 +446,8 @@ impl Role {
         match self {
             Role::Pole => POLE,
             Role::Intermediate | Role::Product => MACHINE,
-            Role::FeedChest | Role::SupplyChest => CHEST,
-            Role::FeedInserter | Role::LinkInserter | Role::SupplyInserter => INSERTER,
+            Role::FeedChest(_) | Role::SupplyChest => CHEST,
+            Role::FeedInserter(_) | Role::LinkInserter | Role::SupplyInserter => INSERTER,
         }
     }
 }
@@ -367,22 +464,23 @@ pub struct CellPart {
 /// machine's own position, with the direction each part stands in when the
 /// cell faces north.
 ///
-/// **The three inserter directions are the whole design and each one points at
-/// what it PICKS UP from.** `Direction::North` on the link inserter means it
-/// takes from the tile *north* of itself — the intermediate machine — and
-/// drops one tile south, into the product machine. `Direction::West` on the
-/// two feed inserters means they take from the chest to their west and drop
-/// east into the machine. Neither is derived from the other; both are the same
-/// rule `PlanState::pickup_position` and `delivery_offset` implement, and
-/// [`fit`] checks all four links with `delivers_into` rather than trusting
-/// this table.
+/// **The inserter directions are the whole design and each one points at what
+/// it PICKS UP from.** `Direction::North` on the link inserter means it takes
+/// from the tile *north* of itself — the intermediate machine — and drops one
+/// tile south, into the product machine. `Direction::West` on the chest
+/// inserters means they take from the chest to their west and drop east into
+/// the machine. Neither is derived from the other; both are the same rule
+/// `PlanState::pickup_position` and `delivery_offset` implement, and [`fit`]
+/// checks every link with `delivers_into` rather than trusting this table.
 ///
-/// The layout as a picture, north frame, `#` for the 3x3 machines:
+/// The layout as a picture, north frame, `#` for the 3x3 machines, with the
+/// second feed row in brackets — present only when the intermediate's recipe
+/// has a second ingredient:
 ///
 /// ```text
 ///        x: -3  -2  -1   0   1
 ///   y  0:  C   >   .  ###
-///      1:  .   .   .  ###
+///      1: [C] [>]  .  ###
 ///      2:  .   .   P   v
 ///      3:  .   .   .  ###
 ///      4:  C   >   .  ###
@@ -390,16 +488,40 @@ pub struct CellPart {
 ///
 /// (The machines are three tiles wide and centred on `x = 0`, so they occupy
 /// `x = -1 .. 1`; the pole `P` at `(-1, 2)` sits in the one-tile gap between
-/// them, where a 5x5 supply area reaches every consumer in the cell.)
-const LAYOUT: [(Role, (f64, f64), Direction); 7] = [
-    (Role::Intermediate, (0., 0.), Direction::North),
-    (Role::Product, (0., 4.), Direction::North),
-    (Role::FeedChest, (-3., 0.), Direction::North),
-    (Role::SupplyChest, (-3., 4.), Direction::North),
-    (Role::FeedInserter, (-2., 0.), Direction::West),
-    (Role::LinkInserter, (0., 2.), Direction::North),
-    (Role::SupplyInserter, (-2., 4.), Direction::West),
-];
+/// them, where a 5x5 supply area reaches every consumer in the cell —
+/// including both feed rows, which is what [`MAX_FEED`] is two for.)
+///
+/// **A one-feed cell comes out of this in exactly the order the fixed table it
+/// replaced had**, which is why widening it moved no red-science plan: the
+/// build order, and therefore every action id in the plan, is this sequence.
+fn layout_table(feeds: usize) -> Vec<(Role, (f64, f64), Direction)> {
+    let feeds = feeds.min(MAX_FEED);
+    let mut out = vec![
+        (Role::Intermediate, (0., 0.), Direction::North),
+        (Role::Product, (0., 4.), Direction::North),
+    ];
+    for (index, y) in FEED_ROWS.iter().take(feeds).enumerate() {
+        #[allow(clippy::cast_possible_truncation)]
+        out.push((Role::FeedChest(index as u8), (-3., *y), Direction::North));
+    }
+    out.push((Role::SupplyChest, (-3., 4.), Direction::North));
+    for (index, y) in FEED_ROWS.iter().take(feeds).enumerate() {
+        #[allow(clippy::cast_possible_truncation)]
+        out.push((Role::FeedInserter(index as u8), (-2., *y), Direction::West));
+    }
+    out.push((Role::LinkInserter, (0., 2.), Direction::North));
+    out.push((Role::SupplyInserter, (-2., 4.), Direction::West));
+    out
+}
+
+/// The rows a feed chest and its inserter stand on, in chest-index order.
+///
+/// `y = 0` is the intermediate machine's own row and `y = 1` the one south of
+/// it. The machine presents a third tile to the west at `y = -1`, and it is
+/// deliberately unused: the pole at [`POLE_OFFSET`] supplies
+/// `y = -0.5 ..= 4.5`, so an inserter there would stand unpowered — see
+/// [`MAX_FEED`].
+const FEED_ROWS: [f64; MAX_FEED] = [0., 1.];
 
 /// Where the cell puts a pole of its **own**, when it has to bring one.
 ///
@@ -465,6 +587,18 @@ impl Cell {
         self.parts.iter().find(|part| part.role == role)
     }
 
+    /// How many feed chests this cell has — one per ingredient of the
+    /// intermediate's recipe.
+    ///
+    /// Counted off the parts rather than carried, so it cannot disagree with
+    /// what actually stands.
+    pub fn feeds(&self) -> usize {
+        self.parts
+            .iter()
+            .filter(|part| matches!(part.role, Role::FeedChest(_)))
+            .count()
+    }
+
     /// Does this cell have to place a pole of its own?
     ///
     /// `false` when it stands inside a supply area that already exists, which
@@ -497,8 +631,8 @@ fn compose(direction: Direction, by: Direction) -> Option<Direction> {
     Direction::from_u8(sum)
 }
 
-/// The eight buildings of a cell whose intermediate machine stands at `origin`
-/// facing `facing`.
+/// The buildings of a cell whose intermediate machine stands at `origin`
+/// facing `facing`, with `feeds` feed chests.
 ///
 /// A rigid body rotated about the origin, which is a **tile centre**: every
 /// part of this cell is one or three tiles across — odd on both axes — so
@@ -507,11 +641,22 @@ fn compose(direction: Direction, by: Direction) -> Option<Direction> {
 /// their own build grid at all four facings, and it is
 /// `tests::every_facing_puts_every_building_on_its_own_grid` rather than a
 /// comment.
-fn layout(origin: &Position, facing: Direction, with_pole: bool) -> Option<Vec<CellPart>> {
+fn layout(
+    origin: &Position,
+    facing: Direction,
+    with_pole: bool,
+    feeds: usize,
+) -> Option<Vec<CellPart>> {
+    // A cell with no feed chest has a machine nothing puts anything into, and
+    // one with more than `MAX_FEED` has an inserter the pole cannot light.
+    // Both are refusals rather than truncations: a truncated cell places
+    // perfectly and starves.
+    if feeds == 0 || feeds > MAX_FEED {
+        return None;
+    }
     let pole = with_pole.then_some((Role::Pole, POLE_OFFSET, Direction::North));
-    LAYOUT
-        .iter()
-        .copied()
+    layout_table(feeds)
+        .into_iter()
         .chain(pole)
         .map(|(role, offset, direction)| {
             Some(CellPart {
@@ -554,7 +699,7 @@ fn entity_for(state: &PlanState, part: &CellPart) -> FactorioEntity {
     }
 }
 
-/// The four links a cell is, in the order items travel them.
+/// The links a cell is, in the order items travel them.
 ///
 /// Returned as positions rather than checked in place so that [`fit`] and
 /// [`cell_steps`] ask the *same* question — one is the expansion-time check
@@ -562,14 +707,18 @@ fn entity_for(state: &PlanState, part: &CellPart) -> FactorioEntity {
 /// second copy of this list could disagree with the first.
 fn links(cell: &Cell) -> Option<Vec<(Position, Position)>> {
     let p = |role: Role| cell.at(role).map(|part| part.position.clone());
-    Some(vec![
-        (p(Role::FeedChest)?, p(Role::FeedInserter)?),
-        (p(Role::FeedInserter)?, p(Role::Intermediate)?),
-        (p(Role::Intermediate)?, p(Role::LinkInserter)?),
-        (p(Role::LinkInserter)?, p(Role::Product)?),
-        (p(Role::SupplyChest)?, p(Role::SupplyInserter)?),
-        (p(Role::SupplyInserter)?, p(Role::Product)?),
-    ])
+    let mut out = Vec::new();
+    for index in 0..cell.feeds() {
+        #[allow(clippy::cast_possible_truncation)]
+        let index = index as u8;
+        out.push((p(Role::FeedChest(index))?, p(Role::FeedInserter(index))?));
+        out.push((p(Role::FeedInserter(index))?, p(Role::Intermediate)?));
+    }
+    out.push((p(Role::Intermediate)?, p(Role::LinkInserter)?));
+    out.push((p(Role::LinkInserter)?, p(Role::Product)?));
+    out.push((p(Role::SupplyChest)?, p(Role::SupplyInserter)?));
+    out.push((p(Role::SupplyInserter)?, p(Role::Product)?));
+    Some(out)
 }
 
 /// Every part of a cell that draws from the network, with what it draws.
@@ -613,8 +762,14 @@ fn consumers(state: &PlanState, cell: &Cell) -> Vec<(Position, &'static str, f64
 /// `false` first by [`plan_cell`]: question 3 then has to be answered by a
 /// network that already exists, and a cell that passes it needs no pole at
 /// all. See [`POLE_OFFSET`] for what one costs.
-fn fit(state: &PlanState, origin: &Position, facing: Direction, with_pole: bool) -> Option<Cell> {
-    let parts = layout(origin, facing, with_pole)?;
+fn fit(
+    state: &PlanState,
+    origin: &Position,
+    facing: Direction,
+    with_pole: bool,
+    feeds: usize,
+) -> Option<Cell> {
+    let parts = layout(origin, facing, with_pole, feeds)?;
     let lane = lane(origin, facing)?;
     for part in &parts {
         if !state.is_area_free_facing(part.role.name(), &part.position, part.direction) {
@@ -672,10 +827,21 @@ fn fit(state: &PlanState, origin: &Position, facing: Direction, with_pole: bool)
 // ---------------------------------------------------------------------------
 
 /// What a whole cell draws, for the anchor search.
-fn cell_demand_kw(state: &PlanState) -> f64 {
+///
+/// Two machines, and one inserter per feed chest plus the link and the supply
+/// one. Read off the spec rather than a constant, because a two-feed cell has
+/// a fourth inserter and an anchor sized for three would be sized short.
+fn cell_demand_kw(state: &PlanState, spec: &AssemblySpec) -> f64 {
     let machines = state.consumer_draw_kw(MACHINE).unwrap_or(0.);
     let inserters = state.consumer_draw_kw(INSERTER).unwrap_or(0.);
-    2. * machines + 3. * inserters
+    let count = inserter_count(spec).to_f64().unwrap_or(3.);
+    2. * machines + count * inserters
+}
+
+/// How many inserters a cell for `spec` has: one per feed chest, one link, one
+/// supply.
+fn inserter_count(spec: &AssemblySpec) -> u32 {
+    u32::try_from(spec.intermediate.ingredients.len()).unwrap_or(1) + 2
 }
 
 /// Find somewhere powered to put one cell, or say why not.
@@ -696,6 +862,7 @@ pub fn plan_cell(
     spec: &AssemblySpec,
 ) -> Result<Cell, PlannerError> {
     let base = Pos::from(anchor);
+    let feeds = spec.intermediate.ingredients.len();
     // The cheap pass first, and the whole ring search is repeated rather than
     // interleaved: a cell twelve tiles out that needs no pole beats one beside
     // the anchor that costs a wood, because wood is the one resource this
@@ -719,7 +886,7 @@ pub fn plan_cell(
                             f64::from(base.0 + dx) + offset_x,
                             f64::from(base.1 + dy) + offset_y,
                         );
-                        if let Some(cell) = fit(state, &candidate, facing, with_pole) {
+                        if let Some(cell) = fit(state, &candidate, facing, with_pole, feeds) {
                             return Ok(cell);
                         }
                     }
@@ -789,7 +956,8 @@ const CELL_SCAN_RADIUS: f64 = 512.0;
 ///   crate has on that — nothing here models which *item* an inserter carries;
 /// * *each of those inserters is itself fed*, which is what makes this a claim
 ///   about the whole chain rather than about the last link of it. The
-///   intermediate machine is counted by this clause and not by name.
+///   intermediate machine is counted by this clause and not by name — see
+///   [`is_supplied`], which is where the recursion into it happens.
 ///
 /// Order-independent by construction: it counts, and it dedupes by tile
 /// through the `(x, y, name)` order `entities_within` already imposes.
@@ -816,26 +984,88 @@ pub fn cells_standing(state: &PlanState, spec: &AssemblySpec) -> u32 {
         {
             continue;
         }
-        // The inserters that put something into this machine, each of which
-        // must itself be taking from something that is not the machine it
-        // feeds -- otherwise a machine ringed by idle inserters would count.
-        let feeders = nearby
-            .iter()
-            .filter(|inserter| inserter.name == INSERTER)
-            .filter(|inserter| state.delivers_into(&inserter.position, &machine.position))
-            .filter(|inserter| {
-                nearby.iter().any(|source| {
-                    source.position != inserter.position
-                        && source.position != machine.position
-                        && state.delivers_into(&source.position, &inserter.position)
-                })
-            })
-            .count();
-        if feeders >= ingredients {
+        if loaded_feeders(state, &nearby, machine, CHAIN_DEPTH) >= ingredients {
             count += 1;
         }
     }
     count
+}
+
+/// How deep [`loaded_feeders`] follows the chain back from the product
+/// machine.
+///
+/// One, because the cell is two machines deep and never three: the product
+/// machine's feeders come from chests and from the intermediate machine, and
+/// the intermediate machine's feeders come from chests. It is stated as a
+/// bound rather than left to the shape of the world because the world is not
+/// a cell — a real factory has machines feeding machines feeding machines, and
+/// an unbounded walk over `entities_within(512)` would be neither cheap nor
+/// obviously terminating.
+const CHAIN_DEPTH: u8 = 1;
+
+/// How many inserters put something *supplied* into `machine`.
+///
+/// The inserter has to deliver into the machine, and it has to be taking from
+/// something else that has something to give — which is [`is_supplied`], and
+/// which is where "the whole chain" stops being a figure of speech.
+fn loaded_feeders(
+    state: &PlanState,
+    nearby: &[FactorioEntity],
+    machine: &FactorioEntity,
+    depth: u8,
+) -> usize {
+    nearby
+        .iter()
+        .filter(|inserter| inserter.name == INSERTER)
+        .filter(|inserter| state.delivers_into(&inserter.position, &machine.position))
+        .filter(|inserter| {
+            nearby.iter().any(|source| {
+                source.position != inserter.position
+                    && source.position != machine.position
+                    && state.delivers_into(&source.position, &inserter.position)
+                    && is_supplied(state, nearby, source, depth)
+            })
+        })
+        .count()
+}
+
+/// Has `source` got anything to hand on?
+///
+/// A chest is taken on trust: **nothing in this crate reads a container's
+/// contents**, which is stated in this module's header and is unchanged here.
+///
+/// A *machine* is not taken on trust, and that is the clause a two-feed cell
+/// made load-bearing. A machine hands on only what it makes, and it makes
+/// nothing unless it has a recipe on it and every ingredient of that recipe
+/// arriving. A one-feed cell could not tell the difference — its intermediate
+/// has one ingredient, and an intermediate with no feeder at all already fails
+/// the "taking from something" clause. A **two**-feed cell can: a transport-
+/// belt machine fed iron plates and no gears stands, is powered, delivers
+/// nothing, and would otherwise have counted as a whole green cell.
+///
+/// `false` for a machine whose recipe the world does not report, which is the
+/// safe direction: an unreadable cell is re-built rather than claimed. That is
+/// the same failure `30b28846` fixed at the source, kept honest here as well.
+fn is_supplied(
+    state: &PlanState,
+    nearby: &[FactorioEntity],
+    source: &FactorioEntity,
+    depth: u8,
+) -> bool {
+    if source.name != MACHINE {
+        return true;
+    }
+    if depth == 0 {
+        return false;
+    }
+    let Some(recipe) = source
+        .recipe
+        .as_deref()
+        .and_then(|name| recipe_for(state, name))
+    else {
+        return false;
+    };
+    loaded_feeders(state, nearby, source, depth - 1) >= ingredients_of(&recipe).len()
 }
 
 /// Does `Goal::Producing { item, per_minute }` hold as an *assembly* cell?
@@ -871,20 +1101,29 @@ pub fn holds_assembling(state: &PlanState, item: &str, per_minute: u32) -> bool 
 /// `Holder::Share`, for the same reason `power::bill` uses it: one bot places
 /// these, so one bot has to be holding them, and `Anyone` sizes its shortfall
 /// against the sum across the roster.
+/// **Merged by item, first occurrence keeping its place.** Green science is
+/// why: its supply chest is charged with `inserter`s, which is also what three
+/// of the cell's own links are made of, and two separate `Goal::Have` subgoals
+/// naming the same item are each satisfied by the *same* items in the bot's
+/// inventory — so the cell would be built with the inserters its chest was
+/// supposed to hold. Nothing in red's bill repeats, which is why the merge
+/// changes no plan that already worked.
 fn bill(spec: &AssemblySpec, count: u32, poles: u32, coal: u32) -> Vec<(ItemId, u32)> {
     let mut out = vec![
         (MACHINE.to_string(), 2 * count),
-        (INSERTER.to_string(), 3 * count),
-        (CHEST.to_string(), 2 * count),
+        (INSERTER.to_string(), inserter_count(spec) * count),
         (
-            spec.intermediate.ingredient.0.clone(),
-            spec.feed_charge().saturating_mul(count),
-        ),
-        (
-            spec.supplied.0.clone(),
-            spec.supply_charge().saturating_mul(count),
+            CHEST.to_string(),
+            (u32::try_from(spec.intermediate.ingredients.len()).unwrap_or(1) + 1) * count,
         ),
     ];
+    for (item, amount) in spec.feed_charges() {
+        out.push((item, amount.saturating_mul(count)));
+    }
+    out.push((
+        spec.supplied.0.clone(),
+        spec.supply_charge().saturating_mul(count),
+    ));
     // Only the cells that could not adopt supply that already stands. A pole
     // in a bill nobody places is one of four wood, spent for nothing.
     if poles > 0 {
@@ -893,7 +1132,14 @@ fn bill(spec: &AssemblySpec, count: u32, poles: u32, coal: u32) -> Vec<(ItemId, 
     if coal > 0 {
         out.push(("coal".to_string(), coal));
     }
-    out
+    let mut merged: Vec<(ItemId, u32)> = Vec::with_capacity(out.len());
+    for (item, amount) in out {
+        match merged.iter_mut().find(|(name, _)| *name == item) {
+            Some((_, total)) => *total = total.saturating_add(amount),
+            None => merged.push((item, amount)),
+        }
+    }
+    merged
 }
 
 /// How much coal keeps a network drawing `demand_kw` running for one charge.
@@ -1011,10 +1257,11 @@ fn place_step(ctx: &mut ExpansionCtx, part: &CellPart) -> Step {
 /// the whole cell is standing. Charging a chest that feeds nothing is the
 /// placed-but-dead machine in its stage-2 form.
 ///
-/// The split between the two charge inserts is by *branch*: the feed chest's
-/// insert asserts the four-link chain through the intermediate machine, and
-/// the supply chest's asserts the two-link one. Both name the product machine
-/// and its recipe, because both are claims about it.
+/// The split between the charge inserts is by *branch*: each feed chest's
+/// insert asserts the four-link chain from that chest through the intermediate
+/// machine, and the supply chest's asserts the two-link one. All of them name
+/// the product machine and its recipe, because all of them are claims about
+/// it.
 fn cell_steps(
     ctx: &mut ExpansionCtx,
     spec: &AssemblySpec,
@@ -1180,25 +1427,33 @@ fn cell_steps(
             ctx.state.set_recipe(&part.position, &recipe.name)?;
         }
 
-        for (chest_role, item, amount, branch) in [
-            (
-                Role::FeedChest,
-                spec.intermediate.ingredient.0.clone(),
-                spec.feed_charge(),
+        // One branch per chest, in chest order: each feed chest asserts the
+        // whole chain through the intermediate machine, and the supply chest
+        // asserts the two-link one. Both name the product machine and its
+        // recipe, because both are claims about it.
+        let mut branches: Vec<(Role, ItemId, u32, Vec<Role>)> = Vec::new();
+        for (index, (item, amount)) in spec.feed_charges().into_iter().enumerate() {
+            #[allow(clippy::cast_possible_truncation)]
+            let index = index as u8;
+            branches.push((
+                Role::FeedChest(index),
+                item,
+                amount,
                 vec![
-                    Role::FeedInserter,
+                    Role::FeedInserter(index),
                     Role::Intermediate,
                     Role::LinkInserter,
                     Role::Product,
                 ],
-            ),
-            (
-                Role::SupplyChest,
-                spec.supplied.0.clone(),
-                spec.supply_charge(),
-                vec![Role::SupplyInserter, Role::Product],
-            ),
-        ] {
+            ));
+        }
+        branches.push((
+            Role::SupplyChest,
+            spec.supplied.0.clone(),
+            spec.supply_charge(),
+            vec![Role::SupplyInserter, Role::Product],
+        ));
+        for (chest_role, item, amount, branch) in branches {
             let Some(chest) = cell.at(chest_role) else {
                 continue;
             };
@@ -1400,7 +1655,7 @@ impl Method for BuildAssemblyCell {
         // `power::PLANT_ADOPT_RADIUS`.
         let mut plant_steps_taken: Vec<Step> = Vec::new();
         let mut power_links: Vec<ActionId> = Vec::new();
-        let want_kw = cell_demand_kw(&ctx.state) * f64::from(build);
+        let want_kw = cell_demand_kw(&ctx.state, &spec) * f64::from(build);
         let anchor = match supply_for(&ctx.state, &from, ANCHOR_SEARCH_RADIUS, want_kw)? {
             Supply::Standing(anchor) => anchor,
             Supply::Build(plant) => {
@@ -1474,14 +1729,40 @@ mod tests {
     use std::sync::Arc;
 
     const PACK: &str = "automation-science-pack";
+    const GREEN: &str = "logistic-science-pack";
 
-    /// The shared fixture plus the one recipe the 1.1 capture never had.
+    /// The shared fixture plus the two recipes the 1.1 capture never had.
     ///
     /// Ingredients and energy are the **live 2.1.17** ones, asserted against
-    /// the capture in `tests/red_science_cell.rs`. It is added `enabled` so
+    /// the capture in `tests/red_science_cell.rs`. They are added `enabled` so
     /// these tests are about the layout rather than about the research ladder.
     fn world() -> FactorioWorld {
         let world = fixture_world();
+        let green: factorio_bot_core::types::FactorioRecipe =
+            factorio_bot_core::serde_json::from_str(
+                r#"{
+              "name": "logistic-science-pack",
+              "valid": true,
+              "enabled": true,
+              "category": "crafting",
+              "ingredients": [
+                { "name": "transport-belt", "ingredient_type": "item", "amount": 1 },
+                { "name": "inserter", "ingredient_type": "item", "amount": 1 }
+              ],
+              "products": [
+                { "name": "logistic-science-pack", "product_type": "item", "amount": 1, "probability": 1.0 }
+              ],
+              "hidden": false,
+              "energy": 6.0,
+              "order": "b",
+              "group": "intermediate-products",
+              "subgroup": "science-pack"
+            }"#,
+            )
+            .expect("the green science recipe parses");
+        world
+            .update_recipes(vec![green])
+            .expect("update_recipes cannot fail for a well-formed recipe");
         let recipe: factorio_bot_core::types::FactorioRecipe =
             factorio_bot_core::serde_json::from_str(
                 r#"{
@@ -1555,8 +1836,11 @@ mod tests {
     /// A cell standing in `state`, built the way the planner would build it,
     /// recipes and all.
     fn stand_a_cell(state: &mut PlanState) -> Cell {
-        let spec = spec();
-        let cell = plan_cell(state, &Position::new(10.5, 10.5), &spec)
+        stand_a_cell_for(state, &spec())
+    }
+
+    fn stand_a_cell_for(state: &mut PlanState, spec: &AssemblySpec) -> Cell {
+        let cell = plan_cell(state, &Position::new(10.5, 10.5), spec)
             .expect("the fixture has room beside its plant");
         for part in &cell.parts {
             let entity = entity_for(state, part);
@@ -1628,6 +1912,112 @@ mod tests {
         assert!(assembly_spec(&s, "not-a-thing").is_none());
     }
 
+    /// Green science, and the forced choice that makes it a cell.
+    ///
+    /// Both of its ingredients are craftable, which is what refused it before
+    /// `MAX_FEED` was two. Only the belt fits an intermediate machine — an
+    /// inserter takes three ingredients and the cell has room for two chests —
+    /// so nothing is *chosen* here: the inserters arrive in the supply chest
+    /// because there is nowhere else for them to come from.
+    #[test]
+    fn green_science_puts_the_belt_in_a_machine_and_the_inserters_in_a_chest() {
+        let s = bare(&[BotId(1)]);
+        let green = assembly_spec(&s, GREEN).expect("green science is a two-feed cell");
+        assert_eq!(green.intermediate.item, "transport-belt");
+        assert_eq!(
+            green.intermediate.ingredients,
+            vec![
+                ("iron-plate".to_string(), 1),
+                ("iron-gear-wheel".to_string(), 1)
+            ],
+            "one feed chest per ingredient, in the recipe's own order"
+        );
+        assert_eq!(green.intermediate.per_run, 2, "a belt recipe yields two");
+        assert_eq!(
+            green.supplied,
+            ("inserter".to_string(), 1),
+            "the half no machine of this cell makes"
+        );
+        assert!(
+            intermediate_for(&s, "inserter", 1).is_none(),
+            "three ingredients is one chest more than one pole can light"
+        );
+
+        // 6 s of recipe at crafting speed 0.5 is 720 ticks a pack: five a
+        // minute per cell, so six a minute is two cells and not one.
+        assert_eq!(green.ticks_per_item, 720);
+        assert_eq!(cells_for(5, green.ticks_per_item).unwrap(), 1);
+        assert_eq!(cells_for(6, green.ticks_per_item).unwrap(), 2);
+
+        // The charge, integer end to end: twelve packs, twelve inserters by
+        // hand, and six runs of a belt recipe that yields two.
+        assert_eq!(green.charge_products(), 12);
+        assert_eq!(green.intermediate_runs(), 6);
+        assert_eq!(
+            green.feed_charges(),
+            vec![
+                ("iron-plate".to_string(), 6),
+                ("iron-gear-wheel".to_string(), 6)
+            ]
+        );
+        assert_eq!(green.supply_charge(), 12);
+    }
+
+    /// Widening the feed side added rivals for the intermediate and changed no
+    /// existing answer.
+    ///
+    /// `repair-pack` is two gears and two electronic circuits, and a circuit
+    /// is a two-ingredient craft that a one-ingredient rule could not see. It
+    /// resolved to the gear before the widening and it must resolve to the
+    /// gear after it, or every plan for it moves.
+    ///
+    /// A tie is a refusal rather than a coin toss, which is asserted on a spec
+    /// the fixture cannot supply: `transport-belt` and `burner-inserter` are
+    /// both iron plate plus gear, so a recipe taking one of each has two
+    /// candidates of equal depth and no ground to choose between them.
+    #[test]
+    fn the_shallower_half_stays_the_intermediate_and_a_tie_is_a_refusal() {
+        let s = bare(&[BotId(1)]);
+        let pack = assembly_spec(&s, "repair-pack")
+            .expect("repair-pack was a cell before MAX_FEED widened");
+        assert_eq!(
+            pack.intermediate.item, "iron-gear-wheel",
+            "the gear, not the deeper circuit"
+        );
+
+        let world = world();
+        let tie: factorio_bot_core::types::FactorioRecipe =
+            factorio_bot_core::serde_json::from_str(
+                r#"{
+              "name": "a-tie",
+              "valid": true,
+              "enabled": true,
+              "category": "crafting",
+              "ingredients": [
+                { "name": "transport-belt", "ingredient_type": "item", "amount": 1 },
+                { "name": "burner-inserter", "ingredient_type": "item", "amount": 1 }
+              ],
+              "products": [
+                { "name": "a-tie", "product_type": "item", "amount": 1, "probability": 1.0 }
+              ],
+              "hidden": false,
+              "energy": 1.0,
+              "order": "z",
+              "group": "other",
+              "subgroup": "other"
+            }"#,
+            )
+            .expect("the tie recipe parses");
+        world
+            .update_recipes(vec![tie])
+            .expect("a well-formed recipe");
+        let tied = PlanState::from_world(Arc::new(world), &[BotId(1)]);
+        assert!(
+            assembly_spec(&tied, "a-tie").is_none(),
+            "two candidates of equal depth is no ground to choose, so no cell"
+        );
+    }
+
     /// Six packs a minute per cell, and the arithmetic that says so.
     #[test]
     fn a_cell_is_six_packs_a_minute_because_the_machine_is_half_speed() {
@@ -1651,9 +2041,9 @@ mod tests {
         let spec = spec();
         assert_eq!(spec.charge_products(), 15, "9000 ticks / 600 a pack");
         assert_eq!(
-            spec.feed_charge(),
-            30,
-            "fifteen gears at two iron plates each"
+            spec.feed_charges(),
+            vec![("iron-plate".to_string(), 30)],
+            "fifteen gears at two iron plates each, in one chest"
         );
         assert_eq!(spec.supply_charge(), 15, "one copper plate a pack");
 
@@ -1668,8 +2058,8 @@ mod tests {
         );
         assert_eq!(circuit.charge_products(), 100, "9000 ticks / 90 a circuit");
         assert_eq!(
-            circuit.feed_charge(),
-            150,
+            circuit.feed_charges(),
+            vec![("copper-plate".to_string(), 150)],
             "300 cables is 150 runs, and a run eats one copper plate"
         );
     }
@@ -1679,7 +2069,7 @@ mod tests {
     /// **No reachable recipe exercises this**, which is why it is asked of a
     /// hand-built spec rather than of red science: a charge of 300 cables is
     /// exactly 150 runs, so floor and ceiling agree and a `div_ceil` dropped
-    /// from `feed_charge` would change no plan the game can produce. An odd
+    /// from `feed_charges` would change no plan the game can produce. An odd
     /// count is the case that separates them, and a machine does not run half
     /// a craft.
     #[test]
@@ -1691,11 +2081,11 @@ mod tests {
         spec.ticks_per_item = 1_000;
         spec.intermediate.per_product = 1;
         spec.intermediate.per_run = 2;
-        spec.intermediate.ingredient = ("iron-plate".to_string(), 3);
+        spec.intermediate.ingredients = vec![("iron-plate".to_string(), 3)];
         assert_eq!(spec.charge_products(), 9);
         assert_eq!(
-            spec.feed_charge(),
-            15,
+            spec.feed_charges(),
+            vec![("iron-plate".to_string(), 15)],
             "five runs of three plates, not four"
         );
     }
@@ -1709,17 +2099,20 @@ mod tests {
         // facing. A wrong offset moves a building half a tile and the game
         // refuses the placement -- after the bot has walked there.
         let s = bare(&[BotId(1)]);
-        for facing in Direction::orthogonal() {
-            let origin = Position::new(10.5, 10.5);
-            for part in layout(&origin, facing, true).expect("a cardinal facing") {
-                let name = part.role.name();
-                let (offset_x, offset_y) = tile_alignment_facing(&s, name, part.direction);
-                assert!(
-                    (part.position.x() - offset_x).fract().abs() < 1. / 512.
-                        && (part.position.y() - offset_y).fract().abs() < 1. / 512.,
-                    "{name} at {} facing {facing:?} is off its own build grid",
-                    part.position
-                );
+        for feeds in 1..=MAX_FEED {
+            for facing in Direction::orthogonal() {
+                let origin = Position::new(10.5, 10.5);
+                for part in layout(&origin, facing, true, feeds).expect("a cardinal facing") {
+                    let name = part.role.name();
+                    let (offset_x, offset_y) = tile_alignment_facing(&s, name, part.direction);
+                    assert!(
+                        (part.position.x() - offset_x).fract().abs() < 1. / 512.
+                            && (part.position.y() - offset_y).fract().abs() < 1. / 512.,
+                        "{name} at {} facing {facing:?} with {feeds} feeds is off its own \
+                         build grid",
+                        part.position
+                    );
+                }
             }
         }
     }
@@ -1727,8 +2120,10 @@ mod tests {
     #[test]
     fn no_two_buildings_of_a_cell_overlap_at_any_facing() {
         let s = bare(&[BotId(1)]);
-        for facing in Direction::orthogonal() {
-            let parts = layout(&Position::new(10.5, 10.5), facing, true).unwrap();
+        for (feeds, facing) in
+            (1..=MAX_FEED).flat_map(|f| Direction::orthogonal().into_iter().map(move |d| (f, d)))
+        {
+            let parts = layout(&Position::new(10.5, 10.5), facing, true, feeds).unwrap();
             for (i, a) in parts.iter().enumerate() {
                 for b in parts.iter().skip(i + 1) {
                     let a_box = s
@@ -1753,31 +2148,36 @@ mod tests {
 
     /// **The inserter-direction claim, at all four facings.**
     ///
-    /// Six links, and every one of them a chance for a rotation that is wrong
-    /// by a quarter turn to place perfectly and move nothing. Asked of a fork
-    /// with the cell standing, so it is the same `delivers_into` the
-    /// `Condition::Feeds` on the charge inserts is checked with.
+    /// Six links for a one-feed cell and eight for a two-feed one, and every
+    /// one of them a chance for a rotation that is wrong by a quarter turn to
+    /// place perfectly and move nothing. Asked of a fork with the cell
+    /// standing, so it is the same `delivers_into` the `Condition::Feeds` on
+    /// the charge inserts is checked with.
     #[test]
     fn every_link_of_the_chain_delivers_at_every_facing() {
-        for facing in Direction::orthogonal() {
-            let s = bare(&[BotId(1)]);
-            let origin = Position::new(10.5, 10.5);
-            let cell = Cell {
-                origin: origin.clone(),
-                facing,
-                parts: layout(&origin, facing, true).unwrap(),
-                lane: lane(&origin, facing).unwrap(),
-                evacuate: Vec::new(),
-            };
-            let mut trial = s.fork();
-            for part in &cell.parts {
-                trial.create_entity(entity_for(&s, part));
-            }
-            for (from, to) in links(&cell).unwrap() {
-                assert!(
-                    trial.delivers_into(&from, &to),
-                    "at {facing:?}, {from} does not deliver into {to}"
-                );
+        for feeds in 1..=MAX_FEED {
+            for facing in Direction::orthogonal() {
+                let s = bare(&[BotId(1)]);
+                let origin = Position::new(10.5, 10.5);
+                let cell = Cell {
+                    origin: origin.clone(),
+                    facing,
+                    parts: layout(&origin, facing, true, feeds).unwrap(),
+                    lane: lane(&origin, facing).unwrap(),
+                    evacuate: Vec::new(),
+                };
+                let mut trial = s.fork();
+                for part in &cell.parts {
+                    trial.create_entity(entity_for(&s, part));
+                }
+                let chain = links(&cell).unwrap();
+                assert_eq!(chain.len(), 4 + 2 * feeds, "two links per chest");
+                for (from, to) in chain {
+                    assert!(
+                        trial.delivers_into(&from, &to),
+                        "at {facing:?} with {feeds} feeds, {from} does not deliver into {to}"
+                    );
+                }
             }
         }
     }
@@ -1790,10 +2190,16 @@ mod tests {
     /// and the placement stays legal while the link stops holding.
     #[test]
     fn an_inserter_turned_round_places_perfectly_and_feeds_nothing() {
-        for role in [Role::FeedInserter, Role::LinkInserter, Role::SupplyInserter] {
+        let roles = (0..MAX_FEED)
+            .map(|index| {
+                #[allow(clippy::cast_possible_truncation)]
+                Role::FeedInserter(index as u8)
+            })
+            .chain([Role::LinkInserter, Role::SupplyInserter]);
+        for role in roles {
             let s = bare(&[BotId(1)]);
             let origin = Position::new(10.5, 10.5);
-            let mut parts = layout(&origin, Direction::North, true).unwrap();
+            let mut parts = layout(&origin, Direction::North, true, MAX_FEED).unwrap();
             for part in parts.iter_mut() {
                 if part.role == role {
                     part.direction = compose(part.direction, Direction::South).unwrap();
@@ -1839,9 +2245,11 @@ mod tests {
         // `PlanState` reads out of the `character` prototype.
         let half = 0.19921875_f64;
         let margin = 1. / 64.;
-        for facing in Direction::orthogonal() {
+        for (feeds, facing) in
+            (1..=MAX_FEED).flat_map(|f| Direction::orthogonal().into_iter().map(move |d| (f, d)))
+        {
             let origin = Position::new(10.5, 10.5);
-            let parts = layout(&origin, facing, true).unwrap();
+            let parts = layout(&origin, facing, true, feeds).unwrap();
             let lane = lane(&origin, facing).unwrap();
             assert_eq!(lane.len(), 5);
             for tile in &lane {
@@ -1862,9 +2270,15 @@ mod tests {
         }
         // And the lane really does reach both chests: a bot standing on it is
         // within a vanilla reach distance of each.
-        let parts = layout(&Position::new(10.5, 10.5), Direction::North, true).unwrap();
+        let parts = layout(&Position::new(10.5, 10.5), Direction::North, true, MAX_FEED).unwrap();
         let lane = lane(&Position::new(10.5, 10.5), Direction::North).unwrap();
-        for role in [Role::FeedChest, Role::SupplyChest] {
+        let chests = (0..MAX_FEED)
+            .map(|index| {
+                #[allow(clippy::cast_possible_truncation)]
+                Role::FeedChest(index as u8)
+            })
+            .chain([Role::SupplyChest]);
+        for role in chests {
             let chest = parts.iter().find(|p| p.role == role).unwrap();
             assert!(
                 lane.iter().any(|tile| {
@@ -1997,16 +2411,18 @@ mod tests {
     #[test]
     fn the_cells_own_pole_covers_every_consumer_in_it() {
         let s = bare(&[BotId(1)]);
-        for facing in Direction::orthogonal() {
-            let parts = layout(&Position::new(10.5, 10.5), facing, true).unwrap();
+        for (feeds, facing) in
+            (1..=MAX_FEED).flat_map(|f| Direction::orthogonal().into_iter().map(move |d| (f, d)))
+        {
+            let parts = layout(&Position::new(10.5, 10.5), facing, true, feeds).unwrap();
             let pole = parts.iter().find(|p| p.role == Role::Pole).unwrap();
             let consumers = parts
                 .iter()
                 .filter(|p| s.consumer_draw_kw(p.role.name()).is_some());
             assert_eq!(
                 consumers.clone().count(),
-                5,
-                "two machines and three inserters"
+                4 + feeds,
+                "two machines, one inserter per feed chest, a link and a supply"
             );
             for part in consumers {
                 let area = s
@@ -2338,11 +2754,61 @@ mod tests {
         // Lay the cell out exactly as the planner would, then take its parts.
         let mut planned = powered(&bots);
         let cell = stand_a_cell(&mut planned);
-        let mut standing: Vec<FactorioEntity> = cell
-            .parts
-            .iter()
-            .map(|part| entity_for(&planned, part))
-            .collect();
+        let recipes = cell_recipes(&cell, &spec);
+
+        // A world that has never heard of this plan, told only what a game
+        // would have told it.
+        let observed = |with_recipes: bool| {
+            observed_world(
+                &planned,
+                &cell.parts,
+                if with_recipes { &recipes } else { &[] },
+                &bots,
+            )
+        };
+
+        assert!(
+            !holds_assembling(&observed(false), PACK, 6),
+            "machines with no recipe on them are the placed-but-dead cell, however \
+             complete the rest of it is -- this is the state every replan used to see"
+        );
+        assert!(
+            holds_assembling(&observed(true), PACK, 6),
+            "the cell stands, is powered, is fed, and the world knows what each \
+             machine is set to; a replan that rebuilt it would build a second factory"
+        );
+    }
+
+    /// The recipes a standing cell has on it, as the entity graph takes them.
+    fn cell_recipes(cell: &Cell, spec: &AssemblySpec) -> Vec<(Position, String)> {
+        vec![
+            (
+                cell.at(Role::Intermediate).unwrap().position.clone(),
+                spec.intermediate.recipe.name.clone(),
+            ),
+            (
+                cell.at(Role::Product).unwrap().position.clone(),
+                spec.recipe.name.clone(),
+            ),
+        ]
+    }
+
+    /// A `PlanState` built the way a **game** builds one.
+    ///
+    /// `parts` go in through `update_chunk_entities` — the door the mod's
+    /// entity events use — and the recipes go on through the entity graph,
+    /// not through a plan's overlay. That distinction is the whole point:
+    /// `30b28846` was three complete cells producing science while
+    /// `cells_standing` read zero, and every test that missed it stood its
+    /// cell through the overlay, which a replan never has.
+    fn observed_world(
+        planned: &PlanState,
+        parts: &[CellPart],
+        recipes: &[(Position, String)],
+        bots: &[BotId],
+    ) -> PlanState {
+        let mut standing: Vec<FactorioEntity> =
+            parts.iter().map(|part| entity_for(planned, part)).collect();
         for (name, position) in [
             (POLE, Position::new(10.5, 10.5)),
             ("steam-engine", Position::new(12.5, 10.5)),
@@ -2367,43 +2833,130 @@ mod tests {
         // A bounding box, because `EntityGraph::add` drops anything with a
         // zero-width one -- the overlay needs none and the graph does.
         for entity in &mut standing {
-            if entity.bounding_box.width() == 0. {
-                if let Some(area) = planned.collision_area(&entity.name, &entity.position) {
-                    entity.bounding_box = area;
-                }
+            if entity.bounding_box.width() == 0.
+                && let Some(area) = planned.collision_area(&entity.name, &entity.position)
+            {
+                entity.bounding_box = area;
             }
         }
+        let world = world();
+        world
+            .update_chunk_entities(standing)
+            .expect("a fixture world accepts a cell");
+        for (position, recipe) in recipes {
+            assert!(
+                world.entity_graph.set_recipe(position, recipe),
+                "the world has a machine at {position} to set to {recipe}"
+            );
+        }
+        PlanState::from_world(Arc::new(world), bots)
+    }
 
-        // A world that has never heard of this plan, told only what a game
-        // would have told it.
-        let observed = |with_recipes: bool| {
-            let world = world();
-            world
-                .update_chunk_entities(standing.clone())
-                .expect("a fixture world accepts a cell");
-            if with_recipes {
-                assert!(world.entity_graph.set_recipe(
-                    &cell.at(Role::Intermediate).unwrap().position,
-                    &spec.intermediate.recipe.name,
-                ));
-                assert!(
-                    world
-                        .entity_graph
-                        .set_recipe(&cell.at(Role::Product).unwrap().position, &spec.recipe.name)
-                );
-            }
-            PlanState::from_world(Arc::new(world), &bots)
-        };
+    /// **The same seam, for the shape green science added**: a cell whose
+    /// intermediate machine has two mouths.
+    ///
+    /// Two claims, and only the second is new. A green cell the *world*
+    /// reports — recipes set through the entity graph, entities through
+    /// `update_chunk_entities` — has to hold, or every replan builds another
+    /// one. And a green cell **short one feed chest** must not: it stands, it
+    /// is powered, both recipes are on it and every inserter is turned the
+    /// right way, and it produces nothing forever, because a transport belt is
+    /// not made of iron plates alone.
+    ///
+    /// A one-feed cell cannot express that second case at all — its
+    /// intermediate has one ingredient, so losing its chest also loses the
+    /// "taking from something" clause that has always been checked. Widening
+    /// the feed side is what made [`is_supplied`] load-bearing.
+    #[test]
+    fn a_green_cell_holds_at_the_seam_and_a_half_fed_one_does_not() {
+        let bots = [BotId(1)];
+        let spec = assembly_spec(&bare(&bots), GREEN).expect("green science is a cell");
+        assert_eq!(spec.intermediate.ingredients.len(), 2, "two feed chests");
 
+        let mut planned = powered(&bots);
+        let cell = stand_a_cell_for(&mut planned, &spec);
+        assert_eq!(cell.feeds(), 2);
+        let recipes = cell_recipes(&cell, &spec);
+
+        // One cell is five packs a minute, which is what `cells_for` says.
         assert!(
-            !holds_assembling(&observed(false), PACK, 6),
-            "machines with no recipe on them are the placed-but-dead cell, however \
-             complete the rest of it is -- this is the state every replan used to see"
+            holds_assembling(
+                &observed_world(&planned, &cell.parts, &recipes, &bots),
+                GREEN,
+                5
+            ),
+            "a whole green cell the world reports must hold, or a replan doubles it"
         );
+
+        // The same cell with the gear chest never built. Everything else is
+        // identical, down to the tile.
+        let starved: Vec<CellPart> = cell
+            .parts
+            .iter()
+            .filter(|part| part.role != Role::FeedChest(1))
+            .cloned()
+            .collect();
+        assert_eq!(starved.len(), cell.parts.len() - 1);
         assert!(
-            holds_assembling(&observed(true), PACK, 6),
-            "the cell stands, is powered, is fed, and the world knows what each \
-             machine is set to; a replan that rebuilt it would build a second factory"
+            !holds_assembling(
+                &observed_world(&planned, &starved, &recipes, &bots),
+                GREEN,
+                5
+            ),
+            "a belt machine with no gears arriving makes no belts, and a cell whose \
+             intermediate makes nothing makes no science"
+        );
+    }
+
+    /// The plan a green goal produces, at the shape rather than the tile.
+    #[test]
+    fn a_green_plan_builds_two_cells_and_charges_three_chests_each() {
+        let bots = [BotId(1)];
+        let state = powered_with_room(&bots);
+        let net = expand(
+            &[Goal::Producing {
+                item: GREEN.into(),
+                per_minute: 5,
+            }],
+            &state,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .expect("green science plans");
+
+        let placed: Vec<&str> = net
+            .actions()
+            .filter_map(|action| match &action.kind {
+                ActionKind::Place { entity } => Some(entity.name.as_str()),
+                _ => None,
+            })
+            .collect();
+        let count = |name: &str| placed.iter().filter(|n| **n == name).count();
+        assert_eq!(count(MACHINE), 2, "an intermediate and a product machine");
+        assert_eq!(count(CHEST), 3, "two feed chests and one supply chest");
+        assert_eq!(count(INSERTER), 4, "two feed, one link, one supply");
+
+        // Three charges, one per chest, and the supply chest's is inserters.
+        let charges: Vec<(String, u32)> = net
+            .actions()
+            .filter_map(|action| match &action.kind {
+                ActionKind::Insert {
+                    entity,
+                    item,
+                    count,
+                    ..
+                } if entity == CHEST => Some((item.clone(), *count)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            charges,
+            vec![
+                ("iron-plate".to_string(), 6),
+                ("iron-gear-wheel".to_string(), 6),
+                ("inserter".to_string(), 12),
+            ],
+            "one charge per chest, in chest order"
         );
     }
 

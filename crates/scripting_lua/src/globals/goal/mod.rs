@@ -238,6 +238,10 @@ impl std::error::Error for PlanRefusal {}
 ///   and "this patch has no edge with room" are all facts a different world
 ///   makes false, and a script can act on each: hand-craft it instead, chart
 ///   more map, or aim at another patch.
+/// - [`ResearchNeedsRoom`](PlannerError::ResearchNeedsRoom) -- a verdict for
+///   the same reason `ResearchNeedsPower` is one, and a fact a script can act
+///   on: the lab has nowhere powered to stand, so the answer is to clear
+///   ground or to bring supply, not to ask again.
 /// - The two `PowerPlant*` variants -- verdicts for the same reason
 ///   `ResearchNeedsPower` is one, and now the ones a caller actually sees:
 ///   since the plant landed, an unpowered world is answered by *building* a
@@ -255,6 +259,7 @@ fn refusal_for(err: &PlannerError) -> Option<PlanRefusal> {
         PlannerError::NoApplicableMethod { .. }
         | PlannerError::NoRoomToWork { .. }
         | PlannerError::ResearchNeedsPower { .. }
+        | PlannerError::ResearchNeedsRoom { .. }
         | PlannerError::PowerPlantNeedsWater { .. }
         | PlannerError::PowerPlantNeedsShore { .. }
         | PlannerError::UnsupportedResearchTrigger { .. }

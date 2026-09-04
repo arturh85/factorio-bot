@@ -246,6 +246,48 @@ pub enum PlannerError {
         supply_kw: f64,
     },
 
+    /// There is power, and there is ground, and no tile has both.
+    ///
+    /// **Deliberately not a `NoApplicableMethod`**, which is what this was and
+    /// which printed "no method can satisfy goal: research
+    /// logistic-science-pack" — read, correctly and uselessly, as "green
+    /// science is out of reach in this world". It is not: a plant stands, the
+    /// lab is affordable, and every free tile within reach is simply outside
+    /// any pole's supply area.
+    ///
+    /// The case it was found on is worth stating, because it is structural
+    /// rather than unlucky. A small pole's supply area is 5x5; a two-feed
+    /// assembly cell (`crate::method::assemble`) fills one, and the cell is
+    /// sited *inline* while the research it unlocks is a subgoal expanded
+    /// afterwards — so the cell takes the ground first. A red-science cell
+    /// leaves a lab-sized hole and a green one does not, which is why green
+    /// was the first goal to hit this.
+    ///
+    /// `powered_blocked` and `free_unpowered` are the two ways a candidate
+    /// failed, counted separately, because they call for opposite fixes:
+    /// blocked-but-powered ground says "build somewhere else or clear it",
+    /// free-but-unpowered ground says "bring a pole".
+    #[error(
+        "{technology} needs a lab, and no ground within {radius} tiles of [{anchor_x}, {anchor_y}] is \
+         both free and inside a supply area ({powered_blocked} powered tiles are built on, \
+         {free_unpowered} free ones have no supply)"
+    )]
+    #[diagnostic(
+        code(planner::research_needs_room),
+        help(
+            "the plan has power and space but not both in one place; a pole's supply area is \
+             5x5 and whatever this plan sited first has taken it"
+        )
+    )]
+    ResearchNeedsRoom {
+        technology: String,
+        radius: i32,
+        anchor_x: f64,
+        anchor_y: f64,
+        powered_blocked: u32,
+        free_unpowered: u32,
+    },
+
     /// No water within `PLANT_WATER_WIDE_SCAN_RADIUS` of the acting bot.
     ///
     /// **The only distance refusal a power plant has left.** There used to be

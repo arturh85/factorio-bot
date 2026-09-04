@@ -93,9 +93,24 @@ for seed in "${SEEDS[@]}"; do
     --seed "$seed" --new \
     --workspace-path "$WORKSPACE"
 
+  # KNOWN PLUMBING BUG, worked around here rather than in the CLI.
+  #
+  # `--workspace-path` is honoured for the GAME -- the scratch workspace gets
+  # its own `--new` map, and the repo's `level.zip` is untouched (verified by
+  # md5 after a search that wrote 16 seeds). It is NOT honoured for the Lua
+  # SCRIPTS ROOT: `dump_map.lua` is resolved against, and `world.dump` writes
+  # into, the settings workspace regardless. So the dump lands in the repo.
+  #
+  # That silently destroyed the t=0 baseline dump once already, and the search
+  # itself produced nothing because it kept looking in the scratch workspace
+  # and skipping. Look in both, preferring the scratch path so this keeps
+  # working the day the plumbing is fixed.
   dump="$WORKSPACE/scripts/map.json"
   if [ ! -f "$dump" ]; then
-    echo "seed $seed produced no dump at $dump -- skipping" >&2
+    dump="$REPO/workspace/scripts/map.json"
+  fi
+  if [ ! -f "$dump" ]; then
+    echo "seed $seed produced no dump -- skipping" >&2
     continue
   fi
   # Moved, not copied: the next seed writes to the same path, and a stale
@@ -112,6 +127,11 @@ for seed in "${SEEDS[@]}"; do
     --json > "$OUT/score-$seed.json"
 
   nix develop -c "$BIN" score-map --world "$OUT/map-$seed.json" --bots 1,2,3,4
+
+  # A dump is ~900 MB. Sixteen seeds is ~14 GB, and this disk has been at 95%.
+  # The score JSON is the artefact worth keeping; the dump is reproducible from
+  # the seed, which is the whole point of recording one.
+  rm -f "$OUT/map-$seed.json"
 done
 
 echo

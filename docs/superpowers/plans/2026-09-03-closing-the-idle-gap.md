@@ -80,6 +80,42 @@ honestly, as before. Also fixed on the way: `scripting_lua`'s
 `plan_cell` call was one argument behind `bdec88af` and failed
 `--all-targets` clippy on master.
 
+## ✅ GREEN SCIENCE WITNESSED — the first time in this project's history
+
+`run-1788559688-08406`, seed `31337`, resumed from `run-1788528493-60555:3`
+(red rate-witnessed), git `b560af5c` (drills, reach, recovery, craft deadline,
+bot death; the enclosure, drain, scheduler and research-deadline fixes landed
+on master after it started), roster `[1,2,3,4]`, `--resume-force`.
+
+```
+WITNESSED: logistic-science-pack in 5 watched machine(s) went 0 -> 5 (+5, wanted 5)
+in 1985 of 3600 ticks, 1844 polls
+RUN FINISHED state=done
+```
+
+| rung | game time from the resume |
+|---|---|
+| 1 — green cell producing 6/min | **75.73 min** (272,636 ticks), 3 plans: 302 → 303 → 149 steps |
+| 2 — witness, 5 packs in 90 s | +0.6 min; the packs arrived in **1,985 ticks (33 s)** |
+
+The red prelude ended at tick 64,465 in the run it was resumed from, so the
+whole ladder from a fresh world would be about **94 game-minutes** — a
+resumed run is not comparable with a fresh one and `--compare` will say so.
+
+Actions: **538 success, 2 failed, 1 lost**; walks 118 of 118. The three
+failures are the two classes named in the section below (ore under a
+standing drill; the research deadline), both fixed on master since.
+Hand-mining iron ore fell from 184 actions / 83,267 ticks (run 3) to
+**64 / 17,909**.
+
+**What the number says next: utilisation was 10.1%.** Bot 1 ran 389 of 541
+actions and was busy 29.7% of the span; bots 2, 3 and 4 were busy **4.2%,
+4.8% and 1.9%**. The two largest single items are still on bot 1 and still
+serial: `craft 75 automation-science-pack` (22,707 ticks) and `research
+logistic-science-pack` (20,643). Those are the world-record lessons — science
+made by machines, a rate rung ahead of the research — and they are the next
+lever, not another defect.
+
 ## Run 5, first batch: 293 of 301, no rock, no siting, no divergence — and two new classes
 
 `run-1788559688-08406` (green, same savepoint, drills + reach + recovery +
@@ -1613,7 +1649,7 @@ infrastructure for a 3h17m game, not a harder milestone.
 | red science producing **once** | never observed | witnessed six times, all inside 780 ticks |
 | red science producing **at a rate** | impossible to claim | **5 packs in 3,240 ticks (~5.5/min)**, twice |
 | green science, planning | did not expand at all | plans end to end |
-| green science, live | never run | executes; run 5 (`run-1788559688-08406`) is the first with no rock or siting failure in its first batch |
+| green science, live | never run | **WITNESSED** — run 5 (`run-1788559688-08406`): cell satisfied at 75.7 min after the red-witness resume, 5 packs in 33 s |
 | furnaces per run | 42 | **8** |
 | recovery (`obs:recover`) | never executed in any run | **fires live** |
 

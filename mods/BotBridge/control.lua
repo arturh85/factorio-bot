@@ -296,6 +296,7 @@ function on_init()
 	storage.resources.map = {}
 	storage.map_area = {x1=0, y1=0, x2=0, y2=0} -- a bounding box of all charted map chunks
 	storage.p = {} -- player-private data
+	storage.bots = {} -- character bots, see `bot_handle`
 	storage.pathfinding = {}
 	storage.pathfinding.map = {}
 	storage.n_clients = 1
@@ -1097,6 +1098,7 @@ function on_whoami()
 end
 
 function on_tick(event)
+	poll_character_bots(event.tick)
 	-- `client_local_data` used to be built here, and only here. It is
 	-- initialised at its declaration now; see the comment there for why. Do
 	-- not restore a lazy init: it would read as necessary and put the ordering
@@ -1120,7 +1122,7 @@ function on_tick(event)
 		if id.idx > id.n then client_local_data.initial_discovery = nil end
 	end
 		
-	for idx, player in pairs(game.players) do
+	for idx, player in each_bot() do
 		-- if storage.p[idx].walking and player.connected then
 
 --		game.print("player " .. tostring(idx) .. " connected " .. tostring(player.connected) .. " character " .. tostring(player.character))
@@ -1325,6 +1327,30 @@ function on_tick(event)
 				end
 			end
 
+			if storage.p[idx].mining and storage.p[idx].mining.inventory_before ~= nil then
+				-- Character bot: the products landed in the inventory, or did
+				-- not. Checked before the entity test because a tree or a
+				-- rock is destroyed on the same tick its yield lands.
+				local m = storage.p[idx].mining
+				local inv = player.get_main_inventory()
+				local delivered = 0
+				for name, was in pairs(m.inventory_before) do
+					local now = inv.get_item_count(name)
+					if now > was then
+						delivered = delivered + (now - was)
+						m.inventory_before[name] = now
+					end
+				end
+				if delivered > 0 then
+					m.left = m.left - delivered
+					if m.left <= 0 then
+						action_completed(event.tick, m.action_id)
+						player.mining_state = { mining = false }
+						storage.p[idx].mining = nil
+					end
+				end
+			end
+
 			if storage.p[idx].mining then
 				local ent = storage.p[idx].mining.entity
 
@@ -1436,7 +1462,7 @@ function on_tick(event)
 	-- periodically update the objects around the player to ensure that nothing is missed
 	-- This is merely a safety net and SHOULD be unnecessary, if all other updates don't miss anything
 --	if event.tick % 300 == 0 and false then -- don't do that for now, as it eats up too much cpu on the c++ part
---		for idx, player in pairs(game.players) do
+--		for idx, player in each_bot() do
 --			if player.connected and player.character then
 --				local x = math.floor(player.character.position.x/32)*32
 --				local y = math.floor(player.character.position.x/32)*32
@@ -1554,7 +1580,7 @@ end
 function writeout_players(tick)
 	local players={}
 	local count = 0
-	for idx, player in pairs(game.players) do
+	for idx, player in each_bot() do
 		if player.connected and player.character then
 			count = count + 1
 			table.insert(players, idx.." "..player.character.position.x.." "..player.character.position.y)
@@ -2035,9 +2061,9 @@ local function sample_bots_body(tick)
 		return
 	end
 	local bots = {}
-	for _, player in pairs(game.connected_players) do
-		local character = player.character
-		bots[#bots + 1] = {
+	for _, player in each_bot() do
+		local character = player.connected and player.character or nil
+		if character ~= nil then bots[#bots + 1] = {
 			id = player.index,
 			position = player.position,
 			-- `inventory_counts` handles Factorio 2.0's get_contents(),
@@ -2047,7 +2073,7 @@ local function sample_bots_body(tick)
 			) or {},
 			crafting_queue = player.crafting_queue_size or 0,
 			mining = character_mining_name(character),
-		}
+		} end
 	end
 	write_sample({
 		kind = "bots",
@@ -2674,6 +2700,12 @@ function exit_cutscene_if_any(player_index)
 end
 
 function on_player_joined_game(event)
+	if has_character_bots() then
+		local joined = game.players[event.player_index]
+		print("ERROR: player " .. joined.name .. " joined a world with character bots; a run is all clients or all characters")
+		joined.print("This run uses character bots; clients are refused.")
+		return
+	end
 --	print("player '"..game.players[event.player_index].name.."' joined")
 --	game.write_file("players_connected.txt", game.players[event.player_index].name..'\n', true, 0) -- only on server
 	storage.n_clients = storage.n_clients + 1
@@ -2780,25 +2812,31 @@ function on_player_died(event)
 	if respawn_in ~= nil then why = why .. ", respawns in " .. tostring(respawn_in) .. " ticks" end
 	print(why)
 
+	fail_bot_actions(idx, event.tick, why)
+end
+
+-- Fail everything bot `idx` was doing, now, with `why`: the walk or mine in
+-- flight, then every craft it was awaited on and the whole bucket (if the
+-- game also raises `on_player_cancelled_crafting` for a lost queue, it must
+-- find nothing left to fail a second time). Shared by a player's death and a
+-- character bot's.
+function fail_bot_actions(idx, tick, why)
 	local p = storage.p[idx]
 	if p ~= nil then
 		if p.walking ~= nil then
-			if p.walking.action_id ~= nil then action_failed(event.tick, p.walking.action_id, why) end
+			if p.walking.action_id ~= nil then action_failed(tick, p.walking.action_id, why) end
 			p.walking = nil
 		end
 		if p.mining ~= nil then
-			if p.mining.action_id ~= nil then action_failed(event.tick, p.mining.action_id, why) end
+			if p.mining.action_id ~= nil then action_failed(tick, p.mining.action_id, why) end
 			p.mining = nil
 		end
 	end
-	-- Every craft this player was awaited on, then the whole bucket: if the
-	-- game also raises `on_player_cancelled_crafting` for the lost queue, it
-	-- must find nothing left to fail a second time.
 	local per_player = craft_actions()[idx]
 	if per_player ~= nil then
 		for _, waiting in pairs(per_player) do
 			for _, waiter in ipairs(waiting) do
-				action_failed(event.tick, waiter.id, why)
+				action_failed(tick, waiter.id, why)
 			end
 		end
 		craft_actions()[idx] = nil
@@ -2883,6 +2921,10 @@ function on_some_entity_deleted(event)
 	if ent == nil then
 		complain("wtf, on_some_entity_created has nil entity")
 		return
+	end
+	if event.name == defines.events.on_entity_died then
+		local bot_id = character_bot_id_of(ent)
+		if bot_id ~= nil then on_character_bot_died(event, bot_id) end
 	end
 	writeout(event.tick, "on_some_entity_deleted", helpers.table_to_json(serialize_entity(ent)))
 
@@ -3012,7 +3054,7 @@ end
 function player_total_inventory(player_id)
 	local i = defines.inventory
 	local is = { i.character_main, i.character_guns, i.character_ammo, i.character_armor } -- TODO: maybe more?
-	return sum_inventory(game.players[player_id], is)
+	return sum_inventory(bot_handle(player_id), is)
 end
 
 function inventory_diff(inv1, inv2)
@@ -3055,7 +3097,7 @@ function to_i64(a)
 end
 
 function on_player_changed_distance(event)
-	for idx, player in pairs(game.players) do
+	for idx, player in each_bot() do
 		writeout(event.tick, "on_player_changed_distance", helpers.table_to_json({
 			player_id = idx,
 			build_distance = player.build_distance,
@@ -3191,7 +3233,7 @@ end
 -- one an executor action is waiting on. Nothing branches on it today; it is
 -- what tells a reader of `storage` which walks were nobody's request.
 function start_walk_waypoints(action_id, player_id, waypoints, step_aside)
-	local player = game.players[player_id]
+	local player = bot_handle(player_id)
 	if player == nil or not player.connected or player.character == nil then
 		return false
 	end
@@ -3240,6 +3282,18 @@ function rcon_action_start_mining(action_id, player_id, name, position, count)
 	if ent and ent.minable then
 --		print("MINING DO")
 		storage.p[player_id].mining = { entity = ent, action_id = action_id, prototype = ent.prototype, left = count }
+		if is_character_bot(player_id) then
+			-- No `on_player_mined_entity` will come: completion is read as an
+			-- inventory delta over the products this entity yields.
+			local inv = player.get_main_inventory()
+			local before = {}
+			local props = ent.prototype.mineable_properties
+			for _, product in pairs((props and props.products) or {}) do
+				if product.name then before[product.name] = inv.get_item_count(product.name) end
+			end
+			if next(before) == nil then before[ent.name] = inv.get_item_count(ent.name) end
+			storage.p[player_id].mining.inventory_before = before
+		end
 	elseif name == "stop" then
 --		print("MINING STOP")
 		storage.p[player_id].mining = nil
@@ -3254,7 +3308,7 @@ end
 
 function rcon_place_entity(player_id, item_name, entity_position, direction)
 	local entproto = prototypes.item[item_name].place_result
-	local player = game.players[player_id]
+	local player = bot_handle(player_id)
 	-- Refused before anything else is asked, and stamped like every other
 	-- exit. The sentence is outside the `can_place_entity said 'no'` family on
 	-- purpose: `note_placement_refusal` (crates/core/src/factorio/rcon.rs)
@@ -3611,7 +3665,7 @@ function rcon_can_place_entities(sites)
 	local out = { tick = game.tick, sites = {} }
 	for i, site in ipairs(sites) do
 		local rec = { ok = false, character = false }
-		local player = game.players[site.player]
+		local player = bot_handle(site.player)
 		local itemproto = prototypes.item[site.item]
 		local entproto = nil
 		if itemproto ~= nil then
@@ -3680,7 +3734,7 @@ end
 
 
 function rcon_insert_to_inventory(player_id, entity_name, entity_pos, inventory_type, items)
-	local player = game.players[player_id]
+	local player = bot_handle(player_id)
 	if player == nil then
 		rcon.print("Error: no such player: " .. tostring(player_id))
 		return
@@ -3741,7 +3795,7 @@ function rcon_insert_to_inventory(player_id, entity_name, entity_pos, inventory_
 end
 
 function rcon_remove_from_inventory(player_id, entity_name, entity_pos, inventory_type, items)
-	local player = game.players[player_id]
+	local player = bot_handle(player_id)
 	if player == nil then
 		rcon.print("Error: no such player: " .. tostring(player_id))
 		return
@@ -3819,7 +3873,7 @@ end
 -- narration on this path: a debug line here would turn a success into a
 -- reported failure. Use `writeout` (stdout) if one is ever needed.
 function rcon_set_recipe(player_id, entity_name, entity_pos, recipe)
-	local player = game.players[player_id]
+	local player = bot_handle(player_id)
 	if player == nil then
 		rcon.print("Error: no such player: " .. tostring(player_id))
 		return
@@ -3968,7 +4022,7 @@ end
 
 function rcon_players()
 	local valid_players = {}
-	for player_id, player in pairs(game.players) do
+	for player_id, player in each_bot() do
 		if player.connected and player.character then
 			table.insert(valid_players, serialize_player(player))
 		end
@@ -4358,7 +4412,7 @@ end
 -- Cancelling them instead would need a queue index and can cascade into other
 -- crafts, per `LuaControl.cancel_crafting`.
 function rcon_action_start_crafting(action_id, player_id, recipe, count)
-	local player = game.players[player_id]
+	local player = bot_handle(player_id)
 	if player == nil then
 		rcon.print("Error: no such player: " .. tostring(player_id))
 		return
@@ -4860,9 +4914,286 @@ function no_character_error(player_id, player)
 		.. tostring(character_missing_reason(player))
 end
 
+
+-- ---------------------------------------------------------------------------
+-- Character bots
+--
+-- A bot is either a connected player (a graphical client) or a server-side
+-- `character` entity this mod created (`rcon_spawn_bots`). The executor
+-- addresses both by one small integer, and `bot_handle` is the one place
+-- that resolves it. A character bot answers through a proxy: the members a
+-- `LuaPlayer` has and a `LuaEntity` lacks (`connected`, `character`, `index`,
+-- `name`, `print`, `ticks_to_respawn`, `controller_type`) are answered here;
+-- everything else -- `walking_state`, `mining_state`, `position`, `surface`,
+-- `force`, `update_selected_entity`, `can_reach_entity`, `get_main_inventory`,
+-- `begin_crafting`, the reach distances -- is `LuaControl`, which the
+-- character entity shares with a player, so it is forwarded as is. Factorio
+-- API methods are dot-called with no `self`, which is what makes forwarding a
+-- function value correct.
+--
+-- What a character bot does NOT get is any `on_player_*` event: none fires
+-- for an entity without a player. `poll_character_bots` (on_tick) reads the
+-- same facts off the entity each tick and emits the same writeouts and
+-- settles, so the Rust side cannot tell the two kinds apart.
+--
+-- Ids: character bots are 1..N and so is the first joining player, so a run
+-- is all clients or all characters -- `rcon_spawn_bots` and
+-- `on_player_joined_game` each refuse the other kind by name.
+--
+-- The proxy is rebuilt on every `bot_handle` call and never stored: a
+-- metatable does not survive `storage`. The registry entry does, entity
+-- reference included, which is how a savepoint resume finds its bots.
+-- ---------------------------------------------------------------------------
+
+CHARACTER_RESPAWN_TICKS = 600 -- a player's respawn delay, 10 s
+
+local CHARACTER_PROXY_OWN = {
+	connected = function(b) return b.entity ~= nil and b.entity.valid end,
+	character = function(b) if b.entity ~= nil and b.entity.valid then return b.entity end end,
+	index = function(b) return b.id end,
+	name = function(b) return b.name end,
+	print = function() return function() end end,
+	ticks_to_respawn = function(b) if b.respawn_at ~= nil then return b.respawn_at - game.tick end end,
+	controller_type = function() return defines.controllers.character end,
+	-- LuaPlayer has this as an attribute and a character entity has it too;
+	-- listed so a dead bot answers 0 rather than raising.
+	crafting_queue_size = function(b) if b.entity ~= nil and b.entity.valid then return b.entity.crafting_queue_size end return 0 end,
+}
+
+local function character_proxy(id, bot)
+	local state = { id = id, name = bot.name, entity = bot.entity, respawn_at = bot.respawn_at }
+	return setmetatable({}, {
+		__index = function(_, key)
+			local own = CHARACTER_PROXY_OWN[key]
+			if own ~= nil then return own(state) end
+			local ent = state.entity
+			if ent == nil or not ent.valid then
+				error("bot " .. tostring(id) .. " has no character (entity gone) while reading `" .. tostring(key) .. "`")
+			end
+			return ent[key]
+		end,
+		__newindex = function(_, key, value)
+			local ent = state.entity
+			if ent == nil or not ent.valid then
+				error("bot " .. tostring(id) .. " has no character (entity gone) while writing `" .. tostring(key) .. "`")
+			end
+			ent[key] = value
+		end,
+	})
+end
+
+function is_character_bot(id)
+	return storage.bots ~= nil and storage.bots[id] ~= nil
+end
+
+function has_character_bots()
+	return storage.bots ~= nil and next(storage.bots) ~= nil
+end
+
+function bot_handle(id)
+	if is_character_bot(id) then
+		return character_proxy(id, storage.bots[id])
+	end
+	return game.players[id]
+end
+
+-- Every bot the run has: players first, then character bots. Returns
+-- `(id, handle)` pairs; callers keep their `player.connected and
+-- player.character` guard, which the proxy answers.
+function each_bot()
+	local list = {}
+	for idx, player in pairs(game.players) do list[#list + 1] = { idx, player } end
+	for id, bot in pairs(storage.bots or {}) do list[#list + 1] = { id, character_proxy(id, bot) } end
+	local i = 0
+	return function()
+		i = i + 1
+		local entry = list[i]
+		if entry ~= nil then return entry[1], entry[2] end
+	end
+end
+
+-- The id of the character bot that owns `entity`, or nil.
+function character_bot_id_of(entity)
+	if storage.bots == nil or entity == nil or not entity.valid or entity.name ~= "character" then return nil end
+	for id, bot in pairs(storage.bots) do
+		if bot.entity ~= nil and bot.entity.valid and bot.entity.unit_number == entity.unit_number then
+			return id
+		end
+	end
+	return nil
+end
+
+function rcon_spawn_bots(count)
+	for _, player in pairs(game.connected_players) do
+		rcon.print("Error: cannot spawn character bots: player " .. player.name ..
+			" is connected; a run is all clients or all characters")
+		return
+	end
+	storage.bots = storage.bots or {}
+	local surface = game.surfaces[1]
+	local force = game.forces["player"]
+	local spawned, kept = {}, {}
+	for id = 1, count do
+		local bot = storage.bots[id]
+		if bot ~= nil and bot.entity ~= nil and bot.entity.valid then
+			kept[#kept + 1] = id
+		else
+			local ent = create_bot_character(surface, force)
+			storage.bots[id] = { entity = ent, name = "bot-" .. id }
+			-- The same starting inventory a joining player gets from freeplay.
+			if remote.interfaces["freeplay"] and remote.interfaces["freeplay"]["get_created_items"] then
+				for name, n in pairs(remote.call("freeplay", "get_created_items")) do
+					ent.insert{ name = name, count = n }
+				end
+			end
+			spawned[#spawned + 1] = id
+		end
+		if storage.p[id] == nil then storage.p[id] = {} end
+		announce_character_bot(game.tick, id)
+	end
+	on_player_changed_distance({ tick = game.tick })
+	rcon.print(helpers.table_to_json({ spawned = spawned, kept = kept }))
+end
+
+function create_bot_character(surface, force)
+	local origin = force.get_spawn_position(surface)
+	local pos = surface.find_non_colliding_position("character", origin, 32, 0.5) or origin
+	return surface.create_entity{ name = "character", position = pos, force = force }
+end
+
+-- What a join emits for a player: inventory and position. The distance
+-- writeout is force-wide and the caller emits it once.
+function announce_character_bot(tick, id)
+	local bot = storage.bots[id]
+	local handle = bot_handle(id)
+	bot.last_pos = nil
+	bot.last_inventory = nil
+	bot.last_queue = nil
+	poll_character_bot(tick, id, handle)
+end
+
+function rcon_set_game_speed(v)
+	game.speed = v
+	rcon.print(tostring(game.speed))
+end
+
+function rcon_game_speed()
+	rcon.print(tostring(game.speed))
+end
+
+-- The per-tick substitute for the four `on_player_*` events a character bot
+-- never raises: position, main inventory, crafted items (queue deltas) and a
+-- respawn after death. Mining completion is handled in the miner itself
+-- (`inventory_before` on the mining record) because it needs the mining
+-- record's accounting.
+function poll_character_bots(tick)
+	if storage.bots == nil then return end
+	for id, bot in pairs(storage.bots) do
+		if bot.entity == nil or not bot.entity.valid then
+			if bot.respawn_at ~= nil and tick >= bot.respawn_at then
+				bot.entity = create_bot_character(game.surfaces[1], game.forces["player"])
+				bot.respawn_at = nil
+				local pos = bot.entity.position
+				writeout(tick, "player_respawned", helpers.table_to_json({
+					player_id = id,
+					position = { x = pos.x, y = pos.y },
+				}))
+				announce_character_bot(tick, id)
+			end
+		else
+			poll_character_bot(tick, id, bot_handle(id))
+		end
+	end
+end
+
+function poll_character_bot(tick, id, handle)
+	local bot = storage.bots[id]
+	if bot.entity == nil or not bot.entity.valid then return end
+	local pos = bot.entity.position
+	if bot.last_pos == nil or bot.last_pos.x ~= pos.x or bot.last_pos.y ~= pos.y then
+		bot.last_pos = { x = pos.x, y = pos.y }
+		writeout(tick, "on_player_changed_position", helpers.table_to_json({
+			player_id = id,
+			position = { x = pos.x, y = pos.y },
+		}))
+	end
+	local contents = bot.entity.get_main_inventory().get_contents()
+	local sig = {}
+	for _, stack in pairs(contents) do
+		sig[#sig + 1] = stack.name .. ":" .. tostring(stack.count) .. ":" .. tostring(stack.quality)
+	end
+	table.sort(sig)
+	local key = table.concat(sig, ",")
+	if bot.last_inventory ~= key then
+		bot.last_inventory = key
+		writeout(tick, "on_player_main_inventory_changed", helpers.table_to_json({
+			player_id = id,
+			main_inventory = contents,
+		}))
+		recent_item_additions[id] = {}
+	end
+	poll_character_crafts(tick, id, handle)
+end
+
+-- A drop in a recipe's queued count is that many finished crafts. Each one is
+-- fed through `on_player_crafted_item` with the event shape the game would
+-- have used, so `settle_crafted_item` and the craft waiters see one path.
+-- Cancellation cannot happen without a player at the keyboard.
+function poll_character_crafts(tick, id, handle)
+	local bot = storage.bots[id]
+	local now = {}
+	local queue = handle.crafting_queue
+	if queue ~= nil then
+		for _, item in pairs(queue) do
+			now[item.recipe] = (now[item.recipe] or 0) + item.count
+		end
+	end
+	local before = bot.last_queue or {}
+	for recipe_name, was in pairs(before) do
+		local finished = was - (now[recipe_name] or 0)
+		if finished > 0 then
+			local recipe = handle.force.recipes[recipe_name]
+			if recipe ~= nil then
+				for _ = 1, finished do
+					on_player_crafted_item({ tick = tick, player_index = id, recipe = recipe })
+				end
+			end
+		end
+	end
+	bot.last_queue = now
+end
+
+function on_character_bot_died(event, id)
+	local bot = storage.bots[id]
+	local cause, cause_type = nil, nil
+	if event.cause ~= nil and event.cause.valid then
+		cause = event.cause.name
+		cause_type = event.cause.type
+	end
+	local position = nil
+	if event.entity ~= nil and event.entity.valid then
+		local pos = event.entity.position
+		position = { x = pos.x, y = pos.y }
+	end
+	writeout(event.tick, "player_died", helpers.table_to_json({
+		player_id = id,
+		position = position,
+		cause = cause,
+		cause_type = cause_type,
+		respawn_in = CHARACTER_RESPAWN_TICKS,
+	}))
+	local why = "ERROR: player " .. tostring(id) .. " has no character: died at tick " .. tostring(event.tick)
+	if cause ~= nil then why = why .. " killed by " .. tostring(cause) end
+	why = why .. ", respawns in " .. tostring(CHARACTER_RESPAWN_TICKS) .. " ticks"
+	print(why)
+	fail_bot_actions(id, event.tick, why)
+	bot.entity = nil
+	bot.respawn_at = event.tick + CHARACTER_RESPAWN_TICKS
+end
+
 function get_player(player_id)
 	if storage.p[player_id] ~= nil then
-		local player = game.players[player_id]
+		local player = bot_handle(player_id)
 		if player == nil or not player.connected then
 			rcon.print("Error: player " .. tostring(player_id) .. " not connected")
 		elseif not player.character then
@@ -4894,6 +5225,9 @@ remote.add_interface("botbridge", {
 	store_map_data=rcon_store_map_data,
 	retrieve_map_data=rcon_retrieve_map_data,
 	players=rcon_players,
+	spawn_bots=rcon_spawn_bots,
+	set_game_speed=rcon_set_game_speed,
+	game_speed=rcon_game_speed,
 	player_force=rcon_player_force,
 	world_snapshot=rcon_world_snapshot,
 	add_research=rcon_add_research,

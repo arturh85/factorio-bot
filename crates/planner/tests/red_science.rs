@@ -247,6 +247,15 @@ fn more_bots_finish_sooner() {
     // to see the critical path, not the planner to emit differently. Same
     // makespan on all three baseline-map goals; two non-critical takes on
     // this fixture moved ten ticks earlier.
+    //
+    // **2682 -> 2543 on 2026-09-05, when the scheduler learned to see it**
+    // (`schedule::lookahead_bound`): each bot now does the coal on the way
+    // out and serves the iron furnace, the longer smelt, before the copper
+    // one. The rest is walking -- bot 2 starts 30 tiles east and walks ~1,300
+    // of its 2,543 ticks -- so 2063 was never the target: that plan took
+    // plates from a furnace that had not started. Baseline map, four bots:
+    // researched:automation 28,023 -> 26,212, red 46,089 -> 44,641, green
+    // 217,749 -> 217,105.
     assert!(many < 2950, "four bots regressed past 2950 ticks: {}", many);
 }
 

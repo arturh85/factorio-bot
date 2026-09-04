@@ -179,6 +179,14 @@ impl Schedule {
 struct Candidate {
     action: ActionId,
     bot: BotId,
+    /// The longest path from this action to the end of the network — see
+    /// [`critical_path`]. The same for every bot offered the action.
+    remaining: Ticks,
+    /// When the action's dependencies allow it to start, before any walk.
+    deps_ready: Ticks,
+    /// Where the bot stands once this candidate's walk (if any) is done: the
+    /// plan's `arrival_point`, or where it already is.
+    arrival: Position,
     /// When the bot sets off. It walks as soon as it is free, even if the
     /// action's dependencies are not ready yet — see `schedule`.
     walk_start: Ticks,
@@ -187,13 +195,170 @@ struct Candidate {
     /// dependencies, whichever is later.
     act_start: Ticks,
     end: Ticks,
+    /// The position this action requires, verbatim from its condition, so the
+    /// lookahead can price the walk from another candidate's arrival.
+    walk_target: Option<(Position, f64, f64)>,
+    /// The lower bound on this bot's finish if it runs this candidate next —
+    /// see [`lookahead_bound`]. Filled in once every feasible candidate of the
+    /// round is known; zero until then.
+    bound: Ticks,
 }
 
 impl Candidate {
-    /// The ranking key. Ascending, so the smallest wins.
-    fn key(&self) -> (Ticks, ActionId, BotId) {
-        (self.end, self.action, self.bot)
+    /// The ranking key. Ascending, so the smallest wins: the candidate whose
+    /// **bot would finish soonest, counting everything that bot still has
+    /// ready**, then the one that itself finishes soonest, then the lowest
+    /// action id, then the lowest bot id.
+    ///
+    /// `end` alone used to be the first key — "earliest finish first" — which
+    /// defers exactly the work that most needs starting: a far trip finishes
+    /// later than every near one, so it waits until nothing nearer is ready,
+    /// and whatever lag it gates (a furnace's whole smelting time) starts that
+    /// much later. See [`lookahead_bound`] for the rule and the measurements,
+    /// including the one that rejected the obvious alternative.
+    fn key(&self) -> (Ticks, Ticks, ActionId, BotId) {
+        (self.bound, self.end, self.action, self.bot)
     }
+}
+
+/// The lower bound on a bot's finish if it runs candidate `next` now, given
+/// the other candidates `others` the same bot could run this round.
+///
+/// ```text
+/// bound = max( end(next) + after(next),
+///              max over c in others of
+///                  max(end(next) + walk(next -> c), deps_ready(c)) + remaining(c) )
+/// ```
+///
+/// where `after(a) = remaining(a) - duration(a)` is the longest path hanging
+/// off `a` once `a` is done, `remaining(c)` the longest path through `c`
+/// itself, and `walk(next -> c)` the travel from where `next` leaves the bot
+/// to where `c` needs it. Both are [`critical_path`] terms; the walk is the
+/// one thing a static priority cannot know, because it depends on where the
+/// bot is standing *now*.
+///
+/// # Why a lookahead and not a priority
+///
+/// The first attempt at fixing the deferred coal trip was the textbook
+/// critical-path rule — rank ready actions by `remaining`, longest first,
+/// with the old `(end, action, bot)` as tie-breaks. It fixed the fixture it
+/// was aimed at (2,682 -> 2,464) and made every real plan **worse**:
+/// `researched:automation` 28,023 -> 29,210, `producing:automation-science-
+/// pack:6` 46,089 -> 47,515, `producing:logistic-science-pack:6` 217,749 ->
+/// 219,274, all on the baseline map with bots 1-4. The listing said why: bot
+/// 1 walked to the coal patch **three separate times** (~460 ticks each way),
+/// because the three coal mines there feed three different furnaces and so
+/// carry three different tails, and work with a longer tail elsewhere got
+/// slotted between them. `end`-first had batched them by accident — once
+/// standing at the coal, the next coal mine is the one that finishes soonest.
+/// A priority computed on the network alone cannot see that the bot is
+/// already there; this bound charges the walk it would waste.
+///
+/// So the rule is: among what this bot could do next, pick the choice under
+/// which the bot's own critical path — its remaining ready work, each item
+/// reached from where the choice leaves the bot — ends soonest. Starting the
+/// long path early and not walking away from co-located work are then the
+/// same objective, not two rules that have to be balanced.
+///
+/// `others` is every feasible candidate on the same bot this round, including
+/// chain-opening actions that another bot may in the end take. That
+/// overstates what this bot will really do, but it overstates every
+/// alternative by the same items, and a bound that counts too much is still a
+/// bound.
+fn lookahead_bound(
+    next: &Candidate,
+    others: &[Candidate],
+    durations: &BTreeMap<ActionId, Ticks>,
+) -> Ticks {
+    let own = next.end + next.remaining - durations[&next.action];
+    others
+        .iter()
+        .filter(|c| c.bot == next.bot && c.action != next.action)
+        .map(|c| {
+            let walk = match &c.walk_target {
+                Some((pos, min_radius, radius)) => {
+                    travel_ticks(&next.arrival, pos, *min_radius, *radius)
+                }
+                None => 0,
+            };
+            (next.end + walk).max(c.deps_ready) + c.remaining
+        })
+        .fold(own, Ticks::max)
+}
+
+/// The longest path from each action to the end of the network: its own
+/// duration, plus the largest of `lag + walk + path` over its successors,
+/// where `walk` is the travel between the two actions' required positions
+/// when both have one.
+///
+/// This is the critical-path length of list scheduling, computed once, before
+/// any bot is chosen, over the network alone. An action on the longest
+/// remaining path cannot be deferred without deferring the makespan. It is
+/// not used as a priority on its own — see [`lookahead_bound`] for why that
+/// was tried and rejected — but as the term every candidate's bound is built
+/// from; the walk term is what makes a far trip count as *long*, not merely
+/// *late*.
+///
+/// # Why a walk that belongs to no edge is counted on one
+///
+/// A network carries no walks — the scheduler emits them, per bot, from
+/// wherever that bot happens to stand. But whichever bot runs `b` after `a`
+/// has to reach `b`'s position, and if it is the bot that ran `a` (the common
+/// case: a chain is one bot) it sets off from `a`'s. So the travel between the
+/// two positions is the least walking that edge can cost, and a lower bound is
+/// what a priority wants: it never claims work that need not happen.
+///
+/// # Why it exists
+///
+/// Measured on `red_science.rs`'s four-bot fixture at `19ac0cc0`, with the
+/// ranking key `(end, action, bot)`: every bot placed both furnaces and mined
+/// both ores before walking the ~240 ticks to the coal, because each of those
+/// finished sooner than the coal trip. The fuel is what starts a furnace, so
+/// each furnace's whole smelting lag began only after the last thing the bot
+/// did, and the take at the end of the longer smelt waited 202 ticks with the
+/// bot standing next to it. Ranked by the bound this feeds, the coal trip is
+/// done on the way out, the iron furnace (the longer smelt) is served before
+/// the copper one, and the fixture fell 2,682 -> 2,543. The rest of that
+/// fixture's time is walking: bot 2 starts 30 tiles east and walks ~1,300 of
+/// its 2,543 ticks, so the 2,063 the fixture measured before the fuel edge
+/// carried the lag is not a target — that plan took plates from a furnace
+/// that had not started.
+///
+/// Deterministic: a `BTreeMap` keyed by `ActionId`, filled in reverse
+/// topological order (`ActionNetwork::topo_order`, itself deterministic), and
+/// every term is an integer tick count.
+pub fn critical_path(net: &ActionNetwork) -> Result<BTreeMap<ActionId, Ticks>, PlannerError> {
+    // Successors, from the predecessor lists the network keeps.
+    let mut succs: BTreeMap<ActionId, Vec<(ActionId, Ticks)>> = BTreeMap::new();
+    for action in net.actions() {
+        for (pred, lag) in net.preds(action.id) {
+            succs.entry(pred).or_default().push((action.id, lag));
+        }
+    }
+    let mut remaining: BTreeMap<ActionId, Ticks> = BTreeMap::new();
+    for id in net.topo_order()?.into_iter().rev() {
+        let action = net
+            .action(id)
+            .expect("topo_order names this network's actions");
+        let from = action.required_position();
+        let after = succs
+            .get(&id)
+            .into_iter()
+            .flatten()
+            .map(|(succ, lag)| {
+                let walk = match (&from, net.action(*succ).and_then(|s| s.required_position())) {
+                    (Some((a, _, _)), Some((b, min_radius, radius))) => {
+                        travel_ticks(a, &b, min_radius, radius)
+                    }
+                    _ => 0,
+                };
+                lag + walk + remaining[succ]
+            })
+            .max()
+            .unwrap_or(0);
+        remaining.insert(id, action.duration + after);
+    }
+    Ok(remaining)
 }
 
 /// A pair rejected because one of the action's preconditions would not hold
@@ -254,6 +419,8 @@ pub fn schedule(
         return Err(PlannerError::NoBots);
     }
     net.validate()?;
+    let remaining = critical_path(net)?;
+    let durations: BTreeMap<ActionId, Ticks> = net.actions().map(|a| (a.id, a.duration)).collect();
 
     let mut sim = state.fork();
     let mut free_at: BTreeMap<BotId, Ticks> = bots.iter().map(|b| (*b, 0)).collect();
@@ -276,7 +443,7 @@ pub fn schedule(
             });
         }
 
-        let mut best: Option<Candidate> = None;
+        let mut feasible: Vec<Candidate> = Vec::new();
         let mut best_rejected: Option<Rejected> = None;
         for action in &ready {
             let deps_ready = net
@@ -456,13 +623,23 @@ pub fn schedule(
                     let walk_start = free_at[&bot];
                     let act_start = (walk_start + travel).max(deps_ready);
                     let end = act_start + action.duration;
+                    let walk_target = action.required_position();
+                    let arrival = match (&walk_target, travel > 0) {
+                        (Some((pos, min_radius, _)), true) => arrival_point(pos, *min_radius),
+                        _ => from.clone(),
+                    };
                     let candidate = Candidate {
                         action: action.id,
                         bot,
+                        remaining: remaining[&action.id],
+                        deps_ready,
+                        arrival,
+                        walk_target,
                         walk_start,
                         travel,
                         act_start,
                         end,
+                        bound: 0,
                     };
 
                     // Feasibility is part of selection, not a check on the winner:
@@ -505,9 +682,7 @@ pub fn schedule(
                             // consulted for it — that is what makes the
                             // preference a preference and not a restriction.
                             feasible_in_an_earlier_tier = true;
-                            if best.as_ref().is_none_or(|b| candidate.key() < b.key()) {
-                                best = Some(candidate);
-                            }
+                            feasible.push(candidate);
                         }
                         Some(condition) => {
                             if best_rejected
@@ -530,6 +705,17 @@ pub fn schedule(
                 }
             }
         }
+
+        // Every feasible pair of the round is known, so each can be priced
+        // against the rest of its bot's ready work.
+        let bounds: Vec<Ticks> = feasible
+            .iter()
+            .map(|c| lookahead_bound(c, &feasible, &durations))
+            .collect();
+        for (candidate, bound) in feasible.iter_mut().zip(bounds) {
+            candidate.bound = bound;
+        }
+        let best = feasible.into_iter().min_by_key(Candidate::key);
 
         // Only when no bot can run any ready action is the plan actually stuck.
         let chosen = match best {
@@ -1350,7 +1536,12 @@ mod tests {
 
         let mut id_gen = ActionIdGen::new();
         let mut net = ActionNetwork::new();
-        let first = net.add(free(&mut id_gen, "opens chain A", 10));
+        // Pinned: with bot 1 the only bot that can open chain B, the
+        // lookahead would otherwise hand chain A to the idle bot 2 (makespan
+        // 10, not 20) and this test would stop exercising the fallback.
+        let mut opens_a = free(&mut id_gen, "opens chain A", 10);
+        opens_a.pinned = Some(BotId(1));
+        let first = net.add(opens_a);
         let mut needs_furnace = free(&mut id_gen, "opens chain B", 10);
         needs_furnace.pre = vec![Condition::HasItem {
             who: Actor::Role,
@@ -1625,9 +1816,173 @@ mod tests {
                 StepKind::Walk { .. } => panic!("no walks in this scenario"),
             })
             .collect();
-        // With (end, action.id, bot) the shorter action is picked first despite its
-        // higher id. With (action.id, end, bot) the order would be reversed.
+        // Both orders bound the bot's finish at 110, so the bound decides
+        // nothing and `end` does: the shorter action is picked first despite
+        // its higher id. With (action.id, end, bot) the order would be
+        // reversed.
         assert_eq!(order, vec![short, long]);
         assert_eq!(result.makespan, 110);
+    }
+
+    /// A far trip that gates two lags must not wait behind near work.
+    ///
+    /// One bot at the origin, two "furnaces" on the spot with smelts of 600
+    /// and 100 ticks, and the coal for both 60 tiles away (a 400-tick walk
+    /// each way). Each furnace needs its ore mined (on the spot, 100 ticks),
+    /// then fuel, then the ore inserted, then a take after the lag, then a
+    /// craft. Under `(end, action, bot)` both ore mines finish sooner than the
+    /// coal trip, so the bot mines them first and every lag starts after the
+    /// bot's last errand; the plan then waits out the long smelt with nothing
+    /// left to do: 1,760 ticks. Under the lookahead the coal goes first, the
+    /// 600-tick furnace is loaded before the 100-tick one, and the short
+    /// furnace's whole cycle happens under the long one's lag: 1,660. (Ranking
+    /// by [`critical_path`] alone also puts the coal first but gives 1,710 —
+    /// it loads the long furnace and then walks off to nothing better.)
+    #[test]
+    fn a_far_trip_gating_a_lag_goes_before_nearer_work() {
+        let bots = [BotId(1)];
+        let s = state(&bots);
+        let here = Position::new(0., 0.);
+        let mut id_gen = ActionIdGen::new();
+        let mut net = ActionNetwork::new();
+        let coal = net.add(at_for(
+            &mut id_gen,
+            "coal",
+            Position::new(60., 0.),
+            0.0,
+            100,
+        ));
+        let mut takes = Vec::new();
+        for (name, lag) in [("long", 600), ("short", 100)] {
+            let ore = net.add(at_for(
+                &mut id_gen,
+                &format!("ore {name}"),
+                here.clone(),
+                3.0,
+                100,
+            ));
+            let fuel = net.add(at_for(
+                &mut id_gen,
+                &format!("fuel {name}"),
+                here.clone(),
+                3.0,
+                10,
+            ));
+            let insert = net.add(at_for(
+                &mut id_gen,
+                &format!("insert {name}"),
+                here.clone(),
+                3.0,
+                10,
+            ));
+            let take = net.add(at_for(
+                &mut id_gen,
+                &format!("take {name}"),
+                here.clone(),
+                3.0,
+                10,
+            ));
+            let craft = net.add(free(&mut id_gen, &format!("craft {name}"), 50));
+            net.link(coal, fuel, 0);
+            net.link(ore, insert, 0);
+            net.link(fuel, insert, 0);
+            net.link(fuel, take, lag);
+            net.link(insert, take, lag);
+            net.link(take, craft, 0);
+            takes.push(take);
+        }
+
+        let result = schedule(&net, &s, &bots).unwrap();
+
+        let first_act = result
+            .steps
+            .iter()
+            .find_map(|step| match &step.what {
+                StepKind::Act { action, .. } => Some(*action),
+                StepKind::Walk { .. } => None,
+            })
+            .expect("something was scheduled");
+        assert_eq!(first_act, coal, "the far coal trip is the first thing done");
+        let take_at = |take: ActionId| {
+            result
+                .steps
+                .iter()
+                .find(|step| matches!(&step.what, StepKind::Act { action, .. } if *action == take))
+                .map(|step| step.start)
+                .expect("every take is scheduled")
+        };
+        assert!(
+            take_at(takes[1]) < take_at(takes[0]),
+            "the short furnace's take ({}) happens under the long furnace's lag, \
+             not after its take ({})",
+            take_at(takes[1]),
+            take_at(takes[0])
+        );
+        // 1,760 under `(end, action, bot)`: both ore mines, then the coal,
+        // then everything else, and the long smelt waited out at the end.
+        assert_eq!(result.makespan, 1660);
+    }
+
+    /// The obvious alternative — rank by [`critical_path`] alone — walks away
+    /// from work the bot is standing on, and this is the shape that cost the
+    /// baseline map 1,187 ticks (see [`lookahead_bound`]).
+    ///
+    /// Two coal mines on the same far tile, each feeding its own furnace at
+    /// the origin; furnace A smelts for 700 ticks, B for 100. Once the first
+    /// coal is mined, A's fuel load has the longest remaining path (720 =
+    /// 10 + 700 + 10, against the second coal's 620 = 100 + 400 + 10 + 100 +
+    /// 10), so a static priority sends the bot 400 ticks home to load it and 400
+    /// back for the other coal: 1,890. Pricing the walk in the bound keeps the
+    /// bot at the coal until both are mined: 1,700 — which is also what the
+    /// old `(end, action, bot)` key gave, by accident: standing at the coal,
+    /// the other coal is the action that finishes soonest.
+    #[test]
+    fn co_located_work_is_finished_before_walking_away() {
+        let bots = [BotId(1)];
+        let s = state(&bots);
+        let here = Position::new(0., 0.);
+        let far = Position::new(60., 0.);
+        let mut id_gen = ActionIdGen::new();
+        let mut net = ActionNetwork::new();
+        let mut coals = Vec::new();
+        for (name, lag) in [("A", 700), ("B", 100)] {
+            let coal = net.add(at_for(
+                &mut id_gen,
+                &format!("coal {name}"),
+                far.clone(),
+                0.0,
+                100,
+            ));
+            let fuel = net.add(at_for(
+                &mut id_gen,
+                &format!("fuel {name}"),
+                here.clone(),
+                3.0,
+                10,
+            ));
+            let take = net.add(at_for(
+                &mut id_gen,
+                &format!("take {name}"),
+                here.clone(),
+                3.0,
+                10,
+            ));
+            net.link(coal, fuel, 0);
+            net.link(fuel, take, lag);
+            coals.push(coal);
+        }
+
+        let result = schedule(&net, &s, &bots).unwrap();
+
+        let acts: Vec<ActionId> = result
+            .steps
+            .iter()
+            .filter_map(|step| match &step.what {
+                StepKind::Act { action, .. } => Some(*action),
+                StepKind::Walk { .. } => None,
+            })
+            .collect();
+        assert_eq!(&acts[..2], &coals[..], "both coals are mined in one trip");
+        assert_eq!(result.makespan, 1700);
     }
 }

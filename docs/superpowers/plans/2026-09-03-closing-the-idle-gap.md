@@ -11,6 +11,22 @@ four bots.
 
 ---
 
+## Two world-record replays, read for lessons — the lever is drill COUNT
+
+Full note: `docs/superpowers/notes/2026-09-04-world-record-replays.md`. Final
+worlds of both saves loaded on a scratch server and their production history
+read at 2-minute resolution. By minute 8: **they have ~1,200 iron plates,
+40–70 burner drills and 100+ stone furnaces, all stone and coal from rocks;
+we have 96 plates, 7 furnaces, no drills, and four bots hand-mining.** Their
+`automation` lands at 10–12 min — later than our 8:17 — with mining already
+automated. Copper is untouched until minute 4–6. Science is machine-made from
+the first pack. The first metric for a 3 h horizon is plates per minute at
+minute 10 (ours ~10, theirs ~350), not the automation timestamp. Our
+`PlaceDrill` cell is the right shape; the plan builds it in ones.
+
+Trap found on the way: `flow_precision_index` names a *window* (`ten_minutes`
+= the last 10 min at 2 s), and rock yields are not counted as production.
+
 ## Rocks work live; the next failure is a furnace fuelled 8,000 ticks after it was fed (`330a9a39`)
 
 `run-1788552801-73005`, same savepoint, with both rock fixes and `--resume-force`

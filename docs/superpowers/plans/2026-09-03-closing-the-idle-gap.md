@@ -80,6 +80,33 @@ honestly, as before. Also fixed on the way: `scripting_lua`'s
 `plan_cell` call was one argument behind `bdec88af` and failed
 `--all-targets` clippy on master.
 
+## ✅ AUTOMATION IN 6:11 — one second under the pre-Space-Age record (`run-1788582657-14978`)
+
+`just bench automation_speedrun.lua --clients 4 --bots 4 --logs`: release
+build, `--seed 31337 --new`, fresh map, git `cbf5ae01`, roster `[1,2,3,4]`,
+no resume, no cheats.
+
+| | |
+|---|---|
+| `researched("automation")` | **22,271 ticks = 6:11 game time** |
+| the record (pre-SA, same recipes) | 6:12 = 22,320 ticks |
+| planned makespan | 21,985 (6:06) — executed within 1.3% |
+| plan | **1**; 167 actions, 217 steps, 0 failed, 0 lost, 100 of 100 walks |
+| fleet utilisation | 38.5% (bot 1 65.6%, bots 2–4 27–33%) |
+
+Yesterday morning this was 8:17 on an unidentifiable map; last night 7:04 on
+this one; now 6:11. **Every second of it is the planner: the schedule
+executed as written.** Provenance says `dirty: true` — the only uncommitted
+change in the tree was another session's docs note
+(`docs/superpowers/notes/2026-09-05-remote-control-approach-review.md`), no
+code.
+
+The comparison still flatters us three ways and the record says so: four bots
+against one human, a map picked for short walks, and a run that does only
+automation. The number to beat honestly is the same runner's split on our
+map, which nobody has. What it does establish: the planner and executor
+agree to 1%, and the roster is now the whole gap.
+
 ## A rock is judged over the bot's whole demand — automation planned 6:05 (`7e330a2c`)
 
 Both halves of my brief were wrong. **No starter drill placement has any
@@ -1919,7 +1946,7 @@ infrastructure for a 3h17m game, not a harder milestone.
 
 | goal | before | now |
 |---|---|---|
-| `researched("automation")` | 21.34 min | **7:04** measured on a fresh seed-`31337` map (`run-1788565090-80288`, release, one plan, zero failures); planned 6:56 |
+| `researched("automation")` | 21.34 min | **6:11** measured on a fresh seed-`31337` map (`run-1788582657-14978`, release, one plan, zero failures); the record is 6:12 |
 | red science cell standing | never satisfied, `stuck_silent` | satisfied in 1 iteration |
 | red science producing **once** | never observed | witnessed six times, all inside 780 ticks |
 | red science producing **at a rate** | impossible to claim | **5 packs in 3,240 ticks (~5.5/min)**, twice |

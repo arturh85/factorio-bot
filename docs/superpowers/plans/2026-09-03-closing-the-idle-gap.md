@@ -220,6 +220,43 @@ three bots one extra iron furnace (three actions) reorders bot 3's ready
 work and its `take 10 copper-ore from the wooden-chest` moves from 8,860 to
 13,473 with no furnace of its involved.
 
+## ✅ THE FOUR-BOT REGRESSION WAS TWO SCHEDULER MECHANISMS (`99ee93c1`)
+
+RCA of run 15 against run 14, traced round by round in `schedule.rs`:
+
+1. **A bot could be committed past a gap another bot's finish would fill.**
+   `schedule` commits one `(action, bot)` per round ranked by that bot's own
+   finish over its own ready work. With the research hung off the steam
+   engine (`c83c5906`), bot 4's `insert 4 iron-ore` — the fourth ore into
+   the furnace whose plates open the engine block — carried bound 50,713
+   while bot 1's cell takes carried 45,146 and won round after round; by the
+   time the insert was committed, bot 1's `free_at` had moved to 47,436 and
+   never moves back. Before the pole edge the insert's short tail got it
+   committed early **by accident**. Now a candidate is committed no earlier
+   than any other bot's choice that finishes before it starts acting.
+2. **Two researches were modelled as concurrent.** A force researches one
+   technology at a time; the plan dispatched `automation` while `logistic`
+   held the labs, so it settled at the first research's end plus its own
+   duration: 13,154 against a modelled 6,000 in run 15 (7,234 in run 14).
+   **5,920 of run 15's ~7,090 loss was that.** The scheduler now keeps the
+   force's research slot.
+
+| goal, `map.json`, four bots | run 14 era | run 15 era | now |
+|---|---|---|---|
+| `researched:automation` | 22,044 | 21,765 | **21,735** |
+| `producing:automation-science-pack:6` | 28,885 | 26,162 | **27,304** |
+| `producing:logistic-science-pack:6` | 57,752 | 59,476 | **52,554** |
+| eight bots, green | — | 53,326 | **48,756** |
+
+Headless validation (`workspace/headless-i/runs/run-1788625111-28152`, 4
+bots, 5x, quiet box): one plan 571 / 53,249, green at 56,370,
+executed/planned **1.059** against hl-09's 1.105; `logistic` settled exactly
+at its planned duration. Run 16 at 1x is the measured lane. Left on the
+table: a strictly chronological commit order plans 51,303 but hands a shared
+research to the busy chain owner on ties; walk overruns (~11–12k per
+four-bot run) are the largest remaining slip and untouched; research
+durations still assume the lab count the method saw.
+
 ## THE RATE VIEW (owner, 2026-09-05 19:20): production stops at minute 15
 
 Owner: "maybe you should prioritize production rates at given times over raw

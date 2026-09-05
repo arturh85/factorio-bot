@@ -112,15 +112,39 @@ pub fn run() {
     }
     #[cfg(feature = "repl")]
     {
-      if let Some(mut app) = app {
-        // No subcommand was run, show help and let the REPL take over
-        app.print_help().expect("failed to print_help");
+      match app {
+        // No subcommand was run: show help and let the REPL take over.
+        Some(mut app) => app.print_help().expect("failed to print_help"),
+        // A subcommand ran, and it is finished. Returning here is the whole
+        // point: this used to fall through into the REPL, so `plan`,
+        // `score-map` and `config show` printed their answer and then died
+        // in reedline with **exit code 101** whenever stdin was not a
+        // terminal -- a pipe, a script, `$(...)`. The offline planning loop
+        // this project leans on is documented as scriptable and was not,
+        // and because the report had already been printed the failure
+        // looked like success to anything reading stdout. A release build
+        // has `repl` in its default features, so the shipped binary is the
+        // one that had it; the `--no-default-features --features cli,lua`
+        // builds used for runs here did not, which is why it went unseen.
+        None => return,
       }
-      // If app is None, a subcommand ran - continue to the REPL
     }
   }
   #[cfg(feature = "repl")]
   {
+    // The REPL needs a terminal to read from. Without one -- a pipe, a
+    // script, a CI job invoking the bare binary -- reedline panics, which
+    // under `panic = "abort"` aborts with **exit code 101** and a crash
+    // banner, for what is really "there is nothing to read". Help has
+    // already been printed by this point, so saying so and leaving is the
+    // honest answer.
+    if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+      eprintln!(
+        "not starting the REPL: stdin is not a terminal. Pass a subcommand \
+         (see the help above), or run this from a terminal."
+      );
+      return;
+    }
     let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
     rt.block_on(async { repl::start(context.clone()).await })
       .expect("repl failed");

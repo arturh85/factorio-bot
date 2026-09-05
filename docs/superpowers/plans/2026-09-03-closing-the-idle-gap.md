@@ -421,6 +421,26 @@ research to the busy chain owner on ties; walk overruns (~11–12k per
 four-bot run) are the largest remaining slip and untouched; research
 durations still assume the lab count the method saw.
 
+## THE OFFLINE LOOP WAS NEVER SCRIPTABLE (`08d6b446`)
+
+`factorio-bot plan` printed its report and then exited **101** whenever
+stdin was not a terminal — a pipe, a script, `$(...)`. With the `repl`
+feature (which is in the **default** features, so every release build has
+it) the binary deliberately continued into the REPL after a subcommand ran,
+and reedline panics without a terminal. Because the report had already been
+printed, the failure read as success to anything reading stdout, and this
+file's own "evaluate a planner change OFFLINE first" loop was not
+scriptable as documented.
+
+It went unseen here because every build in this session used
+`--no-default-features --features cli,lua`, which excludes `repl`. Found by
+the peer session's merge verification, which built with defaults. A
+subcommand now returns when it is done; the bare binary without a terminal
+says so and exits 0 rather than aborting with a crash banner. This is the
+same trap CLAUDE.md warns about from the other side — a pipeline reports
+the last command's status, so `plan | grep` was reporting grep's 0 over a
+101 all along.
+
 ## PER-MACHINE PRODUCTION COUNTERS (owner, 2026-09-05 22:00)
 
 Owner: "each single machine should have a counter how many items it produced

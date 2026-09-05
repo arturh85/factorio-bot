@@ -26,11 +26,22 @@
 -- is explicitly out of this whole sub-project's scope (spec's own
 -- self-review). So ore and coal are inserted DIRECTLY into each furnace's
 -- source/fuel inventory via rcon.insert_to_inventory -- bypassing the belt
--- supply network on purpose, disclosed -- which tests the part that IS in
--- scope: do the 24 built furnaces actually smelt, and do their output
--- inserters actually move plates onto the belt. Production is read from the
--- run's own samples.jsonl (item production statistics), not a container
--- count, since there is no container to read.
+-- supply network on purpose, disclosed -- which tests ONE part of what is in
+-- scope: do the 24 built furnaces actually smelt.
+--
+-- IT CANNOT TEST THE INSERTERS, and an earlier version of this comment
+-- claimed it did. Two reasons, both fatal:
+--   1. Plates are counted by summing each furnace's OWN output_inventory. If
+--      the output inserters were removing them that number would FLATTEN --
+--      a rising curve is evidence that nothing is emptying the furnaces.
+--   2. FurnaceLine has 13 small-electric-pole and NO GENERATOR, and this
+--      script cheats in no power source. Inserters are electric. Power
+--      coverage is not power capacity: an unpowered inserter does not run
+--      slowly, it does not run at all.
+-- So the 87 belts, 48 inserters, 2 splitters and 2 underground belts are
+-- checked here only for STANDING correctly (position + direction + half, read
+-- back off the surface below). Nothing in this script shows them moving an
+-- item, and nothing in it could.
 print("start furnace run")
 
 local FURNACE_LINE = "0eNqdm81vo0gQxf+ViLOd0NUf0D7ubTXSXuYwh9VoRJweL7sYEODsRlH+98WxZmKNaXiPk5UPfn5Vpqq7X+HX5LE6hbYr6yHZvSZPod93ZTuUTZ3sks/NqduHu7+Goe13Dw/fi/3QdGXz/t/9/b45PjyX4d+H7aemOv1h/37+cvg9DYeXfz59+5Jskr4u2u3QbA9d+XRm/5fsxG+Sl2Sn1NsmKR778bIhbM//15b1IdkN3SlsknLf1H2y+/M16ctDXVTna4eXNoyCyiEcR3JdHM8/DV1R923TDdvHUA3JyCzrpzC+zYhfvLgfmjpsv5+6utiHq2sFuHbftG3otm1VDNeXauDSsmvqmwvN29dNEuqhHMpwifz9h5dv9en4GLoxoFjMm6Rt+vLycb1nWN3b9xSn93bkP5Vd2F/++h7XL1ihsePr2wRIwyDN6DMwVhis/fg06j50w/i7G6CdD9jByiyjLIOxhsHmQMBuPmD/UTjHoqq2oRrfsCv327apwi0tm6epFA40YwJVeKE4iitABv1CzHiReEobXiU5xUXKRKULQeOFoqjWpfBS+akRAyPFovRC2GS5KJnnCV4viuqwQqwsVI8VpGKUWQgbLxlF9VnBa0ZRnVagolnojkIUDdUehSgaqj8KVDT5Qths0Sw0XE0UDdVxNVE0VMvVSNHI0l4MLxqhWq4mtmNUy9VI0chCi9R40QjVIjVeNEK1SI0UjSxsRDVZNLLQcg1eNEK1XIMXjVAt10BFs7C9NUTRUJ3RGPqMJRGJlibpCMlFTsG3h5cLZhKSoZBsBpKjED8D8SjkfDyIUWwKU/QMRcGUmdxagSkzybUapsxk1xqUInPZtTBlLrvwjStz2YXvXJnL7tWt21blMNl2fiyDiCnh6fK2vzYgM+VUpDTXRDwPBUQs0xG7KZ7QrtFNxJNcTfg7sVgNbfBYZDlwlrBiYtocbXJg2jLalMG4+TrvKBa+J7yYCCNLac8ECjVTtMeDcYXxYmJBa94ywdQZ3uTBwJbxYmJhO97iwNRlvCmDgfOV7lEsA57xYiKQPOUtEyjaXPEmDwYWxouJha15ywRTZ3iTBwNbxouJhe14iwNTl/GmDAbOV7pHsQx4xouJQHzKWyZQtF7xJg8GFsaLiYWtecsEU2d4kwcDW8aLiYXteIsDU5fxpgwGzle6R7EMeMaLMbHhYMqbMVC4KiXKJuPI+GFGco78UUyn+il0h64ZXyPsH03E3aA3P59HqNvT+WGJiXfivaoMOYKqlLeuHAZ2RG5kOTfNaYgmJ6NPqy52f+fEARVMhOcsvXxS2NVYfvl0iglTirMJI8Lklz5VFcc2fnKMJV5p4ugIxmc4BzMSHzVrB5U50haNSMuYMxgoLSe91og0D90VShZuC0mZ8xEWorBG8HSIQp1hQGmadJcj0gxzzgClWdKyjkhz2I3hl26MjDkDgCHmpJ8eCdEz+3RMmk5Jk35a2tV4HNhLg9KEdP4j0jSzPwWlGXKcEJHG75E8ps/R4BwDZ+Th4Ur2JI/ZFoGxe2JDgyGvBuSUmx2L2ihiTwJKpNxikKmZbQDINCt9zmguLbOQgyIdswKDzIxZOkHmWv8rmkzKAMNE2pRZtUAmtdyATFnpi8SSaamFBxTJH9cV+OSvpc+6KNnRj/Sj5Iye2KLknH4qHyV7euIKkompvyPJ/IgTJQs9lEXJmh9QomjDD1VRtOXniyh6xUwURWf8OA9F5/wIEkV7fhoHoolnDRRZi8TjBoosxkz4ASCKXvGAMope8Ygyirb86AlFO35chqJXTI5QdM5Pu1C05wdAU+ivm8u3L3dXX3LdJFUxosbf6fu734q+3N99Po7o8xdQN8lz6PrLxfm4Szc+c5lKnXVvb/8DoD9BzA=="
@@ -41,13 +52,16 @@ local ANCHOR = { x = 60, y = -100 } -- rescanned clean (0 obstacles) after (40,4
 -- All 179 entities, decoded OFFLINE from the same base64/zlib blob above
 -- (blueprint version 281474976710656 = 1.0.0.0, so raw pre-2.0 directions
 -- are doubled onto the 16-point scale: dir = (raw * 2) % 16 -- matching
--- import_stack's own migration). Used for verification INSTEAD OF
--- `plan.steps[i].direction`, which Task 4's report already found does not
--- exist: `ActionKind::Place` in crates/scripting_lua/src/globals/goal/plan.rs
--- sets only `kind`, `entity`, `pos` on a place step, never `direction` -- so
--- `s.direction` is always Lua `nil`, and a verdict built on it would report
--- "wrong direction" for every single entity regardless of what the game
--- actually did. This table is the ground truth the earlier scripts lacked.
+-- import_stack's own migration). Written because `plan.steps[i].direction`
+-- did not exist when this run was made: `ActionKind::Place` in
+-- crates/scripting_lua/src/globals/goal/plan.rs set only `kind`, `entity`,
+-- `pos`, so `s.direction` was always Lua `nil` and a verdict built on it
+-- would have reported "wrong direction" for every entity regardless of what
+-- the game did. **That gap is closed** -- a place step now publishes
+-- `direction` and `underground_half` -- so a future script should read them
+-- from the plan rather than re-deriving the migration by hand as this table
+-- does. It is kept as-is because it is the ground truth THIS run's numbers
+-- were measured against, and rewriting it would invalidate them.
 local EXPECTED = {
   { name = "transport-belt", x = 1.5, y = 0.5, dir = 4, half = nil },
   { name = "transport-belt", x = 1.5, y = 1.5, dir = 0, half = nil },

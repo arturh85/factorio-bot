@@ -629,7 +629,42 @@ on that struct and serde drops it silently. Renamed the mod's field to
 `#[serde(rename_all = "snake_case")]` already renders "input"/"output"),
 and the live read matched the raw probe. Committed as part of this task.
 
-### 2. Does it smelt? Yes -- a real, rising production curve
+### 2. Does it smelt? Yes. Does anything MOVE? Never shown, and it could not have
+
+**Read this before the curve below.** The smelt test was written to ask two
+questions -- "do the 24 built furnaces smelt, and do their output inserters
+actually move plates onto the belt" -- and this section answers the first at
+length and the second not at all. Worse, the data answers the second
+*negatively*, and the correction belongs here rather than in a footnote:
+
+- **The plate count is the furnaces' own `output_inventory`, summed.** It
+  rises monotonically to ~64 per furnace and never flattens. Had the output
+  inserters been taking plates out, that is exactly what it would have done
+  -- a furnace's output buffer fills, an inserter empties it, and the number
+  read out of the buffer would stall while production continued. The rising
+  curve is evidence of smelting and simultaneously evidence that **nothing
+  was emptying the furnaces**.
+- **It could not have worked.** `FurnaceLine` carries 13 `small-electric-pole`
+  and **no generator at all** -- no boiler, no steam engine, no solar panel --
+  and the run cheated in no power source. Inserters and lamps are electric.
+  Every pole stood, every pole was connected, and the network had zero
+  generation: *power coverage is not power capacity* (see CLAUDE.md's Known
+  Issues), and an unpowered inserter does not run slowly, it does not run.
+- **So the moving half of the block is unproven.** 87 transport-belt, 48
+  inserter, 2 splitter and 2 underground-belt -- **139 of 179 entities, 78% of
+  the block** -- are proven to STAND at the right tile facing the right way
+  (read back off the live surface, 179/179) and **have never been shown to
+  move a single item**. Add the 3 `small-lamp` and it is 142 of 179 that
+  needed power this run never had.
+
+What Task 6 therefore establishes is: a 179-entity designed block is decoded,
+migrated, split across four bots, placed by hand, and read back correct; and
+the *furnaces* in it smelt when fed by hand. Item flow through the block --
+belts, inserters, splitters, the underground pair -- is out of scope of what
+was measured, not out of scope of what was claimed, and closing it needs a
+power source in the blueprint (or cheated in) and a source/sink to count at
+each end.
+
 
 FurnaceLine has no output chest (its 179 entities are 87 belt / 48 inserter
 / 24 furnace / 13 pole / 3 lamp / 2 splitter / 2 underground-belt --
@@ -639,9 +674,10 @@ inserted **directly into each built furnace's own inventories** via
 `rcon.insert_to_inventory` (moves items out of the calling bot's own
 inventory -- confirmed by reading `mods/BotBridge/control.lua`, which is
 why iron-ore/coal were cheated onto bot 1 first), bypassing the belt
-network -- disclosed here and in `scripts/furnace_run.lua`. This tests
-exactly the in-scope part: do the built furnaces smelt, and do their
-output inserters move plates onto the belt.
+network -- disclosed here and in `scripts/furnace_run.lua`. This tests one
+half of the in-scope part: it shows the built furnaces smelt. It shows
+nothing at all about whether the output inserters move plates onto the belt,
+and cannot -- see the correction opening this section.
 
 Getting this working also needed a correction: `defines.inventory`'s
 numeric values are NOT the `order` field `runtime-api.json` lists them
@@ -710,7 +746,11 @@ running at full capacity, never fuel- or ore-starved within the window.
 machines "worked" at some point, 14 stayed `no_fuel`** (exactly the 10 fed
 / 14 unreachable split above), with per-furnace `products finished` around
 63-64 plates each by the end of sampling (10 x ~64 ~= 640, matching the
-in-script total of 639).
+in-script total of 639). **That the two agree is the point and also the
+limit**: both numbers are the same buffer, read two ways. A furnace output
+slot holds 100 iron plates, so 64 is below the back-pressure point -- the
+furnaces were never blocked, which is why the rate held, and equally why
+this window can say nothing about whether anything was emptying them.
 
 **Caveat on the production-curve tooling**: the brief describes `just
 analyse` as now printing "cumulative and per-minute output at fixed game

@@ -361,26 +361,53 @@ BotBridge Mod (Factorio mod for RPC)
     input/output half and its direction, both read back correct off the
     live surface, and a real production curve out of the furnaces it
     built (see `docs/superpowers/notes/2026-09-05-first-block-built.md`).
-    Three things by name:
+    Four things by name:
+    - **"Proven live" means STANDING, and for the furnaces also SMELTING.
+      It does not mean anything MOVED.** 179/179 entities were read back
+      off the live surface at the right tile facing the right way, and the
+      furnaces smelt when fed by hand. But the plate count in that run is
+      the sum of the furnaces' own `output_inventory`, which rose
+      monotonically -- had the output inserters been emptying them it would
+      have flattened -- and it could not have been otherwise: `FurnaceLine`
+      carries 13 poles and **no generator at all**, and the run cheated in
+      no power source. Power coverage is not power capacity. So 87 belts,
+      48 inserters, 2 splitters and 2 underground belts -- **139 of 179
+      entities, 78% of the block** -- are proven to stand and have **never
+      been shown to move a single item**. Closing that needs power in the
+      blueprint and a source/sink to count at each end.
     - **It has no siting story, and refuses rather than guessing.** The
-      block is placed at a fixed offset; if a single tile of its footprint
-      is obstructed, `schedule()` correctly notices the owning bot cannot
-      place there and refuses the whole plan with
-      `PlannerError::ChainOwnerInfeasible` -- a typed, documented refusal
-      (`crates/planner/src/error.rs`), not a crash, but also not a retry or
-      a nudge to a clear tile. This has reproduced on a 37-entity block
-      (MinerLine, three anchors) and a 179-entity one (FurnaceLine, one
-      anchor) alike. Choosing a clear anchor, or clearing obstacles by
-      script first, are the two ways found to get past it; siting the
+      block is placed at a fixed offset. Since 2026-09-05 `expand()` scans
+      the whole footprint **before emitting anything** and refuses with
+      `PlannerError::BlockGroundOccupied`, which names the tile and what is
+      on it -- an entity by prototype name, water, terrain, ore, a
+      footprint the game already refused, or a **character**, called out
+      separately when it is one of this plan's own bots (cleared by
+      walking, not by moving the block). Before that the fact arrived from
+      `schedule()` as `PlannerError::ChainOwnerInfeasible`, blaming an
+      internal scheduling decision for a fact about the ground; four runs
+      across three anchors were spent distinguishing hypotheses the named
+      tile answers in one line. Choosing a clear anchor, or clearing
+      obstacles by script first, are still the two ways past it; siting the
       block automatically is out of scope.
     - **It refuses unrecognised tiles, recipes and module requests by
       name**, rather than silently dropping or misplacing them -- part of
       the same decode/build path, from Task 1's blueprint allowlist work.
-    - **Bands are balanced by entity count**, split across the roster
-      (`bots`) as evenly as an integer division allows -- 179 across 4
-      bots split 45/45/45/44, essentially even; a 6-entity block split
-      3/4/3/0 in an earlier, smaller run, since a handful of entities does
-      not divide as cleanly as 179 does.
+      An entity standing on the right tile **facing the wrong way**, or the
+      wrong half of an underground pair, is refused by name too: it is not
+      "already built", and nothing here can rotate or remove it.
+    - **Bands are balanced by entity count and cut across the block's
+      LONGER axis.** 179 across 4 bots splits 45/45/45/44. The remainder is
+      spread, not dumped: six across four is 2/2/1/1 (it was 2/2/2/0 under
+      the old `div_ceil` chunking -- an idle bot). Two numbers this file
+      used to give here were wrong: it claimed the split was "as even as an
+      integer division allows", which `div_ceil` was not, and it reported a
+      6-entity block as "3/4/3/0", which are **step** counts, not bands --
+      the bands were 2/2/2/0. The axis was also wrong until 2026-09-05: the
+      sort was by x unconditionally, so over `MinerLine` (4 wide, 20 tall)
+      bands 0, 1 and 2 all occupied x = 3.5 and band 0 spanned the whole
+      height the other two were segments of -- three bots interleaved in a
+      one-tile corridor, while the spec claimed "a bot never crosses
+      another's band".
 
 - **crates/executor**: runs a `Schedule` across bots over RCON. Per-action
   completion signals (`tokio::sync::watch`, not polling), lag edges modelling

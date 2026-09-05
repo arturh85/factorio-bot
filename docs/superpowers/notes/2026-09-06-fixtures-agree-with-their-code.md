@@ -37,6 +37,27 @@ margin, carried from one observation in August against a measured worst
 case of 0.301; and a walk speed of 0.15 taken from the prototype against a
 measured 0.1413 over 196,717 ticks. Documented prose is a fixture too.
 
+## The move that would have caught all four, in seconds
+
+**Make the test fail on purpose before believing it.** Swap in the value the
+test exists to forbid, watch it fail with the actual mismatch, revert, watch
+it pass. The siting session's implementer did exactly that for the
+replan-stability Critical — substituted the forbidden roster-centroid seed,
+watched `Pos(0,0)` against `Pos(500,500)`, restored — and its re-reviewer
+then **independently reproduced the experiment rather than trusting the
+report**, doing the same for a second finding by flipping a flag back and
+watching the bystander test fail.
+
+Every one of the four above would have been caught this way. The drill
+accumulator reporting `produced: 0` would have been obvious the moment
+someone asked it for a number it should have been unable to produce; the
+decoy furnace would have failed the instant it faced a direction the
+blueprint did not; the 2×2 furnace fixture would have failed on any legal
+position.
+
+A green test proves nothing until it has been seen to go red for the right
+reason. Treat "it passes" as an unverified claim about the test.
+
 ## What actually caught them
 
 Measurement against the live game, every time. Not review, not more tests,

@@ -1098,6 +1098,58 @@ pub(crate) fn craft_ticks(state: &PlanState, item: &str, count: u32, depth: u32)
         })
 }
 
+/// Ticks a bot spends **with its hands** making `count` of `item`: every
+/// crafting-category recipe on the way down, and nothing for the ore or the
+/// smelting. Recurses exactly as [`craft_ticks`] does and shares its `depth`
+/// backstop and its "unpriceable is never free" rule; it differs only in what
+/// a raw material and a furnace recipe cost, which here is zero.
+///
+/// **This is the price a deal balances, and [`craft_ticks`] is not.** A
+/// plate's ore and smelt are real work, but in a fleet plan they are a
+/// cell's work or a furnace's lag, not the bot's timeline the deal is
+/// balancing -- and from raw they dominate: a lab is 17,232 ticks from raw
+/// and about 1,300 in the hands, a pack 1,266 from raw and 330 in the hands.
+/// Priced from raw, a lab was "worth" thirteen packs and
+/// `have::deal_by_load` gave the two lab builders 20 and 21 of 75 packs and
+/// the third bot 34, whose chain then waited 7,166 ticks on its drill for
+/// the plates those packs need and crafted alone until tick 55,554 while
+/// the builders had finished by 49,427 (`workspace/scripts/map.json`, green,
+/// four bots). In the hands a lab is four packs, and the deal comes out
+/// where the timelines do.
+///
+/// `craft_ticks` keeps its own callers: [`cell_setup_bot_ticks`] compares a
+/// drill against hand-mining, where the ore *is* the bot's time, and
+/// `have::labs_worth_building` deliberately over-prices a lab to err toward
+/// building fewer.
+pub(crate) fn hand_ticks(state: &PlanState, item: &str, count: u32, depth: u32) -> Ticks {
+    if count == 0 || state.has_resource_patches(item) {
+        return 0;
+    }
+    let Some(recipe) = recipe_for(state, item) else {
+        return 0;
+    };
+    if depth == 0 {
+        return Ticks::MAX / 4;
+    }
+    let per = output_per_craft(&recipe, item).max(1);
+    let runs = count.div_ceil(per);
+    let own = match recipe.category.as_str() {
+        SMELTING_CATEGORY => 0,
+        CRAFTING_CATEGORY => recipe_ticks(&recipe).saturating_mul(runs),
+        _ => return Ticks::MAX / 4,
+    };
+    ingredients_of(&recipe)
+        .into_iter()
+        .fold(own, |sum, (ingredient, amount)| {
+            sum.saturating_add(hand_ticks(
+                state,
+                &ingredient,
+                amount.saturating_mul(runs),
+                depth - 1,
+            ))
+        })
+}
+
 /// Character ticks to get `count` of a raw resource the cheaper of the two
 /// ways a plan has: off a tile by hand, or off a rock.
 ///

@@ -746,6 +746,35 @@ impl Action {
     pub fn required_position(&self) -> Option<(Position, f64, f64)> {
         self.pre.iter().find_map(|c| c.required_position())
     }
+
+    /// Does anything about this action depend on *which* bot runs it?
+    ///
+    /// True when a precondition or an effect names the acting bot
+    /// (`Actor::Role`): the bot has to be holding something, standing
+    /// somewhere, or ends up holding something. Such an action belongs to
+    /// the inventory it reads or writes, which is what a chain keeps in one
+    /// pair of hands.
+    ///
+    /// False when every condition and effect is a statement about the world
+    /// -- `EntityAt`, `Powered`, `Researched` -- and nothing about the runner.
+    /// `research automation` is one: its labs are entities, its packs are in
+    /// the labs, and the research is a force-wide fact. Any bot can issue it,
+    /// and the plan is shorter when the bot that can *finish* it soonest does.
+    /// Measured on `run-1788604520-39283`'s plan: the research was stamped
+    /// into the chain of the cell that asked for it, so bot 1 ran it at tick
+    /// 53,423 behind its whole build queue while its dependencies had been
+    /// met at 38,107 and bot 2 had been idle since 36,027. See
+    /// `method::run_steps`, which leaves such an action unstamped.
+    pub fn tied_to_runner(&self) -> bool {
+        let names_role = |who: &Actor| matches!(who, Actor::Role);
+        self.pre.iter().any(|c| match c {
+            Condition::HasItem { who, .. } | Condition::AtPosition { who, .. } => names_role(who),
+            _ => false,
+        }) || self.eff.iter().any(|e| match e {
+            Effect::GainItem { who, .. } | Effect::LoseItem { who, .. } => names_role(who),
+            _ => false,
+        })
+    }
 }
 
 #[cfg(test)]

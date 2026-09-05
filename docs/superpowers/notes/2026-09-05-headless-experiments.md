@@ -248,3 +248,16 @@ against 1.13 in hl-01, so the plan tightened more than the execution did;
 where the extra 10,000 ticks go is the next thing to read off the record
 (the 5x hop tax is ~9,000 of it on hl-01's numbers). Run 14 at 1x with
 clients is the honest measurement of the same master.
+
+### aimbots — merged: the aim stands clear of the other bots too
+
+Run 14's one failed walk: the annulus aim for bot 1 landed 0.515 tiles from
+idle bot 3 (two character half-widths 0.398 + the follower's 0.3 stop box),
+invisible to the entity graph, visible to the game's pathfinder. Now
+`approach_standing` takes the walker's id and treats every other bot's
+character footprint at its `world.players` position (fed by the mod's
+position writeouts; exact for a resting bot) grown by 0.3 as an obstacle:
+free candidates first, else the farthest from any bot, never a refusal. No
+extra RCON round trip. Three tests from the run's own coordinates; core and
+executor tests and clippy green. Judgement: a walking bystander's up-to-a-
+tile-stale position is treated as occupied (conservative).

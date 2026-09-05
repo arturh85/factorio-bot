@@ -80,6 +80,29 @@ honestly, as before. Also fixed on the way: `scripting_lua`'s
 `plan_cell` call was one argument behind `bdec88af` and failed
 `--all-targets` clippy on master.
 
+## ✅ GREEN FROM A FRESH WORLD IN 36:48 — the research split, executed (`run-1788574143-35250`)
+
+Same script and seed as run 7, git `1502629c` (research shared across the
+roster, two labs), debug, no resume, no cheats.
+
+| | run 7 | **run 8** |
+|---|---|---|
+| green cell producing 6/min | 63:42 | **36:48** (132,537 ticks) |
+| green witness | 64:22 | **37:26**, 5 packs in 2,220 ticks |
+| plans | 407 → 86 | 470 → 183 |
+| actions | 454 / 1 failed | **626 / 1 failed** (the same engine refusal; fix not yet in this binary) |
+| research logistic-science-pack | 20,643 ticks, one lab | **7,499**, two labs |
+| fleet utilisation | 12.9% | **30.5%** — bots 2/3/4 at 24%, 28%, 30% (were 3–4%) |
+
+The executed 36:48 is the offline plan's 36:48 to the minute. **The day's
+green number went 60:07 planned / never executed → 36:48 executed**, and the
+whole ladder from an empty map to witnessed green science now fits in 37
+minutes and two plans.
+
+The 51,159 ticks of red-pack crafting are now spread over 12 actions on four
+bots, and the remaining single-bot item is the serial cell ladder the research
+agent named — the `cell-ladder` RCA is in flight.
+
 ## The refused engine site: the mod tested footprints with an unturned box (`1b544f94`)
 
 My brief was wrong on every count. Plan 1 sited nothing inside anything —
@@ -1799,7 +1822,7 @@ infrastructure for a 3h17m game, not a harder milestone.
 | red science producing **once** | never observed | witnessed six times, all inside 780 ticks |
 | red science producing **at a rate** | impossible to claim | **5 packs in 3,240 ticks (~5.5/min)**, twice |
 | green science, planning | did not expand at all | plans end to end |
-| green science, live | never run | **WITNESSED three times** — fresh world end to end in **64:22** (`run-1788569499-05724`); resumed from the red witness in 56.75 min (`run-1788565721-53126`) |
+| green science, live | never run | **WITNESSED four times** — fresh world end to end in **36:48 / 37:26** (`run-1788574143-35250`), down from 64:22 the run before |
 | furnaces per run | 42 | **8** |
 | recovery (`obs:recover`) | never executed in any run | **fires live** |
 

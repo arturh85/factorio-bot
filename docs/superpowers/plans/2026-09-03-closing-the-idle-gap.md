@@ -220,6 +220,42 @@ three bots one extra iron furnace (three actions) reorders bot 3's ready
 work and its `take 10 copper-ore from the wooden-chest` moves from 8,860 to
 13,473 with no furnace of its involved.
 
+## ✅ THE TAIL IS DEALT: offline green 71,167 → 57,752 (`f5f273bb`, branch `tail`)
+
+RCA of run 13's one-bot tail, three mechanisms, each with a number from its
+plan: (1) `Researched::expand` pushed the `research` action inline and
+`run_steps` stamped it with the cell's chain, whose owner is bot 1, so a
+world-scoped action (`Researched`, `EntityAt`, `Powered`; no `HasItem`, no
+`AtPosition`) was welded to one bot — `research automation` had its deps met
+at ~38,107 and started at 53,423 while bot 2 idled from 36,027. (2) The pack
+deal was 11 / 25 / 39 because `deal_by_load`'s preload charged the lead two
+17,232-tick lab bills for one lab and seeded nobody with `planned_ticks`;
+bot 4's 39-pack chain ran to 59,089 and gated `research
+logistic-science-pack`. (3) The cell's 22 placements and all its crafting
+were bot 1's through `BuildAssemblyCell::converges` + `Holder::Share`.
+
+Fixes, general: `Action::tied_to_runner` — an action naming `Actor::Role` in
+no condition or effect belongs to nobody, is left unstamped and off the load
+ledger, and the scheduler gives it to the earliest finisher; `block_bill_ticks`
+prices each item once per bot; the preload is seeded from `planned_ticks`;
+`cell_steps` deals every cell's steps as `Step::Owned` bundles across the
+roster (a roster of one emits the old sequence byte for byte). Two new
+tests pin (1) and (2); planner tests and clippy green.
+
+| goal (map.json, seed 31337) | before | after |
+|---|---|---|
+| `researched:automation` | 177 / 22,044 | 176 / 21,765 |
+| `producing:automation-science-pack:6` | 328 / 28,885 | 324 / 26,162 |
+| `producing:logistic-science-pack:6` | 623 / 71,167 | **569 / 57,752 (−18.8%)** |
+
+Per-bot planned ends 71,167 / 36,027 / 46,079 / 59,367 → 57,732 / 57,722 /
+44,137 / 57,752. Open from this RCA: research is modelled as occupying a bot
+for its whole duration (it is a lag); bundles are dealt without pricing the
+builder's walk; `produce.rs`'s plate cells still bill the chain actor; pricing
+the deal in hand time helps green (54,847) and hurts red (31,296). Validated
+offline only at the time of writing; the headless 5x run of the merge is the
+next section.
+
 ## ✅ GREEN FROM A FRESH WORLD IN 20:59 (`run-1788604520-39283`) — copper bank merged, and the tail is one bot
 
 Run 13, 2026-09-05 12:31, master `cf73a47f` (copper `shared_grow` `48847c80`

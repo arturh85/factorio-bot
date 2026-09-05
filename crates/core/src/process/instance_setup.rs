@@ -557,6 +557,58 @@ fn ensure_bridge_mod_enabled(workspace_mods_path: &Path) -> Option<String> {
     }
 }
 
+/// Makes sure the resolved workspace directory exists, creating it when only
+/// the leaf is missing.
+///
+/// Everything under a workspace is derived -- the server and client instances
+/// are extracted from the archive, `mods` is populated below, `scripts` is
+/// seeded by `scripts::ensure_scripts_dir`, `runs/` appears on the first run --
+/// so a `workspace_path` naming a directory that does not exist yet is a new
+/// instance to set up, not a setting to correct. Researchers running headless
+/// instances side by side point each settings file at its own workspace, and
+/// every one of those starts out missing.
+///
+/// What the old unconditional refusal was actually guarding against is a
+/// typo: a path pointing somewhere else entirely. That protection is kept
+/// where it is real -- when the **parent** does not exist either, the path is
+/// refused with `WorkspaceNotFound`, because creating it (and `create_dir_all`
+/// would) turns a mistyped setting into a silently populated stray tree.
+///
+/// The creation line is narration deliberately not gated on `silent`: every
+/// CLI path sets `silent`, which is how the `Using mods directory` line came to
+/// print on no run at all, and "where did my workspace go" is exactly the
+/// question a user asks later.
+pub(crate) fn ensure_workspace_dir(workspace: &crate::paths::ResolvedWorkspace) -> Result<&Path> {
+    let workspace_path = workspace.as_path();
+    if workspace_path.is_dir() {
+        return Ok(workspace_path);
+    }
+    if workspace_path.exists() {
+        error!(
+            "Workspace path <bright-blue>{:?}</> exists but is not a directory",
+            workspace_path
+        );
+        return Err(WorkspaceNotFound {}.into());
+    }
+    match workspace_path.parent() {
+        Some(parent) if parent.is_dir() => {
+            std::fs::create_dir(workspace_path).into_diagnostic()?;
+            info!(
+                "Created workspace <bright-blue>{:?}</> (new instance; server, mods and scripts are set up on first run)",
+                workspace_path
+            );
+            Ok(workspace_path)
+        }
+        _ => {
+            error!(
+                "Failed to find workspace at <bright-blue>{:?}</>: its parent directory does not exist",
+                workspace_path
+            );
+            Err(WorkspaceNotFound {}.into())
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn setup_factorio_instance(
     workspace_path_str: &str,
@@ -588,14 +640,7 @@ pub async fn setup_factorio_instance(
     // A bare `?`: `RelativeWorkspacePath` is a `Diagnostic`, so the `help`
     // naming the setting and its fix survives into the report.
     let resolved_workspace = crate::paths::resolve_workspace(workspace_path_str)?;
-    let workspace_path = resolved_workspace.as_path();
-    if !workspace_path.exists() {
-        error!(
-            "Failed to find workspace at <bright-blue>{:?}</>",
-            workspace_path
-        );
-        return Err(WorkspaceNotFound {}.into());
-    }
+    let workspace_path = ensure_workspace_dir(&resolved_workspace)?;
     let workspace_data_path = workspace_path.join(PathBuf::from("data"));
     let instance_path = workspace_path.join(PathBuf::from(instance_name));
     let instance_path = Path::new(&instance_path);
@@ -1364,6 +1409,91 @@ mod tests {
             Some(r#"{"version":"2.1.17"}"#),
         ))
         .expect("unparseable version string must not fail the run");
+    }
+}
+
+/// `ensure_workspace_dir`: a missing workspace is a first run when its parent
+/// exists, and a typo when it does not.
+#[cfg(test)]
+mod workspace_dir_tests {
+    use super::*;
+    use crate::paths::resolve_workspace;
+    use tempfile::tempdir;
+
+    fn resolved(path: &Path) -> crate::paths::ResolvedWorkspace {
+        resolve_workspace(path.to_str().expect("utf-8 temp path")).expect("absolute")
+    }
+
+    /// The hl-05 case: `--settings` naming a `workspace_path` that nobody has
+    /// created yet, beside a parent that is there. Created and returned.
+    #[test]
+    fn a_missing_leaf_under_an_existing_parent_is_created() {
+        let parent = tempdir().unwrap();
+        let leaf = parent.path().join("headless-c");
+        assert!(!leaf.exists());
+
+        let workspace = resolved(&leaf);
+        let got = ensure_workspace_dir(&workspace).expect("leaf must be created");
+
+        assert_eq!(got, leaf.as_path());
+        assert!(leaf.is_dir(), "the workspace directory must now exist");
+    }
+
+    /// A parent that does not exist is the typo the refusal guards against:
+    /// nothing is created, and the error is the same `WorkspaceNotFound`.
+    #[test]
+    fn a_missing_parent_is_refused_and_nothing_is_created() {
+        let root = tempdir().unwrap();
+        let leaf = root.path().join("no-such-parent").join("headless-c");
+
+        let err = ensure_workspace_dir(&resolved(&leaf)).expect_err("missing parent must fail");
+
+        assert!(
+            err.downcast_ref::<WorkspaceNotFound>().is_some(),
+            "expected WorkspaceNotFound, got {err:?}"
+        );
+        assert!(
+            !leaf.exists(),
+            "nothing may be created under a missing parent"
+        );
+        assert!(
+            !leaf.parent().unwrap().exists(),
+            "the missing parent must not be created either"
+        );
+        let help = miette::Diagnostic::help(&WorkspaceNotFound {})
+            .map(|h| h.to_string())
+            .unwrap_or_default();
+        assert!(
+            help.contains("parent exists"),
+            "help must say the parent has to exist, got: {help}"
+        );
+    }
+
+    /// An existing workspace is returned as is, contents untouched.
+    #[test]
+    fn an_existing_directory_is_returned_unchanged() {
+        let dir = tempdir().unwrap();
+        let marker = dir.path().join("runs");
+        std::fs::create_dir(&marker).unwrap();
+
+        let workspace = resolved(dir.path());
+        let got = ensure_workspace_dir(&workspace).expect("existing dir is fine");
+
+        assert_eq!(got, dir.path());
+        assert!(marker.is_dir(), "existing contents must survive");
+    }
+
+    /// A file where the workspace should be is neither a typo nor a first run;
+    /// it is refused rather than clobbered.
+    #[test]
+    fn a_file_at_the_workspace_path_is_refused() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("workspace");
+        std::fs::write(&file, b"").unwrap();
+
+        let err = ensure_workspace_dir(&resolved(&file)).expect_err("a file is not a workspace");
+        assert!(err.downcast_ref::<WorkspaceNotFound>().is_some());
+        assert!(file.is_file(), "the file must be left alone");
     }
 }
 

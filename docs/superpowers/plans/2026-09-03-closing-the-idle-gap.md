@@ -107,6 +107,65 @@ in the OpenAPI contract, so nothing to mirror; `oil-gathering` is a
 prerequisite, so its lock is only reachable from a directly stated
 `Extracted` goal.
 
+## The copper bank was the symptom; the queue behind bot 1's release was the loss (`copper-bank`)
+
+The brief: bot 1 waits ~9,300 ticks on its own copper furnace at `[-51, 29]`,
+bank width sized for one, price the bank against the taker's own waits, a
+second furnace is 5 stone and 30 ticks. **Measured on the listing**: bot 1's
+copper takes waited 384 + 1,818 + 1,344 + 2,615 + 384 = **6,545** on its own
+timeline (1, 9, 6, 15 and 1 plates, serial through one furnace, `k = 1`
+because `bank_size`'s `widest` is the *idle* count and an own-queued furnace
+is not idle); the other **7,162** were bots 3 and 4 standing at that furnace
+with the 15-plate smelt's shared ore, waiting for bot 1's take (2,914 and
+4,248). The same shape on iron: bots 2-4 waited 3,002 each at `[-34, -32]`,
+5,170 / 1,936 / 1,936 at `[-38, -16]`, 1,282 ×3 at `[-32, -33]` — every one
+behind a release of bot 1's, because `b0ed1d25`'s own-queue rule sends a
+*shared* smelt behind the taker's own batch, and a shared smelt's inserts are
+on the suppliers' timelines.
+
+**The remedy the brief named was measured eight ways and rejected.** Pocket
+furnaces (stone already in hand, 60 ticks) priced against the wait; own-queued
+furnaces counted as bank slots; a per-bot and a per-smelt bare-wait fraction
+measured on a rehearsal schedule and on the plan's own schedule (a third
+expansion pass); subset selection over priced slots; clustered siting. Every
+variant took bot 1's copper waits out and put them back somewhere else on its
+timeline: the freed time landed on the shared iron batches (one variant stood
+4,026 at a 24-plate take that had been hidden under the research), the solo
+rung-1 fixture went 26,770 → 27,867 … 31,878 in every variant that built for
+the lag, and red on four bots ranged 30,913 … 41,588 across variants that
+differed only in siting or pricing. **On a serial taker's timeline the
+unhidden lag is conserved under the list scheduler's lookahead; a bank moves
+it and adds handling and walking.** `bank_size`'s doc said this crate cannot
+price the "bot is idle anyway" regime; that stands, and now it is measured
+rather than argued.
+
+**What was shipped is one line of mechanism**: a smelt whose ore the roster
+supplies and whose patch has no idle furnace builds a furnace of its own
+(`shared_grow`, beside `own_grow`) instead of queueing its suppliers behind
+the taker's release. Same reasoning as the own-queue rule, applied to the
+timelines the queue actually lands on.
+
+Offline, `workspace/scripts/map.json` (fingerprint `dfac0f4caa0a7500` — the
+t=0 baseline dump, byte-identical to `map-t0-baseline.json`, **not** seed
+`31337`'s map), HEAD → fix:
+
+| bots | goal | HEAD | fix |
+|---|---|---|---|
+| 1,2,3,4 | `researched:automation` | 207 / 21,818 | 209 / 21,903 (+0.4%) |
+| 1,2,3,4 | `producing:automation-science-pack:6` | 358 / 35,239 | **370 / 31,675 (−10.1%)** |
+| 1,2,3,4 | `producing:logistic-science-pack:6` | 610 / 95,237 | **616 / 82,742 (−13.1%)** |
+| 1,2,3 | automation / red / green | 23,411 / 29,962 / 100,599 | 25,166 (+7.5%) / 29,786 / 84,810 |
+| 1,2 | automation / red / green | 28,482 / 46,643 / 120,702 | 25,470 / 41,276 / 105,146 |
+| 1 | all three | identical | identical (no shared smelt exists) |
+
+Red, four bots: bot 1 idle 9,830 → 4,161, its research 28,364 → 25,513, no
+supplier insert waits over 800 ticks (there were nine), utilisation 47.5% →
+54.5%, 13 → 19 furnaces. The two regressions are the scheduler's reshuffle,
+not the mechanism: on four bots the packs are inserted 85 ticks later; on
+three bots one extra iron furnace (three actions) reorders bot 3's ready
+work and its `take 10 copper-ore from the wooden-chest` moves from 8,860 to
+13,473 with no furnace of its involved.
+
 ## ✅ GREEN FROM A FRESH WORLD IN 23:38 (`run-1788594774-55056`) — the furnace-slot fix, executed
 
 Git `b0ed1d25`: a bot with no furnace of its own on the patch builds one as its

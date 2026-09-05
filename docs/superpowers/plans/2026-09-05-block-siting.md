@@ -902,10 +902,24 @@ Neither is answerable by reading. Run against a scratch world, not a measured
 run, and ping the speedrun session for the box first.
 
 ```bash
-# Does a ghost expire? The mod never sets ghost_time_to_live, so it takes the
-# force default. If ghosts expire, the marker silently vanishes mid-run and
+# Does a ghost expire? If it does, the marker silently vanishes mid-run and
 # recovery falls back without saying so -- this repo's signature bug class.
-factorio-bot rcon -s localhost -- '/c rcon.print(game.forces["player"].ghost_time_to_live)'
+#
+# DO NOT look for a force setting. An earlier draft of this plan said the mod
+# "takes the force default", and the speedrun session disproved that against a
+# live 2.1.17 game: `LuaForce.ghost_time_to_live` DOES NOT EXIST -- the server
+# answers "LuaForce doesn't contain key ghost_time_to_live". The property moved
+# in 2.x and guessing its new home is how this plan would acquire a fifth
+# defect.
+#
+# Ask the ghost instead of the API. Stamp one, then read its own lifetime:
+factorio-bot rcon -s localhost -- '/c local s=game.surfaces[1]
+  local g=s.create_entity{name="entity-ghost", inner_name="stone-furnace",
+                          position={0.5,0.5}, force="player"}
+  rcon.print("ttl=" .. tostring(g and g.time_to_live))'
+# `time_to_live` of 0 (or the max u32) means it never expires, which is the
+# answer this task needs. Any finite tick count means ghosts are a marker with
+# a deadline and Step 1 stops here.
 
 # Does placing a real entity over a ghost CONSUME the ghost, or leave it?
 # Leftover ghosts make a finished block look unfinished, which defeats the

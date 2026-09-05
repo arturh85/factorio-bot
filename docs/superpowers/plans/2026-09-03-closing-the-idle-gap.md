@@ -220,6 +220,28 @@ three bots one extra iron furnace (three actions) reorders bot 3's ready
 work and its `take 10 copper-ore from the wooden-chest` moves from 8,860 to
 13,473 with no furnace of its involved.
 
+## WHAT MULTIPLE BOTS ARE ACTUALLY WORTH, on the honest walk model
+
+The mis-credit flattered multi-bot plans specifically — walking is the part
+of a plan that does not parallelise, and every walk was a fifth too cheap —
+so **every four-bot-versus-one speedup this record has quoted is overstated
+by an unknown amount.** Rather than leave that as a caveat, here it is
+measured on `map.json` (seed 31337, t=0, `3d45f40e`, plan makespans in
+ticks; the fixture's own measured speedup fell 2.00× → 1.86× on the same
+change):
+
+| goal | 1 bot | 2 bots | 4 bots | 8 bots | 4-bot speedup |
+|---|---|---|---|---|---|
+| `researched:automation` | 27,348 | 23,115 | 21,943 | 18,416 | **1.25×** |
+| `producing:automation-science-pack:6` | 59,328 | 38,667 | 28,107 | 20,520 | **2.11×** |
+| `producing:logistic-science-pack:6` | 146,120 | 92,717 | 59,018 | 49,080 | **2.48×** |
+
+So bots pay off in proportion to how much independent gathering and
+crafting a goal contains, and barely at all for automation, which is short,
+local and gated on one research. Eight bots add 16% over four for green and
+27% for red. These are plan numbers on one map; the live four-bot green run
+is 15:19 against a one-bot run nobody has made recently.
+
 ## THE WALK MODEL WAS 22–25% SHORT ON EVERY WALK (`3d45f40e`)
 
 Not a tail of stalls: 792 walks across four four-bot runs, **zero walk

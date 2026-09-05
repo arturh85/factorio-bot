@@ -380,3 +380,22 @@ the executor re-paths from clear ground. Ten stub-game tests. Live on
 headless-e, 8 bots, 5x: **one plan (296 steps), automation at tick 19,968
 (≈5:26 from start), 113 walks, 0 failed, 0 teleports** — against six
 replans and `stuck` before. Four bots took 6:18 on the same goal.
+
+### hl-08 — green, eight bots, 5x, everything merged (`run-1788617269-96746`)
+
+One plan, 693 actions / 50,665 ticks, **0 failed, 0 lost, 500 walk events
+none failed**, three pathfinder no-paths recovered by the executor, no
+bench engaged. Green at **71,936 ticks (19:58)**, witness 20:34, 242 tps.
+
+| | 4 bots (hl-04) | 8 bots (hl-08) |
+|---|---|---|
+| plan | 569 / 57,752 | 693 / 50,665 |
+| executed | 68,051 (1.18×) | 71,936 (1.42×) |
+
+So doubling the roster shortens the plan by 12% and lengthens the run by
+6%: the gap between plan and execution grows with bots on the ground.
+Where it goes — walk stalls between bots in the same cell, the
+`background_conflict` waits on a busy assembler site, lag waits sized for
+a roster the planner assumed would not collide — is the next thing to
+read off this record. The mode now runs eight bots without a single
+failure, which is what today set out to establish.

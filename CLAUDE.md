@@ -630,12 +630,19 @@ Three things that are **not** interchangeable between the modes:
   qualifying act to have actually happened, and a `mine-entity` trigger means
   a real extractor mining a real patch. A headless run therefore still cannot
   cross them.
-- **Nothing above 4 bots has been run.** `PlayerId` is `u8`, so 255 is the
-  arithmetic ceiling; before that, the mod polls **every bot every tick**
-  (whole main inventory, sorted signature, crafting-queue scan) and every
-  action is its own RCON round trip, so bot count is what costs tick rate.
-  Parallel *runs* are the cheap axis instead: a headless run needs only a
-  server, its own workspace and its own ports, so the limit is cores.
+- **Eight bots have been run (2026-09-05), nothing above.** Eight characters
+  reach automation in one plan in ~5:26 and green in one plan in 19:58 at
+  5x on seed 31337 — but green's 693-action plan of 50,665 ticks executed
+  in 71,936 (1.42×, against 1.18× for four bots), so the plan is shorter
+  and the run is not: contention between bots on the ground is the open
+  cost. `PlayerId` is `u8`, so 255 is the arithmetic ceiling; before that,
+  the mod polls **every bot every tick** (whole main inventory, sorted
+  signature, crafting-queue scan) and every action is its own RCON round
+  trip, so bot count is what costs tick rate (eight bots still held 242 of
+  300 requested tps). Parallel *runs* are the cheap axis: two headless
+  instances on their own ports and workspaces each held ~220 tps and
+  finished in the wall time of one (`docs/superpowers/notes/
+  2026-09-05-headless-experiments.md`).
 
 ### Important Timing Considerations
 

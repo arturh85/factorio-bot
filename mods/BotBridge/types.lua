@@ -511,6 +511,28 @@ function serialize_entity(entity)
         if recipe ~= nil then
             record.recipe = recipe.name
         end
+    elseif entity.type == "underground-belt" then
+        -- Task 6 (2026-09-05): read back which half of an underground-belt
+        -- pair this entity is. `FactorioEntity::underground_half` travels
+        -- INTO the game via `rcon_place_entity`'s 5th argument (see
+        -- control.lua), but nothing serialized it back OUT until now -- task
+        -- 5's report named this gap explicitly. `entity.belt_to_ground_type`
+        -- is Factorio's own field, "input" or "output".
+        --
+        -- KEYED AS `underground_half`, NOT `belt_to_ground_type` -- confirmed
+        -- the hard way. `find_entities_in_radius`/`find_entities_filtered`
+        -- deserialize this JSON into the strongly-typed Rust
+        -- `FactorioEntity` (crates/core/src/factorio/rcon.rs), whose field
+        -- for exactly this is `underground_half: Option<UndergroundHalf>`
+        -- (crates/core/src/types.rs); a first attempt emitted
+        -- `belt_to_ground_type` here, which matches nothing on that struct,
+        -- so serde silently dropped it and every live read came back `nil`
+        -- even though a raw `remote.call("botbridge","find_entities_filtered",
+        -- ...)` showed the field present and correct. `UndergroundHalf`'s
+        -- `#[serde(rename_all = "snake_case")]` already renders as
+        -- "input"/"output", which is what Factorio's own field returns, so
+        -- no value mapping is needed -- only the key.
+        record.underground_half = entity.belt_to_ground_type
     end
     return record
 end

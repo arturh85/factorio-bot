@@ -352,6 +352,36 @@ BotBridge Mod (Factorio mod for RPC)
     real caller has placed a belt in a real game. See
     `docs/superpowers/notes/2026-09-05-belt-routing-first-run.md`.
 
+  - **`Goal::Built` / `goal.built(blueprint, anchor)`** (`method::blueprint`,
+    `BuildBlock`) places a **decoded Factorio blueprint by hand**, entity by
+    entity, at a fixed anchor -- the opposite of `method::connect`'s
+    self-sited belt run. It is proven live up to 179 entities
+    (`FurnaceLine`: 87 belt, 48 inserter, 24 furnace, 13 pole, 3 lamp, 2
+    splitter, 2 underground-belt), including the underground-belt pair's
+    input/output half and its direction, both read back correct off the
+    live surface, and a real production curve out of the furnaces it
+    built (see `docs/superpowers/notes/2026-09-05-first-block-built.md`).
+    Three things by name:
+    - **It has no siting story, and refuses rather than guessing.** The
+      block is placed at a fixed offset; if a single tile of its footprint
+      is obstructed, `schedule()` correctly notices the owning bot cannot
+      place there and refuses the whole plan with
+      `PlannerError::ChainOwnerInfeasible` -- a typed, documented refusal
+      (`crates/planner/src/error.rs`), not a crash, but also not a retry or
+      a nudge to a clear tile. This has reproduced on a 37-entity block
+      (MinerLine, three anchors) and a 179-entity one (FurnaceLine, one
+      anchor) alike. Choosing a clear anchor, or clearing obstacles by
+      script first, are the two ways found to get past it; siting the
+      block automatically is out of scope.
+    - **It refuses unrecognised tiles, recipes and module requests by
+      name**, rather than silently dropping or misplacing them -- part of
+      the same decode/build path, from Task 1's blueprint allowlist work.
+    - **Bands are balanced by entity count**, split across the roster
+      (`bots`) as evenly as an integer division allows -- 179 across 4
+      bots split 45/45/45/44, essentially even; a 6-entity block split
+      3/4/3/0 in an earlier, smaller run, since a handful of entities does
+      not divide as cleanly as 179 does.
+
 - **crates/executor**: runs a `Schedule` across bots over RCON. Per-action
   completion signals (`tokio::sync::watch`, not polling), lag edges modelling
   machine time, pre-flight wait-graph cycle rejection, and recovery tiers in

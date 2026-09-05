@@ -577,3 +577,172 @@ produce; it did not happen.
   `provenance.json` git commit `c52d6ff2`, `dirty: false`.
 - `scripts/synth_run.lua` (this worktree, tracked). `scripts/synth_plan_check.lua`
   was a throwaway offline sanity check and is not tracked.
+
+## Task 6: FurnaceLine (179 entities) -- built, and it smelts
+
+Fifty times MinerLine. Own box: ports 34200/4324, workspace
+`workspace-blocks-task6`, headless, 4 character bots, seed 31337, `--new`,
+game-speed 5. Machine load was checked before the run itself (fell from
+~22 to ~1 before launch; building/probing in between is fine per the brief)
+so this is not a starved-server measurement.
+
+### Siting: refused once, then a clean anchor
+
+The first anchor, `(40,40)`, had 5 trees inside the 29x11 footprint
+(decoded offline from `scripts/rcontest.lua`'s `FurnaceLine` blob: x in
+[0.5,28.5], y in [0.5,10.5]). All 5 were mined by script before planning
+(disclosed, per the brief), but `goal.plan` still refused: `bot 2 owns
+chain ChainId(1) ... but stone-furnace fits at [51, 48] does not hold
+there` -- the same `ChainOwnerInfeasible` shape as MinerLine (Task 4), at a
+tile none of the 5 known trees stood on (most likely uneven terrain or a
+cliff, invisible to `rcon.find_entities_in_radius` per Task 4's own
+finding). Rather than fight it, a throwaway scan script
+(`scripts/furnace_site_scan.lua`, not tracked -- reproduction trail only)
+checked 6 candidate anchors for in-footprint obstacles; `(60,-100)` came
+back with 0. Rebuilt there, clean, first try. **This is the same siting
+finding as MinerLine, generalised**: obstacle-only clearing is not a full
+site check, and a second anchor was needed. Choosing a clear anchor and
+clearing entities are both the legitimate moves the brief names; both were
+used here, in that order.
+
+### 1. The underground pair: correct type, correct direction, read off the surface
+
+**Yes on both counts.** `underground-belt @ (60.50,-93.50) dir=4
+underground_half=input` and `underground-belt @ (62.50,-93.50) dir=4
+underground_half=output`, matching the blueprint's decoded expectation
+(`dir=4` both, `input`/`output` respectively) exactly. This is the
+Entry/Exit pair Task 5 wired end to end and flagged as unverified live;
+it now is.
+
+Getting a readable answer took a mod fix, done in this task. The first
+attempt added `record.belt_to_ground_type = entity.belt_to_ground_type`
+to `mods/BotBridge/types.lua`'s `serialize_entity` and confirmed via a raw
+`remote.call("botbridge","find_entities_filtered",...)` that Factorio's own
+field reports "input"/"output" correctly -- but every live read through
+`rcon.find_entities_in_radius` still came back `nil`. Cause: that path
+deserializes the JSON into the strongly-typed Rust `FactorioEntity`
+(`crates/core/src/factorio/rcon.rs`), whose field for this is
+`underground_half: Option<UndergroundHalf>` (`crates/core/src/types.rs`,
+added in Task 5) -- a JSON key named `belt_to_ground_type` matches nothing
+on that struct and serde drops it silently. Renamed the mod's field to
+`underground_half` (same value spelling, `UndergroundHalf`'s own
+`#[serde(rename_all = "snake_case")]` already renders "input"/"output"),
+and the live read matched the raw probe. Committed as part of this task.
+
+### 2. Does it smelt? Yes -- a real, rising production curve
+
+FurnaceLine has no output chest (its 179 entities are 87 belt / 48 inserter
+/ 24 furnace / 13 pole / 3 lamp / 2 splitter / 2 underground-belt --
+counted, no container), and belt/ore supply is explicitly out of this
+sub-project's scope. So ore (100/furnace) and coal (20/furnace) were
+inserted **directly into each built furnace's own inventories** via
+`rcon.insert_to_inventory` (moves items out of the calling bot's own
+inventory -- confirmed by reading `mods/BotBridge/control.lua`, which is
+why iron-ore/coal were cheated onto bot 1 first), bypassing the belt
+network -- disclosed here and in `scripts/furnace_run.lua`. This tests
+exactly the in-scope part: do the built furnaces smelt, and do their
+output inserters move plates onto the belt.
+
+Getting this working also needed a correction: `defines.inventory`'s
+numeric values are NOT the `order` field `runtime-api.json` lists them
+under (that field looks like the real value and is not -- it is
+alphabetical-listing metadata). A first attempt trusted it (`fuel=0,
+crafter_input=50`) and every insert failed ("cannot insert to nonexisting
+inventory"). Verified instead against a live probe server
+(`factorio-bot rcon -s localhost`): created a real stone-furnace, called
+`get_inventory(i)` for `i=0..55`, found non-nil at `{1,2,3,4,6,8}`, and
+read `defines.inventory.{fuel,crafter_input,crafter_output}` directly --
+`{fuel=1, crafter_input=2, crafter_output=3}`. Stone-furnace IS a unified
+"crafter" in this Factorio version, just not at the indices the doc
+implied.
+
+10 of 24 furnaces were fed successfully; 14 failed because bot 1 could not
+walk to a stance next to them (`the walk to [..] would end at [..], inside
+transport-belt at [..] -- a character cannot stand there`) -- the packed
+belt layout leaves some furnaces with no adjacent tile a character can
+occupy. This is a feeding-method limitation (insert requires the bot to be
+physically near the target), not a build defect.
+
+Production, read directly from the 10 fed furnaces' own `output_inventory`
+(summed, `iron-plate`), sampled every 600 ticks for 12,000 ticks
+(~3.3 game minutes) after feeding:
+
+| ticks past feed | iron-plate |
+|---:|---:|
+| 600 | 45 |
+| 1800 | 109 |
+| 3600 | 200 |
+| 6000 | 326 |
+| 9000 | 485 |
+| 12000 | 639 |
+
+Steady, roughly linear climb, no plateau within the window -- consistent
+with continuous smelting rather than a one-shot batch. `just analyse`
+against the run directory independently corroborates it from the mod's own
+machine samples: **10 of 24 machines "worked" at some point, 14 stayed
+`no_fuel`** (exactly the 10 fed / 14 unreachable split above), with
+per-furnace `products finished` around 63-64 plates each by the end of
+sampling (10 x ~64 ~= 640, matching the in-script total of 639).
+
+**Caveat on the production-curve tooling**: the brief describes `just
+analyse` as now printing "cumulative and per-minute output at fixed game
+minutes with a plateau detector." That feature is not present in this
+branch's `tools/run_analysis.py` (grepped for `plateau`/`per-minute`/
+`per_minute`: no matches) -- it is very likely a `master` addition this
+branch predates, the same shape as the walk-model correction called out
+below. The PRODUCTION and MACHINES sections `just analyse` does have on
+this branch were used instead, and agree with the in-script curve above.
+
+### 3. Construction time and per-bot counts: the split divided evenly
+
+- **178 of 179 entities placed** (`success=178 failed=0 lost=0 pending=1`).
+  The one pending placement (`transport-belt @ (67.5,-99.5)`) failed
+  because a bot's pathfinder found no route to its stance
+  (`found no path from (62.2,-92.7) to (66.4,-98.0)`) -- a walk failure in a
+  layout packed with the bots' own just-placed neighbours, not a placement
+  or direction defect.
+- **178/178 matched position AND direction exactly, 0 wrong-direction.**
+  Verified against a table decoded OFFLINE from the blueprint (name,
+  position, migrated direction), **not** against `plan.steps[i].direction`
+  -- Task 4's report already found that field does not exist
+  (`ActionKind::Place` sets only `kind`/`entity`/`pos`); relying on it, as
+  the earlier scripts did, would have silently reported "wrong direction"
+  for every single entity (`s.direction` is always Lua `nil`). Confirmed by
+  reproducing that exact failure mode against this run before switching to
+  the offline table.
+- **Planned split: bot 1 = 48 steps/45 placements, bot 2 = 50/45, bot 3 =
+  50/45, bot 4 = 48/44** (196 steps, 179 placements total). **179 divides
+  four ways about as evenly as an integer split can** (45/45/45/44) --
+  answering the brief's question: yes, at this size the band split divides
+  evenly, unlike StarterSteamEngineBoiler's 6-entity {3,4,3,0} split in
+  Task 4.
+- **Construction time: 2,314 ticks** (`tick_before=762`, `tick_after=3076`,
+  via `rcon.game_tick()`), excluding gathering (materials cheated in,
+  disclosed) and excluding the smelt-test window that follows it.
+- Bot 3 was the busiest (1,821 busy / 15,252-tick span = 11.9%, the rest
+  idle after finishing its band) per `just analyse`'s per-window report;
+  all four bots ended up walled in by their own neighbours' placements at
+  various points, consistent with the packed 29x11 layout.
+
+### Caveat on every planned figure here
+
+Master has since corrected the planner's walk model, which had
+under-charged every walk by 22-25%; this branch predates that fix. Nothing
+above quotes a *planned* makespan as a headline number (the reported times
+are all *observed* tick deltas from `rcon.game_tick()`), but the plan's own
+`makespan=2070` (vs the observed 2,314 build ticks) should be read with
+that correction in mind.
+
+### Evidence
+
+- Run directory: `run-1788633550-62260` (workspace
+  `workspace-blocks-task6/runs/`), `done=true success=178 failed=0 lost=0
+  pending=1`.
+- `scripts/furnace_run.lua` (this worktree, tracked): build, live
+  world-back verification against an offline-decoded table, direct
+  furnace feed, and the in-script production curve.
+- `scripts/furnace_site_scan.lua` (this worktree, tracked): the anchor scan
+  that found `(60,-100)` clean after `(40,40)` refused -- reproduction
+  trail, not a reusable tool, same status as `scan_site.lua`/`scan_ore.lua`.
+- `mods/BotBridge/types.lua`: `serialize_entity` now reports
+  `underground_half` for `underground-belt` entities (this task).

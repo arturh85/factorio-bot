@@ -421,6 +421,21 @@ research to the busy chain owner on ties; walk overruns (~11–12k per
 four-bot run) are the largest remaining slip and untouched; research
 durations still assume the lab count the method saw.
 
+## PER-MACHINE PRODUCTION COUNTERS (owner, 2026-09-05 22:00)
+
+Owner: "each single machine should have a counter how many items it produced
+in total." This replaces the attribution *inference* with arithmetic — what
+each machine made between two ticks is then simply known, and an interval's
+output splits into machine-made and roster-made without a verdict.
+
+State: crafting machines already carry the game's own `products_finished`
+in every `machines` sample, with a note in place that an assembler reading
+zero after twenty minutes is the blunt proof it produced nothing. **Mining
+drills have no lifetime counter in the API at all**, so the mod must
+accumulate one and say that it did — a row should carry both the number and
+how it was obtained, so nobody reads an accumulated figure as exact.
+Dispatched as the `machinecount` worktree.
+
 ## ⚠️ A RISING CURVE IS NOT A WORKING FACTORY (2026-09-05, from the peer's review)
 
 The peer session's 179-entity furnace line was reported as smelting. Its

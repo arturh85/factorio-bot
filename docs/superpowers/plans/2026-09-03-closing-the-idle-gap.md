@@ -469,11 +469,29 @@ and their individual totals are 39, 39, 39, 46, 53, 53, 53, 53, 66, 73:
 0.25 items a second is ~53 ore.** Several drills produced exactly that. A
 drill is fuelled, delivers one load's worth, and stops.
 
-The arithmetic that follows is stark. Refuelling a drill costs a walk plus
-an insert — a few hundred ticks when a bot passes anyway — and buys ~53 ore.
-Hand-mining the same 53 ore costs thousands of bot-ticks. The 345 hand-mined
-ore in this run are the expensive substitute for roughly seven refuel trips.
-Dispatched as the `refuel` worktree.
+**And "nobody refuels them" is the wrong reading of that** — corrected by the
+`refuel` agent within the hour. Each drill is fuelled *exactly* for the ore
+its fragment was promised and then stops **by design**: `open_cell_steps`
+(`method/produce.rs`) sizes fuel as `ticks_per_item × (need + 1)`, so
+`need = 52` buys 8 coal, 12,800 ticks, 53 ore. The live run matches to the
+item — fuel actions of 6, 6, 6, 7, 8, 8, 8, 8, 10, 11 coal against lifetime
+totals of 39, 39, 39, 46, 53, 53, 53, 53, 66, 73, which is `coal × 1600/240`
+every time. Multi-visit refuelling exists (`fuel_steps`, `have::fuel_visits`)
+but only above a 50-coal stack, i.e. 80,000 ticks, which no drill approaches.
+
+The actual mechanism is **that a cell is never re-offered**. `Drain`'s
+eligibility is `queued < cell_setup_bot_ticks(spec, 1)`, about 4,000 ticks
+or 16 plates; a cell that has just promised its fragment 52 plates carries
+`queued ≈ 12,480` and is ineligible from then on. So every new fragment pays
+a fresh drill bill — about nine iron plates, themselves hand-mined — instead
+of a coal top-up. Ten fragments, ten cells, ten single loads, and 345 ore
+mined by hand.
+
+The blunt levers trade the goals against each other and are not monotone:
+loosening the drain bound fourfold moves green's split to 664/219 but costs
+automation 27% (21,776 → 27,703), because automation's roster is only 39.6%
+busy and a second fragment behind one drill is pure latency. The fix has to
+be better than a constant.
 
 So the honest finding is narrower and still interesting: **a drill spends
 roughly two thirds of its life waiting for coal.** Eight coal is 32 MJ

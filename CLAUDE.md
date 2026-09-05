@@ -557,6 +557,7 @@ Three things that are **not** interchangeable between the modes:
   is taken, never the sum**: machine production (the force's statistics) and
   hand crafts (`storage.crafted_tally`), because **a hand craft does not appear
   in production statistics at all** — measured, and the reason the first
+  attempt unlocked both plate triggers and never the lab one.
   The `mine-entity`, `build-entity`, `capture-spawner` and
   `create-space-platform` triggers are **not** emulated. Since `ffc56270` the
   mod does send their payload (`oil-processing` arrives as

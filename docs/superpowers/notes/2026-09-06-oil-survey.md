@@ -556,6 +556,10 @@ behind one, so furnaces scale with the bill and with the roster, and the
 `method::power::PLANT_ADOPT_RADIUS` is derived from it — reuse is. It wants
 its own task.
 
-Eight bots was not settled: the expansion runs for many minutes at that
-roster (before the fix it refused in seconds on `have 5 copper-ore`), which is
-itself worth a look — expansion cost grows with the number of shares.
+Eight bots is worse, and is the third thing found here. Before the fix,
+`have:pumpjack:1 --bots 1,2,3,4,5,6,7,8` refused within seconds on `have 5
+copper-ore`. After it, the expansion **did not finish in 1,800 seconds** and
+was killed; it has never been run to completion. A refusal is cheap and a
+plan is not, so this is partly the fix doing more work — but expansion cost
+that grows this steeply with roster size is its own defect, and nobody should
+quote an eight-bot planned makespan until it has been measured.

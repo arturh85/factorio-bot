@@ -80,6 +80,39 @@ honestly, as before. Also fixed on the way: `scripting_lua`'s
 `plan_cell` call was one argument behind `bdec88af` and failed
 `--all-targets` clippy on master.
 
+## The cell ladder was three mechanisms, none of them "the previous cell's plates" (`de765de3`)
+
+My brief said each drill was built from the previous cell's plates. Wrong:
+bot 4's drill was hand-smelted and waited 27,000 ticks on bot 1's *furnace
+queue*. What serialised green:
+
+1. **`Drain::cap` tripped at five drills** because `cells_stood` counted any
+   furnace near the patch with an iron-plate queue — the three hand-smelt
+   furnaces too — and after that every cell was eligible whatever its backlog,
+   so 12-plate drill bills queued 21,830 ticks behind a 78-plate science share.
+2. **`infer_edges` paired every `HasItem` consumer with every earlier producer
+   on its chain**, so bot 1's cells were placed one per take: place, wait
+   8,400, place, wait 8,400. Its own doc admitted this.
+3. **Stated supply edges used the oldest stock (FIFO)**, not the stock the
+   subgoal had just produced for that consumer.
+
+Measured one at a time: the cap fix alone 142,092 (worse), LIFO alone
+195,894, inference alone 142,092, **all three 97,232**. They are one
+mechanism. "Cells built breadth-first by other bots via handover" was built,
+measured and rejected on all three goals.
+
+| goal | before | after |
+|---|---|---|
+| `researched:automation` | 207 / 25,886 | 207 / 25,886 |
+| `producing:automation-science-pack:6` | 359 / 39,791 | 359 / 39,118 |
+| `producing:logistic-science-pack:6` | 503 / 132,507, util 23% | 644 / **97,232 (27:00)**, util 35%, 11 drills, bot 1 idle −44k |
+
+**Open, named:** a bot's starter drill is still ordered after a *crafted*
+drill by `infer_edges` (bot 4's copper cell stood at 56k instead of ~10k);
+`chop_beats_mining` answers per fragment, so a solo bank plan hand-mines 1+3
+coal before swinging a rock; count-ahead-of-demand is still a rate-rung
+decision.
+
 ## ✅ GREEN FROM A FRESH WORLD IN 36:48 — the research split, executed (`run-1788574143-35250`)
 
 Same script and seed as run 7, git `1502629c` (research shared across the

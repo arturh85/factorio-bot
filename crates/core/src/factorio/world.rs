@@ -90,6 +90,39 @@ pub struct RespawnEvent {
     pub position: Option<Position>,
 }
 
+/// The payload of a `"research_trigger_emulated"` writeout: the mod completed
+/// a trigger technology on a headless run because the force had already done
+/// what the trigger names (`mods/BotBridge/control.lua`,
+/// `emulate_research_triggers`).
+///
+/// Two spellings of the count, because the mod writes the counter it read:
+/// `produced` for a `craft-item` trigger (production statistics or the
+/// hand-craft tally, whichever was larger) and `built` for a `build-entity`
+/// one. Both default so a line written by an older mod still parses; the
+/// record folds them into one `count`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct ResearchTriggerEvent {
+    pub technology: String,
+    /// The trigger's `type`: `craft-item` or `build-entity`.
+    pub trigger: String,
+    #[serde(default)]
+    pub item: Option<String>,
+    #[serde(default)]
+    pub entity: Option<String>,
+    pub needed: u32,
+    #[serde(default)]
+    pub produced: Option<u32>,
+    #[serde(default)]
+    pub built: Option<u32>,
+}
+
+impl ResearchTriggerEvent {
+    /// The count that earned the technology, whichever counter it came from.
+    pub fn count(&self) -> u32 {
+        self.produced.or(self.built).unwrap_or(0)
+    }
+}
+
 /// One entry of the death queue: a bot lost its character, or got one back.
 ///
 /// One queue for both rather than two, because the reader
@@ -983,6 +1016,13 @@ pub struct FactorioWorld {
     /// mod stamped on its `writeout` line. Same shape and same reason as
     /// `teleports`: `OutputParser` pushes, `record.deaths()` drains.
     pub deaths: SyncMutex<Vec<(u64, BotLifeEvent)>>,
+    /// Trigger technologies the mod has completed on a headless run since the
+    /// last [`FactorioWorld::drain_research_triggers`], each tagged with the
+    /// game tick. Same shape as `deaths`: `OutputParser` pushes,
+    /// `record.research_triggers()` drains. Until this queue existed the
+    /// mod's line reached only the server log, and `events.jsonl` showed a
+    /// research finishing with no research ever started.
+    pub research_triggers: SyncMutex<Vec<(u64, ResearchTriggerEvent)>>,
     /// Sites the game has refused a build at, for the life of this world.
     ///
     /// Two readers, which is why it sits here rather than in either of them.
@@ -1394,6 +1434,7 @@ impl FactorioWorld {
             flow_graph,
             teleports: SyncMutex::new(Vec::new()),
             deaths: SyncMutex::new(Vec::new()),
+            research_triggers: SyncMutex::new(Vec::new()),
             inventories: DashMap::new(),
             placement_refusals: SyncMutex::new(PlacementRefusals::default()),
             walk_refusals: SyncMutex::new(WalkRefusals::default()),
@@ -1432,6 +1473,17 @@ impl FactorioWorld {
     /// first.
     pub fn drain_deaths(&self) -> Vec<(u64, BotLifeEvent)> {
         std::mem::take(&mut *self.deaths.lock())
+    }
+
+    /// Queues a trigger technology the mod just completed, for
+    /// [`FactorioWorld::drain_research_triggers`] to pick up.
+    pub fn record_research_trigger(&self, tick: u64, event: ResearchTriggerEvent) {
+        self.research_triggers.lock().push((tick, event));
+    }
+
+    /// Takes every emulated trigger queued since the last drain, oldest first.
+    pub fn drain_research_triggers(&self) -> Vec<(u64, ResearchTriggerEvent)> {
+        std::mem::take(&mut *self.research_triggers.lock())
     }
 
     /// Remembers a build the game refused. Returns whether the site was new.
@@ -1892,6 +1944,7 @@ impl<'de> Deserialize<'de> for FactorioWorld {
                     flow_graph,
                     teleports: Default::default(),
                     deaths: Default::default(),
+                    research_triggers: Default::default(),
                     inventories,
                     placement_refusals: SyncMutex::new(placement_refusals),
                     walk_refusals: SyncMutex::new(walk_refusals),
@@ -1945,6 +1998,7 @@ impl Clone for FactorioWorld {
             // two independent recorders.
             teleports: SyncMutex::new(Vec::new()),
             deaths: SyncMutex::new(Vec::new()),
+            research_triggers: SyncMutex::new(Vec::new()),
             // Knowledge, like `placement_refusals` below and for the same
             // reason: what a chest was last seen holding does not stop being
             // our best reading because the world was cloned. Stale in exactly
@@ -2012,6 +2066,7 @@ mod tests {
             next_action_id: Default::default(),
             teleports: Default::default(),
             deaths: Default::default(),
+            research_triggers: Default::default(),
             inventories: Default::default(),
             placement_refusals: Default::default(),
             walk_refusals: Default::default(),

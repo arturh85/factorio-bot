@@ -10843,8 +10843,9 @@ mod tests {
         assert!(
             matches!(
                 &err,
-                PlannerError::UnsupportedResearchTrigger { technology, trigger }
+                PlannerError::UnsupportedResearchTrigger { technology, trigger, act }
                     if technology == "steam-cracking" && trigger == "craft-fluid"
+                        && act == "craft 200 steam"
             ),
             "expected an UnsupportedResearchTrigger naming the kind, got {err:?}"
         );

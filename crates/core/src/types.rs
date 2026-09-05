@@ -1003,11 +1003,14 @@ pub struct ChunkResource {
 /// -- and the planner names it as such (`UndescribedResearchTrigger`) rather
 /// than treating it as either free or unsupported.
 ///
-/// Read off the prototype data, the shipped 2.1.17 shapes are: `craft-item`
-/// `{item, count?}`, `mine-entity` `{entities = {...}}`, `send-item-to-orbit`
-/// `{item}`, `capture-spawner` `{}`, `create-space-platform` `{}`. No shipped
-/// technology uses `craft-fluid` or `build-entity`; their fields follow the
-/// runtime API definition (`fluid`/`amount`, `entity`/`count`).
+/// Enumerated from the live game on 2026-09-05 (Space Age 2.1.17, all 32 --
+/// `docs/superpowers/notes/2026-09-05-research-triggers.md`), the runtime
+/// shapes are: `craft-item` `{item = {name}, count}`, `mine-entity`
+/// `{entities = {...}}`, `build-entity` `{entity = {name}}` (singular -- the
+/// one shipped use is `space-science-pack`, an asteroid collector),
+/// `capture-spawner` `{}` and `create-space-platform` `{}`. No shipped
+/// technology uses `craft-fluid` or `send-item-to-orbit`; their fields follow
+/// the runtime API definition.
 ///
 /// Carrying the kind is still the whole point: it is what lets a planner
 /// distinguish "this research is genuinely free" from "this research has a cost
@@ -1044,7 +1047,8 @@ pub enum ResearchTrigger {
         #[serde(default = "one_item")]
         count: u32,
     },
-    /// Build any one of `entities`. Unused by shipped 2.1.17.
+    /// Build any one of `entities`. Shipped once: `space-science-pack`, an
+    /// `asteroid-collector`, spelled `entity = {name}` at runtime.
     BuildEntity {
         #[serde(default, deserialize_with = "deserialize_helpers::names_one_or_many")]
         entities: Vec<String>,
@@ -1119,6 +1123,8 @@ impl std::fmt::Display for ResearchTrigger {
             ResearchTrigger::CaptureSpawner {
                 entity: Some(entity),
             } => write!(f, "capture a {}", entity),
+            ResearchTrigger::CaptureSpawner { entity: None } => write!(f, "capture a spawner"),
+            ResearchTrigger::CreateSpacePlatform => write!(f, "create a space platform"),
             other => write!(f, "{}", other.kind()),
         }
     }

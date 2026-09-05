@@ -886,6 +886,16 @@ const SCHEMAS: Record<string, SchemaContract> = {
             bot: {required: true, type: 'integer'},
             position: {required: false, ref: 'Position', nullable: true}
         },
+        // A trigger technology the mod completed on a headless run. `item`
+        // and `entity` are each null for the other trigger kind.
+        research_trigger_emulated: {
+            technology: {required: true, type: 'string'},
+            trigger: {required: true, type: 'string'},
+            item: {required: false, type: 'string', nullable: true},
+            entity: {required: false, type: 'string', nullable: true},
+            needed: {required: true, type: 'integer'},
+            count: {required: true, type: 'integer'}
+        },
         roster_changed: {
             bots: {required: true, type: 'array'},
             left: {required: true, type: 'array'},

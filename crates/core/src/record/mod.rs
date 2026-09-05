@@ -803,6 +803,34 @@ pub enum EventKind {
         /// which is not where the walk in flight was going.
         position: Option<Position>,
     },
+    /// The mod completed a Factorio 2.0 *trigger* technology on a headless
+    /// run because the force had already done what the trigger names.
+    ///
+    /// A server-side character has no player, and the game fires `craft-item`
+    /// for machine output but never for a character's hand craft, and never
+    /// `build-entity` for a mod-placed entity
+    /// (`docs/superpowers/notes/2026-09-05-research-triggers.md`). So
+    /// `emulate_research_triggers` in `mods/BotBridge/control.lua` completes
+    /// such a technology from the counters it keeps, only once every
+    /// prerequisite is researched, and writes this line with the count that
+    /// earned it. It is the answer to "why does `on_research_finished` for
+    /// `automation-science-pack` appear with no research ever started?", and
+    /// a run whose log has the finish without this line is one in which the
+    /// game fired the trigger itself. Written by `record.research_triggers()`.
+    ResearchTriggerEmulated {
+        technology: String,
+        /// The trigger's `type`: `craft-item` or `build-entity`.
+        trigger: String,
+        /// The item a `craft-item` trigger counted; `null` for `build-entity`.
+        item: Option<String>,
+        /// The entity a `build-entity` trigger counted; `null` for `craft-item`.
+        entity: Option<String>,
+        /// What the trigger asked for.
+        needed: u32,
+        /// What the force had done when the sweep read it -- at least
+        /// `needed`, by construction.
+        count: u32,
+    },
     /// The supervisor changed the roster it plans for.
     ///
     /// The roster used to be computed once at script start and never again.

@@ -213,6 +213,12 @@ repeat
         -- hand.
         local ne = record.enclosures()
         if ne > 0 then print("   WALLED IN: " .. ne .. " bot(s) can no longer reach open ground") end
+        -- Trigger technologies the mod completed this batch on a headless
+        -- run (`research_trigger_emulated`) -- the line that explains an
+        -- `automation-science-pack` finishing with no research ever started.
+        -- Zero on a client run, where the game fires every trigger itself.
+        local nrt = record.research_triggers()
+        if nrt > 0 then print("   trigger technologies emulated: " .. nrt) end
         -- Grouped, because the four trouble counts are two axes and a flat
         -- list of four `x=n` pairs invites exactly the misreading this line
         -- used to produce: `failed` and `lost` name the same distinction for
@@ -272,6 +278,8 @@ record.refusals()
 -- bot unable to move is precisely the run whose frozen bot someone will want to
 -- look up.
 record.enclosures()
+-- And a trigger technology the sweep completed after the last batch settled.
+record.research_triggers()
 
 local id = record.finish(ok and sup.state or "crashed")
 print("RUN FINISHED state=" .. (ok and sup.state or "crashed") .. " id=" .. id)

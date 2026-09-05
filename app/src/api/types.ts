@@ -1248,6 +1248,27 @@ export type EventKind =
       }
     | {
           /**
+           * The mod completed a Factorio 2.0 trigger technology on a
+           * headless run because the force had already done what the
+           * trigger names (a hand-crafted lab, a placed entity), once every
+           * prerequisite was researched. Explains an `on_research_finished`
+           * with no research ever started; absent on a client run, where
+           * the game fires every trigger itself.
+           */
+          kind: 'research_trigger_emulated';
+          technology: string;
+          /** `'craft-item'` or `'build-entity'`. */
+          trigger: string;
+          /** The item a `craft-item` trigger counted; `null` for `build-entity`. */
+          item: string | null;
+          /** The entity a `build-entity` trigger counted; `null` for `craft-item`. */
+          entity: string | null;
+          needed: number;
+          /** What the force had done when the sweep read it -- at least `needed`. */
+          count: number;
+      }
+    | {
+          /**
            * The supervisor changed the roster it plans for: a bot absent
            * past the bounded respawn wait was dropped, or one dropped earlier
            * came back. Every later `plan_created.bots` shows the new roster;

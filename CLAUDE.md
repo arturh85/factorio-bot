@@ -606,30 +606,48 @@ Three things that are **not** interchangeable between the modes:
   `game_speed`, written at run start from `<instance>/run-mode.json`.
   `just analyse` treats a difference as a note, not a refusal, but **do not
   compare a 5x headless run's timings against a 1x client run**.
-- **Trigger technologies are emulated, and only the `craft-item` ones.**
+- **Trigger technologies: the game fires `mine-entity` itself, the mod
+  emulates `craft-item` and `build-entity`, and prerequisites gate both.**
   Factorio 2.0 unlocks 32 technologies by *doing* — `automation-science-pack`
   by crafting one lab, `electronics` by 10 copper plates, `steam-power` by 50
-  iron plates — and the game fires those from **player** actions, which a
-  server-side character never performs. Left alone, a headless run crafts a
-  lab, places it, and still cannot craft red science: it halts `stuck` at
-  milestone 1 with a precondition that can never become true.
-  `emulate_research_triggers` completes such a technology when the force has
-  **already** produced what the trigger names, sweeping every 60 ticks, only
-  while character bots exist, and writing a `research_trigger_emulated` event
-  naming the counts that earned it. Two counters are consulted and **the larger
-  is taken, never the sum**: machine production (the force's statistics) and
-  hand crafts (`storage.crafted_tally`), because **a hand craft does not appear
-  in production statistics at all** — measured, and the reason the first
-  attempt unlocked both plate triggers and never the lab one.
-  The `mine-entity`, `build-entity`, `capture-spawner` and
-  `create-space-platform` triggers are **not** emulated. Since `ffc56270` the
-  mod does send their payload (`oil-processing` arrives as
-  `{"type":"mine-entity","entities":["crude-oil"],"count":1}`, verified on a
-  server-only dump), so the planner can refuse `oil-processing` by the next
-  rung rather than by the trigger, but emulating one honestly needs the
-  qualifying act to have actually happened, and a `mine-entity` trigger means
-  a real extractor mining a real patch. A headless run therefore still cannot
-  cross them.
+  iron plates. All 32 were enumerated from a live server and each kind was
+  tested against a server-side character on 2026-09-05
+  (`docs/superpowers/notes/2026-09-05-research-triggers.md`):
+  - **`mine-entity` fires with no player at all** — a character bot chopping
+    a rock through `action_start_mining`, a fuelled burner drill and a
+    powered pumpjack each completed their technology. **Do not emulate it.**
+  - **`craft-item` fires for machine output and NOT for a hand craft**: with
+    the sweep switched off, a furnace's tenth copper plate earned
+    `electronics` by itself within ~400 ticks, while a lab hand-crafted
+    through `action_start_crafting` left `automation-science-pack` open for
+    4,000 ticks. `emulate_research_triggers` completes it when the force has
+    **already** produced what the trigger names, every 60 ticks, only while
+    character bots exist, writing a `research_trigger_emulated` event with
+    the counts. Two counters, **the larger taken, never the sum**: machine
+    production (the force's statistics -- redundant with the game, and only
+    ever ahead of it by under 400 ticks) and hand crafts
+    (`storage.crafted_tally`), because **a hand craft does not appear in
+    production statistics at all**. A 60-tick sweep beats the game's own
+    check, which is how the first measurement misread the furnace row --
+    switch the sweep off before concluding what the game does alone.
+  - **`build-entity` does not either** — `surface.create_entity{force=…}`,
+    which is every placement the mod makes, fires nothing with or without
+    `raise_built`. Emulated from `storage.built_tally`, filled in
+    `on_some_entity_created` for entities on the player force. The one
+    shipped use is `space-science-pack` (an asteroid collector), which
+    `can_place_entity` refuses on Nauvis even as a ghost, so the stub tests
+    are its only proof; no live run can cross it here.
+  - **Prerequisites gate the trigger and the act is remembered**: a rock
+    mined with `planet-discovery-vulcanus` open earned nothing; a stromatolite
+    mined *before* `planet-discovery-gleba` earned `heating-tower` right after
+    it. The sweep now skips a technology with an open prerequisite, which is
+    what stops `automation-science-pack` completing in the same sweep as, or
+    before, the two plate triggers it depends on.
+  - **`capture-spawner` and `create-space-platform` are refused by name** in
+    the planner (`UnsupportedResearchTrigger { act }`): no action in this
+    project performs the act, so an emulation would be a grant.
+  `remote.call("botbridge", "set_research_trigger_emulation", false)`
+  switches the sweep off for a measurement and records that it did.
 - **Eight bots have been run (2026-09-05), nothing above.** Eight characters
   reach automation in one plan in ~5:26 and green in one plan in 19:58 at
   5x on seed 31337 — but green's 693-action plan of 50,665 ticks executed

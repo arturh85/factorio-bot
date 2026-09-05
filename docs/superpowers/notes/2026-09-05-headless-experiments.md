@@ -399,3 +399,94 @@ Where it goes — walk stalls between bots in the same cell, the
 a roster the planner assumed would not collide — is the next thing to
 read off this record. The mode now runs eight bots without a single
 failure, which is what today set out to establish.
+
+### crowd — RCA: the extra 21,000 ticks are a research waiting for a pole it did not depend on
+
+Worktree `crowd`, branch `eight-bot-execution-gap`, from `78bca60d`. Read
+off hl-04 (`run-1788611922-87269`, 4 bots) and hl-08
+(`run-1788617269-96746`, 8 bots) with `tools/run_analysis.py` and a
+per-action planned-vs-settled join on `(bot, dispatch order)`; the plan
+carries `planned_start`/`planned_duration` per action and per walk, so
+every overrun below is `settled - dispatched - planned_duration`.
+
+**Accounting.** 8 bots: executed 71,936 = 8,385 before the first dispatch
++ 12,886 slip on the critical path + the 50,665 planned. 4 bots: 68,051 =
+6,438 + 3,861 + 57,752. The pre-dispatch gap is planning wall time under
+5x (`14:07:49` "no buffers to read before planning" → `14:08:17` "planned
+943 steps": 28 s, against 22 s for 4 bots) and is a 5x artefact worth
+1,700 ticks at 1x. The slip is where the roster matters, ranked:
+
+1. **Labs unpowered, ~8,500 ticks on the critical path (planner).** The
+   two `research` actions overran by 23,226 ticks between them —
+   `logistic-science-pack` planned 7,500, took 15,974; `automation`
+   planned 3,000, took 17,752 — and every other verb is within noise
+   (`craft` +2,209 over 104 actions, `mine` +493 over 152). All 85 packs
+   were in the three labs by tick 54,076; the labs read `no_power` in
+   every machine sample from 48,900 to 61,200, `research_progress` stayed
+   `0.0`, and at 61,500 `generated_kw` went 0 → 900 and both researches
+   ran at their modelled rate (logistic 7,300, automation 3,100). What
+   went down at 61,329 was `place small-electric-pole at [38.5, -7.5]`
+   (id 6): the one pole whose supply box meets the steam engine at
+   `[40.5, -5.5]` (direction 4, footprint x 38–43; pole 19's box ends at
+   38 and `boxes_overlap` refuses the edge-touch, as the game does). The
+   plan put it at 49,411 and the research at 42,905, and the research's
+   deps name only the lab-side pole (170), the labs and the inserts — not
+   pole 6, not the engine. `Condition::Powered` is a state predicate no
+   `Effect` satisfies, so `ActionNetwork::infer_edges` draws no edge to
+   it; `schedule()` checks it against a sim that holds every placement
+   already *chosen*, whatever tick it was given, so a pole chosen early
+   on a busy bot satisfied it at 42,905. `Researched`'s method only
+   states the edges when it builds the plant itself (`power_links`);
+   here `supply_for` found the assembler cell's plant standing in the
+   plan state and stated nothing. The 4-bot plan had the same hole and
+   got away with it: its pole 6 was at 20,700 by ledger luck. Offline on
+   `map.json` the 8-bot baseline plan shows the defect verbatim (research
+   41,092, pole 6 49,316).
+2. **Two researches planned concurrently, 3,000 ticks (planner).** The
+   plan overlaps `automation` (43,215–46,215, two labs) under `logistic`
+   (42,905–50,405, three labs); the game researches one technology at a
+   time and ran logistic first (dispatched first), so automation — the
+   one the assembler cells wait on — finished 3,000 after logistic. The
+   4-bot plan overlaps them by 2,867 too and paid 1,316. Not fixed here:
+   the fix is a force-wide research slot in the scheduler, sequencing
+   the critical research first.
+3. **Walks are the 5x round-trip tax, not crowding.** 250 walks overran
+   by 17,599 summed, but the per-walk overrun is the same for both
+   rosters — median 52.5 / 53, p90 150 / 138, max 327 / 279 — and no
+   `blocked by character` stall reached a walk's settle. Two
+   `bot_stepped_aside` events, both at the end. Off the critical path
+   except as ~1,150 of accumulated late dispatch on the research.
+4. **`background_conflict` and `predecessor` waits are downstream.**
+   `place assembling-machine-1 at [36.5, -9.5]` waited 60 s on its own
+   `craft 4 assembling-machine-1`, which waited on `research automation`;
+   bots 7/8's pack inserts waited on labs the research held. Symptoms of
+   1, not causes. Bots 5–8 were idle 72–79% of the run because the plan
+   gave them 11–14k ticks of work, and that is the plan being short, not
+   the execution being slow.
+
+**Fix (this branch).** `PlanState::powering_entities(area)` names the
+poles of every wired component whose supply box meets `area` and the
+generators those poles cover; `Researched` states each as a
+`Condition::EntityAt` precondition, so inference pairs the research with
+whichever action places them and with nothing for what the world already
+carries. Pinned by
+`a_research_names_the_poles_and_generator_its_power_comes_through`, which
+fails on the parent. Offline on `map.json`, `producing:logistic-science-pack:6`:
+
+| bots | before | after |
+|---|---|---|
+| 1,2,3,4 | 569 / 57,752 | 569 / 59,476 |
+| 1–8 | 706 / 50,874 (offline; the live plan was 693 / 50,665) | 706 / 53,326 |
+
+Same action sets; only the schedule moves. The 8-bot plan is the honest
+one now: pole 6 comes forward to 45,745 and both researches start at
+45,775. **The 4-bot plan is 1,724 longer, and that is a scheduler
+tie-break, not the model:** before, `place steam-engine` had no
+successor, so bot 1's take→gears→engine block won the lookahead bound
+against the cell's plate take by ten ticks; with the research hanging
+off the engine its `remaining` grows, the block loses the tie, and bot 1
+idles 5,839 ticks at 29,867 before doing the engine at 47,446. The
+execution it replaces had power in time by luck, so the run may not pay
+it; the plan does. Dropping the engine from the condition would restore
+57,752 and leave a late engine with the same hole as a late pole, so it
+stays.

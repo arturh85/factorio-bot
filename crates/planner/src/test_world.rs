@@ -16,12 +16,14 @@
 //! `automation` carries the real game's numbers; the rest are chosen to reach
 //! specific branches and are commented with which.
 
+use crate::ids::BotId;
+use crate::method::ExpansionCtx;
 use crate::state::PlanState;
 use factorio_bot_core::factorio::util::add_to_rect;
 use factorio_bot_core::factorio::world::FactorioWorld;
 use factorio_bot_core::serde_json;
 use factorio_bot_core::test_utils::fixture_world;
-use factorio_bot_core::types::{FactorioEntity, FactorioForce, Position, Rect};
+use factorio_bot_core::types::{Direction, FactorioEntity, FactorioForce, Position, Rect};
 use std::sync::Arc;
 
 /// A world whose iron front can seat a whole roster, and its ore neighbours
@@ -100,23 +102,6 @@ pub(crate) fn with_trees(world: FactorioWorld, positions: &[Position]) -> Factor
     world
 }
 
-/// A `stone-furnace` footprint at the real prototype's collision box
-/// (`1.3984375` tiles, `crates/core/tests/entity-prototype-fixtures.json`)
-/// rather than a round number: `method::connect`'s tests below depend on
-/// exactly which single cell of the `enclosure` grid this blocks -- a box
-/// under 1.5 tiles wide, centred on a tile centre, never reaches a
-/// neighbouring tile's own centre, so it blocks only the tile it sits on and
-/// leaves every cardinal neighbour free.
-fn stone_furnace(position: &Position) -> FactorioEntity {
-    FactorioEntity {
-        name: "stone-furnace".into(),
-        entity_type: "furnace".into(),
-        position: position.clone(),
-        bounding_box: add_to_rect(&Rect::from_wh(1.3984375, 1.3984375), position),
-        ..Default::default()
-    }
-}
-
 /// A `stone-wall` footprint at its real collision box (`0.578125` tiles).
 fn stone_wall(position: &Position) -> FactorioEntity {
     FactorioEntity {
@@ -128,81 +113,151 @@ fn stone_wall(position: &Position) -> FactorioEntity {
     }
 }
 
-/// Two `stone-furnace`s six tiles apart on open ground, for
-/// `method::connect`'s belt-routing tests: `(0.5, 0.5)` and `(6.5, 0.5)`,
-/// nothing else in the way.
+/// A `lab` at its real prototype collision box, `2.3984375` tiles
+/// (`crates/core/tests/entity-prototype-fixtures.json`).
 ///
-/// Built with real base-world entities (`update_chunk_entities`), not
-/// `PlanState::create_entity`'s overlay: `connect_steps` reads obstacles from
-/// `state.base().entity_graph.blocking_boxes_within`, which never sees the
-/// overlay, so a furnace placed through the overlay would be invisible to the
-/// very check this fixture exists to exercise.
-pub(crate) fn open_world_with_two_machines() -> PlanState {
-    let world = fixture_world();
-    world
-        .update_chunk_entities(vec![
-            stone_furnace(&Position::new(0.5, 0.5)),
-            stone_furnace(&Position::new(6.5, 0.5)),
-        ])
-        .expect("a fixture world accepts two furnaces");
-    PlanState::from_world(Arc::new(world), &[])
-}
-
-/// [`open_world_with_two_machines`], with a `stone-wall` column at `x = 3.5`
-/// spanning `y` from -30 to 30 -- past the 24-tile radius of the
-/// `enclosure::window` on either side of `(0.5, 0.5)`, so every row inside
-/// that window has its `x = 3.5` cell blocked and no route can cross it. The
-/// walled-destination control: `connect_steps` between the two furnaces must
-/// refuse.
-pub(crate) fn two_machines_behind_a_wall() -> PlanState {
-    let world = fixture_world();
-    let mut entities = vec![
-        stone_furnace(&Position::new(0.5, 0.5)),
-        stone_furnace(&Position::new(6.5, 0.5)),
-    ];
-    for y in -30..=30 {
-        entities.push(stone_wall(&Position::new(3.5, f64::from(y) + 0.5)));
+/// **A 3x3 machine, and the shape the old `connect` fixtures never had.** An
+/// odd footprint covers three tiles per axis and therefore sits on a tile
+/// *centre*, so a legal `lab` position is a half-integer. There is no
+/// `FactorioEntity::new_lab`, so it is written out here; the box is the
+/// game's, not a round number chosen to make a test pass.
+fn lab(position: &Position) -> FactorioEntity {
+    FactorioEntity {
+        name: "lab".into(),
+        entity_type: "lab".into(),
+        position: position.clone(),
+        bounding_box: add_to_rect(&Rect::from_wh(2.3984375, 2.3984375), position),
+        ..Default::default()
     }
-    world
-        .update_chunk_entities(entities)
-        .expect("a fixture world accepts two furnaces and a wall");
-    PlanState::from_world(Arc::new(world), &[])
 }
 
-/// [`open_world_with_two_machines`]'s two furnaces moved close together --
-/// `(0.5, 0.5)` and `(0.5, -2.5)`, three tiles apart on the same column --
-/// with three extra `stone-wall`s boxing in every one of the second
-/// furnace's cardinal neighbours except one: `(0.5, -3.5)` (north),
-/// `(1.5, -2.5)` (east) and `(-0.5, -2.5)` (west) are walled off, leaving
-/// only south, `(0.5, -1.5)`, open from the second furnace's own cell.
+/// The shared setup behind every `method::connect` fixture: a `fixture_world`
+/// with `entities` in its **base** entity graph, and an `ExpansionCtx` over
+/// it bound to bot 1.
 ///
-/// `(0.5, -1.5)` is also exactly where the *first* furnace's own belt lands:
-/// north of `(0.5, 0.5)` is its inserter `(0.5, -0.5)`, and north of that is
-/// its belt tile `(0.5, -1.5)` -- the same cell, found by an unrelated
-/// search (the second furnace's own inserter search) that has no way to know
-/// the first search already claimed it, unless `connect_steps` makes its
-/// four tile selections aware of each other.
-///
-/// This is the fixture for that: with the four selections properly aware of
-/// each other, the second furnace's inserter search finds every one of its
-/// neighbours either walled or already claimed and `connect_steps` refuses.
-/// Without that awareness, the search finds `(0.5, -1.5)` "free" (it is
-/// open ground; only the first furnace's own derivation knows otherwise) and
-/// `connect_steps` would emit a second `Place` for a tile the first
-/// furnace's belt already claimed.
-pub(crate) fn two_machines_sharing_a_neighbour() -> PlanState {
+/// Base entities via `update_chunk_entities`, never `PlanState::create_entity`:
+/// `connect_steps` reads obstacles from
+/// `state.base().entity_graph.blocking_boxes_within`, which never sees the
+/// plan overlay, so a machine placed through the overlay would be invisible to
+/// the very check these fixtures exist to exercise.
+fn connect_ctx(entities: Vec<FactorioEntity>) -> ExpansionCtx {
     let world = fixture_world();
-    let entities = vec![
-        stone_furnace(&Position::new(0.5, 0.5)),
-        stone_furnace(&Position::new(0.5, -2.5)),
-        stone_wall(&Position::new(0.5, -3.5)),
-        stone_wall(&Position::new(1.5, -2.5)),
-        stone_wall(&Position::new(-0.5, -2.5)),
-    ];
     world
         .update_chunk_entities(entities)
-        .expect("a fixture world accepts two furnaces and three walls");
-    PlanState::from_world(Arc::new(world), &[])
+        .expect("a fixture world accepts these entities");
+    ExpansionCtx::new(PlanState::from_world(Arc::new(world), &[]), BotId(1))
+}
+
+/// **Two real Factorio machine shapes at legal Factorio positions**, which is
+/// the whole point of this fixture and what its predecessor did not have.
+///
+/// * a `stone-furnace` from the **production constructor**
+///   (`FactorioEntity::new_stone_furnace`, box 1.8) at `(5.0, 5.0)`. Two tiles
+///   per axis is an *even* footprint, so the centre sits on a tile boundary —
+///   an integer. `method::util::tile_alignment` states that rule and says
+///   getting it wrong has already cost this project a day.
+/// * a `lab` (box 2.3984375) at `(12.5, 5.5)`. Three tiles per axis is odd, so
+///   its centre is a tile centre — a half-integer.
+///
+/// The old fixture put a furnace at `(0.5, 0.5)` with a box shrunk to
+/// `1.3984375` and a doc comment explaining that this made it block exactly
+/// one cell. That is not a position a 2x2 entity can occupy in Factorio, and
+/// the one-cell footprint is exactly what let `connect_steps` pass while
+/// treating both machines as 1x1. The fixture had been built to fit the code.
+///
+/// Nothing else is in the way: `fixture_world`'s rocks are at `(20, 20)` and
+/// `(40, 30)`, its trees around `(-20, -20)`, and its ore patches west of
+/// `x = -40`.
+pub(crate) fn furnace_and_lab_on_open_ground() -> (ExpansionCtx, FactorioEntity, FactorioEntity) {
+    let furnace = FactorioEntity::new_stone_furnace(&Position::new(5.0, 5.0), Direction::North);
+    let lab = lab(&Position::new(12.5, 5.5));
+    let ctx = connect_ctx(vec![furnace.clone(), lab.clone()]);
+    (ctx, furnace, lab)
+}
+
+/// [`furnace_and_lab_on_open_ground`], with a `stone-wall` column at
+/// `x = 8.5` spanning `y` from -30 to 30 — past the 24-tile radius of the
+/// `enclosure::window` centred on `(5.0, 5.0)` on either side, so every row
+/// inside that window has its `x = 8.5` cell blocked and no route can cross
+/// it. The walled-destination control: `connect_steps` between the two
+/// machines must refuse.
+///
+/// The column sits strictly between the two machines' own footprints (the
+/// furnace ends at `x = 5.9`, the lab starts at `x = 11.3`), so it blocks the
+/// route and nothing else — in particular neither machine's chosen perimeter
+/// tiles, which are both on their north sides.
+pub(crate) fn furnace_and_lab_behind_a_wall() -> (ExpansionCtx, FactorioEntity, FactorioEntity) {
+    let furnace = FactorioEntity::new_stone_furnace(&Position::new(5.0, 5.0), Direction::North);
+    let lab = lab(&Position::new(12.5, 5.5));
+    let mut entities = vec![furnace.clone(), lab.clone()];
+    for y in -30..=30 {
+        entities.push(stone_wall(&Position::new(8.5, f64::from(y) + 0.5)));
+    }
+    (connect_ctx(entities), furnace, lab)
+}
+
+/// [`furnace_and_lab_on_open_ground`] with one `tree-42` standing on the row
+/// the belt would otherwise run straight along.
+///
+/// **The zero-half-box fixture.** The tree is at `(9.5, 3.05)`, so its
+/// `0.8`-tile box spans `y 2.65..3.45` and covers **no tile centre at all**
+/// (the neighbouring centres are at `y = 2.5` and `y = 3.5`). Rasterised with
+/// the zero half-box `connect_steps` used to pass, it blocks nothing and the
+/// belt is routed straight through it; rasterised with the belt's own
+/// `0.4` half-box it blocks the two cells it really leaves no room on, and
+/// the route detours. Trees and rocks sit at arbitrary sub-tile positions in
+/// a real game, which is why this is the obstacle that exposes it and a
+/// grid-aligned building is not.
+pub(crate) fn furnace_and_lab_with_a_tree() -> (ExpansionCtx, FactorioEntity, FactorioEntity) {
+    let furnace = FactorioEntity::new_stone_furnace(&Position::new(5.0, 5.0), Direction::North);
+    let lab = lab(&Position::new(12.5, 5.5));
+    let entities = vec![
+        furnace.clone(),
+        lab.clone(),
+        FactorioEntity::new_tree(&Position::new(9.5, 3.05)),
+    ];
+    (connect_ctx(entities), furnace, lab)
+}
+
+/// Two `stone-furnace`s close enough that the second's only unwalled
+/// perimeter pair is the pair the first one already claimed.
+///
+/// The window origin is `(-19, -19)`. The first furnace at `(5.0, 5.0)`
+/// covers cells `x 23..=24, y 23..=24`; its first free perimeter pair is
+/// North at `x = 23`, so it claims the inserter cell `(23, 22)` = `(4.5, 3.5)`
+/// and the belt cell `(23, 21)` = `(4.5, 2.5)`. The second furnace at
+/// `(5.0, 1.0)` covers cells `x 23..=24, y 19..=20`, and its own South
+/// perimeter at `x = 23` wants exactly those two cells back.
+///
+/// Seven `stone-wall`s close every other pair: its North side (`(4.5, -0.5)`
+/// and `(5.5, -0.5)`), its East side (`(6.5, 0.5)`, `(6.5, 1.5)`), its West
+/// side (`(3.5, 0.5)`, `(3.5, 1.5)`) and the other South candidate
+/// (`(5.5, 2.5)`). Each wall's `0.578` box, grown by the belt half-box, still
+/// covers exactly the one cell it is centred on, so none of them reaches the
+/// first furnace's claimed pair.
+///
+/// So: with the two ends aware of each other, the second furnace's search
+/// finds every candidate walled or claimed and `connect_steps` refuses.
+/// Without that awareness it finds `(23, 21)` and `(23, 22)` "free" — they
+/// are open ground, and only the first furnace's own derivation knows
+/// otherwise — and emits a second `Place` for tiles the first furnace's belt
+/// and inserter already took.
+pub(crate) fn furnaces_sharing_a_perimeter() -> (ExpansionCtx, FactorioEntity, FactorioEntity) {
+    let first = FactorioEntity::new_stone_furnace(&Position::new(5.0, 5.0), Direction::North);
+    let second = FactorioEntity::new_stone_furnace(&Position::new(5.0, 1.0), Direction::North);
+    let mut entities = vec![first.clone(), second.clone()];
+    for wall in [
+        (4.5, -0.5),
+        (5.5, -0.5),
+        (6.5, 0.5),
+        (6.5, 1.5),
+        (3.5, 0.5),
+        (3.5, 1.5),
+        (5.5, 2.5),
+    ] {
+        entities.push(stone_wall(&Position::new(wall.0, wall.1)));
+    }
+    (connect_ctx(entities), first, second)
 }
 
 /// One force, `player`, with a small technology tree.

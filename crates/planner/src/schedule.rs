@@ -624,6 +624,57 @@ pub fn schedule(
                     let act_start = (walk_start + travel).max(deps_ready);
                     let end = act_start + action.duration;
                     let walk_target = action.required_position();
+                    // A benched bot gets no pairing that would make it walk.
+                    //
+                    // This is the one exclusion in a function whose every
+                    // other memory is a preference, and it is an exclusion
+                    // on purpose: the bench is the game's own answer that
+                    // the character cannot leave its tile
+                    // (`PlanState::benched`), and `run-1788614781-38058`
+                    // is what treating that as a preference costs -- the
+                    // refusal ledger put bot 6 at the back of its tier, the
+                    // tier had one bot in it, and seven plans in a row sent
+                    // it the walk the game had already refused four times.
+                    // Where the bot already stands (`travel == 0`) it may
+                    // still act. The rejection is recorded like any other
+                    // infeasible pair, so a plan that has nobody else names
+                    // the bench in its error rather than dispatching a walk
+                    // it knows will fail.
+                    if travel > 0 && sim.is_benched(bot) {
+                        let at = sim
+                            .benched()
+                            .get(&bot)
+                            .map(Position::to_string)
+                            .unwrap_or_default();
+                        let candidate = Candidate {
+                            action: action.id,
+                            bot,
+                            remaining: remaining[&action.id],
+                            deps_ready,
+                            arrival: from.clone(),
+                            walk_target,
+                            walk_start,
+                            travel,
+                            act_start,
+                            end,
+                            bound: 0,
+                        };
+                        if best_rejected
+                            .as_ref()
+                            .is_none_or(|r| candidate.key() < r.candidate.key())
+                        {
+                            best_rejected = Some(Rejected {
+                                condition: format!(
+                                    "bot {bot} is benched at {at}: the game refused every \
+                                     short hop from where it stands, so it cannot be sent \
+                                     anywhere"
+                                ),
+                                owned_chain: owner.and(chain),
+                                candidate,
+                            });
+                        }
+                        continue;
+                    }
                     let arrival = match (&walk_target, travel > 0) {
                         (Some((pos, min_radius, _)), true) => arrival_point(pos, *min_radius),
                         _ => from.clone(),

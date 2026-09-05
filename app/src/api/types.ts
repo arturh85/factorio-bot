@@ -1315,6 +1315,29 @@ export type EventKind =
            *  floored at 1. */
           unearned_ratio: number | null;
       }
+    | {
+          /** What one `goal.plan` cost: wall time, and what the game clock
+           *  did while the planner thought. The planner is wall-clock work
+           *  and a game left running through it was charged `60 * speed`
+           *  ticks per second of it -- 334 ticks for automation at 1x,
+           *  1,837 at 10x -- which was the whole of the "faster game, longer
+           *  run" tax. `goal.plan` now stops the clock around expansion;
+           *  this event is the receipt. Written by the plan itself, so a
+           *  plan that raised (and has no `plan_created`) still shows its
+           *  cost. */
+          kind: 'planning_timed';
+          /** Wall clock inside expansion and scheduling, pre-check round
+           *  trips included. */
+          planning_ms: number;
+          /** Whether the clock was stopped for the duration. `false` on a
+           *  build without RCON or when the pause request failed, in which
+           *  case `tick_after - tick_before` says what it cost. */
+          paused: boolean;
+          /** `game.tick` when planning began; `null` when nobody could ask. */
+          tick_before: number | null;
+          /** `game.tick` when planning ended; `null` when nobody could ask. */
+          tick_after: number | null;
+      }
     | {kind: 'run_finished'; outcome: string; elapsed_ticks: number}
     /** A kind this build does not know. The server never emits it, but a
      *  future variant decodes to this rather than failing to parse. */

@@ -941,6 +941,33 @@ pub enum EventKind {
         /// away.
         unearned_ratio: Option<f64>,
     },
+    /// What one `goal.plan` cost: wall time, and what the game clock did
+    /// while the planner thought.
+    ///
+    /// The planner is wall-clock work -- ~3 s for automation, ~20 s for green
+    /// -- and a game left running through it is charged `60 * speed` ticks
+    /// per second of thinking: 334 ticks for automation at 1x, 1,837 at 10x,
+    /// 6,438 for green at 5x (2026-09-05). That was the whole of the
+    /// "faster game, longer run" tax. `goal.plan` now pauses the clock around
+    /// expansion, and this event is the receipt: `tick_after - tick_before`
+    /// is what the run was charged, which is zero when `paused` held.
+    ///
+    /// Written by the plan itself rather than folded into `plan_created`,
+    /// which the driver script records later with the plan's steps: a plan
+    /// that raised has no `plan_created` and still cost time.
+    PlanningTimed {
+        /// Wall clock spent inside expansion and scheduling, including the
+        /// placement pre-check round trips.
+        planning_ms: u64,
+        /// Whether the game clock was stopped for the duration. `false` on a
+        /// build without RCON, or when the pause request failed -- in which
+        /// case `tick_after - tick_before` says what it cost.
+        paused: bool,
+        /// `game.tick` when planning began; `None` when nobody could ask.
+        tick_before: Option<u64>,
+        /// `game.tick` when planning ended; `None` when nobody could ask.
+        tick_after: Option<u64>,
+    },
     RunFinished {
         outcome: String,
         elapsed_ticks: u64,

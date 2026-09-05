@@ -5676,6 +5676,28 @@ function rcon_game_speed()
 	rcon.print(tostring(game.speed))
 end
 
+-- Stops or restarts the game clock, and answers with the tick it did so at.
+--
+-- `game.tick_paused` freezes `game.tick` -- machines, characters, the
+-- `on_tick` polling above -- while RCON is still served, so the executor can
+-- ask the game questions (`can_place_entity`, `inventory_contents_at`) in a
+-- world that is not moving. It is what `goal.plan` wraps around expansion:
+-- the planner is wall-clock work, and a game left running through it is
+-- charged `60 * game.speed` ticks per second of thinking -- 334 ticks for
+-- automation at 1x, 1,837 at 10x, 6,438 for green at 5x -- which is the whole
+-- of the "faster game, longer run" tax measured on 2026-09-05.
+--
+-- The stamp is the reply's tick, read *after* the assignment, so a resume
+-- answers with the tick the clock restarted from and a pause with the tick it
+-- stopped at. Asking for the state it already has is a no-op, so an unpause
+-- issued against a running game is safe -- and it is issued on every plan's
+-- exit path, error or not, for exactly that reason.
+function rcon_set_tick_paused(v)
+	game.tick_paused = (v == true or v == "true")
+	stamp_tick()
+	rcon.print(tostring(game.tick_paused))
+end
+
 -- The per-tick substitute for the four `on_player_*` events a character bot
 -- never raises: position, main inventory, crafted items (queue deltas) and a
 -- respawn after death. Mining completion is handled in the miner itself
@@ -5944,6 +5966,7 @@ remote.add_interface("botbridge", {
 	spawn_bots=rcon_spawn_bots,
 	set_game_speed=rcon_set_game_speed,
 	game_speed=rcon_game_speed,
+	set_tick_paused=rcon_set_tick_paused,
 	player_force=rcon_player_force,
 	world_snapshot=rcon_world_snapshot,
 	add_research=rcon_add_research,

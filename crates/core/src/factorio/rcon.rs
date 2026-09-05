@@ -3014,6 +3014,41 @@ impl FactorioRcon {
         Ok(got)
     }
 
+    /// Stops or restarts the game clock (`game.tick_paused`), answering with
+    /// the tick it happened at.
+    ///
+    /// The game keeps serving RCON while paused, so the questions a plan asks
+    /// (`can_place_entities`, buffer contents) still get answered -- against a
+    /// world that is not moving. What does **not** move is anything that needs
+    /// a later tick to answer: a path request (`request_path`) is resolved by
+    /// the game on a subsequent tick and would wait forever, so nothing that
+    /// probes a path may run inside a paused window. `goal.plan` refreshes the
+    /// buffers (which re-probes benched bots) *before* it pauses for exactly
+    /// that reason.
+    ///
+    /// The tick comes from the mod's stamp on the reply rather than a second
+    /// round trip, and is remembered as the last known tick so a record entry
+    /// written straight after is stamped with the moment the clock stopped
+    /// rather than whatever was last seen.
+    pub async fn set_tick_paused(&self, paused: bool) -> Result<u64> {
+        let (lines, tick) = self
+            .remote_call_timed("set_tick_paused", vec![paused.to_string()])
+            .await?;
+        let got = lines
+            .unwrap_or_default()
+            .join("")
+            .trim()
+            .parse::<bool>()
+            .into_diagnostic()
+            .wrap_err("set_tick_paused: unreadable reply")?;
+        if got != paused {
+            return Err(miette!(
+                "set_tick_paused: asked for {paused}, the game reports {got}"
+            ));
+        }
+        tick.ok_or_else(|| miette!("set_tick_paused: the mod answered without a tick stamp"))
+    }
+
     /// The speed the deadlines are scaled by: the last value set or read,
     /// normal speed until then.
     pub fn speed_factor(&self) -> f64 {

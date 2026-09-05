@@ -20,7 +20,8 @@
 
 use super::value::goal_from_lua;
 use super::{
-    BufferRefresher, PlacementChecker, expand_goal, goal_error, planner_error, refuse_unknown_bots,
+    BufferRefresher, PlacementChecker, TickPauser, expand_goal, goal_error, planner_error,
+    refuse_unknown_bots,
 };
 use factorio_bot_core::factorio::rcon::PlacementQuery;
 use factorio_bot_core::factorio::world::FactorioWorld;
@@ -404,20 +405,35 @@ pub(crate) fn install_goal_plan(
     default_roster: Vec<BotId>,
     checker: Option<PlacementChecker>,
     refresher: Option<BufferRefresher>,
+    pauser: Option<TickPauser>,
 ) -> LuaResult<()> {
     table.set(
         "plan",
-        lua.create_async_function(move |_lua, (g, opts): (LuaTable, Option<LuaTable>)| {
+        lua.create_async_function(move |lua, (g, opts): (LuaTable, Option<LuaTable>)| {
             let world = world.clone();
             let default_roster = default_roster.clone();
             let checker = checker.clone();
             let refresher = refresher.clone();
+            let pauser = pauser.clone();
             async move {
                 let goal = goal_from_lua(&g)?;
                 let roster = resolve_roster(opts.as_ref(), &default_roster)?;
-                let (net, scheduled) =
-                    plan_verified(&goal, &world, &roster, checker.as_ref(), refresher.as_ref())
-                        .await?;
+                // Optional for the same reason it is in `goal.start`: absence
+                // means nobody is recording, which a planning-only
+                // interpreter legitimately is.
+                let live = lua
+                    .app_data_ref::<crate::globals::record::LiveRecord>()
+                    .map(|live| live.clone());
+                let (net, scheduled) = plan_verified(
+                    &goal,
+                    &world,
+                    &roster,
+                    checker.as_ref(),
+                    refresher.as_ref(),
+                    pauser.as_ref(),
+                    live.as_ref(),
+                )
+                .await?;
                 narrate_work_split(&net, &scheduled);
                 // The goal, the world and the roster are kept together on the
                 // plan, not because dispatching needs them -- it does not --
@@ -876,6 +892,8 @@ async fn plan_verified(
     roster: &[BotId],
     checker: Option<&PlacementChecker>,
     refresher: Option<&BufferRefresher>,
+    pauser: Option<&TickPauser>,
+    live: Option<&crate::globals::record::LiveRecord>,
 ) -> LuaResult<(ActionNetwork, Schedule)> {
     // Once, before any expansion, and deliberately outside the loop below.
     //
@@ -890,6 +908,113 @@ async fn plan_verified(
     // after expansion would refresh a fact the plan had already been built
     // without.
     narrate_buffer_refresh(refresher).await;
+    // The clock stops *after* the refresh, never before it: the refresh
+    // re-probes benched bots with path requests, which the game answers on a
+    // later tick, and a paused game has no later tick. Everything the rounds
+    // below ask (`can_place_entity`) is answered in the call itself.
+    let clock = PlanningClock::stop(pauser).await;
+    let planned = plan_rounds(goal, world, roster, checker).await;
+    // Restarted on every exit path, a refusal included: a planner error must
+    // never leave the game frozen behind it.
+    let timing = clock.restart(pauser).await;
+    if let Some(live) = live {
+        live.record(timing.event());
+    }
+    planned
+}
+
+/// What one plan cost, as [`PlanningClock`] measured it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PlanningCost {
+    planning_ms: u64,
+    paused: bool,
+    tick_before: Option<u64>,
+    tick_after: Option<u64>,
+}
+
+impl PlanningCost {
+    fn event(&self) -> factorio_bot_core::record::EventKind {
+        factorio_bot_core::record::EventKind::PlanningTimed {
+            planning_ms: self.planning_ms,
+            paused: self.paused,
+            tick_before: self.tick_before,
+            tick_after: self.tick_after,
+        }
+    }
+}
+
+/// The game clock, stopped for the duration of a plan.
+///
+/// See [`TickPauser`] for why: planning is wall-clock work and a game left
+/// running through it charges the run `60 * speed` ticks per second of it,
+/// which was the whole of the speed tax measured on 2026-09-05.
+///
+/// A pause that fails is narrated and the plan proceeds with the clock
+/// running, exactly as before this existed -- the plan is still a plan, only
+/// dearer -- and the resulting [`PlanningCost`] says `paused: false` with the
+/// ticks it cost, so the charge is on record rather than silent.
+struct PlanningClock {
+    started: std::time::Instant,
+    paused: bool,
+    tick_before: Option<u64>,
+}
+
+impl PlanningClock {
+    async fn stop(pauser: Option<&TickPauser>) -> Self {
+        let started = std::time::Instant::now();
+        let (paused, tick_before) = match pauser {
+            None => (false, None),
+            Some(pause) => match pause(true).await {
+                Ok(tick) => (true, Some(tick)),
+                Err(err) => {
+                    factorio_bot_core::tracing::warn!(
+                        "could not stop the game clock for planning; the run will be charged                          the planning time at game speed: {err}"
+                    );
+                    (false, None)
+                }
+            },
+        };
+        Self {
+            started,
+            paused,
+            tick_before,
+        }
+    }
+
+    async fn restart(self, pauser: Option<&TickPauser>) -> PlanningCost {
+        // Asked for even when the pause failed: the game reporting itself
+        // running costs one round trip and rules out a clock left stopped by
+        // an earlier, interrupted plan.
+        let tick_after = match pauser {
+            None => None,
+            Some(pause) => match pause(false).await {
+                Ok(tick) => Some(tick),
+                Err(err) => {
+                    factorio_bot_core::tracing::error!(
+                        "could not restart the game clock after planning: {err}"
+                    );
+                    None
+                }
+            },
+        };
+        let planning_ms = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        PlanningCost {
+            planning_ms,
+            paused: self.paused,
+            tick_before: self.tick_before,
+            tick_after,
+        }
+    }
+}
+
+/// The expand / schedule / pre-check / re-site rounds of [`plan_verified`],
+/// split out so the clock around them has one entry and one exit.
+async fn plan_rounds(
+    goal: &Goal,
+    world: &Arc<FactorioWorld>,
+    roster: &[BotId],
+    checker: Option<&PlacementChecker>,
+) -> LuaResult<(ActionNetwork, Schedule)> {
     for round in 0..=MAX_RESITE_ROUNDS {
         // Rebuilt every round, deliberately: this is the read that picks up
         // the refusals the previous round's query wrote.
@@ -1769,6 +1894,16 @@ mod tests {
         checker: Option<PlacementChecker>,
         refresher: Option<BufferRefresher>,
     ) -> Lua {
+        lua_with_world_checker_refresher_and_pauser(world, roster, checker, refresher, None)
+    }
+
+    fn lua_with_world_checker_refresher_and_pauser(
+        world: Arc<FactorioWorld>,
+        roster: &[u8],
+        checker: Option<PlacementChecker>,
+        refresher: Option<BufferRefresher>,
+        pauser: Option<TickPauser>,
+    ) -> Lua {
         let lua = crate::sandbox::new_sandboxed_lua().expect("sandbox");
         lua.set_app_data(crate::lua_runner::PendingWork::default());
         let table = create_lua_goal_with(
@@ -1778,10 +1913,139 @@ mod tests {
             roster.to_vec(),
             checker,
             refresher,
+            pauser,
         )
         .expect("goal table");
         lua.globals().set("goal", table).expect("install");
         lua
+    }
+
+    /// A [`TickPauser`] that logs every state it was asked for, in order,
+    /// and answers with a clock that only moves while it is running.
+    ///
+    /// The tick it reports is what a real game would: a pause answers with
+    /// the tick the clock stopped at, and a resume with the same tick, because
+    /// nothing advanced in between. `outcome` lets a test make the pause
+    /// request itself fail.
+    fn stub_pauser(
+        outcome: Result<(), &'static str>,
+    ) -> (TickPauser, Arc<std::sync::Mutex<Vec<bool>>>) {
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = calls.clone();
+        let pauser: TickPauser = Arc::new(move |paused: bool| {
+            log.lock().expect("pauser log").push(paused);
+            let outcome = outcome.map(|()| 4_000u64).map_err(|e| e.to_string());
+            Box::pin(async move { outcome })
+                as Pin<Box<dyn Future<Output = Result<u64, String>> + Send>>
+        });
+        (pauser, calls)
+    }
+
+    // ------------------------------------------- goal.plan stops the clock
+
+    /// **Planning happens against a stopped clock, and the clock restarts.**
+    ///
+    /// The planner is wall-clock work, and a game left running through it
+    /// charges the run `60 * speed` ticks per second of thinking -- the whole
+    /// of the speed tax measured on 2026-09-05 (334 ticks at 1x, 1,837 at
+    /// 10x for the same automation plan). One pause, one resume, in that
+    /// order, per `goal.plan`.
+    #[tokio::test]
+    async fn goal_plan_stops_the_clock_and_restarts_it() {
+        let world = seeded_world_for(&[1, 2]);
+        let (pauser, calls) = stub_pauser(Ok(()));
+        let lua =
+            lua_with_world_checker_refresher_and_pauser(world, &[1, 2], None, None, Some(pauser));
+        lua.load(r#"p = goal.plan(goal.have("iron-plate", 8))"#)
+            .exec_async()
+            .await
+            .expect("plan");
+        assert_eq!(
+            *calls.lock().expect("pauser log"),
+            vec![true, false],
+            "one pause before expansion and one resume after it"
+        );
+    }
+
+    /// **A plan that raises still restarts the clock.** A refusal is the
+    /// planner's verdict about the world; a game left frozen behind it would
+    /// hang every later reader of `game.tick`, the executor's lag wait
+    /// included.
+    #[tokio::test]
+    async fn a_refused_plan_restarts_the_clock() {
+        let world = seeded_world_for(&[1, 2]);
+        let (pauser, calls) = stub_pauser(Ok(()));
+        let lua =
+            lua_with_world_checker_refresher_and_pauser(world, &[1, 2], None, None, Some(pauser));
+        let err = lua
+            .load(r#"p = goal.plan(goal.have("no-such-item", 1))"#)
+            .exec_async()
+            .await
+            .expect_err("an unknown item is refused");
+        assert!(
+            err.to_string().contains("no-such-item"),
+            "the refusal names the item: {err}"
+        );
+        assert_eq!(
+            *calls.lock().expect("pauser log"),
+            vec![true, false],
+            "the resume is issued on the error path too"
+        );
+    }
+
+    /// **A pause that fails is not a failed plan.** The plan is dearer, not
+    /// absent: the clock runs on as it did before the pause existed, and the
+    /// resume is still asked for, so a clock an earlier plan left stopped is
+    /// restarted regardless.
+    #[tokio::test]
+    async fn a_failed_pause_still_plans_and_still_resumes() {
+        let world = seeded_world_for(&[1, 2]);
+        let (pauser, calls) = stub_pauser(Err("rcon: connection reset"));
+        let lua =
+            lua_with_world_checker_refresher_and_pauser(world, &[1, 2], None, None, Some(pauser));
+        lua.load(r#"p = goal.plan(goal.have("iron-plate", 8)); assert(#p.steps > 0)"#)
+            .exec_async()
+            .await
+            .expect("the plan is made with the clock running");
+        assert_eq!(*calls.lock().expect("pauser log"), vec![true, false]);
+    }
+
+    /// The refresh runs *before* the clock stops: it re-probes benched bots
+    /// with path requests the game answers on a later tick, and a paused
+    /// game has no later tick.
+    #[tokio::test]
+    async fn the_buffer_refresh_runs_before_the_clock_stops() {
+        let world = seeded_world_for(&[1, 2]);
+        let order = Arc::new(std::sync::Mutex::new(Vec::<&'static str>::new()));
+        let seen = order.clone();
+        let refresher: BufferRefresher = Arc::new(move || {
+            seen.lock().expect("order").push("refresh");
+            Box::pin(async { Ok(0usize) })
+                as Pin<Box<dyn Future<Output = Result<usize, String>> + Send>>
+        });
+        let seen = order.clone();
+        let pauser: TickPauser = Arc::new(move |paused: bool| {
+            seen.lock()
+                .expect("order")
+                .push(if paused { "pause" } else { "resume" });
+            Box::pin(async { Ok(1u64) })
+                as Pin<Box<dyn Future<Output = Result<u64, String>> + Send>>
+        });
+        let lua = lua_with_world_checker_refresher_and_pauser(
+            world,
+            &[1, 2],
+            None,
+            Some(refresher),
+            Some(pauser),
+        );
+        lua.load(r#"p = goal.plan(goal.have("iron-plate", 8))"#)
+            .exec_async()
+            .await
+            .expect("plan");
+        assert_eq!(
+            *order.lock().expect("order"),
+            vec!["refresh", "pause", "resume"]
+        );
     }
 
     /// A [`BufferRefresher`] that counts its calls and answers `outcome`.

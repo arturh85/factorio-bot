@@ -1132,6 +1132,21 @@ const LAG_CHASE_BUDGET: u32 = 1;
 /// to sleep between readings, where being wrong costs an extra round trip
 /// instead of a plan.
 ///
+/// # What this costs at speed -- measured, not assumed
+///
+/// A wall-clock sleep is worth `60 * speed` ticks per second, so the obvious
+/// worry is that at 10x every sleep overshoots by ten times as many ticks.
+/// It does not, because the sleep is *sized* at that speed too: the same
+/// 960-tick lag (`insert 4 copper-ore` -> `take 4 copper-plate`, four smelts
+/// plus one cycle of headroom) was served in **962 ticks at 5x and 965 at
+/// 10x**, and its five-plate sibling in 1,155 at 1x against 1,152 owed -- an
+/// overshoot of two to five ticks at every speed, one RCON round trip's worth
+/// (`run-1788582657-14978`, `run-1788614064-08543`, `run-1788614294-64261`,
+/// 2026-09-05). The speed tax those runs showed (+4% at 5x, +9% at 10x on
+/// the same plan) was entirely *before* the first dispatch: the planner is
+/// wall-clock work and the game ran through it at speed. `goal.plan` now
+/// stops the clock while it thinks; this loop was never the mechanism.
+///
 /// An actuator with no clock ([`Actuator::game_tick`] returning `None`) keeps
 /// the old wall-clock wait, which is the honest fallback: it is the best
 /// available claim when nobody can be asked what time it is.

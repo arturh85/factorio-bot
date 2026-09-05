@@ -70,6 +70,14 @@ import time
 from typing import Any
 
 TICKS_PER_SECOND = 60
+# Below this fraction of the nominal tick rate a run is reported as starved:
+# the server was not keeping up, and its wall-clock-denominated waits (RCON
+# round trips, anything sleeping in seconds) were worth fewer ticks than the
+# same run on a quiet box. 0.8 is a reporting threshold, not a verdict about
+# the data -- every tick-denominated number is still exact.
+STARVED_RATIO = 0.8
+# A heartbeat interval shorter than this measures noise rather than a rate.
+MIN_RATE_INTERVAL_MS = 5_000
 TICKS_PER_MINUTE = 60 * TICKS_PER_SECOND
 
 # Files a complete run leaves behind. Older runs predate some of them and
@@ -289,6 +297,8 @@ def read_provenance(run_dir: str, run_started: dict | None) -> dict:
         ),
         "profile": pick((PROVENANCE_FILE, sidecar.get("profile"), text)),
         "workspace": pick((PROVENANCE_FILE, sidecar.get("workspace"), text)),
+        "bot_mode": pick((PROVENANCE_FILE, sidecar.get("bot_mode"), text)),
+        "game_speed": pick((PROVENANCE_FILE, sidecar.get("game_speed"), text)),
         # Null-with-meaning, but ONLY when the file that defines it is present:
         # `resumed_from: null` there means the run started on a fresh world,
         # where no file at all means nobody ever recorded whether it did.
@@ -794,6 +804,10 @@ def analyse(run_dir: str, freeze_ticks: int = DEFAULT_FREEZE_TICKS) -> dict:
 
     result["vision"] = free_vision(events)
     result["deaths"] = bot_deaths(events)
+    result["tick_rate"] = delivered_tick_rate(
+        events, (result["provenance"].get("game_speed") or {}).get("value")
+    )
+    result["planning"] = planning_rows(events)
 
     placed = load_jsonl(os.path.join(run_dir, "map.jsonl"))
     result["map_present"] = placed.present
@@ -1004,6 +1018,81 @@ def batch_execution(events: list[dict]) -> list[dict]:
         else:
             pl["verdict"] = "unknown"
     return plans
+
+
+def delivered_tick_rate(events: list[dict], game_speed: str | None) -> dict:
+    """How many ticks per second the game actually delivered while batches ran.
+
+    ``batch_progress`` carries both clocks -- the event's ``tick`` and the
+    batch's ``elapsed_ms`` -- so consecutive heartbeats of one batch give a
+    measured tick rate, and the first heartbeat is measured against the
+    batch's first dispatch (``elapsed_ms`` ~0 there). The nominal rate is
+    ``60 * game_speed`` from provenance. A run at 10x on a box that could
+    only deliver 350 tps is a *different run* from one that got its 600, and
+    nothing else in the record says so: every tick-denominated number is the
+    same either way, only the wall clock knows.
+
+    Intervals shorter than ``MIN_RATE_INTERVAL_MS`` are dropped -- a
+    heartbeat 30 ms after a dispatch measures noise, not a rate.
+    """
+    samples: list[tuple[int, int]] = []  # (ticks, ms) per interval
+    origin: tuple[int, int] | None = None  # (tick, elapsed_ms) of the last point
+    for e in events:
+        kind = e.get("kind")
+        if kind == "plan_created":
+            origin = None
+        elif kind in ("action_dispatched", "walk_dispatched") and origin is None:
+            origin = (int(e.get("tick") or 0), 0)
+        elif kind == "batch_progress":
+            tick = e.get("tick")
+            ms = e.get("elapsed_ms")
+            if not isinstance(tick, int) or not isinstance(ms, int):
+                continue
+            if origin is not None:
+                dt, dms = tick - origin[0], ms - origin[1]
+                if dms >= MIN_RATE_INTERVAL_MS and dt >= 0:
+                    samples.append((dt, dms))
+            origin = (tick, ms)
+    ticks = sum(t for t, _ in samples)
+    ms = sum(m for _, m in samples)
+    delivered = ticks * 1000 / ms if ms else None
+    try:
+        speed = float(game_speed) if game_speed is not None else None
+    except ValueError:
+        speed = None
+    nominal = TICKS_PER_SECOND * speed if speed else None
+    ratio = (delivered / nominal) if (delivered is not None and nominal) else None
+    return {
+        "intervals": len(samples),
+        "ticks": ticks,
+        "ms": ms,
+        "delivered_tps": delivered,
+        "nominal_tps": nominal,
+        "ratio": ratio,
+        "starved": ratio is not None and ratio < STARVED_RATIO,
+    }
+
+
+def planning_rows(events: list[dict]) -> list[dict]:
+    """Every ``planning_timed`` event: what each plan cost in wall time and
+    in game ticks. ``charged`` is ``tick_after - tick_before`` -- zero on a
+    plan made against a stopped clock, and ``None`` when either tick is
+    unknown, which is not zero."""
+    rows = []
+    for e in events:
+        if e.get("kind") != "planning_timed":
+            continue
+        before, after = e.get("tick_before"), e.get("tick_after")
+        charged = (after - before) if isinstance(before, int) and isinstance(after, int) else None
+        rows.append(
+            {
+                "tick": e.get("tick"),
+                "planning_ms": e.get("planning_ms"),
+                "paused": bool(e.get("paused")),
+                "charged": charged,
+            }
+        )
+    return rows
 
 
 def waiting_lines(beat: dict, limit: int = 4) -> list[str]:
@@ -1705,6 +1794,29 @@ def report(a: dict, out=sys.stdout, top: int = 12) -> None:
       f"= {a['span_ticks']} ({minutes(a['span_ticks'])} game time)")
     if wall and a["span_ticks"]:
         p(f"  game speed: {a['span_ticks'] / TICKS_PER_SECOND / wall:.2f}x realtime")
+    rate = a.get("tick_rate") or {}
+    if rate.get("delivered_tps") is not None:
+        nominal = rate.get("nominal_tps")
+        against = (
+            f" of {nominal:.0f} nominal ({rate['ratio'] * 100:.0f}%)"
+            if nominal else " (nominal unknown: no game_speed in provenance)"
+        )
+        flag = "  ! STARVED -- the server was not keeping up" if rate.get("starved") else ""
+        p(f"  delivered tick rate: {rate['delivered_tps']:.0f} tps{against} over "
+          f"{rate['intervals']} heartbeat interval(s), {rate['ticks']} ticks in "
+          f"{rate['ms'] / 1000:.0f} s{flag}")
+    planning = a.get("planning") or []
+    if planning:
+        total_ms = sum(r.get("planning_ms") or 0 for r in planning)
+        charged = [r["charged"] for r in planning if r["charged"] is not None]
+        unpaused = sum(1 for r in planning if not r["paused"])
+        charged_s = (
+            f"{sum(charged)} tick(s) charged to the run" if len(charged) == len(planning)
+            else f"{sum(charged)} tick(s) charged over {len(charged)} of them, the rest unknown"
+        )
+        clock = "clock stopped for all" if not unpaused else f"clock RUNNING for {unpaused}"
+        p(f"  planning: {len(planning)} plan(s), {total_ms / 1000:.1f} s wall, "
+          f"{charged_s} ({clock})")
 
     j = a["join"]
     if j["orphan_settles"] or j["never_settled"] or j["null_duration"]:

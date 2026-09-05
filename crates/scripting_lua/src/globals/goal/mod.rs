@@ -115,6 +115,31 @@ pub(crate) type PlacementChecker = Arc<
 pub(crate) type BufferRefresher =
     Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Result<usize, String>> + Send>> + Send + Sync>;
 
+/// How `goal.plan` stops the game clock while it thinks, and restarts it
+/// after. The argument is the state wanted; the answer is the `game.tick` at
+/// which the game granted it.
+///
+/// # Why planning is done against a stopped clock
+///
+/// Expansion and scheduling are wall-clock work -- seconds for automation,
+/// tens of seconds for green -- and the game does not wait for them. A run at
+/// `game.speed = s` is charged `60 * s` ticks per second of planning:
+/// measured on 2026-09-05, automation cost 334 ticks of planning at 1x and
+/// 1,837 at 10x, green 1,960 at 1x and 6,438 at 5x, and that difference was
+/// the **entire** gap between the speeds' executed tick counts -- the lag
+/// waits themselves overshoot by 2-5 ticks at every speed. Stopping the clock
+/// makes the cost zero at every speed rather than proportional to it, and as
+/// a side effect the world the plan was made from is the world it is
+/// dispatched into.
+///
+/// `None` -- no game, or a build with no RCON -- means the clock runs on, as
+/// it always did, and [`EventKind::PlanningTimed`] records `paused: false` so
+/// the charge is visible rather than silent.
+///
+/// [`EventKind::PlanningTimed`]: factorio_bot_core::record::EventKind::PlanningTimed
+pub(crate) type TickPauser =
+    Arc<dyn Fn(bool) -> Pin<Box<dyn Future<Output = Result<u64, String>> + Send>> + Send + Sync>;
+
 /// A planner or executor failure is the script's problem, not the process's.
 fn goal_error(err: impl std::fmt::Display) -> LuaError {
     LuaError::RuntimeError(format!("goal: {err}"))
@@ -395,6 +420,7 @@ pub fn create_lua_goal(
     // them owns the others.
     let probe_rcon = rcon.clone();
     let refresh_rcon = rcon.clone();
+    let pause_rcon = rcon.clone();
     let actuator: ActuatorFactory = Arc::new(move || {
         let rcon = rcon.clone();
         let world = real_world.clone();
@@ -470,7 +496,17 @@ pub fn create_lua_goal(
             }) as Pin<Box<dyn Future<Output = Result<usize, String>> + Send>>
         }) as BufferRefresher
     });
-    create_lua_goal_with(lua, plan_world, actuator, bots, checker, refresher)
+    let pauser: Option<TickPauser> = pause_rcon.map(|rcon| {
+        Arc::new(move |paused: bool| {
+            let rcon = rcon.clone();
+            Box::pin(async move {
+                rcon.set_tick_paused(paused)
+                    .await
+                    .map_err(|err| err.to_string())
+            }) as Pin<Box<dyn Future<Output = Result<u64, String>> + Send>>
+        }) as TickPauser
+    });
+    create_lua_goal_with(lua, plan_world, actuator, bots, checker, refresher, pauser)
 }
 
 /// [`create_lua_goal`] with the actuator supplied rather than built from RCON.
@@ -484,6 +520,7 @@ pub(crate) fn create_lua_goal_with(
     bots: Vec<u8>,
     placement_checker: Option<PlacementChecker>,
     buffer_refresher: Option<BufferRefresher>,
+    tick_pauser: Option<TickPauser>,
 ) -> LuaResult<LuaTable> {
     let map_table = lua.create_table()?;
     map_table.set(
@@ -684,6 +721,7 @@ end
         roster.clone(),
         placement_checker,
         buffer_refresher,
+        tick_pauser,
     )?;
 
     // `goal.holds`
@@ -1378,6 +1416,7 @@ mod tests {
             vec![1, 2],
             None,
             None,
+            None,
         )
         .expect("goal table");
         lua.globals().set("goal", table).expect("install");
@@ -1918,6 +1957,7 @@ mod tests {
                 roster.clone(),
                 None,
                 None,
+                None,
             )
             .expect("goal table");
             lua.globals().set("goal", table).expect("install");
@@ -2012,6 +2052,7 @@ mod tests {
                 seeded_world(bot_count),
                 factory(Arc::new(StubActuator::new(Failure::Never))),
                 (1..=bot_count).collect(),
+                None,
                 None,
                 None,
             )
@@ -2131,6 +2172,7 @@ mod tests {
             vec![1, 2],
             None,
             None,
+            None,
         )
         .expect("goal table");
         lua.globals().set("goal", table).expect("install");
@@ -2177,6 +2219,7 @@ mod tests {
             world,
             factory(Arc::new(StubActuator::new(Failure::Never))),
             vec![1, 2],
+            None,
             None,
             None,
         )
@@ -2312,6 +2355,7 @@ mod tests {
             vec![1, 2],
             None,
             None,
+            None,
         )
         .expect("goal table");
         lua.globals().set("goal", table).expect("install");
@@ -2357,6 +2401,7 @@ mod tests {
             seeded_world_for(&[1, 2]),
             factory(rec.clone()),
             vec![1, 2],
+            None,
             None,
             None,
         )
@@ -2459,6 +2504,7 @@ mod tests {
             vec![1],
             None,
             None,
+            None,
         )
         .expect("goal table");
         lua.globals().set("goal", table).expect("install");
@@ -2529,6 +2575,7 @@ mod tests {
             Arc::new(world),
             factory(Arc::new(StubActuator::new(Failure::Never))),
             vec![1],
+            None,
             None,
             None,
         )

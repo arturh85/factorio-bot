@@ -909,6 +909,15 @@ const SCHEMAS: Record<string, SchemaContract> = {
             model_enemy_structures: {required: true, type: 'integer'},
             unearned_ratio: {required: false, type: 'number', nullable: true}
         },
+        // The planning receipt: wall time, and whether the game clock was
+        // stopped for it. Both ticks are nullable -- "nobody could ask" is
+        // not zero ticks charged.
+        planning_timed: {
+            planning_ms: {required: true, type: 'integer'},
+            paused: {required: true, type: 'boolean'},
+            tick_before: {required: false, type: 'integer', nullable: true},
+            tick_after: {required: false, type: 'integer', nullable: true}
+        },
         run_finished: {
             outcome: {required: true, type: 'string'},
             elapsed_ticks: {required: true, type: 'integer'}

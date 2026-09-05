@@ -1462,6 +1462,17 @@
               "string",
               "null"
             ]
+          },
+          "underground_half": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/UndergroundHalf",
+                "description": "`Some` only for one half of an underground-belt pair -- see\n`crate::blueprint::UndergroundHalf`. An `Option` defaulting to `None`\non a missing field, so every archived run record and world dump\nwritten before this field existed still deserialises."
+              }
+            ]
           }
         },
         "required": [
@@ -3183,6 +3194,14 @@
           "k"
         ],
         "type": "object"
+      },
+      "UndergroundHalf": {
+        "description": "Which half of an underground-belt pair an entity is.\n\nCarried onto `FactorioEntity::underground_half` (`crates/core/src/types.rs`)\nso the placement path -- ultimately `rcon_place_entity` in\n`mods/BotBridge/control.lua`, which sends this as `type` to\n`surface.create_entity` -- can tell the two halves of a pair apart.\n`#[serde(rename_all = \"snake_case\")]` gives the wire spelling `\"input\"` /\n`\"output\"`, which is also Factorio's own `belt_to_ground_type` spelling.",
+        "enum": [
+          "input",
+          "output"
+        ],
+        "type": "string"
       },
       "VideoManifest": {
         "description": "Everything a caller needs to know about one video directory, derived from a\ndirectory listing every time it is asked for.\n\n**One type for the live directory and the archived one.** They hold the same\nfour files and answer the same questions; two shapes would be two chances to\ndisagree about what a recording is.",

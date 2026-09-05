@@ -180,6 +180,14 @@ export interface InventoryItemWithQuality {
 }
 
 /**
+ * Which half of an underground-belt pair a `FactorioEntity` is. Mirrors
+ * `crate::blueprint::UndergroundHalf` in `crates/core/src/blueprint.rs`,
+ * carried onto `FactorioEntity::underground_half` (task 5) so the two halves
+ * of a pair -- otherwise placed identically -- can be told apart.
+ */
+export type UndergroundHalf = 'input' | 'output';
+
+/**
  * One entity as `GET /api/v1/game/find-entities` reports it. Mirrors
  * `FactorioEntity` in `crates/core/src/types.rs`.
  *
@@ -210,6 +218,8 @@ export interface FactorioEntity {
     recipe: string | null;
     ghost_name: string | null;
     ghost_type: string | null;
+    /** Only present (non-null) for one half of an underground-belt pair. */
+    underground_half: UndergroundHalf | null;
 }
 
 /**

@@ -20,6 +20,7 @@ function entity(overrides: Partial<FactorioEntity>): FactorioEntity {
         recipe: null,
         ghost_name: null,
         ghost_type: null,
+        underground_half: null,
         ...overrides
     };
 }

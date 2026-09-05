@@ -12,7 +12,7 @@
  */
 
 import {request} from './http';
-import {FactorioEntity, InventoryItemWithQuality, Position, Rect} from './types';
+import {FactorioEntity, InventoryItemWithQuality, Position, Rect, UndergroundHalf} from './types';
 
 export interface FindEntitiesQuery {
     position: Position;
@@ -97,6 +97,22 @@ function asStringOrNull(value: unknown, path: string): string | null {
     return value === null || value === undefined ? null : asString(value, path);
 }
 
+/**
+ * `underground_half`: `"input"` / `"output"` / `null`. A plain
+ * `asStringOrNull` cast would accept any string, which defeats the point of
+ * this module -- checking the shape a cast would only assume.
+ */
+function asUndergroundHalfOrNull(value: unknown, path: string): UndergroundHalf | null {
+    if (value === null || value === undefined) {
+        return null;
+    }
+    const s = asString(value, path);
+    if (s !== 'input' && s !== 'output') {
+        fail(path, `expected "input" or "output", got ${JSON.stringify(value)}`);
+    }
+    return s;
+}
+
 function parsePosition(value: unknown, path: string): Position {
     const obj = asObject(value, path);
     return {x: asNumber(obj.x, path + '.x'), y: asNumber(obj.y, path + '.y')};
@@ -166,7 +182,8 @@ export function parseFactorioEntity(value: unknown, path = '$'): FactorioEntity 
         amount: asNumberOrNull(obj.amount, path + '.amount'),
         recipe: asStringOrNull(obj.recipe, path + '.recipe'),
         ghost_name: asStringOrNull(obj.ghost_name, path + '.ghost_name'),
-        ghost_type: asStringOrNull(obj.ghost_type, path + '.ghost_type')
+        ghost_type: asStringOrNull(obj.ghost_type, path + '.ghost_type'),
+        underground_half: asUndergroundHalfOrNull(obj.underground_half, path + '.underground_half')
     };
 }
 

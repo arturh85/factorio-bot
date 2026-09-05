@@ -104,6 +104,37 @@ describe('parseFactorioEntity / parseFactorioEntities -- real captures', () => {
         const ship = SPAWN_ENTITIES.find(e => e.name === 'crash-site-spaceship');
         expect(ship?.amount).toBeNull();
     });
+
+    /**
+     * These captures predate `underground_half` (task 5), so the key is
+     * entirely absent -- the same shape as `ghost_name`/`ghost_type` on
+     * every entity that is not a ghost. `parseFactorioEntity` must default
+     * a missing key to `null`, not throw.
+     */
+    it('leaves underground_half null for a capture that predates the field', () => {
+        const ship = SPAWN_ENTITIES.find(e => e.name === 'crash-site-spaceship');
+        expect(ship?.underground_half).toBeNull();
+    });
+});
+
+describe('parseFactorioEntity -- underground_half', () => {
+    const base = {
+        name: 'underground-belt',
+        entity_type: 'underground-belt',
+        position: {x: 0, y: 0},
+        bounding_box: {left_top: {x: -0.4, y: -0.4}, right_bottom: {x: 0.4, y: 0.4}},
+        direction: 0
+    };
+
+    it('parses "input" and "output"', () => {
+        expect(parseFactorioEntity({...base, underground_half: 'input'}).underground_half).toBe('input');
+        expect(parseFactorioEntity({...base, underground_half: 'output'}).underground_half).toBe('output');
+    });
+
+    it('throws on a value that is neither "input" nor "output"', () => {
+        expect(() => parseFactorioEntity({...base, underground_half: 'sideways'}))
+            .toThrow(/underground_half/);
+    });
 });
 
 describe('parseFactorioEntity / parseFactorioEntities -- rejects malformed input', () => {

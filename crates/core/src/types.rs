@@ -1453,6 +1453,12 @@ pub struct FactorioEntity {
     pub recipe: Option<String>,     // only CraftingMachines
     pub ghost_name: Option<String>, // only type = entity-ghost
     pub ghost_type: Option<String>, // only type = entity-ghost
+    /// `Some` only for one half of an underground-belt pair -- see
+    /// `crate::blueprint::UndergroundHalf`. An `Option` defaulting to `None`
+    /// on a missing field, so every archived run record and world dump
+    /// written before this field existed still deserialises.
+    #[serde(default)]
+    pub underground_half: Option<crate::blueprint::UndergroundHalf>,
 }
 
 impl crate::aabb_quadtree::Spatial<Rect> for FactorioEntity {
@@ -1524,26 +1530,31 @@ impl FactorioEntity {
             ..Default::default()
         }
     }
-    /// One half of an underground pair. **Which half is not expressible
-    /// here, and the parameter that pretended otherwise is gone.**
+    /// One half of an underground pair, now nameable.
     ///
     /// Factorio calls the two halves `input` and `output`; they take the same
-    /// direction and are distinguished by `belt_to_ground_type`. This struct
-    /// has no field for it (checked: no `entity_data`, no
-    /// `belt_to_ground_type`, nothing else that fits -- see the struct above),
-    /// and the mod's `rcon_place_entity(player_id, item_name, position,
-    /// direction)` has no argument for it either. An earlier version of this
-    /// constructor took an `output: bool` and immediately discarded it with
-    /// `let _ = output;`, which is worse than not taking it: a caller reads
-    /// the signature as a promise the returned entity carries the half, and
-    /// it does not. The parameter comes back the day the placement path can
-    /// carry it; until then the two halves are told apart only by their
-    /// positions relative to each other.
+    /// direction and are distinguished by `belt_to_ground_type`. An earlier
+    /// version of this constructor took an `output: bool` and immediately
+    /// discarded it with `let _ = output;`, because `FactorioEntity` had
+    /// nowhere to put it -- a signature that promised the returned entity
+    /// carried the half when it did not. `underground_half`
+    /// (`crate::blueprint::UndergroundHalf`) is that place, and the mod's
+    /// `rcon_place_entity` now takes a fifth argument it forwards to
+    /// `surface.create_entity` as `type`, so `half` is honoured all the way
+    /// to the game.
     ///
-    /// `method::connect` never emits these -- it calls `route_belt` with
-    /// `max_underground: None` for exactly this reason -- so nothing in the
-    /// tree calls this constructor today.
-    pub fn new_underground_belt(position: &Position, direction: Direction) -> FactorioEntity {
+    /// `method::connect` still never emits these -- it calls `route_belt`
+    /// with `max_underground: None` -- but the reason is now "not wired up
+    /// yet", not "cannot be expressed": `TileKind::UndergroundEntry` /
+    /// `UndergroundExit` map onto `UndergroundHalf::Input` /
+    /// `UndergroundHalf::Output` respectively, and the `unreachable!()` arm
+    /// in `connect.rs` could construct exactly that the day `max_underground`
+    /// is threaded through.
+    pub fn new_underground_belt(
+        position: &Position,
+        direction: Direction,
+        half: crate::blueprint::UndergroundHalf,
+    ) -> FactorioEntity {
         FactorioEntity {
             name: EntityName::UndergroundBelt.to_string(),
             entity_type: EntityType::UndergroundBelt.to_string(),
@@ -1554,6 +1565,7 @@ impl FactorioEntity {
             // sibling already rounds the same box to 0.8 x 0.8.
             bounding_box: add_to_rect_turned(&Rect::from_wh(0.8, 0.8), position, direction),
             direction: direction.to_u8().unwrap(),
+            underground_half: Some(half),
             ..Default::default()
         }
     }
@@ -2872,5 +2884,31 @@ mod tests {
             err.to_string().contains("category"),
             "expected a complaint about category, got: {err}"
         );
+    }
+
+    /// `new_underground_belt` regained its half parameter because
+    /// `FactorioEntity` can now carry it -- this pins that the two halves it
+    /// builds actually differ, not merely that the parameter is accepted.
+    #[test]
+    fn new_underground_belt_halves_actually_differ() {
+        use crate::blueprint::UndergroundHalf;
+
+        let pos = Position::new(3.0, 4.0);
+        let input =
+            FactorioEntity::new_underground_belt(&pos, Direction::North, UndergroundHalf::Input);
+        let output =
+            FactorioEntity::new_underground_belt(&pos, Direction::North, UndergroundHalf::Output);
+
+        assert_eq!(input.underground_half, Some(UndergroundHalf::Input));
+        assert_eq!(output.underground_half, Some(UndergroundHalf::Output));
+        assert_ne!(
+            input.underground_half, output.underground_half,
+            "the two halves must be told apart by the entity they build, not \
+             only by their position relative to each other"
+        );
+        // Both halves are still ordinary underground belts otherwise --
+        // same name, same type, same footprint -- only the half differs.
+        assert_eq!(input.name, output.name);
+        assert_eq!(input.entity_type, output.entity_type);
     }
 }

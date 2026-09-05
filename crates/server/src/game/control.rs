@@ -95,6 +95,8 @@ pub async fn place_entity(
     let world = require_world(instance)?;
     // Validate the player id before mutating anything, see `require_player`.
     require_player(world, body.player_id)?;
+    // `None`: this HTTP endpoint has no request field for an underground
+    // half yet -- see `FactorioEntity::underground_half`.
     let entity = instance
         .rcon
         .place_entity(
@@ -102,6 +104,7 @@ pub async fn place_entity(
             body.item.clone(),
             position,
             body.direction,
+            None,
             world,
         )
         .await

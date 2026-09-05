@@ -1143,3 +1143,101 @@ fn a_landing_inside_the_walkers_stopping_box_is_refused_and_the_next_exit_taken(
          to leave by another edge. Got ({x}, {y})"
     );
 }
+
+/// **The fifth argument, and the guard around it.**
+///
+/// Task 5 gave `rcon_place_entity` a fifth argument -- `underground_half`,
+/// `"input"` / `"output"` / `nil` -- forwarded to `surface.create_entity` as
+/// `type`. `LuaSurface.create_entity` rejects an unknown `type` key on any
+/// prototype that has none, so the requirement is not just "send it": it is
+/// "send it ONLY for `underground-belt`". `stub_place`/`PLACE_FURNACE` above
+/// never exercise this argument at all (they always call with four), so this
+/// is its own stub: an `underground-belt` place_result, and a `create_entity`
+/// that records what `args.type` actually was.
+fn stub_place_underground(create_ok: bool) -> String {
+    format!(
+        r#"
+        _created = 0
+        _create_type = "<create_entity was never called>"
+
+        local entity = {{ name = "underground-belt" }}
+        local surface = {{
+            can_place_entity = function(args) return true end,
+            create_entity = function(args)
+                _created = _created + 1
+                _create_type = tostring(args.type)
+                if {create_ok} then return entity end
+                return nil
+            end,
+            find_entity = function(name, pos) return nil end,
+        }}
+        local player = {{
+            name = "bot1",
+            connected = true,
+            character = {{}},
+            position = {{ x = 38.3046875, y = 16.4765625 }},
+            force = "player",
+            surface = surface,
+            get_item_count = function(name) return 1 end,
+            remove_item = function(items) return items.count end,
+        }}
+        prototypes = {{ item = {{
+            ["underground-belt"] = {{ place_result = {{
+                name = "underground-belt",
+                collision_box = {{
+                    left_top = {{ x = -0.4, y = -0.4 }},
+                    right_bottom = {{ x = 0.4, y = 0.4 }},
+                }},
+            }} }},
+        }} }}
+        game = {{
+            tick = {tick},
+            players = {{ player }},
+            forces = {{ player = {{ print = noop }} }},
+        }}
+    "#,
+        create_ok = if create_ok { "true" } else { "false" },
+        tick = STUB_TICK,
+    )
+}
+
+/// The fifth argument reaches `surface.create_entity` as `type`, verbatim.
+#[test]
+fn underground_half_is_forwarded_as_type_for_an_underground_belt() {
+    let lua = run(
+        &stub_place_underground(true),
+        STUB_SERIALISE,
+        r#"rcon_place_entity(1, "underground-belt", {38, 16}, 0, "input")"#,
+    );
+    assert_eq!(number(&lua, "_created"), 1);
+    assert_eq!(string_global(&lua, "_create_type"), "input");
+
+    let lua = run(
+        &stub_place_underground(true),
+        STUB_SERIALISE,
+        r#"rcon_place_entity(1, "underground-belt", {38, 16}, 0, "output")"#,
+    );
+    assert_eq!(string_global(&lua, "_create_type"), "output");
+}
+
+/// **The guard.** A placement with no fifth argument at all -- every call
+/// site in this project before task 5, and still every non-underground
+/// placement after it -- must not send `type` at all, or a stone furnace
+/// (this test's own `PLACE_FURNACE`, replayed against the underground stub's
+/// `create_entity`) would carry a `type` key the game rejects on a prototype
+/// that has none.
+#[test]
+fn no_fifth_argument_sends_no_type_at_all() {
+    let lua = run(
+        &stub_place_underground(true),
+        STUB_SERIALISE,
+        PLACE_UNDERGROUND,
+    );
+    assert_eq!(
+        string_global(&lua, "_create_type"),
+        "nil",
+        "omitting the fifth argument must not synthesise a type"
+    );
+}
+
+const PLACE_UNDERGROUND: &str = r#"rcon_place_entity(1, "underground-belt", {38, 16}, 0)"#;

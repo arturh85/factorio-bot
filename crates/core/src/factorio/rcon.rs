@@ -1,3 +1,4 @@
+use crate::blueprint::UndergroundHalf;
 use crate::errors::{
     RconError, RconNoWaterFound, RconOutOfResourceReach, RconPathRequestFailed,
     RconPlayerBlockesAllPlacement, RconPlayerBlockesPlacement, RconPlayerNotFound,
@@ -3968,12 +3969,20 @@ impl FactorioRcon {
         item_name: String,
         entity_position: Position,
         direction: u8,
+        underground_half: Option<UndergroundHalf>,
         world: &Arc<FactorioWorld>,
     ) -> Result<FactorioEntity> {
-        self.place_entity_timed(player_id, item_name, entity_position, direction, world)
-            .await
-            .map(|(entity, _ticks)| entity)
-            .map_err(ActionFailure::into_report)
+        self.place_entity_timed(
+            player_id,
+            item_name,
+            entity_position,
+            direction,
+            underground_half,
+            world,
+        )
+        .await
+        .map(|(entity, _ticks)| entity)
+        .map_err(ActionFailure::into_report)
     }
 
     /// [`FactorioRcon::place_entity`], reporting the game tick it ran at
@@ -3995,12 +4004,19 @@ impl FactorioRcon {
     /// over 1.8s" byte-identical to "refused instantly". See
     /// [`PlacementAttempts`], which owns the measurement and is tested without
     /// a game.
+    ///
+    /// `underground_half` is `Some` only when `item_name` is an
+    /// underground-belt half; the mod's `rcon_place_entity` forwards it to
+    /// `surface.create_entity` as `type`, and only for that entity, because
+    /// the game rejects `type` on a prototype that has none. Every other
+    /// caller passes `None`.
     pub async fn place_entity_timed(
         &self,
         player_id: PlayerId,
         item_name: String,
         entity_position: Position,
         direction: u8,
+        underground_half: Option<UndergroundHalf>,
         world: &Arc<FactorioWorld>,
     ) -> Result<(FactorioEntity, ActionTicks), ActionFailure> {
         let player = world.players.get(&player_id);
@@ -4057,6 +4073,15 @@ impl FactorioRcon {
         // tiles from where it would be standing. A snapshot cannot see that,
         // which is why the recovery has to be here, where the game's own
         // refusal is still a line.
+        // "input" / "output" / `nil` -- the fifth argument `rcon_place_entity`
+        // (`mods/BotBridge/control.lua`) forwards to `surface.create_entity` as
+        // `type`, and only when `item_name` is an underground-belt half. Built
+        // once and reused on the retry below so both dispatches agree.
+        let underground_half_lua = match underground_half {
+            Some(UndergroundHalf::Input) => str_to_lua("input"),
+            Some(UndergroundHalf::Output) => str_to_lua("output"),
+            None => String::from("nil"),
+        };
         let mut attempt: u32 = 0;
         // Purely observational, and deliberately separate from `attempt`:
         // `attempt` is the budget that decides whether to go round again,
@@ -4075,6 +4100,7 @@ impl FactorioRcon {
                         str_to_lua(&item_name),
                         position_to_lua(&entity_position),
                         direction.to_string(),
+                        underground_half_lua.clone(),
                     ],
                 )
                 .await?;
@@ -4144,6 +4170,7 @@ impl FactorioRcon {
                                     str_to_lua(&item_name),
                                     position_to_lua(&entity_position),
                                     direction.to_string(),
+                                    underground_half_lua.clone(),
                                 ],
                             )
                             .await?;

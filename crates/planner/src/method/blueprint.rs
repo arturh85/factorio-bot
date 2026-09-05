@@ -44,18 +44,24 @@ pub fn bands(entities: &[BlueprintEntity], bots: usize) -> Vec<Vec<usize>> {
 /// is read from the world's own prototype table rather than guessed, and the
 /// `bounding_box` is left for `PlanState::create_entity` to fill in from the
 /// same table (see its own doc for why that overlay half exists).
-fn entity_for(state: &PlanState, name: &str, position: &Position, direction: u8) -> FactorioEntity {
+///
+/// `e.underground_half` is carried straight onto the entity -- `Some` only
+/// for one half of an underground-belt pair (`BlueprintEntity::underground_half`),
+/// `None` for everything else -- which is what makes the two halves of a pair
+/// distinguishable all the way to `rcon_place_entity`.
+fn entity_for(state: &PlanState, e: &BlueprintEntity, position: &Position) -> FactorioEntity {
     let entity_type = state
         .base()
         .entity_prototypes
-        .get(name)
+        .get(e.name.as_str())
         .map(|proto| proto.entity_type.clone())
-        .unwrap_or_else(|| name.to_string());
+        .unwrap_or_else(|| e.name.clone());
     FactorioEntity {
-        name: name.to_string(),
+        name: e.name.clone(),
         entity_type,
         position: position.clone(),
-        direction,
+        direction: e.direction,
+        underground_half: e.underground_half,
         ..Default::default()
     }
 }
@@ -139,25 +145,15 @@ impl Method for BuildBlock {
             reason: format!("{e:?}"),
         })?;
 
-        // Refuse the whole goal, by name, rather than place two identical
-        // halves. `connect.rs` sets the precedent (`ConnectRefusal::NoRoute`
-        // over tunnelling under an obstacle it cannot route around): neither
-        // `FactorioEntity` nor the mod's `rcon_place_entity` can express
-        // which half of an underground pair is being built, so the generic
-        // placement path below would emit the SAME entity twice -- a run
-        // that places 100% correctly and connects nothing, the failure this
-        // project has already paid for twice. A later task teaches the
-        // placement path the half and lifts this refusal; until then it has
-        // to be enforced here rather than merely intended by the plan.
-        if bp.entities.iter().any(|e| e.underground_half.is_some()) {
-            return Err(PlannerError::BlueprintRefused {
-                reason: "the blueprint contains an underground belt, and the \
-                         placement path cannot yet express which half is \
-                         being built -- both halves would place identically \
-                         and connect nothing"
-                    .to_string(),
-            });
-        }
+        // This used to refuse the whole goal, by name, whenever it contained
+        // an underground belt: neither `FactorioEntity` nor the mod's
+        // `rcon_place_entity` could say which half of a pair was being
+        // built, so the generic placement path below would have emitted the
+        // SAME entity twice -- a run that places 100% correctly and connects
+        // nothing, the failure this project has already paid for twice. Both
+        // now carry `underground_half` (task 5), via `entity_for` below, so
+        // the two halves place as the distinct entities they are and this
+        // method no longer needs to know underground belts exist at all.
 
         // Only what is NOT already standing. This is what makes the goal
         // re-checkable on a replan and idempotent when built twice.
@@ -219,7 +215,7 @@ impl Method for BuildBlock {
             for idx in indices {
                 let e = &owned[*idx];
                 let world = anchor.add(&e.offset);
-                let entity = entity_for(&ctx.state, &e.name, &world, e.direction);
+                let entity = entity_for(&ctx.state, e, &world);
                 let note = format!("block band {band}");
                 block.push(place_step(ctx, entity, build, &note));
             }
@@ -285,14 +281,17 @@ mod tests {
     /// The `FurnaceLine` fixture (`crates/core/tests/blueprints/furnace_line.txt`)
     /// carries one underground-belt pair -- `an_underground_belt_carries_which_half_it_is`
     /// in `crates/core/tests/blueprint_decode.rs` pins that the decoder reports
-    /// both halves. `expand()` must refuse the WHOLE goal rather than place
-    /// either half through the generic path: neither `FactorioEntity` nor the
-    /// mod's `rcon_place_entity` can say which half is being built, so both
-    /// would place as the same entity and connect nothing -- a run that
-    /// places 100% correctly and moves nothing, the failure `connect.rs`'s
-    /// own underground-belt refusal exists to avoid.
+    /// both halves. `expand()` used to refuse the WHOLE goal by name rather
+    /// than place either half through the generic path, because neither
+    /// `FactorioEntity` nor the mod's `rcon_place_entity` could say which half
+    /// was being built. Both now can (task 5's `FactorioEntity::underground_half`
+    /// and `entity_for` above), so this pins the refusal's replacement: the
+    /// blueprint plans, and the two placements it emits for `underground-belt`
+    /// carry the two different halves, not the same one twice -- the exact
+    /// failure ("places 100% correctly and connects nothing") this whole task
+    /// exists to make unreachable.
     #[test]
-    fn a_blueprint_with_underground_belts_is_refused_by_name() {
+    fn a_blueprint_with_an_underground_belt_pair_now_plans() {
         use crate::ids::BotId;
         use factorio_bot_core::test_utils::fixture_world;
         use std::sync::Arc;
@@ -309,21 +308,48 @@ mod tests {
             anchor: Position::new(0.0, 0.0),
         };
 
-        let err = BuildBlock
+        let steps = BuildBlock
             .expand(&goal, &mut ctx)
-            .expect_err("a blueprint with an underground belt must be refused, not placed");
+            .expect("a blueprint with an underground-belt pair now plans");
 
-        let PlannerError::BlueprintRefused { reason } = err else {
-            panic!("expected BlueprintRefused, got {err:?}");
-        };
-        assert!(
-            reason.contains("underground"),
-            "the refusal must name why: {reason}"
+        let halves = underground_belt_halves(&steps);
+        assert_eq!(
+            halves.len(),
+            2,
+            "FurnaceLine's one underground-belt pair is two placements: {halves:?}"
         );
         assert!(
-            reason.contains("cannot yet express"),
-            "the refusal must say the placement path cannot express the half: {reason}"
+            halves.contains(&Some(UndergroundHalf::Input)),
+            "one half must be the input: {halves:?}"
         );
+        assert!(
+            halves.contains(&Some(UndergroundHalf::Output)),
+            "one half must be the output: {halves:?}"
+        );
+    }
+
+    /// Every `underground_half` carried by an `underground-belt` `Place`
+    /// action anywhere in `steps`, in emission order. Walks `Step::Owned`
+    /// the same way `have_bills` (below) does, since a real plan spreads a
+    /// block's placements over one `Step::Owned` per band.
+    fn underground_belt_halves(
+        steps: &[Step],
+    ) -> Vec<Option<factorio_bot_core::blueprint::UndergroundHalf>> {
+        let mut out = Vec::new();
+        for step in steps {
+            match step {
+                Step::Act(action) => {
+                    if let ActionKind::Place { entity } = &action.kind
+                        && entity.name == "underground-belt"
+                    {
+                        out.push(entity.underground_half);
+                    }
+                }
+                Step::Owned { steps, .. } => out.extend(underground_belt_halves(steps)),
+                _ => {}
+            }
+        }
+        out
     }
 
     /// Every `Goal::Have` stated anywhere in `steps`, summed by item across
@@ -420,7 +446,7 @@ mod tests {
         // would look for it, so `already_stands` finds all 37 already there.
         for e in &bp.entities {
             let world = anchor.add(&e.offset);
-            let entity = entity_for(&ctx.state, &e.name, &world, e.direction);
+            let entity = entity_for(&ctx.state, e, &world);
             ctx.state.create_entity(entity);
         }
 

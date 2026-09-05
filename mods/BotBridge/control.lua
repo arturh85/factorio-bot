@@ -3368,7 +3368,13 @@ function rcon_action_start_mining(action_id, player_id, name, position, count)
 	stamp_tick()
 end
 
-function rcon_place_entity(player_id, item_name, entity_position, direction)
+-- `underground_half` is `"input"` or `"output"` (or `nil`) -- the fifth
+-- argument `crates/core/src/factorio/rcon.rs`'s `place_entity_timed` sends,
+-- carrying `FactorioEntity::underground_half`. Forwarded to
+-- `surface.create_entity` as `type`, and ONLY for `underground-belt`: the
+-- game rejects an unknown `type` key on any prototype that has none, so
+-- sending it unconditionally would break every other placement.
+function rcon_place_entity(player_id, item_name, entity_position, direction, underground_half)
 	local entproto = prototypes.item[item_name].place_result
 	local player = bot_handle(player_id)
 	-- Refused before anything else is asked, and stamped like every other
@@ -3513,7 +3519,14 @@ function rcon_place_entity(player_id, item_name, entity_position, direction)
 	-- phantom behind and needs no matching deletion event. `create_entity`
 	-- does not raise `script_raised_built` unless asked (`raise_built`
 	-- defaults to false **[V]**), so the game does not announce it either.
-	local result = surface.create_entity{name=entproto.name,position=entity_position,direction=direction,force=player.force, fast_replace=true, player=player_identification(player_id), spill=true}
+	local create_args = {name=entproto.name,position=entity_position,direction=direction,force=player.force, fast_replace=true, player=player_identification(player_id), spill=true}
+	-- Only `underground-belt` has a `type` (`belt_to_ground_type`, "input" or
+	-- "output"); `LuaSurface.create_entity` raises on an unknown `type` key
+	-- for any prototype that has none, so this must not be sent unconditionally.
+	if entproto.name == "underground-belt" and underground_half ~= nil then
+		create_args.type = underground_half
+	end
+	local result = surface.create_entity(create_args)
 
 	if result == nil then
 		complain("placing item '"..item_name.."' failed, surface.create_entity returned nil :(")

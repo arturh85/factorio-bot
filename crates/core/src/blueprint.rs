@@ -28,10 +28,21 @@
 
 use crate::types::Position;
 use base64::Engine;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Which half of an underground-belt pair an entity is.
+///
+/// Carried onto `FactorioEntity::underground_half` (`crates/core/src/types.rs`)
+/// so the placement path -- ultimately `rcon_place_entity` in
+/// `mods/BotBridge/control.lua`, which sends this as `type` to
+/// `surface.create_entity` -- can tell the two halves of a pair apart.
+/// `#[serde(rename_all = "snake_case")]` gives the wire spelling `"input"` /
+/// `"output"`, which is also Factorio's own `belt_to_ground_type` spelling.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, utoipa::ToSchema,
+)]
+#[serde(rename_all = "snake_case")]
 pub enum UndergroundHalf {
     Input,
     Output,

@@ -743,9 +743,12 @@ end
 
                 async move {
                     let position = position?;
+                    // `None`: this Lua global has no parameter for an
+                    // underground half yet -- see
+                    // `FactorioEntity::underground_half`.
                     let result = _rcon
                         .as_ref()
-                        .place_entity(player_id, name, position, direction, &_world)
+                        .place_entity(player_id, name, position, direction, None, &_world)
                         .await
                         .map_err(rcon_error)?;
                     _lua.to_value(&result)

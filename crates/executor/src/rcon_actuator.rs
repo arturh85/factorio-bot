@@ -481,9 +481,13 @@ impl Actuator for RconActuator {
             position: at.clone(),
             direction,
         };
+        // `None`: the executor's `Actuator::place` does not yet carry which
+        // half of an underground-belt pair this is -- see
+        // `FactorioEntity::underground_half` and `method::connect`'s own
+        // `max_underground: None` for why the planner never emits one today.
         let (entity, ticks) = self
             .rcon
-            .place_entity_timed(p, item.to_string(), at, direction, &self.world)
+            .place_entity_timed(p, item.to_string(), at, direction, None, &self.world)
             .await
             .map_err(classify)?;
         let actual = EntitySnapshot {

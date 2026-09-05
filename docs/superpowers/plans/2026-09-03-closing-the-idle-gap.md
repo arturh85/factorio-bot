@@ -80,6 +80,33 @@ honestly, as before. Also fixed on the way: `scripting_lua`'s
 `plan_cell` call was one argument behind `bdec88af` and failed
 `--all-targets` clippy on master.
 
+## Oil, first rung: a `mine-entity` trigger names its entity (`ffc56270`)
+
+The mod sent trigger technologies as a bare type because runtime-api.json
+documents a singular `entity` while the prototypes write `entities`. Read off
+the shipped 2.1.17 prototypes: **`mine-entity` carries an `entities` list of
+1–4 names and never a count** (9 techs; `oil-processing` → `["crude-oil"]`),
+`craft-item` carries `item` and an optional `count`, `craft-fluid` and
+`build-entity` are unused by any shipped tech. The mod now accepts a bare
+name, a `{name}` filter or a list of either and always sends `entities` plus
+`count`; Rust types default so old dumps load.
+
+The planner walks the ladder by name instead of `UnsupportedResearchTrigger`:
+`Goal::Extracted{entity}` behind a `Researched` with a `mine-entity` trigger;
+refusals `UndescribedResearchTrigger` (a dump from the old mod — both baseline
+dumps), `NotCharted` (the well is 380 tiles out), `NoExtractor`,
+`ExtractorLocked` (names `oil-gathering`), `ExtractionNotModelled` — the last
+is where the pumpjack cell and fluid routing will go. Charting and extractor
+refusals fire *before* prerequisites, so 100 green packs are never planned in
+front of a missing well. The three science goals are byte-identical.
+
+**Untested live**: the mod side has never run inside Factorio; the bench is a
+scratch server with this mod, a `world.dump`, and `entities: ["crude-oil"]`
+under `oil-processing`. Corrections to my brief: `FactorioTechnology` is not
+in the OpenAPI contract, so nothing to mirror; `oil-gathering` is a
+prerequisite, so its lock is only reachable from a directly stated
+`Extracted` goal.
+
 ## ✅ GREEN FROM A FRESH WORLD IN 23:38 (`run-1788594774-55056`) — the furnace-slot fix, executed
 
 Git `b0ed1d25`: a bot with no furnace of its own on the patch builds one as its

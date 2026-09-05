@@ -34,9 +34,15 @@ pub enum Holder {
     /// diagnosis and the alternatives weighed. The cost of binding is real
     /// and was measured on that same run: two subtrees that ran concurrently
     /// on two bots for 22,072 ticks now serialise onto one. Accepted anyway —
-    /// a slower correct plan beats a faster crashing one — and the fix that
-    /// would remove the trade-off rather than choose a side (a real
-    /// multi-bot decomposition for `Researched`) remains undone.
+    /// a slower correct plan beats a faster crashing one. The fix that
+    /// removes the trade-off rather than choosing a side landed on
+    /// 2026-09-05, and it is a decomposition, not a relaxation: `Researched`
+    /// deals its pack bill, its trigger prerequisite and its labs across the
+    /// roster as `Holder::Share(b)` goals inside `Step::Owned { whose:
+    /// Holder::Share(b) }` blocks, so every share is still sized against and
+    /// bound to one bot — this rule, unchanged — and the shares run in
+    /// parallel because they are different bots' shares, not because the
+    /// binding was loosened.
     ///
     /// The welding is not decoration. A share is what `SplitAcrossBots` hands
     /// a bot to mine, smelt and craft on its own, and what `Researched` asks

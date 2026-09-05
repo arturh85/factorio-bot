@@ -649,6 +649,51 @@ pub(crate) fn world_with_trigger_prerequisite() -> FactorioWorld {
     world
 }
 
+/// `fixture_world()` with one technology, `long-research`, costing `units`
+/// units of one automation science pack each at `unit_ticks` per unit and
+/// needing nothing first.
+///
+/// The shape of the real game's `logistic-science-pack` (75 × 300) without
+/// its prerequisites, so a test about *how* a long research is planned --
+/// dealt across the roster, in how many labs -- is not also a test about
+/// `automation` and the trigger under it.
+pub(crate) fn world_with_long_research(units: u64, unit_ticks: f64) -> FactorioWorld {
+    let json = format!(
+        r#"
+        {{
+          "name": "player",
+          "force_id": 1,
+          "current_research": null,
+          "research_progress": null,
+          "technologies": {{
+            "long-research": {{
+              "name": "long-research",
+              "enabled": true,
+              "upgrade": false,
+              "researched": false,
+              "prerequisites": [],
+              "research_unit_ingredients": [
+                {{ "name": "automation-science-pack", "ingredient_type": "item", "amount": 1 }}
+              ],
+              "research_unit_count": {units},
+              "research_unit_energy": {unit_ticks:?},
+              "order": "l-a",
+              "level": 1,
+              "valid": true
+            }}
+          }}
+        }}
+        "#
+    );
+    let world = fixture_world();
+    let force: FactorioForce =
+        serde_json::from_str(&json).expect("the long-research force must parse");
+    world
+        .update_force(force)
+        .expect("update_force cannot fail for a well-formed force");
+    world
+}
+
 /// `fixture_world()` plus the force above. Nothing else differs.
 pub(crate) fn world_with_technologies() -> FactorioWorld {
     let world = fixture_world();

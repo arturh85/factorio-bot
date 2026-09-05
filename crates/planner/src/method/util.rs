@@ -923,8 +923,29 @@ pub fn trigger_requirement(
 /// the one line to change, and the error is a factor of sixty in a *time
 /// estimate* — it moves makespans, it does not make a plan wrong.
 pub fn research_ticks(tech: &FactorioTechnology) -> Ticks {
-    let ticks = tech.research_unit_energy.to_f64().unwrap_or(0.0)
-        * tech.research_unit_count.to_f64().unwrap_or(0.0);
+    research_ticks_in_labs(tech, 1)
+}
+
+/// How long a whole research takes when `labs` labs share it, in ticks.
+///
+/// Labs research **units**, one at a time each, and the game hands every
+/// lab holding packs its own unit, so `labs` labs finish `count` units in
+/// `ceil(count / labs)` rounds of `unit_time`. That is the model, and it is
+/// exact for labs of equal speed that all hold packs — which is what
+/// `Researched` builds, since it feeds every lab it places. A lab that is
+/// standing empty contributes nothing, and it is the inserts, not this
+/// arithmetic, that decide whether a lab is empty.
+///
+/// `labs == 0` is treated as one: a research in no lab is not a faster
+/// research, and a caller that has counted no labs has counted wrong.
+///
+/// **`research_unit_energy` is in ticks, not seconds** — see
+/// [`research_ticks`], whose single-lab figure this generalises and to
+/// which it is identical at `labs == 1`.
+pub fn research_ticks_in_labs(tech: &FactorioTechnology, labs: u32) -> Ticks {
+    let labs = f64::from(labs.max(1));
+    let units = tech.research_unit_count.to_f64().unwrap_or(0.0);
+    let ticks = tech.research_unit_energy.to_f64().unwrap_or(0.0) * (units / labs).ceil();
     if ticks <= 0.0 {
         return 0;
     }
@@ -2021,5 +2042,28 @@ mod tests {
             3 * per_tile,
             "the drill still owns the three tiles it has not emptied"
         );
+    }
+
+    /// Labs share a research by units: `ceil(units / labs)` rounds of the
+    /// unit time, identical to `research_ticks` at one lab, and a lab count
+    /// of zero is read as one rather than as a division.
+    #[test]
+    fn labs_share_a_research_by_units() {
+        let s = PlanState::from_world(
+            Arc::new(crate::test_world::world_with_long_research(75, 300.0)),
+            &[BotId(1)],
+        );
+        let tech = s.technology("long-research").expect("fixture technology");
+        assert_eq!(research_ticks(&tech), 22_500);
+        assert_eq!(research_ticks_in_labs(&tech, 1), research_ticks(&tech));
+        assert_eq!(research_ticks_in_labs(&tech, 2), 38 * 300);
+        assert_eq!(research_ticks_in_labs(&tech, 3), 25 * 300);
+        assert_eq!(research_ticks_in_labs(&tech, 75), 300);
+        assert_eq!(
+            research_ticks_in_labs(&tech, 76),
+            300,
+            "a lab with no unit is idle, not negative"
+        );
+        assert_eq!(research_ticks_in_labs(&tech, 0), research_ticks(&tech));
     }
 }

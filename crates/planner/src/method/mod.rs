@@ -149,6 +149,18 @@ pub struct ExpansionCtx {
 }
 
 impl ExpansionCtx {
+    /// Whether the goal being expanded is one the caller asked for, as
+    /// opposed to a subgoal of some method's own.
+    ///
+    /// A read of the driver-owned `top_level`, and only a read: the field
+    /// stays the driver's to set. `Researched` asks it to decide whether the
+    /// chain actor is free to craft a share of the packs -- at the top level
+    /// the research is all the chain actor has, and beneath a cell it is one
+    /// item on a timeline that is already the plan's makespan.
+    pub fn is_top_level(&self) -> bool {
+        self.top_level
+    }
+
     pub fn new(state: PlanState, chain_actor: BotId) -> Self {
         // Outside any chain nothing is known about who runs what, and the
         // state may have been forked from one that was mid-expansion. Stated
@@ -702,7 +714,12 @@ fn expand_goal_body(
     //   `chain_actor` serialises them onto one. A slower correct run beats a
     //   faster crashing one, so that cost is accepted, not incidental — do
     //   not "restore parallelism" here without also re-solving the sizing
-    //   problem it removes.
+    //   problem it removes. The parallelism *was* restored, on 2026-09-05,
+    //   and not here: `Researched` now states each pack share, the trigger
+    //   prerequisite and each lab as a different bot's `Holder::Share` inside
+    //   a `Step::Owned` block, so they run on different bots because they
+    //   are different bots' shares, each sized against and bound to its own
+    //   runner by exactly this rule.
     // * **A method that `converges`**, whose decomposition makes several
     //   produced items meet in one inventory. This gets no owner: nothing
     //   named a bot for it, only the shape of the decomposition, so who runs
@@ -2032,23 +2049,37 @@ mod tests {
                  same goal: {fleet_count} against {count}"
             );
         }
+        //
+        // **Iron 91 -> 89, coal 33 -> 54 and stone 25 -> 48 on 2026-09-05**,
+        // when `Researched` began handing a trigger's craft and the first
+        // lab to a lead supplier as owned chains of that bot's, and dealing
+        // the packs across the roster. Two fewer ore: the lead's lab comes
+        // out of the trigger cell's fifty plates on the same bot, where the
+        // chain actor used to dig for a plant and a lab both. Coal and stone
+        // are a second rock: the trigger's cell is the lead's own chain now
+        // and fuels itself off a `rock-huge` of its own, twenty-four coal
+        // and twenty-four stone in one indivisible swing, exactly the solo
+        // plan's second swing (59 and 48). Both are still at or under the
+        // solo bill item by item, which is the half above, and the pin is
+        // what would catch the leftover of that fifty coming to be dug
+        // twice.
         assert_eq!(
             mined(&fleet),
             BTreeMap::from([
-                ("coal".to_string(), 33),
+                ("coal".to_string(), 54),
                 ("copper-ore".to_string(), 29),
-                // The same 91 as the solo bill, and for the same reason it
-                // moved from 41: the trigger's fifty were always drilled,
-                // and are now counted.
-                ("iron-ore".to_string(), 91),
-                // **One** above the solo bill, not ten: see the exemption
-                // above for why any excess is bought rather than wasted, and
-                // note that rocks made the excess almost vanish. A rock hands
-                // over twenty-four stone whether the plan wanted twenty-four
-                // or fifteen, so the fleet's extra furnaces now come out of a
+                // Two under the solo bill's 91, for the reason above; the 91
+                // itself is the trigger's fifty, always drilled and now
+                // counted, plus what the solo bot digs by hand.
+                ("iron-ore".to_string(), 89),
+                // The solo bill's own 48 since 2026-09-05 (it was 25, one
+                // above the solo bill of the time): the second rock above
+                // hands over twenty-four stone whether the plan wanted them
+                // or not, so the fleet's extra furnaces come out of a
                 // surplus that was already on the ground rather than out of
-                // ten more units of digging.
-                ("stone".to_string(), 25),
+                // more digging. See the exemption above for why any excess
+                // is bought rather than wasted.
+                ("stone".to_string(), 48),
             ]),
             "four bots' rung-1 bill"
         );

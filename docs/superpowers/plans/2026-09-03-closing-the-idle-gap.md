@@ -80,6 +80,42 @@ honestly, as before. Also fixed on the way: `scripting_lua`'s
 `plan_cell` call was one argument behind `bdec88af` and failed
 `--all-targets` clippy on master.
 
+## Research work shared across the roster — green planned 60:07 → 36:48 (`34d3773b`)
+
+Three mechanisms serialised research on bot 1, and my brief named one:
+
+1. **`Holder::Share(chain_actor)` on every research subgoal**, made a hard
+   owner by `c470388b`: the 75-pack craft and its gears, cable and circuits
+   were bot 1's because the *bill* was stated for bot 1. The scheduler was
+   right; the decomposition was wrong.
+2. **The trigger technology.** `automation-science-pack` is a 2.0 trigger
+   tech fired by crafting a lab, so every pack craft carried
+   `Researched("automation-science-pack")`; bot 1's `craft 1 lab` fell at
+   tick 101,473 behind the cell's whole bill while bots 2–4 sat on ready
+   ingredients from 46,448. Invisible in the live record, where automation
+   was already researched.
+3. **One lab**, hard-coded by `lab_site` taking the first standing lab.
+
+Landed: the pack bill dealt across the roster as owned `Holder::Share(b)`
+blocks (each share sized against and bound to its bot — `c470388b`'s guarantee
+kept), width from `worth_converging`; the trigger craft and first lab on a
+lead supplier; `labs_worth_building` adds a lab while it saves more than the
+lab's from-raw bill (17,232 ticks, not "10 gears + 10 circuits") shared over
+the roster — two labs for green on four bots, one for automation, never alone.
+
+| goal | before | after |
+|---|---|---|
+| `researched:automation` | 136 / 26,212, util 32% | 207 / **25,886**, util 41% |
+| `producing:automation-science-pack:6` | 300 / 44,641 | 359 / **39,791** |
+| `producing:logistic-science-pack:6` | 402 / 217,105, util 13% | 503 / **132,507 (36:48)**, util 23% |
+
+**Corrections:** the two big actions were 22% of the makespan, not the
+problem — **~60% of green's planned time is bot 1 *waiting* on a serial
+ladder of burner cells, each drill built from the previous cell's plates
+(~86,000 idle ticks, `produce.rs`)**; and the second lab pays only because the
+roster shares its bill. Green's planned number is chaotic at ±20k under small
+changes for the same reason. That ladder is the next RCA.
+
 ## ✅ GREEN FROM A FRESH WORLD IN 64:22 — the first end-to-end, non-resumed number
 
 `run-1788569499-05724`: `factory_stage3.lua --seed 31337 --new`, debug binary at

@@ -233,6 +233,11 @@ fixed game minutes from `run_started`):
 | 15 | 677 / 189 / 55 / 0 | 657 / 189 / 82 / 0 | 661 / 189 / 83 / 0 |
 | 20 | 677 / 189 / 85 / 0 | 670 / 189 / 85 / 6 | 670 / 189 / 85 / 4 |
 
+**Stated plainly: until a cell feeds itself, milestone time has been
+measuring plan length, not factory output.** Every conclusion in this record
+drawn on the makespan alone — including the run-to-run ordering of the last
+two days — compares how long the bots took to build the same dead cell.
+
 Three things the makespan table cannot show. (1) **Runs 14 and 15 are the
 same run on rates**, run 15 a little ahead through minute 12; the 17:20 vs
 18:46 difference is the last two minutes of a factory that has already

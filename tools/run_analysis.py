@@ -10,6 +10,19 @@ failures, what was built, and which bots stopped moving.
     python3 tools/run_analysis.py --all --summary
     python3 tools/run_analysis.py --json workspace/runs/run-1788449752-46541
     python3 tools/run_analysis.py --compare workspace/runs/run-A workspace/runs/run-B
+    python3 tools/run_analysis.py --rates-json workspace/runs/run-A
+    python3 tools/run_analysis.py --rates-md workspace/runs/run-A workspace/runs/run-B
+
+THE FIRST NUMBER IS THE PRODUCTION CURVE. By owner decision (2026-09-05,
+"prioritize production rates at given times over raw run time"), the report
+opens with cumulative production and trailing rates at fixed game-time marks
+(``--marks``, default 5/10/15/20/25/30 minutes from ``run_started``), a
+plateau detector, and a headline that carries both the curve and the
+milestone ticks; the milestone spans follow as a peer section. A producing
+or rate goal is judged on the curve; a researched or first-event goal on the
+tick it flipped. ``--rates-json`` and ``--rates-md`` (and
+``tools/rates_table.py``) emit the same block for the plan record, so its
+tables are generated rather than typed.
 
 ``--compare`` puts two runs side by side with deltas, under a comparability
 block that refuses (exit 3) when the two runs were not produced under the same
@@ -111,6 +124,43 @@ GAP_ROWS = 20
 # line said so, and the loss was found by comparing the last tick of two files
 # by hand. Every archived run is now checked for it on every run of this tool.
 SAMPLE_COVERAGE_SLACK_TICKS = 6000
+
+# PRODUCTION AT FIXED MARKS -- the first number in the report, by owner
+# decision (2026-09-05): "Prioritize production rates at given times over raw
+# run time." A run is judged by what the factory makes per minute at fixed
+# game-time marks, not by the tick a milestone flips; the world-record replay
+# note compares runs the same way (2-minute bins).
+#
+# Marks are GAME minutes from `run_started`, so a 5x headless run and a 1x
+# client run are on the same axis here -- speed scales wall time, not ticks.
+DEFAULT_MARKS = (5, 10, 15, 20, 25, 30)
+# Always shown, in tier order: the last item that differs decides `--compare`'s
+# per-mark verdict, and the tier order is what "ahead" means -- a run holding
+# six green packs is ahead of one holding more iron.
+DEFAULT_RATE_ITEMS = (
+    "iron-plate",
+    "copper-plate",
+    "iron-gear-wheel",
+    "electronic-circuit",
+    "automation-science-pack",
+    "logistic-science-pack",
+)
+# Any other item whose final `made` count reaches this joins the table.
+RATE_ITEM_THRESHOLD = 100
+# The trailing window for the second rate column, in game minutes.
+RATE_WINDOW_MINUTES = 2
+# An item whose count has not grown for this long while the run continued has
+# plateaued. Three minutes is ten force beats: far past a furnace refill, and
+# short enough to catch a cell that died a few minutes before the run ended.
+PLATEAU_MINUTES = 3
+SHORT_ITEM = {
+    "iron-plate": "iron",
+    "copper-plate": "copper",
+    "iron-gear-wheel": "gears",
+    "electronic-circuit": "circuits",
+    "automation-science-pack": "red packs",
+    "logistic-science-pack": "green",
+}
 
 # What world and what build a run came from, read from two places and merged.
 #
@@ -346,6 +396,14 @@ def minutes(ticks: float | None) -> str:
     if ticks is None:
         return "  n/a"
     return f"{ticks / TICKS_PER_MINUTE:5.1f}m"
+
+
+def mmss(ticks: float | None) -> str:
+    """``15:10`` -- game time as minutes:seconds, the shape the plan record uses."""
+    if ticks is None:
+        return "n/a"
+    total = int(round(ticks / TICKS_PER_SECOND))
+    return f"{total // 60}:{total % 60:02d}"
 
 
 def verb_of(action: str) -> str:
@@ -686,7 +744,13 @@ def join_actions(events: list[dict]) -> tuple[list[dict], dict[str, int]]:
     return joined, stats
 
 
-def analyse(run_dir: str, freeze_ticks: int = DEFAULT_FREEZE_TICKS) -> dict:
+def analyse(
+    run_dir: str,
+    freeze_ticks: int = DEFAULT_FREEZE_TICKS,
+    marks: tuple[float, ...] = DEFAULT_MARKS,
+    rate_items: tuple[str, ...] = DEFAULT_RATE_ITEMS,
+    rate_threshold: int = RATE_ITEM_THRESHOLD,
+) -> dict:
     run_id = os.path.basename(os.path.normpath(run_dir))
     result: dict[str, Any] = {"run_id": run_id, "dir": os.path.abspath(run_dir)}
 
@@ -815,6 +879,10 @@ def analyse(run_dir: str, freeze_ticks: int = DEFAULT_FREEZE_TICKS) -> dict:
     samples = load_jsonl(os.path.join(run_dir, "samples.jsonl"))
     result["samples_present"] = samples.present
     result["samples_coverage"] = sample_coverage(samples.rows, lo, hi, samples.present)
+    result["rates"] = production_rates(
+        samples.rows, lo, hi, marks, rate_items, rate_threshold, present=samples.present
+    )
+    result["headline"] = combined_headline(result)
 
     result["windows"] = [score_window(w, events, joined, placed.rows) for w in windows]
     if samples.present:
@@ -1599,6 +1667,510 @@ def production_at(samples: list[dict], windows: list[Window]) -> list[dict]:
     return out
 
 
+def _made(sample: dict) -> dict[str, int]:
+    """The force's cumulative ``made`` table from one force sample.
+
+    The mod serialises an empty table as ``[]`` (see the JSON note in
+    CLAUDE.md), so the field is a list before the first item is made and a
+    dict afterwards. Both mean the same thing here.
+    """
+    made = (sample.get("production") or {}).get("made")
+    return {str(k): int(v) for k, v in made.items()} if isinstance(made, dict) else {}
+
+
+def mark_label(minute: float) -> str:
+    """``5:00`` for a mark; the same shape :func:`minutes` prints spans in."""
+    return mmss(int(round(minute * TICKS_PER_MINUTE)))
+
+
+def production_rates(
+    samples: list[dict],
+    lo: int,
+    hi: int,
+    marks: tuple[float, ...] = DEFAULT_MARKS,
+    items: tuple[str, ...] = DEFAULT_RATE_ITEMS,
+    threshold: int = RATE_ITEM_THRESHOLD,
+    window: float = RATE_WINDOW_MINUTES,
+    present: bool = True,
+) -> dict:
+    """Cumulative production and trailing rates at fixed game-time marks.
+
+    Every mark is ``lo + minute * 3600`` ticks, i.e. game minutes from
+    ``run_started``, and the value at a mark is read off the last force sample
+    at or before it (a step function; the sample beat is 300 ticks, so a value
+    is at most five seconds stale, and ``lag_ticks`` says how stale). Counts
+    are relative to the sample at the origin, so a resumed run reports what
+    it made, not what its savepoint already held; ``baseline`` says which.
+
+    Two rates per item and mark, both in items per game minute:
+
+    ``rate_interval``  over the previous mark interval (the first mark's
+                       interval starts at the origin)
+    ``rate_window``    over the trailing ``window`` minutes, clipped to the
+                       origin, so it sees a cell that died just before the
+                       mark where the interval average would still look fine
+
+    A mark the run never reached is reported by status, never as a zero:
+    ``run_ended`` (past the run's last event), ``samples_end`` (inside the run
+    but past the last force sample -- the samples are short, see
+    ``sample_coverage``), ``no_sample`` (before the first sample).
+
+    ``plateaus`` names, per item, the first sample at which its count reached
+    the value it ended the run with, when that is at least
+    :data:`PLATEAU_MINUTES` before the run's end. It is the terminal plateau
+    only: an item that stalled for three minutes mid-run and then resumed is
+    not reported here, and ``None`` means the item was still growing when the
+    run ended (or was never made at all).
+    """
+    out: dict[str, Any] = {
+        "present": False,
+        "reason": None,
+        "origin_tick": lo,
+        "end_tick": hi,
+        "end_minutes": (hi - lo) / TICKS_PER_MINUTE,
+        "last_sample_tick": None,
+        "baseline": None,
+        "window_minutes": window,
+        "items": [],
+        "marks": [],
+        "plateaus": {},
+        "headline": None,
+    }
+    if not present:
+        out["reason"] = "no samples.jsonl archived -- no production samples"
+        return out
+    force = sorted(
+        (s for s in samples if s.get("kind") == "force" and isinstance(s.get("tick"), int)),
+        key=lambda s: s["tick"],
+    )
+    if not force:
+        out["reason"] = "no production samples (samples.jsonl has no force rows)"
+        return out
+    out["present"] = True
+    last_tick = force[-1]["tick"]
+    out["last_sample_tick"] = last_tick
+
+    def at(tick: int) -> dict | None:
+        latest = None
+        for s in force:
+            if s["tick"] <= tick:
+                latest = s
+            else:
+                break
+        return latest
+
+    origin = at(lo)
+    base = _made(origin) if origin else {}
+    out["baseline"] = (
+        f"sample at tick {origin['tick']}" if origin else "assumed zero (no sample at or before the origin)"
+    )
+    if origin and any(base.values()):
+        out["baseline"] += " -- NON-ZERO, counts below are relative to it"
+
+    final = _made(force[-1])
+    names = list(items) + sorted(
+        n for n, v in final.items() if n not in items and v - base.get(n, 0) >= threshold
+    )
+    out["items"] = names
+
+    def count(tick: int, name: str) -> int | None:
+        s = at(tick)
+        if s is None:
+            return None
+        return _made(s).get(name, 0) - base.get(name, 0)
+
+    def measure(m: float, t: int, prev_minute: float, label: str, is_end: bool) -> dict:
+        entry: dict[str, Any] = {
+            "minute": m,
+            "label": label,
+            "tick": t,
+            "is_end": is_end,
+            "status": "ok",
+            "sample_tick": None,
+            "lag_ticks": None,
+            "items": {},
+        }
+        s = at(t)
+        if t > hi:
+            entry["status"] = "run_ended"
+        elif t > last_tick:
+            entry["status"] = "samples_end"
+        elif s is None:
+            entry["status"] = "no_sample"
+        else:
+            entry["sample_tick"] = s["tick"]
+            entry["lag_ticks"] = t - s["tick"]
+            prev_t = lo + int(round(prev_minute * TICKS_PER_MINUTE))
+            win_t = max(lo, t - int(round(window * TICKS_PER_MINUTE)))
+            win_min = (t - win_t) / TICKS_PER_MINUTE
+            for name in names:
+                c = count(t, name)
+                c_prev = count(prev_t, name) or 0
+                c_win = count(win_t, name) or 0
+                entry["items"][name] = {
+                    "cumulative": c,
+                    "rate_interval": (c - c_prev) / (m - prev_minute) if m > prev_minute else None,
+                    "rate_window": (c - c_win) / win_min if win_min > 0 else None,
+                }
+        return entry
+
+    prev_minute = 0.0
+    last_reached = 0.0
+    for m in marks:
+        t = lo + int(round(m * TICKS_PER_MINUTE))
+        entry = measure(m, t, prev_minute, mark_label(m), False)
+        if entry["status"] == "ok":
+            last_reached = m
+        out["marks"].append(entry)
+        prev_minute = m
+
+    # The run's end as one more column, unless a configured mark already sits
+    # within a beat of it. A run that ends at 17:59 has its goal item -- six
+    # green packs -- invisible at every configured mark otherwise, and the
+    # curve's last point is the one the milestone tick is about.
+    end_t = min(hi, last_tick)
+    end_min = (end_t - lo) / TICKS_PER_MINUTE
+    near = any(m["status"] == "ok" and abs(m["tick"] - end_t) <= 300 for m in out["marks"])
+    if end_t > lo and not near:
+        out["marks"].append(measure(end_min, end_t, last_reached, f"end {mmss(end_t - lo)}", True))
+
+    # "While the run continues": the idle stretch is measured to the run's end
+    # or to the last sample, whichever is earlier, so short samples cannot
+    # manufacture a plateau out of the part of the run they never saw.
+    end = min(hi, last_tick)
+    for name in names:
+        final_c = final.get(name, 0) - base.get(name, 0)
+        if final_c <= 0:
+            out["plateaus"][name] = None
+            continue
+        reached = next(s for s in force if _made(s).get(name, 0) - base.get(name, 0) >= final_c)
+        idle = (end - reached["tick"]) / TICKS_PER_MINUTE
+        out["plateaus"][name] = (
+            {
+                "at_tick": reached["tick"],
+                "at_minute": (reached["tick"] - lo) / TICKS_PER_MINUTE,
+                "count": final_c,
+                "idle_minutes": idle,
+            }
+            if idle >= PLATEAU_MINUTES
+            else None
+        )
+
+    out["headline"] = rates_headline(out)
+    return out
+
+
+def combined_headline(a: dict) -> str:
+    """The rates headline and the milestone ticks on one line.
+
+    ``rates: iron 32->57->43 /min at 5/10/15; red packs 0->8->8; green 0 at 15 | milestone 3 satisfied at 17:20``
+
+    Both, by owner refinement: rates where they measure the thing, game time
+    where it makes more sense. A milestone's ``at`` is game time from
+    ``run_started``, the same axis as the marks.
+    """
+    head = (a.get("rates") or {}).get("headline") or "rates: not computed"
+    lo = a.get("tick_lo") or 0
+    bits = []
+    for m in a.get("milestones") or []:
+        idx = _milestone_index(m.get("label") or "")
+        name = f"milestone {idx}" if idx is not None else (m.get("label") or "milestone")
+        if m.get("hi") is None:
+            bits.append(f"{name} open")
+        else:
+            word = (m.get("outcome") or "").split()[0].lower() or "closed"
+            bits.append(f"{name} {word} at {mmss(m['hi'] - lo)}")
+    return head + (" | " + "; ".join(bits) if bits else " | no milestones")
+
+
+def compare_rates(a: dict, b: dict) -> dict:
+    """The fixed-mark tables of two runs side by side, with a verdict per mark.
+
+    "Ahead" is decided in tier order (:data:`DEFAULT_RATE_ITEMS`, highest
+    last): the highest-tier item whose cumulative count differs names the run
+    that is ahead, so six green packs beat any amount of iron. Equal on every
+    tier is ``level``. A mark only one run reached is reported as such, not
+    as a win: a run that ended at 17:59 did not lose minute 20.
+
+    Marks are game time, so runs at different `game_speed` or `bot_mode` ARE
+    comparable here -- the speed scales wall time, not ticks. The report says
+    so in place, because the comparability block above it flags those fields.
+    """
+    ra, rb = a.get("rates") or {}, b.get("rates") or {}
+    out: dict[str, Any] = {"present": False, "reason": None, "items": [], "marks": []}
+    missing = [side for side, r in (("A", ra), ("B", rb)) if not r.get("present")]
+    if missing:
+        out["reason"] = "; ".join(
+            f"run {side} has {((ra if side == 'A' else rb).get('reason') or 'no production samples')}"
+            for side in missing
+        )
+        return out
+    out["present"] = True
+    items = list(ra["items"]) + [i for i in rb["items"] if i not in ra["items"]]
+    out["items"] = items
+    tiers = [i for i in DEFAULT_RATE_ITEMS if i in items]
+    minutes_seen: list[float] = []
+    for r in (ra, rb):
+        for m in r["marks"]:
+            if not m.get("is_end") and m["minute"] not in minutes_seen:
+                minutes_seen.append(m["minute"])
+
+    def status_text(r: dict, m: dict | None) -> str:
+        if m is None:
+            return "not measured"
+        if m["status"] == "run_ended":
+            return f"run ended at {mmss(r['end_tick'] - r['origin_tick'])}"
+        if m["status"] == "samples_end":
+            return f"samples end at {mmss(r['last_sample_tick'] - r['origin_tick'])}"
+        if m["status"] == "no_sample":
+            return "no sample"
+        return "ok"
+
+    pairs = [
+        (
+            minute,
+            mark_label(minute),
+            next((m for m in ra["marks"] if m["minute"] == minute and not m.get("is_end")), None),
+            next((m for m in rb["marks"] if m["minute"] == minute and not m.get("is_end")), None),
+        )
+        for minute in sorted(minutes_seen)
+    ]
+    ea = next((m for m in ra["marks"] if m.get("is_end")), None)
+    eb = next((m for m in rb["marks"] if m.get("is_end")), None)
+    if ea or eb:
+        # The two ends are different minutes; the row says which.
+        pairs.append(("end", f"end (A {mmss(ra['end_tick'] - ra['origin_tick'])}, "
+                             f"B {mmss(rb['end_tick'] - rb['origin_tick'])})", ea, eb))
+    for minute, label, ma, mb in pairs:
+        row: dict[str, Any] = {
+            "minute": minute,
+            "label": label,
+            "status_a": status_text(ra, ma),
+            "status_b": status_text(rb, mb),
+            "items": {},
+            "ahead": None,
+            "decided_by": None,
+            "verdict": "",
+        }
+        ok_a = row["status_a"] == "ok"
+        ok_b = row["status_b"] == "ok"
+        for name in items:
+            va = (ma["items"].get(name) if ok_a else None) or {}
+            vb = (mb["items"].get(name) if ok_b else None) or {}
+            row["items"][name] = {
+                "cumulative": _num(va.get("cumulative"), vb.get("cumulative")),
+                "rate_interval": _num(va.get("rate_interval"), vb.get("rate_interval")),
+                "rate_window": _num(va.get("rate_window"), vb.get("rate_window")),
+            }
+        if ok_a and ok_b:
+            row["ahead"] = "level"
+            for name in reversed(tiers):
+                ca = row["items"][name]["cumulative"]["a"] or 0
+                cb = row["items"][name]["cumulative"]["b"] or 0
+                if ca != cb:
+                    row["ahead"] = "A" if ca > cb else "B"
+                    row["decided_by"] = name
+                    row["verdict"] = (
+                        f"at {row['label']} {row['ahead']} ahead "
+                        f"({SHORT_ITEM.get(name, name)} {max(ca, cb)} vs {min(ca, cb)})"
+                    )
+                    break
+            if row["ahead"] == "level":
+                row["verdict"] = f"at {row['label']} level"
+        elif ok_a or ok_b:
+            side, other, why = ("A", "B", row["status_b"]) if ok_a else ("B", "A", row["status_a"])
+            row["ahead"] = None
+            row["verdict"] = f"at {row['label']} only {side} measured ({other}: {why})"
+        else:
+            row["verdict"] = f"at {row['label']} neither measured (A: {row['status_a']}; B: {row['status_b']})"
+        out["marks"].append(row)
+    return out
+
+
+def report_compare_rates(c: dict, p, a_id: str, b_id: str, plateaus: dict[str, list[str]]) -> None:
+    p(hr("  PRODUCTION AT FIXED MARKS  (cumulative made at game minutes from run_started)"))
+    p("    GAME TIME, so a 5x headless run and a 1x client run ARE comparable here:")
+    p("    game_speed scales the wall clock, not the tick, and these marks are ticks.")
+    p("    A rate by wall time is never printed by this tool.")
+    if not c.get("present"):
+        p(f"    {c.get('reason')}")
+        return
+    ok_marks = [m for m in c["marks"] if m["status_a"] == "ok" or m["status_b"] == "ok"]
+    for m in c["marks"]:
+        if m["status_a"] != "ok" and m["status_b"] != "ok":
+            p(f"    {m['verdict']}")
+            continue
+        p(f"\n    {m['label']}")
+        p(f"      {'item':<24} {('A ' + a_id)[-22:]:>22} {('B ' + b_id)[-22:]:>22} {'B - A':>8}   "
+          f"{'/min A':>7} {'/min B':>7}")
+        for name in c["items"]:
+            v = m["items"][name]
+            cu, ri = v["cumulative"], v["rate_interval"]
+            p(f"      {name[:24]:<24} {_cell(cu['a']):>22} {_cell(cu['b']):>22} "
+              f"{_delta_cell(cu['delta']):>8}   {_cell(ri['a']):>7} {_cell(ri['b']):>7}")
+        if m["status_a"] != "ok":
+            p(f"            A: {m['status_a']}")
+        if m["status_b"] != "ok":
+            p(f"            B: {m['status_b']}")
+    p("")
+    p("    verdict (tier order, highest item that differs decides):")
+    p("      " + "; ".join(m["verdict"] for m in c["marks"]))
+    if not ok_marks:
+        p("      no mark reached in either run")
+    for side, lines in plateaus.items():
+        for line in lines:
+            p(f"    {side}: {line}")
+
+
+def rates_headline(r: dict) -> str:
+    """One line: ``rates: iron 32->57->43 /min at 5/10/15; red packs 0->8->8; green 0 at 15; run ended 17:59 before mark 20``."""
+    if not r.get("present"):
+        return f"rates: {r.get('reason') or 'unavailable'}"
+    reached = [m for m in r["marks"] if m["status"] == "ok"]
+    if not reached:
+        first = r["marks"][0] if r["marks"] else None
+        why = f" (run ended at {mmss(r['end_tick'] - r['origin_tick'])})" if first and first["status"] == "run_ended" else ""
+        return f"rates: no mark reached{why}"
+
+    def series(name: str) -> str:
+        vals = []
+        for m in reached:
+            if m.get("is_end"):
+                continue
+            rate = (m["items"].get(name) or {}).get("rate_interval")
+            vals.append("?" if rate is None else f"{rate:.0f}")
+        return "->".join(vals)
+
+    ats = "/".join(f"{m['minute']:g}" for m in reached if not m.get("is_end"))
+    parts = [f"rates: iron {series('iron-plate')} /min at {ats}"]
+    parts.append(f"red packs {series('automation-science-pack')}")
+    fixed = [m for m in reached if not m.get("is_end")]
+    ends = [m for m in reached if m.get("is_end")]
+    greens = []
+    if fixed:
+        greens.append(f"{(fixed[-1]['items'].get('logistic-science-pack') or {}).get('cumulative', 0)} at {fixed[-1]['minute']:g}")
+    for m in ends:
+        greens.append(f"{(m['items'].get('logistic-science-pack') or {}).get('cumulative', 0)} at {m['label']}")
+    parts.append("green " + ", ".join(greens))
+    missed = [m for m in r["marks"] if m["status"] != "ok"]
+    if missed:
+        m0 = missed[0]
+        if m0["status"] == "run_ended":
+            parts.append(f"run ended {mmss(r['end_tick'] - r['origin_tick'])} before mark {m0['minute']:g}")
+        elif m0["status"] == "samples_end":
+            parts.append(f"samples end {mmss(r['last_sample_tick'] - r['origin_tick'])} before mark {m0['minute']:g}")
+        else:
+            parts.append(f"no sample at mark {m0['minute']:g}")
+    return "; ".join(parts)
+
+
+def plateau_lines(r: dict) -> list[str]:
+    lines = []
+    for name in r.get("items") or []:
+        pl = (r.get("plateaus") or {}).get(name)
+        if pl:
+            lines.append(
+                f"{name} plateaus at {mmss(int(pl['at_tick'] - r['origin_tick']))} "
+                f"({pl['count']}) -- production stopped {pl['idle_minutes']:.1f} min "
+                f"before the run ended"
+            )
+    return lines
+
+
+def report_rates(r: dict, p, headline: str | None = None) -> None:
+    """The fixed-mark table, in the report's own layout."""
+    p(hr("  PRODUCTION AT FIXED MARKS  (game minutes from run_started -- the first number)"))
+    p(f"    {headline or r.get('headline') or rates_headline(r)}")
+    if not r.get("present"):
+        p(f"    {r.get('reason')}")
+        return
+    reached = [m for m in r["marks"] if m["status"] == "ok"]
+    missed = [m for m in r["marks"] if m["status"] != "ok"]
+    if reached:
+        p(f"    cell = cumulative made, then /min over the previous mark interval, then /min over the trailing "
+          f"{r['window_minutes']:g}-min window")
+        p(f"    {'item':<24}" + "".join(f"{m['label']:>19}" for m in reached))
+        for name in r["items"]:
+            cells = []
+            for m in reached:
+                v = m["items"].get(name) or {}
+                c = v.get("cumulative")
+                if c is None:
+                    cells.append(f"{'?':>19}")
+                    continue
+                ri = v.get("rate_interval")
+                rw = v.get("rate_window")
+                ri_s = "?" if ri is None else f"{ri:.0f}"
+                rw_s = "?" if rw is None else f"{rw:.0f}"
+                cells.append(f"{c:>8} {ri_s:>4}/{rw_s:<5}")
+            p(f"    {name[:24]:<24}" + "".join(cells))
+        stale = max((m["lag_ticks"] or 0) for m in reached)
+        if stale > 600:
+            p(f"    (a value is read off the last force sample at or before its mark; the worst "
+              f"is {stale} ticks stale)")
+    for m in missed:
+        if m["status"] == "run_ended":
+            p(f"    {m['label']:>7}: run ended at {mmss(r['end_tick'] - r['origin_tick'])}")
+        elif m["status"] == "samples_end":
+            p(f"    {m['label']:>7}: samples end at {mmss(r['last_sample_tick'] - r['origin_tick'])} "
+              f"(the run itself ran to {mmss(r['end_tick'] - r['origin_tick'])})")
+        else:
+            p(f"    {m['label']:>7}: no force sample at or before this mark")
+    if r.get("baseline") and "NON-ZERO" in r["baseline"]:
+        p(f"    baseline: {r['baseline']}")
+    for line in plateau_lines(r):
+        p(f"    {line}")
+    if reached and not any(plateau_lines(r)):
+        p(f"    no item plateaued for >= {PLATEAU_MINUTES} min before the end")
+
+
+def rates_markdown(analyses: list[dict], items: tuple[str, ...] | list[str], what: str = "cumulative") -> str:
+    """The plan record's table: one row per mark, one column per run.
+
+    ``what`` is ``cumulative`` (the counts) or ``rate`` (per-interval /min).
+    A mark a run never reached prints the reason, never a zero.
+    """
+    key = "cumulative" if what == "cumulative" else "rate_interval"
+    heads = " / ".join(SHORT_ITEM.get(i, i) for i in items)
+    header = "| minute | " + " | ".join(
+        f"{a['run_id']} {heads}" + ("" if what == "cumulative" else " (/min)") for a in analyses
+    ) + " |"
+    lines = [header, "|---|" + "---|" * len(analyses)]
+    marks: list[Any] = []
+    for a in analyses:
+        for m in (a.get("rates") or {}).get("marks") or []:
+            slot = "end" if m.get("is_end") else m["minute"]
+            if slot not in marks:
+                marks.append(slot)
+    for minute in sorted(marks, key=lambda k: (k == "end", k if k != "end" else 0)):
+        cells = []
+        for a in analyses:
+            r = a.get("rates") or {}
+            if not r.get("present"):
+                cells.append(r.get("reason") or "no production samples")
+                continue
+            if minute == "end":
+                m = next((x for x in r["marks"] if x.get("is_end")), None)
+            else:
+                m = next((x for x in r["marks"] if x["minute"] == minute and not x.get("is_end")), None)
+            if m is None:
+                cells.append("not measured" if minute != "end" else "(a mark sits at the end)")
+            elif m["status"] == "run_ended":
+                cells.append(f"run ended at {mmss(r['end_tick'] - r['origin_tick']).strip()}")
+            elif m["status"] == "samples_end":
+                cells.append(f"samples end at {mmss(r['last_sample_tick'] - r['origin_tick']).strip()}")
+            elif m["status"] != "ok":
+                cells.append("no sample")
+            else:
+                vals = []
+                for i in items:
+                    v = (m["items"].get(i) or {}).get(key)
+                    vals.append("?" if v is None else (f"{v:.0f}" if key != "cumulative" else str(v)))
+                cells.append(" / ".join(vals) + (f" ({m['label'][4:]})" if minute == "end" else ""))
+        lines.append(f"| {minute if minute == 'end' else format(minute, 'g')} | " + " | ".join(cells) + " |")
+    return "\n".join(lines)
+
+
 # Machines listed individually in the report before the tail is rolled up.
 MACHINE_ROWS = 24
 
@@ -1895,6 +2467,23 @@ def report(a: dict, out=sys.stdout, top: int = 12) -> None:
               "sampled or never archived;")
             p("      nothing below that reads samples describes them")
 
+    # First, above the milestone spans: the owner's rule is that a run is
+    # judged by what it makes per minute at fixed marks, and the milestone
+    # tick is the second number.
+    report_rates(a.get("rates") or {"present": False, "reason": "not computed"}, p, a.get("headline"))
+
+    # A peer of the table above, not demoted: a producing/rate goal is judged
+    # on the curve, a researched/first-event goal on the tick it flipped, and
+    # the record carries both. `at` is game time from run_started, the same
+    # axis as the marks above; `span` is the milestone's own window.
+    p(hr("  MILESTONES  (game time; `at` = from run_started, the marks' axis)"))
+    if not a["milestones"]:
+        p("    none recorded")
+    for m in a["milestones"]:
+        span = f"{m['span_ticks']:>7} ticks {minutes(m['span_ticks'])}" if m["span_ticks"] is not None else "   still open"
+        at = f"at {mmss(m['hi'] - a['tick_lo']):>6}" if m["hi"] is not None else "open     "
+        p(f"    {m['label'][:56]:<56} {at}  {m['lo']:>7} -> {str(m['hi']):>7}  {span}  {m['outcome']}")
+
     p(hr("  FREE VISION  (ground the model was given without a bot going there)"))
     v = a.get("vision") or {}
     if not v.get("present"):
@@ -1966,13 +2555,6 @@ def report(a: dict, out=sys.stdout, top: int = 12) -> None:
             if not d["deaths"]:
                 p("    ... with NO death recorded: a character missing for some other reason")
                 p("        (cutscene, controller switch), or a death the mod did not see.")
-
-    p(hr("  MILESTONES"))
-    if not a["milestones"]:
-        p("    none recorded")
-    for m in a["milestones"]:
-        span = f"{m['span_ticks']:>7} ticks {minutes(m['span_ticks'])}" if m["span_ticks"] is not None else "   still open"
-        p(f"    {m['label'][:56]:<56} {m['lo']:>7} -> {str(m['hi']):>7}  {span}  {m['outcome']}")
 
     p(hr("  PLANS  (who the planner gave the work to)"))
     if not a["plans"]:
@@ -3003,6 +3585,7 @@ def compare_numbers(a: dict, b: dict) -> dict:
 
     span = _num(a.get("span_ticks"), b.get("span_ticks"))
     return {
+        "rates": compare_rates(a, b),
         "shape": {
             "roster": {"a": a.get("roster"), "b": b.get("roster")},
             "outcome": {"a": a.get("outcome"), "b": b.get("outcome")},
@@ -3048,6 +3631,11 @@ def compare(a: dict, b: dict, force: bool = False) -> dict:
     }
     if not out["numbers_withheld"]:
         out["numbers"] = compare_numbers(a, b)
+        out["headlines"] = {"a": a.get("headline"), "b": b.get("headline")}
+        out["plateaus"] = {
+            "A": plateau_lines(a.get("rates") or {}),
+            "B": plateau_lines(b.get("rates") or {}),
+        }
     return out
 
 
@@ -3089,6 +3677,14 @@ def report_compare(c: dict, out=sys.stdout, top: int = 12) -> None:
 
     n = c["numbers"]
     s = n["shape"]
+
+    # First, by the owner's rule: the curve before the milestone tick.
+    for side, key in (("A", "a"), ("B", "b")):
+        p(f"  {side}: {(c.get('headlines') or {}).get(key)}")
+    report_compare_rates(
+        n.get("rates") or {"present": False, "reason": "not computed"},
+        p, a_id, b_id, c.get("plateaus") or {},
+    )
 
     def row(label: str, va: Any, vb: Any, d: Any = None) -> None:
         p(f"    {label:<24} {_cell(va):>22} {_cell(vb):>22} {_delta_cell(d):>12}")
@@ -3218,8 +3814,8 @@ def compare_main(args: argparse.Namespace) -> int:
         if not os.path.isdir(d):
             print(f"no such run directory: {d}", file=sys.stderr)
             return 2
-    a = analyse(args.compare[0], args.freeze_ticks)
-    b = analyse(args.compare[1], args.freeze_ticks)
+    a = analyse(args.compare[0], args.freeze_ticks, args.marks, args.rate_items, args.rate_threshold)
+    b = analyse(args.compare[1], args.freeze_ticks, args.marks, args.rate_items, args.rate_threshold)
     c = compare(a, b, force=args.force)
     if args.json:
         json.dump(c, sys.stdout, indent=2, default=str)
@@ -3255,7 +3851,28 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--freeze-ticks", type=int, default=DEFAULT_FREEZE_TICKS,
                     help=f"frozen-position threshold in ticks (default {DEFAULT_FREEZE_TICKS})")
     ap.add_argument("--top", type=int, default=12, help="rows in the by-subject breakdown")
+    ap.add_argument("--marks", default=",".join(str(m) for m in DEFAULT_MARKS),
+                    help="game minutes from run_started at which production is read "
+                         f"(default {','.join(str(m) for m in DEFAULT_MARKS)})")
+    ap.add_argument("--rate-items", default=",".join(DEFAULT_RATE_ITEMS),
+                    help="items always shown in the production table, in tier order "
+                         "(the highest that differs decides --compare's verdict)")
+    ap.add_argument("--rate-threshold", type=int, default=RATE_ITEM_THRESHOLD,
+                    help="any other item made at least this many times joins the table "
+                         f"(default {RATE_ITEM_THRESHOLD})")
+    ap.add_argument("--rates-json", action="store_true",
+                    help="print only the production-at-marks block as JSON (one object, "
+                         "or a list for several runs) -- for generating the record's tables")
+    ap.add_argument("--rates-md", action="store_true",
+                    help="print the production-at-marks table as Markdown, one column per "
+                         "run (tools/rates_table.py is the same thing with more options)")
     args = ap.parse_args(argv)
+    try:
+        args.marks = tuple(float(m) for m in args.marks.split(",") if m.strip())
+    except ValueError:
+        print(f"--marks wants comma-separated minutes, got {args.marks!r}", file=sys.stderr)
+        return 2
+    args.rate_items = tuple(i.strip() for i in args.rate_items.split(",") if i.strip())
 
     if args.compare:
         if args.all or args.dirs:
@@ -3284,9 +3901,16 @@ def main(argv: list[str]) -> int:
         if not os.path.isdir(d):
             print(f"no such run directory: {d}", file=sys.stderr)
             continue
-        results.append(analyse(d, args.freeze_ticks))
+        results.append(analyse(d, args.freeze_ticks, args.marks, args.rate_items, args.rate_threshold))
 
-    if args.json:
+    if args.rates_json:
+        rates = [{"run_id": a["run_id"], "headline": a.get("headline"), **(a.get("rates") or {})}
+                 for a in results]
+        json.dump(rates if len(rates) > 1 else rates[0], sys.stdout, indent=2)
+        print()
+    elif args.rates_md:
+        print(rates_markdown(results, args.rate_items))
+    elif args.json:
         json.dump(results if len(results) > 1 else results[0], sys.stdout, indent=2)
         print()
     elif args.summary:

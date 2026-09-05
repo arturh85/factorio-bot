@@ -22,6 +22,7 @@ use super::value::goal_from_lua;
 use super::{
     BufferRefresher, PlacementChecker, expand_goal, goal_error, planner_error, refuse_unknown_bots,
 };
+use factorio_bot_core::blueprint::UndergroundHalf;
 use factorio_bot_core::factorio::rcon::PlacementQuery;
 use factorio_bot_core::factorio::world::FactorioWorld;
 use factorio_bot_core::mlua::prelude::*;
@@ -60,6 +61,13 @@ const KNOWN_PREDICATE_KEYS: &[&str] = &[
     // And its inner bound, on the same terms. A walk serving a placement has
     // a non-zero one; every other walk has zero.
     "min_radius",
+    // A placement's facing, on Factorio 2.x's 16-point scale, and which half
+    // of an underground-belt pair it is. Both are plain comparable values,
+    // and both are on a step because placing correctly and functioning are
+    // separate concerns -- `p:count{ kind = "place", direction = 4 }` is the
+    // question a caller verifying a block actually has.
+    "direction",
+    "underground_half",
 ];
 
 /// What a plan was planned *from*: everything a later recovery needs to
@@ -1112,6 +1120,34 @@ fn step_to_lua(lua: &Lua, net: &ActionNetwork, step: &ScheduledStep) -> LuaResul
                     t.set("kind", "place")?;
                     t.set("entity", entity.name.clone())?;
                     t.set("pos", position_to_lua(lua, &entity.position)?)?;
+                    // **Placing correctly and functioning are separate
+                    // concerns**, and until 2026-09-05 a place step published
+                    // only the first two: name and tile. A live run verifying
+                    // `goal.built`'s central claim -- that a pre-2.0
+                    // blueprint's directions are migrated onto the 16-point
+                    // scale -- had to re-implement the whole migration
+                    // OFFLINE, in Lua, against the same base64 blob, because
+                    // `s.direction` was always `nil` here and a verdict built
+                    // on it would have reported "wrong direction" for every
+                    // entity regardless of what the game did. That is not a
+                    // check a caller should have to re-derive.
+                    t.set("direction", entity.direction)?;
+                    // The other field whose whole reason for existing is the
+                    // same separation: an underground belt's two halves stand
+                    // identically and connect nothing if they are the same
+                    // half. `None` is left as an absent key rather than
+                    // mlua's null sentinel, which is light userdata and
+                    // therefore TRUTHY in Lua -- `s.underground_half or "-"`
+                    // would not substitute the default.
+                    if let Some(half) = entity.underground_half {
+                        t.set(
+                            "underground_half",
+                            match half {
+                                UndergroundHalf::Input => "input",
+                                UndergroundHalf::Output => "output",
+                            },
+                        )?;
+                    }
                 }
                 ActionKind::Insert {
                     pos,
@@ -1554,6 +1590,94 @@ mod tests {
             assert(p:count{ kind = "place", entity = "iron-chest" } == 0)
             assert(#p:find{ kind = "mine" } == 1)
             assert(p:find{ kind = "mine" }[1].item == "iron-ore")
+        "#,
+        )
+        .exec()
+        .expect("script");
+    }
+
+    /// **A place step used to publish only `kind`, `entity` and `pos`.**
+    ///
+    /// A live run verifying this branch's central claim -- that a pre-2.0
+    /// blueprint's directions are migrated onto Factorio 2.x's 16-point scale
+    /// -- had to re-implement the whole migration offline, in Lua, against
+    /// the same base64 blob, because `s.direction` was always `nil` and a
+    /// verdict built on it would have called every entity wrong regardless of
+    /// what the game did. `underground_half` is the same class of fact: two
+    /// halves of a pair stand identically and connect nothing if they are the
+    /// same half.
+    #[test]
+    fn a_place_step_publishes_its_direction_and_underground_half() {
+        use factorio_bot_core::blueprint::UndergroundHalf;
+        use factorio_bot_core::types::{FactorioEntity, Position};
+        use factorio_bot_planner::Action;
+
+        let mut net = ActionNetwork::default();
+        let mut steps = Vec::new();
+        for (i, (name, direction, half)) in [
+            ("transport-belt", 12u8, None),
+            ("underground-belt", 4u8, Some(UndergroundHalf::Input)),
+            ("underground-belt", 4u8, Some(UndergroundHalf::Output)),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let id = ActionId(i as u32);
+            let label = format!("place {name} -- block band 0");
+            net.add(Action {
+                id,
+                kind: ActionKind::Place {
+                    entity: Box::new(FactorioEntity {
+                        name: name.into(),
+                        entity_type: "transport-belt".into(),
+                        position: Position::new(i as f64, 0.0),
+                        direction,
+                        underground_half: half,
+                        ..Default::default()
+                    }),
+                },
+                pre: vec![],
+                eff: vec![],
+                duration: 10,
+                pinned: None,
+                label: label.clone(),
+            });
+            steps.push(ScheduledStep {
+                what: StepKind::Act { action: id, label },
+                bot: BotId(1),
+                start: (i as Ticks) * 10,
+                end: (i as Ticks) * 10 + 10,
+            });
+        }
+        let plan = PlanValue::new(
+            Arc::new(net),
+            Arc::new(Schedule {
+                makespan: 30,
+                steps,
+            }),
+            test_origin(&[BotId(1)]),
+        );
+        let lua = lua_with_plan(plan);
+        lua.load(
+            r#"
+            assert(p.steps[1].direction == 12, "a west-facing belt says 12, not nil")
+            assert(p.steps[1].underground_half == nil,
+                   "a plain belt is neither half of a pair")
+            assert(p.steps[2].underground_half == "input")
+            assert(p.steps[3].underground_half == "output")
+            -- And both are usable as predicates, which is what a caller
+            -- verifying a block actually does.
+            assert(p:count{ kind = "place", direction = 4 } == 2)
+            assert(p:count{ kind = "place", underground_half = "output" } == 1)
+            -- The label carries the band, which is how the block's own
+            -- placements are told from a plan's scaffolding.
+            local own = 0
+            for _, s in ipairs(p.steps) do
+                if s.kind == "place" and string.find(s.label, "block band", 1, true) then
+                    own = own + 1
+                end
+            end
+            assert(own == 3, "all three are the block's own, got " .. own)
         "#,
         )
         .exec()

@@ -235,6 +235,13 @@ impl std::error::Error for PlanRefusal {}
 ///   content outside the decoder's allowlist), not a fact about the world.
 ///   No map, no research and no amount of exploring changes whether a given
 ///   string decodes.
+/// - [`BlockGroundOccupied`](PlannerError::BlockGroundOccupied) -- its
+///   sibling, and the opposite answer: a **verdict**. It names a tile and
+///   what is on it, which is precisely a fact about the world, and every one
+///   of its cases is something a script can act on -- move the anchor, clear
+///   the tree, or walk the bot standing on the footprint off it. Grouping it
+///   with `BlueprintRefused` because both mention a blueprint would tell a
+///   supervisor that a clear anchor two tiles away was a construction error.
 /// - The three cell variants -- [`NoCellProduces`](PlannerError::NoCellProduces),
 ///   [`NoPatchForCell`](PlannerError::NoPatchForCell) and
 ///   [`NoRoomForCell`](PlannerError::NoRoomForCell) and
@@ -303,7 +310,8 @@ fn refusal_for(err: &PlannerError) -> Option<PlanRefusal> {
         | PlannerError::UndescribedResearchTrigger { .. }
         | PlannerError::NoExtractor { .. }
         | PlannerError::ExtractorLocked { .. }
-        | PlannerError::ExtractionNotModelled { .. } => true,
+        | PlannerError::ExtractionNotModelled { .. }
+        | PlannerError::BlockGroundOccupied { .. } => true,
 
         PlannerError::InsufficientItems { .. }
         | PlannerError::UnknownBot(_)
@@ -594,15 +602,37 @@ end
             r#"
 --- builds a goal value: a designed blueprint stands at an anchor
 --
--- Pure, like `goal.have`: the blueprint string is decoded, and an unsupported
--- entity or a blueprint containing underground belts is refused, only at
+-- Pure, like `goal.have`: the blueprint string is decoded only at
 -- `goal.plan`, which is the first call with a world to check it against.
+--
+-- **Underground belts are supported**, and were the headline result of the
+-- work that added this goal. They used to be refused by name -- neither the
+-- entity type nor the mod's placement RPC could say which half of a pair was
+-- being built, so the two halves would have been placed as the same entity: a
+-- block that stands 100% correctly and moves nothing. Both halves now carry
+-- their own `input`/`output`, verified off a live surface, so a blueprint
+-- containing them plans and builds like any other.
 --
 -- Planning it means *the entities the blueprint names that are not yet
 -- standing*, re-derived against the world on every expansion rather than
 -- remembered -- so replanning after a partial build finishes it rather than
 -- doubling it, and building an already-standing blueprint plans nothing at
--- all. The entities are split into bands across the roster, one band per bot.
+-- all. "Already standing" means the same name on the same tile facing the
+-- same way, and the same underground half: an entity turned the wrong way is
+-- *not* built, and is reported rather than skipped.
+--
+-- **It has no siting story.** The block goes at the anchor you name. Four
+-- things refuse it, each by name at `goal.plan`: a string that does not
+-- decode; content the decoder does not understand (a tile, a recipe, a module
+-- request, a circuit wire); an entity already standing on the right tile the
+-- wrong way round, which nothing here can rotate or remove; and **ground that
+-- is not clear** -- which names the tile and what is on it, including the
+-- case of one of your own bots standing on the footprint, cleared by walking
+-- rather than by moving the block.
+--
+-- The entities are split into bands across the roster, one band per bot, cut
+-- across the block's longer axis so each band is a region a bot can work
+-- without crossing another's.
 -- @string blueprint_string the blueprint, in Factorio's exported string form
 -- @param anchor `types.Position` where the blueprint's own origin lands in the world
 -- @treturn table a goal value
@@ -638,7 +668,7 @@ end
 --- expands a goal value and schedules it against one roster, in one call
 -- Consumes a goal value: a table with a `kind` field, such as
 -- `{ kind = "have", item = "iron-plate", count = 8 }`, built by `goal.have`,
--- `goal.researched`, `goal.producing` or `goal.all`. Expansion and scheduling share the
+-- `goal.researched`, `goal.producing`, `goal.built` or `goal.all`. Expansion and scheduling share the
 -- same roster -- `SplitAcrossBots` sizes each bot's share against that bot's
 -- own holdings, so a network expanded for four bots only ever makes sense
 -- scheduled on those same four; this call is what makes the mismatch
@@ -660,6 +690,20 @@ end
 -- Both radii and the other scalar fields are accepted by `plan:count{...}`
 -- and `plan:find{...}`; `to` and `pos` are not, being tables rather than
 -- comparable values.
+--
+-- A `kind == "place"` step carries `entity`, `pos`, and -- since 2026-09-05
+-- -- `direction` (Factorio 2.x's 16-point `defines.direction`, already
+-- migrated off a pre-2.0 blueprint's eight-point scale) plus
+-- `underground_half`, which is `"input"` or `"output"` for one half of an
+-- underground-belt pair and absent for everything else. Both exist because
+-- placing correctly and functioning are separate concerns: a belt on the
+-- right tile facing the wrong way, and two underground halves that are the
+-- same half, each stand perfectly and carry nothing. Without these a caller
+-- verifying a build had to re-derive the direction migration itself.
+-- Every step also carries `label`, which for a `goal.built` placement always
+-- contains "block band N" -- that is what tells the block's own placements
+-- apart from the scaffolding a plan builds for itself (furnaces to smelt the
+-- plates, a lab to run a research), which are `kind == "place"` too.
 --
 -- A `kind == "chop"` step is a swing at a standing tree or rock rather than at
 -- an ore tile, and it is its own kind because its `entity` and its `item` are

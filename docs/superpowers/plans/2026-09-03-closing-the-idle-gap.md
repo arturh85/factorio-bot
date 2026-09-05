@@ -80,6 +80,38 @@ honestly, as before. Also fixed on the way: `scripting_lua`'s
 `plan_cell` call was one argument behind `bdec88af` and failed
 `--all-targets` clippy on master.
 
+## A shared smelt builds its own furnace — red −10%, green −13% offline (`e2b8d9c9`)
+
+Half of the "9,300 ticks bot 1 waits on its copper furnace" was not bot 1's:
+bots 3 and 4 stood 2,914 and 4,248 ticks at that furnace waiting to *insert*
+the shared smelt's ore behind bot 1's take, and the same shape repeated on
+three iron furnaces. `b0ed1d25`'s own-first rule was written for the taker's
+own loads; a shared smelt's inserts sit on the suppliers' timelines, so
+queueing it behind the taker's batch put the wait it exists to avoid on three
+bots at once. Fix beside `own_grow`: a smelt whose ore the roster supplies,
+on a patch with no idle furnace, builds a furnace of its own.
+
+| goal (four bots) | before | after |
+|---|---|---|
+| `researched:automation` | 207 / 21,818 | 209 / 21,903 (+0.4%) |
+| `producing:automation-science-pack:6` | 358 / 35,239 | 370 / **31,675 (−10.1%)** |
+| `producing:logistic-science-pack:6` | 610 / 95,237 | 616 / **82,742 (−13.1%, 22:59)** |
+
+No supplier-insert wait over 800 ticks remains on red (there were nine);
+utilisation 47.5% → 54.5%. **Pricing the bank against the taker's own waits
+was built eight ways and rejected**: on a serial taker unhidden lag is
+conserved under the lookahead key — every variant moved the copper waits
+elsewhere on bot 1's timeline and added handling.
+
+**A correction that touches every offline number in this record:**
+`workspace/scripts/map.json` is byte-identical to `map-t0-baseline.json`
+(fingerprint `dfac0f4caa0a7500`) — the *old* map's t=0 dump, not seed 31337
+(`c161fa3f437221d0`). Every offline plan quoted since 2026-09-04 was made on
+the old map while every live run was on 31337. The offline and live numbers
+still moved together, but they are two maps. A seed-31337 t=0 dump is being
+written now (`workspace/scripts/map-31337-t0.json`) for offline work from
+here on; the old baseline stays as the historical reference.
+
 ## The supplier ranking was never consulted; the leak was in the rehearsal (`be29d33d`)
 
 My brief said `furnace_suppliers` hands other bots' furnaces to bot 1. It

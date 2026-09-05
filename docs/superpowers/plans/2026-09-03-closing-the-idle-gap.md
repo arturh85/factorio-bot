@@ -3944,6 +3944,16 @@ That is the separate `Holder::Share` ceiling.
 
 ## Open items not on the critical path
 
+- **Executor deadlines are wall-clock scaled by game speed, not ticks delivered.**
+  `sized_deadline` and the walker's stall clock expire on the wall clock, so a
+  server starved below its promised tick rate (a build on the box, four clients
+  plus a 5x headless run) makes a wait expire before the game has done the
+  work: run 9 lost a walk that way, and the peer session once collected from a
+  furnace that had not finished. Measure deadlines in `game.tick` as read over
+  RCON (the mod's `BatchProgress` beat already carries it), and record the
+  delivered tick rate in the run so a starved run says so. Raised 2026-09-05
+  by the peer session; not yet dispatched.
+
 - **Flaky test**: `crates/planner/tests/red_science.rs::every_expansion_replays_in_time_order`
   failed once under a full `--workspace` run, reported by the provenance
   agent. **Not reproduced in 18 subsequent attempts** — 12 isolated runs and

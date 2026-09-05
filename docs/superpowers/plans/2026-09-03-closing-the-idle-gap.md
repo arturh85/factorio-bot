@@ -80,6 +80,30 @@ honestly, as before. Also fixed on the way: `scripting_lua`'s
 `plan_cell` call was one argument behind `bdec88af` and failed
 `--all-targets` clippy on master.
 
+## The refused engine site: the mod tested footprints with an unturned box (`1b544f94`)
+
+My brief was wrong on every count. Plan 1 sited nothing inside anything —
+its four poles were at [33.5,−14.5] [38.5,−7.5] [35.5,−7.5] [40.5,−11.5] and
+none overlapped the engine's east box; the pole at (42.5,−5.5) belonged to
+**plan 2**, emitted 345 ticks after the refusal. What blocked the engine was
+**bot 1 itself**, parked at (42.24, −6.77) where its walk to the pipe left it
+— inside the *east-facing* 3 × 5 footprint by 0.41 tiles. The mod's
+`rcon_place_entity`, `character_in_footprint`, `step_aside_from_footprint`
+and `rcon_can_place_entities` all tested the prototype's collision box
+**unturned**, so the game said no for the actor, every branch saw nobody, and
+the generic `said 'no'` went into the refusal ledger as a bad site; plan 2
+moved the whole plant 10 tiles east.
+
+Fixed where it lives: every footprint question in the mod uses the box turned
+to the placement's direction; the refusal names what was in the footprint and
+the tile; the record carries the direction and a step-aside reason; the
+planner excludes the *turned* refused box; the executor's pre-place check
+steps the actor out of its own footprint before any RPC. Verified live,
+read-only, on bots 3 and 4 that a character alone in the box makes
+`can_place_entity` false. Offline plans unchanged. One planner-side gap named
+for later: `arrival_point` models a walk as landing on the annulus's inner
+edge along +x while the walker stops anywhere in a small box.
+
 ## Research work shared across the roster — green planned 60:07 → 36:48 (`34d3773b`)
 
 Three mechanisms serialised research on bot 1, and my brief named one:

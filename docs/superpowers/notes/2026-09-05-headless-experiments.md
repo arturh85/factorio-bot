@@ -343,3 +343,20 @@ for a player) and `bench` (executor/planner: a refused walk from a start
 the game cannot leave is a boxed-in bot, not an unreachable destination;
 the ledger's answer must reach the next plan; a bot that cannot move is
 benched and the roster continues without it).
+
+### bench — merged: a boxed-in bot is probed, benched and released
+
+Three mechanisms behind hl-07's seven plans for one wedged bot: (1) the
+walk ledger only reorders candidate tiers in `schedule.rs` and never empties
+one, and bot 6's coal share had one candidate (itself); (2) the enclosure
+fill seeds from the tile centre and holds no characters, so a character
+overlapping a furnace's edge read `Open`; (3) nobody ever asked the game
+whether the character could move. Now a no-path refusal triggers four
+3-tile hop probes over the existing `async_request_player_path`; all four
+definitively refused = `BoxedIn`, the bot is benched where it stands
+(`bot_benched` event, `boxed_in` failure kind), the planner gives a benched
+bot no work with travel and refuses by name if the whole roster is benched,
+and a successful walk, a pre-plan re-probe, or moving a tile away releases
+it. 21 new tests across executor, planner and scripting; offline automation
+unchanged at 176 / 21,765. Not yet seen live; the spawn branch's eight-bot
+run is the first chance.

@@ -311,6 +311,15 @@ is an action, not a tick, and pricing it made green worse (108,170).
 | planned vs executed | 83,311 vs 85,090 — 2.1% |
 | fleet utilisation | **43.0%** (bot 1 77.9%, bots 2–4 26–37%) |
 
+**Disclosure (2026-09-05, from the peer session):** during this run the peer
+issued several `factorio-bot rcon --settings <its file> -s localhost` queries
+meant for its scratch server on 4324; because of the bug fixed in `47c087fe`
+they dialled this run's port 4321 instead. All were read-only prints (a
+recipe's enabled flag, a technology's researched flag, an entity count) and
+all returned empty, so they most likely never landed, but the record cannot
+prove that. Nothing odd was found in the run's record; the number stands with
+this note attached.
+
 Fresh-world green over the night: **64:22 → 36:48 → 31:35 → 26:32 → 29:09 →
 23:38.** Offline the same change moved red +5.2% (33,487 → 35,239) because
 red is bot-1-bound and bots 3/4 now stand furnaces of their own; automation

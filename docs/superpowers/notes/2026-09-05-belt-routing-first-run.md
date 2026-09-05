@@ -159,3 +159,91 @@ settings file prepared for the live run
 (`.worktrees/route/scratch/route-headless-settings.toml`, ports 34200/4324,
 its own workspace under `~/.local/share/factorio-bot-dev/workspace-route-belt`)
 was not used.
+
+---
+
+## Addendum: the whole-branch review found the code could not connect any real machine
+
+The section above says the primitives "are internally consistent and pass
+their own tests". That was true and it was not worth much. The final
+whole-branch review, run before any merge decision, found a **Critical**:
+`connect_steps` treated `from` and `to` as 1×1 entities whose position is a
+tile centre, and **every machine the spec names is neither**.
+
+Two independent halves, both on open ground with no obstacle anywhere:
+
+- **Footprint.** The inserter tile was the first free cardinal neighbour of
+  the machine's *centre cell*. A 3×3 (assembling machine, lab, electric
+  mining drill) has all four of those inside its own rasterised footprint, so
+  the connection refused `NoRoute`. A 2×2 (stone furnace, burner drill) has
+  two of four inside it, so the chain bent and the belt endpoint ended up
+  diagonal from the machine.
+- **Alignment.** An entity covering an even number of tiles on an axis has its
+  centre on a tile *boundary* — a stone furnace sits at an integer.
+  `method::util::tile_alignment` had already written that rule down, and says
+  getting it wrong cost this project a day once. Every position
+  `cell_to_position` produces is a half-integer, so for any even-footprint
+  machine both `dx` and `dy` came out non-zero half-integers,
+  `inserter_facing` returned `None`, and the connection refused
+  `NotCardinal`. Always.
+
+Drill → furnace → chest, the spec's own first consumer, therefore refused at
+**both** machine ends; only the chest (1×1) would have worked.
+
+### Why four reviews missed it, and what that says about the no-caller ruling
+
+**The fixtures had been built to fit the code.** `test_world`'s furnace sat at
+`(0.5, 0.5)` — not a position a 2×2 entity can occupy in Factorio — with its
+box shrunk to `1.3984375` and a doc comment explaining, approvingly, that this
+made it block *exactly one cell*. The production constructor
+`FactorioEntity::new_stone_furnace` uses `1.8`. A fixture that is 1×1 and
+half-integer is precisely the one input for which "treat the machine as a
+tile" is lossless, so every geometry assertion passed.
+
+The plan's closing ruling — stop before wiring `connect_steps` to a caller,
+because the wiring lands in files another session was editing — is still
+defensible on its own terms. But **the absence of a caller is what hid this**:
+nothing but a hand-written fixture ever ran the code, and the fixture was
+written by the same task. A primitive with no caller is not "complete and
+tested on its own terms"; it is untested against reality, and the ledger
+sentence claiming otherwise has been corrected.
+
+### What the fix wave changed
+
+- `connect_steps` now takes the two `FactorioEntity`s and reads each one's
+  `bounding_box`. Both footprints are marked occupied on the grid; each end is
+  three collinear cells (the footprint cell the inserter reaches into, the
+  inserter, the belt) taken from the machine's **perimeter**, scanned N/E/S/W.
+  Facings are computed between two cell centres of one grid, so
+  `ConnectRefusal::NotCardinal` is now unreachable by construction and is kept
+  as an assertion.
+- The obstacle grid is rasterised with the belt's own half-box (`0.4`), not
+  zero. With zero a cell counted as blocked only when an obstacle covered its
+  exact *centre*: grid-aligned buildings were accidentally safe, but **a tree
+  or a rock sits at an arbitrary sub-tile position** and a 0.8-wide box can
+  miss a tile centre while leaving no room for a belt — so the route was
+  planned straight through it and the build would have failed partway,
+  breaking the module's own refuse-before-placing promise.
+- The materials bill now exists: `Goal::Have` subgoals plus `HasItem`
+  preconditions and `LoseItem`/`CreateEntity` effects on every `Place`, with
+  real `ActionId`s, `AreaFree`, `AtPosition` and `PLACE_TICKS` — the shape
+  `power.rs` emits. Three of the spec's four refusal paths existed only on
+  paper before this.
+- The fixtures are rebuilt on legal Factorio positions: a `stone-furnace` from
+  the production constructor at the integer `(5.0, 5.0)`, a `lab` with its
+  real `2.3984375` box at the half-integer `(12.5, 5.5)`.
+
+**Each of the three defects was reproduced against the new tests before the
+fix was accepted**, by reverting the fix in place and watching the tests go
+red: forcing a 1×1 footprint fails all three connection tests; taking the
+facing from the machine's raw position fails them with `NotCardinal`; setting
+the half-box back to zero routes the belt straight through the tree.
+
+### What is still not established
+
+Everything the section above says. There is still no caller, so no belt has
+been placed in a real game, and the two failure modes this project has paid
+for — a placement that looks right and does nothing, and a ghost count that
+validates nothing — still cannot be checked for here. The fix wave makes the
+geometry *capable* of connecting a real machine; it does not show that one
+ever has.

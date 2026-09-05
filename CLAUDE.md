@@ -290,27 +290,58 @@ BotBridge Mod (Factorio mod for RPC)
   Methods live in `method/`; `state.rs` overlays a `FactorioWorld` snapshot.
 
   - **`method::connect`** (`connect_steps`, built on `graph::route::route_belt`
-    in `crates/core`) routes a `transport-belt` run between two tiles and
-    places the inserter at each end. **Belts only** — `route_belt` is always
-    called with `max_underground: None`, so a route needing to cross an
-    obstacle refuses (`ConnectRefusal::NoRoute`) rather than tunnelling
-    under it; underground belts are deliberately out of scope for this
-    version, not a bug. It **refuses before placing anything**: every
-    `ConnectRefusal` variant (`NoRoute`, `SpanTooLong`, `NotCardinal`) is
-    returned before any action is emitted, because a half-built belt run is
-    worse than none — items would sit on it with no bot left to carry them.
-    Inserter facing has **exactly one owner**, `inserter_facing()` in the same
-    module: it names the side the inserter *picks up from*, established
-    empirically elsewhere in this file (see the inserter-direction note under
-    Known Issues) and is the only place in the planner that computes it, so no
-    caller re-derives the convention.
-    **As of 2026-09-05 this module has no caller anywhere in the tree** —
-    `connect_steps`/`route_belt`/`ConnectRefusal` appear nowhere outside their
-    own tests, no `Goal` variant reaches it, and no CLI or Lua entry point
-    names it. It is tested in isolation (grid search, undergrounds-bounded,
-    inserter-facing, action-emission fixtures) but **cannot yet be exercised
-    by any live run or offline plan** — `plan --goal producing:...` produces a
-    byte-identical schedule with or without this code. See
+    in `crates/core`) routes a `transport-belt` run between two **machines**
+    and places the inserter at each end. It takes the two `FactorioEntity`s,
+    not two positions, because **the size and the parity of a machine are the
+    whole problem**: an inserter tile is derived from the machine's
+    *footprint perimeter* (`bounding_box`), and every facing is computed
+    between two cell centres of one grid. The first version derived it from
+    the four neighbours of the machine's *centre cell* instead, which refuses
+    every 3×3 (all four are inside its own footprint) and hands every 2×2 a
+    diagonal — and because an even footprint sits on a tile *boundary* (see
+    `method::util::tile_alignment`) while every belt tile is a half-integer,
+    it refused `NotCardinal` on open ground for every stone furnace. Four
+    task reviews passed it; the fixtures had been built at illegal positions
+    with a shrunken box, so they fitted the code.
+    **Belts only** — `route_belt` is always called with
+    `max_underground: None`, so a route needing to cross an obstacle refuses
+    (`ConnectRefusal::NoRoute`) rather than tunnelling under it; underground
+    belts are deliberately out of scope for this version, not a bug (a
+    Factorio pair needs one `input` half and one `output` half, and neither
+    `FactorioEntity` nor the mod's `rcon_place_entity` can express which).
+    It **refuses before placing anything**: every `ConnectRefusal` variant is
+    returned before an action is emitted or a single entity lands in the
+    plan overlay, because a half-built belt run is worse than none — items
+    would sit on it with no bot left to carry them. That promise depends on
+    the obstacle grid being a **placement** grid: `enclosure::rasterize` is
+    called with the belt's own half-box (0.4), not zero. With zero a tile
+    counted as blocked only when an obstacle covered its exact centre, so
+    grid-aligned buildings were accidentally safe and **trees and rocks, which
+    sit at arbitrary sub-tile positions, were missed entirely** — the route
+    was planned through them and the build failed partway.
+    Materials are stated both as `Goal::Have` subgoals and as `HasItem`
+    preconditions on each `Place`, so the existing shortfall machinery
+    refuses before the first belt goes down; the emitted steps are ordinary
+    `Step::Act(Action { id, pre, eff, duration, .. })`, the same shape
+    `power.rs` emits.
+    Inserter facing is computed by `inserter_facing()` in the same module: it
+    names the side the inserter *picks up from* (established empirically —
+    see the inserter-direction note under Known Issues). **It is the one
+    place new code should use, not the only encoding in the tree**:
+    `PlanState::delivers_into` derives the same fact from an inserter's
+    pickup/drop positions, and `method::assemble` places its cell's inserters
+    from fixed offsets with the directions written out. All three agree
+    today; a claim that this is "the only place in the planner that computes
+    it" was overstated and is now corrected in the function's own doc.
+    **As of 2026-09-05 this module still has no caller anywhere in the tree**
+    — `connect_steps`/`route_belt`/`ConnectRefusal` appear nowhere outside
+    their own tests, no `Goal` variant reaches it, and no CLI or Lua entry
+    point names it, so `plan --goal producing:...` produces a byte-identical
+    schedule with or without it. **That absence is what hid the geometry
+    defect for four reviews**: nothing but a fixture ever exercised the code,
+    and the fixtures were written alongside it. Treat any claim that this
+    module is "complete and tested" as scoped to its own unit tests until a
+    real caller has placed a belt in a real game. See
     `docs/superpowers/notes/2026-09-05-belt-routing-first-run.md`.
 
 - **crates/executor**: runs a `Schedule` across bots over RCON. Per-action

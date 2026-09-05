@@ -45,6 +45,7 @@ pub use tracing;
 
 pub mod aabb_quadtree;
 pub mod app_settings;
+pub mod blueprint;
 pub mod constants;
 pub mod draw;
 pub mod errors;

@@ -2521,6 +2521,30 @@ impl PlanState {
         drills
     }
 
+    /// Names of every `resource` prototype this world knows, in lexical
+    /// order.
+    ///
+    /// The mirror of [`PlanState::extractors_for`]'s filter over the same
+    /// table: that one walks every `mining-drill` prototype for a given
+    /// category, this walks every `resource` prototype regardless of
+    /// category. It exists so a caller can invert the resource -> category ->
+    /// drill relation -- "which resources can THIS drill extract" -- without
+    /// hardcoding which resource names a map might carry (iron-ore,
+    /// copper-ore, coal, stone, crude-oil, uranium-ore, and whatever a mod
+    /// adds). Sorted for the same reason `extractors_for` sorts: the answer
+    /// must depend on the data, not on `DashMap`'s iteration order.
+    pub fn resource_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .base
+            .entity_prototypes
+            .iter()
+            .filter(|proto| proto.entity_type == "resource")
+            .map(|proto| proto.name.clone())
+            .collect();
+        names.sort();
+        names
+    }
+
     /// The water tile nearest `from`, or `None` if there is none within
     /// `max_radius`.
     ///

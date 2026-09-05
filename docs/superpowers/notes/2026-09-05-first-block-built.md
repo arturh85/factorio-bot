@@ -1,4 +1,4 @@
-# The first live build: MinerLine can't be sited; StarterSteamEngineBoiler stood, 6/6
+# The first live build: MinerLine can't be sited; StarterSteamEngineBoiler stood 6/6; a synthetic fixture proves the direction migration
 
 Task 4 of the blueprint-blocks plan: run `goal.built(blueprint, anchor)`
 against a real, headless, four-bot Factorio server on seed 31337, and read
@@ -370,3 +370,145 @@ predates commit `17cdd5f7`.
   (workspace `workspace-blocks-task4/runs/`), both `done=true success=6
   failed=0 lost=0`.
 - `scripts/starter_run.lua` (this worktree, tracked).
+
+---
+
+## Closing the gap: a SYNTHETIC fixture proves the direction migration
+
+Every direction in `StarterSteamEngineBoiler` is 0 — the coordinator's own
+retarget noted "a smaller sample" as its cost and missed that the real cost
+was zero rotations, so the migration this whole plan exists to catch was
+never exercised. **This fixture is synthetic and proves the migration, not
+that real exports decode** — the two real blueprints (`MinerLine`,
+`StarterSteamEngineBoiler`) already cover real-export decoding in this
+repo's unit tests (`crates/core/tests/blueprint_decode.rs`); this run's job
+is the direction arithmetic alone.
+
+### Building the fixture
+
+Hand-built four `transport-belt` at four distinct, non-merging adjacent
+tiles in a row, carrying raw pre-2.0 (eight-point) directions `0, 2, 4, 6`:
+
+| entity | raw (8-pt) | expected migrated (16-pt) |
+|---|---|---|
+| belt 1 | 0 (north) | 0 |
+| belt 2 | 2 (east)  | 4 |
+| belt 3 | 4 (south) | 8 |
+| belt 4 | 6 (west)  | 12 |
+
+Encoded the same way `crates/core/tests/blueprint_decode.rs`'s
+`encode_blueprint` test helper does — reused its approach rather than
+inventing an encoder: envelope
+`{"blueprint":{"item":"blueprint","version":281474976710656,"entities":[...]}}`,
+zlib-compressed, base64-encoded, `"0"`-prefixed. `version = 281474976710656`
+is 1.0.0.0, which is what makes `import_stack` migrate the directions on
+decode rather than pass them through unchanged (a 2.x-versioned blueprint's
+directions are already 16-point and must not be doubled — not exercised by
+this fixture, deliberately). Built and verified by eye first (round-tripped
+the JSON back out of the encoded string in Python) before spending a run on
+it.
+
+**Cheats, disclosed:** every bot was given 4 `transport-belt` via
+`rcon.cheat_item` before planning — the same reason as every other cheat in
+this note, isolating placement from gathering. No entity was cheated in.
+
+### Rebuilt first, to rule out a stale binary
+
+Per the coordinator's instruction (a stale binary caused a false alarm
+earlier today): rebuilt clean before this run.
+
+```
+$ CARGO_TARGET_DIR=.../target nix develop -c cargo build --no-default-features --features cli,lua
+   Finished `dev` profile [unoptimized + debuginfo] target(s) in 6.27s
+$ stat -c '%y %n' target/debug/factorio-bot
+2026-09-05 18:50:03.762765216 +0200 target/debug/factorio-bot
+$ git log --oneline -1
+c52d6ff2 docs(plan): correct the MinerLine finding, and StarterSteamEngineBoiler stands 6/6
+```
+
+Tree was clean (`git status` showed no changes under `crates/`, `app/`,
+`Cargo.{toml,lock}`) before the build, and `provenance.json` for the run
+below independently confirms the same commit and a clean tree:
+`"git":{"commit":"c52d6ff2ef0551436d938cb1c68a35742052fc50","dirty":false}`.
+
+New driver script: `scripts/synth_run.lua`. Anchor `(10, 10)` — the same
+bare-dirt spot `StarterSteamEngineBoiler` built six entities around
+cleanly. (An anchor of `(0, 0)` was tried first, offline, before the
+coordinator's hold-the-box message arrived mid-check — a `--clients 0`
+dry-plan found the game would refuse a belt at `[0.5, 0.5]` there,
+unrelated to this fixture; that process was killed immediately on the
+hold instruction and nothing further was run until the all-clear.)
+
+### It planned and ran clean; the machine was otherwise idle throughout
+
+`goal.plan` produced 8 steps (4 placements + 4 walks) across 4 bots, no
+refusal. `goal.run` reported `done=true success=4 failed=0 lost=0`
+(`run-1788627039-02448`).
+
+### Reading the four directions back, off the surface, two independent ways plus the record
+
+**In-script**, `rcon.find_entities_in_radius(anchor, 10, "transport-belt")`,
+sorted left-to-right by x:
+
+```
+belt[1] raw=0 @ (10.50,10.50) expected_16pt=0  game_reports=0  OK
+belt[2] raw=2 @ (11.50,10.50) expected_16pt=4  game_reports=4  OK
+belt[3] raw=4 @ (12.50,10.50) expected_16pt=8  game_reports=8  OK
+belt[4] raw=6 @ (13.50,10.50) expected_16pt=12 game_reports=12 OK
+```
+
+**External**, the standalone `factorio-bot rcon -s localhost --settings
+scratch/task4-settings.toml` CLI, fired in a loop from a separate shell
+against the run's own server while it executed (8 attempts; the last one
+landed after all four were placed, the rest before any belt existed):
+
+```
+EXTPROBE:transport-belt,10.5,10.5,0;transport-belt,11.5,10.5,4;transport-belt,12.5,10.5,8;transport-belt,13.5,10.5,12
+```
+
+Exact match.
+
+**`map.jsonl`'s own `placed` records**, the same drift-tracking mechanism
+used for `StarterSteamEngineBoiler`, and this time with **no drift at
+all** (`transport-belt` is a 1×1 footprint, so there is no tile-centre
+parity snap the way there was for the odd-shaped entities in the six-entity
+build):
+
+```
+{"kind":"placed","bot":1,"intent":{"name":"transport-belt","position":{"x":10.5,"y":10.5},"direction":0}, "actual":{...,"direction":0}, "drift":null}
+{"kind":"placed","bot":2,"intent":{"name":"transport-belt","position":{"x":11.5,"y":10.5},"direction":4}, "actual":{...,"direction":4}, "drift":null}
+{"kind":"placed","bot":3,"intent":{"name":"transport-belt","position":{"x":12.5,"y":10.5},"direction":8}, "actual":{...,"direction":8}, "drift":null}
+{"kind":"placed","bot":4,"intent":{"name":"transport-belt","position":{"x":13.5,"y":10.5},"direction":12},"actual":{...,"direction":12},"drift":null}
+```
+
+### Verdict
+
+**All four observed directions matched all four expected, in order: `0
+vs 0`, `4 vs 4`, `8 vs 8`, `12 vs 12`.** No belt arrived on an odd number
+and none arrived on its raw (undoubled) value. Confirmed three ways —
+in-script RCON, an independent external `factorio-bot rcon -s localhost`
+process, and `map.jsonl`'s drift-tracked record — all in exact agreement.
+
+**What this does and does not prove.** It proves the eight-to-sixteen point
+direction migration end to end, live, on all four cardinal directions, on a
+fixture built specifically to exercise every non-trivial case
+`StarterSteamEngineBoiler` could not. **It does not prove that real
+Factorio exports decode correctly** — that is a separate claim, already
+covered by this repo's own unit tests
+(`the_miner_line_decodes_to_its_37_entities`,
+`pre_two_point_zero_directions_are_doubled_onto_the_sixteen_point_scale` in
+`crates/core/tests/blueprint_decode.rs`) against the two real blueprints
+used elsewhere in this note. Had any belt come back odd or undoubled, that
+would have been the single most valuable finding this whole plan could
+produce; it did not happen.
+
+### Evidence (synthetic fixture)
+
+- `scratch/synth_run.log`, `scratch/external_rcon_synth.log`,
+  `scratch/synth_plan_check.log` (the killed `(0,0)` dry-check; this
+  worktree, local, not committed).
+- Run directory: `run-1788627039-02448` (workspace
+  `workspace-blocks-task4/runs/`), `done=true success=4 failed=0 lost=0`,
+  `provenance.json` git commit `c52d6ff2`, `dirty: false`.
+- `scripts/synth_run.lua` (this worktree, tracked). `scripts/synth_plan_check.lua`
+  was a throwaway offline sanity check and is not tracked.

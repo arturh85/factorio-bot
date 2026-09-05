@@ -22,6 +22,7 @@ use factorio_bot_core::factorio::world::FactorioWorld;
 use factorio_bot_core::serde_json;
 use factorio_bot_core::test_utils::fixture_world;
 use factorio_bot_core::types::{FactorioEntity, FactorioForce, Position, Rect};
+use std::sync::Arc;
 
 /// A world whose iron front can seat a whole roster, and its ore neighbours
 /// with it.
@@ -97,6 +98,75 @@ pub(crate) fn with_trees(world: FactorioWorld, positions: &[Position]) -> Factor
         .update_chunk_entities(entities)
         .expect("a fixture world accepts trees");
     world
+}
+
+/// A `stone-furnace` footprint at the real prototype's collision box
+/// (`1.3984375` tiles, `crates/core/tests/entity-prototype-fixtures.json`)
+/// rather than a round number: `method::connect`'s tests below depend on
+/// exactly which single cell of the `enclosure` grid this blocks -- a box
+/// under 1.5 tiles wide, centred on a tile centre, never reaches a
+/// neighbouring tile's own centre, so it blocks only the tile it sits on and
+/// leaves every cardinal neighbour free.
+fn stone_furnace(position: &Position) -> FactorioEntity {
+    FactorioEntity {
+        name: "stone-furnace".into(),
+        entity_type: "furnace".into(),
+        position: position.clone(),
+        bounding_box: add_to_rect(&Rect::from_wh(1.3984375, 1.3984375), position),
+        ..Default::default()
+    }
+}
+
+/// A `stone-wall` footprint at its real collision box (`0.578125` tiles).
+fn stone_wall(position: &Position) -> FactorioEntity {
+    FactorioEntity {
+        name: "stone-wall".into(),
+        entity_type: "wall".into(),
+        position: position.clone(),
+        bounding_box: add_to_rect(&Rect::from_wh(0.578125, 0.578125), position),
+        ..Default::default()
+    }
+}
+
+/// Two `stone-furnace`s six tiles apart on open ground, for
+/// `method::connect`'s belt-routing tests: `(0.5, 0.5)` and `(6.5, 0.5)`,
+/// nothing else in the way.
+///
+/// Built with real base-world entities (`update_chunk_entities`), not
+/// `PlanState::create_entity`'s overlay: `connect_steps` reads obstacles from
+/// `state.base().entity_graph.blocking_boxes_within`, which never sees the
+/// overlay, so a furnace placed through the overlay would be invisible to the
+/// very check this fixture exists to exercise.
+pub(crate) fn open_world_with_two_machines() -> PlanState {
+    let world = fixture_world();
+    world
+        .update_chunk_entities(vec![
+            stone_furnace(&Position::new(0.5, 0.5)),
+            stone_furnace(&Position::new(6.5, 0.5)),
+        ])
+        .expect("a fixture world accepts two furnaces");
+    PlanState::from_world(Arc::new(world), &[])
+}
+
+/// [`open_world_with_two_machines`], with a `stone-wall` column at `x = 3.5`
+/// spanning `y` from -30 to 30 -- past the 24-tile radius of the
+/// `enclosure::window` on either side of `(0.5, 0.5)`, so every row inside
+/// that window has its `x = 3.5` cell blocked and no route can cross it. The
+/// walled-destination control: `connect_steps` between the two furnaces must
+/// refuse.
+pub(crate) fn two_machines_behind_a_wall() -> PlanState {
+    let world = fixture_world();
+    let mut entities = vec![
+        stone_furnace(&Position::new(0.5, 0.5)),
+        stone_furnace(&Position::new(6.5, 0.5)),
+    ];
+    for y in -30..=30 {
+        entities.push(stone_wall(&Position::new(3.5, f64::from(y) + 0.5)));
+    }
+    world
+        .update_chunk_entities(entities)
+        .expect("a fixture world accepts two furnaces and a wall");
+    PlanState::from_world(Arc::new(world), &[])
 }
 
 /// One force, `player`, with a small technology tree.

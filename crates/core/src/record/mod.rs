@@ -594,6 +594,13 @@ pub enum EventKind {
         /// entity's collision box centred here, not this single tile -- the
         /// game tested the box, so the box is what the refusal is about.
         position: Position,
+        /// The `defines.direction` the build was aimed with, when known. The
+        /// box the game tested is the prototype's box turned this way, so
+        /// this is what makes the excluded region the right shape for a
+        /// building that is not square: a steam engine facing east claims
+        /// 4.7 by 2.5 tiles, not 2.5 by 4.7. `null` on lines written before
+        /// the direction was carried.
+        direction: Option<u8>,
         /// `"dispatch"` or `"pre_check"` -- whether a bot flew to this site
         /// and was refused, or the planner asked before committing to it.
         ///
@@ -609,17 +616,18 @@ pub enum EventKind {
         /// The distinct names of the entities the game found in the tested
         /// collision box, sorted.
         ///
-        /// Always empty for `source = "dispatch"`: the game's refusal names
-        /// no cause and there is nothing left to ask by the time it arrives.
-        /// That absence of a cause is what five consecutive runs were spent
-        /// on, and filling it in is most of the reason the pre-check exists.
-        ///
-        /// Empty on a `pre_check` refusal means something else and is
-        /// genuinely informative: no entity intersected the footprint at all,
-        /// so the ground itself is the answer -- see `tile`.
+        /// Filled on both sources. The pre-check always reported it; a
+        /// `dispatch` refusal carries it since the mod started appending what
+        /// it found to its `said 'no'` line (`rcon_place_entity`,
+        /// `mods/BotBridge/control.lua`) -- before that it was always empty
+        /// here, and that absence of a cause is what five consecutive runs
+        /// were spent on. Empty now means the game scanned the box and found
+        /// no entity in it, so the ground itself is the answer -- see `tile`.
+        /// Empty **and** `tile: null` on a `dispatch` line is the older
+        /// shape, where nothing was asked.
         blockers: Vec<String>,
-        /// The tile under the refused centre, when it was asked for. `None`
-        /// for `source = "dispatch"`.
+        /// The tile under the refused centre, when the game named it. `None`
+        /// only on a `dispatch` line whose reply named nothing.
         tile: Option<String>,
     },
     /// A character cannot reach open ground from where it stands.
@@ -693,8 +701,18 @@ pub enum EventKind {
         placing: String,
         /// Where it was about to be placed.
         site: Position,
+        /// `"enclosure"` or `"footprint"`: whether the placement would have
+        /// walled the character in, or would have stood on the tile the
+        /// character was standing on. The second is the acting bot inside
+        /// its own placement's collision box -- the game refuses that build
+        /// for the actor's sake, and `run-1788569499-05724` lost a 407-step
+        /// plan to exactly that refusal being read as a verdict about the
+        /// ground.
+        reason: String,
         /// How many tiles the character would have been left with, had it
-        /// stayed -- the same count [`EventKind::BotEnclosed`] reports.
+        /// stayed -- the same count [`EventKind::BotEnclosed`] reports. `0`
+        /// for `reason = "footprint"`, where the placement stands on the
+        /// character's own tile.
         pocket_tiles: f64,
     },
     /// A bot lost its character: the game's `on_player_died`, as the mod

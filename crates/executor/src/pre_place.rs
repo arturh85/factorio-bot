@@ -33,6 +33,29 @@
 //! ground once the footprint stands, filtered to tiles the placement can
 //! still be made from.
 //!
+//! # The second gap, closed here for the same reason
+//!
+//! The same three facts answer a simpler question first: **is the character
+//! standing inside the footprint it is about to build?** The plan says it
+//! must not -- every `Place` carries an `AtPosition` annulus whose inner
+//! radius is the placement's clearance -- but the annulus is judged against
+//! where the *model* left the bot after its last walk, and the walker stops
+//! anywhere within a small box of its waypoint. `run-1788569499-05724`: bot 1
+//! walked to the pipe at `[43.5, -5.5]` and stopped at `(42.24, -6.77)`;
+//! the plan's next placement was a steam engine facing east at
+//! `[40.5, -5.5]`, whose turned box reaches to `x = 42.85`. The model had the
+//! bot 3.0 tiles from the engine's centre, past the 2.94-tile clearance, so
+//! no walk was emitted; the game had it 0.55 tiles inside the box and
+//! refused the build. The mod is meant to answer that case with
+//! `§player_blocks_placement§` and did not (its own check used the
+//! north-frame box -- fixed alongside this); the refusal went into the ledger
+//! as a fact about the ground and the next plan moved the whole plant.
+//!
+//! Asked here, the answer is a one- or two-tile walk to the nearest tile
+//! outside the box that keeps the site within reach, before any RPC is
+//! spent. The mod's own answer remains the backstop for a world whose
+//! position for the character is stale.
+//!
 //! # What it deliberately does not do
 //!
 //! * It does not refuse to build next to an already-enclosed bot. A bot that
@@ -47,7 +70,7 @@
 //!   enclosure it might prevent -- detection still names one afterwards.
 
 use factorio_bot_core::factorio::util::calculate_distance;
-use factorio_bot_core::factorio::world::FactorioWorld;
+use factorio_bot_core::factorio::world::{FactorioWorld, StepAsideReason};
 use factorio_bot_core::graph::enclosure::{
     Escape, character_half_box, escape_from, escape_with, step_aside_target,
 };
@@ -75,7 +98,11 @@ pub enum PrePlace {
     StepAside {
         from: Position,
         to: Position,
-        /// How many tiles the character would have been left with.
+        /// Which of the two conditions asked for the walk.
+        reason: StepAsideReason,
+        /// How many tiles the character would have been left with; `0.0`
+        /// for [`StepAsideReason::Footprint`], where the placement would
+        /// stand on the character's own tile.
         pocket_tiles: f64,
     },
     /// The placement would seal the character in and no tile it can reach
@@ -117,25 +144,69 @@ pub fn judge_placement(
         return PrePlace::Proceed;
     };
 
+    let (half_x, half_y) = character_half_box(&world.entity_graph);
+    // Where a step aside may land, for either reason: outside the footprint
+    // by the character's own half-box plus the walk's landing tolerance, and
+    // still within building reach of the site.
+    let clear_of = Rect::new(
+        &Position::new(
+            footprint.left_top.x() - half_x - STEP_ASIDE_RADIUS,
+            footprint.left_top.y() - half_y - STEP_ASIDE_RADIUS,
+        ),
+        &Position::new(
+            footprint.right_bottom.x() + half_x + STEP_ASIDE_RADIUS,
+            footprint.right_bottom.y() + half_y + STEP_ASIDE_RADIUS,
+        ),
+    );
+    let reach = build_distance - REACH_MARGIN;
+    let admit =
+        |tile: &Position| !contains(&clear_of, tile) && calculate_distance(tile, at) <= reach;
+
+    if character_overlaps(&footprint, &here, half_x, half_y) {
+        return match step_aside_target(
+            &world.entity_graph,
+            &here,
+            std::slice::from_ref(&footprint),
+            admit,
+        ) {
+            Some(to) => {
+                warn!(
+                    player,
+                    from = %here,
+                    to = %to,
+                    placing = name,
+                    site = %at,
+                    direction,
+                    "STEPPING ASIDE: the character stands inside the box this placement \
+                     would occupy, so the game would refuse it for the actor's sake; \
+                     walking it to the nearest tile outside the box first"
+                );
+                PrePlace::StepAside {
+                    from: here,
+                    to,
+                    reason: StepAsideReason::Footprint,
+                    pocket_tiles: 0.0,
+                }
+            }
+            None => {
+                info!(
+                    player,
+                    from = %here,
+                    placing = name,
+                    site = %at,
+                    "pre-place check: the character stands inside the placement's box and no \
+                     tile within reach was found to step to; the placement goes ahead and the \
+                     mod's own actor-in-footprint answer will walk the bot instead"
+                );
+                PrePlace::Proceed
+            }
+        };
+    }
+
     let before = escape_from(&world.entity_graph, &here);
     let after = escape_with(&world.entity_graph, &here, std::slice::from_ref(&footprint));
     match (before, after) {
         (Escape::Open, Escape::Enclosed { pocket_tiles }) => {
-            let (half_x, half_y) = character_half_box(&world.entity_graph);
-            let clear_of = Rect::new(
-                &Position::new(
-                    footprint.left_top.x() - half_x - STEP_ASIDE_RADIUS,
-                    footprint.left_top.y() - half_y - STEP_ASIDE_RADIUS,
-                ),
-                &Position::new(
-                    footprint.right_bottom.x() + half_x + STEP_ASIDE_RADIUS,
-                    footprint.right_bottom.y() + half_y + STEP_ASIDE_RADIUS,
-                ),
-            );
-            let reach = build_distance - REACH_MARGIN;
-            let admit = |tile: &Position| {
-                !contains(&clear_of, tile) && calculate_distance(tile, at) <= reach
-            };
             match step_aside_target(
                 &world.entity_graph,
                 &here,
@@ -156,6 +227,7 @@ pub fn judge_placement(
                     PrePlace::StepAside {
                         from: here,
                         to,
+                        reason: StepAsideReason::Enclosure,
                         pocket_tiles,
                     }
                 }
@@ -216,6 +288,20 @@ fn footprint_of(world: &FactorioWorld, name: &str, at: &Position, direction: u8)
     .ok()?;
     (entity.bounding_box.width() > 0. && entity.bounding_box.height() > 0.)
         .then_some(entity.bounding_box)
+}
+
+/// Whether a character centred at `here` collides with `footprint`.
+///
+/// Box against box, as the game tests it, not point against box: the
+/// character in `run-1788569499-05724` had its *centre* 0.02 tiles outside
+/// the engine's box on the y axis and its own 0.2-tile half-box well inside
+/// it. Open intervals -- boxes that merely touch do not collide, which is
+/// the same tolerance `PlanState::placement_clearance` argues from.
+fn character_overlaps(footprint: &Rect, here: &Position, half_x: f64, half_y: f64) -> bool {
+    here.x() - half_x < footprint.right_bottom.x()
+        && here.x() + half_x > footprint.left_top.x()
+        && here.y() - half_y < footprint.right_bottom.y()
+        && here.y() + half_y > footprint.left_top.y()
 }
 
 fn contains(rect: &Rect, point: &Position) -> bool {
@@ -307,9 +393,11 @@ mod tests {
             PrePlace::StepAside {
                 from,
                 to,
+                reason,
                 pocket_tiles,
             } => {
                 assert_eq!(from, bot_1_stood_at());
+                assert_eq!(reason, StepAsideReason::Enclosure);
                 // Exact: the game's grid sees the two chest tiles, the two
                 // pole-side tiles and the assembler's two as walls, and
                 // nothing else.

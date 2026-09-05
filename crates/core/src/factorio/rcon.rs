@@ -656,22 +656,95 @@ fn note_placement_refusal(
     line: &str,
     item_name: &str,
     entity_position: &Position,
+    direction: u8,
 ) {
     if !line.contains(CAN_PLACE_REFUSAL) {
         return;
     }
-    // `at_dispatch`, not a literal: the mod's line names no cause and there is
-    // nothing left to ask by the time it arrives here, so this path has no
-    // blockers and no tile to report. Only the pre-flight check
-    // (`FactorioRcon::can_place_entities`) can fill those in.
-    let refusal = PlacementRefusal::at_dispatch(tick, item_name, entity_position.clone());
+    // What the mod found in the box it had just had judged, read off the
+    // line it appended it to. Nothing here is reconstructed from this side's
+    // model: a refusal is the game disagreeing with the model, so the
+    // model's opinion of the site is exactly the thing that cannot explain
+    // it. An older mod that appended nothing yields an empty list and no
+    // tile, which is what every dispatch refusal used to carry.
+    let (blockers, tile) = parse_footprint_evidence(line);
+    let refusal = PlacementRefusal::at_dispatch(
+        tick,
+        item_name,
+        entity_position.clone(),
+        direction,
+        blockers,
+        tile,
+    );
+    let cause = describe_blockers(&refusal.blockers, refusal.tile.as_deref());
     if world.record_placement_refusal(refusal) {
         warn!(
-            "the game refused to build {} at {}; the planner will avoid that footprint \
-             for the rest of this run",
-            item_name, entity_position
+            "the game refused to build {} at {} facing {} ({}); the planner will avoid that \
+             footprint for the rest of this run",
+            item_name, entity_position, direction, cause
         );
     }
+}
+
+/// The parenthesis `rcon_place_entity` (`mods/BotBridge/control.lua`) appends
+/// to the ground's refusal, read back as `(blockers, tile)`.
+///
+/// Two shapes, and only these two -- `describe_footprint` in the mod is the
+/// writer and this is its reader:
+///
+/// ```text
+/// ... said 'no' (in the footprint: small-electric-pole, tree-01; tile: grass-1)
+/// ... said 'no' (nothing in the footprint; tile: grass-1)
+/// ```
+///
+/// The tile clause is optional in both (the mod omits it when the tile is
+/// invalid). A line with no parenthesis at all -- an older mod, or one of the
+/// other exits in the same family -- reads as an empty list and no tile, the
+/// same as before the mod named anything. The retry note
+/// [`PlacementAttempts::explain`] appends comes *after* this parenthesis and
+/// after a `;`, which is why the search is for the parenthesis that opens
+/// right after the refusal rather than for the last `(` on the line.
+fn parse_footprint_evidence(line: &str) -> (Vec<String>, Option<String>) {
+    const FOUND: &str = "(in the footprint: ";
+    const EMPTY: &str = "(nothing in the footprint";
+    const TILE: &str = "; tile: ";
+    let Some(after) = line
+        .find(CAN_PLACE_REFUSAL)
+        .map(|at| &line[at + CAN_PLACE_REFUSAL.len()..])
+    else {
+        return (Vec::new(), None);
+    };
+    let after = after.trim_start();
+    let (blockers, rest) = if let Some(rest) = after.strip_prefix(FOUND) {
+        let Some(end) = rest.find(')') else {
+            return (Vec::new(), None);
+        };
+        let inside = &rest[..end];
+        let (names, tile_part) = match inside.find(TILE) {
+            Some(at) => (&inside[..at], Some(&inside[at + TILE.len()..])),
+            None => (inside, None),
+        };
+        let blockers = names
+            .split(',')
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
+            .collect();
+        (blockers, tile_part)
+    } else if let Some(rest) = after.strip_prefix(EMPTY) {
+        let Some(end) = rest.find(')') else {
+            return (Vec::new(), None);
+        };
+        let inside = &rest[..end];
+        (Vec::new(), inside.strip_prefix(TILE))
+    } else {
+        return (Vec::new(), None);
+    };
+    let tile = rest
+        .map(str::trim)
+        .filter(|tile| !tile.is_empty())
+        .map(str::to_string);
+    (blockers, tile)
 }
 
 /// Joins a `can_place_entities` reply to the queries that produced it and
@@ -707,6 +780,7 @@ fn accept_verdicts(
             tick: reply.tick,
             entity: query.item_name.clone(),
             position: query.position.clone(),
+            direction: Some(query.direction),
             source: RefusalSource::PreCheck,
             blockers: verdict.blockers.clone(),
             tile: verdict.tile.clone(),
@@ -3763,6 +3837,7 @@ impl FactorioRcon {
                                     line,
                                     &item_name,
                                     &entity_position,
+                                    direction,
                                 );
                                 Err(ActionFailure::refused(
                                     RconError {
@@ -3794,7 +3869,7 @@ impl FactorioRcon {
                 sleep(FOOTPRINT_CLEAR_BACKOFF).await;
                 continue;
             }
-            note_placement_refusal(world, tick, line, &item_name, &entity_position);
+            note_placement_refusal(world, tick, line, &item_name, &entity_position, direction);
             return Err(ActionFailure::refused(
                 RconError {
                     message: attempts.explain(line, tick),
@@ -5722,6 +5797,9 @@ mod placement_precheck_tests {
             Some(20),
             "stone-furnace",
             Position::new(1., 1.),
+            0,
+            Vec::new(),
+            None,
         ));
         let learned = world.placement_refusals();
         assert_eq!(learned.len(), 1);
@@ -7303,12 +7381,87 @@ mod placement_refusal_tests {
     fn the_generic_refusal_is_remembered_with_its_site() {
         let world = world();
         let at = Position::new(-16., -58.);
-        note_placement_refusal(&world, Some(6198), GENERIC, "stone-furnace", &at);
+        note_placement_refusal(&world, Some(6198), GENERIC, "stone-furnace", &at, 0);
         let refusals = world.placement_refusals();
         assert_eq!(refusals.len(), 1, "got {refusals:?}");
         assert_eq!(refusals[0].entity, "stone-furnace");
         assert_eq!(refusals[0].position, at);
         assert_eq!(refusals[0].tick, Some(6198));
+        assert_eq!(refusals[0].direction, Some(0));
+        assert!(
+            refusals[0].blockers.is_empty() && refusals[0].tile.is_none(),
+            "a line that names nothing reports nothing: {:?}",
+            refusals[0]
+        );
+    }
+
+    /// **The line `run-1788569499-05724` should have had.** The mod scans the
+    /// box it just had judged and appends what it found; this side reads it
+    /// back into the ledger, so a dispatch refusal no longer reaches the
+    /// record as `blockers: []` -- which reads as "nothing was there" and was
+    /// the whole of what that run's refusal said.
+    #[test]
+    fn what_the_mod_found_in_the_footprint_is_kept_with_the_refusal() {
+        let world = world();
+        let at = Position::new(40.5, -5.5);
+        note_placement_refusal(
+            &world,
+            Some(172826),
+            "cannot place item 'steam-engine' because surface.can_place_entity said 'no' \
+             (in the footprint: pipe, small-electric-pole; tile: grass-1)",
+            "steam-engine",
+            &at,
+            4,
+        );
+        let refusals = world.placement_refusals();
+        assert_eq!(refusals.len(), 1, "got {refusals:?}");
+        assert_eq!(
+            refusals[0].blockers,
+            vec!["pipe".to_string(), "small-electric-pole".to_string()]
+        );
+        assert_eq!(refusals[0].tile.as_deref(), Some("grass-1"));
+        assert_eq!(
+            refusals[0].direction,
+            Some(4),
+            "the box the game tested is the one turned east; the ledger has to \
+             exclude that shape and not the north-frame one"
+        );
+    }
+
+    /// Every shape the mod writes, and the shapes it does not, read back
+    /// without inventing a name.
+    #[test]
+    fn the_footprint_parenthesis_reads_back_exactly() {
+        let base = "cannot place item 'x' because surface.can_place_entity said 'no'";
+        assert_eq!(parse_footprint_evidence(base), (vec![], None));
+        assert_eq!(
+            parse_footprint_evidence(&format!("{base} (nothing in the footprint; tile: water)")),
+            (vec![], Some("water".to_string()))
+        );
+        assert_eq!(
+            parse_footprint_evidence(&format!("{base} (nothing in the footprint)")),
+            (vec![], None)
+        );
+        assert_eq!(
+            parse_footprint_evidence(&format!("{base} (in the footprint: tree-01)")),
+            (vec!["tree-01".to_string()], None)
+        );
+        // The retry note `PlacementAttempts::explain` appends comes after,
+        // and must not be read as part of the evidence.
+        assert_eq!(
+            parse_footprint_evidence(&format!(
+                "{base} (in the footprint: a, b; tile: dirt-4); dispatched 4 times over 120 \
+                 game ticks (1.8s of waiting between attempts) and refused every time"
+            )),
+            (
+                vec!["a".to_string(), "b".to_string()],
+                Some("dirt-4".to_string())
+            )
+        );
+        assert_eq!(
+            parse_footprint_evidence("§player_blocks_placement§"),
+            (vec![], None)
+        );
     }
 
     /// The other half of the same branch. A player-blocked refusal is about a
@@ -7323,6 +7476,7 @@ mod placement_refusal_tests {
             "§player_blocks_placement§",
             "stone-furnace",
             &Position::new(-16., -58.),
+            0,
         );
         assert!(
             world.placement_refusals().is_empty(),
@@ -7346,6 +7500,7 @@ mod placement_refusal_tests {
             "cannot place item 'stone-furnace' because a character is standing in the footprint",
             "stone-furnace",
             &Position::new(-39., -12.),
+            0,
         );
         assert!(
             world.placement_refusals().is_empty(),
@@ -7364,7 +7519,14 @@ mod placement_refusal_tests {
             "cannot place item 'stone-furnace' because place_result is nil",
             "ERROR: something else entirely",
         ] {
-            note_placement_refusal(&world, None, line, "stone-furnace", &Position::new(0., 0.));
+            note_placement_refusal(
+                &world,
+                None,
+                line,
+                "stone-furnace",
+                &Position::new(0., 0.),
+                0,
+            );
         }
         assert!(
             world.placement_refusals().is_empty(),
@@ -7381,7 +7543,7 @@ mod placement_refusal_tests {
         let world = world();
         let at = Position::new(-16., -58.);
         for tick in [6198, 6204, 6209] {
-            note_placement_refusal(&world, Some(tick), GENERIC, "stone-furnace", &at);
+            note_placement_refusal(&world, Some(tick), GENERIC, "stone-furnace", &at, 0);
         }
         assert_eq!(world.placement_refusals().len(), 1);
         assert_eq!(world.unreported_placement_refusals().len(), 1);

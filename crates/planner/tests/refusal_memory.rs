@@ -45,7 +45,7 @@ const OVERLAPPING_NEIGHBOUR: (f64, f64) = (-17., -58.);
 const CLEAR_NEIGHBOUR: (f64, f64) = (-18., -58.);
 
 fn refused(entity: &str, (x, y): (f64, f64)) -> PlacementRefusal {
-    PlacementRefusal::at_dispatch(Some(6198), entity, Position::new(x, y))
+    PlacementRefusal::at_dispatch(Some(6198), entity, Position::new(x, y), 0, Vec::new(), None)
 }
 
 /// A fixture world with `refusals` already recorded, the way a run's

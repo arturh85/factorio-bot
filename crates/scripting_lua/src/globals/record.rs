@@ -1862,6 +1862,7 @@ end
                             EventKind::PlacementRefused {
                                 entity: refusal.entity,
                                 position: refusal.position,
+                                direction: refusal.direction,
                                 source: refusal.source.as_str().to_string(),
                                 blockers: refusal.blockers,
                                 tile: refusal.tile,
@@ -1962,6 +1963,7 @@ end
                                 to: step.to,
                                 placing: step.placing,
                                 site: step.site,
+                                reason: step.reason.as_str().to_string(),
                                 pocket_tiles: step.pocket_tiles,
                             },
                         )
@@ -3382,6 +3384,9 @@ mod tests {
                     Some(tick),
                     "stone-furnace",
                     Position { x, y },
+                    0,
+                    Vec::new(),
+                    None,
                 ),
             );
         }
@@ -3398,6 +3403,7 @@ mod tests {
             EventKind::PlacementRefused {
                 entity,
                 position,
+                direction,
                 source,
                 blockers,
                 tile,
@@ -3405,10 +3411,11 @@ mod tests {
                 assert_eq!(entity, "stone-furnace");
                 assert_eq!(position.x, -16.);
                 assert_eq!(position.y, -58.);
+                assert_eq!(*direction, Some(0));
                 assert_eq!(source, "dispatch");
                 assert!(
                     blockers.is_empty() && tile.is_none(),
-                    "a refusal observed at dispatch has no cause to report: \
+                    "a refusal whose reply named nothing reports nothing: \
                      {blockers:?} / {tile:?}"
                 );
             }
@@ -3460,6 +3467,7 @@ mod tests {
             tick: Some(6198),
             entity: "stone-furnace".to_string(),
             position: Position { x: -16., y: -58. },
+            direction: Some(4),
             source: factorio_bot_core::factorio::world::RefusalSource::PreCheck,
             blockers: vec!["tree-01".to_string(), "tree-02".to_string()],
             tile: Some("grass-3".to_string()),
@@ -3527,6 +3535,9 @@ mod tests {
                 None,
                 "stone-furnace",
                 Position { x: 0., y: 0. },
+                0,
+                Vec::new(),
+                None,
             ),
         );
         let written: u32 = lua

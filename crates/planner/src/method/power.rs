@@ -902,6 +902,7 @@ pub fn plant_steps(ctx: &mut ExpansionCtx, plant: &Plant) -> (Vec<Step>, Vec<Act
 mod tests {
     use super::*;
     use crate::ids::BotId;
+    use crate::method::util::free_area_near;
     use factorio_bot_core::test_utils::fixture_world;
     use std::sync::Arc;
 
@@ -1256,6 +1257,164 @@ mod tests {
         );
         for place_id in &place_ids {
             assert!(linked_from_evacuate.contains(place_id));
+        }
+    }
+
+    /// Box against box, the way `PlanState::is_area_clear_of` tests it.
+    fn overlap(a: &Rect, b: &Rect) -> bool {
+        a.left_top.x() < b.right_bottom.x()
+            && a.right_bottom.x() > b.left_top.x()
+            && a.left_top.y() < b.right_bottom.y()
+            && a.right_bottom.y() > b.left_top.y()
+    }
+
+    /// A pump position at which a whole plant facing `facing` fits the
+    /// fixture, found by scanning rather than assumed: `fit` wants no water
+    /// under the pump, only room, so any clear patch will do, and the scan
+    /// keeps the test honest about the fixture's contents.
+    fn a_place_where_a_plant_fits(s: &PlanState, facing: Direction) -> (Position, Plant) {
+        for y in -40..40 {
+            for x in -40..40 {
+                let pump = Position::new(f64::from(x) + 0.5, f64::from(y) + 0.5);
+                if let Some(plant) = fit(s, &pump, facing) {
+                    return (pump, plant);
+                }
+            }
+        }
+        panic!("the fixture has nowhere for a plant facing {facing:?}");
+    }
+
+    /// A tile centre inside the engine's turned box **and outside its
+    /// north-frame box** -- two tiles from the centre along the box's long
+    /// axis. The engine is 2.5 by 4.7, so along its long axis that tile is
+    /// 0.35 inside the box and along its short axis it would be 0.75 outside
+    /// it: the one tile that tells a turned check from an unturned one.
+    fn a_tile_only_the_turned_box_covers(s: &PlanState, engine: &PlantPart) -> Position {
+        let area = s
+            .collision_area_facing(ENGINE, &engine.position, engine.direction)
+            .expect("the engine has a prototype");
+        let c = area.center();
+        let tile = if area.width() > area.height() {
+            Position::new(c.x() + 2.0, c.y())
+        } else {
+            Position::new(c.x(), c.y() + 2.0)
+        };
+        assert_eq!(tile.x().fract().abs(), 0.5, "{tile} is not a tile centre");
+        assert_eq!(tile.y().fract().abs(), 0.5, "{tile} is not a tile centre");
+        let pole = s
+            .collision_area(POLE, &tile)
+            .expect("the pole has a prototype");
+        assert!(overlap(&pole, &area), "{tile} is not inside {area:?}");
+        let unturned = s
+            .collision_area(ENGINE, &engine.position)
+            .expect("the engine has a prototype");
+        // South is the north frame turned twice: the same shape, so this
+        // tile cannot tell them apart and the assertion is only for the two
+        // facings that change the shape.
+        assert!(
+            !overlap(&pole, &unturned)
+                || matches!(engine.direction, Direction::North | Direction::South),
+            "{tile} must lie outside the north-frame box for the test to see a turn"
+        );
+        tile
+    }
+
+    /// **Order one: the plant is expanded first, a pole from another chain
+    /// second.** Once `plant_steps` has emitted the plant, the `added`
+    /// overlay carries every part with its direction, so a pole sited
+    /// afterwards -- the lab's, the cell's, anyone's -- cannot land on the
+    /// engine's turned box, and `free_area_near` walks it off.
+    ///
+    /// This is the case `run-1788569499-05724` was suspected of, and it
+    /// holds: the pole at `[42.5, -5.5]` there came from the *next* plan,
+    /// after the engine had been refused for a different reason entirely.
+    /// Pinned all the same, in all four facings, because the east and west
+    /// ones are the shape a north-frame check would get wrong.
+    #[test]
+    fn a_pole_sited_after_the_plant_stays_off_the_engines_turned_box() {
+        for facing in Direction::orthogonal() {
+            let s = state();
+            let (_pump, plant) = a_place_where_a_plant_fits(&s, facing);
+            let engine = plant
+                .parts
+                .iter()
+                .find(|p| p.name == ENGINE)
+                .expect("an engine");
+            let inside = a_tile_only_the_turned_box_covers(&s, engine);
+            assert!(
+                s.is_area_free(POLE, &inside),
+                "{facing:?}: before the plant is emitted the tile is open ground"
+            );
+
+            let mut ctx = ExpansionCtx::new(s, BotId(1));
+            let _ = plant_steps(&mut ctx, &plant);
+
+            assert!(
+                !ctx.state.is_area_free(POLE, &inside),
+                "{facing:?}: the emitted engine claims {inside}"
+            );
+            let sited =
+                free_area_near(&ctx.state, &inside, POLE).expect("there is room for a pole");
+            let pole = ctx
+                .state
+                .collision_area(POLE, &sited)
+                .expect("the pole has a prototype");
+            for part in &plant.parts {
+                let area = ctx
+                    .state
+                    .collision_area_facing(part.name, &part.position, part.direction)
+                    .expect("every part has a prototype");
+                assert!(
+                    !overlap(&pole, &area),
+                    "{facing:?}: a pole sited at {sited} overlaps {} at {} facing {:?}",
+                    part.name,
+                    part.position,
+                    part.direction
+                );
+            }
+        }
+    }
+
+    /// **Order two: the pole is already there, the plant is sited second.**
+    /// A pole another chain emitted onto what would be the engine's turned
+    /// box refuses that candidate outright -- `fit` asks
+    /// `is_area_free_facing` with the engine's own direction -- while the
+    /// north-frame question, which is the one a direction-blind check would
+    /// ask, still says the ground is free. That difference is the whole test.
+    #[test]
+    fn a_pole_already_standing_refuses_the_plant_candidate_over_it() {
+        for facing in Direction::orthogonal() {
+            let s = state();
+            let (pump, plant) = a_place_where_a_plant_fits(&s, facing);
+            let engine = plant
+                .parts
+                .iter()
+                .find(|p| p.name == ENGINE)
+                .expect("an engine");
+            let inside = a_tile_only_the_turned_box_covers(&s, engine);
+
+            let mut taken = state();
+            taken.create_entity(FactorioEntity {
+                name: POLE.to_string(),
+                entity_type: "electric-pole".to_string(),
+                position: inside.clone(),
+                ..Default::default()
+            });
+            assert!(
+                !taken.is_area_free_facing(ENGINE, &engine.position, facing),
+                "{facing:?}: the engine's turned box is taken"
+            );
+            if facing == Direction::East || facing == Direction::West {
+                assert!(
+                    taken.is_area_free(ENGINE, &engine.position),
+                    "{facing:?}: the north-frame box is NOT taken -- which is exactly \
+                     the answer a direction-blind check would act on"
+                );
+            }
+            assert!(
+                fit(&taken, &pump, facing).is_none(),
+                "{facing:?}: the candidate whose engine would stand on the pole is refused"
+            );
         }
     }
 

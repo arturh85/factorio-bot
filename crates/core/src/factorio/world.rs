@@ -144,42 +144,67 @@ pub struct PlacementRefusal {
     pub entity: String,
     /// The centre the build was aimed at, exactly as dispatched.
     pub position: Position,
+    /// The `defines.direction` the build was aimed with, when it is known.
+    ///
+    /// The box the game tested is the prototype's box **turned this way**: a
+    /// steam engine is 2.5 by 4.7 tiles facing north and 4.7 by 2.5 facing
+    /// east, so a refusal without its direction names a centre and the wrong
+    /// shape around it. `PlanState::from_world` (`crates/planner`) excludes
+    /// the turned box when this is present and the north-frame one when it is
+    /// not -- which is the reading every ledger entry got before this field
+    /// existed, kept for the entries that predate it (`#[serde(default)]`:
+    /// a dumped world from an older build still loads).
+    #[serde(default)]
+    pub direction: Option<u8>,
     /// Whether the game was asked before or after the plan committed to this
     /// site. See [`RefusalSource`].
     pub source: RefusalSource,
     /// What the game found standing in the tested collision box, deduplicated
     /// and sorted by name.
     ///
-    /// **Empty is not "nothing was there".** Only the pre-flight check asks;
-    /// a refusal observed at dispatch carries the game's bare `said 'no'` and
-    /// nothing else, so it always arrives with this empty. An empty list on a
-    /// [`RefusalSource::PreCheck`] refusal *is* informative — it means no
-    /// entity intersected the box and the ground itself (see `tile`) is the
-    /// answer.
+    /// Both sources fill this now. The pre-flight check always did; a refusal
+    /// observed at dispatch carries it since the mod started appending what
+    /// it found to the `said 'no'` line (see [`Self::at_dispatch`]), so an
+    /// empty list means the game scanned the box and found no entity in it
+    /// -- the ground itself (see `tile`) is the answer -- on either source.
+    /// The one exception is a dispatch refusal from a mod that did not append
+    /// anything, which arrives empty *and* with `tile == None`; that pair is
+    /// the signature of "not asked", and `tile` is what tells the two apart.
     pub blockers: Vec<String>,
-    /// The name of the tile under the refused centre, when the pre-flight
-    /// check reported one. `None` for a refusal observed at dispatch, which
-    /// has no way to ask.
+    /// The name of the tile under the refused centre, when the game reported
+    /// one. `None` only when the reply named nothing at all.
     pub tile: Option<String>,
 }
 
 impl PlacementRefusal {
-    /// A refusal observed **at dispatch**: a bot tried to build here and the
-    /// game said no without naming a cause.
+    /// A refusal observed **at dispatch**: a bot tried to build `entity` at
+    /// `position` facing `direction` and the game said no.
     ///
-    /// There is no `blockers`/`tile` argument on purpose. That path has
-    /// nothing to put in them -- the mod's line is all there is by then -- and
-    /// an optional argument would invite a caller to fill them in from
-    /// somewhere else, which would make a guess indistinguishable from an
-    /// observation.
-    pub fn at_dispatch(tick: Option<u64>, entity: impl Into<String>, position: Position) -> Self {
+    /// `blockers` and `tile` are what the mod's own line said stood there --
+    /// `rcon_place_entity` scans the box it just had judged and appends the
+    /// result, and `note_placement_refusal` (`crate::factorio::rcon`) reads
+    /// it back. They are an **observation the mod made**, never something a
+    /// caller reconstructs from a model of its own: a refusal is the game
+    /// disagreeing with the model, so the model's opinion of the site is the
+    /// one thing that cannot explain it. A caller with no such observation
+    /// passes an empty list and `None`, which is what the record shows for
+    /// every refusal from before the mod named anything.
+    pub fn at_dispatch(
+        tick: Option<u64>,
+        entity: impl Into<String>,
+        position: Position,
+        direction: u8,
+        blockers: Vec<String>,
+        tile: Option<String>,
+    ) -> Self {
         PlacementRefusal {
             tick,
             entity: entity.into(),
             position,
+            direction: Some(direction),
             source: RefusalSource::Dispatch,
-            blockers: Vec::new(),
-            tile: None,
+            blockers,
+            tile,
         }
     }
 }
@@ -614,8 +639,42 @@ pub struct StepAside {
     /// The placement that would have sealed it in, as `name` and position.
     pub placing: String,
     pub site: Position,
+    /// Why the walk was made. See [`StepAsideReason`].
+    pub reason: StepAsideReason,
     /// How many tiles the character would have been left with, had it stayed.
+    ///
+    /// For [`StepAsideReason::Footprint`] this is `0.0`, and literally so:
+    /// the placement would stand on the character's own tile.
     pub pocket_tiles: f64,
+}
+
+/// Why the pre-place check walked a character before a build.
+///
+/// Two conditions, one walk. They are told apart in the record because they
+/// say different things about the plan: an `Enclosure` is a site the plan
+/// chose legally whose *surroundings* made the stand-point a trap, while a
+/// `Footprint` is the acting bot standing where the plan is about to build
+/// -- the plan's annulus (`Condition::AtPosition { min_radius }`) said not
+/// to, and the walk that brought the bot here landed inside it anyway, which
+/// is a fact about the walker, not the site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StepAsideReason {
+    /// The placement would have walled the character in where it stood.
+    Enclosure,
+    /// The character stood inside the placement's own collision box, so the
+    /// game would have refused the build for the actor's sake.
+    Footprint,
+}
+
+impl StepAsideReason {
+    /// The wire spelling, shared by the record's `EventKind::BotSteppedAside`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            StepAsideReason::Enclosure => "enclosure",
+            StepAsideReason::Footprint => "footprint",
+        }
+    }
 }
 
 /// What a container or machine was last observed to be holding.
@@ -2007,11 +2066,15 @@ mod tests {
             Some(4242),
             "stone-furnace",
             Position::new(-40.5, 39.5),
+            0,
+            Vec::new(),
+            None,
         ));
         world.record_placement_refusal(PlacementRefusal {
             tick: None,
             entity: "burner-mining-drill".into(),
             position: Position::new(1.5, 2.5),
+            direction: Some(4),
             source: RefusalSource::PreCheck,
             blockers: vec!["tree-01".into()],
             tile: Some("grass-1".into()),

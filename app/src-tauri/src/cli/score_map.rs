@@ -53,10 +53,9 @@ use clap::{Arg, ArgAction, ArgMatches, Command, value_parser};
 use factorio_bot_core::miette::{IntoDiagnostic, Result, miette};
 use factorio_bot_core::serde_json;
 use factorio_bot_core::types::Position;
-use factorio_bot_planner::method::expand;
 use factorio_bot_planner::method::have::registry_for;
 use factorio_bot_planner::score::{DEFAULT_SEARCH_RADIUS, MapScore};
-use factorio_bot_planner::{PlanReport, PlanState, pick_chain_actor, schedule};
+use factorio_bot_planner::{PlanReport, PlanState, pick_chain_actor, plan_best};
 use serde::Serialize;
 use std::path::PathBuf;
 
@@ -327,15 +326,14 @@ fn plan_for(
   bots: &[factorio_bot_planner::BotId],
 ) -> std::result::Result<PlanReport, String> {
   let actor = pick_chain_actor(state, bots).ok_or_else(|| "no bots to plan for".to_owned())?;
-  let net = expand(
+  let (net, scheduled) = plan_best(
     std::slice::from_ref(goal),
     state,
     &registry_for(bots),
     actor,
+    bots,
   )
   .map_err(|err| format!("the goal did not expand: {err}"))?;
-  let scheduled =
-    schedule(&net, state, bots).map_err(|err| format!("the plan did not schedule: {err}"))?;
   Ok(PlanReport::of(&net, &scheduled, bots))
 }
 

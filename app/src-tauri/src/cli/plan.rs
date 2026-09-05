@@ -36,9 +36,8 @@ use factorio_bot_core::factorio::world::FactorioWorld;
 use factorio_bot_core::miette::{IntoDiagnostic, Result, miette};
 use factorio_bot_core::serde_json;
 use factorio_bot_planner::goal::{Goal, Holder};
-use factorio_bot_planner::method::expand;
 use factorio_bot_planner::method::have::registry_for;
-use factorio_bot_planner::{BotId, PlanReport, PlanState, pick_chain_actor, schedule};
+use factorio_bot_planner::{BotId, PlanReport, PlanState, pick_chain_actor, plan_best};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -290,10 +289,11 @@ fn plan_from_dump(
 
   let chain_actor = pick_chain_actor(&state, &bots)
     .ok_or_else(|| miette!("no bots to plan for; a roster needs at least one"))?;
-  let net = expand(&goals, &state, &registry_for(&bots), chain_actor)
+  // `plan_best`, not `expand` + `schedule`: the drain policy is settled by
+  // reading finished schedules, so the CLI has to make the same choice a run
+  // makes or the offline loop stops predicting it.
+  let (net, scheduled) = plan_best(&goals, &state, &registry_for(&bots), chain_actor, &bots)
     .map_err(|err| miette!("the goal did not expand: {err}"))?;
-  let scheduled =
-    schedule(&net, &state, &bots).map_err(|err| miette!("the plan did not schedule: {err}"))?;
 
   let listing = if steps {
     step_lines(&scheduled, &bots)

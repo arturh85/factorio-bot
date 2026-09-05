@@ -27,10 +27,7 @@ use factorio_bot_core::mlua::prelude::*;
 use factorio_bot_core::plan::planner::{Planner, ServerOwnership};
 use factorio_bot_executor::walk_memory::reprobe_benched;
 use factorio_bot_executor::{Actuator, RconActuator};
-use factorio_bot_planner::{
-    ActionNetwork, BotId, Goal, PlanState, PlannerError, expand, holds, pick_chain_actor,
-    registry_for,
-};
+use factorio_bot_planner::{BotId, PlanState, PlannerError, holds};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -1118,6 +1115,29 @@ fn install_goal_holds(
 /// move. `pick_chain_actor` makes the choice and argues it; the state has to be
 /// built before it can be asked, which is the only reason the two lines below
 /// swapped order.
+///
+/// # Test-only since 2026-09-05
+///
+/// `plan_rounds` used to call this and then `schedule`; it now calls
+/// [`factorio_bot_planner::plan_best`], which builds the plan under each
+/// drain policy and keeps the shorter schedule -- a choice that cannot be
+/// made from a network alone. Every property this function's doc argues is
+/// still the production path's: `plan_rounds` builds the same `PlanState`,
+/// calls the same `refuse_unknown_bots` and the same `pick_chain_actor`, and
+/// hands `plan_best` the actor it returns. This survives as the lower-level
+/// probe its own tests use.
+// These reach the planner directly and are test-only since `plan_rounds`
+// moved to `plan_best`. They sit here, below every `.set("name", ...)`
+// registration in this file, and not with the other imports at the top,
+// because `doc_guard::production_half` cuts a source file at its FIRST
+// column-zero `#[cfg(test)]` -- a test-gated import above the bindings hides
+// every binding under it, and the guard then reports `goal.holds` and
+// `goal.refusal` as installed at runtime but never registered. Measured, not
+// guessed: that is exactly what it said.
+#[cfg(test)]
+use factorio_bot_planner::{ActionNetwork, Goal, expand, pick_chain_actor, registry_for};
+
+#[cfg(test)]
 fn expand_goal(goal: Goal, world: &Arc<FactorioWorld>, bots: &[BotId]) -> LuaResult<ActionNetwork> {
     let state = PlanState::from_world(world.clone(), bots);
     refuse_unknown_bots(&state)?;

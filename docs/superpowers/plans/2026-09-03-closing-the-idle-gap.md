@@ -220,6 +220,43 @@ three bots one extra iron furnace (three actions) reorders bot 3's ready
 work and its `take 10 copper-ore from the wooden-chest` moves from 8,860 to
 13,473 with no furnace of its involved.
 
+## ✅ AND THE CREDIT MADE REAL: a walk stops where the action can reach (`b6f6777f`)
+
+The other half of the walk RCA, and this one is a genuine speedup rather
+than an honest price. **The margin was measured, not guessed**:
+`scripts/walkprobe.lua`, 128 probe walks on seed 31337 across eight
+bearings and radii 0.5–5, resting positions read off the mod. Worst
+overshoot past the requested radius: **0.301 tiles**, and the mean is
+negative at every radius — bots usually stop short. The `R + 1.1` this
+codebase had carried since 2026-08-30, from a single walk, was about three
+times too pessimistic. Margin set to **0.6**, twice the measured maximum,
+because a stop box's diagonal worst case is 0.424 and 128 draws are not a
+proof; a post-arrival reach check makes being wrong cost one short step
+instead of a failed action.
+
+One rule drives both sides now (`approach_aim`): the planner charges and
+simulates to the same point the executor aims the game at, and a blocked
+outer ring degrades inward to exactly the old behaviour.
+
+| goal, `map.json` | 4 bots before → after | 8 bots |
+|---|---|---|
+| `researched:automation` | 21,943 → **21,776** (−0.8%) | 18,310 |
+| `producing:automation-science-pack:6` | 28,107 → **26,990** (−4.0%) | 19,573 |
+| `producing:logistic-science-pack:6` | 59,018 → **52,819** (−10.5%) | 49,229 |
+
+Action counts identical everywhere: the same plan, walked less. The saving
+scales with reach — a build's `(1.3, 10]` annulus gives up 6.1 tiles a
+trip, a mine's 2.7 disc only 1.4. Live at 5x: green 56,360 → **55,253**,
+executed/planned 0.987 → **0.999**, **zero failed actions and zero reach
+corrections over 242 walks** on the verbs that would complain first (74
+places, 69 inserts, 71 takes, 111 mines).
+
+What is left of walking is the trips themselves: 201 walks, 43,638 planned
+bot-ticks, mean 217 ticks ≈ 30 tiles. That is a siting and assignment
+question, not a walking one. Also found: the mine's own corrective walk
+(`too far away, moving first!`, 30 times in one run) exists only as a log
+line and deserves an event.
+
 ## WHAT MULTIPLE BOTS ARE ACTUALLY WORTH, on the honest walk model
 
 The mis-credit flattered multi-bot plans specifically — walking is the part

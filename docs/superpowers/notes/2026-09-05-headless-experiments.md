@@ -679,3 +679,138 @@ Green at **70,881 (19:41)** against hl-04's 68,051; executed/planned 1.106
 against 1.18. So the ratio improved as designed and the absolute got worse
 by 2,800 ticks, with my own workspace build and test suite running on the
 box for most of it (load 17). Not a clean point; run 15 at 1x is.
+
+### fourbot — RCA: run 15's 1,724 plan ticks and its 5,900 execution ticks (`four-bot-regression`)
+
+Runs 14 (`run-1788612263-27812`, master `e30d98c8`) and 15
+(`run-1788621697-14165`, master `917fdcd2`): four clients, 1x, seed 31337
+`--new`, `producing:logistic-science-pack:6`, same map, same roster. Plans
+diffed per bot on `(bot, planned_start)`; dispatch/settle joined per bot in
+dispatch order (never on `id`); every tick below is relative to the first
+`walk_dispatched` of the run (5,593 and 6,780).
+
+**Where the 1,724 plan ticks went.** The two plans are identical up to bot
+1's step 163 (29,857). There, run 14 has bot 1 do `take 16 iron-plate from
+the furnace at [-6, -25]` → `craft 8 iron-gear-wheel` → `craft 1
+steam-engine` → `place steam-engine` (30,851–31,431); run 15 has bot 1 idle
+5,839 ticks, take 34 plates from the cell at 35,706, idle 5,810 more, and
+do the same four steps at 47,446–48,026. `research logistic-science-pack`
+moves 42,667 → 48,026 (bot 4 → bot 3) behind the engine it now names, and
+the cell's last `set`/`charge` steps 57,655 → 59,426 behind the research.
+
+It is not a tie-break, and the engine edge is not wrong. The scheduler
+(`crates/planner/src/schedule.rs`) commits one `(action, bot)` per round,
+ranked by `(bound, end, action, bot)` where `bound` is *that bot's* finish
+over its ready work. `1ba679b3` hung the research off the engine, so
+`remaining` grew for everything upstream of it — including bot 4's
+`insert 4 iron-ore at [-6, -25]`, the fourth ore into the furnace whose 16
+plates open the engine block. Traced round by round: that insert was ready
+from tick 21,016 (`deps_ready`), acted at 27,522, and carried bound
+50,713; bot 1's cell takes carried bound 45,146 (their tails are short) and
+won round after round, so bot 1 was committed to 35,706 and then to
+41,526 while the insert stayed uncommitted. It was committed with six
+actions left; its successor, bot 1's `take 16 iron-plate` (ready 30,796),
+then found `free_at[1] = 47,436`, and `free_at` never moves back. Before
+`1ba679b3` the insert's bound was small enough to be committed early, and
+the block landed at 30,851 by that accident.
+
+**Fix (`40aaa211`).** Each bot's own next action is still the bound's;
+*which bot's choice is committed this round* is no longer, because the
+bound compares nothing across bots. A candidate is committed no earlier in
+the round order than any other bot's choice that finishes before it starts
+acting (`schedule.rs`, "The gap, measured"). Pinned by
+`tests/scheduling.rs::a_bot_is_not_committed_past_a_gap_another_bots_finish_could_fill`
+(3,120 on the parent, 2,110 fixed).
+
+| offline, `map.json`, `producing:logistic-science-pack:6` | before | after |
+|---|---|---|
+| bots 1–4 | 569 / 59,476 | 569 / **52,554** |
+| bots 1–8 | 706 / 53,326 | 706 / **48,756** |
+
+Research after the pole and the engine in both: four bots pole 6 at 22,240,
+engine 29,754, researches 33,821 and 40,856; eight bots engine 15,271, pole
+6 at 20,049, researches 27,257 and 34,757. Two pinned fixture makespans in
+`have.rs` moved down with it (7,156 → 6,982; 7,654 → 7,007).
+
+**Where the execution ticks went.** Slip by verb, `elapsed − planned_duration`
+summed, first plan only:
+
+| verb | run 14 | run 15 |
+|---|---|---|
+| walk | +12,084 (191) | +11,415 (188) |
+| research | **+1,083** (2) | **+7,003** (2) |
+| craft | +2,204 | +2,883 |
+| mine | +469 | +466 |
+| everything else | ≤ 0 | ≤ 0 |
+
+Per bot, `actual_end − planned_end`: run 14 {1: +2,463, 2: +2,459, 3:
++1,940, 4: −3,408}; run 15 {1: +7,795, 2: +8,627, 3: +1,920, 4: +7,809}.
+`waiting_on` histograms are the same shape (`predecessor` 34 → 44 samples,
+`background_conflict` 23 → 28, `reply` 59 → 63, `walk` 28 → 26). No
+`bot_benched`, no `research_trigger_emulated` (clients, not characters:
+the sweep never runs), and the force samples put technologies 1–3
+unlocked at 6,1xx / 8,2xx / 15,4xx in *both* runs — the trigger gate is not
+in this.
+
+The research is the whole difference. `research logistic-science-pack` ran
+11,249 in both runs. `research automation` was dispatched at 52,810 (run
+14) / 53,892 (run 15) while the first research held the labs, and the game
+runs one research per force: it settled 7,234 / **13,154** against 6,000 —
+exactly the first research's end (54,344 / 61,346) plus its own 5,700. Run
+14 queued 1,534; run 15 queued 7,454, because the pole-edge plan had moved
+the first research 5,359 later and the second only 863. The force samples
+agree: `research` becomes `automation` at 54,407 / 61,620, one sample after
+the first finishes. That is 5,920 of the 7,090 between the runs' cell
+ticks; the plan's 1,724 is the rest.
+
+**Fix (same commit).** The scheduler keeps the force's research slot: a
+`Research` starts no earlier than the previous one ends, whichever bot
+dispatches it (`research_free_at` in `schedule`). Pinned by
+`tests/scheduling.rs::two_researches_never_overlap_whoever_runs_them`
+(500 on the parent, 800 fixed). Modelled in the scheduler rather than as
+an edge because which research goes first is a choice, not a dependency.
+
+**Weighed and not it.** The client walks: +11.4k to +12.1k in both runs,
+188 vs 193 walks, the same per-bot overruns (±150). The bench/probe path:
+no `bot_benched` event in either run. The trigger sweep: never runs with
+clients, and the unlock ticks match. Crafts +679 worse in run 15 — real
+but small, and not pursued.
+
+**Validated live (hl-i, `workspace/headless-i/runs/run-1788625111-28152`,
+four character bots, 5x, seed 31337 `--new`, `factory_stage3.lua`, load 0.7
+at launch, own instance on ports 34218/4338).** One plan, 571 actions /
+**53,249**, 0 failed, 0 lost, 232 walks, green at **56,370** — executed /
+planned **1.059**.
+
+| | hl-09 (`run-1788620990-78758`, master, load 17) | hl-i (this branch, load 0.7) |
+|---|---|---|
+| plan | 571 / 64,100 | 571 / **53,249** |
+| green | 70,881 | **56,370** |
+| executed / planned | 1.105 | **1.059** |
+| `research automation` | dispatched 55,049, settled 58,048 (el 2,999) | dispatched 49,500, settled 55,923 (el 6,423 vs 6,000) |
+| `research logistic-science-pack` | dispatched 55,680, settled 70,648, **el 14,968 vs 7,500** | dispatched 38,974, settled 50,223, el 11,249 = planned |
+
+hl-09 is a different roster shape from runs 14/15 (character bots, 5x) and
+ran under load 17, so the absolute times are not comparable; the ratio and
+the research overrun are. The plan puts the researches at 35,226 and 46,626
+with no overlap; execution slip still dispatched `automation` 723 ticks
+before the first settled, so it queued 423 — against hl-09's 7,468 and run
+15's 7,154. The residual is execution slip against a serialised plan, not
+an overlap in the plan.
+
+**What remains.** (1) A strictly chronological commit order (per-bot best
+by bound, cross-bot by `end`) planned 51,303 four-bot against this rule's
+52,554 — but it hands a shared research to the busy chain owner whenever
+the ends tie (`an_action_that_is_nobodys_goes_to_the_bot_that_finishes_it_soonest`),
+so the gap rule is the principled one; ~1,250 may be on the table there.
+(2) The research slot serialises but the research *duration* still assumes
+the lab count the method saw; a research planned on two labs runs on
+however many stand when it is dispatched. (3) Walk overruns of ~11–12k per
+four-bot run are the largest slip in both runs and untouched here. (4)
+Executor side: a research dispatched while another runs settles when the
+queue drains, and its verdict wait is `sized_deadline(expected_ticks)` —
+three times the plan's duration plus a minute (`rcon.rs`). Run 15's 13,154
+against 6,000 fit; a queue longer than 2x the second research's own
+duration would be reported `NoVerdict` and replanned around. The slot in
+the plan makes that unreachable unless the plan is wrong about the
+research durations themselves.

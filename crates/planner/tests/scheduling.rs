@@ -465,3 +465,106 @@ fn scheduling_terminates_on_a_deep_chain() {
     let result = schedule(&net, &state(&bots), &bots).expect("schedulable");
     assert_eq!(result.makespan, 200, "a chain cannot be parallelised");
 }
+
+/// An action on `bot`, needing nothing, taking `duration` ticks.
+fn pinned(id_gen: &mut ActionIdGen, label: &str, bot: BotId, duration: Ticks) -> Action {
+    let mut action = free(id_gen, duration);
+    action.pinned = Some(bot);
+    action.label = label.into();
+    action
+}
+
+fn act_start(plan: &Schedule, action: ActionId) -> Ticks {
+    plan.steps
+        .iter()
+        .find_map(|s| match &s.what {
+            StepKind::Act { action: id, .. } if *id == action => Some(s.start),
+            _ => None,
+        })
+        .expect("the action is scheduled")
+}
+
+/// **`run-1788621697-14165`'s 1,724 plan ticks, as a fixture.** Four clients
+/// at 1x: bot 1 stood free at 29,867 with nothing ready but a cell take whose
+/// plates would exist at 35,706, and took it -- committing its timeline past
+/// a 5,839-tick gap -- while bot 4's fourth ore insert into the furnace at
+/// `[-6, -25]`, ready since 21,016, was still uncommitted in the round order
+/// because its bound (50,713, the research hangs off that furnace's plates)
+/// lost every round to bot 1's 45,146. When the insert was finally
+/// committed, its successor -- bot 1's `take 16 iron-plate`, the start of the
+/// steam-engine block, ready at 30,796 -- found bot 1 free at 47,436, and the
+/// research waited on the engine until 48,026.
+///
+/// In miniature: bot 1's far take `F` waits on a 1,000-tick lag from its own
+/// first step `L`; bot 2's short `P` gates bot 1's `E`, which carries the
+/// long `R`. Ranked by bound alone, `F` (bound 1,020: bot 1 has nothing
+/// else) is committed before `P` (bound 2,110: `R` hangs off it), `E` then
+/// finds bot 1 free at 1,020, and the plan is 1,020 + 100 + 2,000 = 3,120.
+/// Committing `P` first, because it finishes before `F` starts, puts `E` in
+/// the gap and the plan is 2,110.
+#[test]
+fn a_bot_is_not_committed_past_a_gap_another_bots_finish_could_fill() {
+    let bots = [BotId(1), BotId(2)];
+    let mut id_gen = ActionIdGen::new();
+    let mut net = ActionNetwork::new();
+    let l = net.add(pinned(&mut id_gen, "L: start the far lag", BotId(1), 10));
+    let f = net.add(pinned(&mut id_gen, "F: the far take", BotId(1), 10));
+    net.link(l, f, 1000);
+    let p = net.add(pinned(
+        &mut id_gen,
+        "P: the short predecessor",
+        BotId(2),
+        10,
+    ));
+    let e = net.add(pinned(&mut id_gen, "E: the engine block", BotId(1), 100));
+    net.link(p, e, 0);
+    let r = net.add(free(&mut id_gen, 2000));
+    net.link(e, r, 0);
+
+    let plan = schedule(&net, &state(&bots), &bots).expect("schedulable");
+    assert!(
+        act_start(&plan, e) < act_start(&plan, f),
+        "E (ready at 10) belongs in the gap before F (ready at 1,010), got E at {} and F at {}",
+        act_start(&plan, e),
+        act_start(&plan, f)
+    );
+    assert_eq!(plan.makespan, 2110, "{plan:#?}");
+}
+
+/// **`run-1788621697-14165`'s 7,454 execution ticks, as a fixture.** The plan
+/// held `research logistic-science-pack` (11,400) from 48,026 and `research
+/// automation` (6,000) from 52,063, on two bots; a force researches one
+/// technology at a time, so the second waited in the game's queue until
+/// 61,346 and settled 13,154 after dispatch against its 6,000. Run 14 had
+/// the same overlap for 1,534 ticks and paid the same way. Two researches
+/// are a sequence, whoever runs them.
+#[test]
+fn two_researches_never_overlap_whoever_runs_them() {
+    let bots = [BotId(1), BotId(2)];
+    let mut id_gen = ActionIdGen::new();
+    let mut net = ActionNetwork::new();
+    let mut ids = Vec::new();
+    for (tech, duration) in [("automation", 500 as Ticks), ("logistic-science-pack", 300)] {
+        let mut action = free(&mut id_gen, duration);
+        action.kind = ActionKind::Research { tech: tech.into() };
+        action.label = format!("research {tech}");
+        ids.push(net.add(action));
+    }
+
+    let plan = schedule(&net, &state(&bots), &bots).expect("schedulable");
+    let spans: Vec<(Ticks, Ticks)> = plan
+        .steps
+        .iter()
+        .filter_map(|s| match &s.what {
+            StepKind::Act { action, .. } if ids.contains(action) => Some((s.start, s.end)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(spans.len(), 2);
+    let (a, b) = (spans[0], spans[1]);
+    assert!(
+        a.1 <= b.0 || b.1 <= a.0,
+        "the labs run one research at a time, got {a:?} and {b:?}"
+    );
+    assert_eq!(plan.makespan, 800, "{plan:#?}");
+}

@@ -1,5 +1,6 @@
 //! Assignment of a bot-free action network to concrete bots over time.
 
+use crate::action::ActionKind;
 use crate::error::PlannerError;
 use crate::ids::{ActionId, BotId, ChainId, Ticks};
 use crate::network::ActionNetwork;
@@ -176,6 +177,7 @@ impl Schedule {
     }
 }
 
+#[derive(Clone)]
 struct Candidate {
     action: ActionId,
     bot: BotId,
@@ -208,7 +210,10 @@ impl Candidate {
     /// The ranking key. Ascending, so the smallest wins: the candidate whose
     /// **bot would finish soonest, counting everything that bot still has
     /// ready**, then the one that itself finishes soonest, then the lowest
-    /// action id, then the lowest bot id.
+    /// action id, then the lowest bot id. It decides a bot's own next action
+    /// and which bot a shared action goes to; *when* a bot's choice is
+    /// committed relative to the other bots' is decided in `schedule`, by
+    /// time, because the bound is not comparable across bots.
     ///
     /// `end` alone used to be the first key — "earliest finish first" — which
     /// defers exactly the work that most needs starting: a far trip finishes
@@ -428,6 +433,17 @@ pub fn schedule(
     let mut done: BTreeSet<ActionId> = BTreeSet::new();
     let mut steps: Vec<ScheduledStep> = Vec::new();
     let mut chain_binding: BTreeMap<ChainId, BotId> = BTreeMap::new();
+    // When the force's research slot is free. A force researches one
+    // technology at a time, however many labs it has and whoever dispatches
+    // it, so two `Research` actions are a sequence in the game whatever the
+    // network says. `run-1788621697-14165` planned `research
+    // logistic-science-pack` (11,400) from 48,026 and `research automation`
+    // (6,000) from 52,063 on two bots; the game queued the second until the
+    // first finished at 61,346 and it settled 13,154 ticks after dispatch.
+    // Run 14 overlapped them by 2,867 and paid 1,534 the same way. Modelled
+    // here rather than as a network edge because which research goes first
+    // is a scheduling choice, not a dependency.
+    let mut research_free_at: Ticks = 0;
 
     while done.len() < net.len() {
         let ready: Vec<&crate::action::Action> = net
@@ -621,7 +637,10 @@ pub fn schedule(
                         None => 0,
                     };
                     let walk_start = free_at[&bot];
-                    let act_start = (walk_start + travel).max(deps_ready);
+                    let mut act_start = (walk_start + travel).max(deps_ready);
+                    if matches!(action.kind, ActionKind::Research { .. }) {
+                        act_start = act_start.max(research_free_at);
+                    }
                     let end = act_start + action.duration;
                     let walk_target = action.required_position();
                     // A benched bot gets no pairing that would make it walk.
@@ -766,7 +785,81 @@ pub fn schedule(
         for (candidate, bound) in feasible.iter_mut().zip(bounds) {
             candidate.bound = bound;
         }
-        let best = feasible.into_iter().min_by_key(Candidate::key);
+        // Each bot's own next action is the one under which its finish
+        // bound is least -- that is what the bound was built to decide, and
+        // it is decided here, one candidate per bot.
+        let mut best_per_bot: BTreeMap<BotId, Candidate> = BTreeMap::new();
+        for candidate in feasible {
+            match best_per_bot.get(&candidate.bot) {
+                Some(held) if held.key() <= candidate.key() => {}
+                _ => {
+                    best_per_bot.insert(candidate.bot, candidate);
+                }
+            }
+        }
+        let per_bot: Vec<Candidate> = best_per_bot.into_values().collect();
+
+        // Which bot's choice is *committed* this round is a different
+        // question, and the bound answers it badly: it is a statement about
+        // one bot's remaining work, so across bots it says only which bot
+        // has less to do. Committing by it alone let a bot with little ready
+        // work fix its timeline far into the future while another bot's
+        // near-term step -- the one whose successor would have filled the
+        // first bot's gap -- was still uncommitted, and `free_at` never
+        // moves back.
+        //
+        // # The gap, measured
+        //
+        // `run-1788621697-14165`, four clients at 1x, `producing:logistic-
+        // science-pack:6`, 569 actions: bot 1 stood free at 29,867 with
+        // nothing ready but `take 34 iron-plate from the cell`, whose plates
+        // would exist at 35,706, and was committed to it (bound 45,146),
+        // then to the next cell take at 41,526 (bound 45,146 again). Bot 4's
+        // `insert 4 iron-ore at [-6, -25]` -- ready since 21,016, acting at
+        // 27,522, bound 50,713 because the research hangs off that furnace's
+        // plates through the steam engine -- lost every round to those.
+        // When it was committed at last (six actions from the end of the
+        // round order), its successor `take 16 iron-plate from the furnace`,
+        // the first step of bot 1's engine block and ready at 30,796, found
+        // bot 1 free at 47,436. The engine went down at 47,996, the research
+        // that names it started at 48,026, and the plan was 59,476 where
+        // the same network had scheduled to 57,752 before the research named
+        // the engine (`1ba679b3`) -- not because the edge was wrong, but
+        // because the longer tail raised the insert's bound and so pushed it
+        // *later* in the round order. In the game, the two researches then
+        // overlapped by 7,363 planned ticks, which the force's single
+        // research slot turned into 7,454 ticks of queueing.
+        //
+        // # The rule
+        //
+        // A candidate is committed no earlier in the round order than any
+        // other bot's choice that *finishes before it starts acting*: as long
+        // as such a choice exists, that one is committed instead, ranked by
+        // the same key. Nothing a bot would do in its gap is decided before
+        // everything that could put work into that gap has been. Within a
+        // bot the lookahead still decides -- the coal-trip measurement in
+        // `lookahead_bound` is about a bot's own ordering and is untouched --
+        // and a shared action still goes to the bot the bound favours, since
+        // the other bot's candidate for it does not finish before it starts.
+        // Strict `<` on the finish: two zero-length choices at one tick
+        // would otherwise defer each other forever, and each step of the
+        // walk below lowers `act_start`, so it ends. On `map.json` the
+        // four-bot plan goes 59,476 -> 52,554 and the eight-bot plan 53,326
+        // -> 48,756, the research behind the pole and the engine in both;
+        // pinned by `tests/scheduling.rs`
+        // (`a_bot_is_not_committed_past_a_gap_another_bots_finish_could_fill`).
+        let mut best = per_bot.iter().min_by_key(|c| c.key()).cloned();
+        while let Some(w) = &best {
+            let earlier = per_bot
+                .iter()
+                .filter(|c| c.bot != w.bot && c.end < w.act_start)
+                .min_by_key(|c| c.key())
+                .cloned();
+            match earlier {
+                Some(e) => best = Some(e),
+                None => break,
+            }
+        }
 
         // Only when no bot can run any ready action is the plan actually stuck.
         let chosen = match best {
@@ -852,6 +945,11 @@ pub fn schedule(
             chain_binding.insert(chain, chosen.bot);
         }
 
+        if matches!(action.kind, ActionKind::Research { .. }) {
+            // The slot is taken until this research is done; the next one
+            // starts no earlier, whichever bot dispatches it.
+            research_free_at = chosen.end;
+        }
         free_at.insert(chosen.bot, chosen.end);
         finished.insert(chosen.action, chosen.end);
         done.insert(chosen.action);

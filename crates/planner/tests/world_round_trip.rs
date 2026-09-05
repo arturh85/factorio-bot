@@ -34,7 +34,9 @@
 //! they are exercised without steering it; they get their plan-level coverage
 //! in `refusal_memory.rs` and `unreachable_memory.rs`.
 
-use factorio_bot_core::factorio::world::{Enclosure, FactorioWorld, PlacementRefusal, WalkRefusal};
+use factorio_bot_core::factorio::world::{
+    Bench, Enclosure, FactorioWorld, HOP_DISTANCE, PlacementRefusal, WalkRefusal,
+};
 use factorio_bot_core::serde_json;
 use factorio_bot_core::test_utils::fixture_world;
 use factorio_bot_core::types::{
@@ -141,6 +143,13 @@ fn world_mid_run() -> FactorioWorld {
         pocket_tiles: 12.5,
         searched_tiles: 48.,
     });
+    world.record_bench(Bench {
+        tick: None,
+        player: 2,
+        at: Position::new(0., 0.),
+        refused_hops: 4,
+        hop_tiles: HOP_DISTANCE,
+    });
 
     world
 }
@@ -227,6 +236,7 @@ fn the_ledgers_are_load_bearing_for_this_fixture() {
         "placement_refusals",
         "walk_refusals",
         "enclosures",
+        "benches",
     ] {
         assert!(object.remove(gone).is_some(), "{gone} was written");
     }
@@ -268,6 +278,7 @@ fn a_loaded_world_answers_the_four_questions_from_world_asks() {
         "refused walks"
     );
     assert_eq!(loaded.enclosures(), live.enclosures(), "enclosures");
+    assert_eq!(loaded.benches(), live.benches(), "benches");
 
     let state = PlanState::from_world(Arc::new(loaded), &BOTS);
     assert!(

@@ -855,6 +855,17 @@ const SCHEMAS: Record<string, SchemaContract> = {
             pocket_tiles: {required: true, type: 'number'},
             searched_tiles: {required: true, type: 'number'}
         },
+        bot_benched: {
+            bot: {required: true, type: 'integer'},
+            position: {required: true, ref: 'Position'},
+            refused_hops: {required: true, type: 'integer'},
+            hop_tiles: {required: true, type: 'number'}
+        },
+        bot_released: {
+            bot: {required: true, type: 'integer'},
+            position: {required: true, ref: 'Position'},
+            why: {required: true, type: 'string'}
+        },
         bot_stepped_aside: {
             bot: {required: true, type: 'integer'},
             from: {required: true, ref: 'Position'},
@@ -961,6 +972,7 @@ const SCHEMAS: Record<string, SchemaContract> = {
         timeout: true,
         no_character: true,
         destination_blocked: true,
+        boxed_in: true,
         other: true
     }),
     WalkFailure: objectContract<WalkFailure>({

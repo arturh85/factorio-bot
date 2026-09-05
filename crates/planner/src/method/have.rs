@@ -5218,13 +5218,16 @@ pub fn even_shares(
 ///   tier keeps, stated again here because this is a filter and that is a
 ///   reordering.
 pub(crate) fn participants_that_can_work(state: &PlanState, candidates: Vec<BotId>) -> Vec<BotId> {
-    if state.walled_in().is_empty() {
+    if !state.any_sidelined() {
         return candidates;
     }
+    // `may_own_work` folds in the bench (`PlanState::benched`): the game's
+    // own verdict that a bot cannot move, which `run-1788614781-38058` showed
+    // the walled-in fill can miss entirely.
     let able: Vec<BotId> = candidates
         .iter()
         .copied()
-        .filter(|bot| !state.is_walled_in(*bot))
+        .filter(|bot| state.may_own_work(*bot))
         .collect();
     if able.is_empty() { candidates } else { able }
 }

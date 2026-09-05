@@ -1391,6 +1391,42 @@ pub struct PlanState {
     /// same reason. Empty in every fixture: nothing writes
     /// `FactorioWorld::enclosures` unless a real game refused a real walk.
     walled_in: BTreeMap<BotId, f64>,
+    /// Bots the *game* has said cannot move from where they stand, with the
+    /// position each was benched at.
+    ///
+    /// # The witness is the game, and there is no second one
+    ///
+    /// `FactorioWorld::benches` is written by `crates/executor`'s
+    /// `walk_memory::note_mobility` when the pathfinder has refused a walk
+    /// **and** refused a short hop in every direction from the character.
+    /// That is the game reasoning from the character's own collision box at
+    /// its own position, which is exactly what [`Self::walled_in`]'s fill
+    /// cannot do: the fill models no characters and seeds from a tile
+    /// centre. In `run-1788614781-38058` bot 6 stood overlapping a furnace,
+    /// the fill said open, `walled_in` stayed empty, and the bot was given a
+    /// gathering share -- and so a walk -- on seven consecutive plans.
+    ///
+    /// So no fill is asked to agree here. What keeps the bench honest is
+    /// that it is a fact about a *position*: a row applies only while the
+    /// bot still stands within [`WalkRefusal::SAME_PLACE_TOLERANCE`] of
+    /// where it was earned. A bot pushed clear by a step-aside or a
+    /// recovery is not the bot the game answered for, and is back in every
+    /// split on the next plan without anyone having to lift the row. The
+    /// executor also lifts it outright when a walk for that bot succeeds or
+    /// a re-probe before the plan finds a hop the game will path.
+    ///
+    /// # What reads it
+    ///
+    /// Everything [`Self::walled_in`] gates -- shares
+    /// ([`crate::method::have::even_shares`]) and the chain actor
+    /// ([`crate::method::pick_chain_actor`]) -- and one thing it does not:
+    /// [`crate::schedule`] refuses a benched bot every candidate pairing
+    /// whose action would need it to walk. A walled-in bot keeps its
+    /// membership because the fill might be wrong in the bot's favour; a
+    /// benched bot has the game's word that it cannot go, and a plan that
+    /// sends it anyway is the defect this field exists to end. It may still
+    /// act where it stands.
+    benched: BTreeMap<BotId, Position>,
     /// How much of each raw item this expansion has so far sent to be
     /// *gathered* -- picked off a tile or swung out of a rock -- summed over
     /// every `Have`/`Produced` that reached `Mine` or `Chop`. Written by those
@@ -1611,11 +1647,38 @@ impl PlanState {
             fuel,
             refused_walks,
             walled_in: BTreeMap::new(),
+            benched: BTreeMap::new(),
             gathering_recorded: BTreeMap::new(),
             gathering_forecast: BTreeMap::new(),
         };
         state.walled_in = state.find_walled_in();
+        state.benched = state.find_benched();
         state
+    }
+
+    /// The benches that still apply: one per roster bot the game has benched
+    /// and that is still standing where the bench was earned -- see the
+    /// [`PlanState::benched`] field for why the position is the test and
+    /// why no fill is consulted.
+    fn find_benched(&self) -> BTreeMap<BotId, Position> {
+        let benches = self.base.benches();
+        if benches.is_empty() {
+            return BTreeMap::new();
+        }
+        let mut out = BTreeMap::new();
+        for (bot, state) in &self.bots {
+            let here = benches.iter().find(|bench| {
+                bench.player == bot.0
+                    && (bench.at.x - state.position.x)
+                        .hypot(bench.at.y - state.position.y)
+                        .total_cmp(&WalkRefusal::SAME_PLACE_TOLERANCE)
+                        .is_le()
+            });
+            if let Some(bench) = here {
+                out.insert(*bot, bench.at.clone());
+            }
+        }
+        out
     }
 
     /// Record that `bot` has been sent to gather `need` of `item` by hand --
@@ -3043,6 +3106,37 @@ impl PlanState {
     /// `crates/scripting_lua`'s planning entry point narrates it.
     pub fn walled_in(&self) -> &BTreeMap<BotId, f64> {
         &self.walled_in
+    }
+
+    /// Whether the game has benched this bot where it stands -- see the
+    /// [`PlanState::benched`] field.
+    pub fn is_benched(&self, bot: BotId) -> bool {
+        self.benched.contains_key(&bot)
+    }
+
+    /// Every benched bot with the position its bench was earned at.
+    ///
+    /// Exposed for the reason [`PlanState::walled_in`] is: a plan that
+    /// quietly gives a bot nothing and cannot say why is the failure mode
+    /// this exclusion would otherwise introduce.
+    pub fn benched(&self) -> &BTreeMap<BotId, Position> {
+        &self.benched
+    }
+
+    /// Whether this bot may be handed work no other bot could take over --
+    /// a gathering share, or the chain actor's role. `false` for a bot that
+    /// is walled in or benched; the two readers of this,
+    /// [`crate::method::have::even_shares`] and
+    /// [`crate::method::pick_chain_actor`], ask exactly this one question.
+    pub fn may_own_work(&self, bot: BotId) -> bool {
+        !self.is_walled_in(bot) && !self.is_benched(bot)
+    }
+
+    /// Whether any bot is walled in or benched -- the cheap test the two
+    /// readers above make first, so a healthy run provably takes the path
+    /// it always did.
+    pub fn any_sidelined(&self) -> bool {
+        !self.walled_in.is_empty() || !self.benched.is_empty()
     }
 
     /// Whether this tile is clear.

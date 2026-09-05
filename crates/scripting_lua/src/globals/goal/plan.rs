@@ -689,6 +689,27 @@ fn narrate_work_split(net: &ActionNetwork, plan: &Schedule) {
 /// stop being silent. Only the *move* is reported: saying "the chain actor is
 /// bot 1" on every plan where nothing happened would bury the line that
 /// matters.
+/// Says which bots the game has benched, and that they get no walk this plan.
+///
+/// The bench is the one exclusion in the planner that is not a preference
+/// (`crates/planner`'s `schedule` refuses a benched bot every pairing that
+/// would make it walk), so a plan made with one looks like a plan for a
+/// smaller roster with nothing in `plan_created.bots` to say why. This line,
+/// and the `bot_benched` event `record.enclosures()` writes, are what say
+/// why.
+fn narrate_benched_bots(state: &PlanState) {
+    for (bot, at) in state.benched() {
+        factorio_bot_core::paris::warn!(
+            "bot <bright-blue>{}</> is benched at <bright-blue>{}</>: the game refused every \
+             short hop from where it stands, so this plan gives it no step that needs it \
+             to walk. It is back the moment a walk for it succeeds, it is found somewhere \
+             else, or a re-probe before a plan finds a way out",
+            bot.0,
+            at,
+        );
+    }
+}
+
 fn narrate_walled_in_bots(state: &PlanState, roster: &[BotId]) {
     let walled_in = state.walled_in();
     if walled_in.is_empty() {
@@ -879,6 +900,7 @@ async fn plan_verified(
         if round == 0 {
             narrate_production_goals(goal, &state);
             narrate_walled_in_bots(&state, roster);
+            narrate_benched_bots(&state);
         }
         let net = expand_goal(goal.clone(), world, roster)?;
         let scheduled = schedule(&net, &state, roster).map_err(planner_error)?;
@@ -1802,6 +1824,50 @@ mod tests {
             1,
             "one refresh per goal.plan"
         );
+    }
+
+    /// **A benched bot gets no walk through the real bindings.**
+    ///
+    /// The mechanism is `crates/planner`'s (`PlanState::benched`, pinned by
+    /// `crates/planner/tests/benched_bot.rs`); this is the seam that proves
+    /// `goal.plan` reads it -- the world the run's `goal` table closed over
+    /// is the world the executor benches in, and a plan made through the
+    /// bindings gives the benched bot nothing that would make it walk.
+    /// `run-1788614781-38058` handed bot 6 a walk on seven plans in a row.
+    #[tokio::test]
+    async fn goal_plan_gives_a_benched_bot_no_walk() {
+        use factorio_bot_core::factorio::world::{Bench, HOP_DISTANCE};
+        let world = seeded_world_for(&[1, 2]);
+        let at = world
+            .players
+            .get(&1)
+            .map(|p| p.position.clone())
+            .expect("bot 1 is a player");
+        world.record_bench(Bench {
+            tick: None,
+            player: 1,
+            at,
+            refused_hops: 4,
+            hop_tiles: HOP_DISTANCE,
+        });
+        let lua = lua_with_world_and_checker(world, &[1, 2], None);
+        lua.load(
+            r#"
+            local p = goal.plan(goal.have("coal", 2))
+            assert(#p.steps > 0, "the fixture has coal to mine")
+            for _, s in ipairs(p:for_bot(1)) do
+                assert(s.kind ~= "walk", "bot 1 is benched and must not be sent anywhere")
+            end
+            local walks = 0
+            for _, s in ipairs(p:for_bot(2)) do
+                if s.kind == "walk" then walks = walks + 1 end
+            end
+            assert(walks > 0, "bot 2 does the walking instead")
+            "#,
+        )
+        .exec_async()
+        .await
+        .expect("plan");
     }
 
     /// Once per `goal.plan`, not once per re-siting round.

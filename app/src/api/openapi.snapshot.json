@@ -976,6 +976,75 @@
             "type": "object"
           },
           {
+            "description": "The game said this bot cannot move, and the next plan will not send it\nanywhere.\n\nAfter a walk the pathfinder refused, the executor asked the game for a\nshort path from the character in each of four directions\n(`FactorioRcon::probe_player_hops`) and every one was refused. That\nis the game's own verdict on the *character*, which neither\n[`EventKind::BotEnclosed`] (a fill over this process's occupancy\nmodel) nor a `no_path` walk (a verdict on one destination) can give:\nin `run-1788614781-38058` bot 6 stood overlapping a furnace, the fill\nsaid open, four walks said `no_path`, and seven plans in a row sent it\nthe same walk until the run halted `stuck` with seven healthy bots\nidle.\n\nUnlike `bot_enclosed`, this one is acted on: `crates/planner`'s\n`PlanState::from_world` reads the bench and gives the bot no step\nthat would need it to walk. It is lifted by [`EventKind::BotReleased`].\n\nWritten by `record.enclosures()` from `FactorioWorld::benches`.",
+            "properties": {
+              "bot": {
+                "format": "int32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "hop_tiles": {
+                "description": "How far each hop was aimed, in tiles.",
+                "format": "double",
+                "type": "number"
+              },
+              "kind": {
+                "enum": [
+                  "bot_benched"
+                ],
+                "type": "string"
+              },
+              "position": {
+                "$ref": "#/components/schemas/Position",
+                "description": "Where the character stood when every hop was refused. Observed."
+              },
+              "refused_hops": {
+                "description": "How many hops were asked for and refused.",
+                "format": "int32",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "bot",
+              "position",
+              "refused_hops",
+              "hop_tiles",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A benched bot can move again, and the next plan may send it.\n\nWritten by `record.enclosures()` when the executor lifted a bench:\n`why` is `\"walked\"` when a walk for the bot succeeded, or `\"probed\"`\nwhen the re-probe before a plan found a hop the game would path.",
+            "properties": {
+              "bot": {
+                "format": "int32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "enum": [
+                  "bot_released"
+                ],
+                "type": "string"
+              },
+              "position": {
+                "$ref": "#/components/schemas/Position",
+                "description": "Where the bench had been earned."
+              },
+              "why": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "bot",
+              "position",
+              "why",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
             "description": "A bot was walked clear of a placement that would otherwise have sealed\nit in -- the [`EventKind::BotEnclosed`] that did not happen.\n\nWritten by `record.enclosures()` from the queue `crates/executor`'s\npre-place check fills (`FactorioWorld::step_asides`). The check runs\nbefore every placement: with the footprint added to the occupancy\nmodel, would the fill around the character about to build it close?\nIn `run-1788552801-73005` it would have, and did -- bot 1 placed an\n`assembling-machine-1` from the one patch of ground whose every exit\ncrossed it, and stood there for 40 000 ticks.\n\nThis is a bot doing something the plan did not ask for. It is in the\nrecord so that a reader comparing the plan to what happened can see\nwhy a `place` was preceded by a walk the schedule has no step for.",
             "properties": {
               "bot": {
@@ -3497,6 +3566,7 @@
           "timeout",
           "no_character",
           "destination_blocked",
+          "boxed_in",
           "other"
         ],
         "type": "string"

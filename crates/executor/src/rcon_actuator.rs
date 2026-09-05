@@ -1,12 +1,15 @@
 use crate::actuator::{ActionTicks, Actuator, ActuatorError, ActuatorFailure};
 use crate::pre_place::{PrePlace, STEP_ASIDE_RADIUS, judge_placement};
-use crate::walk_memory::{note_walk_refusal, pathfinder_found_nothing};
+use crate::walk_memory::{
+    Mobility, note_mobility, note_walk_refusal, note_walk_succeeded, pathfinder_found_nothing,
+    probe_mobility,
+};
 use async_trait::async_trait;
 use factorio_bot_core::constants::BOT_FORCE;
 use factorio_bot_core::factorio::rcon::{
     ActionFailure, DestinationFull, Dispatch, FactorioRcon, approach_standing,
 };
-use factorio_bot_core::factorio::world::{FactorioWorld, StepAside, StepAsideReason};
+use factorio_bot_core::factorio::world::{FactorioWorld, HOP_DISTANCE, StepAside, StepAsideReason};
 use factorio_bot_core::record::map::{EntitySnapshot, Placement, drift_between};
 use factorio_bot_core::types::{PlayerId, Position};
 use factorio_bot_planner::{BotId, InventorySlot};
@@ -342,51 +345,86 @@ impl Actuator for RconActuator {
         // it.
         let (goal, slack) =
             approach_standing(&self.world, &to, min_radius, radius, here.as_ref(), Some(p));
-        self.rcon
+        let failure = match self
+            .rcon
             .move_player_timed(&self.world, p, &goal, Some(slack))
             .await
-            .map_err(|failure| {
-                // The one layer that holds both halves of what the game just
-                // answered: the destination the plan named, and where the
-                // character was standing when it asked. `run.rs` has the
-                // first and not the second; `crates/core` has the second and
-                // not the first. See `walk_memory` for what is remembered and
-                // what is deliberately not.
-                note_walk_refusal(&self.world, p, here.as_ref(), &to, &failure);
-                // And the record gets both halves too. A pre-dispatch
-                // refusal carries no position of its own -- the mod answers
-                // `failed to path find` and nothing else -- so the run
-                // record used to archive it as `no_path` from nowhere to
-                // nowhere, which cannot be analysed: run
-                // `run-1788552801-73005`'s three refusals from one spot
-                // read as three unrelated failures. The wording is the one
-                // `classify_walk_failure`'s `walk_endpoints` already reads
-                // (`found no path from (x/y) to (x/y)`); `from` is the
-                // world's reading of the character, `to` is the goal the
-                // game was actually asked for, which `approach_annulus` has
-                // moved off the plan's `to` by the annulus.
-                let refused_from = here
-                    .as_ref()
-                    .filter(|_| pathfinder_found_nothing(&failure.error))
-                    .cloned();
-                let failure = classify(failure);
-                match (refused_from, failure.error) {
-                    (Some(from), ActuatorError::Rejected(message)) => ActuatorFailure {
-                        error: ActuatorError::Rejected(format!(
-                            "{message} -- found no path from ({}/{}) to ({}/{})",
-                            from.x(),
-                            from.y(),
-                            goal.x(),
-                            goal.y()
-                        )),
-                        ticks: failure.ticks,
-                    },
-                    (_, error) => ActuatorFailure {
-                        error,
-                        ticks: failure.ticks,
-                    },
+        {
+            Ok(ticks) => {
+                // A bot that just walked can plainly move: if it was benched,
+                // it is not any more. Cheap -- one map lookup -- and the way
+                // a bot pushed clear by something the plan never asked for
+                // rejoins the roster.
+                note_walk_succeeded(&self.world, p, ticks.replied);
+                return Ok(ticks);
+            }
+            Err(failure) => failure,
+        };
+        // The one layer that holds both halves of what the game just
+        // answered: the destination the plan named, and where the
+        // character was standing when it asked. `run.rs` has the
+        // first and not the second; `crates/core` has the second and
+        // not the first. See `walk_memory` for what is remembered and
+        // what is deliberately not.
+        note_walk_refusal(&self.world, p, here.as_ref(), &to, &failure);
+        // And the record gets both halves too. A pre-dispatch
+        // refusal carries no position of its own -- the mod answers
+        // `failed to path find` and nothing else -- so the run
+        // record used to archive it as `no_path` from nowhere to
+        // nowhere, which cannot be analysed: run
+        // `run-1788552801-73005`'s three refusals from one spot
+        // read as three unrelated failures. The wording is the one
+        // `classify_walk_failure`'s `walk_endpoints` already reads
+        // (`found no path from (x/y) to (x/y)`); `from` is the
+        // world's reading of the character, `to` is the goal the
+        // game was actually asked for, which `approach_annulus` has
+        // moved off the plan's `to` by the annulus.
+        let refused_from = here
+            .as_ref()
+            .filter(|_| pathfinder_found_nothing(&failure.error))
+            .cloned();
+        // The pathfinder said no route from here. Is *here* the problem?
+        // Ask the game -- four short hops -- rather than the occupancy
+        // model, which in `run-1788614781-38058` answered "open" for a
+        // character standing in a furnace. A boxed-in verdict benches the
+        // bot (`note_mobility`), and is worded into the failure so the
+        // record's `walk_settled` says `boxed_in` rather than one more
+        // `no_path` against a destination that was fine.
+        let mut boxed_in: Option<u8> = None;
+        if let Some(from) = refused_from.as_ref() {
+            let verdict = probe_mobility(&self.rcon, &self.world, p, from).await;
+            note_mobility(&self.world, p, from, failure.ticks.dispatched, &verdict);
+            if let Mobility::BoxedIn { refused_hops } = verdict {
+                boxed_in = Some(refused_hops);
+            }
+        }
+        let failure = classify(failure);
+        Err(match (refused_from, failure.error) {
+            (Some(from), ActuatorError::Rejected(message)) => {
+                let mut message = format!(
+                    "{message} -- found no path from ({}/{}) to ({}/{})",
+                    from.x(),
+                    from.y(),
+                    goal.x(),
+                    goal.y()
+                );
+                if let Some(refused_hops) = boxed_in {
+                    message.push_str(&format!(
+                        " -- and the character is boxed in: the game refused all \
+                         {refused_hops} short hops of {HOP_DISTANCE} tiles from where it \
+                         stands, so it is benched until it can move"
+                    ));
                 }
-            })
+                ActuatorFailure {
+                    error: ActuatorError::Rejected(message),
+                    ticks: failure.ticks,
+                }
+            }
+            (_, error) => ActuatorFailure {
+                error,
+                ticks: failure.ticks,
+            },
+        })
     }
 
     async fn mine(

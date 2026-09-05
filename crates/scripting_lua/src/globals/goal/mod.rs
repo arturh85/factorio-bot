@@ -24,6 +24,7 @@ use factorio_bot_core::factorio::rcon::{FactorioRcon, PlacementQuery, PlacementV
 use factorio_bot_core::factorio::world::FactorioWorld;
 use factorio_bot_core::mlua::prelude::*;
 use factorio_bot_core::plan::planner::Planner;
+use factorio_bot_executor::walk_memory::reprobe_benched;
 use factorio_bot_executor::{Actuator, RconActuator};
 use factorio_bot_planner::{
     ActionNetwork, BotId, Goal, PlanState, PlannerError, expand, holds, pick_chain_actor,
@@ -441,7 +442,27 @@ pub fn create_lua_goal(
         let world = plan_world.clone();
         Arc::new(move || {
             let planner = Planner::new(world.clone(), Some(rcon.clone()));
+            let rcon = rcon.clone();
+            let world = world.clone();
             Box::pin(async move {
+                // The same moment, for the same reason: this runs at the top
+                // of every plan, and a bench is the one ledger only the game
+                // can lift. A benched bot that can move again and is not
+                // re-asked stays benched for the whole plan, idle beside
+                // work it could do. The probe is four short path requests
+                // per benched bot and none at all for a healthy roster.
+                let released = reprobe_benched(&rcon, &world).await;
+                if !released.is_empty() {
+                    factorio_bot_core::paris::info!(
+                        "released from the bench: bot(s) <bright-blue>{}</> -- the game will \
+                         path them again",
+                        released
+                            .iter()
+                            .map(|p| p.to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                }
                 planner
                     .refresh_buffers()
                     .await

@@ -384,6 +384,10 @@ def pos_key(p: Any) -> str:
 # match wins. Wordings come from `FactorioRcon::player_path_attempt` and from
 # BotBridge's own (now removed) re-path, both quoted in `WalkFailureKind`.
 WALK_TEXT_RULES = (
+    # Before `no_path`: the executor appends this to a `found no path` refusal
+    # when its mobility probe found every short hop refused too, so the string
+    # matches both and the bench is the finding (`WalkFailureKind::BoxedIn`).
+    ("boxed_in", re.compile(r"the character is boxed in", re.I)),
     ("no_path", re.compile(r"failed to path find|returned no path", re.I)),
     ("pathfinder_busy", re.compile(r"try again later|refused a re-path", re.I)),
     ("repath_limit", re.compile(r"re-?path limit", re.I)),

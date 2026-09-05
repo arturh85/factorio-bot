@@ -793,6 +793,12 @@ export type WalkFailureKind =
      * The aim was wrong, not the map.
      */
     | 'destination_blocked'
+    /**
+     * The pathfinder refused the walk **and** every short hop from where the
+     * character stands: the bot cannot leave its own tile, so the destination
+     * was not what was unreachable. A `bot_benched` event sits beside it.
+     */
+    | 'boxed_in'
     | 'other';
 
 /**
@@ -1156,6 +1162,37 @@ export type EventKind =
            *  wider than this window produces **no event**, so no events is
            *  not evidence that no bot was walled in. */
           searched_tiles: number;
+      }
+    | {
+          /**
+           * The game said this bot cannot move, and the next plan will not
+           * send it anywhere. After a refused walk the executor asked the
+           * pathfinder for a short hop in each of four directions from the
+           * character, and every one was refused -- the game's own verdict
+           * on the *character*, which neither `bot_enclosed` (a fill over
+           * the occupancy model) nor a `no_path` walk (a verdict on one
+           * destination) can give. Unlike `bot_enclosed`, this is acted on.
+           */
+          kind: 'bot_benched';
+          bot: number;
+          /** Where the character stood when every hop was refused. Observed. */
+          position: Position;
+          /** How many hops were asked for and refused. */
+          refused_hops: number;
+          /** How far each hop was aimed, in tiles. */
+          hop_tiles: number;
+      }
+    | {
+          /**
+           * A benched bot can move again, and the next plan may send it.
+           * `why` is `walked` when a walk for it succeeded, or `probed` when
+           * the re-probe before a plan found a hop the game would path.
+           */
+          kind: 'bot_released';
+          bot: number;
+          /** Where the bench had been earned. */
+          position: Position;
+          why: string;
       }
     | {
           /**

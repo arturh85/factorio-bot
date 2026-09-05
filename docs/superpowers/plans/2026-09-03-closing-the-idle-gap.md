@@ -80,6 +80,38 @@ honestly, as before. Also fixed on the way: `scripting_lua`'s
 `plan_cell` call was one argument behind `bdec88af` and failed
 `--all-targets` clippy on master.
 
+## ✅ GREEN FROM A FRESH WORLD IN 64:22 — the first end-to-end, non-resumed number
+
+`run-1788569499-05724`: `factory_stage3.lua --seed 31337 --new`, debug binary at
+`790e2c63`, roster `[1,2,3,4]`, no resume, no cheats. One 498-step plan for
+the whole ladder (automation, the red cell, the green cell), one replan.
+
+| | game time from tick 0 |
+|---|---|
+| automation researched (first tech in the samples) | ~8:00 |
+| green cell producing 6/min | **63:42** (229,357 ticks) |
+| green witness: 6 packs in 2,341 ticks | **64:22** |
+
+Actions **454 success, 1 failed** (a refused steam-engine site — see the RCA
+below), walks 103 of 103, plans 407 → 86 steps. Fleet utilisation 12.9%: bot
+1 ran 338 of 455 actions, busy 41%; bots 2–4 busy 3–4%.
+
+Two things the run showed working for the first time live: the pre-placement
+enclosure check **stepped bot 1 out of a 19-tile pocket** before it placed an
+assembler at [55.5, 2.5] (`bot_stepped_aside`, tick 236,884), and the ore
+tiles under standing drills stayed off the hand-mining list. One label is
+wrong: the driver prints `WALLED IN: 1 bot(s)` for that step-aside, because
+`record.enclosures()` now drains both. Fixed below.
+
+### The one failure: the plan's own pole inside its engine's footprint
+
+`place steam-engine at [40.5, -5.5]` refused by `can_place_entity`, recorded
+with `blockers: []`. Live: `small-electric-pole@42.5,-5.5` and `pipe@43.5,-5.5`
+from the same plan; `can_place(north) = true`, `can_place(east) = false` — the
+east-facing 3 × 5 footprint contains the pole. One placement of a plan sat
+inside another's future footprint and the area check saw neither. RCA agent
+dispatched (`footprint-overlay`).
+
 ## Green in ONE plan: 56.75 min after the resume, 264 of 264 (`run-1788565721-53126`)
 
 Same savepoint, git `5bfcd9e0` (every fix of the night in the binary).
@@ -1707,7 +1739,7 @@ infrastructure for a 3h17m game, not a harder milestone.
 | red science producing **once** | never observed | witnessed six times, all inside 780 ticks |
 | red science producing **at a rate** | impossible to claim | **5 packs in 3,240 ticks (~5.5/min)**, twice |
 | green science, planning | did not expand at all | plans end to end |
-| green science, live | never run | **WITNESSED twice** — run 6 (`run-1788565721-53126`): one plan, 264 of 264, cell at 56.75 min after the red-witness resume, 5 packs in 34 s |
+| green science, live | never run | **WITNESSED three times** — fresh world end to end in **64:22** (`run-1788569499-05724`); resumed from the red witness in 56.75 min (`run-1788565721-53126`) |
 | furnaces per run | 42 | **8** |
 | recovery (`obs:recover`) | never executed in any run | **fires live** |
 

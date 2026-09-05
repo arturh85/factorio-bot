@@ -169,3 +169,20 @@ Three mechanisms, all now dispatched:
 What the mode taught in one hour: a client run at 1x hides all three behind
 the step-aside and the absence of replans; the headless run at 5x surfaced
 them in six minutes each, with a record that names the tick.
+
+### charid — merged: a character bot in the way is a bot, not a stranger
+
+Two layers, both in `mods/BotBridge/control.lua`, core untouched. (1) Both
+blocker sites resolved a character through `LuaEntity.player`, nil for every
+registry character: `walk_stall_describe` said "character (no player)" and
+`step_aside_from_footprint` asked nobody to move — the four-refusals-over-543-
+ticks pattern. Now `bot_of_character(entity)` resolves through `entity.player`
+then `storage.bots`, so a character bot reads `character #N (walking)` and
+gets the same step-aside walk. (2) Found by the first live run with (1) alone:
+the step-aside landing could sit in the 0.6-tile crack between two assemblers,
+within the walker's 0.3 arrival box, still inside the footprint; landings now
+must clear the footprint by the character half-box + arrival half-width.
+Three stub-game tests in `crates/core/tests/botbridge_*`. Live, headless-b at
+5x, seed 31337: run 1 (layer 1 only) one refusal, two plans; **run 2
+(`run-1788610299-95745`) zero refusals, one plan of 569 steps, green
+witnessed, `state=done`.** Under load ~30 from other builds, so no timing.

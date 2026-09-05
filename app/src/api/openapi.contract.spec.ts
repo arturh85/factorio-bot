@@ -795,7 +795,8 @@ const SCHEMAS: Record<string, SchemaContract> = {
             since_last_dispatch_ms: {required: true, type: 'integer'},
             bots_in_flight: {required: true, type: 'array'},
             waiting: {required: false, arrayOf: 'WaitingStep'},
-            waiting_total: {required: false, type: 'integer'}
+            waiting_total: {required: false, type: 'integer'},
+            reach_corrections: {required: false, type: 'integer'}
         },
         action_dispatched: {
             id: {required: true, type: 'integer'},

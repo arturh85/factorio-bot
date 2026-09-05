@@ -228,7 +228,15 @@ fn assert_preconditions_hold_over_time(
     result: &Schedule,
 ) {
     enum Event {
-        Arrive(Position),
+        /// The annulus, not a point: where a walk *ends* depends on where the
+        /// bot set off from, so the point is computed at replay time from the
+        /// position the replay itself holds. Naming it here would be naming it
+        /// before the previous step had moved the bot.
+        Arrive {
+            to: Position,
+            min_radius: f64,
+            radius: f64,
+        },
         Check(ActionId),
         Apply(ActionId),
     }
@@ -238,7 +246,11 @@ fn assert_preconditions_hold_over_time(
     let mut timeline: Vec<(Ticks, u8, BotId, Event)> = Vec::new();
     for step in &result.steps {
         match &step.what {
-            StepKind::Walk { to, min_radius, .. } => {
+            StepKind::Walk {
+                to,
+                min_radius,
+                radius,
+            } => {
                 // A `Walk` names the annulus, not a point in it -- the point
                 // is the game's to choose. What the *plan* believes it reached
                 // is `arrival_point`, the same function `schedule()` advances
@@ -248,7 +260,11 @@ fn assert_preconditions_hold_over_time(
                     step.end,
                     0,
                     step.bot,
-                    Event::Arrive(arrival_point(to, *min_radius)),
+                    Event::Arrive {
+                        to: to.clone(),
+                        min_radius: *min_radius,
+                        radius: *radius,
+                    },
                 ));
             }
             StepKind::Act { action, .. } => {
@@ -262,7 +278,18 @@ fn assert_preconditions_hold_over_time(
     let mut replay = initial.fork();
     for (tick, _, bot, event) in &timeline {
         match event {
-            Event::Arrive(to) => replay.set_position(*bot, to.clone()),
+            Event::Arrive {
+                to,
+                min_radius,
+                radius,
+            } => {
+                let from = replay
+                    .bot(*bot)
+                    .expect("the replay holds every bot the schedule names")
+                    .position
+                    .clone();
+                replay.set_position(*bot, arrival_point(to, &from, *min_radius, *radius));
+            }
             Event::Check(id) => {
                 let a = net.action(*id).expect("action exists");
                 for condition in &a.pre {

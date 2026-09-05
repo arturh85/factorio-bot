@@ -986,6 +986,13 @@ export type EventKind =
           /** How many were waiting before the list was capped. Equal to
            *  `waiting.length` when nothing was dropped. */
           waiting_total: number;
+          /** How many walks came to rest outside the reach of the action they
+           *  served and needed a corrective step, cumulative. A walk stops on
+           *  the outer ring of its annulus, holding back a measured margin for
+           *  the arrival itself; this says how often that margin was wrong.
+           *  It states no verdict -- zero means it could be tightened, a
+           *  rising number means it is too thin. */
+          reach_corrections: number;
       }
     | {
           kind: 'action_dispatched';

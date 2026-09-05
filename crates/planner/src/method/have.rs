@@ -11534,8 +11534,11 @@ mod tests {
             // 7278 -> 7156 on 2026-09-05: a bot with no furnace of its own on the patch builds one instead of queueing behind another bot's batch, and a smelt queues behind its own batch before a lighter furnace of somebody else's (`tests/furnace_reuse.rs`).
             // 7156 -> 6982 on 2026-09-05: a candidate is committed no earlier in the round order than one on another bot that finishes before it starts (`schedule.rs`, the four-bot regression of run-1788621697-14165).
             // 6982 -> 7346 on 2026-09-05: the walk model stopped crediting a bot for `radius` tiles it never saved (`schedule::travel_ticks`) and the speed constant came down from the prototype's 0.15 to the measured 0.14. The plan is the same plan, priced honestly; see `WALK_TILES_PER_TICK`.
+            // 7346 -> 7253 on 2026-09-05: a walk stops on the outer ring of the
+            // action's reach (`rcon::approach_aim`), so the last tiles of every
+            // approach are neither walked nor charged.
             plan.makespan,
-            7346,
+            7253,
             "15866 with the subtree on one bot, 12403 once the ore converged, \
              and 10011 once the furnaces themselves became other bots' \
              errands; {per_bot:?}"
@@ -11701,8 +11704,9 @@ mod tests {
             // 6955 -> 7654 on 2026-09-05: each supplier stands a furnace of its own instead of queueing behind bot 1's (`tests/furnace_reuse.rs`); on this wide front that is three more furnace bills for smelts that were not on the critical path, and the narrow fixture above gains 122 by the same rule. The spread this test is about is unchanged: every bot still supplies the unlock.
             // 7654 -> 7007 on 2026-09-05: the same round-order rule as the narrow fixture's 7156 -> 6982.
             // 7007 -> 7321 on 2026-09-05: the walk model stopped crediting a bot for `radius` tiles it never saved (`schedule::travel_ticks`) and the speed constant came down from the prototype's 0.15 to the measured 0.14. The plan is the same plan, priced honestly; see `WALK_TILES_PER_TICK`.
+            // 7321 -> 7251 on 2026-09-05: the outer ring, as the narrow fixture.
             plan.makespan,
-            7321,
+            7251,
             "17122 before time-aware claims, 12428 after them, and 10053 once \
              R3 made a furnace somebody else's errand -- 42 ticks off the \
              narrow fixture's 10011: {per_bot:?}"
@@ -14601,7 +14605,12 @@ mod owned_gathering {
         // 31482 -> 29260 on 2026-09-05: four more actions and a shorter plan -- no fragment waits on the cell's backlog, and `infer_edges` no longer serialises the chain's plate consumers behind every earlier producer.
         // 29260 -> 26770 later on 2026-09-05: the coal that was dug a tile at a time comes off the rock the plan swings at anyway (see the action count above).
         // 26770 -> 27522 on 2026-09-05: the walk model stopped crediting a bot for `radius` tiles it never saved (`schedule::travel_ticks`) and the speed constant came down from the prototype's 0.15 to the measured 0.14. Same plan, priced honestly; see `WALK_TILES_PER_TICK`.
-        assert_eq!(plan.makespan, 27522, "one bot's rung-1 makespan");
+        // 27522 -> 27295 on 2026-09-05: a walk stops on the OUTER ring of the
+        // action's reach now, not the inner one, so the last few tiles of every
+        // approach are neither walked nor charged (`schedule::travel_ticks`,
+        // `rcon::approach_aim`). Same plan, shorter -- and the run gets shorter
+        // with it, which the honest-pricing change before it did not.
+        assert_eq!(plan.makespan, 27295, "one bot's rung-1 makespan");
         assert!(
             net.actions().all(|a| net
                 .chain_of(a.id)

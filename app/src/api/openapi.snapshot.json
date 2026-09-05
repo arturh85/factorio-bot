@@ -568,6 +568,12 @@
                 "minimum": 0,
                 "type": "integer"
               },
+              "reach_corrections": {
+                "description": "How many walks have come to rest outside the reach of the action\nthey served and needed a corrective step, cumulative since the\nactuator was built.\n\nA walk stops on the **outer** ring of its annulus — as far from the\ntarget as the action's reach allows, less\n[`crate::factorio::rcon::ARRIVAL_MARGIN`], which is worth\n8,200-10,200 ticks of a four-bot green run. That margin was\nmeasured (128 probe walks; worst overshoot 0.301 tiles) and\nmeasurement is not proof, so the executor re-checks reach after\nevery walk and this is how often it had to act.\n\n**It states no verdict either.** Zero says the margin is not being\ntested and could be tightened; a number that grows says it is too\nthin. Which of those is worth acting on is not decided here, and\nnothing compares this against a threshold.\n\n`#[serde(default)]` so a run recorded before the outer ring existed\nstill opens — and reads zero, which for such a run is the truth:\nits walks stopped on the inner ring and had no margin to be wrong\nabout.",
+                "format": "int32",
+                "minimum": 0,
+                "type": "integer"
+              },
               "settled": {
                 "description": "How many have reached a verdict of any kind (succeeded, failed or\nlost).",
                 "format": "int32",

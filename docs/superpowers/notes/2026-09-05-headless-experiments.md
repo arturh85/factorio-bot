@@ -947,3 +947,141 @@ position to be *measured* rather than inferred, and today it never is
 (`executor::replay::WALK_BELIEF`). That is the next piece of work here and
 it is worth ~8k ticks a run. (c) `HANDOVER_WALK_TICKS` is a flat 300 and
 was not touched.
+
+### outerring — a walk stops on the OUTER ring of the action's reach
+
+The follow-up to `walkslip`'s "found and not fixed (b)". That RCA made the
+model honest about a walk to the *inner* ring; this one moves the walk. An
+action's `radius` is how close a bot must be for it to succeed — mining
+reach, build reach, an insert's reach — so every tile walked inside it is
+walked for nothing, and both the plan and the run pay for it.
+
+**The margin is measured, not guessed.** The previous attempt at this failed
+because a walk aimed at the bound rested 3.345 tiles out against a reach of 3,
+so the first thing built here was the measurement. 128 probe walks on seed
+31337 (`scripts/walkprobe.lua`, four headless character bots, legs of 3-20
+tiles on eight bearings, requested radii 0.5 / 0.75 / 1 / 1.5 / 2 / 2.5 / 3 /
+5), reading each resting position off `world.player(id)` — exact under
+`--headless`, where `poll_character_bot` writes a character's position on every
+tick it changes:
+
+| requested radius | n | mean overshoot | max |
+|---|---|---|---|
+| 0.50 | 22 | −0.12 | +0.202 |
+| 0.75 | 14 | −0.40 | −0.137 |
+| 1.00 | 22 | −0.45 | +0.219 |
+| 1.50 | 14 | −0.15 | **+0.301** |
+| 2.00 | 14 | −0.28 | +0.135 |
+| 2.50 | 8 | −0.12 | +0.071 |
+| 3.00 | 13 | −0.25 | +0.192 |
+| 5.00 | 21 | −0.48 | +0.329 |
+
+**The largest overshoot in the whole set is 0.301 tiles** — the mod follower's
+own 0.3-by-0.3 stop box, and nothing else. The mean is negative at every
+radius: a bot usually stops *short* of the disc it asked for. The `R + 1.1`
+this codebase had written down (`approach_radius`) was a guess from one 2026-08-30
+walk and is wrong by a factor of three.
+
+`ARRIVAL_MARGIN = 0.6`, twice that maximum. The doubling is not superstition:
+the stop box is a box, so its worst case on a diagonal is `0.3 * sqrt(2) =
+0.424`, and a margin has to cover a case 128 draws did not happen to show.
+
+**It is deliberately not the worst case the system permits.**
+`PATH_ENDPOINT_SLACK` lets `judge_path` dispatch a path whose last waypoint is
+a whole tile past the requested radius, so a rest up to `slack + 1.3` out is
+legal — it was simply never observed. Paying 1.3 tiles on every walk to insure
+against that is the wrong trade when the executor can re-check reach after
+every walk, which it now does.
+
+**The shape of the change.** One rule, `rcon::approach_aim`, read by both
+sides: aim at `radius − slack − ARRIVAL_MARGIN`, floored at the old inner aim
+(`min_radius + slack`) and capped at the bot's own distance so a bot already in
+reach is never marched back out. `schedule::travel_ticks` and `arrival_point`
+charge and simulate to the same number, `approach_annulus` /
+`approach_standing` aim the game at it, and `approach_standing`'s sweep now
+steps *inward* from it when the graph faults a ring — so a blocked outer ring
+degrades to exactly the behaviour that shipped before. `Approach::Inner` keeps
+the old rule for corrective walks, which is also what the historical
+reproductions in `mining_reach_tests` now ask for.
+
+**The margin being wrong is measured, not assumed.** After every walk
+`RconActuator::close_reach_gap` measures the resting position against the
+action's reach the way the game does (`reach_distance`, to the collision box)
+and, if it is short, steps closer with an `Approach::Inner` walk rather than
+failing the action. The cached world position answers in the common case with
+no round trip; the game is asked only when that reading says short.
+`EventKind::BatchProgress` carries the cumulative count as `reach_corrections`,
+stating no verdict: zero says the margin could be tightened, a rising number
+says it is too thin.
+
+**Offline, `workspace/scripts/map.json` (seed 31337 t=0):**
+
+| goal | bots | before | after |
+|---|---|---|---|
+| `researched:automation` | 4 | 176 / 21,943 | 176 / **21,776** (−0.8%) |
+| `producing:automation-science-pack:6` | 4 | 324 / 28,107 | 324 / **26,990** (−4.0%) |
+| `producing:logistic-science-pack:6` | 4 | 569 / 59,018 | 569 / **52,819** (−10.5%) |
+| `researched:automation` | 8 | — | 364 / 18,310 |
+| `producing:automation-science-pack:6` | 8 | — | 535 / 19,573 |
+| `producing:logistic-science-pack:6` | 8 | — | 706 / 49,229 |
+
+The action counts are identical: the same plan, walked less far. The saving
+scales with the reach — a build's `(1.3, 10]` annulus gives up 6.1 tiles a
+trip, a mine's 2.7-tile disc only 1.4 — which is why green (many placements)
+moves 10.5% and automation (short, local, mostly mining) moves 0.8%. No 8-bot
+"before" was measured; those rows are after-only.
+
+**Where the remaining walk time is.** The four-bot green plan still holds
+**201 walks totalling 43,638 planned bot-ticks, mean 217 ticks ≈ 30 tiles**.
+The outer ring takes the last few tiles off each trip; what is left is the
+trips themselves. The next lever is their *number* and their *targets* — a
+bot's route between ore, furnace and cell — not their last few tiles.
+
+**Live validation, 5x headless, four bots, seed 31337 `--new`,
+`factory_stage3.lua`** — `headless-k/run-1788633819-31735` against
+`headless-j/run-1788628585-05711`:
+
+| | before | after |
+|---|---|---|
+| actions executed | 571 (all success) | 571 (all success) |
+| failures / lost | 0 / 0 | **0 / 0** |
+| walk failures | 0 of 226 | **0 of 242** |
+| planned makespan | 56,475 | **54,884** |
+| green cell satisfied at | 56,360 | **55,253** |
+| executed / planned | 0.987 | **0.999** |
+| walk ticks planned / measured | 54,154 / 51,706 (0.955) | 51,257 / **49,652** (0.969) |
+| reach-margin corrections | (field did not exist) | **0** |
+
+**Zero corrections over 242 walks, and zero failed actions** — the margin held
+everywhere it was tested, on the entity-adjacent verbs (74 places, 69 inserts,
+71 takes, 111 mines) that would have been the first to complain. The run
+reaches green 1,107 ticks earlier on a plan 1,591 ticks shorter, and
+`executed/planned` stays at 1.0, which is the point: the plan got shorter and
+the run got shorter with it.
+
+**Found and not fixed.**
+
+(a) **The permitted tail is still untested.** 0 corrections means the margin
+was never exercised, so the `slack + 1.3` case `PATH_ENDPOINT_SLACK` allows
+remains theory. If `reach_corrections` ever climbs, the choice is a bigger
+margin or a tighter `judge_path` — and the counter is there to make that a
+measurement rather than an argument.
+
+(b) **The mine's own corrective walk is not in the record.** `too far away,
+moving first!` fired **30 times** in this run — a pre-existing mechanism
+(`player_mine_timed`), unrelated to the outer ring (it fires when the *plan*
+put a bot out of the game's `resource_reach_distance`, and it fired before this
+change too), but it exists only as a `warn!` line. It should be an event with
+the distance and the reach, the way `reach_corrections` now is; without a log
+nobody can count it after the fact.
+
+(c) **`world.dump`-based offline plans cannot see this at all** for withdraw
+paths, per the standing blind spot: `inventories` is `[]`, so the numbers above
+exercise mining and placement walks and not furnace hand-overs.
+
+(d) **`pnpm lint` cannot run in a fresh worktree** — `tsc` dies with `TS2688
+Cannot find type definition file for 'web-bluetooth'` after a
+`--frozen-lockfile --prefer-offline` install. The contract test itself
+(`openapi.contract.spec.ts`, 274 assertions including the new
+`reach_corrections`) passes. Environment, not this change, but it means the
+frontend half of the seam was verified by vitest alone here.

@@ -441,27 +441,35 @@ same trap CLAUDE.md warns about from the other side — a pipeline reports
 the last command's status, so `plan | grep` was reporting grep's 0 over a
 101 all along.
 
-## ⚠️ DRILLS ARE FUELLED ONCE AND THEN STARVE
+## ⚠️ A DRILL SPENDS TWO THIRDS OF ITS LIFE WAITING FOR COAL (part retracted)
 
-Found while building the per-machine counters. In run 17's samples the ten
-burner drills read **`working` 416 times and `no_fuel` 818** — two thirds of
-every reading is a drill sitting dry. The plan does place and fuel them
-(`fuel the burner-mining-drill with 8 coal`, 58 fuel actions in the plan),
-but **each drill is fuelled once and never again**: 8 coal is 32 MJ against
-a 150 kW burner, about 12,800 ticks, and a green run is now 52,000. In the
-counter agent's own headless run every drill read `no_fuel` for the whole
-run and produced **zero**, so every ore was hand-mined there.
+**Retracted in part, within the hour, and worth keeping as an example.** The
+first version of this section said every drill was fuelled once, never
+refuelled, and produced zero. The zero came from the counter agent's own
+first accumulator, which keyed a resource tile by `unit_number` — a field a
+resource entity does not have — so it credited nothing to any drill
+anywhere. That was a defect in the instrument, not a fact about the run, and
+I had already written it into this record as a finding. The agent caught and
+retracted it before anything was dispatched on it.
 
-Two things follow. The planner pays for ten placements and a fuel trip and
-then hand-mines anyway for most of the run, which is the expensive path it
-placed drills to avoid. And the drill-versus-hand decision is made without a
-fuel budget: a drill is worth its placement only for as long as its coal
-lasts, and nothing tops it up. The fix is not obviously "refuel more" —
-it may be fewer drills fuelled properly, or a drill that is only placed
-where a bot will pass again anyway.
+**What the record actually supports**, from fields that were never broken.
+Across 1,342 drill sample rows in the two runs examined: run 17's ten drills
+read `working` 416 times against `no_fuel` 818; the counter agent's run read
+414 against 928. Every drill in both runs held coal at some point and read
+`working` at some point, from tick 1,800 to 46,200, so they were fuelled,
+they ran, they ran dry, and they were refuelled. The plan carries a
+`fuel the burner-mining-drill with N coal` step for every placement and all
+of them settled successfully.
 
-Not yet dispatched: it needs the per-machine drill counters to quantify what
-the drills actually contributed, which is the branch in flight.
+So the honest finding is narrower and still interesting: **a drill spends
+roughly two thirds of its life waiting for coal.** Eight coal is 32 MJ
+against a 150 kW burner, about 12,800 ticks, and a green run is 52,000. What
+that costs is not yet known, because the split of the 670 iron and 189
+copper ore between drill output and hand mining needs one re-run on the
+fixed counters — which will answer it outright rather than by inference.
+
+The lesson is the one this record keeps relearning from the other side: a
+new instrument's first reading is evidence about the instrument.
 
 ## PER-MACHINE PRODUCTION COUNTERS (owner, 2026-09-05 22:00)
 

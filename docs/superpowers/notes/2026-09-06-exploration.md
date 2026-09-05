@@ -28,10 +28,12 @@ approach assumed**.
 * **The reveal radius is ±128 tiles (4 chunks)** — measured twice, exactly.
 * **A server-side character charts nothing.** `force.is_chunk_charted` is false
   everywhere, including under the character's own feet, after 700 ticks.
-* **And the mechanism failed in the live test.** Four bots walked a full ring
-  out to ±256 tiles and the model's resource census did not change by a single
-  tile. Walking did not teach the model anything. This is the finding that
-  matters most and it is **not fixed**.
+* **And the mechanism does not work: a bot cannot walk into unexplored ground
+  at all.** The pathfinder refuses -- `failed to path find` -- because it
+  cannot path into chunks that do not exist. Teleporting past the frontier
+  generates ground; `request_to_generate_chunks` generates ground; **walking
+  cannot get there to begin with.** Exploration in this codebase is a mod-side
+  capability, not a walking capability. See section 5.
 
 ---
 
@@ -275,59 +277,92 @@ The three pinned baselines are unchanged, as required:
 
 ---
 
-## 5. The live run: the mechanism did not work
+## 5. The live runs: walking cannot cross the frontier
 
-`factorio-bot lua explore_ring.lua --headless --bots 4 --game-speed 5 --seed 31337 --new`
+Two runs, in order. The first showed the symptom; the second found the cause.
 
-The script asks `researched:oil-processing` before and after running
-`goal.charted(0, 0, 384)`. Before:
+### 5a. The ring taught the model nothing
+
+`explore_ring.lua`, headless, seed 31337, `--new`: ask
+`researched:oil-processing` before and after running `goal.charted(0, 0, 384)`.
+
+Before, the refusal names the census `coal (466), copper-ore (462), iron-ore
+(940), stone (387)` with 17 of 17 probes covered. The ring planned and ran --
+makespan 3,609 ticks, 4 bots, 4 steps each, all eight ring-1 cells attempted.
+After, the refusal names **exactly the same census**: 466 / 462 / 940 / 387.
+Not one new tile.
+
+### 5b. Why: the pathfinder will not path into ungenerated ground
+
+`frontier_walk.lua` walks bot 1 east in steps, on a fresh seed-31337 map whose
+generated block is 400 chunks, tiles `[-320, 320)`:
 
 ```
-plannable before: false
-refusal: no crude-oil is charted anywhere this plan can see ...
-  the plan sees coal (466 tiles), copper-ore (462 tiles), iron-ore (940 tiles), stone (387 tiles);
-  charted ground covers 17 of 17 probes within 256 tiles of [0.5, 0.5],
-  so the uncharted ground is beyond that radius
+x=100  REACHED
+x=200  REACHED
+x=300  NO PATH -- the game's pathfinder returned no path: Error: failed to path find
+x=400  NO PATH        x=440  NO PATH        x=480  NO PATH
+x=560  NO PATH        x=600  NO PATH
 ```
 
-The ring planned and ran: **makespan 3,609 ticks, 4 bots, 4 steps each** (two
-walks and two surveys apiece — all eight ring-1 cells attempted), finished in
-~13 s wall at 5×. Bots ended up where they were sent; one is at (−249.2, 255.2).
+An earlier five-leg tour to (600,0), (600,600), (-600,600), (-600,-600) and
+(600,-600) refused **every leg** with the same error.
 
-After:
+So a bot cannot be sent past the edge of the generated world: `rcon.move`
+refuses before dispatching anything. The ring in 5a "worked" only because
++/-256 is *inside* the block the map is created with -- it walked over ground
+the model already had, which is precisely why it learned nothing.
 
-```
-plannable after: false
-refusal: ... the plan sees coal (466 tiles), copper-ore (462 tiles),
-  iron-ore (940 tiles), stone (387 tiles);
-  charted ground covers 7 of 17 probes within 256 tiles of [-249.22, 255.23],
-  ending soonest 128 tiles south-east at [-158.71, 345.74]
-```
+**A caveat on the boundary.** The refusal begins between x=200 and x=300, which
+is inside the 320-tile frontier, so the x=300 refusal may be terrain (a lake)
+rather than the frontier itself. That does not affect the conclusion: every
+probe *beyond* the frontier refuses, in every direction tried.
 
-**The census is byte-identical: 466 / 462 / 940 / 387. Not one new tile.**
+**And it is why the raw walk verb must not be used for this.** Dispatched
+straight at (600, 0), `action_start_walk_waypoints` does not path at all: the
+bot walked into the first obstacle and stopped at x = 63.7, reporting nothing.
+That would have read as "walking generates nothing" for entirely the wrong
+reason.
 
-So the bots walked a full ring to ±256 tiles and **the world model learned
-nothing at all**. The premise the whole approach rests on — that moving a
-character causes the engine to generate chunks, which the mod writes out, which
-the model ingests — did not hold in this run, even though §2 measured a
-character generating an 81-chunk block when it was *created or teleported* into
-virgin ground.
+### 5c. The two controls, on one server
 
-The distinction between those two observations is the open question, and I did
-not settle it. The leading hypothesis is that the 9×9 block follows an entity
-being **placed** into ungenerated space, and that a character **walking** does
-not push the generation frontier outward at all — in which case walking is not
-an exploration mechanism in this codebase and the honest options are a mod-side
-`request_to_generate_chunks` around each bot (cheap, legitimate — it asks for
-the ground the bot is standing on to exist), or radar.
+Chunk counts and the eastern frontier, measured in sequence on a single fresh
+seed-31337 server:
 
-Note also that the "after" refusal reports **7 of 17 probes** from the bot's new
-position: the model genuinely does not have ground around (−249, 255), which is
-consistent with nothing having been generated there.
+| step | chunks | eastern frontier |
+|---|---:|---:|
+| A. baseline (`--new`) | 400 | 320 |
+| B. spawn one character bot at origin | 400 | 320 |
+| C. **teleport** that bot to (1500, 0) | **481** (+81) | **1632** |
+| D. **`request_to_generate_chunks`** at (3000, 0), r=3 | **683** (+202) | **3200** |
 
-**Do not read this note as "exploration works".** The planner primitive works,
-is tested, and produces the right plan for the right cost. The step from that
-plan to new knowledge is unproven and currently looks false.
+* **B**: placing a bot inside already-generated ground generates nothing.
+* **C**: placing it in virgin ground generates the 9x9 block of section 2.
+  Generation is **placement-driven**, which is why the teleport probes worked
+  and why walking -- which cannot reach virgin ground -- never triggers it.
+* **D**: `request_to_generate_chunks` does exactly what walking cannot, from
+  the mod, with no character anywhere near it.
+
+### What this means
+
+**Exploration is a mod-side capability, not a walking capability.** The
+`Goal::Charted` / `Scout` / `Survey` machinery is right and worth keeping -- it
+decides *where to look*, nearest-first, avoiding nests, and it produces the
+correct plan at the correct cost. What it cannot do is make the ground exist.
+The missing piece is a mod verb that asks the engine to generate chunks around
+a point, called when a survey runs or just ahead of it, so the bot then has
+somewhere to walk to.
+
+That verb is defensible: it asks for the ground the bot is heading to to
+*exist*, which the engine does for a real player continuously as they move. It
+is not `force.chart` -- it reveals nothing to the force, and the model would
+still learn only what `on_chunk_generated` writes out. But the honesty question
+deserves its own look before it ships: generating ground the bot has not
+reached is a small piece of free vision, and the +/-128 reveal radius is the
+natural bound to hold it to.
+
+Radar remains the alternative, and is more attractive than section 2 suggested:
+it is the only mechanism that works today with no new mod surface.
 
 ---
 
@@ -344,10 +379,12 @@ plan to new knowledge is unproven and currently looks false.
 
 ## What I found and did not fix
 
-1. **Walking does not appear to grow the model** (§5). The most important open
-   item; it needs one run that watches `surface.get_chunks()` while a bot walks
-   outward, to separate "walking generates nothing" from "the ring landed
-   inside already-generated ground".
+1. **The charting mechanism itself.** Section 5 settles *why* walking does not
+   grow the model -- the pathfinder refuses to enter ungenerated ground -- but
+   the fix is not built: there is no mod verb wrapping
+   `request_to_generate_chunks`, so `Goal::Charted` can still only plan surveys
+   over ground that already exists. That is the next dispatch, and it is
+   mod-side work plus one RCON binding, not planner work.
 2. **No entity carries a `force`**, so "enemy" is a type-string guess and this
    project's own turrets will eventually read as threats (§3).
 3. **A bot death is still not an event.** The roster is computed once and never

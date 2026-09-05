@@ -454,3 +454,152 @@ and whether the mod's `set_recipe` eviction path survives a refinery whose
 fluids get evicted (`control.lua:4721`) — the query for that is a savepoint
 world, a placed refinery with `basic-oil-processing` running, and a
 `set_recipe` to something else.
+
+---
+
+## The roster refusal
+
+Diagnosed and fixed 2026-09-06, on branch `shares-refuse-with-more-bots`. The
+survey above found it ("An incidental defect found while surveying") and did
+not diagnose it; this section is the answer, written here because this is
+where it was found.
+
+**It is wrong, not badly worded.** A plan existed and the planner failed to
+find it, so a better message would have been a better-worded mistake.
+
+### The mechanism
+
+Not the share arithmetic. `even_shares` divides a shortfall evenly, and a
+share of six is not harder to satisfy than a share of nine — it is *later*.
+What has run out by then is the tile ledger.
+
+A mining claim spent a **whole tile** (`PlanState::claimed`, read through
+`resource_unclaimed_for` in `crates/planner/src/state.rs`), permanently,
+whoever made it and however little it took; and `mining_tile_separation` then
+crowds every tile within 3.69 of that claim out for every *other* runner.
+Shares are per-bot, so a roster of `n` burns `n` tiles per shortfall where two
+bots burn two — and a deep goal has hundreds of shortfalls. Instrumented at
+the exact refusal of `have:pumpjack:1` at three bots, on this dump's charted
+iron field:
+
+```
+tiles=940  claimed=324  crowded=616  free=0
+physical=522,467 ore    of which 134,734 sat on the 324 claimed tiles
+need=6
+```
+
+Half a million ore in the ground, six wanted, none offered. The four-bot run
+reached the same wall one bot later (412 claimed, 528 crowded).
+
+### The fix
+
+`PlanState::claim_yields_to`: **where the world states what a tile holds, the
+runner that already claimed it may draw from it again**, against what is left
+(`resource_available` = the game's `resource_amount` less `consumed`). Every
+other runner is still refused the tile, and crowding is untouched.
+
+Two reasons it is the right relaxation rather than a loosened bound:
+
+* `MiningClaim` already makes exactly this argument for crowding — a bot runs
+  one action at a time, an owned chain is offered to one bot and an unowned
+  one binds to a single bot at its first action — so two draws by one runner
+  are provably disjoint in time whatever the schedule turns out to be.
+* Whole-tile exclusivity's own stated reason was that the planner "cannot know
+  what a tile really holds", `DEFAULT_RESOURCE_PER_TILE` standing in for a
+  reading nobody took. Where the world *does* state the amount that reason is
+  absent — and where it does not, the old rule stands verbatim, which is why
+  every hand-built fixture behaves exactly as before.
+
+The defect whole-tile exclusivity was introduced for — four *different* bots
+sent to one tile, and the game reporting `the target stone was gone before
+mining finished` — is untouched: the relaxation is same-runner only.
+
+### Before and after, `factorio-bot plan` against this dump
+
+| goal | roster | before | after |
+|---|---|---|---|
+| `have:pumpjack:1` | 1 | 776 acts, 746,162 (3:27:16) | 707 acts, 753,322 (3:29:15) |
+| | 2 | 986 acts, 458,660 (2:07:24) | 969 acts, 460,480 (2:07:54) |
+| | 3 | **refused**, 6 iron-ore | **1,601 acts, 335,805 (1:33:16)** |
+| | 4 | **refused**, 6 iron-ore | **refused**, 17 iron-plate — different cause, below |
+| `researched:automation` | 4 | 176 acts, 21,776 | 176 acts, 21,784 |
+| `producing:automation-science-pack:6` | 4 | 324 acts, 26,990 | 324 acts, **22,547** |
+| `producing:logistic-science-pack:6` | 4 | 569 acts, 52,819 | 570 acts, **52,224** |
+| `researched:engine` | 4 | **refused**, 14 iron-plate | **1,206 acts, 126,590 (0:35:09)** |
+| `researched:automation-2` | 4 | **refused**, 20 iron-plate | **904 acts, 93,675 (0:26:01)** |
+| `researched:fluid-handling` | 4 | **refused**, 7 iron-ore | **1,843 acts, 205,042 (0:56:57)** |
+| `have:storage-tank:1` | 4 | **refused**, 8 iron-ore | **1,743 acts, 205,836 (0:57:10)** |
+| `researched:oil-gathering` | 4 | **refused**, 27 iron-ore | **refused**, 24 iron-plate — same second cause |
+
+Four of the survey's five goals plan at the default roster where none did.
+Nothing regressed except `researched:automation` by **8 ticks** (21,776 →
+21,784, +0.04%, same 176 actions: two fewer walks for bots 1 and 2, one more
+each for 3 and 4), and the one-bot pumpjack by 7,160 ticks on 69 *fewer*
+actions. Both are stated rather than rounded away.
+
+### The one-bot pumpjack debit is understood, not merely observed
+
+Fewer actions and a longer schedule does suggest a serialisation, and it is
+one — but not of the bot's own work. For a single bot `makespan = planned +
+idle`, exactly, and both columns are in the report:
+
+| | actions | walks | planned | idle | makespan |
+|---|---|---|---|---|---|
+| before | 776 | 223 | 660,834 | 85,328 | 746,162 |
+| after | 707 | 206 | **660,255** | **93,067** | 753,322 |
+
+The bot's own work got *cheaper* by 579 ticks and it walks 17 times fewer.
+The whole regression is **+7,739 ticks of idle** (7,739 − 579 = the 7,160).
+The mediator is visible in the same plans: **31 stone furnaces before, 26
+after** (and 28 burner drills against 23). Fewer distinct claimed tiles means
+fewer sites, so fewer furnaces get built, so more batches queue behind each
+one — and machine time is a lag edge, which for a lone bot is simply waiting.
+
+That is the honest trade and it is roster-shaped: with one bot there is
+nobody to overlap the wait with, which is why it shows here and reverses
+completely at three (refused → 1:33:16). It is also the same defect the
+furnace-ground cliff below is: a smelt builds its own furnace rather than
+queueing deliberately, so furnace *count* is an accident of how many sites
+the ore ledger happened to hand out.
+
+### The second cliff, found and NOT fixed
+
+`have:pumpjack:1` at four bots and `researched:oil-gathering` at four still
+refuse — one layer deeper, on `have N iron-plate`, and for an unrelated
+reason. Evidence: with the method registry instrumented, `MethodRegistry::find`
+never returns `None` for that goal, so the error comes from *inside* a
+method's `expand`; in `smelt_steps` (`crates/planner/src/method/have.rs`) the
+only reachable `NoApplicableMethod` for iron-plate is the
+`free_area_near(&trial, &anchor, &furnace_entity).ok_or_else(...)` site — **no
+free ground for another furnace** within `FREE_TILE_SEARCH_RADIUS` (12 tiles,
+`crates/planner/src/method/util.rs`).
+
+The three-bot pumpjack plan that now succeeds **places 75 stone furnaces**.
+That is the real finding: a smelt builds its own furnace rather than queueing
+behind one, so furnaces scale with the bill and with the roster, and the
+12-tile ring around the anchor fills. Raising the radius is not the fix —
+`method::power::PLANT_ADOPT_RADIUS` is derived from it — reuse is. It wants
+its own task.
+
+### Eight bots: the ladder is fine, the deep oil goal is not
+
+`have:pumpjack:1 --bots 1,2,3,4,5,6,7,8` refused within seconds before the fix
+(on `have 5 copper-ore`) and **did not finish in 1,800 seconds** after it. It
+has never been run to completion, so no eight-bot pumpjack makespan may be
+quoted.
+
+That is specific to the deep oil goal. **The three goals this project actually
+runs at eight bots all plan in seconds, and all three get faster**, measured
+on the same dump with a master build that reproduces the known master numbers
+exactly:
+
+| goal (8 bots) | master | branch |
+|---|---|---|
+| `researched:automation` | 364 acts, 18,310 ticks, 1.52 s | 382 acts, **18,291**, 1.40 s |
+| `producing:automation-science-pack:6` | 535 acts, 19,573 ticks, 2.70 s | 590 acts, **18,863**, 2.58 s |
+| `producing:logistic-science-pack:6` | 706 acts, 49,229 ticks, 3.28 s | 915 acts, **46,766**, 5.01 s |
+
+Green costs **+53% of planning wall time** (3.3 s → 5.0 s) for a **5% shorter
+plan**, which is a trade worth making at five seconds and would not be at
+five minutes. Expansion cost growing with the number of shares is still a
+real defect — the pumpjack is the proof — it simply does not gate the ladder.

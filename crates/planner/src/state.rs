@@ -531,13 +531,18 @@ impl Default for BotState {
 /// construction: an unknown runner is never treated as a match, not even
 /// against another unknown one.
 ///
-/// # What this deliberately does not relax
+/// # What this relaxes, and what it does not
 ///
-/// Whole-tile exclusivity ([`PlanState::is_resource_claimed`]) stays global.
-/// It is not a simultaneity rule: it exists because the planner cannot know
-/// what a tile really holds (see [`DEFAULT_RESOURCE_PER_TILE`]), and one bot
-/// mining one tile twice runs into that same unknown however far apart in time
-/// the two swings are.
+/// Whole-tile exclusivity ([`PlanState::is_resource_claimed`]) stays global as
+/// a *fact*: the tile is claimed, and every other runner is refused it. What
+/// changed on 2026-09-06 is who "every other" means for the runner that
+/// already holds it. Exclusivity is not a simultaneity rule — it existed
+/// because the planner could not know what a tile really holds (see
+/// [`DEFAULT_RESOURCE_PER_TILE`]), so a second draw would spend an invented
+/// number. Where the world *states* the tile's amount, that reason is absent,
+/// and [`PlanState::claim_yields_to`] lets the claim's own runner draw again
+/// against `resource_available`. A tile the world said nothing about keeps
+/// the old rule verbatim.
 #[derive(Clone, Debug)]
 struct MiningClaim {
     /// The tile's centre, kept beside its flooring `Pos` key so a distance is
@@ -955,6 +960,17 @@ pub struct PlanState {
     /// It costs almost nothing in locality. Candidate tiles are ordered by
     /// distance, so the second claimant takes the *next* nearest tile — one
     /// tile further on, inside the same patch — rather than a different patch.
+    ///
+    /// **Whole, against everybody else; by the amount, against itself.** The
+    /// defect above is four *different* bots on one tile, and that is what
+    /// exclusivity answers, unchanged. What it also did, until 2026-09-06, was
+    /// bar the claim's **own** runner — so a plan spent a tile per shortfall
+    /// per bot, and a deep goal on a 940-tile field claimed 324 tiles that
+    /// still held 134,734 ore between them and then refused a share of six.
+    /// Where the world states a tile's amount there is no assumption left to
+    /// protect and [`PlanState::claim_yields_to`] lets that one runner draw
+    /// again; where it states nothing, the paragraph above stands word for
+    /// word. See [`MiningClaim`] for why one runner's two draws cannot collide.
     ///
     /// **A claim covers the ground around the tile, not only the tile.** Whole-
     /// tile exclusivity stopped two bots being sent to one ore and did nothing
@@ -4136,11 +4152,14 @@ impl PlanState {
     /// it ([`Self::resource_tile_blocked`]). All four, in the order they are
     /// cheap to test.
     ///
-    /// Crowding is asked for the *current* claim runner
-    /// ([`PlanState::claim_runner`]); everything else here is runner-blind,
-    /// because a tile that is spoken for, occupied or built over is that way
-    /// for everybody. [`PlanState::resource_unclaimed_for`] is the same
-    /// question asked on behalf of a stated runner.
+    /// Two of the four are asked for the *current* claim runner
+    /// ([`PlanState::claim_runner`]): crowding, and — since 2026-09-06 —
+    /// whether the tile's own claim yields ([`PlanState::claim_yields_to`],
+    /// which relaxes only for the runner that made the claim, and only where
+    /// the world stated the tile's amount). Occupied and built over stay
+    /// runner-blind, because a tile somebody is standing on or has built over
+    /// is that way for everybody. [`PlanState::resource_unclaimed_for`] is
+    /// the same question asked on behalf of a stated runner.
     pub fn resource_unclaimed(&self, position: &Position, item: &str) -> u32 {
         self.resource_unclaimed_for(position, item, self.claim_runner)
     }
@@ -4156,7 +4175,10 @@ impl PlanState {
         item: &str,
         runner: Option<ClaimRunner>,
     ) -> u32 {
-        if self.is_resource_claimed(position) || self.is_resource_crowded_for(position, runner) {
+        if self.is_resource_claimed(position) && !self.claim_yields_to(position, item, runner) {
+            return 0;
+        }
+        if self.is_resource_crowded_for(position, runner) {
             return 0;
         }
         if self.resource_tile_occupied(position) {
@@ -4166,6 +4188,58 @@ impl PlanState {
             return 0;
         }
         self.resource_available(position, item)
+    }
+
+    /// May the runner that already holds this tile's claim draw from it
+    /// **again**?
+    ///
+    /// Two conditions, and both are needed:
+    ///
+    /// * **The claim is on the asking runner's own serial timeline.** That is
+    ///   the argument [`MiningClaim`] already makes for crowding — a bot runs
+    ///   one action at a time, an owned chain is offered to one bot and an
+    ///   unowned one binds to a single bot the moment its first action is
+    ///   placed — so two draws by the same runner are provably disjoint in
+    ///   time and cannot collide on the ground. `None` on either side is
+    ///   *unknown* and never matches, exactly as in
+    ///   [`is_resource_crowded_for`](Self::is_resource_crowded_for).
+    /// * **The world said how much this tile holds.** This is the whole of
+    ///   what whole-tile exclusivity was ever protecting. Its stated reason
+    ///   was that "the planner cannot know what a tile really holds" — with
+    ///   [`DEFAULT_RESOURCE_PER_TILE`] standing in for a reading nobody took,
+    ///   a second draw from the same tile spends a number that was invented.
+    ///   Where `EntityGraph::resource_amount` carries the game's own
+    ///   reading, that reason is simply absent: `consumed` subtracts what the
+    ///   plan has taken (see [`Self::resource_available`]) and the tile
+    ///   reports zero of its own accord once it is drained. A tile the world
+    ///   said nothing about keeps the old rule and the old reason.
+    ///
+    /// # Why this is not a tuning knob
+    ///
+    /// A claim spends a whole tile, and a tile is up to hundreds of ore. On
+    /// the seed-31337 t=0 dump the charted iron field is 940 tiles holding
+    /// 522,467 ore; planning `have:pumpjack:1` for three bots claimed 324 of
+    /// those tiles — still holding 134,734 ore between them — and the
+    /// separation rule crowded the remaining 616 out, so a share of **6** ore
+    /// found nothing and the whole plan was refused with
+    /// `NoApplicableMethod`. Two bots planned the same goal on the same map.
+    /// The cliff is in the arithmetic and not in the ground: shares are
+    /// per-bot, so a roster of `n` burns `n` tiles per shortfall where a
+    /// roster of two burns two, and a deep goal has hundreds of shortfalls.
+    /// Adding a bot made a plan into a refusal, and four bots is the default
+    /// roster.
+    fn claim_yields_to(
+        &self,
+        position: &Position,
+        item: &str,
+        runner: Option<ClaimRunner>,
+    ) -> bool {
+        let key = Pos::from(position);
+        let Some(claim) = self.claimed.get(&key) else {
+            return false;
+        };
+        same_runner(claim.runner, runner)
+            && self.base.entity_graph.resource_amount(item, &key).is_some()
     }
 
     /// Is a character standing on the resource tile whose ore sits at
@@ -4711,6 +4785,49 @@ mod tests {
     use super::*;
     use factorio_bot_core::test_utils::{fixture_entity_prototypes, fixture_world};
     use factorio_bot_core::types::{FactorioEntity, Position};
+
+    /// The fixture, with every iron tile re-delivered carrying the amount the
+    /// game would have reported for it — the same re-delivery
+    /// `tests/tile_capacity.rs` uses, and for the same reason: it is how a
+    /// real reading arrives, and the *only* difference from `fixture_world()`
+    /// is that the world now says what a tile holds.
+    fn state_with_iron_holding(bots: &[BotId], amount: u32) -> PlanState {
+        let world = fixture_world();
+        let ore: Vec<FactorioEntity> = world
+            .entity_graph
+            .resource_patches("iron-ore")
+            .into_iter()
+            .flat_map(|patch| patch.elements)
+            .map(|tile| {
+                let mut entity = FactorioEntity::new_resource(
+                    &tile,
+                    factorio_bot_core::types::Direction::North,
+                    "iron-ore",
+                );
+                entity.amount = Some(amount);
+                entity
+            })
+            .collect();
+        assert!(!ore.is_empty(), "the fixture carries an iron field");
+        world
+            .update_chunk_entities(ore)
+            .expect("re-delivering ore with amounts");
+        PlanState::from_world(Arc::new(world), bots)
+    }
+
+    /// One tile of the fixture's iron field, chosen the same way every time —
+    /// the lowest `(x, y)`, as `tests/tile_capacity.rs` chooses it, so the
+    /// tile is a property of the field rather than a literal that a fixture
+    /// change could quietly move off the ore.
+    fn a_stated_iron_tile(state: &PlanState) -> Position {
+        let mut tiles: Vec<Position> = state
+            .resource_patches("iron-ore")
+            .into_iter()
+            .flat_map(|patch| patch.elements)
+            .collect();
+        tiles.sort_by(|a, b| a.x.total_cmp(&b.x).then(a.y.total_cmp(&b.y)));
+        tiles.into_iter().next().expect("the field has tiles")
+    }
 
     fn state() -> PlanState {
         PlanState::from_world(Arc::new(fixture_world()), &[BotId(1), BotId(2)])
@@ -6307,12 +6424,13 @@ mod tests {
         assert!(a.is_resource_crowded_for(&neighbour, Some(ClaimRunner::Bot(BotId(1)))));
     }
 
-    /// Time-awareness relaxes *crowding* and nothing else. Whole-tile
-    /// exclusivity is not a simultaneity rule — it exists because the planner
-    /// cannot know what a tile really holds — so a bot is still refused its
-    /// own claimed tile.
+    /// A tile the world never stated an amount for keeps the old rule: the
+    /// planner would be spending [`DEFAULT_RESOURCE_PER_TILE`], a number
+    /// nobody read, so a bot is still refused its own claimed tile. The
+    /// fixture's ore carries no `amount` (`FactorioEntity::new_resource`
+    /// leaves it `None`), which is exactly that case.
     #[test]
-    fn a_runner_does_not_get_its_own_tile_back() {
+    fn a_runner_does_not_get_a_guessed_tile_back() {
         let mut a = state();
         a.set_claim_runner(Some(ClaimRunner::Bot(BotId(1))));
         let tile = Position::new(-40.5, 40.5);
@@ -6320,6 +6438,58 @@ mod tests {
 
         assert!(a.is_resource_claimed(&tile));
         assert_eq!(a.resource_unclaimed(&tile, "iron-ore"), 0);
+    }
+
+    /// The world stated what this tile holds, so the runner that claimed it
+    /// draws from it again — for what is *left*, not for the whole tile — and
+    /// every other runner is still refused.
+    ///
+    /// This is the arithmetic behind the roster cliff: a claim used to spend a
+    /// whole tile, so a plan's `n`th share found a field that was claimed and
+    /// crowded to the last tile while hundreds of thousands of ore sat in it.
+    /// See [`PlanState::claim_yields_to`].
+    #[test]
+    fn a_runner_gets_a_stated_tile_back_for_what_is_left() {
+        let mut a = state_with_iron_holding(&[BotId(1), BotId(2)], 40);
+        let tile = a_stated_iron_tile(&a);
+        assert_eq!(
+            a.resource_unclaimed(&tile, "iron-ore"),
+            40,
+            "the tile is free and holds what the world said before anything claims it"
+        );
+        a.set_claim_runner(Some(ClaimRunner::Bot(BotId(1))));
+        a.consume_resource(&tile, "iron-ore", 6)
+            .expect("the tile holds forty");
+
+        assert!(a.is_resource_claimed(&tile));
+        assert_eq!(
+            a.resource_unclaimed(&tile, "iron-ore"),
+            34,
+            "its own claim costs the runner what it took, not the tile"
+        );
+        assert_eq!(
+            a.resource_unclaimed_for(&tile, "iron-ore", Some(ClaimRunner::Bot(BotId(2)))),
+            0,
+            "the claim is still exclusive against everybody else"
+        );
+        assert_eq!(
+            a.resource_unclaimed_for(&tile, "iron-ore", None),
+            0,
+            "an unknown runner matches nothing, here as everywhere"
+        );
+    }
+
+    /// The other half of the ledger: a tile drawn dry reports nothing, so a
+    /// reusable claim cannot become an infinite one.
+    #[test]
+    fn a_stated_tile_still_runs_out() {
+        let mut a = state_with_iron_holding(&[BotId(1)], 10);
+        let tile = a_stated_iron_tile(&a);
+        a.set_claim_runner(Some(ClaimRunner::Bot(BotId(1))));
+        a.consume_resource(&tile, "iron-ore", 10).expect("all ten");
+
+        assert_eq!(a.resource_unclaimed(&tile, "iron-ore"), 0);
+        assert!(a.consume_resource(&tile, "iron-ore", 1).is_err());
     }
 
     /// The binding is a stack, not a setting: `set_claim_runner` hands back

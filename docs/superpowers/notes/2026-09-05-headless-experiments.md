@@ -186,3 +186,25 @@ Three stub-game tests in `crates/core/tests/botbridge_*`. Live, headless-b at
 5x, seed 31337: run 1 (layer 1 only) one refusal, two plans; **run 2
 (`run-1788610299-95745`) zero refusals, one plan of 569 steps, green
 witnessed, `state=done`.** Under load ~30 from other builds, so no timing.
+
+### rockpath — merged: the approach aim stands clear of what the graph knows
+
+RCA answer to hl-02's refused walk and hl-03's "no path to [-13,-12]": neither
+the pathfinder, the collision mask, the planner's clearance nor the entity
+graph — **the executor's own aim**. `approach_annulus` put the goal
+`min_radius + slack` from the target *toward the bot*, which for bot 4's rock
+landed 0.7 tiles inside the neighbouring big-rock (prototype box
+`{{-1,-0.90},{1,1}}`, in the dump); and the insert/fuel walk to a furnace is a
+disc centred on the furnace itself, so the offset-goal fallback ended on the
+bot's own position. Both refusals were correct and both inputs were wrong.
+Now `approach_standing` bounds the inner radius by the target's own
+clearance, keeps the annulus aim unless the graph proves it blocked, else
+sweeps 16 bearings per ring (bot's side first) and one ring out; the walk
+retries once at a tight path radius when only the route's end is inside a
+box; and the refusal is classified `DestinationBlocked` instead of `other`.
+Six tests; core/executor/scripting_lua tests, workspace clippy, contract spec
+green; offline plans byte-identical (the planner is untouched). Also learnt:
+a pre-dispatch refusal's `walk_settled` tick is the record's high-water mark,
+which reads as "refused at batch end" (4,400 and 7,800 ticks late here) —
+open item; and bots wedge in the 0.6-tile gaps between touching furnaces
+(the game routes a 0.4-wide character through them) — open item.

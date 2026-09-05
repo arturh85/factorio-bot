@@ -3343,6 +3343,49 @@ impl PlanState {
         out
     }
 
+    /// Every entity of this name in the overlay and the base world.
+    ///
+    /// Used by block siting to run `already_stands` backwards
+    /// (`method::blueprint::recover_anchor`): a block's own entities can
+    /// stand anywhere the plan has building history, and the caller has no
+    /// position to search around yet -- finding one IS the question this
+    /// method answers, which is why it is not built on
+    /// [`PlanState::entities_within`]: that one needs a centre, and there
+    /// isn't one yet.
+    ///
+    /// The base half reads `EntityGraph`'s own quad tree directly
+    /// (`inner_tree().iter()`) rather than `find_entities_in_radius` with an
+    /// invented "big enough" radius -- there is no radius that is honestly
+    /// "the whole map" from this crate, which knows nothing of the quad
+    /// tree's bounds and must not guess at them.
+    ///
+    /// Returns them in a deterministic order -- the planner is pure and an
+    /// iteration order that varies would make a plan vary. Sorted by
+    /// `Pos::from(&e.position)`, same as [`PlanState::entities_within`].
+    pub fn entities_named(&self, name: &str) -> Vec<FactorioEntity> {
+        let mut out: Vec<FactorioEntity> = Vec::new();
+        let mut seen: BTreeSet<Pos> = BTreeSet::new();
+        for entity in self.added.values() {
+            if entity.name == name {
+                seen.insert(Pos::from(&entity.position));
+                out.push(entity.clone());
+            }
+        }
+        let tree = self.base.entity_graph.inner_tree();
+        for (entity, _rect) in tree.iter().map(|(_, v)| v) {
+            if entity.name != name {
+                continue;
+            }
+            let key = Pos::from(&entity.position);
+            if self.removed.contains(&key) || !seen.insert(key) {
+                continue;
+            }
+            out.push(entity.clone());
+        }
+        out.sort_by_key(|e| Pos::from(&e.position));
+        out
+    }
+
     /// The nearest pole to `from`, within `radius`, whose own supply area has
     /// at least `kw` of generation **left uncommitted** — i.e. somewhere a
     /// consumer could be built and actually run.

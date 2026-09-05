@@ -237,6 +237,102 @@ fn already_stands(state: &PlanState, e: &BlueprintEntity, world: &Position) -> S
     }
 }
 
+/// The anchor this block is ALREADY sited at, read back off the ground.
+///
+/// Siting must not be recomputed on a replan. `Goal::Built`'s whole shape
+/// assumes an anchor is stable -- "building it twice is a no-op rather than
+/// a second factory" -- and a search that re-runs against a world we have
+/// since built into can answer differently than it did last time. A block
+/// half-built at site A would then restart at site B: two half-factories, no
+/// error, and a production curve that still rises.
+///
+/// So the site is chosen exactly once, when the first entity goes down, and
+/// every later expansion rediscovers it from the entities themselves. This
+/// needs no new state and nothing to keep in sync, because `already_stands`
+/// answers the question backwards: each standing entity that matches a
+/// blueprint entity implies `standing.position - blueprint.offset`.
+///
+/// Scored by how many of the block's entities that candidate satisfies, so an
+/// unrelated entity of the same name cannot outvote the block itself.
+///
+/// **A single match is refused outright, never merely outvoted.** A fresh
+/// build has NOTHING standing at its real anchor, so a lone entity elsewhere
+/// that happens to share one name -- a power pole built for an unrelated
+/// purpose, say -- would otherwise be the only candidate in `votes` and win
+/// by default, with nothing to outvote it. That is not hypothetical: a power
+/// rig planted purely to unlock research (`test_world::with_steam_power`,
+/// a `small-electric-pole` and a `steam-engine` with no relation to any
+/// block) was read as one-sixth of `StarterSteamEngineBoiler` on a
+/// perfectly empty site, and the plan silently placed five of its six
+/// entities as if the sixth already stood -- while genuinely standing at
+/// nowhere near the requested anchor. Requiring at least two corroborating
+/// entities before trusting a recovery is what a single coincidence cannot
+/// pass; it is also **the honest limit this now has**: a one-entity
+/// blueprint can never be recovered (there is only ever one thing to match),
+/// and a two-or-more block whose FIRST entity alone has been built is read
+/// as nothing standing rather than as a one-entity partial build. Both are
+/// the conservative wrong answer -- re-siting a block that is genuinely one
+/// entity into its own build -- not the dangerous one this replaces.
+///
+/// Ties on the score are broken toward the LARGER key, not an arbitrary one:
+/// a block whose own entities are evenly spaced (offsets `0, 3, 6, 9`)
+/// standing only partly built (two of four, spaced by the same `3`) is
+/// satisfied equally by several candidate anchors -- shifting the guess by
+/// any multiple of that spacing re-lines-up the same two standing entities
+/// against a different pair of offsets. The larger key is the one that
+/// assigns the standing entities to the block's *earliest* offsets rather
+/// than a later, coincidentally-matching pair, which is the answer a caller
+/// who placed entities in blueprint order actually wants.
+///
+/// Votes are keyed by half-tile fixed point (`(x, y) * 2, rounded`), not by
+/// `Pos`: `Pos::from` floors to `(i32, i32)`, which is lossy for a fact this
+/// exact -- every legal Factorio entity centre is a multiple of 0.5, so an
+/// anchor at 10.0 and one at 10.5 would collapse into the same bucket. This
+/// is the identical shape of round-trip that once made mining fail for every
+/// ore on every map while every test passed, because `Pos` floors resource
+/// positions too.
+fn recover_anchor(state: &PlanState, bp: &Blueprint) -> Option<Position> {
+    let mut votes: BTreeMap<(i64, i64), usize> = BTreeMap::new();
+    for e in &bp.entities {
+        for candidate in state.entities_named(&e.name) {
+            // Candidate anchor: `e` is standing where `candidate` actually
+            // is, so the block's anchor -- if this is really it -- is offset
+            // back by `e.offset`.
+            let anchor = Position::new(
+                candidate.position.x() - e.offset.x(),
+                candidate.position.y() - e.offset.y(),
+            );
+            let satisfied = bp
+                .entities
+                .iter()
+                .filter(|b| {
+                    matches!(
+                        already_stands(state, b, &anchor.add(&b.offset)),
+                        Standing::AsDesigned
+                    )
+                })
+                .count();
+            // >= 2, not > 0: see the doc above -- a single matching entity
+            // is exactly the shape of coincidence this must refuse, not
+            // merely risk losing a tie-break to.
+            if satisfied >= 2 {
+                let key = (
+                    (anchor.x() * 2.0).round() as i64,
+                    (anchor.y() * 2.0).round() as i64,
+                );
+                votes.insert(key, satisfied);
+            }
+        }
+    }
+    votes
+        // Most entities satisfied wins; on a tie the larger key wins (see
+        // the doc above) -- deterministic either way, so the answer does not
+        // depend on iteration order.
+        .into_iter()
+        .max_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)))
+        .map(|(key, _)| Position::new(key.0 as f64 / 2.0, key.1 as f64 / 2.0))
+}
+
 /// Build a designed block by hand, one band per bot.
 pub struct BuildBlock;
 
@@ -253,19 +349,29 @@ impl Method for BuildBlock {
         let Goal::Built { blueprint, site } = goal else {
             return Ok(Vec::new());
         };
-        // Task 2 replaces this with resolution. Behaviour is unchanged for
-        // now: only an explicit anchor is honoured.
-        let anchor = match site {
-            Site::At(p) => p.clone(),
-            Site::Near(_) | Site::Anywhere => {
-                return Err(PlannerError::BlueprintRefused {
-                    reason: "siting is not implemented yet; pass an explicit anchor".to_string(),
-                });
-            }
-        };
         let bp: Blueprint = decode(blueprint).map_err(|e| PlannerError::BlueprintRefused {
             reason: format!("{e:?}"),
         })?;
+
+        // A recovered anchor wins over anything the caller says: standing
+        // entities are a fact about the world, and a `Site` is only ever a
+        // hint about where to start looking. This is what stops a replan
+        // from re-siting a block that is already partly built -- see
+        // `recover_anchor`'s own doc. Task 3 (the search) is what fills in
+        // `Near`/`Anywhere` when nothing is standing yet; until then those
+        // two still refuse rather than guess.
+        let anchor = match recover_anchor(&ctx.state, &bp) {
+            Some(recovered) => recovered,
+            None => match site {
+                Site::At(p) => p.clone(),
+                Site::Near(_) | Site::Anywhere => {
+                    return Err(PlannerError::BlueprintRefused {
+                        reason: "siting is not implemented yet; pass an explicit anchor"
+                            .to_string(),
+                    });
+                }
+            },
+        };
 
         // This used to refuse the whole goal, by name, whenever it contained
         // an underground belt: neither `FactorioEntity` nor the mod's
@@ -444,6 +550,85 @@ mod tests {
             direction: 4,
             underground_half: None::<UndergroundHalf>,
         }
+    }
+
+    /// A fresh, empty world with one bot -- the state `recover_anchor`'s own
+    /// tests build on, before any entity is stood on it.
+    fn test_state() -> PlanState {
+        use crate::ids::BotId;
+        use factorio_bot_core::test_utils::fixture_world;
+        use std::sync::Arc;
+
+        PlanState::from_world(Arc::new(fixture_world()), &[BotId(1)])
+    }
+
+    fn at_named(x: f64, y: f64, name: &str) -> BlueprintEntity {
+        BlueprintEntity {
+            name: name.to_string(),
+            offset: Position::new(x, y),
+            direction: 0,
+            underground_half: None::<UndergroundHalf>,
+        }
+    }
+
+    fn stone_furnace_at(x: f64, y: f64) -> FactorioEntity {
+        FactorioEntity::new_stone_furnace(&Position::new(x, y), Direction::North)
+    }
+
+    /// **Recovery, not re-siting.** Two of a four-furnace block stand at an
+    /// anchor the caller never names again -- a replan must find them, not
+    /// choose somewhere new. This is the failure `Goal::Built` exists to make
+    /// unreachable: a block half-built at site A restarting at site B, with
+    /// no error and a production curve that still rises.
+    #[test]
+    fn a_partly_built_block_recovers_its_own_anchor_and_does_not_move() {
+        let bp = Blueprint {
+            entities: vec![
+                at_named(0.0, 0.0, "stone-furnace"),
+                at_named(3.0, 0.0, "stone-furnace"),
+                at_named(6.0, 0.0, "stone-furnace"),
+                at_named(9.0, 0.0, "stone-furnace"),
+            ],
+            version: 0,
+        };
+        let mut state = test_state();
+        // The block was sited at (20.5, 20.5) on a previous plan and two of
+        // its furnaces got built before the replan.
+        state.create_entity(stone_furnace_at(20.5, 20.5));
+        state.create_entity(stone_furnace_at(23.5, 20.5));
+
+        let recovered = recover_anchor(&state, &bp).expect("two standing furnaces imply an anchor");
+        assert_eq!(Pos::from(&recovered), Pos::from(&Position::new(20.5, 20.5)));
+    }
+
+    #[test]
+    fn a_block_with_nothing_standing_recovers_no_anchor() {
+        let bp = Blueprint {
+            entities: vec![at_named(0.0, 0.0, "stone-furnace")],
+            version: 0,
+        };
+        let state = test_state();
+        assert!(recover_anchor(&state, &bp).is_none());
+    }
+
+    /// A decoy furnace unrelated to the block stands alone; the block's own
+    /// two furnaces stand together. The pair must outvote the single.
+    #[test]
+    fn the_anchor_satisfying_the_most_entities_wins() {
+        let bp = Blueprint {
+            entities: vec![
+                at_named(0.0, 0.0, "stone-furnace"),
+                at_named(3.0, 0.0, "stone-furnace"),
+            ],
+            version: 0,
+        };
+        let mut state = test_state();
+        state.create_entity(stone_furnace_at(-40.5, -40.5)); // decoy
+        state.create_entity(stone_furnace_at(10.5, 10.5));
+        state.create_entity(stone_furnace_at(13.5, 10.5));
+
+        let recovered = recover_anchor(&state, &bp).expect("the pair implies an anchor");
+        assert_eq!(Pos::from(&recovered), Pos::from(&Position::new(10.5, 10.5)));
     }
 
     /// Bands are balanced by ENTITY COUNT, not by area: a block whose entities

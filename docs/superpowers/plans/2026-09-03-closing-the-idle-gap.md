@@ -80,6 +80,31 @@ honestly, as before. Also fixed on the way: `scripting_lua`'s
 `plan_cell` call was one argument behind `bdec88af` and failed
 `--all-targets` clippy on master.
 
+## ✅ GREEN FROM A FRESH WORLD IN 23:38 (`run-1788594774-55056`) — the furnace-slot fix, executed
+
+Git `b0ed1d25`: a bot with no furnace of its own on the patch builds one as its
+own errand, and least-loaded reads the whole queue (the proxy had been reset
+on every adoption). The RCA found **one furnace at [-34,-32] carrying 26
+batches from all four bots (53 visits)** while two furnaces two tiles away sat
+idle after one batch each; three mechanisms, none of them bank width. The
+brief's remedy — price the queue wait — was measured and rejected: a release
+is an action, not a tick, and pricing it made green worse (108,170).
+
+| | |
+|---|---|
+| green cell producing 6/min | **23:38** (85,090 ticks) |
+| green witness | **24:16** |
+| plan | one — 811 steps, 617 actions, 0 failed, 0 lost, 194 of 194 walks |
+| planned vs executed | 83,311 vs 85,090 — 2.1% |
+| fleet utilisation | **43.0%** (bot 1 77.9%, bots 2–4 26–37%) |
+
+Fresh-world green over the night: **64:22 → 36:48 → 31:35 → 26:32 → 29:09 →
+23:38.** Offline the same change moved red +5.2% (33,487 → 35,239) because
+red is bot-1-bound and bots 3/4 now stand furnaces of their own; automation
+held (21,818). Open from this RCA: `furnace_suppliers` ranks by
+`planned_mining`, which does not count rock swings, so it hands other bots'
+furnaces to bot 1.
+
 ## The stalled walk was a starved server, and the stall clock counted from the wrong place (`2e705d0b`)
 
 Every hypothesis in my brief was wrong, and the record had the answer.
@@ -2073,7 +2098,7 @@ infrastructure for a 3h17m game, not a harder milestone.
 | red science producing **once** | never observed | witnessed six times, all inside 780 ticks |
 | red science producing **at a rate** | impossible to claim | **5 packs in 3,240 ticks (~5.5/min)**, twice |
 | green science, planning | did not expand at all | plans end to end |
-| green science, live | never run | **WITNESSED seven times** — fresh world best **26:32 / 27:10** (`run-1788578779-80166`); current planner 29:09 (`run-1788583161-11653`, the rock forecast's +5%, under RCA); 64:22 → 36:48 → 31:35 → 26:32 → 29:09 |
+| green science, live | never run | **WITNESSED eight times** — fresh world **23:38 / 24:16** (`run-1788594774-55056`), one plan, zero failures; 64:22 → 36:48 → 31:35 → 26:32 → 29:09 → 23:38 over one night |
 | furnaces per run | 42 | **8** |
 | recovery (`obs:recover`) | never executed in any run | **fires live** |
 

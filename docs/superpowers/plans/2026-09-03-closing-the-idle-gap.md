@@ -461,6 +461,20 @@ they ran, they ran dry, and they were refuelled. The plan carries a
 `fuel the burner-mining-drill with N coal` step for every placement and all
 of them settled successfully.
 
+**Answered by the counters (`run-1788640611-64852`, green at 15:14 on the
+merged master): drills produced 514 of the 859 ore, hands mined 345 — 40% of
+all ore in the run is hand-mined.** All ten drills end the run `no_fuel`,
+and their individual totals are 39, 39, 39, 46, 53, 53, 53, 53, 66, 73:
+**eight coal is 32 MJ against a 150 kW burner, about 12,800 ticks, which at
+0.25 items a second is ~53 ore.** Several drills produced exactly that. A
+drill is fuelled, delivers one load's worth, and stops.
+
+The arithmetic that follows is stark. Refuelling a drill costs a walk plus
+an insert — a few hundred ticks when a bot passes anyway — and buys ~53 ore.
+Hand-mining the same 53 ore costs thousands of bot-ticks. The 345 hand-mined
+ore in this run are the expensive substitute for roughly seven refuel trips.
+Dispatched as the `refuel` worktree.
+
 So the honest finding is narrower and still interesting: **a drill spends
 roughly two thirds of its life waiting for coal.** Eight coal is 32 MJ
 against a 150 kW burner, about 12,800 ticks, and a green run is 52,000. What

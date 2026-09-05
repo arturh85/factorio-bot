@@ -3944,15 +3944,18 @@ That is the separate `Holder::Share` ceiling.
 
 ## Open items not on the critical path
 
-- **Executor deadlines are wall-clock scaled by game speed, not ticks delivered.**
-  `sized_deadline` and the walker's stall clock expire on the wall clock, so a
-  server starved below its promised tick rate (a build on the box, four clients
-  plus a 5x headless run) makes a wait expire before the game has done the
-  work: run 9 lost a walk that way, and the peer session once collected from a
-  furnace that had not finished. Measure deadlines in `game.tick` as read over
-  RCON (the mod's `BatchProgress` beat already carries it), and record the
-  delivered tick rate in the run so a starved run says so. Raised 2026-09-05
-  by the peer session; not yet dispatched.
+- **Tick-based waits exist; their behaviour on a starved server above 1x is untested.**
+  Corrected 2026-09-05 after the peer session read the code: `Actuator::game_tick`
+  reads `game.tick` over RCON and the lag wait in `run.rs` polls it against an
+  absolute deadline in ticks (the wall clock only estimates the sleep between
+  readings), motivated by a run that waited a modelled 4,032 ticks while ~3,599
+  passed. The remaining gaps: (1) an actuator that cannot report a clock falls
+  back to wall clock × game speed, the old behaviour, so mocks and attached
+  servers without a clock still have it; (2) `Actuator::game_speed` was stubbed
+  at 1.0 until the peer's branch plumbed the real value, and that path has never
+  been exercised on a starved box at 5x. Shape of the item: a test or headless
+  experiment that starves the server at 5x and checks no wait expires early,
+  plus the delivered tick rate recorded per run. Nobody owns it yet.
 
 - **Flaky test**: `crates/planner/tests/red_science.rs::every_expansion_replays_in_time_order`
   failed once under a full `--workspace` run, reported by the provenance

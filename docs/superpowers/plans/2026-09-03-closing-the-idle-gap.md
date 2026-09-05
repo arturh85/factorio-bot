@@ -80,6 +80,36 @@ honestly, as before. Also fixed on the way: `scripting_lua`'s
 `plan_cell` call was one argument behind `bdec88af` and failed
 `--all-targets` clippy on master.
 
+## A rock is judged over the bot's whole demand — automation planned 6:05 (`7e330a2c`)
+
+Both halves of my brief were wrong. **No starter drill placement has any
+incoming edge** — `de765de3`'s same-chain skip already removed the ordering;
+three of four starter drills stay in inventory on automation and red because
+`cell_setup_bot_ticks` prices the held drill and furnace as nine plates mined
+and smelted from nothing. Pricing them free was built and measured: every
+starter drill on ore in the first minute, and automation 25,886 → 32,693,
+green 97,232 → 127,801 — a burner drill is 240 ticks per plate against 120 by
+hand, so a one-drill share ends *later* unless the bot has other work. The
+wrong price was keeping single-drill cells off the critical path by
+accident; the true price is the count rung. Reverted, documented on the
+function.
+
+What shipped: `expand` rehearses once, recording per `(bot, item)` how much
+`Mine`/`Chop` were asked for, and the real pass prices a rock over the bot's
+whole demand while coverage stays per fragment. Per bot, not roster-wide — a
+roster-wide forecast made four bots swing four rocks for one bot's coal.
+
+| goal | before | after |
+|---|---|---|
+| `researched:automation` | 207 / 25,886 | 197 / **21,883 (6:05)** |
+| `producing:automation-science-pack:6` | 359 / 39,118 | 347 / **33,487** |
+| `producing:logistic-science-pack:6` | 644 / 97,232 | 628 / 102,405 (+5.3%) |
+
+Hand-mined coal: 13/15/16 actions → 4/4/**0**. Green's +5,173 is a scheduling
+shift through the shared hand-smelt furnace slot (bot-ticks *fell* 137,504 →
+136,096); the 86 iron hand-mines are drill work rocks cannot touch. **6:05
+planned is under the 6:12 record; it is a plan, not a run.**
+
 ## ✅ GREEN FROM A FRESH WORLD IN 26:32, ONE PLAN, ZERO FAILURES (`run-1788578779-80166`)
 
 Git `5c5087fb` (everything of the night: rocks, reach, fuel lag, recovery,

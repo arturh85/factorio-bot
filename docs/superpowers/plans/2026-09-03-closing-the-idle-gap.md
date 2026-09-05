@@ -3989,6 +3989,21 @@ That is the separate `Holder::Share` ceiling.
 
 ## Open items not on the critical path
 
+- **`FactorioEntity::new_stone_furnace` uses a 1.8 collision box**
+  (`crates/core/src/types.rs` ~1655) while the repo's prototype fixture
+  records 1.3984375 for the furnace's box; nothing was changed. Reported by
+  the peer session 2026-09-05 from the belt-routing review; unowned. A test
+  world built from the constructor is therefore 0.4 tiles wider than the
+  game's, which is the class of fixture lie that let a routing primitive pass
+  four reviews while unable to connect any real machine.
+- **A fixture written by the same task as the code can lie in the code's
+  favour.** The belt-routing branch's first version passed every review and
+  the whole suite with a furnace placed where a 2×2 entity cannot stand; only
+  a whole-branch review that checked the fixture against real prototype
+  geometry caught it. Rule to carry: build test worlds from prototype data
+  (the dump, `map.json`) or assert the fixture against it, never from
+  hand-typed positions alone.
+
 - **Tick-based waits exist; their behaviour on a starved server above 1x is untested.**
   Corrected 2026-09-05 after the peer session read the code: `Actuator::game_tick`
   reads `game.tick` over RCON and the lag wait in `run.rs` polls it against an

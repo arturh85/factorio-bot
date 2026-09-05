@@ -507,3 +507,9 @@ much.
 −1,723 ticks, and the executed/planned ratio at 10x is now the 1x
 client run's 1.01. The planner took its usual 3.0 s and the game did not
 move: RCON served the placement pre-check while `game.tick_paused` held.
+
+**And at 5x** (`run-1788619691-37853`, same box, same commit): milestone
+**21,781** ticks against 22,724 before (−943; plan 21,681, ratio 1.005),
+start → first dispatch 36 ticks, execution span 21,722, `planning_timed`
+3,131 ms paused at tick 431, delivered 262 of 300 tps (87%), 0 failed.
+Three speeds now read 1.01 / 1.005 / 1.014 against their plans.

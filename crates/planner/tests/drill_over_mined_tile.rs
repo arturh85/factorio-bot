@@ -215,7 +215,8 @@ fn a_tile_a_mine_has_claimed_is_not_a_drill_site() {
         with_claim.set_claim_runner(Some(ClaimRunner::Bot(BotId(1))));
         with_claim.claim_resource(&claimed);
 
-        let resited = plan_cell(&with_claim, &from, &spec, 1).expect("there is other ore to build on");
+        let resited =
+            plan_cell(&with_claim, &from, &spec, 1).expect("there is other ore to build on");
         let resited_area = with_claim
             .collision_area_facing("burner-mining-drill", &resited.drill, resited.facing)
             .expect("the fixture has a drill prototype");

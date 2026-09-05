@@ -554,7 +554,15 @@ evidence in this record rather than by preference.
    one, and **before today the goal could not have been checked honestly at
    all**. Goal kind and verification are built together or it passes while
    roster-fed.
-2. **Exploration.** The bots chart nothing. This record already warns that
+2. **Exploration, as a square spiral** (owner, 2026-09-06). A character
+   reveals ground as it walks, so exploring *is* a walk pattern: Chebyshev
+   rings, which tile the plane exactly where circles cannot; a lattice of
+   standing points spaced by the **measured** reveal radius rather than an
+   assumed one; already-charted cells skipped; rings split across the
+   roster; and a predicate to stop on, since exploring is nearly always in
+   service of finding one thing. Nearest-first ordering falls out for free,
+   which is what we want — the first oil found is the nearest oil. The bots
+   chart nothing today. This record already warns that
    measured distances are what has been *seen*, not what exists; oil is the
    immediate victim, since a pumpjack cannot be planned onto a patch nobody
    has looked at, and block siting and any non-spawn map are the others.

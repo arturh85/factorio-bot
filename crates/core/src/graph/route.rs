@@ -120,6 +120,9 @@ pub fn route_belt(
     let mut best: Vec<u32> = vec![u32::MAX; GRID * GRID * 4];
     let mut came: Vec<Option<((usize, usize), Direction)>> = vec![None; GRID * GRID * 4];
     let mut heap = BinaryHeap::new();
+    // Every cell the search actually visited, for an honest refusal message
+    // if it never reaches `to`.
+    let mut reached: Vec<bool> = vec![false; GRID * GRID];
 
     for (dir, _) in DIRECTIONS {
         let slot = state_index(from, dir);
@@ -133,6 +136,7 @@ pub fn route_belt(
     }
 
     while let Some(node) = heap.pop() {
+        reached[cell_index(node.cell.0, node.cell.1)] = true;
         if node.cell == to {
             return Ok(reconstruct(&came, origin, from, to, node.facing));
         }
@@ -163,7 +167,7 @@ pub fn route_belt(
     }
 
     Err(RouteError::NoPath {
-        blocked: blocking_tiles(blocked, origin, to),
+        blocked: blocking_tiles(blocked, origin, &reached),
     })
 }
 
@@ -186,17 +190,45 @@ fn heuristic(a: (usize, usize), b: (usize, usize)) -> u32 {
     (dx + dy) * STEP
 }
 
-/// The occupied tiles touching the destination, for the refusal message.
-fn blocking_tiles(blocked: &[bool], origin: (f64, f64), to: (usize, usize)) -> Vec<Position> {
-    let mut out = Vec::new();
-    for (_, (dx, dy)) in DIRECTIONS {
-        if let Some(n) = step(to, dx, dy)
-            && blocked[cell_index(n.0, n.1)]
-        {
-            out.push(cell_to_position(origin, n));
+/// The occupied tiles touching the region the search actually reached, for
+/// an honest refusal message.
+///
+/// The naive version of this only looked at the four neighbours of `to`,
+/// which is wrong whenever the wall that stopped the search is further out,
+/// or the failure is a chokepoint mid-route rather than a walled
+/// destination: the destination's own neighbours can all be free while the
+/// search still never got there. Scanning every reached cell's neighbours
+/// names the tiles that actually stopped the frontier, wherever they are.
+///
+/// A `(usize, usize)` set, not a `Position` one: `Position` holds `f64` and
+/// cannot be deduplicated or ordered, so cells are deduplicated on the grid
+/// first and only converted to positions -- in ascending `(x, y)` order, a
+/// fixed order rather than an artefact of traversal -- once that is done. An
+/// empty result is honest here: it means the search reached the map edge
+/// without ever bordering a blocked cell, i.e. nothing on the grid stopped
+/// it.
+fn blocking_tiles(blocked: &[bool], origin: (f64, f64), reached: &[bool]) -> Vec<Position> {
+    let mut cells: Vec<(usize, usize)> = Vec::new();
+    for y in 0..GRID {
+        for x in 0..GRID {
+            if !reached[cell_index(x, y)] {
+                continue;
+            }
+            for (_, (dx, dy)) in DIRECTIONS {
+                if let Some(n) = step((x, y), dx, dy)
+                    && blocked[cell_index(n.0, n.1)]
+                {
+                    cells.push(n);
+                }
+            }
         }
     }
-    out
+    cells.sort_unstable();
+    cells.dedup();
+    cells
+        .into_iter()
+        .map(|c| cell_to_position(origin, c))
+        .collect()
 }
 
 fn reconstruct(

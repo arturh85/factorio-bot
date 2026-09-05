@@ -434,4 +434,120 @@ mod tests {
             "nothing to place means nothing to bill either: {steps:?}"
         );
     }
+
+    /// **The bill was verified by tests that could not have failed.**
+    ///
+    /// `fixture_world` marks every recipe `enabled: true`
+    /// (`crates/core/tests/recipes-fixtures.json`), so
+    /// `a_plan_for_miner_line_on_an_empty_world_bills_its_materials` above
+    /// proves the SHAPE of the bill -- one `Goal::Have` per item still
+    /// missing -- but cannot prove the bill is ever actually CONSULTED. A
+    /// `Place` action whose `HasItem` precondition has no `Goal::Have`
+    /// behind it at all reads exactly the same against that fixture as one
+    /// that does, because nothing in an all-enabled world is ever short of
+    /// anything: `BuildBlock::expand()` called directly, in isolation,
+    /// cannot tell "the bill works" from "there is no bill". That gap is
+    /// not hypothetical -- a live offline check against the real seed-31337
+    /// dump was once misread as exactly this defect (a stale binary, not a
+    /// real one, but the class of failure it described was real: a bill
+    /// with the right shape that the planner never actually gathers).
+    ///
+    /// So this drives `Goal::Built` through the REAL top-level driver
+    /// (`crate::method::expand`, with `registry_for` -- the registry
+    /// `goal.plan`, the `plan` CLI and `score-map` all actually build from,
+    /// not the dead `default_registry` the brief pointed at) against a
+    /// world where `steam-engine`'s recipe is genuinely locked
+    /// (`crate::test_world::world_with_locked_recipe`), unlocked by a
+    /// `steam-power` technology exactly as it is in the real game -- not
+    /// simply absent from a fixture that never modelled locks at all. If
+    /// the bill were ever silently dropped, this is the test that would
+    /// catch it: `expand()` would return `PlannerError::InsufficientItems`
+    /// for a bot holding zero steam engines with nothing gathering any,
+    /// rather than a network with a research action, several craft actions
+    /// and six place actions, correctly ordered.
+    #[test]
+    fn a_locked_recipe_is_actually_researched_and_crafted_not_merely_billed() {
+        use crate::ids::BotId;
+        use crate::method::expand;
+        use crate::method::have::registry_for;
+        use crate::schedule::schedule;
+        use std::sync::Arc;
+
+        // `scripts/rcontest.lua`'s `StarterSteamEngineBoiler` -- six
+        // entities: two `steam-engine`, two `small-electric-pole`, one
+        // `boiler`, one `pipe`. Chosen over `MinerLine` for this test
+        // because it is the cheaper of the two blueprints the same live
+        // check named, and cheap is what a fixture-bounded ore patch wants:
+        // the point here is the research/craft PATH, not another pass at
+        // the quantities `a_plan_for_miner_line_on_an_empty_world_bills_its_materials`
+        // already covers.
+        let blueprint = "0eNqdkdEKwjAMRf8lz504nRv0V0Rkm0ECbVrWThxj/242RQXrgz6VhHtPLr0jNKZH3xFH0CNQ6ziA3o8Q6My1mXdx8AgaKKIFBVzbeQoRa5shn4kRJgXEJ7yCzqeDAuRIkfDOWYbhyL1tsBNBmqDAuyAmx/NFAWUiHOQppkl9QDYviK2NydBgGztqM+9MgvVAlSnU9rc8eYpR/BMnSdo9SY0jI5tvOYrVLuUvn35P/utpsUpLS5/6rX4FF+zCIq6qbZ5X1brcyP/fAHsdtKc=".to_string();
+
+        let bots = [BotId(1), BotId(2), BotId(3), BotId(4)];
+        // `world_with_locked_recipe` builds on `fixture_world`, whose own
+        // hundred trees are `tree-42` -- a name the prototype fixture gives
+        // no `mine_result`, so they yield nothing (see
+        // `have.rs::wood_is_still_refused_in_a_world_whose_trees_have_no_prototype`).
+        // A pole needs wood, so a real, minable tree has to be added the
+        // same way `have.rs::wooded_state` does, clear of both the
+        // blueprint's anchor and `with_steam_power`'s fixtures below.
+        let world = crate::test_world::with_trees(
+            crate::test_world::world_with_locked_recipe("steam-engine", &["steam-power"]),
+            &[Position::new(5.0, 5.0), Position::new(6.0, 5.0)],
+        );
+        let mut state = PlanState::from_world(Arc::new(world), &bots);
+        // A locked recipe's unlocker may need researching, and research
+        // needs somewhere powered to put a lab -- the same reason
+        // `have.rs::locked_state` supplies it. Without this the test would
+        // fail on `ResearchNeedsPower` rather than on the question it
+        // actually asks.
+        crate::test_world::with_steam_power(&mut state);
+
+        let goal = Goal::Built {
+            blueprint,
+            anchor: Position::new(30.0, 30.0),
+        };
+
+        let net = expand(&[goal], &state, &registry_for(&bots), BotId(1))
+            .expect("a genuinely locked recipe is researched and crafted, not refused");
+
+        // Proof that the bill was CONSULTED, not merely stated: a research
+        // action for the unlocking technology and every one of the six
+        // placements are actually present in the expanded network. A world
+        // where the `Have` subgoal did nothing (the exact defect this test
+        // answers to) would have failed inside `expand` above with
+        // `PlannerError::InsufficientItems` on the first `Place`'s
+        // precondition -- it would never have reached this line at all.
+        assert!(
+            net.actions()
+                .any(|a| matches!(&a.kind, ActionKind::Research { tech } if tech == "steam-power")),
+            "steam-power is locked in this fixture, so six standing \
+             entities must go through a research action: {:?}",
+            net.actions().map(|a| &a.label).collect::<Vec<_>>()
+        );
+        // Filtered to THIS blueprint's own placements, not every `Place` in
+        // the network: a correct plan also builds scaffolding of its own --
+        // stone furnaces to smelt the plates, a lab to run the research --
+        // and those are `ActionKind::Place` too. `place_step`'s label always
+        // carries "block band N" (see `expand`, above), which nothing else
+        // in the plan emits, so it is what tells the six placements this
+        // test is actually about apart from the plan's own infrastructure.
+        let placements = net
+            .actions()
+            .filter(|a| {
+                matches!(a.kind, ActionKind::Place { .. }) && a.label.contains("block band")
+            })
+            .count();
+        assert_eq!(
+            placements,
+            6,
+            "all six of StarterSteamEngineBoiler's entities are placed, not \
+             just billed: {:?}",
+            net.actions().map(|a| &a.label).collect::<Vec<_>>()
+        );
+
+        // The round trip a live caller actually takes: `expand` alone proves
+        // the network is buildable, `schedule` proves it is also runnable.
+        schedule(&net, &state, &bots).expect("the plan schedules");
+    }
 }

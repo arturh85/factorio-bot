@@ -67,4 +67,23 @@ mod tests {
             "an inserter is cardinal; a diagonal is a caller bug, not a default"
         );
     }
+
+    /// **Defends the sign convention.** Screen coordinates here use +y for
+    /// south, not north. A future edit that inverts the north/south directions
+    /// would pass the horizontal tests but fail this one.
+    #[test]
+    fn an_inserter_picks_up_from_north_when_moving_south_in_screen_coordinates() {
+        let north = Position::new(0.5, 0.5);
+        let south = Position::new(0.5, 2.5);
+        assert_eq!(
+            inserter_facing(&north, &south),
+            Some(Direction::North),
+            "moving items north -> south (positive y) means facing NORTH, the pickup side"
+        );
+        assert_eq!(
+            inserter_facing(&south, &north),
+            Some(Direction::South),
+            "and the reverse faces south"
+        );
+    }
 }

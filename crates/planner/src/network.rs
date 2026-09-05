@@ -257,10 +257,25 @@ impl ActionNetwork {
                     if world_scoped != world_pass {
                         continue;
                     }
+                    // Since 2026-09-05 the same chain is skipped too. Within
+                    // a chain the pairing is stated exactly by
+                    // `method::run_steps`, which links each consumer to the
+                    // producers whose stock it spends -- the assignment this
+                    // doc says belongs with the methods. Inferring it here as
+                    // well ordered every plate consumer on a chain after
+                    // *every* earlier plate producer on it: on
+                    // `producing:logistic-science-pack:6` bot 1's chain
+                    // placed its cells one per take -- place, wait 8,400,
+                    // place, wait 8,400 -- because each drill's six
+                    // hand-smelted gear plates were paired with the previous
+                    // cell's thirty-two-plate take. Hypotheses 1 and 2 hold
+                    // within a chain exactly as across two, and the scheduler
+                    // defers a consumer whose bot does not yet hold the items
+                    // rather than failing, so nothing is lost by leaving the
+                    // order to the stated edge.
                     if !world_scoped
-                        && let (Some(p), Some(c)) =
-                            (self.chain_of(*producer), self.chain_of(*consumer))
-                        && p != c
+                        && self.chain_of(*producer).is_some()
+                        && self.chain_of(*consumer).is_some()
                     {
                         continue;
                     }
@@ -1009,8 +1024,14 @@ mod tests {
         assert_eq!(net.owner_of(ChainId(1)), None);
     }
 
+    /// A role-scoped `HasItem` pairing is left to the driver's stated edge
+    /// whenever both actions sit on a chain -- the same chain included,
+    /// since 2026-09-05. It used to be inferred within a chain, which paired
+    /// every consumer of an item with every earlier producer of it on the
+    /// chain and stood a plan's cells one per take (see the method's doc).
+    /// A free action still gets its edge: nothing says it is separate work.
     #[test]
-    fn inference_does_not_link_across_chains() {
+    fn inference_leaves_a_chains_item_pairings_to_the_stated_edge() {
         let mut id_gen = ActionIdGen::new();
         let mut net = ActionNetwork::new();
         let a_mine = net.add(mine(&mut id_gen, "iron-plate", 2));
@@ -1024,8 +1045,24 @@ mod tests {
 
         net.infer_edges();
 
-        assert_eq!(net.preds(a_craft), vec![(a_mine, 0)], "chain 0 only");
-        assert_eq!(net.preds(b_craft), vec![(b_mine, 0)], "chain 1 only");
+        assert!(
+            net.preds(a_craft).is_empty(),
+            "within a chain the supply edge is `run_steps`'s to state: {:?}",
+            net.preds(a_craft)
+        );
+        assert!(net.preds(b_craft).is_empty(), "and never across chains");
+
+        // Free actions, in a network of their own: nothing says they are
+        // separate work, so the edge stands.
+        let mut free = ActionNetwork::new();
+        let free_mine = free.add(mine(&mut id_gen, "iron-plate", 2));
+        let free_craft = free.add(craft(&mut id_gen, "iron-plate", 2, "iron-gear-wheel"));
+        free.infer_edges();
+        assert_eq!(
+            free.preds(free_craft),
+            vec![(free_mine, 0)],
+            "a free consumer is still ordered after its producer"
+        );
     }
 
     #[test]

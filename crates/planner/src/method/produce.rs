@@ -1530,81 +1530,56 @@ struct LiveCell {
 /// already spoken for is not offered again -- that is the exhaustion the live
 /// run hit (`take 64 ... removed 40`), moved from the game into the model.
 fn cell_ledger(state: &PlanState, spec: &CellSpec) -> Vec<LiveCell> {
-    let mut seen: BTreeSet<Pos> = BTreeSet::new();
     let mut out: Vec<LiveCell> = Vec::new();
-    for patch in state.resource_patches(&spec.ore) {
-        let centre = Position::new(
-            (patch.rect.left_top.x() + patch.rect.right_bottom.x()) / 2.,
-            (patch.rect.left_top.y() + patch.rect.right_bottom.y()) / 2.,
-        );
-        let reach = (patch.rect.width() / 2.).hypot(patch.rect.height() / 2.)
-            + f64::from(CELL_SEARCH_RADIUS)
-            + CELL_PAIR_RADIUS;
-        for drill in state.entities_within(&centre, reach) {
-            if drill.name != DRILL || !seen.insert(Pos::from(&drill.position)) {
-                continue;
-            }
-            let Some(facing) = Direction::from_u8(drill.direction) else {
-                continue;
-            };
-            let Some(furnace) = state
-                .entities_within(&drill.position, CELL_PAIR_RADIUS)
-                .into_iter()
-                .find(|target| {
-                    target.name == FURNACE && state.delivers_into(&drill.position, &target.position)
-                })
-            else {
-                continue;
-            };
-            let Some(area) = state.collision_area_facing(DRILL, &drill.position, facing) else {
-                continue;
-            };
-            let claimed = footprint_tiles(&area)
-                .iter()
-                .any(|tile| state.is_resource_claimed(&Position::from(tile)));
-            let (queued, started_by) = match state.machine_queue(&furnace.position) {
-                Some(queue) => {
-                    if queue.item != spec.item {
-                        continue;
-                    }
-                    // This plan's cell, live only once its placement has
-                    // been simulated -- the claim is the mark; see above.
-                    if !claimed {
-                        continue;
-                    }
-                    (queue.queued, Some(queue.release))
+    for (drill, facing, furnace) in drill_fed_pairs(state, spec) {
+        let Some(area) = state.collision_area_facing(DRILL, &drill.position, facing) else {
+            continue;
+        };
+        let claimed = footprint_tiles(&area)
+            .iter()
+            .any(|tile| state.is_resource_claimed(&Position::from(tile)));
+        let (queued, started_by) = match state.machine_queue(&furnace) {
+            Some(queue) => {
+                if queue.item != spec.item {
+                    continue;
                 }
-                None => {
-                    // Standing from an earlier plan. A claim under it with
-                    // no queue on its furnace is a hand's, and a tile a hand
-                    // has spoken for is not offered twice; a furnace a
-                    // hand-smelt has committed is that smelt's.
-                    if claimed || state.machine_committed(&furnace.position) {
-                        continue;
-                    }
-                    if !state.covers_resource(&area, &spec.ore) {
-                        continue;
-                    }
-                    (0, None)
+                // This plan's cell, live only once its placement has been
+                // simulated -- the claim is the mark; see above.
+                if !claimed {
+                    continue;
                 }
-            };
-            let room = cell_yield(state, &drill.position, facing, &spec.ore);
-            if room == 0 {
-                continue;
+                (queue.queued, Some(queue.release))
             }
-            out.push(LiveCell {
-                cell: Cell {
-                    drill: drill.position.clone(),
-                    facing,
-                    furnace: furnace.position.clone(),
-                },
-                room,
-                queued,
-                started_by,
-                drill_fuel: state.fuelled(&drill.position, "coal"),
-                furnace_fuel: state.fuelled(&furnace.position, "coal"),
-            });
+            None => {
+                // Standing from an earlier plan. A claim under it with no
+                // queue on its furnace is a hand's, and a tile a hand has
+                // spoken for is not offered twice; a furnace a hand-smelt
+                // has committed is that smelt's.
+                if claimed || state.machine_committed(&furnace) {
+                    continue;
+                }
+                if !state.covers_resource(&area, &spec.ore) {
+                    continue;
+                }
+                (0, None)
+            }
+        };
+        let room = cell_yield(state, &drill.position, facing, &spec.ore);
+        if room == 0 {
+            continue;
         }
+        out.push(LiveCell {
+            cell: Cell {
+                drill: drill.position.clone(),
+                facing,
+                furnace: furnace.clone(),
+            },
+            room,
+            queued,
+            started_by,
+            drill_fuel: state.fuelled(&drill.position, "coal"),
+            furnace_fuel: state.fuelled(&furnace, "coal"),
+        });
     }
     out.sort_by(|a, b| {
         a.queued
@@ -1627,12 +1602,32 @@ fn cell_ledger(state: &PlanState, spec: &CellSpec) -> Vec<LiveCell> {
 /// that decides one thing: a cell with more queued than a cell takes to
 /// stand ([`bound`](Self::bound)) is a cell this fragment would wait on
 /// longer than a hand would take, so it is not offered, and the fragment
-/// goes by hand unless it pays for a cell of its own. Once the plan has as
-/// many live cells as match the roster's own hand-mining rate
-/// ([`cap`](Self::cap)) every cell is offered whatever its backlog: past that
-/// the hands are the slower supply, and measured on
-/// `producing:logistic-science-pack:6` the difference is 7 drills, 217,766
-/// ticks and 19,560 ticks of hand-mining against 10, 233,002 and 29,160.
+/// goes by hand unless it pays for a cell of its own.
+///
+/// # The cap that used to override the bound, and why it is gone
+///
+/// Until 2026-09-05, once the plan had stood as many cells as match the
+/// roster's hand-mining rate (two a bot -- eight on four bots) every cell
+/// was offered *whatever its backlog*, on the argument that past that
+/// point the hands are the slower supply. Two things were wrong with it,
+/// and the first hid the second. The count took every furnace near the
+/// patch with a queue for the item, and a hand-smelt's furnace carries the
+/// same `queue_machine` entry -- so on `producing:logistic-science-pack:6`
+/// it read 8 with **five** drills standing and three hand-smelt furnaces,
+/// and from then on every fragment of bot 1's -- the drills' own three-,
+/// six- and twelve-plate bills among them -- was queued behind cells
+/// carrying 8,640 to 30,000 ticks: `take 12 iron-plate` waited 21,830 ticks
+/// behind bot 4's 78 science plates for what a hand makes in 1,500, and the
+/// drill it was for stood at tick 79,000. That is the serial ladder of
+/// cells the run record showed. Counting only drill-fed furnaces, the cap
+/// still trips honestly at eight on green and does the same thing a little
+/// later: 143,745 ticks with it, **97,232** without, on
+/// `workspace/scripts/map.json` over four bots (the solo rung-1 fixture
+/// moves 31,482 -> 29,260 the same way). The argument was about
+/// throughput; a fragment asks about latency, and a cell past the bound is
+/// a wait a hand beats however many cells stand. The one place a
+/// backlogged cell is still drawn on is `PlaceDrill::expand`'s no-room
+/// path, where nothing else can serve.
 ///
 /// **Opening a cell on that backlog was measured and rejected.** With "open
 /// another while every live cell is past the bound, up to two cells a bot",
@@ -1658,27 +1653,10 @@ impl Drain {
     fn new(state: &PlanState, spec: &CellSpec) -> Self {
         let live = cell_ledger(state, spec);
         let bound = Self::bound(state, spec);
-        // Cells *stood*, not cells live: a cell this plan has already spent
-        // to the last ore is capacity it built, and the question is whether
-        // the roster's rate has been matched by building, not whether every
-        // cell still has ground. Measured on
-        // `producing:logistic-science-pack:6`: counting live cells instead
-        // made 10 drills, 234,213 ticks and 25,200 ticks of hand-mining out
-        // of 7, 217,766 and 19,560.
-        let eligible: Vec<LiveCell> = if cells_stood(state, spec) >= Self::cap(state, spec) {
-            live.clone()
-        } else {
-            live.iter().filter(|c| c.queued < bound).cloned().collect()
-        };
+        // Under the bound, and only under it -- see the type's doc for the
+        // cap this replaced.
+        let eligible: Vec<LiveCell> = live.iter().filter(|c| c.queued < bound).cloned().collect();
         Drain { live, eligible }
-    }
-
-    /// Cells that match the roster's own hand-mining rate: hand ticks an ore
-    /// over the cell's ticks an item, times the roster. Vanilla: two a bot.
-    fn cap(state: &PlanState, spec: &CellSpec) -> usize {
-        let hand = mining_ticks(state, &spec.ore).max(1);
-        let per_bot = spec.ticks_per_item.div_ceil(hand).max(1) as usize;
-        per_bot.saturating_mul(state.bot_ids().len()).max(1)
     }
 
     /// Backlog past which a fragment would wait longer than a cell takes to
@@ -1690,11 +1668,20 @@ impl Drain {
     }
 }
 
-/// How many cells for `spec` this plan has stood, placed or still being
-/// billed, spent or not: the furnaces carrying [`promise`]'s queue entry for
-/// the item.
-fn cells_stood(state: &PlanState, spec: &CellSpec) -> usize {
+/// Every burner drill near a patch of the cell's ore that delivers into a
+/// stone furnace: `(drill, facing, furnace)`, each drill once, in the order
+/// the patches and the entity query return them.
+///
+/// Extracted from [`cell_ledger`] on 2026-09-05 for a cell *count* that
+/// has since been deleted with the cap it served (see [`Drain`]); kept as
+/// the one place the pair is defined. It does **not** ask whether the drill
+/// stands on ore -- the ledger asks that of each pair itself.
+fn drill_fed_pairs(
+    state: &PlanState,
+    spec: &CellSpec,
+) -> Vec<(FactorioEntity, Direction, Position)> {
     let mut seen: BTreeSet<Pos> = BTreeSet::new();
+    let mut out = Vec::new();
     for patch in state.resource_patches(&spec.ore) {
         let centre = Position::new(
             (patch.rect.left_top.x() + patch.rect.right_bottom.x()) / 2.,
@@ -1703,17 +1690,26 @@ fn cells_stood(state: &PlanState, spec: &CellSpec) -> usize {
         let reach = (patch.rect.width() / 2.).hypot(patch.rect.height() / 2.)
             + f64::from(CELL_SEARCH_RADIUS)
             + CELL_PAIR_RADIUS;
-        for furnace in state.entities_within(&centre, reach) {
-            if furnace.name == FURNACE
-                && state
-                    .machine_queue(&furnace.position)
-                    .is_some_and(|queue| queue.item == spec.item)
-            {
-                seen.insert(Pos::from(&furnace.position));
+        for drill in state.entities_within(&centre, reach) {
+            if drill.name != DRILL || !seen.insert(Pos::from(&drill.position)) {
+                continue;
             }
+            let Some(facing) = Direction::from_u8(drill.direction) else {
+                continue;
+            };
+            let Some(furnace) = state
+                .entities_within(&drill.position, CELL_PAIR_RADIUS)
+                .into_iter()
+                .find(|target| {
+                    target.name == FURNACE && state.delivers_into(&drill.position, &target.position)
+                })
+            else {
+                continue;
+            };
+            out.push((drill, facing, furnace.position.clone()));
         }
     }
-    seen.len()
+    out
 }
 
 /// Record on the furnace what this plan has now promised out of `cell`:
@@ -2124,6 +2120,27 @@ fn fuel_both(
 /// Sited on ground that holds [`site_ore`] -- the take, the headroom, an
 /// allowance for a stale amount, and never less than a load -- from where the
 /// acting bot stands.
+///
+/// # One cell per share, and that was measured on 2026-09-05
+///
+/// A share of any size stands one cell and waits on it: `have 78 iron-plate`
+/// is one drill with 18,720 ticks queued. Splitting a share across
+/// `ceil(need / c)`-plate cells built by the rest of the roster in
+/// [`Step::Owned`] blocks -- each builder bringing the drill, the furnace
+/// and the coal, the taker only taking -- was built and measured on
+/// `workspace/scripts/map.json` over four bots, and lost on every goal:
+/// `researched:automation` 25,886 -> 27,836, `producing:automation-science-pack:6`
+/// 39,118 -> 48,559, `producing:logistic-science-pack:6` 97,232 -> 122,718.
+/// Each builder's own share needs its starter drill, so a cell built for
+/// someone else costs a crafted drill whose nine plates queue on the
+/// hand-smelt bank; the taker still waits for the slower of its cells; and
+/// the plan's real serialisation was never this wait -- it was every plate
+/// consumer on a chain being ordered after every earlier plate producer
+/// (`ActionNetwork::infer_edges`, narrowed the same day) and the drain cap
+/// tripping on hand-smelt furnaces (see [`Drain`]). With those two fixed,
+/// green's makespan fell by a quarter with one cell per share. The count
+/// lever the world-record replays show is real, and it is a *rate* decision
+/// -- `Producing` standing its ore cells up front -- not a per-fragment one.
 fn open_cell_steps(
     ctx: &mut ExpansionCtx,
     spec: &CellSpec,
@@ -2187,8 +2204,7 @@ fn open_cell_steps(
         }
     }
     let last = timed.last().map(|(id, _)| *id);
-    if let (Some(last), Some(started_by)) = (last, fuel_ids.first().copied()) {
-        let _ = last;
+    if let (Some(_), Some(started_by)) = (last, fuel_ids.first().copied()) {
         promise(ctx, spec, &cell, started_by, need);
     }
     Ok((steps, last))
@@ -2966,7 +2982,8 @@ mod tests {
         // 5,800 -> 5,810 when the fuel load started carrying the smelting lag
         // (`have::every_fuel_load_gates_the_take_by_the_whole_smelting_time`).
         // Moved by the lookahead scheduling key (51c7f695): a bound over the bot's other ready work replaces (end, id) as the primary key, and the plan overlaps the longer smelt under the shorter one.
-        assert_eq!(sched.makespan, 5466, "ticks for one bot to build one cell");
+        // 5466 -> 3989 on 2026-09-05: `infer_edges` no longer orders every plate consumer on the chain after every earlier plate producer; the stated supply edge (`run_steps`) is the only one, and the drill's and the furnace's bills overlap.
+        assert_eq!(sched.makespan, 3989, "ticks for one bot to build one cell");
     }
 
     #[test]
@@ -3340,6 +3357,119 @@ mod tests {
         );
         let plan = schedule(&net, &s, &bots).expect("it schedules");
         assert!(plan.makespan > 0);
+    }
+
+    /// A cell past the drain bound is not offered, however many cells stand.
+    /// The cap that used to override the bound -- "two a bot, then every
+    /// cell whatever its backlog" -- is gone; see [`Drain`] for the measured
+    /// reason. On a solo roster the old cap was two, so two backlogged
+    /// cells are exactly the case it used to open up.
+    #[test]
+    fn a_backlogged_cell_is_never_offered_however_many_stand() {
+        let bots = vec![BotId(1)];
+        let spec = iron();
+        // Stand both cells the way `run_steps` would: the placements'
+        // effects applied, so the drills' ground is claimed and the ledger
+        // reads the cells as live.
+        let stand = |queued: u32| -> ExpansionCtx {
+            let mut ctx = ExpansionCtx::new(state(&bots), BotId(1));
+            ctx.state.gain(BotId(1), DRILL, 2);
+            ctx.state.gain(BotId(1), FURNACE, 2);
+            let cells = plan_cells(&ctx.state, &Position::new(0., 0.), &spec, 2, 1)
+                .expect("the fixture sites two cells");
+            for cell in &cells {
+                let mut steps = Vec::new();
+                place_steps(&mut ctx, &spec, cell, &mut steps);
+                for step in &steps {
+                    if let Step::Act(action) = step {
+                        for effect in &action.eff {
+                            effect
+                                .apply(&mut ctx.state, BotId(1))
+                                .expect("a placement's effects apply");
+                        }
+                    }
+                }
+                let started_by = ctx.ids.next();
+                promise(&mut ctx, &spec, cell, started_by, queued);
+            }
+            ctx
+        };
+        // Fifty plates queued: 12,000 ticks, three times the bound.
+        let ctx = stand(50);
+        let drain = Drain::new(&ctx.state, &spec);
+        assert_eq!(drain.live.len(), 2, "both cells are live");
+        assert!(
+            drain.eligible.is_empty(),
+            "neither is offered past the bound: {:?}",
+            drain.eligible.iter().map(|c| c.queued).collect::<Vec<_>>()
+        );
+
+        // The same two cells with next to nothing queued are both offered.
+        let fresh = stand(1);
+        assert_eq!(Drain::new(&fresh.state, &spec).eligible.len(), 2);
+    }
+
+    /// Four bots each asking for a share of plates stand their cells on
+    /// more than one bot, and no cell's bill -- the drill's own gears and
+    /// plates -- is served out of another cell's take. That take would be
+    /// queued behind the other share (12,000 ticks here), which is the
+    /// serial ladder `run-1788569499-05724` showed live: bot 1 waiting on
+    /// `take 12 iron-plate from the cell` for the drill of its next cell
+    /// while the roster stood idle.
+    #[test]
+    fn four_bots_stand_their_own_cells_and_no_bill_waits_on_a_take() {
+        let bots = vec![BotId(1), BotId(2), BotId(3), BotId(4)];
+        let s = state(&bots);
+        let goals: Vec<Goal> = bots
+            .iter()
+            .map(|bot| Goal::Have {
+                item: "iron-plate".into(),
+                count: 50,
+                whose: Holder::Share(*bot),
+            })
+            .collect();
+        let net = expand(&goals, &s, &registry_for(&bots), BotId(1)).expect("four shares plan");
+        let plan = schedule(&net, &s, &bots).expect("it schedules");
+
+        let placers: BTreeSet<BotId> = bots
+            .iter()
+            .copied()
+            .filter(|bot| {
+                plan.steps_for(*bot).iter().any(|step| {
+                    matches!(&step.what, crate::schedule::StepKind::Act { label, .. }
+                        if label.starts_with("place burner-mining-drill"))
+                })
+            })
+            .collect();
+        assert!(
+            placers.len() >= 2,
+            "cells are stood on more than one bot: {placers:?}"
+        );
+
+        let is_take = |id: ActionId| {
+            net.action(id)
+                .is_some_and(|a| a.label.contains("from the cell"))
+        };
+        for craft in net
+            .actions()
+            .filter(|a| a.label.starts_with("craft 1 burner-mining-drill"))
+        {
+            let mut seen: BTreeSet<ActionId> = BTreeSet::new();
+            let mut stack: Vec<ActionId> =
+                net.preds(craft.id).into_iter().map(|(id, _)| id).collect();
+            while let Some(id) = stack.pop() {
+                if !seen.insert(id) {
+                    continue;
+                }
+                assert!(
+                    !is_take(id),
+                    "{} is downstream of {}",
+                    craft.label,
+                    net.action(id).map(|a| a.label.as_str()).unwrap_or("?")
+                );
+                stack.extend(net.preds(id).into_iter().map(|(id, _)| id));
+            }
+        }
     }
 
     // ---- cells an earlier plan left standing --------------------------------

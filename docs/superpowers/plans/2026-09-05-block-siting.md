@@ -868,3 +868,105 @@ Both must be 0. Then merge master in, re-run, and land per `superpowers:finishin
 **Spec coverage:** replan stability → Task 2 + Task 5's test; ring search with bounded radius and typed refusal → Task 3; ore-awareness with tile-centre warning → Task 4; determinism → Tasks 3 and 7; offline-then-headless evidence → Task 7; `Site` shape → Tasks 1 and 6. The spec's "honest limit" on one-entity blueprints is documented in `recover_anchor`'s doc comment in Task 2.
 
 **Known soft spot, deliberately left for the implementer:** Task 4's `drills_are_fed` sketches an API (`mine_products`, `covers_any_resource`) that may not match what `PlanState` actually offers — the step says so explicitly and directs the implementer to read `state.rs` first rather than trust the sketch. That is honest about what I verified (the helpers exist) versus what I did not (their exact semantics for this use).
+
+---
+
+### Task 8: Ghosts mark the site (owner-directed, added 2026-09-06)
+
+The owner directed this after Tasks 1-3 were planned. It replaces vote-based
+recovery as the PRIMARY mechanism and keeps voting as the fallback.
+
+**Why it is better than what Task 2 built**, and not merely different: a ghost
+records the siting decision in the world *before any real entity exists*. That
+dissolves the Important finding the Task 2 review raised — with `satisfied >= 2`
+a block with exactly one entity standing recovers nothing, falls into a fresh
+search, and can be sited twice. With ghosts there is no such window, the
+threshold stops being load-bearing, and an unambiguous marker replaces a guess.
+The owner's second reason is a product one: the viewer and the recorded video
+show the *plan* — ghosts appear, then fill in — instead of entities popping into
+existence with no visible intent.
+
+**Files:**
+- Modify: `crates/planner/src/action.rs` (a new `ActionKind`)
+- Modify: `crates/planner/src/method/blueprint.rs` (emit it first; ghost-aware recovery)
+- Modify: `crates/executor/src/rcon_actuator.rs` (dispatch it)
+- Test: all three, plus a live check
+
+**Interfaces:**
+- Consumes: `recover_anchor` (Task 2), `resolve_site` (Task 5).
+- Produces: `ActionKind::StampGhosts { blueprint: String, anchor: Position }`.
+
+- [ ] **Step 1: FIRST, answer two questions in a live game — the rest is built on them**
+
+Neither is answerable by reading. Run against a scratch world, not a measured
+run, and ping the speedrun session for the box first.
+
+```bash
+# Does a ghost expire? The mod never sets ghost_time_to_live, so it takes the
+# force default. If ghosts expire, the marker silently vanishes mid-run and
+# recovery falls back without saying so -- this repo's signature bug class.
+factorio-bot rcon -s localhost -- '/c rcon.print(game.forces["player"].ghost_time_to_live)'
+
+# Does placing a real entity over a ghost CONSUME the ghost, or leave it?
+# Leftover ghosts make a finished block look unfinished, which defeats the
+# whole viewer benefit.
+```
+
+**If ghosts expire by default, stop and report.** The fix is either setting
+`ghost_time_to_live = 0` for the force (a world mutation with its own
+consequences, and a decision for the owner) or abandoning ghosts as the marker.
+Do not silently work around it.
+
+- [ ] **Step 2: Write the failing test for ghost-aware recovery**
+
+```rust
+#[test]
+fn a_ghost_recovers_the_anchor_with_no_real_entity_standing() {
+    // The whole point: the anchor is known before ANY real entity exists,
+    // which is exactly the window vote-based recovery cannot cover.
+    let bp = Blueprint {
+        entities: vec![
+            at_named(0.0, 0.0, "stone-furnace"),
+            at_named(3.0, 0.0, "stone-furnace"),
+        ],
+        version: BLUEPRINT_VERSION_2_0,
+    };
+    let mut state = test_state();
+    state.create_entity(ghost_of("stone-furnace", 20.5, 20.5));
+
+    let recovered = recover_anchor(&state, &bp).expect("a ghost is a site marker");
+    assert_eq!(Pos::from(&recovered), Pos::from(&Position::new(20.5, 20.5)));
+}
+```
+
+`ghost_of` builds a `FactorioEntity` with `name: "entity-ghost"` and
+`ghost_name: Some(real_name)` — that separation is what stops a ghost being
+read as a built entity, so preserve it rather than faking a ghost as a
+same-named entity.
+
+- [ ] **Step 3: Ghost-aware recovery, ghosts first**
+
+`recover_anchor` gains a pass that matches a blueprint entity against an
+entity whose `ghost_name` equals its name. A ghost match is EXACT — one is
+enough, no `satisfied >= 2` floor — because a ghost is placed by us and means
+only one thing, where a standing furnace might belong to anyone. Fall through
+to the existing vote path when no ghost is found.
+
+- [ ] **Step 4: Emit the stamp as the block's first action**
+
+`ActionKind::StampGhosts` emitted once per block, before any `Place`, with the
+resolved anchor. The planner stays pure — it emits the action, it does not
+place anything.
+
+- [ ] **Step 5: Executor dispatch**
+
+`rcon_actuator` calls the existing `place_blueprint(player, blueprint, anchor,
+only_ghosts = true)`. **The mod needs no change** — `rcon_place_blueprint`
+already takes `only_ghosts` and `crates/core/src/factorio/rcon.rs` already
+binds it. Verified 2026-09-06.
+
+- [ ] **Step 6: Full suite, clippy, commit**
+
+Ghosts do not collide, so the stamp must not change any clearance result. If a
+`placement_occupant` test starts failing after this task, that is a real defect,
+not a test to update: it would mean the marker is blocking the build it marks.

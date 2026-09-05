@@ -220,6 +220,29 @@ three bots one extra iron furnace (three actions) reorders bot 3's ready
 work and its `take 10 copper-ore from the wooden-chest` moves from 8,860 to
 13,473 with no furnace of its involved.
 
+## ✅ AUTOMATION: 6:05 ON RELEASE (`run-1788641738-65147`) — a new record, and the plan was right
+
+`just bench automation_speedrun.lua`, 2026-09-05 23:01, master `185faa11`,
+release profile, four clients at 1x, seed 31337 `--new`, 100% tick delivery.
+
+| | previous best | **now** |
+|---|---|---|
+| `researched:automation` | 6:11 (`run-1788582657-14978`) | **6:05** (21,922 ticks) |
+| plan | 21,985 | 21,775, one plan |
+| executed − planned | +286 | **+147 ticks (0.7%)** |
+| failed / lost / failed walks | 0 | **0 / 0 / 0** |
+| fleet utilisation | — | 38.2% |
+
+The margin over the record is small; the interesting number is the second
+one. Executed lands 147 ticks above a 21,775-tick plan, which is the walk
+model and the clock pause together: the planner's estimate of its own work
+is now right to under one percent, on a measured run, in the shipped release
+build.
+
+Utilisation is 38.2% — automation is short, local and gated on one research,
+which is why four bots buy only 1.25× here against 2.48× for green. Rates
+read `roster-fed; no generator until 4:06`, as every run does.
+
 ## ✅✅✅ RUN 17: GREEN IN 14:26 (`run-1788635061-85457`) — best on both measures
 
 2026-09-05 21:19, master `a7e3b0eb`, four clients at 1x, seed 31337 `--new`,
@@ -2762,7 +2785,7 @@ infrastructure for a 3h17m game, not a harder milestone.
 
 | goal | before | now |
 |---|---|---|
-| `researched("automation")` | 21.34 min | **6:11** measured on a fresh seed-`31337` map (`run-1788582657-14978`, release, one plan, zero failures); the record is 6:12 |
+| `researched("automation")` | 21.34 min | **6:05** measured on a fresh seed-`31337` map (`run-1788641738-65147`, release, one plan, zero failures, executed 0.7% over plan) |
 | red science cell standing | never satisfied, `stuck_silent` | satisfied in 1 iteration |
 | red science producing **once** | never observed | witnessed six times, all inside 780 ticks |
 | red science producing **at a rate** | impossible to claim | **5 packs in 3,240 ticks (~5.5/min)**, twice |

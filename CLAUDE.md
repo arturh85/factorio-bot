@@ -778,6 +778,22 @@ per-bot failed walks, frozen-position detection, repeated refused destinations,
 sample coverage, per-network power and per-machine status. It exists because
 the ad-hoc one-liners that produced those wrong answers were unrepeatable.
 
+**The first number is the production curve; the milestone tick is the second,
+and the record carries both** (owner rule, 2026-09-05: "prioritize production
+rates at given times over raw run time"). `just analyse` opens with cumulative
+production and /min at fixed game-time marks (5/10/15/20/25/30 min from
+`run_started`, `--marks` to change) plus a plateau detector, and the milestone
+spans follow as a peer section; the headline line carries both (`rates: iron
+32->57->43 /min at 5/10/15; ... | milestone 3 satisfied at 17:20`). Judge a
+`producing:`/rate goal on the curve and a `researched:`/first-event goal on
+the tick it flipped. Marks are game time, so a 5x headless run and a 1x client
+run are comparable *on rates* (not on wall time). `--rates-md` /
+`tools/rates_table.py` print the record's table -- generate it, do not type
+it. **Known limit as of 2026-09-05: production plateaus at the plan's bill.**
+In runs 13-15 iron stops at ~670 around minute 15 and red packs at 85, then
+nothing grows until the run ends: the cell makes what the plan asked for and no
+more, so a later mark measures the bill, not the factory.
+
 - **Game time, not wall clock.** `roster ready -> SATISFIED` on the clock
   includes client load and startup. One run read as 24.4 min on the clock and
   21.4 min of game time.

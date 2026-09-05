@@ -80,6 +80,29 @@ honestly, as before. Also fixed on the way: `scripting_lua`'s
 `plan_cell` call was one argument behind `bdec88af` and failed
 `--all-targets` clippy on master.
 
+## ✅ GREEN FROM A FRESH WORLD IN 26:32, ONE PLAN, ZERO FAILURES (`run-1788578779-80166`)
+
+Git `5c5087fb` (everything of the night: rocks, reach, fuel lag, recovery,
+deadlines, bot death, enclosure step-aside, drain, lookahead scheduler,
+ore-under-drill graph fix, research split with two labs, turned-box
+footprints, cell ladder). Fresh seed-31337 world, debug build, no resume.
+
+| | |
+|---|---|
+| green cell producing 6/min | **26:32** (95,527 ticks) |
+| green witness, 5 packs in 2,280 ticks | **27:10** |
+| plans | **1** — 799 steps, 619 actions, **0 failed, 0 lost, 360 of 360 walks** |
+| planned vs executed | 95,192 vs 95,527 — **0.35%** |
+| fleet utilisation | **36.0%** (bot 1 59.7%, bots 2–4 23–32%) |
+
+Fresh-world green over one night: **64:22 → 36:48 → 31:35 → 26:32**, and the
+last one needed no replan, no recovery and no refusal. Where the ticks go
+now: red-pack crafting 25,582 over six actions, hand-mining iron 86 actions /
+23,831 ticks (fragments still hand-mined beside 11 drills), research 12,599
+on two labs, copper 11,711. The named opens from the ladder agent are next:
+the starter drill ordered behind a crafted one by `infer_edges`, and
+`chop_beats_mining` answering per fragment.
+
 ## ✅ GREEN FROM A FRESH WORLD IN 31:35 (`run-1788576604-65414`) — footprint fix confirmed live
 
 Git `399c041c` (footprint fix in; cell ladder not yet), fresh seed-31337 world.
@@ -1871,7 +1894,7 @@ infrastructure for a 3h17m game, not a harder milestone.
 | red science producing **once** | never observed | witnessed six times, all inside 780 ticks |
 | red science producing **at a rate** | impossible to claim | **5 packs in 3,240 ticks (~5.5/min)**, twice |
 | green science, planning | did not expand at all | plans end to end |
-| green science, live | never run | **WITNESSED five times** — fresh world end to end in **31:35 / 32:15** (`run-1788576604-65414`); 64:22 → 36:48 → 31:35 over the night |
+| green science, live | never run | **WITNESSED six times** — fresh world end to end in **26:32 / 27:10** (`run-1788578779-80166`), one plan, zero failures; 64:22 → 36:48 → 31:35 → 26:32 over the night |
 | furnaces per run | 42 | **8** |
 | recovery (`obs:recover`) | never executed in any run | **fires live** |
 

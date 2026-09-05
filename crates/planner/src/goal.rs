@@ -1,6 +1,7 @@
 //! What we want, stated declaratively and without reference to any bot.
 
 use crate::ids::{BotId, ItemId};
+use factorio_bot_core::types::Position;
 use serde::{Deserialize, Serialize};
 
 /// Who must end up holding the items.
@@ -156,6 +157,20 @@ pub enum Goal {
         entity: String,
         unlocks: Option<String>,
     },
+    /// This blueprint stands at this anchor.
+    ///
+    /// **Shaped to survive replanning.** Expanding it means *the entities not
+    /// yet standing*, re-derived against the world every time, so it is
+    /// verifiable rather than a remembered instruction, and building it twice
+    /// is a no-op. Every other goal here is item-shaped for the same reason:
+    /// this planner replans constantly, and a goal naming particular machines
+    /// would be stale the moment a replan sited a different one.
+    Built {
+        /// The blueprint string, decoded on each expansion.
+        blueprint: String,
+        /// Where the blueprint's own origin lands in the world.
+        anchor: Position,
+    },
     All(Vec<Goal>),
 }
 
@@ -180,6 +195,9 @@ impl std::fmt::Display for Goal {
                 Some(tech) => write!(f, "extract from {} to unlock {}", entity, tech),
                 None => write!(f, "extract from {}", entity),
             },
+            Goal::Built { blueprint, anchor } => {
+                write!(f, "build {}-byte block at {}", blueprint.len(), anchor)
+            }
             Goal::All(goals) => write!(f, "all of {} goals", goals.len()),
         }
     }

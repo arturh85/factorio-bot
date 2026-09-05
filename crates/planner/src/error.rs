@@ -641,4 +641,13 @@ pub enum PlannerError {
     )]
     #[diagnostic(code(planner::expansion_too_deep))]
     ExpansionTooDeep { goal: String, depth: u32 },
+
+    /// A [`crate::goal::Goal::Built`] named a blueprint string
+    /// `factorio_bot_core::blueprint::decode` refuses -- not base64, not
+    /// zlib, not JSON, or content outside its allowlist. `reason` is the
+    /// decoder's own `Debug` rendering of the `BlueprintError`, which for
+    /// `Unsupported` names the offending key.
+    #[error("blueprint refused: {reason}")]
+    #[diagnostic(code(planner::blueprint_refused))]
+    BlueprintRefused { reason: String },
 }

@@ -4917,6 +4917,7 @@ pub fn default_registry() -> MethodRegistry {
         .with(Box::new(crate::method::assemble::BuildAssemblyCell {
             bots: Vec::new(),
         }))
+        .with(Box::new(crate::method::blueprint::BuildBlock))
 }
 
 /// Split a shared goal into one independent chain per bot.

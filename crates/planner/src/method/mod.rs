@@ -2,6 +2,7 @@
 //! runs them until only actions remain.
 
 pub mod assemble;
+pub mod blueprint;
 pub mod connect;
 pub mod extract;
 pub mod have;

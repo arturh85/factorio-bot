@@ -742,3 +742,52 @@ fn an_offset_of_exactly_three_tenths_is_steered_not_stranded() {
     );
     assert_eq!(failure(&lua), None);
 }
+
+/// **A character bot in the way is a bot, not a stranger.** `walk_stall_describe`
+/// named a blocking character by `LuaEntity.player`, which is nil for every
+/// server-side character, so a headless run's bot 1 -- mid-walk -- was
+/// reported as `character (no player)`, which the Rust side renders as "an
+/// undriven character" and treats as something nothing will ever move.
+/// Resolved through `storage.bots` it reads exactly as a client bot does:
+/// `character #1 (walking)`, parsed by `walk_blocker` to the bot id and its
+/// activity.
+#[test]
+fn a_registry_character_blocking_a_walk_is_named_as_the_bot_it_is() {
+    let lua = load(&format!(
+        r#"{INIT_STORAGE}
+        local acting = make_player(2, 0, 0)
+        acting.force = {{ name = "player" }}
+        -- Bot 1's character: no `player` field at all, only a registry entry.
+        local blocker = {{
+            valid = true, type = "character", name = "character", unit_number = 101,
+            force = {{ name = "player" }},
+            position = {{ x = 1, y = 0 }},
+            prototype = {{ collision_box = {{
+                left_top = {{ x = -0.2, y = -0.2 }}, right_bottom = {{ x = 0.2, y = 0.2 }} }} }},
+        }}
+        storage.bots = {{ [1] = {{ entity = blocker, name = "bot-1" }} }}
+        storage.p[1] = {{ walking = {{ idx = 1, waypoints = {{}}, action_id = 5 }} }}
+        acting.surface.find_entities_filtered = function(args) return {{ blocker }} end
+        acting.surface.get_tile = function(x, y) return {{ valid = true, name = "grass-1" }} end
+        rcon.print(walk_stall_cause(acting, {{ x = 0, y = 0 }}, {{ x = 5, y = 0 }}, 1, 0))
+    "#
+    ));
+    let lines: Vec<String> = lua
+        .load("return _rcon_lines")
+        .eval::<mlua::Table>()
+        .expect("_rcon_lines")
+        .sequence_values::<String>()
+        .map(|l| l.expect("a line"))
+        .collect();
+    assert_eq!(lines.len(), 1, "one clause, got {lines:?}");
+    let clause = &lines[0];
+    assert!(
+        clause.contains("by character #1 (walking)"),
+        "a character bot is named by its bot id and what it is doing, not as \
+         `(no player)`. Got {clause}"
+    );
+    let blocker = walk_blocker(clause).unwrap_or_else(|| panic!("unparsed: {clause}"));
+    assert_eq!(blocker.kind, WalkBlockerKind::Character);
+    assert_eq!(blocker.player, Some(1), "{clause}");
+    assert_eq!(blocker.activity.as_deref(), Some("walking"), "{clause}");
+}

@@ -447,6 +447,19 @@ const PARKED_STRANGER: &str = r#"
         left_top = { x = -21.67, y = 23.43 },
         right_bottom = { x = -21.27, y = 24.03 } } }
 "#;
+/// The same character as a **headless character bot**: no player behind it
+/// (`LuaEntity.player` is nil for every server-side character), only a
+/// `storage.bots` registry entry that names it by `unit_number`. Bot 3 of
+/// `run-1788608648-56109`, in effect -- the run whose three placements each
+/// failed after four refusals because nothing asked this character to move.
+const PARKED_CHARACTER_BOT: &str = r#"
+    { name = "character", type = "character", bot_id = 3, valid = true,
+      unit_number = 303,
+      position = { x = -21.47, y = 23.73 },
+      bounding_box = {
+        left_top = { x = -21.67, y = 23.43 },
+        right_bottom = { x = -21.27, y = 24.03 } } }
+"#;
 /// Something that is *not* going to walk away, in the same footprint.
 const TREE: &str = r#"
     { name = "tree-01", type = "tree", bounding_box = {
@@ -545,6 +558,26 @@ fn stub_refused_place(player_position: (f64, f64), occupants: &str) -> String {
                 e.player = blocker
                 players[e.player_index] = blocker
                 storage.p[e.player_index] = {{}}
+            end
+            -- A character bot: registered by `unit_number` through a
+            -- *different* Lua value from the one the footprint scan returns,
+            -- as the live game hands back a fresh `LuaEntity` per query.
+            if e.bot_id ~= nil then
+                storage.bots = storage.bots or {{}}
+                storage.bots[e.bot_id] = {{
+                    name = "bot-" .. e.bot_id,
+                    entity = {{
+                        valid = true,
+                        name = "character",
+                        type = "character",
+                        unit_number = e.unit_number,
+                        position = e.position,
+                        surface = surface,
+                        character_running_speed = 0.15,
+                        walking_state = {{ walking = false }},
+                    }},
+                }}
+                storage.p[e.bot_id] = {{}}
             end
         end
         game = {{
@@ -958,6 +991,39 @@ fn a_character_with_no_player_is_asked_nothing_and_does_not_raise() {
         one_line_reply(&lua),
         "cannot place item 'stone-furnace' because a character is standing in the footprint",
         "and the reply is unaffected by there being nobody to move"
+    );
+}
+
+/// **The headless defect.** `step_aside_from_footprint` used to identify the
+/// character it found by `LuaEntity.player`, which is nil for every character
+/// bot -- so a headless roster's blocker was a stranger to it, and it asked
+/// nobody to move. `run-1788608648-56109` (`--headless --bots 4`) refused a
+/// burner drill, an assembler and one more placement four times each over
+/// 543 ticks, failed all three, and ended `stuck` after four plans; the same
+/// plan family with graphical clients never refused one. The registry
+/// (`storage.bots`) is the identity seam, and `bot_of_character` resolves
+/// through it, so a character bot is asked to step aside exactly as a client
+/// bot is -- and under the same bot id.
+#[test]
+fn a_parked_character_bot_in_the_footprint_is_asked_to_walk_out_too() {
+    let lua = refuse(ACTOR_AWAY, PARKED_CHARACTER_BOT);
+    assert_eq!(
+        one_line_reply(&lua),
+        "cannot place item 'stone-furnace' because a character is standing in the footprint",
+        "still the transient wording, so the ledger learns nothing about the ground"
+    );
+    let moved = asked_to_move(&lua);
+    assert_eq!(
+        moved.len(),
+        1,
+        "the character bot has no player, and the registry is how it is found. \
+         Got {moved:?}"
+    );
+    let (idx, waypoint) = moved[0];
+    assert_eq!(idx, 3, "walked under its bot id, the one the executor addresses");
+    assert!(
+        !inside_footprint(waypoint),
+        "{waypoint:?} is inside {FOOTPRINT:?}"
     );
 }
 

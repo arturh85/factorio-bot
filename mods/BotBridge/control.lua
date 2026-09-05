@@ -489,16 +489,18 @@ end
 function walk_stall_describe(entity, acting_player)
 	local t = entity.type
 	if t == "character" then
-		-- `LuaEntity.player` is nil for a character nobody is driving. That is
-		-- not a hypothetical here: a disconnected bot leaves its character
-		-- standing exactly where it was, and it is still solid.
-		local blocker = entity.player
-		if blocker == nil then return "character (no player)" end
+		-- `LuaEntity.player` is nil for a character nobody is driving, and
+		-- nil for every character bot -- see `bot_of_character`. A character
+		-- neither a player nor the registry claims is still solid: a
+		-- disconnected bot leaves its character standing exactly where it
+		-- was.
+		local blocker_id = bot_of_character(entity)
+		if blocker_id == nil then return "character (no player)" end
 		-- **What it is doing is the point of naming it.** `step_aside_from_footprint`
 		-- steers only a blocker that is neither walking nor mining, so a
 		-- blocker reported `(mining)` is one nothing is going to move, and a
 		-- caller waiting for it to wander off is waiting for nothing.
-		local state = storage.p[blocker.index]
+		local state = storage.p[blocker_id]
 		local doing = "idle"
 		if state ~= nil then
 			if state.walking ~= nil then
@@ -507,7 +509,7 @@ function walk_stall_describe(entity, acting_player)
 				doing = "mining"
 			end
 		end
-		return "character #" .. blocker.index .. " (" .. doing .. ")"
+		return "character #" .. blocker_id .. " (" .. doing .. ")"
 	elseif t == "tree" then
 		return "tree '" .. entity.name .. "'"
 	elseif t == "simple-entity" then
@@ -3765,15 +3767,18 @@ end
 function step_aside_from_footprint(surface, footprint, position, acting_player)
 	local bb = add_to_bounding_box(footprint, position)
 	for _, character in ipairs(surface.find_entities_filtered{ area = bb, type = "character" }) do
-		-- `LuaEntity.player` is "the player connected to this character, if
-		-- any" **[V]** (runtime-api.json, Factorio 2.1.17, api 6). Nil for a
-		-- character nobody is driving, which cannot be asked to walk and must
-		-- not raise here -- a raise inside an RCON handler costs the caller
-		-- its whole reply.
-		local blocker = character.player
-		if blocker ~= nil and blocker.index ~= acting_player.index
+		-- Resolved through `bot_of_character`, not `LuaEntity.player`: the
+		-- latter is nil for every character bot, and reading it here is what
+		-- left a headless roster's blockers unasked -- `run-1788608648-56109`
+		-- refused three placements four times each over 543 ticks, failed
+		-- them, and replanned, while the same plan family with clients never
+		-- refused one. A character nobody claims cannot be asked to walk and
+		-- must not raise here -- a raise inside an RCON handler costs the
+		-- caller its whole reply.
+		local blocker_id, blocker = bot_of_character(character)
+		if blocker_id ~= nil and blocker_id ~= acting_player.index
 			and blocker.connected and blocker.character ~= nil then
-			local state = storage.p[blocker.index]
+			local state = storage.p[blocker_id]
 			if state ~= nil and state.walking == nil and state.mining == nil then
 				local target = placement_step_aside_target(bb, character)
 				local landing = surface.find_non_colliding_position(
@@ -3784,7 +3789,7 @@ function step_aside_from_footprint(surface, footprint, position, acting_player)
 				-- that costs time and changes nothing. Either way, better no
 				-- walk than a walk that ends in a leg timeout.
 				if landing ~= nil and not position_in_rect(landing, bb) then
-					start_walk_waypoints(PLACEMENT_STEP_ASIDE_ACTION_ID, blocker.index,
+					start_walk_waypoints(PLACEMENT_STEP_ASIDE_ACTION_ID, blocker_id,
 						{ { landing.x, landing.y } }, true)
 				end
 			end
@@ -5202,15 +5207,50 @@ function each_bot()
 end
 
 -- The id of the character bot that owns `entity`, or nil.
+--
+-- Matched by identity first -- two `LuaEntity` values for the same entity
+-- compare equal -- and by `unit_number` second, which is what a stub game
+-- can supply and what survives the registry entry being a different Lua
+-- value from the one `find_entities_filtered` handed back. `valid` is tested
+-- against `false` rather than for truth so an entity that never had the
+-- field (a stub) is not mistaken for a dead one.
 function character_bot_id_of(entity)
 	local bots = character_bots()
-	if bots == nil or entity == nil or not entity.valid or entity.name ~= "character" then return nil end
+	if bots == nil or entity == nil or entity.valid == false
+		or (entity.name ~= "character" and entity.type ~= "character") then
+		return nil
+	end
 	for id, bot in pairs(bots) do
-		if bot.entity ~= nil and bot.entity.valid and bot.entity.unit_number == entity.unit_number then
-			return id
+		local ent = bot.entity
+		if ent ~= nil and ent.valid ~= false then
+			if ent == entity then return id end
+			local n = ent.unit_number
+			if n ~= nil and n == entity.unit_number then return id end
 		end
 	end
 	return nil
+end
+
+-- **The one way to get from a character entity to the bot it is.** Returns
+-- `(bot id, handle)` -- the handle being what `bot_handle` gives for that id
+-- -- or nil for a character nobody claims.
+--
+-- `LuaEntity.player` is "the player connected to this character, if any"
+-- **[V]** (runtime-api.json, Factorio 2.1.17, api 6), and a character bot has
+-- no player, so every site that identified a blocking character by that field
+-- saw a headless roster as a crowd of undriven strangers: `walk_stall_describe`
+-- reported a walking bot 1 as `character (no player)`, and
+-- `step_aside_from_footprint` asked nobody to move, which is what turned a
+-- transient into three failed placements and a replan in
+-- `run-1788608648-56109`. A blocker is a *bot* in both modes, and the answer
+-- has to be the same small integer the executor addresses it by.
+function bot_of_character(entity)
+	if entity == nil then return nil end
+	local player = entity.player
+	if player ~= nil then return player.index, player end
+	local id = character_bot_id_of(entity)
+	if id == nil then return nil end
+	return id, bot_handle(id)
 end
 
 function rcon_spawn_bots(count)

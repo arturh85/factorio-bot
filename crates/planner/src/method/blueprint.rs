@@ -2,14 +2,12 @@
 
 use crate::action::{Action, ActionKind, Actor, Condition, Effect};
 use crate::error::PlannerError;
-use crate::goal::Goal;
+use crate::goal::{Goal, Holder};
+use crate::method::have::PLACE_TICKS;
 use crate::method::{ExpansionCtx, Method, Step};
 use crate::state::PlanState;
 use factorio_bot_core::blueprint::{Blueprint, BlueprintEntity, decode};
 use factorio_bot_core::types::{FactorioEntity, Pos, Position};
-
-/// How long one placement is modelled to take. Same figure `connect.rs` uses.
-const PLACE_TICKS: u32 = 30;
 
 /// Split a block into one band per bot, **balanced by entity count**.
 ///
@@ -140,6 +138,26 @@ impl Method for BuildBlock {
             reason: format!("{e:?}"),
         })?;
 
+        // Refuse the whole goal, by name, rather than place two identical
+        // halves. `connect.rs` sets the precedent (`ConnectRefusal::NoRoute`
+        // over tunnelling under an obstacle it cannot route around): neither
+        // `FactorioEntity` nor the mod's `rcon_place_entity` can express
+        // which half of an underground pair is being built, so the generic
+        // placement path below would emit the SAME entity twice -- a run
+        // that places 100% correctly and connects nothing, the failure this
+        // project has already paid for twice. A later task teaches the
+        // placement path the half and lifts this refusal; until then it has
+        // to be enforced here rather than merely intended by the plan.
+        if bp.entities.iter().any(|e| e.underground_half.is_some()) {
+            return Err(PlannerError::BlueprintRefused {
+                reason: "the blueprint contains an underground belt, and the \
+                         placement path cannot yet express which half is \
+                         being built -- both halves would place identically \
+                         and connect nothing"
+                    .to_string(),
+            });
+        }
+
         // Only what is NOT already standing. This is what makes the goal
         // re-checkable on a replan and idempotent when built twice.
         let mut wanted: Vec<&BlueprintEntity> = Vec::new();
@@ -154,24 +172,36 @@ impl Method for BuildBlock {
         }
 
         let owned: Vec<BlueprintEntity> = wanted.iter().map(|e| (*e).clone()).collect();
+        // Sorted (`bot_ids` reads a `BTreeMap`'s keys), so band `i` naming
+        // `roster[i]` is a deterministic, replan-stable assignment.
         let roster = ctx.state.bot_ids();
         let split = bands(&owned, roster.len().max(1));
 
-        let build = ctx
-            .state
-            .bot(ctx.chain_actor)
-            .map(|b| b.build_distance)
-            .unwrap_or(10.0);
-
-        let mut steps = Vec::new();
+        // Each band is bound to its own bot with `Step::Owned`, the same
+        // machinery `assemble.rs`'s cell-charging does for a bot's own
+        // materials. Unbound, every placement is `Actor::Role` with no chain
+        // of its own, and the scheduler assigns greedily -- nothing then
+        // stops two bots working the same corner, which is the whole
+        // structural reason a band exists in the first place.
+        let mut steps = Vec::with_capacity(split.iter().map(Vec::len).sum());
         for (band, indices) in split.iter().enumerate() {
+            if indices.is_empty() {
+                continue;
+            }
+            let bot = roster.get(band).copied().unwrap_or(ctx.chain_actor);
+            let build = ctx.state.bot(bot).map(|b| b.build_distance).unwrap_or(10.0);
+            let mut block = Vec::with_capacity(indices.len());
             for idx in indices {
                 let e = &owned[*idx];
                 let world = anchor.add(&e.offset);
                 let entity = entity_for(&ctx.state, &e.name, &world, e.direction);
                 let note = format!("block band {band}");
-                steps.push(place_step(ctx, entity, build, &note));
+                block.push(place_step(ctx, entity, build, &note));
             }
+            steps.push(Step::Owned {
+                whose: Holder::Share(bot),
+                steps: block,
+            });
         }
         Ok(steps)
     }
@@ -225,5 +255,49 @@ mod tests {
     fn bands_are_deterministic() {
         let ents: Vec<BlueprintEntity> = (0..17).map(|i| at((i % 5) as f64)).collect();
         assert_eq!(bands(&ents, 4), bands(&ents, 4));
+    }
+
+    /// The `FurnaceLine` fixture (`crates/core/tests/blueprints/furnace_line.txt`)
+    /// carries one underground-belt pair -- `an_underground_belt_carries_which_half_it_is`
+    /// in `crates/core/tests/blueprint_decode.rs` pins that the decoder reports
+    /// both halves. `expand()` must refuse the WHOLE goal rather than place
+    /// either half through the generic path: neither `FactorioEntity` nor the
+    /// mod's `rcon_place_entity` can say which half is being built, so both
+    /// would place as the same entity and connect nothing -- a run that
+    /// places 100% correctly and moves nothing, the failure `connect.rs`'s
+    /// own underground-belt refusal exists to avoid.
+    #[test]
+    fn a_blueprint_with_underground_belts_is_refused_by_name() {
+        use crate::ids::BotId;
+        use factorio_bot_core::test_utils::fixture_world;
+        use std::sync::Arc;
+
+        let blueprint = include_str!("../../../core/tests/blueprints/furnace_line.txt")
+            .trim()
+            .to_string();
+        let mut ctx = ExpansionCtx::new(
+            PlanState::from_world(Arc::new(fixture_world()), &[BotId(1)]),
+            BotId(1),
+        );
+        let goal = Goal::Built {
+            blueprint,
+            anchor: Position::new(0.0, 0.0),
+        };
+
+        let err = BuildBlock
+            .expand(&goal, &mut ctx)
+            .expect_err("a blueprint with an underground belt must be refused, not placed");
+
+        let PlannerError::BlueprintRefused { reason } = err else {
+            panic!("expected BlueprintRefused, got {err:?}");
+        };
+        assert!(
+            reason.contains("underground"),
+            "the refusal must name why: {reason}"
+        );
+        assert!(
+            reason.contains("cannot yet express"),
+            "the refusal must say the placement path cannot express the half: {reason}"
+        );
     }
 }

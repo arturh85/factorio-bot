@@ -231,12 +231,15 @@ fixed game minutes from `run_started`):
 | 5 | 80 / 69 / 0 / 0 | 159 / 94 / 0 / 0 | 165 / 100 / 0 / 0 |
 | 10 | 326 / 133 / 18 / 0 | 442 / 146 / 42 / 0 | 463 / 152 / 47 / 0 |
 | 15 | 677 / 189 / 55 / 0 | 657 / 189 / 82 / 0 | 661 / 189 / 83 / 0 |
-| 20 | 677 / 189 / 85 / 0 | 670 / 189 / 85 / 6 | 670 / 189 / 85 / 4 |
+| 20 | 677 / 189 / 85 / 0 | run ended at 18:00 | run ended at 19:25 |
+| end | 677 / 189 / 85 / 4 (21:39) | 670 / 189 / 85 / 6 (18:00) | 670 / 189 / 85 / 4 (19:22) |
 
 **Stated plainly: until a cell feeds itself, milestone time has been
 measuring plan length, not factory output.** Every conclusion in this record
 drawn on the makespan alone — including the run-to-run ordering of the last
 two days — compares how long the bots took to build the same dead cell.
+
+(Corrected by `just analyse --rates-md`: runs 14 and 15 never reached minute 20 from `run_started`; the row I first typed there was the end value. `--compare` now says: run 15 ahead at 5, 10 and 15; run 14 ahead at the end.)
 
 Three things the makespan table cannot show. (1) **Runs 14 and 15 are the
 same run on rates**, run 15 a little ahead through minute 12; the 17:20 vs

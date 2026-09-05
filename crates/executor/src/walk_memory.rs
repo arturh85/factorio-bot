@@ -25,12 +25,205 @@
 //! positions it alone holds.
 
 use factorio_bot_core::errors::RconPathRequestFailed;
-use factorio_bot_core::factorio::rcon::{ActionFailure, path_request_was_busy};
-use factorio_bot_core::factorio::world::{Enclosure, FactorioWorld, WalkRefusal};
+use factorio_bot_core::factorio::rcon::{ActionFailure, FactorioRcon, path_request_was_busy};
+use factorio_bot_core::factorio::world::{
+    Bench, BenchRelease, Enclosure, FactorioWorld, HOP_DISTANCE, WalkRefusal,
+};
 use factorio_bot_core::graph::enclosure::{Escape, SEARCH_RADIUS, escape_from};
 use factorio_bot_core::miette::Report;
 use factorio_bot_core::tracing::{info, warn};
 use factorio_bot_core::types::{PlayerId, Position};
+use std::sync::Arc;
+
+/// What a mobility probe established about a character -- see
+/// [`judge_mobility`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum Mobility {
+    /// At least one short hop was pathed: the character can leave its tile,
+    /// so whatever was unreachable, it was not the character.
+    Free {
+        /// The first hop target the game agreed to route to.
+        hop: Position,
+    },
+    /// Every hop asked for came back `failed to path find`: the character
+    /// cannot leave its own tile.
+    BoxedIn {
+        /// How many hops were asked for and refused.
+        refused_hops: u8,
+    },
+    /// The probe did not establish either: no hop was pathed, and at least
+    /// one answer was not the pathfinder saying no -- a full queue that
+    /// outlasted its retries, a timeout, a dropped connection.
+    Unknown,
+}
+
+/// Turns the game's answers to a hop probe into a verdict on the character.
+///
+/// Pure, so it can be tested without a game -- the asking is
+/// `FactorioRcon::probe_player_hops`, the judging is here, and the two are
+/// separated for the reason this module's header gives.
+///
+/// # The three answers are not symmetrical
+///
+/// * One pathed hop is enough for [`Mobility::Free`]. The claim it makes is
+///   only "the character can leave its tile", and one route proves that.
+/// * [`Mobility::BoxedIn`] needs *every* hop to be a definitive
+///   `failed to path find` ([`pathfinder_found_nothing`]). Benching a bot
+///   takes it out of every plan until something lifts the bench, so the
+///   evidence has to be the game's searched-and-found-nothing for each
+///   direction, not a queue that was full in one of them.
+/// * Anything else is [`Mobility::Unknown`], and unknown changes nothing:
+///   the walk failed, the walk ledger holds the pair, and the next plan
+///   proceeds as it did before this probe existed.
+///
+/// An empty probe is `Unknown` for the same reason: no question was asked.
+pub fn judge_mobility(hops: &[(Position, Result<(), Report>)]) -> Mobility {
+    if let Some((hop, _)) = hops.iter().find(|(_, answer)| answer.is_ok()) {
+        return Mobility::Free { hop: hop.clone() };
+    }
+    if hops.is_empty() {
+        return Mobility::Unknown;
+    }
+    let all_refused = hops
+        .iter()
+        .all(|(_, answer)| answer.as_ref().err().is_some_and(pathfinder_found_nothing));
+    if all_refused {
+        Mobility::BoxedIn {
+            refused_hops: u8::try_from(hops.len()).unwrap_or(u8::MAX),
+        }
+    } else {
+        Mobility::Unknown
+    }
+}
+
+/// Asks the game whether `player` can leave the spot it stands on, and
+/// judges the answer. See [`judge_mobility`] for the verdicts and
+/// `FactorioRcon::probe_player_hops` for the question.
+pub async fn probe_mobility(
+    rcon: &FactorioRcon,
+    world: &Arc<FactorioWorld>,
+    player: PlayerId,
+    at: &Position,
+) -> Mobility {
+    judge_mobility(&rcon.probe_player_hops(world, player, at).await)
+}
+
+/// Writes a mobility verdict into the world's bench ledger. Returns whether
+/// the ledger changed.
+///
+/// [`Mobility::BoxedIn`] benches the player at `at`; [`Mobility::Free`]
+/// lifts a bench it had, as [`BenchRelease::Probed`]; [`Mobility::Unknown`]
+/// touches nothing. Every branch logs, for the reason [`note_walk_refusal`]
+/// gives: this ledger decides what the next plan may ask of a bot, and a
+/// decision that reaches no log is a decision nobody can audit.
+pub fn note_mobility(
+    world: &FactorioWorld,
+    player: PlayerId,
+    at: &Position,
+    tick: Option<u64>,
+    verdict: &Mobility,
+) -> bool {
+    match verdict {
+        Mobility::BoxedIn { refused_hops } => {
+            let changed = world.record_bench(Bench {
+                tick,
+                player,
+                at: at.clone(),
+                refused_hops: *refused_hops,
+                hop_tiles: HOP_DISTANCE,
+            });
+            warn!(
+                player,
+                at = %at,
+                refused_hops,
+                hop_tiles = HOP_DISTANCE,
+                changed,
+                "BENCHED: the game refused every short hop from where this character \
+                 stands, so it cannot leave its own tile -- the next plan gives it no \
+                 step that needs it to walk, until a walk succeeds or a re-probe finds \
+                 a way out"
+            );
+            changed
+        }
+        Mobility::Free { hop } => {
+            let released = world.release_bench(player, tick, BenchRelease::Probed);
+            if released {
+                warn!(
+                    player,
+                    at = %at,
+                    hop = %hop,
+                    "RELEASED: the game will now path this character to a short hop, so \
+                     its bench is lifted and the next plan may send it"
+                );
+            } else {
+                info!(
+                    player,
+                    at = %at,
+                    hop = %hop,
+                    "the game paths this character to a short hop from where it stands, \
+                     so what was unreachable is the destination, not the bot"
+                );
+            }
+            released
+        }
+        Mobility::Unknown => {
+            info!(
+                player,
+                at = %at,
+                "the mobility probe established nothing -- no hop was pathed and not \
+                 every answer was the pathfinder saying no -- so the bench ledger is \
+                 left as it was"
+            );
+            false
+        }
+    }
+}
+
+/// A walk for `player` succeeded, which is proof enough that it can move:
+/// lifts its bench if it had one. Returns whether it did.
+///
+/// This is how a bot pushed clear by something the plan did not ask for --
+/// another bot's step-aside, a recovery teleport, a mined-away wall -- gets
+/// back into the roster without waiting for a re-probe.
+pub fn note_walk_succeeded(world: &FactorioWorld, player: PlayerId, tick: Option<u64>) -> bool {
+    let released = world.release_bench(player, tick, BenchRelease::Walked);
+    if released {
+        warn!(
+            player,
+            "RELEASED: a walk for this benched character succeeded, so its bench is \
+             lifted and the next plan may send it"
+        );
+    }
+    released
+}
+
+/// Re-asks the game about every benched character, from where it stands
+/// now, and lifts the bench of each one it will path. Returns the players
+/// released.
+///
+/// Called before a plan is made (`crates/scripting_lua`'s buffer refresher),
+/// because that is the moment the answer matters: a bench is what keeps the
+/// planner from re-sending a bot the game refused, and the only party that
+/// can say the refusal has ended is the game. A bot whose position the world
+/// has lost is probed from where it was benched, which is the last place it
+/// was known to be.
+pub async fn reprobe_benched(rcon: &FactorioRcon, world: &Arc<FactorioWorld>) -> Vec<PlayerId> {
+    let mut released = Vec::new();
+    for bench in world.benches() {
+        let at = world
+            .players
+            .get(&bench.player)
+            .map(|player| player.position.clone())
+            .unwrap_or_else(|| bench.at.clone());
+        let verdict = probe_mobility(rcon, world, bench.player, &at).await;
+        if matches!(verdict, Mobility::Free { .. })
+            && note_mobility(world, bench.player, &at, rcon.last_tick(), &verdict)
+        {
+            released.push(bench.player);
+        }
+    }
+    released
+}
 
 /// Whether the pathfinder searched and reported that there is no way there.
 ///
@@ -201,13 +394,20 @@ fn note_enclosure(world: &FactorioWorld, player: PlayerId, from: &Position, tick
                  point it can walk to is inside this pocket"
             );
         }
+        // Carefully *not* "the character is not boxed in". This fill reasons
+        // over a model that holds no characters and seeds from a tile centre;
+        // `run-1788614781-38058`'s bot 6 stood overlapping a furnace, this
+        // arm said the destination was the problem, and the game refused
+        // every path from the spot. Whether the character itself can move is
+        // the mobility probe's answer (`note_mobility`), not this one's.
         Escape::Open => info!(
             player,
             at = %from,
             searched_tiles = SEARCH_RADIUS,
-            "the walk was refused but the character is not boxed in: the free \
-             region around it reaches the edge of the searched window, so what \
-             is unreachable is the destination, not the bot"
+            "the occupancy model finds no enclosure here: the free region around \
+             the tile reaches the edge of the searched window. That says nothing \
+             about whether the character itself can leave its tile -- the game's \
+             hop probe answers that"
         ),
         Escape::Unknown(why) => info!(
             player,
@@ -419,5 +619,220 @@ mod tests {
             &path_failure(BUSY)
         ));
         assert!(world.enclosures().is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // The mobility probe: the game's verdict on the character, judged here.
+    // -----------------------------------------------------------------------
+
+    fn refused(reason: &str) -> Report {
+        RconPathRequestFailed {
+            reason: format!("Error: {reason}"),
+        }
+        .into()
+    }
+
+    /// Four hops, each with an answer, as `probe_player_hops` returns them.
+    fn hops(answers: [Result<(), Report>; 4]) -> Vec<(Position, Result<(), Report>)> {
+        factorio_bot_core::factorio::world::hop_targets(&here())
+            .into_iter()
+            .zip(answers)
+            .collect()
+    }
+
+    /// Bot 6 of `run-1788614781-38058`, as the game would have answered had
+    /// anyone asked: no route three tiles in any direction.
+    #[test]
+    fn every_hop_refused_is_boxed_in() {
+        let verdict = judge_mobility(&hops([
+            Err(refused(NO_PATH)),
+            Err(refused(NO_PATH)),
+            Err(refused(NO_PATH)),
+            Err(refused(NO_PATH)),
+        ]));
+        assert_eq!(verdict, Mobility::BoxedIn { refused_hops: 4 });
+    }
+
+    /// One route is enough: the claim is only "it can leave its tile".
+    #[test]
+    fn one_pathed_hop_is_free_and_names_the_hop() {
+        let targets = factorio_bot_core::factorio::world::hop_targets(&here());
+        let verdict = judge_mobility(&hops([
+            Err(refused(NO_PATH)),
+            Err(refused(NO_PATH)),
+            Ok(()),
+            Err(refused(NO_PATH)),
+        ]));
+        assert_eq!(
+            verdict,
+            Mobility::Free {
+                hop: targets[2].clone()
+            }
+        );
+    }
+
+    /// A full queue in one direction is not the pathfinder saying no, and a
+    /// bench needs the game's no in every direction.
+    #[test]
+    fn a_busy_answer_among_refusals_is_unknown_not_boxed_in() {
+        let verdict = judge_mobility(&hops([
+            Err(refused(NO_PATH)),
+            Err(refused(BUSY)),
+            Err(refused(NO_PATH)),
+            Err(refused(NO_PATH)),
+        ]));
+        assert_eq!(verdict, Mobility::Unknown);
+    }
+
+    /// Nor is a timeout, which is not the pathfinder answering at all.
+    #[test]
+    fn a_timeout_among_refusals_is_unknown() {
+        let verdict = judge_mobility(&hops([
+            Err(refused(NO_PATH)),
+            Err(refused(NO_PATH)),
+            Err(RconTimeout {}.into()),
+            Err(refused(NO_PATH)),
+        ]));
+        assert_eq!(verdict, Mobility::Unknown);
+    }
+
+    /// No question asked, no answer claimed.
+    #[test]
+    fn an_empty_probe_is_unknown() {
+        assert_eq!(judge_mobility(&[]), Mobility::Unknown);
+    }
+
+    /// The bench: a boxed-in verdict is written where the next plan reads.
+    #[test]
+    fn a_boxed_in_verdict_benches_the_bot_where_it_stands() {
+        let world = FactorioWorld::new();
+        let verdict = Mobility::BoxedIn { refused_hops: 4 };
+        assert!(note_mobility(&world, 6, &here(), None, &verdict));
+        let benches = world.benches();
+        assert_eq!(benches.len(), 1);
+        assert_eq!(benches[0].player, 6);
+        assert_eq!(benches[0].at, here());
+        assert_eq!(benches[0].refused_hops, 4);
+        assert_eq!(benches[0].hop_tiles, HOP_DISTANCE);
+        assert!(world.is_benched(6));
+        // The same verdict from the same spot is the same bench, not a
+        // second row for the record.
+        assert!(!note_mobility(&world, 6, &here(), None, &verdict));
+        assert_eq!(world.benches().len(), 1);
+    }
+
+    /// The record sees the transition once, and the ledger keeps the state.
+    #[test]
+    fn a_bench_is_queued_for_the_record_once() {
+        use factorio_bot_core::factorio::world::BenchChange;
+        let world = FactorioWorld::new();
+        let verdict = Mobility::BoxedIn { refused_hops: 4 };
+        note_mobility(&world, 6, &here(), Some(26_953), &verdict);
+        note_mobility(&world, 6, &here(), Some(30_587), &verdict);
+        let changes = world.drain_bench_changes();
+        assert_eq!(changes.len(), 1);
+        assert!(matches!(&changes[0], BenchChange::Benched(bench) if bench.player == 6));
+        assert!(
+            world.drain_bench_changes().is_empty(),
+            "drained means drained"
+        );
+        assert!(
+            world.is_benched(6),
+            "draining the events does not lift the bench"
+        );
+    }
+
+    /// Free from where it stands lifts the bench, and says why.
+    #[test]
+    fn a_free_verdict_releases_a_benched_bot() {
+        use factorio_bot_core::factorio::world::{BenchChange, BenchRelease};
+        let world = FactorioWorld::new();
+        note_mobility(
+            &world,
+            6,
+            &here(),
+            None,
+            &Mobility::BoxedIn { refused_hops: 4 },
+        );
+        world.drain_bench_changes();
+        let free = Mobility::Free { hop: there() };
+        assert!(note_mobility(&world, 6, &here(), Some(40_000), &free));
+        assert!(!world.is_benched(6));
+        let changes = world.drain_bench_changes();
+        assert_eq!(changes.len(), 1);
+        assert!(matches!(
+            &changes[0],
+            BenchChange::Released {
+                player: 6,
+                why: BenchRelease::Probed,
+                tick: Some(40_000),
+                ..
+            }
+        ));
+        // Free for a bot that was never benched changes nothing.
+        assert!(!note_mobility(&world, 3, &here(), None, &free));
+        assert!(world.drain_bench_changes().is_empty());
+    }
+
+    /// Unknown is not a verdict, and a bench survives it.
+    #[test]
+    fn an_unknown_verdict_leaves_the_bench_as_it_was() {
+        let world = FactorioWorld::new();
+        note_mobility(
+            &world,
+            6,
+            &here(),
+            None,
+            &Mobility::BoxedIn { refused_hops: 4 },
+        );
+        assert!(!note_mobility(&world, 6, &here(), None, &Mobility::Unknown));
+        assert!(world.is_benched(6));
+        assert!(!note_mobility(&world, 3, &here(), None, &Mobility::Unknown));
+        assert!(!world.is_benched(3));
+    }
+
+    /// A walk that succeeded is the plainest proof of movement there is.
+    #[test]
+    fn a_successful_walk_releases_the_bench() {
+        use factorio_bot_core::factorio::world::{BenchChange, BenchRelease};
+        let world = FactorioWorld::new();
+        note_mobility(
+            &world,
+            6,
+            &here(),
+            None,
+            &Mobility::BoxedIn { refused_hops: 4 },
+        );
+        world.drain_bench_changes();
+        assert!(note_walk_succeeded(&world, 6, Some(41_000)));
+        assert!(!world.is_benched(6));
+        let changes = world.drain_bench_changes();
+        assert!(matches!(
+            &changes[..],
+            [BenchChange::Released {
+                player: 6,
+                why: BenchRelease::Walked,
+                ..
+            }]
+        ));
+        assert!(
+            !note_walk_succeeded(&world, 1, Some(41_000)),
+            "a bot that was never benched has nothing to release"
+        );
+    }
+
+    /// A bench earned somewhere else is about somewhere else: the bot moved
+    /// between the two, so the new spot replaces the old and the record is
+    /// told where it is stuck now.
+    #[test]
+    fn a_bench_earned_elsewhere_replaces_the_old_one() {
+        let world = FactorioWorld::new();
+        let verdict = Mobility::BoxedIn { refused_hops: 4 };
+        note_mobility(&world, 6, &here(), None, &verdict);
+        assert!(note_mobility(&world, 6, &there(), None, &verdict));
+        let benches = world.benches();
+        assert_eq!(benches.len(), 1, "one bench per player");
+        assert_eq!(benches[0].at, there());
+        assert_eq!(world.drain_bench_changes().len(), 2);
     }
 }

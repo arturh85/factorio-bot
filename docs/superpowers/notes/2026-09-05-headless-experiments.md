@@ -814,3 +814,22 @@ against 6,000 fit; a queue longer than 2x the second research's own
 duration would be reported `NoVerdict` and replanned around. The slot in
 the plan makes that unreachable unless the plan is wrong about the
 research durations themselves.
+
+### the peer's belt work, for the shared record (2026-09-05 evening)
+
+Reported by `factorio-bot-3a`, whose branch this is: a 1.x blueprint's
+eight-point directions 0/2/4/6 arrived in the game as 0/4/8/12 on the 2.0
+sixteen-point scale, all four exact, verified three ways (in-script surface
+query, an external rcon process, and the record's drift field). So decoding
+a blueprint in Rust and placing it without the game's import migration does
+not silently rotate everything a half-turn — the failure the decoder was
+designed around, and one that would have looked perfect in every count.
+Proven on a fixture built to exercise the migration, not on arbitrary real
+exports; a real export carrying tiles, wires, modules or filters is refused
+by name. Underground pairs are not yet expressible through the placement
+path, which is why `connect` refuses rather than tunnels.
+
+**Agreed between the sessions:** entity-placing code crosses a headless run
+at 5x with zero failed actions, on the author's instance and on mine, before
+it enters any measured 1x run. The first live belt lands in a run nobody is
+quoting.

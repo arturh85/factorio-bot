@@ -585,6 +585,18 @@ evidence in this record rather than by preference.
    handled in the mod; nothing decides to *prevent* them, and it is what the
    companion and enemy use cases need most.
 
+   **Owner, 2026-09-06: arm the bots later; early game, avoid nests.** That
+   is nearly free — `EntityGraph.threats` already stores spawners and worms
+   and round-trips through the dump, and `threats_from`, `nearest_threat`
+   and `threat_census` have **zero non-test callers**. Perception exists;
+   nothing consults it. Avoidance is therefore folded into the exploration
+   work as its first caller: the lattice skips cells within a stand-off of a
+   known threat, a nest found mid-spiral excludes ground behind it before a
+   bot walks there, and a skipped cell is an event so refused ground is
+   visible rather than looking like the spiral stopped. Combat — shotguns,
+   grenades, turrets, ammunition — is deferred until avoidance is shown to
+   be insufficient, and that demonstration is the argument for it.
+
 Explicitly deferred: making runs continuous and event-driven. It is the
 right long-term shape for a companion bot and it changes the execution model
 underneath everything else, so standing goals and oil land against the

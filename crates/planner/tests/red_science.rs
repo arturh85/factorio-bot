@@ -328,6 +328,17 @@ fn the_plan_renders_as_a_gantt_chart() {
 /// zero cross-chain edges and this test failed on its own discrimination check
 /// rather than on any assertion about a plan. `world_without_furnaces_or_rocks`
 /// is the third fixture, added for that reason; see its own doc.
+///
+/// **It stopped again on 2026-09-05, and the fourth case is why.** A bot with
+/// no furnace of its own on a patch now stands one as its *own* errand rather
+/// than queueing behind another bot's batch (`have::patch_furnace_budget`),
+/// and in this goal every bot's share is exactly one smelt per ore -- so every
+/// furnace in the three fixtures above is a first furnace, none is handed
+/// over, and the edge count went to zero. The handover still exists: it is a
+/// taker's *second* furnace on a patch that travels. So the fourth case gives
+/// bot 1 a smelt of its own ahead of the packs, on the rock-less world where
+/// the stone under a furnace is real work to move, and R3 fires on the pack
+/// chain's furnace for every roster wider than one.
 #[test]
 fn every_expansion_replays_in_time_order() {
     let mut cross_chain_edges = 0usize;
@@ -338,16 +349,35 @@ fn every_expansion_replays_in_time_order() {
     ];
     for bots in &rosters {
         for count in [1u32, 2, 4, 10] {
-            for (name, state) in [
-                ("with furnaces", world_with_furnaces(bots)),
-                ("without furnaces", world_without_furnaces(bots)),
+            let second_smelt = Goal::Have {
+                item: "iron-plate".into(),
+                count: 3,
+                whose: Holder::Bot(BotId(1)),
+            };
+            for (name, state, goals) in [
+                (
+                    "with furnaces",
+                    world_with_furnaces(bots),
+                    vec![goal(count)],
+                ),
+                (
+                    "without furnaces",
+                    world_without_furnaces(bots),
+                    vec![goal(count)],
+                ),
                 (
                     "without furnaces or rocks",
                     world_without_furnaces_or_rocks(bots),
+                    vec![goal(count)],
+                ),
+                (
+                    "without furnaces or rocks, bot 1 smelting first",
+                    world_without_furnaces_or_rocks(bots),
+                    vec![second_smelt, goal(count)],
                 ),
             ] {
-                let net = expand(&[goal(count)], &state, &registry_for(bots), BotId(1))
-                    .unwrap_or_else(|e| {
+                let net =
+                    expand(&goals, &state, &registry_for(bots), BotId(1)).unwrap_or_else(|e| {
                         panic!("{} packs on {} bots, {}: {}", count, bots.len(), name, e)
                     });
                 let plan = schedule(&net, &state, bots).unwrap_or_else(|e| {

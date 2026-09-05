@@ -1761,6 +1761,7 @@ fn promise(ctx: &mut ExpansionCtx, spec: &CellSpec, cell: &Cell, started_by: Act
         &cell.furnace,
         &spec.item,
         started_by,
+        None,
         spec.ticks_per_item.saturating_mul(count),
     );
 }

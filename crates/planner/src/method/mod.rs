@@ -2286,11 +2286,19 @@ mod tests {
             // when the drain cap went (`produce::Drain`) and its fragments
             // went back to hand-smelting; the fleet's trigger chain, which
             // is the lead's own, still fuels its cell off a rock of its own.
-            let slack = if item == "coal" { 24 } else { 0 };
+            //
+            // Two rocks since later on 2026-09-05, 78 against 48: a bot with
+            // no furnace of its own on the patch now stands one
+            // (`have::patch_furnace_budget`), and a bot fuelling a furnace
+            // of its own prices its coal over its own demand -- one swings a
+            // rock for it, the others dig a few by hand. Gathered, not
+            // duplicated: the plates are the same plates, smelted without
+            // queueing behind bot 1.
+            let slack = if item == "coal" { 48 } else { 0 };
             assert!(
                 fleet_count <= count + slack,
                 "four bots must not dig more {item} than one bot does for the \
-                 same goal (one rock of coal allowed): {fleet_count} against {count}"
+                 same goal (two rocks of coal allowed): {fleet_count} against {count}"
             );
         }
         //
@@ -2307,10 +2315,21 @@ mod tests {
         // solo bill item by item, which is the half above, and the pin is
         // what would catch the leftover of that fifty coming to be dug
         // twice.
+        //
+        // **Coal 54 -> 78 and stone 48 -> 93 later on 2026-09-05**, when a
+        // bot with no furnace of its own on the patch started standing one
+        // rather than queueing behind bot 1's (`have::patch_furnace_budget`,
+        // `tests/furnace_reuse.rs`). Three suppliers each want five stone
+        // and a coal or two for a furnace of their own, and each prices that
+        // over its own demand: one swings a `rock-huge` (24 coal, 24 stone),
+        // one a `rock-big` (20 stone) and digs its coal by hand. Every extra
+        // unit is a rock's surplus or a supplier's own fuel, not the solo
+        // bill dug twice -- iron and copper, the items a duplication would
+        // show on, do not move.
         assert_eq!(
             mined(&fleet),
             BTreeMap::from([
-                ("coal".to_string(), 54),
+                ("coal".to_string(), 78),
                 ("copper-ore".to_string(), 29),
                 // Two under the solo bill's 91, for the reason above; the 91
                 // itself is the trigger's fifty, always drilled and now
@@ -2323,7 +2342,7 @@ mod tests {
                 // surplus that was already on the ground rather than out of
                 // more digging. See the exemption above for why any excess
                 // is bought rather than wasted.
-                ("stone".to_string(), 48),
+                ("stone".to_string(), 93),
             ]),
             "four bots' rung-1 bill"
         );

@@ -356,3 +356,197 @@ fn a_queued_batchs_fuel_waits_with_its_ore() {
         let _ = when(&result, id);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Whose queue a smelt joins
+// ---------------------------------------------------------------------------
+
+/// A furnace's whole queue, per position: the batches in it in the order they
+/// run, with the bot that takes each.
+fn queues(net: &ActionNetwork, result: &Schedule) -> BTreeMap<String, Vec<(BotId, ActionId)>> {
+    let taker = |id: ActionId| {
+        result
+            .steps
+            .iter()
+            .find_map(|step| match &step.what {
+                factorio_bot_planner::schedule::StepKind::Act { action, .. } if *action == id => {
+                    Some(step.bot)
+                }
+                _ => None,
+            })
+            .expect("every take is scheduled")
+    };
+    let mut by_furnace: BTreeMap<String, Vec<(BotId, ActionId)>> = BTreeMap::new();
+    let mut all = batches(net);
+    all.sort_by_key(|batch| when(result, batch.take));
+    for batch in all {
+        by_furnace
+            .entry(batch.pos.to_string())
+            .or_default()
+            .push((taker(batch.take), batch.take));
+    }
+    by_furnace
+}
+
+fn plan_goals(goals: Vec<Goal>, bots: &[BotId]) -> (ActionNetwork, PlanState, Schedule) {
+    let state = PlanState::from_world(Arc::new(fixture_world()), bots);
+    let net = expand(&[Goal::All(goals)], &state, &registry_for(bots), BotId(1))
+        .expect("the goals expand");
+    let result = schedule(&net, &state, bots).expect("the plan schedules");
+    (net, state, result)
+}
+
+fn have_for(item: &str, count: u32, bot: BotId) -> Goal {
+    Goal::Have {
+        item: item.into(),
+        count,
+        whose: Holder::Bot(bot),
+    }
+}
+
+/// **A bot with no furnace of its own on the patch builds one**, even when
+/// the patch is already at the roster's budget, rather than queueing behind
+/// another bot's batch.
+///
+/// The defect this pins, measured on `producing:logistic-science-pack:6`
+/// against `workspace/scripts/map.json`: bot 1's first smelts built every
+/// furnace the budget allowed, so bot 4's nine drill plates queued 9,848
+/// ticks behind bot 1's ladder on the furnace at `[-34, -32]`, its drill
+/// stood at 44,658 instead of ~33,000, and its 78-plate cell take -- the
+/// step green's research waits on -- slid with it. A stone furnace is five
+/// stone and thirty ticks; the queue it replaces is thousands.
+///
+/// Two bots, budget two. Bot 1's two smelts fill the budget greedily, as
+/// they always did; bot 2's smelt then gets a furnace of its own instead of
+/// a place in bot 1's queue, and that furnace is bot 2's own errand -- the
+/// point of it is independence from the other bot's timeline, so its
+/// placement is never handed over.
+#[test]
+fn a_bot_with_no_furnace_of_its_own_builds_one_rather_than_queueing() {
+    let bots = [BotId(1), BotId(2)];
+    let (net, _, result) = plan_goals(
+        vec![
+            have_for("iron-plate", 7, BotId(1)),
+            have_for("iron-gear-wheel", 9, BotId(1)),
+            have_for("iron-plate", 6, BotId(2)),
+        ],
+        &bots,
+    );
+    let built = furnaces_placed(&net);
+    assert_eq!(
+        built.len(),
+        3,
+        "two for bot 1's bank at the budget, one of bot 2's own; got {built:?}"
+    );
+    let by_furnace = queues(&net, &result);
+    let bot_2s: Vec<(&String, &Vec<(BotId, ActionId)>)> = by_furnace
+        .iter()
+        .filter(|(_, queue)| queue.iter().any(|(bot, _)| *bot == BotId(2)))
+        .collect();
+    assert_eq!(
+        bot_2s.len(),
+        1,
+        "bot 2 smelts in one furnace: {by_furnace:?}"
+    );
+    let (pos, queue) = bot_2s[0];
+    assert!(
+        queue.iter().all(|(bot, _)| *bot == BotId(2)),
+        "bot 2's furnace at {pos} carries nobody else's batch: {queue:?}"
+    );
+    let placed_by = result
+        .steps
+        .iter()
+        .find_map(|step| match &step.what {
+            factorio_bot_planner::schedule::StepKind::Act { action, .. }
+                if site(&net, *action).map(|p| p.to_string()).as_ref() == Some(pos)
+                    && matches!(
+                        net.action(*action).map(|a| &a.kind),
+                        Some(ActionKind::Place { .. })
+                    ) =>
+            {
+                Some(step.bot)
+            }
+            _ => None,
+        })
+        .expect("bot 2's furnace is placed");
+    assert_eq!(
+        placed_by,
+        BotId(2),
+        "a furnace built so that a bot need not wait on another is that bot's own errand"
+    );
+}
+
+/// **A smelt queues behind its own batch before anybody else's**, whatever
+/// the load. Waiting on a take the same bot performs costs that bot nothing
+/// it was not already paying -- its actions are serial -- while a batch of
+/// another bot's puts the wait on that bot's timeline, which the expansion
+/// cannot see and the schedule then pays for.
+///
+/// Bot 2's first smelt gets a furnace of its own and loads it heavily; its
+/// second is small, and every one of bot 1's furnaces carries less. Least-
+/// loaded alone would send it to bot 1's; it goes behind its own.
+#[test]
+fn a_smelt_queues_behind_its_own_batch_before_a_lighter_furnace_of_another_bots() {
+    let bots = [BotId(1), BotId(2)];
+    let (net, _, result) = plan_goals(
+        vec![
+            have_for("iron-plate", 4, BotId(1)),
+            have_for("iron-gear-wheel", 3, BotId(1)),
+            have_for("iron-plate", 20, BotId(2)),
+            have_for("copper-plate", 1, BotId(2)),
+            have_for("iron-plate", 22, BotId(2)),
+        ],
+        &bots,
+    );
+    let by_furnace = queues(&net, &result);
+    let bot_2s: Vec<(&String, &Vec<(BotId, ActionId)>)> = by_furnace
+        .iter()
+        .filter(|(_, queue)| {
+            queue
+                .iter()
+                .any(|(bot, take)| *bot == BotId(2) && is_iron_take(&net, *take))
+        })
+        .collect();
+    assert_eq!(
+        bot_2s.len(),
+        1,
+        "both of bot 2's iron smelts run in bot 2's own furnace: {by_furnace:?}"
+    );
+    let (_, queue) = bot_2s[0];
+    let iron: Vec<_> = queue
+        .iter()
+        .filter(|(_, take)| is_iron_take(&net, *take))
+        .collect();
+    assert_eq!(iron.len(), 2, "two batches of bot 2's, queued: {queue:?}");
+    assert!(
+        iron.iter().all(|(bot, _)| *bot == BotId(2)),
+        "and nobody else's between them: {queue:?}"
+    );
+}
+
+fn is_iron_take(net: &ActionNetwork, id: ActionId) -> bool {
+    matches!(
+        net.action(id).map(|a| &a.kind),
+        Some(ActionKind::Remove { item, .. }) if item == "iron-plate"
+    )
+}
+
+/// **The two rules above keep a plan deterministic**: which furnace is a
+/// bot's own is read off mutable state, so the same goals must queue the same
+/// way twice.
+#[test]
+fn whose_queue_a_smelt_joins_is_identical_on_a_second_expansion() {
+    let bots = [BotId(1), BotId(2)];
+    let goals = || {
+        vec![
+            have_for("iron-plate", 7, BotId(1)),
+            have_for("iron-gear-wheel", 9, BotId(1)),
+            have_for("iron-plate", 6, BotId(2)),
+            have_for("iron-plate", 3, BotId(2)),
+        ]
+    };
+    let (first, _, first_plan) = plan_goals(goals(), &bots);
+    let (second, _, second_plan) = plan_goals(goals(), &bots);
+    assert_eq!(queues(&first, &first_plan), queues(&second, &second_plan));
+    assert_eq!(first_plan.steps, second_plan.steps);
+}

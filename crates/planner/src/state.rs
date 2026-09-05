@@ -650,6 +650,16 @@ pub struct MachineQueue {
     /// The action that leaves the machine empty — the take of the newest batch
     /// queued into it. A later batch's inserts must be ordered after this.
     pub release: ActionId,
+    /// The bot whose timeline `release` sits on: the taker of the newest
+    /// batch, or `None` for a cell's furnace, whose take is timed from a
+    /// drill rather than from anyone's hands.
+    ///
+    /// This is what lets a smelt tell *its own* queue from somebody else's.
+    /// Queueing behind a batch the same bot takes costs that bot nothing it
+    /// was not already paying — its actions are serial — while queueing
+    /// behind another bot's puts the wait on that bot's timeline, which the
+    /// expansion cannot see. See `method::have::adoptable_furnaces`.
+    pub taker: Option<BotId>,
     /// Machine time this plan has already queued into it, across every batch.
     /// Not a start tick and not a finish tick: nothing in this crate knows when
     /// an action runs until `schedule` says so. It exists only to be compared
@@ -948,6 +958,19 @@ pub struct PlanState {
     /// Keyed by `Pos` for the same reason and with the same soundness argument
     /// as `committed_machines`.
     machine_queue: BTreeMap<Pos, MachineQueue>,
+    /// Machine time this plan has queued into each machine, **across every
+    /// batch and every smelt**, which is what [`MachineQueue::queued`] reports.
+    ///
+    /// Kept apart from `machine_queue` because the two have different
+    /// lifetimes. A smelt that adopts a queued furnace *unqueues* it while it
+    /// emits (its entry names the previous smelt's release, which a third
+    /// smelt must not read) and queues it again behind its own take. The total
+    /// used to live only on the entry, so that cycle reset it to the newest
+    /// batch alone, and "least-loaded first" compared the last batch each
+    /// furnace ran rather than the queue on it. On green that put twenty-six
+    /// batches from all four bots onto one furnace while two others stood
+    /// with one long batch each -- see `method::have::adoptable_furnaces`.
+    machine_load: BTreeMap<Pos, Ticks>,
     /// Buffers this plan is *filling*, whose contents are therefore already
     /// spoken for.
     ///
@@ -1544,6 +1567,7 @@ impl PlanState {
             claimed: Default::default(),
             committed_machines: Default::default(),
             machine_queue: Default::default(),
+            machine_load: Default::default(),
             stockpiled: Default::default(),
             claim_runner: None,
             force,
@@ -3618,19 +3642,22 @@ impl PlanState {
         position: &Position,
         item: &str,
         release: ActionId,
+        taker: Option<BotId>,
         ticks: Ticks,
     ) {
         let key = Pos::from(position);
         let queued = self
-            .machine_queue
+            .machine_load
             .get(&key)
-            .map_or(0, |q| q.queued)
+            .map_or(0, |q| *q)
             .saturating_add(ticks);
+        self.machine_load.insert(key.clone(), queued);
         self.machine_queue.insert(
             key,
             MachineQueue {
                 item: item.to_owned(),
                 release,
+                taker,
                 queued,
             },
         );
@@ -3641,6 +3668,11 @@ impl PlanState {
     /// Called where a batch is emitted that cannot be proved to leave the
     /// machine empty. It does **not** un-commit the machine, and that asymmetry
     /// is the point: the plan is still using it, and now nothing else may.
+    ///
+    /// Nor does it forget the machine time already queued: the load a machine
+    /// carries is a fact about every batch this plan put into it, and a smelt
+    /// that unqueues a furnace while it emits and queues it again behind its
+    /// own take must find the total where it left it. See `machine_load`.
     pub fn unqueue_machine(&mut self, position: &Position) {
         self.machine_queue.remove(&Pos::from(position));
     }
@@ -4208,6 +4240,38 @@ fn tile_box(point: &Position) -> Rect {
 
 #[cfg(test)]
 mod tests {
+    /// **The load a machine carries survives a smelt adopting it.**
+    ///
+    /// `smelt_steps` unqueues a furnace while it emits and queues it again
+    /// behind its own take, and `queued` used to be reset to the newest
+    /// batch by that cycle -- so "least-loaded first" compared each
+    /// furnace's last batch instead of its queue, and green piled
+    /// twenty-six batches onto one furnace. The total lives in
+    /// `machine_load` now, which only `queue_machine` writes.
+    #[test]
+    fn the_queued_total_survives_unqueueing() {
+        let mut state = PlanState::from_world(
+            Arc::new(factorio_bot_core::test_utils::fixture_world()),
+            &[BotId(1), BotId(2)],
+        );
+        let pos = Position::new(-38.0, -16.0);
+        state.commit_machine(&pos);
+        state.queue_machine(&pos, "iron-plate", ActionId(7), Some(BotId(1)), 768);
+        assert_eq!(state.machine_queue(&pos).map(|q| q.queued), Some(768));
+        state.unqueue_machine(&pos);
+        assert!(
+            state.machine_queue(&pos).is_none(),
+            "nothing may queue while a smelt emits"
+        );
+        state.queue_machine(&pos, "iron-plate", ActionId(19), Some(BotId(2)), 192);
+        let entry = state
+            .machine_queue(&pos)
+            .expect("queued again behind the newest take");
+        assert_eq!(entry.queued, 960, "both batches, not just the newest");
+        assert_eq!(entry.release, ActionId(19));
+        assert_eq!(entry.taker, Some(BotId(2)));
+    }
+
     use super::*;
     use factorio_bot_core::test_utils::{fixture_entity_prototypes, fixture_world};
     use factorio_bot_core::types::{FactorioEntity, Position};

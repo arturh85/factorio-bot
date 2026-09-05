@@ -684,9 +684,34 @@ fn patch_scan(state: &PlanState, item: &str, anchor: &Position) -> Option<(Posit
 ///
 /// Idle furnaces first, nearest the anchor — a furnace with nothing queued in
 /// it is strictly better than one with a batch to wait for, whatever the
-/// distance. Then queued ones, **least-loaded first**
+/// distance. Then queued ones: **the taker's own before anybody else's**, and
+/// within each group **least-loaded first**
 /// ([`crate::state::MachineQueue::queued`]), so a bank spreads across the
 /// patch's furnaces instead of piling onto whichever is nearest.
+///
+/// "Own" is a furnace whose newest batch this smelt's taker takes itself
+/// ([`crate::state::MachineQueue::taker`]). Queueing behind it costs the
+/// taker nothing it was not already paying — its actions are serial — while
+/// queueing behind another bot's batch puts the wait on *that* bot's
+/// timeline, which nothing here can see: the release is an action, not a
+/// tick, and the bot that performs it may be crafting science packs for
+/// 7,500 ticks first. Measured on `producing:logistic-science-pack:6` against
+/// `workspace/scripts/map.json`, with the load totals corrected but this rule
+/// absent, the queues spread evenly across three furnaces and the makespan
+/// went 102,405 → 108,170, because every bot then waited on a batch some
+/// *other* bot would insert late; with it, 95,237.
+///
+/// # The load total, and the bug that hid behind it
+///
+/// `queued` is the machine time of **every** batch this plan put into the
+/// furnace, kept in `PlanState::machine_load` across the unqueue/queue cycle a
+/// smelt performs while it emits. It used to live only on the queue entry,
+/// which that cycle replaced, so what "least-loaded" compared was the newest
+/// batch on each furnace and not its queue: on green the furnace at
+/// `[-34, -32]` read 576–2,304 while carrying twenty-six batches from all four
+/// bots, and two furnaces two tiles away stood with one long batch each. That
+/// was the mechanism behind run 11's +5,173 — see
+/// `docs/superpowers/plans/2026-09-03-closing-the-idle-gap.md`.
 ///
 /// Ties break on distance and then on `(x, y)`, which `entities_within` has
 /// already sorted by, so the answer does not depend on the order the entity
@@ -697,6 +722,7 @@ fn adoptable_furnaces(
     item: &str,
     anchor: &Position,
     entity: &str,
+    taker: Option<BotId>,
     want: u32,
 ) -> PatchFurnaces {
     let (centre, radius) = patch_scan(state, ore, anchor)
@@ -707,7 +733,6 @@ fn adoptable_furnaces(
         .filter(|e| e.name == entity)
         .map(|e| e.position)
         .collect();
-    let crowd = standing.len() as u32;
     let usable: Vec<Position> = standing
         .into_iter()
         .filter(|pos| !state.holds_buffer(pos))
@@ -718,6 +743,7 @@ fn adoptable_furnaces(
                 .any(|feeder| feeder.position != *pos && state.delivers_into(&feeder.position, pos))
         })
         .collect();
+    let usable_count = usable.len() as u32;
     let mut idle: Vec<Position> = usable
         .iter()
         .filter(|pos| !state.machine_committed(pos))
@@ -729,33 +755,41 @@ fn adoptable_furnaces(
             .then(a.x.total_cmp(&b.x))
             .then(a.y.total_cmp(&b.y))
     });
-    let mut queued: Vec<(Ticks, Position, ActionId)> = usable
+    // `own` first: a furnace whose newest batch this smelt's taker takes
+    // itself. `(own, queued, distance, x, y)` sorted ascending with `own`
+    // false-before-true inverted, so the taker's own furnaces lead and each
+    // group is least-loaded first.
+    let mut queued: Vec<(bool, Ticks, Position, ActionId)> = usable
         .iter()
         .filter(|pos| state.machine_committed(pos))
         .filter_map(|pos| {
             let entry = state.machine_queue(pos)?;
-            (entry.item == item).then(|| (entry.queued, pos.clone(), entry.release))
+            let own = taker.is_some() && entry.taker == taker;
+            (entry.item == item).then(|| (!own, entry.queued, pos.clone(), entry.release))
         })
         .collect();
-    queued.sort_by(|(a_queued, a, _), (b_queued, b, _)| {
-        a_queued
-            .cmp(b_queued)
+    queued.sort_by(|(a_other, a_queued, a, _), (b_other, b_queued, b, _)| {
+        a_other
+            .cmp(b_other)
+            .then(a_queued.cmp(b_queued))
             .then_with(|| calculate_distance(a, anchor).total_cmp(&calculate_distance(b, anchor)))
             .then(a.x.total_cmp(&b.x))
             .then(a.y.total_cmp(&b.y))
     });
+    let own_count = queued.iter().filter(|(other, ..)| !other).count() as u32;
     let mut furnaces: Vec<Reuse> = idle.into_iter().map(Reuse::Idle).collect();
     let idle_count = furnaces.len() as u32;
     furnaces.extend(
         queued
             .into_iter()
-            .map(|(_, pos, release)| Reuse::Queued { pos, release }),
+            .map(|(_, _, pos, release)| Reuse::Queued { pos, release }),
     );
     furnaces.truncate(want as usize);
     PatchFurnaces {
         furnaces,
         idle_count,
-        crowd,
+        own_count,
+        hand: usable_count,
     }
 }
 
@@ -793,10 +827,13 @@ struct PatchFurnaces {
     /// [`bank_size`] was measured against and must keep being given — see
     /// [`patch_furnace_budget`] for why the queued ones are not simply added to it.
     idle_count: u32,
-    /// Every stone furnace standing near the patch, usable or not, which is
-    /// what [`patch_furnace_budget`] is a bound on. A cell's terminal furnace is
-    /// refused as an adoption *and* takes up ground, so it counts here.
-    crowd: u32,
+    /// How many of the queued ones carry a batch the taker itself takes, so
+    /// that queueing behind it keeps the wait on the taker's own timeline.
+    own_count: u32,
+    /// Furnaces a hand-smelt could load: standing near the patch, feeding no
+    /// cell and holding no buffer, whether idle or queued, whatever they are
+    /// committed to. This is what [`patch_furnace_budget`] bounds.
+    hand: u32,
 }
 
 /// The most stone furnaces this plan puts on the ground beside one ore patch
@@ -860,9 +897,29 @@ struct PatchFurnaces {
 /// 12 tiles of the patch*. `produce::CELL_SITES_RESERVED` reserves six sites;
 /// 42 furnaces overwhelm that and a roster's worth does not.
 ///
-/// The count it is compared against is every stone furnace standing near the
-/// patch, a cell's terminal furnace included — that one is refused as an
-/// adoption but still takes up ground, and ground is what this is about.
+/// # What it counts, and the exception to it
+///
+/// The count it is compared against is the **hand-smelt** furnaces near the
+/// patch ([`PatchFurnaces::hand`]): standing, feeding no cell, holding no
+/// buffer. It used to be every stone furnace there, a cell's terminal furnace
+/// included, on the argument that ground is ground. That starved the bots the
+/// budget was named for: on green, bot 2's starter cell stood by the iron
+/// patch before the first hand-smelt was expanded, so a "budget of four" was
+/// three hand furnaces — all bot 1's — and by the time bot 4 asked, four
+/// cells had made it six against four. Ground is now protected where the
+/// furnace is *sited* (`produce::cell_room_to_spare` and
+/// `is_cell_furnace_ground` step a hand furnace off cell ground once the patch
+/// runs short), which is the better instrument for it.
+///
+/// **A bot with no furnace of its own on the patch builds one whatever the
+/// count**, and that furnace is its own errand (`smelt_steps`, `own_grow`).
+/// This is the bound's own reasoning applied per bot rather than first-come:
+/// a bot loads and unloads one furnace at a time, so the width at which
+/// independent smelts stop queueing behind each other is one per *bot*, and
+/// a first-come budget handed all of them to the chain owner. What it costs
+/// is at most `roster − 1` furnaces past the budget, five stone and thirty
+/// ticks each; what it bought on green was the difference between bot 4's
+/// drill standing at 44,658 and at ~33,000.
 fn patch_furnace_budget(state: &PlanState) -> u32 {
     state.bot_ids().len().max(1) as u32
 }
@@ -1157,6 +1214,15 @@ fn smelt_steps(
     let per_run = smelting_ticks(&ctx.state, &recipe, &furnace_entity);
     let recipe_run_ticks = recipe_ticks(&recipe);
 
+    // The bot the plates end up with, and the one whose timeline the bank's
+    // takes sit on. `None` for a `Holder::Anyone` smelt, which is expanded
+    // inside a chain nothing named an owner for -- see the furnace-handover
+    // block further down, which refuses `Anyone` for the same reason.
+    let taker_bot = match &whose {
+        Holder::Bot(bot) | Holder::Share(bot) => Some(*bot),
+        Holder::Anyone => None,
+    };
+
     // The bank: how many furnaces this smelt runs at once, which of them
     // already stand, and what each one carries.
     //
@@ -1171,9 +1237,20 @@ fn smelt_steps(
         || PatchFurnaces {
             furnaces: Vec::new(),
             idle_count: 0,
-            crowd: 0,
+            own_count: 0,
+            hand: 0,
         },
-        |ore| adoptable_furnaces(&ctx.state, ore, item, &anchor, &furnace_entity, MAX_BANK),
+        |ore| {
+            adoptable_furnaces(
+                &ctx.state,
+                ore,
+                item,
+                &anchor,
+                &furnace_entity,
+                taker_bot,
+                MAX_BANK,
+            )
+        },
     );
     // How wide a bank pays, asked with the **idle** count and not the usable
     // one. `bank_size`'s own measurement is that a furnace is worth spreading
@@ -1189,23 +1266,34 @@ fn smelt_steps(
     );
     // One entry per bank slot; `None` is "site and build a furnace here".
     //
-    // Three cases, and the third is the whole of this change:
+    // Four cases:
     //
     // * something at the patch is **idle** — adopt it, exactly as before, and
     //   `bank_size` has already said how many;
+    // * nothing is idle and **the taker has no furnace of its own** there —
+    //   build one, and build it *as the taker* (`own_grow` below keeps it out
+    //   of the handover). Every furnace a taker could queue on is somebody
+    //   else's batch, and a wait on another bot's timeline is the one cost
+    //   this expansion cannot price; five stone can. See
+    //   `patch_furnace_budget` for the measurement;
     // * nothing is idle and the patch is **under the roster's furnace budget**
     //   — build one, exactly as every smelt used to. `bank_size` answers 1 by
     //   construction (`widest` is the idle count), so a buildable slot is never
     //   fed back into it and its measured refusal to build for the lag alone
     //   stands;
-    // * nothing is idle and the patch is **full** — queue behind the
-    //   least-loaded furnace already there rather than putting another one on
-    //   ground a cell will need.
+    // * nothing is idle and the patch is **full** — queue behind a furnace
+    //   already there rather than putting another one on ground a cell will
+    //   need: the taker's own first, then the least-loaded of the rest
+    //   (`adoptable_furnaces`).
     //
     // The last arm can still fall through to building: a patch whose furnaces
     // are all a cell's or all holding buffers offers nothing to queue behind,
     // and refusing to smelt at all would be worse than one more furnace.
-    let grow = patch.idle_count == 0 && patch.crowd < patch_furnace_budget(&ctx.state);
+    // `Holder::Anyone` names no taker, so it has no queue of its own to
+    // prefer and no claim to a furnace of its own: it grows with the budget
+    // and queues least-loaded, as every smelt did before takers were known.
+    let own_grow = patch.idle_count == 0 && patch.own_count == 0 && taker_bot.is_some();
+    let grow = own_grow || (patch.idle_count == 0 && patch.hand < patch_furnace_budget(&ctx.state));
     let mut slots: Vec<Option<Reuse>> = Vec::new();
     if grow {
         slots.push(None);
@@ -1348,10 +1436,6 @@ fn smelt_steps(
     // inventory the handover could be sized in opposition to; it keeps the
     // whole bank, exactly as before. `SharedSmelt::taker` refuses `Anyone`
     // for the same reason and says so at length.
-    let taker_bot = match &whose {
-        Holder::Bot(bot) | Holder::Share(bot) => Some(*bot),
-        Holder::Anyone => None,
-    };
     // Two questions, in this order: *which* slots are worth handing away
     // (`worth_handing_a_furnace_over`, a fact about this smelt's own bill) and
     // then *who* gets them (`furnace_suppliers`, a fact about the roster).
@@ -1362,6 +1446,11 @@ fn smelt_steps(
         let worth: Vec<usize> = bank
             .iter()
             .enumerate()
+            // A furnace grown so that the taker need not wait on another bot
+            // is the taker's own errand: handing its placement to a supplier
+            // would put the very dependency it exists to remove back on the
+            // critical path. It is always slot 0, pushed first above.
+            .filter(|(index, _)| !(own_grow && *index == 0))
             .filter(|(_, furnace_slot)| {
                 worth_handing_a_furnace_over(
                     &ctx.state,
@@ -1564,7 +1653,7 @@ fn smelt_steps(
             }],
             duration: TRANSFER_TICKS,
             pinned: None,
-            label: format!("fuel the furnace with {} coal", coal),
+            label: format!("fuel the furnace with {} coal at {}", coal, pos),
         }
     }
 
@@ -1782,7 +1871,7 @@ fn smelt_steps(
                     }],
                     duration: TRANSFER_TICKS,
                     pinned: None,
-                    label: format!("insert {} {}", total, ingredient),
+                    label: format!("insert {} {} at {}", total, ingredient, pos),
                 })));
             }
         }
@@ -1980,7 +2069,7 @@ fn smelt_steps(
                     }],
                     duration: TRANSFER_TICKS,
                     pinned: None,
-                    label: format!("insert {} {}", put, ore),
+                    label: format!("insert {} {} at {}", put, ore, pos),
                 })));
             }
             // Ore the bank had no room for. It stays where it is, and the
@@ -2197,7 +2286,7 @@ fn smelt_steps(
                 }],
                 duration: TRANSFER_TICKS,
                 pinned: None,
-                label: format!("take {} {} from the furnace", take, item),
+                label: format!("take {} {} from the furnace at {}", take, item, pos),
             })));
 
             let smelt_lag = per_run
@@ -2265,6 +2354,7 @@ fn smelt_steps(
                     &furnace_slot.pos,
                     item,
                     remove_id,
+                    taker_bot,
                     per_run.saturating_mul(furnace_slot.runs),
                 );
             }
@@ -10819,8 +10909,9 @@ mod tests {
             // Moved by the lookahead scheduling key (51c7f695): a bound over the bot's other ready work replaces (end, id) as the primary key, and the plan overlaps the longer smelt under the shorter one.
             // Moved again on 2026-09-05, 9965 -> 9900: the trigger's lab craft is the lead supplier's own chain now (`Researched`'s trigger path), off the chain actor's timeline.
             // 9900 -> 7278 later on 2026-09-05: `infer_edges` leaves a chain's plate pairings to the stated supply edge (see `a_wider_ore_front_barely_moves_the_spread_it_used_to_unlock`).
+            // 7278 -> 7156 on 2026-09-05: a bot with no furnace of its own on the patch builds one instead of queueing behind another bot's batch, and a smelt queues behind its own batch before a lighter furnace of somebody else's (`tests/furnace_reuse.rs`).
             plan.makespan,
-            7278,
+            7156,
             "15866 with the subtree on one bot, 12403 once the ore converged, \
              and 10011 once the furnaces themselves became other bots' \
              errands; {per_bot:?}"
@@ -10909,8 +11000,9 @@ mod tests {
             // Moved by the lookahead scheduling key (51c7f695): a bound over the bot's other ready work replaces (end, id) as the primary key, and the plan overlaps the longer smelt under the shorter one.
             // Moved again on 2026-09-05, 9987 -> 9897, for the narrow fixture's reason: the trigger's lab craft is the lead supplier's; 3 ticks off the narrow fixture's 9900 now.
             // 9897 -> 6955 later on 2026-09-05: `infer_edges` leaves a chain's plate pairings to the stated supply edge, so the chains' consumers no longer wait for every earlier producer of the same item.
+            // 6955 -> 7654 on 2026-09-05: each supplier stands a furnace of its own instead of queueing behind bot 1's (`tests/furnace_reuse.rs`); on this wide front that is three more furnace bills for smelts that were not on the critical path, and the narrow fixture above gains 122 by the same rule. The spread this test is about is unchanged: every bot still supplies the unlock.
             plan.makespan,
-            6955,
+            7654,
             "17122 before time-aware claims, 12428 after them, and 10053 once \
              R3 made a furnace somebody else's errand -- 42 ticks off the \
              narrow fixture's 10011: {per_bot:?}"

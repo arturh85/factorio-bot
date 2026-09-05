@@ -109,6 +109,77 @@ walking_state read back walking=true`, so the next such line tells whether
 the game held a steered character or something overwrote the steer. Five
 stub-runtime walker tests, offline plans untouched.
 
+## The shared furnace: least-loaded compared the newest batch, and the budget starved every bot but the first — green planned 26:27
+
+The RCA behind run 11's +5,173, done offline against `workspace/scripts/map.json`
+with a listing that now names the furnace on every fuel, insert and take (`at
+[-34, -32]`). **Three mechanisms, and my brief named none of them exactly.**
+
+1. **"Least-loaded first" compared the newest batch, not the queue.**
+   `smelt_steps` unqueues a furnace while it emits and queues it again behind
+   its own take; `MachineQueue::queued` lived only on that entry, so the cycle
+   reset it to the last batch. On green the furnace at `[-34, -32]` read
+   576–2,304 while carrying **26 batches from all four bots** (53 visits); the
+   furnaces at `[-33, -30]` and `[-38, -16]`, two tiles away, sat at 3,072 and
+   3,840 with one long shared batch each and were never chosen again. The
+   total now lives in `PlanState::machine_load`, which only `queue_machine`
+   writes.
+2. **The budget counted cells.** `patch_furnace_budget` is one furnace per bot,
+   compared against *every* stone furnace near the patch — bot 2's starter cell
+   stood there before the first hand-smelt was expanded, so "four" was three
+   hand furnaces, all bot 1's, and by the time bot 4 asked, cells had made it
+   six against four. It now bounds hand-smelt furnaces (`PatchFurnaces::hand`);
+   ground is protected where a furnace is sited (`cell_room_to_spare`).
+3. **The budget was first-come.** Bot 1's first smelts built every furnace it
+   allowed, so bot 4's nine drill plates queued 9,848 ticks behind bot 1's
+   ladder; its drill stood at 44,658 (37,100 → 42,273 on the fuel that opened
+   the queue, exactly the brief's numbers), its 78-plate cell take at 63,668,
+   research behind it. **A bot with no furnace of its own on the patch now
+   builds one, as its own errand** (`own_grow`), and a smelt queues behind
+   *its own* batch before a lighter furnace of somebody else's.
+
+The critical path, before: bot 4's drill plates (3 + 6) queued on `[-34, -32]`
+behind bot 3's 10/2/4 and bot 2's 8 → drill placed 44,658 → 78 plates at 240
+each → 63,668 → 39 packs crafted → 76,548 → research → cell. After: bot 4
+smelts its nine on its own furnace at `[-38, -18]` (takes 32,405 / 33,779),
+cell take **53,009**, and the makespan is bot 1's chain.
+
+**What the numbers refused.** Fix 1 alone: green 102,405 → **108,170** — the
+queues spread evenly and every bot then waited on a batch some *other* bot
+would insert late (bot 3's insert at 41,028 held bot 1's 16-plate take to
+44,302). Fix 1 + 2: 113,330. "Own furnace first, and only then the budget"
+(a bot chains everything on one furnace): automation 27,265, red 52,557 —
+bot 1's bank overlap is real. Fix 3 with the own furnace handed to a
+supplier: automation 22,240, because `furnace_suppliers` ranks by
+`planned_mining`, which does not count rock swings, and so hands bot 3's
+furnace to bot 1 — **open**, and a separate RCA.
+
+| goal | before | after | furnaces | util |
+|---|---|---|---|---|
+| `researched:automation` | 197 / 21,883 | 207 / **21,818** | 8 → 12 | 42.0 → 45.2% |
+| `producing:automation-science-pack:6` | 347 / 33,487 | 358 / **35,239** (+5.2%) | 8 → 13 | 47.2 → 47.5% |
+| `producing:logistic-science-pack:6` | 628 / 102,405 | 610 / **95,237 (26:27)** | 18 → 24 | 33.2 → 35.8% |
+
+Green per bot, steps / planned / idle: before `{1: 355/58,432/43,973, 2:
+168/22,897/79,508, 3: 148/24,857/77,548, 4: 148/29,910/72,495}`; after `{1:
+370/62,396/32,841, 2: 162/22,265/72,972, 3: 141/24,249/70,988, 4:
+138/27,577/67,660}`. Bot 1 hand-mines 36 more iron ore (a 24-ore smelt that
+was shared is now its own) and is the whole critical path.
+
+**Red moves up 1,752**, and it is bot 1's timeline: bots 3 and 4 each stand a
+furnace of their own (+330 ticks each, from a rock), bot 1 builds a fourth
+(the budget no longer counts the cell), and its `research automation` starts
+at 28,364 instead of 26,715. The plates are the same plates; the red plan is
+bot-1-bound and every tick bot 1 spends before the research is makespan.
+
+Pins moved, each with its reason in place: the unlock fixtures 7,278 → 7,156
+and 6,955 → 7,654; the fleet's rung-1 bill coal 54 → 78 and stone 48 → 93
+(three suppliers fuel furnaces of their own off rocks — gathered, not dug
+twice; iron and copper do not move). `every_expansion_replays_in_time_order`
+lost its cross-chain edges — every furnace in its fixtures was a first
+furnace — and gained a fourth case where bot 1 smelts first, so R3 still
+fires on a taker's second furnace.
+
 ## Run 11: the rock forecast's +5% on green reproduced live — 29:09 (`run-1788583161-11653`)
 
 Same script, seed and roster as run 10, git `cbf5ae01`. One plan, 605 of 605,

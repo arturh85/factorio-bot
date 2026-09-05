@@ -220,6 +220,29 @@ three bots one extra iron furnace (three actions) reorders bot 3's ready
 work and its `take 10 copper-ore from the wooden-chest` moves from 8,860 to
 13,473 with no furnace of its involved.
 
+## ⚠️ RUN 15: 18:46 (`run-1788621697-14165`) — slower than run 14, honestly
+
+2026-09-05 17:20, master `917fdcd2` (everything of the afternoon merged),
+four clients at 1x, seed 31337 `--new`, debug build, 100% tick delivery,
+**clock stopped for both plannings (26.4 s, 0 ticks charged)** — the first
+measured run under the 17cdd5f7 rule, so its number excludes planning and
+run 14's included ~1,983 ticks of it.
+
+| | run 14 | run 15 |
+|---|---|---|
+| green cell | 17:20 (62,408) | **18:46 (67,598)** |
+| plan | 569 / 57,752 (+ 9-step replan) | 569 / 59,476, one plan |
+| executed / planned | 1.046 (planning removed) | **1.137** |
+| failed | 1 walk | none |
+| fleet utilisation | 60.9% | 58.4% |
+
+So the pole-edge change (`c83c5906`) that took eight bots from 71,936 to
+67,636 at 5x costs four bots ~1,700 ticks of plan and ~3,900 ticks of
+execution at 1x. The number stands and 17:20 remains the best; the RCA is
+dispatched as the `fourbot` worktree: where the extra execution slip sits
+per bot against run 14, and whether the pole condition should be an edge
+(order) without being a scheduling tie the cell's plate take wins.
+
 ## The afternoon after 17:20: what headless mode found (2026-09-05, 15:00–18:00)
 
 Full log in `docs/superpowers/notes/2026-09-05-headless-experiments.md`. On

@@ -3097,6 +3097,7 @@ function on_some_entity_created(event)
 	end
 
 	writeout(event.tick, "on_some_entity_created", helpers.table_to_json(serialize_entity(ent)))
+	tally_built_entity(ent)
 
 --	if ent.type == "pipe" or ent.type == "pipe-to-ground" or ent.type == "wall" or ent.type == "heat-pipe" then -- HACK to semi-correctly assign an orientation to pipes etc
 --		-- need to write out neighboring entities as well, because they might have changed their orientation by this event
@@ -5753,26 +5754,63 @@ RESEARCH_TRIGGER_PERIOD = 60
 -- `steam-power` that way. `get_input_count` on the item flow statistics is
 -- everything the force produced by any means.
 --
--- Only `craft-item` is emulated. The other live types are `mine-entity` (11 of
--- them, including `oil-processing`), `build-entity`, `capture-spawner` and
--- `create-space-platform`, and `serialize_technology` deliberately sends no
--- payload for those because the shipped prototypes and the runtime API
--- disagree about the field's shape. Emulating a trigger whose condition cannot
--- be read would be granting it, so they are left alone and a headless run
--- still cannot cross them.
+-- **Which kinds the game fires by itself, measured on 2026-09-05** on a
+-- scratch headless server (Space Age 2.1.17, one character bot, no player;
+-- `docs/superpowers/notes/2026-09-05-research-triggers.md` has the ticks):
+--
+-- * `mine-entity` -- the game fires it **without any player**: a character
+--   bot chopping a `big-volcanic-rock` through `action_start_mining` earned
+--   `tungsten-carbide`, a fuelled burner drill on calcite earned
+--   `calcite-processing`, and a pumpjack on a well earned `oil-processing`.
+--   Nothing here touches `mine-entity`; emulating it would fire a second time
+--   at best and early at worst.
+-- * `craft-item` -- split down the middle. **Machine output fires by
+--   itself**: with this sweep switched off, a stone furnace's tenth copper
+--   plate earned `electronics` within ~400 ticks. **A character's hand
+--   craft does not**: with the sweep off, `electronics` and `steam-power`
+--   researched and a lab crafted through `action_start_crafting` (in the
+--   inventory, absent from the statistics), `automation-science-pack` stayed
+--   open for 4,000 ticks and completed 4 ticks after the sweep came back.
+--   So the emulation is *needed* for the hand-craft tally and merely
+--   *redundant* for the statistics -- it reads both because the trigger does
+--   not say which route a run will take, and the statistics path can only
+--   ever complete a technology the game was about to complete itself.
+-- * `build-entity` -- `surface.create_entity{force = player}`, which is how
+--   every placement this mod makes lands, fired nothing for an
+--   `asteroid-collector` with `space-platform` researched, with and without
+--   `raise_built = true`. Emulated, from `storage.built_tally`, which
+--   `on_some_entity_created` fills with every entity this force built.
+-- * `capture-spawner` and `create-space-platform` -- no action in this mod
+--   can capture a spawner or launch a platform, so there is no act to count
+--   and nothing to emulate. The planner refuses them by name.
+--
+-- **Prerequisites gate the trigger, and the game counts the act before
+-- them.** Measured twice: the rock mined with `planet-discovery-vulcanus`
+-- unresearched earned nothing, and a `copper-stromatolite` mined *before*
+-- `planet-discovery-gleba` was set researched earned `heating-tower` a few
+-- ticks *after* it was. So the sweep skips a technology whose prerequisites
+-- are open, and reads a counter that remembers the act: exactly the game's
+-- behaviour, and the reason `automation-science-pack` (prerequisites
+-- `electronics` and `steam-power`) can no longer complete in the same sweep
+-- as, or before, the two plate triggers that unlock it.
 --
 -- Runs only while character bots exist. With real players the game does this
 -- itself, and doing it twice would be both wrong and invisible.
+-- `set_research_trigger_emulation(false)` over the remote interface switches
+-- the sweep off for a measurement of what the game does on its own; the
+-- switch is in `storage`, so it survives a save and is reported honestly
+-- rather than lost with the Lua state.
 function emulate_research_triggers(tick)
 	if not has_character_bots() then return end
 	if tick % RESEARCH_TRIGGER_PERIOD ~= 0 then return end
+	if storage.research_trigger_emulation_off then return end
 	local force = game.forces["player"]
 	local ok_stats, stats = pcall(function()
 		return force.get_item_production_statistics(game.surfaces[1])
 	end)
 	if not ok_stats or stats == nil then return end
 	for name, tech in pairs(force.technologies) do
-		if not tech.researched and tech.enabled then
+		if not tech.researched and tech.enabled and prerequisites_researched(tech) then
 			local ok, trigger = pcall(function() return tech.prototype.research_trigger end)
 			if ok and trigger ~= nil and trigger.type == "craft-item" and trigger.item ~= nil then
 				local item = trigger.item
@@ -5808,9 +5846,80 @@ function emulate_research_triggers(tick)
 						" (" .. tostring(item) .. " " .. tostring(produced) ..
 						"/" .. tostring(needed) .. ")")
 				end
+			elseif ok and trigger ~= nil and trigger.type == "build-entity" then
+				-- The shipped trigger (`space-science-pack`) spells its
+				-- target `entity = {name = ...}`, singular, where
+				-- `mine-entity` spells `entities = {...}`; `trigger_names`
+				-- (types.lua) reads both, and any one of the names earns it.
+				local names = trigger_names(trigger.entities)
+				if #names == 0 then names = trigger_names(trigger.entity) end
+				local needed = trigger.count or 1
+				local built, earned_by = 0, nil
+				for _, entity_name in ipairs(names) do
+					local count = (storage.built_tally or {})[entity_name] or 0
+					if count > built then built, earned_by = count, entity_name end
+				end
+				if #names > 0 and built >= needed then
+					tech.researched = true
+					writeout(tick, "research_trigger_emulated", helpers.table_to_json({
+						technology = name,
+						trigger = "build-entity",
+						entity = earned_by,
+						needed = needed,
+						built = built,
+					}))
+					print("research trigger earned: " .. tostring(name) ..
+						" (built " .. tostring(earned_by) .. " " .. tostring(built) ..
+						"/" .. tostring(needed) .. ")")
+				end
 			end
 		end
 	end
+end
+
+-- Whether every prerequisite of `tech` is researched. A technology with no
+-- prerequisites (`electronics`, `steam-power`) passes. Guarded because the
+-- stub game the Rust tests load this file into does not always give a
+-- technology a `prerequisites` table; an unreadable table reads as "open",
+-- which can only ever delay a trigger, never grant one.
+function prerequisites_researched(tech)
+	local ok, met = pcall(function()
+		for _, prerequisite in pairs(tech.prerequisites or {}) do
+			if not prerequisite.researched then return false end
+		end
+		return true
+	end)
+	return ok and met
+end
+
+-- Switch the trigger sweep off (or on again). A measurement of what the game
+-- fires on its own needs the sweep out of the way; nothing in a run calls
+-- this. The state lives in `storage` so a save carries it, and the change is
+-- in the record, because a run made with the sweep off and no line saying so
+-- would read as a run in which the game fired every trigger itself.
+function rcon_set_research_trigger_emulation(enabled)
+	storage.research_trigger_emulation_off = not enabled
+	writeout(game.tick, "research_trigger_emulation", helpers.table_to_json({
+		enabled = enabled and true or false,
+	}))
+	rcon.print("research trigger emulation " .. (enabled and "on" or "off"))
+end
+
+-- What this force has built, per entity prototype, for the whole session --
+-- the counter a `build-entity` trigger is read from. Fed by
+-- `on_some_entity_created`, which is the one point every build this mod
+-- knows about passes through: `rcon_place_entity` after the item is paid
+-- for, and the game's own `on_built_entity` / `on_robot_built_entity`.
+-- Only the player force's builds count: `on_biter_base_built` reaches the
+-- same handler and a spawner the enemy raised is not something we built.
+function tally_built_entity(ent)
+	if storage == nil then return end
+	storage.built_tally = storage.built_tally or {}
+	local ok, ours = pcall(function()
+		return ent.valid and ent.force ~= nil and ent.force.name == "player"
+	end)
+	if not ok or not ours then return end
+	storage.built_tally[ent.name] = (storage.built_tally[ent.name] or 0) + 1
 end
 
 function poll_character_bot(tick, id, handle)
@@ -5986,5 +6095,6 @@ remote.add_interface("botbridge", {
 	action_start_walk_waypoints=rcon_action_start_walk_waypoints,
 	action_start_mining=rcon_action_start_mining,
 	action_start_crafting=rcon_action_start_crafting,
-	action_start_research=rcon_action_start_research
+	action_start_research=rcon_action_start_research,
+	set_research_trigger_emulation=rcon_set_research_trigger_emulation
 })

@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
 use crate::factorio::ticks::ActionOutcome;
-use crate::factorio::world::{DeathEvent, FactorioWorld, RespawnEvent, TeleportEvent};
+use crate::factorio::world::{
+    DeathEvent, FactorioWorld, ResearchTriggerEvent, RespawnEvent, TeleportEvent,
+};
 // use crate::factorio::ws::{
 //     FactorioWebSocketServer, PlayerChangedMainInventoryMessage, PlayerChangedPositionMessage,
 //     PlayerDistanceChangedMessage, PlayerLeftMessage, ResearchCompletedMessage,
@@ -508,6 +510,27 @@ impl OutputParser {
                     );
                 }
             },
+            "research_trigger_emulated" => {
+                match serde_json::from_str::<ResearchTriggerEvent>(rest) {
+                    Ok(event) => {
+                        info!(
+                            "trigger technology {} earned at tick {} ({} {}/{})",
+                            event.technology,
+                            tick,
+                            event.trigger,
+                            event.count(),
+                            event.needed
+                        );
+                        self.world.record_research_trigger(tick, event);
+                    }
+                    Err(err) => {
+                        error!(
+                            "<red>failed to deserialize research_trigger_emulated</>: {:?} '{}'",
+                            err, rest
+                        );
+                    }
+                }
+            }
             _ => {
                 error!("<red>unexpected action</>: <bright-blue>{}</>", action);
             }

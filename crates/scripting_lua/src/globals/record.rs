@@ -2268,6 +2268,65 @@ end
     }
 
     map_table.set(
+        "__doc_entry_research_triggers",
+        String::from(
+            r#"
+--- flushes the trigger technologies the mod has completed on a headless run
+-- Factorio 2.0 unlocks some technologies by *doing* -- craft a lab, smelt
+-- 50 iron plates -- and the game fires those from a player's actions. A
+-- server-side character has no player: the game still fires `mine-entity`
+-- and a furnace's `craft-item`, but never a hand craft's, and never
+-- `build-entity`. The mod's sweep completes those from its own counters once
+-- the act has happened and every prerequisite is researched, and each
+-- completion is queued as a `research_trigger_emulated` event naming the
+-- technology, the trigger kind, what was counted and how many against how
+-- many were needed. This flushes that queue into `events.jsonl`.
+--
+-- Call it once per loop iteration, alongside `record.actions` and
+-- `record.deaths`, and once more after the loop. A run with real players
+-- writes none of these: the game fires every trigger itself.
+-- @treturn number how many events were written
+-- @raise if no recording is running
+function record.research_triggers()
+end
+    "#,
+        ),
+    )?;
+    {
+        let slot = slot.clone();
+        let world = world.clone();
+        map_table.set(
+            "research_triggers",
+            lua.create_function(move |_lua, ()| {
+                let mut guard = slot.lock();
+                let recorder = guard.as_mut().ok_or_else(|| {
+                    record_error("no recording is running -- call record.start() first")
+                })?;
+                let mut written = 0u32;
+                for (tick, event) in world.drain_research_triggers() {
+                    let tick = recorder.not_before(tick);
+                    let count = event.count();
+                    recorder
+                        .record(
+                            tick,
+                            EventKind::ResearchTriggerEmulated {
+                                technology: event.technology,
+                                trigger: event.trigger,
+                                item: event.item,
+                                entity: event.entity,
+                                needed: event.needed,
+                                count,
+                            },
+                        )
+                        .map_err(record_error)?;
+                    written += 1;
+                }
+                Ok(written)
+            })?,
+        )?;
+    }
+
+    map_table.set(
         "__doc_entry_roster_changed",
         String::from(
             r#"
@@ -4396,6 +4455,80 @@ mod tests {
             other => panic!("expected bot_released, got {other:?}"),
         }
         assert_eq!(read_event_ticks(&run_dir), vec![26_953, 40_000]);
+    }
+
+    /// The mod's `research_trigger_emulated` line through the real parser
+    /// into `events.jsonl`, both spellings of the count: `produced` for a
+    /// `craft-item` trigger, `built` for a `build-entity` one.
+    #[test]
+    fn an_emulated_trigger_reaches_events_jsonl_through_the_real_parser() {
+        let lua = crate::sandbox::new_sandboxed_lua().expect("sandbox");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let recorder = RunRecorder::start(tmp.path(), "run-1").expect("recorder starts");
+        let run_dir = recorder.dir().to_path_buf();
+        let slot: Slot = Arc::new(Mutex::new(Some(recorder)));
+        let world = Arc::new(FactorioWorld::new());
+
+        let table = create_lua_record_with_slot(
+            &lua,
+            Arc::new(FactorioRcon::new_empty()),
+            world.clone(),
+            tmp.path().join("scripts"),
+            vec![],
+            slot,
+        )
+        .expect("record table");
+        lua.globals().set("record", table).expect("install");
+
+        let mut parser = factorio_bot_core::process::output_parser::OutputParser::with_world(world);
+        parser
+            .parse(
+                22_680,
+                "research_trigger_emulated",
+                r#"{"technology":"automation-science-pack","trigger":"craft-item","item":"lab","needed":1,"produced":1}"#,
+            )
+            .expect("craft-item line parses");
+        parser
+            .parse(
+                30_000,
+                "research_trigger_emulated",
+                r#"{"technology":"space-science-pack","trigger":"build-entity","entity":"asteroid-collector","needed":1,"built":2}"#,
+            )
+            .expect("build-entity line parses");
+
+        let written: u32 = lua
+            .load("return record.research_triggers()")
+            .eval()
+            .expect("record.research_triggers() runs");
+        assert_eq!(written, 2);
+        let events = read_events(&run_dir);
+        assert_eq!(
+            events,
+            vec![
+                EventKind::ResearchTriggerEmulated {
+                    technology: "automation-science-pack".into(),
+                    trigger: "craft-item".into(),
+                    item: Some("lab".into()),
+                    entity: None,
+                    needed: 1,
+                    count: 1,
+                },
+                EventKind::ResearchTriggerEmulated {
+                    technology: "space-science-pack".into(),
+                    trigger: "build-entity".into(),
+                    item: None,
+                    entity: Some("asteroid-collector".into()),
+                    needed: 1,
+                    count: 2,
+                },
+            ]
+        );
+        assert_eq!(read_event_ticks(&run_dir), vec![22_680, 30_000]);
+        let again: u32 = lua
+            .load("return record.research_triggers()")
+            .eval()
+            .expect("record.research_triggers() runs on an empty queue");
+        assert_eq!(again, 0);
     }
 
     /// Drives the real mod->core->Lua road for a death, as

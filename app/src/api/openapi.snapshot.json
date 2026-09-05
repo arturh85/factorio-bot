@@ -1184,6 +1184,58 @@
             "type": "object"
           },
           {
+            "description": "The mod completed a Factorio 2.0 *trigger* technology on a headless\nrun because the force had already done what the trigger names.\n\nA server-side character has no player, and the game fires `craft-item`\nfor machine output but never for a character's hand craft, and never\n`build-entity` for a mod-placed entity\n(`docs/superpowers/notes/2026-09-05-research-triggers.md`). So\n`emulate_research_triggers` in `mods/BotBridge/control.lua` completes\nsuch a technology from the counters it keeps, only once every\nprerequisite is researched, and writes this line with the count that\nearned it. It is the answer to \"why does `on_research_finished` for\n`automation-science-pack` appear with no research ever started?\", and\na run whose log has the finish without this line is one in which the\ngame fired the trigger itself. Written by `record.research_triggers()`.",
+            "properties": {
+              "count": {
+                "description": "What the force had done when the sweep read it -- at least\n`needed`, by construction.",
+                "format": "int32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "entity": {
+                "description": "The entity a `build-entity` trigger counted; `null` for `craft-item`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "item": {
+                "description": "The item a `craft-item` trigger counted; `null` for `build-entity`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "kind": {
+                "enum": [
+                  "research_trigger_emulated"
+                ],
+                "type": "string"
+              },
+              "needed": {
+                "description": "What the trigger asked for.",
+                "format": "int32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "technology": {
+                "type": "string"
+              },
+              "trigger": {
+                "description": "The trigger's `type`: `craft-item` or `build-entity`.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "technology",
+              "trigger",
+              "needed",
+              "count",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
             "description": "The supervisor changed the roster it plans for.\n\nThe roster used to be computed once at script start and never again.\n`scripts/supervisor.lua` now re-checks `rcon.players()` before every\nplan: a rostered bot that has had no character for longer than the\nbounded respawn wait is dropped, and one that was dropped and came\nback is picked up again. Written by `record.roster_changed()` from the\nsupervisor's `rerostered` transition, so the reader of a run whose\n`plan_created.bots` shrinks from four to three finds the line that\nsays why, rather than the silence run 30 left.\n\n**Only removals and returns, never additions.** A bot that was never\nin the roster this run started with is not picked up mid-run, because\n\"the first non-empty answer is the roster\" is the bug that froze run\n30 on `[2]`, and re-rostering must not reintroduce it.",
             "properties": {
               "bots": {

@@ -277,3 +277,189 @@ fn serialize_entity_sends_an_inserter_pickup_position_in_snake_case() {
     assert_eq!(pickup.get::<f64>("x").expect("x"), 5.5);
     assert_eq!(pickup.get::<f64>("y").expect("y"), 2.5);
 }
+
+/// A `LuaTechnology` as `serialize_technology` reads it, with `trigger` as
+/// the Lua source of `prototype.research_trigger`. Only the fields the
+/// serialiser touches are present; `table_properties` pcalls the rest.
+fn technology_with_trigger(lua: &Lua, trigger: &str) -> Table {
+    lua.load(format!(
+        r#"
+        return {{
+            name = "oil-processing", enabled = true, upgrade = false, order = "e-b",
+            researched = false, level = 1, valid = true,
+            research_unit_count = 1, research_unit_energy = 0,
+            research_unit_ingredients = {{}},
+            prerequisites = {{ {{ name = "oil-gathering" }} }},
+            prototype = {{
+                effects = {{ {{ type = "unlock-recipe", recipe = "oil-refinery" }} }},
+                research_trigger = {trigger},
+            }},
+        }}
+        "#
+    ))
+    .eval()
+    .expect("the technology table builds")
+}
+
+fn trigger_of(lua: &Lua, trigger: &str) -> Table {
+    call(
+        lua,
+        "serialize_technology",
+        technology_with_trigger(lua, trigger),
+    )
+    .get("research_trigger")
+    .expect("a technology with a trigger sends one")
+}
+
+fn names(table: &Table, key: &str) -> Vec<String> {
+    table
+        .get::<Table>(key)
+        .unwrap_or_else(|e| panic!("{key} is a list: {e}"))
+        .sequence_values::<String>()
+        .map(|v| v.expect("a name"))
+        .collect()
+}
+
+/// The shape `data/base/prototypes/technology.lua` writes for
+/// `oil-processing`: `entities = {"crude-oil"}`, a list, and no `count`.
+/// Sent as an entity list with the count defaulted to one.
+#[test]
+fn serialize_technology_sends_a_mine_entity_triggers_entity_list() {
+    let lua = botbridge_types();
+    let out = trigger_of(
+        &lua,
+        r#"{ type = "mine-entity", entities = { "crude-oil" } }"#,
+    );
+    assert_eq!(out.get::<String>("type").expect("type"), "mine-entity");
+    assert_eq!(names(&out, "entities"), vec!["crude-oil"]);
+    assert_eq!(out.get::<u32>("count").expect("count"), 1);
+}
+
+/// The shape `runtime-api.json` 2.1.17 documents for the same trigger: a
+/// singular `entity` string. Nobody has captured which of the two the runtime
+/// actually hands the mod, so both are read, and both come out as the list.
+#[test]
+fn serialize_technology_reads_the_documented_singular_entity_too() {
+    let lua = botbridge_types();
+    let out = trigger_of(&lua, r#"{ type = "mine-entity", entity = "uranium-ore" }"#);
+    assert_eq!(names(&out, "entities"), vec!["uranium-ore"]);
+
+    // An `EntityIDFilter` is a table with a `name`, and `build-entity` is
+    // documented with one; a list of them is read the same way. `count`
+    // is forwarded when present.
+    let out = trigger_of(
+        &lua,
+        r#"{ type = "build-entity", entities = { { name = "radar", quality = "normal" }, "lab" }, count = 3 }"#,
+    );
+    assert_eq!(out.get::<String>("type").expect("type"), "build-entity");
+    assert_eq!(names(&out, "entities"), vec!["radar", "lab"]);
+    assert_eq!(out.get::<u32>("count").expect("count"), 3);
+}
+
+/// A trigger that names nothing is sent as its bare type, exactly as every
+/// non-craft trigger was until 2026-09-05, so the planner can tell
+/// "undescribed" from "unsupported" by the payload's absence alone.
+#[test]
+fn serialize_technology_sends_the_bare_type_for_a_trigger_naming_nothing() {
+    let lua = botbridge_types();
+    let out = trigger_of(&lua, r#"{ type = "mine-entity", entities = {} }"#);
+    assert_eq!(out.get::<String>("type").expect("type"), "mine-entity");
+    assert!(matches!(
+        out.get::<Value>("entities").expect("entities"),
+        Value::Nil
+    ));
+    assert!(matches!(
+        out.get::<Value>("count").expect("count"),
+        Value::Nil
+    ));
+
+    // The shipped `captivity` trigger: `{type = "capture-spawner"}`, any
+    // spawner. Nothing to name, nothing sent but the type.
+    let out = trigger_of(&lua, r#"{ type = "capture-spawner" }"#);
+    assert_eq!(out.get::<String>("type").expect("type"), "capture-spawner");
+    assert!(matches!(
+        out.get::<Value>("entity").expect("entity"),
+        Value::Nil
+    ));
+}
+
+/// The `craft-item` shape is unchanged: `item` is an `ItemIDFilter` table
+/// at runtime and a string in the prototype data, and both still come out as
+/// the item's name with the count defaulted to one. Every archived dump was
+/// read this way and the planner's early tree depends on it.
+#[test]
+fn serialize_technology_keeps_the_craft_item_shape() {
+    let lua = botbridge_types();
+    let out = trigger_of(&lua, r#"{ type = "craft-item", item = { name = "lab" } }"#);
+    assert_eq!(out.get::<String>("type").expect("type"), "craft-item");
+    assert_eq!(out.get::<String>("item").expect("item"), "lab");
+    assert_eq!(out.get::<u32>("count").expect("count"), 1);
+    assert!(matches!(
+        out.get::<Value>("entities").expect("entities"),
+        Value::Nil
+    ));
+
+    let out = trigger_of(
+        &lua,
+        r#"{ type = "craft-item", item = "steel-plate", count = 50 }"#,
+    );
+    assert_eq!(out.get::<String>("item").expect("item"), "steel-plate");
+    assert_eq!(out.get::<u32>("count").expect("count"), 50);
+}
+
+/// The remaining payloads, per the runtime definition: `craft-fluid` carries
+/// `fluid` and `amount`, `send-item-to-orbit` an `item`, `capture-spawner`
+/// an optional `entity`.
+#[test]
+fn serialize_technology_sends_the_other_trigger_payloads() {
+    let lua = botbridge_types();
+    let out = trigger_of(
+        &lua,
+        r#"{ type = "craft-fluid", fluid = "steam", amount = 200 }"#,
+    );
+    assert_eq!(out.get::<String>("fluid").expect("fluid"), "steam");
+    assert_eq!(out.get::<f64>("amount").expect("amount"), 200.0);
+
+    let out = trigger_of(
+        &lua,
+        r#"{ type = "send-item-to-orbit", item = { name = "satellite" } }"#,
+    );
+    assert_eq!(out.get::<String>("item").expect("item"), "satellite");
+
+    let out = trigger_of(
+        &lua,
+        r#"{ type = "capture-spawner", entity = "biter-spawner" }"#,
+    );
+    assert_eq!(
+        out.get::<String>("entity").expect("entity"),
+        "biter-spawner"
+    );
+}
+
+/// What the planner reads: the serialised record round-trips through the
+/// Rust type with the entity list intact.
+#[test]
+fn a_serialised_mine_entity_trigger_loads_as_the_rust_variant() {
+    use factorio_bot_core::types::{FactorioTechnology, ResearchTrigger};
+    let lua = botbridge_types();
+    let record = call(
+        &lua,
+        "serialize_technology",
+        technology_with_trigger(
+            &lua,
+            r#"{ type = "mine-entity", entities = { "crude-oil" } }"#,
+        ),
+    );
+    let json: serde_json::Value = lua
+        .from_value(Value::Table(record))
+        .expect("the record is plain data");
+    let tech: FactorioTechnology =
+        serde_json::from_value(json.clone()).unwrap_or_else(|err| panic!("{err} in {json}"));
+    assert_eq!(
+        tech.research_trigger,
+        Some(ResearchTrigger::MineEntity {
+            entities: vec!["crude-oil".into()],
+            count: 1,
+        })
+    );
+}

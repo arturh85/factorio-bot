@@ -2304,6 +2304,68 @@ impl PlanState {
         }
     }
 
+    /// The `resource_category` of the resource prototype `name`, or `None`
+    /// when there is no such resource or the capture predates the field.
+    ///
+    /// The two `None`s are told apart by [`PlanState::is_resource`]; a
+    /// caller that needs to say *why* it cannot answer asks both.
+    pub fn resource_category(&self, name: &str) -> Option<String> {
+        self.base
+            .entity_prototypes
+            .get(name)
+            .filter(|proto| proto.entity_type == "resource")
+            .and_then(|proto| proto.resource_category.clone())
+    }
+
+    /// What mining the prototype `name` yields, by product name in lexical
+    /// order (`mine_result` is a `BTreeMap`). Empty for a prototype the world
+    /// does not know or one that yields nothing.
+    pub fn mine_products(&self, name: &str) -> Vec<String> {
+        self.base
+            .entity_prototypes
+            .get(name)
+            .and_then(|proto| proto.mine_result.clone())
+            .map(|products| products.into_keys().collect())
+            .unwrap_or_default()
+    }
+
+    /// Whether `name` is a `resource` prototype -- something that comes out
+    /// of the ground -- whatever else the capture knows about it.
+    pub fn is_resource(&self, name: &str) -> bool {
+        self.base
+            .entity_prototypes
+            .get(name)
+            .is_some_and(|proto| proto.entity_type == "resource")
+    }
+
+    /// The `mining-drill` prototypes whose `resource_categories` list
+    /// `category`, by name in lexical order.
+    ///
+    /// This is the game's own rule for what mines what -- a drill works a
+    /// resource iff the resource's category is among the drill's -- read off
+    /// the prototype table the same way [`PlanState::hand_mining_obstacle`]
+    /// reads the character's. Sorted so the answer depends on the data and
+    /// not on the map's iteration order. A drill captured before the mod
+    /// sent `resource_categories` lists nothing and is never returned: an
+    /// absent answer is read as "not said", never as "mines everything".
+    pub fn extractors_for(&self, category: &str) -> Vec<String> {
+        let mut drills: Vec<String> = self
+            .base
+            .entity_prototypes
+            .iter()
+            .filter(|proto| proto.entity_type == "mining-drill")
+            .filter(|proto| {
+                proto
+                    .resource_categories
+                    .as_ref()
+                    .is_some_and(|categories| categories.iter().any(|c| c == category))
+            })
+            .map(|proto| proto.name.clone())
+            .collect();
+        drills.sort();
+        drills
+    }
+
     /// The water tile nearest `from`, or `None` if there is none within
     /// `max_radius`.
     ///

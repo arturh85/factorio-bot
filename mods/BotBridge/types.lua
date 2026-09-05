@@ -194,6 +194,34 @@ function serialize_fluidbox_prototype(fluidbox)
     return record
 end
 
+-- The names a trigger payload field carries, as a list.
+--
+-- A trigger field arrives in one of three spellings depending on which
+-- schema the runtime follows -- a bare name (`"crude-oil"`), an
+-- `ItemIDFilter`/`EntityIDFilter` table (`{name = "lab", quality = ...}`), or
+-- a list of either (`entities = {"crude-oil"}`) -- and this reads all three
+-- into one shape. `nil`, an empty table and anything else read as no names,
+-- which the caller turns into "send the type alone".
+function trigger_names(value)
+    local names = {}
+    if type(value) == "string" then
+        table.insert(names, value)
+    elseif type(value) == "table" then
+        if type(value.name) == "string" then
+            table.insert(names, value.name)
+        else
+            for _, v in ipairs(value) do
+                if type(v) == "string" then
+                    table.insert(names, v)
+                elseif type(v) == "table" and type(v.name) == "string" then
+                    table.insert(names, v.name)
+                end
+            end
+        end
+    end
+    return names
+end
+
 function serialize_technology(technology)
     local record = table_properties(
         technology,
@@ -262,26 +290,65 @@ function serialize_technology(technology)
     -- `research_trigger` attribute at all), so it has to be reached through
     -- `.prototype`. The pcall guards the same way.
     --
-    -- Only `craft-item` is given a payload, because it is the one variant both
-    -- shipped schemas agree on: `item` is an ItemIDFilter -- a *table* with a
-    -- `name`, not a bare string -- and `count` is a uint32 that the prototype
-    -- data omits when it means one. `mine-entity` is the cautionary case:
-    -- runtime-api.json documents a singular `entity` string while the shipped
-    -- prototypes write `entities = {...}`, a list. Sending just the type for
-    -- those tells the planner "trigger-based, and I cannot describe it", which
-    -- is what lets it refuse instead of costing the work at zero.
+    -- Every trigger type carries whatever payload the runtime table holds,
+    -- normalised to one shape per kind. Until 2026-09-05 only `craft-item`
+    -- did, because the two shipped schemas disagree about `mine-entity`:
+    -- runtime-api.json 2.1.17 documents a singular `entity :: string`, while
+    -- `data/base/prototypes/technology.lua` writes `entities = {"crude-oil"}`,
+    -- a list (and Space Age lists up to four names for one trigger). Nobody
+    -- has captured what the runtime actually hands `.prototype.research_trigger`
+    -- for one of these -- there is no live dump of it in the archive -- so
+    -- rather than pick a schema, `trigger_names` accepts BOTH: a bare name, an
+    -- `ItemIDFilter`/`EntityIDFilter` table with a `name`, or a list of
+    -- either, and always sends `entities`, a list. The planner then chooses
+    -- among the names instead of being told "trigger-based, and I cannot
+    -- describe it" -- which is what the bare type used to mean, and which
+    -- made `oil-processing` unplannable whether or not a well was charted.
+    --
+    -- What is still sent for a trigger that names nothing is the bare type,
+    -- exactly as before, so an old dump and a new one disagree only by the
+    -- payload's presence and the planner can tell "undescribed" from
+    -- "unsupported".
     local ok_trigger, trigger = pcall(function()
         return technology.prototype.research_trigger
     end)
     if ok_trigger and trigger ~= nil and trigger.type ~= nil then
         local out = { type = trigger.type }
-        if trigger.type == "craft-item" and trigger.item ~= nil then
-            if type(trigger.item) == "table" then
-                out.item = trigger.item.name
-            else
-                out.item = trigger.item
+        if trigger.type == "craft-item" then
+            local names = trigger_names(trigger.item)
+            if #names > 0 then
+                out.item = names[1]
+                out.count = trigger.count or 1
             end
-            out.count = trigger.count or 1
+        elseif trigger.type == "craft-fluid" then
+            local names = trigger_names(trigger.fluid)
+            if #names > 0 then
+                out.fluid = names[1]
+                out.amount = trigger.amount or 1
+            end
+        elseif trigger.type == "mine-entity" or trigger.type == "build-entity" then
+            -- The list wins when both spellings are present and it is not
+            -- empty; the singular is the documented runtime shape.
+            local names = trigger_names(trigger.entities)
+            if #names == 0 then
+                names = trigger_names(trigger.entity)
+            end
+            if #names > 0 then
+                out.entities = names
+                out.count = trigger.count or 1
+            end
+        elseif trigger.type == "send-item-to-orbit" then
+            local names = trigger_names(trigger.item)
+            if #names > 0 then
+                out.item = names[1]
+            end
+        elseif trigger.type == "capture-spawner" then
+            -- `entity` is optional here: the shipped `captivity` trigger
+            -- names none, meaning any spawner.
+            local names = trigger_names(trigger.entity)
+            if #names > 0 then
+                out.entity = names[1]
+            end
         end
         -- Only send a craft-item trigger that actually named an item; a
         -- half-filled one would deserialise into a goal to craft nothing.

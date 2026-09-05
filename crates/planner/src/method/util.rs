@@ -854,20 +854,47 @@ pub fn research_ingredients(tech: &FactorioTechnology) -> Vec<(String, u32)> {
         .collect()
 }
 
-/// What a `research_trigger` technology actually costs, as the items its
-/// trigger requires be crafted.
+/// What a `research_trigger` technology asks of the plan, as a goal shape.
+///
+/// Two of the eight trigger kinds are planned, and they are planned
+/// differently: a `craft-item` is satisfied by *producing* the item, which
+/// any of the producing methods can do and hang the unlock on; a
+/// `mine-entity` is satisfied by mining a *named entity*, which is a hand's
+/// work when the character can dig it and a machine's when it cannot --
+/// `oil-processing` names `crude-oil`, and a character cannot mine a well.
+/// The choice between those is [`crate::method::have::Researched`]'s, made
+/// against the world; this only says what the trigger wants.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TriggerRequirement {
+    /// `count` of `item` must be produced.
+    Craft { item: String, count: u32 },
+    /// `count` of any one of `entities` must be mined, by whatever can mine
+    /// it. Never empty: an empty list refuses in [`trigger_requirement`].
+    Mine { entities: Vec<String>, count: u32 },
+}
+
+/// What a `research_trigger` technology actually costs, as the work its
+/// trigger requires.
 ///
 /// `Ok(None)` is the ordinary pack-researched technology, whose bill
-/// `research_ingredients` already describes. `Ok(Some((item, count)))` is a
-/// trigger this planner can express: the technology completes when `count` of
-/// `item` have been crafted, which is an ordinary `Goal::Have`.
+/// `research_ingredients` already describes. `Ok(Some(_))` is a trigger this
+/// planner can express -- see [`TriggerRequirement`].
 ///
 /// Everything else is an error, deliberately. A trigger technology has an empty
 /// pack bill and zero research time, so the alternative to refusing is planning
 /// it as free — which is precisely the defect this function exists to fix, and
-/// which is invisible in the resulting plan. Both error variants name the
+/// which is invisible in the resulting plan. Every error variant names the
 /// technology, so a caller learns which step is not modelled rather than
-/// receiving a makespan that is quietly too small.
+/// receiving a makespan that is quietly too small. Three are told apart:
+///
+/// * [`PlannerError::UnsupportedResearchTrigger`] -- a kind with no goal
+///   (`craft-fluid`, `build-entity`, orbit, spawner, platform, scripted, or
+///   one this build has never heard of);
+/// * [`PlannerError::UndescribedResearchTrigger`] -- a `mine-entity` with no
+///   entity named, which is what every dump written before 2026-09-05 holds,
+///   because the mod sent the bare type. A new dump fixes it; nothing in the
+///   planner can;
+/// * [`PlannerError::SelfUnlockingResearchTrigger`] -- below.
 ///
 /// # The self-unlocking case
 ///
@@ -887,7 +914,7 @@ pub fn research_ingredients(tech: &FactorioTechnology) -> Vec<(String, u32)> {
 pub fn trigger_requirement(
     state: &PlanState,
     tech: &FactorioTechnology,
-) -> Result<Option<(String, u32)>, PlannerError> {
+) -> Result<Option<TriggerRequirement>, PlannerError> {
     let Some(trigger) = &tech.research_trigger else {
         return Ok(None);
     };
@@ -902,7 +929,22 @@ pub fn trigger_requirement(
                     item: item.clone(),
                 });
             }
-            Ok(Some((item.clone(), *count)))
+            Ok(Some(TriggerRequirement::Craft {
+                item: item.clone(),
+                count: *count,
+            }))
+        }
+        ResearchTrigger::MineEntity { entities, count } => {
+            if entities.is_empty() {
+                return Err(PlannerError::UndescribedResearchTrigger {
+                    technology: tech.name.clone(),
+                    trigger: trigger.kind().to_string(),
+                });
+            }
+            Ok(Some(TriggerRequirement::Mine {
+                entities: entities.clone(),
+                count: (*count).max(1),
+            }))
         }
         other => Err(PlannerError::UnsupportedResearchTrigger {
             technology: tech.name.clone(),

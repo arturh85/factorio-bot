@@ -585,6 +585,155 @@ pub(crate) fn world_with_trigger(
     world
 }
 
+/// How the pumpjack recipe stands in [`world_with_oil`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PumpjackRecipe {
+    /// No recipe at all -- the shared fixture's own state.
+    Absent,
+    /// Present and disabled, unlocked by `oil-gathering`, which is or is not
+    /// researched in the world.
+    LockedBy { researched: bool },
+}
+
+/// What [`world_with_oil`] builds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct OilFixture {
+    /// Twelve charted crude-oil wells, as a workspace resumed from a
+    /// savepoint holds them (the provenance of `run-1788538389-09170`); or
+    /// none, as a fresh map does.
+    pub wells: bool,
+    /// Whether the prototypes carry the fields the game decides mining by:
+    /// crude oil's `resource_category` (`basic-fluid`), the pumpjack's
+    /// `resource_categories` (`[basic-fluid]`) and the character's
+    /// (`[basic-solid]`). The shared fixture is an older capture with none of
+    /// them, which is its own case.
+    pub categories: bool,
+    pub pumpjack: PumpjackRecipe,
+    /// Whether `oil-processing` lists `oil-gathering` as a prerequisite, as
+    /// the shipped tree does. Off by default so a plan for it holds only the
+    /// trigger's own subtree.
+    pub prerequisite: bool,
+}
+
+/// The oil ladder's last rung: `oil-processing`, a `mine-entity` trigger
+/// naming `crude-oil`, exactly as `data/base/prototypes/technology.lua`
+/// writes it -- plus whatever of the world around it `fixture` asks for.
+pub(crate) fn world_with_oil(fixture: OilFixture) -> FactorioWorld {
+    use factorio_bot_core::types::{Direction, FactorioRecipe};
+
+    let world = fixture_world();
+    if fixture.wells {
+        let wells: Vec<FactorioEntity> = (0..12)
+            .map(|i| {
+                FactorioEntity::new_resource(
+                    &Position::new(20.5 + 4. * f64::from(i), 20.5),
+                    Direction::North,
+                    "crude-oil",
+                )
+            })
+            .collect();
+        world
+            .update_chunk_entities(wells)
+            .expect("a chunk of wells");
+    }
+    if fixture.categories {
+        world
+            .entity_prototypes
+            .get_mut("crude-oil")
+            .expect("the fixture has a crude-oil prototype")
+            .resource_category = Some("basic-fluid".into());
+        world
+            .entity_prototypes
+            .get_mut("pumpjack")
+            .expect("the fixture has a pumpjack prototype")
+            .resource_categories = Some(vec!["basic-fluid".into()]);
+        world
+            .entity_prototypes
+            .get_mut("character")
+            .expect("the fixture has a character prototype")
+            .resource_categories = Some(vec!["basic-solid".into()]);
+    }
+    let gathering = match fixture.pumpjack {
+        PumpjackRecipe::Absent => String::new(),
+        PumpjackRecipe::LockedBy { researched } => {
+            let recipe: FactorioRecipe = serde_json::from_str(
+                r#"{
+                  "name": "pumpjack", "valid": true, "enabled": false, "category": "crafting",
+                  "ingredients": [
+                    { "name": "steel-plate", "ingredient_type": "item", "amount": 5 },
+                    { "name": "iron-gear-wheel", "ingredient_type": "item", "amount": 10 },
+                    { "name": "electronic-circuit", "ingredient_type": "item", "amount": 5 },
+                    { "name": "pipe", "ingredient_type": "item", "amount": 10 }
+                  ],
+                  "products": [
+                    { "name": "pumpjack", "product_type": "item", "amount": 1, "probability": 1.0 }
+                  ],
+                  "hidden": false, "energy": 5.0, "order": "b-b", "group": "production",
+                  "subgroup": "extraction-machine"
+                }"#,
+            )
+            .expect("the pumpjack recipe parses");
+            world
+                .update_recipes(vec![recipe])
+                .expect("update_recipes cannot fail for a well-formed recipe");
+            format!(
+                r#",
+                "oil-gathering": {{
+                  "name": "oil-gathering",
+                  "enabled": true,
+                  "upgrade": false,
+                  "researched": {researched},
+                  "prerequisites": [],
+                  "research_unit_ingredients": [],
+                  "research_unit_count": 1,
+                  "research_unit_energy": 60.0,
+                  "order": "e-a",
+                  "level": 1,
+                  "valid": true,
+                  "unlocked_recipes": ["pumpjack"]
+                }}"#
+            )
+        }
+    };
+    let prerequisites = if fixture.prerequisite {
+        r#"["oil-gathering"]"#
+    } else {
+        "[]"
+    };
+    let json = format!(
+        r#"
+        {{
+          "name": "player",
+          "force_id": 1,
+          "current_research": null,
+          "research_progress": null,
+          "technologies": {{
+            "oil-processing": {{
+              "name": "oil-processing",
+              "enabled": true,
+              "upgrade": false,
+              "researched": false,
+              "prerequisites": {prerequisites},
+              "research_unit_ingredients": [],
+              "research_unit_count": 1,
+              "research_unit_energy": 0.0,
+              "order": "e-b",
+              "level": 1,
+              "valid": true,
+              "unlocked_recipes": ["oil-refinery", "chemical-plant", "basic-oil-processing"],
+              "research_trigger": {{ "type": "mine-entity", "entities": ["crude-oil"] }}
+            }}{gathering}
+          }}
+        }}
+        "#
+    );
+    let force: FactorioForce = serde_json::from_str(&json).expect("the generated oil force parses");
+    world
+        .update_force(force)
+        .expect("update_force cannot fail for a well-formed force");
+    world
+}
+
 /// A `craft-item` trigger technology sitting as the **prerequisite** of an
 /// ordinary pack-costed one — the shape the live game presents and no other
 /// fixture here does.

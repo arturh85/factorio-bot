@@ -263,6 +263,17 @@ impl std::error::Error for PlanRefusal {}
 ///   the item's resource is nowhere in the model, and the error says where
 ///   charted ground ends. That is the fact a supervisor script branches on
 ///   to walk a bot to the frontier and re-plan.
+/// - The four extraction rungs a `mine-entity` trigger can stop at --
+///   [`UndescribedResearchTrigger`](PlannerError::UndescribedResearchTrigger),
+///   [`NoExtractor`](PlannerError::NoExtractor),
+///   [`ExtractorLocked`](PlannerError::ExtractorLocked) and
+///   [`ExtractionNotModelled`](PlannerError::ExtractionNotModelled) -- all
+///   verdicts, each about a different thing a script can act on: the world
+///   was captured by a mod that did not describe the trigger (dump again),
+///   the prototypes name no machine for the resource, the machine's recipe
+///   wants a research the script can plan first, and the planner's own
+///   modelling ends there. `UnsupportedResearchTrigger` is their sibling and
+///   was a verdict already.
 fn refusal_for(err: &PlannerError) -> Option<PlanRefusal> {
     use miette::Diagnostic;
 
@@ -282,7 +293,11 @@ fn refusal_for(err: &PlannerError) -> Option<PlanRefusal> {
         | PlannerError::NoRoomForCell { .. }
         | PlannerError::NoRoomForCellNearPower { .. }
         | PlannerError::NotHandMinable { .. }
-        | PlannerError::NotCharted { .. } => true,
+        | PlannerError::NotCharted { .. }
+        | PlannerError::UndescribedResearchTrigger { .. }
+        | PlannerError::NoExtractor { .. }
+        | PlannerError::ExtractorLocked { .. }
+        | PlannerError::ExtractionNotModelled { .. } => true,
 
         PlannerError::InsufficientItems { .. }
         | PlannerError::UnknownBot(_)

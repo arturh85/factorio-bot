@@ -275,6 +275,99 @@ pub enum PlannerError {
     )]
     SelfUnlockingResearchTrigger { technology: String, item: ItemId },
 
+    /// A trigger technology whose trigger *kind* this planner can plan, in a
+    /// world whose mod did not say what the trigger names.
+    ///
+    /// Distinct from [`PlannerError::UnsupportedResearchTrigger`] on purpose.
+    /// Until 2026-09-05 `mods/BotBridge/types.lua` sent every trigger but
+    /// `craft-item` as its bare type, so every archived dump holds
+    /// `{"type": "mine-entity"}` with no entity list, and a planner reading
+    /// one cannot tell `oil-processing` (crude oil) from
+    /// `uranium-processing` (uranium ore). That is a fact about the *capture*,
+    /// not about the trigger kind, and the fix is a new dump -- which is what
+    /// this says, where "unsupported" would send a reader to the planner.
+    #[error(
+        "{technology} is unlocked by a {trigger} trigger that names no entity; the mod that \
+         wrote this world could not describe it"
+    )]
+    #[diagnostic(
+        code(planner::undescribed_research_trigger),
+        help(
+            "dump the world again with the current BotBridge mod, which sends the trigger's \
+             entity list"
+        )
+    )]
+    UndescribedResearchTrigger {
+        technology: String,
+        /// The trigger's `type` string, e.g. `mine-entity`.
+        trigger: String,
+    },
+
+    /// Nothing in the world's prototypes can mine `entity` at all.
+    ///
+    /// A verdict about the prototype table, not the map: no `mining-drill`
+    /// lists the entity's resource category among the categories it mines,
+    /// or the entity has no resource prototype the planner could ask, or the
+    /// machine that would mine it has no recipe. Exploring changes none of
+    /// that, so this is raised before any prerequisite is planned.
+    #[error("nothing in this world's prototypes can extract from {entity}: {why}")]
+    #[diagnostic(
+        code(planner::no_extractor),
+        help(
+            "a resource is mined by the machines whose `resource_categories` list its \
+             `resource_category`; both fields are sent by the mod since 2026-09-04, so a world \
+             captured earlier cannot answer this"
+        )
+    )]
+    NoExtractor { entity: String, why: String },
+
+    /// Mining `entity` takes a machine whose recipe this force has not
+    /// unlocked, and nothing in this plan unlocks it.
+    ///
+    /// The ordinary answer for `oil-processing` planned on its own:
+    /// crude oil is mined by a pumpjack, whose recipe `oil-gathering`
+    /// unlocks. Planned as a prerequisite of `oil-processing` -- which it is
+    /// -- that research is already in the plan and this is not raised; it is
+    /// raised for a `Goal::Extracted` stated directly, or by a mod whose
+    /// extractor is unlocked outside the technology's own prerequisites.
+    #[error(
+        "extracting from {entity} takes a {extractor}, whose recipe needs {technology} \
+         researched first"
+    )]
+    #[diagnostic(
+        code(planner::extractor_locked),
+        help(
+            "plan `researched:{technology}` first, or state the research goal that has it as a prerequisite"
+        )
+    )]
+    ExtractorLocked {
+        entity: String,
+        extractor: String,
+        technology: String,
+    },
+
+    /// Everything the world needs is in place, and this planner cannot yet
+    /// site and run the extractor.
+    ///
+    /// The honest end of the ladder for `oil-processing` as of 2026-09-05:
+    /// the well is charted, a pumpjack mines it, its recipe is reachable --
+    /// and no method knows how to stand a pumpjack on a well, power it and
+    /// give its output somewhere to go. Refused by name rather than costed at
+    /// zero, exactly as an inexpressible trigger is, so the next piece of
+    /// work is named by the refusal instead of hidden in a makespan.
+    #[error(
+        "extracting from {entity} takes a {extractor} standing on it and running, which this \
+         planner does not yet know how to site, power or drain"
+    )]
+    #[diagnostic(
+        code(planner::extraction_not_modelled),
+        help(
+            "the extractor cell -- siting on the patch, power, and where the output goes -- is \
+             the next thing to build; see docs/superpowers/specs/2026-09-04-exploration-design.md"
+        )
+    )]
+    ExtractionNotModelled { entity: String, extractor: String },
+
     /// A `Step::Owned` whose holder names no bot.
     ///
     /// Deliberately an error rather than "keep the current chain". A handover

@@ -136,6 +136,26 @@ pub enum Goal {
         item: ItemId,
         per_minute: u32,
     },
+    /// Cause something to be *extracted* from `entity` -- a resource a hand
+    /// cannot work -- by a machine standing on it: a pumpjack on a crude-oil
+    /// well, a drill on uranium ore with acid piped in.
+    ///
+    /// Distinct from [`Goal::Produced`], which names the *product*: a
+    /// Factorio 2.0 `mine-entity` trigger fires on mining a named entity and
+    /// does not care what comes out or where it goes, and for crude oil the
+    /// product is a fluid no inventory can hold. `unlocks` rides on it for
+    /// the same reason it rides on `Produced` -- only the method that stands
+    /// the machine up knows which action to hang `Effect::Researched` on.
+    ///
+    /// No method claims this yet: [`crate::method::extract::Extract`] refuses
+    /// it by name, saying which prerequisite is missing. It is a goal rather
+    /// than an error so that the refusal is asked of the world *after* the
+    /// technology's own prerequisites have been planned, and so that the
+    /// method that eventually sites a pumpjack has a goal to claim.
+    Extracted {
+        entity: String,
+        unlocks: Option<String>,
+    },
     All(Vec<Goal>),
 }
 
@@ -156,6 +176,10 @@ impl std::fmt::Display for Goal {
             Goal::Producing { item, per_minute } => {
                 write!(f, "produce {} {}/min", per_minute, item)
             }
+            Goal::Extracted { entity, unlocks } => match unlocks {
+                Some(tech) => write!(f, "extract from {} to unlock {}", entity, tech),
+                None => write!(f, "extract from {}", entity),
+            },
             Goal::All(goals) => write!(f, "all of {} goals", goals.len()),
         }
     }
@@ -208,6 +232,10 @@ mod tests {
             Goal::Producing {
                 item: "iron-plate".into(),
                 per_minute: 30,
+            },
+            Goal::Extracted {
+                entity: "crude-oil".into(),
+                unlocks: Some("oil-processing".into()),
             },
         ]);
         let json = serde_json::to_string(&goal).expect("serialises");

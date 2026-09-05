@@ -46,11 +46,11 @@ use crate::goal::{Goal, Holder};
 use crate::ids::{ActionId, BotId, Ticks};
 use crate::method::power::{POLE, Supply, plant_steps, supply_for};
 use crate::method::util::{
-    CRAFTING_CATEGORY, FREE_TILE_SEARCH_RADIUS, RecipeGate, SMELTING_CATEGORY, free_area_near,
-    free_area_near_where, ingredients_of, mine_bill, mining_ticks, nearest_resource_tile,
-    output_per_craft, recipe_for, recipe_gate, recipe_ticks, research_ingredients,
-    research_ticks_in_labs, resource_seats, resource_supply_at_least, resource_tiles_for,
-    smelting_ticks, trigger_requirement,
+    CRAFTING_CATEGORY, FREE_TILE_SEARCH_RADIUS, RecipeGate, SMELTING_CATEGORY, TriggerRequirement,
+    free_area_near, free_area_near_where, ingredients_of, mine_bill, mining_ticks,
+    nearest_resource_tile, output_per_craft, recipe_for, recipe_gate, recipe_ticks,
+    research_ingredients, research_ticks_in_labs, resource_seats, resource_supply_at_least,
+    resource_tiles_for, smelting_ticks, trigger_requirement,
 };
 use crate::method::{ExpansionCtx, GoalSite, Method, MethodRegistry, Step};
 use crate::state::PlanState;
@@ -239,6 +239,10 @@ pub fn holds(goal: &Goal, state: &PlanState) -> Option<bool> {
             crate::method::produce::holds_producing(state, item, *per_minute)
                 || crate::method::assemble::holds_assembling(state, item, *per_minute),
         ),
+        // The model has no notion of "a machine is extracting from this
+        // well": nothing in the overlay records an extractor standing on a
+        // patch, and nothing observes output. Unanswerable, not unmet.
+        Goal::Extracted { .. } => None,
         Goal::All(goals) => {
             let mut answer = Some(true);
             for g in goals {
@@ -3602,6 +3606,67 @@ fn lab_site(
     })
 }
 
+/// How a `mine-entity` trigger will be met, decided against the world.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MineTrigger {
+    /// A character digs it: `Mine` produces `count` of `item` and hangs the
+    /// unlock on the mining action, exactly as a craft would.
+    ByHand { item: ItemId, count: u32 },
+    /// A machine has to: `Goal::Extracted` for `entity`.
+    ByMachine { entity: String },
+}
+
+/// Which of a `mine-entity` trigger's entities the plan will mine, and how.
+///
+/// The trigger fires on mining *any* of the names it lists (Space Age lists
+/// four rocks for `tungsten-carbide`), so the first that is charted and that
+/// a hand can dig wins -- that is the cheapest satisfaction the planner has
+/// -- and a hand can dig it only when `Mine` would actually go to *that*
+/// entity for its product, which `resource_yielding` decides: a trigger
+/// naming `copper-stromatolite` is not met by mining a copper-ore patch.
+/// Failing that, the first charted entity goes to a machine.
+///
+/// Refuses, in the name of the first entity listed, when none is charted;
+/// and when the chosen entity has nothing to mine it, since neither fact
+/// changes with research. See `crate::method::extract::world_refusal`.
+fn mine_trigger_goal(
+    ctx: &ExpansionCtx,
+    tech: &str,
+    entities: &[String],
+    count: u32,
+) -> Result<MineTrigger, PlannerError> {
+    let origin = crate::method::extract::origin_of(ctx);
+    let charted: Vec<&String> = entities
+        .iter()
+        .filter(|entity| ctx.state.has_resource_patches(entity))
+        .collect();
+    let Some(first) = charted.first() else {
+        let named = entities.first().map(String::as_str).unwrap_or(tech);
+        return Err(crate::method::extract::not_charted(
+            &ctx.state, named, &origin,
+        ));
+    };
+    for entity in &charted {
+        if ctx.state.hand_mining_obstacle(entity).is_some() {
+            continue;
+        }
+        if let Some(item) = ctx
+            .state
+            .mine_products(entity)
+            .into_iter()
+            .find(|item| ctx.state.resource_yielding(item).as_deref() == Some(entity.as_str()))
+        {
+            return Ok(MineTrigger::ByHand { item, count });
+        }
+    }
+    if let Some(refusal) = crate::method::extract::world_refusal(&ctx.state, first, &origin) {
+        return Err(refusal);
+    }
+    Ok(MineTrigger::ByMachine {
+        entity: (*first).clone(),
+    })
+}
+
 impl Method for Researched {
     fn name(&self) -> &'static str {
         "research"
@@ -3628,11 +3693,13 @@ impl Method for Researched {
         // `trigger_requirement` cannot report here — `converges` has no error
         // channel — so an inexpressible trigger contributes nothing and the
         // refusal is left to `expand`, which is reached either way.
-        let trigger = trigger_requirement(state, &tech)
-            .ok()
-            .flatten()
-            .into_iter()
-            .collect::<Vec<_>>();
+        // A `mine-entity` trigger is nothing for the acting bot's inventory
+        // either way -- a hand-mined ore goes through `Produced` and an
+        // extracted one through a machine -- so only a craft counts.
+        let trigger: Vec<(String, u32)> = match trigger_requirement(state, &tech).ok().flatten() {
+            Some(TriggerRequirement::Craft { item, count }) => vec![(item, count)],
+            _ => Vec::new(),
+        };
         // **The lab is deliberately not counted here**, though it is one more
         // thing that has to land in the acting bot's hands. Counting it was
         // tried and reverted: `automation` needs one pack type, so the lab
@@ -3706,6 +3773,18 @@ impl Method for Researched {
         // the pack path — where the empty bill and zero energy below would
         // plan it as free and hand the caller a makespan missing the work.
         let trigger = trigger_requirement(&ctx.state, &tech)?;
+        // A `mine-entity` trigger is settled against the world *now*, before
+        // a single prerequisite is planned: whether the entity is charted and
+        // whether anything mines it are facts no research changes, and
+        // `oil-processing` sits on `oil-gathering`'s hundred red-and-green
+        // packs. Refusing after all of those were planned would be a true
+        // refusal in the wrong place. See `crate::method::extract`.
+        let mine_trigger = match &trigger {
+            Some(TriggerRequirement::Mine { entities, count }) => {
+                Some(mine_trigger_goal(ctx, name, entities, *count)?)
+            }
+            _ => None,
+        };
 
         // The roster this research is dealt across, and the supplier that
         // takes the work the chain actor's own timeline does not need: a
@@ -3739,7 +3818,7 @@ impl Method for Researched {
                 .state
                 .technology(prerequisite)
                 .and_then(|t| trigger_requirement(&ctx.state, &t).ok().flatten());
-            if let (Some(lead), Some((item, count))) = (lead, trigger)
+            if let (Some(lead), Some(TriggerRequirement::Craft { item, count })) = (lead, trigger)
                 && !ctx.state.is_researched(prerequisite)
             {
                 load(
@@ -3789,15 +3868,39 @@ impl Method for Researched {
         // which is the very item this crafted, so one lab is crafted and not
         // two. A roster of one has nobody to hand it to and plans what it
         // always planned.
-        if let Some((item, count)) = &trigger {
-            let builder = lead.unwrap_or(ctx.chain_actor);
-            let produced = Step::Subgoal(Goal::Produced {
+        //
+        // A `mine-entity` trigger takes the same seat: `Produced` of what the
+        // entity yields when a hand can dig it (`Mine` hangs the unlock on
+        // the mining action exactly as it would on a craft), and
+        // `Goal::Extracted` when it cannot -- a pumpjack on a well -- which
+        // no method claims yet and `Extract` refuses by the next missing
+        // prerequisite. The choice was made above, before the prerequisites.
+        let subgoal = match (&trigger, mine_trigger) {
+            (Some(TriggerRequirement::Craft { item, count }), _) => Some(Goal::Produced {
                 item: item.clone(),
                 count: *count,
-                whose: Holder::Share(builder),
+                whose: Holder::Share(lead.unwrap_or(ctx.chain_actor)),
                 unlocks: Some(name.clone()),
-            });
-            push_owned(&mut steps, builder, vec![produced], alone);
+            }),
+            (Some(TriggerRequirement::Mine { .. }), Some(MineTrigger::ByHand { item, count })) => {
+                Some(Goal::Produced {
+                    item,
+                    count,
+                    whose: Holder::Share(lead.unwrap_or(ctx.chain_actor)),
+                    unlocks: Some(name.clone()),
+                })
+            }
+            (Some(TriggerRequirement::Mine { .. }), Some(MineTrigger::ByMachine { entity })) => {
+                Some(Goal::Extracted {
+                    entity,
+                    unlocks: Some(name.clone()),
+                })
+            }
+            _ => None,
+        };
+        if let Some(subgoal) = subgoal {
+            let builder = lead.unwrap_or(ctx.chain_actor);
+            push_owned(&mut steps, builder, vec![Step::Subgoal(subgoal)], alone);
             return Ok(steps);
         }
         // Where this research will happen. Chosen before the bill is emitted so
@@ -4639,6 +4742,7 @@ pub fn default_registry() -> MethodRegistry {
         // never chopped for.
         .with(Box::new(Chop))
         .with(Box::new(Mine))
+        .with(Box::new(crate::method::extract::Extract))
         .with(Box::new(Researched { bots: Vec::new() }))
         .with(Box::new(crate::method::produce::BuildCell))
         // Its sibling, and disjoint from it by construction: `BuildCell`
@@ -6075,6 +6179,7 @@ pub fn registry_for(bots: &[BotId]) -> MethodRegistry {
             bots: bots.to_vec(),
         }))
         .with(Box::new(Mine))
+        .with(Box::new(crate::method::extract::Extract))
         // Roster-aware since 2026-09-05: the pack bill is dealt across these
         // bots and each delivers its share to the lab itself. See the
         // method's `expand`.
@@ -10554,6 +10659,33 @@ mod tests {
     #[test]
     fn an_inexpressible_trigger_is_refused_by_name() {
         let s = trigger_state(
+            "steam-cracking",
+            r#"{"type": "craft-fluid", "fluid": "steam", "amount": 200}"#,
+            None,
+            None,
+        );
+        let mut ctx = ExpansionCtx::new(s.fork(), BotId(1));
+        let err = Researched { bots: Vec::new() }
+            .expand(&Goal::Researched("steam-cracking".into()), &mut ctx)
+            .expect_err("a craft-fluid trigger cannot be expressed as a goal");
+        assert!(
+            matches!(
+                &err,
+                PlannerError::UnsupportedResearchTrigger { technology, trigger }
+                    if technology == "steam-cracking" && trigger == "craft-fluid"
+            ),
+            "expected an UnsupportedResearchTrigger naming the kind, got {err:?}"
+        );
+    }
+
+    /// The bare `{"type": "mine-entity"}` is what every dump written before
+    /// 2026-09-05 holds -- the mod sent no payload for it -- and it is not
+    /// *unsupported*: the kind is planned now. What is missing is the
+    /// capture, and the refusal has to send a reader to a new dump rather
+    /// than to the planner.
+    #[test]
+    fn a_mine_entity_trigger_naming_nothing_is_refused_as_undescribed() {
+        let s = trigger_state(
             "uranium-processing",
             r#"{"type": "mine-entity"}"#,
             None,
@@ -10562,14 +10694,264 @@ mod tests {
         let mut ctx = ExpansionCtx::new(s.fork(), BotId(1));
         let err = Researched { bots: Vec::new() }
             .expand(&Goal::Researched("uranium-processing".into()), &mut ctx)
-            .expect_err("a mine-entity trigger cannot be expressed as a goal");
+            .expect_err("a trigger naming no entity cannot be planned");
         assert!(
             matches!(
                 &err,
-                PlannerError::UnsupportedResearchTrigger { technology, trigger }
+                PlannerError::UndescribedResearchTrigger { technology, trigger }
                     if technology == "uranium-processing" && trigger == "mine-entity"
             ),
-            "expected an UnsupportedResearchTrigger naming the kind, got {err:?}"
+            "expected an UndescribedResearchTrigger, got {err:?}"
+        );
+    }
+
+    // ---- mine-entity triggers ---------------------------------------------
+    //
+    // `oil-processing` is `{type = "mine-entity", entities = {"crude-oil"}}`
+    // in the shipped prototypes: zero science, done when a pumpjack extracts
+    // from a well. These pin what the planner says at each rung of that
+    // ladder, on a fixture holding the wells of a resumed workspace.
+
+    use crate::test_world::{OilFixture, PumpjackRecipe, world_with_oil};
+
+    fn oil_state(fixture: OilFixture) -> PlanState {
+        PlanState::from_world(Arc::new(world_with_oil(fixture)), &[BotId(1)])
+    }
+
+    const OIL: OilFixture = OilFixture {
+        wells: true,
+        categories: true,
+        pumpjack: PumpjackRecipe::Absent,
+        prerequisite: false,
+    };
+
+    /// A hand cannot mine a well, so the trigger becomes an extraction goal
+    /// -- not a `Produced` (`Mine` would refuse it as not hand-minable, a
+    /// true statement that names the wrong next step) and not a refusal, so
+    /// that the method which eventually sites a pumpjack has a goal to claim.
+    #[test]
+    fn a_mine_entity_trigger_a_hand_cannot_work_becomes_an_extraction_goal() {
+        let s = oil_state(OIL);
+        let steps = research_steps(&s, "oil-processing");
+        assert_eq!(
+            subgoals(&steps),
+            vec![Goal::Extracted {
+                entity: "crude-oil".into(),
+                unlocks: Some("oil-processing".into()),
+            }]
+        );
+        assert!(
+            !steps.iter().any(
+                |step| matches!(step, Step::Act(a) if matches!(a.kind, ActionKind::Research { .. }))
+            ),
+            "a trigger technology issues no research action"
+        );
+    }
+
+    /// The same trigger naming an ore a hand digs -- and that `Mine` would
+    /// go to for its product -- is met by producing the ore, exactly as a
+    /// craft-item trigger is met by producing the item; `Mine` hangs the
+    /// unlock on the mining action.
+    #[test]
+    fn a_mine_entity_trigger_a_hand_can_work_is_produced() {
+        let s = trigger_state(
+            "iron-processing",
+            r#"{"type": "mine-entity", "entities": ["iron-ore"], "count": 5}"#,
+            None,
+            None,
+        );
+        assert!(
+            s.has_resource_patches("iron-ore"),
+            "the fixture charts iron"
+        );
+        let steps = research_steps(&s, "iron-processing");
+        assert_eq!(
+            subgoals(&steps),
+            vec![Goal::Produced {
+                item: "iron-ore".into(),
+                count: 5,
+                whose: Holder::Share(BotId(1)),
+                unlocks: Some("iron-processing".into()),
+            }]
+        );
+        let net = expand(
+            &[Goal::Researched("iron-processing".into())],
+            &s,
+            &registry_for(&[BotId(1)]),
+            BotId(1),
+        )
+        .expect("mining five ore plans");
+        let miner = net
+            .actions()
+            .find(|a| {
+                a.eff
+                    .contains(&Effect::Researched("iron-processing".into()))
+            })
+            .expect("some action carries the unlock");
+        assert!(
+            matches!(&miner.kind, ActionKind::Mine { item, .. } if item == "iron-ore"),
+            "the unlock rides on the mining action, got {:?}",
+            miner.kind
+        );
+    }
+
+    /// A fresh map charts no well. That is "unexplored", with where charted
+    /// ground ends -- the same refusal an uncharted ore gets -- and it is
+    /// raised *before* the technology's prerequisites are planned:
+    /// `oil-gathering` is a hundred red-and-green packs, and no amount of
+    /// them charts a well.
+    #[test]
+    fn a_mine_entity_trigger_on_an_uncharted_entity_refuses_as_not_charted_first() {
+        let s = oil_state(OilFixture {
+            wells: false,
+            prerequisite: true,
+            pumpjack: PumpjackRecipe::LockedBy { researched: false },
+            ..OIL
+        });
+        let mut ctx = ExpansionCtx::new(s.fork(), BotId(1));
+        let err = Researched { bots: Vec::new() }
+            .expand(&Goal::Researched("oil-processing".into()), &mut ctx)
+            .expect_err("no well is charted");
+        match &err {
+            PlannerError::NotCharted { item, resource, .. } => {
+                assert_eq!(item, "crude-oil");
+                assert_eq!(resource, "crude-oil");
+            }
+            other => panic!("expected NotCharted, got {other}"),
+        }
+    }
+
+    /// The well is charted and the world's prototypes are an old capture
+    /// with no categories: nothing can be matched, and the refusal says the
+    /// capture cannot answer rather than that nothing mines oil.
+    #[test]
+    fn an_extraction_goal_on_an_old_capture_says_the_capture_cannot_answer() {
+        let s = oil_state(OilFixture {
+            categories: false,
+            ..OIL
+        });
+        let mut ctx = ExpansionCtx::new(s.fork(), BotId(1));
+        let err = Researched { bots: Vec::new() }
+            .expand(&Goal::Researched("oil-processing".into()), &mut ctx)
+            .expect_err("the capture has no categories");
+        match &err {
+            PlannerError::NoExtractor { entity, why } => {
+                assert_eq!(entity, "crude-oil");
+                assert!(why.contains("resource category"), "{why}");
+            }
+            other => panic!("expected NoExtractor, got {other}"),
+        }
+    }
+
+    /// Everything the world can say is said, and no recipe makes a pumpjack:
+    /// still nothing can extract, and the refusal names the machine.
+    #[test]
+    fn an_extraction_goal_with_no_extractor_recipe_names_the_machine() {
+        let s = oil_state(OIL);
+        let err = expand(
+            &[Goal::Researched("oil-processing".into())],
+            &s,
+            &registry_for(&[BotId(1)]),
+            BotId(1),
+        )
+        .expect_err("no recipe makes a pumpjack in this fixture");
+        match &err {
+            PlannerError::NoExtractor { entity, why } => {
+                assert_eq!(entity, "crude-oil");
+                assert!(why.contains("pumpjack"), "{why}");
+            }
+            other => panic!("expected NoExtractor, got {other}"),
+        }
+    }
+
+    /// The pumpjack recipe is locked behind `oil-gathering`, and nothing in
+    /// this plan researches it: the refusal names that technology, which is
+    /// the next thing to plan.
+    #[test]
+    fn an_extraction_goal_names_the_locked_extractor_recipe() {
+        let s = oil_state(OilFixture {
+            pumpjack: PumpjackRecipe::LockedBy { researched: false },
+            ..OIL
+        });
+        let err = expand(
+            &[Goal::Researched("oil-processing".into())],
+            &s,
+            &registry_for(&[BotId(1)]),
+            BotId(1),
+        )
+        .expect_err("the pumpjack recipe is locked");
+        match &err {
+            PlannerError::ExtractorLocked {
+                entity,
+                extractor,
+                technology,
+            } => {
+                assert_eq!(entity, "crude-oil");
+                assert_eq!(extractor, "pumpjack");
+                assert_eq!(technology, "oil-gathering");
+            }
+            other => panic!("expected ExtractorLocked, got {other}"),
+        }
+        assert!(
+            err.to_string().contains("oil-gathering"),
+            "the next prerequisite is in the message: {err}"
+        );
+    }
+
+    /// The honest end of the ladder today: well charted, pumpjack mines it,
+    /// recipe open -- and no method sites one. Refused by the name of the
+    /// missing piece, not costed at zero.
+    #[test]
+    fn an_extraction_goal_with_everything_in_place_names_the_unmodelled_cell() {
+        let s = oil_state(OilFixture {
+            pumpjack: PumpjackRecipe::LockedBy { researched: true },
+            ..OIL
+        });
+        let err = expand(
+            &[Goal::Researched("oil-processing".into())],
+            &s,
+            &registry_for(&[BotId(1)]),
+            BotId(1),
+        )
+        .expect_err("nothing sites a pumpjack yet");
+        match &err {
+            PlannerError::ExtractionNotModelled { entity, extractor } => {
+                assert_eq!(entity, "crude-oil");
+                assert_eq!(extractor, "pumpjack");
+            }
+            other => panic!("expected ExtractionNotModelled, got {other}"),
+        }
+    }
+
+    /// `Goal::Extracted` stated directly -- what a script will say once it
+    /// can -- reaches the same ladder without a technology in front of it.
+    #[test]
+    fn an_extraction_goal_stated_directly_is_refused_by_the_same_ladder() {
+        let s = oil_state(OilFixture {
+            pumpjack: PumpjackRecipe::LockedBy { researched: false },
+            ..OIL
+        });
+        let err = expand(
+            &[Goal::Extracted {
+                entity: "crude-oil".into(),
+                unlocks: None,
+            }],
+            &s,
+            &registry_for(&[BotId(1)]),
+            BotId(1),
+        )
+        .expect_err("the pumpjack recipe is locked");
+        assert!(
+            matches!(err, PlannerError::ExtractorLocked { .. }),
+            "got {err}"
+        );
+        assert_eq!(
+            Goal::Extracted {
+                entity: "crude-oil".into(),
+                unlocks: Some("oil-processing".into()),
+            }
+            .to_string(),
+            "extract from crude-oil to unlock oil-processing"
         );
     }
 

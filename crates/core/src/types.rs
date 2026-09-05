@@ -71,6 +71,82 @@ mod deserialize_helpers {
         deserializer.deserialize_any(VecOrEmptyMap(PhantomData))
     }
 
+    /// Deserializes a list of names that the mod may have written as a bare
+    /// string (`"crude-oil"`), a filter table with a `name` (`{"name":
+    /// "lab"}`), a list of either, `{}` (Lua's empty table) or `null`.
+    ///
+    /// Written for `ResearchTrigger`'s `entities`, whose runtime shape is
+    /// documented as singular and shipped as a list -- see that type. The
+    /// mod normalises to a list, so the other spellings are for dumps written
+    /// by hand or by a mod version that forwarded the table untouched.
+    pub fn names_one_or_many<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct Names;
+
+        fn name_of<E: de::Error>(value: serde_json::Value) -> Result<Option<String>, E> {
+            match value {
+                serde_json::Value::String(name) => Ok(Some(name)),
+                serde_json::Value::Object(map) => match map.get("name") {
+                    Some(serde_json::Value::String(name)) => Ok(Some(name.clone())),
+                    Some(other) => Err(E::custom(format!(
+                        "a name filter's `name` must be a string, got {other}"
+                    ))),
+                    None => Ok(None),
+                },
+                serde_json::Value::Null => Ok(None),
+                other => Err(E::custom(format!("expected a name, got {other}"))),
+            }
+        }
+
+        impl<'de> Visitor<'de> for Names {
+            type Value = Vec<String>;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("a name, a {name} table, a list of either, or an empty table")
+            }
+
+            fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
+                Ok(vec![v.to_string()])
+            }
+
+            fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+                Ok(Vec::new())
+            }
+
+            fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
+                Ok(Vec::new())
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                let mut names = Vec::new();
+                while let Some(elem) = seq.next_element::<serde_json::Value>()? {
+                    names.extend(name_of::<A::Error>(elem)?);
+                }
+                Ok(names)
+            }
+
+            fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
+            where
+                M: MapAccess<'de>,
+            {
+                let mut fields = serde_json::Map::new();
+                while let Some((key, value)) = map.next_entry::<String, serde_json::Value>()? {
+                    fields.insert(key, value);
+                }
+                Ok(name_of::<M::Error>(serde_json::Value::Object(fields))?
+                    .into_iter()
+                    .collect())
+            }
+        }
+
+        deserializer.deserialize_any(Names)
+    }
+
     // A custom `deserialize_with` opts a field out of serde's built-in
     // "missing key means None" handling for `Option<T>` fields, so every
     // caller of these two helpers must pair them with `#[serde(default)]` to
@@ -909,18 +985,29 @@ pub struct ChunkResource {
 /// The trigger lives on the **prototype**, not on `LuaTechnology` — the same
 /// split that already forced `effects` to be read through `.prototype`.
 ///
-/// # Why only `craft-item` carries a payload
+/// # What each variant carries, and why every payload field is `default`
 ///
-/// `craft-item` is the one variant whose runtime shape is unambiguous: `item`
-/// is an `ItemIDFilter` (a table with a `name`) and `count` is a `uint32`. The
-/// others are deliberately modelled as payload-free markers, because the two
-/// shipped schemas disagree about them — `runtime-api.json` documents
-/// `mine-entity` as carrying a singular `entity :: string`, while the shipped
+/// The mod (`mods/BotBridge/types.lua`, `serialize_technology`) sends one
+/// normalised shape per kind. Until 2026-09-05 only `craft-item` had a
+/// payload, because the two shipped schemas disagree about `mine-entity` --
+/// `runtime-api.json` documents a singular `entity :: string`, the shipped
 /// prototype data (`data/base/prototypes/technology.lua`) writes `entities =
-/// {...}`, a list. Guessing between them is exactly the mistake this project
-/// has made twice from recalled API shapes, so the planner is told *that* the
-/// technology has a trigger it cannot express, and refuses, rather than being
-/// handed a field that might not exist.
+/// {...}`, a list -- and the mod refused to guess. It now reads both spellings
+/// and always sends `entities`, a list, so the disagreement is settled on the
+/// Lua side where the live table is.
+///
+/// Every payload field defaults, so a dump or a snapshot written when the mod
+/// sent the bare type still loads: `{"type": "mine-entity"}` becomes
+/// `MineEntity { entities: [], count: 1 }`. An **empty** list is therefore a
+/// distinct state -- "the mod that wrote this could not describe the trigger"
+/// -- and the planner names it as such (`UndescribedResearchTrigger`) rather
+/// than treating it as either free or unsupported.
+///
+/// Read off the prototype data, the shipped 2.1.17 shapes are: `craft-item`
+/// `{item, count?}`, `mine-entity` `{entities = {...}}`, `send-item-to-orbit`
+/// `{item}`, `capture-spawner` `{}`, `create-space-platform` `{}`. No shipped
+/// technology uses `craft-fluid` or `build-entity`; their fields follow the
+/// runtime API definition (`fluid`/`amount`, `entity`/`count`).
 ///
 /// Carrying the kind is still the whole point: it is what lets a planner
 /// distinguish "this research is genuinely free" from "this research has a cost
@@ -928,8 +1015,7 @@ pub struct ChunkResource {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Hash, Eq)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum ResearchTrigger {
-    /// Craft `count` of `item`. The only variant a goal planner can express
-    /// directly, and the one the early tree is built from.
+    /// Craft `count` of `item`. The variant the early tree is built from.
     CraftItem {
         item: String,
         /// Absent in the prototype data for a trigger that wants a single item
@@ -939,11 +1025,42 @@ pub enum ResearchTrigger {
         #[serde(default = "one_item")]
         count: u32,
     },
-    CraftFluid,
-    MineEntity,
-    BuildEntity,
-    SendItemToOrbit,
-    CaptureSpawner,
+    /// Craft (in a machine) `amount` of `fluid`. Unused by shipped 2.1.17.
+    CraftFluid {
+        #[serde(default)]
+        fluid: Option<String>,
+        /// `R64` rather than `f64` so this type keeps deriving `Hash`, like
+        /// `FactorioRecipe::energy`.
+        #[serde(default = "one_amount")]
+        amount: Box<R64>,
+    },
+    /// Mine any one of `entities` -- with a hand, a drill or a pumpjack;
+    /// the game does not care which. `oil-processing` is `["crude-oil"]`,
+    /// `uranium-processing` is `["uranium-ore"]`, and Space Age lists up to
+    /// four rocks for one trigger.
+    MineEntity {
+        #[serde(default, deserialize_with = "deserialize_helpers::names_one_or_many")]
+        entities: Vec<String>,
+        #[serde(default = "one_item")]
+        count: u32,
+    },
+    /// Build any one of `entities`. Unused by shipped 2.1.17.
+    BuildEntity {
+        #[serde(default, deserialize_with = "deserialize_helpers::names_one_or_many")]
+        entities: Vec<String>,
+        #[serde(default = "one_item")]
+        count: u32,
+    },
+    SendItemToOrbit {
+        #[serde(default)]
+        item: Option<String>,
+    },
+    /// `entity` is optional in the runtime definition, and the shipped
+    /// `captivity` trigger names none: any spawner.
+    CaptureSpawner {
+        #[serde(default)]
+        entity: Option<String>,
+    },
     CreateSpacePlatform,
     Scripted,
     /// A `type` this build does not know — a newer Factorio or a mod. Kept as a
@@ -958,17 +1075,21 @@ fn one_item() -> u32 {
     1
 }
 
+fn one_amount() -> Box<R64> {
+    Box::new(r64(1.0))
+}
+
 impl ResearchTrigger {
     /// The `type` string this trigger came from, for diagnostics that have to
     /// name it back to a caller.
     pub fn kind(&self) -> &'static str {
         match self {
             ResearchTrigger::CraftItem { .. } => "craft-item",
-            ResearchTrigger::CraftFluid => "craft-fluid",
-            ResearchTrigger::MineEntity => "mine-entity",
-            ResearchTrigger::BuildEntity => "build-entity",
-            ResearchTrigger::SendItemToOrbit => "send-item-to-orbit",
-            ResearchTrigger::CaptureSpawner => "capture-spawner",
+            ResearchTrigger::CraftFluid { .. } => "craft-fluid",
+            ResearchTrigger::MineEntity { .. } => "mine-entity",
+            ResearchTrigger::BuildEntity { .. } => "build-entity",
+            ResearchTrigger::SendItemToOrbit { .. } => "send-item-to-orbit",
+            ResearchTrigger::CaptureSpawner { .. } => "capture-spawner",
             ResearchTrigger::CreateSpacePlatform => "create-space-platform",
             ResearchTrigger::Scripted => "scripted",
             ResearchTrigger::Unknown => "unknown",
@@ -982,6 +1103,22 @@ impl std::fmt::Display for ResearchTrigger {
             ResearchTrigger::CraftItem { item, count } => {
                 write!(f, "craft {} {}", count, item)
             }
+            ResearchTrigger::CraftFluid {
+                fluid: Some(fluid),
+                amount,
+            } => write!(f, "craft {} {}", amount.raw(), fluid),
+            ResearchTrigger::MineEntity { entities, count } if !entities.is_empty() => {
+                write!(f, "mine {} {}", count, entities.join(" or "))
+            }
+            ResearchTrigger::BuildEntity { entities, count } if !entities.is_empty() => {
+                write!(f, "build {} {}", count, entities.join(" or "))
+            }
+            ResearchTrigger::SendItemToOrbit { item: Some(item) } => {
+                write!(f, "send {} to orbit", item)
+            }
+            ResearchTrigger::CaptureSpawner {
+                entity: Some(entity),
+            } => write!(f, "capture a {}", entity),
             other => write!(f, "{}", other.kind()),
         }
     }
@@ -2008,21 +2145,41 @@ mod tests {
 
     /// The trigger shapes, verbatim from the shipped API definition:
     /// `workspace/factorio-api-docs/runtime-api.json`, `application_version`
-    /// 2.1.17, concept `ResearchTrigger`. Eight `type` values, and only
-    /// `craft-item` is modelled with a payload.
+    /// 2.1.17, concept `ResearchTrigger`. Eight `type` values. The bare type
+    /// -- what the mod sent for everything but `craft-item` until 2026-09-05,
+    /// and so what every archived dump holds -- must still load, with every
+    /// payload at its default.
     #[test]
     fn every_documented_trigger_type_deserialises_to_its_own_variant() {
         let cases: [(&str, ResearchTrigger); 7] = [
-            (r#"{"type":"craft-fluid"}"#, ResearchTrigger::CraftFluid),
-            (r#"{"type":"mine-entity"}"#, ResearchTrigger::MineEntity),
-            (r#"{"type":"build-entity"}"#, ResearchTrigger::BuildEntity),
+            (
+                r#"{"type":"craft-fluid"}"#,
+                ResearchTrigger::CraftFluid {
+                    fluid: None,
+                    amount: Box::new(r64(1.0)),
+                },
+            ),
+            (
+                r#"{"type":"mine-entity"}"#,
+                ResearchTrigger::MineEntity {
+                    entities: vec![],
+                    count: 1,
+                },
+            ),
+            (
+                r#"{"type":"build-entity"}"#,
+                ResearchTrigger::BuildEntity {
+                    entities: vec![],
+                    count: 1,
+                },
+            ),
             (
                 r#"{"type":"send-item-to-orbit"}"#,
-                ResearchTrigger::SendItemToOrbit,
+                ResearchTrigger::SendItemToOrbit { item: None },
             ),
             (
                 r#"{"type":"capture-spawner"}"#,
-                ResearchTrigger::CaptureSpawner,
+                ResearchTrigger::CaptureSpawner { entity: None },
             ),
             (
                 r#"{"type":"create-space-platform"}"#,
@@ -2040,6 +2197,95 @@ mod tests {
                 "{json} is documented and must not fall through to Unknown"
             );
         }
+    }
+
+    /// The shape the mod sends since 2026-09-05 for `oil-processing`, read
+    /// off `data/base/prototypes/technology.lua` (`entities = {"crude-oil"}`)
+    /// and normalised to a list. `count` is absent there and means one.
+    #[test]
+    fn a_mine_entity_trigger_keeps_its_entity_list() {
+        let got: ResearchTrigger =
+            serde_json::from_str(r#"{"type":"mine-entity","entities":["crude-oil"]}"#)
+                .expect("parses");
+        assert_eq!(
+            got,
+            ResearchTrigger::MineEntity {
+                entities: vec!["crude-oil".into()],
+                count: 1,
+            }
+        );
+        assert_eq!(got.to_string(), "mine 1 crude-oil");
+
+        // Space Age's `tungsten-carbide` names four rocks for one trigger.
+        let got: ResearchTrigger = serde_json::from_str(
+            r#"{"type":"mine-entity","entities":["big-volcanic-rock","huge-volcanic-rock"],"count":2}"#,
+        )
+        .expect("parses");
+        assert_eq!(
+            got.to_string(),
+            "mine 2 big-volcanic-rock or huge-volcanic-rock"
+        );
+    }
+
+    /// The three other spellings a trigger field can arrive in: the singular
+    /// `entity` string `runtime-api.json` documents, a filter table with a
+    /// `name` (what `EntityIDFilter` is), and Lua's `{}` for an empty list.
+    /// The mod normalises all of them, but a dump written by hand or by an
+    /// older mod that forwarded the table untouched must not fail to load.
+    #[test]
+    fn a_mine_entity_trigger_accepts_the_singular_and_filter_spellings() {
+        let singular: ResearchTrigger =
+            serde_json::from_str(r#"{"type":"mine-entity","entities":"crude-oil"}"#)
+                .expect("a bare name parses");
+        assert!(matches!(
+            singular,
+            ResearchTrigger::MineEntity { ref entities, .. } if entities == &["crude-oil".to_string()]
+        ));
+        let filters: ResearchTrigger = serde_json::from_str(
+            r#"{"type":"build-entity","entities":[{"name":"radar","quality":"normal"}],"count":3}"#,
+        )
+        .expect("a filter list parses");
+        assert_eq!(
+            filters,
+            ResearchTrigger::BuildEntity {
+                entities: vec!["radar".into()],
+                count: 3,
+            }
+        );
+        let empty: ResearchTrigger =
+            serde_json::from_str(r#"{"type":"mine-entity","entities":{}}"#)
+                .expect("Lua's empty table parses");
+        assert_eq!(
+            empty,
+            ResearchTrigger::MineEntity {
+                entities: vec![],
+                count: 1,
+            }
+        );
+    }
+
+    /// The payloads of the remaining kinds, per `runtime-api.json` 2.1.17.
+    #[test]
+    fn the_other_trigger_kinds_keep_their_payloads() {
+        let fluid: ResearchTrigger =
+            serde_json::from_str(r#"{"type":"craft-fluid","fluid":"steam","amount":200.0}"#)
+                .expect("parses");
+        assert_eq!(
+            fluid,
+            ResearchTrigger::CraftFluid {
+                fluid: Some("steam".into()),
+                amount: Box::new(r64(200.0)),
+            }
+        );
+        assert_eq!(fluid.to_string(), "craft 200 steam");
+        let orbit: ResearchTrigger =
+            serde_json::from_str(r#"{"type":"send-item-to-orbit","item":"satellite"}"#)
+                .expect("parses");
+        assert_eq!(orbit.to_string(), "send satellite to orbit");
+        let spawner: ResearchTrigger =
+            serde_json::from_str(r#"{"type":"capture-spawner","entity":"biter-spawner"}"#)
+                .expect("parses");
+        assert_eq!(spawner.to_string(), "capture a biter-spawner");
     }
 
     /// `craft-item` is the one variant the planner can act on, so its payload

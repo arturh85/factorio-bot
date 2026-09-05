@@ -793,9 +793,16 @@ mod tests {
     // ---- the power budget -------------------------------------------------
 
     fn put(s: &mut PlanState, name: &str, x: f64, y: f64) {
+        // A crafting machine is put down *set*: with no recipe it never
+        // crafts, and the ledger charges it nothing. Every machine these
+        // tests put down is a load.
+        let recipe = name
+            .starts_with("assembling-machine")
+            .then(|| "iron-gear-wheel".to_string());
         s.create_entity(FactorioEntity {
             name: name.into(),
             position: Position::new(x, y),
+            recipe,
             ..Default::default()
         });
     }

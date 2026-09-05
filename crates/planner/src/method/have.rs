@@ -3578,6 +3578,42 @@ fn lab_site_with_pole(state: &PlanState, anchor: &Position) -> Option<(Position,
     Some((pos, pole))
 }
 
+/// A lab already standing within [`LAB_SEARCH_RADIUS`] of `anchor` that one
+/// pole would light, nearest first, with the pole that lights it.
+///
+/// Only labs [`lab_site`]'s first tier passed over come here -- the powered
+/// ones were taken already -- so every lab this finds is one with no supply,
+/// and [`pole_for_lab`] is what decides whether a single pole on free ground
+/// can join it to a network that generates. A lab nothing can reach is left
+/// where it is.
+///
+/// Ordered by `(distance, x, y)` with `total_cmp`, so the same lab is chosen
+/// on every run.
+fn standing_lab_to_light(
+    state: &PlanState,
+    anchor: &Position,
+    taken: &[Position],
+) -> Option<(Position, Position)> {
+    let mut labs: Vec<(f64, Position)> = state
+        .entities_within(anchor, LAB_SEARCH_RADIUS)
+        .into_iter()
+        .filter(|entity| entity.name == LAB && !taken.contains(&entity.position))
+        .map(|entity| {
+            (
+                calculate_distance(&entity.position, anchor),
+                entity.position,
+            )
+        })
+        .collect();
+    labs.sort_by(|a, b| {
+        a.0.total_cmp(&b.0)
+            .then(a.1.x.total_cmp(&b.1.x))
+            .then(a.1.y.total_cmp(&b.1.y))
+    });
+    labs.into_iter()
+        .find_map(|(_, lab)| pole_for_lab(state, &lab).map(|pole| (lab, pole)))
+}
+
 /// Is a lab centred at `pos` supplied with enough power to research?
 fn lab_is_powered(state: &PlanState, pos: &Position) -> bool {
     match state.collision_area(LAB, pos) {
@@ -3634,6 +3670,20 @@ fn lab_site(
             supply_kw: 0.0,
         });
     };
+    // A standing lab that only lacks a pole, before any new lab: the pole is
+    // one wood, and the lab it lights is ten circuits, ten gears and four
+    // belts already in the ground. `run-1788608648-56109`'s second plan
+    // crafted and placed two labs beside its new plant with two standing
+    // unpowered twenty tiles away, and its final world held four. The pole
+    // is `pole_for_lab`'s, so it is on free ground and it reaches a
+    // generator, exactly as the pole a new lab would bring.
+    if let Some((pos, pole)) = standing_lab_to_light(state, &anchor, taken) {
+        return Ok(LabSite {
+            pos,
+            needs_placing: false,
+            pole: Some(pole),
+        });
+    }
     // Sited around the supplying pole rather than around the bot: the search
     // reaches 12 tiles, and a lab has to end up inside a supply area, not
     // inside walking distance. The candidate grid is the lab's own -- a lab
@@ -12584,6 +12634,122 @@ mod tests {
             calculate_distance(&lab, &pole) < 8.,
             "the lab at {lab} has to sit in the pole's supply area, and the pole is at {pole}"
         );
+    }
+
+    /// **`run-1788608648-56109`, plan 2.** Plan 1 was cut with the pump, the
+    /// pipes and the boiler down and no engine; plan 2 sited a whole second
+    /// plant twenty tiles up the shore and two more labs beside it.
+    ///
+    /// The next plan finishes the plant it finds: exactly one steam engine,
+    /// where the standing pump's own layout puts it, and no second pump or
+    /// boiler.
+    #[test]
+    fn a_plant_cut_short_is_finished_by_the_next_plan_rather_than_replaced() {
+        use crate::method::power::{BOILER, ENGINE, PIPE, PUMP};
+        let bots = [BotId(1)];
+        let mut s = unpowered_lakeside_state(&bots);
+        let from = s
+            .bot(BotId(1))
+            .map(|b| b.position.clone())
+            .unwrap_or_default();
+        let plant = crate::method::power::plan_plant(&s, &from).expect("the fixture has a lake");
+        for part in plant
+            .parts
+            .iter()
+            .filter(|part| [PUMP, PIPE, BOILER].contains(&part.name))
+        {
+            let entity = crate::method::power::entity_for(&s, part);
+            s.create_entity(entity);
+        }
+        let net = expand(
+            &[Goal::Researched("automation".into())],
+            &s,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .expect("a half-built plant is finished, not refused");
+        let placed = |name: &str| -> Vec<Position> {
+            net.actions()
+                .filter_map(|a| match &a.kind {
+                    ActionKind::Place { entity } if entity.name == name => {
+                        Some(entity.position.clone())
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(placed(PUMP), Vec::<Position>::new(), "the pump stands");
+        assert_eq!(placed(BOILER), Vec::<Position>::new(), "the boiler stands");
+        assert_eq!(placed(PIPE), Vec::<Position>::new(), "the pipes stand");
+        assert_eq!(
+            placed(ENGINE),
+            vec![plant.engine.clone()],
+            "one engine, where the standing pump's layout puts it"
+        );
+        assert!(
+            !placed("small-electric-pole").is_empty(),
+            "the engine's pole is placed"
+        );
+        assert_eq!(
+            placed("lab").len(),
+            1,
+            "and the lab is sited beside the finished plant"
+        );
+    }
+
+    /// A lab standing with no supply is lit by one pole and used, rather
+    /// than left there while a second lab is crafted and placed beside the
+    /// pole -- the run above's second plan did exactly that, and its world
+    /// ended with four labs for one research.
+    #[test]
+    fn a_standing_unpowered_lab_is_lit_rather_than_built_again() {
+        let bots = [BotId(1)];
+        let mut s = tech_state(&bots);
+        // The pole's wood; the fixture's bots start empty.
+        s.gain(BotId(1), "wood", 1);
+        // The fixture's pole at (10.5, 10.5) supplies y in 8..13; a lab at
+        // y = 17.5 covers 16..19 and is out of it, while a pole at (10.5,
+        // 15.5) is five tiles from the first -- inside wire reach -- and
+        // reaches the lab.
+        let standing = Position::new(10.5, 17.5);
+        s.create_entity(FactorioEntity {
+            name: LAB.into(),
+            entity_type: LAB.into(),
+            position: standing.clone(),
+            ..Default::default()
+        });
+        assert!(
+            !lab_is_powered(&s, &standing),
+            "the premise: the lab is dark"
+        );
+        let site = lab_site(&s, &Position::new(0., 0.), "automation", &[]).expect("a site");
+        assert_eq!(site.pos, standing, "the standing lab is the site");
+        assert!(!site.needs_placing, "and it is not placed again");
+        let pole = site.pole.clone().expect("lit by a pole of its own");
+        let mut lit = s.fork();
+        lit.create_entity(pole_entity(&s, &pole));
+        assert!(
+            lab_is_powered(&lit, &standing),
+            "the pole at {pole} lights it"
+        );
+
+        let net = expand(
+            &[Goal::Researched("automation".into())],
+            &s,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .expect("the chain expands");
+        let labs = net
+            .actions()
+            .filter(|a| matches!(&a.kind, ActionKind::Place { entity } if entity.name == LAB))
+            .count();
+        assert_eq!(labs, 0, "no lab is placed");
+        let poles = net
+            .actions()
+            .filter(|a| matches!(&a.kind, ActionKind::Place { entity } if entity.name == POLE))
+            .count();
+        assert_eq!(poles, 1, "one pole is");
     }
 
     /// A world with **no water at all** still refuses, and by a different name

@@ -270,6 +270,27 @@ fn consumer_kw(name: &str) -> Option<f64> {
     }
 }
 
+/// Is `name` a consumer that draws its [`consumer_kw`] only once a recipe is
+/// set on it?
+///
+/// The crafting machines of the table above: each has an `energy_usage` it
+/// draws while crafting and a drain of a few kW otherwise, and with no recipe
+/// it never crafts. A lab, a drill, an inserter and a radar have no recipe to
+/// set and draw whenever they have work. By name rather than by
+/// `entity_type`, because entities this crate's own methods create in the
+/// overlay carry the prototype's type and entities a test creates by hand
+/// often carry none, and the ledger has to charge both the same.
+fn takes_a_recipe(name: &str) -> bool {
+    matches!(
+        name,
+        "assembling-machine-1"
+            | "assembling-machine-2"
+            | "assembling-machine-3"
+            | "chemical-plant"
+            | "oil-refinery"
+    )
+}
+
 /// Where a machine puts what it produces, as a north-frame offset from its own
 /// position.
 ///
@@ -3279,6 +3300,29 @@ impl PlanState {
     /// subtracted from a supply computed over a *different* network would be
     /// worse than no budget at all.
     ///
+    /// # A crafting machine with no recipe draws nothing
+    ///
+    /// An assembling machine's `energy_usage` is what it draws **while
+    /// crafting**; with no recipe set it can never craft, and what it draws
+    /// is its drain -- 2.5 kW for an `assembling-machine-1`, a thirtieth of
+    /// the figure in [`consumer_kw`]. So a machine whose `recipe` is `None`
+    /// is not charged here.
+    ///
+    /// This matters because a replan is what sets recipes. A plan cut short
+    /// after its machines went down and before its `set recipe` leaves dead
+    /// machines on the network, and charging each of them 75 kW is how
+    /// `run-1788608648-56109`'s fourth plan came to read 145 kW of headroom
+    /// on a 900 kW engine with two labs and *no running machine at all* on
+    /// it -- five recipe-less machines from two abandoned cells were 375 of
+    /// the missing 755 -- and sited a third power plant for a cell wanting
+    /// 189. The plan that finishes those machines sets their recipes in its
+    /// overlay as it does so, and from that moment they are charged.
+    ///
+    /// Not a 2.5 kW drain entry instead of zero: the drain is not in
+    /// [`consumer_kw`], and a second per-machine table for a thirtieth of the
+    /// first is the drift that table's own doc warns against. The 2.5 kW is
+    /// inside the slack nameplate accounting already has.
+    ///
     /// # What it cannot see
     ///
     /// A consumer [`consumer_kw`] does not name draws nothing here, which
@@ -3301,6 +3345,9 @@ impl PlanState {
             let Some(kw) = consumer_kw(&entity.name) else {
                 continue;
             };
+            if takes_a_recipe(&entity.name) && entity.recipe.is_none() {
+                continue;
+            }
             if net.carries(&self.footprint_of(entity)) {
                 total += kw;
             }
@@ -4732,13 +4779,55 @@ mod tests {
         });
         assert_eq!(s.electric_demand_kw(&site, None), 60.0);
 
-        // And an assembling machine beside it.
+        // And an assembling machine beside it -- one with a recipe, since a
+        // machine with none can never craft and is charged nothing.
         s.create_entity(FactorioEntity {
             name: "assembling-machine-1".into(),
             position: Position::new(11.5, 8.5),
+            recipe: Some("iron-gear-wheel".into()),
             ..Default::default()
         });
         assert_eq!(s.electric_demand_kw(&site, None), 135.0, "60 + 75");
+    }
+
+    /// A crafting machine with no recipe set draws nothing but its drain, and
+    /// is charged nothing.
+    ///
+    /// `run-1788608648-56109`, plan 4: five recipe-less machines from two
+    /// cells earlier plans never finished were charged 375 kW of a 900 kW
+    /// engine, the cell to build wanted 189, and the plan sited a third
+    /// power plant. The lab beside them keeps its 60: it has no recipe to
+    /// set and draws whenever it has packs.
+    #[test]
+    fn a_crafting_machine_with_no_recipe_is_not_charged() {
+        let mut s = powered(
+            Some(Position::new(10.5, 10.5)),
+            Some(Position::new(12.5, 10.5)),
+        );
+        let site = lab_area(&s, Position::new(8.5, 8.5));
+        s.create_entity(FactorioEntity {
+            name: "lab".into(),
+            position: Position::new(8.5, 8.5),
+            ..Default::default()
+        });
+        s.create_entity(FactorioEntity {
+            name: "assembling-machine-1".into(),
+            entity_type: "assembling-machine".into(),
+            position: Position::new(11.5, 8.5),
+            ..Default::default()
+        });
+        assert_eq!(
+            s.electric_demand_kw(&site, None),
+            60.0,
+            "the lab, and not the machine nothing has set a recipe on"
+        );
+        s.set_recipe(&Position::new(11.5, 8.5), "iron-gear-wheel")
+            .expect("the machine stands");
+        assert_eq!(
+            s.electric_demand_kw(&site, None),
+            135.0,
+            "and the moment a recipe goes on it, it is charged"
+        );
     }
 
     /// `except` names a tile, and it excludes exactly that one.
@@ -4755,6 +4844,9 @@ mod tests {
             s.create_entity(FactorioEntity {
                 name: name.into(),
                 position: pos,
+                // Only the assembler reads it; a machine with none is not
+                // charged.
+                recipe: Some("iron-gear-wheel".into()),
                 ..Default::default()
             });
         }
@@ -4881,10 +4973,12 @@ mod tests {
             Some(Position::new(10.5, 10.5)),
             "an idle engine has all 900 kW to give"
         );
-        // One assembling machine of the largest kind: 375 kW committed.
+        // One assembling machine of the largest kind, with a recipe on it:
+        // 375 kW committed.
         s.create_entity(FactorioEntity {
             name: "assembling-machine-3".into(),
             position: Position::new(9.5, 8.5),
+            recipe: Some("iron-gear-wheel".into()),
             ..Default::default()
         });
         assert_eq!(
@@ -4919,6 +5013,9 @@ mod tests {
             s.create_entity(FactorioEntity {
                 name: name.into(),
                 position: Position::new(x, y),
+                // Only the assembler reads it; a machine with none is not
+                // charged.
+                recipe: Some("iron-gear-wheel".into()),
                 ..Default::default()
             });
         }

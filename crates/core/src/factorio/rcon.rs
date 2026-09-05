@@ -1091,6 +1091,82 @@ fn standing_verdict(world: &FactorioWorld, at: &Position) -> StandingVerdict {
     }
 }
 
+/// Half the side of the box the mod's walk follower halts in.
+///
+/// The follower stops "within a 0.3-by-0.3 box" of its last waypoint (see
+/// [`approach_radius`]), so a walker aimed at a point can come to rest up to
+/// this far from it on either axis. A bystander's box is grown by it before
+/// the aim is tested, so "clear of the bystander" means clear of everywhere
+/// the walker might actually stop, not only of the point it was aimed at.
+const ARRIVAL_HALF_WIDTH: f64 = 0.3;
+
+/// The ground the *other* bots are standing on, as boxes an aim must stay
+/// out of.
+///
+/// The entity graph holds no characters -- `blocked_tree` is built from
+/// entities and tiles, and a player's character is neither -- so a bot
+/// standing still is invisible to [`standing_verdict`]. That is the whole of
+/// `run-1788612263-27812`, bot 1, step 253 (tick 65,801): an insert at the
+/// assembler at `[36.5, -5.5]`, aimed from `[29.26, -15.29]` at
+/// `[34.73, -7.89]`, while bot 3 stood idle at `[34.25, -7.70]` and had done
+/// since tick 55,330. The aim was 0.51 tiles from bot 3 -- closer than two
+/// characters' half-widths plus the walker's stop box -- and the game's
+/// pathfinder, which does see characters, answered `failed to path find`.
+/// The batch replanned: nine steps and ~1,500 ticks for a goal the sweep
+/// could have stepped 22.5° round.
+///
+/// Positions come from `world.players`, fed by the mod's
+/// `on_player_changed_position` writeouts: once per tile while a bot walks,
+/// and once more when its walker lets it stop (`writeout_player_position`
+/// in `control.lua`). A resting bot -- the only kind that can be in the way
+/// for long -- is therefore exact, and a walking one is within a tile of
+/// where it was last seen, which the sweep then treats as occupied ground it
+/// would rather not aim at. No RCON round trip is spent on this.
+///
+/// Each box is the character's own footprint at that position, grown by
+/// [`ARRIVAL_HALF_WIDTH`]. `walker` is left out: it is the bot being aimed,
+/// and its own position is on the near side of every ring it is aimed at.
+fn bystander_boxes(world: &FactorioWorld, walker: Option<PlayerId>) -> Vec<Rect> {
+    let mut boxes: Vec<(PlayerId, Rect)> = world
+        .players
+        .iter()
+        .filter(|player| Some(*player.key()) != walker)
+        .map(|player| {
+            let footprint = character_footprint(world, &player.position);
+            let grown = Rect::new(
+                &Position::new(
+                    footprint.left_top.x() - ARRIVAL_HALF_WIDTH,
+                    footprint.left_top.y() - ARRIVAL_HALF_WIDTH,
+                ),
+                &Position::new(
+                    footprint.right_bottom.x() + ARRIVAL_HALF_WIDTH,
+                    footprint.right_bottom.y() + ARRIVAL_HALF_WIDTH,
+                ),
+            );
+            (*player.key(), grown)
+        })
+        .collect();
+    // `DashMap` iterates in no fixed order; the aim must not depend on it.
+    boxes.sort_by_key(|(id, _)| *id);
+    boxes.into_iter().map(|(_, rect)| rect).collect()
+}
+
+/// How far a character standing at `at` is from the nearest bystander's grown
+/// box: zero when it overlaps one, `f64::INFINITY` when there are none.
+fn bystander_clearance(world: &FactorioWorld, at: &Position, bystanders: &[Rect]) -> f64 {
+    let footprint = character_footprint(world, at);
+    bystanders
+        .iter()
+        .map(|bystander| {
+            if boxes_overlap(bystander, &footprint) {
+                0.0
+            } else {
+                distance_to_rect(at, bystander)
+            }
+        })
+        .fold(f64::INFINITY, f64::min)
+}
+
 /// A walk would have ended somewhere a character cannot stand.
 ///
 /// Raised *before* any walk is dispatched, by [`judge_path`], when
@@ -1343,21 +1419,27 @@ fn within_mining_reach(
 /// within reach. A disc centred on a rock asks the pathfinder for a point
 /// inside the rock, and `judge_path` refuses it before dispatch; that refusal
 /// halted bot 1 in every batch of the first two live runs to chop one.
+///
+/// `walker` is the player doing the mining, so its own position is not
+/// counted as a bystander on the ring.
 fn mining_approach(
     world: &FactorioWorld,
     here: &Position,
     target: &Position,
     reach: f64,
+    walker: Option<PlayerId>,
 ) -> (Position, f64) {
     match blocking_box_at(world, target) {
         // `approach_standing` derives the same clearance from the same box,
-        // and on top of it keeps the aim off any *other* box on the ring.
+        // and on top of it keeps the aim off any *other* box on the ring --
+        // and off the other bots standing round it.
         Some(rect) => approach_standing(
             world,
             target,
             0.0,
             reach + (rect.width() / 2.).min(rect.height() / 2.),
             Some(here),
+            walker,
         ),
         None => (target.clone(), approach_radius(reach)),
     }
@@ -1573,12 +1655,36 @@ const APPROACH_BEARINGS: usize = 16;
 /// after it was picked up, a bare position -- is a plain disc and goes out
 /// untouched, so the game keeps resolving the ring for the walks it always
 /// has.
+///
+/// # The other bots are obstacles too
+///
+/// The graph never sees a character, so a bot standing still on the ring is
+/// a box the sweep above would aim straight into -- which is what it did in
+/// `run-1788612263-27812` (see [`bystander_boxes`]). Every other bot's
+/// current position is therefore a box as well, grown by the walker's own
+/// stop box, and a candidate is *free* only when the graph cannot prove it
+/// blocked **and** no bystander stands on it. The two are ranked, not
+/// equated: the graph's boxes are buildings, rocks and water, which do not
+/// move, so a candidate inside one is never returned while a free one
+/// exists; a bystander is a bot that may be about to walk off, so when every
+/// graph-clear candidate has one on it, the candidate **farthest from any
+/// bot** is returned anyway -- a walking bot will have moved, and an idle one
+/// is what the mod's stall handling (`walk_stall_describe`, and the
+/// step-aside it asks for) exists to deal with. Refusing here would refuse on
+/// a position that may be seconds stale.
+///
+/// With no bot near the ring nothing changes: the annulus's own aim is
+/// returned untouched when the graph cannot fault it, and the sweep's first
+/// graph-clear candidate otherwise, exactly as before bystanders were
+/// consulted. `walker` names the bot being aimed, so its own position is not
+/// counted against it; `None` counts every player the world knows.
 pub fn approach_standing(
     world: &FactorioWorld,
     target: &Position,
     min_radius: f64,
     radius: f64,
     from: Option<&Position>,
+    walker: Option<PlayerId>,
 ) -> (Position, f64) {
     let inner = match blocking_box_at(world, target) {
         Some(rect) => {
@@ -1593,11 +1699,20 @@ pub fn approach_standing(
     if inner.is_nan() || inner <= 0.0 {
         return (goal, slack);
     }
-    if standing_verdict(world, &goal) == StandingVerdict::NotProvablyBlocked {
+    let bystanders = bystander_boxes(world, walker);
+    let is_free = |at: &Position| -> bool {
+        standing_verdict(world, at) == StandingVerdict::NotProvablyBlocked
+            && bystander_clearance(world, at, &bystanders) > 0.0
+    };
+    if is_free(&goal) {
         return (goal, slack);
     }
     let towards = approach_direction(target, from);
     let step = std::f64::consts::TAU / APPROACH_BEARINGS as f64;
+    // The best candidate the graph cannot fault but a bystander stands on,
+    // ranked by how far it is from the nearest bot. Only consulted when no
+    // candidate is free of both.
+    let mut crowded: Option<(Position, f64)> = None;
     let mut aim = inner + slack;
     while aim + slack <= radius {
         for k in 0..APPROACH_BEARINGS {
@@ -1615,13 +1730,25 @@ pub fn approach_standing(
                 towards.x() * sin + towards.y() * cos,
             );
             let candidate = aim_along(target, &direction, aim);
-            if standing_verdict(world, &candidate) == StandingVerdict::NotProvablyBlocked {
+            if standing_verdict(world, &candidate) != StandingVerdict::NotProvablyBlocked {
+                continue;
+            }
+            let clearance = bystander_clearance(world, &candidate, &bystanders);
+            if clearance > 0.0 {
                 return (candidate, slack);
+            }
+            // Strictly greater, so the first of equals -- the nearest bearing
+            // -- keeps its place.
+            if crowded.as_ref().is_none_or(|(_, best)| clearance > *best) {
+                crowded = Some((candidate, clearance));
             }
         }
         aim += 1.0;
     }
-    (goal, slack)
+    match crowded {
+        Some((candidate, _)) => (candidate, slack),
+        None => (goal, slack),
+    }
 }
 
 /// One ulp of `value`, directed away from `from`. Ties (`value == from`) move
@@ -3665,7 +3792,13 @@ impl FactorioRcon {
             // walk at the target's own centre with a plain disc is what
             // `judge_path` refused in every batch of run-1788551693-66583 --
             // the centre of a huge-rock is inside the huge-rock.
-            let (goal, slack) = mining_approach(world, &here, position, resource_reach_distance);
+            let (goal, slack) = mining_approach(
+                world,
+                &here,
+                position,
+                resource_reach_distance,
+                Some(player_id),
+            );
             self.move_player_timed(world, player_id, &goal, Some(slack))
                 .await?;
             // Where the walk *ended*, not where it was aimed. The two differ by
@@ -8862,7 +8995,7 @@ mod mining_reach_tests {
             StandingVerdict::Blocked { .. }
         ));
 
-        let (goal, slack) = approach_standing(&world, &target, clearance, REACH, Some(&here));
+        let (goal, slack) = approach_standing(&world, &target, clearance, REACH, Some(&here), None);
         assert_eq!(
             standing_verdict(&world, &goal),
             StandingVerdict::NotProvablyBlocked,
@@ -8904,7 +9037,7 @@ mod mining_reach_tests {
             StandingVerdict::Blocked { .. }
         ));
 
-        let (goal, slack) = approach_standing(&world, &target, 0.0, BUILD_REACH, Some(&here));
+        let (goal, slack) = approach_standing(&world, &target, 0.0, BUILD_REACH, Some(&here), None);
         assert_eq!(
             standing_verdict(&world, &goal),
             StandingVerdict::NotProvablyBlocked,
@@ -8920,6 +9053,209 @@ mod mining_reach_tests {
         assert!(goal.y() > target.y(), "aimed at {goal}");
     }
 
+    /// The bots of `run-1788612263-27812` at tick 65,801, as `samples.jsonl`
+    /// has them at tick 65,820 (the first beat after the refusal), with bot
+    /// 1 -- the walker -- at the position its refusal named.
+    fn run_1788612263_bots() -> [(PlayerId, Position); 4] {
+        [
+            (1, Position::new(29.26171875, -15.29296875)),
+            (2, Position::new(36.28515625, -11.25390625)),
+            (3, Position::new(34.25390625, -7.69921875)),
+            (4, Position::new(31.21484375, -13.75)),
+        ]
+    }
+
+    /// The two assemblers bot 2 had placed in the 30 ticks before the walk,
+    /// as the run's `map.jsonl` has them, plus the bots in `players`.
+    fn world_of_run_1788612263(players: &[(PlayerId, Position)]) -> Arc<FactorioWorld> {
+        let world = FactorioWorld::new();
+        let prototypes: Vec<FactorioEntityPrototype> = fixture_entity_prototypes()
+            .iter()
+            .map(|v| v.clone())
+            .collect();
+        world.update_entity_prototypes(prototypes).unwrap();
+        let entities = [Position::new(36.5, -5.5), Position::new(36.5, -9.5)]
+            .into_iter()
+            .map(|position| {
+                FactorioEntity::from_prototype(
+                    "assembling-machine-1",
+                    position,
+                    None,
+                    None,
+                    None,
+                    world.entity_prototypes.clone(),
+                )
+                .expect("the fixture has an assembling-machine-1 prototype")
+            })
+            .collect();
+        world.update_chunk_entities(entities).unwrap();
+        for (id, position) in players {
+            world.players.insert(
+                *id,
+                FactorioPlayer {
+                    player_id: *id,
+                    position: position.clone(),
+                    ..Default::default()
+                },
+            );
+        }
+        Arc::new(world)
+    }
+
+    /// `run-1788612263-27812`, bot 1, step 253, tick 65,801: an insert at
+    /// the assembler at `[36.5, -5.5]`, aimed from `[29.26, -15.29]`. The
+    /// annulus put the aim at `[34.73, -7.89]` -- the first half of this
+    /// test reproduces the run's own number -- half a tile from where bot 3
+    /// had been standing idle since tick 55,330. The graph holds no
+    /// characters, so nothing in it could fault the aim; the game's
+    /// pathfinder could, and did (`failed to path find`), and the batch
+    /// replanned. `approach_standing` must now aim clear of bot 3 and still
+    /// inside the annulus, on bot 1's own side of the machine.
+    #[test]
+    fn run_1788612263_bot_1_is_aimed_off_the_bot_standing_on_the_ring() {
+        let bots = run_1788612263_bots();
+        let world = world_of_run_1788612263(&bots);
+        let target = Position::new(36.5, -5.5);
+        let here = bots[0].1.clone();
+        let bystander = bots[2].1.clone();
+        let rect = blocking_box_at(&world, &target).expect("the assembler has a box");
+        let clearance =
+            (rect.width() / 2.).hypot(rect.height() / 2.) + 0.19921875f64.hypot(0.19921875);
+
+        // The mechanism, with the run's numbers: the annulus aim is the one
+        // the refusal named, the graph cannot fault it, and bot 3 is on it.
+        let (naive, _) = approach_annulus(&target, clearance, BUILD_REACH, Some(&here));
+        assert!(
+            (naive.x() - 34.730088110096574).abs() < 1e-6
+                && (naive.y() - -7.8945866745752244).abs() < 1e-6,
+            "the run's aim was [34.730088110096574, -7.8945866745752244], this reproduces {naive}"
+        );
+        assert!(calculate_distance(&naive, &bystander) < 0.52);
+        assert_eq!(
+            standing_verdict(&world, &naive),
+            StandingVerdict::NotProvablyBlocked,
+            "the graph holds no characters, so it cannot see bot 3"
+        );
+        let bystanders = bystander_boxes(&world, Some(1));
+        assert_eq!(bystanders.len(), 3, "bots 2, 3 and 4; never the walker");
+        assert_eq!(bystander_clearance(&world, &naive, &bystanders), 0.0);
+
+        let (goal, slack) =
+            approach_standing(&world, &target, 0.0, BUILD_REACH, Some(&here), Some(1));
+        assert_ne!(goal, naive, "the aim must move off bot 3");
+        assert!(
+            bystander_clearance(&world, &goal, &bystanders) > 0.0,
+            "aimed at {goal}, still on a bot"
+        );
+        assert_eq!(
+            standing_verdict(&world, &goal),
+            StandingVerdict::NotProvablyBlocked,
+            "aimed at {goal}"
+        );
+        // Clear of bot 3 by more than two characters' half-widths plus the
+        // walker's stop box, on both axes at once or on one of them.
+        let footprint = character_footprint(&world, &goal);
+        let dx = (goal.x() - bystander.x()).abs();
+        let dy = (goal.y() - bystander.y()).abs();
+        let apart = footprint.width() + ARRIVAL_HALF_WIDTH;
+        assert!(dx >= apart || dy >= apart, "aimed at {goal}: {dx} x {dy}");
+        // Still in the annulus the plan granted.
+        let d = calculate_distance(&goal, &target);
+        assert!(d - slack + 1e-9 >= clearance, "{d} - {slack} < {clearance}");
+        assert!(
+            d + slack <= BUILD_REACH + 1e-9,
+            "{d} + {slack} > {BUILD_REACH}"
+        );
+        // And on bot 1's side of the machine, south-west of it.
+        assert!(
+            goal.x() < target.x() && goal.y() < target.y(),
+            "aimed at {goal}"
+        );
+    }
+
+    /// With the same world and no other bot near the ring, the aim is the
+    /// annulus's own, byte for byte -- bystanders change nothing on open
+    /// ground. And the walker's *own* position is never a bystander: bot 1
+    /// standing exactly on the annulus aim is still aimed there.
+    #[test]
+    fn a_ring_with_no_other_bot_on_it_is_aimed_as_before() {
+        let target = Position::new(36.5, -5.5);
+        let here = Position::new(29.26171875, -15.29296875);
+        let rect = {
+            let world = world_of_run_1788612263(&[]);
+            blocking_box_at(&world, &target).expect("the assembler has a box")
+        };
+        let clearance =
+            (rect.width() / 2.).hypot(rect.height() / 2.) + 0.19921875f64.hypot(0.19921875);
+        let (naive, naive_slack) = approach_annulus(&target, clearance, BUILD_REACH, Some(&here));
+
+        // The other bots far away, the walker where it was.
+        let far = [
+            (1, here.clone()),
+            (2, Position::new(0., 0.)),
+            (4, Position::new(-30., 20.)),
+        ];
+        let world = world_of_run_1788612263(&far);
+        assert_eq!(
+            approach_standing(&world, &target, 0.0, BUILD_REACH, Some(&here), Some(1)),
+            (naive.clone(), naive_slack)
+        );
+
+        // The walker itself already standing on the aim.
+        let world = world_of_run_1788612263(&[(1, naive.clone())]);
+        assert_eq!(
+            approach_standing(&world, &target, 0.0, BUILD_REACH, Some(&naive), Some(1)),
+            approach_annulus(&target, clearance, BUILD_REACH, Some(&naive))
+        );
+        // But the same position under another id is in the way.
+        let world = world_of_run_1788612263(&[(1, here.clone()), (3, naive.clone())]);
+        let (moved, _) = approach_standing(&world, &target, 0.0, BUILD_REACH, Some(&here), Some(1));
+        assert_ne!(moved, naive);
+    }
+
+    /// A ring with a bot on every bearing is still aimed -- at the graph-clear
+    /// candidate farthest from any bot, which with every candidate equally
+    /// covered is the annulus's own aim -- rather than refused. A bot is not
+    /// a building: it may be about to move, and the walk's own stall
+    /// handling is the party that knows whether it did.
+    #[test]
+    fn a_ring_crowded_with_bots_on_every_bearing_is_aimed_at_the_clearest() {
+        let target = Position::new(36.5, -5.5);
+        let here = Position::new(29.26171875, -15.29296875);
+        let rect = {
+            let world = world_of_run_1788612263(&[]);
+            blocking_box_at(&world, &target).expect("the assembler has a box")
+        };
+        let clearance =
+            (rect.width() / 2.).hypot(rect.height() / 2.) + 0.19921875f64.hypot(0.19921875);
+        // An annulus with room for exactly one ring, so the sweep cannot
+        // step outward past the crowd.
+        let radius = clearance + 2.0 * PATH_ENDPOINT_SLACK;
+        let (naive, slack) = approach_annulus(&target, clearance, radius, Some(&here));
+        let ring = clearance + slack;
+        let mut crowd: Vec<(PlayerId, Position)> = vec![(1, here.clone())];
+        for k in 0..APPROACH_BEARINGS {
+            let a = std::f64::consts::TAU * k as f64 / APPROACH_BEARINGS as f64;
+            let towards = approach_direction(&target, Some(&here));
+            let direction = Position::new(
+                towards.x() * a.cos() - towards.y() * a.sin(),
+                towards.x() * a.sin() + towards.y() * a.cos(),
+            );
+            crowd.push((10 + k as PlayerId, aim_along(&target, &direction, ring)));
+        }
+        let world = world_of_run_1788612263(&crowd);
+        let bystanders = bystander_boxes(&world, Some(1));
+        assert_eq!(bystanders.len(), APPROACH_BEARINGS);
+        let (goal, got_slack) =
+            approach_standing(&world, &target, 0.0, radius, Some(&here), Some(1));
+        assert_eq!(got_slack, slack);
+        assert_eq!(bystander_clearance(&world, &goal, &bystanders), 0.0);
+        assert_eq!(
+            goal, naive,
+            "every candidate equally covered: the nearest bearing wins"
+        );
+    }
+
     /// Ore has no box and a disc has no inner bound, so nothing here has a
     /// reason to move: the request goes out exactly as `approach_annulus`
     /// always made it.
@@ -8929,7 +9265,7 @@ mod mining_reach_tests {
         let ore = Position::new(-31., -31.);
         let here = Position::new(-28.6640625, -26.8046875);
         assert_eq!(
-            approach_standing(&world, &ore, 0.0, BUILD_REACH, Some(&here)),
+            approach_standing(&world, &ore, 0.0, BUILD_REACH, Some(&here), None),
             approach_annulus(&ore, 0.0, BUILD_REACH, Some(&here))
         );
     }
@@ -8953,7 +9289,7 @@ mod mining_reach_tests {
         let world = world_with(&all);
         let here = Position::new(10., 0.);
         let clearance = stone_furnace_clearance();
-        let (goal, slack) = approach_standing(&world, &target, clearance, 3.0, Some(&here));
+        let (goal, slack) = approach_standing(&world, &target, clearance, 3.0, Some(&here), None);
         assert_eq!(
             (goal, slack),
             approach_annulus(&target, clearance, 3.0, Some(&here))
@@ -9057,7 +9393,7 @@ mod mining_reach_tests {
             Position::new(10., -5.),
             Position::new(0., 0.),
         ] {
-            let (goal, slack) = mining_approach(&world, &here, &rock, REACH);
+            let (goal, slack) = mining_approach(&world, &here, &rock, REACH, None);
             let d = calculate_distance(&goal, &rock);
             // `1e-9` on both bounds: far below the game's 1/256 position
             // quantum, far above f64 rounding of `d - slack` at this scale.
@@ -9075,7 +9411,7 @@ mod mining_reach_tests {
             assert!(distance_to_rect(&goal, &rect) + slack <= REACH + 1e-9);
         }
         let ore = Position::new(40.5, 40.5);
-        let (goal, slack) = mining_approach(&world, &Position::new(50., 50.), &ore, REACH);
+        let (goal, slack) = mining_approach(&world, &Position::new(50., 50.), &ore, REACH, None);
         assert_eq!(goal, ore, "ore is stood on, as it always was");
         assert_eq!(slack, approach_radius(REACH));
     }

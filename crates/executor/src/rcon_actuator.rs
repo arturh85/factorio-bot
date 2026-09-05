@@ -334,8 +334,14 @@ impl Actuator for RconActuator {
         // every collision box the entity graph has seen -- a rock beside the
         // one being chopped, the furnace an insert is aimed at -- because a
         // goal inside a box is the one request the pathfinder answers with a
-        // route nobody can walk, or with no route at all.
-        let (goal, slack) = approach_standing(&self.world, &to, min_radius, radius, here.as_ref());
+        // route nobody can walk, or with no route at all. So are the other
+        // bots: the graph holds no characters, and `world.players` -- the
+        // same map `here` was just read from, fed by the mod's position
+        // writeouts, no round trip -- is where a bot parked on the ring is
+        // known. `p` is the walker, so its own position is not held against
+        // it.
+        let (goal, slack) =
+            approach_standing(&self.world, &to, min_radius, radius, here.as_ref(), Some(p));
         self.rcon
             .move_player_timed(&self.world, p, &goal, Some(slack))
             .await

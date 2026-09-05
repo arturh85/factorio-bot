@@ -668,3 +668,14 @@ name with the act: capture-spawner, create-space-platform. Eleven stub-game
 tests. Live: `run-1788620523-34289`, 4 bots at 5x, automation done with
 electronics fired by the game and steam-power / automation-science-pack
 emulated from honest counts.
+
+### hl-09 — green, 4 bots, 5x, master with the pole edge and the clock pause (`run-1788620990-78758`)
+
+One plan of 571 / **64,100** (the live plan, with real inventories, is longer
+than the offline 59,476 and than hl-04's 57,752 — the pole edge lengthened
+the plan, not only the offline tie-break), 0 failed, 0 lost. Two
+`planning_timed` receipts, 17,595 ms and 15 ms, both `paused: true`.
+Green at **70,881 (19:41)** against hl-04's 68,051; executed/planned 1.106
+against 1.18. So the ratio improved as designed and the absolute got worse
+by 2,800 ticks, with my own workspace build and test suite running on the
+box for most of it (load 17). Not a clean point; run 15 at 1x is.

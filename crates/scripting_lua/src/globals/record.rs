@@ -750,6 +750,17 @@ impl LiveRecord {
     }
 }
 
+/// Records an event at a tick the caller observed itself -- still never
+/// earlier than something already in the log. See [`RunRecorder::not_before`].
+fn record_at(slot: &Slot, tick: u64, kind: EventKind) -> LuaResult<()> {
+    let mut guard = slot.lock();
+    let recorder = guard
+        .as_mut()
+        .ok_or_else(|| record_error("no recording is running -- call record.start() first"))?;
+    let tick = recorder.not_before(tick);
+    recorder.record(tick, kind).map_err(record_error)
+}
+
 /// Records a *live* event: stamped with the game's clock, never earlier than
 /// something already in the log. See [`RunRecorder::not_before`].
 fn record_live(
@@ -1349,6 +1360,12 @@ end
 -- is `plan`'s length and `makespan` the latest
 -- `planned_start + planned_duration` across every entry (0 for an empty plan).
 --
+-- `plan.tick`, when the table carries one, is the tick the event is stamped
+-- with: the tick `goal.plan` handed the plan back at (`PlanValue.tick`).
+-- Without it the event takes the last RCON reply's tick, which on a headless
+-- run is the run's start -- the plan then reads as made before the seconds of
+-- planning that went into it.
+--
 -- `bots` is the **roster the plan was expanded against** -- every bot the
 -- planner was allowed to give work to -- and it is the third argument because
 -- nothing else knows it. Pass `plan.bots`.
@@ -1397,17 +1414,25 @@ end
                         steps.push(planned);
                     }
                     let step_count = u32::try_from(steps.len()).unwrap_or(u32::MAX);
-                    record_live(
-                        &slot,
-                        &rcon,
-                        EventKind::PlanCreated {
-                            milestone_index: index,
-                            steps: step_count,
-                            makespan,
-                            bots: roster_from_lua(bots)?,
-                            plan: steps,
-                        },
-                    )
+                    // `plan.tick` is the tick `goal.plan` handed the plan
+                    // back at (`PlanValue.tick`, carried onto the shaped
+                    // table by `supervisor.lua`). Without it the event was
+                    // stamped with the last RCON reply's tick, which on a
+                    // headless run is the run's *start*: `plan_created`
+                    // read 415 while the game stood at 2,252, and the
+                    // planning time it hid was the whole speed tax.
+                    let made_at: Option<u64> = plan.get("tick")?;
+                    let kind = EventKind::PlanCreated {
+                        milestone_index: index,
+                        steps: step_count,
+                        makespan,
+                        bots: roster_from_lua(bots)?,
+                        plan: steps,
+                    };
+                    match made_at {
+                        Some(tick) => record_at(&slot, tick, kind),
+                        None => record_live(&slot, &rcon, kind),
+                    }
                 },
             )?,
         )?;
@@ -2540,6 +2565,57 @@ mod tests {
     }
 
     // ------------------------------------------------------------- plan_created
+
+    /// **`plan.tick` is the event's tick.** Without it the event takes the
+    /// last RCON reply's tick, which on a headless run is the run's start --
+    /// `plan_created` read 415 while the game stood at 2,252, and the
+    /// planning time that hid was the whole speed tax. The stub RCON here
+    /// has never answered, so the only way this event can read 4,180 is
+    /// through the field.
+    #[test]
+    fn plan_created_is_stamped_with_the_tick_the_plan_was_made_at() {
+        let (lua, _tmp, run_dir) = recording_lua_for(vec![1, 2]);
+        lua.load(
+            r#"
+            local plan = {
+                { id = 1, bot = 1, action = "mine 10 iron-ore", deps = {},
+                  planned_start = 0, planned_duration = 300 },
+            }
+            plan.tick = 4180
+            record.plan_created(1, plan, { 1, 2 })
+            "#,
+        )
+        .exec()
+        .expect("plan_created runs");
+        assert_eq!(read_event_ticks(&run_dir), vec![4180]);
+        match &read_events(&run_dir)[0] {
+            EventKind::PlanCreated { steps, .. } => assert_eq!(*steps, 1),
+            other => panic!("expected plan_created, got {other:?}"),
+        }
+    }
+
+    /// Without the field the event falls back to the last observed tick, as
+    /// it always did -- and never to a tick earlier than the log already has.
+    #[test]
+    fn plan_created_without_a_tick_is_stamped_live() {
+        let (lua, _tmp, run_dir) = recording_lua_for(vec![1, 2]);
+        lua.load(
+            r#"
+            record.plan_created(1, {
+                { id = 1, bot = 1, action = "mine 10 iron-ore", deps = {},
+                  planned_start = 0, planned_duration = 300 },
+            }, { 1, 2 })
+            "#,
+        )
+        .exec()
+        .expect("plan_created runs");
+        let ticks = read_event_ticks(&run_dir);
+        assert_eq!(ticks.len(), 1);
+        assert!(
+            ticks[0] < 4180,
+            "no plan.tick, so not the planning clock's stamp: {ticks:?}"
+        );
+    }
 
     /// `bots` is the roster the plan was made for, not the bots it used.
     ///

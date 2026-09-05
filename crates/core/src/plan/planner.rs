@@ -127,6 +127,28 @@ pub const BUFFER_ENTITIES: [&str; 2] = ["stone-furnace", "wooden-chest"];
 /// the drill's was the one slot nobody asked about.
 pub const FUELLED_ENTITIES: [&str; 2] = ["burner-mining-drill", "stone-furnace"];
 
+/// Whether the server behind [`Planner::rcon`] is this process's to command.
+///
+/// A server this process **started** (`factorio-bot lua <script>`, `start`,
+/// the REST API's execute path) is nobody else's: stopping its clock while
+/// the planner thinks costs no one anything. A server this process merely
+/// **attached to** (`--connect`, `--server <host>`) may be someone's live
+/// multiplayer game -- the companion- and enemy-bot use cases -- and
+/// `game.tick_paused = true` there freezes every human player in it. So
+/// the pause is gated on this, and an attached run records its planning
+/// with the clock left running and says so.
+///
+/// `Owned` is the default of [`Planner::new`] because every constructor
+/// site but the two attaching ones starts its own server, and the attaching
+/// ones are the CLI's `--connect` and `--server` branches, which name it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServerOwnership {
+    /// This process started the server; it may stop the clock.
+    Owned,
+    /// This process attached to a server someone else runs; it must not.
+    Attached,
+}
+
 pub struct Planner {
     pub rcon: Option<Arc<FactorioRcon>>,
     pub real_world: Arc<FactorioWorld>,
@@ -134,6 +156,8 @@ pub struct Planner {
     /// type's documentation for why this is a second name and not a second
     /// world.
     pub plan_world: Arc<FactorioWorld>,
+    /// See [`ServerOwnership`].
+    pub server: ServerOwnership,
 }
 
 impl Planner {
@@ -142,6 +166,15 @@ impl Planner {
             rcon,
             plan_world: world.clone(),
             real_world: world,
+            server: ServerOwnership::Owned,
+        }
+    }
+
+    /// [`Planner::new`] for a server this process did not start.
+    pub fn attached(world: Arc<FactorioWorld>, rcon: Option<Arc<FactorioRcon>>) -> Planner {
+        Planner {
+            server: ServerOwnership::Attached,
+            ..Self::new(world, rcon)
         }
     }
 

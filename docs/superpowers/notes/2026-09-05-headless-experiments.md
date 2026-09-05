@@ -515,3 +515,135 @@ itself now being the critical path at 49,303 against a planned 45,840,
 because its `craft 1 copper-cable` waited 1,055 ticks on a furnace for
 the plate. The planning gap is unchanged at 8,042 ticks (28 s at 5x).
 Per-walk overrun is again the 5x tax: median 53.5, p90 146.
+### lagwait — RCA: the speed tax is planning time, not the lag wait
+
+**Claim under test (hl-06):** the +4% at 5x / +9% at 10x on the same
+automation plan "lives inside the long waits — the tick-polled lag wait
+sleeps a wall-clock estimate between readings, and at speed each sleep is
+worth more ticks." **Refuted by the records.** Worktree `lagwait`, branch
+`lag-wait-at-speed`; analysis script kept as `scratch/waits.py` there.
+
+**Where the ticks went.** `splits.json`'s `elapsed_ticks` runs from
+`milestone_started` to `milestone_satisfied`. Split at the first dispatch:
+
+| speed | run | milestone span | start → first dispatch | first dispatch → last settle | plan |
+|---|---|---|---|---|---|
+| 1x clients | run-1788582657-14978 | 22,271 | **334** (3116→3450) | 21,937 | 21,985 |
+| 5x headless | run-1788614064-08543 | 22,724 | **942** (415→1357) | 21,782 | 21,765 |
+| 10x headless | run-1788614294-64261 | 23,715 | **1,837** (415→2252) | 21,878 | 21,765 |
+| 1x clients, green | run-1788612263-27812 | 62,408 | **1,983** (3610→5593) | 60,425 | 57,752 |
+| 5x headless, green | run-1788611922-87269 | 68,051 | **6,438** (415→6853) | 61,613 | 57,752 |
+
+The execution span is flat across speeds (21,937 / 21,782 / 21,878 — the
+10x run executes the plan in *fewer* ticks than 1x). Everything that grows
+is **before the first dispatch**: 942 ticks at 5x and 1,837 at 10x are the
+same ~3.1 s of wall clock (`942/300 = 3.14 s`, `1837/600 = 3.06 s`), which
+is the planner expanding and scheduling automation; green's 6,438 at 5x is
+21.5 s, its planning time. The game does not wait for the planner, so a run
+at `game.speed = s` is charged `60·s` ticks per second of thinking. At 1x
+the same charge exists (334 / 1,983 ticks) and is small enough to have read
+as noise. Of green's +5,643 ticks at 5x, 4,455 are planning; the remaining
+~1,200 are inside execution (walk stalls between bots, `place` settling —
+not this note's subject).
+
+Note the `plan_created` tick in a headless record is **stale**: it is
+`FactorioRcon::last_tick`, the stamp on the last RCON reply, and nothing
+between `record.start` and the first dispatch refreshes it, so it reads
+415 while the game is actually at 1,357 (5x) or 2,252 (10x). The client
+run's 3,435 was fresh only because client polling kept the stamp moving.
+
+**The lag wait itself is tick-exact at every speed.** A furnace `take n`
+is linked to its `insert` with a lag of `192 · (n + 1)` ticks (one cycle
+of headroom; `crates/planner/src/method/produce.rs`), and the executor
+serves it in `wait_out_lag` (`crates/executor/src/run.rs`) by reading
+`game.tick`, sleeping `owed / (60 · speed)` seconds, re-reading, and
+stopping when `deadline - now == 0`. Measured as settle(insert) →
+dispatch(take) on the same bot:
+
+| speed | lag edge | modelled | waited | overshoot |
+|---|---|---|---|---|
+| 1x | `insert 5 copper-ore` → `take 5 copper-plate` (bot 2, id 40) | 1,152 | 1,155 | +3 |
+| 5x | `insert 4 copper-ore at [22,-51]` → `take 4 copper-plate` (bot 3, id 152) | 960 | 962 | +2 |
+| 10x | same edge, same bot | 960 | 965 | +5 |
+| 5x / 10x | `take 4 iron-ore from the wooden-chest` → `take 4 iron-plate` (bot 1, id 67) | 960 | 957 / 957 | −3 (the insert was earlier than the chest take) |
+
+The sleep is sized *at the speed* (`ticks_to_wall_clock(ticks, speed)`),
+so a 10x sleep is ten times shorter in seconds and worth the same ticks;
+the overshoot is one RCON round trip (2–5 ticks) regardless of speed.
+`Actuator::game_speed` reads the real `game.speed` over RCON
+(`rcon_actuator.rs`), and `scale_deadline` in `rcon.rs` only bounds the
+reply wait. The mod polls character bots **every tick**
+(`poll_character_bots` from `on_tick`, `control.lua`), so a craft or
+mining completion is noticed on the tick it happens. The per-action
+`reply` wait is the one thing that does scale — ~3 ticks per round trip
+at 10x versus ~0.3 at 1x, visible as `place` growing 545 → 1,071 ticks
+over 22 placements and mine/walk gaps +400/+540 — but it is offset by
+slack elsewhere and the execution span does not move.
+
+**Delivered tick rate**, from `batch_progress` (tick vs `elapsed_ms`):
+1x 60/60, 5x 253 of 300 (84%, beside another run), 10x **529 of 600
+(88%)**, green 5x 299/300. hl-06's "roughly 360 of 600" was a
+wall-from-launch estimate including startup, not the executing rate.
+
+**Fix (general, no speed in it):** `goal.plan` stops the game clock while
+it thinks. `mods/BotBridge/control.lua` gains `set_tick_paused`
+(`game.tick_paused`, answering with the tick), `FactorioRcon::set_tick_paused`
+carries it, and `goal.plan` (`crates/scripting_lua/src/globals/goal/plan.rs`,
+`PlanningClock`) pauses after the buffer refresh — which must run
+unpaused: it re-probes benched bots with path requests the game answers on
+a later tick — and resumes on every exit path, refusal included. RCON is
+served while paused, so the placement pre-check still gets its answers. A
+pause that fails is narrated and the plan proceeds as before. The receipt
+is a new `planning_timed` event (`planning_ms`, `paused`, `tick_before`,
+`tick_after`), and `just analyse` prints it beside a new
+`delivered tick rate: N tps of M nominal (P%)` line that says `STARVED`
+below 80%. Four `goal.plan` tests pin pause→resume ordering, the
+error-path resume, the failed-pause fallback and refresh-before-pause.
+
+This changes what a run's `elapsed_ticks` means — planning is no longer
+charged, at 1x either — so a number from before this commit carries up to
+~330 (automation) / ~2,000 (green) ticks of planning at 1x that a number
+after it does not. `planning_timed` on the new records says exactly how
+much.
+
+**Validation — automation, 4 character bots, seed 31337, 10x, headless-g
+(`run-1788619571-63940`, commit `abfcd2c3`, dirty tree: no).**
+
+| | before (`run-1788614294-64261`) | after (`run-1788619571-63940`) |
+|---|---|---|
+| plan | 176 actions / 21,765 | 176 actions / 21,681 |
+| milestone `elapsed_ticks` | **23,715** (1.09×) | **21,992** (1.014×) |
+| start → first dispatch | 1,837 | 154 (429 → 583: server settle, roster, `RconActuator::new`) |
+| first dispatch → last settle | 21,878 | 21,843 |
+| `planning_timed` | — | 3,013 ms, `paused: true`, tick 480 → 480 |
+| delivered tick rate | 529 of 600 (88%) | 528 of 600 (88%) |
+| failed / lost | 0 / 0 | 0 / 0 |
+
+−1,723 ticks, and the executed/planned ratio at 10x is now the 1x
+client run's 1.01. The planner took its usual 3.0 s and the game did not
+move: RCON served the placement pre-check while `game.tick_paused` held.
+
+**And at 5x** (`run-1788619691-37853`, same box, same commit): milestone
+**21,781** ticks against 22,724 before (−943; plan 21,681, ratio 1.005),
+start → first dispatch 36 ticks, execution span 21,722, `planning_timed`
+3,131 ms paused at tick 431, delivered 262 of 300 tps (87%), 0 failed.
+Three speeds now read 1.01 / 1.005 / 1.014 against their plans.
+
+**Two follow-ups from review.** (1) The pause is gated on the run
+**owning** the server: `Planner::server` is `ServerOwnership::Owned` from
+every constructor but the CLI's `--connect` and `--server <host>` branches,
+which use `Planner::attached`. An attached run — possibly someone's live
+multiplayer game, where `game.tick_paused` would freeze every human in it
+— plans with `ClockPolicy::LeaveRunning`, reads the tick either side of
+the plan instead, and its `planning_timed` carries `paused: false, reason:
+"attached server, clock left running"` (new `reason` field, `null` when
+paused). No explicit `--pause-while-planning` flag: ownership is the whole
+decision and the CLI already knows it, so a flag would only let an attached
+run opt into freezing someone else's game. (2) `plan_created.tick` was
+stale on headless runs (`FactorioRcon::last_tick`, unrefreshed since run
+start). `goal.plan` now returns the tick the clock answered on the way out
+as `plan.tick`; `supervisor.lua` carries it onto the shaped table and
+`record.plan_created` stamps the event with it, falling back to the live
+tick only when the plan has none. Tests: attached clock is read twice and
+never stopped; `plan.tick` is the clock's answer / `nil` with no clock;
+`record.plan_created` takes `plan.tick`.

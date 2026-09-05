@@ -1330,6 +1330,58 @@
             "type": "object"
           },
           {
+            "description": "What one `goal.plan` cost: wall time, and what the game clock did\nwhile the planner thought.\n\nThe planner is wall-clock work -- ~3 s for automation, ~20 s for green\n-- and a game left running through it is charged `60 * speed` ticks\nper second of thinking: 334 ticks for automation at 1x, 1,837 at 10x,\n6,438 for green at 5x (2026-09-05). That was the whole of the\n\"faster game, longer run\" tax. `goal.plan` now pauses the clock around\nexpansion, and this event is the receipt: `tick_after - tick_before`\nis what the run was charged, which is zero when `paused` held.\n\nWritten by the plan itself rather than folded into `plan_created`,\nwhich the driver script records later with the plan's steps: a plan\nthat raised has no `plan_created` and still cost time.",
+            "properties": {
+              "kind": {
+                "enum": [
+                  "planning_timed"
+                ],
+                "type": "string"
+              },
+              "paused": {
+                "description": "Whether the game clock was stopped for the duration. `false` on a\nbuild without RCON, or when the pause request failed -- in which\ncase `tick_after - tick_before` says what it cost.",
+                "type": "boolean"
+              },
+              "planning_ms": {
+                "description": "Wall clock spent inside expansion and scheduling, including the\nplacement pre-check round trips.",
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "reason": {
+                "description": "Why the clock was left running, when it was: `\"attached server,\nclock left running\"` for a `--connect` / `--server` run, whose\ngame may be somebody's live multiplayer session, or `\"pause\nrequest failed\"`. `None` whenever `paused` is true, and on a\nbuild with no game to ask.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "tick_after": {
+                "description": "`game.tick` when planning ended; `None` when nobody could ask.",
+                "format": "int64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "tick_before": {
+                "description": "`game.tick` when planning began; `None` when nobody could ask.",
+                "format": "int64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "planning_ms",
+              "paused",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
             "properties": {
               "elapsed_ticks": {
                 "format": "int64",

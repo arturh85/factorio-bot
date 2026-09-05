@@ -56,6 +56,7 @@ pub(crate) fn binding_tables(
         planner.real_world.clone(),
         None,
         vec![],
+        planner.server,
     )?;
     let record_table = create_lua_record(
         lua,
@@ -550,6 +551,7 @@ mod tests {
             planner.real_world.clone(),
             None,
             vec![],
+            planner.server,
         )
         .expect("goal table");
         let mut names = std::collections::BTreeSet::new();

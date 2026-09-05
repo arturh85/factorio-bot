@@ -310,7 +310,9 @@ async fn run(matches: &ArgMatches, _context: &mut Context) -> Result<()> {
       world.recipes.len(),
       world.players.len()
     );
-    let mut planner = Planner::new(world, Some(rcon));
+    // Attached: this is someone else's server, and `goal.plan` must not
+    // stop its clock (see `ServerOwnership`).
+    let mut planner = Planner::attached(world, Some(rcon));
 
     let (stdout, stderr) =
       run_script_file(&mut planner, &app_settings, script_path, bots, None).await?;
@@ -318,7 +320,9 @@ async fn run(matches: &ArgMatches, _context: &mut Context) -> Result<()> {
 
     info!("Script completed");
   } else {
-    // Full mode: start Factorio server + clients
+    // Full mode: start Factorio server + clients -- unless `--server <host>`
+    // named one, in which case nothing is started and the run is attached.
+    let attached_server = server_host.is_some();
     let params = start_params(
       matches,
       &app_settings,
@@ -345,7 +349,11 @@ async fn run(matches: &ArgMatches, _context: &mut Context) -> Result<()> {
     let script_result = match instance_state.world.as_ref() {
       Some(world) => {
         info!("Factorio started, running script...");
-        let mut planner = Planner::new(world.clone(), Some(instance_state.rcon.clone()));
+        let mut planner = if attached_server {
+          Planner::attached(world.clone(), Some(instance_state.rcon.clone()))
+        } else {
+          Planner::new(world.clone(), Some(instance_state.rcon.clone()))
+        };
         if clients == 0 && !headless {
           // The one mode entitled to bots the game does not have. `--clients 0`
           // starts no Factorio client at all, so the world has no players and

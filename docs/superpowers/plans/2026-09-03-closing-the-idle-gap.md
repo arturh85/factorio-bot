@@ -220,6 +220,55 @@ three bots one extra iron furnace (three actions) reorders bot 3's ready
 work and its `take 10 copper-ore from the wooden-chest` moves from 8,860 to
 13,473 with no furnace of its involved.
 
+## EXPLORATION: the map is far richer than the model, and walking may not reveal it
+
+Built as `Goal::Charted { around, radius }` → `method::scout::Scout` →
+`ActionKind::Survey` (branch `bots-that-chart`, `7388202a`, not merged):
+square Chebyshev rings walked nearest-first, no new mod verb.
+
+**What the model cannot see.** At t=0 on seed 31337 there are **400 chunks
+generated and zero charted**, and the model's 2,255 resource tiles come from
+`on_chunk_generated` — not from charting. Against the map within ±672:
+
+| | t=0 model | actually there |
+|---|---:|---:|
+| iron / copper / coal / stone | 940 / 462 / 466 / 387 | 3,658 / 2,712 / 1,887 / 1,920 |
+| **crude oil** | **0** | **43** |
+| **uranium / enemy structures** | **0 / 0** | **559 / 154** |
+
+**Nearest crude oil is 372.5 tiles away; the nearest nest is 244.6.** So oil
+lies *beyond* the nest-free radius, and "avoid nests early" and "reach oil"
+are in tension — reaching the first oil means routing past nests, not
+merely away from them. That is a fact the defence lane and the oil lane both
+have to plan around, and it was not knowable before tonight.
+
+**The load-bearing constant, measured rather than assumed:** a character on
+empty ground generates a **9×9 chunk block centred on it**, so reveal is
+±128 tiles and the lattice pitch is **256**, eight times coarser than the
+agent had assumed. On that pitch, ring 1 reaches past the oil in **1:37 of
+four-bot time**. Exploration is cheap; radar is not needed for the first oil.
+
+**And the honest negative result, which is the important part.** A live
+four-bot run walked a full ring to ±256 and **the census did not move by a
+single tile** — 466/462/940/387 before and after. Walking may not push the
+generation frontier at all; the 81-chunk block followed *placement or
+teleport* into virgin ground, not walking. `force.is_chunk_charted` is false
+everywhere, including under a character's own feet: a server-side character
+charts nothing, and the model learns by generation. **The planner primitive
+is proven; the step from plan to new knowledge is not.** The open question
+is one run watching `surface.get_chunks()` while a bot walks outward, to
+separate "walking generates nothing" from "the ring landed in already
+generated ground". The alternatives are a mod-side `request_to_generate_chunks`
+or radar.
+
+Two bugs the build found in itself: skipping a cell on its **centre tile**
+skipped the one cell whose reveal contains the oil, so the spiral could
+never have found what it exists to find; and `holds` and `Scout` disagreed,
+so `charted:0:0:256` read as already satisfied with all eight ring-1 cells
+unvisited and planned nothing, silently. Threat avoidance — a 50-tile
+stand-off, refusing rather than returning an empty plan — is the **first
+non-test caller of the threat index**, which had none.
+
 ## ✖ RUN 18 VOID — my own load rule, broken by me
 
 2026-09-06 00:13. Launched a four-client 1x green run at load **14.8**, an

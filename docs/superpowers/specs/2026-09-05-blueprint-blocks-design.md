@@ -84,6 +84,50 @@ reason two of them cannot trap each other — this repo has already lost a run t
 a bot walled in by its own cell placements, and to a placement refused because
 a character stood in the footprint.
 
+## What the repo's own blueprints turn out to contain
+
+Four real strings already live in `scripts/rcontest.lua`, and decoding them
+settles several design questions that were guesses:
+
+| blueprint | entities | contents |
+|---|---|---|
+| `FurnaceLine` | **179** | 87 transport-belt, 48 inserter, 24 stone-furnace, 13 pole, 3 lamp, **2 splitter**, **2 underground-belt** |
+| `MinerLine` | 37 | 13 electric-mining-drill, 21 transport-belt, 3 pole |
+| `StarterSteamEngineBoiler` | 6 | 2 steam-engine, 2 pole, boiler, pipe |
+
+`FurnaceLine` is the smelter array this project wants, it already exists, and
+it is 179 entities — which is exactly the scale at which four bots beat one
+player, and far past what the planner places today.
+
+**Splitters need no router.** A splitter inside a blueprint is just another
+entity to place. The hard splitter problem is *deciding* where one goes, and a
+designed block has already decided. This is the strongest argument for doing
+blocks before more routing.
+
+### Two traps found by decoding, both of which would place perfectly and do nothing
+
+**1. Underground belts carry their half in the blueprint, and our placement
+path cannot say it.** `FurnaceLine` contains
+`{"name":"underground-belt","direction":2,"type":"input"}` and a matching
+`"output"`. `FactorioEntity` has no field for that and
+`rcon_place_entity(player_id, item_name, position, direction)` has no argument
+for it, which is the same gap that made the belt router disable undergrounds.
+**So it is a prerequisite here, not a later item**: a block containing an
+underground pair cannot be built honestly until the placement path carries
+`belt_to_ground_type`. Either that lands first, or v1 refuses blueprints
+containing undergrounds by name — and `FurnaceLine` is such a blueprint.
+
+**2. These are Factorio 1.x blueprints, and the direction scale changed.**
+Their `version` field is `281474976710656`, i.e. 1.0.0.0, and every direction
+in them is one of `0, 2, 4, 6` — the old **eight**-point scale where 2 is east.
+Factorio 2.0 uses **sixteen** points, where east is 4 and 2 is a diagonal.
+The mod never had to care because `import_stack` migrates on import; **decoding
+in Rust bypasses that migration entirely.** Placing a 1.x blueprint's raw
+directions into 2.1 turns every belt and inserter a half-turn, which is a
+factory that places 100% correctly and moves nothing — this project's signature
+failure, arriving through a new door. The decoder must convert by version, and
+a test must pin east to east.
+
 ## Refusals, all before anything is placed
 
 - an entity name the prototypes do not know;

@@ -79,6 +79,28 @@ impl std::fmt::Display for Holder {
     }
 }
 
+/// Where a block goes.
+///
+/// `Goal::Built` used to carry a bare `anchor: Position`, which made siting
+/// the caller's problem: a 37-entity `MinerLine` was attempted at three
+/// anchors and never got past planning, because one obstructed tile anywhere
+/// along its 21-tile belt run makes the whole block infeasible. On real
+/// terrain that is the normal case.
+///
+/// Derives `PartialEq` but not `Eq`/`Ord`, matching [`Goal`] itself: both
+/// carry a [`Position`], whose `f64` fields cannot implement either.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum Site {
+    /// This exact anchor, or refuse. The pre-siting behaviour, kept because a
+    /// caller that has already chosen must still be able to say so — and
+    /// because every existing test and script says it.
+    At(Position),
+    /// Search outward from here.
+    Near(Position),
+    /// Search outward from the roster's centroid.
+    Anywhere,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Goal {
     Have {
@@ -168,8 +190,8 @@ pub enum Goal {
     Built {
         /// The blueprint string, decoded on each expansion.
         blueprint: String,
-        /// Where the blueprint's own origin lands in the world.
-        anchor: Position,
+        /// Where the block goes: a fixed anchor, a hint, or nothing.
+        site: Site,
     },
     All(Vec<Goal>),
 }
@@ -195,8 +217,13 @@ impl std::fmt::Display for Goal {
                 Some(tech) => write!(f, "extract from {} to unlock {}", entity, tech),
                 None => write!(f, "extract from {}", entity),
             },
-            Goal::Built { blueprint, anchor } => {
-                write!(f, "build {}-byte block at {}", blueprint.len(), anchor)
+            Goal::Built { blueprint, site } => {
+                let where_ = match site {
+                    Site::At(p) => format!("at {p}"),
+                    Site::Near(p) => format!("near {p}"),
+                    Site::Anywhere => "anywhere".to_string(),
+                };
+                write!(f, "build {}-byte block {}", blueprint.len(), where_)
             }
             Goal::All(goals) => write!(f, "all of {} goals", goals.len()),
         }
@@ -290,5 +317,26 @@ mod tests {
             "a share sized for bot 2"
         );
         assert_eq!(Holder::Anyone.to_string(), "anyone");
+    }
+
+    #[test]
+    fn a_built_goal_displays_its_siting_mode() {
+        let at = Goal::Built {
+            blueprint: "0eJyrVkrKz1cCoxQlK6VEJR2lYqVYHQVjIz0DPQMDPUM9IwMlHaVSJStDPQNTMDbUM9AzMlXSUcpMUbIy0jMwBWMDsFCsDgBnexPQ".to_string(),
+            site: Site::At(Position::new(3.0, 4.0)),
+        };
+        assert!(format!("{at}").contains("at [3, 4]"));
+
+        let near = Goal::Built {
+            blueprint: "x".to_string(),
+            site: Site::Near(Position::new(-8.0, 2.0)),
+        };
+        assert!(format!("{near}").contains("near [-8, 2]"));
+
+        let anywhere = Goal::Built {
+            blueprint: "x".to_string(),
+            site: Site::Anywhere,
+        };
+        assert!(format!("{anywhere}").contains("anywhere"));
     }
 }

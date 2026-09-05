@@ -18,7 +18,7 @@ mod test_world;
 
 pub use action::{Action, ActionKind, Actor, Condition, Effect, InventorySlot};
 pub use error::PlannerError;
-pub use goal::{Goal, Holder};
+pub use goal::{Goal, Holder, Site};
 pub use ids::{ActionId, ActionIdGen, BotId, ChainId, ChainIdGen, ItemId, Ticks};
 pub use method::have::default_registry;
 pub use method::have::holds;

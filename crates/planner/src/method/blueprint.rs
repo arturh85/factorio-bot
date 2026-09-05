@@ -2,7 +2,7 @@
 
 use crate::action::{Action, ActionKind, Actor, Condition, Effect};
 use crate::error::PlannerError;
-use crate::goal::{Goal, Holder};
+use crate::goal::{Goal, Holder, Site};
 use crate::method::have::PLACE_TICKS;
 use crate::method::{ExpansionCtx, Method, Step};
 use crate::state::PlanState;
@@ -250,8 +250,18 @@ impl Method for BuildBlock {
     }
 
     fn expand(&self, goal: &Goal, ctx: &mut ExpansionCtx) -> Result<Vec<Step>, PlannerError> {
-        let Goal::Built { blueprint, anchor } = goal else {
+        let Goal::Built { blueprint, site } = goal else {
             return Ok(Vec::new());
+        };
+        // Task 2 replaces this with resolution. Behaviour is unchanged for
+        // now: only an explicit anchor is honoured.
+        let anchor = match site {
+            Site::At(p) => p.clone(),
+            Site::Near(_) | Site::Anywhere => {
+                return Err(PlannerError::BlueprintRefused {
+                    reason: "siting is not implemented yet; pass an explicit anchor".to_string(),
+                });
+            }
         };
         let bp: Blueprint = decode(blueprint).map_err(|e| PlannerError::BlueprintRefused {
             reason: format!("{e:?}"),
@@ -498,7 +508,7 @@ mod tests {
         );
         let goal = Goal::Built {
             blueprint,
-            anchor: Position::new(0.0, 0.0),
+            site: Site::At(Position::new(0.0, 0.0)),
         };
 
         let steps = BuildBlock
@@ -595,7 +605,7 @@ mod tests {
         );
         let goal = Goal::Built {
             blueprint,
-            anchor: Position::new(0.0, 0.0),
+            site: Site::At(Position::new(0.0, 0.0)),
         };
 
         let steps = BuildBlock
@@ -777,7 +787,10 @@ mod tests {
         // And the goal it belongs to no longer plans as if the block were
         // finished. Before this fix `expand` returned Ok(vec![]) here -- the
         // exact silent freeze.
-        let goal = Goal::Built { blueprint, anchor };
+        let goal = Goal::Built {
+            blueprint,
+            site: Site::At(anchor),
+        };
         let err = BuildBlock
             .expand(&goal, &mut ctx)
             .expect_err("a wrong-facing entity is not silently accepted");
@@ -865,7 +878,10 @@ mod tests {
             ..Default::default()
         });
 
-        let goal = Goal::Built { blueprint, anchor };
+        let goal = Goal::Built {
+            blueprint,
+            site: Site::At(anchor),
+        };
         let err = BuildBlock
             .expand(&goal, &mut ctx)
             .expect_err("occupied ground is refused before anything is emitted");
@@ -913,7 +929,10 @@ mod tests {
             BotId(1),
         );
 
-        let goal = Goal::Built { blueprint, anchor };
+        let goal = Goal::Built {
+            blueprint,
+            site: Site::At(anchor),
+        };
         let err = BuildBlock
             .expand(&goal, &mut ctx)
             .expect_err("a bot standing on the footprint refuses the block");
@@ -952,7 +971,10 @@ mod tests {
             ctx.state.create_entity(entity);
         }
 
-        let goal = Goal::Built { blueprint, anchor };
+        let goal = Goal::Built {
+            blueprint,
+            site: Site::At(anchor),
+        };
         let steps = BuildBlock
             .expand(&goal, &mut ctx)
             .expect("a fully-standing block plans cleanly");
@@ -1033,7 +1055,7 @@ mod tests {
 
         let goal = Goal::Built {
             blueprint,
-            anchor: Position::new(30.0, 30.0),
+            site: Site::At(Position::new(30.0, 30.0)),
         };
 
         let net = expand(&[goal], &state, &registry_for(&bots), BotId(1))

@@ -24,6 +24,20 @@ tick it flipped. ``--rates-json`` and ``--rates-md`` (and
 ``tools/rates_table.py``) emit the same block for the plan record, so its
 tables are generated rather than typed.
 
+AND EVERY CURVE CARRIES AN ATTRIBUTION, because a rising curve is NOT evidence
+of a working factory. ``production.made`` counts what a *machine* produced,
+and a stone furnace a bot walked to and hand-loaded is a machine. A peer
+session's 179-entity furnace line was reported as smelting and had no
+generator at all: its 48 inserters and 87 belts had never moved an item, and
+every plate came from a bot carrying ore and coal in by hand. So each mark
+interval also reports what the roster was doing (busy %, and the count of
+feeding-verb dispatches), what the electric network generated and drew, which
+machines were actually working and whether they were electric or burner --
+and a verdict per item: ``roster-fed`` / ``factory`` / ``unclear``. The
+plateau detector says which kind a plateau is: input ran out, or the factory
+stopped. The honest test the green milestone already applies -- "5 packs reach
+the chest with every bot idle" -- is the standard this block generalises.
+
 ``--compare`` puts two runs side by side with deltas, under a comparability
 block that refuses (exit 3) when the two runs were not produced under the same
 conditions and flags every other way they might not be measuring the same
@@ -149,6 +163,52 @@ DEFAULT_RATE_ITEMS = (
 RATE_ITEM_THRESHOLD = 100
 # The trailing window for the second rate column, in game minutes.
 RATE_WINDOW_MINUTES = 2
+# WHO MADE IT. `production.made` counts what a *machine* produced, and a
+# furnace a bot walked to and hand-loaded is a machine, so a rising curve is
+# not evidence of a working factory. A peer session's 179-entity furnace line
+# was reported as smelting and had no generator at all: its 48 inserters and
+# 87 belts had never moved an item, and every plate came from a bot carrying
+# ore and coal in by hand. These verbs are the hand-feeding ones -- the acts
+# by which a bot, not a belt, puts input into a machine or takes output out.
+#
+# BUT: `insert`, `take`, `fuel`, `stock` and `charge` SETTLE IN THE TICK THEY
+# DISPATCH (see the module docstring), so their share of *ticks* is ~0 and a
+# duration-based "fraction of the interval spent feeding" understates them to
+# nothing. The count of feeding actions dispatched in the interval is the
+# signal that actually works; the tick fraction is reported beside it and is
+# essentially `mine` alone. Reading the tick column as "the roster barely fed
+# anything" is the error this comment exists to prevent.
+FEEDING_VERBS = ("insert", "stock", "charge", "fuel", "take", "mine")
+
+# A machine `status` (Factorio's `LuaEntity.status`) that means the machine is
+# waiting for INPUT -- something a bot or a belt must bring it. Distinguished
+# from the electrical ones because they answer different questions about a
+# plateau: input ran out, or the factory stopped.
+STARVED_STATUSES = (
+    "no_ingredients",
+    "no_fuel",
+    "item_ingredient_shortage",
+    "no_minable_resources",
+    "missing_science_packs",
+)
+ELECTRICAL_STATUSES = ("no_power", "low_power")
+
+# Machine types that put an ITEM into `production.made`. A lab consumes packs
+# and produces research, a boiler and a steam engine produce fluid and
+# electricity, a chest produces nothing -- so a working lab is not evidence
+# that the item curve was machine-made, and counting it as such is how "the
+# factory drew 120 kW" became a verdict about plates that stone furnaces
+# smelted from ore a bot carried in.
+PRODUCER_TYPES = (
+    "furnace",
+    "mining-drill",
+    "assembling-machine",
+    "chemical-plant",
+    "oil-refinery",
+    "centrifuge",
+    "rocket-silo",
+)
+
 # An item whose count has not grown for this long while the run continued has
 # plateaued. Three minutes is ten force beats: far past a furnace refill, and
 # short enough to catch a cell that died a few minutes before the run ended.
@@ -879,8 +939,16 @@ def analyse(
     samples = load_jsonl(os.path.join(run_dir, "samples.jsonl"))
     result["samples_present"] = samples.present
     result["samples_coverage"] = sample_coverage(samples.rows, lo, hi, samples.present)
+    activity = bot_activity(events, joined, result.get("roster"))
     result["rates"] = production_rates(
-        samples.rows, lo, hi, marks, rate_items, rate_threshold, present=samples.present
+        samples.rows,
+        lo,
+        hi,
+        marks,
+        rate_items,
+        rate_threshold,
+        present=samples.present,
+        activity=activity,
     )
     result["headline"] = combined_headline(result)
 
@@ -1683,6 +1751,351 @@ def mark_label(minute: float) -> str:
     return mmss(int(round(minute * TICKS_PER_MINUTE)))
 
 
+def bot_activity(
+    events: list[dict], joined: list[dict], roster: list | None = None
+) -> dict:
+    """Every bot's busy spans and dispatch ticks, tagged with the verb.
+
+    The spans are the same dispatch->settle intervals :func:`idle_gaps` uses,
+    with walks read off ``walk_settled``'s own ``bot`` field and NEVER joined
+    on the ``id`` ``walk_dispatched`` does not have. Zero-length spans are
+    kept: most feeding verbs settle in the tick they dispatch, so as intervals
+    they are points, and their whole contribution is to the dispatch count.
+
+    An ``action_settled`` with no matching dispatch has no start tick and
+    cannot become a span; those are counted in ``orphan_settles`` so the
+    denominator is not silently short.
+    """
+    spans: dict[Any, list[tuple[int, int, str]]] = collections.defaultdict(list)
+    dispatches: dict[Any, list[tuple[int, str]]] = collections.defaultdict(list)
+    orphans = 0
+    for j in joined:
+        if j.get("bot") is None:
+            continue
+        if "start" not in j:
+            orphans += 1
+            continue
+        spans[j["bot"]].append((j["start"], j["tick"], j.get("verb") or "?"))
+    for e in events:
+        kind, bot = e.get("kind"), e.get("bot")
+        if bot is None:
+            continue
+        if kind == "walk_settled":
+            spans[bot].append((e["tick"] - (e.get("elapsed_ticks") or 0), e["tick"], "walk"))
+        elif kind == "action_dispatched":
+            dispatches[bot].append((e["tick"], verb_of(e.get("action") or "")))
+    bots = sorted(
+        {b for b in list(roster or []) + list(spans) + list(dispatches) if b is not None}
+    )
+    return {"spans": dict(spans), "dispatches": dict(dispatches), "bots": bots, "orphan_settles": orphans}
+
+
+def _merged_ticks(spans, lo: int, hi: int) -> int:
+    """Union length of ``spans`` clipped to ``[lo, hi]``; points count 0."""
+    clipped = sorted(
+        (max(a, lo), min(b, hi)) for a, b in spans if max(a, lo) <= min(b, hi)
+    )
+    total = 0
+    cur_a = cur_b = None
+    for a, b in clipped:
+        if cur_b is not None and a <= cur_b:
+            cur_b = max(cur_b, b)
+        else:
+            if cur_b is not None:
+                total += cur_b - cur_a
+            cur_a, cur_b = a, b
+    if cur_b is not None:
+        total += cur_b - cur_a
+    return total
+
+
+def interval_activity(act: dict | None, lo: int, hi: int) -> dict | None:
+    """What the roster was doing over ``(lo, hi]``, in bot-ticks and actions.
+
+    ``busy_pct`` and ``feed_pct`` are of the whole roster's bot-ticks, so four
+    bots all mining for the whole interval is 100%. ``feed_actions`` is the
+    count of :data:`FEEDING_VERBS` dispatches that fall inside it -- the number
+    that actually detects hand-feeding, because five of those six verbs record
+    no duration at all.
+    """
+    if act is None or hi <= lo:
+        return None
+    bots = act["bots"]
+    if not bots:
+        return None
+    busy = feed = 0
+    for bot in bots:
+        spans = act["spans"].get(bot) or []
+        busy += _merged_ticks([(a, b) for a, b, _ in spans], lo, hi)
+        feed += _merged_ticks(
+            [(a, b) for a, b, v in spans if v in FEEDING_VERBS], lo, hi
+        )
+    verbs: collections.Counter = collections.Counter()
+    for bot in bots:
+        for tick, verb in act["dispatches"].get(bot) or []:
+            if lo < tick <= hi:
+                verbs[verb] += 1
+    capacity = len(bots) * (hi - lo)
+    feed_actions = sum(n for v, n in verbs.items() if v in FEEDING_VERBS)
+    return {
+        "bots": len(bots),
+        "span_ticks": hi - lo,
+        "busy_ticks": busy,
+        "busy_pct": 100.0 * busy / capacity,
+        "feed_ticks": feed,
+        "feed_pct": 100.0 * feed / capacity,
+        "actions": sum(verbs.values()),
+        "feed_actions": feed_actions,
+        "other_actions": sum(verbs.values()) - feed_actions,
+        "feed_verbs": dict(sorted(verbs.items(), key=lambda kv: -kv[1]) or {}),
+    }
+
+
+def interval_power(force: list[dict], lo: int, hi: int) -> dict:
+    """Generation and draw over ``(lo, hi]``, from the force samples in it.
+
+    ``any_generation`` is the flag the whole attribution turns on: if the force
+    generated nothing at any beat of the interval, nothing electric ran, so
+    whatever was produced came out of a burner machine -- and in these runs a
+    burner machine is one a bot walked to and loaded.
+    """
+    rows = [s for s in force if lo < s["tick"] <= hi]
+    at = None
+    for s in force:
+        if s["tick"] <= hi:
+            at = s
+        else:
+            break
+    if not rows and at is not None:
+        rows = [at]
+    def field(s, name):
+        return ((s.get("power") or {}).get(name)) or 0.0
+    out = {
+        "samples": len(rows),
+        "generated_kw": field(at, "generated_kw") if at else None,
+        "consumed_kw": field(at, "consumed_kw") if at else None,
+        "satisfaction": ((at.get("power") or {}).get("satisfaction")) if at else None,
+        "max_generated_kw": max((field(s, "generated_kw") for s in rows), default=None),
+        "max_consumed_kw": max((field(s, "consumed_kw") for s in rows), default=None),
+    }
+    out["any_generation"] = bool(out["max_generated_kw"])
+    out["any_consumption"] = bool(out["max_consumed_kw"])
+    return out
+
+
+def attribute_output(
+    delta: int | None, activity: dict | None, power: dict, machines: dict | None = None
+) -> dict:
+    """Who earned this interval's output: the roster, the factory, or unclear.
+
+    Three verdicts, and ``unclear`` is said freely -- a wrong confident label
+    is worse than an honest one:
+
+    ``roster-fed``  bots ran feeding actions and little or no electricity was
+                    drawn. The machines produced; the bots carried.
+    ``factory``     electricity was drawn and the roster fed nothing in this
+                    interval. Hedged even so: a bot that loaded a furnace in
+                    the *previous* interval is still being smelted here, which
+                    is why the previous interval's verdict is printed too.
+    ``unclear``     anything else, including the honest mixed case.
+    """
+    if not delta:
+        return {"verdict": "no output", "why": "nothing made in this interval"}
+    if activity is None:
+        return {"verdict": "unclear", "why": "no bot activity to attribute this to (no events joined)"}
+    feed = activity["feed_actions"]
+    busy = activity["busy_pct"]
+    if not power.get("any_generation"):
+        if feed:
+            return {
+                "verdict": "roster-fed",
+                "why": f"no generator: this output was hand-fed ({feed} feeding action(s), "
+                       f"roster {busy:.0f}% busy)",
+            }
+        return {
+            "verdict": "unclear",
+            "why": "no generator and no feeding action in this interval -- a burner machine "
+                   "loaded earlier, or a burner inserter, could have made this",
+        }
+    if not power.get("any_consumption"):
+        if feed:
+            return {
+                "verdict": "roster-fed",
+                "why": f"power was generated but nothing electric drew any of it; "
+                       f"{feed} feeding action(s) by the roster",
+            }
+        return {
+            "verdict": "unclear",
+            "why": "power was generated, nothing drew it, and no feeding action was dispatched",
+        }
+    kw = power["max_consumed_kw"]
+    # Power is drawn. That is still not evidence about ITEMS until the machines
+    # that made them are named: a lab drawing 120 kW says nothing about plates
+    # a hand-loaded stone furnace smelted.
+    if machines and machines.get("samples"):
+        elec, burner = machines["working_electric"], machines["working_burner"]
+        if elec == 0:
+            other = ", ".join(machines.get("powered_nonproducers") or {}) or "nothing that makes items"
+            names = ", ".join(machines.get("working_burner_names") or {}) or "none"
+            if feed:
+                return {
+                    "verdict": "roster-fed",
+                    "why": f"{kw:.0f} kW was drawn, but no ELECTRIC machine that makes items worked "
+                           f"in this interval -- the power went to {other}. The producing machines "
+                           f"were burner-fuelled ({names}), and the roster ran {feed} feeding "
+                           f"action(s) into them",
+                }
+            return {
+                "verdict": "unclear",
+                "why": f"{kw:.0f} kW drawn by {other}, no electric producer working, and no feeding "
+                       f"action dispatched -- this came out of burner machines ({names}) loaded "
+                       f"before the interval began",
+            }
+        if feed:
+            return {
+                "verdict": "unclear",
+                "why": f"{elec} working reading(s) of electric producers "
+                       f"({', '.join(machines.get('working_electric_names') or {}) or '?'}) and "
+                       f"{burner} of burner ones, while the roster ran {feed} feeding action(s) "
+                       f"-- this output could be either",
+            }
+        return {
+            "verdict": "factory",
+            "why": f"electric producers worked ({', '.join(machines.get('working_electric_names') or {}) or '?'}) "
+                   f"drawing {kw:.0f} kW, and the roster fed nothing in this interval "
+                   f"({busy:.0f}% busy on other work)",
+        }
+    if feed:
+        return {
+            "verdict": "unclear",
+            "why": f"electric machines drew {kw:.0f} kW while the roster "
+                   f"also ran {feed} feeding action(s) -- this output could be either "
+                   f"(no machine samples to say which machines worked)",
+        }
+    return {
+        "verdict": "factory",
+        "why": f"{kw:.0f} kW drawn and the roster fed nothing in this "
+               f"interval ({busy:.0f}% busy on other work)",
+    }
+
+
+def machine_power_kinds(samples: list[dict]) -> dict[str, str]:
+    """``burner`` / ``electric`` / ``unknown`` per machine, from the run's own evidence.
+
+    Inferred rather than tabulated by name, so a machine this tool has never
+    heard of is classed by what the game said about it: a ``fuel`` slot with
+    anything in it, or a ``no_fuel`` status, is a burner; ``no_power`` or
+    ``low_power`` is electric. A machine that showed neither stays ``unknown``
+    and is counted as neither -- the honest answer, and the one that keeps an
+    unrecognised entity from tipping a verdict.
+    """
+    kinds: dict[str, str] = {}
+    for s in samples:
+        if s.get("kind") != "machines":
+            continue
+        for key, m in (s.get("machines") or {}).items():
+            if kinds.get(key) in ("burner", "electric"):
+                continue
+            status = m.get("status")
+            if m.get("fuel") or status == "no_fuel":
+                kinds[key] = "burner"
+            elif status in ELECTRICAL_STATUSES or m.get("network") is not None:
+                kinds[key] = "electric"
+            else:
+                kinds.setdefault(key, "unknown")
+    return kinds
+
+
+def machine_statuses(samples: list[dict], lo: int, hi: int) -> dict:
+    """Status counts over the machine samples in ``(lo, hi]``.
+
+    ``starved`` and ``electrical`` split the two reasons a plateau has: waiting
+    for input somebody must bring, versus waiting for power. Containers carry
+    no meaningful status and are excluded.
+
+    ``working_electric`` and ``working_burner`` count only :data:`PRODUCER_TYPES`
+    -- the machines that can put an item into ``production.made``. This is the
+    field that separates "the factory made it" from "the network was powering
+    a lab while bots hand-loaded stone furnaces", which the kW figure alone
+    cannot do.
+    """
+    counts: collections.Counter = collections.Counter()
+    kinds = machine_power_kinds(samples)
+    working = collections.Counter()
+    working_names: dict[str, collections.Counter] = collections.defaultdict(collections.Counter)
+    powered_nonproducers: collections.Counter = collections.Counter()
+    rows = 0
+    for s in samples:
+        if s.get("kind") != "machines" or not (lo < s.get("tick", 0) <= hi):
+            continue
+        rows += 1
+        for key, m in (s.get("machines") or {}).items():
+            if m.get("type") in CONTAINER_TYPES:
+                continue
+            status = m.get("status") or "unreported"
+            counts[status] += 1
+            if status != "working":
+                continue
+            kind = kinds.get(key, "unknown")
+            if m.get("type") in PRODUCER_TYPES:
+                working[kind] += 1
+                working_names[kind][m.get("name") or "?"] += 1
+            elif kind == "electric":
+                powered_nonproducers[m.get("name") or "?"] += 1
+    total = sum(counts.values())
+    return {
+        "samples": rows,
+        "total": total,
+        "by_status": dict(counts.most_common()),
+        "dominant": counts.most_common(1)[0][0] if counts else None,
+        "starved": sum(counts[s] for s in STARVED_STATUSES),
+        "electrical": sum(counts[s] for s in ELECTRICAL_STATUSES),
+        "working": counts.get("working", 0),
+        "working_electric": working["electric"],
+        "working_burner": working["burner"],
+        "working_unknown": working["unknown"],
+        "working_electric_names": dict(working_names["electric"].most_common()),
+        "working_burner_names": dict(working_names["burner"].most_common()),
+        "powered_nonproducers": dict(powered_nonproducers.most_common()),
+    }
+
+
+def classify_plateau(activity: dict | None, power: dict, machines: dict) -> dict:
+    """Which kind of plateau this is: input ran out, or the factory stopped.
+
+    Read off the stretch AFTER the item stopped growing. The machine statuses
+    are the strongest evidence available -- a wall of ``no_ingredients`` /
+    ``no_fuel`` is a factory waiting for something to be brought to it, and
+    ``no_power`` is a factory that stopped. The roster's feeding count decides
+    the remaining case: nobody fed it, so what it was fed by hand ran out.
+    """
+    if not machines.get("total") and activity is None:
+        return {"kind": "unclear", "why": "no machine samples and no bot activity after the plateau"}
+    dom = machines.get("dominant")
+    if machines.get("total"):
+        if machines["electrical"] > machines["starved"]:
+            return {
+                "kind": "the factory stopped",
+                "why": f"machines were mostly {dom} after the plateau "
+                       f"({machines['electrical']} electrical vs {machines['starved']} starved readings)",
+            }
+        if machines["starved"] > machines["working"]:
+            fed = (activity or {}).get("feed_actions")
+            tail = "" if fed is None else f"; the roster ran {fed} feeding action(s) after it"
+            return {
+                "kind": "input ran out",
+                "why": f"machines were mostly {dom} after the plateau "
+                       f"({machines['starved']} starved readings){tail}",
+            }
+    if activity is not None and activity["feed_actions"] == 0:
+        return {
+            "kind": "input ran out",
+            "why": "the roster dispatched no feeding action after the plateau, so nothing "
+                   "refilled what it had been fed by hand",
+        }
+    return {"kind": "unclear", "why": "machines kept working and the roster kept feeding, yet the count stopped"}
+
+
 def production_rates(
     samples: list[dict],
     lo: int,
@@ -1692,6 +2105,7 @@ def production_rates(
     threshold: int = RATE_ITEM_THRESHOLD,
     window: float = RATE_WINDOW_MINUTES,
     present: bool = True,
+    activity: dict | None = None,
 ) -> dict:
     """Cumulative production and trailing rates at fixed game-time marks.
 
@@ -1714,6 +2128,14 @@ def production_rates(
     ``run_ended`` (past the run's last event), ``samples_end`` (inside the run
     but past the last force sample -- the samples are short, see
     ``sample_coverage``), ``no_sample`` (before the first sample).
+
+    EVERY MARK CARRIES AN ATTRIBUTION, because a rising curve is not evidence
+    of a working factory: ``production.made`` counts what a machine produced
+    and a hand-loaded furnace is a machine. ``attribution`` on each mark says
+    what the roster was doing over the interval and what the electric network
+    generated and drew; each item's entry carries a ``verdict`` --
+    ``roster-fed`` / ``factory`` / ``unclear`` -- and the reason for it. It is
+    ``unclear`` whenever the record cannot separate the two, which is often.
 
     ``plateaus`` names, per item, the first sample at which its count reached
     the value it ended the run with, when that is at least
@@ -1803,15 +2225,29 @@ def production_rates(
             prev_t = lo + int(round(prev_minute * TICKS_PER_MINUTE))
             win_t = max(lo, t - int(round(window * TICKS_PER_MINUTE)))
             win_min = (t - win_t) / TICKS_PER_MINUTE
+            act = interval_activity(activity, prev_t, t)
+            pw = interval_power(force, prev_t, t)
+            mach = machine_statuses(samples, prev_t, t)
+            entry["attribution"] = {
+                "from_tick": prev_t,
+                "from_minute": prev_minute,
+                "roster": act,
+                "power": pw,
+                "machines": mach,
+                "no_generator": not pw.get("any_generation"),
+            }
             for name in names:
                 c = count(t, name)
                 c_prev = count(prev_t, name) or 0
                 c_win = count(win_t, name) or 0
-                entry["items"][name] = {
+                item = {
                     "cumulative": c,
+                    "made_in_interval": None if c is None else c - c_prev,
                     "rate_interval": (c - c_prev) / (m - prev_minute) if m > prev_minute else None,
                     "rate_window": (c - c_win) / win_min if win_min > 0 else None,
                 }
+                item.update(attribute_output(item["made_in_interval"], act, pw, mach))
+                entry["items"][name] = item
         return entry
 
     prev_minute = 0.0
@@ -1845,16 +2281,28 @@ def production_rates(
             continue
         reached = next(s for s in force if _made(s).get(name, 0) - base.get(name, 0) >= final_c)
         idle = (end - reached["tick"]) / TICKS_PER_MINUTE
-        out["plateaus"][name] = (
-            {
-                "at_tick": reached["tick"],
-                "at_minute": (reached["tick"] - lo) / TICKS_PER_MINUTE,
-                "count": final_c,
-                "idle_minutes": idle,
-            }
-            if idle >= PLATEAU_MINUTES
-            else None
-        )
+        if idle < PLATEAU_MINUTES:
+            out["plateaus"][name] = None
+            continue
+        tail_act = interval_activity(activity, reached["tick"], end)
+        tail_pw = interval_power(force, reached["tick"], end)
+        tail_mach = machine_statuses(samples, reached["tick"], end)
+        out["plateaus"][name] = {
+            "at_tick": reached["tick"],
+            "at_minute": (reached["tick"] - lo) / TICKS_PER_MINUTE,
+            "count": final_c,
+            "idle_minutes": idle,
+            "roster": tail_act,
+            "power": tail_pw,
+            "machines": tail_mach,
+            **classify_plateau(tail_act, tail_pw, tail_mach),
+        }
+
+    # When the lights came on. `None` means never: every item this run made was
+    # made without electricity, which is the peer session's exact case.
+    gen = next((s for s in force if ((s.get("power") or {}).get("generated_kw") or 0) > 0), None)
+    out["first_generation_tick"] = gen["tick"] if gen else None
+    out["first_generation_minute"] = (gen["tick"] - lo) / TICKS_PER_MINUTE if gen else None
 
     out["headline"] = rates_headline(out)
     return out
@@ -2022,6 +2470,37 @@ def report_compare_rates(c: dict, p, a_id: str, b_id: str, plateaus: dict[str, l
             p(f"    {side}: {line}")
 
 
+def attribution_note(r: dict, name: str) -> str | None:
+    """The half of the headline that says who earned the curve.
+
+    ``roster-fed; no generator until 12:40`` -- the verdict that covers most of
+    the marks where the item was actually produced, and when (if ever) the
+    force generated its first watt. A curve with no verdict behind it is not
+    reported as anything.
+    """
+    verdicts = collections.Counter(
+        (m["items"].get(name) or {}).get("verdict")
+        for m in r.get("marks") or []
+        if m.get("status") == "ok"
+    )
+    verdicts.pop("no output", None)
+    verdicts.pop(None, None)
+    bits = []
+    if verdicts:
+        top, n = verdicts.most_common(1)[0]
+        total = sum(verdicts.values())
+        bits.append(top if n == total else f"mostly {top}")
+    if not r.get("marks"):
+        return None
+    if r.get("first_generation_tick") is None:
+        bits.append("no generator all run")
+    elif r["first_generation_minute"]:
+        bits.append(
+            f"no generator until {mmss(int(r['first_generation_tick'] - r['origin_tick']))}"
+        )
+    return "; ".join(bits) if bits else None
+
+
 def rates_headline(r: dict) -> str:
     """One line: ``rates: iron 32->57->43 /min at 5/10/15; red packs 0->8->8; green 0 at 15; run ended 17:59 before mark 20``."""
     if not r.get("present"):
@@ -2042,7 +2521,8 @@ def rates_headline(r: dict) -> str:
         return "->".join(vals)
 
     ats = "/".join(f"{m['minute']:g}" for m in reached if not m.get("is_end"))
-    parts = [f"rates: iron {series('iron-plate')} /min at {ats}"]
+    note = attribution_note(r, "iron-plate")
+    parts = [f"rates: iron {series('iron-plate')} /min at {ats}" + (f" ({note})" if note else "")]
     parts.append(f"red packs {series('automation-science-pack')}")
     fixed = [m for m in reached if not m.get("is_end")]
     ends = [m for m in reached if m.get("is_end")]
@@ -2069,12 +2549,80 @@ def plateau_lines(r: dict) -> list[str]:
     for name in r.get("items") or []:
         pl = (r.get("plateaus") or {}).get(name)
         if pl:
+            kind = pl.get("kind")
             lines.append(
                 f"{name} plateaus at {mmss(int(pl['at_tick'] - r['origin_tick']))} "
                 f"({pl['count']}) -- production stopped {pl['idle_minutes']:.1f} min "
                 f"before the run ended"
+                + (f": {kind.upper()} -- {pl.get('why')}" if kind else "")
             )
     return lines
+
+
+def report_attribution(r: dict, reached: list[dict], p) -> None:
+    """Who earned each interval: the roster's work, the network's power, a verdict.
+
+    Printed under the counts on purpose. The counts alone have already misled
+    once -- a 179-entity furnace line with no generator at all read as a
+    working factory -- and this block is the answer to "who put the ore in".
+    """
+    p("")
+    p("    attribution: what the roster did over each mark's interval, and what the "
+      "electric network did")
+    p("    feed acts = insert/stock/charge/fuel/take/mine dispatches. Five of those six settle in")
+    p("    the tick they dispatch, so the feed% TICK column is essentially `mine` alone -- the")
+    p("    count is the column that detects hand-feeding, not the percentage.")
+    p("    working prod = readings of an item-making machine in `working` status, electric/burner.")
+    p("    A working lab or boiler is not in it: neither puts an item into `production.made`.")
+    p(f"    {'mark':<8}{'bots':>5}{'busy%':>7}{'feed%':>7}{'feed acts':>10}{'other':>7}"
+      f"{'gen kW':>9}{'cons kW':>9}{'sat':>6}{'work e/b':>10}  note")
+    for m in reached:
+        a = m.get("attribution") or {}
+        act, pw, mach = a.get("roster"), a.get("power") or {}, a.get("machines") or {}
+        def num(v, fmt="{:.0f}"):
+            return "?" if v is None else fmt.format(v)
+        note = ""
+        if a.get("no_generator"):
+            made = any((i.get("made_in_interval") or 0) > 0 for i in m["items"].values())
+            note = ("no generator: this output was hand-fed" if made
+                    else "no generator (and nothing was made)")
+        elif not pw.get("any_consumption"):
+            note = "power generated, nothing drew it"
+        p(f"    {m['label']:<8}"
+          f"{(act or {}).get('bots', '?'):>5}"
+          f"{num((act or {}).get('busy_pct')):>7}"
+          f"{num((act or {}).get('feed_pct')):>7}"
+          f"{num((act or {}).get('feed_actions')):>10}"
+          f"{num((act or {}).get('other_actions')):>7}"
+          f"{num(pw.get('max_generated_kw')):>9}"
+          f"{num(pw.get('max_consumed_kw')):>9}"
+          f"{num(pw.get('satisfaction'), '{:.2f}'):>6}"
+          + (f"{mach['working_electric']}/{mach['working_burner']}".rjust(10)
+             if mach.get("samples") else f"{'?':>10}")
+          + f"  {note}")
+    if any((m.get("attribution") or {}).get("roster") is None for m in reached):
+        p("    (a '?' row is an interval with no bot activity to attribute -- the events "
+          "carried no dispatch or settle for it)")
+    p("")
+    p("    verdict per item and interval -- `unclear` is said freely; a wrong confident label")
+    p("    is worse than an honest one")
+    for name in r["items"]:
+        cells = []
+        for m in reached:
+            v = (m["items"].get(name) or {}).get("verdict")
+            if v and v != "no output":
+                cells.append(f"{m['label'].strip()} {v}")
+        if cells:
+            p(f"      {name[:24]:<24} " + ", ".join(cells))
+    shown = set()
+    for m in reached:
+        for name in r["items"]:
+            item = m["items"].get(name) or {}
+            key = (item.get("verdict"), item.get("why"))
+            if item.get("verdict") in (None, "no output") or key in shown:
+                continue
+            shown.add(key)
+            p(f"      why ({name} at {m['label'].strip()}): {item['why']}")
 
 
 def report_rates(r: dict, p, headline: str | None = None) -> None:
@@ -2104,6 +2652,7 @@ def report_rates(r: dict, p, headline: str | None = None) -> None:
                 rw_s = "?" if rw is None else f"{rw:.0f}"
                 cells.append(f"{c:>8} {ri_s:>4}/{rw_s:<5}")
             p(f"    {name[:24]:<24}" + "".join(cells))
+        report_attribution(r, reached, p)
         stale = max((m["lag_ticks"] or 0) for m in reached)
         if stale > 600:
             p(f"    (a value is read off the last force sample at or before its mark; the worst "

@@ -116,7 +116,6 @@ pub fn route_belt(
     to: (usize, usize),
     max_underground: Option<u8>,
 ) -> Result<Route, RouteError> {
-    let _ = max_underground; // Task 2.
     let mut best: Vec<u32> = vec![u32::MAX; GRID * GRID * 4];
     let mut came: Vec<Option<((usize, usize), Direction)>> = vec![None; GRID * GRID * 4];
     let mut heap = BinaryHeap::new();
@@ -163,12 +162,107 @@ pub fn route_belt(
                     facing: dir,
                 });
             }
+
+            // An underground pair: enter at `node.cell`, surface `span` tiles
+            // on in the same direction. The pair itself never turns -- that
+            // is not a thing the game has -- and it is only worth taking
+            // over ground that is actually blocked, because on open ground a
+            // pair costs two belts' worth of iron for a run a single surface
+            // tile would cover for free.
+            if let Some(max) = max_underground {
+                for span in 2..=(max as i64 + 1) {
+                    let Some(exit) = step(node.cell, dx * span, dy * span) else {
+                        break;
+                    };
+                    if blocked[cell_index(exit.0, exit.1)] {
+                        continue;
+                    }
+                    let crosses_blocked = (1..span).any(|i| {
+                        step(node.cell, dx * i, dy * i)
+                            .map(|c| blocked[cell_index(c.0, c.1)])
+                            .unwrap_or(false)
+                    });
+                    if !crosses_blocked {
+                        continue;
+                    }
+                    let cost = node.cost
+                        + STEP * span as u32
+                        + if dir == node.facing { 0 } else { TURN_PENALTY };
+                    let exit_slot = state_index(exit, dir);
+                    if cost < best[exit_slot] {
+                        best[exit_slot] = cost;
+                        came[exit_slot] = Some((node.cell, node.facing));
+                        heap.push(Node {
+                            cost,
+                            estimate: heuristic(exit, to),
+                            cell: exit,
+                            facing: dir,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(max) = max_underground {
+        let widest = widest_blocked_run(blocked, from, to);
+        if widest > max as u32 {
+            return Err(RouteError::SpanTooLong {
+                needed: widest,
+                max,
+            });
         }
     }
 
     Err(RouteError::NoPath {
         blocked: blocking_tiles(blocked, origin, &reached),
     })
+}
+
+/// The longest run of consecutive blocked cells on the straight (Bresenham)
+/// line from `from` to `to`.
+///
+/// This is what tells a refusal whether the obstacle was a wall an
+/// underground pair simply is not long enough for, versus some other reason
+/// the search never reached `to` -- a chokepoint the wall check would not
+/// see, or a walled-off destination reachable in a straight line but sealed
+/// on every side. Only the first of those is `SpanTooLong`; getting this
+/// wrong by *under*-reporting (falling back to `NoPath`) is far cheaper than
+/// blaming a span that was never the problem, so this only ever looks at the
+/// direct line, never claims a run it did not actually measure, and a caller
+/// still gets `NoPath` whenever this comes back at or under `max`.
+fn widest_blocked_run(blocked: &[bool], from: (usize, usize), to: (usize, usize)) -> u32 {
+    let (mut x, mut y) = (from.0 as i64, from.1 as i64);
+    let (x1, y1) = (to.0 as i64, to.1 as i64);
+    let adx = (x1 - x).abs();
+    let ady = -(y1 - y).abs();
+    let sx: i64 = if x < x1 { 1 } else { -1 };
+    let sy: i64 = if y < y1 { 1 } else { -1 };
+    let mut err = adx + ady;
+
+    let mut widest = 0u32;
+    let mut current = 0u32;
+    loop {
+        if blocked[cell_index(x as usize, y as usize)] {
+            current += 1;
+            widest = widest.max(current);
+        } else {
+            current = 0;
+        }
+        if x == x1 && y == y1 {
+            break;
+        }
+        let e2 = 2 * err;
+        if e2 >= ady {
+            err += ady;
+            x += sx;
+        }
+        if e2 <= adx {
+            err += adx;
+            y += sy;
+        }
+    }
+    widest
 }
 
 fn state_index(cell: (usize, usize), facing: Direction) -> usize {
@@ -259,6 +353,18 @@ fn reconstruct(
             direction,
             kind: TileKind::Belt,
         });
+    }
+    // A step further than one tile from its predecessor is an underground
+    // jump: the earlier tile is where the pair dives, the later one is where
+    // it surfaces, and everything in between is never placed at all.
+    for i in 1..cells.len() {
+        let (prev, _) = cells[i - 1];
+        let (cur, _) = cells[i];
+        let dist = prev.0.abs_diff(cur.0) + prev.1.abs_diff(cur.1);
+        if dist > 1 {
+            tiles[i - 1].kind = TileKind::UndergroundEntry;
+            tiles[i].kind = TileKind::UndergroundExit;
+        }
     }
     let _ = CELL;
     Route { tiles }

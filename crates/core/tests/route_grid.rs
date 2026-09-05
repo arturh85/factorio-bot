@@ -136,3 +136,67 @@ fn equal_length_routes_prefer_the_straight_one_over_a_zigzag() {
         route.tiles.iter().map(|t| t.direction).collect::<Vec<_>>()
     );
 }
+
+#[test]
+fn a_wall_is_crossed_underground_when_the_surface_cannot_go_round() {
+    let mut grid = open_grid();
+    // A full-height wall at x = 12: no surface route exists at all.
+    for y in 0..GRID {
+        block(&mut grid, 12, y);
+    }
+
+    let route = route_belt(&grid, (0.0, 0.0), (10, 10), (14, 10), Some(4))
+        .expect("an underground pair crosses a one-tile wall");
+
+    assert_eq!(
+        route
+            .tiles
+            .iter()
+            .filter(|t| t.kind == TileKind::UndergroundEntry)
+            .count(),
+        1,
+        "exactly one entry"
+    );
+    assert_eq!(
+        route
+            .tiles
+            .iter()
+            .filter(|t| t.kind == TileKind::UndergroundExit)
+            .count(),
+        1,
+        "exactly one exit"
+    );
+    assert!(
+        route.tiles.iter().all(|t| t.position.x() != 12.5),
+        "nothing is placed inside the wall"
+    );
+}
+
+#[test]
+fn a_wall_wider_than_the_prototype_allows_is_refused_by_span() {
+    let mut grid = open_grid();
+    for x in 12..=20 {
+        for y in 0..GRID {
+            block(&mut grid, x, y);
+        }
+    }
+
+    let err = route_belt(&grid, (0.0, 0.0), (10, 10), (22, 10), Some(4))
+        .expect_err("a nine-tile wall is wider than a span of four");
+
+    match err {
+        RouteError::SpanTooLong { max, .. } => assert_eq!(max, 4),
+        other => panic!("expected SpanTooLong, got {other:?}"),
+    }
+}
+
+#[test]
+fn undergrounds_are_not_used_when_the_surface_is_open() {
+    let grid = open_grid();
+    let route = route_belt(&grid, (0.0, 0.0), (10, 10), (14, 10), Some(4))
+        .expect("open ground routes on the surface");
+    assert!(
+        route.tiles.iter().all(|t| t.kind == TileKind::Belt),
+        "an underground pair costs 2 belts' worth of iron for nothing here"
+    );
+}

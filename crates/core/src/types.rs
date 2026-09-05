@@ -1524,6 +1524,36 @@ impl FactorioEntity {
             ..Default::default()
         }
     }
+    /// `output = true` is the surfacing half of the pair; Factorio calls the
+    /// two halves `input` and `output` and they take the same direction.
+    ///
+    /// FIXME: `FactorioEntity` has no field to record which half this is
+    /// (checked: there is no `entity_data`, no `belt_to_ground_type`, nothing
+    /// else that fits -- see the struct above). `output` is accepted so a
+    /// caller can express intent and so the signature matches the two
+    /// distinct entities a route actually places, but it is otherwise
+    /// dropped here: the returned entity cannot be told apart from its mate
+    /// by inspecting it, only by its position relative to the other half. In
+    /// game, Factorio infers input/output automatically from direction and
+    /// the presence of a matching underground belt within range, so this may
+    /// not block placement -- but a caller that needs to *read back* which
+    /// half an entity is will need a new field on `FactorioEntity`, which is
+    /// out of scope for this constructor (it is a shared type used well
+    /// beyond routing).
+    pub fn new_underground_belt(
+        position: &Position,
+        direction: Direction,
+        output: bool,
+    ) -> FactorioEntity {
+        let _ = output; // see FIXME above: nowhere to carry this yet.
+        FactorioEntity {
+            name: "underground-belt".into(),
+            entity_type: "underground-belt".into(),
+            position: position.clone(),
+            direction: direction.to_u8().unwrap(),
+            ..Default::default()
+        }
+    }
     pub fn new_splitter(position: &Position, direction: Direction) -> FactorioEntity {
         FactorioEntity {
             name: EntityName::Splitter.to_string(),

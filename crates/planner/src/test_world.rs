@@ -159,11 +159,13 @@ fn connect_ctx(entities: Vec<FactorioEntity>) -> ExpansionCtx {
 /// * a `lab` (box 2.3984375) at `(12.5, 5.5)`. Three tiles per axis is odd, so
 ///   its centre is a tile centre — a half-integer.
 ///
-/// The old fixture put a furnace at `(0.5, 0.5)` with a box shrunk to
-/// `1.3984375` and a doc comment explaining that this made it block exactly
-/// one cell. That is not a position a 2x2 entity can occupy in Factorio, and
-/// the one-cell footprint is exactly what let `connect_steps` pass while
-/// treating both machines as 1x1. The fixture had been built to fit the code.
+/// The old fixture put a furnace at `(0.5, 0.5)`, where a 2x2 entity cannot
+/// legally sit in Factorio. At `(0.5, 0.5)` both boxes — 1.3984375 and 1.8 —
+/// cover exactly one cell, making them indistinguishable in this fixture, so
+/// the box could never have been the discriminator. The illegal *position*
+/// alone was what let `connect_steps` pass while treating both machines as 1x1.
+/// The fixture had been built to fit the code. (The production constructor uses
+/// 1.8, which does not match the prototype fixture's 1.3984375.)
 ///
 /// Nothing else is in the way: `fixture_world`'s rocks are at `(20, 20)` and
 /// `(40, 30)`, its trees around `(-20, -20)`, and its ore patches west of

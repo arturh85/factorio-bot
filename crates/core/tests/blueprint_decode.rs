@@ -143,3 +143,72 @@ fn a_blueprint_object_with_an_unsupported_top_level_key_is_refused_by_name() {
         BlueprintError::Unsupported("wires".into())
     );
 }
+
+/// **The duplicated migration had already drifted.** `crates/core/src/blueprint.rs`
+/// carried its own `VERSION_2_0` and `migrate_direction` alongside the
+/// `BLUEPRINT_VERSION_2_0` / `blueprint_direction` pair that predates this
+/// branch. The canonical one folds (`% 8` before doubling, `% 16` after);
+/// the copy used `saturating_mul(2)` and folded nothing, so a 1.x blueprint
+/// carrying a direction of 8 or more decoded to 16..=254 -- a number outside
+/// `defines.direction` entirely, handed straight to `create_entity`. This
+/// pins the fold in the only place a caller can see it: through `decode`.
+#[test]
+fn an_out_of_range_direction_is_folded_rather_than_doubled_past_the_scale() {
+    // 1.0.0.0, so the 8-point scale: 9 folds to 1, which doubles to 2.
+    let text = encode_blueprint(
+        r#"{"item":"blueprint","version":281474976710656,"entities":[
+             {"entity_number":1,"name":"transport-belt","position":{"x":0.5,"y":0.5},"direction":9}]}"#,
+    );
+    let bp = decode(&text).expect("decodes");
+    assert_eq!(
+        bp.entities[0].direction, 2,
+        "a 1.x direction of 9 is 1 on the eight-point scale, so 2 on the sixteen-point one"
+    );
+
+    // 2.x, so the 16-point scale is already correct and only folds.
+    let text = encode_blueprint(
+        r#"{"item":"blueprint","version":562949953421312,"entities":[
+             {"entity_number":1,"name":"transport-belt","position":{"x":0.5,"y":0.5},"direction":20}]}"#,
+    );
+    let bp = decode(&text).expect("decodes");
+    assert_eq!(bp.entities[0].direction, 4, "20 folds to 4, not to 20");
+}
+
+/// **A few kilobytes must not be allowed to become gigabytes.**
+/// `POST /api/v1/scripts/execute` is unauthenticated and a script hands any
+/// string it likes to `goal.built`, so the zlib stream reaching `decode` is
+/// attacker-shaped. An unbounded `read_to_end` on the decoder is a remote
+/// memory-exhaustion primitive that reports nothing until the allocator
+/// gives up. This builds a genuine zlib bomb -- highly compressible zeroes,
+/// a couple of hundred kilobytes on the wire -- and asserts the decoder
+/// refuses it by name rather than materialising it.
+#[test]
+fn a_zlib_bomb_is_refused_by_size_rather_than_inflated() {
+    use base64::Engine;
+    use factorio_bot_core::blueprint::MAX_DECOMPRESSED_BYTES;
+    use std::io::Write;
+
+    let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
+    // One megabyte at a time so the test itself never holds the whole
+    // expansion; the payload is not valid JSON, and must never be reached.
+    let chunk = vec![b'0'; 1024 * 1024];
+    for _ in 0..(MAX_DECOMPRESSED_BYTES / (1024 * 1024) + 2) {
+        encoder.write_all(&chunk).expect("in-memory zlib write");
+    }
+    let compressed = encoder.finish().expect("in-memory zlib finish");
+    assert!(
+        compressed.len() < 1024 * 1024,
+        "the point of the test is that a small input inflates hugely: {} bytes",
+        compressed.len()
+    );
+    let text = format!(
+        "0{}",
+        base64::engine::general_purpose::STANDARD.encode(compressed)
+    );
+
+    assert_eq!(
+        decode(&text).err(),
+        Some(BlueprintError::TooLarge(MAX_DECOMPRESSED_BYTES)),
+        "an over-sized expansion is refused by name, not decoded"
+    );
+}

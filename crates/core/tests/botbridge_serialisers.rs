@@ -575,3 +575,177 @@ fn a_serialised_mine_entity_trigger_loads_as_the_rust_variant() {
         })
     );
 }
+
+// --------------------------------------------------------------------------
+// The structural guard: every key `serialize_entity` emits, in every branch.
+// --------------------------------------------------------------------------
+
+/// A minimal `LuaEntity` table of the given `type`, with the two inventory
+/// getters the serialiser unconditionally calls. `contents` decides whether
+/// they answer with an inventory or with nothing, so the two inventory keys
+/// are reachable from at least one branch.
+fn entity_table(lua: &Lua, name: &str, entity_type: &str, with_inventories: bool) -> Table {
+    let point = |x: f64, y: f64| {
+        let table = lua.create_table().expect("table");
+        table.set("x", x).expect("set");
+        table.set("y", y).expect("set");
+        table
+    };
+    let bounding_box = lua.create_table().expect("table");
+    bounding_box.set("left_top", point(0.1, 0.1)).expect("set");
+    bounding_box
+        .set("right_bottom", point(0.9, 0.9))
+        .expect("set");
+
+    let entity = lua.create_table().expect("table");
+    entity.set("name", name).expect("set");
+    entity.set("type", entity_type).expect("set");
+    entity.set("direction", 4).expect("set");
+    entity.set("position", point(0.5, 0.5)).expect("set");
+    entity.set("bounding_box", bounding_box).expect("set");
+    for getter in ["get_output_inventory", "get_fuel_inventory"] {
+        let getter_fn = if with_inventories {
+            lua.create_function(|lua, ()| {
+                // A `LuaInventory` as the serialiser uses it: only
+                // `get_contents()`, whose 2.x shape is a list of
+                // `{name, count, quality}`.
+                let slot = lua.create_table()?;
+                slot.set("name", "coal")?;
+                slot.set("count", 3)?;
+                slot.set("quality", "normal")?;
+                let contents = lua.create_table()?;
+                contents.set(1, slot)?;
+                let inventory = lua.create_table()?;
+                inventory.set(
+                    "get_contents",
+                    lua.create_function(move |_, ()| Ok(contents.clone()))?,
+                )?;
+                Ok(Value::Table(inventory))
+            })
+            .expect("function")
+        } else {
+            lua.create_function(|_, ()| Ok(Value::Nil))
+                .expect("function")
+        };
+        entity.set(getter, getter_fn).expect("set");
+    }
+    entity
+}
+
+/// Every branch of `serialize_entity`'s `elseif` chain, as a table the
+/// serialiser can be handed. Adding a branch to the mod without adding a row
+/// here leaves that branch unguarded -- which is the one thing this test
+/// cannot check for itself, and the reason the table is written out by name
+/// rather than derived.
+fn every_serialize_entity_branch(lua: &Lua) -> Vec<(&'static str, Table)> {
+    let resource = entity_table(lua, "iron-ore", "resource", false);
+    resource.set("amount", 2500).expect("set");
+
+    let inserter = inserter_table(lua);
+
+    let ghost = entity_table(lua, "entity-ghost", "entity-ghost", false);
+    ghost
+        .set("ghost_name", "assembling-machine-1")
+        .expect("set");
+    ghost.set("ghost_type", "assembling-machine").expect("set");
+    let recipe = lua.create_table().expect("table");
+    recipe.set("name", "iron-gear-wheel").expect("set");
+    ghost
+        .set(
+            "get_recipe",
+            lua.create_function(move |_, ()| Ok(recipe.clone()))
+                .expect("function"),
+        )
+        .expect("set");
+
+    let assembler = entity_table(lua, "assembling-machine-1", "assembling-machine", true);
+    let recipe = lua.create_table().expect("table");
+    recipe.set("name", "iron-gear-wheel").expect("set");
+    assembler
+        .set(
+            "get_recipe",
+            lua.create_function(move |_, ()| Ok(recipe.clone()))
+                .expect("function"),
+        )
+        .expect("set");
+
+    let underground = underground_belt_table(lua, "input");
+
+    // The final `else`: no branch of the chain applies at all.
+    let plain = entity_table(lua, "transport-belt", "transport-belt", false);
+
+    vec![
+        ("resource", resource),
+        ("inserter", inserter),
+        ("entity-ghost", ghost),
+        ("assembling-machine", assembler),
+        ("underground-belt", underground),
+        ("plain", plain),
+    ]
+}
+
+/// **One test instead of one per field, because the tax was the problem.**
+///
+/// `serialize_entity` emits fourteen keys and `FactorioEntity` is plain
+/// serde: a key whose name does not match a field is *dropped silently*,
+/// with no error anywhere. That has now happened twice -- `pickupPosition`
+/// for camelCase (every inserter arrived with `pickup_position: None` and
+/// `EntityGraph::connect` linked nothing) and `belt_to_ground_type` for
+/// Factorio's own spelling of `underground_half` (every live read came back
+/// `nil` while a raw `remote.call` showed the value present). Each was
+/// answered with a test about that one field, which guards that one field
+/// and nothing else: the next mismatch is as invisible as the first two
+/// were, and the next author pays a per-field tax to keep it that way.
+///
+/// So this drives EVERY branch of the serialiser's `elseif` chain and checks
+/// each key it produces against `schema_for!(FactorioEntity)` -- the struct's
+/// own declared shape, not a list written down here. A branch that emits a
+/// key `FactorioEntity` has no field for fails, and the failure NAMES the
+/// key. The one thing it cannot see is a new branch nobody added to
+/// `every_serialize_entity_branch`, which is why that function says so.
+///
+/// **Deliberately not `deny_unknown_fields`**, which would answer the same
+/// question at runtime: 24+ archived run records and a world dump were
+/// written by older mods and must still deserialise, and a strict struct
+/// would refuse every one of them.
+#[test]
+fn every_key_serialize_entity_emits_is_a_field_of_factorio_entity() {
+    use factorio_bot_core::schemars::schema_for;
+
+    let schema = serde_json::Value::from(schema_for!(FactorioEntity));
+    let properties = schema
+        .get("properties")
+        .and_then(|p| p.as_object())
+        .expect("FactorioEntity is an object schema with properties");
+    let known: std::collections::BTreeSet<&str> = properties.keys().map(String::as_str).collect();
+
+    let lua = botbridge_types();
+    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for (branch, table) in every_serialize_entity_branch(&lua) {
+        let out = call(&lua, "serialize_entity", table);
+        for pair in out.clone().pairs::<String, Value>() {
+            let (key, _) = pair.expect("the serialised entity has string keys");
+            assert!(
+                known.contains(key.as_str()),
+                "the `{branch}` branch of serialize_entity emits `{key}`, which is not a \
+                 field of FactorioEntity -- serde will DROP it silently. Known fields: {known:?}"
+            );
+            seen.insert(key);
+        }
+        // And the whole record must survive the trip into the typed struct,
+        // not merely name fields that exist.
+        let json: serde_json::Value = lua
+            .from_value(Value::Table(out))
+            .expect("the serialised entity converts to json");
+        let _: FactorioEntity = serde_json::from_value(json.clone())
+            .unwrap_or_else(|err| panic!("{branch}: {err} in {json}"));
+    }
+
+    // The branches between them must reach every key the serialiser can
+    // emit; a shrinking count would mean a branch stopped being exercised.
+    assert_eq!(
+        seen.len(),
+        14,
+        "serialize_entity emits fourteen distinct keys across its branches; saw {seen:?}"
+    );
+}

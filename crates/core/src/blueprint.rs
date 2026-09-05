@@ -26,8 +26,9 @@
 //! here: every refusal names the exact key that tripped it, and there is no
 //! path -- entity or blueprint-object -- that drops a key silently.
 
-use crate::types::Position;
+use crate::types::{Direction, Position, blueprint_direction};
 use base64::Engine;
+use num_traits::ToPrimitive;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -74,11 +75,25 @@ pub enum BlueprintError {
     /// Content this build refuses to place rather than silently drop.
     /// Carries the offending key's name, e.g. `"items"` or `"filters"`.
     Unsupported(String),
+    /// The compressed payload inflates past [`MAX_DECOMPRESSED_BYTES`].
+    ///
+    /// zlib is happy to turn a few kilobytes into gigabytes, and the string
+    /// reaching `decode` is attacker-shaped: `POST /api/v1/scripts/execute`
+    /// is unauthenticated and a script may hand any string at all to
+    /// `goal.built`. An unbounded `read_to_end` on the decoder is therefore
+    /// a remote memory-exhaustion primitive, and one that reports nothing at
+    /// all until the allocator gives up. Carries the cap, not the actual
+    /// size -- the actual size is precisely what must never be materialised.
+    TooLarge(u64),
 }
 
-/// Factorio encodes a version as four 16-bit fields; 2.0.0.0 is this value.
-/// Anything below it used the eight-point direction scale.
-const VERSION_2_0: u64 = 2 << 48;
+/// The most a blueprint is allowed to inflate to.
+///
+/// Deliberately far above anything real: the 179-entity `FurnaceLine` this
+/// decoder was built for is ~35 kB of JSON, and a large blueprint *book* is
+/// low single-digit megabytes, so 32 MiB refuses nothing a person would send
+/// and still bounds the damage a crafted string can do.
+pub const MAX_DECOMPRESSED_BYTES: u64 = 32 * 1024 * 1024;
 
 /// The only entity keys this decoder understands. Anything else present on
 /// an entity fails the decode by name -- see the module doc for why this is
@@ -137,9 +152,18 @@ pub fn decode(text: &str) -> Result<Blueprint, BlueprintError> {
     let mut json = Vec::new();
     {
         use std::io::Read;
+        // `.take(cap + 1)`, not `.take(cap)`: reading exactly the cap cannot
+        // tell "this is precisely the largest allowed blueprint" from "there
+        // was more and the reader stopped", and refusing a legal payload for
+        // being exactly at the limit is the wrong half of that ambiguity.
+        // One byte of headroom makes the overflow observable.
         flate2::read::ZlibDecoder::new(&raw[..])
+            .take(MAX_DECOMPRESSED_BYTES + 1)
             .read_to_end(&mut json)
             .map_err(|_| BlueprintError::NotDeflate)?;
+        if json.len() as u64 > MAX_DECOMPRESSED_BYTES {
+            return Err(BlueprintError::TooLarge(MAX_DECOMPRESSED_BYTES));
+        }
     }
     let envelope: Value = serde_json::from_slice(&json).map_err(|_| BlueprintError::NotJson)?;
     let body_value = envelope
@@ -178,7 +202,16 @@ pub fn decode(text: &str) -> Result<Blueprint, BlueprintError> {
         entities.push(BlueprintEntity {
             name: e.name,
             offset: Position::new(e.position.x, e.position.y),
-            direction: migrate_direction(e.direction, body.version),
+            // The CANONICAL migration (`crates/core/src/types.rs`), not a
+            // second copy of it. This module carried its own `VERSION_2_0`
+            // and `migrate_direction` for one commit, and they had already
+            // drifted: the canonical pair folds with `% 8` / `% 16` before
+            // doubling, the copy used `saturating_mul(2)` and folded
+            // nothing, so a blueprint carrying a direction >= 8 produced
+            // 16..=254 -- a number outside `defines.direction` entirely,
+            // handed straight to `create_entity`.
+            direction: Direction::to_u8(&blueprint_direction(e.direction, body.version))
+                .expect("blueprint_direction folds into 0..=15"),
             underground_half,
         });
     }
@@ -186,14 +219,4 @@ pub fn decode(text: &str) -> Result<Blueprint, BlueprintError> {
         entities,
         version: body.version,
     })
-}
-
-/// **Pre-2.0 blueprints used eight directions; 2.0 uses sixteen.**
-/// Doubling is the whole migration: old 2 (east) becomes 4 (east).
-fn migrate_direction(direction: u8, version: u64) -> u8 {
-    if version < VERSION_2_0 {
-        direction.saturating_mul(2)
-    } else {
-        direction
-    }
 }

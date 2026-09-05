@@ -435,12 +435,32 @@ hand-fed by a bot is a machine. A curve that rises while bots ferry ore is
 inventory moving, not a factory running. Every plateau in this record is
 that curve running out of hand-fed input.
 
-The honest test is production **while the bots are idle** — which the green
-milestone already applies ("5 green packs reach the output chest in 90 s
-with every bot idle") but the rate table does not. Dispatched as the
-`ratehonest` worktree: mark each interval with what the bots were doing and
-what the power networks were carrying, so a curve says whether it was
-earned by the factory or by the roster.
+**Answered, with evidence (`c7d663f1`): our green runs are roster-fed.**
+The table now attributes every interval — roster busy %, feeding-action
+count, generation and draw, working readings of *producer* machines — and
+every item in every interval up to minute 15 in runs 14, 16, 17 and the
+headless run reads `roster-fed`. Verbatim from the tool at minute 5:
+`no generator: this output was hand-fed (254 feeding action(s), roster 90%
+busy)`. **No run had a generator at all before minute 8:26.** And every
+plateau in all four runs classifies as **input ran out**, not as a factory
+that stopped.
+
+One correction the agent found that matters more than the feature: **kW
+drawn is not evidence about items.** Every furnace here is a stone furnace
+and every drill a burner drill; the 120 kW at minute 10 goes to a lab and a
+steam engine. Counting power alone would have called these runs automated.
+The verdict counts only working readings of producer types, split electric
+from burner.
+
+What the record cannot answer: belts and inserters are not sampled at all,
+so the peer's "48 inserters never moved an item" has no equivalent here;
+five of the six feeding verbs settle in their dispatch tick, so the count
+is the signal and not the duration; an interval with both an electric
+assembler working and bots feeding is honestly reported `unclear`.
+
+The only automation these runs demonstrate is the green milestone's own
+witness: five packs in ninety seconds with every bot idle, covering the
+green cell alone.
 
 ## THE RATE VIEW (owner, 2026-09-05 19:20): production stops at minute 15
 

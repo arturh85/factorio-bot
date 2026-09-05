@@ -220,6 +220,35 @@ three bots one extra iron furnace (three actions) reorders bot 3's ready
 work and its `take 10 copper-ore from the wooden-chest` moves from 8,860 to
 13,473 with no furnace of its involved.
 
+## ✅✅ RUN 16: GREEN IN 15:19, AND AHEAD ON RATES (`run-1788625945-57257`)
+
+2026-09-05 18:48, master `1e965ed7`, four clients at 1x, seed 31337 `--new`,
+debug build, 100% tick delivery, planning excluded (25.1 s, clock stopped).
+Best on both measures.
+
+| | run 14 | run 15 | **run 16** |
+|---|---|---|---|
+| green cell | 17:20 | 18:46 | **15:19** (55,152) |
+| green witness | 18:00 | 19:25 | **15:57** |
+| plan | 569 / 57,752 | 569 / 59,476 | 569 / **52,554** |
+| executed / planned | 1.046 | 1.137 | **1.050** |
+| fleet utilisation | 60.9% | 58.4% | **67.4%** |
+| failed | 1 walk | none | **none** |
+| iron plate /min at 5 / 10 / 15 | 32 / 57 / 43 | 33 / 60 / 40 | **36 / 64 / 34** |
+| red packs /min at 5 / 10 / 15 | 0 / 8 / 8 | 0 / 9 / 7 | **0 / 13 / 4** |
+
+Fresh-world green: 64:22 → 36:48 → 31:35 → 26:32 → 29:09 → 23:38 → 20:59 →
+17:20 → 18:46 → **15:19**. Automation's record for comparison is 6:11.
+
+**The plateau is unchanged and is now the whole story.** Copper stops at
+11:46 (189), red packs at 11:51 (85), circuits at 12:51 (66) — production
+ends four minutes before the run does, at exactly the plan's bill, because
+the cell is charged by hand. Run 16 reaches the same dead end sooner and
+with less waste. The next objective is the self-fed cell (drills and
+furnaces feeding the assemblers through belts and inserters, owned by the
+peer session via its `connect` primitive), measured as a sustained rate
+over a window rather than as six packs.
+
 ## ✅ THE FOUR-BOT REGRESSION WAS TWO SCHEDULER MECHANISMS (`99ee93c1`)
 
 RCA of run 15 against run 14, traced round by round in `schedule.rs`:
@@ -2470,7 +2499,7 @@ infrastructure for a 3h17m game, not a harder milestone.
 | red science producing **once** | never observed | witnessed six times, all inside 780 ticks |
 | red science producing **at a rate** | impossible to claim | **5 packs in 3,240 ticks (~5.5/min)**, twice |
 | green science, planning | did not expand at all | plans end to end |
-| green science, live | never run | **WITNESSED ten times** — fresh world **17:20 / 17:59** (`run-1788612263-27812`), 569-step plan plus a 9-step replan; 64:22 → 36:48 → 31:35 → 26:32 → 29:09 → 23:38 → 20:59 → 17:20 |
+| green science, live | never run | **WITNESSED twelve times** — fresh world **15:19 / 15:57** (`run-1788625945-57257`), one 569-step plan, zero failures, 67.4% utilisation; 64:22 → … → 17:20 → 18:46 → 15:19 |
 | furnaces per run | 42 | **8** |
 | recovery (`obs:recover`) | never executed in any run | **fires live** |
 

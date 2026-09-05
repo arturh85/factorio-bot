@@ -304,6 +304,12 @@ impl std::error::Error for PlanRefusal {}
 ///   the tree, or walk the bot standing on the footprint off it. Grouping it
 ///   with `BlueprintRefused` because both mention a blueprint would tell a
 ///   supervisor that a clear anchor two tiles away was a construction error.
+/// - [`NoSiteFound`](PlannerError::NoSiteFound) -- `BlockGroundOccupied`'s
+///   sibling and the same verdict: the ground defeated the placement, this
+///   time after the planner searched rather than at one caller-chosen
+///   anchor. It names how far the search looked and what it hit, which is
+///   exactly what a script needs to widen the search, try a different seed,
+///   or clear ground before asking again.
 /// - The three cell variants -- [`NoCellProduces`](PlannerError::NoCellProduces),
 ///   [`NoPatchForCell`](PlannerError::NoPatchForCell) and
 ///   [`NoRoomForCell`](PlannerError::NoRoomForCell) and
@@ -373,7 +379,8 @@ fn refusal_for(err: &PlannerError) -> Option<PlanRefusal> {
         | PlannerError::NoExtractor { .. }
         | PlannerError::ExtractorLocked { .. }
         | PlannerError::ExtractionNotModelled { .. }
-        | PlannerError::BlockGroundOccupied { .. } => true,
+        | PlannerError::BlockGroundOccupied { .. }
+        | PlannerError::NoSiteFound { .. } => true,
 
         PlannerError::InsufficientItems { .. }
         | PlannerError::UnknownBot(_)

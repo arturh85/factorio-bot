@@ -190,6 +190,41 @@ fn parse_reply<T: serde::de::DeserializeOwned>(call: &str, text: &str) -> Result
     })
 }
 
+/// Says so, loudly, when a successful placement moved a character.
+///
+/// `rcon_place_entity` (`mods/BotBridge/control.lua`, `push_characters_out_of`)
+/// adds `pushed_out: [{bot, from, to}]` to the entity it answers with whenever
+/// the built entity's real bounding box held a character -- the game's own
+/// push-out for a player, done for a server-side character, which the game
+/// leaves inside the building with every later path request refused. The
+/// entity parse ignores the field, so this is where the executor's log learns
+/// of it; the record learns of it through the mod's `teleport` writeout with
+/// reason `placement_pushed_out`. Absent `to` means the character fit nowhere
+/// within reach and was left where it stood.
+fn note_pushed_out(player_id: PlayerId, line: &str) {
+    if !line.contains("\"pushed_out\"") {
+        return;
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+        return;
+    };
+    let Some(pushed) = value.get("pushed_out").and_then(|v| v.as_array()) else {
+        return;
+    };
+    for push in pushed {
+        match push.get("to") {
+            Some(to) if !to.is_null() => warn!(
+                "#{} built {} over bot {} at {}; the character was moved out to {}",
+                player_id, value["name"], push["bot"], push["from"], to
+            ),
+            _ => warn!(
+                "#{} built {} over bot {} at {}, and the character fit nowhere within reach: it is still inside",
+                player_id, value["name"], push["bot"], push["from"]
+            ),
+        }
+    }
+}
+
 /// Judges the reply to an `insert_to_inventory` / `remove_from_inventory` RPC.
 ///
 /// # This is where a transfer's `Success` gets its strength
@@ -4242,6 +4277,7 @@ impl FactorioRcon {
             // a run's dispatch task, on the failure path, where a returned
             // error is what the executor is waiting for.
             if line.starts_with('{') {
+                note_pushed_out(player_id, line);
                 return Ok((
                     parse_reply("place_entity", line)
                         .map_err(|e| ActionFailure::refused(e, refused_at))?,
@@ -4294,6 +4330,7 @@ impl FactorioRcon {
                             }
                             let line = &lines[0];
                             if line.starts_with('{') {
+                                note_pushed_out(player_id, line);
                                 Ok((
                                     parse_reply("place_entity", line)
                                         .map_err(|e| ActionFailure::refused(e, refused_at))?,

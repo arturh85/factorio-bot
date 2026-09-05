@@ -791,3 +791,142 @@ fn a_registry_character_blocking_a_walk_is_named_as_the_bot_it_is() {
     assert_eq!(blocker.player, Some(1), "{clause}");
     assert_eq!(blocker.activity.as_deref(), Some("walking"), "{clause}");
 }
+
+// ---------------------------------------------------------------------------
+// a pinned character steps onto clear ground before the walk is failed
+// ---------------------------------------------------------------------------
+
+/// Bot 6 of `run-1788614781-38058`, in miniature: a walk stalls against a
+/// furnace whose box covers the tile the character stands on. The follower
+/// steers the character to the nearest tile nothing collides with -- here one
+/// tile east, the north and west neighbours being under the same furnace --
+/// and fails the walk only once it is there, with the stall's own cause
+/// first (so `move_player_timed` re-paths) and the step it took last (so the
+/// record says where the fresh path will start from).
+///
+/// No path request and no teleport: this is a walk by the same follower, and
+/// the destination is not reported as reached.
+#[test]
+fn a_character_pinned_by_a_building_steps_clear_and_then_fails_the_walk() {
+    let (gx, gy) = GOAL;
+    let sx = gx + START_OFFSET; // -16.5: on the tile [-17, -16] x [17, 18]
+    let lua = load(&format!(
+        r#"{}
+        local me = _players[1]
+        me.force = {{ name = "player" }}
+        local furnace = {{
+            valid = true, type = "furnace", name = "stone-furnace",
+            force = {{ name = "player" }},
+            position = {{ x = -17, y = 17 }},
+            bounding_box = {{ left_top = {{ x = -17.7, y = 16.3 }}, right_bottom = {{ x = -16.3, y = 17.7 }} }},
+            prototype = {{ collision_box = {{
+                left_top = {{ x = -0.7, y = -0.7 }}, right_bottom = {{ x = 0.7, y = 0.7 }} }} }},
+        }}
+        me.surface.find_entities_filtered = function(args)
+            local a, b = args.area, furnace.bounding_box
+            if b.left_top.x <= a.right_bottom.x and b.right_bottom.x >= a.left_top.x
+                and b.left_top.y <= a.right_bottom.y and b.right_bottom.y >= a.left_top.y then
+                return {{ furnace }}
+            end
+            return {{}}
+        end
+        me.surface.get_tile = function(x, y) return {{ valid = true, name = "dirt-5" }} end
+    "#,
+        two_leg_walk()
+    ));
+
+    tick(&lua, TICK);
+    assert_eq!(failure(&lua), None, "not failed yet: the step comes first");
+    let landing: (f64, f64) = lua
+        .load("local w = storage.p[1].walking.waypoints return { #w, w[1].x, w[1].y }")
+        .eval::<mlua::Table>()
+        .map(|t| {
+            assert_eq!(t.get::<i64>(1).unwrap(), 1, "one waypoint: the landing");
+            (t.get(2).unwrap(), t.get(3).unwrap())
+        })
+        .expect("the step-clear walk");
+    assert_eq!(
+        landing,
+        (sx + 1.0, gy),
+        "the nearest clear tile centre; north and west are under the furnace"
+    );
+    assert!(
+        line_containing(&lua, "walk_step_clear").is_some(),
+        "the step is written out as it starts, got {:?}",
+        stdout(&lua)
+    );
+
+    tick(&lua, TICK + 1);
+    assert!(walking_state_is_walking(&lua), "steering at the landing");
+    assert_eq!(failure(&lua), None);
+
+    // The character gets there.
+    lua.load(format!("_players[1].position.x = {}", sx + 1.0))
+        .exec()
+        .expect("arrive");
+    tick(&lua, TICK + 2);
+    let reported = failure(&lua).expect("the walk is failed on arrival");
+    assert!(
+        walk_reports_stalled_leg(&reported),
+        "the stall's own wording leads, so the Rust retry re-paths: {reported}"
+    );
+    assert!(
+        reported.contains(&format!("from ({sx}/{gy}) to ({}/{gy})", gx + 3.0)),
+        "where it stalled and what it was steering at, unchanged: {reported}"
+    );
+    assert!(
+        reported.contains("by entity 'stone-furnace' (ours)"),
+        "and what it was pressed against: {reported}"
+    );
+    assert!(
+        reported.ends_with(&format!(", then stepped clear to ({}/{gy})", sx + 1.0)),
+        "the step is the last clause, after everything the parsers read: {reported}"
+    );
+    let blocker = walk_blocker(&reported).expect("the Rust side still reads the cause");
+    assert_eq!(blocker.kind, WalkBlockerKind::Entity, "{reported}");
+
+    assert_eq!(path_requests(&lua), Vec::<u32>::new(), "no path of its own");
+    assert_eq!(teleports(&lua), 0, "and no teleport: it walked");
+    assert!(!walking_state_is_walking(&lua), "and it has stopped");
+}
+
+/// A step that itself stalls is reported as the stall it is -- once per walk,
+/// so a character wedged on every side cannot step forever.
+#[test]
+fn a_step_clear_that_stalls_is_failed_and_not_retried() {
+    let lua = load(&format!(
+        r#"{}
+        local me = _players[1]
+        me.force = {{ name = "player" }}
+        -- A furnace on every tile: nowhere is clear, except that the search
+        -- is asked about tiles two out, where this stub answers "clear".
+        me.surface.find_entities_filtered = function(args)
+            local a = args.area
+            if math.abs(a.left_top.x - (-17)) < 1.5 and math.abs(a.left_top.y - 17) < 1.5 then
+                return {{ {{ valid = true, type = "furnace", name = "stone-furnace",
+                    force = {{ name = "player" }},
+                    prototype = {{ collision_box = {{
+                        left_top = {{ x = -0.7, y = -0.7 }}, right_bottom = {{ x = 0.7, y = 0.7 }} }} }} }} }}
+            end
+            return {{}}
+        end
+        me.surface.get_tile = function(x, y) return {{ valid = true, name = "dirt-5" }} end
+    "#,
+        two_leg_walk()
+    ));
+    tick(&lua, TICK);
+    assert_eq!(failure(&lua), None, "stepping clear first");
+    // Force the step's own leg past the stall clock without moving.
+    lua.load(format!("storage.p[1].walking.idx_tick = {}", TICK - 100))
+        .exec()
+        .expect("age the leg");
+    tick(&lua, TICK + 1);
+    tick(&lua, TICK + 2);
+    let reported = failure(&lua).expect("the second stall fails the walk");
+    assert!(
+        reported.contains("after stepping clear from"),
+        "and says the step was tried: {reported}"
+    );
+    assert!(walk_reports_stalled_leg(&reported), "{reported}");
+    assert_eq!(teleports(&lua), 0);
+}

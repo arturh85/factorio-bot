@@ -624,6 +624,95 @@ function walk_stall_cause(player, pos, dest, dx, dy)
 	return msg
 end
 
+--- How far, in whole tiles about its own, a stalled character looks for a
+--- tile nothing else stands on before its walk is failed.
+---
+--- **A stall against a building can leave the character somewhere the
+--- pathfinder will not start from.** Bot 6 of `run-1788614781-38058` walked a
+--- path the game had computed *before* bot 3 built two furnaces across it
+--- (`[-5, -28]` and `[-6, -30]`, ticks 15852-15854; the walk was dispatched
+--- at ~15700 from forty tiles away), steered into the 0.6-tile crack between
+--- their boxes, and stalled at `(-5.20, -29.10)` -- legal by its collision
+--- box, touching the second furnace, on a tile that furnace covers. From
+--- there every path request was refused: six replans, the same
+--- `failed to path find` from the same coordinates, and the run halted
+--- `stuck`. The executor's fresh path (`move_player_timed`,
+--- crates/core/src/factorio/rcon.rs) starts from where the character stands,
+--- and where it stood was the problem.
+---
+--- A player in that crack walks out by hand. A character bot has only the
+--- follower, so the follower does the one thing a player would: before the
+--- stall is reported, if the tile under the character holds anything that
+--- collides with a walker, it steers to the nearest tile that holds nothing
+--- (this many tiles out at most), and *then* fails the walk with the stall's
+--- cause -- the destination was not reached and must not be reported as
+--- reached -- so the executor's retry asks the pathfinder from clear ground.
+--- Once per walk: a step that itself stalls is reported as the stall it is.
+--- No teleport is involved; this is a walk, dispatched by the same follower.
+WALK_STEP_CLEAR_RADIUS = 2
+
+-- The centre of the tile `pos` is on.
+function tile_centre(pos)
+	return { x = math.floor(pos.x) + 0.5, y = math.floor(pos.y) + 0.5 }
+end
+
+-- Whether the whole tile centred at `centre` holds nothing a walker collides
+-- with (other than `self_character`), and is itself walkable ground. The
+-- same judgement `walk_stall_cause` makes about the probe box, made about a
+-- tile: resources, ghosts, corpses and items are passable; anything with a
+-- collision box is not.
+function walk_tile_is_clear(surface, centre, self_character)
+	local area = {
+		left_top = { x = centre.x - 0.5, y = centre.y - 0.5 },
+		right_bottom = { x = centre.x + 0.5, y = centre.y + 0.5 },
+	}
+	for _, entity in pairs(surface.find_entities_filtered{ area = area }) do
+		if entity.valid ~= false
+			and entity ~= self_character
+			and not WALK_STALL_PASSABLE_TYPES[entity.type]
+			and walk_stall_collides(entity)
+		then
+			return false
+		end
+	end
+	local tile = surface.get_tile(centre.x, centre.y)
+	if tile ~= nil and tile.valid ~= false and type(tile.collides_with) == "function"
+		and tile.collides_with("player") then
+		return false
+	end
+	return true
+end
+
+-- Where a character stalled at `pos` should step to before its walk is
+-- failed: nil when the tile it stands on is already clear (the stall is not
+-- a pinned character, and there is nothing to step out of), else the nearest
+-- clear tile centre within WALK_STEP_CLEAR_RADIUS, nearest to `pos` first and
+-- north-west first among equals, or nil when none is.
+function walk_step_clear_landing(player, pos)
+	local surface = player.surface
+	local me = player.character
+	local here = tile_centre(pos)
+	if walk_tile_is_clear(surface, here, me) then return nil end
+	local candidates = {}
+	for dy = -WALK_STEP_CLEAR_RADIUS, WALK_STEP_CLEAR_RADIUS do
+		for dx = -WALK_STEP_CLEAR_RADIUS, WALK_STEP_CLEAR_RADIUS do
+			if dx ~= 0 or dy ~= 0 then
+				local c = { x = here.x + dx, y = here.y + dy }
+				candidates[#candidates + 1] = { centre = c, dist = distance(pos, c), dy = dy, dx = dx }
+			end
+		end
+	end
+	table.sort(candidates, function(a, b)
+		if a.dist ~= b.dist then return a.dist < b.dist end
+		if a.dy ~= b.dy then return a.dy < b.dy end
+		return a.dx < b.dx
+	end)
+	for _, c in ipairs(candidates) do
+		if walk_tile_is_clear(surface, c.centre, me) then return c.centre end
+	end
+	return nil
+end
+
 --- Where a bot standing in a refused footprint is asked to stand instead, and
 --- how hard the game is asked to find it somewhere.
 ---
@@ -1225,7 +1314,17 @@ function on_tick(event)
 						w.progress_tick = nil
 						if w.idx > #w.waypoints then
 							player.walking_state = {walking=false}
-							action_completed(event.tick, w.action_id)
+							if w.stepped_clear ~= nil then
+								-- The last waypoint was the step-clear landing,
+								-- not the caller's destination: this walk
+								-- stalled, and stepping clear is how it ends,
+								-- not where it was going. See
+								-- WALK_STEP_CLEAR_RADIUS.
+								action_failed(event.tick, w.action_id, w.stepped_clear.cause
+									.. ", then stepped clear to " .. coord(pos))
+							else
+								action_completed(event.tick, w.action_id)
+							end
 							storage.p[idx].walking = nil
 							writeout_player_position(event.tick, idx, player)
 							dx = 0
@@ -1370,21 +1469,57 @@ function on_tick(event)
 						if ok_speed and type(running) == "number" then
 							speed = string.format("%.3f", running)
 						end
-						w.stuck = "ERROR: stuck while walking, leg " .. w.idx .. " of "
+						local stuck = "ERROR: stuck while walking, leg " .. w.idx .. " of "
 							.. #w.waypoints .. " made no progress for "
 							.. (event.tick - since_progress) .. " ticks from "
 							.. coord(pos) .. " to " .. coord(dest)
 							.. ", moved " .. moved .. " tiles" .. leg .. ", " .. cause
 							.. ", steering " .. (direction ~= "" and direction or "nowhere") .. " at " .. speed
 							.. " tiles/tick, walking_state read back walking=" .. read_back
-						-- Nil the waypoint being steered at rather than advancing past
-						-- it: the `dest == nil` arm above then clears `walking` and
-						-- reports `w.stuck` on the next tick, which is the one exit a
-						-- failed walk has. Stop steering now -- `direction` above was
-						-- computed for a leg this walk is no longer walking.
-						direction = ""
-						player.walking_state = {walking=false}
-						w.waypoints[w.idx] = nil
+						-- A pinned character steps onto clear ground first, and
+						-- the walk is failed when it gets there (or when that
+						-- step stalls too). See WALK_STEP_CLEAR_RADIUS.
+						local landing = nil
+						if w.stepped_clear == nil then
+							local ok, found = pcall(walk_step_clear_landing, player, pos)
+							if ok then landing = found end
+						end
+						if landing ~= nil then
+							w.stepped_clear = { from = { x = pos.x, y = pos.y }, to = landing, cause = stuck }
+							w.waypoints = { landing }
+							w.idx = 1
+							w.idx_tick = event.tick
+							w.idx_pos = { x = pos.x, y = pos.y }
+							w.best_dist = nil
+							w.progress_tick = nil
+							print("Player is pinned at " .. coord(pos) .. ", stepping clear to "
+								.. coord(landing) .. " before failing the walk")
+							writeout(event.tick, "walk_step_clear", helpers.table_to_json({
+								player_id = idx,
+								action_id = w.action_id,
+								from = w.stepped_clear.from,
+								to = { x = landing.x, y = landing.y },
+								cause = cause,
+							}))
+							-- Steered at the landing from the next tick on; the
+							-- direction computed above was for the dead leg.
+							direction = ""
+							player.walking_state = {walking=false}
+						else
+							if w.stepped_clear ~= nil then
+								stuck = stuck .. ", after stepping clear from "
+									.. coord(w.stepped_clear.from) .. " towards " .. coord(w.stepped_clear.to)
+							end
+							w.stuck = stuck
+							-- Nil the waypoint being steered at rather than advancing past
+							-- it: the `dest == nil` arm above then clears `walking` and
+							-- reports `w.stuck` on the next tick, which is the one exit a
+							-- failed walk has. Stop steering now -- `direction` above was
+							-- computed for a leg this walk is no longer walking.
+							direction = ""
+							player.walking_state = {walking=false}
+							w.waypoints[w.idx] = nil
+						end
 					end
 
 					if direction ~= "" then
@@ -3459,17 +3594,7 @@ function rcon_place_entity(player_id, item_name, entity_position, direction)
 		-- `PlacementVerdict::is_durable_refusal`. Two call sites, one concept:
 		-- any character, not just the acting one, is a transient. A third path
 		-- asking this question must draw it the same way.
-		if position_in_rect(player.position, bb) then
-			rcon.print("§player_blocks_placement§")
-		elseif character_in_footprint(surface, footprint, pos) then
-			-- Ask whoever it is to move, so the next attempt has a chance of
-			-- finding the ground it was always going to find. Before this, the
-			-- classification was right and nothing acted on it: an idle bot in
-			-- a footprint was a transient with no end. See
-			-- `step_aside_from_footprint`.
-			step_aside_from_footprint(surface, footprint, pos, player)
-			rcon.print("cannot place item '"..item_name.."' because a character is standing in the footprint")
-		else
+		if not report_character_in_footprint(surface, footprint, bb, pos, player, item_name) then
 			-- The ground's verdict, and what was ON the ground when it was
 			-- given. The bare sentence is what `note_placement_refusal`
 			-- (crates/core/src/factorio/rcon.rs) matches and must stay
@@ -3513,6 +3638,30 @@ function rcon_place_entity(player_id, item_name, entity_position, direction)
 	-- phantom behind and needs no matching deletion event. `create_entity`
 	-- does not raise `script_raised_built` unless asked (`raise_built`
 	-- defaults to false **[V]**), so the game does not announce it either.
+	-- **Asked again at the instant of building, of the box about to be
+	-- built.** `can_place_entity` above collides with characters and this
+	-- handler runs between ticks, so nothing walks in between the two calls
+	-- -- but the question is cheap, and a character is the one blocker that
+	-- moves: the whole reason the two-way branch above exists is that the
+	-- game's verdict is not always about the ground. A character in the box
+	-- here, walking or standing, is refused with the transient wording (and
+	-- an idle one asked aside), never built over.
+	--
+	-- Gated on the scan of the raw box, not on the actor's position against
+	-- the expanded one: the expanded box reaches half a tile past what the
+	-- game judged, and an actor standing there with the game saying yes is a
+	-- placement that has always succeeded and must go on succeeding.
+	do
+		local pos = {x = entity_position[1], y = entity_position[2]}
+		local footprint = collision_box_facing(entproto.collision_box, direction)
+		if character_in_footprint(surface, footprint, pos) then
+			local bb = add_to_bounding_box(expand_rect_floor_ceil(footprint), pos)
+			report_character_in_footprint(surface, footprint, bb, pos, player, item_name)
+			stamp_tick()
+			return
+		end
+	end
+
 	local result = surface.create_entity{name=entproto.name,position=entity_position,direction=direction,force=player.force, fast_replace=true, player=player_identification(player_id), spill=true}
 
 	if result == nil then
@@ -3541,9 +3690,87 @@ function rcon_place_entity(player_id, item_name, entity_position, direction)
 		return
 	end
 
+	-- The entity stands and is paid for. If a character is inside it anyway
+	-- -- the game placed the box somewhere other than where it was judged,
+	-- or a check above was wrong about what the game collides with -- it is
+	-- moved out now, the way the game moves a player a building lands on,
+	-- and the move is in the reply and in the record. See
+	-- `push_characters_out_of`.
+	local pushed = push_characters_out_of(surface, result)
 	on_some_entity_created({tick=last_tick, entity = result})
-	rcon.print(helpers.table_to_json(serialize_entity(result)))
+	local reply = serialize_entity(result)
+	if #pushed > 0 then reply.pushed_out = pushed end
+	rcon.print(helpers.table_to_json(reply))
 	stamp_tick()
+end
+
+-- The two character arms of a placement refusal, in the order
+-- `rcon_place_entity` documents: the acting player in the expanded box gets
+-- the `§player_blocks_placement§` sentinel, any other character in the raw
+-- box gets the transient wording and, when idle, a walk out. Prints the
+-- reply and answers true when a character was the cause; false when the
+-- caller has to report the ground.
+function report_character_in_footprint(surface, footprint, bb, pos, player, item_name)
+	if position_in_rect(player.position, bb) then
+		rcon.print("§player_blocks_placement§")
+		return true
+	elseif character_in_footprint(surface, footprint, pos) then
+		-- Ask whoever it is to move, so the next attempt has a chance of
+		-- finding the ground it was always going to find. Before this, the
+		-- classification was right and nothing acted on it: an idle bot in
+		-- a footprint was a transient with no end. See
+		-- `step_aside_from_footprint`.
+		step_aside_from_footprint(surface, footprint, pos, player)
+		rcon.print("cannot place item '"..item_name.."' because a character is standing in the footprint")
+		return true
+	end
+	return false
+end
+
+--- How far from its own position a character overlapped by a freshly built
+--- entity is allowed to be moved to stand clear of it, and how finely the
+--- spot is chosen. A character is 0.4 tiles across and nothing this mod
+--- builds is wider than a steam engine, so a few tiles always holds a spot.
+PLACEMENT_PUSH_OUT_RADIUS = 4
+PLACEMENT_PUSH_OUT_PRECISION = 0.25
+
+-- Moves every character overlapping `entity`'s real bounding box to the
+-- nearest spot the game says a character fits, and reports each move.
+--
+-- **What the game does for a player, done for a character.** A building
+-- placed on a connected player pushes the player out; a server-side
+-- `character` entity gets no such courtesy, and one left inside a furnace
+-- has every path request refused from then on -- there is no legitimate
+-- action that gets it out, because walking starts with the pathfinder. The
+-- move is a `teleport`, recorded through `teleport_writeout` so the record
+-- shows it as one (`record.teleports()`), and returned so the reply carries
+-- it too: `{ bot = <id or 0>, from = {x,y}, to = {x,y} }` per character. A
+-- character that fits nowhere within the radius is left and reported with
+-- `to = nil` rather than silently.
+--
+-- Read off `entity.bounding_box` -- the box the game gave the entity, at the
+-- position and orientation it actually has -- not off the prototype box the
+-- checks before `create_entity` reasoned about. This is the one scan that
+-- cannot be wrong about which box was built.
+function push_characters_out_of(surface, entity)
+	local pushed = {}
+	local bb = entity.bounding_box
+	if bb == nil then return pushed end
+	for _, character in pairs(surface.find_entities_filtered{ area = bb, type = "character" }) do
+		if character.valid ~= false and character ~= entity then
+			local from = { x = character.position.x, y = character.position.y }
+			local landing = surface.find_non_colliding_position(
+				"character", from, PLACEMENT_PUSH_OUT_RADIUS, PLACEMENT_PUSH_OUT_PRECISION)
+			local id = bot_of_character(character) or 0
+			local record = { bot = id, from = from }
+			if landing ~= nil and type(character.teleport) == "function" and character.teleport(landing) then
+				record.to = { x = landing.x, y = landing.y }
+				teleport_writeout(game.tick, id, "placement_pushed_out", from, record.to, nil)
+			end
+			pushed[#pushed + 1] = record
+		end
+	end
+	return pushed
 end
 
 -- The exact question a build asks the game, in one place.
@@ -5309,12 +5536,21 @@ function rcon_spawn_bots(count)
 	local surface = game.surfaces[1]
 	local force = game.forces["player"]
 	local spawned, kept = {}, {}
+	-- Where the characters that survive from a previous call stand, so the
+	-- new ones are placed clear of them too. See `character_spawn_position`.
+	local taken = {}
+	for _, bot in pairs(storage.bots) do
+		if bot.entity ~= nil and bot.entity.valid then
+			local p = bot.entity.position
+			taken[#taken + 1] = { x = p.x, y = p.y }
+		end
+	end
 	for id = 1, count do
 		local bot = storage.bots[id]
 		if bot ~= nil and bot.entity ~= nil and bot.entity.valid then
 			kept[#kept + 1] = id
 		else
-			local ent = create_bot_character(surface, force)
+			local ent = create_bot_character(surface, force, id, taken)
 			storage.bots[id] = { entity = ent, name = "bot-" .. id }
 			-- The same starting inventory a joining player gets from freeplay.
 			if remote.interfaces["freeplay"] and remote.interfaces["freeplay"]["get_created_items"] then
@@ -5331,9 +5567,92 @@ function rcon_spawn_bots(count)
 	rcon.print(helpers.table_to_json({ spawned = spawned, kept = kept }))
 end
 
-function create_bot_character(surface, force)
-	local origin = force.get_spawn_position(surface)
+--- How far apart character bots are spawned, in tiles, and how many lattice
+--- points past its own a bot may try before falling back to the game's own
+--- search.
+---
+--- **Half a tile is not apart.** The first eight-bot run
+--- (`run-1788614781-38058`) spawned its characters through
+--- `find_non_colliding_position("character", spawn, 32, 0.5)`, which answered
+--- `(0,0) (-0.5,-0.5) (-0.5,0.5) (0.5,-0.5) (0,-0.5) (0,0.5) (-0.5,0) (0.5,0)`:
+--- eight characters inside one two-by-two tile square, legal by the collision
+--- box (0.4 across) and useless to the pathfinder, which refused the first walk
+--- of bots 1, 5 and 6 -- the three at `x = 0`, each with two neighbours on its
+--- own tile -- with `failed to path find` from the spawn itself. The executor's
+--- walk memory then learned three perfectly reachable destinations as
+--- unreachable. A player joining a server is placed the same way and the same
+--- thing would happen to eight of them, except that players move on their own
+--- and a headless roster waits to be told.
+---
+--- So each bot gets its own tile, two apart, on a spiral about the spawn in
+--- bot-id order -- deterministic, so bot 3 stands where bot 3 stood last run
+--- -- and the game is asked only to confirm that tile centre (or the nearest
+--- within a tile of it) is standable. A candidate within a tile of a character
+--- already placed is skipped for the next lattice point, so the answer holds
+--- whether or not the game counts characters as colliding.
+CHARACTER_SPAWN_SPACING = 2
+CHARACTER_SPAWN_TRIES = 64
+
+-- The n-th point (n >= 1) of a square spiral on the integer lattice: ring 0 is
+-- the origin, ring k the 8k points at Chebyshev distance k, each ring in a
+-- fixed row-major order. Pure, so a test can enumerate it.
+function character_spawn_offset(n)
+	if n <= 1 then return { x = 0, y = 0 } end
+	local rest = n - 1
+	local k = 1
+	while rest > 8 * k do
+		rest = rest - 8 * k
+		k = k + 1
+	end
+	local i = 0
+	for dy = -k, k do
+		for dx = -k, k do
+			if math.max(math.abs(dx), math.abs(dy)) == k then
+				i = i + 1
+				if i == rest then return { x = dx, y = dy } end
+			end
+		end
+	end
+	return { x = k, y = k }
+end
+
+-- Where bot `id` is spawned: its own tile on the spiral, confirmed by the
+-- game, and at least a tile from every position in `taken` (which this
+-- function appends to). Falls back to the game's own wide search only when
+-- every lattice point tried is water, cliff or somebody else.
+function character_spawn_position(surface, origin, id, taken)
+	local base = { x = math.floor(origin.x) + 0.5, y = math.floor(origin.y) + 0.5 }
+	local n = id
+	for _ = 1, CHARACTER_SPAWN_TRIES do
+		local off = character_spawn_offset(n)
+		local candidate = {
+			x = base.x + off.x * CHARACTER_SPAWN_SPACING,
+			y = base.y + off.y * CHARACTER_SPAWN_SPACING,
+		}
+		local pos = surface.find_non_colliding_position("character", candidate, 1, 0.5, true)
+		if pos ~= nil then
+			local clear = true
+			for _, other in ipairs(taken) do
+				if math.max(math.abs(other.x - pos.x), math.abs(other.y - pos.y)) < 1 then
+					clear = false
+					break
+				end
+			end
+			if clear then
+				taken[#taken + 1] = { x = pos.x, y = pos.y }
+				return pos
+			end
+		end
+		n = n + 1
+	end
 	local pos = surface.find_non_colliding_position("character", origin, 32, 0.5) or origin
+	taken[#taken + 1] = { x = pos.x, y = pos.y }
+	return pos
+end
+
+function create_bot_character(surface, force, id, taken)
+	local origin = force.get_spawn_position(surface)
+	local pos = character_spawn_position(surface, origin, id or 1, taken or {})
 	return surface.create_entity{ name = "character", position = pos, force = force }
 end
 

@@ -440,6 +440,29 @@ impl OutputParser {
                     );
                 }
             },
+            // A stalled character stood on a tile something collides with
+            // and is walking to the nearest clear one before its walk is
+            // failed (`walk_step_clear_landing` in `mods/BotBridge/control.lua`).
+            // Not a teleport -- it is a walk -- so it is logged, not queued
+            // as one; the walk's own failure carries the same fact into the
+            // record (`then stepped clear to (x/y)`).
+            "walk_step_clear" => match serde_json::from_str::<serde_json::Value>(rest) {
+                Ok(event) => {
+                    warn!(
+                        "<yellow>step clear</>: bot {} is pinned at {} ({}), walking to {} before its walk is failed",
+                        event["player_id"],
+                        event["from"],
+                        event["cause"].as_str().unwrap_or("cause unknown"),
+                        event["to"],
+                    );
+                }
+                Err(err) => {
+                    error!(
+                        "<red>failed to deserialize walk_step_clear</>: {:?} '{}'",
+                        err, rest
+                    );
+                }
+            },
             // A bot lost its character (`on_player_died` in
             // `mods/BotBridge/control.lua`). Logged here so it is visible
             // while the run happens, and queued on `self.world` for

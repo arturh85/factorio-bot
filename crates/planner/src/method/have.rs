@@ -243,6 +243,7 @@ pub fn holds(goal: &Goal, state: &PlanState) -> Option<bool> {
         // well": nothing in the overlay records an extractor standing on a
         // patch, and nothing observes output. Unanswerable, not unmet.
         Goal::Extracted { .. } => None,
+        Goal::Built { .. } => None,
         Goal::All(goals) => {
             let mut answer = Some(true);
             for g in goals {

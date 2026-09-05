@@ -229,6 +229,12 @@ impl std::error::Error for PlanRefusal {}
 ///   never told about the technology, and both are broken inputs rather than
 ///   verdicts. `supervisor.lua` has named "an unknown item or technology" a
 ///   construction error since it was written, and this keeps that promise.
+/// - [`BlueprintRefused`](PlannerError::BlueprintRefused) -- a fault for the
+///   same reason as `UnknownTechnology`: it names a defect in the blueprint
+///   *string* the script handed over (bad base64, bad zlib, bad JSON, or
+///   content outside the decoder's allowlist), not a fact about the world.
+///   No map, no research and no amount of exploring changes whether a given
+///   string decodes.
 /// - The three cell variants -- [`NoCellProduces`](PlannerError::NoCellProduces),
 ///   [`NoPatchForCell`](PlannerError::NoPatchForCell) and
 ///   [`NoRoomForCell`](PlannerError::NoRoomForCell) and
@@ -310,7 +316,8 @@ fn refusal_for(err: &PlannerError) -> Option<PlanRefusal> {
         | PlannerError::BufferShort { .. }
         | PlannerError::UnknownTechnology { .. }
         | PlannerError::NoMachineForRecipe { .. }
-        | PlannerError::TooManyCells { .. } => false,
+        | PlannerError::TooManyCells { .. }
+        | PlannerError::BlueprintRefused { .. } => false,
     };
     verdict.then(|| PlanRefusal {
         // Every variant carries a `#[diagnostic(code(...))]` today. The

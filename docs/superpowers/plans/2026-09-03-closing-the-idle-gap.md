@@ -220,6 +220,43 @@ three bots one extra iron furnace (three actions) reorders bot 3's ready
 work and its `take 10 copper-ore from the wooden-chest` moves from 8,860 to
 13,473 with no furnace of its involved.
 
+## ✅ GREEN FROM A FRESH WORLD IN 20:59 (`run-1788604520-39283`) — copper bank merged, and the tail is one bot
+
+Run 13, 2026-09-05 12:31, master `cf73a47f` (copper `shared_grow` `48847c80`
+merged), four clients at 1x, seed 31337 `--new`, debug build, log in
+`workspace/session-logs/run13.log`.
+
+| | |
+|---|---|
+| green cell producing 6/min | **20:59** (75,543 ticks) |
+| green witness | **21:38** |
+| plan | one — 816 steps, 623 actions, 0 failed, 0 lost, 193 of 193 walks |
+| planned vs executed | 71,167 vs 75,543 — 6.1% |
+| fleet utilisation | **44.9%** (bot 1 the whole window; bots 2–4 idle for the last 12.6 / 10.0 / 7.4 min) |
+| steps/bot | {1: 278, 2: 123, 3: 115, 4: 107}; planned ticks {1: 40,276, 2: 17,166, 3: 20,800, 4: 24,660} |
+
+Fresh-world green: **64:22 → 36:48 → 31:35 → 26:32 → 29:09 → 23:38 → 20:59.**
+Three walk stalls at tick ~9,000 where our own furnace at ≈(-12.8,-11.5) and
+drill at ≈(-12.6,-13.6) pinch the walkway next to spawn and bots 1, 3, 4 met
+there together; one `failed to path find` for bot 4's mining approach near
+(35.7,-52.8). All resolved by the walker's steering and the recovery tiers;
+no walk failed. Bot 1's idle by verb waited for: `take` 13,947 ticks,
+`research` 2,927.
+
+**The mechanism now in the way is the tail.** The plan ends the other three
+bots at ticks 36,027 / 46,079 / 59,367 and leaves bot 1 alone for 47 actions
+and 35,000 ticks: all 22 `place` steps of the green cell, all crafting of the
+cell's parts (copper-cable 1,530 ticks, gears 1,020, circuits 1,020, inserters
+1,020 — 4,600 ticks a free bot could have taken), **and both researches**.
+`research automation` (6,000 ticks) starts at 53,423, behind bot 1's queue,
+while bot 2 has been idle since 36,027; `research logistic-science-pack`
+(11,400) then gates the recipe set and the charging. Research is chained to
+the crafter because the lab and the packs are in bot 1's hands, and the cell
+build is one bot's sequence. Two levers, both planner: hand the research to
+the earliest free bot (a materials handover through the cell's chest is one
+action) and split the cell's crafting and placing across the idle roster the
+way `Holder::Share` splits research. Dispatched as the `tail` worktree.
+
 ## ✅ GREEN FROM A FRESH WORLD IN 23:38 (`run-1788594774-55056`) — the furnace-slot fix, executed
 
 Git `b0ed1d25`: a bot with no furnace of its own on the patch builds one as its
@@ -2238,7 +2275,7 @@ infrastructure for a 3h17m game, not a harder milestone.
 | red science producing **once** | never observed | witnessed six times, all inside 780 ticks |
 | red science producing **at a rate** | impossible to claim | **5 packs in 3,240 ticks (~5.5/min)**, twice |
 | green science, planning | did not expand at all | plans end to end |
-| green science, live | never run | **WITNESSED eight times** — fresh world **23:38 / 24:16** (`run-1788594774-55056`), one plan, zero failures; 64:22 → 36:48 → 31:35 → 26:32 → 29:09 → 23:38 over one night |
+| green science, live | never run | **WITNESSED nine times** — fresh world **20:59 / 21:38** (`run-1788604520-39283`), one plan, zero failures; 64:22 → 36:48 → 31:35 → 26:32 → 29:09 → 23:38 → 20:59 |
 | furnaces per run | 42 | **8** |
 | recovery (`obs:recover`) | never executed in any run | **fires live** |
 

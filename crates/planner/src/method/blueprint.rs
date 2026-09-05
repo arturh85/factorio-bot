@@ -6,35 +6,99 @@ use crate::goal::{Goal, Holder};
 use crate::method::have::PLACE_TICKS;
 use crate::method::{ExpansionCtx, Method, Step};
 use crate::state::PlanState;
-use factorio_bot_core::blueprint::{Blueprint, BlueprintEntity, decode};
-use factorio_bot_core::types::{FactorioEntity, Pos, Position};
+use factorio_bot_core::blueprint::{Blueprint, BlueprintEntity, UndergroundHalf, decode};
+use factorio_bot_core::num_traits::FromPrimitive;
+use factorio_bot_core::types::{Direction, FactorioEntity, Pos, Position};
 use std::collections::BTreeMap;
 
-/// Split a block into one band per bot, **balanced by entity count**.
+/// Which of a block's two axes the bands are cut across.
 ///
-/// Sorted by x, then chunked so each band holds as near an equal number of
-/// entities as divides. Balancing by width instead would hand one bot a dense
-/// corner and another an empty margin.
+/// Not a preference: a band is only a *region* if the cut runs across the
+/// block's short side, and the promise a band makes -- "a bot never crosses
+/// another's band, which is the structural reason two of them cannot trap
+/// each other" -- is a promise about regions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SplitAxis {
+    /// Vertical slabs: cut across x, right for a block wider than it is tall.
+    X,
+    /// Horizontal slabs: cut across y.
+    Y,
+}
+
+/// The axis `bands` will cut across for these entities: the block's LONGER
+/// one, so the slabs are cut across its short side.
 ///
-/// Deterministic: the sort is by `total_cmp` on x with the entity's index as
-/// the tie-break, so equal-x entities always fall the same way.
+/// Ties (a square block) go to x, which is the axis this function always
+/// used; nothing about a square makes either choice better and a fixed
+/// tie-break keeps the split deterministic.
+fn split_axis(entities: &[BlueprintEntity]) -> SplitAxis {
+    let mut min = (f64::INFINITY, f64::INFINITY);
+    let mut max = (f64::NEG_INFINITY, f64::NEG_INFINITY);
+    for e in entities {
+        min = (min.0.min(e.offset.x()), min.1.min(e.offset.y()));
+        max = (max.0.max(e.offset.x()), max.1.max(e.offset.y()));
+    }
+    let width = max.0 - min.0;
+    let height = max.1 - min.1;
+    if height > width {
+        SplitAxis::Y
+    } else {
+        SplitAxis::X
+    }
+}
+
+/// Split a block into one band per bot, **balanced by entity count and cut
+/// across the block's longer axis**.
+///
+/// Sorted along the dominant axis, then chunked so each band holds as near an
+/// equal number of entities as divides. Balancing by *extent* instead would
+/// hand one bot a dense corner and another an empty margin, which is why the
+/// chunking counts entities; choosing the axis by extent is a different
+/// question and is answered by [`split_axis`].
+///
+/// **This sorted by x unconditionally until 2026-09-05, and the spec's
+/// spatial claim was false on a fixture this crate ships.** `MinerLine` is 4
+/// tiles wide and 21 tall: over its 37 entities, bands 0, 1 and 2 all
+/// occupied x = 3.5, and band 0 spanned the whole 20-tile height that bands 1
+/// and 2 were segments of -- three bots interleaved in a one-tile corridor,
+/// which is the opposite of the disjointness the band exists to provide. The
+/// synthetic test that passed was correct for its own case (a wide block) and
+/// is exactly what let this through; `bands_over_the_real_miner_line_are_
+/// disjoint_along_the_split_axis` is the one that would not have.
+///
+/// **The remainder is spread, not dumped.** `div_ceil` chunking gave six
+/// entities across four bots as 2/2/2/0 -- a whole idle bot -- where the even
+/// split is 2/2/1/1. The first `n % bots` bands take one extra each.
+///
+/// Deterministic: the sort is by `total_cmp` on the chosen axis with the
+/// entity's index as the tie-break, so equal-coordinate entities always fall
+/// the same way.
 pub fn bands(entities: &[BlueprintEntity], bots: usize) -> Vec<Vec<usize>> {
     if bots == 0 {
         return Vec::new();
     }
+    let axis = split_axis(entities);
+    let key = |i: usize| match axis {
+        SplitAxis::X => entities[i].offset.x(),
+        SplitAxis::Y => entities[i].offset.y(),
+    };
     let mut order: Vec<usize> = (0..entities.len()).collect();
-    order.sort_by(|a, b| {
-        entities[*a]
-            .offset
-            .x()
-            .total_cmp(&entities[*b].offset.x())
-            .then(a.cmp(b))
-    });
+    order.sort_by(|a, b| key(*a).total_cmp(&key(*b)).then(a.cmp(b)));
+
+    // Sizes first, then fill: `n / bots` each, and the first `n % bots` bands
+    // take one extra. Bands that want nothing (more bots than entities) stay
+    // empty rather than being handed a stray entity.
+    let base = entities.len() / bots;
+    let remainder = entities.len() % bots;
     let mut out = vec![Vec::new(); bots];
-    let per = entities.len().div_ceil(bots).max(1);
-    for (slot, idx) in order.into_iter().enumerate() {
-        out[(slot / per).min(bots - 1)].push(idx);
+    let mut rest = order.as_slice();
+    for (band, slot) in out.iter_mut().enumerate() {
+        let size = base + usize::from(band < remainder);
+        let (mine, tail) = rest.split_at(size);
+        slot.extend_from_slice(mine);
+        rest = tail;
     }
+    debug_assert!(rest.is_empty(), "every entity lands in exactly one band");
     out
 }
 
@@ -112,16 +176,64 @@ fn place_step(ctx: &mut ExpansionCtx, entity: FactorioEntity, build: f64, note: 
     step
 }
 
-/// Is a blueprint entity of `name` already standing centred at `world`?
+/// `"input"` / `"output"` / `"neither"`, for a refusal message.
+fn half_name(half: Option<UndergroundHalf>) -> &'static str {
+    match half {
+        Some(UndergroundHalf::Input) => "input",
+        Some(UndergroundHalf::Output) => "output",
+        None => "neither",
+    }
+}
+
+/// What is standing where a blueprint entity wants to be.
+///
+/// Three answers, and the middle one is the whole point of this type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Standing {
+    /// Nothing of this name is centred on that tile.
+    Nothing,
+    /// The blueprint's entity, exactly as designed -- same name, same tile,
+    /// same facing, same underground half. Nothing to do.
+    AsDesigned,
+    /// Something of the right name on the right tile, **facing the wrong way
+    /// or the wrong half of an underground pair**. Carries what stands and
+    /// what was wanted, so a refusal can say both.
+    Differently {
+        direction: (u8, u8),
+        half: (Option<UndergroundHalf>, Option<UndergroundHalf>),
+    },
+}
+
+/// Is `e` already standing, as designed, centred at `world`?
 ///
 /// The same pattern `assemble.rs::standing_parts` and `power.rs::finish` use:
 /// `entity_at` answers for anything covering the point, so the name and the
 /// **tile-centred** position both have to match, or a machine one tile off
 /// the layout would be read as this one.
-fn already_stands(state: &PlanState, name: &str, world: &Position) -> bool {
-    match state.entity_at(world) {
-        Some(entity) => entity.name == name && Pos::from(&entity.position) == Pos::from(world),
-        None => false,
+///
+/// **It compared name and tile only until 2026-09-05, and that is the worst
+/// shape of bug this branch can have.** A belt standing on the right tile
+/// facing the wrong way, or an underground half placed as `input` where
+/// `output` was wanted, read as *already built*. It cannot produce a bad
+/// build from a clean start -- but it permanently freezes one in, because
+/// replanning is exactly what would otherwise correct it, and replanning is
+/// the mechanism this whole method is built on ("re-derived against the world
+/// on every expansion rather than remembered"). Direction and
+/// `underground_half` are the two fields whose whole reason for existing on
+/// this path is that placing correctly and functioning are separate concerns.
+fn already_stands(state: &PlanState, e: &BlueprintEntity, world: &Position) -> Standing {
+    let Some(entity) = state.entity_at(world) else {
+        return Standing::Nothing;
+    };
+    if entity.name != e.name || Pos::from(&entity.position) != Pos::from(world) {
+        return Standing::Nothing;
+    }
+    if entity.direction == e.direction && entity.underground_half == e.underground_half {
+        return Standing::AsDesigned;
+    }
+    Standing::Differently {
+        direction: (entity.direction, e.direction),
+        half: (entity.underground_half, e.underground_half),
     }
 }
 
@@ -157,15 +269,71 @@ impl Method for BuildBlock {
 
         // Only what is NOT already standing. This is what makes the goal
         // re-checkable on a replan and idempotent when built twice.
+        //
+        // An entity standing on the right tile facing the WRONG way is
+        // neither: it is not built, and this method has no action that
+        // rotates or removes it (`ActionKind` has `Place`, and its `Remove`
+        // is an inventory slot, not an entity). Emitting the placement anyway
+        // would dispatch a build the game refuses -- `can_place_entity` is
+        // asked without fast-replace (`rcon_place_entity`,
+        // mods/BotBridge/control.lua) -- and a refused build is *remembered*
+        // as a fact about that ground for the rest of the run
+        // (`note_placement_refusal`). So it is refused here, by name, saying
+        // both facings. What must never happen again is the third option:
+        // reading it as done.
         let mut wanted: Vec<&BlueprintEntity> = Vec::new();
         for e in &bp.entities {
             let world = anchor.add(&e.offset);
-            if !already_stands(&ctx.state, &e.name, &world) {
-                wanted.push(e);
+            match already_stands(&ctx.state, e, &world) {
+                Standing::AsDesigned => {}
+                Standing::Nothing => wanted.push(e),
+                Standing::Differently { direction, half } => {
+                    return Err(PlannerError::BlockGroundOccupied {
+                        entity: e.name.clone(),
+                        tile: format!("({}, {})", world.x(), world.y()),
+                        occupant: format!(
+                            "a {} already stands there facing {} where the blueprint wants {}{}; \
+                             this planner has no action that rotates or removes a standing \
+                             entity, so it cannot be corrected from here",
+                            e.name,
+                            direction.0,
+                            direction.1,
+                            match half {
+                                (standing, wanted) if standing != wanted => format!(
+                                    ", and it is the {} half where the {} half was wanted",
+                                    half_name(standing),
+                                    half_name(wanted)
+                                ),
+                                _ => String::new(),
+                            }
+                        ),
+                    });
+                }
             }
         }
         if wanted.is_empty() {
             return Ok(Vec::new());
+        }
+
+        // **The fourth refusal: the ground itself.** The spec named it and it
+        // was never built, so occupancy reached the caller as
+        // `PlannerError::ChainOwnerInfeasible` out of `schedule()` -- an
+        // internal scheduling verdict standing in for a fact about a tile.
+        // Four runs across three anchors were spent distinguishing hypotheses
+        // this answers in one line, and the note recording them still ends
+        // unresolved. Scanned over the whole footprint BEFORE a single step
+        // is emitted, so nothing half-plans; and only over `wanted`, since an
+        // entity already standing as designed occupies its own tile.
+        for e in &wanted {
+            let world = anchor.add(&e.offset);
+            let facing = Direction::from_u8(e.direction).unwrap_or(Direction::North);
+            if let Some(occupant) = ctx.state.placement_occupant(&e.name, &world, facing) {
+                return Err(PlannerError::BlockGroundOccupied {
+                    entity: e.name.clone(),
+                    tile: format!("({}, {})", world.x(), world.y()),
+                    occupant: occupant.to_string(),
+                });
+            }
         }
 
         let owned: Vec<BlueprintEntity> = wanted.iter().map(|e| (*e).clone()).collect();
@@ -419,6 +587,310 @@ mod tests {
             ]),
             "the bill states exactly what MinerLine's 37 entities need, and \
              nothing else: {bill:?}"
+        );
+    }
+
+    /// **The band's spatial promise, checked against a fixture this crate
+    /// ships, which is where the promise was false.**
+    ///
+    /// The spec claims "a bot never crosses another's band, which is the
+    /// structural reason two of them cannot trap each other". `bands` sorted
+    /// by x unconditionally, so over `MinerLine` -- 4 tiles wide, 20 tall --
+    /// bands 0, 1 and 2 all occupied x = 3.5 (21 of its 37 entities sit on
+    /// that one column) and band 0 spanned the whole height that bands 1 and
+    /// 2 were segments of: three bots interleaved in a one-tile corridor.
+    ///
+    /// `bands_split_by_count_not_by_width` above is correct and passed
+    /// throughout, because its synthetic block is wide. That is exactly how
+    /// this got through, and it is why this test uses the real fixture.
+    #[test]
+    fn bands_over_the_real_miner_line_are_disjoint_along_the_split_axis() {
+        let bp = decode(include_str!("../../../core/tests/blueprints/miner_line.txt").trim())
+            .expect("fixture decodes");
+
+        assert_eq!(
+            split_axis(&bp.entities),
+            SplitAxis::Y,
+            "MinerLine spans x 1.5..=5.5 and y 0.5..=20.5, so the cut runs across y"
+        );
+
+        let split = bands(&bp.entities, 4);
+        let interval = |band: &Vec<usize>| {
+            band.iter()
+                .fold((f64::INFINITY, f64::NEG_INFINITY), |acc, i| {
+                    let y = bp.entities[*i].offset.y();
+                    (acc.0.min(y), acc.1.max(y))
+                })
+        };
+        let mut reached = f64::NEG_INFINITY;
+        for (n, band) in split.iter().enumerate() {
+            assert!(
+                !band.is_empty(),
+                "37 across 4 leaves no band empty: {split:?}"
+            );
+            let (lo, hi) = interval(band);
+            assert!(
+                lo >= reached,
+                "band {n} starts at y={lo} but band {} already reached y={reached}: the bands \
+                 interleave, which is the failure this test exists for",
+                n.saturating_sub(1)
+            );
+            reached = hi;
+        }
+
+        // And the demonstration that x was the wrong axis for this block:
+        // every band covers essentially the whole 4-tile width, so no cut
+        // across x could have separated them into regions at all.
+        for (n, band) in split.iter().enumerate() {
+            let (lo, hi) = band
+                .iter()
+                .fold((f64::INFINITY, f64::NEG_INFINITY), |acc, i| {
+                    let x = bp.entities[*i].offset.x();
+                    (acc.0.min(x), acc.1.max(x))
+                });
+            assert!(
+                hi - lo >= 2.0,
+                "band {n} spans x {lo}..={hi}; MinerLine's bands all span its width, which is \
+                 why the split cannot be made along x"
+            );
+        }
+    }
+
+    /// **The remainder is spread, not dumped on the last band.**
+    /// `div_ceil` chunking gave six entities across four bots as 2/2/2/0 --
+    /// a whole idle bot on a small block -- where the even split is 2/2/1/1.
+    #[test]
+    fn a_remainder_is_spread_across_the_bands_not_dumped() {
+        let ents: Vec<BlueprintEntity> = (0..6).map(|i| at(i as f64)).collect();
+        let lengths: Vec<usize> = bands(&ents, 4).iter().map(Vec::len).collect();
+        assert_eq!(lengths, vec![2, 2, 1, 1], "six across four is 2/2/1/1");
+
+        // And nothing is lost or duplicated by the spreading.
+        let ents: Vec<BlueprintEntity> = (0..37).map(|i| at((i % 7) as f64)).collect();
+        let split = bands(&ents, 4);
+        let lengths: Vec<usize> = split.iter().map(Vec::len).collect();
+        assert_eq!(lengths, vec![10, 9, 9, 9], "37 across four is 10/9/9/9");
+        let mut seen: Vec<usize> = split.iter().flatten().copied().collect();
+        seen.sort_unstable();
+        assert_eq!(seen, (0..37).collect::<Vec<_>>());
+    }
+
+    /// A block with fewer entities than bots leaves the extra bands empty
+    /// rather than handing one of them a stray entity.
+    #[test]
+    fn more_bots_than_entities_leaves_the_extra_bands_empty() {
+        let ents: Vec<BlueprintEntity> = (0..2).map(|i| at(i as f64)).collect();
+        let lengths: Vec<usize> = bands(&ents, 4).iter().map(Vec::len).collect();
+        assert_eq!(lengths, vec![1, 1, 0, 0]);
+    }
+
+    /// **The worst shape of bug this method can have, and it was live.**
+    ///
+    /// `already_stands` compared name and tile only, so a belt standing on
+    /// the right tile facing the WRONG way read as already built. It cannot
+    /// produce a bad build from a clean start; it *freezes one in*, because
+    /// replanning -- the mechanism this whole method rests on -- is what
+    /// would otherwise correct it, and this is the one path the branch exists
+    /// to protect.
+    ///
+    /// The correction is not a silent placement. `ActionKind` has no action
+    /// that rotates or removes a standing entity, and `rcon_place_entity`
+    /// asks `can_place_entity` without fast-replace, so a placement emitted
+    /// over the wrong-facing belt would be refused at dispatch AND remembered
+    /// as a fact about that ground for the rest of the run
+    /// (`note_placement_refusal`). So it is refused here, by name, saying
+    /// both facings -- what must never happen again is reading it as done.
+    #[test]
+    fn an_entity_facing_the_wrong_way_is_not_read_as_already_built() {
+        use crate::ids::BotId;
+        use factorio_bot_core::test_utils::fixture_world;
+        use std::sync::Arc;
+
+        let blueprint = include_str!("../../../core/tests/blueprints/miner_line.txt")
+            .trim()
+            .to_string();
+        let bp = decode(&blueprint).expect("fixture decodes");
+        let anchor = Position::new(0.0, 0.0);
+
+        let mut ctx = ExpansionCtx::new(
+            PlanState::from_world(Arc::new(fixture_world()), &[BotId(1)]),
+            BotId(1),
+        );
+        // Stand the whole block as designed, then turn ONE belt.
+        let turned = bp
+            .entities
+            .iter()
+            .position(|e| e.name == "transport-belt")
+            .expect("MinerLine has belts");
+        for (n, e) in bp.entities.iter().enumerate() {
+            let world = anchor.add(&e.offset);
+            let mut entity = entity_for(&ctx.state, e, &world);
+            if n == turned {
+                // 4 is east, 12 is west: the same tile, the opposite way, and
+                // a belt run that carries nothing.
+                entity.direction = if e.direction == 4 { 12 } else { 4 };
+            }
+            ctx.state.create_entity(entity);
+        }
+
+        // The direct fact first: the standing entity is NOT "as designed".
+        let e = &bp.entities[turned];
+        let world = anchor.add(&e.offset);
+        assert!(
+            matches!(
+                already_stands(&ctx.state, e, &world),
+                Standing::Differently { .. }
+            ),
+            "a belt facing the wrong way is neither absent nor as designed"
+        );
+
+        // And the goal it belongs to no longer plans as if the block were
+        // finished. Before this fix `expand` returned Ok(vec![]) here -- the
+        // exact silent freeze.
+        let goal = Goal::Built { blueprint, anchor };
+        let err = BuildBlock
+            .expand(&goal, &mut ctx)
+            .expect_err("a wrong-facing entity is not silently accepted");
+        let message = err.to_string();
+        assert!(
+            message.contains("transport-belt")
+                && message.contains(&format!("({}, {})", world.x(), world.y())),
+            "the refusal names the entity and the tile: {message}"
+        );
+        assert!(
+            message.contains("facing"),
+            "the refusal says which way it faces and which way was wanted: {message}"
+        );
+    }
+
+    /// The underground half is the other field whose whole reason for
+    /// existing is that placing correctly and functioning are separate
+    /// concerns: an `input` half where an `output` was wanted stands on the
+    /// right tile, faces the right way, and connects nothing.
+    #[test]
+    fn an_underground_belt_on_the_wrong_half_is_not_read_as_already_built() {
+        use crate::ids::BotId;
+        use factorio_bot_core::test_utils::fixture_world;
+        use std::sync::Arc;
+
+        let blueprint = include_str!("../../../core/tests/blueprints/furnace_line.txt")
+            .trim()
+            .to_string();
+        let bp = decode(&blueprint).expect("fixture decodes");
+        let anchor = Position::new(0.0, 0.0);
+        let mut ctx = ExpansionCtx::new(
+            PlanState::from_world(Arc::new(fixture_world()), &[BotId(1)]),
+            BotId(1),
+        );
+
+        let e = bp
+            .entities
+            .iter()
+            .find(|e| e.underground_half == Some(UndergroundHalf::Input))
+            .expect("FurnaceLine has an input half");
+        let world = anchor.add(&e.offset);
+        let mut standing = entity_for(&ctx.state, e, &world);
+        standing.underground_half = Some(UndergroundHalf::Output);
+        ctx.state.create_entity(standing);
+
+        match already_stands(&ctx.state, e, &world) {
+            Standing::Differently { half, .. } => assert_eq!(
+                half,
+                (Some(UndergroundHalf::Output), Some(UndergroundHalf::Input)),
+                "the refusal has to know which half stands and which was wanted"
+            ),
+            other => panic!("the wrong half must not read as built: {other:?}"),
+        }
+    }
+
+    /// **The spec's fourth refusal, which was never built.**
+    ///
+    /// `expand` used to emit every placement regardless of what was on the
+    /// ground, and occupancy surfaced from `schedule()` as
+    /// `ChainOwnerInfeasible` -- an internal scheduling verdict standing in
+    /// for a fact about a tile. Four runs across three anchors were spent
+    /// distinguishing hypotheses this answers in one line.
+    #[test]
+    fn a_block_whose_ground_is_occupied_is_refused_naming_the_tile() {
+        use crate::ids::BotId;
+        use factorio_bot_core::test_utils::fixture_world;
+        use std::sync::Arc;
+
+        let blueprint = include_str!("../../../core/tests/blueprints/miner_line.txt")
+            .trim()
+            .to_string();
+        let bp = decode(&blueprint).expect("fixture decodes");
+        let anchor = Position::new(0.0, 0.0);
+        let mut ctx = ExpansionCtx::new(
+            PlanState::from_world(Arc::new(fixture_world()), &[BotId(1)]),
+            BotId(1),
+        );
+
+        // A stone furnace squarely on the tile the block's first entity wants.
+        let blocked = anchor.add(&bp.entities[0].offset);
+        ctx.state.create_entity(FactorioEntity {
+            name: "stone-furnace".into(),
+            entity_type: "furnace".into(),
+            position: blocked.clone(),
+            ..Default::default()
+        });
+
+        let goal = Goal::Built { blueprint, anchor };
+        let err = BuildBlock
+            .expand(&goal, &mut ctx)
+            .expect_err("occupied ground is refused before anything is emitted");
+        let message = err.to_string();
+        assert!(
+            message.contains(&format!("({}, {})", blocked.x(), blocked.y()))
+                && message.contains("stone-furnace"),
+            "the refusal names the tile and what is on it: {message}"
+        );
+    }
+
+    /// **A roster bot's own body is the refusal a researcher hits first.**
+    ///
+    /// The block is placed at a fixed offset, and a character blocks a
+    /// placement exactly as a rock does -- but it is cleared by walking, not
+    /// by moving the block, so the message has to say which of the two it is.
+    #[test]
+    fn a_roster_bot_standing_on_the_footprint_is_named_as_such() {
+        use crate::ids::BotId;
+        use factorio_bot_core::test_utils::fixture_world;
+        use factorio_bot_core::types::FactorioPlayer;
+        use std::sync::Arc;
+
+        let blueprint = include_str!("../../../core/tests/blueprints/miner_line.txt")
+            .trim()
+            .to_string();
+        let bp = decode(&blueprint).expect("fixture decodes");
+        let anchor = Position::new(0.0, 0.0);
+        let on_top = anchor.add(&bp.entities[0].offset);
+
+        let world = fixture_world();
+        world.players.insert(
+            1,
+            FactorioPlayer {
+                player_id: 1,
+                position: on_top.clone(),
+                build_distance: 10,
+                reach_distance: 10,
+                resource_reach_distance: 4.0,
+                ..Default::default()
+            },
+        );
+        let mut ctx = ExpansionCtx::new(
+            PlanState::from_world(Arc::new(world), &[BotId(1)]),
+            BotId(1),
+        );
+
+        let goal = Goal::Built { blueprint, anchor };
+        let err = BuildBlock
+            .expand(&goal, &mut ctx)
+            .expect_err("a bot standing on the footprint refuses the block");
+        let message = err.to_string();
+        assert!(
+            message.contains("character 1") && message.contains("own bots"),
+            "the refusal distinguishes a roster bot's body from a rock: {message}"
         );
     }
 

@@ -826,6 +826,69 @@ impl std::fmt::Display for ChartingSummary {
     }
 }
 
+/// What is standing on a piece of ground, when something is.
+///
+/// The naming half of [`PlanState::occupant_of`]. A refusal that says
+/// "obstructed" tells whoever reads it nothing they can act on; one that
+/// names the tile and what is on it distinguishes "move the block", "clear a
+/// tree", "step off the footprint" and "the game already refused here"
+/// without a run.
+///
+/// Ordered exactly as `occupant_of` checks: a footprint covered by two of
+/// these reports the first, which is deliberate -- the alternative is
+/// reporting all of them and making the message longer without making it
+/// more useful.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Occupant {
+    /// An entity, planned or already standing, by its prototype name.
+    Entity(String),
+    /// A `player_collidable` tile.
+    Water,
+    /// A tree, cliff, rock or unit. Deliberately unnamed: `blocked_tree`
+    /// keeps an `is_minable` flag and no name at all, so a name here would
+    /// be invented rather than read.
+    Terrain,
+    /// A character. `on_roster` is the difference between "somebody else is
+    /// standing there" and "one of the bots you are planning for is standing
+    /// on the ground you asked it to build on" -- the second is the case a
+    /// researcher building a block near their own bots hits, and it is
+    /// cleared by walking, not by moving the block.
+    Character { player: PlayerId, on_roster: bool },
+    /// Ore. Occupancy by policy rather than by collision -- see
+    /// [`PlanState::occupant_of`]'s ore paragraph.
+    Resource,
+    /// A footprint the game itself already refused a build at, this run.
+    Refused,
+    /// The world has no prototype for the entity, so its footprint cannot be
+    /// sized at all. Not "clear": the same case
+    /// [`PlanState::is_area_free_facing`] answers `false` for.
+    Unknown,
+}
+
+impl std::fmt::Display for Occupant {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Occupant::Entity(name) => write!(f, "occupied by {name}"),
+            Occupant::Water => write!(f, "water"),
+            Occupant::Terrain => write!(f, "occupied by a tree, cliff, rock or unit"),
+            Occupant::Character {
+                player,
+                on_roster: true,
+            } => write!(
+                f,
+                "character {player}, one of this plan's own bots, is standing on it"
+            ),
+            Occupant::Character {
+                player,
+                on_roster: false,
+            } => write!(f, "character {player} is standing on it"),
+            Occupant::Resource => write!(f, "ore, which this planner will not bury"),
+            Occupant::Refused => write!(f, "a footprint the game already refused a build at"),
+            Occupant::Unknown => write!(f, "an entity this world has no prototype for"),
+        }
+    }
+}
+
 /// The world at a point in a hypothetical plan.
 ///
 /// `base` is shared and never mutated; every difference lives in the overlay
@@ -2740,9 +2803,34 @@ impl PlanState {
     /// must get the strict answer to both, which a single name-shaped
     /// parameter could not express.
     fn is_area_clear_of(&self, area: &Rect, water_blocks: bool, resource_blocks: bool) -> bool {
+        self.occupant_of(area, water_blocks, resource_blocks)
+            .is_none()
+    }
+
+    /// [`is_area_clear_of`](Self::is_area_clear_of), but SAYING WHAT IS THERE.
+    ///
+    /// The same six sources in the same order, because it is the same
+    /// function -- `is_area_clear_of` is now `occupant_of(..).is_none()`, so
+    /// the two cannot drift into disagreeing about whether ground is clear
+    /// while disagreeing about why.
+    ///
+    /// It exists because a bare `false` is a bad refusal. `BuildBlock`
+    /// (`method::blueprint`) places a block at a *fixed* anchor and has no
+    /// siting story at all, so occupancy is its most likely refusal -- and
+    /// until this existed the fact reached the caller as
+    /// `PlannerError::ChainOwnerInfeasible`, which blames an internal
+    /// scheduling decision for a fact about the ground. Four runs across
+    /// three anchors were spent distinguishing hypotheses that a named tile
+    /// would have settled in one line.
+    fn occupant_of(
+        &self,
+        area: &Rect,
+        water_blocks: bool,
+        resource_blocks: bool,
+    ) -> Option<Occupant> {
         for entity in self.added.values() {
             if boxes_overlap(&self.footprint_of(entity), area) {
-                return false;
+                return Some(Occupant::Entity(entity.name.clone()));
             }
         }
         // `find_entities_in_radius` keeps only entities whose *centre* point
@@ -2769,7 +2857,7 @@ impl PlanState {
                 continue;
             }
             if boxes_overlap(&entity.bounding_box, area) {
-                return false;
+                return Some(Occupant::Entity(entity.name.clone()));
             }
         }
         // Everything the entity tree structurally cannot hold: trees, cliffs,
@@ -2789,7 +2877,14 @@ impl PlanState {
                 continue;
             }
             if boxes_overlap(&blocked, area) {
-                return false;
+                return Some(if self.base.entity_graph.is_water_at(&blocked.center()) {
+                    Occupant::Water
+                } else {
+                    // A tree, cliff, rock or unit. `blocked_tree` keeps an
+                    // `is_minable` flag and no name at all, so naming one
+                    // here would be inventing the name.
+                    Occupant::Terrain
+                });
             }
         }
         // Characters. Nothing above can see one: they are in no tree, and
@@ -2797,9 +2892,16 @@ impl PlanState {
         // makes a character move out of the way, and believing one will is the
         // same wrong answer as not seeing it at all. Roster bots included:
         // being on the roster is not a promise that this plan will move you.
-        for character in self.characters.values() {
+        for (player, character) in &self.characters {
             if boxes_overlap(character, area) {
-                return false;
+                // Whether it is one of the bots this plan is FOR is the whole
+                // difference between "someone is standing there" and "the
+                // thing you asked to build is under your own feet", which is
+                // what a researcher building a block near their roster hits.
+                return Some(Occupant::Character {
+                    player: *player,
+                    on_roster: self.bots.contains_key(&BotId(*player)),
+                });
             }
         }
         // Footprints the game has already refused a build at. Not a model of
@@ -2808,7 +2910,7 @@ impl PlanState {
         // the refusal never said what the answer was about.
         for refused in &self.refused {
             if boxes_overlap(refused, area) {
-                return false;
+                return Some(Occupant::Refused);
             }
         }
         // Ore. Not in the entity tree — `EntityGraph::add` routes a resource
@@ -2823,9 +2925,36 @@ impl PlanState {
                 .iter()
                 .any(|tile| self.base.entity_graph.any_resource_at(tile))
         {
-            return false;
+            return Some(Occupant::Resource);
         }
-        true
+        None
+    }
+
+    /// What occupies the ground an entity of `name` facing `direction` would
+    /// stand on, if anything does.
+    ///
+    /// The naming twin of [`is_area_free_facing`](Self::is_area_free_facing),
+    /// and it answers with the same tolerances: water blocks only what
+    /// collides with water, ore blocks everything but a mining drill.
+    ///
+    /// `Some(Occupant::Unknown)` -- not `None` -- when the world carries no
+    /// prototype for `name`: `collision_area_facing` cannot size the
+    /// footprint, `is_area_free_facing` answers `false` for exactly that
+    /// case, and answering "clear" here would be the one wrong answer.
+    pub fn placement_occupant(
+        &self,
+        name: &str,
+        position: &Position,
+        direction: Direction,
+    ) -> Option<Occupant> {
+        match self.collision_area_facing(name, position, direction) {
+            Some(area) => self.occupant_of(
+                &area,
+                self.collides_with_water(name),
+                !self.stands_on_resources(name),
+            ),
+            None => Some(Occupant::Unknown),
+        }
     }
 
     /// Every obstacle a walking character could not pass through, inside

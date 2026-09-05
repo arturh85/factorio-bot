@@ -650,4 +650,31 @@ pub enum PlannerError {
     #[error("blueprint refused: {reason}")]
     #[diagnostic(code(planner::blueprint_refused))]
     BlueprintRefused { reason: String },
+
+    /// A [`crate::goal::Goal::Built`] cannot be built at the anchor it names,
+    /// because the ground one of its entities needs is not clear.
+    ///
+    /// **The spec's fourth refusal, and it was never built.** Until
+    /// 2026-09-05 `BuildBlock::expand` checked only whether an entity was
+    /// already standing and emitted the placement regardless of what else was
+    /// on the tile; occupancy then surfaced from `schedule()` as
+    /// [`PlannerError::ChainOwnerInfeasible`], which blames an internal
+    /// scheduling decision for a fact about the ground. Four runs across
+    /// three anchors were spent distinguishing hypotheses that a named tile
+    /// answers in one line, and the note recording them still ends
+    /// unresolved.
+    ///
+    /// `occupant` names what is there -- an entity by prototype name, water,
+    /// terrain, ore, a footprint the game already refused, or a **character**,
+    /// which is called out separately when it is one of this plan's own bots:
+    /// a roster bot's body blocks a fixed-offset placement exactly like a
+    /// rock does, and it is the case a researcher building a block near their
+    /// bots hits first. It is cleared by walking, not by moving the block.
+    #[error("cannot build {entity} at tile {tile}: {occupant}")]
+    #[diagnostic(code(planner::block_ground_occupied))]
+    BlockGroundOccupied {
+        entity: String,
+        tile: String,
+        occupant: String,
+    },
 }

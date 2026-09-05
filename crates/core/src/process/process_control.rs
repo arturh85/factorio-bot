@@ -210,7 +210,13 @@ impl FactorioInstance {
                 let (_world, rcon, child, used_factorio_port) = Self::start_server(
                     &settings.workspace_path,
                     &rcon_settings,
-                    None,
+                    // Was `None`, so the game port from the settings file
+                    // reached `setup_factorio_instance` and never the
+                    // server's command line: every server listened on 34197
+                    // whatever `factorio_port` said, and a second instance
+                    // beside a live one died with "Host address is already
+                    // in use".
+                    factorio_port,
                     &instance_name,
                     // websocket_server,
                     params.write_logs,

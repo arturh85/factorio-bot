@@ -46,6 +46,12 @@ BENCHMARK_SEED := "31337"
 bench SCRIPT *ARGS:
     cargo run --release --no-default-features --features cli,lua -- lua {{SCRIPT}} --seed {{BENCHMARK_SEED}} --new {{ARGS}}
 
+# Headless: bots are server-side characters, no graphical client, world at
+# 5x. Seconds to start instead of minutes; same record, no video. Use it to
+# iterate; use `bench` (clients, 1x, filmable) for a number you will quote.
+headless SCRIPT *ARGS:
+    cargo run --no-default-features --features cli,lua -- lua {{SCRIPT}} --headless --bots 4 --game-speed 5 {{ARGS}}
+
 # Fast iteration: connect to already-running Factorio (start with 'just factorio' first)
 lua-connect SCRIPT *ARGS:
     cargo run --release --no-default-features --features cli,lua -- lua --connect {{SCRIPT}} {{ARGS}}

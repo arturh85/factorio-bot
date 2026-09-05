@@ -1198,19 +1198,23 @@ end
                             .map_err(record_error)?;
                     }
 
+                    // Video is filmed from a client's window, and a headless
+                    // run has none. Every live script asks for video, so this
+                    // is skipped with a warning rather than refused -- the
+                    // same "never fatal" rule the capture itself follows --
+                    // but said here by name, rather than left to
+                    // `VideoRecorder::start` to report "no window found",
+                    // which reads as a capture fault.
+                    let headless = run_mode.as_ref().map(|m| m.bot_mode)
+                        == Some(run_mode::BotMode::Characters);
+                    if headless && video.is_some() {
+                        factorio_bot_core::tracing::warn!(
+                            "video requested, but this run is --headless and has no client \
+                             window to film; recording without video"
+                        );
+                    }
+                    let video = if headless { None } else { video };
                     if let Some(video) = video {
-                        // Video is filmed from a client's window, and a
-                        // headless run has none. Refused here by name rather
-                        // than left to `VideoRecorder::start` to report "no
-                        // window found", which reads as a capture fault.
-                        if run_mode.as_ref().map(|m| m.bot_mode)
-                            == Some(run_mode::BotMode::Characters)
-                        {
-                            return Err(record_error(
-                                "video is filmed from a graphical client, and this run has \
-                                 none (--headless); start the run without video or with clients",
-                            ));
-                        }
                         // Never fatal: `VideoRecorder::start` returns `Ok` with
                         // `status: failed` and a reason for every capture
                         // failure, and the run goes on without it. Only an

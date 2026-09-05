@@ -220,6 +220,35 @@ three bots one extra iron furnace (three actions) reorders bot 3's ready
 work and its `take 10 copper-ore from the wooden-chest` moves from 8,860 to
 13,473 with no furnace of its involved.
 
+## ✅✅✅ RUN 17: GREEN IN 14:26 (`run-1788635061-85457`) — best on both measures
+
+2026-09-05 21:19, master `a7e3b0eb`, four clients at 1x, seed 31337 `--new`,
+100% tick delivery, planning excluded (27.2 s, clock stopped).
+
+| | run 14 | run 16 | **run 17** |
+|---|---|---|---|
+| green cell | 17:20 | 15:19 | **14:26** (51,977) |
+| green witness | 18:00 | 15:57 | **15:02** |
+| plan | 569 / 57,752* | 569 / 52,554* | 569 / **52,819** |
+| executed / planned | 1.046* | 1.050* | **0.984** |
+| fleet utilisation | 60.9% | 67.4% | **69.5%** |
+| iron plate /min at 5 / 10 / 15 | 32 / 57 / 43 | 36 / 64 / 34 | **40 / 73 / 22** |
+| red packs /min at 5 / 10 | 0 / 8 | 0 / 13 | **0 / 17** |
+| reach corrections | — | — | **0** |
+
+\* plans before the walk model was corrected are ~22% under-priced; only run
+17's ratio is meaningful against 1.0.
+
+Fresh-world green: 64:22 → 36:48 → 31:35 → 26:32 → 29:09 → 23:38 → 20:59 →
+17:20 → 18:46 → 15:19 → **14:26**. Zero failed actions, zero failed walks
+across 402 walk events, zero reach corrections — the 0.6-tile margin held
+in a client run as it did headless. Two paths reported a waypoint needing
+something destroyed and were routed around.
+
+The plateau is unchanged: production still stops at the plan's bill, and
+this run reaches it faster and at a higher rate than any before it. The
+self-fed cell remains the next objective.
+
 ## ✅ AND THE CREDIT MADE REAL: a walk stops where the action can reach (`b6f6777f`)
 
 The other half of the walk RCA, and this one is a genuine speedup rather
@@ -2595,7 +2624,7 @@ infrastructure for a 3h17m game, not a harder milestone.
 | red science producing **once** | never observed | witnessed six times, all inside 780 ticks |
 | red science producing **at a rate** | impossible to claim | **5 packs in 3,240 ticks (~5.5/min)**, twice |
 | green science, planning | did not expand at all | plans end to end |
-| green science, live | never run | **WITNESSED twelve times** — fresh world **15:19 / 15:57** (`run-1788625945-57257`), one 569-step plan, zero failures, 67.4% utilisation; 64:22 → … → 17:20 → 18:46 → 15:19 |
+| green science, live | never run | **WITNESSED thirteen times** — fresh world **14:26 / 15:02** (`run-1788635061-85457`), one 569-step plan, zero failures, 69.5% utilisation, executed/planned 0.984; 64:22 → … → 15:19 → 14:26 |
 | furnaces per run | 42 | **8** |
 | recovery (`obs:recover`) | never executed in any run | **fires live** |
 

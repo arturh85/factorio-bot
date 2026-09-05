@@ -269,6 +269,37 @@ unvisited and planned nothing, silently. Threat avoidance — a 50-tile
 stand-off, refusing rather than returning an empty plan — is the **first
 non-test caller of the threat index**, which had none.
 
+## ✅✅✅ RUN 19: GREEN IN 13:29 (`run-1788647791-64290`) — best on every measure
+
+2026-09-06 00:50, master `80b048b5`, four clients at 1x, seed 31337 `--new`,
+**launched at load 0.82/6.87 on a floor the other session cleared and my own
+agents held**. 100% tick delivery, planning excluded (40.4 s, clock stopped).
+
+| | run 14 | run 17 | **run 19** |
+|---|---|---|---|
+| green cell | 17:20 | 14:26 | **13:29** (48,587) |
+| green witness | 18:00 | 15:02 | **14:07** |
+| plan | 569 / 57,752 | 569 / 52,819 | **452 / 49,050** |
+| executed / planned | 1.046 | 0.984 | **0.991** |
+| fleet utilisation | 60.9% | 69.5% | **67.4%** |
+| failed / lost / failed walks | 1 walk | 0 | **0 / 0 / 0 of 396** |
+| iron plate /min at 5 / 10 | 32 / 57 | 40 / 73 | **51 / 65** |
+| red packs /min at 10 | 8 | 17 | **17** |
+| ore drilled vs hand-mined | — | — | **551 / 273 (66.9%)**, six drills |
+
+Fresh-world green: 64:22 → … → 20:59 → 17:20 → 18:46 → 15:19 → 14:26 →
+**13:29**. Automation's record is 6:05.
+
+**The drill numbers came out exactly as the offline plan predicted** — 551
+drilled against a planned ~553, hand bill 273 against a planned 273 — which
+is the per-machine counters and the drain-policy planner agreeing to within
+two items on a measurement neither could make a week ago.
+
+The plateau is unchanged and remains the whole remaining story: rates read
+`roster-fed; no generator until 6:37`, and production still stops at the
+plan's bill. What changed tonight is that the plan is smaller, honest, and
+executed to within 0.9%.
+
 ## ✖ RUN 18 VOID — my own load rule, broken by me
 
 2026-09-06 00:13. Launched a four-client 1x green run at load **14.8**, an
@@ -2944,7 +2975,7 @@ infrastructure for a 3h17m game, not a harder milestone.
 | red science producing **once** | never observed | witnessed six times, all inside 780 ticks |
 | red science producing **at a rate** | impossible to claim | **5 packs in 3,240 ticks (~5.5/min)**, twice |
 | green science, planning | did not expand at all | plans end to end |
-| green science, live | never run | **WITNESSED thirteen times** — fresh world **14:26 / 15:02** (`run-1788635061-85457`), one 569-step plan, zero failures, 69.5% utilisation, executed/planned 0.984; 64:22 → … → 15:19 → 14:26 |
+| green science, live | never run | **WITNESSED fourteen times** — fresh world **13:29 / 14:07** (`run-1788647791-64290`), one 452-step plan, zero failures, executed/planned 0.991, 67% of ore drilled; 64:22 → … → 14:26 → 13:29 |
 | furnaces per run | 42 | **8** |
 | recovery (`obs:recover`) | never executed in any run | **fires live** |
 

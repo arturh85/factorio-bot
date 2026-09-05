@@ -208,3 +208,23 @@ a pre-dispatch refusal's `walk_settled` tick is the record's high-water mark,
 which reads as "refused at batch end" (4,400 and 7,800 ticks late here) —
 open item; and bots wedge in the 0.6-tile gaps between touching furnaces
 (the game routes a 0.4-wide character through them) — open item.
+
+### reuse — merged (`28d101d9`): a replan finishes what it finds standing
+
+Four mechanisms behind hl-03's three pumps, two boilers, four labs and six
+assemblers, all in `crates/planner`: (1) `power.rs` `supply_for` had no tier
+between "adopt a pole that reaches a generator with headroom" and "site a new
+plant", so a pump + boiler with no engine read as no supply, and its own
+pump blocked its own shoreline site, so the next tile up the shore won;
+(2) `state.rs` `electric_demand_kw` charged full draw for every recipe-less
+assembler of an abandoned cell, so the one working engine read as full and
+a third plant was sited, after which the shoreline was full and the goal
+refused; (3) `assemble.rs` counted only complete cells and sited only on
+clear ground ("nothing here plans repairs"); (4) `have.rs` `lab_site`
+ignored a standing lab that was merely unpowered. Now a standing pump
+anchors a plant to finish, dead machines draw nothing, a partial cell is
+finished around its machines, and a dark lab is lit with a pole. Three
+integration tests (`tests/standing_site_reuse.rs`) fail before and pass
+after; eleven unit tests; planner suite and clippy green; t=0 plans for all
+three goals byte-identical. Open: parts placed with drift are passed over;
+partial-cell inserter facing is checked only through `delivers_into`.

@@ -537,6 +537,31 @@ Nothing regressed except `researched:automation` by **8 ticks** (21,776 →
 each for 3 and 4), and the one-bot pumpjack by 7,160 ticks on 69 *fewer*
 actions. Both are stated rather than rounded away.
 
+### The one-bot pumpjack debit is understood, not merely observed
+
+Fewer actions and a longer schedule does suggest a serialisation, and it is
+one — but not of the bot's own work. For a single bot `makespan = planned +
+idle`, exactly, and both columns are in the report:
+
+| | actions | walks | planned | idle | makespan |
+|---|---|---|---|---|---|
+| before | 776 | 223 | 660,834 | 85,328 | 746,162 |
+| after | 707 | 206 | **660,255** | **93,067** | 753,322 |
+
+The bot's own work got *cheaper* by 579 ticks and it walks 17 times fewer.
+The whole regression is **+7,739 ticks of idle** (7,739 − 579 = the 7,160).
+The mediator is visible in the same plans: **31 stone furnaces before, 26
+after** (and 28 burner drills against 23). Fewer distinct claimed tiles means
+fewer sites, so fewer furnaces get built, so more batches queue behind each
+one — and machine time is a lag edge, which for a lone bot is simply waiting.
+
+That is the honest trade and it is roster-shaped: with one bot there is
+nobody to overlap the wait with, which is why it shows here and reverses
+completely at three (refused → 1:33:16). It is also the same defect the
+furnace-ground cliff below is: a smelt builds its own furnace rather than
+queueing deliberately, so furnace *count* is an accident of how many sites
+the ore ledger happened to hand out.
+
 ### The second cliff, found and NOT fixed
 
 `have:pumpjack:1` at four bots and `researched:oil-gathering` at four still
@@ -556,10 +581,25 @@ behind one, so furnaces scale with the bill and with the roster, and the
 `method::power::PLANT_ADOPT_RADIUS` is derived from it — reuse is. It wants
 its own task.
 
-Eight bots is worse, and is the third thing found here. Before the fix,
-`have:pumpjack:1 --bots 1,2,3,4,5,6,7,8` refused within seconds on `have 5
-copper-ore`. After it, the expansion **did not finish in 1,800 seconds** and
-was killed; it has never been run to completion. A refusal is cheap and a
-plan is not, so this is partly the fix doing more work — but expansion cost
-that grows this steeply with roster size is its own defect, and nobody should
-quote an eight-bot planned makespan until it has been measured.
+### Eight bots: the ladder is fine, the deep oil goal is not
+
+`have:pumpjack:1 --bots 1,2,3,4,5,6,7,8` refused within seconds before the fix
+(on `have 5 copper-ore`) and **did not finish in 1,800 seconds** after it. It
+has never been run to completion, so no eight-bot pumpjack makespan may be
+quoted.
+
+That is specific to the deep oil goal. **The three goals this project actually
+runs at eight bots all plan in seconds, and all three get faster**, measured
+on the same dump with a master build that reproduces the known master numbers
+exactly:
+
+| goal (8 bots) | master | branch |
+|---|---|---|
+| `researched:automation` | 364 acts, 18,310 ticks, 1.52 s | 382 acts, **18,291**, 1.40 s |
+| `producing:automation-science-pack:6` | 535 acts, 19,573 ticks, 2.70 s | 590 acts, **18,863**, 2.58 s |
+| `producing:logistic-science-pack:6` | 706 acts, 49,229 ticks, 3.28 s | 915 acts, **46,766**, 5.01 s |
+
+Green costs **+53% of planning wall time** (3.3 s → 5.0 s) for a **5% shorter
+plan**, which is a trade worth making at five seconds and would not be at
+five minutes. Expansion cost growing with the number of shares is still a
+real defect — the pumpjack is the proof — it simply does not gate the ladder.

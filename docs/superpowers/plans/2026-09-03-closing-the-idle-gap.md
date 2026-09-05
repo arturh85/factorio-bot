@@ -4032,6 +4032,12 @@ That is the separate `Holder::Share` ceiling.
 
 ## Open items not on the critical path
 
+- **Oil's trigger is free.** Measured 2026-09-05 (`1f296b47`): the game fires
+  `mine-entity` triggers for a drill or pumpjack on the named resource, in
+  headless mode too, so `oil-processing` unlocks the moment a pumpjack
+  extracts crude. The oil rungs still open are the planner's: rate, fluid
+  cell, steel, exploration/radar, power — not the trigger.
+
 - **`FactorioEntity::new_stone_furnace` uses a 1.8 collision box**
   (`crates/core/src/types.rs` ~1655) while the repo's prototype fixture
   records 1.3984375 for the furnace's box; nothing was changed. Reported by

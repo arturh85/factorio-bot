@@ -647,3 +647,24 @@ as `plan.tick`; `supervisor.lua` carries it onto the shaped table and
 tick only when the plan has none. Tests: attached clock is read twice and
 never stopped; `plan.tick` is the clock's answer / `nil` with no clock;
 `record.plan_created` takes `plan.tick`.
+
+### triggers — merged (`1f296b47`): every trigger enumerated from the live game
+
+32 trigger technologies (19 craft-item, 10 mine-entity, 1 build-entity,
+1 capture-spawner, 1 create-space-platform), table in
+`docs/superpowers/notes/2026-09-05-research-triggers.md`. Measured with the
+sweep switched off: the game fires **mine-entity** for a character's own
+chop and for a drill or pumpjack on the resource — `oil-processing` needs
+no emulation at all, headless or not — and fires **craft-item** for machine
+output ~400 ticks after the count; it does **not** fire craft-item for a
+character's hand craft nor build-entity for a scripted build. The sweep now
+gates on prerequisites (it used to ignore them), emulates build-entity from
+a per-prototype tally of what our mod placed for our force, keeps the
+hand-craft tally for craft-item, leaves mine-entity to the game (pinned by
+a test), and can be switched off for measurements with a record line. The
+`research_trigger_emulated` event reached `events.jsonl` for the first time
+(the parser had been answering it with "unexpected action"). Refused by
+name with the act: capture-spawner, create-space-platform. Eleven stub-game
+tests. Live: `run-1788620523-34289`, 4 bots at 5x, automation done with
+electronics fired by the game and steam-power / automation-science-pack
+emulated from honest counts.

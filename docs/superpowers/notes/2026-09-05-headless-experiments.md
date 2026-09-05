@@ -1291,3 +1291,46 @@ right to be strict; its truncation heuristic is what surprises.
 more, and the world-record replays put 40–70 down in their first six minutes.
 `Drain`'s own doc argues that count ahead of demand is a *rate* decision for
 `BuildCell` to make, and nothing here changes that.
+
+#### refuel — live validation (`run-1788645306-91919`)
+
+Seed 31337, map `c161fa3f437221d0`, 4 headless character bots, 5x, commit
+`dd5b1bc7` clean, **release** profile, on its own instance (`headless-m`, ports
+4342/34222). `factory_stage3.lua`, both milestones satisfied, **zero failures of
+any kind**: 452 actions and 197 walks dispatched, 452 and 197 settled, no failed
+or lost actions, no failed or lost walks, no refusals.
+
+| | reference `run-1788640611-64852` | this run |
+|---|---:|---:|
+| plan makespan | 54,884 | **50,440** |
+| green satisfied, elapsed game ticks | 54,875 (15:14) | **52,781 (14:39)** |
+| execution over plan | 1.000× | 1.046× |
+| drills placed | 10 | 6 |
+| drill fuel actions | 10 | **12** |
+| ore from drills | 514 | **551** |
+| ore mined by hand | 345 | **273** |
+| total ore (furnace plates) | 859 | 824 |
+| drilled share | 59.8% | **66.9%** |
+
+**Five of the six drills were refuelled, and that is the whole mechanism made
+visible.** Fuel visits by drill position: `(-16,-33)` twice (ticks 2,745 and
+16,992), `(-13,-14)` twice (2,026 and 17,226), `(-9,-31)` twice (2,949 and
+28,417), `(-18,-37)` twice (20,714 and 25,914), `(-14,-33)` three times, and
+`(35,-52)` — the copper cell — once. In the reference run every one of the ten
+drills was fuelled exactly once and never revisited. The lifetime counters say
+the same thing from the other side: 126, 93, 93, 93, 93 and 53 ore, where 93 is
+6 coal (40) plus 8 coal (53) and only the single-visit copper drill lands on a
+one-load figure.
+
+**The planned split predicted the live one almost exactly**: 83 coal planned
+into drills, 83 dispatched, ~553 ore bought against 551 counted, and the plan's
+hand-mining bill of 273 ore came out at exactly 273. So the offline loop is
+predictive for this quantity and a future change to it can be judged without a
+run.
+
+**Two caveats on the comparison, neither of which moves the split.** The
+reference run was a **debug** build and this one is release, which changes wall
+time and can change tick-rate-dependent waiting, though both are quoted in game
+ticks; and the two ran on different instances, though on the same seed and the
+same verified map digest. The 3.8% improvement in the green tick is the softer
+number here — the split and the refuel visits are the hard ones.

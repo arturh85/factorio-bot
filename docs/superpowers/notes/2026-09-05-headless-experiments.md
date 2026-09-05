@@ -833,3 +833,117 @@ path, which is why `connect` refuses rather than tunnels.
 at 5x with zero failed actions, on the author's instance and on mine, before
 it enters any measured 1x run. The first live belt lands in a run nobody is
 quoting.
+### walkslip — RCA
+
+Item (3) above: the ~11–12k walk overrun per four-bot run. It was **the
+model, not the walking**. The bots walked as well as the game allows; the
+plan was charging for a shorter journey than it then asked for.
+
+**The measurement.** Join `walk_dispatched` to `walk_settled` **per bot in
+dispatch order** — walks carry no `id` — and take each walk's distance as
+the gap between consecutive targets, which is what the bot actually
+covered. Pooled over 792 walks in four seed-31337 four-bot runs
+(`run-1788625945-57257`, `run-1788612263-27812`,
+`headless-i/run-1788625111-28152`, `headless-a/run-1788611922-87269`; zero
+walk failures between them):
+
+| | planned | measured | error |
+|---|---|---|---|
+| run-1788625945-57257 | 36,903 | 47,421 | −22.2% |
+| run-1788612263-27812 | 36,288 | 48,083 | −24.5% |
+| headless-i/…-28152 | 41,023 | 53,368 | −23.1% |
+| headless-a/…-87269 | 36,100 | 47,845 | −24.5% |
+
+Not a tail of stalls: run 16 had **one** `bot_stepped_aside` and no
+failures, and the per-walk overrun is spread across all 192 of them. Two
+mechanisms, ranked by ticks:
+
+**1. The unrealised `radius` credit — 8,200–10,200 ticks a run, 70–82% of
+the overrun.** `travel_ticks` (`crates/planner/src/schedule.rs`) charged
+`(distance − radius) / speed`. Nothing on either side of it stops the bot
+at `radius`. The planner's own `arrival_point`, applied by `schedule()` one
+statement after the charge, puts the bot at `min_radius` from the target —
+the **centre** for a disc. `approach_annulus`
+(`crates/core/src/factorio/rcon.rs`), which is what the executor aims the
+game at, does the same: a disc is aimed at the target itself, an annulus at
+`min_radius + slack` with `slack` capped at one tile. Both stop on the
+*inner* ring; only the price stopped on the outer one. It is visible in the
+record as two spikes and nothing else — every walk to a disc of radius 2.7
+came in exactly 18 ticks over (`2.7 / 0.15`), every walk to a disc of
+radius 10 exactly 66–67.
+
+**2. The speed constant — 2,200–3,500 ticks, 18–30%.** With the whole
+distance charged, the implied speed is **0.1413** tiles a tick pooled
+(185,268 modelled against 196,717 measured), not the character prototype's
+0.15. The path is a pathfinder polyline through waypoints on tile centres,
+the mod's follower steers in 8 compass directions and consumes a leg only
+inside a 0.3-tile box of its waypoint, and one RCON round trip plus one
+path request brackets every walk. None of it is recoverable by planning.
+
+**Not the cause, checked:** obstacle detours (the residual after (1) is
+only 5–8%, far too small for a route that bends much), stalls and re-paths
+(one step-aside in 192 walks), arrival tolerance, dispatch overhead (the
+apparent 37-tick fixed intercept is an artefact of short walks, whose
+target-to-target distance over-states what was walked — those measure
+*faster* than 0.15).
+
+**The change.** `travel_ticks` charges down to `min_radius`, not `radius`
+— `radius` still decides *whether* a walk is needed, which is all it was
+ever entitled to decide. `WALK_TILES_PER_TICK` 0.15 → **0.14**, rounded
+down from the measured 0.1413 so the model over-charges by ~1% rather than
+under-charging. The residual `slack` beyond `min_radius` is left to that
+margin rather than imported into the planner, which is pure.
+
+**Offline, seed-31337 t=0 dump — identical action counts everywhere, so
+this is the same plan priced honestly:**
+
+| goal | bots | before | after |
+|---|---|---|---|
+| researched:automation | 4 | 176 / 21,735 | 176 / 21,943 |
+| researched:automation | 8 | 364 / 18,218 | 364 / 18,416 |
+| producing:automation-science-pack:6 | 4 | 324 / 27,304 | 324 / 28,107 |
+| producing:automation-science-pack:6 | 8 | 535 / 19,247 | 535 / 20,520 |
+| producing:logistic-science-pack:6 | 4 | 569 / 52,554 | 569 / **59,018** |
+| producing:logistic-science-pack:6 | 8 | 706 / 48,756 | 706 / 49,080 |
+
+Green four-bot is the goal with the most walking and moves most (+12.3%);
+automation, which is short and local, moves 1%.
+
+**Live validation, 5x headless, four bots, seed 31337 `--new`,
+`factory_stage3.lua`** — `headless-j/run-1788628585-05711` against
+`headless-i/run-1788625111-28152`:
+
+| | before | after |
+|---|---|---|
+| actions executed | 571 | 571 |
+| planned makespan | 53,249 | 56,475 |
+| green satisfied at | 56,370 | 56,360 |
+| **executed / planned** | **1.059** | **0.998** |
+| walk planned / measured | 43,068 / 55,712 (1.294) | 54,154 / 51,706 (0.955) |
+| failures | 0 | 0 |
+
+The run itself is the same length to within ten ticks — as it must be,
+since nothing about the walking changed. What changed is that the plan now
+predicts it to 0.2% where it was 5.9% optimistic. The walk term goes from
++29% to −4.5%, the sign the rounding was chosen for.
+
+**What this cost, and it is a real cost.** `red_science.rs`'s
+`more_bots_finish_sooner` fell from 1.9995x to 1.857x and its floor was
+lowered to 1.8x. That is not drift: `one` gained 6.9% and `many` 15.1%.
+**Walking is the part of a plan that does not parallelise** — four bots
+each make their own trip, one bot arrives once and stays — so a per-walk
+credit was flattering multi-bot plans specifically. Every four-bot-vs-one
+speedup this project has quoted was somewhat overstated for that reason.
+
+**Found and not fixed.** (a) The *real* walk is still slower than the
+prototype speed and always will be; 0.14 is a calibration against four runs
+on one map and should be re-measured if the terrain mix changes — it is one
+constant with one doc comment, deliberately. (b) The executor could
+genuinely take the `radius` credit by stopping the walk on the outer ring,
+which would make runs faster rather than merely honest — but
+`approach_radius`'s own history is against it (a walk aimed at the bound
+rested 3.345 tiles out against a reach of 3), so it needs the resting
+position to be *measured* rather than inferred, and today it never is
+(`executor::replay::WALK_BELIEF`). That is the next piece of work here and
+it is worth ~8k ticks a run. (c) `HANDOVER_WALK_TICKS` is a flat 300 and
+was not touched.

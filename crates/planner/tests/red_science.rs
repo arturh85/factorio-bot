@@ -220,9 +220,23 @@ fn more_bots_finish_sooner() {
     // correctness defect now than then. The floor is 1.9x for that reason:
     // the ratio moved because `one` fell, not because `many` rose by more
     // than a scheduling round.
+    //
+    // **one = 5534, many = 2980 (1.857x) on 2026-09-05**, when the walk model
+    // stopped crediting a bot for `radius` tiles it never walks and the speed
+    // constant came down from the prototype's 0.15 to the measured 0.14
+    // (`schedule::travel_ticks`, `WALK_TILES_PER_TICK`). The floor drops to
+    // 1.8x, and the *direction* is the point rather than the size: `one` gained
+    // 357 ticks (6.9%) and `many` gained 391 (15.1%), more than twice as much
+    // proportionally. That is what honest travel pricing does — **walking is
+    // the part of a plan that does not parallelise.** Four bots each make their
+    // own trip to the ore; one bot arrives once and stays. Every tick the old
+    // model handed back as a `radius` credit was handed back per *walk*, and
+    // four bots walk more, so the under-priced model was flattering the
+    // four-bot plan specifically. The speedup this test asserts is real and
+    // was always somewhat overstated.
     assert!(
-        many.saturating_mul(19) < one.saturating_mul(10),
-        "four bots ({} ticks) must beat one ({} ticks) by more than 1.9x",
+        many.saturating_mul(18) < one.saturating_mul(10),
+        "four bots ({} ticks) must beat one ({} ticks) by more than 1.8x",
         many,
         one
     );
@@ -267,7 +281,13 @@ fn more_bots_finish_sooner() {
     // plates from a furnace that had not started. Baseline map, four bots:
     // researched:automation 28,023 -> 26,212, red 46,089 -> 44,641, green
     // 217,749 -> 217,105.
-    assert!(many < 2950, "four bots regressed past 2950 ticks: {}", many);
+    //
+    // **2543 -> 2980 on 2026-09-05** with the honest walk price above. Bot 2
+    // walks ~1,300 of its ticks on this fixture, so a 6-7% rise in the price of
+    // a tile and the loss of a per-walk credit land here harder than anywhere
+    // else. Ceiling raised to 3300, 11% above the measured figure — the same
+    // margin the 2950 kept above 2682.
+    assert!(many < 3300, "four bots regressed past 3300 ticks: {}", many);
 }
 
 #[test]

@@ -121,6 +121,15 @@ pub const REVEAL_PITCH: f64 = 256.;
 /// [`REVEAL_PITCH`] is twice this, which is what makes the lattice tile.
 pub const REVEAL_RADIUS: f64 = REVEAL_PITCH / 2.;
 
+/// The reveal a survey asks the game to create, in **chunks**.
+///
+/// Four, matching [`REVEAL_RADIUS`] (128 tiles / 32 tiles per chunk) and
+/// matching the mod's own clamp, which is the binding one -- asking for more
+/// silently gets four. Named here so the executor does not spell a magic
+/// number, and so the two halves of the reveal (what a lattice cell is worth,
+/// and what a survey asks for) cannot drift apart.
+pub const SURVEY_CHUNK_RADIUS: u32 = 4;
+
 /// How far a lattice point must be from a charted enemy structure before a
 /// bot is sent to it, in tiles.
 ///
@@ -196,7 +205,9 @@ impl SurveyPlan {
     /// empty plan, because "nothing to do" is not "blocked".
     #[must_use]
     pub fn is_boxed_in(&self) -> bool {
-        self.visit.is_empty() && !self.skipped.is_empty() && self.threat_skips() == self.skipped.len()
+        self.visit.is_empty()
+            && !self.skipped.is_empty()
+            && self.threat_skips() == self.skipped.len()
     }
 }
 

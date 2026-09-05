@@ -28,12 +28,15 @@ approach assumed**.
 * **The reveal radius is ±128 tiles (4 chunks)** — measured twice, exactly.
 * **A server-side character charts nothing.** `force.is_chunk_charted` is false
   everywhere, including under the character's own feet, after 700 ticks.
-* **And the mechanism does not work: a bot cannot walk into unexplored ground
-  at all.** The pathfinder refuses -- `failed to path find` -- because it
-  cannot path into chunks that do not exist. Teleporting past the frontier
-  generates ground; `request_to_generate_chunks` generates ground; **walking
-  cannot get there to begin with.** Exploration in this codebase is a mod-side
-  capability, not a walking capability. See section 5.
+* **A bot cannot walk into unexplored ground at all** -- the pathfinder
+  refuses, `failed to path find`, because it cannot path into chunks that do
+  not exist. So exploration is a **mod-side** capability, not a walking one
+  (section 5).
+* **With the mod verb that makes ground exist, it works end to end.** One ring
+  survey on seed 31337 took the model from **no crude oil and no nests at all**
+  to **7 crude-oil tiles, 559 uranium and 32 enemy structures**, and iron from
+  940 to 2,452 tiles, for 3,609 planned ticks across four bots (section 6).
+  The `NotCharted` refusal that blocked `researched:oil-processing` is gone.
 
 ---
 
@@ -366,6 +369,101 @@ it is the only mechanism that works today with no new mod surface.
 
 ---
 
+## 6. The capability, and the end-to-end proof
+
+### `generate_chunks`, the one act a player cannot perform
+
+`mods/BotBridge/control.lua` gains `rcon_generate_chunks(x, y, radius)`,
+registered on the `botbridge` remote interface, bound in Rust as
+`FactorioRcon::generate_chunks` and reached from the executor's `Survey`
+dispatch, which now **generates before it walks**.
+
+**It is clamped to 4 chunks, mod-side.** That is `GENERATE_CHUNKS_MAX_RADIUS`,
+and it is the reveal a character standing there would have been given for free
+-- the measured 9x9 block of section 2. A caller asking for more silently gets
+four; the clamp lives in the mod so no caller can widen it. That bound is the
+whole honesty argument, and it is what
+`crates/core/tests/botbridge_generate_chunks.rs` tests hardest.
+
+**The argument that it is legitimate.** A *human* player walks into unexplored
+ground constantly: they hold a key, and the engine makes the ground as they go.
+Our bots cannot, only because we steer them through `request_path`, which will
+not path into chunks that do not exist. That is an artefact of how we drive a
+character, not a rule of the game. Clamped to one character's own reveal, this
+verb restores parity a player already has.
+
+**The argument against, stated rather than buried.** The ground appears
+*before* the bot arrives rather than as it does, so a plan can see one reveal
+further than a player would at that instant. It is small, it is bounded, and it
+is **not nothing**. So it is disclosed:
+`EventKind::BatchProgress` now carries `ground_generate_calls`,
+`ground_generated_chunks` and `ground_generate_failures`, the way
+`research_trigger_emulated` discloses its own emulation. It rides on
+`BatchProgress` rather than `provenance.json` because provenance is written at
+run start, before any survey has run, and the manifest only exists for runs
+that finished -- while a killed run still generated its ground.
+
+**Is it fit for a measured speedrun run?** My answer: **yes for research and
+capability work, and I would not quote a speedrun time from a run that used it
+without saying so beside the number.** The three counters make that possible
+rather than requiring anyone to remember. If the owner wants a run with *no*
+asterisk at all, the honest alternative is **radar** -- 20 red science, 10 iron
+plate, 5 gears, 5 circuits, 300 kW, all paid in game -- which reveals ground
+with nobody standing in it and needs no new mod surface. Radar is the right
+answer for a headline speedrun; this verb is the right answer for everything
+else, and the counters are what keep the two from being confused.
+
+The failure counter exists because this crate has no logger. A server whose
+BotBridge predates the verb answers "no such function", and without the third
+counter that run would read as one that simply found no new ground.
+
+### The proof
+
+`explore_ring.lua`, headless, four bots, 5x, seed 31337, `--new`, with
+`FACTORIO_BOT_REFRESH_MODS=1` so the release binary ships the edited mod.
+
+**Before** -- `researched:oil-processing` refuses:
+
+```
+no crude-oil is charted anywhere this plan can see, so crude-oil has nowhere
+to come from; the plan sees coal (466 tiles), copper-ore (462 tiles),
+iron-ore (940 tiles), stone (387 tiles); charted ground covers 17 of 17
+probes within 256 tiles of [0.5, 0.5]
+```
+
+`goal.charted(0, 0, 384)` planned 8 surveys, makespan **3,609 ticks**, four
+bots, four steps each. **After**:
+
+```
+a power plant needs water, and the plan can see none within 128 tiles
+```
+
+**The `NotCharted` refusal is gone.** The goal now fails several rungs further
+up the ladder, for a reason that has nothing to do with oil -- which is exactly
+what "the bots went and looked" is supposed to change.
+
+The census confirms it directly:
+
+| | t=0 | after one ring |
+|---|---:|---:|
+| iron-ore | 940 | **2,452** |
+| copper-ore | 462 | **1,400** |
+| coal | 466 | **853** |
+| stone | 387 | **895** |
+| **crude-oil** | **0** | **7** |
+| **uranium-ore** | **0** | **559** |
+| **enemy structures** | **0** | **32** |
+
+Cost: 3,609 planned ticks across four bots, ~14 s wall at 5x. The copper the
+standing-goal lane is gated on triples; the threat index -- which had no
+non-test caller at all until this work -- now has 32 real structures in it, so
+the stand-off has something to avoid on the next ring.
+
+**This is the acceptance test the whole exploration lane exists for, and it
+passes.**
+
+---
+
 ## Verification
 
 * `nix develop -c cargo test --workspace` — green, 81 test binaries, exit 0.
@@ -379,12 +477,9 @@ it is the only mechanism that works today with no new mod surface.
 
 ## What I found and did not fix
 
-1. **The charting mechanism itself.** Section 5 settles *why* walking does not
-   grow the model -- the pathfinder refuses to enter ungenerated ground -- but
-   the fix is not built: there is no mod verb wrapping
-   `request_to_generate_chunks`, so `Goal::Charted` can still only plan surveys
-   over ground that already exists. That is the next dispatch, and it is
-   mod-side work plus one RCON binding, not planner work.
+1. **Radar is still unbuilt**, and it is the mechanism a no-asterisk speedrun
+   run wants (section 6). `generate_chunks` is disclosed rather than free, and
+   for a headline time that disclosure is a cost radar does not have.
 2. **No entity carries a `force`**, so "enemy" is a type-string guess and this
    project's own turrets will eventually read as threats (§3).
 3. **A bot death is still not an event.** The roster is computed once and never

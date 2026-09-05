@@ -842,6 +842,9 @@ async fn beat_batch_progress(
                 longest,
             );
         }
+        // The disclosure counter, read once so the three numbers in the event
+        // describe the same instant. See `EventKind::BatchProgress`.
+        let ground = act.ground_generated();
         live.record(EventKind::BatchProgress {
             elapsed_ms,
             total: snap.total,
@@ -857,6 +860,9 @@ async fn beat_batch_progress(
             waiting: snap.waiting,
             waiting_total: snap.waiting_total,
             reach_corrections: u32::try_from(act.reach_corrections()).unwrap_or(u32::MAX),
+            ground_generate_calls: u32::try_from(ground.0).unwrap_or(u32::MAX),
+            ground_generated_chunks: u32::try_from(ground.1).unwrap_or(u32::MAX),
+            ground_generate_failures: u32::try_from(ground.2).unwrap_or(u32::MAX),
         });
     }
 }

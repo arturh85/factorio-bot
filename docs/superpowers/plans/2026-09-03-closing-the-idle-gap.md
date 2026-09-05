@@ -541,6 +541,28 @@ accumulate one and say that it did — a row should carry both the number and
 how it was obtained, so nobody reads an accumulated figure as exact.
 Dispatched as the `machinecount` worktree.
 
+## THE MISSING FIFTH GOAL KIND: nothing means "keep this true"
+
+Named by the `second` session, 2026-09-05, and it is the cause of which the
+plateau is the symptom. The goal vocabulary is `Have`, `Researched`,
+`Produced` and `Built`, and **all four are one-shot**. Nothing in it means
+*keep this true*, so no plan ever expands capacity, and every run's output
+stops at precisely the bill its plan was written for. Every finding in this
+record about production plateauing, hand-fed cells and roster-fed curves is
+that one absence seen from a different angle.
+
+This is a fifth goal kind, not a repair to an existing one, and it is what
+makes a self-feeding factory expressible at all. Not taken tonight; it wants
+its own design rather than being wedged into a lane.
+
+**Overnight lanes agreed between the sessions:** block siting (a `Built`
+goal choosing its own ore-aware anchor) to `second`; **oil to this session**,
+because batteries and electric furnaces — two thirds of the owner's stated
+target of electric smelting and self-expanding solar power — are hard-gated
+behind petroleum, solar is the only pre-oil piece, and `petroleum` appears
+nowhere in the planner, core or scripts today. 1x client runs stay in this
+lane; the other session uses headless 5x only.
+
 ## ⚠️ A RISING CURVE IS NOT A WORKING FACTORY (2026-09-05, from the peer's review)
 
 The peer session's 179-entity furnace line was reported as smelting. Its

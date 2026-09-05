@@ -80,6 +80,23 @@ honestly, as before. Also fixed on the way: `scripting_lua`'s
 `plan_cell` call was one argument behind `bdec88af` and failed
 `--all-targets` clippy on master.
 
+## Green in ONE plan: 56.75 min after the resume, 264 of 264 (`run-1788565721-53126`)
+
+Same savepoint, git `5bfcd9e0` (every fix of the night in the binary).
+**One plan, 264 actions, 0 failed, 0 lost, 134 of 134 walks**; planned makespan
+202,262, executed 204,295 — within 1%. Cell satisfied at **56.75 min** (run 5:
+75.73), witness 5 packs in 2,040 ticks, `state=done`. Hand-mined iron: 24
+actions (run 3: 184; run 5: 64). No step-aside was needed.
+
+**Utilisation 10.0%**: bot 1 ran 205 of 264 actions and was busy 34.9%; bots
+2, 3, 4 were busy 1.8%, 2.0%, 1.3%. On bot 1's serial timeline: `craft 75
+automation-science-pack` 22,575 ticks, `research logistic-science-pack`
+22,499, gears 4,919. That is 25% of the makespan on two actions three bots
+could have shared or halved. The record already names the cause: a
+`Researched` chain's trigger and pack subtrees are bound to one bot
+(`c470388b`, "22,072 ticks on a live four-bot run"), and the plan builds one
+lab. RCA agent dispatched (`research-parallelism`).
+
 ## ✅ AUTOMATION IN 7:04 — `just bench` run for the first time, seed 31337 validated
 
 `run-1788565090-80288`: `just bench automation_speedrun.lua --clients 4 --bots
@@ -1690,7 +1707,7 @@ infrastructure for a 3h17m game, not a harder milestone.
 | red science producing **once** | never observed | witnessed six times, all inside 780 ticks |
 | red science producing **at a rate** | impossible to claim | **5 packs in 3,240 ticks (~5.5/min)**, twice |
 | green science, planning | did not expand at all | plans end to end |
-| green science, live | never run | **WITNESSED** — run 5 (`run-1788559688-08406`): cell satisfied at 75.7 min after the red-witness resume, 5 packs in 33 s |
+| green science, live | never run | **WITNESSED twice** — run 6 (`run-1788565721-53126`): one plan, 264 of 264, cell at 56.75 min after the red-witness resume, 5 packs in 34 s |
 | furnaces per run | 42 | **8** |
 | recovery (`obs:recover`) | never executed in any run | **fires live** |
 

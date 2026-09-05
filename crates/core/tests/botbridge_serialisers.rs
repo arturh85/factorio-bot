@@ -8,7 +8,8 @@
 //! and feed it the table shapes `workspace/factorio-api-docs/runtime-api.json`
 //! describes for 2.1.
 
-use factorio_bot_core::types::FactorioRecipe;
+use factorio_bot_core::blueprint::UndergroundHalf;
+use factorio_bot_core::types::{FactorioEntity, FactorioRecipe};
 use mlua::{Function, Lua, LuaSerdeExt, Table, Value};
 
 /// Loads the mod's serialisers. The path is the same live reference a debug
@@ -276,6 +277,117 @@ fn serialize_entity_sends_an_inserter_pickup_position_in_snake_case() {
         .expect("pickup_position must be sent");
     assert_eq!(pickup.get::<f64>("x").expect("x"), 5.5);
     assert_eq!(pickup.get::<f64>("y").expect("y"), 2.5);
+}
+
+/// **This bug class has now bitten twice, and every other test in this file
+/// is blind to it.** `pickup_position` first (comment above), and then
+/// `underground_half`: a first attempt at reading an underground-belt's
+/// input/output half back out of the game named the field
+/// `belt_to_ground_type` (Factorio's own name for it) in the Lua table, which
+/// matched nothing on `FactorioEntity` (whose field is `underground_half`) --
+/// serde silently drops an unrecognised key, so the round trip came back
+/// `None` with no error anywhere. Confirmed live: a raw `remote.call` showed
+/// the mod's JSON carrying the right value, and every `rcon.find_entities_*`
+/// read through the Rust struct still reported `nil`.
+///
+/// Every test above this one only checks the LUA TABLE `serialize_entity`
+/// returns -- `serialize_entity_sends_an_inserter_pickup_position_in_snake_case`
+/// asserts a key exists in the table, never that `FactorioEntity` actually
+/// deserialises it. That is exactly the gap both bugs lived in: a key can be
+/// present, correctly spelled even, and still not survive the trip into the
+/// typed struct a caller actually reads (wrong name, wrong shape, a renamed
+/// field). So these two tests go the whole way: real mod source, through
+/// `serialize_entity`, through the same `LuaSerdeExt` + `serde_json`
+/// round-trip `a_serialised_2_1_recipe_deserialises_into_factorio_recipe`
+/// uses, into a real `FactorioEntity`, and assert the field survives THERE.
+#[test]
+fn a_serialised_inserter_deserialises_into_factorio_entity_with_pickup_position() {
+    let lua = botbridge_types();
+    let out = call(&lua, "serialize_entity", inserter_table(&lua));
+
+    let json: serde_json::Value = lua
+        .from_value(Value::Table(out))
+        .expect("the serialised entity converts to json");
+    let entity: FactorioEntity =
+        serde_json::from_value(json.clone()).unwrap_or_else(|err| panic!("{err} in {json}"));
+
+    let pickup = entity
+        .pickup_position
+        .expect("pickup_position must survive into FactorioEntity, not just the Lua table");
+    assert_eq!(pickup.x, 5.5);
+    assert_eq!(pickup.y, 2.5);
+}
+
+fn underground_belt_table(lua: &Lua, half: &str) -> Table {
+    let point = |x: f64, y: f64| {
+        let table = lua.create_table().expect("table");
+        table.set("x", x).expect("set");
+        table.set("y", y).expect("set");
+        table
+    };
+    let bounding_box = lua.create_table().expect("table");
+    bounding_box
+        .set("left_top", point(0.1015625, 10.1015625))
+        .expect("set");
+    bounding_box
+        .set("right_bottom", point(0.8984375, 10.8984375))
+        .expect("set");
+
+    let entity = lua.create_table().expect("table");
+    entity.set("name", "underground-belt").expect("set");
+    entity.set("type", "underground-belt").expect("set");
+    entity.set("direction", 4).expect("set");
+    entity.set("position", point(0.5, 10.5)).expect("set");
+    entity.set("bounding_box", bounding_box).expect("set");
+    // `entity.belt_to_ground_type` -- Factorio's own field, confirmed live
+    // against a real game to read "input"/"output" (never nil, even for an
+    // underground-belt created with no `type` argument at all).
+    entity.set("belt_to_ground_type", half).expect("set");
+    for getter in ["get_output_inventory", "get_fuel_inventory"] {
+        let nothing = lua
+            .create_function(|_, ()| Ok(Value::Nil))
+            .expect("function");
+        entity.set(getter, nothing).expect("set");
+    }
+    entity
+}
+
+#[test]
+fn a_serialised_underground_belt_deserialises_into_factorio_entity_with_its_half() {
+    let lua = botbridge_types();
+
+    let input_out = call(
+        &lua,
+        "serialize_entity",
+        underground_belt_table(&lua, "input"),
+    );
+    let input_json: serde_json::Value = lua
+        .from_value(Value::Table(input_out))
+        .expect("the serialised entity converts to json");
+    let input_entity: FactorioEntity = serde_json::from_value(input_json.clone())
+        .unwrap_or_else(|err| panic!("{err} in {input_json}"));
+    assert_eq!(
+        input_entity.underground_half,
+        Some(UndergroundHalf::Input),
+        "underground_half must survive into FactorioEntity, not just Factorio's own \
+         entity.belt_to_ground_type or the Lua table serialize_entity returns"
+    );
+
+    let output_out = call(
+        &lua,
+        "serialize_entity",
+        underground_belt_table(&lua, "output"),
+    );
+    let output_json: serde_json::Value = lua
+        .from_value(Value::Table(output_out))
+        .expect("the serialised entity converts to json");
+    let output_entity: FactorioEntity = serde_json::from_value(output_json.clone())
+        .unwrap_or_else(|err| panic!("{err} in {output_json}"));
+    assert_eq!(
+        output_entity.underground_half,
+        Some(UndergroundHalf::Output),
+        "the two halves of a pair must not collapse to the same value"
+    );
 }
 
 /// A `LuaTechnology` as `serialize_technology` reads it, with `trigger` as

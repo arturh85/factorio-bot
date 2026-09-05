@@ -597,7 +597,7 @@ there` -- the same `ChainOwnerInfeasible` shape as MinerLine (Task 4), at a
 tile none of the 5 known trees stood on (most likely uneven terrain or a
 cliff, invisible to `rcon.find_entities_in_radius` per Task 4's own
 finding). Rather than fight it, a throwaway scan script
-(`scripts/furnace_site_scan.lua`, not tracked -- reproduction trail only)
+(`scripts/furnace_site_scan.lua`, tracked -- reproduction trail only)
 checked 6 candidate anchors for in-footprint obstacles; `(60,-100)` came
 back with 0. Rebuilt there, clean, first try. **This is the same siting
 finding as MinerLine, generalised**: obstacle-only clearing is not a full
@@ -663,26 +663,54 @@ belt layout leaves some furnaces with no adjacent tile a character can
 occupy. This is a feeding-method limitation (insert requires the bot to be
 physically near the target), not a build defect.
 
-Production, read directly from the 10 fed furnaces' own `output_inventory`
-(summed, `iron-plate`), sampled every 600 ticks for 12,000 ticks
-(~3.3 game minutes) after feeding:
+Production, read directly from the 10 (of 24) fed furnaces' own
+`output_inventory` (summed, `iron-plate`), sampled every 600 ticks for
+12,000 ticks (~3.3 game minutes) after feeding. Game ticks run at 60/s
+regardless of `--game-speed` (which scales wall clock, not tick count), so
+game-minutes = ticks/3600:
 
-| ticks past feed | iron-plate |
-|---:|---:|
-| 600 | 45 |
-| 1800 | 109 |
-| 3600 | 200 |
-| 6000 | 326 |
-| 9000 | 485 |
-| 12000 | 639 |
+| ticks past feed | game-min past feed | cumulative iron-plate | plates/min this interval |
+|---:|---:|---:|---:|
+| 600 | 0.17 | 45 | -- (startup, no prior sample) |
+| 1200 | 0.33 | 76 | 186 |
+| 1800 | 0.50 | 109 | 198 |
+| 2400 | 0.67 | 139 | 180 |
+| 3000 | 0.83 | 170 | 186 |
+| 3600 | 1.00 | 200 | 180 |
+| 4200 | 1.17 | 235 | 210 |
+| 4800 | 1.33 | 265 | 180 |
+| 5400 | 1.50 | 295 | 180 |
+| 6000 | 1.67 | 326 | 186 |
+| 6600 | 1.83 | 359 | 198 |
+| 7200 | 2.00 | 389 | 180 |
+| 7800 | 2.17 | 420 | 186 |
+| 8400 | 2.33 | 450 | 180 |
+| 9000 | 2.50 | 485 | 210 |
+| 9600 | 2.67 | 515 | 180 |
+| 10200 | 2.83 | 545 | 180 |
+| 10800 | 3.00 | 576 | 186 |
+| 11400 | 3.17 | 609 | 198 |
+| 12000 | 3.33 | 639 | 180 |
 
-Steady, roughly linear climb, no plateau within the window -- consistent
-with continuous smelting rather than a one-shot batch. `just analyse`
-against the run directory independently corroborates it from the mod's own
-machine samples: **10 of 24 machines "worked" at some point, 14 stayed
-`no_fuel`** (exactly the 10 fed / 14 unreachable split above), with
-per-furnace `products finished` around 63-64 plates each by the end of
-sampling (10 x ~64 ~= 640, matching the in-script total of 639).
+**Steady-state rate: 187.6 plates/minute, across the 10 of 24 furnaces that
+were reachable and fed** -- (639-45) plates over (12000-600) ticks =
+594 plates / 11,400 ticks = 594 / 3.1667 game-minutes = 187.58/min,
+excluding the first 600-tick sample (startup lag before the first read, not
+representative of steady output). The full window including that startup
+sample reads 639 plates / 3.333 game-minutes = 191.7/min, close but
+slightly inflated by the same startup edge. Per-interval rates above sit
+between 180 and 210/min with no drift up or down -- no plateau, consistent
+with continuous smelting rather than a one-shot batch, and matching the
+**theoretical maximum for 10 stone furnaces smelting continuously**
+(192 ticks/plate each -> 10 x 3600/192 = 187.5/min): the fed furnaces were
+running at full capacity, never fuel- or ore-starved within the window.
+
+`just analyse` against the run directory independently corroborates the
+10-of-24 denominator from the mod's own machine samples: **10 of 24
+machines "worked" at some point, 14 stayed `no_fuel`** (exactly the 10 fed
+/ 14 unreachable split above), with per-furnace `products finished` around
+63-64 plates each by the end of sampling (10 x ~64 ~= 640, matching the
+in-script total of 639).
 
 **Caveat on the production-curve tooling**: the brief describes `just
 analyse` as now printing "cumulative and per-minute output at fixed game

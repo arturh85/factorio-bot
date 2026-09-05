@@ -1966,7 +1966,11 @@ end
                             },
                         )
                         .map_err(record_error)?;
-                    written += 1;
+                    // Written, but NOT counted: every driver prints this
+                    // call's answer as "WALLED IN: N bot(s) can no longer
+                    // reach open ground", and a step-aside is the enclosure
+                    // that did not happen. run-1788569499-05724 printed
+                    // `WALLED IN: 1` for a bot that had just walked clear.
                 }
                 Ok(written)
             })?,

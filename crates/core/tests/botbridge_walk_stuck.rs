@@ -35,7 +35,7 @@
 //! stub records every path request, which is how "the mod asks for nothing of
 //! its own any more" is checked rather than assumed.
 
-use factorio_bot_core::factorio::rcon::walk_reports_stalled_leg;
+use factorio_bot_core::factorio::rcon::{WalkBlockerKind, walk_blocker, walk_reports_stalled_leg};
 use mlua::{Lua, LuaOptions, StdLib};
 
 const CONTROL_LUA: &str = include_str!(concat!(
@@ -520,4 +520,225 @@ fn a_path_answer_is_written_out_even_while_a_walk_is_stalled() {
         line.contains("9999#"),
         "the reply is keyed by the handle, got {line}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// the follower driving a character that moves
+//
+// Everything above holds the character still and asks what the follower says
+// about it. These tests move the character the way the game would -- 0.15
+// tiles per tick in the direction `walking_state` names -- and ask what the
+// follower does over a whole leg. They exist because of run 9
+// (`workspace/runs/run-1788576604-65414`): bot 1 walked 1.04 of a 1.42-tile
+// leg in 7 ticks, the game then held it still for 54 ticks on open dirt with
+// nothing within twelve tiles, and the follower reported "made no progress for
+// 61 ticks" -- the whole time since the leg began -- from a position a reader
+// took for the leg's origin. The clock is a progress clock now, and the
+// message says where on the leg the character stopped and what the follower
+// was doing when it did.
+
+/// Where the character starts for every walk below: 0.05 tiles off the centre
+/// of its own tile, which is where a real walk starts -- and the pathfinder's
+/// first waypoint is that tile centre, so the first leg is over before the
+/// character has moved. Then a 1.42-tile diagonal, which is what most legs of
+/// a real path are (the median leg in run 11 was exactly `sqrt(2)`).
+const START: (f64, f64) = (10.45, 10.45);
+const OWN_TILE: (f64, f64) = (10.5, 10.5);
+const NEXT_TILE: (f64, f64) = (11.5, 9.5);
+
+/// A stub character that walks: after each tick, `step_character(idx, speed)`
+/// moves it `speed` tiles along the direction `walking_state` names, exactly
+/// as the game would. The probe's two surface calls are stubbed to "open
+/// ground", so a stall here reads `nothing findable` rather than
+/// `probe failed`.
+const MOVING_STUB: &str = r#"
+    local dir_names = {}
+    for _, name in ipairs({ "north", "northeast", "east", "southeast",
+                            "south", "southwest", "west", "northwest" }) do
+        dir_names[defines.direction[name]] = name
+    end
+    local dir_vec = {
+        north = { 0, -1 }, northeast = { 1, -1 }, east = { 1, 0 }, southeast = { 1, 1 },
+        south = { 0, 1 }, southwest = { -1, 1 }, west = { -1, 0 }, northwest = { -1, -1 },
+    }
+    function step_character(idx, speed)
+        local p = _players[idx]
+        local ws = p.walking_state
+        if ws == nil or not ws.walking then return false end
+        local v = dir_vec[dir_names[ws.direction]]
+        local len = math.sqrt(v[1] * v[1] + v[2] * v[2])
+        p.position.x = p.position.x + v[1] / len * speed
+        p.position.y = p.position.y + v[2] / len * speed
+        return true
+    end
+    function open_ground(idx)
+        local s = _players[idx].surface
+        s.find_entities_filtered = function() return {} end
+        s.get_tile = function() return { name = "dirt-3", valid = true } end
+    end
+"#;
+
+/// A walk dispatched through the mod's own `start_walk_waypoints`, so the leg
+/// origin, the clock and the first-tick arrival are the real ones.
+fn dispatched_walk(start: (f64, f64), waypoints: &[(f64, f64)]) -> String {
+    let legs = waypoints
+        .iter()
+        .map(|(x, y)| format!("{{ {x}, {y} }}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        r#"{INIT_STORAGE}
+        {MOVING_STUB}
+        make_player(1, {sx}, {sy})
+        open_ground(1)
+        game.tick = {dispatch}
+        assert(start_walk_waypoints({ACTION}, 1, {{ {legs} }}) == true)
+    "#,
+        sx = start.0,
+        sy = start.1,
+        dispatch = TICK - 1,
+    )
+}
+
+/// One tick of the game as the follower sees it: `on_tick`, then the character
+/// moves by what the follower set -- or does not, when `moves` says so.
+fn drive(lua: &Lua, at: u64, moves: bool) {
+    tick(lua, at);
+    if moves {
+        lua.load("step_character(1, 0.15)")
+            .exec()
+            .expect("step_character");
+    }
+}
+
+fn success(lua: &Lua) -> Option<String> {
+    line_containing(lua, &format!("action_completed§ok {ACTION}"))
+}
+
+/// The first waypoint of a real path is the centre of the tile the character
+/// stands on, and the character is already inside its box. That leg is done
+/// on the first tick, and the next waypoint is steered at on that same tick:
+/// no tick is spent, no clock is started on a leg that never needed walking.
+#[test]
+fn a_waypoint_the_character_already_stands_inside_is_done_on_the_first_tick() {
+    let lua = load(&dispatched_walk(START, &[OWN_TILE, NEXT_TILE]));
+    drive(&lua, TICK, true);
+
+    assert_eq!(walk_field::<u64>(&lua, "idx"), Some(2), "leg 1 is over");
+    assert!(walking_state_is_walking(&lua), "and leg 2 is being steered");
+    assert_eq!(failure(&lua), None);
+
+    for at in TICK + 1..TICK + 20 {
+        drive(&lua, at, true);
+    }
+    assert!(
+        success(&lua).is_some(),
+        "a 1.42-tile leg at full speed is over in about ten ticks, got {:?}",
+        stdout(&lua)
+    );
+    assert_eq!(failure(&lua), None);
+}
+
+/// A leg walked slowly is not a stall. The character here advances on one tick
+/// in four -- what a script-walked character does in a game whose tick rate
+/// has collapsed -- so a 5-tile leg takes about 136 ticks. The old clock,
+/// 3x the straight-line time floored at 60, gave this leg 100 ticks from the
+/// tick it began and failed the walk with "made no progress" while the
+/// character was visibly progressing. A progress clock restarts every tick
+/// the character gets closer.
+#[test]
+fn a_leg_walked_at_a_quarter_of_full_speed_is_not_a_stall() {
+    let lua = load(&dispatched_walk(START, &[OWN_TILE, (15.5, 10.5)]));
+    for (i, at) in (TICK..TICK + 170).enumerate() {
+        drive(&lua, at, i % 4 == 0);
+    }
+    assert_eq!(
+        failure(&lua),
+        None,
+        "a slow leg is walked, not failed, got {:?}",
+        stdout(&lua)
+    );
+    assert!(
+        success(&lua).is_some(),
+        "and it arrives, got {:?}",
+        stdout(&lua)
+    );
+}
+
+/// Run 9's stall, exactly: seven ticks of walking, then the game holds the
+/// character still. The verdict counts from the last tick the leg got closer
+/// -- 61, not 68 -- and says where on the leg the character is, where the leg
+/// began, what the follower was steering, and what the engine's own
+/// `walking_state` read back at that instant.
+#[test]
+fn a_character_the_game_holds_still_is_reported_with_the_ticks_since_it_last_moved() {
+    let lua = load(&dispatched_walk(START, &[OWN_TILE, NEXT_TILE]));
+    // Tick 0 ends leg 1 and steers leg 2; the character moves on ticks 0..6.
+    for at in TICK..TICK + 7 {
+        drive(&lua, at, true);
+    }
+    // Held still from here. The last tick that saw the distance shrink is
+    // TICK + 7 (it reads the position tick 6's step produced), so the clock
+    // runs out on TICK + 68 and the verdict is written on TICK + 69.
+    for at in TICK + 7..TICK + 68 {
+        drive(&lua, at, false);
+        assert_eq!(failure(&lua), None, "not yet, at tick {at}");
+    }
+    drive(&lua, TICK + 68, false);
+    drive(&lua, TICK + 69, false);
+    let reported = failure(&lua).expect("the walk is failed");
+
+    assert!(walk_reports_stalled_leg(&reported), "got {reported}");
+    assert!(
+        reported.contains("leg 2 of 2 made no progress for 61 ticks from ("),
+        "ticks since the last progress, not since the leg began, got {reported}"
+    );
+    assert!(
+        reported.contains("moved 1.05 tiles of a 1.42-tile leg that began at (10.45/10.45)"),
+        "where on the leg it stopped, and the leg's own origin, got {reported}"
+    );
+    assert!(
+        reported.contains("by nothing findable on tile 'dirt-3'"),
+        "the probe still answers, got {reported}"
+    );
+    assert!(
+        reported
+            .contains(", steering east at 0.150 tiles/tick, walking_state read back walking=true"),
+        "what the follower was doing and what the engine held, got {reported}"
+    );
+
+    let blocker = walk_blocker(&reported).expect("the Rust side reads it");
+    assert_eq!(blocker.kind, WalkBlockerKind::Nothing);
+    assert_eq!(blocker.moved_tiles, Some(1.05));
+    assert_eq!(blocker.leg_tiles, Some(1.42));
+    assert_eq!(blocker.engine_walking, Some(true));
+}
+
+/// An offset of exactly 0.3 used to be neither inside the arrival box
+/// (`< 0.3`) nor steered (`> 0.3`): the character stood there until the clock
+/// ran out. The steer is the complement of the box now.
+#[test]
+fn an_offset_of_exactly_three_tenths_is_steered_not_stranded() {
+    // 0.5 - 0.2 is exactly the double nearest 0.3 (10.5 - 10.2 is not), which
+    // is what makes this reachable at all; the fixture checks it rather than
+    // assuming it.
+    let lua = load(&format!(
+        "{}\nassert(({} - {}) == 0.3, 'the fixture needs an exact 0.3')",
+        dispatched_walk((0.2, 10.5), &[(0.5, 10.5)]),
+        0.5,
+        0.2
+    ));
+    drive(&lua, TICK, true);
+    assert!(
+        walking_state_is_walking(&lua) || success(&lua).is_some(),
+        "0.3 away is steered, got {:?}",
+        stdout(&lua)
+    );
+    drive(&lua, TICK + 1, true);
+    assert!(
+        success(&lua).is_some(),
+        "and arrives, got {:?}",
+        stdout(&lua)
+    );
+    assert_eq!(failure(&lua), None);
 }

@@ -327,31 +327,54 @@ function distance(a,b)
 	return math.sqrt((x1-x2)*(x1-x2) + (y1-y2)*(y1-y2))
 end
 
--- How long the "stuck" check should wait before deciding a leg is not
--- progressing, sized to the leg being walked rather than a flat constant.
+-- How many consecutive ticks a leg may go without getting any closer to its
+-- waypoint before the walk is failed as stalled.
 --
--- `LuaControl.character_running_speed` is "the current movement speed of
--- this character, including effects from exoskeletons, tiles, stickers and
--- shooting" -- tiles/tick, the same unit the planner's offline
--- `WALK_TILES_PER_TICK` constant (crates/planner/src/schedule.rs) has to
--- guess at. Reading it live here means the mod never hardcodes a speed.
+-- **This is a progress clock, not a leg timeout.** It used to be
+-- `walk_leg_timeout_ticks`: 3x the straight-line time of the leg, floored at
+-- 60, counted from the tick the leg began -- and the message it produced said
+-- `made no progress` while measuring nothing of the kind. Run 9
+-- (`run-1788576604-65414`) is the case that retired it: bot 1 walked 1.04 of
+-- a 1.42-tile leg in 7 ticks, the game then held the character still for 54
+-- ticks on open dirt with nothing within twelve tiles of it, and the clock --
+-- which had been running since the leg began -- reported "no progress for 61
+-- ticks" from a position that was clearly not where the leg started. A
+-- reader took `from` for the leg's origin and the leg for 0.38 tiles long.
 --
--- The margin is generous on purpose: a real walk turns corners, decelerates
--- approaching a waypoint, and can be slowed by other entities in the way --
--- none of which this straight-line estimate models. 3x the straight-line
--- time, floored at 60 ticks (one second, matching the previous flat
--- constant, for very short legs), is chosen so an ordinary walk essentially
--- never times out while a genuinely stuck bot is still bounded.
-function walk_leg_timeout_ticks(player, from_pos, to_pos)
-	local speed = player.character_running_speed
-	if speed == nil or speed <= 0 then
-		-- Should not happen for a connected player with a character (the
-		-- only case this is ever called for), but a walk must never divide
-		-- by zero or a negative number over a fallback that never triggers.
-		speed = 0.15
+-- Measured as progress instead, the clock restarts on every tick the distance
+-- to the waypoint shrinks, so a leg walked slowly never trips it -- and a
+-- lagging game, where a script-walked character advances only on some ticks,
+-- is exactly when legs are walked slowly. The old scaling by leg length
+-- existed only to tolerate slow legs and is not needed by a clock that
+-- tolerates them by construction. What is left is the one question the check
+-- was always meant to ask: has the character stopped getting closer?
+--
+-- 60 ticks is a second of standing still, the floor the old timeout had for
+-- short legs. A wedged character is reported a second after it stops; a
+-- character the game holds still for longer than that is reported as exactly
+-- that, with `moved <d> tiles of a <len>-tile leg` and the steering the
+-- follower was applying, so the record can tell the two apart.
+WALK_STALL_TICKS = 60
+
+-- The tick a leg last got closer to its waypoint, or the tick it began if it
+-- never has. Stored on the walk as `progress_tick` / `best_dist`; a walk
+-- restored from a save written by a build without those fields simply counts
+-- from `idx_tick`, which is what the old timeout did.
+function walk_leg_progress_tick(w)
+	return w.progress_tick or w.idx_tick
+end
+
+-- Records this tick's distance to the waypoint. The first measurement of a
+-- leg only sets the baseline -- it is not progress, or every leg would buy
+-- itself a free second on its first tick. Every later tick that gets closer
+-- than the best so far restarts the clock.
+function walk_leg_note_distance(w, tick, dist)
+	if w.best_dist == nil then
+		w.best_dist = dist
+	elseif dist < w.best_dist then
+		w.best_dist = dist
+		w.progress_tick = tick
 	end
-	local leg_length = distance(from_pos, to_pos)
-	return math.max(60, math.ceil((leg_length / speed) * 3))
 end
 
 -- A copy of where a character stands as a leg begins, or nil if it has no
@@ -1183,10 +1206,19 @@ function on_tick(event)
 					local dx = dest.x - pos.x
 					local dy = dest.y - pos.y
 
+					-- A leg is done the moment the character is inside its
+					-- 0.3-by-0.3 box, on whichever tick that is -- including
+					-- the first tick of the walk, where the pathfinder's first
+					-- waypoint is routinely the centre of the tile the
+					-- character already stands on. That leg costs nothing:
+					-- the next waypoint is steered at on this same tick.
 					if (math.abs(dx) < 0.3 and math.abs(dy) < 0.3) then
 						w.idx = w.idx + 1
 						w.idx_tick = event.tick
 						w.idx_pos = { x = pos.x, y = pos.y }
+						-- New leg, new progress clock. See WALK_STALL_TICKS.
+						w.best_dist = nil
+						w.progress_tick = nil
 						if w.idx > #w.waypoints then
 							player.walking_state = {walking=false}
 							action_completed(event.tick, w.action_id)
@@ -1198,20 +1230,24 @@ function on_tick(event)
 							dest = w.waypoints[w.idx]
 							dx = dest.x - pos.x
 							dy = dest.y - pos.y
-							-- New leg: size its own timeout instead of
-							-- inheriting the one the previous, differently
-							-- sized leg computed.
-							w.leg_timeout = walk_leg_timeout_ticks(player, pos, dest)
 						end
 					end
 
-					if math.abs(dx) > 0.3 then
+					if storage.p[idx].walking ~= nil then
+						walk_leg_note_distance(w, event.tick, math.sqrt(dx * dx + dy * dy))
+					end
+
+					-- The steer is the complement of the arrival box above:
+					-- `>= 0.3` here against `< 0.3` there. With `> 0.3` an
+					-- offset of exactly 0.3 was neither arrived nor steered,
+					-- and the character stood still until the clock ran out.
+					if math.abs(dx) >= 0.3 then
 						if dx < 0 then dx = -1 else dx = 1 end
 					else
 						dx = 0
 					end
 
-					if math.abs(dy) > 0.3 then
+					if math.abs(dy) >= 0.3 then
 						if dy < 0 then dy = -1 else dy = 1 end
 					else
 						dy = 0
@@ -1235,7 +1271,8 @@ function on_tick(event)
 					end
 
 --					print("waypoint "..w.idx.." of "..#w.waypoints..", pos = "..coord(pos)..", dest = "..coord(dest).. ", dx/dy="..dx.."/"..dy..", dir="..direction)
-					if w.idx_tick ~= nil and event.tick - w.idx_tick > (w.leg_timeout or 60) then
+					local since_progress = walk_leg_progress_tick(w)
+					if since_progress ~= nil and event.tick - since_progress > WALK_STALL_TICKS then
 						-- **The leg has stopped progressing, and the reason is almost
 						-- always that the path is stale.** This mod steers along
 						-- waypoints the game's pathfinder chose once, at dispatch time,
@@ -1288,27 +1325,54 @@ function on_tick(event)
 						if not probed then
 							cause = "blocker unknown (probe failed: " .. tostring(cause) .. ")"
 						end
-						-- **`made no progress` is measured as a leg TIMEOUT, not as a
-						-- position delta**, and it has said so since long before this
-						-- probe existed: the check above is `event.tick - w.idx_tick >
-						-- w.leg_timeout`, which fires just as readily for a leg that
-						-- was walked slowly as for one that was wedged. Those are
-						-- different bugs -- a wrong `walk_leg_timeout_ticks` estimate
-						-- against something solid in the way -- and the wording alone
-						-- cannot tell them apart. The distance actually covered can,
-						-- and it is the number that makes `nothing findable` readable:
-						-- nothing in the way and nothing moved is the pathfinder's
-						-- problem, nothing in the way and three tiles covered is this
-						-- timeout's.
+						-- **`made no progress` now means what it says**: the tick
+						-- count is the time since the distance to the waypoint
+						-- last shrank (WALK_STALL_TICKS), not the time since the
+						-- leg began. `from` is where the character stands NOW --
+						-- `walk_endpoints` (crates/scripting_lua/src/globals/record.rs)
+						-- documents it as the observed stall position and the
+						-- archive is read that way -- so the leg's own origin and
+						-- length follow, or a reader takes `from`..`to` for the
+						-- leg and a 1.42-tile leg for a 0.38-tile one, which is
+						-- what happened with run 9.
+						--
+						-- The steering clause is the observation the engine
+						-- question needs. Run 9's character stood still for 54
+						-- ticks on open dirt with this follower setting
+						-- `walking_state` every one of them while the server ran
+						-- at 2-10 ticks a second. Whether the game kept the
+						-- state it was given (`walking=true` read back: it held
+						-- the character in place) or dropped it (`walking=false`:
+						-- something else, in practice the client's own input,
+						-- overwrote the steer) is the difference between two
+						-- mechanisms, and only this instant can tell them apart.
+						-- `player.walking_state` read here is the engine's value
+						-- after the previous tick's steer was applied and the
+						-- tick was simulated.
 						local moved = "unknown"
+						local leg = ""
 						if w.idx_pos ~= nil then
 							moved = string.format("%.2f", distance(w.idx_pos, pos))
+							leg = " of a " .. string.format("%.2f", distance(w.idx_pos, dest))
+								.. "-tile leg that began at " .. coord(w.idx_pos)
+						end
+						local read_back = "unreadable"
+						local ok_state, state = pcall(function() return player.walking_state end)
+						if ok_state and type(state) == "table" then
+							read_back = tostring(state.walking == true)
+						end
+						local speed = "unknown"
+						local ok_speed, running = pcall(function() return player.character_running_speed end)
+						if ok_speed and type(running) == "number" then
+							speed = string.format("%.3f", running)
 						end
 						w.stuck = "ERROR: stuck while walking, leg " .. w.idx .. " of "
 							.. #w.waypoints .. " made no progress for "
-							.. (event.tick - w.idx_tick) .. " ticks from "
+							.. (event.tick - since_progress) .. " ticks from "
 							.. coord(pos) .. " to " .. coord(dest)
-							.. ", moved " .. moved .. " tiles, " .. cause
+							.. ", moved " .. moved .. " tiles" .. leg .. ", " .. cause
+							.. ", steering " .. (direction ~= "" and direction or "nowhere") .. " at " .. speed
+							.. " tiles/tick, walking_state read back walking=" .. read_back
 						-- Nil the waypoint being steered at rather than advancing past
 						-- it: the `dest == nil` arm above then clears `walking` and
 						-- reports `w.stuck` on the next tick, which is the one exit a
@@ -3207,22 +3271,18 @@ function start_walk_waypoints(action_id, player_id, waypoints, step_aside)
 	-- the stuck check below measured "ticks since the *previous* waypoint"
 	-- rather than "ticks since this leg started" -- and for the first leg
 	-- specifically, it measured nothing at all until arrival, exempting it
-	-- from the check entirely. Stamping it here, with a timeout sized to this
-	-- leg's own length, covers leg 1 the same way every later leg is covered.
-	local leg_timeout = 60
-	if tmp[1] ~= nil then
-		leg_timeout = walk_leg_timeout_ticks(player, player.character.position, tmp[1])
-	end
+	-- from the check entirely. Stamping it here covers leg 1 the same way
+	-- every later leg is covered: the progress clock (WALK_STALL_TICKS)
+	-- counts from here until the first tick the leg gets closer.
 	storage.p[player_id].walking = {
 		idx = 1,
 		waypoints = tmp,
 		action_id = action_id,
 		idx_tick = game.tick,
 		-- Where this leg started, so a stall can say how far the character
-		-- actually got. See `walk_stall_cause` for why the answer is not
-		-- already in the message.
+		-- actually got and how long the leg was. See `walk_stall_cause` for
+		-- why the answer is not already in the message.
 		idx_pos = walk_leg_origin(player),
-		leg_timeout = leg_timeout,
 		step_aside = step_aside,
 	}
 	return true

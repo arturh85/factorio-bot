@@ -4503,6 +4503,26 @@ mod tests {
         );
     }
 
+    /// The wording the mod produces since its stall clock measures progress:
+    /// the leg's length and origin follow `moved`, and a steering observation
+    /// follows the tile. `from` is still the stall position and `to` the
+    /// waypoint -- the two extra coordinates in the sentence must not be the
+    /// ones read here, or the archive's "where the character stood" column
+    /// would silently become "where the leg began".
+    #[test]
+    fn a_stalled_walk_with_the_leg_and_steering_clauses_still_reads_the_same_two_positions() {
+        let stalled = "game rejected the command: Unexpected Response: ERROR: stuck while \
+                       walking, leg 2 of 86 made no progress for 54 ticks from \
+                       (-44.8125/74.71484375) to (-44.5/74.5), moved 1.04 tiles of a \
+                       1.42-tile leg that began at (-45.55078125/75.453125), blocked at \
+                       (-44.062/74.715) by nothing findable on tile 'dirt-3', steering \
+                       east at 0.150 tiles/tick, walking_state read back walking=true";
+        let failure = classify_walk_failure(stalled);
+        assert_eq!(failure.kind, WalkFailureKind::Stalled);
+        assert_eq!(failure.from, Some(Position::new(-44.8125, 74.71484375)));
+        assert_eq!(failure.destination, Some(Position::new(-44.5, 74.5)));
+    }
+
     /// A walk that arrived carries no failure, and a wording nothing
     /// recognises still carries one.
     ///

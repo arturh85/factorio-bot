@@ -1218,6 +1218,18 @@ struct PathWaypoint {
 /// *does*: previously the mod discarded the flag before it ever crossed the
 /// wire, and a leg that the pathfinder had already flagged as blocked looked
 /// identical to a clear one all the way down to the stuck-teleport it caused.
+///
+/// # Zero-length legs are dropped here
+///
+/// The game repeats a waypoint: in `run-1788583161-11653`, 60 of 5,131 legs
+/// across 192 paths were a position followed by itself -- 35 mid-path, 25 as
+/// the final pair -- and those were the *only* legs shorter than half a tile
+/// (every other one was 0.77 or longer; the median is a 1.41-tile diagonal).
+/// The mod's follower survives such a leg, but not for free: it advances one
+/// waypoint per tick, so a repeated waypoint is a tick spent standing inside a
+/// box it was already in, and it counts as a leg in every `leg N of M` the
+/// record carries. The path is the place to remove it, because this is the one
+/// function every path passes through on its way to the mod.
 fn waypoint_positions(waypoints: Vec<PathWaypoint>, context: &str) -> Vec<Position> {
     let blocked = waypoints
         .iter()
@@ -1231,7 +1243,14 @@ fn waypoint_positions(waypoints: Vec<PathWaypoint>, context: &str) -> Vec<Positi
             waypoints.len()
         );
     }
-    waypoints.into_iter().map(|w| w.position).collect()
+    let mut positions: Vec<Position> = Vec::with_capacity(waypoints.len());
+    for w in waypoints {
+        if positions.last().is_some_and(|last| *last == w.position) {
+            continue;
+        }
+        positions.push(w.position);
+    }
+    positions
 }
 
 /// Whether a player at `player` may mine a resource at `target`.
@@ -1649,6 +1668,9 @@ const WALK_BLOCKED_BY: &str = " by ";
 const WALK_ON_TILE: &str = " on tile '";
 const WALK_MOVED: &str = ", moved ";
 const WALK_MOVED_UNIT: &str = " tiles";
+const WALK_LEG_OF_A: &str = " tiles of a ";
+const WALK_LEG_UNIT: &str = "-tile leg";
+const WALK_READ_BACK: &str = "walking_state read back walking=";
 const WALK_PROBE_FAILED: &str = "blocker unknown (probe failed: ";
 const WALK_NOTHING_FINDABLE: &str = "nothing findable";
 
@@ -1722,19 +1744,32 @@ pub struct WalkBlocker {
     /// **Observed.** How far the character actually travelled on the leg that
     /// gave up.
     ///
-    /// The reason this is not redundant with the wording next to it:
-    /// `made no progress for <t> ticks` is a **leg timeout**, measured as
-    /// `event.tick - w.idx_tick > w.leg_timeout` and nothing else, so it fires
-    /// as readily for a leg that was walked slowly as for one that was wedged.
-    /// It has always overstated what it measured. This is the measurement, and
-    /// it is what makes [`WalkBlockerKind::Nothing`] readable: nothing in the
-    /// way and nothing moved is a pathfinder problem, nothing in the way and
-    /// three tiles covered is `walk_leg_timeout_ticks` being wrong.
+    /// `made no progress for <t> ticks` used to be a **leg timeout**, counted
+    /// from the tick the leg began, so this was the only number that said
+    /// whether the character was wedged. The mod's clock is a progress clock
+    /// now (`WALK_STALL_TICKS`: ticks since the distance to the waypoint last
+    /// shrank), so the wording and this number finally agree -- and together
+    /// with [`WalkBlocker::leg_tiles`] they say *where on the leg* the
+    /// character stopped. Run 9 stopped 1.04 tiles into a 1.42-tile leg on
+    /// open ground: it had walked, and then the game held it.
     ///
     /// `None` when the mod could not say -- a walk still in flight across a
     /// save written by a build that did not stamp the leg's origin, the same
     /// case the `w.stuck == true` fallback covers.
     pub moved_tiles: Option<f64>,
+    /// **Observed.** The straight-line length of the leg that gave up, from
+    /// where it began to the waypoint. Beside `moved_tiles` this is what turns
+    /// "moved 1.04 tiles" from a bare distance into a position on the leg.
+    /// `None` from a mod that did not say.
+    pub leg_tiles: Option<f64>,
+    /// **Observed.** What `player.walking_state.walking` read back at the
+    /// instant of the stall -- the engine's own value, one simulated tick
+    /// after the follower last set it. `Some(true)` means the game kept the
+    /// steer and did not move the character; `Some(false)` means something
+    /// overwrote the steer between the follower's write and the next tick.
+    /// Those are two different mechanisms, and run 9 could not tell them
+    /// apart. `None` from a mod that did not say.
+    pub engine_walking: Option<bool>,
     /// The unparsed cause text, for [`WalkBlockerKind::ProbeFailed`] and
     /// [`WalkBlockerKind::Unknown`].
     pub detail: Option<String>,
@@ -1752,8 +1787,20 @@ impl WalkBlocker {
             tile: None,
             others: 0,
             moved_tiles: None,
+            leg_tiles: None,
+            engine_walking: None,
             detail: None,
         }
+    }
+
+    /// `after 1.04 tiles`, or `after 1.04 of 1.42 tiles` when the mod said how
+    /// long the leg was.
+    fn moved_clause(&self) -> Option<String> {
+        let moved = self.moved_tiles?;
+        Some(match self.leg_tiles {
+            Some(leg) => format!("after {moved} of {leg} tiles"),
+            None => format!("after {moved} tiles"),
+        })
     }
 
     /// A short, stable rendering for a line somebody reads while the run is
@@ -1780,12 +1827,21 @@ impl WalkBlocker {
                 .name
                 .clone()
                 .unwrap_or_else(|| format!("{:?}", self.kind).to_lowercase()),
-            WalkBlockerKind::Nothing => match (self.tile.as_deref(), self.moved_tiles) {
-                (Some(tile), Some(moved)) => format!("nothing, on {tile}, after {moved} tiles"),
-                (Some(tile), None) => format!("nothing, on {tile}"),
-                (None, Some(moved)) => format!("nothing, after {moved} tiles"),
-                (None, None) => "nothing".to_string(),
-            },
+            WalkBlockerKind::Nothing => {
+                let mut parts = vec!["nothing".to_string()];
+                if let Some(tile) = self.tile.as_deref() {
+                    parts.push(format!("on {tile}"));
+                }
+                if let Some(moved) = self.moved_clause() {
+                    parts.push(moved);
+                }
+                match self.engine_walking {
+                    Some(true) => parts.push("game still walking".to_string()),
+                    Some(false) => parts.push("game not walking".to_string()),
+                    None => {}
+                }
+                parts.join(", ")
+            }
             WalkBlockerKind::ProbeFailed => "unknown -- the probe raised".to_string(),
             WalkBlockerKind::Unknown => {
                 self.detail.clone().unwrap_or_else(|| "unknown".to_string())
@@ -1836,6 +1892,8 @@ pub fn walk_blocker(message: &str) -> Option<WalkBlocker> {
         let mut blocker = WalkBlocker::of(WalkBlockerKind::ProbeFailed);
         blocker.detail = Some(why.trim_end().trim_end_matches(')').trim().to_string());
         blocker.moved_tiles = moved_tiles;
+        blocker.leg_tiles = parse_leg_tiles(message);
+        blocker.engine_walking = parse_engine_walking(message);
         return Some(blocker);
     }
     let (_, tail) = message.split_once(WALK_BLOCKED_AT)?;
@@ -1904,6 +1962,8 @@ pub fn walk_blocker(message: &str) -> Option<WalkBlocker> {
     blocker.tile = tile;
     blocker.others = others;
     blocker.moved_tiles = moved_tiles;
+    blocker.leg_tiles = parse_leg_tiles(message);
+    blocker.engine_walking = parse_engine_walking(message);
     Some(blocker)
 }
 
@@ -1917,6 +1977,28 @@ fn parse_moved_tiles(message: &str) -> Option<f64> {
     let (_, tail) = message.split_once(WALK_MOVED)?;
     let (value, _) = tail.split_once(WALK_MOVED_UNIT)?;
     value.trim().parse().ok()
+}
+
+/// `moved <d> tiles of a <len>-tile leg` -- the `<len>`.
+fn parse_leg_tiles(message: &str) -> Option<f64> {
+    let (_, tail) = message.split_once(WALK_LEG_OF_A)?;
+    let (value, _) = tail.split_once(WALK_LEG_UNIT)?;
+    value.trim().parse().ok()
+}
+
+/// `walking_state read back walking=<true|false>` -- the boolean. Anything
+/// else the mod wrote there (`unreadable`) is `None`.
+fn parse_engine_walking(message: &str) -> Option<bool> {
+    let (_, tail) = message.split_once(WALK_READ_BACK)?;
+    let word = tail
+        .split(|c: char| !c.is_ascii_alphabetic())
+        .next()
+        .unwrap_or_default();
+    match word {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    }
 }
 
 /// The digits at the start of `text`, or zero. Used for the `(+N more)` count,
@@ -1973,9 +2055,9 @@ fn is_stalled_walk(failure: &ActionFailure) -> bool {
 /// [`is_stalled_walk`] refuses to retry anything else. So an attempt cannot
 /// both consume [`ACTION_RESULT_DEADLINE`] and be retried: a walk the game goes
 /// quiet on is [`Dispatch::NoVerdict`] and ends the loop. What a retry actually
-/// costs is one path request round trip plus the mod's own leg timeout
-/// (`walk_leg_timeout_ticks`, 3x the straight-line time of one leg, floored at
-/// 60 ticks) -- seconds, not minutes. Three attempts therefore bound a
+/// costs is one path request round trip plus the mod's own stall clock
+/// (`WALK_STALL_TICKS`, 60 ticks without the leg getting any closer to its
+/// waypoint) -- seconds, not minutes. Three attempts therefore bound a
 /// hopelessly stuck walk to the same order the mod's re-path budget did, which
 /// is the property that must not regress: being told in seconds instead of
 /// after the executor's 360-second deadline is the whole point.
@@ -6474,6 +6556,79 @@ mod transfer_guarantee_tests {
         assert_eq!(blocker.others, 1, "{clause}");
     }
 
+    /// The wording the mod produces since the progress clock: the leg's
+    /// length and origin ride after `moved`, and the steering observation
+    /// rides after the tile. Every older reader still finds what it read
+    /// before -- the retry's two words, the archive's two coordinates, the
+    /// `moved` distance, the tile -- and the new fields come out beside them.
+    /// This is run 9's stall, as the new mod would have reported it.
+    #[test]
+    fn the_leg_and_the_steering_ride_after_the_cause_without_displacing_it() {
+        let stall = "ERROR: stuck while walking, leg 2 of 86 made no progress for 54 ticks \
+                     from (-44.8125/74.71484375) to (-44.5/74.5), moved 1.04 tiles of a \
+                     1.42-tile leg that began at (-45.55078125/75.453125), blocked at \
+                     (-44.062/74.715) by nothing findable on tile 'dirt-3', steering east \
+                     at 0.150 tiles/tick, walking_state read back walking=true";
+        assert!(walk_reports_stalled_leg(stall), "the retry still fires");
+        let blocker = walk_blocker(stall).expect("the clause is there");
+        assert_eq!(blocker.kind, WalkBlockerKind::Nothing);
+        assert_eq!(blocker.tile.as_deref(), Some("dirt-3"));
+        assert_eq!(blocker.moved_tiles, Some(1.04));
+        assert_eq!(blocker.leg_tiles, Some(1.42));
+        assert_eq!(blocker.engine_walking, Some(true));
+        assert_eq!(
+            blocker.summary(),
+            "nothing, on dirt-3, after 1.04 of 1.42 tiles, game still walking"
+        );
+
+        // A named blocker carries them too, and `(+N more)` is still found
+        // with a clause after it.
+        let tree = "ERROR: stuck while walking, leg 3 of 4 made no progress for 61 ticks \
+                    from (1.0/2.0) to (2.0/2.0), moved 0.00 tiles of a 1.00-tile leg that \
+                    began at (1.0/2.0), blocked at (1.75/2.0) by tree 'tree-01' on tile \
+                    'grass-1' (+2 more), steering east at 0.150 tiles/tick, walking_state \
+                    read back walking=false";
+        let blocker = walk_blocker(tree).expect("the clause is there");
+        assert_eq!(blocker.kind, WalkBlockerKind::Tree);
+        assert_eq!(blocker.name.as_deref(), Some("tree-01"));
+        assert_eq!(blocker.others, 2);
+        assert_eq!(blocker.leg_tiles, Some(1.0));
+        assert_eq!(blocker.engine_walking, Some(false));
+
+        // And a message from before either clause existed reads as before:
+        // absent, never zero or false.
+        let old = "ERROR: stuck while walking, leg 9 of 10 made no progress for 61 ticks \
+                   from (1.0/2.0) to (2.0/2.0), moved 0.02 tiles, blocked at (1.75/2.0) \
+                   by nothing findable on tile 'grass-1'";
+        let blocker = walk_blocker(old).expect("the clause is there");
+        assert_eq!(blocker.leg_tiles, None);
+        assert_eq!(blocker.engine_walking, None);
+        assert_eq!(blocker.summary(), "nothing, on grass-1, after 0.02 tiles");
+    }
+
+    /// The game repeats waypoints, and the repeat is dropped before the path
+    /// reaches the mod: 60 of run 11's 5,131 legs were a position followed by
+    /// itself, and they were the only legs shorter than half a tile.
+    #[test]
+    fn a_repeated_waypoint_is_dropped_from_the_path() {
+        let path = [(1.5, 1.5), (1.5, 1.5), (2.5, 2.5), (3.5, 3.5), (3.5, 3.5)]
+            .into_iter()
+            .map(|(x, y)| PathWaypoint {
+                position: Position::new(x, y),
+                needs_destroy_to_reach: false,
+            })
+            .collect();
+        let positions = waypoint_positions(path, "test");
+        assert_eq!(
+            positions,
+            vec![
+                Position::new(1.5, 1.5),
+                Position::new(2.5, 2.5),
+                Position::new(3.5, 3.5)
+            ]
+        );
+    }
+
     /// The clause is appended to the stall wording the retry already matches,
     /// and appended **after** the two coordinates -- so
     /// [`walk_reports_stalled_leg`] still fires and the archive's endpoint
@@ -6524,7 +6679,7 @@ mod transfer_guarantee_tests {
         // And the mod really does append it: the follower's own source, not a
         // description of it.
         assert!(
-            CONTROL_LUA.contains(r#".. ", moved " .. moved .. " tiles, " .. cause"#),
+            CONTROL_LUA.contains(r#".. ", moved " .. moved .. " tiles" .. leg .. ", " .. cause"#),
             "the stall no longer carries a cause clause and a distance"
         );
         assert!(

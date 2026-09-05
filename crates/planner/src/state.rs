@@ -3693,10 +3693,10 @@ impl PlanState {
     ///   (`within_resource_reach`, `crates/core/src/factorio/rcon.rs`), and
     ///   the same bound the mod re-checks before setting `mining_state`. A bot
     ///   further out than this does not mine at all, so every bot that does
-    ///   mine tile `T` is somewhere in `disc(T, reach)`. The executor actually
-    ///   aims at `approach_radius(reach)` — half of it — so this is the worst
-    ///   case rather than the expected one, which is the direction a
-    ///   separation has to err in. The roster's largest plausible reach is
+    ///   mine tile `T` is somewhere in `disc(T, reach)`. The executor aims
+    ///   *inside* it — at `reach` less the pathfinder's slack and the arrival
+    ///   margin (`approach_aim`) — so this is the worst case rather than the
+    ///   expected one, which is the direction a separation has to err in. The roster's largest plausible reach is
     ///   used; see [`MAX_PLAUSIBLE_RESOURCE_REACH`].
     /// * **`(0.5 + character_x).hypot(0.5 + character_y)`** — the furthest a
     ///   character's *centre* can be from a tile's centre while its collision

@@ -1424,14 +1424,19 @@ fn distance_to_rect(from: &Position, rect: &Rect) -> f64 {
 /// and "2.9 from the rock", and the second number is what a centre rule
 /// refused in run-1788551693-66583 after the bot had walked exactly where
 /// the plan sent it. A boxless target falls back to the centre.
-fn mining_distance(world: &FactorioWorld, from: &Position, target: &Position) -> f64 {
+///
+/// Public because the executor asks the same question after every walk
+/// (`RconActuator::close_reach_gap`): "is the bot near enough to act on this?"
+/// is one rule, and a second implementation of it beside this one would be a
+/// second answer.
+pub fn reach_distance(world: &FactorioWorld, from: &Position, target: &Position) -> f64 {
     match blocking_box_at(world, target) {
         Some(rect) => distance_to_rect(from, &rect),
         None => calculate_distance(from, target),
     }
 }
 
-/// [`within_resource_reach`], measured by [`mining_distance`].
+/// [`within_resource_reach`], measured by [`reach_distance`].
 fn within_mining_reach(
     world: &FactorioWorld,
     player: &Position,
@@ -1477,9 +1482,149 @@ fn mining_approach(
             reach + (rect.width() / 2.).min(rect.height() / 2.),
             Some(here),
             walker,
+            // [`Approach::Inner`], not `Outer`: this walk only ever happens
+            // because the bot is *already* out of reach, which is the case the
+            // outer ring's margin was wrong about. A recovery walk buys
+            // certainty, not ticks.
+            Approach::Inner,
         ),
         None => (target.clone(), approach_radius(reach)),
     }
+}
+
+/// How far past the radius it asked for a walk actually comes to rest,
+/// **measured on this game rather than reasoned about**, plus headroom.
+///
+/// A walk asks the game for a path ending within `slack` of a goal and the
+/// mod's follower then walks it. The question the outer-ring aim turns on is
+/// how far past `slack` the character ends up, because that is what has to be
+/// held back from the action's own reach.
+///
+/// 128 probe walks were dispatched for this on seed 31337 (four headless
+/// character bots, legs of 3 to 20 tiles in eight bearings, requested radii
+/// 0.5, 0.75, 1, 1.5, 2, 2.5, 3 and 5), reading each resting position back off
+/// `world.player(id)` — exact under `--headless`, where
+/// `poll_character_bot` writes a character's position on every tick it
+/// changes. **The largest overshoot in the whole set was 0.301 tiles**, which
+/// is the follower's own 0.3-by-0.3 stop box and nothing else; the mean was
+/// *negative* at every radius (the bot usually stops short, inside the disc it
+/// asked for). Nothing came close to the `R + 1.1` this file used to guess at
+/// on the strength of one 2026-08-30 walk.
+///
+/// 0.6 is twice that maximum. The doubling is not superstition: the stop box
+/// is a box, so its worst case on a diagonal is `0.3 * sqrt(2) = 0.424`, and a
+/// margin has to cover a case the probe did not happen to draw.
+///
+/// **It is deliberately not big enough to cover the worst case the system
+/// permits.** [`PATH_ENDPOINT_SLACK`] lets [`judge_path`] dispatch a path
+/// whose last waypoint is a whole tile past the requested radius (tile-centre
+/// snapping), so a resting position up to `slack + 1.3` out is legal and was
+/// simply never observed. Paying 1.3 tiles of margin on every walk to insure
+/// against a case that did not occur in 128 trials is the wrong trade when the
+/// executor re-checks reach after every walk anyway
+/// (`RconActuator::walk`): the margin is sized on what happens, and the
+/// re-check is what makes being wrong about it cost one short step instead of
+/// a failed action.
+pub const ARRIVAL_MARGIN: f64 = 0.6;
+
+/// Which end of the annulus a walk should stop at.
+///
+/// The band a walk has to end in is `(min_radius, radius]`, and both ends
+/// satisfy the plan equally: `Condition::AtPosition` measures distance and
+/// nothing else. What differs is the price. `radius` is a *reach* — mining
+/// reach, build reach, the distance an insert works from — so every tile
+/// walked inside it is a tile walked for nothing, and the planner charges for
+/// it: 8,200-10,200 ticks a four-bot green run, ~16% of its planned makespan
+/// (see [`factorio_bot_planner::schedule::travel_ticks`]).
+///
+/// So the ordinary aim is [`Approach::Outer`]. [`Approach::Inner`] is what a
+/// *corrective* walk asks for — the one dispatched when a bot came to rest
+/// short of the reach after all — where being close matters and a handful of
+/// ticks does not.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Approach {
+    /// Stop as far from the target as the reach allows, less the margin the
+    /// arrival needs. The default for every planned walk.
+    Outer,
+    /// Stop as close to the target as the annulus allows. What the executor's
+    /// corrective walk asks for, and what every walk asked for before the
+    /// outer ring existed.
+    Inner,
+}
+
+/// How far from `target` a walk into `(min_radius, radius]` should aim, and
+/// the path radius to request, as `(aim, slack)`.
+///
+/// **One rule, in one place, for the model and the game alike.** The planner
+/// charges `travel_ticks` to `aim` and simulates arrival there; the executor
+/// asks the game for a path ending within `slack` of the point `aim` out.
+/// They were separately derived before, and the model's number was the fiction
+/// the walk RCA measured.
+///
+/// # The arithmetic
+///
+/// A path may end anywhere within `slack` of the goal, and the character then
+/// rests up to [`ARRIVAL_MARGIN`] past that, so a resting position lies
+/// between `aim - slack - ARRIVAL_MARGIN` and `aim + slack + ARRIVAL_MARGIN`.
+/// [`Approach::Outer`] therefore aims at `radius - slack - ARRIVAL_MARGIN`,
+/// which puts the far end of that interval exactly on `radius` — in reach, by
+/// construction, with no fudge factor.
+///
+/// The aim is floored at the inner aim, `min_radius + slack`, so it can never
+/// come out *closer* than the walk asked for before this existed: on a band
+/// too narrow to hold the margin the two collapse onto each other and the
+/// behaviour is the old one exactly.
+///
+/// `slack` halves whatever the band has left after the margin, capped at
+/// [`PATH_ENDPOINT_SLACK`], for the reason [`approach_annulus`] gives: the
+/// whole request disc has to fit inside the band, and a tile of room is what
+/// lets the pathfinder find ground rather than hit a named coordinate.
+///
+/// # The degenerate cases answer as they always did
+///
+/// An aim of zero or less — a disc so small that the margin eats it, which is
+/// every `radius <= ~1.6` — is not a ring at all, and asking for a goal a
+/// fraction of a tile off the target buys nothing. Those fall back to the old
+/// answer: the target itself, at [`approach_radius`]. So does
+/// [`Approach::Inner`] on a plain disc, which is what that arm has always
+/// meant.
+///
+/// A NaN bound is normalised to zero rather than propagated: a NaN fails every
+/// comparison, and handing the game a NaN goal is the one answer worse than a
+/// wrong one.
+pub fn approach_aim(min_radius: f64, radius: f64, approach: Approach) -> (f64, f64) {
+    let min_radius = if min_radius.is_nan() {
+        0.0
+    } else {
+        min_radius.max(0.0)
+    };
+    let radius = if radius.is_nan() {
+        0.0
+    } else {
+        radius.max(0.0)
+    };
+    let inner_slack = ((radius - min_radius).max(0.0) / 2.0).min(PATH_ENDPOINT_SLACK);
+    let inner = |slack: f64| {
+        if min_radius <= 0.0 {
+            (0.0, approach_radius(radius))
+        } else {
+            (min_radius + slack, slack)
+        }
+    };
+    if approach == Approach::Inner {
+        return inner(inner_slack);
+    }
+    let slack = ((radius - min_radius - ARRIVAL_MARGIN).max(0.0) / 2.0).min(PATH_ENDPOINT_SLACK);
+    let floor = if min_radius <= 0.0 {
+        0.0
+    } else {
+        min_radius + slack
+    };
+    let aim = (radius - slack - ARRIVAL_MARGIN).max(floor);
+    if aim <= 0.0 {
+        return inner(inner_slack);
+    }
+    (aim, slack)
 }
 
 /// The path radius to request when a walk must end within `bound` of a goal.
@@ -1600,24 +1745,98 @@ fn approach_direction(target: &Position, from: Option<&Position>) -> Position {
 /// `radius` is a reach (10) and `min_radius` a clearance (~1.3), and a
 /// `Place` whose prototype is unknown is refused by its own `AreaFree`
 /// precondition before it can be walked to.
+///
+/// # Which ring
+///
+/// [`approach_aim`] decides how far out to aim and holds the whole rule; this
+/// function is the geometry that turns that distance into a point. An
+/// [`Approach::Outer`] aim stops on the *outer* ring, as far from the target
+/// as the reach allows, which is the whole point of the exercise — every tile
+/// closer than that is walked for nothing. [`Approach::Inner`] is the old
+/// behaviour, kept for corrective walks.
 pub fn approach_annulus(
     target: &Position,
     min_radius: f64,
     radius: f64,
     from: Option<&Position>,
+    approach: Approach,
 ) -> (Position, f64) {
-    // `is_nan` first and explicitly: a NaN fails every comparison, so a plain
-    // `<= 0.0` would fall through and hand the game a NaN goal, which is the
-    // one answer worse than a wrong one. Nothing produces a NaN bound today —
-    // `placement_clearance` is a sum of prototype half-diagonals — so this is
-    // the arm that keeps it that way rather than one that fires.
-    if min_radius.is_nan() || min_radius <= 0.0 {
-        return (target.clone(), approach_radius(radius));
+    let (aim, slack) = approach_aim_toward(target, min_radius, radius, from, approach);
+    // An aim of zero is the plain disc: the goal is the target itself, and the
+    // game — the only party that knows what is walkable — resolves the ring.
+    // `approach_aim` normalises a NaN bound to zero and lands here, so a NaN
+    // goal cannot reach the game.
+    if aim <= 0.0 {
+        return (target.clone(), slack);
     }
-    let width = (radius - min_radius).max(0.0);
-    let slack = (width / 2.0).min(PATH_ENDPOINT_SLACK);
     let direction = approach_direction(target, from);
-    (aim_along(target, &direction, min_radius + slack), slack)
+    (aim_along(target, &direction, aim), slack)
+}
+
+/// [`approach_aim`], with the one fact it cannot see: where the bot is.
+///
+/// Never *further out* than the bot already is. The outer ring is where a
+/// walk should stop, not somewhere a bot should be marched to: a bot already
+/// standing inside the band satisfies the condition where it is, and sending
+/// it back out to the ring would walk it away from its own target — 6.5 tiles
+/// backwards, in the geometry of run 10's second refusal. The planner agrees
+/// by construction: `travel_ticks` charges zero for a bot already in the band,
+/// so a walk it emits is one it believes has ground to cover.
+///
+/// The clamp cannot break either bound. It only ever *reduces* the aim, and
+/// never below `min_radius + slack`, the inner aim of this same request: the
+/// pathfinder may answer anywhere within `slack` of the goal, and the
+/// exclusion zone is the one bound that must hold.
+///
+/// Separate from [`approach_annulus`] so [`approach_standing`]'s sweep starts
+/// on exactly the ring the goal is on, to the ulp, rather than on a distance
+/// measured back out of it.
+fn approach_aim_toward(
+    target: &Position,
+    min_radius: f64,
+    radius: f64,
+    from: Option<&Position>,
+    approach: Approach,
+) -> (f64, f64) {
+    match from {
+        Some(from) => approach_aim_at(
+            min_radius,
+            radius,
+            calculate_distance(from, target),
+            approach,
+        ),
+        None => approach_aim(min_radius, radius, approach),
+    }
+}
+
+/// [`approach_aim_toward`] over a distance rather than two points, so the
+/// planner — which measures the same distance and must charge for the same
+/// aim — reads the rule from here instead of restating it.
+///
+/// `distance` is how far the bot stands from the target now. The aim is capped
+/// by it for the same reason [`approach_aim_toward`] gives: a bot nearer than
+/// the outer ring is not marched back out to it.
+pub fn approach_aim_at(
+    min_radius: f64,
+    radius: f64,
+    distance: f64,
+    approach: Approach,
+) -> (f64, f64) {
+    let (aim, slack) = approach_aim(min_radius, radius, approach);
+    // A degenerate disc has already collapsed to the target itself, and its
+    // `slack` is a *path radius* rather than an offset into a band -- flooring
+    // against it would push the aim half a tile off a target the condition
+    // measures exactly. `within 0 of [60, 0]` is such a condition, and it is
+    // in the suite.
+    if approach == Approach::Inner || aim <= 0.0 {
+        return (aim, slack);
+    }
+    let floor = if min_radius > 0.0 {
+        min_radius + slack
+    } else {
+        0.0
+    };
+    (aim.min(distance).max(floor), slack)
 }
 
 /// The point `aim` out from `target` along the unit vector `direction`,
@@ -1715,6 +1934,15 @@ const APPROACH_BEARINGS: usize = 16;
 /// graph-clear candidate otherwise, exactly as before bystanders were
 /// consulted. `walker` names the bot being aimed, so its own position is not
 /// counted against it; `None` counts every player the world knows.
+///
+/// # Which way the sweep walks
+///
+/// The first candidate is always the aim [`approach_aim`] chose, and the
+/// search moves **away from it towards the other end of the band**: inward, a
+/// tile at a time, for an [`Approach::Outer`] aim, and outward for an
+/// [`Approach::Inner`] one. Either way the fallback of last resort is where
+/// walks stopped before the outer ring existed, so a ring the graph faults
+/// degrades to the old behaviour rather than to nothing.
 pub fn approach_standing(
     world: &FactorioWorld,
     target: &Position,
@@ -1722,6 +1950,7 @@ pub fn approach_standing(
     radius: f64,
     from: Option<&Position>,
     walker: Option<PlayerId>,
+    approach: Approach,
 ) -> (Position, f64) {
     let inner = match blocking_box_at(world, target) {
         Some(rect) => {
@@ -1732,7 +1961,7 @@ pub fn approach_standing(
         }
         None => min_radius,
     };
-    let (goal, slack) = approach_annulus(target, inner, radius, from);
+    let (goal, slack) = approach_annulus(target, inner, radius, from, approach);
     if inner.is_nan() || inner <= 0.0 {
         return (goal, slack);
     }
@@ -1750,8 +1979,29 @@ pub fn approach_standing(
     // ranked by how far it is from the nearest bot. Only consulted when no
     // candidate is free of both.
     let mut crowded: Option<(Position, f64)> = None;
-    let mut aim = inner + slack;
-    while aim + slack <= radius {
+    // Where the sweep starts and which way it goes. `approach_aim` already
+    // chose the ring this walk wants; the search only ever gives ground
+    // towards the *other* end of the band, and stops when the ring no longer
+    // fits inside it with its slack.
+    let (start, stride) = match approach {
+        // From the aim `approach_annulus` just chose -- read back off the goal
+        // it produced, so the clamp against the bot's own distance applies to
+        // the sweep too rather than only to its first candidate.
+        Approach::Outer => (
+            approach_aim_toward(target, inner, radius, from, approach).0,
+            -1.0,
+        ),
+        Approach::Inner => (inner + slack, 1.0),
+    };
+    let mut aim = start;
+    // The bound is stated per direction rather than as one two-sided test:
+    // `inner + slack - slack >= inner` is not reliably true in floating point,
+    // and an inward sweep that skipped its own first ring on an ulp would be
+    // a silent regression of exactly the kind this file is full of.
+    while match approach {
+        Approach::Outer => aim >= inner + slack,
+        Approach::Inner => aim + slack <= radius,
+    } {
         for k in 0..APPROACH_BEARINGS {
             // 0, +1, -1, +2, -2, ...: the bot's own bearing first, then out
             // either side of it, so the first free candidate is the nearest.
@@ -1780,7 +2030,7 @@ pub fn approach_standing(
                 crowded = Some((candidate, clearance));
             }
         }
-        aim += 1.0;
+        aim += stride;
     }
     match crowded {
         Some((candidate, _)) => (candidate, slack),
@@ -3887,7 +4137,7 @@ impl FactorioRcon {
                     RconOutOfResourceReach {
                         target_x: position.x(),
                         target_y: position.y(),
-                        distance: mining_distance(world, &landed, position),
+                        distance: reach_distance(world, &landed, position),
                         reach: resource_reach_distance,
                     }
                     .into(),
@@ -8666,7 +8916,8 @@ mod approach_annulus_tests {
         // 10 left it: its previous walk settled at tick 199116 on the column
         // at x = -51.729, y = 17.
         let here = Position::new(-51.72941750255542, 17.);
-        let (goal, slack) = approach_annulus(&site, clearance, BUILD_REACH, Some(&here));
+        let (goal, slack) =
+            approach_annulus(&site, clearance, BUILD_REACH, Some(&here), Approach::Outer);
 
         assert_eq!(
             slack, PATH_ENDPOINT_SLACK,
@@ -8725,7 +8976,8 @@ mod approach_annulus_tests {
             "which the bot was outside, so it had to walk -- 0.723 tiles, onto              ground the pathfinder then refused"
         );
 
-        let (goal, slack) = approach_annulus(&site, clearance, BUILD_REACH, Some(&here));
+        let (goal, slack) =
+            approach_annulus(&site, clearance, BUILD_REACH, Some(&here), Approach::Outer);
         assert!(
             calculate_distance(&here, &goal) <= slack,
             "the bot is already inside the request, so there is nothing to              dispatch: {} from a goal with {slack} of slack",
@@ -8761,7 +9013,8 @@ mod approach_annulus_tests {
             for y in [-30., 11., 11.5, 60.] {
                 for radius in [2.0, 3.5, BUILD_REACH] {
                     let here = Position::new(x, y);
-                    let (goal, slack) = approach_annulus(&target, clearance, radius, Some(&here));
+                    let (goal, slack) =
+                        approach_annulus(&target, clearance, radius, Some(&here), Approach::Outer);
                     let d = calculate_distance(&goal, &target);
                     assert!(
                         d - slack >= clearance,
@@ -8808,22 +9061,49 @@ mod approach_annulus_tests {
         );
     }
 
-    /// A plain disc is untouched, byte for byte.
+    /// A plain disc stops on the outer ring now, and the ring is inside the
+    /// reach with the margin to spare.
     ///
     /// This is most walks: mining, inserting, removing and crafting all set
-    /// `min_radius` to zero, so the target is a point the condition itself
-    /// accepts and the game is the right party to resolve the ring. Run 10's
-    /// walk 9 — bot 2, step 9, `to [-31, -31]` — is one of those, and its
-    /// refusal is **not** this defect: the game accepted the request, walked
-    /// the bot, and the *mod* then failed a mid-walk re-path to the path's own
-    /// last waypoint at a radius of 0.5 -- machinery since deleted, in favour
-    /// of the retry in `move_player_timed`. Nothing here would have changed it,
-    /// and this test says so by pinning that nothing here changed.
+    /// `min_radius` to zero, and every one of them used to be aimed at the
+    /// target's own centre -- the bot walked the action's whole reach for
+    /// nothing, and `travel_ticks` charged it. A disc of radius 10 arrived
+    /// 66-67 ticks late in every run measured for the walk RCA, which is
+    /// exactly `10 / 0.15`.
+    ///
+    /// [`Approach::Inner`] still answers what this always answered, which is
+    /// what a corrective walk asks for.
     #[test]
-    fn a_plain_disc_asks_for_exactly_what_it_always_did() {
+    fn a_plain_disc_now_stops_on_the_outer_ring() {
         let target = Position::new(-31., -31.);
-        let here = Position::new(-28.6640625, -26.8046875);
-        let (goal, slack) = approach_annulus(&target, 0.0, BUILD_REACH, Some(&here));
+        // Far enough away that the aim is the ring rather than the bot's own
+        // distance: 14.1 tiles out.
+        let here = Position::new(-21., -21.);
+        let (goal, slack) =
+            approach_annulus(&target, 0.0, BUILD_REACH, Some(&here), Approach::Outer);
+        let d = calculate_distance(&goal, &target);
+        assert_eq!(slack, PATH_ENDPOINT_SLACK);
+        assert!(
+            (d - (BUILD_REACH - slack - ARRIVAL_MARGIN)).abs() < 1e-9,
+            "aimed at {d}, not at the outer ring less the slack and the margin"
+        );
+        // The guarantee, over the whole request disc rather than its centre:
+        // every point the pathfinder may answer with, plus the margin the
+        // follower's stop box needs, is still in reach.
+        assert!(d + slack + ARRIVAL_MARGIN <= BUILD_REACH + 1e-9);
+        assert!(d > 0.0, "and it is outside min_radius, which is zero");
+        // It aims towards the bot, so the walk is shorter and not longer.
+        assert!(calculate_distance(&goal, &here) < calculate_distance(&here, &target));
+
+        // A bot already closer than the ring is not marched back out to it.
+        let inside = Position::new(-28.6640625, -26.8046875);
+        let (goal, _) = approach_annulus(&target, 0.0, BUILD_REACH, Some(&inside), Approach::Outer);
+        assert_eq!(goal, inside, "it is already in reach: nothing to walk");
+
+        // And the old rule is still available, unchanged, for the corrective
+        // walk that uses it.
+        let (goal, slack) =
+            approach_annulus(&target, 0.0, BUILD_REACH, Some(&here), Approach::Inner);
         assert_eq!(goal, target);
         assert_eq!(slack, approach_radius(BUILD_REACH));
         assert_eq!(slack, 5.0);
@@ -8836,14 +9116,30 @@ mod approach_annulus_tests {
     fn an_unknown_bot_position_falls_back_on_the_planners_own_direction() {
         let clearance = stone_furnace_clearance();
         let site = Position::new(-63., 11.);
-        let (goal, slack) = approach_annulus(&site, clearance, BUILD_REACH, None);
-        assert_eq!(goal.y(), 11.);
-        assert_eq!(goal.x(), -63. + clearance + slack);
+        let (goal, slack) = approach_annulus(&site, clearance, BUILD_REACH, None, Approach::Outer);
+        // `+x`, to within the outward ulp nudge `aim_along` applies to both
+        // coordinates: the direction is the planner's, the distance is the
+        // outer ring.
+        assert!((goal.y() - 11.).abs() < 1e-9, "aimed at {goal}");
+        assert!(
+            (goal.x() - (-63. + BUILD_REACH - slack - ARRIVAL_MARGIN)).abs() < 1e-9,
+            "aimed at {goal}"
+        );
+        let d = calculate_distance(&goal, &site);
+        assert!(d - slack >= clearance && d + slack <= BUILD_REACH + 1e-9);
 
         // A bot standing exactly on the target has no direction to offer
-        // either, and must not produce a NaN goal.
-        let (on_top, _) = approach_annulus(&site, clearance, BUILD_REACH, Some(&site));
-        assert_eq!(on_top, goal);
+        // either, and must not produce a NaN goal. It is aimed the same way,
+        // at the *inner* aim rather than the outer one: a bot inside the
+        // clearance is never sent further out than the clearance needs, and
+        // zero distance is as far inside as it gets.
+        let (on_top, slack) =
+            approach_annulus(&site, clearance, BUILD_REACH, Some(&site), Approach::Outer);
+        assert!((on_top.y() - goal.y()).abs() < 1e-9, "aimed at {on_top}");
+        assert!(
+            (calculate_distance(&on_top, &site) - (clearance + slack)).abs() < 1e-9,
+            "aimed at {on_top}"
+        );
     }
 
     /// An annulus too thin for a whole tile of slack shrinks to fit rather
@@ -8852,9 +9148,21 @@ mod approach_annulus_tests {
     fn a_narrow_annulus_shrinks_the_request_instead_of_overrunning_it() {
         let target = Position::new(0., 0.);
         let here = Position::new(10., 0.);
-        let (goal, slack) = approach_annulus(&target, 2.0, 3.0, Some(&here));
-        assert_eq!(slack, 0.5, "half the annulus's width, not a whole tile");
-        assert_eq!(goal, Position::new(2.5, 0.));
+        let (goal, slack) = approach_annulus(&target, 2.0, 3.0, Some(&here), Approach::Outer);
+        // The band is one tile wide and 0.6 of it is the arrival margin, so
+        // the slack is half of what is left and the outer and inner aims
+        // coincide: a band too narrow to hold the margin behaves exactly as it
+        // did before the outer ring existed.
+        assert_eq!(
+            slack, 0.2,
+            "half of what the margin leaves, not a whole tile"
+        );
+        assert_eq!(goal, Position::new(2.2, 0.));
+        assert_eq!(
+            approach_annulus(&target, 2.0, 3.0, Some(&here), Approach::Inner).0,
+            Position::new(2.5, 0.),
+            "the inner rule is unchanged and is the wider of the two here"
+        );
     }
 }
 
@@ -9104,7 +9412,8 @@ mod mining_reach_tests {
         // other rock. `here` is the ore tile bot 4 had just mined, not the
         // exact spot it stood on, so the run's `[-18.56, 22.24]` is
         // reproduced to within a tenth of a tile rather than exactly.
-        let (naive, _) = approach_annulus(&target, clearance, REACH, Some(&here));
+        // `Approach::Inner` is the rule that made the run's request.
+        let (naive, _) = approach_annulus(&target, clearance, REACH, Some(&here), Approach::Inner);
         assert!(
             (naive.x() - -18.5613).abs() < 0.1 && (naive.y() - 22.2393).abs() < 0.1,
             "the run's aim was [-18.56, 22.24], this reproduces {naive}"
@@ -9114,7 +9423,15 @@ mod mining_reach_tests {
             StandingVerdict::Blocked { .. }
         ));
 
-        let (goal, slack) = approach_standing(&world, &target, clearance, REACH, Some(&here), None);
+        let (goal, slack) = approach_standing(
+            &world,
+            &target,
+            clearance,
+            REACH,
+            Some(&here),
+            None,
+            Approach::Outer,
+        );
         assert_eq!(
             standing_verdict(&world, &goal),
             StandingVerdict::NotProvablyBlocked,
@@ -9150,13 +9467,23 @@ mod mining_reach_tests {
         let here = Position::new(-22.21875, -9.70703125);
 
         // Control: the disc as it was asked for is centred on the furnace.
-        let (naive, _) = approach_annulus(&target, 0.0, BUILD_REACH, Some(&here));
+        // `Approach::Inner` is the rule that produced the run's own request --
+        // a disc aimed at its own centre -- so the reproduction stays exact.
+        let (naive, _) = approach_annulus(&target, 0.0, BUILD_REACH, Some(&here), Approach::Inner);
         assert!(matches!(
             standing_verdict(&world, &naive),
             StandingVerdict::Blocked { .. }
         ));
 
-        let (goal, slack) = approach_standing(&world, &target, 0.0, BUILD_REACH, Some(&here), None);
+        let (goal, slack) = approach_standing(
+            &world,
+            &target,
+            0.0,
+            BUILD_REACH,
+            Some(&here),
+            None,
+            Approach::Outer,
+        );
         assert_eq!(
             standing_verdict(&world, &goal),
             StandingVerdict::NotProvablyBlocked,
@@ -9243,7 +9570,15 @@ mod mining_reach_tests {
 
         // The mechanism, with the run's numbers: the annulus aim is the one
         // the refusal named, the graph cannot fault it, and bot 3 is on it.
-        let (naive, _) = approach_annulus(&target, clearance, BUILD_REACH, Some(&here));
+        // `Approach::Inner` is the rule of the day, so the reproduction is
+        // exact; the outer ring is a later choice and would not land here.
+        let (naive, _) = approach_annulus(
+            &target,
+            clearance,
+            BUILD_REACH,
+            Some(&here),
+            Approach::Inner,
+        );
         assert!(
             (naive.x() - 34.730088110096574).abs() < 1e-6
                 && (naive.y() - -7.8945866745752244).abs() < 1e-6,
@@ -9259,8 +9594,15 @@ mod mining_reach_tests {
         assert_eq!(bystanders.len(), 3, "bots 2, 3 and 4; never the walker");
         assert_eq!(bystander_clearance(&world, &naive, &bystanders), 0.0);
 
-        let (goal, slack) =
-            approach_standing(&world, &target, 0.0, BUILD_REACH, Some(&here), Some(1));
+        let (goal, slack) = approach_standing(
+            &world,
+            &target,
+            0.0,
+            BUILD_REACH,
+            Some(&here),
+            Some(1),
+            Approach::Outer,
+        );
         assert_ne!(goal, naive, "the aim must move off bot 3");
         assert!(
             bystander_clearance(&world, &goal, &bystanders) > 0.0,
@@ -9306,7 +9648,13 @@ mod mining_reach_tests {
         };
         let clearance =
             (rect.width() / 2.).hypot(rect.height() / 2.) + 0.19921875f64.hypot(0.19921875);
-        let (naive, naive_slack) = approach_annulus(&target, clearance, BUILD_REACH, Some(&here));
+        let (naive, naive_slack) = approach_annulus(
+            &target,
+            clearance,
+            BUILD_REACH,
+            Some(&here),
+            Approach::Outer,
+        );
 
         // The other bots far away, the walker where it was.
         let far = [
@@ -9316,19 +9664,49 @@ mod mining_reach_tests {
         ];
         let world = world_of_run_1788612263(&far);
         assert_eq!(
-            approach_standing(&world, &target, 0.0, BUILD_REACH, Some(&here), Some(1)),
+            approach_standing(
+                &world,
+                &target,
+                0.0,
+                BUILD_REACH,
+                Some(&here),
+                Some(1),
+                Approach::Outer
+            ),
             (naive.clone(), naive_slack)
         );
 
         // The walker itself already standing on the aim.
         let world = world_of_run_1788612263(&[(1, naive.clone())]);
         assert_eq!(
-            approach_standing(&world, &target, 0.0, BUILD_REACH, Some(&naive), Some(1)),
-            approach_annulus(&target, clearance, BUILD_REACH, Some(&naive))
+            approach_standing(
+                &world,
+                &target,
+                0.0,
+                BUILD_REACH,
+                Some(&naive),
+                Some(1),
+                Approach::Outer
+            ),
+            approach_annulus(
+                &target,
+                clearance,
+                BUILD_REACH,
+                Some(&naive),
+                Approach::Outer
+            )
         );
         // But the same position under another id is in the way.
         let world = world_of_run_1788612263(&[(1, here.clone()), (3, naive.clone())]);
-        let (moved, _) = approach_standing(&world, &target, 0.0, BUILD_REACH, Some(&here), Some(1));
+        let (moved, _) = approach_standing(
+            &world,
+            &target,
+            0.0,
+            BUILD_REACH,
+            Some(&here),
+            Some(1),
+            Approach::Outer,
+        );
         assert_ne!(moved, naive);
     }
 
@@ -9350,7 +9728,8 @@ mod mining_reach_tests {
         // An annulus with room for exactly one ring, so the sweep cannot
         // step outward past the crowd.
         let radius = clearance + 2.0 * PATH_ENDPOINT_SLACK;
-        let (naive, slack) = approach_annulus(&target, clearance, radius, Some(&here));
+        let (naive, slack) =
+            approach_annulus(&target, clearance, radius, Some(&here), Approach::Outer);
         let ring = clearance + slack;
         let mut crowd: Vec<(PlayerId, Position)> = vec![(1, here.clone())];
         for k in 0..APPROACH_BEARINGS {
@@ -9365,8 +9744,15 @@ mod mining_reach_tests {
         let world = world_of_run_1788612263(&crowd);
         let bystanders = bystander_boxes(&world, Some(1));
         assert_eq!(bystanders.len(), APPROACH_BEARINGS);
-        let (goal, got_slack) =
-            approach_standing(&world, &target, 0.0, radius, Some(&here), Some(1));
+        let (goal, got_slack) = approach_standing(
+            &world,
+            &target,
+            0.0,
+            radius,
+            Some(&here),
+            Some(1),
+            Approach::Outer,
+        );
         assert_eq!(got_slack, slack);
         assert_eq!(bystander_clearance(&world, &goal, &bystanders), 0.0);
         assert_eq!(
@@ -9384,8 +9770,16 @@ mod mining_reach_tests {
         let ore = Position::new(-31., -31.);
         let here = Position::new(-28.6640625, -26.8046875);
         assert_eq!(
-            approach_standing(&world, &ore, 0.0, BUILD_REACH, Some(&here), None),
-            approach_annulus(&ore, 0.0, BUILD_REACH, Some(&here))
+            approach_standing(
+                &world,
+                &ore,
+                0.0,
+                BUILD_REACH,
+                Some(&here),
+                None,
+                Approach::Outer
+            ),
+            approach_annulus(&ore, 0.0, BUILD_REACH, Some(&here), Approach::Outer)
         );
     }
 
@@ -9408,10 +9802,18 @@ mod mining_reach_tests {
         let world = world_with(&all);
         let here = Position::new(10., 0.);
         let clearance = stone_furnace_clearance();
-        let (goal, slack) = approach_standing(&world, &target, clearance, 3.0, Some(&here), None);
+        let (goal, slack) = approach_standing(
+            &world,
+            &target,
+            clearance,
+            3.0,
+            Some(&here),
+            None,
+            Approach::Outer,
+        );
         assert_eq!(
             (goal, slack),
-            approach_annulus(&target, clearance, 3.0, Some(&here))
+            approach_annulus(&target, clearance, 3.0, Some(&here), Approach::Outer)
         );
     }
 
@@ -9480,7 +9882,7 @@ mod mining_reach_tests {
             "control: the centre rule refuses it"
         );
         assert!(within_mining_reach(&world, &beside, &rock, REACH));
-        assert_eq!(mining_distance(&world, &beside, &rock), 1.5);
+        assert_eq!(reach_distance(&world, &beside, &rock), 1.5);
         // And a target with no box -- ore -- is still the centre rule.
         let ore = Position::new(40.5, 40.5);
         assert!(!within_mining_reach(

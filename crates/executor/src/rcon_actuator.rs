@@ -7,13 +7,15 @@ use crate::walk_memory::{
 use async_trait::async_trait;
 use factorio_bot_core::constants::BOT_FORCE;
 use factorio_bot_core::factorio::rcon::{
-    ActionFailure, DestinationFull, Dispatch, FactorioRcon, approach_standing,
+    ActionFailure, Approach, DestinationFull, Dispatch, FactorioRcon, approach_standing,
+    reach_distance,
 };
 use factorio_bot_core::factorio::world::{FactorioWorld, HOP_DISTANCE, StepAside, StepAsideReason};
 use factorio_bot_core::record::map::{EntitySnapshot, Placement, drift_between};
 use factorio_bot_core::types::{PlayerId, Position};
 use factorio_bot_planner::{BotId, InventorySlot};
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// The game's own `defines.inventory` table, read once at construction.
@@ -174,6 +176,18 @@ pub struct RconActuator {
     /// its own steps strictly in order, so the previous entry has always been
     /// claimed by the time a second insert finishes.
     destinations_full: Mutex<BTreeMap<PlayerId, DestinationFull>>,
+    /// How many walks came to rest out of the action's reach and needed a
+    /// corrective step, since this actuator was built.
+    ///
+    /// **This is the number that says whether [`ARRIVAL_MARGIN`] is right.**
+    /// The margin is sized on 128 measured walks, and a measurement is a claim
+    /// about what has happened, not a proof about what can. A run that reports
+    /// zero of these has a margin it could afford to tighten; a run that
+    /// reports many has one that is too thin, and either way the answer is in
+    /// the record rather than in somebody's recollection of a live run.
+    ///
+    /// [`ARRIVAL_MARGIN`]: factorio_bot_core::factorio::rcon::ARRIVAL_MARGIN
+    reach_corrections: AtomicU64,
 }
 
 impl RconActuator {
@@ -223,7 +237,114 @@ impl RconActuator {
             connected,
             placements: Mutex::new(BTreeMap::new()),
             destinations_full: Mutex::new(BTreeMap::new()),
+            reach_corrections: AtomicU64::new(0),
         })
+    }
+
+    /// Measures where a walk actually came to rest and, if it is short of the
+    /// action's reach, closes the gap with one more step.
+    ///
+    /// # Why this exists at all
+    ///
+    /// The walk aims at the outer ring now
+    /// (`factorio_bot_core::factorio::rcon::Approach::Outer`), which is where
+    /// the saving is and also where the risk is: the aim holds back
+    /// `ARRIVAL_MARGIN` from the reach, and that margin is a *measurement*
+    /// (128 probe walks, worst overshoot 0.301 tiles) rather than a proof.
+    /// `PATH_ENDPOINT_SLACK` still permits a path to end a whole tile past the
+    /// radius it asked for, so a resting position outside the reach is legal,
+    /// rare, and — before this — silent: the action dispatched next would be
+    /// refused, or worse, accepted and never completed. A mine outside
+    /// `resource_reach_distance` produces *no event at all* and sat unanswered
+    /// for 21,400 ticks in the 2026-08-30 run.
+    ///
+    /// The previous attempt at an outer-ring aim failed exactly here: a walk
+    /// rested 3.345 tiles out against a reach of 3, and nothing measured it.
+    ///
+    /// # What it costs when the margin was right, which is nearly always
+    ///
+    /// One map lookup. The world's cached position is consulted first, and
+    /// when that already proves the bot in reach — the ordinary case, since
+    /// the aim leaves `slack + ARRIVAL_MARGIN` of room — nothing is asked of
+    /// the game at all. That matters: an RCON round trip per walk is the
+    /// latency this project measured at ~37,000 bot-ticks a 1x run.
+    ///
+    /// The game is asked only when the cached reading says the bot is short,
+    /// because that reading can be stale by up to a tile for a **graphical
+    /// client** (`on_player_changed_position` fires once per tile crossed).
+    /// A headless character's is exact — `poll_character_bot` writes it on
+    /// every tick it changes — so on the mode this project is built around the
+    /// query fires only when the correction is real.
+    ///
+    /// # Distance is measured to the box, not the centre
+    ///
+    /// [`reach_distance`], the same rule `can_reach_entity` uses and the same
+    /// one the mine path applies: for a `huge-rock` the difference between the
+    /// two is 1.5 tiles, and a centre rule refused a legitimate mine over it
+    /// in `run-1788551693-66583`.
+    ///
+    /// # A correction that fails is not a walk that failed
+    ///
+    /// The corrective step's outcome is deliberately not propagated. The walk
+    /// the plan asked for *succeeded* — the bot is within `radius` of nothing
+    /// it was promised, only outside a reach the plan inferred — and the
+    /// action that follows has its own guards (`player_mine_timed`
+    /// re-measures, `place`/`insert` are refused by the game with a readable
+    /// error). Turning a completed walk into a failed one here would replan a
+    /// batch over a step, which is the opposite of the point.
+    async fn close_reach_gap(&self, p: PlayerId, to: &Position, min_radius: f64, radius: f64) {
+        let Some(cached) = self.world.players.get(&p).map(|pl| pl.position.clone()) else {
+            return;
+        };
+        if reach_distance(&self.world, &cached, to) <= radius {
+            return;
+        }
+        // The cached reading says short. Ask the game before acting on it.
+        let rest = match self.rcon.connected_players().await {
+            Ok(players) => players
+                .into_iter()
+                .find(|player| player.player_id == p)
+                .map(|player| player.position)
+                .unwrap_or(cached),
+            // No answer is not evidence of anything. The cached reading is
+            // what there is, and it already says short.
+            Err(_) => cached,
+        };
+        let distance = reach_distance(&self.world, &rest, to);
+        if distance <= radius {
+            return;
+        }
+        let corrections = self.reach_corrections.fetch_add(1, Ordering::Relaxed) + 1;
+        factorio_bot_core::tracing::warn!(
+            bot = p,
+            rested = distance,
+            reach = radius,
+            corrections,
+            target = %format!("({}/{})", to.x(), to.y()),
+            "a walk came to rest outside the action's reach -- stepping closer"
+        );
+        let (goal, slack) = approach_standing(
+            &self.world,
+            to,
+            min_radius,
+            radius,
+            Some(&rest),
+            Some(p),
+            // The margin was wrong once here already. This step buys
+            // certainty, not ticks.
+            Approach::Inner,
+        );
+        if let Err(failure) = self
+            .rcon
+            .move_player_timed(&self.world, p, &goal, Some(slack))
+            .await
+        {
+            factorio_bot_core::tracing::warn!(
+                bot = p,
+                error = %failure.error,
+                "the corrective step was refused; the action will answer for itself"
+            );
+        }
     }
 
     /// The Factorio player a `BotId` names: itself.
@@ -343,8 +464,21 @@ impl Actuator for RconActuator {
         // writeouts, no round trip -- is where a bot parked on the ring is
         // known. `p` is the walker, so its own position is not held against
         // it.
-        let (goal, slack) =
-            approach_standing(&self.world, &to, min_radius, radius, here.as_ref(), Some(p));
+        // `Approach::Outer`: stop as far from the target as the action's reach
+        // allows. Every tile closer than that is a tile walked for nothing --
+        // 8,200-10,200 ticks of a four-bot green run
+        // (`factorio_bot_planner::schedule::travel_ticks`). What keeps that
+        // safe is not the aim but `close_reach_gap` below, which measures where
+        // the bot actually came to rest.
+        let (goal, slack) = approach_standing(
+            &self.world,
+            &to,
+            min_radius,
+            radius,
+            here.as_ref(),
+            Some(p),
+            Approach::Outer,
+        );
         let failure = match self
             .rcon
             .move_player_timed(&self.world, p, &goal, Some(slack))
@@ -356,6 +490,7 @@ impl Actuator for RconActuator {
                 // a bot pushed clear by something the plan never asked for
                 // rejoins the roster.
                 note_walk_succeeded(&self.world, p, ticks.replied);
+                self.close_reach_gap(p, &to, min_radius, radius).await;
                 return Ok(ticks);
             }
             Err(failure) => failure,
@@ -425,6 +560,10 @@ impl Actuator for RconActuator {
                 ticks: failure.ticks,
             },
         })
+    }
+
+    fn reach_corrections(&self) -> u64 {
+        self.reach_corrections.load(Ordering::Relaxed)
     }
 
     async fn mine(
@@ -1053,6 +1192,7 @@ mod tests {
             connected: [1u8].into_iter().collect(),
             placements: Mutex::new(BTreeMap::new()),
             destinations_full: Mutex::new(BTreeMap::new()),
+            reach_corrections: AtomicU64::new(0),
         };
         let f = tokio::runtime::Builder::new_current_thread()
             .enable_all()

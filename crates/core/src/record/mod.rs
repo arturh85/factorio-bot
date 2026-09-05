@@ -334,6 +334,29 @@ pub enum EventKind {
         /// whenever nothing was dropped.
         #[serde(default)]
         waiting_total: u32,
+        /// How many walks have come to rest outside the reach of the action
+        /// they served and needed a corrective step, cumulative since the
+        /// actuator was built.
+        ///
+        /// A walk stops on the **outer** ring of its annulus — as far from the
+        /// target as the action's reach allows, less
+        /// [`crate::factorio::rcon::ARRIVAL_MARGIN`], which is worth
+        /// 8,200-10,200 ticks of a four-bot green run. That margin was
+        /// measured (128 probe walks; worst overshoot 0.301 tiles) and
+        /// measurement is not proof, so the executor re-checks reach after
+        /// every walk and this is how often it had to act.
+        ///
+        /// **It states no verdict either.** Zero says the margin is not being
+        /// tested and could be tightened; a number that grows says it is too
+        /// thin. Which of those is worth acting on is not decided here, and
+        /// nothing compares this against a threshold.
+        ///
+        /// `#[serde(default)]` so a run recorded before the outer ring existed
+        /// still opens — and reads zero, which for such a run is the truth:
+        /// its walks stopped on the inner ring and had no margin to be wrong
+        /// about.
+        #[serde(default)]
+        reach_corrections: u32,
     },
     ActionDispatched {
         id: u32,

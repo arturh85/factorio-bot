@@ -17,7 +17,7 @@ use utoipa_axum::routes;
 ///
 /// Mirrors `manage::scripts::scripts_root_path`: reads `workspace_path`
 /// straight out of settings rather than going through
-/// `factorio_bot_core::scripts::scripts_dir`'s CWD-relative fallback, for the
+/// any CWD-relative fallback (the deleted `scripts::scripts_dir` had one), for the
 /// same reason -- a request must be bound to the *configured* workspace, not
 /// to wherever the server process's working directory happens to be.
 ///

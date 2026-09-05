@@ -89,8 +89,23 @@ places perfectly and produces nothing, which is the exact failure class this
 repo keeps paying for.
 
 So a candidate site is rejected unless **every mining drill in the blueprint has
-ore under its mining area**. Among accepted sites, prefer the one covering the
-most ore, ties by distance to seed, then by `(x, y)`.
+ore under its mining area**. The **first acceptable site in ring order wins** —
+there is no ranking by ore coverage.
+
+That sentence originally said "prefer the one covering the most ore", and it was
+dropped on 2026-09-06 rather than implemented. Ranking requires comparing every
+candidate, which turns a search that exits on its first hit into an
+unconditional sweep of the whole radius — and the cost of that sweep is already
+the largest open question on this work. The gain is small, because the search is
+**seeded at the ore patch** for a block containing drills, so the first
+acceptable site is already on the ore and ranking would only pick a denser tile
+within it. Ring order also encodes the preference that matters more: nearest to
+the seed, meaning least walking, which is the dominant cost in every measurement
+this repo has taken.
+
+The trade is recorded rather than hidden: a drill block may sit on a thinner
+part of a patch than it might have. That is visible in production rates and
+cheaper to fix later than to pay for on every expansion now.
 
 Two facts from the record constrain the implementation:
 

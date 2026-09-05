@@ -699,7 +699,14 @@ fn patch_scan(state: &PlanState, item: &str, anchor: &Position) -> Option<(Posit
 /// queueing behind another bot's batch puts the wait on *that* bot's
 /// timeline, which nothing here can see: the release is an action, not a
 /// tick, and the bot that performs it may be crafting science packs for
-/// 7,500 ticks first. Measured on `producing:logistic-science-pack:6` against
+/// 7,500 ticks first.
+///
+/// That reasoning is about the taker's *own* loads, and it does not carry
+/// to a smelt whose ore the roster supplies: there the inserts sit on the
+/// suppliers' timelines, and queueing behind the taker's batch puts *their*
+/// wait on the taker's release -- the very cost the rule avoids, landed on
+/// several bots at once. `smelt_steps` builds for such a smelt instead
+/// (`shared_grow`) whatever this order says; the measurement is there. Measured on `producing:logistic-science-pack:6` against
 /// `workspace/scripts/map.json`, with the load totals corrected but this rule
 /// absent, the queues spread evenly across three furnaces and the makespan
 /// went 102,405 → 108,170, because every bot then waited on a batch some
@@ -916,7 +923,10 @@ struct PatchFurnaces {
 /// runs short), which is the better instrument for it.
 ///
 /// **A bot with no furnace of its own on the patch builds one whatever the
-/// count**, and that furnace is its own errand (`smelt_steps`, `own_grow`).
+/// count**, and that furnace is its own errand (`smelt_steps`, `own_grow`);
+/// **so does a smelt whose ore the roster supplies** (`shared_grow`, same
+/// place), because the queue it would otherwise join puts its suppliers'
+/// inserts behind the taker's release.
 /// This is the bound's own reasoning applied per bot rather than first-come:
 /// a bot loads and unloads one furnace at a time, so the width at which
 /// independent smelts stop queueing behind each other is one per *bot*, and
@@ -1302,7 +1312,27 @@ fn smelt_steps(
     // prefer and no claim to a furnace of its own: it grows with the budget
     // and queues least-loaded, as every smelt did before takers were known.
     let own_grow = patch.idle_count == 0 && patch.own_count == 0 && taker_bot.is_some();
-    let grow = own_grow || (patch.idle_count == 0 && patch.hand < patch_furnace_budget(&ctx.state));
+    // A smelt whose ore the roster supplies (`SharedOre`) has its inserts on
+    // the suppliers' timelines, so queueing it behind the taker's own batch
+    // puts every supplier's wait on the taker's release -- the wait on
+    // another bot's timeline that the own-queue rule above exists to avoid,
+    // landed on three bots at once. Measured on
+    // `producing:automation-science-pack:6` against
+    // `workspace/scripts/map.json`, four bots: bots 3 and 4 stood 2,914 and
+    // 4,248 ticks at bot 1's copper furnace at `[-51, 29]` waiting to insert,
+    // and bots 2-4 stood 3,002 each at `[-34, -32]` and 5,170 / 1,936 /
+    // 1,936 at `[-38, -16]` on iron, every one of them behind a take of bot
+    // 1's. Five stone and thirty ticks buy a furnace those inserts do not
+    // wait on. Same shape as `own_grow`, and for the same reason; the
+    // difference is only whose timeline the queue would have landed on.
+    let shared_grow = patch.idle_count == 0
+        && taker_bot.is_some()
+        && shared
+            .as_ref()
+            .is_some_and(|s| ingredients.iter().any(|(name, _)| *name == s.ore));
+    let grow = own_grow
+        || shared_grow
+        || (patch.idle_count == 0 && patch.hand < patch_furnace_budget(&ctx.state));
     let mut slots: Vec<Option<Reuse>> = Vec::new();
     if grow {
         slots.push(None);
@@ -11997,6 +12027,71 @@ mod tests {
     }
 
     /// The handover itself: several bots load one furnace, one bot unloads it.
+    /// **A shared smelt does not queue its suppliers behind the taker's own
+    /// release.** Four bots each smelt once, so the iron patch stands at the
+    /// roster's furnace budget with every furnace queued; bot 1 then asks for
+    /// gears a second time, which `SharedSmelt` splits across the roster. The
+    /// own-queue rule would put that smelt behind bot 1's first batch, and
+    /// every supplier's insert behind bot 1's take of it -- the shape that
+    /// held bots 2-4 for 3,002 ticks each at `[-34, -32]` on the red-science
+    /// plan (see `smelt_steps`, `shared_grow`). It builds a fifth furnace
+    /// instead, and no supplier's insert waits on any take.
+    #[test]
+    fn a_shared_smelt_builds_its_own_furnace_rather_than_queueing_its_suppliers() {
+        let bots = vec![BotId(1), BotId(2), BotId(3), BotId(4)];
+        let s = smelting_state(&bots);
+        let net = expand(
+            &[Goal::All(vec![
+                gears_for(BotId(2), 2),
+                gears_for(BotId(3), 2),
+                gears_for(BotId(4), 2),
+                gears_for(BotId(1), 2),
+                gears_for(BotId(1), 10),
+            ])],
+            &s,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .expect("five smelts plan");
+        let placed = net
+            .actions()
+            .filter(|a| matches!(&a.kind, ActionKind::Place { entity } if entity.name == "stone-furnace"))
+            .count();
+        assert_eq!(
+            placed, 5,
+            "one furnace per bot at the budget, and one more for the shared smelt"
+        );
+        let supplier_inserts: Vec<&Action> = furnace_ore_inserts(&net)
+            .into_iter()
+            .filter(|a| {
+                net.chain_of(a.id)
+                    .and_then(|c| net.owner_of(c))
+                    .is_some_and(|owner| owner != BotId(1))
+            })
+            .collect();
+        assert!(
+            supplier_inserts.len() >= 2,
+            "the second smelt is shared across the roster: {} supplier insert(s)",
+            supplier_inserts.len()
+        );
+        for insert in supplier_inserts {
+            let behind_a_take = net.preds(insert.id).iter().any(|(pred, _)| {
+                matches!(
+                    net.action(*pred).map(|a| &a.kind),
+                    Some(ActionKind::Remove {
+                        slot: InventorySlot::FurnaceResult,
+                        ..
+                    })
+                )
+            });
+            assert!(
+                !behind_a_take,
+                "{} is ordered behind a take of the taker's",
+                insert.label
+            );
+        }
+    }
+
     #[test]
     fn a_converged_smelt_hands_each_supplier_a_chain_of_its_own() {
         let bots = vec![BotId(1), BotId(2), BotId(3), BotId(4)];

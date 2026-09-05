@@ -3449,6 +3449,55 @@ impl PlanState {
         total
     }
 
+    /// The poles and generators through which `area` reads its supply: every
+    /// pole of a wired component whose supply area meets `area`, and every
+    /// generator one of those poles covers. Name and position of each, in
+    /// the fixed order [`entities_within`](Self::entities_within) returns.
+    ///
+    /// **What a `Condition::Powered` is made of, so a method can order an
+    /// action after the placements that make it true.** `Powered` is a
+    /// statement about the state and no `Effect` satisfies it, so
+    /// `ActionNetwork::infer_edges` draws no edge to it; the scheduler
+    /// checks it against a state that holds every placement already
+    /// *chosen*, whatever tick that placement was given. Measured on
+    /// `run-1788617269-96746` (eight character bots, 5x): the research was
+    /// scheduled at 42,905 and the one pole joining the labs' poles to the
+    /// steam engine, `[38.5, -7.5]`, at 49,411 — the pole had been chosen
+    /// earlier, on a bot that was busy, so `Powered` held in the sim and
+    /// nothing said the research had to wait for it. The labs stood
+    /// `no_power` with all 85 packs inside for 12,300 ticks, and the two
+    /// researches ran 13,000 ticks over their planned durations. A method
+    /// that turns this list into `Condition::EntityAt` preconditions gets
+    /// the edges by inference, from exactly the placements that create
+    /// these entities, and none for entities the world already carries.
+    ///
+    /// Empty when nothing reaches `area`, which is `Powered`'s "no".
+    pub fn powering_entities(&self, area: &Rect) -> Vec<(Position, String)> {
+        let Some(net) = self.electric_network(area) else {
+            return Vec::new();
+        };
+        let mut out: Vec<(Position, String)> = Vec::new();
+        // `net.poles` and `net.parent` are indexed in the order the poles
+        // were filtered out of `net.nearby`, so the same filter, applied in
+        // the same order, recovers each pole's index.
+        let mut pole_index = 0;
+        for entity in &net.nearby {
+            let is_pole = pole_supply_half_extent(&entity.name).is_some()
+                && pole_wire_reach(&entity.name).is_some();
+            if is_pole {
+                if net.supplying.contains(&net.root(pole_index)) {
+                    out.push((entity.position.clone(), entity.name.clone()));
+                }
+                pole_index += 1;
+                continue;
+            }
+            if generation_kw(&entity.name).is_some() && net.carries(&self.footprint_of(entity)) {
+                out.push((entity.position.clone(), entity.name.clone()));
+            }
+        }
+        out
+    }
+
     /// Steps 1 and 2 of [`electric_supply_kw`](Self::electric_supply_kw):
     /// which poles are near `area`, which of them are wired together, and
     /// which of those components reach `area` at all.

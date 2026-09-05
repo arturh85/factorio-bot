@@ -4446,6 +4446,27 @@ impl Method for Researched {
                 entity: LAB.into(),
                 kw: LAB_POWER_KW,
             });
+            // `Powered` says the lab's ground is supplied *in the state*,
+            // and the state holds every placement this plan has chosen
+            // whatever tick it was given -- so a pole the scheduler hands
+            // to a busy bot 6,500 ticks after the research still satisfies
+            // it. Naming the poles and the generator the supply comes
+            // through as `EntityAt` turns each into an edge from the
+            // placement that creates it, by inference, and into nothing for
+            // what the world already carries. `power_links` below covers a
+            // plant this research builds itself; this covers the one it
+            // found standing, which is the one a cell planned before it.
+            if let Some(area) = ctx.state.collision_area(LAB, pos) {
+                for (position, name) in ctx.state.powering_entities(&area) {
+                    let standing = Condition::EntityAt {
+                        pos: position,
+                        name,
+                    };
+                    if !pre.contains(&standing) {
+                        pre.push(standing);
+                    }
+                }
+            }
         }
         // No `HasItem`/`LoseItem` for the packs any more. They are spent by
         // the inserts above, which is where the game spends them: a lab
@@ -6959,6 +6980,52 @@ mod tests {
                 .any(|(from, _)| *from == place.id),
             "and the insert must wait for the lab to be standing"
         );
+    }
+
+    /// **`run-1788617269-96746`'s 13,000 ticks, as a test.** Eight character
+    /// bots at 5x: the assembler cell sited its plant and poles before the
+    /// research was expanded, so the research found its supply standing in
+    /// the plan state and stated nothing about it. The scheduler put the one
+    /// pole joining the labs to the steam engine, `[38.5, -7.5]`, at 49,411
+    /// on a busy bot and the research at 42,905; the labs sat `no_power` with
+    /// every pack inside from tick 48,900 to 61,200, and `research
+    /// logistic-science-pack` ran 8,474 ticks over its 7,500. `Powered` is a
+    /// state predicate no effect satisfies, so inference can draw no edge to
+    /// it; the research has to *name* the poles and the generator its power
+    /// comes through, as `EntityAt`, so that whichever action places them
+    /// is paired with it. Here the plant stands in the world, so the
+    /// conditions hold outright and cost no edge -- what is pinned is that
+    /// they are stated at all.
+    #[test]
+    fn a_research_names_the_poles_and_generator_its_power_comes_through() {
+        let bots = [BotId(1)];
+        let s = tech_state(&bots);
+        let net = expand(
+            &[Goal::Researched("automation".into())],
+            &s,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .expect("the goal expands against a powered fixture");
+        let research = net
+            .actions()
+            .find(|a| matches!(a.kind, ActionKind::Research { .. }))
+            .expect("the research itself");
+        // The fixture's plant, exactly as `test_world::with_steam_power`
+        // stands it: one pole, one engine.
+        for (name, position) in [
+            ("small-electric-pole", Position::new(10.5, 10.5)),
+            ("steam-engine", Position::new(12.5, 10.5)),
+        ] {
+            assert!(
+                research.pre.contains(&Condition::EntityAt {
+                    pos: position.clone(),
+                    name: name.into(),
+                }),
+                "the research must require the standing {name} at {position} its power comes through, got {:?}",
+                research.pre
+            );
+        }
     }
 
     /// The same world and the same goal give the same research plan, twice.

@@ -1,6 +1,16 @@
 -- One-shot: list iron-ore tiles within 120 of spawn, to find a patch big
 -- enough for MinerLine's 13-drill, two-column footprint (x in {a,a+4},
 -- y spanning ~18 tiles).
+--
+-- Kept, unlike synth_plan_check.lua (a throwaway "does this even decode"
+-- sanity check with no findings of its own): this script's output is the
+-- reproduction trail behind the anchor `(-27, -34)` used in
+-- docs/superpowers/notes/2026-09-05-first-block-built.md's MinerLine
+-- siting-gap finding -- the 940-tile iron patch bbox and the brute-force
+-- anchor search it fed both come from a run of this file. Hardcoded to
+-- MinerLine's own offsets and this session's anchor `(0,0)` scan radius on
+-- purpose; it is not meant to be reusable for another blueprint or map
+-- without editing it.
 print("start scan_ore")
 local found = rcon.find_entities_in_radius({ x = 0, y = 0 }, 150, "iron-ore")
 print("iron-ore tiles found: " .. tostring(#found))

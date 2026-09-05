@@ -262,15 +262,44 @@ New driver script: `scripts/starter_run.lua`. Anchor `(10, 10)` — the same
 bare-dirt spot MinerLine's attempt 1 found refused for drills, which is
 irrelevant here since none of these six entities need ore under them.
 
-### It planned and ran clean, no refusal at all
+### It planned and ran clean, no refusal at all -- and the roster was not even
 
 `goal.plan` produced 10 steps (6 placements + 4 walks) across 4 bots in one
-round, no refusal, no `ChainOwnerInfeasible`. `goal.run` reported
-`done=true success=6 failed=0 lost=0`. Ran it **twice**
-(`run-1788625294-24845`, `run-1788625403-87799`) for independent
-confirmation; both identical.
+round, no refusal, no `ChainOwnerInfeasible`. **Per-bot: bot 1 got 3 steps,
+bot 2 got 4, bot 3 got 3, bot 4 got 0** — identical in both runs (`this plan
+divides as bot 1: 3 step(s) ... bot 2: 4 step(s) ... bot 3: 3 step(s)`, plus
+the printed per-bot totals). `bands()` splits `MinerLine`-style blocks by
+entity count across the *whole* roster, and six entities into four bots
+does not divide evenly — bot 4 drew the empty band both times. This is a
+structural fact about a six-entity block on four bots, not a bug: `goal.run`
+still reported `done=true success=6 failed=0 lost=0` in both runs.
 
-### Reading it back: position and direction, two independent ways
+One bot did not simply idle, though: **bot 3 stalled walking**, blocked by
+its own just-placed `steam-engine` (`#3 stalled walking to
+9.898430592398137/9.99421923653743 ... blocked by our own steam-engine ...
+leg 10 of 11 made no progress for 61 ticks`), asked the game for a fresh
+path, and the first retry's `player_path()` call itself failed
+(`path_request_failed`) before a later attempt succeeded — this happened
+identically in both runs, so it is reproducible, not a one-off. It did not
+fail the build: no failed or lost action was reported.
+
+Ran it **twice** (`run-1788625294-24845`, `run-1788625403-87799`) for
+independent confirmation; both identical, including this stall.
+
+**Wall clock**, from the harness's own log timestamps (`paris`'s narration
+is 1-second granularity; where a `tracing` WARN line for the stall above
+also landed in the same window, it resolves to the millisecond and gives a
+tighter bound): run 1's `dispatching...` printed at `16:21:34` and the
+walk-retry warnings landed at `16:21:34.977045Z` / `16:21:35.030035Z`, and
+`run returned` printed at `16:21:35` — the whole dispatch-and-verify phase
+fits inside roughly one second of wall clock. Run 2: `dispatching...` at
+`16:23:23`, the same two warnings at `16:23:24.008750Z` /
+`16:23:24.061915Z`, `run returned` at `16:23:24` — same bound. This is
+consistent with the tick numbers below: 224 game ticks at `game-speed 5`
+is ≈300 ticks/real-second, i.e. ≈0.75 real seconds, inside the ≤~1-2s window
+the paris timestamps bound it to.
+
+### Reading it back: position and direction, from two sources
 
 **From inside the script**, `rcon.find_entities_in_radius(anchor, 15, name)`
 — a direct query against the live surface, not a log — found all 6:
@@ -284,12 +313,18 @@ boiler              @ (9.50,15.00)  dir=0
 pipe                @ (11.50,15.50) dir=0
 ```
 
-**From outside the process**, the standalone `factorio-bot rcon -s
-localhost --settings scratch/task4-settings.toml` CLI, fired in a loop from
-a separate shell against the run's own server while it was still up (11
+**From a second process**, the standalone `factorio-bot rcon -s localhost
+--settings scratch/task4-settings.toml` CLI, fired in a loop from a
+separate shell against the run's own server while it was still up (11
 attempts before it shut down; one landed mid-build and returned a partial
-read, the rest a `bb8` timeout as the server closed) — genuinely
-independent of both the executor and this script:
+read, the rest a `bb8` timeout as the server closed). **This and the
+in-script reading above share an instrument**: both call the same
+`find_entities_filtered`/`find_entities_in_radius` query, just from two
+separate OS processes. Running it twice rules out the script lying to
+itself about what it queried or misreporting its own result — it does
+**not** rule out a defect in `find_entities_filtered` itself, or in how
+both callers interpret its reply, since a bug shared by the query path
+would show up identically in both:
 
 ```
 EXTPROBE:small-electric-pole,11.5,4.5,0;steam-engine,9.5,6.5,0;steam-engine,9.5,11.5,0
@@ -327,10 +362,13 @@ observed here (both blueprint and the two live reads agree at 0), but worth
 noting as a gap in what a script can verify without decoding the blueprint
 by hand.
 
-**A third, independent source agrees: `map.jsonl`'s own `placed` records.**
-The record system tracks exactly this intent-vs-actual gap on purpose
-(`crates/core/src/record/map.rs`'s `drift_between`), and every one of the 6
-lines in `run-1788625403-87799/map.jsonl` shows it explicitly:
+**A genuinely separate source agrees: `map.jsonl`'s own `placed` records.**
+Unlike the two `find_entities` reads above, this comes from a different
+instrument entirely — the executor's own `place_entity` RCON call's return
+value, captured at the moment of placement and written by
+`crates/core/src/record/map.rs`'s `drift_between` before this script ever
+asked the surface anything. Every one of the 6 lines in
+`run-1788625403-87799/map.jsonl` shows it explicitly:
 
 ```
 {"kind":"placed","bot":1,"intent":{"name":"steam-engine","position":{"x":9.0,"y":6.0},"direction":0},
@@ -344,13 +382,16 @@ exactly as intended (0) on every entity, and that the only difference is the
 known, uniform tile-centre snap, not a silent divergence.
 
 **Verdict: 6/6 entities stood at their expected position (anchor + relative
-offset, uniformly shifted to the tile centre) and expected direction (0, matching
-the blueprint's own unrotated export), confirmed three ways — in-script RCON
-query, an independent external `factorio-bot rcon -s localhost` process, and
-`map.jsonl`'s own drift tracking — for both `goal.run`s.** No 8-to-16-point
-migration defect surfaced — every direction in this blueprint is the trivial
-0 case, so this run does not exercise a non-zero migrated direction; it
-confirms the identity case only.
+offset, uniformly shifted to the tile centre) and expected direction (0,
+matching the blueprint's own unrotated export), for both `goal.run`s.**
+Confirmed by two sources: the `find_entities` query (asked twice, from two
+processes — the in-script reading and the external `factorio-bot rcon -s
+localhost` process, which rules out the script lying to itself but not a
+defect shared by that query path) and, separately, `map.jsonl`'s
+`place_entity`-return-value record, which agrees independently. No
+8-to-16-point migration defect surfaced — every direction in this
+blueprint is the trivial 0 case, so this run does not exercise a non-zero
+migrated direction; it confirms the identity case only.
 
 ### Construction time
 
@@ -439,13 +480,29 @@ dry-plan found the game would refuse a belt at `[0.5, 0.5]` there,
 unrelated to this fixture; that process was killed immediately on the
 hold instruction and nothing further was run until the all-clear.)
 
-### It planned and ran clean; the machine was otherwise idle throughout
+### It planned and ran clean, perfectly balanced across all four bots
 
 `goal.plan` produced 8 steps (4 placements + 4 walks) across 4 bots, no
-refusal. `goal.run` reported `done=true success=4 failed=0 lost=0`
+refusal. **Per-bot: bot 1, 2, 3 and 4 each got exactly 2 steps** (one
+placement + one walk apiece — `this plan divides as bot 1: 2 step(s) ...
+bot 2: 2 step(s) ... bot 3: 2 step(s) ... bot 4: 2 step(s)`), unlike
+`StarterSteamEngineBoiler`'s uneven 3/4/3/0 split: four entities onto four
+bots divides evenly, so every bot did the same amount of work and none
+idled. `goal.run` reported `done=true success=4 failed=0 lost=0`
 (`run-1788627039-02448`).
 
-### Reading the four directions back, off the surface, two independent ways plus the record
+`rcon.game_tick()` around `goal.run` reported **128 ticks** of game time
+(`tick_before=424 tick_after=552`) — cheated materials again, so this
+excludes gathering.
+
+**Wall clock**, from the harness's own `paris` log timestamps (1-second
+granularity, no embedded `tracing` warnings this time to sharpen it, unlike
+`StarterSteamEngineBoiler`'s bot-3 stall): `dispatching...` printed at
+`16:50:39`, `run returned` at `16:50:40` — the whole dispatch-and-verify
+phase fits inside roughly one second, consistent with 128 game ticks at
+`game-speed 5` (≈300 ticks/real-second, ≈0.43 real seconds).
+
+### Reading the four directions back, off the surface, from two sources
 
 **In-script**, `rcon.find_entities_in_radius(anchor, 10, "transport-belt")`,
 sorted left-to-right by x:
@@ -457,10 +514,14 @@ belt[3] raw=4 @ (12.50,10.50) expected_16pt=8  game_reports=8  OK
 belt[4] raw=6 @ (13.50,10.50) expected_16pt=12 game_reports=12 OK
 ```
 
-**External**, the standalone `factorio-bot rcon -s localhost --settings
-scratch/task4-settings.toml` CLI, fired in a loop from a separate shell
-against the run's own server while it executed (8 attempts; the last one
-landed after all four were placed, the rest before any belt existed):
+**From a second process**, the standalone `factorio-bot rcon -s localhost
+--settings scratch/task4-settings.toml` CLI, fired in a loop from a
+separate shell against the run's own server while it executed (8 attempts;
+the last one landed after all four were placed, the rest before any belt
+existed). As with `StarterSteamEngineBoiler`, this and the in-script
+reading above share an instrument — both are the same `find_entities`
+query, called from two processes — so agreement here rules out the script
+lying to itself, not a defect in that query path itself:
 
 ```
 EXTPROBE:transport-belt,10.5,10.5,0;transport-belt,11.5,10.5,4;transport-belt,12.5,10.5,8;transport-belt,13.5,10.5,12
@@ -468,10 +529,12 @@ EXTPROBE:transport-belt,10.5,10.5,0;transport-belt,11.5,10.5,4;transport-belt,12
 
 Exact match.
 
-**`map.jsonl`'s own `placed` records**, the same drift-tracking mechanism
-used for `StarterSteamEngineBoiler`, and this time with **no drift at
-all** (`transport-belt` is a 1×1 footprint, so there is no tile-centre
-parity snap the way there was for the odd-shaped entities in the six-entity
+**`map.jsonl`'s own `placed` records** — a genuinely separate source, from
+the executor's `place_entity` RCON return value rather than a
+`find_entities` query — the same drift-tracking mechanism used for
+`StarterSteamEngineBoiler`, and this time with **no drift at all**
+(`transport-belt` is a 1×1 footprint, so there is no tile-centre parity
+snap the way there was for the odd-shaped entities in the six-entity
 build):
 
 ```
@@ -485,9 +548,11 @@ build):
 
 **All four observed directions matched all four expected, in order: `0
 vs 0`, `4 vs 4`, `8 vs 8`, `12 vs 12`.** No belt arrived on an odd number
-and none arrived on its raw (undoubled) value. Confirmed three ways —
-in-script RCON, an independent external `factorio-bot rcon -s localhost`
-process, and `map.jsonl`'s drift-tracked record — all in exact agreement.
+and none arrived on its raw (undoubled) value. Confirmed by two sources in
+exact agreement: the `find_entities` query (asked twice, from two
+processes — in-script and the external `factorio-bot rcon -s localhost`
+process) and, separately, `map.jsonl`'s `place_entity`-return-value
+record.
 
 **What this does and does not prove.** It proves the eight-to-sixteen point
 direction migration end to end, live, on all four cardinal directions, on a

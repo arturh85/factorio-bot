@@ -1,6 +1,17 @@
 -- One-shot: for a list of candidate anchors, check whether MinerLine's 37
 -- entities would all sit on legal ground -- drills need iron-ore under them,
 -- everything else needs to be clear of trees/rocks/water/other entities.
+--
+-- Kept, unlike synth_plan_check.lua, for the same reason as scan_ore.lua:
+-- this is the reproduction trail behind
+-- docs/superpowers/notes/2026-09-05-first-block-built.md's MinerLine
+-- finding, specifically the negative result that this heuristic is
+-- UNRELIABLE -- it reported anchor `(-33, -40)` clean and the live game
+-- still refused a belt there, because `find_entities_in_radius` cannot see
+-- terrain (water, cliffs) at all. The `CANDIDATES` list below is exactly
+-- the abandoned search from that session, left as-is on purpose: it is the
+-- evidence for "this many anchors were tried", not a reusable tool. The
+-- hardcoded `OFFSETS` are MinerLine's own decoded entity positions.
 print("start scan_site")
 
 local OFFSETS = {

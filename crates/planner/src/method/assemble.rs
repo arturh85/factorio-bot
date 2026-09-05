@@ -122,7 +122,7 @@ use crate::state::PlanState;
 use factorio_bot_core::factorio::util::calculate_distance;
 use factorio_bot_core::num_traits::{FromPrimitive, ToPrimitive};
 use factorio_bot_core::types::{Direction, FactorioEntity, FactorioRecipe, Pos, Position};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// The crafting machine a cell is built from.
 ///
@@ -712,6 +712,15 @@ pub struct Cell {
     /// when no existing network already covers the ground -- see
     /// [`POLE_OFFSET`].
     pub parts: Vec<CellPart>,
+    /// The roles whose building the world already holds, on the tile and
+    /// under the name [`parts`](Self::parts) gives them.
+    ///
+    /// Empty for a cell [`plan_cell`] sites on clear ground. A cell
+    /// [`complete_cell`] finishes lists here what a cut-short plan left
+    /// behind -- two machines and nothing else, in `run-1788608648-56109`'s
+    /// third plan -- and [`cell_steps`] neither bills nor places those parts
+    /// again. See [`Cell::stands`].
+    pub standing: Vec<Role>,
     /// Every tile a bot must be able to stand on to charge this cell.
     pub lane: Vec<Position>,
     /// Bystanders `fit` found would be sealed into a pocket by this cell's
@@ -745,11 +754,22 @@ impl Cell {
     /// Does this cell have to place a pole of its own?
     ///
     /// `false` when it stands inside a supply area that already exists, which
-    /// is the cheap case and the one [`plan_cell`] looks for first. The bill
-    /// reads this rather than assuming: a pole nobody needs is one wood spent
-    /// out of a lifetime supply of four.
+    /// is the cheap case and the one [`plan_cell`] looks for first -- and
+    /// `false` when its own pole is one of the parts already standing. The
+    /// bill reads this rather than assuming: a pole nobody needs is one wood
+    /// spent out of a lifetime supply of four.
     pub fn brings_pole(&self) -> bool {
-        self.at(Role::Pole).is_some()
+        self.at(Role::Pole).is_some() && !self.stands(Role::Pole)
+    }
+
+    /// Is the building in `role` already in the world?
+    pub fn stands(&self, role: Role) -> bool {
+        self.standing.contains(&role)
+    }
+
+    /// The parts this cell still has to place, in build order.
+    pub fn missing(&self) -> impl Iterator<Item = &CellPart> {
+        self.parts.iter().filter(|part| !self.stands(part.role))
     }
 
     /// The ground whose electric network this cell is on.
@@ -917,8 +937,9 @@ fn fit(
     origin: &Position,
     facing: Direction,
     with_pole: bool,
-    feeds: usize,
+    spec: &AssemblySpec,
 ) -> Option<Cell> {
+    let feeds = spec.intermediate.ingredients.len();
     let parts = layout(origin, facing, with_pole, feeds)?;
     let lane = lane(origin, facing)?;
     for part in &parts {
@@ -931,17 +952,29 @@ fn fit(
             return None;
         }
     }
-    let mut cell = Cell {
+    let cell = Cell {
         origin: origin.clone(),
         facing,
         parts,
+        standing: Vec::new(),
         lane,
         evacuate: Vec::new(),
     };
+    works(state, cell, spec)
+}
+
+/// Questions 2 to 4 of [`fit`], asked of a cell whose ground is already
+/// settled: with its missing parts standing on a fork, does every link
+/// deliver, does every consumer have its capacity, and does the cell seal
+/// nobody in?
+///
+/// Shared by [`fit`] and [`fit_partial`] so that a cell being finished is
+/// held to exactly the checks a cell being sited is -- a standing inserter
+/// turned the wrong way fails `delivers_into` here the same as a planned one
+/// would, which is what makes reuse safe to prefer.
+fn works(state: &PlanState, mut cell: Cell, spec: &AssemblySpec) -> Option<Cell> {
     let mut trial = state.fork();
-    for part in &cell.parts {
-        trial.create_entity(entity_for(state, part));
-    }
+    reserve_in(&mut trial, &cell, spec).ok()?;
     for (from, to) in links(&cell)? {
         if !trial.delivers_into(&from, &to) {
             return None;
@@ -962,7 +995,7 @@ fn fit(
     // above has already had the chance to reject this candidate for free --
     // see `crate::enclosure::check`'s own doc for why `trial` (parts already
     // created) is exactly the fork that check wants.
-    match crate::enclosure::check(state, &trial, origin) {
+    match crate::enclosure::check(state, &trial, &cell.origin) {
         crate::enclosure::EnclosurePrevention::Clear => {}
         crate::enclosure::EnclosurePrevention::Evacuate(evacuations) => {
             cell.evacuate = evacuations;
@@ -970,6 +1003,213 @@ fn fit(
         crate::enclosure::EnclosurePrevention::Refuse => return None,
     }
     Some(cell)
+}
+
+/// Put `cell` into `state` the way the plan will: its missing parts created,
+/// and **both machines set to their recipes**.
+///
+/// The recipes are the point. `PlanState::electric_demand_kw` charges a
+/// crafting machine only once it has a recipe -- a machine with none can
+/// never draw more than its drain -- so a reservation without them would let
+/// a second cell be sized against capacity the first has already spoken for,
+/// and [`fuel_for`] would size the boiler's coal for an empty network. Every
+/// fork that stands a cell up goes through here so that the three cannot
+/// disagree: [`works`], [`plan_cells`] and [`fuel_for`].
+///
+/// Standing parts are left as they are, recipes included: a standing machine
+/// is only accepted by [`fit_partial`] with the right recipe or none, and
+/// `set_recipe` on one already set to it is a no-op.
+fn reserve_in(state: &mut PlanState, cell: &Cell, spec: &AssemblySpec) -> Result<(), PlannerError> {
+    for part in cell.missing() {
+        state.create_entity(entity_for(state, part));
+    }
+    for (role, recipe) in [
+        (Role::Intermediate, &spec.intermediate.recipe),
+        (Role::Product, &spec.recipe),
+    ] {
+        if let Some(part) = cell.at(role) {
+            state.set_recipe(&part.position, &recipe.name)?;
+        }
+    }
+    Ok(())
+}
+
+/// The recipe a standing machine in `role` may already carry.
+fn recipe_for_role(spec: &AssemblySpec, role: Role) -> Option<&str> {
+    match role {
+        Role::Intermediate => Some(spec.intermediate.recipe.name.as_str()),
+        Role::Product => Some(spec.recipe.name.as_str()),
+        _ => None,
+    }
+}
+
+/// The cell `machine` is part of, finished: every layout that puts a machine
+/// on that tile is tried, and the one with the most of it already standing
+/// wins.
+///
+/// # What "part of a cell" is taken to mean
+///
+/// A standing machine does not say which cell it was meant for -- an
+/// assembling machine has no facing, and the mod reports every one at
+/// direction 0 -- so the layout is recovered by trial: the machine is taken as
+/// the [`Role::Intermediate`] and as the [`Role::Product`] of a cell at each
+/// of the four facings, with and without a pole of the cell's own, and each
+/// of those sixteen layouts is checked against the world part by part:
+///
+/// * an entity **of the part's name on the part's tile** is that part,
+///   standing. A machine also has to carry the role's recipe **or none**; a
+///   machine set to something else belongs to some other arrangement;
+/// * **empty ground** is a part to place;
+/// * **anything else** means this layout is not the cell, and it is dropped.
+///
+/// Every tile of the lane has to be free too, exactly as for a new cell. A
+/// layout with nothing of it standing is not a cell to finish, and a layout
+/// whose product machine `exclude` names is somebody's complete cell already.
+///
+/// The survivors are then held to [`works`] -- links, capacity, enclosure --
+/// and the one with the **most standing parts** is the answer, ties going to
+/// the first in the fixed order `(facing, role, with_pole)`. Most, not first:
+/// two machines four tiles apart are the two machines of one cell at exactly
+/// one facing, and the other fifteen layouts each claim one of them and
+/// would build the rest of a different cell around it.
+fn fit_partial(
+    state: &PlanState,
+    machine: &FactorioEntity,
+    spec: &AssemblySpec,
+    exclude: &BTreeSet<Pos>,
+) -> Option<Cell> {
+    let feeds = spec.intermediate.ingredients.len();
+    let table = layout_table(feeds);
+    let mut best: Option<(usize, Cell)> = None;
+    for facing in Direction::orthogonal() {
+        for role in [Role::Intermediate, Role::Product] {
+            let Some((_, offset, _)) = table.iter().find(|(r, _, _)| *r == role) else {
+                continue;
+            };
+            let Some(turned) = Position::new(offset.0, offset.1).turn(facing) else {
+                continue;
+            };
+            let origin = Position::new(
+                machine.position.x() - turned.x(),
+                machine.position.y() - turned.y(),
+            );
+            for with_pole in [false, true] {
+                let Some(parts) = layout(&origin, facing, with_pole, feeds) else {
+                    continue;
+                };
+                let Some(lane) = lane(&origin, facing) else {
+                    continue;
+                };
+                if parts.iter().any(|part| {
+                    matches!(part.role, Role::Intermediate | Role::Product)
+                        && exclude.contains(&Pos::from(&part.position))
+                }) {
+                    continue;
+                }
+                let Some(standing) = standing_parts(state, &parts, spec) else {
+                    continue;
+                };
+                if standing.is_empty() {
+                    continue;
+                }
+                if lane.iter().any(|tile| !state.is_position_free(tile)) {
+                    continue;
+                }
+                let count = standing.len();
+                if best.as_ref().is_some_and(|(most, _)| *most >= count) {
+                    continue;
+                }
+                let cell = Cell {
+                    origin: origin.clone(),
+                    facing,
+                    parts,
+                    standing,
+                    lane,
+                    evacuate: Vec::new(),
+                };
+                if let Some(cell) = works(state, cell, spec) {
+                    best = Some((count, cell));
+                }
+            }
+        }
+    }
+    best.map(|(_, cell)| cell)
+}
+
+/// Which of `parts` already stand, or `None` when one of them is blocked by
+/// something that is not it.
+fn standing_parts(state: &PlanState, parts: &[CellPart], spec: &AssemblySpec) -> Option<Vec<Role>> {
+    let mut standing = Vec::new();
+    for part in parts {
+        let name = part.role.name();
+        match state.entity_at(&part.position) {
+            // The same name **centred on the same tile**: `entity_at` answers
+            // for any entity covering the point, and a machine one tile off
+            // the layout is somebody else's.
+            Some(entity)
+                if entity.name == name
+                    && Pos::from(&entity.position) == Pos::from(&part.position) =>
+            {
+                if let Some(wanted) = recipe_for_role(spec, part.role)
+                    && entity.recipe.as_deref().is_some_and(|set| set != wanted)
+                {
+                    return None;
+                }
+                standing.push(part.role);
+            }
+            Some(_) => return None,
+            None => {
+                if !state.is_area_free_facing(name, &part.position, part.direction) {
+                    return None;
+                }
+            }
+        }
+    }
+    Some(standing)
+}
+
+/// How far from the anchor [`complete_cell`] looks for a machine to finish a
+/// cell around: the cell search itself, plus the furthest a cell's own part
+/// stands from its origin, so a machine at the edge of where a new cell
+/// could go is still a candidate.
+const PARTIAL_CELL_SCAN_RADIUS: f64 = CELL_SEARCH_RADIUS as f64 + 6.;
+
+/// A cell to finish rather than build, if a machine near `anchor` is part of
+/// one -- nearest machine first.
+///
+/// Asked by [`plan_cells`] **before** [`plan_cell`], because a cell whose two
+/// machines stand is two machines the plan does not have to craft, and a
+/// planner that only ever sites on clear ground walks past them every replan:
+/// `run-1788608648-56109`'s third plan placed four assembling machines beside
+/// the two its second plan had already put down, and its fourth plan two
+/// more beside those. Six machines for a goal that needs four, none of them
+/// ever fed.
+///
+/// `exclude` names both machines of every cell that is already whole (see
+/// [`cell_machines`]) and of every cell this plan has just chosen, so a cell
+/// is neither finished twice, nor "finished" when it needs nothing, nor built
+/// through a machine some other cell is using.
+pub fn complete_cell(
+    state: &PlanState,
+    anchor: &Position,
+    spec: &AssemblySpec,
+    exclude: &BTreeSet<Pos>,
+) -> Option<Cell> {
+    let mut machines: Vec<(f64, FactorioEntity)> = state
+        .entities_within(anchor, PARTIAL_CELL_SCAN_RADIUS)
+        .into_iter()
+        .filter(|entity| entity.name == MACHINE)
+        .filter(|entity| !exclude.contains(&Pos::from(&entity.position)))
+        .map(|entity| (calculate_distance(&entity.position, anchor), entity))
+        .collect();
+    machines.sort_by(|a, b| {
+        a.0.total_cmp(&b.0)
+            .then(a.1.position.x.total_cmp(&b.1.position.x))
+            .then(a.1.position.y.total_cmp(&b.1.position.y))
+    });
+    machines
+        .into_iter()
+        .find_map(|(_, machine)| fit_partial(state, &machine, spec, exclude))
 }
 
 // ---------------------------------------------------------------------------
@@ -996,6 +1236,10 @@ fn inserter_count(spec: &AssemblySpec) -> u32 {
 
 /// How many chests a cell for `spec` has: one per feed chest, one supply, one
 /// output.
+///
+/// Only a test asks now: [`bill`] counts chests off the cell's own missing
+/// parts, so this is the number a cell sited on clear ground has to place.
+#[cfg(test)]
 fn chest_count(spec: &AssemblySpec) -> u32 {
     u32::try_from(spec.intermediate.ingredients.len()).unwrap_or(1) + 2
 }
@@ -1018,7 +1262,6 @@ pub fn plan_cell(
     spec: &AssemblySpec,
 ) -> Result<Cell, PlannerError> {
     let base = Pos::from(anchor);
-    let feeds = spec.intermediate.ingredients.len();
     // The cheap pass first, and the whole ring search is repeated rather than
     // interleaved: a cell twelve tiles out that needs no pole beats one beside
     // the anchor that costs a wood, because wood is the one resource this
@@ -1042,7 +1285,7 @@ pub fn plan_cell(
                             f64::from(base.0 + dx) + offset_x,
                             f64::from(base.1 + dy) + offset_y,
                         );
-                        if let Some(cell) = fit(state, &candidate, facing, with_pole, feeds) {
+                        if let Some(cell) = fit(state, &candidate, facing, with_pole, spec) {
                             return Ok(cell);
                         }
                     }
@@ -1056,13 +1299,20 @@ pub fn plan_cell(
     })
 }
 
-/// Site `count` cells, each clear of the ones before it.
+/// Site `count` cells, each clear of the ones before it -- finishing what
+/// already stands before siting anything new.
 ///
 /// Each cell is reserved on a fork as it is chosen, so the next search sees it
-/// standing there — and, since the reservation includes its pole and its five
-/// consumers, the *second* cell's `Powered` check is asked against a network
-/// the first cell has already spent capacity on. Without that, two cells on
-/// one 900 kW engine would each be sized against the whole of it.
+/// standing there — and, since the reservation includes its pole, its five
+/// consumers **and their recipes** (see [`reserve_in`]), the *second* cell's
+/// `Powered` check is asked against a network the first cell has already
+/// spent capacity on. Without that, two cells on one 900 kW engine would each
+/// be sized against the whole of it.
+///
+/// [`complete_cell`] is asked first for every one of the `count`, with the
+/// product machines of whole cells and of the cells chosen so far excluded,
+/// so a half-built cell is finished exactly once and a plan needing two cells
+/// with two half-built ones standing finishes both.
 pub fn plan_cells(
     state: &PlanState,
     anchor: &Position,
@@ -1071,10 +1321,24 @@ pub fn plan_cells(
 ) -> Result<Vec<Cell>, PlannerError> {
     let mut trial = state.fork();
     let mut out = Vec::new();
+    // **Both** machines of every cell already spoken for, not just the
+    // product: a layout at another facing through a cell's intermediate
+    // machine has a product tile of its own, and excluding products alone
+    // let the second cell of a green plan be "finished" around the first
+    // cell's intermediate -- one machine feeding two link inserters, and a
+    // plan three machines long for a factory that needs four. Measured on
+    // `workspace/scripts/map.json` the moment this tier existed.
+    let mut exclude: BTreeSet<Pos> = cell_machines(state, spec).iter().map(Pos::from).collect();
     for _ in 0..count {
-        let cell = plan_cell(&trial, anchor, spec)?;
-        for part in &cell.parts {
-            trial.create_entity(entity_for(&trial, part));
+        let cell = match complete_cell(&trial, anchor, spec, &exclude) {
+            Some(cell) => cell,
+            None => plan_cell(&trial, anchor, spec)?,
+        };
+        reserve_in(&mut trial, &cell, spec)?;
+        for role in [Role::Intermediate, Role::Product] {
+            if let Some(part) = cell.at(role) {
+                exclude.insert(Pos::from(&part.position));
+            }
         }
         out.push(cell);
     }
@@ -1137,8 +1401,15 @@ const CELL_SCAN_RADIUS: f64 = 512.0;
 /// Order-independent by construction: it counts, and it dedupes by tile
 /// through the `(x, y, name)` order `entities_within` already imposes.
 pub fn cells_standing(state: &PlanState, spec: &AssemblySpec) -> u32 {
+    u32::try_from(complete_cells(state, spec).len()).unwrap_or(u32::MAX)
+}
+
+/// The product machines of every complete cell for `spec` -- the positions
+/// behind [`cells_standing`]'s count, so that [`plan_cells`] can keep a whole
+/// cell out of [`complete_cell`]'s candidates. Same five clauses, same order.
+pub fn complete_cells(state: &PlanState, spec: &AssemblySpec) -> Vec<Position> {
     let ingredients = ingredients_of(&spec.recipe).len();
-    let mut count = 0u32;
+    let mut out = Vec::new();
     let nearby = state.entities_within(&Position::new(0., 0.), CELL_SCAN_RADIUS);
     for machine in &nearby {
         if machine.name != MACHINE {
@@ -1163,10 +1434,36 @@ pub fn cells_standing(state: &PlanState, spec: &AssemblySpec) -> u32 {
             continue;
         }
         if loaded_feeders(state, &nearby, machine, CHAIN_DEPTH) >= ingredients {
-            count += 1;
+            out.push(machine.position.clone());
         }
     }
-    count
+    out
+}
+
+/// Every machine that belongs to a complete cell for `spec`: each product
+/// machine [`complete_cells`] names, and the machine feeding it through its
+/// link inserter -- found the way [`loaded_feeders`] finds it, as the
+/// [`MACHINE`] source of an inserter that delivers into the product.
+pub fn cell_machines(state: &PlanState, spec: &AssemblySpec) -> Vec<Position> {
+    let nearby = state.entities_within(&Position::new(0., 0.), CELL_SCAN_RADIUS);
+    let mut out = Vec::new();
+    for product in complete_cells(state, spec) {
+        for inserter in nearby
+            .iter()
+            .filter(|inserter| inserter.name == INSERTER)
+            .filter(|inserter| state.delivers_into(&inserter.position, &product))
+        {
+            for source in nearby.iter().filter(|source| {
+                source.name == MACHINE
+                    && source.position != product
+                    && state.delivers_into(&source.position, &inserter.position)
+            }) {
+                out.push(source.position.clone());
+            }
+        }
+        out.push(product);
+    }
+    out
 }
 
 /// Does anything take `machine`'s product away?
@@ -1319,12 +1616,26 @@ pub fn holds_assembling(state: &PlanState, item: &str, per_minute: u32) -> bool 
 /// inventory — so the cell would be built with the inserters its chest was
 /// supposed to hold. Nothing in red's bill repeats, which is why the merge
 /// changes no plan that already worked.
-fn bill(spec: &AssemblySpec, count: u32, poles: u32, coal: u32) -> Vec<(ItemId, u32)> {
-    let mut out = vec![
-        (MACHINE.to_string(), 2 * count),
-        (INSERTER.to_string(), inserter_count(spec) * count),
-        (CHEST.to_string(), chest_count(spec) * count),
-    ];
+///
+/// **The buildings are counted off the cells' missing parts**, not off the
+/// cell count: a cell being finished bills what it lacks, and a bill that
+/// still said "two machines per cell" would have the bot craft the two it is
+/// standing next to. The charges are per cell whatever stands, and the pole
+/// is [`Cell::brings_pole`]'s answer.
+fn bill(spec: &AssemblySpec, cells: &[Cell], coal: u32) -> Vec<(ItemId, u32)> {
+    let count = cells.len() as u32;
+    let mut out: Vec<(ItemId, u32)> = Vec::new();
+    for name in [MACHINE, INSERTER, CHEST] {
+        let missing = cells
+            .iter()
+            .flat_map(Cell::missing)
+            .filter(|part| part.role.name() == name && part.role != Role::Pole)
+            .count() as u32;
+        if missing > 0 {
+            out.push((name.to_string(), missing));
+        }
+    }
+    let poles = cells.iter().filter(|cell| cell.brings_pole()).count() as u32;
     for (item, amount) in spec.feed_charges() {
         out.push((item, amount.saturating_mul(count)));
     }
@@ -1496,7 +1807,6 @@ fn cell_steps(
     // a `Condition::Powered`, which no effect satisfies and which therefore
     // orders nothing by itself.
     let mut needs_power: Vec<ActionId> = Vec::new();
-    let count = cells.len() as u32;
 
     // A recipe the force has not unlocked will not go on a machine, and a
     // trigger technology lands *after* the craft that fires it settles --
@@ -1514,8 +1824,6 @@ fn cell_steps(
     };
     let product_gate = gate_pre(&spec.recipe, &mut steps);
     let intermediate_gate = gate_pre(&spec.intermediate.recipe, &mut steps);
-
-    let poles = cells.iter().filter(|cell| cell.brings_pole()).count() as u32;
 
     let reach = ctx
         .state
@@ -1548,7 +1856,9 @@ fn cell_steps(
             })
             .collect();
         let mut part_ids: Vec<ActionId> = Vec::new();
-        for part in &cell.parts {
+        // Only what is missing: a part the world already holds is neither
+        // billed (the bundle's `need` counts these steps) nor placed.
+        for part in cell.missing() {
             let step = place_step(ctx, part);
             if let Step::Act(action) = &step {
                 part_ids.push(action.id);
@@ -1612,6 +1922,19 @@ fn cell_steps(
             let Some(part) = cell.at(role) else {
                 continue;
             };
+            // A standing machine already set to this recipe needs no visit;
+            // `fit_partial` accepts a standing machine only with this recipe
+            // or none, so anything else here is a machine still to set.
+            if cell.stands(role)
+                && ctx
+                    .state
+                    .entity_at(&part.position)
+                    .and_then(|entity| entity.recipe)
+                    .as_deref()
+                    == Some(recipe.name.as_str())
+            {
+                continue;
+            }
             let mut pre = vec![
                 Condition::AtPosition {
                     who: Actor::Role,
@@ -1766,7 +2089,7 @@ fn cell_steps(
     // it replaces.
     let builders = participants_that_can_work(&ctx.state, roster.to_vec());
     if builders.len() < 2 {
-        for (item, amount) in bill(spec, count, poles, coal) {
+        for (item, amount) in bill(spec, cells, coal) {
             steps.push(Step::Subgoal(Goal::Have {
                 item,
                 count: amount,
@@ -2127,7 +2450,7 @@ impl Method for BuildAssemblyCell {
             }
         };
         let cells = plan_cells(&ctx.state, &anchor, &spec, build)?;
-        let (coal, boiler) = fuel_for(&ctx.state, &anchor, &cells);
+        let (coal, boiler) = fuel_for(&ctx.state, &anchor, &cells, &spec);
         let roster = self.roster(ctx.chain_actor);
         let (built, needs_power) = cell_steps(ctx, &spec, &cells, coal, boiler, &roster)?;
         let mut steps = plant_steps_taken;
@@ -2156,11 +2479,16 @@ impl Method for BuildAssemblyCell {
 /// network's draw — the cells, and whatever else was already on it — rather
 /// than the cells' own. A boiler fuelled for the cells alone would run the lab
 /// beside them dry.
-fn fuel_for(state: &PlanState, anchor: &Position, cells: &[Cell]) -> (u32, Option<Position>) {
+fn fuel_for(
+    state: &PlanState,
+    anchor: &Position,
+    cells: &[Cell],
+    spec: &AssemblySpec,
+) -> (u32, Option<Position>) {
     let mut trial = state.fork();
     for cell in cells {
-        for part in &cell.parts {
-            trial.create_entity(entity_for(state, part));
+        if reserve_in(&mut trial, cell, spec).is_err() {
+            return (0, None);
         }
     }
     let Some(ground) = cells.first().and_then(Cell::on_network_at) else {
@@ -2301,8 +2629,11 @@ mod tests {
     }
 
     fn stand_a_cell_for(state: &mut PlanState, spec: &AssemblySpec) -> Cell {
-        let cell = plan_cell(state, &Position::new(10.5, 10.5), spec)
-            .expect("the fixture has room beside its plant");
+        stand_a_cell_at(state, &Position::new(10.5, 10.5), spec)
+    }
+
+    fn stand_a_cell_at(state: &mut PlanState, anchor: &Position, spec: &AssemblySpec) -> Cell {
+        let cell = plan_cell(state, anchor, spec).expect("the fixture has room beside its plant");
         for part in &cell.parts {
             let entity = entity_for(state, part);
             state.create_entity(entity);
@@ -2629,6 +2960,7 @@ mod tests {
                     origin: origin.clone(),
                     facing,
                     parts: layout(&origin, facing, true, feeds).unwrap(),
+                    standing: Vec::new(),
                     lane: lane(&origin, facing).unwrap(),
                     evacuate: Vec::new(),
                 };
@@ -2683,6 +3015,7 @@ mod tests {
                 origin: origin.clone(),
                 facing: Direction::North,
                 parts,
+                standing: Vec::new(),
                 lane: lane(&origin, Direction::North).unwrap(),
                 evacuate: Vec::new(),
             };
@@ -3011,10 +3344,14 @@ mod tests {
             });
         }
         for y in [7.5, 13.5] {
+            // With a recipe: a crafting machine with none is charged nothing
+            // by `electric_demand_kw` (it can never craft), and this fixture
+            // is a *load*.
             state.create_entity(FactorioEntity {
                 name: "assembling-machine-3".into(),
                 entity_type: "assembling-machine".into(),
                 position: Position::new(31.5, y),
+                recipe: Some("iron-gear-wheel".into()),
                 ..Default::default()
             });
         }
@@ -3654,6 +3991,185 @@ mod tests {
         )
         .expect("a satisfied goal is not a refusal");
         assert_eq!(net.len(), 0, "the cell already stands");
+    }
+
+    // ---- finishing what stands --------------------------------------------
+
+    fn placed(net: &ActionNetwork, name: &str) -> Vec<Position> {
+        net.actions()
+            .filter_map(|a| match &a.kind {
+                ActionKind::Place { entity } if entity.name == name => {
+                    Some(entity.position.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// **`run-1788608648-56109`, plan 3.** Plan 2 had put two assembling
+    /// machines down and nothing else of their cell; plan 3 placed four more
+    /// beside them. A cell whose machines stand is finished around them:
+    /// no machine is placed or crafted, every other part is, and both
+    /// recipes are set.
+    #[test]
+    fn a_cell_whose_machines_stand_is_finished_around_them() {
+        let bots = [BotId(1)];
+        let mut s = powered(&bots);
+        let cell = plan_cell(&s, &Position::new(10.5, 10.5), &spec()).expect("room");
+        for role in [Role::Intermediate, Role::Product] {
+            let part = cell.at(role).expect("a cell has two machines");
+            let entity = entity_for(&s, part);
+            s.create_entity(entity);
+        }
+        let net = expand(
+            &[Goal::Producing {
+                item: PACK.into(),
+                per_minute: 6,
+            }],
+            &s,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .expect("two machines are a cell to finish");
+        assert_eq!(
+            placed(&net, MACHINE),
+            Vec::<Position>::new(),
+            "the machines stand and are not placed again"
+        );
+        assert!(
+            !net.actions()
+                .any(|a| a.label.contains("craft") && a.label.contains(MACHINE)),
+            "nor crafted: {:?}",
+            net.actions().map(|a| a.label.clone()).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            placed(&net, INSERTER).len(),
+            inserter_count(&spec()) as usize,
+            "every inserter of the cell is placed"
+        );
+        assert_eq!(placed(&net, CHEST).len(), chest_count(&spec()) as usize);
+        let recipes: Vec<Position> = net
+            .actions()
+            .filter_map(|a| match &a.kind {
+                ActionKind::SetRecipe { pos, .. } => Some(pos.clone()),
+                _ => None,
+            })
+            .collect();
+        let mut machines: Vec<Position> = [Role::Intermediate, Role::Product]
+            .iter()
+            .map(|role| cell.at(*role).unwrap().position.clone())
+            .collect();
+        let mut recipes_sorted = recipes;
+        let sort = |v: &mut Vec<Position>| {
+            v.sort_by(|a, b| a.x.total_cmp(&b.x).then(a.y.total_cmp(&b.y)));
+        };
+        sort(&mut machines);
+        sort(&mut recipes_sorted);
+        assert_eq!(
+            recipes_sorted, machines,
+            "both standing machines get their recipe"
+        );
+    }
+
+    /// A world that already holds a whole plant and a lab gets a cell beside
+    /// them and none of them again.
+    #[test]
+    fn a_standing_plant_and_lab_are_built_neither_again() {
+        use crate::method::power::{BOILER, ENGINE, PUMP};
+        let bots = [BotId(1)];
+        let mut s = bare(&bots);
+        s.gain(BotId(1), "wood", 1);
+        let plant = crate::method::power::plan_plant(&s, &Position::new(40., 40.))
+            .expect("the fixture has a lake");
+        for part in &plant.parts {
+            let entity = crate::method::power::entity_for(&s, part);
+            s.create_entity(entity);
+        }
+        let lab = crate::method::util::free_area_near_where(&s, &plant.pole, "lab", |candidate| {
+            s.collision_area("lab", candidate)
+                .is_some_and(|area| s.electric_supply_kw(&area) >= 60.)
+        })
+        .expect("powered ground beside the plant");
+        s.create_entity(FactorioEntity {
+            name: "lab".into(),
+            entity_type: "lab".into(),
+            position: lab,
+            ..Default::default()
+        });
+        let net = expand(
+            &[Goal::Producing {
+                item: PACK.into(),
+                per_minute: 6,
+            }],
+            &s,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .expect("a powered world gets a cell");
+        for name in [PUMP, BOILER, ENGINE, "lab"] {
+            assert_eq!(
+                placed(&net, name),
+                Vec::<Position>::new(),
+                "{name} stands already"
+            );
+        }
+        assert_eq!(
+            placed(&net, MACHINE).len(),
+            2,
+            "one cell, beside the standing plant"
+        );
+        let product = placed(&net, MACHINE)[0].clone();
+        assert!(
+            calculate_distance(&product, &plant.pole) < 30.,
+            "sited off the standing plant's pole, not somewhere of its own"
+        );
+    }
+
+    /// The cell's power is the half-built plant, finished: with a pump, its
+    /// pipes and a boiler standing and no engine, the plan places exactly
+    /// the engine and its pole.
+    #[test]
+    fn a_half_built_plant_is_finished_for_the_cell() {
+        use crate::method::power::{BOILER, ENGINE, PIPE, POLE as PLANT_POLE, PUMP};
+        let bots = [BotId(1)];
+        let mut s = bare(&bots);
+        s.gain(BotId(1), "wood", 2);
+        let plant = crate::method::power::plan_plant(&s, &Position::new(40., 40.))
+            .expect("the fixture has a lake");
+        for part in plant
+            .parts
+            .iter()
+            .filter(|part| [PUMP, PIPE, BOILER].contains(&part.name))
+        {
+            let entity = crate::method::power::entity_for(&s, part);
+            s.create_entity(entity);
+        }
+        let net = expand(
+            &[Goal::Producing {
+                item: PACK.into(),
+                per_minute: 6,
+            }],
+            &s,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .expect("a half-built plant is finished for the cell");
+        for name in [PUMP, BOILER, PIPE] {
+            assert_eq!(
+                placed(&net, name),
+                Vec::<Position>::new(),
+                "{name} stands already"
+            );
+        }
+        assert_eq!(
+            placed(&net, ENGINE),
+            vec![plant.engine.clone()],
+            "exactly the engine"
+        );
+        assert!(
+            placed(&net, PLANT_POLE).contains(&plant.pole),
+            "and the pole that carries it"
+        );
     }
 
     // ---- determinism ------------------------------------------------------

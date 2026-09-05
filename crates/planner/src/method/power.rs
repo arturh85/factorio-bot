@@ -325,8 +325,20 @@ pub struct PlantPart {
 /// A whole plant, sited and checked, ready to be turned into steps.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Plant {
-    /// In build order: pump, pipe, pipe, boiler, pipe, engine, pole.
+    /// The parts still to be placed, in build order: pump, pipe, pipe, boiler,
+    /// pipe, engine, pole -- less whatever [`standing`](Self::standing) holds.
+    ///
+    /// A plant [`plan_plant`] sites has all seven here. A plant
+    /// [`complete_plant`] finishes has only the missing ones, and the bill
+    /// [`plant_steps`] emits is read off this list, so a pump that already
+    /// stands is neither crafted nor placed again.
     pub parts: Vec<PlantPart>,
+    /// The parts of this plant the world already holds, by name and tile.
+    ///
+    /// Empty for a plant sited from scratch. Carried rather than dropped so a
+    /// caller can say *what* was reused, and so a test can assert that a
+    /// partial site was completed rather than started over.
+    pub standing: Vec<PlantPart>,
     /// Where the coal goes.
     pub boiler: Position,
     /// The generator whose 900 kW the pole carries.
@@ -473,6 +485,12 @@ pub enum Supply {
     /// Nothing is emitted for it: the entities are in the world already.
     Standing(Position),
     /// Nothing that stands can carry it; this is the plant to build.
+    ///
+    /// Either a whole plant on a fresh shoreline, or -- when a pump already
+    /// stands whose plant was never finished -- the *rest* of that plant: see
+    /// [`complete_plant`], and [`Plant::standing`] for which is which. The
+    /// caller does not need to tell them apart: [`plant_steps`] places and
+    /// bills only what is in [`Plant::parts`].
     Build(Plant),
 }
 
@@ -488,7 +506,17 @@ pub enum Supply {
 ///    distance to, because building a second one costs about 45 iron plates
 ///    and one of a run's four irreplaceable wood. See [`PLANT_ADOPT_RADIUS`]
 ///    for the run that was killed by not doing this.
-/// 3. **A plant.** Only when the planner can see no working supply at all.
+/// 3. **The rest of a plant somebody started.** A pump on a shoreline with
+///    its boiler beside it and no engine is most of a plant already paid for,
+///    and a replan that walks past it to a fresh shoreline pays for a whole
+///    second one -- and then a third, until the shore is full of its own
+///    half-built sites and the next plan is refused for want of a shoreline.
+///    That is exactly what `run-1788608648-56109` did: four plans, three
+///    pumps, two boilers, one engine, and a fifth plan halted with *"no
+///    shoreline within 10 tiles of it has room for a pump, a boiler, a steam
+///    engine and the pipes between them"*. See [`complete_plant`].
+/// 4. **A plant.** Only when the planner can see no working supply at all
+///    and nothing standing it could finish.
 ///
 /// Tiers 1 and 2 are one question asked twice with a wider bound, and that is
 /// a pure cost split rather than a policy: [`PlanState::nearest_supply_anchor`]
@@ -544,7 +572,189 @@ pub fn supply_for(
             return Ok(Supply::Standing(anchor));
         }
     }
+    if let Some(plant) = complete_plant(state, from, kw) {
+        return Ok(Supply::Build(plant));
+    }
     Ok(Supply::Build(plan_plant(state, from)?))
+}
+
+/// The rest of a plant that already has its pump down, if one stands within
+/// [`PLANT_ADOPT_RADIUS`] of `from` and finishing it would leave `kw` of
+/// headroom.
+///
+/// # What "a plant somebody started" is taken to mean
+///
+/// An offshore pump is the one part of a plant that names the whole layout:
+/// [`layout`] is a rigid body hung off the pump's tile and facing, so a pump
+/// standing at `p` facing `d` says exactly where its pipes, boiler and engine
+/// belong. Every such pump is a candidate, nearest first, and for each one
+/// every part of the layout is checked against the world:
+///
+/// * an entity **of the part's own name on the part's own tile** is the part,
+///   already standing, and is neither billed nor placed again;
+/// * **empty ground** is a part to place;
+/// * **anything else** -- a different entity on the tile, a rock, water where
+///   the engine goes -- means this pump's plant cannot be finished as
+///   designed, and the pump is passed over. Nothing here plans a plant
+///   *around* an obstacle; that is [`plan_plant`]'s job, on ground it chooses.
+///
+/// The pole is sited exactly as [`fit`] sites it -- but a pole that already
+/// stands and reaches the engine is taken first, because the engine may have
+/// been the one part a cut-short plan never placed while its pole went down
+/// early (bots deal a plant's parts out and place them in whatever order
+/// their walks allow; `run-1788608648-56109`'s first plan had all four poles
+/// and the pump down before its boiler, and never reached the engine).
+///
+/// # Why it is asked after the standing-network tiers and before the shoreline
+///
+/// A network that already generates and has headroom costs nothing; this
+/// costs the missing parts; a fresh plant costs all of them. A pump whose
+/// plant *is* complete and wired is found by tier 2 when it has headroom, and
+/// comes here with nothing missing when it has none -- in which case it is
+/// skipped, and the next pump along may be the half-built one whose engine
+/// would double the supply. That is the fourth plan of the run above: it had
+/// a working 900 kW plant with 145 kW left, a cell to build wanting 189, and
+/// a pump-and-boiler 20 tiles away wanting only an engine.
+///
+/// # Headroom is checked on the finished plant, not assumed
+///
+/// The completed engine's pole may join a network that is already
+/// over-committed, in which case 900 kW more is not `kw` of headroom. So the
+/// candidate is finished on a fork and asked the same question
+/// [`PlanState::nearest_supply_anchor`] asks of a standing network, at its own
+/// pole. A pump whose finished plant would still not carry the consumer is
+/// passed over like an unusable one.
+///
+/// Deterministic: pumps are ordered by `(distance, x, y)` with `total_cmp`,
+/// the layout is a fixed sequence, and the pole search is
+/// [`free_area_near_where`]'s.
+pub fn complete_plant(state: &PlanState, from: &Position, kw: f64) -> Option<Plant> {
+    let mut pumps: Vec<(f64, FactorioEntity)> = state
+        .entities_within(from, PLANT_ADOPT_RADIUS)
+        .into_iter()
+        .filter(|entity| entity.name == PUMP)
+        .map(|entity| (calculate_distance(&entity.position, from), entity))
+        .collect();
+    pumps.sort_by(|a, b| {
+        a.0.total_cmp(&b.0)
+            .then(a.1.position.x.total_cmp(&b.1.position.x))
+            .then(a.1.position.y.total_cmp(&b.1.position.y))
+    });
+    pumps
+        .into_iter()
+        .find_map(|(_, pump)| finish(state, &pump, kw))
+}
+
+/// [`complete_plant`] for one pump: the plant its layout describes, with the
+/// standing parts split from the missing ones, or `None` when it cannot be
+/// finished or would not carry `kw`.
+fn finish(state: &PlanState, pump: &FactorioEntity, kw: f64) -> Option<Plant> {
+    let facing = Direction::from_u8(pump.direction)?;
+    if !Direction::orthogonal().contains(&facing) {
+        return None;
+    }
+    let parts = layout(&pump.position, facing)?;
+    let mut standing: Vec<PlantPart> = Vec::new();
+    let mut missing: Vec<PlantPart> = Vec::new();
+    for part in parts {
+        match state.entity_at(&part.position) {
+            // The same name **centred on the same tile**: `entity_at` answers
+            // for any entity covering the point, and a boiler one tile off
+            // the layout is not this plant's boiler.
+            Some(entity)
+                if entity.name == part.name
+                    && Pos::from(&entity.position) == Pos::from(&part.position) =>
+            {
+                standing.push(part);
+            }
+            Some(_) => return None,
+            None => {
+                if !state.is_area_free_facing(part.name, &part.position, part.direction) {
+                    return None;
+                }
+                missing.push(part);
+            }
+        }
+    }
+    let boiler = standing
+        .iter()
+        .chain(missing.iter())
+        .find(|part| part.name == BOILER)?
+        .position
+        .clone();
+    let engine_part = standing
+        .iter()
+        .chain(missing.iter())
+        .find(|part| part.name == ENGINE)?
+        .clone();
+    let engine = engine_part.position.clone();
+
+    let mut trial = state.fork();
+    for part in &missing {
+        trial.create_entity(entity_for(&trial, part));
+    }
+    let engine_area = trial.collision_area_facing(ENGINE, &engine, engine_part.direction)?;
+
+    // A pole that already reaches the engine, nearest first in
+    // `entities_within`'s fixed order; only otherwise one to place, sited
+    // exactly as `fit` sites it.
+    let pole_standing = trial
+        .entities_within(
+            &engine,
+            f64::from(crate::method::util::FREE_TILE_SEARCH_RADIUS) + 4.,
+        )
+        .into_iter()
+        .find(|entity| trial.pole_would_supply(&entity.name, &entity.position, &engine_area));
+    let pole = match pole_standing {
+        Some(entity) => {
+            let position = entity.position.clone();
+            standing.push(PlantPart {
+                name: POLE,
+                position: position.clone(),
+                direction: Direction::North,
+            });
+            position
+        }
+        None => {
+            let position = free_area_near_where(&trial, &engine, POLE, |candidate| {
+                trial.pole_would_supply(POLE, candidate, &engine_area)
+            })?;
+            let part = PlantPart {
+                name: POLE,
+                position: position.clone(),
+                direction: Direction::North,
+            };
+            trial.create_entity(entity_for(&trial, &part));
+            missing.push(part);
+            position
+        }
+    };
+    // A plant with nothing missing is not something to finish: either tier 2
+    // already found it, or its network has no headroom and finishing it
+    // changes nothing. Either way the next pump along is the one to ask.
+    if missing.is_empty() {
+        return None;
+    }
+    // Finished, would it carry the consumer? The same question a standing
+    // network is asked, at this plant's own pole.
+    trial.nearest_supply_anchor(&pole, 0.5, kw)?;
+
+    let mut plant = Plant {
+        parts: missing,
+        standing,
+        boiler,
+        engine,
+        pole,
+        evacuate: Vec::new(),
+    };
+    match crate::enclosure::check(state, &trial, &pump.position) {
+        crate::enclosure::EnclosurePrevention::Clear => {}
+        crate::enclosure::EnclosurePrevention::Evacuate(evacuations) => {
+            plant.evacuate = evacuations;
+        }
+        crate::enclosure::EnclosurePrevention::Refuse => return None,
+    }
+    Some(plant)
 }
 
 /// Find somewhere to build a plant within reach of `from`, or say why not.
@@ -664,6 +874,7 @@ fn fit(state: &PlanState, pump: &Position, facing: Direction) -> Option<Plant> {
     parts.push(pole_part);
     let mut plant = Plant {
         parts,
+        standing: Vec::new(),
         boiler,
         engine,
         pole,
@@ -688,7 +899,7 @@ fn fit(state: &PlanState, pump: &Position, facing: Direction) -> Option<Plant> {
 /// engine's type is `generator` and a small electric pole's is `electric-pole`,
 /// neither of which is its name, and `EntityGraph::add`'s whitelist is keyed on
 /// the pair.
-fn entity_for(state: &PlanState, part: &PlantPart) -> FactorioEntity {
+pub(crate) fn entity_for(state: &PlanState, part: &PlantPart) -> FactorioEntity {
     let entity_type = state
         .base()
         .entity_prototypes
@@ -725,15 +936,22 @@ fn on_its_grid(state: &PlanState, part: &PlantPart) -> bool {
 /// `Holder::Share`, not `Holder::Anyone`, for the same reason the lab and the
 /// science packs use it: one bot places these, so one bot has to be holding
 /// them, and `Anyone` sizes its shortfall against the sum across the roster.
-fn bill() -> Vec<(&'static str, u32)> {
-    vec![
-        (PUMP, 1),
-        (PIPE, PIPE_COUNT),
-        (BOILER, 1),
-        (ENGINE, 1),
-        (POLE, 1),
-        ("coal", PLANT_COAL),
-    ]
+///
+/// **Read off [`Plant::parts`], not stated.** A whole plant bills a pump,
+/// three pipes, a boiler, an engine and a pole; a plant being finished bills
+/// only what is missing, which is the whole point of finishing it. The coal
+/// is billed either way: a boiler that stands may have burnt through what it
+/// was given.
+fn bill(plant: &Plant) -> Vec<(&'static str, u32)> {
+    let mut out: Vec<(&'static str, u32)> = Vec::new();
+    for part in &plant.parts {
+        match out.iter_mut().find(|(name, _)| *name == part.name) {
+            Some((_, count)) => *count += 1,
+            None => out.push((part.name, 1)),
+        }
+    }
+    out.push(("coal", PLANT_COAL));
+    out
 }
 
 /// The steps that build `plant`, and the ids the caller must order its
@@ -762,7 +980,7 @@ pub fn plant_steps(ctx: &mut ExpansionCtx, plant: &Plant) -> (Vec<Step>, Vec<Act
     let mut steps: Vec<Step> = Vec::new();
     let mut order_research_after: Vec<ActionId> = Vec::new();
 
-    for (item, count) in bill() {
+    for (item, count) in bill(plant) {
         steps.push(Step::Subgoal(Goal::Have {
             item: item.into(),
             count,
@@ -1725,6 +1943,161 @@ mod tests {
                 "the two-tier search must answer what one wide search would, at {offset} tiles"
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Finishing a plant somebody started
+    // -----------------------------------------------------------------------
+
+    /// The fixture's plant with only the parts in `names` standing -- the
+    /// world a plan cut short mid-build leaves behind.
+    fn state_with_a_partial_plant(names: &[&str]) -> (PlanState, Plant) {
+        let mut s = state();
+        let plant = plan_plant(&s, &Position::new(40., 40.)).expect("the fixture has a lake");
+        for part in plant.parts.iter().filter(|part| names.contains(&part.name)) {
+            let entity = entity_for(&s, part);
+            s.create_entity(entity);
+        }
+        (s, plant)
+    }
+
+    fn names(parts: &[PlantPart]) -> Vec<&'static str> {
+        parts.iter().map(|part| part.name).collect()
+    }
+
+    /// **Run `run-1788608648-56109`, plan 2.** Plan 1 had placed the pump at
+    /// `[46.5, -8.5]`, three pipes and the boiler at `[45, -5.5]`, and was
+    /// cut before the engine. Plan 2 sited a whole second plant twenty
+    /// tiles up the shore.
+    #[test]
+    fn a_plant_missing_its_engine_is_finished_rather_than_started_over() {
+        let (s, plant) = state_with_a_partial_plant(&[PUMP, PIPE, BOILER]);
+        let from = Position::new(plant.pole.x(), plant.pole.y() + 20.);
+        let Supply::Build(finished) = supply_for(&s, &from, 64., 60.).expect("a lake") else {
+            panic!("a pump and a boiler generate nothing; something must be built")
+        };
+        assert_eq!(
+            names(&finished.standing),
+            vec![PUMP, PIPE, PIPE, BOILER, PIPE],
+            "what plan 1 left standing is what is reused"
+        );
+        assert_eq!(
+            names(&finished.parts),
+            vec![ENGINE, POLE],
+            "only the engine and its pole are placed"
+        );
+        assert_eq!(
+            finished.engine, plant.engine,
+            "the engine goes where the pump's own layout puts it"
+        );
+        assert_eq!(finished.boiler, plant.boiler);
+    }
+
+    /// The pole went down before the engine -- the run's plan 1 had all four
+    /// poles placed by tick 30,189 and the boiler at 33,341 -- so a standing
+    /// pole that reaches the engine's ground is kept and only the engine is
+    /// billed.
+    #[test]
+    fn a_standing_pole_that_reaches_the_engine_is_kept() {
+        let (s, plant) = state_with_a_partial_plant(&[PUMP, PIPE, BOILER, POLE]);
+        let finished = complete_plant(&s, &plant.pole, 60.).expect("finishable");
+        assert_eq!(names(&finished.parts), vec![ENGINE]);
+        assert_eq!(finished.pole, plant.pole);
+        assert!(
+            finished.standing.iter().any(|part| part.name == POLE),
+            "the standing pole is reported as reused"
+        );
+    }
+
+    /// A pump whose engine ground is taken by something else cannot be
+    /// finished as designed, and a fresh plant is sited instead of a
+    /// broken one.
+    #[test]
+    fn a_pump_whose_layout_is_blocked_is_passed_over() {
+        let (mut s, plant) = state_with_a_partial_plant(&[PUMP, PIPE, BOILER]);
+        s.create_entity(FactorioEntity {
+            name: "iron-chest".into(),
+            entity_type: "container".into(),
+            position: plant.engine.clone(),
+            ..Default::default()
+        });
+        assert!(
+            complete_plant(&s, &plant.pole, 60.).is_none(),
+            "a blocked layout is not a plant to finish"
+        );
+        let Supply::Build(fresh) = supply_for(&s, &plant.pole, 64., 60.).expect("a lake") else {
+            panic!("nothing generates here")
+        };
+        assert!(fresh.standing.is_empty(), "a whole plant, somewhere else");
+        assert_ne!(fresh.engine, plant.engine);
+    }
+
+    /// The finished plant's bill is the missing parts and the coal, not the
+    /// whole seven.
+    #[test]
+    fn a_finished_plant_bills_only_what_it_places() {
+        let (s, plant) = state_with_a_partial_plant(&[PUMP, PIPE, BOILER]);
+        let finished = complete_plant(&s, &plant.pole, 60.).expect("finishable");
+        assert_eq!(
+            bill(&finished),
+            vec![(ENGINE, 1), (POLE, 1), ("coal", PLANT_COAL)]
+        );
+        let whole = plan_plant(&state(), &Position::new(40., 40.)).expect("a lake");
+        assert_eq!(
+            bill(&whole),
+            vec![
+                (PUMP, 1),
+                (PIPE, PIPE_COUNT),
+                (BOILER, 1),
+                (ENGINE, 1),
+                (POLE, 1),
+                ("coal", PLANT_COAL)
+            ],
+            "a plant sited from scratch still bills all of it"
+        );
+    }
+
+    /// **Plan 4 of the same run.** The one working plant had 145 kW left, the
+    /// cell wanted 189, and the half-built plant from plan 1 stood twenty
+    /// tiles away wanting an engine. Plan 4 sited a third plant; plan 5 found
+    /// no shoreline left and the run halted.
+    ///
+    /// A complete plant with nothing missing is not something to finish, so
+    /// the half-built one beside it is.
+    #[test]
+    fn a_full_network_is_not_finished_but_the_half_built_plant_beside_it_is() {
+        let (mut s, first) = state_with_a_standing_plant();
+        let second = plan_plant(&s, &Position::new(40., 40.)).expect("room for a second");
+        assert_ne!(second.engine, first.engine);
+        for part in second
+            .parts
+            .iter()
+            .filter(|part| part.name != ENGINE && part.name != POLE)
+        {
+            let entity = entity_for(&s, part);
+            s.create_entity(entity);
+        }
+        // A lab on the first plant's network: 60 of its 900 kW spoken for.
+        s.create_entity(FactorioEntity {
+            name: "lab".into(),
+            entity_type: "lab".into(),
+            position: Position::new(first.pole.x(), first.pole.y() + 2.5),
+            ..Default::default()
+        });
+        assert!(
+            s.nearest_supply_anchor(&first.pole, PLANT_ADOPT_RADIUS, 900.)
+                .is_none(),
+            "the premise: the standing network cannot carry 900 kW more"
+        );
+        let Supply::Build(finished) = supply_for(&s, &first.pole, 64., 900.).expect("a lake")
+        else {
+            panic!("nothing standing carries 900 kW")
+        };
+        assert_eq!(
+            finished.engine, second.engine,
+            "the half-built plant is finished"
+        );
+        assert_eq!(names(&finished.parts), vec![ENGINE, POLE]);
     }
 
     /// The bound is wide enough that a plant is never built where one could

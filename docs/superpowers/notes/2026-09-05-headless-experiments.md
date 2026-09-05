@@ -490,3 +490,28 @@ execution it replaces had power in time by luck, so the run may not pay
 it; the plan does. Dropping the engine from the condition would restore
 57,752 and leave a late engine with the same hole as a late pole, so it
 stays.
+
+**Validated (hl-f, `workspace/headless-f/runs/run-1788619567-57945`,
+8 bots, 5x, seed 31337 fresh, `factory_stage3.lua`, load 5.5 at launch).**
+One plan, 693 actions / 53,421 (live; the offline plan on the t=0 dump is
+706 / 53,326), 0 failed, 0 lost, 250/250 walks, three pathfinder no-paths
+recovered.
+
+| | hl-08 (before) | hl-f (after) |
+|---|---|---|
+| plan | 693 / 50,665 | 693 / 53,421 |
+| green cell (5x) | 71,936 (19:58) | **67,636 (18:48)**, −6.0% |
+| executed / planned | 1.42× | 1.27× |
+| research overrun (both) | +23,226 | +1,498 |
+| labs `no_power` window | 48,900–61,200 | 49,200–58,200, with the research not yet dispatched |
+
+The pole went down at rel. 49,303 and both researches dispatched at
+49,304 — the edge did what it says. Eight bots now finish 415 ticks ahead
+of four (68,051), which is still not the 12% the plan promises: the
+residual is mechanism 2 exactly as predicted (`automation` ran first
+this time, 1,999; `logistic` then took 9,999 against its 7,500 — the two
+are planned side by side and the game runs them in series), plus pole 6
+itself now being the critical path at 49,303 against a planned 45,840,
+because its `craft 1 copper-cable` waited 1,055 ticks on a furnace for
+the plate. The planning gap is unchanged at 8,042 ticks (28 s at 5x).
+Per-walk overrun is again the 5x tax: median 53.5, p90 146.

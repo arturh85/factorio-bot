@@ -11532,8 +11532,9 @@ mod tests {
             // Moved again on 2026-09-05, 9965 -> 9900: the trigger's lab craft is the lead supplier's own chain now (`Researched`'s trigger path), off the chain actor's timeline.
             // 9900 -> 7278 later on 2026-09-05: `infer_edges` leaves a chain's plate pairings to the stated supply edge (see `a_wider_ore_front_barely_moves_the_spread_it_used_to_unlock`).
             // 7278 -> 7156 on 2026-09-05: a bot with no furnace of its own on the patch builds one instead of queueing behind another bot's batch, and a smelt queues behind its own batch before a lighter furnace of somebody else's (`tests/furnace_reuse.rs`).
+            // 7156 -> 6982 on 2026-09-05: a candidate is committed no earlier in the round order than one on another bot that finishes before it starts (`schedule.rs`, the four-bot regression of run-1788621697-14165).
             plan.makespan,
-            7156,
+            6982,
             "15866 with the subtree on one bot, 12403 once the ore converged, \
              and 10011 once the furnaces themselves became other bots' \
              errands; {per_bot:?}"
@@ -11697,8 +11698,9 @@ mod tests {
             // Moved again on 2026-09-05, 9987 -> 9897, for the narrow fixture's reason: the trigger's lab craft is the lead supplier's; 3 ticks off the narrow fixture's 9900 now.
             // 9897 -> 6955 later on 2026-09-05: `infer_edges` leaves a chain's plate pairings to the stated supply edge, so the chains' consumers no longer wait for every earlier producer of the same item.
             // 6955 -> 7654 on 2026-09-05: each supplier stands a furnace of its own instead of queueing behind bot 1's (`tests/furnace_reuse.rs`); on this wide front that is three more furnace bills for smelts that were not on the critical path, and the narrow fixture above gains 122 by the same rule. The spread this test is about is unchanged: every bot still supplies the unlock.
+            // 7654 -> 7007 on 2026-09-05: the same round-order rule as the narrow fixture's 7156 -> 6982.
             plan.makespan,
-            7654,
+            7007,
             "17122 before time-aware claims, 12428 after them, and 10053 once \
              R3 made a furnace somebody else's errand -- 42 ticks off the \
              narrow fixture's 10011: {per_bot:?}"

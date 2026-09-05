@@ -220,6 +220,31 @@ three bots one extra iron furnace (three actions) reorders bot 3's ready
 work and its `take 10 copper-ore from the wooden-chest` moves from 8,860 to
 13,473 with no furnace of its involved.
 
+## ✅ GREEN FROM A FRESH WORLD IN 17:20 (`run-1788612263-27812`) — the merged afternoon, measured
+
+Run 14, 2026-09-05 14:44, master `53949434` (tail, character-identity,
+walk-into-rock, replan-reuses-site, belt-routing all merged; workspace tests
+green), four clients at 1x, seed 31337 `--new`, debug build. Validated first
+headless at 5x (hl-04: one plan, 0 failed, 18:54 at 5x) — the first run of
+the day to follow the offline → headless → 1x sequence.
+
+| | |
+|---|---|
+| green cell producing 6/min | **17:20** (62,408 ticks) |
+| green witness | **17:59** |
+| plans | 569 / 57,752, then 9 / 75 after one failed walk at tick 62,191 |
+| failed / lost | 0 / 0 actions; 1 walk |
+| planned vs executed | 57,752 vs 62,408 — 8.1% |
+| fleet utilisation | **60.9%** (was 44.9%) |
+| steps/bot | {1: 195, 2: 152, 3: 125, 4: 97} (was {278, 123, 115, 107}) |
+
+Fresh-world green: **64:22 → 36:48 → 31:35 → 26:32 → 29:09 → 23:38 → 20:59 →
+17:20.** The failed walk: bot 1 was aimed at (34.73, -7.89) for the
+assembler at (36.5, -5.5) while bot 3 stood idle at (34.25, -7.70) — the
+aim sits on a standing bot, the entity graph holds no characters, and the
+game answered no path. Dispatched as the `aimbots` worktree: the approach
+aim must avoid the roster's known positions the way it now avoids boxes.
+
 ## ✅ THE TAIL IS DEALT: offline green 71,167 → 57,752 (`f5f273bb`, branch `tail`)
 
 RCA of run 13's one-bot tail, three mechanisms, each with a number from its
@@ -2320,7 +2345,7 @@ infrastructure for a 3h17m game, not a harder milestone.
 | red science producing **once** | never observed | witnessed six times, all inside 780 ticks |
 | red science producing **at a rate** | impossible to claim | **5 packs in 3,240 ticks (~5.5/min)**, twice |
 | green science, planning | did not expand at all | plans end to end |
-| green science, live | never run | **WITNESSED nine times** — fresh world **20:59 / 21:38** (`run-1788604520-39283`), one plan, zero failures; 64:22 → 36:48 → 31:35 → 26:32 → 29:09 → 23:38 → 20:59 |
+| green science, live | never run | **WITNESSED ten times** — fresh world **17:20 / 17:59** (`run-1788612263-27812`), 569-step plan plus a 9-step replan; 64:22 → 36:48 → 31:35 → 26:32 → 29:09 → 23:38 → 20:59 → 17:20 |
 | furnaces per run | 42 | **8** |
 | recovery (`obs:recover`) | never executed in any run | **fires live** |
 

@@ -1402,6 +1402,15 @@ fn step_to_lua(lua: &Lua, net: &ActionNetwork, step: &ScheduledStep) -> LuaResul
                     t.set("kind", "evacuate")?;
                     t.set("pos", position_to_lua(lua, to)?)?;
                 }
+                // Its own kind for the same reason `evacuate` is, and the
+                // distinction matters more here than anywhere else: a
+                // supervisor script reading this plan is exactly the caller
+                // that wants to know how much of a round it is about to spend
+                // *looking* rather than building.
+                ActionKind::Survey { to } => {
+                    t.set("kind", "survey")?;
+                    t.set("pos", position_to_lua(lua, to)?)?;
+                }
             }
         }
     }

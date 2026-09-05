@@ -112,7 +112,11 @@ pub fn kind_occupancy(kind: &ActionKind) -> Occupancy {
         | ActionKind::Remove { .. }
         | ActionKind::SetRecipe { .. }
         // Walking, under another name.
-        | ActionKind::Evacuate { .. } => Occupancy::Exclusive,
+        | ActionKind::Evacuate { .. }
+        // Also walking. A survey occupies the bot for its whole duration --
+        // the bot IS the instrument, and one that is halfway to a frontier
+        // is not available for anything else.
+        | ActionKind::Survey { .. } => Occupancy::Exclusive,
     }
 }
 
@@ -199,9 +203,12 @@ pub fn inventory_footprint(action: &Action) -> BTreeSet<ItemId> {
         ActionKind::Place { entity } => {
             items.insert(entity.name.clone());
         }
+        // None of these spends an item. A survey buys information with time,
+        // which is exactly why it costs nothing here.
         ActionKind::Research { .. }
         | ActionKind::SetRecipe { .. }
-        | ActionKind::Evacuate { .. } => {}
+        | ActionKind::Evacuate { .. }
+        | ActionKind::Survey { .. } => {}
     }
     items
 }

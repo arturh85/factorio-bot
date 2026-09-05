@@ -104,6 +104,29 @@ pub(crate) fn install_goal_constructors(lua: &Lua, table: &LuaTable) -> LuaResul
         })?,
     )?;
 
+    let mt = metatable.clone();
+    table.set(
+        "charted",
+        lua.create_function(move |lua, (x, y, radius): (LuaValue, LuaValue, LuaValue)| {
+            let t = lua.create_table()?;
+            t.set("kind", "charted")?;
+            t.set("x", require_coordinate(x, "x")?)?;
+            t.set("y", require_coordinate(y, "y")?)?;
+            // A radius is a coordinate as far as parsing goes -- a finite
+            // number -- and a non-positive one is refused here rather than
+            // reaching `PlanState::charting`, where every probe would land on
+            // the origin and a one-tile disc would report the whole map as
+            // seen.
+            let radius = require_coordinate(radius, "radius")?;
+            if radius <= 0.0 {
+                return Err(goal_error("goal.charted needs a positive radius"));
+            }
+            t.set("radius", radius)?;
+            t.set_metatable(Some(mt.clone()))?;
+            Ok(t)
+        })?,
+    )?;
+
     table.set(
         "all",
         lua.create_function(move |lua, goals: LuaTable| {
@@ -161,6 +184,13 @@ pub(crate) fn goal_from_lua(value: &LuaTable) -> LuaResult<Goal> {
                 require_coordinate(value.get("y")?, "y")?,
             ),
         }),
+        "charted" => Ok(Goal::Charted {
+            around: Position::new(
+                require_coordinate(value.get("x")?, "x")?,
+                require_coordinate(value.get("y")?, "y")?,
+            ),
+            radius: require_coordinate(value.get("radius")?, "radius")?,
+        }),
         "all" => {
             let goals = require_table_field(value.get("goals")?, "goals")?;
             let len = goals.raw_len();
@@ -203,6 +233,16 @@ fn render_goal(t: &LuaTable) -> LuaResult<String> {
                 "build {}-byte block at {}",
                 blueprint.len(),
                 anchor
+            ))
+        }
+        "charted" => {
+            let around = Position::new(
+                require_coordinate(t.get("x")?, "x")?,
+                require_coordinate(t.get("y")?, "y")?,
+            );
+            Ok(format!(
+                "chart within {:.0} tiles of {around}",
+                require_coordinate(t.get("radius")?, "radius")?
             ))
         }
         "all" => {

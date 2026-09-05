@@ -1297,6 +1297,26 @@ async fn perform<A: Actuator + ?Sized>(
         // a verdict gets exactly one of these") would have nothing to record
         // against the dispatch the scheduler already wrote down.
         ActionKind::Evacuate { to } => act.walk(bot, to.clone(), 0.0, EVACUATE_RADIUS).await,
+        // Same shape as `Evacuate` and for the same reason: the scheduler has
+        // already walked the bot here to satisfy this action's own
+        // `AtPosition`, and there is nothing else to ask the game for --
+        // charting is the *engine's* response to a character standing
+        // somewhere new, not a verb anybody calls. The re-confirmation walk is
+        // what gives the action a verdict to record.
+        //
+        // The radius is the planner's own `SURVEY_RADIUS` rather than
+        // `EVACUATE_RADIUS`: a survey buys chunks, and half a chunk of slack
+        // costs no ground. Asking for evacuation's precision here would fail
+        // walks over float noise for no gain.
+        ActionKind::Survey { to } => {
+            act.walk(
+                bot,
+                to.clone(),
+                0.0,
+                factorio_bot_planner::method::scout::SURVEY_RADIUS,
+            )
+            .await
+        }
     }
 }
 

@@ -686,6 +686,42 @@ pub enum ActionKind {
     Evacuate {
         to: Position,
     },
+    /// Walk to `to` so that the ground around it is charted, and stand there.
+    ///
+    /// Mechanically identical to [`ActionKind::Evacuate`] -- walk there, ask
+    /// the game for nothing else -- and a separate variant for the same
+    /// reason `Evacuate` is: the record has to say *why* a bot walked
+    /// somewhere. An evacuation is a bot getting out of the way of a
+    /// placement; a survey is a bot spending its own time to buy the plan
+    /// information. Reading one as the other would misattribute the entire
+    /// cost of exploration to enclosure prevention.
+    ///
+    /// # Why walking, and not a radar
+    ///
+    /// Both are legitimate (`docs/superpowers/specs/2026-09-04-exploration-design.md`
+    /// weighs them), and walking is what this variant buys. The deciding
+    /// numbers are on seed 31337 and were measured, not assumed:
+    ///
+    /// * The ground exploration is first needed for is **close**. Copper's
+    ///   nearest charted tile at t=0 is 54.9 tiles from spawn against iron's
+    ///   18.4, so the first goal that is gated on looking is gated on a walk
+    ///   of well under a minute. A radar costs 20 red science, 10 iron plate,
+    ///   5 gears, 5 circuits and a standing 300 kW -- and red science is
+    ///   itself downstream of copper, so paying for a radar to find copper is
+    ///   circular on exactly the map where looking first matters.
+    /// * The ground is **safe**. The nearest charted enemy structure to spawn
+    ///   is 246.6 tiles, which covers the whole of
+    ///   [`crate::score::DEFAULT_SEARCH_RADIUS`] (256) that scoring already
+    ///   works in. Radar's real advantage is that nobody has to stand in the
+    ///   dangerous place, and inside this radius there is no danger to buy off.
+    ///
+    /// So: walk inside the safe radius, and leave radar to the work that
+    /// actually goes past it. That work needs a bot-death event first
+    /// (piece 2 of the design), which does not exist yet, which is the honest
+    /// reason this variant stops where it does.
+    Survey {
+        to: Position,
+    },
 }
 
 impl ActionKind {
@@ -720,7 +756,7 @@ impl ActionKind {
             | ActionKind::Remove { pos, .. }
             | ActionKind::SetRecipe { pos, .. } => Some(pos.clone()),
             ActionKind::Place { entity } => Some(entity.position.clone()),
-            ActionKind::Evacuate { to } => Some(to.clone()),
+            ActionKind::Evacuate { to } | ActionKind::Survey { to } => Some(to.clone()),
             ActionKind::Craft { .. } | ActionKind::Research { .. } => None,
         }
     }

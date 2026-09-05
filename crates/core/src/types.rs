@@ -1550,6 +1550,11 @@ impl FactorioEntity {
             name: "underground-belt".into(),
             entity_type: "underground-belt".into(),
             position: position.clone(),
+            // Same footprint as `new_transport_belt`'s: the real prototype's
+            // collision box is 0.796875 x 0.796875 (checked against
+            // `crates/core/tests/entity-prototype-fixtures.json`), and that
+            // sibling already rounds the same box to 0.8 x 0.8.
+            bounding_box: add_to_rect_turned(&Rect::from_wh(0.8, 0.8), position, direction),
             direction: direction.to_u8().unwrap(),
             ..Default::default()
         }

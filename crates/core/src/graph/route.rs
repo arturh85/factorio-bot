@@ -56,20 +56,24 @@ const STEP: u32 = 10;
 const TURN_PENALTY: u32 = 6;
 
 /// Search state: a cell plus the direction we entered it from, because the
-/// cost of leaving depends on it.
+/// cost of leaving depends on it, plus whether this cell is the surfacing
+/// end of an underground pair (`surfaced`). A surfaced cell cannot launch
+/// another jump -- see the note on the underground move below -- so it is
+/// part of the state, not just an annotation on the route afterwards.
 #[derive(PartialEq)]
 struct Node {
     cost: u32,
     estimate: u32,
     cell: (usize, usize),
     facing: Direction,
+    surfaced: bool,
 }
 
 // `Direction` derives `PartialEq` only (see `types.rs`), not `Eq`, so `Node`
 // cannot derive `Eq` either. The derived `PartialEq` above never compares a
-// float (cost/estimate are `u32`, cell is `(usize, usize)`, facing is a
-// fieldless-discriminant enum), so it is already reflexive, symmetric and
-// transitive -- a legitimate manual `Eq`.
+// float (cost/estimate are `u32`, cell is `(usize, usize)`, facing and
+// surfaced are fieldless-discriminant/bool), so it is already reflexive,
+// symmetric and transitive -- a legitimate manual `Eq`.
 impl Eq for Node {}
 
 impl Ord for Node {
@@ -80,8 +84,14 @@ impl Ord for Node {
             other.cost + other.estimate,
             other.cell,
             dir_key(other.facing),
+            other.surfaced,
         )
-            .cmp(&(self.cost + self.estimate, self.cell, dir_key(self.facing)))
+            .cmp(&(
+                self.cost + self.estimate,
+                self.cell,
+                dir_key(self.facing),
+                self.surfaced,
+            ))
     }
 }
 
@@ -94,6 +104,10 @@ impl PartialOrd for Node {
 fn dir_key(d: Direction) -> u8 {
     Direction::to_u8(&d).unwrap_or(0)
 }
+
+/// One search-state predecessor: the cell and facing it came from, plus
+/// whether *that* predecessor cell was itself the surfacing end of a jump.
+type Predecessor = ((usize, usize), Direction, bool);
 
 const DIRECTIONS: [(Direction, (i64, i64)); 4] = [
     (Direction::North, (0, -1)),
@@ -116,51 +130,70 @@ pub fn route_belt(
     to: (usize, usize),
     max_underground: Option<u8>,
 ) -> Result<Route, RouteError> {
-    let mut best: Vec<u32> = vec![u32::MAX; GRID * GRID * 4];
-    let mut came: Vec<Option<((usize, usize), Direction)>> = vec![None; GRID * GRID * 4];
+    let mut best: Vec<u32> = vec![u32::MAX; GRID * GRID * 8];
+    let mut came: Vec<Option<Predecessor>> = vec![None; GRID * GRID * 8];
     let mut heap = BinaryHeap::new();
     // Every cell the search actually visited, for an honest refusal message
     // if it never reaches `to`.
     let mut reached: Vec<bool> = vec![false; GRID * GRID];
 
     for (dir, _) in DIRECTIONS {
-        let slot = state_index(from, dir);
+        let slot = state_index(from, dir, false);
         best[slot] = 0;
         heap.push(Node {
             cost: 0,
             estimate: heuristic(from, to),
             cell: from,
             facing: dir,
+            surfaced: false,
         });
     }
 
     while let Some(node) = heap.pop() {
         reached[cell_index(node.cell.0, node.cell.1)] = true;
         if node.cell == to {
-            return Ok(reconstruct(&came, origin, from, to, node.facing));
+            return Ok(reconstruct(
+                &came,
+                origin,
+                from,
+                to,
+                node.facing,
+                node.surfaced,
+            ));
         }
-        let slot = state_index(node.cell, node.facing);
+        let slot = state_index(node.cell, node.facing, node.surfaced);
         if node.cost > best[slot] {
             continue;
         }
         for (dir, (dx, dy)) in DIRECTIONS {
-            let Some(next) = step(node.cell, dx, dy) else {
-                continue;
-            };
-            if blocked[cell_index(next.0, next.1)] {
-                continue;
-            }
-            let cost = node.cost + STEP + if dir == node.facing { 0 } else { TURN_PENALTY };
-            let next_slot = state_index(next, dir);
-            if cost < best[next_slot] {
-                best[next_slot] = cost;
-                came[next_slot] = Some((node.cell, node.facing));
-                heap.push(Node {
-                    cost,
-                    estimate: heuristic(next, to),
-                    cell: next,
-                    facing: dir,
-                });
+            // The normal move and the underground move are independent
+            // options out of `node.cell` in this direction, not a fallback
+            // chain: a blocked (or off-grid) immediate neighbour must not
+            // suppress an underground attempt in the same direction -- that
+            // is exactly the case where a jump is needed, when the wall
+            // starts on the very next tile. Each is therefore its own `if`,
+            // never a shared early `continue`.
+            if let Some(next) = step(node.cell, dx, dy)
+                && !blocked[cell_index(next.0, next.1)]
+            {
+                let cost = node.cost + STEP + if dir == node.facing { 0 } else { TURN_PENALTY };
+                // A normal step always lands on an ordinary tile: whether or
+                // not `node` itself was a jump's exit, the tile we are
+                // stepping onto now is ground, not another underground
+                // entity, so `surfaced` resets to `false` here regardless of
+                // `node.surfaced`.
+                let next_slot = state_index(next, dir, false);
+                if cost < best[next_slot] {
+                    best[next_slot] = cost;
+                    came[next_slot] = Some((node.cell, node.facing, node.surfaced));
+                    heap.push(Node {
+                        cost,
+                        estimate: heuristic(next, to),
+                        cell: next,
+                        facing: dir,
+                        surfaced: false,
+                    });
+                }
             }
 
             // An underground pair: enter at `node.cell`, surface `span` tiles
@@ -169,7 +202,22 @@ pub fn route_belt(
             // over ground that is actually blocked, because on open ground a
             // pair costs two belts' worth of iron for a run a single surface
             // tile would cover for free.
-            if let Some(max) = max_underground {
+            //
+            // Gated on `!node.surfaced`: `node.cell` already holds a real
+            // underground-belt entity (the *output* half of the previous
+            // jump) whenever `node.surfaced` is true, and a tile can only
+            // ever hold one entity. Launching a second jump from that same
+            // tile would need it to simultaneously be an output and an
+            // input, which the game cannot build and which this search must
+            // not either -- without this gate, two jumps separated by
+            // nothing at all silently collapse onto one shared tile during
+            // reconstruction, and one of the two roles (`UndergroundEntry` /
+            // `UndergroundExit`) is overwritten and lost. A normal surface
+            // step first (handled above, and it always clears `surfaced`)
+            // is what makes a fresh launch tile legal again.
+            if !node.surfaced
+                && let Some(max) = max_underground
+            {
                 for span in 2..=(max as i64 + 1) {
                     let Some(exit) = step(node.cell, dx * span, dy * span) else {
                         break;
@@ -188,15 +236,16 @@ pub fn route_belt(
                     let cost = node.cost
                         + STEP * span as u32
                         + if dir == node.facing { 0 } else { TURN_PENALTY };
-                    let exit_slot = state_index(exit, dir);
+                    let exit_slot = state_index(exit, dir, true);
                     if cost < best[exit_slot] {
                         best[exit_slot] = cost;
-                        came[exit_slot] = Some((node.cell, node.facing));
+                        came[exit_slot] = Some((node.cell, node.facing, node.surfaced));
                         heap.push(Node {
                             cost,
                             estimate: heuristic(exit, to),
                             cell: exit,
                             facing: dir,
+                            surfaced: true,
                         });
                     }
                 }
@@ -265,8 +314,8 @@ fn widest_blocked_run(blocked: &[bool], from: (usize, usize), to: (usize, usize)
     widest
 }
 
-fn state_index(cell: (usize, usize), facing: Direction) -> usize {
-    cell_index(cell.0, cell.1) * 4 + (dir_key(facing) / 4) as usize
+fn state_index(cell: (usize, usize), facing: Direction, surfaced: bool) -> usize {
+    cell_index(cell.0, cell.1) * 8 + (dir_key(facing) / 4) as usize * 2 + surfaced as usize
 }
 
 fn step(cell: (usize, usize), dx: i64, dy: i64) -> Option<(usize, usize)> {
@@ -326,19 +375,24 @@ fn blocking_tiles(blocked: &[bool], origin: (f64, f64), reached: &[bool]) -> Vec
 }
 
 fn reconstruct(
-    came: &[Option<((usize, usize), Direction)>],
+    came: &[Option<Predecessor>],
     origin: (f64, f64),
     from: (usize, usize),
     to: (usize, usize),
     facing: Direction,
+    surfaced: bool,
 ) -> Route {
     let mut cells = vec![(to, facing)];
     let mut cursor = (to, facing);
+    let mut cursor_surfaced = surfaced;
     while cursor.0 != from {
-        let Some(prev) = came[state_index(cursor.0, cursor.1)] else {
+        let Some((prev_cell, prev_facing, prev_surfaced)) =
+            came[state_index(cursor.0, cursor.1, cursor_surfaced)]
+        else {
             break;
         };
-        cursor = prev;
+        cursor = (prev_cell, prev_facing);
+        cursor_surfaced = prev_surfaced;
         cells.push(cursor);
     }
     cells.reverse();

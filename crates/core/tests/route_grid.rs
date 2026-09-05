@@ -185,7 +185,13 @@ fn a_wall_wider_than_the_prototype_allows_is_refused_by_span() {
         .expect_err("a nine-tile wall is wider than a span of four");
 
     match err {
-        RouteError::SpanTooLong { max, .. } => assert_eq!(max, 4),
+        RouteError::SpanTooLong { needed, max } => {
+            assert_eq!(max, 4);
+            assert_eq!(
+                needed, 9,
+                "the wall is exactly nine columns wide (x = 12..=20)"
+            );
+        }
         other => panic!("expected SpanTooLong, got {other:?}"),
     }
 }
@@ -199,4 +205,124 @@ fn undergrounds_are_not_used_when_the_surface_is_open() {
         route.tiles.iter().all(|t| t.kind == TileKind::Belt),
         "an underground pair costs 2 belts' worth of iron for nothing here"
     );
+}
+
+#[test]
+fn a_wall_exactly_as_wide_as_the_prototype_allows_still_succeeds() {
+    let mut grid = open_grid();
+    // Four blocked columns: the widest wall a span of four can still cross
+    // (entry at x = 11, exit at x = 16, four hidden tiles in between).
+    for x in 12..=15 {
+        for y in 0..GRID {
+            block(&mut grid, x, y);
+        }
+    }
+
+    let route = route_belt(&grid, (0.0, 0.0), (10, 10), (17, 10), Some(4))
+        .expect("a four-tile wall is exactly what a span of four can cross");
+
+    assert_eq!(
+        route
+            .tiles
+            .iter()
+            .filter(|t| t.kind == TileKind::UndergroundEntry)
+            .count(),
+        1
+    );
+    assert_eq!(
+        route
+            .tiles
+            .iter()
+            .filter(|t| t.kind == TileKind::UndergroundExit)
+            .count(),
+        1
+    );
+    assert!(
+        (12..=15).all(|x| route
+            .tiles
+            .iter()
+            .all(|t| t.position.x() != x as f64 + 0.5)),
+        "nothing is placed inside the wall"
+    );
+}
+
+#[test]
+fn span_too_long_is_withheld_when_undergrounds_cannot_be_the_reason() {
+    // The destination cell itself is the obstacle. No span, however long,
+    // can fix that -- an underground's exit must land on a free cell, so
+    // enabling undergrounds must not turn this into a fabricated
+    // `SpanTooLong`; it is still `NoPath`.
+    let mut grid = open_grid();
+    block(&mut grid, 14, 10);
+
+    let err = route_belt(&grid, (0.0, 0.0), (10, 10), (14, 10), Some(4))
+        .expect_err("a destination that is itself blocked has no route, underground or not");
+
+    match err {
+        RouteError::NoPath { blocked } => assert!(
+            !blocked.is_empty(),
+            "a refusal must name the tiles that stopped it"
+        ),
+        other => panic!(
+            "expected NoPath (the obstacle is the destination cell itself, not a span the \
+             prototype can't cross), got {other:?}"
+        ),
+    }
+}
+
+#[test]
+fn adjacent_jumps_cannot_share_a_tile_as_both_exit_and_entry() {
+    // Two three-tile walls separated by a single free column at x = 15.
+    // Neither wall alone needs more than a span of four, but there is no
+    // room for a real surface tile between the two undergrounds it would
+    // take to cross both: the only free column between the walls is the
+    // one tile wide. Before the chaining gate existed, the search happily
+    // launched a second jump directly from the first jump's exit tile,
+    // silently overwriting that tile's `UndergroundExit` role with
+    // `UndergroundEntry` on reconstruction -- entry and exit counts came out
+    // unequal, i.e. an entry with no matching exit. Both walls span the
+    // grid's full height, so the only way through is some underground
+    // arrangement; there being an actual route at all already exercises the
+    // one-real-tile-between-jumps requirement, and the entry/exit count
+    // check below is what the missing gate broke.
+    let mut grid = open_grid();
+    for x in [12, 13, 14, 16, 17, 18] {
+        for y in 0..GRID {
+            block(&mut grid, x, y);
+        }
+    }
+
+    let route = route_belt(&grid, (0.0, 0.0), (10, 10), (20, 10), Some(4))
+        .expect("a route exists via a normal step between the two jumps");
+
+    let entries = route
+        .tiles
+        .iter()
+        .filter(|t| t.kind == TileKind::UndergroundEntry)
+        .count();
+    let exits = route
+        .tiles
+        .iter()
+        .filter(|t| t.kind == TileKind::UndergroundExit)
+        .count();
+    assert_eq!(
+        entries, exits,
+        "every underground entry must have a matching exit -- got {entries} entries and \
+         {exits} exits: {:?}",
+        route
+            .tiles
+            .iter()
+            .map(|t| (t.position.x(), t.position.y(), t.kind))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(entries, 2, "both walls are crossed underground");
+    for x in [12, 13, 14, 16, 17, 18] {
+        assert!(
+            route
+                .tiles
+                .iter()
+                .all(|t| t.position.x() != x as f64 + 0.5),
+            "nothing is placed inside either wall"
+        );
+    }
 }

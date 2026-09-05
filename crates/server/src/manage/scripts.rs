@@ -26,8 +26,9 @@ pub struct ScriptContent {
 
 /// Resolves the scripts root for this request from the current settings.
 ///
-/// Deliberately does not call `factorio_bot_core::scripts::scripts_dir`:
-/// that function checks `./scripts` and `../../scripts` relative to the
+/// Deliberately does not consult the process CWD (the deleted
+/// `factorio_bot_core::scripts::scripts_dir` did): that function checked
+/// `./scripts` and `../../scripts` relative to the
 /// *server process's* current working directory before ever looking at
 /// `workspace_path`. That is the right convenience for a developer running
 /// `cargo repl` from a checkout, but wrong for an HTTP handler — a request

@@ -56,8 +56,8 @@ use tokio::fs::create_dir;
 #[cfg(not(debug_assertions))]
 pub const MODS_CONTENT: include_dir::Dir = include_dir!("mods");
 /// The repo's `scripts/` directory, embedded. Extracted into
-/// `<workspace>/scripts` by [`crate::scripts::ensure_scripts_dir`], which --
-/// together with [`crate::scripts::scripts_dir`] -- is its only consumer.
+/// `<workspace>/scripts` by [`crate::scripts::ensure_scripts_dir`], its only
+/// consumer.
 #[cfg(not(debug_assertions))]
 pub const SCRIPTS_CONTENT: include_dir::Dir = include_dir!("scripts");
 
@@ -383,10 +383,10 @@ fn symlink_dir(original: &Path, link: &Path) -> std::io::Result<()> {
     }
 }
 
-/// Copies a directory tree. Used only as the fallback when a symlink cannot
-/// be created.
+/// Copies a directory tree: the fallback when a symlink cannot be created,
+/// and how `scripts::ensure_scripts_dir` seeds a workspace from the checkout.
 #[cfg(debug_assertions)]
-fn copy_dir_recursive(from: &Path, to: &Path) -> std::io::Result<()> {
+pub(crate) fn copy_dir_recursive(from: &Path, to: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(to)?;
     for entry in std::fs::read_dir(from)? {
         let entry = entry?;

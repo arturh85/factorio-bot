@@ -24,108 +24,182 @@ pub enum ScriptPathError {
     EscapesRoot { requested: String },
 }
 
-/// Locates the directory holding user Lua scripts.
+/// The repo's `scripts/` directory as a compile-time path -- the seed a debug
+/// build copies into a new workspace, and the reference its staleness check
+/// compares against.
 ///
-/// Development checkouts keep them at the repository root; an installed copy
-/// keeps them under the workspace. The development paths are resolved against
-/// the current working directory, which is why a server started from an
-/// arbitrary directory falls back to the workspace copy.
-pub fn scripts_dir(workspace_path: &Path) -> Result<PathBuf> {
-    for candidate in [PathBuf::from("./scripts"), PathBuf::from("../../scripts")] {
-        if candidate.exists() {
-            return std::fs::canonicalize(candidate).into_diagnostic();
-        }
-    }
+/// Resolved from `CARGO_MANIFEST_DIR`, never from the process's working
+/// directory, for the same reason `repo_mods_path!` in `instance_setup.rs` is:
+/// a script name must mean the same file whatever directory the binary was
+/// started from. The predecessor of this constant (`scripts_dir`, deleted)
+/// probed `./scripts` and `../../scripts` relative to the CWD *ahead of* the
+/// workspace, so from the repo root every workspace ran the checkout's
+/// scripts and from anywhere else a new one had none. Nothing called it any
+/// more by the time it was deleted, but its CWD probe had survived in the
+/// staleness check.
+///
+/// A compile-time fact: a debug binary carried away from its source tree finds
+/// nothing here, which `bootstrap_scripts_dir` reports rather than fails on.
+#[cfg(debug_assertions)]
+const REPO_SCRIPTS_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../scripts");
 
+/// Makes `<workspace>/scripts` exist and hold the shipped scripts, logs one
+/// line naming the directory and how it came to be, and returns its canonical
+/// path.
+///
+/// **This is the only resolution of a script name there is.** Every caller --
+/// the CLI's `lua` subcommand, the REPL, `serve`, and the HTTP script routes
+/// -- resolves `<workspace>/scripts` and nothing else, so a request can never
+/// be redirected to whatever `./scripts` happens to be relative to the
+/// process's working directory. That used to be true of the server only; the
+/// CLI went through a CWD-probing lookup until it was made to share this one.
+///
+/// What "hold the shipped scripts" means depends on the build, mirroring how
+/// `instance_setup::resolve_workspace_mods` treats `mods/`:
+///
+/// - **debug**: a missing *or empty* directory is seeded by **copying** the
+///   checkout's `scripts/` ([`REPO_SCRIPTS_PATH`]). A copy, not a symlink like
+///   `BotBridge` gets, because scripts write: `file_write`, `world.draw` and
+///   `world.dump` all land under the scripts root, and through a symlink an
+///   864 MB `map.json` would land in the checkout. The price of a copy is that
+///   an edit in the checkout does not run until copied over, which is exactly
+///   what the staleness warning below is for. An empty directory counts as
+///   missing because every debug build before this one created it empty, so
+///   that is the state a workspace made by one is in.
+/// - **release**: a missing or empty directory is extracted from the snapshot
+///   `include_dir!` baked into the binary (`SCRIPTS_CONTENT`); a release
+///   binary has no checkout to copy from.
+///
+/// An already-populated directory is **left alone** in both builds: a script
+/// under the workspace may have been edited on purpose, and this runs on every
+/// server request that touches scripts. It is checked for drift instead, once
+/// per process -- against the embedded snapshot in a release build (naming
+/// [`REFRESH_SCRIPTS_ENV`] as the way to refresh it) and against the checkout
+/// on disk in a debug build. That check exists because `run-1788449752-46541`
+/// spent an hour looking for an enclosure report that could not appear:
+/// `workspace/scripts/factory_stage2.lua` predated the `record.enclosures()`
+/// call by five hours, and the run said nothing about it.
+///
+/// The `Using scripts directory` line is printed once per process, through
+/// `paris` (stdout) and deliberately **not** gated on any `silent` flag: it
+/// is the counterpart of the `Using mods directory` line, which printed on no
+/// run at all while it was so gated, and it is the authoritative answer to
+/// "which file did my script name resolve to".
+///
+/// Takes [`crate::paths::ResolvedWorkspace`], not a bare `&Path`: this
+/// function joins `workspace_path` straight onto `scripts`, so an unresolved
+/// -- possibly relative -- `workspace_path` reaching here would silently
+/// create and populate `<process cwd>/<relative>/scripts`. Requiring the type
+/// that only [`crate::paths::resolve_workspace`] can mint makes that
+/// unreachable rather than merely undocumented.
+pub fn ensure_scripts_dir(workspace_path: &crate::paths::ResolvedWorkspace) -> Result<PathBuf> {
+    use std::sync::OnceLock;
+    static LOGGED: OnceLock<()> = OnceLock::new();
+    let (scripts, source) = bootstrap_scripts_dir(workspace_path)?;
+    if LOGGED.set(()).is_ok() {
+        info!(
+            "Using scripts directory <bright-blue>{:?}</> ({})",
+            &scripts, source
+        );
+    }
+    Ok(scripts)
+}
+
+/// [`ensure_scripts_dir`] without the log line: the canonical scripts root
+/// and the sentence explaining how it came to hold what it holds. Separate so
+/// the sentence is testable, since the line itself goes to stdout once.
+pub(crate) fn bootstrap_scripts_dir(
+    workspace_path: &crate::paths::ResolvedWorkspace,
+) -> Result<(PathBuf, String)> {
+    let workspace_path = workspace_path.as_path();
     let workspace_scripts = workspace_path.join("scripts");
-    if workspace_scripts.exists() {
-        return std::fs::canonicalize(workspace_scripts).into_diagnostic();
-    }
+    let source = if is_missing_or_empty(&workspace_scripts) {
+        seed_scripts_dir(workspace_path, &workspace_scripts)?
+    } else {
+        check_scripts_staleness_once(&workspace_scripts)?;
+        pre_existing_source()
+    };
+    let scripts = std::fs::canonicalize(&workspace_scripts).into_diagnostic()?;
+    Ok((scripts, source))
+}
 
-    #[cfg(not(debug_assertions))]
-    {
-        std::fs::create_dir_all(&workspace_scripts).into_diagnostic()?;
-        crate::process::instance_setup::SCRIPTS_CONTENT
-            .extract(workspace_scripts.clone())
-            .map_err(|err| miette!("failed to extract bundled scripts: {err:?}"))?;
-        std::fs::canonicalize(workspace_scripts).into_diagnostic()
+/// True when `dir` is absent, or is a directory with nothing in it. Not a
+/// directory at all (a stray file at that name) reads as missing too, and the
+/// seeding step then fails on it loudly rather than resolving scripts against
+/// a file.
+fn is_missing_or_empty(dir: &Path) -> bool {
+    match std::fs::read_dir(dir) {
+        Ok(mut entries) => entries.next().is_none(),
+        Err(_) => true,
     }
+}
 
-    #[cfg(debug_assertions)]
-    Err(miette!(
-        "missing scripts/ directory: {}",
-        workspace_scripts.display()
+/// Replaces the missing-or-empty `workspace_scripts` with `staging`, which
+/// the caller has just finished populating. Staging under a sibling name and
+/// renaming in one step means a crash or a full disk mid-copy leaves no
+/// half-populated `scripts/` that the next start would mistake for a finished
+/// one. An existing empty directory is removed first, since `rename` onto a
+/// directory is not portable.
+fn install_staged(staging: &Path, workspace_scripts: &Path) -> Result<()> {
+    if workspace_scripts.is_dir() {
+        std::fs::remove_dir(workspace_scripts).into_diagnostic()?;
+    }
+    std::fs::rename(staging, workspace_scripts).into_diagnostic()
+}
+
+/// Debug seeding: copy the checkout's `scripts/` in, or create the directory
+/// empty and say why when this binary's checkout is gone.
+#[cfg(debug_assertions)]
+fn seed_scripts_dir(workspace_path: &Path, workspace_scripts: &Path) -> Result<String> {
+    let Some(checkout) = repo_scripts_checkout() else {
+        std::fs::create_dir_all(workspace_scripts).into_diagnostic()?;
+        return Ok(format!(
+            "debug build; created empty: this binary was compiled against {REPO_SCRIPTS_PATH:?}, \
+             and there is no directory there now, so there was nothing to seed it from"
+        ));
+    };
+    let staging = workspace_path.join(".scripts-partial");
+    let _ = std::fs::remove_dir_all(&staging);
+    crate::process::instance_setup::copy_dir_recursive(&checkout, &staging)
+        .map_err(|err| miette!("failed to copy {checkout:?} into {staging:?}: {err}"))?;
+    install_staged(&staging, workspace_scripts)?;
+    Ok(format!(
+        "debug build; seeded by copying {checkout:?} -- a copy, so a script's file_write and \
+         world.dump land here and not in the checkout, and an edit there does NOT run until \
+         copied over"
     ))
 }
 
-/// Creates `workspace_path/scripts` if it is not there yet, and returns its
-/// canonical path.
-///
-/// This is the bootstrap half of [`scripts_dir`] without the CWD-relative
-/// lookup. The HTTP server resolves the scripts root straight from
-/// `workspace_path` (see `scripts_root` in `crates/server/src/manage/scripts.rs`)
-/// precisely so a request can never be redirected to whatever `./scripts`
-/// happens to be relative to the server process's working directory — but that
-/// also means it never runs [`scripts_dir`]'s directory creation, so on a fresh
-/// install every `/api/v1/scripts*` route answered "missing scripts directory"
-/// with no way to create a first script from a browser. Callers that start a
-/// long-running server call this once at startup instead.
-///
-/// In release builds a *newly created* directory is seeded with the bundled
-/// scripts (`SCRIPTS_CONTENT`), matching [`scripts_dir`]. An already-populated
-/// directory is left alone -- editing `scripts/*.lua` in the repo has no
-/// effect on it -- so this is safe to call on every start; when it is already
-/// populated this also checks it for drift from the embedded snapshot (once
-/// per process, since callers such as the HTTP script routes call this on
-/// every request) and warns if any script is stale, naming
-/// [`REFRESH_SCRIPTS_ENV`]
-/// as the way to refresh it. Debug builds skip the *extraction* -- a
-/// developer checkout has `scripts/` already, and `scripts_dir` falls back to
-/// it -- but **not the staleness check**.
-///
-/// That exemption used to cover both, on the reasoning that a checkout
-/// "already has them". It does not, in the way that matters: the CLI resolves
-/// a script by bare name against `<workspace>/scripts`, never against the repo
-/// (unlike `mods/`, which does fall back to the checkout in a debug build), so
-/// a workspace copy left over from an earlier release build is what actually
-/// runs. `run-1788449752-46541` spent an hour looking for an enclosure report
-/// that could not appear: `workspace/scripts/factory_stage2.lua` predated the
-/// `record.enclosures()` call by five hours, the debug build compiled the
-/// check out, and the run said nothing about either. The comparison is against
-/// the snapshot `include_dir!` baked in at compile time, which in a debug
-/// build is this checkout as it stood when the binary was built -- exactly the
-/// question a developer is asking.
-///
-/// Takes [`crate::paths::ResolvedWorkspace`], not a bare `&Path`: this
-/// function joins `workspace_path` straight onto `scripts` with no
-/// CWD-relative fallback (unlike [`scripts_dir`]), so an unresolved --
-/// possibly relative -- `workspace_path` reaching here would silently create
-/// and populate `<process cwd>/<relative>/scripts`. Requiring the type that
-/// only [`crate::paths::resolve_workspace`] can mint makes that unreachable
-/// rather than merely undocumented.
-pub fn ensure_scripts_dir(workspace_path: &crate::paths::ResolvedWorkspace) -> Result<PathBuf> {
-    let workspace_path = workspace_path.as_path();
-    let workspace_scripts = workspace_path.join("scripts");
-    if !workspace_scripts.is_dir() {
-        #[cfg(not(debug_assertions))]
-        {
-            // Build under a sibling name and rename in one step: a crash or a
-            // full disk mid-extraction leaves no half-populated `scripts/`
-            // that the next start would mistake for a finished one.
-            let staging = workspace_path.join(".scripts-partial");
-            let _ = std::fs::remove_dir_all(&staging);
-            std::fs::create_dir_all(&staging).into_diagnostic()?;
-            crate::process::instance_setup::SCRIPTS_CONTENT
-                .extract(staging.clone())
-                .map_err(|err| miette!("failed to extract bundled scripts: {err:?}"))?;
-            std::fs::rename(&staging, &workspace_scripts).into_diagnostic()?;
-        }
-        #[cfg(debug_assertions)]
-        std::fs::create_dir_all(&workspace_scripts).into_diagnostic()?;
-    } else {
-        check_scripts_staleness_once(&workspace_scripts)?;
-    }
-    std::fs::canonicalize(&workspace_scripts).into_diagnostic()
+/// Release seeding: extract the snapshot embedded in this binary.
+#[cfg(not(debug_assertions))]
+fn seed_scripts_dir(workspace_path: &Path, workspace_scripts: &Path) -> Result<String> {
+    let staging = workspace_path.join(".scripts-partial");
+    let _ = std::fs::remove_dir_all(&staging);
+    std::fs::create_dir_all(&staging).into_diagnostic()?;
+    crate::process::instance_setup::SCRIPTS_CONTENT
+        .extract(staging.clone())
+        .map_err(|err| miette!("failed to extract bundled scripts: {err:?}"))?;
+    install_staged(&staging, workspace_scripts)?;
+    Ok(String::from(
+        "release build; extracted from the compile-time snapshot embedded in this binary; \
+         edits to scripts/ need a rebuild",
+    ))
+}
+
+#[cfg(debug_assertions)]
+fn pre_existing_source() -> String {
+    String::from(
+        "debug build; pre-existing workspace copy, left alone -- an edit in the checkout's \
+         scripts/ does NOT run until copied over; see the staleness warning above, if any",
+    )
+}
+
+#[cfg(not(debug_assertions))]
+fn pre_existing_source() -> String {
+    format!(
+        "release build; pre-existing workspace copy, left alone -- editing scripts/ does NOT \
+         update it; see the staleness warning above, or set {REFRESH_SCRIPTS_ENV}=1 to refresh it"
+    )
 }
 
 /// Set to any value to overwrite stale files under `<workspace>/scripts` with
@@ -205,7 +279,7 @@ fn check_scripts_staleness_once(workspace_scripts: &Path) -> Result<()> {
     };
     // A canonical `workspace/scripts` that *is* the checkout (someone pointed
     // the workspace at the repo) can never be stale against itself.
-    if std::fs::canonicalize(&checkout).ok().as_deref() == Some(workspace_scripts) {
+    if checkout.as_path() == workspace_scripts {
         return Ok(());
     }
     let stale = stale_against_checkout(&checkout, workspace_scripts);
@@ -222,14 +296,15 @@ fn check_scripts_staleness_once(workspace_scripts: &Path) -> Result<()> {
     Ok(())
 }
 
-/// The repository's own `scripts/` directory, by the same probe
-/// [`scripts_dir`] uses, or `None` when this process is not running from a
-/// checkout.
+/// The repository's own `scripts/` directory -- [`REPO_SCRIPTS_PATH`],
+/// canonicalized -- or `None` when this binary's checkout is no longer there.
+/// Canonical so the log line does not carry `../..`, and so the comparison
+/// against a canonical `workspace/scripts` in the staleness check holds.
 #[cfg(debug_assertions)]
 fn repo_scripts_checkout() -> Option<PathBuf> {
-    [PathBuf::from("./scripts"), PathBuf::from("../../scripts")]
-        .into_iter()
-        .find(|candidate| candidate.is_dir())
+    std::fs::canonicalize(REPO_SCRIPTS_PATH)
+        .ok()
+        .filter(|path| path.is_dir())
 }
 
 /// File names present in `checkout` whose copy under `workspace_scripts` is
@@ -267,7 +342,7 @@ fn stale_against_checkout(checkout: &Path, workspace_scripts: &Path) -> Vec<Stri
 /// the final component is resolved and bounds-checked like any other.
 ///
 /// `root` must already be canonical — every caller obtains it from
-/// [`scripts_dir`] or [`ensure_scripts_dir`], both of which canonicalize. A
+/// [`ensure_scripts_dir`], which canonicalizes. A
 /// non-canonical `root` fails closed: the canonical result will not
 /// `starts_with` it, so everything is denied rather than let through.
 ///
@@ -315,7 +390,7 @@ pub fn resolve_script_path(
 /// then overwrote the target through a path that passed every bounds check.
 ///
 /// `root` must already be canonical — every caller obtains it from
-/// [`scripts_dir`] or [`ensure_scripts_dir`], both of which canonicalize. A
+/// [`ensure_scripts_dir`], which canonicalizes. A
 /// non-canonical `root` fails closed: no canonicalized parent will
 /// `starts_with` it, so everything is denied rather than let through.
 ///
@@ -478,6 +553,132 @@ mod tests {
         assert_eq!(
             fs::read_to_string(scripts.join("mine.lua")).expect("read"),
             "-- mine"
+        );
+        // "Left alone" means no seeding either: a populated workspace does
+        // not grow the shipped scripts, however stale or sparse it is. The
+        // staleness check may warn; it must not write.
+        assert!(
+            !scripts.join("lib.lua").exists(),
+            "a populated scripts/ was seeded on top of"
+        );
+        let (_, source) = bootstrap_scripts_dir(&resolved(&workspace)).expect("bootstraps");
+        assert!(
+            source.contains("pre-existing workspace copy, left alone"),
+            "unexpected source sentence: {source}"
+        );
+    }
+
+    /// The file a fresh workspace must be able to run by bare name. Every
+    /// script in the repo `include`s it, so its absence is the "path not
+    /// found" a researcher's brand-new `--settings` workspace used to hit.
+    const SHIPPED_SCRIPT: &str = "lib.lua";
+
+    /// A brand-new workspace -- the shape a researcher's `--settings <file>`
+    /// pointing at its own `workspace_path` produces -- gets the shipped
+    /// scripts, not an empty directory. In a debug build they come from the
+    /// checkout (byte-identical); in a release build from the embedded
+    /// snapshot, which is that same checkout at compile time.
+    #[test]
+    fn a_new_workspace_is_seeded_with_the_shipped_scripts() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let workspace = dir.path().join("workspace");
+        fs::create_dir_all(&workspace).expect("mkdir");
+
+        let (scripts, source) = bootstrap_scripts_dir(&resolved(&workspace)).expect("bootstraps");
+
+        let seeded = scripts.join(SHIPPED_SCRIPT);
+        assert!(
+            seeded.is_file(),
+            "{seeded:?} was not seeded; source: {source}"
+        );
+        assert!(
+            !workspace.join(".scripts-partial").exists(),
+            "staging directory left behind"
+        );
+        #[cfg(debug_assertions)]
+        {
+            let checkout = repo_scripts_checkout().expect("this test runs from a checkout");
+            assert_eq!(
+                fs::read(&seeded).expect("read seeded"),
+                fs::read(checkout.join(SHIPPED_SCRIPT)).expect("read checkout"),
+                "seeded copy differs from the checkout"
+            );
+            // A copy, not a symlink: a script's `file_write` must land in the
+            // workspace, never in the checkout.
+            assert!(
+                !fs::symlink_metadata(&scripts)
+                    .expect("metadata")
+                    .file_type()
+                    .is_symlink(),
+                "{scripts:?} is a symlink into the checkout"
+            );
+            assert!(
+                source.contains("seeded by copying"),
+                "unexpected source sentence: {source}"
+            );
+            // The source names the checkout it copied from -- the answer to
+            // "which scripts/ did this run get".
+            assert!(
+                source.contains(&format!("{checkout:?}")),
+                "source does not name the checkout: {source}"
+            );
+        }
+        #[cfg(not(debug_assertions))]
+        assert!(
+            source.contains("extracted from the compile-time snapshot"),
+            "unexpected source sentence: {source}"
+        );
+    }
+
+    /// Every debug build before seeding existed created `workspace/scripts`
+    /// *empty*, so that is the state a workspace made by one is in. It is
+    /// indistinguishable from "missing" for every purpose that matters and is
+    /// treated as such.
+    #[test]
+    fn an_empty_scripts_directory_is_seeded_like_a_missing_one() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let workspace = dir.path().join("workspace");
+        fs::create_dir_all(workspace.join("scripts")).expect("mkdir");
+
+        let (scripts, _) = bootstrap_scripts_dir(&resolved(&workspace)).expect("bootstraps");
+
+        assert!(
+            scripts.join(SHIPPED_SCRIPT).is_file(),
+            "an empty scripts/ was left empty"
+        );
+    }
+
+    /// The scripts root is `<workspace>/scripts`, full stop. The deleted
+    /// `scripts_dir` probed `./scripts` and `../../scripts` relative to the
+    /// process CWD *first*, so from the repo root every workspace silently ran
+    /// the checkout's scripts. `cargo test -p factorio-bot-core` runs with
+    /// `crates/core` as its CWD, where that second probe would match -- so
+    /// this test's precondition is that the decoy exists, and its assertion is
+    /// that the decoy lost.
+    #[test]
+    fn resolution_ignores_the_working_directory() {
+        let cwd = std::env::current_dir().expect("cwd");
+        let decoy = cwd.join("../../scripts");
+        assert!(
+            decoy.is_dir(),
+            "test precondition: {decoy:?} (the old CWD probe's match) must exist"
+        );
+        let decoy = fs::canonicalize(&decoy).expect("canonicalize decoy");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let workspace = dir.path().join("workspace");
+        fs::create_dir_all(&workspace).expect("mkdir");
+
+        let scripts = ensure_scripts_dir(&resolved(&workspace)).expect("bootstraps");
+
+        assert_ne!(scripts, decoy, "resolved to the CWD-relative checkout");
+        assert_eq!(
+            scripts,
+            fs::canonicalize(workspace.join("scripts")).expect("canonicalize")
+        );
+        assert!(
+            scripts.starts_with(fs::canonicalize(dir.path()).expect("canonicalize tempdir")),
+            "{scripts:?} is not under the workspace"
         );
     }
 

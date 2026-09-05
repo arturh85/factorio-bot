@@ -1111,10 +1111,21 @@ fn run_steps(
                 for effect in &action.eff {
                     effect.apply(&mut ctx.state, binding)?;
                 }
+                // Whether the action is anybody's in particular. An action
+                // whose every condition and effect is about the world and
+                // none about the runner (`Action::tied_to_runner`) is not
+                // held to the chain below, and its ticks are not this bot's
+                // load either: the scheduler gives it to whoever finishes it
+                // soonest, and charging it to the chain actor here would make
+                // that bot look busier to `furnace_suppliers` and the pack
+                // deal than it will be.
+                let tied = action.tied_to_runner();
                 // The load ledger a method reads to rank bots
                 // (`PlanState::planned_ticks`), fed here because this is the
                 // one place every action passes with its chain's runner set.
-                ctx.state.note_planned_ticks(action.duration);
+                if tied {
+                    ctx.state.note_planned_ticks(action.duration);
+                }
                 // **The supply edge is stated, not inferred.** `infer_edges`
                 // pairs every producer of an item with every consumer of it
                 // and drops whichever pairing would close a cycle -- so with
@@ -1208,7 +1219,23 @@ fn run_steps(
                 // Stamp it with the chain it was expanded under, so the
                 // scheduler keeps the chain together. Outside a per-bot
                 // subtree there is no chain and the action stays free.
-                if let Some(chain) = ctx.chain {
+                //
+                // **Only an action that is somebody's.** A chain exists to
+                // keep items and the hands that hold them together; an action
+                // that names no hands -- `research automation`, whose labs,
+                // packs and result are all world facts -- has nothing to keep
+                // together, and stamping it anyway welds it to the chain
+                // actor's queue. That is what put the green plan's tail on
+                // one bot: `research automation` (6,000 ticks) sat behind
+                // bot 1's cell build from tick 38,107 to 53,423 while bot 2
+                // had been idle since 36,027, and `research
+                // logistic-science-pack` (11,400) queued behind it. Left
+                // unstamped, the scheduler offers it to the whole roster and
+                // the bot that finishes it soonest takes it. Its ordering is
+                // untouched: every edge to and from it is world-scoped
+                // (`EntityAt`, `Researched`, the stated `Link`s) and
+                // `infer_edges` keeps those whatever the chains.
+                if let (Some(chain), true) = (ctx.chain, tied) {
                     net.set_chain(id, chain);
                 }
                 for producer in suppliers {
@@ -2352,15 +2379,27 @@ mod tests {
         // of digging one stone; bot 3 takes the `rock-big` bot 4 had, and
         // bot 4 digs its five by hand. Rock surplus, not the solo bill dug
         // twice: iron, copper and coal do not move.
+        //
+        // **Coal 78 -> 76, iron 89 -> 87 and stone 97 -> 72 later still on
+        // 2026-09-05**, when the pack deal was priced in hand time
+        // (`produce::hand_ticks`) and seeded with `planned_ticks`. The plant
+        // is worth two packs in the hands, not twenty, so the packs go
+        // 1 / 1 / 4 / 4 instead of piling onto the bots with no preload:
+        // bots 3 and 4 craft theirs from the plates they start with and
+        // never go to the patch, so nobody stands a furnace there for them
+        // -- the `rock-big` and the hand-dug five are gone from the stone,
+        // and with them the coal and the two ore that fed those furnaces.
+        // Fewer, not different: iron and copper are still under the solo
+        // bill.
         assert_eq!(
             mined(&fleet),
             BTreeMap::from([
-                ("coal".to_string(), 78),
+                ("coal".to_string(), 76),
                 ("copper-ore".to_string(), 29),
-                // Two under the solo bill's 91, for the reason above; the 91
-                // itself is the trigger's fifty, always drilled and now
+                // Four under the solo bill's 91, for the reasons above; the
+                // 91 itself is the trigger's fifty, always drilled and now
                 // counted, plus what the solo bot digs by hand.
-                ("iron-ore".to_string(), 89),
+                ("iron-ore".to_string(), 87),
                 // The solo bill's own 48 since 2026-09-05 (it was 25, one
                 // above the solo bill of the time): the second rock above
                 // hands over twenty-four stone whether the plan wanted them
@@ -2368,7 +2407,7 @@ mod tests {
                 // surplus that was already on the ground rather than out of
                 // more digging. See the exemption above for why any excess
                 // is bought rather than wasted.
-                ("stone".to_string(), 97),
+                ("stone".to_string(), 72),
             ]),
             "four bots' rung-1 bill"
         );
@@ -3282,9 +3321,12 @@ mod tests {
         ctx.chain = Some(taker_chain);
         net.set_chain_owner(taker_chain, BotId(1));
 
-        let mine = bare(&mut ctx, "the taker acts");
+        // `gains`, not `bare`: a chain holds actions that are somebody's,
+        // and an action naming no bot at all is left unstamped -- see
+        // `an_action_that_is_nobodys_goes_to_the_bot_that_finishes_it_soonest`.
+        let mine = gains(&mut ctx, "the taker acts", "iron-gear-wheel", 1);
         let mine_id = mine.id;
-        let theirs = bare(&mut ctx, "the supplier acts");
+        let theirs = gains(&mut ctx, "the supplier acts", "iron-gear-wheel", 1);
         let theirs_id = theirs.id;
         let steps = vec![
             Step::Act(mine),
@@ -3306,6 +3348,100 @@ mod tests {
         );
         assert_eq!(net.owner_of(supplier_chain), Some(BotId(2)));
         assert_eq!(net.owner_of(taker_chain), Some(BotId(1)));
+    }
+
+    /// **An action that is nobody's is not welded to the chain it was
+    /// expanded under.** The mechanism behind the green plan's one-bot tail
+    /// (`run-1788604520-39283`): `research automation` was emitted inside
+    /// the cell's chain, so its only candidate was the chain's owner, bot 1,
+    /// which ran it at tick 53,423 behind its whole build queue while its
+    /// dependencies had been met at 38,107 and bot 2 had been idle since
+    /// 36,027.
+    ///
+    /// The shape in miniature: one bot owns a chain of a short craft, a
+    /// long craft, and between them a `Research` whose only condition is
+    /// world-scoped (`Researched`) and whose only effect is too. Three other
+    /// bots stand idle. The research may not start before the short craft
+    /// (a stated link, as the method states it after the pack inserts) and
+    /// takes 500 ticks; the long craft takes 1,000. Stamped, the research is
+    /// bot 1's and the plan is 100 + 500 + 1,000; unstamped, an idle bot
+    /// runs it alongside the long craft and the plan is 1,100.
+    #[test]
+    fn an_action_that_is_nobodys_goes_to_the_bot_that_finishes_it_soonest() {
+        use crate::action::{Condition, Effect};
+        use crate::schedule::schedule;
+        let bots = [BotId(1), BotId(2), BotId(3), BotId(4)];
+        let state = PlanState::from_world(Arc::new(fixture_world()), &bots);
+        let mut ctx = ExpansionCtx::new(state.fork(), BotId(1));
+        let mut net = crate::network::ActionNetwork::new();
+        let reg = MethodRegistry::new();
+
+        let mut short = gains(&mut ctx, "craft the lab", "lab", 1);
+        short.duration = 100;
+        let short_id = short.id;
+        let mut research = bare(&mut ctx, "research automation");
+        research.kind = crate::action::ActionKind::Research {
+            tech: "automation".into(),
+        };
+        research.pre = vec![Condition::Researched("automation-science-pack".into())];
+        research.eff = vec![Effect::Researched("automation".into())];
+        research.duration = 500;
+        let research_id = research.id;
+        assert!(!research.tied_to_runner(), "control: nothing names a bot");
+        assert!(short.tied_to_runner(), "control: the craft is its runner's");
+        let mut long = gains(&mut ctx, "craft the cell", "inserter", 34);
+        long.duration = 1000;
+        let long_id = long.id;
+
+        let mut unlock = bare(&mut ctx, "the trigger fires");
+        unlock.eff = vec![Effect::Researched("automation-science-pack".into())];
+        unlock.duration = 1;
+
+        let steps = vec![
+            Step::Act(unlock),
+            Step::Owned {
+                whose: Holder::Share(BotId(1)),
+                steps: vec![
+                    Step::Act(short),
+                    Step::Act(research),
+                    Step::Act(long),
+                    Step::Link {
+                        from: short_id,
+                        to: research_id,
+                        lag: 0,
+                    },
+                ],
+            },
+        ];
+        let mut promised = Vec::new();
+        run_steps(steps, &mut ctx, &mut net, &reg, &mut promised).expect("expands");
+        net.infer_edges();
+
+        let chain = net.chain_of(short_id).expect("the craft is chained");
+        assert_eq!(net.chain_of(long_id), Some(chain));
+        assert_eq!(net.owner_of(chain), Some(BotId(1)));
+        assert_eq!(
+            net.chain_of(research_id),
+            None,
+            "an action that names no bot is not held to the chain"
+        );
+
+        let plan = schedule(&net, &state, &bots).expect("schedules");
+        assert_eq!(plan.assignment(short_id), Some(BotId(1)));
+        assert_eq!(plan.assignment(long_id), Some(BotId(1)));
+        let runner = plan
+            .assignment(research_id)
+            .expect("the research is scheduled");
+        assert_ne!(
+            runner,
+            BotId(1),
+            "the research goes to a bot that finishes it sooner than the chain's owner"
+        );
+        assert_eq!(
+            plan.makespan, 1100,
+            "the long craft and the research overlap: {:#?}",
+            plan.steps
+        );
     }
 
     #[test]
@@ -3447,8 +3583,8 @@ mod tests {
         let outer = ctx.chains.next();
         ctx.chain = Some(outer);
 
-        let first = bare(&mut ctx, "one");
-        let second = bare(&mut ctx, "two");
+        let first = gains(&mut ctx, "one", "iron-gear-wheel", 1);
+        let second = gains(&mut ctx, "two", "iron-gear-wheel", 1);
         let steps = vec![Step::Act(first), Step::Act(second)];
         let mut promised = Vec::new();
         run_steps(steps, &mut ctx, &mut net, &reg, &mut promised).expect("expands");

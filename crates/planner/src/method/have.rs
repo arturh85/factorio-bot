@@ -3857,11 +3857,34 @@ impl Method for Researched {
         // What each bot is already asked to make before the packs are dealt
         // -- see [`deal_by_load`]. Priced from raw at character speed, the
         // same way `labs_worth_building` prices a lab.
-        let mut preload: BTreeMap<BotId, Ticks> = roster.iter().map(|bot| (*bot, 0)).collect();
+        //
+        // **Seeded with what this expansion has already committed each bot
+        // to** (`PlanState::planned_ticks`, the ledger `furnace_suppliers`
+        // ranks by), not with zero. Beneath a cell the suppliers arrive here
+        // already carrying ore shares, furnace errands and stockpiles from
+        // the goals expanded before this one, and a deal that cannot see
+        // them hands the most packs to whichever bot the earlier deals
+        // happened to load least by this method's own accounting rather than
+        // by the plan's.
+        let mut preload: BTreeMap<BotId, Ticks> = roster
+            .iter()
+            .map(|bot| (*bot, ctx.state.planned_ticks(*bot)))
+            .collect();
         let load = |preload: &mut BTreeMap<BotId, Ticks>, bot: BotId, ticks: Ticks| {
             let entry = preload.entry(bot).or_default();
             *entry = entry.saturating_add(ticks);
         };
+        // What a bot's preload already pays for, so a later block asking for
+        // the same item is not charged for it twice. The lead's trigger craft
+        // *is* the lab it goes on to place: `Have { lab, 1, Share(lead) }`
+        // in its first-lab block is met by the `Produced { lab, 1 }` above
+        // it and crafts nothing, yet the block was priced from raw as if it
+        // did. Measured on `workspace/scripts/map.json`, green over four
+        // bots: the lead carried two 17,232-tick lab bills in its preload
+        // and one in its plan, and `deal_by_load` dealt the 75 packs 11 /
+        // 25 / 39 -- the lead idle from tick 36,027, the bot with 39 packs
+        // crafting until 59,089 and the research behind it.
+        let mut covered: BTreeMap<(BotId, ItemId), u32> = BTreeMap::new();
 
         let mut steps: Vec<Step> = Vec::new();
         // Prerequisites stay inline, on the chain actor. A trigger among them
@@ -3880,13 +3903,17 @@ impl Method for Researched {
                 load(
                     &mut preload,
                     lead,
-                    crate::method::produce::craft_ticks(
+                    crate::method::produce::hand_ticks(
                         &ctx.state,
                         &item,
                         count,
                         crate::method::produce::CRAFT_TICKS_MAX_DEPTH,
                     ),
                 );
+                // The craft leaves the lead holding what it made, and a
+                // block below asking the lead for the same item is met by it.
+                let entry = covered.entry((lead, item)).or_default();
+                *entry = entry.saturating_add(count);
             }
         }
         // A `craft-item` trigger fires on the **act of producing**, and the
@@ -4028,7 +4055,7 @@ impl Method for Researched {
                         load(
                             &mut preload,
                             ctx.chain_actor,
-                            block_bill_ticks(&ctx.state, &built),
+                            block_bill_ticks(&ctx.state, ctx.chain_actor, &built, &mut covered),
                         );
                         steps.extend(built);
                         power_links = links;
@@ -4061,7 +4088,7 @@ impl Method for Researched {
         load(
             &mut preload,
             first_builder,
-            block_bill_ticks(&ctx.state, &built),
+            block_bill_ticks(&ctx.state, first_builder, &built, &mut covered),
         );
         push_owned(&mut steps, first_builder, built, alone);
 
@@ -4126,7 +4153,11 @@ impl Method for Researched {
                 .unwrap_or(ctx.chain_actor);
             lab_positions.push(site.pos.clone());
             let built = lab_build_steps(ctx, &site, builder, &mut power_links);
-            load(&mut preload, builder, block_bill_ticks(&ctx.state, &built));
+            load(
+                &mut preload,
+                builder,
+                block_bill_ticks(&ctx.state, builder, &built, &mut covered),
+            );
             push_owned(&mut steps, builder, built, alone);
         }
         let labs = lab_positions.len() as u32;
@@ -4234,7 +4265,9 @@ impl Method for Researched {
                     .into_keys()
                     .map(|bot| (bot, preload.get(&bot).copied().unwrap_or(0)))
                     .collect();
-            let per = crate::method::produce::craft_ticks(
+            // Hand time, like every preload it is weighed against -- see
+            // `produce::hand_ticks` for why the deal is not priced from raw.
+            let per = crate::method::produce::hand_ticks(
                 &ctx.state,
                 &item,
                 1,
@@ -4428,17 +4461,43 @@ fn push_owned(steps: &mut Vec<Step>, bot: BotId, block: Vec<Step>, alone: bool) 
     }
 }
 
-/// What a block of steps asks its bot to make, priced from raw at character
-/// speed: every `Have` and `Produced` subgoal at the block's top level,
-/// through `produce::craft_ticks`. A standing lab's block asks for nothing
-/// and prices at zero. Feeds [`deal_by_load`], so a bot standing up a plant
-/// or a lab is dealt that much less of the packs.
-fn block_bill_ticks(state: &PlanState, steps: &[Step]) -> Ticks {
+/// What a block of steps asks its bot to make with its hands: every `Have`
+/// and `Produced` subgoal at the block's top level, through
+/// `produce::hand_ticks` -- crafting only, since the ore and the smelting are
+/// a cell's or a furnace's time and the deal this feeds balances bot
+/// timelines (see `hand_ticks` for the measurement). A standing lab's block
+/// asks for nothing and prices at zero. Feeds [`deal_by_load`], so a bot
+/// standing up a plant or a lab is dealt that much less of the packs.
+///
+/// `covered` is what `bot`'s earlier blocks in the same deal already leave
+/// it holding, keyed `(bot, item)`: a `Have` is priced net of it and spends
+/// it, so one item is charged once however many blocks name it. A
+/// `Produced` is priced in full -- production ignores possession, which is
+/// its whole point -- and adds what it makes.
+fn block_bill_ticks(
+    state: &PlanState,
+    bot: BotId,
+    steps: &[Step],
+    covered: &mut BTreeMap<(BotId, ItemId), u32>,
+) -> Ticks {
     steps
         .iter()
         .map(|step| match step {
-            Step::Subgoal(Goal::Have { item, count, .. } | Goal::Produced { item, count, .. }) => {
-                crate::method::produce::craft_ticks(
+            Step::Subgoal(Goal::Have { item, count, .. }) => {
+                let credit = covered.entry((bot, item.clone())).or_default();
+                let spent = (*credit).min(*count);
+                *credit -= spent;
+                crate::method::produce::hand_ticks(
+                    state,
+                    item,
+                    count - spent,
+                    crate::method::produce::CRAFT_TICKS_MAX_DEPTH,
+                )
+            }
+            Step::Subgoal(Goal::Produced { item, count, .. }) => {
+                let entry = covered.entry((bot, item.clone())).or_default();
+                *entry = entry.saturating_add(*count);
+                crate::method::produce::hand_ticks(
                     state,
                     item,
                     *count,
@@ -4805,7 +4864,9 @@ pub fn default_registry() -> MethodRegistry {
         // claims a `Producing` whose item smelts from one ore, this one claims
         // a `Producing` whose item is crafted from two ingredients. No item is
         // claimed by both, so the order between them changes no plan.
-        .with(Box::new(crate::method::assemble::BuildAssemblyCell))
+        .with(Box::new(crate::method::assemble::BuildAssemblyCell {
+            bots: Vec::new(),
+        }))
 }
 
 /// Split a shared goal into one independent chain per bot.
@@ -5106,7 +5167,7 @@ pub fn even_shares(
 ///   made leaves none of those — the same rule `crate::schedule`'s refusal
 ///   tier keeps, stated again here because this is a filter and that is a
 ///   reordering.
-fn participants_that_can_work(state: &PlanState, candidates: Vec<BotId>) -> Vec<BotId> {
+pub(crate) fn participants_that_can_work(state: &PlanState, candidates: Vec<BotId>) -> Vec<BotId> {
     if state.walled_in().is_empty() {
         return candidates;
     }
@@ -5140,7 +5201,7 @@ fn participants_that_can_work(state: &PlanState, candidates: Vec<BotId>) -> Vec<
 /// It is the design's one tuning constant, and the first live run after this
 /// lands is still what should be read for whether handovers fire where they
 /// should not.
-const HANDOVER_WALK_TICKS: Ticks = 300;
+pub(crate) const HANDOVER_WALK_TICKS: Ticks = 300;
 
 /// The supplier shares for a convergence, or `None` when convergence does not
 /// pay.
@@ -6251,7 +6312,9 @@ pub fn registry_for(bots: &[BotId]) -> MethodRegistry {
         // claims a `Producing` whose item smelts from one ore, this one claims
         // a `Producing` whose item is crafted from two ingredients. No item is
         // claimed by both, so the order between them changes no plan.
-        .with(Box::new(crate::method::assemble::BuildAssemblyCell))
+        .with(Box::new(crate::method::assemble::BuildAssemblyCell {
+            bots: bots.to_vec(),
+        }))
 }
 
 #[cfg(test)]
@@ -13756,6 +13819,67 @@ mod tests {
         );
     }
 
+    /// **A bot's preload prices each item once.** The lead's trigger craft
+    /// (`Produced { lab, 1 }`) leaves it holding the lab its first-lab block
+    /// then asks for (`Have { lab, 1 }`), so the block costs nothing -- it
+    /// crafts nothing. Before this the lead was charged two lab bills for one
+    /// lab, and `deal_by_load` dealt it 11 of 75 packs against 39 for a bot
+    /// with no preload (`workspace/scripts/map.json`, green, four bots).
+    /// Another bot's block, or a block for a different item, is priced in
+    /// full.
+    #[test]
+    fn a_preload_prices_a_trigger_crafted_lab_once() {
+        let s = PlanState::from_world(
+            Arc::new(crate::test_world::world_with_technologies()),
+            &[BotId(1), BotId(2)],
+        );
+        // In the hands: the lab (2 s), ten gears, ten circuits and their
+        // fifteen cable crafts, two belt crafts and their two gears -- all at
+        // 0.5 s -- and no ore or smelting at all.
+        let lab = crate::method::produce::hand_ticks(
+            &s,
+            LAB,
+            1,
+            crate::method::produce::CRAFT_TICKS_MAX_DEPTH,
+        );
+        assert_eq!(lab, 120 + 300 + 300 + 450 + 60 + 60);
+        let have = |bot: BotId| {
+            vec![Step::Subgoal(Goal::Have {
+                item: LAB.into(),
+                count: 1,
+                whose: Holder::Share(bot),
+            })]
+        };
+        let produced = vec![Step::Subgoal(Goal::Produced {
+            item: LAB.into(),
+            count: 1,
+            whose: Holder::Share(BotId(2)),
+            unlocks: Some("automation-science-pack".into()),
+        })];
+
+        let mut covered = BTreeMap::new();
+        assert_eq!(
+            block_bill_ticks(&s, BotId(2), &produced, &mut covered),
+            lab,
+            "production is priced in full"
+        );
+        assert_eq!(
+            block_bill_ticks(&s, BotId(2), &have(BotId(2)), &mut covered),
+            0,
+            "the lab the trigger crafted is the lab the block places"
+        );
+        assert_eq!(
+            block_bill_ticks(&s, BotId(2), &have(BotId(2)), &mut covered),
+            lab,
+            "and it is spent: a second lab is a second lab"
+        );
+        assert_eq!(
+            block_bill_ticks(&s, BotId(1), &have(BotId(1)), &mut covered),
+            lab,
+            "another bot's lab is that bot's to make"
+        );
+    }
+
     /// `dealing_width` on the fixture's numbers (a pack is 300 ticks): ten
     /// packs go four ways, five go three, three stay with the chain actor,
     /// and a roster of one deals nothing however large the bill.
@@ -14744,10 +14868,13 @@ mod stockpiling {
     /// inserting iron ore into the chain owner's furnace, for the lab. The
     /// lab is now the lead supplier's, built out of what the trigger's fifty
     /// plates leave over on that same bot, so there is no twenty-ore bill
-    /// left to converge on -- and the patch is worked by two runners at
-    /// once instead: the lead digging for the plant, the chain actor for its
-    /// share of the packs. Two bots on the patch is the property; the
-    /// 21,382-tick makespan (28,951 before) is what it buys.
+    /// left to converge on -- and the roster works at once instead: since
+    /// the deal was priced in hand time (`produce::hand_ticks`, later on
+    /// 2026-09-05) the packs go 1 / 1 / 4 / 4, bots 3 and 4 crafting theirs
+    /// out of the plates they start with by tick 3,777 while bot 1 digs for
+    /// the plant and its one pack; before that they went to the patch. Two
+    /// bots crafting packs at once is the property; the 21,520-tick makespan
+    /// (21,382 with the patch shared, 28,951 before either) is what it buys.
     ///
     /// Equality rather than `<=`: the trees are the only difference between
     /// the two worlds, and with no chest to build nothing reads them, so a
@@ -14772,7 +14899,7 @@ mod stockpiling {
             "with no chest to build, the trees should change nothing"
         );
 
-        let mut diggers: BTreeSet<BotId> = BTreeSet::new();
+        let mut crafters: BTreeSet<BotId> = BTreeSet::new();
         for step in &with_trees.steps {
             let StepKind::Act { action, .. } = step.what else {
                 continue;
@@ -14780,16 +14907,16 @@ mod stockpiling {
             let Some(action) = net.action(action) else {
                 continue;
             };
-            if let ActionKind::Mine { item, .. } = &action.kind
-                && item == "iron-ore"
+            if let ActionKind::Craft { item, .. } = &action.kind
+                && item == "automation-science-pack"
             {
-                diggers.insert(step.bot);
+                crafters.insert(step.bot);
             }
         }
         assert!(
-            diggers.len() >= 2,
-            "the seats the chest gave up are for the roster to dig on at once, and it did not: \
-             diggers {diggers:?}"
+            crafters.len() >= 2,
+            "the seats the chest gave up are for the roster to work at once, and it did not: \
+             pack crafters {crafters:?}"
         );
     }
 

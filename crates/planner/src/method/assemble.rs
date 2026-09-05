@@ -107,8 +107,10 @@
 use crate::action::{Action, ActionKind, Actor, Condition, Effect, InventorySlot};
 use crate::error::PlannerError;
 use crate::goal::{Goal, Holder};
-use crate::ids::{ActionId, ItemId, Ticks};
-use crate::method::have::{PLACE_TICKS, TRANSFER_TICKS};
+use crate::ids::{ActionId, BotId, ItemId, Ticks};
+use crate::method::have::{
+    HANDOVER_WALK_TICKS, PLACE_TICKS, TRANSFER_TICKS, participants_that_can_work,
+};
 use crate::method::power::{POLE, Supply, plant_steps, supply_for};
 use crate::method::produce::cells_for;
 use crate::method::util::{
@@ -120,6 +122,7 @@ use crate::state::PlanState;
 use factorio_bot_core::factorio::util::calculate_distance;
 use factorio_bot_core::num_traits::{FromPrimitive, ToPrimitive};
 use factorio_bot_core::types::{Direction, FactorioEntity, FactorioRecipe, Pos, Position};
+use std::collections::BTreeMap;
 
 /// The crafting machine a cell is built from.
 ///
@@ -1486,6 +1489,7 @@ fn cell_steps(
     cells: &[Cell],
     coal: u32,
     boiler: Option<Position>,
+    roster: &[BotId],
 ) -> Result<(Vec<Step>, Vec<ActionId>), PlannerError> {
     let mut steps: Vec<Step> = Vec::new();
     // The actions that cannot run before the network exists: the ones carrying
@@ -1512,13 +1516,6 @@ fn cell_steps(
     let intermediate_gate = gate_pre(&spec.intermediate.recipe, &mut steps);
 
     let poles = cells.iter().filter(|cell| cell.brings_pole()).count() as u32;
-    for (item, amount) in bill(spec, count, poles, coal) {
-        steps.push(Step::Subgoal(Goal::Have {
-            item,
-            count: amount,
-            whose: Holder::Share(ctx.chain_actor),
-        }));
-    }
 
     let reach = ctx
         .state
@@ -1526,7 +1523,14 @@ fn cell_steps(
         .map(|b| b.reach_distance)
         .unwrap_or(10.0);
 
+    // Every cell's steps are *built* first -- ids allocated, sites and
+    // recipes reserved in `ctx.state`, in exactly the order they were when
+    // they were emitted as they went -- and emitted afterwards, so that a
+    // roster can deal them out by item (see the end of this function). A
+    // roster of one emits them in the order it always did.
+    let mut builds: Vec<CellBuild> = Vec::with_capacity(cells.len());
     for cell in cells {
+        let mut build = CellBuild::default();
         // Every bystander `fit` found would be sealed in by this cell walks
         // clear before any of the cell's own parts go down -- see
         // `crate::enclosure::check`.
@@ -1539,7 +1543,7 @@ fn cell_steps(
                     evacuation,
                     &format!("the assembly cell at {}", cell.origin),
                 );
-                steps.push(step);
+                build.evacuations.push(step);
                 id
             })
             .collect();
@@ -1549,11 +1553,11 @@ fn cell_steps(
             if let Step::Act(action) = &step {
                 part_ids.push(action.id);
             }
-            steps.push(step);
+            build.places.push((part.role.name().to_string(), step));
         }
         for evacuation_id in &evacuation_ids {
             for part_id in &part_ids {
-                steps.push(Step::Link {
+                build.links.push(Step::Link {
                     from: *evacuation_id,
                     to: *part_id,
                     lag: 0,
@@ -1562,6 +1566,7 @@ fn cell_steps(
         }
 
         let Some(chain) = links(cell) else {
+            builds.push(build);
             continue;
         };
         let entity_at = |role: Role| -> Option<Condition> {
@@ -1621,7 +1626,7 @@ fn cell_steps(
             ];
             pre.extend(gate.iter().cloned());
             let id = ctx.ids.next();
-            steps.push(Step::Act(Box::new(Action {
+            build.recipes.push(Step::Act(Box::new(Action {
                 id,
                 kind: ActionKind::SetRecipe {
                     pos: part.position.clone(),
@@ -1721,32 +1726,128 @@ fn cell_steps(
                 ));
             }
             let id = ctx.ids.next();
-            needs_power.push(id);
-            steps.push(Step::Act(Box::new(Action {
-                id,
-                kind: ActionKind::Insert {
-                    pos: chest.position.clone(),
-                    entity: CHEST.into(),
-                    slot: InventorySlot::Chest,
-                    item: item.clone(),
-                    count: amount,
-                },
-                pre,
-                eff: vec![Effect::LoseItem {
-                    who: Actor::Role,
-                    item: item.clone(),
-                    count: amount,
-                }],
-                duration: TRANSFER_TICKS,
-                pinned: None,
-                label: format!(
-                    "charge the {} chest with {} {}",
-                    chest_role_name(chest_role),
-                    amount,
-                    item
-                ),
-            })));
+            let label = format!(
+                "charge the {} chest with {} {}",
+                chest_role_name(chest_role),
+                amount,
+                item
+            );
+            build.charges.push((
+                item.clone(),
+                amount,
+                Box::new(Action {
+                    id,
+                    kind: ActionKind::Insert {
+                        pos: chest.position.clone(),
+                        entity: CHEST.into(),
+                        slot: InventorySlot::Chest,
+                        item: item.clone(),
+                        count: amount,
+                    },
+                    pre,
+                    eff: vec![Effect::LoseItem {
+                        who: Actor::Role,
+                        item,
+                        count: amount,
+                    }],
+                    duration: TRANSFER_TICKS,
+                    pinned: None,
+                    label,
+                }),
+            ));
         }
+        builds.push(build);
+    }
+
+    // Who builds what. With one bot there is nobody to deal to, and the bill
+    // and the steps go out exactly as they always have; with a roster the
+    // cell is dealt out by item -- see [`deal_bundles`] for the rule and
+    // [`BuildAssemblyCell`]'s `converges` doc for why this is not the welding
+    // it replaces.
+    let builders = participants_that_can_work(&ctx.state, roster.to_vec());
+    if builders.len() < 2 {
+        for (item, amount) in bill(spec, count, poles, coal) {
+            steps.push(Step::Subgoal(Goal::Have {
+                item,
+                count: amount,
+                whose: Holder::Share(ctx.chain_actor),
+            }));
+        }
+        for build in builds {
+            steps.extend(build.evacuations);
+            steps.extend(build.places.into_iter().map(|(_, step)| step));
+            steps.extend(build.links);
+            steps.extend(build.recipes);
+            for (_, _, action) in build.charges {
+                needs_power.push(action.id);
+                steps.push(Step::Act(action));
+            }
+        }
+    } else {
+        // The coal first, and inline: it is the one bill left on the chain
+        // this method opened, and the first `Holder::Share` a chain meets is
+        // what names its owner (`expand_goal_body`), so it must be met
+        // before any dealt block opens a chain of its own.
+        if coal > 0 {
+            steps.push(Step::Subgoal(Goal::Have {
+                item: "coal".into(),
+                count: coal,
+                whose: Holder::Share(ctx.chain_actor),
+            }));
+        }
+        let mut bundles: BTreeMap<ItemId, Bundle> = BTreeMap::new();
+        let mut links: Vec<Step> = Vec::new();
+        let mut recipes: Vec<Step> = Vec::new();
+        for build in builds {
+            steps.extend(build.evacuations);
+            for (item, step) in build.places {
+                let bundle = bundles.entry(item).or_default();
+                bundle.need = bundle.need.saturating_add(1);
+                bundle.places.push(step);
+            }
+            for (item, amount, action) in build.charges {
+                let bundle = bundles.entry(item).or_default();
+                bundle.need = bundle.need.saturating_add(amount);
+                bundle.charges.push(*action);
+            }
+            links.extend(build.links);
+            recipes.extend(build.recipes);
+        }
+        for (item, bundle, bot) in deal_bundles(&ctx.state, bundles, &builders) {
+            let reach = ctx.state.bot(bot).map(|b| b.reach_distance).unwrap_or(10.0);
+            let mut block: Vec<Step> =
+                Vec::with_capacity(1 + bundle.places.len() + bundle.charges.len());
+            // `Holder::Share(bot)`: this bot places and charges these, so
+            // this bot's inventory is what the shortfall is sized against,
+            // and -- through `Step::Owned` -- this bot is who runs it.
+            block.push(Step::Subgoal(Goal::Have {
+                item: item.clone(),
+                count: bundle.need,
+                whose: Holder::Share(bot),
+            }));
+            block.extend(bundle.places);
+            for mut action in bundle.charges {
+                // The charger's own reach, now that the charger is known.
+                for condition in &mut action.pre {
+                    if let Condition::AtPosition {
+                        who: Actor::Role,
+                        radius,
+                        ..
+                    } = condition
+                    {
+                        *radius = reach;
+                    }
+                }
+                needs_power.push(action.id);
+                block.push(Step::Act(Box::new(action)));
+            }
+            steps.push(Step::Owned {
+                whose: Holder::Share(bot),
+                steps: block,
+            });
+        }
+        steps.extend(links);
+        steps.extend(recipes);
     }
 
     // The plant's fuel, which is the cell's fuel: a boiler's slot holds one
@@ -1795,6 +1896,121 @@ fn cell_steps(
     Ok((steps, needs_power))
 }
 
+/// One cell's steps, built before any is emitted -- see `cell_steps`.
+#[derive(Default)]
+struct CellBuild {
+    evacuations: Vec<Step>,
+    /// Each placement, with the item it places.
+    places: Vec<(ItemId, Step)>,
+    /// Evacuation-before-placement edges.
+    links: Vec<Step>,
+    recipes: Vec<Step>,
+    /// Each chest charge, with the item and count the charger has to hold.
+    charges: Vec<(ItemId, u32, Box<Action>)>,
+}
+
+/// Everything a cell needs of one item: the placements of it and the charges
+/// of it, and the count that has to be in one bot's hands for both.
+///
+/// **Merged by item, exactly as [`bill`] merges.** Green's supply chest is
+/// charged with inserters, which is also what the cell's own links are made
+/// of; a bot handed the inserters to place and a different bot the inserters
+/// to charge would each be sized against its own inventory and clash with
+/// nobody, but a bot handed both must see one bill, or the cell is built
+/// with the inserters its chest was supposed to hold.
+#[derive(Default)]
+struct Bundle {
+    need: u32,
+    places: Vec<Step>,
+    charges: Vec<Action>,
+}
+
+/// Deal a cell's bundles across `builders`, heaviest first, each to whoever
+/// is lightest at that moment. Returns them in the order dealt.
+///
+/// # Why the cell is dealt at all
+///
+/// `BuildAssemblyCell::converges` welds the cell to one bot, and that was the
+/// whole of the green plan's tail: `run-1788604520-39283` left bot 1 alone
+/// for the last 47 actions and ~35,000 ticks -- eight chests, ten inserters,
+/// four machines and the crafting behind them -- while bots 2, 3 and 4 had
+/// finished at 36,027 / 46,079 / 59,367. With the research off that chain
+/// (`Action::tied_to_runner`) and the packs dealt evenly, bot 1 was still
+/// last by 21,000 ticks: 23,668 of them idle, waiting on its own single
+/// drills for the plates behind 34 inserters and 8 chests.
+///
+/// The distinction that makes dealing safe is the one `have::furnace_suppliers`
+/// draws for a furnace: a placed chest, inserter or machine is a **map
+/// fact**. Everything that comes after it -- the next placement's `AreaFree`,
+/// the charge's `EntityAt` and `Feeds`, the recipe's `EntityAt` -- names a
+/// position and no bot, so the item, its craft and its placement can be one
+/// other bot's errand end to end; and a charge is inventory-convergent only
+/// with its own `Have`, which travels with it. Each bundle's bill is sized
+/// against its builder (`Holder::Share(builder)`) and bound to it
+/// (`Step::Owned` always names an owner), so sizing and binding still agree:
+/// several independently correct chains, not one chain with a relaxed owner.
+///
+/// # The rule
+///
+/// Load is [`PlanState::planned_ticks`] -- what this expansion has already
+/// committed each bot to -- plus, as each bundle is dealt, its price **from
+/// raw** (`produce::craft_ticks`), its placements and transfers, and one
+/// [`HANDOVER_WALK_TICKS`] for the trip. Heaviest bundle first, each to the
+/// lightest `(load, BotId)`, so the deal is a function of its inputs alone.
+/// The taker is a candidate like anyone else, and a walled-in bot is not
+/// (`participants_that_can_work`).
+///
+/// From raw and not in hand time, unlike the pack deal, and that was
+/// measured. A supplier has no cell: a thirty-plate charge is thirty ore it
+/// mines and smelts itself, and priced in hand time (zero) it was dealt as
+/// if free. On `workspace/scripts/map.json` over four bots, hand time gave
+/// `producing:logistic-science-pack:6` 54,847 ticks but
+/// `producing:automation-science-pack:6` 31,296 -- worse than the undealt
+/// 26,066, because the bot handed the chests and the plate charge waited
+/// 4,950 ticks on a hand furnace before crafting its pack share and the
+/// research slid behind it. From raw the two are 57,752 and 26,162, against
+/// 71,167 and 28,885 before the cell was dealt at all.
+fn deal_bundles(
+    state: &PlanState,
+    bundles: BTreeMap<ItemId, Bundle>,
+    builders: &[BotId],
+) -> Vec<(ItemId, Bundle, BotId)> {
+    let mut loads: BTreeMap<BotId, Ticks> = builders
+        .iter()
+        .map(|bot| (*bot, state.planned_ticks(*bot)))
+        .collect();
+    let mut order: Vec<(Ticks, ItemId, Bundle)> = bundles
+        .into_iter()
+        .map(|(item, bundle)| {
+            let price = crate::method::produce::craft_ticks(
+                state,
+                &item,
+                bundle.need,
+                crate::method::produce::CRAFT_TICKS_MAX_DEPTH,
+            )
+            .saturating_add(PLACE_TICKS.saturating_mul(bundle.places.len() as Ticks))
+            .saturating_add(TRANSFER_TICKS.saturating_mul(bundle.charges.len() as Ticks))
+            .saturating_add(HANDOVER_WALK_TICKS);
+            (price, item, bundle)
+        })
+        .collect();
+    order.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    order
+        .into_iter()
+        .map(|(price, item, bundle)| {
+            let bot = loads
+                .iter()
+                .map(|(bot, load)| (*load, *bot))
+                .min()
+                .map(|(_, bot)| bot)
+                .expect("builders is non-empty");
+            let load = loads.entry(bot).or_default();
+            *load = load.saturating_add(price);
+            (item, bundle, bot)
+        })
+        .collect()
+}
+
 /// The word a charge-insert label uses for a chest.
 fn chest_role_name(role: Role) -> &'static str {
     match role {
@@ -1808,7 +2024,26 @@ fn chest_role_name(role: Role) -> &'static str {
 // ---------------------------------------------------------------------------
 
 /// Build enough assembly cells to produce an item at a rate.
-pub struct BuildAssemblyCell;
+pub struct BuildAssemblyCell {
+    /// The roster the cell's bundles are dealt across -- `registry_for`'s,
+    /// exactly as `Researched` carries it. Empty in `default_registry`,
+    /// where the chain actor builds the whole cell, which is what this
+    /// method did for every roster before the deal. See [`deal_bundles`].
+    pub bots: Vec<BotId>,
+}
+
+impl BuildAssemblyCell {
+    /// The bots a cell is dealt across: the registry's roster with repeats
+    /// removed and the chain actor always among them, ascending -- the same
+    /// rule and the same reasons as `Researched::roster`.
+    fn roster(&self, chain_actor: BotId) -> Vec<BotId> {
+        let mut roster: Vec<BotId> = self.bots.clone();
+        roster.push(chain_actor);
+        roster.sort_unstable();
+        roster.dedup();
+        roster
+    }
+}
 
 impl Method for BuildAssemblyCell {
     fn name(&self) -> &'static str {
@@ -1893,7 +2128,8 @@ impl Method for BuildAssemblyCell {
         };
         let cells = plan_cells(&ctx.state, &anchor, &spec, build)?;
         let (coal, boiler) = fuel_for(&ctx.state, &anchor, &cells);
-        let (built, needs_power) = cell_steps(ctx, &spec, &cells, coal, boiler)?;
+        let roster = self.roster(ctx.chain_actor);
+        let (built, needs_power) = cell_steps(ctx, &spec, &cells, coal, boiler, &roster)?;
         let mut steps = plant_steps_taken;
         steps.extend(built);
         // Every id, not just the generator's: an engine with no steam produces

@@ -80,6 +80,35 @@ honestly, as before. Also fixed on the way: `scripting_lua`'s
 `plan_cell` call was one argument behind `bdec88af` and failed
 `--all-targets` clippy on master.
 
+## The stalled walk was a starved server, and the stall clock counted from the wrong place (`2e705d0b`)
+
+Every hypothesis in my brief was wrong, and the record had the answer.
+`from` in the wording is the *stall position*, not the leg's origin: leg 2
+was 1.42 tiles, the character had walked 1.04 of it in 7 ticks and then stood
+still for 54. Nothing physical was there — run 11's chunk write-out for the
+same seed shows zero entities within 12 tiles and 1,024 tiles of `dirt-3`.
+**`video/ticks.jsonl` shows the server at 2.3–10 ticks per second through
+the exact windows in which the character froze** (60 tps before and after);
+run 9 had 35 slow spans, runs 10 and 11 had none and no failed walks. Across
+1,581 in-flight beats under a healthy tick rate a steered character never once
+stood still.
+
+**Those slow spans are mine.** Run 9 was launched at 02:50 and I ran the
+merged planner/core/executor/scripting-lua suites and a CLI build in
+`.worktrees/chop` from 02:53 — a starved server during a measured run. The
+CLAUDE.md rule "never start a live run while an agent is building" holds in
+the other direction too. Memory written.
+
+What landed anyway, because the clock was wrong on its own: the walker's
+`walk_leg_timeout_ticks` (from the leg's start) is now `WALK_STALL_TICKS`
+counting from the last tick the distance to the waypoint shrank; consecutive
+duplicate waypoints (60 of 5,131 legs in run 11, the only sub-half-tile legs)
+are dropped at the request; the verdict now says `moved 1.04 tiles of a
+1.42-tile leg that began at (x/y) … steering east at 0.150 tiles/tick,
+walking_state read back walking=true`, so the next such line tells whether
+the game held a steered character or something overwrote the steer. Five
+stub-runtime walker tests, offline plans untouched.
+
 ## Run 11: the rock forecast's +5% on green reproduced live — 29:09 (`run-1788583161-11653`)
 
 Same script, seed and roster as run 10, git `cbf5ae01`. One plan, 605 of 605,

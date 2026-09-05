@@ -887,11 +887,20 @@
             "description": "The game refused a build, and the planner has stopped offering that\nsite.\n\nWritten by `record.refusals()` (`crates/scripting_lua`) from the\nledger two writers fill: `FactorioRcon::place_entity_timed`, when a\ndispatched build is refused *without* naming the acting player as the\ncause, and `FactorioRcon::can_place_entities`, the pre-flight check\n`goal.plan` runs over a plan's chosen sites before returning it.\n`source` says which. From here to the end of the run,\n`PlanState::from_world` excludes the collision box of `entity` centred\nat `position`, so every later plan sites around it.\n\nThat consequence is the reason this is a record line at all. A planner\nthat has silently started preferring distant tiles is a planner nobody\ncan diagnose; four consecutive runs were spent on refusals whose only\ntrace was an error string, and the next reader should be able to see\nwhich ground the planner has written off and when it learned to.\n\nA refusal the acting player caused is deliberately absent: the mod\nnames that one, the RCON layer walks the bot aside and retries it, and\nthe ground is fine once the bot moves.",
             "properties": {
               "blockers": {
-                "description": "The distinct names of the entities the game found in the tested\ncollision box, sorted.\n\nAlways empty for `source = \"dispatch\"`: the game's refusal names\nno cause and there is nothing left to ask by the time it arrives.\nThat absence of a cause is what five consecutive runs were spent\non, and filling it in is most of the reason the pre-check exists.\n\nEmpty on a `pre_check` refusal means something else and is\ngenuinely informative: no entity intersected the footprint at all,\nso the ground itself is the answer -- see `tile`.",
+                "description": "The distinct names of the entities the game found in the tested\ncollision box, sorted.\n\nFilled on both sources. The pre-check always reported it; a\n`dispatch` refusal carries it since the mod started appending what\nit found to its `said 'no'` line (`rcon_place_entity`,\n`mods/BotBridge/control.lua`) -- before that it was always empty\nhere, and that absence of a cause is what five consecutive runs\nwere spent on. Empty now means the game scanned the box and found\nno entity in it, so the ground itself is the answer -- see `tile`.\nEmpty **and** `tile: null` on a `dispatch` line is the older\nshape, where nothing was asked.",
                 "items": {
                   "type": "string"
                 },
                 "type": "array"
+              },
+              "direction": {
+                "description": "The `defines.direction` the build was aimed with, when known. The\nbox the game tested is the prototype's box turned this way, so\nthis is what makes the excluded region the right shape for a\nbuilding that is not square: a steam engine facing east claims\n4.7 by 2.5 tiles, not 2.5 by 4.7. `null` on lines written before\nthe direction was carried.",
+                "format": "int32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
               },
               "entity": {
                 "description": "The item the bot was holding, which is the name the collision box\nexcluded from later plans is looked up under.",
@@ -912,7 +921,7 @@
                 "type": "string"
               },
               "tile": {
-                "description": "The tile under the refused centre, when it was asked for. `None`\nfor `source = \"dispatch\"`.",
+                "description": "The tile under the refused centre, when the game named it. `None`\nonly on a `dispatch` line whose reply named nothing.",
                 "type": [
                   "string",
                   "null"
@@ -989,9 +998,13 @@
                 "type": "string"
               },
               "pocket_tiles": {
-                "description": "How many tiles the character would have been left with, had it\nstayed -- the same count [`EventKind::BotEnclosed`] reports.",
+                "description": "How many tiles the character would have been left with, had it\nstayed -- the same count [`EventKind::BotEnclosed`] reports. `0`\nfor `reason = \"footprint\"`, where the placement stands on the\ncharacter's own tile.",
                 "format": "double",
                 "type": "number"
+              },
+              "reason": {
+                "description": "`\"enclosure\"` or `\"footprint\"`: whether the placement would have\nwalled the character in, or would have stood on the tile the\ncharacter was standing on. The second is the acting bot inside\nits own placement's collision box -- the game refuses that build\nfor the actor's sake, and `run-1788569499-05724` lost a 407-step\nplan to exactly that refusal being read as a verdict about the\nground.",
+                "type": "string"
               },
               "site": {
                 "$ref": "#/components/schemas/Position",
@@ -1008,6 +1021,7 @@
               "to",
               "placing",
               "site",
+              "reason",
               "pocket_tiles",
               "kind"
             ],

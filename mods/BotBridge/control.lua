@@ -3296,7 +3296,19 @@ function rcon_place_entity(player_id, item_name, entity_position, direction)
 
 	if not surface.can_place_entity(placement_check_args(entproto, entity_position, direction, player.force)) then
 		local pos = {x = entity_position[1], y = entity_position[2]}
-		local bb = add_to_bounding_box(expand_rect_floor_ceil(entproto.collision_box), pos)
+		-- The box the game just judged is the prototype's box turned to
+		-- `direction`, and every question below is asked of THAT box. Asking
+		-- the north-frame one instead is how `run-1788569499-05724` lost a
+		-- plan: bot 1 stood at (42.24, -6.77), 0.55 tiles inside the east
+		-- edge of a steam engine facing east at [40.5, -5.5]. The engine is
+		-- 2.5 by 4.7 north-frame, so the unturned box reached only to x =
+		-- 41.75 (42 expanded) and the actor was "outside" it; the turned one
+		-- reaches x = 42.85. The game said no for the actor, all three
+		-- branches below said "the ground", the site went into the refusal
+		-- ledger and the next plan moved the whole plant. See
+		-- `collision_box_facing`.
+		local footprint = collision_box_facing(entproto.collision_box, direction)
+		local bb = add_to_bounding_box(expand_rect_floor_ceil(footprint), pos)
 		-- **Three answers, not two, and the order is deliberate.**
 		--
 		-- `can_place_entity` collides with characters like anything else, but
@@ -3333,16 +3345,25 @@ function rcon_place_entity(player_id, item_name, entity_position, direction)
 		-- asking this question must draw it the same way.
 		if position_in_rect(player.position, bb) then
 			rcon.print("§player_blocks_placement§")
-		elseif character_in_footprint(surface, entproto, pos) then
+		elseif character_in_footprint(surface, footprint, pos) then
 			-- Ask whoever it is to move, so the next attempt has a chance of
 			-- finding the ground it was always going to find. Before this, the
 			-- classification was right and nothing acted on it: an idle bot in
 			-- a footprint was a transient with no end. See
 			-- `step_aside_from_footprint`.
-			step_aside_from_footprint(surface, entproto, pos, player)
+			step_aside_from_footprint(surface, footprint, pos, player)
 			rcon.print("cannot place item '"..item_name.."' because a character is standing in the footprint")
 		else
-			rcon.print("cannot place item '"..item_name.."' because surface.can_place_entity said 'no'")
+			-- The ground's verdict, and what was ON the ground when it was
+			-- given. The bare sentence is what `note_placement_refusal`
+			-- (crates/core/src/factorio/rcon.rs) matches and must stay
+			-- intact; the parenthesis after it is what that function reads
+			-- the blockers and the tile out of. Without it a refusal at
+			-- dispatch reached the record as `blockers: []`, which reads as
+			-- "nothing was there" and was, five runs running, the whole of
+			-- what anyone had to go on.
+			rcon.print("cannot place item '"..item_name.."' because surface.can_place_entity said 'no'"
+				..describe_footprint(scan_footprint(surface, footprint, pos)))
 		end
 		stamp_tick()
 		return
@@ -3440,10 +3461,42 @@ function placement_check_args(entproto, position, direction, force)
 	}
 end
 
+-- The prototype's collision box turned to face `direction`.
+--
+-- `LuaEntityPrototype.collision_box` is the box of the entity facing north
+-- **[V]** (runtime-api.json, Factorio 2.1.17, api 6: "the bounding box used
+-- for collision checking", given once, per prototype, not per direction). A
+-- steam engine is 2.5 wide and 4.7 tall in that frame and 4.7 wide and 2.5
+-- tall once it faces east or west; a boiler is 3x2 north and 2x3 east.
+-- `can_place_entity` takes the direction and judges the turned box, so
+-- anything that reasons about what that judgement covered has to turn the
+-- box the same way -- `rcon_place_entity`'s three-way branch,
+-- `character_in_footprint`, `step_aside_from_footprint` and
+-- `rcon_can_place_entities` all do, through this.
+--
+-- Turned about the entity's own centre, clockwise, one quarter per cardinal:
+-- east is (x, y) -> (-y, x), south (-x, -y), west (y, -x). Only the four
+-- cardinals turn; a half-diagonal `direction` -- nothing this mod places
+-- stands on one -- gets the north-frame box back rather than a guess.
+-- Always a fresh table, never the prototype's own, which is read-only and
+-- must not be handed to a caller that will shift it in place.
+function collision_box_facing(bb, direction)
+	local lt, rb = bb.left_top, bb.right_bottom
+	if direction == defines.direction.east then
+		return { left_top = { x = -rb.y, y = lt.x }, right_bottom = { x = -lt.y, y = rb.x } }
+	elseif direction == defines.direction.south then
+		return { left_top = { x = -rb.x, y = -rb.y }, right_bottom = { x = -lt.x, y = -lt.y } }
+	elseif direction == defines.direction.west then
+		return { left_top = { x = lt.y, y = -rb.x }, right_bottom = { x = rb.y, y = -lt.x } }
+	end
+	return { left_top = { x = lt.x, y = lt.y }, right_bottom = { x = rb.x, y = rb.y } }
+end
+
 -- Whether any character stands in the footprint `can_place_entity` just
 -- tested.
 --
--- The **raw** collision box, not the floor/ceil-expanded one
+-- `footprint` is the **raw** collision box, already turned to the placement's
+-- direction (see `collision_box_facing`), not the floor/ceil-expanded one
 -- `rcon_place_entity` uses for its acting-player test: the expanded box
 -- reaches half a tile past what the game actually judged and would pull in a
 -- bot standing legitimately clear, turning a real ground refusal into a
@@ -3453,9 +3506,59 @@ end
 -- Filtered at the game by `type`, which is safe here in a way it is not for
 -- the queries that feed `EntityGraph`: this asks only whether a character is
 -- present, so nothing about trees is load-bearing.
-function character_in_footprint(surface, entproto, position)
-	local bb = add_to_bounding_box(entproto.collision_box, position)
+function character_in_footprint(surface, footprint, position)
+	local bb = add_to_bounding_box(footprint, position)
 	return #surface.find_entities_filtered{ area = bb, type = "character" } > 0
+end
+
+-- What stands in `footprint` centred at `position`, and what tile is under
+-- the centre: `{ character = bool, blockers = {sorted distinct names}, tile =
+-- name or nil }`.
+--
+-- One scan for the two callers that report a refusal -- the pre-flight
+-- `rcon_can_place_entities` and the dispatched `rcon_place_entity` -- so the
+-- two cannot describe the same ground differently. `blockers` is every
+-- entity in the box, characters included: this describes, it does not
+-- judge, and the judging (`character` is a transient, the rest is the
+-- ground) stays with the callers.
+function scan_footprint(surface, footprint, position)
+	local bb = add_to_bounding_box(footprint, position)
+	local seen = {}
+	local out = { character = false, blockers = {} }
+	for _, e in pairs(surface.find_entities_filtered{ area = bb }) do
+		if e.type == "character" then
+			out.character = true
+		end
+		if not seen[e.name] then
+			seen[e.name] = true
+			out.blockers[#out.blockers + 1] = e.name
+		end
+	end
+	table.sort(out.blockers)
+	local tile = surface.get_tile(position.x, position.y)
+	if tile ~= nil and tile.valid then
+		out.tile = tile.name
+	end
+	return out
+end
+
+-- The parenthesis `rcon_place_entity` appends to the ground's refusal, from a
+-- `scan_footprint` result: ` (in the footprint: a, b; tile: grass-1)`, or
+-- ` (nothing in the footprint; tile: grass-1)` when the box held no entity
+-- and the tile is the only thing left to blame. `note_placement_refusal`
+-- (crates/core/src/factorio/rcon.rs) parses exactly this shape; the two
+-- wordings are the only ones it knows.
+function describe_footprint(scan)
+	local what
+	if #scan.blockers > 0 then
+		what = "in the footprint: " .. table.concat(scan.blockers, ", ")
+	else
+		what = "nothing in the footprint"
+	end
+	if scan.tile ~= nil then
+		return " (" .. what .. "; tile: " .. scan.tile .. ")"
+	end
+	return " (" .. what .. ")"
 end
 
 -- Where to send a character that is standing inside `bb`, and why that spot.
@@ -3545,8 +3648,8 @@ end
 -- reports the transient wording, and still teaches the refusal ledger nothing;
 -- the difference is that by the time anything asks again, the blocker is
 -- somewhere else.
-function step_aside_from_footprint(surface, entproto, position, acting_player)
-	local bb = add_to_bounding_box(entproto.collision_box, position)
+function step_aside_from_footprint(surface, footprint, position, acting_player)
+	local bb = add_to_bounding_box(footprint, position)
 	for _, character in ipairs(surface.find_entities_filtered{ area = bb, type = "character" }) do
 		-- `LuaEntity.player` is "the player connected to this character, if
 		-- any" **[V]** (runtime-api.json, Factorio 2.1.17, api 6). Nil for a
@@ -3603,10 +3706,10 @@ end
 -- ground itself (water, a cliff edge) is the answer and there is no entity to
 -- find.
 --
--- The box queried is the raw `collision_box` shifted to the position -- the
--- box `can_place_entity` tested -- not the floor/ceil-expanded one
--- `rcon_place_entity` uses for its player-in-footprint test, which would pull
--- in neighbours that are not colliding with anything.
+-- The box queried is the raw `collision_box`, turned to `direction` and
+-- shifted to the position -- the box `can_place_entity` tested -- not the
+-- floor/ceil-expanded one `rcon_place_entity` uses for its player-in-footprint
+-- test, which would pull in neighbours that are not colliding with anything.
 function rcon_can_place_entities(sites)
 	local out = { tick = game.tick, sites = {} }
 	for i, site in ipairs(sites) do
@@ -3627,29 +3730,18 @@ function rcon_can_place_entities(sites)
 			if surface.can_place_entity(placement_check_args(entproto, pos, site.direction, player.force)) then
 				rec.ok = true
 			else
-				local bb = add_to_bounding_box(entproto.collision_box, pos)
-				local seen = {}
-				local blockers = {}
-				for _, e in pairs(surface.find_entities_filtered{ area = bb }) do
-					if e.type == "character" then
-						rec.character = true
-					end
-					if not seen[e.name] then
-						seen[e.name] = true
-						blockers[#blockers + 1] = e.name
-					end
-				end
-				table.sort(blockers)
+				-- The box the check just judged: turned to the site's
+				-- direction, exactly as `placement_check_args` asked.
+				local scan = scan_footprint(surface,
+					collision_box_facing(entproto.collision_box, site.direction), pos)
+				rec.character = scan.character
 				-- Omitted rather than sent empty: `helpers.table_to_json`
 				-- renders an empty Lua table as `{}`, which is an object, and
 				-- the Rust side reads this field as a list.
-				if #blockers > 0 then
-					rec.blockers = blockers
+				if #scan.blockers > 0 then
+					rec.blockers = scan.blockers
 				end
-				local tile = surface.get_tile(pos.x, pos.y)
-				if tile ~= nil and tile.valid then
-					rec.tile = tile.name
-				end
+				rec.tile = scan.tile
 			end
 		end
 		out.sites[i] = rec

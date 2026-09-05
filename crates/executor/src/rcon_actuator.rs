@@ -6,7 +6,7 @@ use factorio_bot_core::constants::BOT_FORCE;
 use factorio_bot_core::factorio::rcon::{
     ActionFailure, DestinationFull, Dispatch, FactorioRcon, approach_annulus,
 };
-use factorio_bot_core::factorio::world::{FactorioWorld, StepAside};
+use factorio_bot_core::factorio::world::{FactorioWorld, StepAside, StepAsideReason};
 use factorio_bot_core::record::map::{EntitySnapshot, Placement, drift_between};
 use factorio_bot_core::types::{PlayerId, Position};
 use factorio_bot_planner::{BotId, InventorySlot};
@@ -421,6 +421,7 @@ impl Actuator for RconActuator {
             PrePlace::StepAside {
                 from,
                 to,
+                reason,
                 pocket_tiles,
             } => {
                 let ticks = self
@@ -432,8 +433,13 @@ impl Actuator for RconActuator {
                         ActuatorFailure {
                             error: ActuatorError::Rejected(format!(
                                 "stepping aside to {to} before placing {item} at {at} -- from \
-                                 {from} the placement would wall the character into \
-                                 {pocket_tiles} tiles -- and the walk failed: {}",
+                                 {from} the placement would {} -- and the walk failed: {}",
+                                match reason {
+                                    StepAsideReason::Enclosure =>
+                                        format!("wall the character into {pocket_tiles} tiles"),
+                                    StepAsideReason::Footprint =>
+                                        "stand on the character itself".to_string(),
+                                },
                                 failure.error
                             )),
                             ticks: failure.ticks,
@@ -446,6 +452,7 @@ impl Actuator for RconActuator {
                     to,
                     placing: item.to_string(),
                     site: at.clone(),
+                    reason,
                     pocket_tiles,
                 });
             }

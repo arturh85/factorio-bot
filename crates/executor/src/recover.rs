@@ -714,6 +714,9 @@ mod tests {
                 Some(30),
                 "stone-furnace",
                 site.clone(),
+                0,
+                Vec::new(),
+                None,
             ),
         );
         let refused = PlanState::from_world(Arc::new(world), &BOTS);

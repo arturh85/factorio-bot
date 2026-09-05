@@ -841,6 +841,7 @@ const SCHEMAS: Record<string, SchemaContract> = {
         placement_refused: {
             entity: {required: true, type: 'string'},
             position: {required: true, ref: 'Position'},
+            direction: {required: false, type: 'integer', nullable: true},
             source: {required: true, type: 'string'},
             blockers: {required: true, type: 'array'},
             tile: {required: false, type: 'string', nullable: true}
@@ -857,6 +858,7 @@ const SCHEMAS: Record<string, SchemaContract> = {
             to: {required: true, ref: 'Position'},
             placing: {required: true, type: 'string'},
             site: {required: true, ref: 'Position'},
+            reason: {required: true, type: 'string'},
             pocket_tiles: {required: true, type: 'number'}
         },
         bot_died: {

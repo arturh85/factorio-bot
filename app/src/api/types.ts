@@ -1103,14 +1103,20 @@ export type EventKind =
           /** The centre the build was aimed at. The excluded region is the
            *  whole collision box centred here, not this one tile. */
           position: Position;
+          /** The `defines.direction` the build was aimed with, when known:
+           *  the excluded box is the prototype's box turned this way, which
+           *  is a different shape for anything not square. `null` on lines
+           *  written before it was carried. */
+          direction: number | null;
           /** `'dispatch'` or `'pre_check'` -- see above. */
           source: string;
           /** The distinct names of the entities the game found in the tested
-           *  collision box, sorted. Always empty for `'dispatch'`, which has
-           *  no way to ask. Empty for `'pre_check'` means no entity was in
-           *  the footprint at all, which points at `tile`. */
+           *  collision box, sorted. Filled on both sources; empty means the
+           *  game scanned the box and found no entity, which points at
+           *  `tile`. Empty with `tile: null` on a `'dispatch'` line is the
+           *  older shape, where nothing was asked. */
           blockers: string[];
-          /** The tile under the refused centre. `null` for `'dispatch'`. */
+          /** The tile under the refused centre, when the game named it. */
           tile: string | null;
       }
     | {
@@ -1162,7 +1168,12 @@ export type EventKind =
           placing: string;
           /** Where it was about to be placed. */
           site: Position;
-          /** How many tiles the character would have been left with. */
+          /** `'enclosure'` (the placement would have walled the character
+           *  in) or `'footprint'` (the character stood inside the
+           *  placement's own collision box). */
+          reason: string;
+          /** How many tiles the character would have been left with; `0`
+           *  for `'footprint'`. */
           pocket_tiles: number;
       }
     | {

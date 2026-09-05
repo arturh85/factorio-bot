@@ -473,6 +473,7 @@ fn stub_refused_place(player_position: (f64, f64), occupants: &str) -> String {
             can_place_entity = function(args) return false end,
             create_entity = function(args) error("must not build a refused site") end,
             find_entity = function(name, pos) return nil end,
+            get_tile = function(x, y) return {{ valid = true, name = "grass-1" }} end,
             find_non_colliding_position = function(name, center, radius, precision)
                 _searched_from[#_searched_from + 1] = {{ x = center.x, y = center.y }}
                 if _nowhere_to_stand then return nil end
@@ -512,6 +513,15 @@ fn stub_refused_place(player_position: (f64, f64), occupants: &str) -> String {
                 collision_box = {{
                     left_top = {{ x = -0.9, y = -0.9 }},
                     right_bottom = {{ x = 0.9, y = 0.9 }},
+                }},
+            }} }},
+            -- The live 2.1.17 box, read off the running game: 2.5 wide and
+            -- 4.7 tall facing north, and the other way round facing east.
+            ["steam-engine"] = {{ place_result = {{
+                name = "steam-engine",
+                collision_box = {{
+                    left_top = {{ x = -1.25, y = -2.35 }},
+                    right_bottom = {{ x = 1.25, y = 2.35 }},
                 }},
             }} }},
         }} }}
@@ -555,6 +565,118 @@ fn refuse(player_position: (f64, f64), occupants: &str) -> Lua {
         STUB_SERIALISE,
         &format!(r#"rcon_place_entity(1, "stone-furnace", {SITE}, 0)"#),
     )
+}
+
+/// [`refuse`] for the steam engine of `run-1788569499-05724`, at its site
+/// `[40.5, -5.5]`, facing `direction` -- a Lua expression, so a test can
+/// hand in `defines.direction.east` and have it compare equal to what the mod
+/// reads out of the same table.
+fn refuse_engine(direction: &str, player_position: (f64, f64), occupants: &str) -> Lua {
+    run(
+        &stub_refused_place(player_position, occupants),
+        STUB_SERIALISE,
+        &format!(r#"rcon_place_entity(1, "steam-engine", {{40.5, -5.5}}, {direction})"#),
+    )
+}
+
+// ---------------------------------------------------------------------------
+// The box the game judged is the box turned to the placement's direction.
+// ---------------------------------------------------------------------------
+
+/// Bot 1 of `run-1788569499-05724` at tick 172826, from the run's own
+/// `samples.jsonl`: parked where its walk to the pipe at `[43.5, -5.5]` left
+/// it. The engine facing east at `[40.5, -5.5]` has its box at
+/// `[38.15, 42.85] x [-6.75, -4.25]`; the character's `±0.2` box around this
+/// point reaches `x = 42.44` and `y = -6.57`, inside it on both axes. Facing
+/// north the box is `[39.25, 41.75] x [-7.85, -3.15]`, and the same character
+/// is half a tile clear of it.
+const ACTOR_IN_THE_EAST_BOX: (f64, f64) = (42.2421875, -6.765625);
+
+/// **The refusal `run-1788569499-05724` lost its plan to.** The game judged
+/// the turned box and said no for the actor standing in it; the mod tested
+/// the north-frame box, found the actor outside it, and called the refusal a
+/// verdict about the ground. That wording is the one `note_placement_refusal`
+/// remembers, so the site was fenced off and the next plan moved the whole
+/// plant eleven tiles east.
+#[test]
+fn the_acting_bot_inside_the_turned_box_gets_the_walk_aside_sentinel() {
+    assert_eq!(
+        one_line_reply(&refuse_engine(
+            "defines.direction.east",
+            ACTOR_IN_THE_EAST_BOX,
+            ""
+        )),
+        "§player_blocks_placement§",
+        "an east-facing engine reaches x = 42.85; the actor at x = 42.24 is \
+         inside it, and the RCON layer can walk it out"
+    );
+}
+
+/// The control: the same character against the same engine facing north is
+/// genuinely outside the box, so the refusal is the ground's -- and now says
+/// what the ground had on it.
+#[test]
+fn the_same_bot_beside_the_north_box_is_not_the_cause() {
+    let line = one_line_reply(&refuse_engine(
+        "defines.direction.north",
+        ACTOR_IN_THE_EAST_BOX,
+        "",
+    ));
+    assert!(
+        line.contains("can_place_entity said 'no'"),
+        "the north-frame box ends at x = 41.75 and the actor stands at 42.24; \
+         nothing about this refusal is the actor's. Got {line:?}"
+    );
+}
+
+/// A bystander in the turned box is found in the turned box: the scan
+/// `character_in_footprint` runs is over the same box the game judged.
+#[test]
+fn a_bystander_in_the_turned_box_is_a_transient_and_is_scanned_there() {
+    let bystander = r#"
+        { name = "character", type = "character", player_index = 3,
+          position = { x = 42.2421875, y = -6.765625 },
+          bounding_box = {
+            left_top = { x = 42.04, y = -6.97 },
+            right_bottom = { x = 42.44, y = -6.57 } } }
+    "#;
+    let lua = refuse_engine("defines.direction.east", ACTOR_AWAY, bystander);
+    let line = one_line_reply(&lua);
+    assert!(
+        line.contains("a character is standing in the footprint"),
+        "found in the turned box, and named as the transient it is. Got {line:?}"
+    );
+    assert_eq!(
+        string_global(&lua, "_filter_area"),
+        "38.15,-6.75,42.85,-4.25",
+        "the box scanned is the engine's box turned east and shifted to the \
+         site -- 4.7 wide and 2.5 tall -- not the north-frame one"
+    );
+}
+
+/// **What the record used to lack.** A refusal the ground owns now says what
+/// stood in the box and what tile was under the centre, in the parenthesis
+/// `note_placement_refusal` (`crates/core/src/factorio/rcon.rs`) reads back.
+/// `blockers: []` on a dispatch refusal used to mean "nobody asked"; now it
+/// means the game scanned the box and found no entity.
+#[test]
+fn the_grounds_refusal_names_what_stood_in_the_footprint() {
+    let line = one_line_reply(&refuse(ACTOR_AWAY, TREE));
+    assert!(
+        line.contains("cannot place item 'stone-furnace'")
+            && line.contains("can_place_entity said 'no'"),
+        "the sentence the ledger matches is intact. Got {line:?}"
+    );
+    assert!(
+        line.ends_with("(in the footprint: tree-01; tile: grass-1)"),
+        "the parenthesis is the evidence. Got {line:?}"
+    );
+    let empty = one_line_reply(&refuse(ACTOR_AWAY, ""));
+    assert!(
+        empty.ends_with("(nothing in the footprint; tile: grass-1)"),
+        "an empty box is said in words, so it cannot be mistaken for a box \
+         nobody looked in. Got {empty:?}"
+    );
 }
 
 fn string_global(lua: &Lua, name: &str) -> String {

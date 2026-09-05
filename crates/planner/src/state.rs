@@ -1412,16 +1412,29 @@ impl PlanState {
             })
             .collect();
         // Sites the game refused, turned into the boxes it refused them at.
-        // The prototype lookup is the same one `collision_area` makes, under
-        // the same name the planner used when it chose the site, so the box
-        // excluded here is exactly the box that was offered and turned down.
+        // The prototype lookup is the same one `collision_area_facing` makes,
+        // under the same name the planner used when it chose the site and
+        // turned the same way the build was aimed, so the box excluded here
+        // is exactly the box that was offered and turned down. A refusal that
+        // carries no direction (a ledger written before it was recorded) is
+        // read north-facing, which is what every entry was read as until
+        // then; a direction no building stands on falls back the same way
+        // rather than to a guess.
         let mut refused: Vec<Rect> = base
             .placement_refusals()
             .iter()
             .map(|refusal| {
+                let facing = refusal
+                    .direction
+                    .and_then(Direction::from_u8)
+                    .unwrap_or(Direction::North);
                 base.entity_prototypes
                     .get(&refusal.entity)
-                    .map(|proto| add_to_rect(&proto.collision_box, &refusal.position))
+                    .map(|proto| {
+                        let box_ = rotated_collision_box(&proto.collision_box, facing)
+                            .unwrap_or_else(|| proto.collision_box.clone());
+                        add_to_rect(&box_, &refusal.position)
+                    })
                     // No prototype: the one thing that can be said without
                     // inventing a size is that the game refused a build
                     // centred here. A unit box around that centre is the

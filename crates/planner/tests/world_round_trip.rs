@@ -124,6 +124,9 @@ fn world_mid_run() -> FactorioWorld {
         Some(4242),
         "stone-furnace",
         NOWHERE,
+        4,
+        vec!["tree-01".to_string()],
+        Some("grass-1".to_string()),
     ));
     world.record_walk_refusal(WalkRefusal {
         tick: None,

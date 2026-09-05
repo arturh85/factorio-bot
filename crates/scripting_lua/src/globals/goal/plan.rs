@@ -2031,6 +2031,7 @@ mod tests {
                             tick: Some(6198),
                             entity: query.item_name.clone(),
                             position: query.position.clone(),
+                            direction: Some(query.direction),
                             source: RefusalSource::PreCheck,
                             blockers: verdict.blockers.clone(),
                             tile: verdict.tile.clone(),

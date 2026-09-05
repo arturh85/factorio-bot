@@ -490,3 +490,20 @@ charged, at 1x either — so a number from before this commit carries up to
 ~330 (automation) / ~2,000 (green) ticks of planning at 1x that a number
 after it does not. `planning_timed` on the new records says exactly how
 much.
+
+**Validation — automation, 4 character bots, seed 31337, 10x, headless-g
+(`run-1788619571-63940`, commit `abfcd2c3`, dirty tree: no).**
+
+| | before (`run-1788614294-64261`) | after (`run-1788619571-63940`) |
+|---|---|---|
+| plan | 176 actions / 21,765 | 176 actions / 21,681 |
+| milestone `elapsed_ticks` | **23,715** (1.09×) | **21,992** (1.014×) |
+| start → first dispatch | 1,837 | 154 (429 → 583: server settle, roster, `RconActuator::new`) |
+| first dispatch → last settle | 21,878 | 21,843 |
+| `planning_timed` | — | 3,013 ms, `paused: true`, tick 480 → 480 |
+| delivered tick rate | 529 of 600 (88%) | 528 of 600 (88%) |
+| failed / lost | 0 / 0 | 0 / 0 |
+
+−1,723 ticks, and the executed/planned ratio at 10x is now the 1x
+client run's 1.01. The planner took its usual 3.0 s and the game did not
+move: RCON served the placement pre-check while `game.tick_paused` held.

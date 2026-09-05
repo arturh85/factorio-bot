@@ -220,6 +220,43 @@ three bots one extra iron furnace (three actions) reorders bot 3's ready
 work and its `take 10 copper-ore from the wooden-chest` moves from 8,860 to
 13,473 with no furnace of its involved.
 
+## THE WALK MODEL WAS 22–25% SHORT ON EVERY WALK (`3d45f40e`)
+
+Not a tail of stalls: 792 walks across four four-bot runs, **zero walk
+failures**, and the plan under-charged every one of them.
+
+1. **The unrealised `radius` credit — 8,200–10,200 ticks a run, 70–82% of
+   the error.** `travel_ticks` charged `(distance − radius) / speed`, but
+   nothing stops the bot at `radius`: `arrival_point` and the executor's
+   `approach_annulus` both stop it on the **inner** ring (`min_radius`, the
+   centre for a disc). In the record it is two clean spikes: every disc of
+   radius 2.7 came in exactly 18 ticks over, every disc of radius 10 exactly
+   66–67.
+2. **The speed constant — 2,200–3,500 ticks.** Implied speed pooled over
+   196,717 measured ticks is **0.1413** tiles/tick, not the prototype's
+   0.15: a polyline through tile centres, an 8-direction follower with a
+   0.3-tile arrival box, one RCON round trip per walk. Now 0.14, rounded
+   down so the model over-charges ~1% rather than under-charging.
+
+Ruled out with numbers: obstacle detours (5–8% residual), stalls (one
+step-aside in 192 walks), dispatch overhead.
+
+**The plans got longer and nothing got slower.** Green four bots
+52,554 → **59,018**; automation 21,735 → 21,943; eight-bot green 48,756 →
+49,080; action counts identical everywhere. Live at 5x the run was the same
+length to ten ticks (56,360 vs 56,370) and **executed/planned went 1.059 →
+0.998**, the walk term from +29% to −4.5%. Applied to the four historical
+runs the new model predicts each within ±3% where the old was 22–25% short.
+
+Two consequences worth stating. **Every four-bot-versus-one speedup quoted
+in this record was somewhat overstated** — the per-walk credit flattered
+multi-bot plans specifically, and the fixture's measured speedup fell from
+2.00× to 1.86×. And **the credit can be made real**: stopping a walk on the
+outer ring is worth ~8,000 ticks a run, which is a genuine speedup rather
+than an honest price. Dispatched as the `outerring` worktree; it needs the
+bot's resting position measured rather than inferred, since a walk aimed at
+the bound once rested 3.345 tiles out against a reach of 3.
+
 ## ✅✅ RUN 16: GREEN IN 15:19, AND AHEAD ON RATES (`run-1788625945-57257`)
 
 2026-09-05 18:48, master `1e965ed7`, four clients at 1x, seed 31337 `--new`,

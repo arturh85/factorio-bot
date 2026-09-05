@@ -261,3 +261,30 @@ free candidates first, else the farthest from any bot, never a refusal. No
 extra RCON round trip. Three tests from the run's own coordinates; core and
 executor tests and clippy green. Judgement: a walking bystander's up-to-a-
 tile-stale position is treated as occupied (conservative).
+
+### hl-05 — two headless runs at once (a: warm workspace, c: brand-new), automation, 5x
+
+| | headless-a `run-1788614064-08543` | headless-c `run-1788614152-60729` |
+|---|---|---|
+| automation | 22,724 ticks (6:19) | 22,670 ticks (6:18) |
+| plans / failed | 1 / 0 | 1 / 0 |
+| delivered tps | 217.9 | 228.6 |
+
+Both against the 1x client bench of 22,271 (6:11) on the same seed, and
+with the box at load ~9 from another session's builds. So two instances on
+their own ports and workspaces coexist, each holds ~3.7x of its requested
+5x under contention, and the pair costs about as much wall time as one
+(~3 min from launch to done). **Parallel runs are the cheap axis**, as the
+headless section of CLAUDE.md predicted; the limit is cores.
+
+Two things a researcher hits on the way, one fixed and one not:
+
+- **A brand-new `workspace_path` is refused**: `Failed to find workspace …
+  failed to find workspace! help: correct settings.workspace_path to a valid
+  directory` (`factorio::workspace::not_found`). Everything under it is
+  derived from the archive path, so the directory should be created, with a
+  line saying so. Open — a small `instance_setup` change.
+- **Scripts seeding** (merged `3cd57c70`): on the second attempt, with the
+  directory made by hand, the run printed `Using scripts directory
+  ".../headless-c/scripts" (debug build; seeded by copying ".../scripts" …)`
+  and ran. Before today this would have been `path not found`.

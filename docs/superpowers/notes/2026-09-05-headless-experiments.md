@@ -360,3 +360,23 @@ and a successful walk, a pre-plan re-probe, or moving a tile away releases
 it. 21 new tests across executor, planner and scripting; offline automation
 unchanged at 176 / 21,765. Not yet seen live; the spawn branch's eight-bot
 run is the first chance.
+
+### spawn — merged (`f24c02a6`): eight bots on eight tiles, and my furnace story refuted
+
+The agent read the record instead of trusting my summary: bot 3's furnaces
+at [-5,-28] and [-6,-30] went down at ticks 15,852–15,854 while bot 6 was
+still mining copper 40 tiles away; bot 6's later walk followed a path
+computed before those furnaces existed and **steered it into the 0.6-tile
+crack between them**, touching a tile a furnace covers, from which the
+pathfinder will not start. Nothing was built over anyone. Three changes in
+`mods/BotBridge/control.lua`: characters spawn on their own tile centres
+two apart in a square spiral (the pile was eight 0.8-tile characters in one
+2×2 square); a second footprint scan right before `create_entity`, and a
+push-out with a `teleport` record and `pushed_out` in the reply if a build
+ever lands on a character anyway; and the actual fix — a walker stalled on
+a tile something solid covers re-targets once at the nearest clear tile
+(`walk_step_clear` event), then fails the walk with the stall's cause so
+the executor re-paths from clear ground. Ten stub-game tests. Live on
+headless-e, 8 bots, 5x: **one plan (296 steps), automation at tick 19,968
+(≈5:26 from start), 113 walks, 0 failed, 0 teleports** — against six
+replans and `stuck` before. Four bots took 6:18 on the same goal.

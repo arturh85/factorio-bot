@@ -4,7 +4,7 @@ use crate::walk_memory::{note_walk_refusal, pathfinder_found_nothing};
 use async_trait::async_trait;
 use factorio_bot_core::constants::BOT_FORCE;
 use factorio_bot_core::factorio::rcon::{
-    ActionFailure, DestinationFull, Dispatch, FactorioRcon, approach_annulus,
+    ActionFailure, DestinationFull, Dispatch, FactorioRcon, approach_standing,
 };
 use factorio_bot_core::factorio::world::{FactorioWorld, StepAside, StepAsideReason};
 use factorio_bot_core::record::map::{EntitySnapshot, Placement, drift_between};
@@ -330,7 +330,12 @@ impl Actuator for RconActuator {
             .players
             .get(&p)
             .map(|player| player.position.clone());
-        let (goal, slack) = approach_annulus(&to, min_radius, radius, here.as_ref());
+        // And the world is an input too: `approach_standing` keeps the aim off
+        // every collision box the entity graph has seen -- a rock beside the
+        // one being chopped, the furnace an insert is aimed at -- because a
+        // goal inside a box is the one request the pathfinder answers with a
+        // route nobody can walk, or with no route at all.
+        let (goal, slack) = approach_standing(&self.world, &to, min_radius, radius, here.as_ref());
         self.rcon
             .move_player_timed(&self.world, p, &goal, Some(slack))
             .await

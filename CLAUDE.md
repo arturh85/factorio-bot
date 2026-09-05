@@ -503,6 +503,73 @@ Local docs: `cd docs/userguide && mdbook serve` or `cd docs/devguide && mdbook s
 
 The system supports running multiple graphical Factorio clients controlled by Lua scripts for multi-bot coordination.
 
+### Headless character bots: `--headless`, and the two modes
+
+**A bot is either a connected graphical client or a server-side `character`
+entity, and a run is all of one or all of the other.** The mix is refused by
+name, in the mod and in core, before a process is spawned.
+
+```bash
+# Iterate: four character bots, no client, world at 5x
+just headless factory_stage2.lua
+factorio-bot lua <script> --headless --bots 4 --game-speed 5
+
+# Measure or film: clients, 1x, the number you quote
+just bench <script>
+```
+
+Why it exists: a client costs ~26 s of sprite load each plus a connect wait
+bounded at 300 s, and **`--headless` had the script running 12-13 seconds after
+launch** with four bots. `--game-speed` scales `game.speed` and the executor's
+wall-clock deadlines with it (`Actuator::game_speed` now reads the real value
+over RCON instead of assuming 1.0).
+
+Three things that are **not** interchangeable between the modes:
+
+- **A character bot is honestly equipped; a `--clients 0` bot is fabricated.**
+  Spawning asks freeplay for its starting items
+  (`remote.call("freeplay", "get_created_items")`), so each character holds the
+  8 iron plates, furnace, drill and wood a joining player gets. `--clients 0`
+  has no players at all, so
+  `Planner::initiate_missing_players_with_default_inventory` **synthesises** a
+  roster holding wood/furnace/drill and no plates. `goal_smoke.lua` asserts a
+  positive makespan for `have("iron-plate", 5)`, which is true only of the
+  fabricated roster: on `--headless` the goal is already satisfied and an empty
+  plan is the correct answer, not a regression.
+- **No video.** It is filmed from a client window and there is none, so
+  `record.start{video = true}` warns and records everything else rather than
+  failing the run.
+- **Provenance says which mode ran**: `bot_mode` (`clients` / `characters`) and
+  `game_speed`, written at run start from `<instance>/run-mode.json`.
+  `just analyse` treats a difference as a note, not a refusal, but **do not
+  compare a 5x headless run's timings against a 1x client run**.
+- **Trigger technologies are emulated, and only the `craft-item` ones.**
+  Factorio 2.0 unlocks 32 technologies by *doing* — `automation-science-pack`
+  by crafting one lab, `electronics` by 10 copper plates, `steam-power` by 50
+  iron plates — and the game fires those from **player** actions, which a
+  server-side character never performs. Left alone, a headless run crafts a
+  lab, places it, and still cannot craft red science: it halts `stuck` at
+  milestone 1 with a precondition that can never become true.
+  `emulate_research_triggers` completes such a technology when the force has
+  **already** produced what the trigger names, sweeping every 60 ticks, only
+  while character bots exist, and writing a `research_trigger_emulated` event
+  naming the counts that earned it. Two counters are consulted and **the larger
+  is taken, never the sum**: machine production (the force's statistics) and
+  hand crafts (`storage.crafted_tally`), because **a hand craft does not appear
+  in production statistics at all** — measured, and the reason the first
+  attempt unlocked both plate triggers and never the lab one. The 11
+  `mine-entity` triggers (**`oil-processing` among them**), `build-entity`,
+  `capture-spawner` and `create-space-platform` are **not** emulated:
+  `serialize_technology` sends no payload for them because the shipped
+  prototypes and the runtime API disagree about the field's shape, and
+  emulating a condition you cannot read is granting it.
+- **Nothing above 4 bots has been run.** `PlayerId` is `u8`, so 255 is the
+  arithmetic ceiling; before that, the mod polls **every bot every tick**
+  (whole main inventory, sorted signature, crafting-queue scan) and every
+  action is its own RCON round trip, so bot count is what costs tick rate.
+  Parallel *runs* are the cheap axis instead: a headless run needs only a
+  server, its own workspace and its own ports, so the limit is cores.
+
 ### Important Timing Considerations
 
 - **Archive extraction**: 8-10 minutes per client instance on first setup (macOS DMG extraction)

@@ -3430,7 +3430,7 @@ function rcon_place_entity(player_id, item_name, entity_position, direction)
 	-- phantom behind and needs no matching deletion event. `create_entity`
 	-- does not raise `script_raised_built` unless asked (`raise_built`
 	-- defaults to false **[V]**), so the game does not announce it either.
-	local result = surface.create_entity{name=entproto.name,position=entity_position,direction=direction,force=player.force, fast_replace=true, player=player, spill=true}
+	local result = surface.create_entity{name=entproto.name,position=entity_position,direction=direction,force=player.force, fast_replace=true, player=player_identification(player_id), spill=true}
 
 	if result == nil then
 		complain("placing item '"..item_name.."' failed, surface.create_entity returned nil :(")
@@ -4615,7 +4615,7 @@ function rcon_place_blueprint(player_id, blueprint, pos_x, pos_y, direction, for
 		force = player.force,
 		position = { pos_x, pos_y },
 		-- by_player :: PlayerSpecification (optional): The player to use if any. If provided defines.events.on_built_entity will also be fired on successful entity creation.
-		by_player = player,
+		by_player = player_identification(player_id),
 		-- direction :: defines.direction (optional): The direction to use when building
 		direction = direction,
 		-- build_mode :: defines.build_mode (optional), 2.0's replacement for
@@ -4722,7 +4722,7 @@ function rcon_cheat_blueprint(player_id, blueprint, pos_x, pos_y, direction, for
 		force = player.force,
 		position = { pos_x, pos_y },
 		-- by_player :: PlayerSpecification (optional): The player to use if any. If provided defines.events.on_built_entity will also be fired on successful entity creation.
-		by_player = player,
+		by_player = player_identification(player_id),
 		-- direction :: defines.direction (optional): The direction to use when building
 		direction = direction,
 		-- build_mode :: defines.build_mode (optional), 2.0's replacement for
@@ -4999,6 +4999,34 @@ function has_character_bots()
 	return bots ~= nil and next(bots) ~= nil
 end
 
+-- What to pass to a Factorio field that wants a **PlayerIdentification** --
+-- a `LuaPlayer`, a player index, or a player name -- and not a handle.
+--
+-- `bot_handle` answers every *read* the mod performs, which is why the proxy
+-- reached these call sites unnoticed: `player.force` and `player.surface` are
+-- fine, and then the engine rejects the table itself with
+-- `Invalid PlayerIdentification. Expected LuaPlayer, index or name`. In the
+-- first headless run every single placement failed that way and the run
+-- halted `stuck` at milestone 1 with 165 steps planned and 11 succeeded.
+--
+-- For a connected player the bot id **is** the player index, so returning it
+-- passes exactly the identification the call site passed before. For a
+-- character bot there is nothing to name, and the field is omitted -- it is
+-- optional at all three sites. The cost of omitting it is stated where it
+-- matters: `create_entity` uses `player` only for the build's attribution and
+-- for where `spill` puts leftovers, but `build_blueprint`'s `by_player` is
+-- also what raises `on_built_entity`, so a blueprint built by a character bot
+-- creates its entities without that event. Nothing in this mod's own
+-- bookkeeping reads it (`on_some_entity_created` covers the paths the
+-- executor uses), and character bots do not build blueprints today; if that
+-- changes, this is the line to revisit.
+function player_identification(player_id)
+	if is_character_bot(player_id) then
+		return nil
+	end
+	return player_id
+end
+
 function bot_handle(id)
 	if is_character_bot(id) then
 		return character_proxy(id, storage.bots[id])
@@ -5115,6 +5143,95 @@ function poll_character_bots(tick)
 			poll_character_bot(tick, id, bot_handle(id))
 		end
 	end
+	emulate_research_triggers(tick)
+end
+
+-- How often the trigger sweep runs. A trigger technology completing a second
+-- late costs nothing -- the executor is waiting on a research settle either
+-- way -- and the sweep reads a statistics counter per candidate technology,
+-- so it is not something to do 60 times a second.
+RESEARCH_TRIGGER_PERIOD = 60
+
+-- Complete a **trigger technology** the force has already earned.
+--
+-- Factorio 2.0 unlocks 32 technologies by doing rather than by researching --
+-- `automation-science-pack` by crafting one lab, `electronics` by 10 copper
+-- plates, `steam-power` by 50 iron plates. **The game fires those from the
+-- player's own actions, and a server-side character has no player**, so on a
+-- `--headless` run they never fire at all: the first acceptance run crafted a
+-- lab, placed it, and still could not craft red science, because the
+-- technology the lab unlocks stayed unresearched through 9 replans. That gate
+-- is the whole early game.
+--
+-- **This is emulation, not a grant**, and the distinction is the owner's rule
+-- about honest runs: the sweep completes a technology only when the force has
+-- *already done the thing the trigger names*, which is exactly when a client
+-- run would have been given it. It never runs ahead of the work.
+--
+-- The counter is the force's own **production statistics**, not a count of
+-- hand-crafts, because that is what the trigger actually measures: nobody
+-- hand-crafts 50 iron plates, they smelt them, and a client run reaches
+-- `steam-power` that way. `get_input_count` on the item flow statistics is
+-- everything the force produced by any means.
+--
+-- Only `craft-item` is emulated. The other live types are `mine-entity` (11 of
+-- them, including `oil-processing`), `build-entity`, `capture-spawner` and
+-- `create-space-platform`, and `serialize_technology` deliberately sends no
+-- payload for those because the shipped prototypes and the runtime API
+-- disagree about the field's shape. Emulating a trigger whose condition cannot
+-- be read would be granting it, so they are left alone and a headless run
+-- still cannot cross them.
+--
+-- Runs only while character bots exist. With real players the game does this
+-- itself, and doing it twice would be both wrong and invisible.
+function emulate_research_triggers(tick)
+	if not has_character_bots() then return end
+	if tick % RESEARCH_TRIGGER_PERIOD ~= 0 then return end
+	local force = game.forces["player"]
+	local ok_stats, stats = pcall(function()
+		return force.get_item_production_statistics(game.surfaces[1])
+	end)
+	if not ok_stats or stats == nil then return end
+	for name, tech in pairs(force.technologies) do
+		if not tech.researched and tech.enabled then
+			local ok, trigger = pcall(function() return tech.prototype.research_trigger end)
+			if ok and trigger ~= nil and trigger.type == "craft-item" and trigger.item ~= nil then
+				local item = trigger.item
+				if type(item) == "table" then item = item.name end
+				local needed = trigger.count or 1
+				-- `input_counts`, the table, rather than a getter: this is the
+				-- shape `sample_force_body` already reads in this build, so it
+				-- is known to exist here rather than assumed from the docs.
+				local ok_count, produced = pcall(function()
+					return stats.input_counts[item] or 0
+				end)
+				if not ok_count then produced = 0 end
+				-- **The larger of the two counters, never their sum.**
+				-- Machine production lands in the statistics; a hand craft
+				-- does not, and is only in `crafted_tally`. Adding them would
+				-- double-count any item that turns out to appear in both, and
+				-- a trigger fired early is a technology this run did not earn
+				-- -- the exact thing the owner's honest-run rule forbids.
+				-- Taking the maximum can only ever fire *late*, which costs
+				-- some ticks and claims nothing false.
+				local tally = (storage.crafted_tally or {})[item] or 0
+				if tally > produced then produced = tally end
+				if produced >= needed then
+					tech.researched = true
+					writeout(tick, "research_trigger_emulated", helpers.table_to_json({
+						technology = name,
+						trigger = "craft-item",
+						item = item,
+						needed = needed,
+						produced = produced,
+					}))
+					print("research trigger earned: " .. tostring(name) ..
+						" (" .. tostring(item) .. " " .. tostring(produced) ..
+						"/" .. tostring(needed) .. ")")
+				end
+			end
+		end
+	end
 end
 
 function poll_character_bot(tick, id, handle)
@@ -5168,10 +5285,41 @@ function poll_character_crafts(tick, id, handle)
 				for _ = 1, finished do
 					on_player_crafted_item({ tick = tick, player_index = id, recipe = recipe })
 				end
+				tally_crafted_products(recipe, finished)
 			end
 		end
 	end
 	bot.last_queue = now
+end
+
+-- What character bots have crafted by hand, per item, for the whole session.
+--
+-- **A hand craft does not appear in the force's production statistics.**
+-- Measured, not assumed: at tick 55,200 of `run-1788597675-93375` the force
+-- had made 202 iron plates and 71 copper plates (both smelted, both counted)
+-- while three labs sat in bot inventories and `production.made.lab` was
+-- absent entirely. That is why the statistics sweep alone unlocked
+-- `electronics` (10 copper plates) and `steam-power` (50 iron plates) and
+-- never `automation-science-pack`, whose trigger is one crafted lab.
+function tally_crafted_products(recipe, times)
+	storage.crafted_tally = storage.crafted_tally or {}
+	local ok, products = pcall(function() return recipe.products end)
+	if not ok or products == nil then return end
+	for _, product in pairs(products) do
+		if product.type == "item" and product.name ~= nil then
+			local amount = product.amount
+			if amount == nil then
+				-- A probabilistic product cannot be counted as certain, and a
+				-- trigger fired on a guess is a granted technology. Skip it:
+				-- undercounting delays the unlock, overcounting invents it.
+				amount = 0
+			end
+			if amount > 0 then
+				storage.crafted_tally[product.name] =
+					(storage.crafted_tally[product.name] or 0) + amount * times
+			end
+		end
+	end
 end
 
 function on_character_bot_died(event, id)

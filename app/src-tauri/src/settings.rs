@@ -1,6 +1,16 @@
 //! Re-exported from `factorio_bot_core::app_settings` so the existing
 //! `crate::settings::` call sites keep compiling.
-pub use factorio_bot_core::app_settings::{SharedAppSettings, load_app_settings};
+//!
+//! `load_app_settings` is deliberately **not** re-exported here any more. Its
+//! only remaining caller is the REPL's command builder, which runs before a
+//! `Context` exists and so has no resolved settings to consult; it names the
+//! core path itself. Re-exporting it from the crate every module already
+//! imports made "just load the settings again" the easy thing to reach for,
+//! which is how a `--settings` override came to be honoured by the server and
+//! ignored by script resolution (see `crate::scripting::run_script_file`).
+//! Without the `repl` feature nothing used it at all, and the unused re-export
+//! warned.
+pub use factorio_bot_core::app_settings::SharedAppSettings;
 
 use factorio_bot_core::app_settings::{AppSettings as CoreAppSettings, fill_workspace_default};
 use factorio_bot_core::miette::{Result, miette};

@@ -312,7 +312,8 @@ async fn run(matches: &ArgMatches, _context: &mut Context) -> Result<()> {
     );
     let mut planner = Planner::new(world, Some(rcon));
 
-    let (stdout, stderr) = run_script_file(&mut planner, script_path, bots, None).await?;
+    let (stdout, stderr) =
+      run_script_file(&mut planner, &app_settings, script_path, bots, None).await?;
     print_script_output(&stdout, &stderr);
 
     info!("Script completed");
@@ -355,7 +356,7 @@ async fn run(matches: &ArgMatches, _context: &mut Context) -> Result<()> {
           // plans for three, instead of a phantom bot at the origin.
           planner.initiate_missing_players_with_default_inventory(bots);
         }
-        run_script_file(&mut planner, script_path, bots, None).await
+        run_script_file(&mut planner, &app_settings, script_path, bots, None).await
       }
       None => Err(factorio_bot_core::miette::miette!(
         "Failed to start Factorio (no world available)"

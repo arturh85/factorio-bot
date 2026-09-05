@@ -1,7 +1,7 @@
 use crate::context::Context;
 use crate::repl::{Error, Subcommand};
 use crate::scripting::run_script_file;
-use crate::settings::load_app_settings;
+use factorio_bot_core::app_settings::load_app_settings;
 use factorio_bot_core::miette;
 use factorio_bot_core::miette::IntoDiagnostic;
 use factorio_bot_core::paris::error;
@@ -26,7 +26,13 @@ async fn run(matches: ArgMatches, context: &mut Context) -> Result<Option<String
         instance_state.world.clone().unwrap(),
         Some(instance_state.rcon.clone()),
       );
-      if let Err(err) = run_script_file(&mut planner, &filename, bot_count, None).await {
+      // The settings the REPL was started with, override and all -- not a
+      // fresh `load_app_settings()`, which would read the default file and
+      // resolve scripts against a workspace this session is not using.
+      let app_settings = context.app_settings.read().await.clone();
+      if let Err(err) =
+        run_script_file(&mut planner, &app_settings, &filename, bot_count, None).await
+      {
         error!("failed to execute: {:?}", err);
       }
     }

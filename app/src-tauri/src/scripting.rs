@@ -1,4 +1,4 @@
-use crate::settings::load_app_settings;
+use factorio_bot_core::app_settings::AppSettings;
 use factorio_bot_core::miette;
 use factorio_bot_core::plan::planner::Planner;
 use factorio_bot_scripting_lua::OutputSink;
@@ -15,14 +15,24 @@ use std::sync::Arc;
 ///
 /// `sink`, when present, receives the script's output line by line while it
 /// runs; the full transcript is returned either way.
+///
+/// **`app_settings` is a parameter, not something this function loads.** It
+/// used to call `load_app_settings()`, which reads the *default* settings file
+/// and knows nothing about `--settings` or any other override -- so a run
+/// pointed at a second workspace started its server there and then resolved
+/// the script name against the default workspace's `scripts/`. A name present
+/// in both (every script in the repo) ran the wrong copy silently; a name
+/// present only in the named workspace failed with `path not found`, naming a
+/// file that plainly existed. Taking the settings the caller already resolved
+/// is what makes that unrepresentable: there is no longer a settings value in
+/// scope here for a call site to disagree with.
 pub async fn run_script_file(
   planner: &mut Planner,
+  app_settings: &AppSettings,
   path: &str,
   bot_count: u8,
   sink: Option<Arc<dyn OutputSink>>,
 ) -> miette::Result<(String, String)> {
-  // Was `.unwrap()`, which is reachable from the GUI and from `serve`.
-  let app_settings = load_app_settings()?;
   // Was `PathBuf::from(app_settings.factorio.workspace_path.to_string())` --
   // the raw configured string, never checked for being absolute, joined by
   // `ensure_scripts_dir` against the process's working directory. Resolving

@@ -311,3 +311,35 @@ long waits — the tick-polled lag wait sleeps a wall-clock estimate between
 readings, and at speed each sleep is worth more ticks. That is the mechanism
 to measure next, not the hop. The open item "per-action executor hop
 latency" in the state memory is withdrawn.
+
+### hl-07 — eight character bots, 5x, on a workspace that did not exist (`run-1788614781-38058`) — STUCK
+
+`Created workspace ".../headless-d" (new instance; …)` printed and the run
+started (merged `675f93b7`); `Using bot mode characters (8 requested, ids
+[1..8])`; the planner divided 298 steps over eight bots. Then:
+
+- **The first walks of bots 1, 5 and 6 were refused from the spawn pile**
+  ((0,0), (0,-0.5), (0,0.5): eight 0.8-tile characters spawned within half
+  a tile of each other) and the walk memory learned three destinations as
+  unreachable — for the map, not for the pile. With four bots this never
+  happens. Spawn must spread the characters (`find_non_colliding_position`
+  per bot), and a refusal whose start is inside other characters must not
+  be learned.
+- **Bot 6 was wedged by a furnace.** Bot 3's plan-2 `place stone-furnace at
+  [-5, -28]` went down while bot 6 was at/through (-5.2, -29.1); the
+  furnace's box spans y −29..−27 and bot 6's 0.4 half-box overlaps it. A
+  real player is pushed out by the game; a server-side character is not,
+  and the mod's in-footprint check sees bots standing, not walking through.
+  From then on every path request from bot 6 failed, the walk memory said
+  "not boxed in" (it reasons over the entity graph, which holds no
+  characters and evidently not that furnace's box against the bot's), and
+  **six replans handed bot 6 the same walk to (12.5, −33.5)** with
+  `learned=false` each time — the ledger knew and the plan did not care.
+  Halted `stuck` with seven healthy bots idle.
+
+Dispatched: `spawn` (mod: spread the spawn; placement over a character,
+standing or walking, either refuses or pushes it out the way the game does
+for a player) and `bench` (executor/planner: a refused walk from a start
+the game cannot leave is a boxed-in bot, not an unreachable destination;
+the ledger's answer must reach the next plan; a bot that cannot move is
+benched and the roster continues without it).

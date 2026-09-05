@@ -80,6 +80,28 @@ honestly, as before. Also fixed on the way: `scripting_lua`'s
 `plan_cell` call was one argument behind `bdec88af` and failed
 `--all-targets` clippy on master.
 
+## Run 11: the rock forecast's +5% on green reproduced live — 29:09 (`run-1788583161-11653`)
+
+Same script, seed and roster as run 10, git `cbf5ae01`. One plan, 605 of 605,
+zero failures; green cell at **29:09** (104,990 ticks), witness 29:48. Run 10
+on the previous planner: 26:32 (95,527). Offline the forecast predicted
+97,232 → 102,405; live it was 95,527 → 104,990 — **the +5% is real and the
+plan is the whole cause** (execution again within 1%). Hand-mined coal is
+zero; iron hand-mining is unchanged at 86 actions / 23,828 ticks; bot 1 busy
+52.6%.
+
+The agent's own trace: bot 1 now swings its rock first instead of placing its
+furnace at 209 and digging six single coal; its furnace queue shifts, and
+because the hand-smelt furnace is shared as a *slot*, bot 4's crafted-drill
+plates queue 37,100 → 42,273 behind it, its 78-plate cell take 58,495 →
+63,668, research behind that — the same 5,173 at every step. Planned
+bot-ticks fell; the makespan rose through one shared furnace. That is the
+next RCA: a second furnace for a shared bank is 5 stone against 5,000 ticks
+of queue.
+
+Net for the night on the fresh-world ladder: **automation 6:11 (record 6:12),
+green 26:32 best / 29:09 current**, both one plan, zero failures.
+
 ## ✅ AUTOMATION IN 6:11 — one second under the pre-Space-Age record (`run-1788582657-14978`)
 
 `just bench automation_speedrun.lua --clients 4 --bots 4 --logs`: release
@@ -1951,7 +1973,7 @@ infrastructure for a 3h17m game, not a harder milestone.
 | red science producing **once** | never observed | witnessed six times, all inside 780 ticks |
 | red science producing **at a rate** | impossible to claim | **5 packs in 3,240 ticks (~5.5/min)**, twice |
 | green science, planning | did not expand at all | plans end to end |
-| green science, live | never run | **WITNESSED six times** — fresh world end to end in **26:32 / 27:10** (`run-1788578779-80166`), one plan, zero failures; 64:22 → 36:48 → 31:35 → 26:32 over the night |
+| green science, live | never run | **WITNESSED seven times** — fresh world best **26:32 / 27:10** (`run-1788578779-80166`); current planner 29:09 (`run-1788583161-11653`, the rock forecast's +5%, under RCA); 64:22 → 36:48 → 31:35 → 26:32 → 29:09 |
 | furnaces per run | 42 | **8** |
 | recovery (`obs:recover`) | never executed in any run | **fires live** |
 

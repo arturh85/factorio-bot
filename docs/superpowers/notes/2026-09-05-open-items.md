@@ -58,6 +58,39 @@ that runs were too expensive to justify it. That reason has expired: a
 headless run at 5x costs about three minutes. Worth reconsidering on its
 merits rather than on cost.
 
+## What four bots are actually worth (not an open item — a measurement)
+
+Recorded here because it answers a question this project has been asserting
+rather than measuring, and because it corrects earlier claims. **The finding
+and the numbers are the speedrun session's**, measured after it corrected the
+planner's walk model (`3d45f40e`); they live in its own words in the plan
+record. Repeated here so they are not lost.
+
+The walk model under-charged every walk by 22-25%: `travel_ticks` credited an
+action's `radius` although the bot stops on the inner ring, and the speed
+constant was the prototype's `0.15` where measurement over 196,717 ticks gives
+`0.1413`. Nothing got slower when it was fixed — a live 5x run came out the
+same length to within ten ticks — but **executed over planned moved from
+1.059 to 0.998**, which is the model no longer lying about the largest single
+cost in a plan.
+
+**The mis-credit flattered multi-bot plans specifically**, so every
+four-bots-versus-one speedup quoted in this repo before that commit is
+overstated by an unknown amount. On the honest model:
+
+| goal | four bots against one |
+|---|---|
+| `researched:automation` | **1.25x** |
+| red science | **2.11x** |
+| green science | **2.48x** |
+
+Eight bots add a further 16% over four for green.
+
+**So bots pay off in proportion to the independent gathering and crafting a
+goal contains, and barely at all for automation.** That is a sharper claim
+than "multiple bots are faster", and it is the first version of it anyone
+here has measured rather than assumed.
+
 ## The one with a plan already
 
 **The self-fed cell**, through `method::connect`. Production plateaus at

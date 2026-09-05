@@ -48,14 +48,14 @@ use crate::method::power::{POLE, Supply, plant_steps, supply_for};
 use crate::method::util::{
     CRAFTING_CATEGORY, FREE_TILE_SEARCH_RADIUS, RecipeGate, SMELTING_CATEGORY, free_area_near,
     free_area_near_where, ingredients_of, mine_bill, mining_ticks, nearest_resource_tile,
-    output_per_craft, recipe_for, recipe_gate, recipe_ticks, research_ingredients, research_ticks,
-    resource_seats, resource_supply_at_least, resource_tiles_for, smelting_ticks,
-    trigger_requirement,
+    output_per_craft, recipe_for, recipe_gate, recipe_ticks, research_ingredients,
+    research_ticks_in_labs, resource_seats, resource_supply_at_least, resource_tiles_for,
+    smelting_ticks, trigger_requirement,
 };
 use crate::method::{ExpansionCtx, GoalSite, Method, MethodRegistry, Step};
 use crate::state::PlanState;
 use factorio_bot_core::factorio::util::calculate_distance;
-use factorio_bot_core::types::{FactorioEntity, Pos, Position};
+use factorio_bot_core::types::{FactorioEntity, FactorioTechnology, Pos, Position};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Does `item` still have to be *produced*, in the sense that no single bot
@@ -3180,7 +3180,14 @@ impl Method for HandCraft {
 /// is modelled. A plan that needs power it cannot see is refused, not
 /// improvised. Nor is fuel: a boiler that has run out reads as generating,
 /// because the world model carries nameplate capacity and not throughput.
-pub struct Researched;
+pub struct Researched {
+    /// The roster the pack bill is dealt across -- `registry_for`'s, exactly
+    /// as `SplitAcrossBots` and `Stockpile` carry it. Empty in
+    /// [`default_registry`], where the chain actor alone crafts and delivers
+    /// every pack, which is what this method did for every roster before
+    /// 2026-09-05. See [`Researched::roster`].
+    pub bots: Vec<BotId>,
+}
 
 /// The building research happens in.
 ///
@@ -3408,14 +3415,29 @@ fn lab_is_powered(state: &PlanState, pos: &Position) -> bool {
 /// does not research slowly, it researches **not at all**, and a plan whose
 /// last step can never complete is the failure this whole method was rewritten
 /// to remove — see [`PlannerError::ResearchNeedsPower`].
-fn lab_site(state: &PlanState, from: &Position, technology: &str) -> Result<LabSite, PlannerError> {
+///
+/// `taken` names labs this research has already claimed, so that a second lab
+/// for the same research is a second building and not the first one found
+/// twice: the first lab is in the overlay by the time the second is sited (see
+/// [`lab_build_steps`]), and would otherwise be returned as "already
+/// standing".
+fn lab_site(
+    state: &PlanState,
+    from: &Position,
+    technology: &str,
+    taken: &[Position],
+) -> Result<LabSite, PlannerError> {
     // A standing lab first, so two researches in one plan share one building.
     // `entities_within` is already in a fixed order, so "the first powered
     // one" is the same lab on every run.
     if let Some(existing) = state
         .entities_within(from, LAB_SEARCH_RADIUS)
         .into_iter()
-        .find(|entity| entity.name == LAB && lab_is_powered(state, &entity.position))
+        .find(|entity| {
+            entity.name == LAB
+                && !taken.contains(&entity.position)
+                && lab_is_powered(state, &entity.position)
+        })
     {
         return Ok(LabSite {
             pos: existing.position,
@@ -3503,10 +3525,13 @@ impl Method for Researched {
         // caught the loss immediately.
         //
         // Nothing is lost by not counting it: every subgoal this method emits
-        // names `Holder::Share(ctx.chain_actor)`, so the lab and the packs are
-        // welded to one bot by the holder they state, which is a stronger
-        // guarantee than a convergence chain and is where the ownership comes
-        // from. Convergence is for decompositions where *nothing* names a bot.
+        // names a `Holder::Share` -- the chain actor's for its own share, and
+        // since 2026-09-05 a supplier's, inside a `Step::Owned` block, for a
+        // pack share, a trigger prerequisite or a lab handed to that
+        // supplier -- so each is welded to one bot by the holder it states,
+        // which is a stronger guarantee than a convergence chain and is where
+        // the ownership comes from. Convergence is for decompositions where
+        // *nothing* names a bot.
         research_ingredients(&tech)
             .iter()
             .chain(trigger.iter())
@@ -3553,7 +3578,6 @@ impl Method for Researched {
             .unwrap_or_default()
             .into_iter()
             .collect();
-        let ingredients = research_ingredients(&tech);
 
         // A Factorio 2.0 trigger technology, if this is one. The `?` is the
         // point: a trigger this planner cannot express, or one that only this
@@ -3562,9 +3586,52 @@ impl Method for Researched {
         // plan it as free and hand the caller a makespan missing the work.
         let trigger = trigger_requirement(&ctx.state, &tech)?;
 
+        // The roster this research is dealt across, and the supplier that
+        // takes the work the chain actor's own timeline does not need: a
+        // trigger's craft and the first lab. See [`Researched::roster`] and
+        // the comments at the trigger path and the first lab.
+        let roster = self.roster(ctx.chain_actor);
+        let suppliers: Vec<BotId> = roster
+            .iter()
+            .copied()
+            .filter(|bot| *bot != ctx.chain_actor)
+            .collect();
+        let lead = suppliers.first().copied();
+        let alone = suppliers.is_empty();
+        // What each bot is already asked to make before the packs are dealt
+        // -- see [`deal_by_load`]. Priced from raw at character speed, the
+        // same way `labs_worth_building` prices a lab.
+        let mut preload: BTreeMap<BotId, Ticks> = roster.iter().map(|bot| (*bot, 0)).collect();
+        let load = |preload: &mut BTreeMap<BotId, Ticks>, bot: BotId, ticks: Ticks| {
+            let entry = preload.entry(bot).or_default();
+            *entry = entry.saturating_add(ticks);
+        };
+
         let mut steps: Vec<Step> = Vec::new();
+        // Prerequisites stay inline, on the chain actor. A trigger among them
+        // reaches the trigger path below in its own expansion and is handed
+        // over *there*; what this loop does for it is the accounting -- the
+        // lead is about to carry that craft, so it is dealt fewer packs.
         for prerequisite in &prerequisites {
             steps.push(Step::Subgoal(Goal::Researched(prerequisite.clone())));
+            let trigger = ctx
+                .state
+                .technology(prerequisite)
+                .and_then(|t| trigger_requirement(&ctx.state, &t).ok().flatten());
+            if let (Some(lead), Some((item, count))) = (lead, trigger)
+                && !ctx.state.is_researched(prerequisite)
+            {
+                load(
+                    &mut preload,
+                    lead,
+                    crate::method::produce::craft_ticks(
+                        &ctx.state,
+                        &item,
+                        count,
+                        crate::method::produce::CRAFT_TICKS_MAX_DEPTH,
+                    ),
+                );
+            }
         }
         // A `craft-item` trigger fires on the **act of producing**, and the
         // game researches the technology itself. So the trigger path emits one
@@ -3579,13 +3646,37 @@ impl Method for Researched {
         //
         // `Holder::Share` for the same reason the pack bill uses it: one action
         // reading one bot's inventory.
+        //
+        // **That inventory is the lead supplier's, when there is one.** A
+        // trigger's craft carries the `Effect::Researched` every pack craft
+        // in the plan waits on, through the pack recipe's
+        // `Condition::Researched` -- and it reaches this method however the
+        // plan comes to need it: as a prerequisite of a pack research, or as
+        // the recipe gate of the first pack anyone crafts, which on the real
+        // map is how `automation-science-pack` (fired by crafting a lab) is
+        // met, `automation` having no prerequisite at all. On the chain
+        // actor's timeline that craft sits behind everything else on it: in
+        // the green plan on `workspace/scripts/map.json` bot 1's `craft 1
+        // lab` fell at tick 101,473, after the whole cell's own bill, while
+        // bots 2, 3 and 4 had their pack ingredients ready by tick 46,448
+        // and sat idle for 55,000 ticks waiting on it; in the red plan it
+        // fell at 41,117 and the three suppliers waited 8,945 ticks each.
+        //
+        // Handed over as a `Step::Owned` block, so the bill is sized against
+        // the lead *and* bound to the lead -- `c470388b`'s guarantee, kept for
+        // whichever bot runs it. The same lead then places the first lab,
+        // which is the very item this crafted, so one lab is crafted and not
+        // two. A roster of one has nobody to hand it to and plans what it
+        // always planned.
         if let Some((item, count)) = &trigger {
-            steps.push(Step::Subgoal(Goal::Produced {
+            let builder = lead.unwrap_or(ctx.chain_actor);
+            let produced = Step::Subgoal(Goal::Produced {
                 item: item.clone(),
                 count: *count,
-                whose: Holder::Share(ctx.chain_actor),
+                whose: Holder::Share(builder),
                 unlocks: Some(name.clone()),
-            }));
+            });
+            push_owned(&mut steps, builder, vec![produced], alone);
             return Ok(steps);
         }
         // Where this research will happen. Chosen before the bill is emitted so
@@ -3626,255 +3717,373 @@ impl Method for Researched {
         // unsatisfiable site, an unknown technology — means something other
         // than power is missing, and building a power plant would not help.
         let mut power_links: Vec<ActionId> = Vec::new();
-        let site = match lab_site(&ctx.state, &from, name) {
+        let site = match lab_site(&ctx.state, &from, name, &[]) {
             Ok(site) => site,
             Err(PlannerError::ResearchNeedsPower { .. }) => {
                 let anchor = match supply_for(&ctx.state, &from, LAB_SEARCH_RADIUS, LAB_POWER_KW)? {
                     Supply::Standing(anchor) => anchor,
                     Supply::Build(plant) => {
+                        // **The plant stays the chain actor's**, and that was
+                        // measured rather than assumed. Handing it to the
+                        // lead supplier along with the trigger and the first
+                        // lab reads well -- three bills on one bot spend each
+                        // other's leftovers, where three bills on three bots
+                        // each dig their own -- and on `workspace/scripts/
+                        // map.json` over four bots it planned
+                        // `researched:automation` at 30,441 ticks (31,252 on
+                        // a second supplier) against **22,828** with the
+                        // plant here: the lead's chain became trigger, plant
+                        // and lab in series, one furnace queue and three
+                        // round trips to the lab site long, while the chain
+                        // actor sat idle from tick 18,516 waiting on it. The
+                        // plant is the largest bill a research carries, and
+                        // the bot whose only other work is a pack share is
+                        // the bot with room for it -- and its bill goes into
+                        // that bot's preload, so the packs go elsewhere. What
+                        // it costs is the trigger's leftover plates, stranded
+                        // on the lead, which the fixture pins in
+                        // `four_bots_do_not_re_mine_what_an_earlier_chain_of_theirs_produced`.
                         let anchor = plant.pole.clone();
                         let (built, links) = plant_steps(ctx, &plant);
+                        load(
+                            &mut preload,
+                            ctx.chain_actor,
+                            block_bill_ticks(&ctx.state, &built),
+                        );
                         steps.extend(built);
                         power_links = links;
                         anchor
                     }
                 };
-                lab_site(&ctx.state, &anchor, name)?
+                lab_site(&ctx.state, &anchor, name, &[])?
             }
             Err(other) => return Err(other),
         };
 
-        let build = ctx
-            .state
-            .bot(ctx.chain_actor)
-            .map(|b| b.build_distance)
-            .unwrap_or(10.0);
-        let reach = ctx
-            .state
-            .bot(ctx.chain_actor)
-            .map(|b| b.reach_distance)
-            .unwrap_or(10.0);
+        // **The first lab is the lead supplier's to place**, when there is
+        // one and the chain actor is not already carrying a lab: the lead is
+        // the bot the trigger prerequisite above hands the lab craft to, so
+        // it is the bot holding the lab when the placement comes round --
+        // `Have { lab, 1, Share(lead) }` is then already met and no second
+        // lab is crafted. A chain actor that holds a lab places it itself, as
+        // it always did; a roster of one has nobody else. See
+        // [`lab_build_steps`] for the steps and the reservation, and
+        // [`labs_worth_building`] for why the builder's pack share shrinks
+        // by what the lab costs.
+        let lab_bill = lab_bill_ticks(&ctx.state);
+        let first_builder = match lead {
+            Some(lead) if ctx.state.available(&Holder::Share(ctx.chain_actor), LAB) == 0 => lead,
+            _ => ctx.chain_actor,
+        };
+        let first = site.pos.clone();
+        let mut lab_positions: Vec<Position> = vec![first.clone()];
+        let built = lab_build_steps(ctx, &site, first_builder, &mut power_links);
+        load(
+            &mut preload,
+            first_builder,
+            block_bill_ticks(&ctx.state, &built),
+        );
+        push_owned(&mut steps, first_builder, built, alone);
 
-        // A pole of the lab's own, when `lab_site` had to reach past every
-        // supply area that already stood -- see [`lab_site_with_pole`]. Its id
-        // joins `power_links` rather than ordering anything by itself: the
-        // research carries `Condition::Powered`, which no effect satisfies, so
-        // the edge from the thing that brings the power has to be stated. It
-        // is the same edge `plant_steps` returns for the plant's own parts.
-        if let Some(pole) = &site.pole {
-            steps.push(Step::Subgoal(Goal::Have {
-                item: POLE.into(),
-                count: 1,
-                whose: Holder::Share(ctx.chain_actor),
-            }));
-            let entity = pole_entity(&ctx.state, pole);
-            let min_radius = ctx.state.placement_clearance(POLE).unwrap_or(0.0);
-            let id = ctx.ids.next();
-            power_links.push(id);
-            steps.push(Step::Act(Box::new(Action {
-                id,
-                kind: ActionKind::Place {
-                    entity: Box::new(entity.clone()),
-                },
-                pre: vec![
-                    Condition::AtPosition {
-                        who: Actor::Role,
-                        pos: pole.clone(),
-                        radius: build,
-                        min_radius,
-                    },
-                    Condition::AreaFree {
-                        pos: pole.clone(),
-                        entity: POLE.into(),
-                        direction: 0,
-                    },
-                    Condition::HasItem {
-                        who: Actor::Role,
-                        item: POLE.into(),
-                        count: 1,
-                    },
-                ],
-                eff: vec![
-                    Effect::LoseItem {
-                        who: Actor::Role,
-                        item: POLE.into(),
-                        count: 1,
-                    },
-                    Effect::CreateEntity(Box::new(entity.clone())),
-                ],
-                duration: PLACE_TICKS,
-                pinned: None,
-                label: format!("place {} at {}", POLE, pole),
-            })));
-            // Taken now, for the same reason the lab's site is taken now: every
-            // placement later in this plan -- including the labs of this
-            // technology's own prerequisites -- reads `ctx.state`, and ground
-            // that is not recorded as spoken for is chosen twice.
-            ctx.state.create_entity(entity);
-        }
-
-        if site.needs_placing {
-            // `Holder::Share` for the same reason the packs below use it: the
-            // bot that places the lab is the bot that has to be holding it.
-            steps.push(Step::Subgoal(Goal::Have {
-                item: LAB.into(),
-                count: 1,
-                whose: Holder::Share(ctx.chain_actor),
-            }));
-            let lab = FactorioEntity {
-                name: LAB.into(),
-                entity_type: LAB.into(),
-                position: site.pos.clone(),
-                ..Default::default()
+        // **The packs are a deliverable, not a personal stock.** Every bot on
+        // the roster crafts a share of the bill and carries it to the lab
+        // itself -- the lab is a world entity (`Condition::EntityAt`) that any
+        // bot can reach, exactly as a furnace is -- so nothing here needs the
+        // whole bill to land in one inventory, and the roster's crafting time
+        // runs in parallel instead of in one bot's serial timeline.
+        //
+        // This is the decomposition `Holder::Share`'s own doc called "the fix
+        // that would remove the trade-off rather than choose a side", and it
+        // keeps `c470388b`'s guarantee intact: each share is stated as
+        // `Holder::Share(b)` **and** emitted inside a `Step::Owned { whose:
+        // Holder::Share(b) }` block, so the bot a share is sized against is
+        // the bot that runs it, by construction, with no fallback tier. What
+        // is freed is only the claim that the shares are one inventory --
+        // which was never a fact about the research, only about the old
+        // `HasItem` the research action no longer carries.
+        //
+        // Measured on `workspace/scripts/map.json`, four bots,
+        // `producing:logistic-science-pack:6`: `craft 75
+        // automation-science-pack` was 22,500 ticks on bot 1's serial
+        // timeline while bots 2, 3 and 4 planned 8,957 / 6,733 / 6,721 ticks
+        // of work against a 217,105-tick makespan.
+        //
+        // **The chain actor's share is an owned block too**, not inline. A
+        // top-level `Researched` opens no chain, so an inline insert would be
+        // chainless, and a chainless `insert 5 automation-science-pack` is
+        // free for the scheduler to hand to *any* bot holding five packs --
+        // which, once several bots craft packs, is a supplier, whose own
+        // insert then finds its packs gone: `ChainOwnerInfeasible { bot: 3,
+        // condition: "has 5 automation-science-pack" }`, measured the moment
+        // the split existed. Latent before it, because only one bot ever
+        // held packs. Welding each bot's craft to its own insert is what a
+        // chain is for.
+        // A second lab, and a third, while each one still pays -- see
+        // [`labs_worth_building`] for the break-even. Sited beside the first
+        // one, so the inserts and the research all point at one place, and
+        // handed to a supplier where there is one: the builder's chain then
+        // runs alongside the chain actor's rather than in front of the
+        // research on it. An extra lab that has nowhere powered to stand is
+        // simply not built -- the first lab's refusal is the plan's, an extra
+        // lab's is a lost saving, not a lost plan.
+        let wanted = labs_worth_building(&tech, lab_bill, roster.len() as u32);
+        for extra in 1..wanted {
+            let site = match lab_site(&ctx.state, &first, name, &lab_positions) {
+                Ok(site) => site,
+                Err(
+                    PlannerError::ResearchNeedsPower { .. }
+                    | PlannerError::ResearchNeedsRoom { .. },
+                ) => {
+                    break;
+                }
+                Err(other) => return Err(other),
             };
-            // The annulus's inner bound, exactly as `Smelt`'s placement uses
-            // it: a lab is 2.4 tiles across, and standing on the tile it is
-            // going for satisfies a plain disc trivially and then has the game
-            // refuse the build with `player_blocks_placement`.
-            let min_radius = ctx.state.placement_clearance(LAB).unwrap_or(0.0);
-            steps.push(Step::Act(Box::new(Action {
-                id: ctx.ids.next(),
-                kind: ActionKind::Place {
-                    entity: Box::new(lab.clone()),
-                },
-                pre: vec![
-                    Condition::AtPosition {
-                        who: Actor::Role,
-                        pos: site.pos.clone(),
-                        radius: build,
-                        min_radius,
-                    },
-                    Condition::AreaFree {
-                        pos: site.pos.clone(),
-                        entity: LAB.into(),
-                        direction: 0,
-                    },
-                    Condition::HasItem {
-                        who: Actor::Role,
-                        item: LAB.into(),
-                        count: 1,
-                    },
-                ],
-                eff: vec![
-                    Effect::LoseItem {
-                        who: Actor::Role,
-                        item: LAB.into(),
-                        count: 1,
-                    },
-                    Effect::CreateEntity(Box::new(lab)),
-                ],
-                duration: PLACE_TICKS,
-                pinned: None,
-                label: format!("place lab at {}", site.pos),
-            })));
-            // **The site is taken now, not when the action runs.** `expand`
-            // returns its whole step list before `run_steps` executes any of
-            // it, so a technology's prerequisites -- which are `Researched`
-            // subgoals of their own, expanded afterwards -- would each call
-            // `lab_site` against a state where this site is still empty and
-            // choose it again. `military` came out of that with three
-            // `place lab at [8.5, 8.5]` actions, only the first of which the
-            // game would accept.
-            //
-            // Recording it here makes them find this lab standing and reuse
-            // it, and it keeps every *other* placement in the plan off the
-            // ground it is going to occupy. It is the same reservation
-            // `Mine` makes when it claims a resource tile during expansion,
-            // for the same reason and at the same moment.
-            //
-            // `run_steps` applies the action's own `Effect::CreateEntity`
-            // later; both write the same entity under the same `Pos` key, so
-            // the repeat is a no-op rather than a second lab.
-            ctx.state.create_entity(FactorioEntity {
-                name: LAB.into(),
-                entity_type: LAB.into(),
-                position: site.pos.clone(),
-                ..Default::default()
-            });
+            // Dealt round the suppliers after the lead, which has the first
+            // lab; with one supplier it takes them all.
+            let builder = suppliers
+                .get(extra as usize % suppliers.len().max(1))
+                .copied()
+                .unwrap_or(ctx.chain_actor);
+            lab_positions.push(site.pos.clone());
+            let built = lab_build_steps(ctx, &site, builder, &mut power_links);
+            load(&mut preload, builder, block_bill_ticks(&ctx.state, &built));
+            push_owned(&mut steps, builder, built, alone);
+        }
+        let labs = lab_positions.len() as u32;
+
+        // How many units each lab researches: `ceil(units / labs)` for the
+        // first `units % labs` labs and one fewer for the rest, the same
+        // arithmetic `research_ticks_in_labs` prices the research at. **Units,
+        // not packs**: a technology whose unit is one red and one green pack
+        // must find both in the *same* lab, and dealing the two pack types
+        // out independently would leave one lab a red pack over and another
+        // a green pack short, with the research one unit from finishing for
+        // ever. So the split is of units, and each lab's bill of every pack
+        // type follows from that.
+        let units = tech.research_unit_count;
+        let units_in_lab: Vec<u64> = (0..u64::from(labs))
+            .map(|k| units / u64::from(labs) + u64::from(k < units % u64::from(labs)))
+            .collect();
+
+        // Who delivers how much of each pack type to which lab.
+        //
+        // Per pack type: what each bot already holds (unreserved) is credited,
+        // the rest is dealt out across the participants `even_shares` seats
+        // -- walled-in bots excluded, unknown bots refused -- and each bot's
+        // delivery (holding plus work) is then poured into the labs in order,
+        // so a lab is filled by as few bots as possible and a bot walks to
+        // as few labs as possible. The stated `Have` target is holding plus
+        // work, for `SplitAcrossBots`' reason: a `Have` is a holding, and
+        // asking a bot already holding five packs for a share of five would
+        // be a goal already met.
+        //
+        // **Dealt by load, not by count**, which is where this departs from
+        // `even_shares`' equal work: a bot that is also standing up a lab is
+        // already carrying that lab's bill, and handing it an equal share of
+        // the packs on top would make its chain the longest and put the lab
+        // it built in front of the research after all. `deal_by_load` gives
+        // it fewer packs by exactly what the lab costs, so every chain ends
+        // together and the lab's bill is spread across the roster -- which is
+        // the price `labs_worth_building` charged for it. With no lab to
+        // build every preload is zero and the deal is `even_shares`' own.
+        //
+        // **Not every bill is worth dealing out.** Each supplier's share is a
+        // chain of its own -- its own ore, its own furnace, its own walk to
+        // the lab -- and a bill of two packs is one bot's errand however many
+        // bots there are. [`dealing_width`] is the gate: `worth_converging`'s
+        // arithmetic, and the widest width that passes it.
+        #[derive(Default)]
+        struct Delivery {
+            targets: Vec<(ItemId, u32)>,
+            inserts: Vec<(ItemId, usize, u32)>,
+        }
+        let mut per_bot: BTreeMap<BotId, Delivery> = BTreeMap::new();
+        let bill: Ticks = tech
+            .research_unit_ingredients
+            .iter()
+            .map(|ingredient| {
+                let count = u32::try_from(units.saturating_mul(u64::from(ingredient.amount)))
+                    .unwrap_or(u32::MAX);
+                let held = roster
+                    .iter()
+                    .map(|bot| ctx.state.available(&Holder::Share(*bot), &ingredient.name))
+                    .fold(0u32, |sum, n| sum.saturating_add(n));
+                solo_ticks(&ctx.state, &ingredient.name, count.saturating_sub(held))
+            })
+            .fold(0, |sum: Ticks, n| sum.saturating_add(n));
+        //
+        // **Beneath another method, the chain actor deals itself none.** At
+        // the top level the research is all the chain actor has, and it takes
+        // a share like anyone; as a subgoal of a cell it is one item on a
+        // timeline that is already the plan's makespan, carrying work this
+        // method cannot see or price into a preload. `Stockpile`'s rule --
+        // the taker does not supply its own stockpile -- for the same reason
+        // it gives: a tick moved off that timeline is worth more than a tick
+        // added to a bot standing still. Measured on
+        // `producing:automation-science-pack:6`: 48,855 ticks with the chain
+        // actor dealt a share of `automation`'s ten packs, 43,819 without.
+        let dealt_to: Vec<BotId> = if ctx.is_top_level() || suppliers.is_empty() {
+            roster.clone()
+        } else {
+            suppliers.clone()
+        };
+        let width = dealing_width(bill, dealt_to.len() as u32);
+        let candidates: Vec<BotId> = if width > 1 {
+            dealt_to
+        } else {
+            vec![ctx.chain_actor]
+        };
+        for ingredient in &tech.research_unit_ingredients {
+            let item = ingredient.name.clone();
+            let mut lab_needs: Vec<u32> = units_in_lab
+                .iter()
+                .map(|u| {
+                    u32::try_from(u.saturating_mul(u64::from(ingredient.amount)))
+                        .unwrap_or(u32::MAX)
+                })
+                .collect();
+            let held: BTreeMap<BotId, u32> = roster
+                .iter()
+                .map(|bot| (*bot, ctx.state.available(&Holder::Share(*bot), &item)))
+                .collect();
+            let held_total = held.values().fold(0u32, |sum, n| sum.saturating_add(*n));
+            let count = lab_needs.iter().fold(0u32, |sum, n| sum.saturating_add(*n));
+            let need = count.saturating_sub(held_total);
+            let participants: Vec<(BotId, Ticks)> =
+                even_shares(&ctx.state, &item, need, &candidates, width)?
+                    .into_keys()
+                    .map(|bot| (bot, preload.get(&bot).copied().unwrap_or(0)))
+                    .collect();
+            let per = crate::method::produce::craft_ticks(
+                &ctx.state,
+                &item,
+                1,
+                crate::method::produce::CRAFT_TICKS_MAX_DEPTH,
+            );
+            let work = deal_by_load(need, &participants, per);
+            for bot in &roster {
+                let mut deliver = held
+                    .get(bot)
+                    .copied()
+                    .unwrap_or(0)
+                    .saturating_add(work.get(bot).copied().unwrap_or(0));
+                let mut target = 0u32;
+                for (lab, remaining) in lab_needs.iter_mut().enumerate() {
+                    if deliver == 0 {
+                        break;
+                    }
+                    let n = deliver.min(*remaining);
+                    if n == 0 {
+                        continue;
+                    }
+                    *remaining -= n;
+                    deliver -= n;
+                    target = target.saturating_add(n);
+                    per_bot
+                        .entry(*bot)
+                        .or_default()
+                        .inserts
+                        .push((item.clone(), lab, n));
+                }
+                if target > 0 {
+                    per_bot
+                        .entry(*bot)
+                        .or_default()
+                        .targets
+                        .push((item.clone(), target));
+                }
+            }
         }
 
-        for (item, count) in &ingredients {
-            // `Holder::Share`, not `Holder::Anyone`. The research is one action
-            // reading one bot's inventory, so the packs have to end up in one
-            // inventory, and `Holder::Anyone` sizes its shortfall against the
-            // sum across the roster instead. The difference is not academic:
-            // every bot the Lua runner starts carries one stone furnace, so a
-            // roster of four satisfies `Have { stone-furnace, 1, Anyone }`
-            // without crafting anything, and the second furnace a science pack
-            // chain needs is then placed by a bot that has already spent its
-            // own. `Share` sizes against the chain actor — the same bot the
-            // driver simulates every effect in this subtree against — and,
-            // since 2026-09-02, also runs the chain: the sizing is only true
-            // for the bot it was done against (see the owner-binding comment
-            // in `method/mod.rs::expand_goal_body`).
-            steps.push(Step::Subgoal(Goal::Have {
-                item: item.clone(),
-                count: *count,
-                whose: Holder::Share(ctx.chain_actor),
-            }));
-        }
-
-        // The packs, into the lab. This is the step run 30 did not have: it
+        // The packs, into the labs. This is the step run 30 did not have: it
         // crafted ten automation science packs, carried them, and inserted
         // them nowhere, so `research_progress` stayed at 0.0 for the remaining
         // 60,661 ticks of the run.
         let mut insert_ids: Vec<ActionId> = Vec::new();
-        for (item, count) in &ingredients {
-            let id = ctx.ids.next();
-            insert_ids.push(id);
-            steps.push(Step::Act(Box::new(Action {
-                id,
-                kind: ActionKind::Insert {
-                    pos: site.pos.clone(),
-                    entity: LAB.into(),
-                    slot: InventorySlot::LabInput,
-                    item: item.clone(),
-                    count: *count,
-                },
-                pre: vec![
-                    Condition::AtPosition {
-                        who: Actor::Role,
-                        pos: site.pos.clone(),
-                        radius: reach,
-                        min_radius: 0.0,
-                    },
-                    Condition::EntityAt {
-                        pos: site.pos.clone(),
-                        name: LAB.into(),
-                    },
-                    Condition::HasItem {
-                        who: Actor::Role,
+        for (bot, delivery) in per_bot {
+            let reach = ctx.state.bot(bot).map(|b| b.reach_distance).unwrap_or(10.0);
+            let mut block: Vec<Step> = Vec::new();
+            for (item, target) in delivery.targets {
+                // `Holder::Share(bot)`, not `Holder::Anyone`: this bot's share
+                // is what this bot inserts, so it is this bot's inventory the
+                // shortfall is sized against -- and, since 2026-09-02, this
+                // bot that runs the chain (see the owner-binding comment in
+                // `method/mod.rs::expand_goal_body`), which `push_owned`
+                // makes true for the chain actor's share exactly as for a
+                // supplier's.
+                block.push(Step::Subgoal(Goal::Have {
+                    item,
+                    count: target,
+                    whose: Holder::Share(bot),
+                }));
+            }
+            for (item, lab, count) in delivery.inserts {
+                let pos = lab_positions[lab].clone();
+                let id = ctx.ids.next();
+                insert_ids.push(id);
+                let label = if labs > 1 {
+                    format!("insert {} {} into the lab at {}", count, item, pos)
+                } else {
+                    format!("insert {} {} into the lab", count, item)
+                };
+                block.push(Step::Act(Box::new(Action {
+                    id,
+                    kind: ActionKind::Insert {
+                        pos: pos.clone(),
+                        entity: LAB.into(),
+                        slot: InventorySlot::LabInput,
                         item: item.clone(),
-                        count: *count,
+                        count,
                     },
-                ],
-                eff: vec![Effect::LoseItem {
-                    who: Actor::Role,
-                    item: item.clone(),
-                    count: *count,
-                }],
-                duration: TRANSFER_TICKS,
-                pinned: None,
-                label: format!("insert {} {} into the lab", count, item),
-            })));
+                    pre: vec![
+                        Condition::AtPosition {
+                            who: Actor::Role,
+                            pos: pos.clone(),
+                            radius: reach,
+                            min_radius: 0.0,
+                        },
+                        Condition::EntityAt {
+                            pos,
+                            name: LAB.into(),
+                        },
+                        Condition::HasItem {
+                            who: Actor::Role,
+                            item: item.clone(),
+                            count,
+                        },
+                    ],
+                    eff: vec![Effect::LoseItem {
+                        who: Actor::Role,
+                        item,
+                        count,
+                    }],
+                    duration: TRANSFER_TICKS,
+                    pinned: None,
+                    label,
+                })));
+            }
+            push_owned(&mut steps, bot, block, alone);
         }
 
         let mut pre: Vec<Condition> = prerequisites
             .iter()
             .map(|prerequisite| Condition::Researched(prerequisite.clone()))
             .collect();
-        // The lab has to exist before anything is put into it, and the
-        // research has to happen at a lab that is standing and supplied. Both
-        // are stated; neither was, and run 30 is what that cost.
-        pre.push(Condition::EntityAt {
-            pos: site.pos.clone(),
-            name: LAB.into(),
-        });
-        pre.push(Condition::Powered {
-            pos: site.pos.clone(),
-            entity: LAB.into(),
-            kw: LAB_POWER_KW,
-        });
+        // Every lab has to exist before anything is put into it, and the
+        // research has to happen at labs that are standing and supplied. Both
+        // are stated, for every lab; neither was, and run 30 is what that
+        // cost.
+        for pos in &lab_positions {
+            pre.push(Condition::EntityAt {
+                pos: pos.clone(),
+                name: LAB.into(),
+            });
+            pre.push(Condition::Powered {
+                pos: pos.clone(),
+                entity: LAB.into(),
+                kw: LAB_POWER_KW,
+            });
+        }
         // No `HasItem`/`LoseItem` for the packs any more. They are spent by
         // the inserts above, which is where the game spends them: a lab
         // consumes what is in its `lab_input`, not what a bot is carrying.
@@ -3892,14 +4101,14 @@ impl Method for Researched {
             kind: ActionKind::Research { tech: name.clone() },
             pre,
             eff,
-            duration: research_ticks(&tech),
+            duration: research_ticks_in_labs(&tech, labs),
             pinned: None,
             label: format!("research {}", name),
         })));
 
-        // `Condition::EntityAt` already orders the research after the place,
+        // `Condition::EntityAt` already orders the research after each place,
         // and each insert's `HasItem` orders it after whatever produced the
-        // packs -- but nothing states that the packs are in the lab *before*
+        // packs -- but nothing states that the packs are in the labs *before*
         // the research starts, because no effect of an insert satisfies any
         // condition of the research. Inference cannot draw this edge; the
         // method holds both ids, so it states it.
@@ -3914,6 +4123,372 @@ impl Method for Researched {
         Ok(steps)
     }
 }
+
+/// Hand `steps` to `bot` as a chain of its own -- a `Step::Owned` block --
+/// or nothing, for an empty block.
+///
+/// Used for every bot-specific block `Researched` emits, the chain actor's
+/// included: the chain is what welds a bot's craft to its insert and its lab
+/// to its placement, and an inline block at the top level of a plan would
+/// have no chain at all (see the pack comment in `expand`).
+///
+/// `alone` is a roster with no supplier, and it keeps the block inline: with
+/// one bot there is nobody a chainless insert could be handed to, and inline
+/// is exactly what this method emitted before 2026-09-05, so a roster of one
+/// plans the plan it always planned -- `the_single_bot_rung_one_plan_is_untouched`
+/// pins it at the action.
+fn push_owned(steps: &mut Vec<Step>, bot: BotId, block: Vec<Step>, alone: bool) {
+    if alone {
+        steps.extend(block);
+    } else if !block.is_empty() {
+        steps.push(Step::Owned {
+            whose: Holder::Share(bot),
+            steps: block,
+        });
+    }
+}
+
+/// What a block of steps asks its bot to make, priced from raw at character
+/// speed: every `Have` and `Produced` subgoal at the block's top level,
+/// through `produce::craft_ticks`. A standing lab's block asks for nothing
+/// and prices at zero. Feeds [`deal_by_load`], so a bot standing up a plant
+/// or a lab is dealt that much less of the packs.
+fn block_bill_ticks(state: &PlanState, steps: &[Step]) -> Ticks {
+    steps
+        .iter()
+        .map(|step| match step {
+            Step::Subgoal(Goal::Have { item, count, .. } | Goal::Produced { item, count, .. }) => {
+                crate::method::produce::craft_ticks(
+                    state,
+                    item,
+                    *count,
+                    crate::method::produce::CRAFT_TICKS_MAX_DEPTH,
+                )
+            }
+            _ => 0,
+        })
+        .fold(0, |sum: Ticks, n| sum.saturating_add(n))
+}
+
+impl Researched {
+    /// The bots a pack bill is dealt across: the registry's roster, with
+    /// repeats removed and the chain actor always among them, in ascending
+    /// `BotId`.
+    ///
+    /// Ascending rather than the caller's order for `SplitAcrossBots`' reason:
+    /// emission order fixes `ActionId` allocation and therefore `schedule`'s
+    /// tie-break, so a symmetric roster's plan must not move when only the
+    /// order the bots were listed in changes. The chain actor is added when
+    /// the roster does not name it because the first lab and the research are
+    /// its regardless, and a bill dealt to everyone *but* the bot holding the
+    /// lab is a bill with an extra walk in it.
+    ///
+    /// An empty roster -- [`default_registry`]'s -- is the chain actor alone,
+    /// which plans exactly what this method planned before the split.
+    fn roster(&self, chain_actor: BotId) -> Vec<BotId> {
+        let mut roster = distinct_bots(&self.bots);
+        if !roster.contains(&chain_actor) {
+            roster.push(chain_actor);
+        }
+        roster.sort_unstable();
+        roster
+    }
+}
+
+/// The steps that stand a lab at `site`, run by `builder`: its pole, when the
+/// site needs one of its own, and the lab itself, when the site is not a lab
+/// already standing. Empty for a standing lab.
+///
+/// Both bills are `Holder::Share(builder)`: the bot that places a thing is the
+/// bot that has to be holding it. The pole's id joins `power_links` rather
+/// than ordering anything by itself -- the research carries
+/// `Condition::Powered`, which no effect satisfies, so the edge from the thing
+/// that brings the power has to be stated, and it is the same edge
+/// `plant_steps` returns for the plant's own parts.
+///
+/// **Both entities are taken now, not when the action runs.** `expand`
+/// returns its whole step list before `run_steps` executes any of it, so a
+/// technology's prerequisites -- which are `Researched` subgoals of their
+/// own, expanded afterwards -- would each call `lab_site` against a state
+/// where this site is still empty and choose it again. `military` came out
+/// of that with three `place lab at [8.5, 8.5]` actions, only the first of
+/// which the game would accept. Recording it here makes them find this lab
+/// standing and reuse it, and it keeps every *other* placement in the plan
+/// off the ground it is going to occupy -- including this same method's own
+/// second lab, sited a moment later. It is the same reservation `Mine` makes
+/// when it claims a resource tile during expansion, for the same reason and
+/// at the same moment. `run_steps` applies the action's own
+/// `Effect::CreateEntity` later; both write the same entity under the same
+/// `Pos` key, so the repeat is a no-op rather than a second lab.
+fn lab_build_steps(
+    ctx: &mut ExpansionCtx,
+    site: &LabSite,
+    builder: BotId,
+    power_links: &mut Vec<ActionId>,
+) -> Vec<Step> {
+    let mut steps: Vec<Step> = Vec::new();
+    let build = ctx
+        .state
+        .bot(builder)
+        .map(|b| b.build_distance)
+        .unwrap_or(10.0);
+
+    if let Some(pole) = &site.pole {
+        steps.push(Step::Subgoal(Goal::Have {
+            item: POLE.into(),
+            count: 1,
+            whose: Holder::Share(builder),
+        }));
+        let entity = pole_entity(&ctx.state, pole);
+        let min_radius = ctx.state.placement_clearance(POLE).unwrap_or(0.0);
+        let id = ctx.ids.next();
+        power_links.push(id);
+        steps.push(Step::Act(Box::new(Action {
+            id,
+            kind: ActionKind::Place {
+                entity: Box::new(entity.clone()),
+            },
+            pre: vec![
+                Condition::AtPosition {
+                    who: Actor::Role,
+                    pos: pole.clone(),
+                    radius: build,
+                    min_radius,
+                },
+                Condition::AreaFree {
+                    pos: pole.clone(),
+                    entity: POLE.into(),
+                    direction: 0,
+                },
+                Condition::HasItem {
+                    who: Actor::Role,
+                    item: POLE.into(),
+                    count: 1,
+                },
+            ],
+            eff: vec![
+                Effect::LoseItem {
+                    who: Actor::Role,
+                    item: POLE.into(),
+                    count: 1,
+                },
+                Effect::CreateEntity(Box::new(entity.clone())),
+            ],
+            duration: PLACE_TICKS,
+            pinned: None,
+            label: format!("place {} at {}", POLE, pole),
+        })));
+        ctx.state.create_entity(entity);
+    }
+
+    if site.needs_placing {
+        steps.push(Step::Subgoal(Goal::Have {
+            item: LAB.into(),
+            count: 1,
+            whose: Holder::Share(builder),
+        }));
+        let lab = FactorioEntity {
+            name: LAB.into(),
+            entity_type: LAB.into(),
+            position: site.pos.clone(),
+            ..Default::default()
+        };
+        // The annulus's inner bound, exactly as `Smelt`'s placement uses
+        // it: a lab is 2.4 tiles across, and standing on the tile it is
+        // going for satisfies a plain disc trivially and then has the game
+        // refuse the build with `player_blocks_placement`.
+        let min_radius = ctx.state.placement_clearance(LAB).unwrap_or(0.0);
+        steps.push(Step::Act(Box::new(Action {
+            id: ctx.ids.next(),
+            kind: ActionKind::Place {
+                entity: Box::new(lab.clone()),
+            },
+            pre: vec![
+                Condition::AtPosition {
+                    who: Actor::Role,
+                    pos: site.pos.clone(),
+                    radius: build,
+                    min_radius,
+                },
+                Condition::AreaFree {
+                    pos: site.pos.clone(),
+                    entity: LAB.into(),
+                    direction: 0,
+                },
+                Condition::HasItem {
+                    who: Actor::Role,
+                    item: LAB.into(),
+                    count: 1,
+                },
+            ],
+            eff: vec![
+                Effect::LoseItem {
+                    who: Actor::Role,
+                    item: LAB.into(),
+                    count: 1,
+                },
+                Effect::CreateEntity(Box::new(lab.clone())),
+            ],
+            duration: PLACE_TICKS,
+            pinned: None,
+            label: format!("place lab at {}", site.pos),
+        })));
+        ctx.state.create_entity(lab);
+    }
+    steps
+}
+
+/// How many labs a research is worth: one, and one more for as long as the
+/// next lab shortens the research by more than it costs the makespan.
+///
+/// The saving of the `n+1`-th lab is `research_ticks_in_labs(n) -
+/// research_ticks_in_labs(n + 1)`, which falls off as `1/n(n+1)`, so the loop
+/// ends on its own -- at the latest when there are as many labs as units and
+/// the saving is zero.
+///
+/// **What an extra lab costs the makespan is its bill divided by the
+/// roster**, plus the one extra insert it takes. The bill is
+/// [`lab_bill_ticks`], the whole thing from raw materials at character speed;
+/// who carries it is decided by [`deal_by_load`], which shrinks the builder's
+/// pack share by exactly that much, so the bill is spread over every chain
+/// that feeds the research and each of them grows by a `k`-th of it. A roster
+/// of one carries the whole bill on the one timeline there is, and that is the
+/// same formula at `k = 1`.
+///
+/// **The break-even, on the fixture's vanilla numbers.** A lab from raw is
+/// 17,232 ticks at character speed, placement included
+/// (`lab_bill_is_priced_from_raw_materials` works the sum), so the `n+1`-th
+/// lab pays when it saves more than `17,232 / k + 10`:
+///
+/// | technology | units × unit ticks | 2nd lab saves | k = 1 (17,242) | k = 4 (4,318) |
+/// |---|---:|---:|---|---|
+/// | `automation` | 10 × 600 | 3,000 | no | no |
+/// | `logistic-science-pack` | 75 × 300 | 11,100 (3rd: 3,900) | no | **two labs** |
+///
+/// A lone bot never builds a second lab for a research shorter than ~34,500
+/// ticks, and that is right: it would cost the bot more than it saves.
+/// Pinned by `a_second_lab_pays_for_green_on_four_bots_and_not_for_red` and
+/// `a_roster_of_one_plans_what_the_roster_free_method_planned`.
+fn labs_worth_building(tech: &FactorioTechnology, lab_bill: Ticks, roster: u32) -> u32 {
+    let extra = (lab_bill / roster.max(1)).saturating_add(TRANSFER_TICKS);
+    let mut labs = 1u32;
+    while labs < MAX_LABS {
+        let saving = research_ticks_in_labs(tech, labs)
+            .saturating_sub(research_ticks_in_labs(tech, labs + 1));
+        if saving <= extra {
+            break;
+        }
+        labs += 1;
+    }
+    labs
+}
+
+/// What one lab costs to stand up from nothing: `produce::craft_ticks` --
+/// recursive, mining and smelting included, at character speed -- plus the
+/// placement.
+///
+/// From nothing, deliberately: a bot may well be holding some of the plates,
+/// and a cell may be smelting them, so a real plan can come out cheaper. That
+/// asymmetry only ever makes a lab look dearer than it is, which errs toward
+/// building fewer -- the direction a gate whose failure mode is "four bots
+/// each build a lab for a ten-unit research" has to err in.
+fn lab_bill_ticks(state: &PlanState) -> Ticks {
+    crate::method::produce::craft_ticks(
+        state,
+        LAB,
+        1,
+        crate::method::produce::CRAFT_TICKS_MAX_DEPTH,
+    )
+    .saturating_add(PLACE_TICKS)
+}
+
+/// Deal `need` items across `participants`, each already carrying `preload`
+/// ticks of other work on the same chain, so that every participant's total
+/// load ends as even as one item's price (`per`) allows.
+///
+/// Water-filling, one item at a time: each item goes to whoever is lightest
+/// at that moment, `(load, BotId)` -- a total order, so the deal is a
+/// function of the inputs alone and a tie goes to the lowest id. A
+/// participant whose preload already exceeds what the others reach gets
+/// nothing, and the others carry what it would have. With every preload
+/// zero this is `even_shares`' equal work, remainder to the lowest `BotId`.
+///
+/// One item at a time rather than a single fair line, and that was a bug
+/// fixed on the fixture: a fair line averaged over a lead carrying a lab's
+/// worth of preload sat far above the other bots, and the first of them in
+/// id order filled up to it -- ten of ten packs to bot 1, none to bots 3
+/// and 4, with the lead correctly at zero. `need` is at most a few hundred
+/// and `k` at most a roster, so the loop is cheap.
+///
+/// `per` of zero -- an item this world cannot price -- deals by count.
+fn deal_by_load(need: u32, participants: &[(BotId, Ticks)], per: Ticks) -> BTreeMap<BotId, u32> {
+    let per = u64::from(per.max(1));
+    let mut shares: BTreeMap<BotId, u32> = participants.iter().map(|(bot, _)| (*bot, 0)).collect();
+    if participants.is_empty() {
+        return shares;
+    }
+    let mut loads: Vec<(u64, BotId)> = participants
+        .iter()
+        .map(|(bot, preload)| (u64::from(*preload), *bot))
+        .collect();
+    for _ in 0..need {
+        loads.sort_unstable();
+        let (load, bot) = loads[0];
+        *shares.entry(bot).or_default() += 1;
+        loads[0] = (load.saturating_add(per), bot);
+    }
+    shares
+}
+
+/// How many bots a pack bill is worth dealing across: the widest split that
+/// still pays, or one.
+///
+/// [`worth_converging`]'s own test, `solo / k + handover(k) < solo`, with
+/// the same handover -- one [`TRANSFER_TICKS`] and one
+/// [`HANDOVER_WALK_TICKS`] per supplier, plus the one transfer the taker
+/// makes -- because a pack share *is* a convergence: several bots produce,
+/// one lab consumes, and what the walk prices is the same walk. `bill` is
+/// the shallow `solo_ticks` of the whole pack bill, one level, the pack
+/// crafts themselves; it under-states what a split spreads, so this
+/// under-fires, the direction every gate in this file errs in. Integer
+/// arithmetic throughout.
+///
+/// **The widest paying width, not the cheapest estimate.** The estimate is
+/// in bot-ticks and charges every supplier's walk as if it were on the
+/// taker's timeline, which it is not; among the widths that pay at all, the
+/// one that takes the most off the taker is the wider one. Measured in the
+/// 2026-09-05 sweep on `workspace/scripts/map.json` over four bots, with the
+/// trigger handed to the lead and the shares still dealt by count:
+/// `automation`'s ten packs at width 4 planned `researched:automation` at
+/// 24,068 ticks against 26,130 undealt and
+/// `producing:automation-science-pack:6` at 41,627 against 44,641, while
+/// widths 2 and 3 were *worse* than 1 on the second (48,532 and 49,357) --
+/// a split that leaves one bot most of the bill pays for its chains and
+/// keeps the serial craft. The break-even on the fixture's numbers is four
+/// packs at two bots and eight at four; pinned by
+/// `a_pack_bill_is_dealt_as_wide_as_it_pays`.
+fn dealing_width(bill: Ticks, roster: u32) -> u32 {
+    let mut width = 1u32;
+    for k in 2..=roster {
+        let handover = TRANSFER_TICKS
+            .saturating_add(HANDOVER_WALK_TICKS)
+            .saturating_mul(k)
+            .saturating_add(TRANSFER_TICKS);
+        if (bill / k).saturating_add(handover) < bill {
+            width = k;
+        }
+    }
+    width
+}
+
+/// The most labs one research will stand up, however long it is.
+///
+/// A bound on the search, not a claim about the game: labs are limited by
+/// powered ground and by who feeds them, and both are paid for per lab above.
+/// Eight is more than any roster this planner has been run with, and a
+/// research long enough to want a ninth wants a different plan, not a ninth
+/// lab.
+const MAX_LABS: u32 = 8;
 
 /// The roster-free registry: no `SplitAcrossBots`, no `SharedSmelt`.
 ///
@@ -3943,7 +4518,7 @@ pub fn default_registry() -> MethodRegistry {
         // never chopped for.
         .with(Box::new(Chop))
         .with(Box::new(Mine))
-        .with(Box::new(Researched))
+        .with(Box::new(Researched { bots: Vec::new() }))
         .with(Box::new(crate::method::produce::BuildCell))
         // Its sibling, and disjoint from it by construction: `BuildCell`
         // claims a `Producing` whose item smelts from one ore, this one claims
@@ -5379,7 +5954,12 @@ pub fn registry_for(bots: &[BotId]) -> MethodRegistry {
             bots: bots.to_vec(),
         }))
         .with(Box::new(Mine))
-        .with(Box::new(Researched))
+        // Roster-aware since 2026-09-05: the pack bill is dealt across these
+        // bots and each delivers its share to the lab itself. See the
+        // method's `expand`.
+        .with(Box::new(Researched {
+            bots: bots.to_vec(),
+        }))
         // Last: it claims `Goal::Producing`, which nothing else claims, so
         // where it sits changes no other goal's method. Behind
         // `AlreadySatisfied`, which now has a real answer for a production
@@ -5398,6 +5978,7 @@ mod tests {
     use crate::ids::ActionId;
     use crate::ids::BotId;
     use crate::method::expand;
+    use crate::method::util::research_ticks;
     use crate::method::util::{tile_alignment, unlocking_technology};
     use crate::network::ActionNetwork;
     use crate::schedule::{StepKind, schedule};
@@ -5494,7 +6075,7 @@ mod tests {
     /// against the technology's stated cost.
     fn research_steps(state: &PlanState, tech: &str) -> Vec<Step> {
         let mut ctx = ExpansionCtx::new(state.fork(), BotId(1));
-        Researched
+        Researched { bots: Vec::new() }
             .expand(&Goal::Researched(tech.into()), &mut ctx)
             .expect("the fixture technologies all expand")
     }
@@ -6118,7 +6699,7 @@ mod tests {
             Arc::new(crate::test_world::world_with_technologies()),
             &bots,
         );
-        let err = lab_site(&s, &Position::new(0., 0.), "automation")
+        let err = lab_site(&s, &Position::new(0., 0.), "automation", &[])
             .err()
             .expect("an unpowered world must refuse, not site a dead lab");
         let PlannerError::ResearchNeedsPower {
@@ -6156,7 +6737,7 @@ mod tests {
             position: Position::new(10.5, 10.5),
             ..Default::default()
         });
-        let err = lab_site(&s, &Position::new(0., 0.), "automation")
+        let err = lab_site(&s, &Position::new(0., 0.), "automation", &[])
             .err()
             .expect("a pole is not a generator");
         assert!(
@@ -6216,7 +6797,7 @@ mod tests {
                 });
             }
         }
-        let err = lab_site(&s, &Position::new(0., 0.), "automation")
+        let err = lab_site(&s, &Position::new(0., 0.), "automation", &[])
             .err()
             .expect("a lab has nowhere to stand");
         let PlannerError::ResearchNeedsRoom {
@@ -6285,7 +6866,7 @@ mod tests {
     fn a_lab_with_no_powered_ground_brings_a_pole_of_its_own() {
         let bots = [BotId(1)];
         let s = a_full_supply_area(&bots);
-        let site = lab_site(&s, &Position::new(0., 0.), "automation")
+        let site = lab_site(&s, &Position::new(0., 0.), "automation", &[])
             .expect("free ground beside the supply area, and a pole for it");
         let pole = site.pole.clone().unwrap_or_else(|| {
             panic!("every tile with supply is built on, so the lab has to bring a pole")
@@ -6331,7 +6912,8 @@ mod tests {
     fn the_pole_a_lab_brings_has_to_reach_the_generator() {
         let bots = [BotId(1)];
         let s = a_full_supply_area(&bots);
-        let site = lab_site(&s, &Position::new(0., 0.), "automation").expect("a site with a pole");
+        let site =
+            lab_site(&s, &Position::new(0., 0.), "automation", &[]).expect("a site with a pole");
         let pole = site.pole.clone().expect("a pole of its own");
         // Every pole in this world is one small pole's wire reach of the next,
         // or the lab draws from nothing. The fixture's only other pole is the
@@ -6412,19 +6994,19 @@ mod tests {
         let s = tech_state(&[BotId(1)]);
         let mixed = Goal::Researched("mixed-research".into());
         assert!(
-            Researched.converges(&mixed, &s),
+            Researched { bots: Vec::new() }.converges(&mixed, &s),
             "a science pack and an iron plate both have to be made"
         );
 
         let mut stocked = s.fork();
         stocked.gain(BotId(1), "iron-plate", 6);
         assert!(
-            !Researched.converges(&mixed, &stocked),
+            !Researched { bots: Vec::new() }.converges(&mixed, &stocked),
             "with the plates in hand only one thing is still produced"
         );
 
         assert!(
-            !Researched.converges(&Goal::Researched("automation".into()), &s),
+            !Researched { bots: Vec::new() }.converges(&Goal::Researched("automation".into()), &s),
             "one ingredient type is never a convergence"
         );
     }
@@ -6447,7 +7029,7 @@ mod tests {
             "the premise: nobody holds a lab, so one has to be crafted"
         );
         assert!(
-            !Researched.converges(&Goal::Researched("automation".into()), &s),
+            !Researched { bots: Vec::new() }.converges(&Goal::Researched("automation".into()), &s),
             "the lab is welded by the Holder::Share its subgoal names, not by a convergence"
         );
     }
@@ -6469,13 +7051,13 @@ mod tests {
         let mut stocked = s.fork();
         stocked.gain(BotId(1), "iron-plate", 6);
         assert!(
-            !Researched.converges(&mixed, &stocked),
+            !Researched { bots: Vec::new() }.converges(&mixed, &stocked),
             "the plates are in hand, so only the packs are still produced"
         );
 
         stocked.reserve(&Holder::Share(BotId(1)), "iron-plate", 6);
         assert!(
-            Researched.converges(&mixed, &stocked),
+            Researched { bots: Vec::new() }.converges(&mixed, &stocked),
             "but plates promised to another action have to be made again"
         );
     }
@@ -9795,9 +10377,16 @@ mod tests {
 
         // The claim this test exists for: the chain is bound to the bot its
         // bill was sized against, not to whoever is nearest.
+        //
+        // **Bot 3, not bot 2, since 2026-09-05.** `Researched` now hands a
+        // trigger prerequisite to its lead supplier -- the lowest bot on the
+        // roster other than the chain actor -- inside a `Step::Owned` block,
+        // so `steam-power`'s fifty plates are sized against bot 3 and owned
+        // by bot 3. The claim is unchanged: sized and bound are one value,
+        // and bot 4, cheapest for the coal, still gets none of it.
         assert_eq!(
             net.owner_of(chain),
-            Some(BotId(2)),
+            Some(BotId(3)),
             "a Share(b) chain must be owned by b, or the scheduler is free \
              to hand a bill sized for b's inventory to a bot holding less"
         );
@@ -9811,9 +10400,9 @@ mod tests {
                 let StepKind::Act { action, .. } = s.what else {
                     return true;
                 };
-                action != take.id && action != mine.id || s.bot == BotId(2)
+                action != take.id && action != mine.id || s.bot == BotId(3)
             }),
-            "the whole chain must run on bot 2, got {:?}",
+            "the whole chain must run on bot 3, got {:?}",
             plan.steps
         );
     }
@@ -9850,7 +10439,7 @@ mod tests {
             None,
         );
         let mut ctx = ExpansionCtx::new(s.fork(), BotId(1));
-        let err = Researched
+        let err = Researched { bots: Vec::new() }
             .expand(&Goal::Researched("uranium-processing".into()), &mut ctx)
             .expect_err("a mine-entity trigger cannot be expressed as a goal");
         assert!(
@@ -9877,7 +10466,7 @@ mod tests {
             None,
         );
         let mut ctx = ExpansionCtx::new(s.fork(), BotId(1));
-        let err = Researched
+        let err = Researched { bots: Vec::new() }
             .expand(&Goal::Researched("foundry".into()), &mut ctx)
             .expect_err("a technology whose trigger only it can unlock is unreachable");
         assert!(
@@ -10197,8 +10786,9 @@ mod tests {
         );
         assert_eq!(
             // Moved by the lookahead scheduling key (51c7f695): a bound over the bot's other ready work replaces (end, id) as the primary key, and the plan overlaps the longer smelt under the shorter one.
+            // Moved again on 2026-09-05, 9965 -> 9900: the trigger's lab craft is the lead supplier's own chain now (`Researched`'s trigger path), off the chain actor's timeline.
             plan.makespan,
-            9965,
+            9900,
             "15866 with the subtree on one bot, 12403 once the ore converged, \
              and 10011 once the furnaces themselves became other bots' \
              errands; {per_bot:?}"
@@ -10285,8 +10875,9 @@ mod tests {
         );
         assert_eq!(
             // Moved by the lookahead scheduling key (51c7f695): a bound over the bot's other ready work replaces (end, id) as the primary key, and the plan overlaps the longer smelt under the shorter one.
+            // Moved again on 2026-09-05, 9987 -> 9897, for the narrow fixture's reason: the trigger's lab craft is the lead supplier's; 3 ticks off the narrow fixture's 9900 now.
             plan.makespan,
-            9987,
+            9897,
             "17122 before time-aware claims, 12428 after them, and 10053 once \
              R3 made a furnace somebody else's errand -- 42 ticks off the \
              narrow fixture's 10011: {per_bot:?}"
@@ -12179,6 +12770,288 @@ mod tests {
             .count();
         assert_eq!(takes, 1, "twenty runs fit in one load of seventy");
     }
+
+    // ---- A research is the roster's job, not the chain actor's ---------
+
+    /// Four bots, seventy-five packs. Everything about the plan that used to
+    /// sit on bot 1's serial timeline is dealt out: the pack crafts land on
+    /// more than one bot, every bot that crafts delivers to a lab itself,
+    /// there are two labs and the research is priced for two.
+    #[test]
+    fn seventy_five_packs_are_crafted_on_several_bots_and_each_delivers_to_a_lab() {
+        let bots = [BotId(1), BotId(2), BotId(3), BotId(4)];
+        let mut s = PlanState::from_world(
+            Arc::new(crate::test_world::world_with_long_research(75, 300.0)),
+            &bots,
+        );
+        crate::test_world::with_steam_power(&mut s);
+        let net = expand(
+            &[Goal::Researched("long-research".into())],
+            &s,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .expect("seventy-five packs over four bots expand");
+
+        let owner = |a: &Action| net.chain_of(a.id).and_then(|c| net.owner_of(c));
+        let crafters: BTreeSet<BotId> = net
+            .actions()
+            .filter(|a| matches!(&a.kind, ActionKind::Craft { item, .. } if item == "automation-science-pack"))
+            .filter_map(owner)
+            .collect();
+        assert!(
+            crafters.len() > 1,
+            "the pack crafts must be dealt across the roster, got {crafters:?}"
+        );
+
+        let inserts: Vec<&Action> = net
+            .actions()
+            .filter(|a| matches!(&a.kind, ActionKind::Insert { slot, .. } if *slot == InventorySlot::LabInput))
+            .collect();
+        let deliverers: BTreeSet<BotId> = inserts.iter().filter_map(|a| owner(a)).collect();
+        assert_eq!(
+            deliverers, crafters,
+            "every bot that crafts packs carries them to a lab itself"
+        );
+        let delivered: u32 = inserts
+            .iter()
+            .map(|a| match &a.kind {
+                ActionKind::Insert { count, .. } => *count,
+                _ => 0,
+            })
+            .sum();
+        assert_eq!(
+            delivered, 75,
+            "and between them they deliver the whole bill"
+        );
+
+        let labs: Vec<&Action> = net
+            .actions()
+            .filter(|a| matches!(&a.kind, ActionKind::Place { entity } if entity.name == "lab"))
+            .collect();
+        assert_eq!(
+            labs.len(),
+            2,
+            "seventy-five units at 300 ticks are worth two labs"
+        );
+        let builders: BTreeSet<BotId> = labs.iter().filter_map(|a| owner(a)).collect();
+        assert!(
+            !builders.contains(&BotId(1)),
+            "the labs are the suppliers' to stand up, got {builders:?}"
+        );
+        let lab_sites: BTreeSet<String> = inserts
+            .iter()
+            .filter_map(|a| match &a.kind {
+                ActionKind::Insert { pos, .. } => Some(pos.to_string()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(lab_sites.len(), 2, "and both labs are fed");
+
+        let research = research_actions(&net);
+        assert_eq!(research.len(), 1);
+        let tech = s.technology("long-research").expect("fixture technology");
+        assert_eq!(
+            research[0].duration,
+            research_ticks_in_labs(&tech, 2),
+            "the research is priced for the labs it has: ceil(75 / 2) rounds of 300"
+        );
+        assert_eq!(research[0].duration, 11_400);
+
+        schedule(&net, &s, &bots).expect("and the plan schedules on the roster it was made for");
+    }
+
+    /// The same technology on a roster of one plans exactly what the
+    /// roster-free method plans: one lab, every pack on the one bot, no
+    /// `Step::Owned` anywhere. A single bot has nobody to deal to and the old
+    /// plan is the right plan.
+    #[test]
+    fn a_roster_of_one_plans_what_the_roster_free_method_planned() {
+        let mut s = PlanState::from_world(
+            Arc::new(crate::test_world::world_with_long_research(75, 300.0)),
+            &[BotId(1)],
+        );
+        crate::test_world::with_steam_power(&mut s);
+        let expand_with = |bots: Vec<BotId>| {
+            let mut ctx = ExpansionCtx::new(s.fork(), BotId(1));
+            Researched { bots }
+                .expand(&Goal::Researched("long-research".into()), &mut ctx)
+                .expect("expands")
+        };
+        let solo = expand_with(vec![BotId(1)]);
+        let roster_free = expand_with(Vec::new());
+        assert_eq!(format!("{solo:?}"), format!("{roster_free:?}"));
+        assert!(
+            !solo.iter().any(|step| matches!(step, Step::Owned { .. })),
+            "nobody to hand anything to, so nothing is handed: the steps stay inline"
+        );
+        assert_eq!(
+            solo.iter()
+                .filter(|step| matches!(step, Step::Act(a) if matches!(&a.kind, ActionKind::Place { entity } if entity.name == "lab")))
+                .count(),
+            1,
+            "a lone bot builds one lab: the second would cost it more than it saves"
+        );
+        assert_eq!(research_step(&solo).duration, 22_500);
+    }
+
+    /// The break-even for a second lab, on the fixture's numbers, both ways
+    /// round: `automation` never earns one, `logistic-science-pack`'s shape
+    /// (75 units at 300 ticks) earns exactly one on four bots and none alone.
+    #[test]
+    fn a_second_lab_pays_for_green_on_four_bots_and_not_for_red() {
+        let s = PlanState::from_world(
+            Arc::new(crate::test_world::world_with_long_research(75, 300.0)),
+            &[BotId(1)],
+        );
+        let bill = lab_bill_ticks(&s);
+        let green = s.technology("long-research").expect("fixture technology");
+        let red = PlanState::from_world(
+            Arc::new(crate::test_world::world_with_technologies()),
+            &[BotId(1)],
+        )
+        .technology("automation")
+        .expect("fixture technology");
+
+        assert_eq!(labs_worth_building(&green, bill, 4), 2);
+        assert_eq!(labs_worth_building(&green, bill, 1), 1);
+        assert_eq!(labs_worth_building(&red, bill, 4), 1);
+        assert_eq!(labs_worth_building(&red, bill, 1), 1);
+        // The rule, not the table: the n+1-th lab pays while it saves more
+        // than a k-th of the bill plus an insert.
+        let saving =
+            |labs| research_ticks_in_labs(&green, labs) - research_ticks_in_labs(&green, labs + 1);
+        assert!(
+            saving(1) > bill / 4 + TRANSFER_TICKS,
+            "the second lab pays on four bots"
+        );
+        assert!(saving(2) <= bill / 4 + TRANSFER_TICKS, "the third does not");
+        assert!(
+            saving(1) <= bill + TRANSFER_TICKS,
+            "and alone, not even the second"
+        );
+    }
+
+    /// What a lab costs from raw materials at character speed, worked from
+    /// the fixture's vanilla recipes the way
+    /// `craft_ticks_prices_a_drill_and_a_furnace_from_raw_materials` works a
+    /// drill: a plate is 312 (mine 120, smelt 192), so
+    ///
+    /// * ten gears: 10 × 30 + 20 plates × 312 = 6,540;
+    /// * ten circuits: 10 × 30 + 10 plates × 312 + thirty cable (15 crafts
+    ///   × 30 + 15 copper × 312) = 300 + 3,120 + 5,130 = 8,550;
+    /// * four belts: 2 crafts × 30 + 2 plates × 312 + 2 gears (2 × 30 + 4 ×
+    ///   312) = 60 + 624 + 1,308 = 1,992;
+    /// * the lab itself, 2 s: 120; and its placement: 30.
+    #[test]
+    fn lab_bill_is_priced_from_raw_materials() {
+        let s = PlanState::from_world(
+            Arc::new(crate::test_world::world_with_technologies()),
+            &[BotId(1)],
+        );
+        assert_eq!(
+            lab_bill_ticks(&s),
+            120 + 6_540 + 8_550 + 1_992 + PLACE_TICKS
+        );
+    }
+
+    /// `dealing_width` on the fixture's numbers (a pack is 300 ticks): ten
+    /// packs go four ways, five go three, three stay with the chain actor,
+    /// and a roster of one deals nothing however large the bill.
+    #[test]
+    fn a_pack_bill_is_dealt_as_wide_as_it_pays() {
+        assert_eq!(
+            dealing_width(3_000, 4),
+            4,
+            "10 packs: 750 + 4 × 310 + 10 < 3,000"
+        );
+        assert_eq!(
+            dealing_width(1_500, 4),
+            3,
+            "5 packs: four ways is 1,635, three is 1,440"
+        );
+        assert_eq!(dealing_width(900, 4), 1, "3 packs: even two ways is 1,080");
+        assert_eq!(dealing_width(22_500, 1), 1);
+        assert_eq!(dealing_width(0, 4), 1);
+    }
+
+    /// `deal_by_load`: equal work with no preloads, remainder to the lowest
+    /// id; a participant already carrying a lab's worth gets that much less.
+    #[test]
+    fn packs_are_dealt_by_load_so_a_lab_builder_crafts_fewer() {
+        let even = deal_by_load(10, &[(BotId(1), 0), (BotId(2), 0), (BotId(3), 0)], 300);
+        assert_eq!(
+            even,
+            BTreeMap::from([(BotId(1), 4), (BotId(2), 3), (BotId(3), 3)])
+        );
+        let loaded = deal_by_load(10, &[(BotId(1), 0), (BotId(2), 1_500), (BotId(3), 0)], 300);
+        assert_eq!(
+            loaded,
+            BTreeMap::from([(BotId(1), 5), (BotId(2), 0), (BotId(3), 5)]),
+            "bot 2 is carrying five packs' worth already"
+        );
+        // 7/3 and 6/4 are equally uneven (2,100 against 1,800 either way);
+        // the tie goes to the lowest id, so the deal is a function of its
+        // inputs and nothing else.
+        let heavy = deal_by_load(10, &[(BotId(1), 0), (BotId(2), 900)], 300);
+        assert_eq!(heavy, BTreeMap::from([(BotId(1), 7), (BotId(2), 3)]));
+        assert_eq!(
+            deal_by_load(0, &[(BotId(1), 0)], 300),
+            BTreeMap::from([(BotId(1), 0)])
+        );
+        assert_eq!(deal_by_load(3, &[], 300), BTreeMap::new());
+    }
+
+    /// The trigger prerequisite -- `steam-power`, fired by crafting fifty
+    /// iron plates -- is the lead supplier's, and so is the first lab; the
+    /// research itself stays the chain actor's. Bot 2 states the research,
+    /// bot 3 makes the plates and stands the lab up.
+    #[test]
+    fn a_trigger_prerequisite_and_the_first_lab_go_to_the_lead_supplier() {
+        let bots = [BotId(2), BotId(3), BotId(4)];
+        let mut s = PlanState::from_world(
+            Arc::new(crate::test_world::world_with_trigger_prerequisite()),
+            &bots,
+        );
+        crate::test_world::with_steam_power(&mut s);
+        let net = expand(
+            &[Goal::Researched("automation".into())],
+            &s,
+            &registry_for(&bots),
+            BotId(2),
+        )
+        .expect("the goal expands");
+        let owner = |a: &Action| net.chain_of(a.id).and_then(|c| net.owner_of(c));
+
+        let trigger = net
+            .actions()
+            .find(|a| a.eff.contains(&Effect::Researched("steam-power".into())))
+            .expect("the trigger's production carries the effect");
+        assert_eq!(owner(trigger), Some(BotId(3)), "the trigger is the lead's");
+
+        let lab = net
+            .actions()
+            .find(|a| matches!(&a.kind, ActionKind::Place { entity } if entity.name == "lab"))
+            .expect("one lab is placed");
+        assert_eq!(owner(lab), Some(BotId(3)), "and so is the lab");
+        assert_eq!(
+            net.actions()
+                .filter(|a| matches!(&a.kind, ActionKind::Craft { item, .. } if item == "lab"))
+                .count(),
+            1,
+            "one lab is crafted, by the bot that places it"
+        );
+
+        let research = research_actions(&net);
+        assert_eq!(research.len(), 1);
+        assert!(
+            matches!(owner(research[0]), None | Some(BotId(2))),
+            "the research is not the lead's: it stays with whoever stated it, got {:?}",
+            owner(research[0])
+        );
+
+        schedule(&net, &s, &bots).expect("and it schedules");
+    }
 }
 
 #[cfg(test)]
@@ -12954,10 +13827,18 @@ mod stockpiling {
     ///
     /// The shared fixture's iron seats nine. A four-bot roster's stockpile
     /// wants `k + 2 * known = 3 + 8` of them, so `worth_stockpiling` refuses
-    /// every bill, and what the roster does with the patch instead is the
-    /// twenty-ore shared smelt: three bots inserting iron ore into the chain
-    /// owner's furnace. That is asserted directly, because "no chest" alone
-    /// would also be true of a plan that lost the smelt as well.
+    /// every bill, and what the roster does with the patch instead is
+    /// asserted directly, because "no chest" alone would also be true of a
+    /// plan that lost its parallel gathering as well.
+    ///
+    /// Until 2026-09-05 that was the twenty-ore shared smelt: three bots
+    /// inserting iron ore into the chain owner's furnace, for the lab. The
+    /// lab is now the lead supplier's, built out of what the trigger's fifty
+    /// plates leave over on that same bot, so there is no twenty-ore bill
+    /// left to converge on -- and the patch is worked by two runners at
+    /// once instead: the lead digging for the plant, the chain actor for its
+    /// share of the packs. Two bots on the patch is the property; the
+    /// 21,382-tick makespan (28,951 before) is what it buys.
     ///
     /// Equality rather than `<=`: the trees are the only difference between
     /// the two worlds, and with no chest to build nothing reads them, so a
@@ -12982,7 +13863,7 @@ mod stockpiling {
             "with no chest to build, the trees should change nothing"
         );
 
-        let mut ore_suppliers: BTreeSet<BotId> = BTreeSet::new();
+        let mut diggers: BTreeSet<BotId> = BTreeSet::new();
         for step in &with_trees.steps {
             let StepKind::Act { action, .. } = step.what else {
                 continue;
@@ -12990,18 +13871,16 @@ mod stockpiling {
             let Some(action) = net.action(action) else {
                 continue;
             };
-            if let ActionKind::Insert { entity, item, .. } = &action.kind
-                && entity != BUFFER_CHEST
+            if let ActionKind::Mine { item, .. } = &action.kind
                 && item == "iron-ore"
-                && step.bot != BotId(1)
             {
-                ore_suppliers.insert(step.bot);
+                diggers.insert(step.bot);
             }
         }
         assert!(
-            ore_suppliers.len() >= 2,
-            "the seats the chest gave up were meant for the shared smelt, which did not fire: \
-             suppliers {ore_suppliers:?}"
+            diggers.len() >= 2,
+            "the seats the chest gave up are for the roster to dig on at once, and it did not: \
+             diggers {diggers:?}"
         );
     }
 

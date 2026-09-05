@@ -226,9 +226,18 @@ Built as `Goal::Charted { around, radius }` → `method::scout::Scout` →
 `ActionKind::Survey` (branch `bots-that-chart`, `7388202a`, not merged):
 square Chebyshev rings walked nearest-first, no new mod verb.
 
+**"Charted" is the wrong word for what this project does, and it has misled
+both sessions.** Nothing in any run is ever charted: `force.is_chunk_charted`
+is false everywhere, including under a character's own feet. The model's
+resources are **ingested from `on_chunk_generated`**, so what it knows is
+what the game has *generated*, not what anyone has seen. The other session
+withdrew a claim of its own on this basis — "copper's nearest charted tile
+is 55 tiles" was really the nearest *ingested* tile — and the correction
+matters because the two words point at different APIs.
+
 **What the model cannot see.** At t=0 on seed 31337 there are **400 chunks
-generated and zero charted**, and the model's 2,255 resource tiles come from
-`on_chunk_generated` — not from charting. Against the map within ±672:
+generated and zero charted**, and the model's 2,255 resource tiles all come
+from generation. Against the map within ±672:
 
 | | t=0 model | actually there |
 |---|---:|---:|

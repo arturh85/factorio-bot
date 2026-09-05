@@ -8,6 +8,7 @@ use crate::method::{ExpansionCtx, Method, Step};
 use crate::state::PlanState;
 use factorio_bot_core::blueprint::{Blueprint, BlueprintEntity, decode};
 use factorio_bot_core::types::{FactorioEntity, Pos, Position};
+use std::collections::BTreeMap;
 
 /// Split a block into one band per bot, **balanced by entity count**.
 ///
@@ -190,7 +191,31 @@ impl Method for BuildBlock {
             }
             let bot = roster.get(band).copied().unwrap_or(ctx.chain_actor);
             let build = ctx.state.bot(bot).map(|b| b.build_distance).unwrap_or(10.0);
-            let mut block = Vec::with_capacity(indices.len());
+
+            // The bill, stated as `Goal::Have` subgoals -- the same pattern
+            // `connect.rs` uses for its belt and inserter counts -- so the
+            // existing shortfall machinery goes and gets what this band is
+            // short of before the first placement, rather than refusing with
+            // a bare `HasItem` precondition failure. Counted from `owned`,
+            // which is already only what is NOT standing, so replanning a
+            // block that is partly built bills only the remainder and never
+            // double-counts what a previous expansion (or the live world)
+            // already placed. A `BTreeMap` keeps the emission order -- and
+            // so the `ActionId` allocation the tie-break in `schedule`
+            // depends on -- alphabetical and deterministic rather than
+            // hash-order.
+            let mut bill: BTreeMap<String, u32> = BTreeMap::new();
+            for idx in indices {
+                *bill.entry(owned[*idx].name.clone()).or_insert(0) += 1;
+            }
+            let mut block = Vec::with_capacity(bill.len() + indices.len());
+            for (item, count) in bill {
+                block.push(Step::Subgoal(Goal::Have {
+                    item,
+                    count,
+                    whose: Holder::Share(bot),
+                }));
+            }
             for idx in indices {
                 let e = &owned[*idx];
                 let world = anchor.add(&e.offset);
@@ -298,6 +323,115 @@ mod tests {
         assert!(
             reason.contains("cannot yet express"),
             "the refusal must say the placement path cannot express the half: {reason}"
+        );
+    }
+
+    /// Every `Goal::Have` stated anywhere in `steps`, summed by item across
+    /// however many bands (and therefore `Step::Owned` blocks) it is spread
+    /// over. A one-bot roster puts the whole bill in one band, but this
+    /// stays correct for a multi-bot split too, which is what the coming
+    /// live task actually runs.
+    fn have_bills(steps: &[Step]) -> BTreeMap<String, u32> {
+        let mut out = BTreeMap::new();
+        for step in steps {
+            match step {
+                Step::Subgoal(Goal::Have { item, count, .. }) => {
+                    *out.entry(item.clone()).or_insert(0) += *count;
+                }
+                Step::Owned { steps, .. } => {
+                    for (item, count) in have_bills(steps) {
+                        *out.entry(item).or_insert(0) += count;
+                    }
+                }
+                _ => {}
+            }
+        }
+        out
+    }
+
+    /// The brief's own requirement: the bill must be stated as `Goal::Have`
+    /// subgoals, or a roster starting with nothing but a freeplay inventory
+    /// (the coming live task's four bots) never gets off the ground --
+    /// `HasItem` preconditions alone only plan a block bots already happen
+    /// to be carrying in full.
+    ///
+    /// `MinerLine` (`crates/core/tests/blueprints/miner_line.txt`) is the
+    /// fixture `the_miner_line_decodes_to_its_37_entities` in
+    /// `crates/core/tests/blueprint_decode.rs` already pins at 13
+    /// `electric-mining-drill`, 21 `transport-belt` and 3
+    /// `small-electric-pole` -- the counts asserted here are not invented,
+    /// they are that same fixture's own numbers.
+    #[test]
+    fn a_plan_for_miner_line_on_an_empty_world_bills_its_materials() {
+        use crate::ids::BotId;
+        use factorio_bot_core::test_utils::fixture_world;
+        use std::sync::Arc;
+
+        let blueprint = include_str!("../../../core/tests/blueprints/miner_line.txt")
+            .trim()
+            .to_string();
+        let mut ctx = ExpansionCtx::new(
+            PlanState::from_world(Arc::new(fixture_world()), &[BotId(1)]),
+            BotId(1),
+        );
+        let goal = Goal::Built {
+            blueprint,
+            anchor: Position::new(0.0, 0.0),
+        };
+
+        let steps = BuildBlock
+            .expand(&goal, &mut ctx)
+            .expect("an empty world plans a fresh block");
+
+        let bill = have_bills(&steps);
+        assert_eq!(
+            bill,
+            BTreeMap::from([
+                ("electric-mining-drill".to_string(), 13),
+                ("small-electric-pole".to_string(), 3),
+                ("transport-belt".to_string(), 21),
+            ]),
+            "the bill states exactly what MinerLine's 37 entities need, and \
+             nothing else: {bill:?}"
+        );
+    }
+
+    /// **Must not double-count.** A block already standing has nothing left
+    /// to place, so it must ask for nothing either -- billing the full 37
+    /// items for a block that is already there would send bots gathering
+    /// materials for a build with no work left to do.
+    #[test]
+    fn a_block_already_standing_bills_nothing() {
+        use crate::ids::BotId;
+        use factorio_bot_core::test_utils::fixture_world;
+        use std::sync::Arc;
+
+        let blueprint = include_str!("../../../core/tests/blueprints/miner_line.txt")
+            .trim()
+            .to_string();
+        let bp = decode(&blueprint).expect("fixture decodes");
+        let anchor = Position::new(0.0, 0.0);
+
+        let mut ctx = ExpansionCtx::new(
+            PlanState::from_world(Arc::new(fixture_world()), &[BotId(1)]),
+            BotId(1),
+        );
+        // Stand every entity the blueprint names, exactly where `expand`
+        // would look for it, so `already_stands` finds all 37 already there.
+        for e in &bp.entities {
+            let world = anchor.add(&e.offset);
+            let entity = entity_for(&ctx.state, &e.name, &world, e.direction);
+            ctx.state.create_entity(entity);
+        }
+
+        let goal = Goal::Built { blueprint, anchor };
+        let steps = BuildBlock
+            .expand(&goal, &mut ctx)
+            .expect("a fully-standing block plans cleanly");
+
+        assert!(
+            steps.is_empty(),
+            "nothing to place means nothing to bill either: {steps:?}"
         );
     }
 }

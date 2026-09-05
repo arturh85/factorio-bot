@@ -1085,3 +1085,99 @@ Cannot find type definition file for 'web-bluetooth'` after a
 (`openapi.contract.spec.ts`, 274 assertions including the new
 `reach_corrections`) passes. Environment, not this change, but it means the
 frontend half of the seam was verified by vitest alone here.
+
+### machinecount
+
+**Every machine now carries a lifetime count of the items it has made, and
+says how that number was obtained.** `produced` plus `produced_source`
+(`game` / `accumulated` / `unavailable` / `not-a-producer`) on every machine
+row; `tools/run_analysis.py` splits an interval's output into machine-made and
+hand-made by subtraction instead of inferring it from feeding verbs and
+statuses. Branch `per-machine-production`, from `de71321a`.
+
+**A crafting machine is counted by the game, and the game is right.** In
+`run-1788638239-43349` (seed 31337, headless, 4 bots, 5x, green satisfied at
+15:51) the 27 stone furnaces sum to **859 = 670 iron-plate + 189 copper-plate**
+and the assemblers to **31 = 24 transport-belt + 7 logistic-science-pack** --
+each exactly equal to the force's own `production.made`. So the standing
+suspicion that `products_finished` might be a reading bug is settled: it is
+not, and a machine reporting a low or zero count really did not produce.
+`products_finished` counts **crafts**, not items, so the mod multiplies each
+new craft by the recipe's yield -- a `copper-cable` assembler reads 204 next to
+a `products_finished` of 102, and a record that summed the raw counter against
+`production.made` would be short by half and look like lost output.
+
+**A mining drill is counted by nobody, and getting it right took three live
+measurements that no stub test could have replaced.** Factorio 2.1.17 gives a
+drill no lifetime counter, no `mining_progress` attribute at all (only
+`bonus_mining_progress`, the productivity bar), no drill inventory define and
+no drill-mined event -- checked in `runtime-api.json`, not remembered. The only
+signal is the fall in the `amount` of the resource it is working. Each version
+below passed every stub test in the file and was wrong on a live server:
+
+| keyed on | counted | actually mined |
+|---|---|---|
+| `mining_target.unit_number` | **0** | 133 |
+| the target's position, against last tick's target | 120 | 133 |
+| per-tile memory, reading only the current target | 130 | 133 |
+| every tile in the drill's `mining_area`, per tick | **133** | 133 |
+
+1. **A resource entity has no `unit_number`.** `mining_target.unit_number`
+   comes back nil while `.amount` reads 290. Keying on it credited nothing at
+   all -- 0 for a drill that had just mined 133 iron ore -- and the fixture
+   that hid it was one this branch wrote, giving its resource a unit number the
+   game does not give. A resource is identified by its position.
+2. **A drill works several tiles and switches between them**, so comparing a
+   reading to whatever the drill was pointed at *last tick* throws away the
+   item mined at each switch: 120 of 133.
+3. **The drill mines a tile and moves the pointer in the same tick**, so the
+   tile that just lost an item is no longer the one the drill names, and that
+   item is stranded until the drill points at that tile again -- which, if it
+   has run out of fuel, is never: 130 of 133, one per tile in the area.
+
+So the accumulator watches **the tiles, not the pointer**: every resource in
+the drill's `mining_area`, a set fixed and primed when tracking starts,
+read per tick (4 amount reads for a burner drill, 25 for the biggest), with a
+depleted tile's remainder credited from `on_resource_depleted`. Measured
+**exact, 133 of 133**. It remains an upper bound when two drills' areas overlap
+a tile -- both see the same fall, both take credit -- which is flagged as
+`produced_shared` rather than hidden, and it cannot count an infinite resource
+at all (a pumpjack's crude oil never falls), which reports
+`produced_source: "unavailable"` rather than a zero that reads as "made
+nothing".
+
+**A stone furnace names no recipe when it is idle.** `get_recipe()` answers nil
+on an empty furnace, so the last machine sample of a run whose furnaces have
+gone quiet names no item at all; reading only that row filed all 859 items of
+this run's furnace output under "unattributed". The analysis uses the last
+recipe a machine was *ever seen with*, and lists a machine that held more than
+one inside an interval as `ambiguous` rather than splitting its output by
+guess.
+
+**Found and not fixed.**
+
+(a) **`run-1788638239-43349`'s drill counters are all zero and all wrong** --
+it ran on version 1 of the accumulator. Its own record contradicts them: the
+plan carries a `fuel` step for each of the 10 `place burner-mining-drill`
+steps, all 10 fuel actions settled `success`, all 10 drills held coal in at
+least one sample, and all 10 read `working` -- 414 `working` rows against 928
+`no_fuel`, from tick 1,800 to 46,200. So **how the 670 iron and 189 copper ore
+split between drill output and hand mining is still unknown**, and one re-run
+on the fixed mod answers it outright. The `hand-made` verdicts that run's
+analysis prints for the two ores are an artefact of the broken counter, not a
+finding.
+
+(b) **A drill spends most of its life out of fuel** -- 928 of 1,342 drill
+sample rows. That is now measurable per drill in items rather than in status
+readings, and it is the obvious next question for the rate work.
+
+(c) **The counters accumulate only while a sampling session is open.** For a
+crafting machine that costs nothing (the game kept the count and the mod
+re-derives it), but a drill's number means "since recording started". Every
+recorded run starts its session before placing anything, so the two coincide
+today.
+
+(d) **The frontend half of the seam was not run here.** The worktree has no
+`node_modules` and installing one was not worth a build slot on a busy box;
+the Rust snapshot test passes and `types.ts` / `openapi.contract.spec.ts` were
+updated in step, so the contract test is the one check outstanding.

@@ -457,6 +457,34 @@ export interface MachineSample {
      */
     products_finished: number | null;
     /**
+     * This machine's lifetime item count, in ITEMS rather than crafts: a
+     * `copper-cable` craft yields two, so an assembler with
+     * `products_finished: 3` reports `produced: 6`. Between two samples, the
+     * difference is what this machine made -- which is what turns "who made
+     * this output" from an inference into arithmetic.
+     *
+     * `null` for a machine that makes no items (lab, boiler, steam engine,
+     * chest) and for a producer whose count cannot be obtained.
+     * `produced_source` says which, always.
+     */
+    produced: number | null;
+    /**
+     * How `produced` was obtained: `game` (the game's own craft counter times
+     * the recipe yield), `accumulated` (the mod counted it per tick from the
+     * fall in the resource a drill is mining -- Factorio gives a drill no
+     * counter at all), `unavailable` (a producer this cannot count, such as a
+     * pumpjack on infinite crude oil) or `not-a-producer` (a lab, boiler,
+     * engine or chest). `null` only for a run archived before the counters
+     * existed.
+     */
+    produced_source: string | null;
+    /**
+     * Set when this drill shared its resource tile with another drill and
+     * both were credited with the same fall: the count is then an upper bound
+     * and the sum double-counts.
+     */
+    produced_shared: boolean | null;
+    /**
      * For a mining drill, the resource under it -- what separates
      * `no_minable_resources` on a depleted patch from a drill that was never
      * placed over ore.

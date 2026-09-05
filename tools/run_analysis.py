@@ -1883,10 +1883,206 @@ def interval_power(force: list[dict], lo: int, hi: int) -> dict:
     return out
 
 
+def machine_production(samples: list[dict], lo: int, hi: int) -> dict:
+    """What each machine itself produced in ``(lo, hi]``, from its own counter.
+
+    This is arithmetic where everything around it is inference. Each machine
+    row carries a lifetime ``produced`` count and a ``produced_source`` saying
+    how it was obtained (``game`` for a crafting machine's
+    ``products_finished`` times the recipe yield, ``accumulated`` for a mining
+    drill the mod counted itself, ``unavailable`` for a producer whose count
+    cannot be had, ``not-a-producer`` for a lab, boiler, engine or chest). The
+    difference between two samples is what that machine made in between.
+
+    An item is named from the machine's ``recipe`` (a crafting machine) or
+    ``mining`` (a drill), and **not from the last sample alone**. A stone
+    furnace has no recipe when its input is empty -- ``get_recipe()`` answers
+    nil -- so the final row of a run whose furnaces have gone quiet names no
+    item at all, and reading only that row files every plate a run smelted
+    under "unattributed". Measured on `run-1788638239-43349`, where 859 items
+    of furnace output landed there. So the last recipe the machine was
+    *ever seen with* up to ``hi`` is what names its output.
+
+    A machine seen with more than one recipe inside the interval is attributed
+    to the last of them and listed in ``ambiguous``: splitting its output
+    between them would be a guess, and this is the honest shape of that guess
+    not being made.
+
+    ``available`` is false for a run archived before the counters existed, and
+    every caller falls back to the older status/feeding inference then. It is
+    never "the machines produced nothing": that is ``total == 0``.
+    """
+    rows = [s for s in samples if s.get("kind") == "machines"]
+    base_at = end_at = None
+    # The last item name each machine was ever seen making, up to `hi`, and how
+    # many distinct ones it showed inside the interval.
+    named: dict[str, str] = {}
+    in_interval: dict[str, set] = collections.defaultdict(set)
+    for s in rows:
+        tick = s.get("tick", 0)
+        if tick <= lo:
+            base_at = s
+        if tick <= hi:
+            end_at = s
+        else:
+            continue
+        for key, m in (s.get("machines") or {}).items():
+            item = m.get("recipe") or m.get("mining")
+            if item is None:
+                continue
+            named[key] = item
+            if tick > lo:
+                in_interval[key].add(item)
+    base_rows = (base_at or {}).get("machines") or {}
+    end_rows = (end_at or {}).get("machines") or {}
+    out: dict[str, Any] = {
+        "available": any("produced_source" in m for m in end_rows.values()),
+        "base_tick": (base_at or {}).get("tick"),
+        "end_tick": (end_at or {}).get("tick"),
+        "by_item": {},
+        "by_machine": [],
+        "total": 0,
+        "unattributed": 0,
+        "unavailable": {},
+        "no_counter": 0,
+        "shared": [],
+        # Machines that held more than one recipe inside the interval: their
+        # output is attributed to the last, and that is a choice, not a fact.
+        "ambiguous": [],
+    }
+    by_item: collections.Counter = collections.Counter()
+    by_name: dict[str, collections.Counter] = collections.defaultdict(collections.Counter)
+    unavailable: collections.Counter = collections.Counter()
+    for key, m in end_rows.items():
+        source = m.get("produced_source")
+        if source == "not-a-producer":
+            continue
+        if source == "unavailable":
+            # A producer this mechanism cannot count -- a pumpjack on infinite
+            # crude oil. Named, so its output is known to be missing from the
+            # sums rather than assumed to be zero.
+            unavailable[m.get("name") or "?"] += 1
+            continue
+        produced = m.get("produced")
+        if source is None or produced is None:
+            out["no_counter"] += 1
+            continue
+        before = (base_rows.get(key) or {}).get("produced") or 0
+        delta = produced - before
+        if delta <= 0:
+            continue
+        # The recipe on this row when it has one, else the last one this
+        # machine was seen with: an idle stone furnace reports none.
+        item = m.get("recipe") or m.get("mining") or named.get(key)
+        if len(in_interval.get(key) or ()) > 1:
+            out["ambiguous"].append(
+                {"key": key, "name": m.get("name"), "items": sorted(in_interval[key])}
+            )
+        entry = {
+            "key": key,
+            "name": m.get("name"),
+            "type": m.get("type"),
+            "item": item,
+            "produced": delta,
+            "source": source,
+            "shared": bool(m.get("produced_shared")),
+        }
+        out["by_machine"].append(entry)
+        out["total"] += delta
+        if item is None:
+            # A machine with no recipe and no mining target that nonetheless
+            # produced: countable, but not attributable to an item.
+            out["unattributed"] += delta
+            continue
+        by_item[item] += delta
+        by_name[item][m.get("name") or "?"] += delta
+        if entry["shared"]:
+            out["shared"].append(entry["name"])
+    out["by_item"] = dict(by_item)
+    out["by_name"] = {item: dict(c.most_common()) for item, c in by_name.items()}
+    out["unavailable"] = dict(unavailable.most_common())
+    return out
+
+
+def attribute_from_counters(delta: int, produced: dict, item: str, activity: dict | None) -> dict:
+    """The verdict when the machines' own counters can answer it.
+
+    No inference at all: ``machine_made`` is what the machines in this interval
+    say they made of this item, ``delta`` is what the force's statistics say
+    was made in total, and the difference is what the roster made by hand --
+    hand crafting and hand mining do not pass through any machine.
+
+    The two numbers are independent measurements of overlapping quantities, so
+    a machine total *above* the force total is a contradiction and is reported
+    as one rather than clamped away. The known cause is two drills sharing a
+    resource tile, which the row flags.
+    """
+    machine_made = produced["by_item"].get(item, 0)
+    names = ", ".join(f"{n}x{c}" for n, c in (produced.get("by_name") or {}).get(item, {}).items())
+    feed = (activity or {}).get("feed_actions")
+    fed = "" if feed is None else f"; the roster ran {feed} feeding action(s)"
+    common = {
+        "machine_made": machine_made,
+        "roster_made": max(0, delta - machine_made),
+        "source": "counters",
+    }
+    if machine_made > delta * 1.05 + 1:
+        shared = ", ".join(sorted(set(produced.get("shared") or []))) or "none flagged"
+        return {
+            **common,
+            "verdict": "unclear",
+            "why": f"the machines' own counters say {machine_made} while the force's statistics "
+                   f"say {delta} was made -- they cannot both be right. Drills sharing a resource "
+                   f"tile double-count and are flagged: {shared}",
+        }
+    if machine_made == 0:
+        return {
+            **common,
+            "verdict": "hand-made",
+            "why": f"no machine produced any of the {delta} made in this interval -- every one of "
+                   f"them came out of the roster's own hands (hand crafting and hand mining pass "
+                   f"through no machine){fed}",
+        }
+    share = machine_made / delta if delta else 0.0
+    if share >= 0.95:
+        if feed:
+            return {
+                **common,
+                "verdict": "roster-fed",
+                "why": f"machines made {machine_made} of the {delta} ({share * 100:.0f}%) -- "
+                       f"{names} -- and the roster ran {feed} feeding action(s), so the machines "
+                       f"produced it and the bots carried what went in",
+            }
+        return {
+            **common,
+            "verdict": "factory",
+            "why": f"machines made {machine_made} of the {delta} ({share * 100:.0f}%) -- {names} "
+                   f"-- and the roster fed nothing in this interval",
+        }
+    return {
+        **common,
+        "verdict": "mixed",
+        "why": f"machines made {machine_made} of the {delta} ({share * 100:.0f}%) -- {names} -- "
+               f"and the remaining {delta - machine_made} was hand-made{fed}",
+    }
+
+
 def attribute_output(
-    delta: int | None, activity: dict | None, power: dict, machines: dict | None = None
+    delta: int | None,
+    activity: dict | None,
+    power: dict,
+    machines: dict | None = None,
+    produced: dict | None = None,
+    item: str | None = None,
 ) -> dict:
     """Who earned this interval's output: the roster, the factory, or unclear.
+
+    **Per-machine counters first.** When the run's machine rows carry them
+    (``produced`` / ``produced_source``), the split is arithmetic and
+    :func:`attribute_from_counters` does it. Everything below is the fallback
+    for a run archived before the counters existed, and it *infers*: from the
+    feeding verbs the roster dispatched, the kW drawn, and how many machines
+    read ``working``.
 
     Three verdicts, and ``unclear`` is said freely -- a wrong confident label
     is worse than an honest one:
@@ -1901,6 +2097,17 @@ def attribute_output(
     """
     if not delta:
         return {"verdict": "no output", "why": "nothing made in this interval"}
+    if produced and produced.get("available") and item is not None:
+        return attribute_from_counters(delta, produced, item, activity)
+    # Every verdict below is inferred, and says so in `source`: a reader must
+    # be able to tell a measured split from a plausible one.
+    return {"source": "inference", **_attribute_by_inference(delta, activity, power, machines)}
+
+
+def _attribute_by_inference(
+    delta: int, activity: dict | None, power: dict, machines: dict | None = None
+) -> dict:
+    """The pre-counter attribution, kept for runs archived without counters."""
     if activity is None:
         return {"verdict": "unclear", "why": "no bot activity to attribute this to (no events joined)"}
     feed = activity["feed_actions"]
@@ -2060,7 +2267,53 @@ def machine_statuses(samples: list[dict], lo: int, hi: int) -> dict:
     }
 
 
-def classify_plateau(activity: dict | None, power: dict, machines: dict) -> dict:
+def classify_plateau(
+    activity: dict | None,
+    power: dict,
+    machines: dict,
+    produced: dict | None = None,
+    item: str | None = None,
+) -> dict:
+    """Which kind of plateau this is, from the counters where they exist.
+
+    With per-machine counters the first question is answerable outright: did
+    any machine produce anything at all after the item stopped growing? Zero is
+    "the machines stopped"; a positive total with none of *this* item is "the
+    machines kept working and none of them made this" -- a plateau of one
+    product inside a factory that is still running, which the status wall
+    cannot distinguish from a dead one. The status/feeding reading is kept as
+    the ``why`` behind it, and as the whole answer for a run with no counters.
+    """
+    if produced and produced.get("available"):
+        inferred = _classify_plateau_inferred(activity, power, machines)
+        total = produced.get("total") or 0
+        of_item = (produced.get("by_item") or {}).get(item, 0) if item else 0
+        if total == 0:
+            return {
+                "kind": "the machines stopped",
+                "why": f"not one machine produced a single item after the plateau -- their own "
+                       f"lifetime counters, not an inference. {inferred['why']}",
+                "source": "counters",
+            }
+        if of_item == 0:
+            return {
+                "kind": "the machines kept working, but none made this item",
+                "why": f"machines produced {total} item(s) after the plateau and none of them was "
+                       f"{item or 'this item'} -- the factory is running and this product is not "
+                       f"part of what it is making. {inferred['why']}",
+                "source": "counters",
+            }
+        return {
+            "kind": "unclear",
+            "why": f"machines' counters say {of_item} of {item} was produced after the point the "
+                   f"force's statistics stopped growing -- the two disagree, and nothing here can "
+                   f"say which is right",
+            "source": "counters",
+        }
+    return {"source": "inference", **_classify_plateau_inferred(activity, power, machines)}
+
+
+def _classify_plateau_inferred(activity: dict | None, power: dict, machines: dict) -> dict:
     """Which kind of plateau this is: input ran out, or the factory stopped.
 
     Read off the stretch AFTER the item stopped growing. The machine statuses
@@ -2228,12 +2481,16 @@ def production_rates(
             act = interval_activity(activity, prev_t, t)
             pw = interval_power(force, prev_t, t)
             mach = machine_statuses(samples, prev_t, t)
+            # What the machines themselves say they made over this interval.
+            # Where it is available it replaces the inference entirely.
+            prod = machine_production(samples, prev_t, t)
             entry["attribution"] = {
                 "from_tick": prev_t,
                 "from_minute": prev_minute,
                 "roster": act,
                 "power": pw,
                 "machines": mach,
+                "produced": prod,
                 "no_generator": not pw.get("any_generation"),
             }
             for name in names:
@@ -2246,7 +2503,7 @@ def production_rates(
                     "rate_interval": (c - c_prev) / (m - prev_minute) if m > prev_minute else None,
                     "rate_window": (c - c_win) / win_min if win_min > 0 else None,
                 }
-                item.update(attribute_output(item["made_in_interval"], act, pw, mach))
+                item.update(attribute_output(item["made_in_interval"], act, pw, mach, prod, name))
                 entry["items"][name] = item
         return entry
 
@@ -2287,6 +2544,7 @@ def production_rates(
         tail_act = interval_activity(activity, reached["tick"], end)
         tail_pw = interval_power(force, reached["tick"], end)
         tail_mach = machine_statuses(samples, reached["tick"], end)
+        tail_prod = machine_production(samples, reached["tick"], end)
         out["plateaus"][name] = {
             "at_tick": reached["tick"],
             "at_minute": (reached["tick"] - lo) / TICKS_PER_MINUTE,
@@ -2295,7 +2553,8 @@ def production_rates(
             "roster": tail_act,
             "power": tail_pw,
             "machines": tail_mach,
-            **classify_plateau(tail_act, tail_pw, tail_mach),
+            "produced": tail_prod,
+            **classify_plateau(tail_act, tail_pw, tail_mach, tail_prod, name),
         }
 
     # When the lights came on. `None` means never: every item this run made was
@@ -2603,9 +2862,46 @@ def report_attribution(r: dict, reached: list[dict], p) -> None:
     if any((m.get("attribution") or {}).get("roster") is None for m in reached):
         p("    (a '?' row is an interval with no bot activity to attribute -- the events "
           "carried no dispatch or settle for it)")
+    counted = [m for m in reached
+               if ((m.get("attribution") or {}).get("produced") or {}).get("available")]
+    if counted:
+        p("")
+        p("    per-machine production: what the MACHINES themselves counted over each interval,")
+        p("    against what the force's statistics say was made. The difference is hand work --")
+        p("    hand crafting and hand mining pass through no machine at all.")
+        p(f"    {'mark':<8}{'machines made':>15}{'of which drills':>17}  by machine")
+        for m in counted:
+            prod = m["attribution"]["produced"]
+            drills = sum(e["produced"] for e in prod["by_machine"] if e["type"] == "mining-drill")
+            names: collections.Counter = collections.Counter()
+            for e in prod["by_machine"]:
+                names[e["name"] or "?"] += e["produced"]
+            summary = ", ".join(f"{n} {c}" for n, c in names.most_common(4)) or "nothing"
+            p(f"    {m['label']:<8}{prod['total']:>15}{drills:>17}  {summary}")
+            if prod["unavailable"]:
+                p(f"            (uncountable producers, not in the total: "
+                  f"{', '.join(f'{n}x{c}' for n, c in prod['unavailable'].items())})")
+            if prod["shared"]:
+                p(f"            (drills sharing a resource tile double-count and are flagged: "
+                  f"{', '.join(sorted(set(prod['shared'])))})")
+            if prod["ambiguous"]:
+                names = ", ".join(
+                    f"{a['name']} ({'/'.join(a['items'])})" for a in prod["ambiguous"][:4]
+                )
+                p(f"            (held more than one recipe in this interval, so their output is "
+                  f"attributed to the last: {names})")
+            if prod["unattributed"]:
+                p(f"            ({prod['unattributed']} item(s) from a machine that never named a "
+                  f"recipe or a resource -- countable, not attributable)")
+            if prod["no_counter"]:
+                p(f"            ({prod['no_counter']} machine row(s) carried no counter)")
     p("")
     p("    verdict per item and interval -- `unclear` is said freely; a wrong confident label")
     p("    is worse than an honest one")
+    if counted:
+        p("    (these are counter arithmetic, not inference: `hand-made` means no machine made any")
+        p("     of it, `mixed` means both, `factory`/`roster-fed` mean the machines made it and the")
+        p("     roster respectively did not or did carry the inputs)")
     for name in r["items"]:
         cells = []
         for m in reached:
@@ -2783,6 +3079,11 @@ def machines_at(samples: list[dict]) -> dict | None:
                     "recipes": set(),
                     "networks": set(),
                     "products_finished": 0,
+                    # The lifetime ITEM count, which is not the craft count:
+                    # a copper-cable craft yields two.
+                    "produced": 0,
+                    "produced_source": None,
+                    "produced_shared": False,
                     "ever_crafting": False,
                     "samples": 0,
                     # For a chest, the count that matters: how much of the run
@@ -2801,6 +3102,12 @@ def machines_at(samples: list[dict]) -> dict | None:
             entry["products_finished"] = max(
                 entry["products_finished"], m.get("products_finished") or 0
             )
+            # Also monotonic, and the number the owner asked for: how many
+            # items this one machine has made in its life.
+            entry["produced"] = max(entry["produced"], m.get("produced") or 0)
+            if m.get("produced_source") is not None:
+                entry["produced_source"] = m["produced_source"]
+            entry["produced_shared"] = entry["produced_shared"] or bool(m.get("produced_shared"))
             entry["ever_crafting"] = entry["ever_crafting"] or bool(m.get("crafting"))
             if not (m.get("output") or m.get("input") or m.get("fuel")):
                 entry["empty_samples"] += 1
@@ -2827,7 +3134,14 @@ def machines_at(samples: list[dict]) -> dict | None:
         # is enough: a machine can finish a craft between two samples without
         # ever being caught mid-craft, and `working` can be true for a machine
         # whose output is blocked before anything completes.
-        worked = statuses.get("working", 0) > 0 or entry["products_finished"] > 0
+        worked = (
+            statuses.get("working", 0) > 0
+            or entry["products_finished"] > 0
+            # A burner drill is never caught `working` often and has no craft
+            # counter at all; its accumulated item count is the only evidence
+            # it ever mined anything.
+            or entry["produced"] > 0
+        )
         nets = sorted(entry["networks"])
         # A chest is sampled alongside the machines because an empty one is
         # why a working cell stops, but it has no `status` and can never be
@@ -2862,6 +3176,9 @@ def machines_at(samples: list[dict]) -> dict | None:
                 # machine that is not electric, or is wired to nothing.
                 "orphan_networks": [n for n in nets if n not in sub_to_net],
                 "products_finished": entry["products_finished"],
+                "produced": entry["produced"],
+                "produced_source": entry["produced_source"],
+                "produced_shared": entry["produced_shared"],
                 "worked": worked,
             }
         )
@@ -3385,6 +3702,38 @@ def report(a: dict, out=sys.stdout, top: int = 12) -> None:
         if finished:
             top_finished = sorted(finished.items(), key=lambda kv: -kv[1])[:MACHINE_ROWS]
             p(f"    products finished: {dict(top_finished)}")
+        # The lifetime item count per machine -- the owner's number. Separate
+        # from `products finished` above because they are different units: a
+        # craft is not an item wherever the recipe yields more than one, and a
+        # mining drill has no craft counter at all.
+        produced = [m for m in mach["machines"] if (m.get("produced") or 0) > 0]
+        if produced:
+            total = sum(m["produced"] for m in produced)
+            by_name: collections.Counter = collections.Counter()
+            for m in produced:
+                by_name[m["name"] or "?"] += m["produced"]
+            p(f"    items produced by machines over the whole run: {total} "
+              f"({dict(by_name.most_common())})")
+            top = sorted(produced, key=lambda m: -m["produced"])[:MACHINE_ROWS]
+            p("    per machine: " + ", ".join(
+                f"{m['name']}@[{(m['position'] or {}).get('x')}, {(m['position'] or {}).get('y')}]"
+                f"={m['produced']}"
+                + ("*" if m.get("produced_shared") else "")
+                for m in top
+            ))
+            if any(m.get("produced_shared") for m in produced):
+                p("      (* this drill shared a resource tile with another and both were "
+                  "credited: an upper bound, and the sum double-counts)")
+        uncountable = [m for m in mach["machines"] if m.get("produced_source") == "unavailable"]
+        if uncountable:
+            p(f"    {len(uncountable)} producer(s) whose output cannot be counted at all "
+              f"(an infinite resource never falls): "
+              f"{', '.join(sorted({m['name'] or '?' for m in uncountable}))}")
+        missing = [m for m in mach["machines"]
+                   if m.get("produced_source") is None and m["type"] not in CONTAINER_TYPES]
+        if missing and len(missing) == len(mach["machines"]):
+            p("    (this run carries no per-machine production counters -- it predates them, "
+              "and every attribution above it is inference, not arithmetic)")
     p("")
 
 

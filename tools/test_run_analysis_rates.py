@@ -359,6 +359,244 @@ class AttributionTest(unittest.TestCase):
         self.assertIn("verdict per item and interval", text)
 
 
+def counted_furnace(produced: int, status: str = "working") -> dict:
+    """A stone furnace whose lifetime item count the game supplied."""
+    m = furnace(status)
+    m["recipe"] = "iron-plate"
+    m["produced"] = produced
+    m["produced_source"] = "game"
+    return m
+
+
+def counted_drill(produced: int, shared: bool = False) -> dict:
+    """A burner drill, counted by the mod because Factorio counts nothing."""
+    m = {
+        "name": "burner-mining-drill",
+        "type": "mining-drill",
+        "position": {"x": 3.0, "y": 3.0},
+        "status": "working",
+        "mining": "iron-ore",
+        "produced": produced,
+        "produced_source": "accumulated",
+        "input": {},
+        "output": {},
+        "fuel": {"coal": 2},
+    }
+    if shared:
+        m["produced_shared"] = True
+    return m
+
+
+class CounterAttributionTest(unittest.TestCase):
+    """The split by arithmetic: what each machine counted, against the force total.
+
+    Hand crafting and hand mining pass through no machine, so the difference
+    between "what the force made" and "what the machines say they made" is the
+    roster's own hands. Before the counters existed this was inferred from
+    feeding-verb counts and machine statuses and was often honestly
+    ``unclear``; these cases are the ones the inference could not settle.
+    """
+
+    def rates(self, samples, events=(), marks=(5,), hi=None):
+        events = sorted(events, key=lambda e: e["tick"])
+        joined, _ = ra.join_actions(events)
+        act = ra.bot_activity(events, joined, [1]) if events else None
+        return ra.production_rates(
+            samples, ORIGIN, hi or (ORIGIN + 5 * TPM), marks=marks, activity=act
+        )
+
+    def curve(self, per_beat=5, gen=0.0, con=0.0, upto=5):
+        return [
+            powered_force_sample(ORIGIN + i * 300, {"iron-plate": i * per_beat}, gen, con)
+            for i in range(0, upto * 12 + 1)
+        ]
+
+    def machines(self, rows_at):
+        """``rows_at(i) -> machines dict`` on the same 300-tick beat."""
+        return [machines_sample(ORIGIN + i * 300, rows_at(i)) for i in range(0, 61)]
+
+    def test_machines_made_all_of_it_and_nobody_fed_them(self):
+        samples = self.curve(gen=900.0, con=150.0)
+        samples += self.machines(lambda i: {"1": counted_furnace(i * 5)})
+        r = self.rates(samples, other_events([ORIGIN + 600]))
+        item = r["marks"][0]["items"]["iron-plate"]
+        self.assertEqual(item["verdict"], "factory")
+        self.assertEqual(item["source"], "counters")
+        self.assertEqual(item["machine_made"], 300)
+        self.assertEqual(item["roster_made"], 0)
+        self.assertIn("machines made 300 of the 300", item["why"])
+
+    def test_machines_made_it_while_bots_carried_the_inputs(self):
+        """The case the inference calls `unclear`: power drawn AND bots feeding."""
+        samples = self.curve(gen=900.0, con=150.0)
+        samples += self.machines(lambda i: {"1": counted_furnace(i * 5)})
+        r = self.rates(samples, feeding_events([ORIGIN + 600 * i for i in range(1, 15)]))
+        item = r["marks"][0]["items"]["iron-plate"]
+        self.assertEqual(item["verdict"], "roster-fed")
+        self.assertEqual(item["machine_made"], 300)
+        self.assertIn("the bots carried what went in", item["why"])
+
+    def test_no_machine_made_any_of_it_is_hand_made(self):
+        """A furnace stood there all run and produced nothing; the plates are hand crafts."""
+        samples = self.curve(gen=900.0, con=150.0)
+        samples += self.machines(lambda i: {"1": counted_furnace(0, status="no_fuel")})
+        r = self.rates(samples, other_events([ORIGIN + 600]))
+        item = r["marks"][0]["items"]["iron-plate"]
+        self.assertEqual(item["verdict"], "hand-made")
+        self.assertEqual(item["machine_made"], 0)
+        self.assertEqual(item["roster_made"], 300)
+        self.assertIn("no machine produced any", item["why"])
+
+    def test_both_at_once_is_mixed_not_unclear(self):
+        samples = self.curve(gen=900.0, con=150.0)
+        samples += self.machines(lambda i: {"1": counted_furnace(i * 2)})
+        r = self.rates(samples, feeding_events([ORIGIN + 600]))
+        item = r["marks"][0]["items"]["iron-plate"]
+        self.assertEqual(item["verdict"], "mixed")
+        self.assertEqual(item["machine_made"], 120)
+        self.assertEqual(item["roster_made"], 180)
+        self.assertIn("the remaining 180 was hand-made", item["why"])
+
+    def test_a_drill_is_attributed_to_the_ore_it_mines(self):
+        samples = [
+            powered_force_sample(ORIGIN + i * 300, {"iron-ore": i * 4, "iron-plate": i * 5}, 0.0, 0.0)
+            for i in range(0, 61)
+        ]
+        samples += self.machines(
+            lambda i: {"1": counted_furnace(i * 5), "2": counted_drill(i * 4)}
+        )
+        r = self.rates(samples, other_events([ORIGIN + 600]))
+        ore = r["marks"][0]["items"]["iron-ore"]
+        self.assertEqual(ore["machine_made"], 240)
+        self.assertEqual(ore["verdict"], "factory")
+        prod = r["marks"][0]["attribution"]["produced"]
+        self.assertEqual(prod["by_item"], {"iron-plate": 300, "iron-ore": 240})
+        self.assertEqual(prod["total"], 540)
+
+    def test_two_drills_on_one_tile_are_reported_as_a_contradiction(self):
+        """Both saw the same fall, so their sum exceeds what the force made."""
+        samples = [
+            powered_force_sample(ORIGIN + i * 300, {"iron-ore": i * 4}, 0.0, 0.0)
+            for i in range(0, 61)
+        ]
+        samples += self.machines(lambda i: {
+            "1": counted_drill(i * 4, shared=True),
+            "2": counted_drill(i * 4, shared=True),
+        })
+        r = self.rates(samples, other_events([ORIGIN + 600]))
+        ore = r["marks"][0]["items"]["iron-ore"]
+        self.assertEqual(ore["verdict"], "unclear")
+        self.assertIn("cannot both be right", ore["why"])
+        self.assertIn("burner-mining-drill", ore["why"])
+
+    def test_an_uncountable_producer_is_named_not_counted_as_zero(self):
+        samples = self.curve()
+        pump = {
+            "name": "pumpjack", "type": "mining-drill", "position": {"x": 1.0, "y": 1.0},
+            "status": "working", "mining": "crude-oil", "produced_source": "unavailable",
+            "input": {}, "output": {}, "fuel": {},
+        }
+        samples += self.machines(lambda i: {"1": counted_furnace(i * 5), "2": dict(pump)})
+        r = self.rates(samples, other_events([ORIGIN + 600]))
+        prod = r["marks"][0]["attribution"]["produced"]
+        self.assertEqual(prod["unavailable"], {"pumpjack": 1})
+        self.assertEqual(prod["by_item"], {"iron-plate": 300})
+
+    def test_an_idle_furnace_names_no_recipe_and_is_still_attributed(self):
+        """Measured on `run-1788638239-43349`, not imagined.
+
+        `get_recipe()` on a stone furnace with an empty input answers nil, so
+        the last machine sample of a run whose furnaces have gone quiet names
+        no item at all. Reading only that row filed all 859 items of that
+        run's furnace output under "unattributed".
+        """
+        samples = self.curve(gen=900.0, con=150.0)
+
+        def rows(i):
+            m = counted_furnace(i * 5, "working" if i < 40 else "no_ingredients")
+            if i >= 40:
+                m.pop("recipe")  # the game answers nil, so the mod writes no key
+            return {"1": m}
+
+        samples += self.machines(rows)
+        r = self.rates(samples, other_events([ORIGIN + 600]))
+        item = r["marks"][0]["items"]["iron-plate"]
+        self.assertEqual(item["machine_made"], 300)
+        self.assertEqual(item["verdict"], "factory")
+        self.assertEqual(r["marks"][0]["attribution"]["produced"]["unattributed"], 0)
+
+    def test_a_run_without_counters_still_gets_the_old_inference(self):
+        samples = self.curve(gen=900.0, con=150.0)
+        samples += self.machines(lambda i: {"1": assembler("working")})
+        r = self.rates(samples, other_events([ORIGIN + 600]))
+        item = r["marks"][0]["items"]["iron-plate"]
+        self.assertEqual(item["source"], "inference")
+        self.assertEqual(item["verdict"], "factory")
+        self.assertNotIn("machine_made", item)
+        self.assertFalse(r["marks"][0]["attribution"]["produced"]["available"])
+
+    def test_plateau_says_the_machines_stopped(self):
+        flat = [powered_force_sample(ORIGIN + i * 300, {"iron-plate": min(i, 12) * 5}, 900.0, 120.0)
+                for i in range(0, 121)]
+        flat += [machines_sample(ORIGIN + i * 300,
+                                 {"1": counted_furnace(min(i, 12) * 5,
+                                                       "working" if i <= 12 else "no_fuel")})
+                 for i in range(0, 121)]
+        r = self.rates(flat, feeding_events([ORIGIN + 300]), marks=(5, 10), hi=ORIGIN + 10 * TPM)
+        pl = r["plateaus"]["iron-plate"]
+        self.assertEqual(pl["kind"], "the machines stopped")
+        self.assertEqual(pl["source"], "counters")
+        self.assertIn("not one machine produced a single item", pl["why"])
+
+    def test_plateau_says_the_machines_kept_working_on_something_else(self):
+        """Iron stops; the drills keep mining ore. Not the same plateau at all."""
+        flat = [powered_force_sample(ORIGIN + i * 300,
+                                     {"iron-plate": min(i, 12) * 5, "iron-ore": i * 4}, 900.0, 120.0)
+                for i in range(0, 121)]
+        flat += [machines_sample(ORIGIN + i * 300, {
+            "1": counted_furnace(min(i, 12) * 5, "working" if i <= 12 else "no_ingredients"),
+            "2": counted_drill(i * 4),
+        }) for i in range(0, 121)]
+        r = self.rates(flat, feeding_events([ORIGIN + 300]), marks=(5, 10), hi=ORIGIN + 10 * TPM)
+        pl = r["plateaus"]["iron-plate"]
+        self.assertEqual(pl["kind"], "the machines kept working, but none made this item")
+        self.assertIn("none of them was iron-plate", pl["why"])
+
+    def test_report_prints_the_per_machine_block(self):
+        samples = self.curve(gen=900.0, con=150.0)
+        samples += self.machines(lambda i: {"1": counted_furnace(i * 5), "2": counted_drill(i * 2)})
+        r = self.rates(samples, feeding_events([ORIGIN + 600]))
+        out = io.StringIO()
+        ra.report_rates(r, lambda line="": out.write(line + "\n"))
+        text = out.getvalue()
+        self.assertIn("per-machine production", text)
+        self.assertIn("stone-furnace 300", text)
+        self.assertIn("counter arithmetic, not inference", text)
+
+
+class MachineLifetimeTest(unittest.TestCase):
+    """The owner's number, per machine, over the whole run."""
+
+    def test_lifetime_counts_are_kept_per_machine_and_summarised(self):
+        samples = [machines_sample(ORIGIN + i * 300, {
+            "1": counted_furnace(i * 5),
+            "2": counted_drill(i * 2),
+            "3": {**lab("working"), "produced_source": "not-a-producer"},
+        }) for i in range(0, 13)]
+        mach = ra.machines_at(samples)
+        by_key = {m["key"]: m for m in mach["machines"]}
+        self.assertEqual(by_key["1"]["produced"], 60)
+        self.assertEqual(by_key["1"]["produced_source"], "game")
+        self.assertEqual(by_key["2"]["produced"], 24)
+        self.assertEqual(by_key["2"]["produced_source"], "accumulated")
+        # A drill is rarely caught `working` and has no craft counter; its
+        # accumulated count is the only evidence it ever mined anything.
+        self.assertTrue(by_key["2"]["worked"])
+        # A lab makes research, not items: no count, and it says why.
+        self.assertEqual(by_key["3"]["produced"], 0)
+        self.assertEqual(by_key["3"]["produced_source"], "not-a-producer")
+
+
 class CompareRatesTest(unittest.TestCase):
     def test_verdict_names_the_run_ahead_and_the_deciding_item(self):
         s_a = synthetic_samples()

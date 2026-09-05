@@ -333,6 +333,89 @@ fn recover_anchor(state: &PlanState, bp: &Blueprint) -> Option<Position> {
         .map(|(key, _)| Position::new(key.0 as f64 / 2.0, key.1 as f64 / 2.0))
 }
 
+/// Rings outward from `seed`, first clear footprint wins.
+///
+/// Deterministic by construction: rings ascend, and within a ring tiles are
+/// visited in `(x, y)` order. No RNG, no float comparison, no hash iteration —
+/// the planner is pure, and a site that varied between two plans of the same
+/// world would make every offline comparison meaningless.
+///
+/// The candidate test is `placement_occupant`, which is the SAME predicate
+/// `expand` already uses to refuse an anchor. Two predicates meant to agree,
+/// written twice, eventually disagree — and here a disagreement would site a
+/// block on ground the very next check refuses.
+///
+/// **`seed` must be replan-stable.** `recover_anchor` only trusts an anchor
+/// once two of the block's entities stand (see its own doc), so a block with
+/// exactly one entity built recovers nothing and falls back to this search.
+/// Placements only ever ADD obstacles and `first_obstruction` skips this
+/// block's own entities standing as designed, so a search from the SAME seed
+/// always finds every earlier ring still blocked and returns the same
+/// anchor. A seed that moves between expansions (a roster centroid, say)
+/// breaks that: it can re-order the rings and site the block a second time,
+/// with no error and a production curve that still rises. Callers pass a
+/// fixed reference — the world origin for `Site::Anywhere`, the caller's own
+/// point for `Site::Near` — never anything that tracks where bots have
+/// walked to.
+///
+/// `pub`, matching `method::connect::connect_steps`: as of this task nothing
+/// in the tree calls it yet (the seed policy above is wiring for the task
+/// that does), and a private, uncalled function would be flagged dead code
+/// rather than read as work in progress.
+pub fn search_site(
+    state: &PlanState,
+    bp: &Blueprint,
+    seed: &Position,
+    max_radius: i32,
+) -> Result<Position, PlannerError> {
+    let mut nearest: Option<String> = None;
+    for radius in 0..=max_radius {
+        for dy in -radius..=radius {
+            for dx in -radius..=radius {
+                // Ring, not disc: skip what an inner radius already tried.
+                if dx.abs() != radius && dy.abs() != radius {
+                    continue;
+                }
+                let anchor = Position::new(seed.x() + dx as f64, seed.y() + dy as f64);
+                match first_obstruction(state, bp, &anchor) {
+                    None => return Ok(anchor),
+                    Some(what) => {
+                        if nearest.is_none() {
+                            nearest = Some(what);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Err(PlannerError::NoSiteFound {
+        entities: bp.entities.len(),
+        seed: format!("{seed}"),
+        searched: max_radius,
+        nearest_obstruction: nearest
+            .unwrap_or_else(|| "nothing (the search bound was reached first)".to_string()),
+    })
+}
+
+/// The first thing standing in this block's way at `anchor`, if any.
+///
+/// An entity already standing AS DESIGNED is not an obstruction — it is this
+/// block, already partly built, which is exactly the case `recover_anchor`
+/// hands here.
+fn first_obstruction(state: &PlanState, bp: &Blueprint, anchor: &Position) -> Option<String> {
+    for e in &bp.entities {
+        let world = anchor.add(&e.offset);
+        if matches!(already_stands(state, e, &world), Standing::AsDesigned) {
+            continue;
+        }
+        let facing = Direction::from_u8(e.direction).unwrap_or(Direction::North);
+        if let Some(occupant) = state.placement_occupant(&e.name, &world, facing) {
+            return Some(occupant.to_string());
+        }
+    }
+    None
+}
+
 /// Build a designed block by hand, one band per bot.
 pub struct BuildBlock;
 
@@ -575,6 +658,25 @@ mod tests {
         FactorioEntity::new_stone_furnace(&Position::new(x, y), Direction::North)
     }
 
+    /// A stone furnace that can never be read as `Standing::AsDesigned`
+    /// against `at_named`'s default direction (0, i.e. `Direction::North`).
+    ///
+    /// **Why not `stone_furnace_at`.** `first_obstruction` treats an entity
+    /// standing exactly as a blueprint entity designs it (same name, same
+    /// tile, same facing) as friendly ground, not an obstruction -- that is
+    /// the whole point of the stability guarantee (Ruling A / the search
+    /// tests below). `stone_furnace_at` places its furnace facing
+    /// `Direction::North`, which is also `at_named`'s default `direction:
+    /// 0`, so a single-entity blueprint's own designed entity is
+    /// indistinguishable from that decoy: `search_site` would read it as
+    /// "this block, already built here" and stop instantly, never stepping
+    /// outward -- which silently defeats a test whose entire point is
+    /// forcing the search past a blocked seed. Facing a different way makes
+    /// it a genuine, unrelated obstacle instead.
+    fn blocking_stone_furnace_at(x: f64, y: f64) -> FactorioEntity {
+        FactorioEntity::new_stone_furnace(&Position::new(x, y), Direction::South)
+    }
+
     /// **Recovery, not re-siting.** Two of a four-furnace block stand at an
     /// anchor the caller never names again -- a replan must find them, not
     /// choose somewhere new. This is the failure `Goal::Built` exists to make
@@ -629,6 +731,154 @@ mod tests {
 
         let recovered = recover_anchor(&state, &bp).expect("the pair implies an anchor");
         assert_eq!(Pos::from(&recovered), Pos::from(&Position::new(10.5, 10.5)));
+    }
+
+    /// The ring search itself: blocked at the seed tile, it must step
+    /// outward to the first clear footprint, and answer the same way twice.
+    #[test]
+    fn a_block_is_sited_on_the_first_clear_ring_and_is_deterministic() {
+        let bp = Blueprint {
+            entities: vec![at_named(0.0, 0.0, "stone-furnace")],
+            version: 0,
+        };
+        let mut state = test_state();
+        // Block the seed tile itself, so the search must step outward. Faced
+        // away from the blueprint's own (default) direction -- see
+        // `blocking_stone_furnace_at`'s doc for why a same-facing furnace
+        // would not do.
+        state.create_entity(blocking_stone_furnace_at(0.5, 0.5));
+
+        let first =
+            search_site(&state, &bp, &Position::new(0.5, 0.5), 20).expect("open ground exists");
+        let again = search_site(&state, &bp, &Position::new(0.5, 0.5), 20).expect("same answer");
+        assert_eq!(
+            Pos::from(&first),
+            Pos::from(&again),
+            "siting must be deterministic"
+        );
+        assert_ne!(Pos::from(&first), Pos::from(&Position::new(0.5, 0.5)));
+    }
+
+    /// A search bounded and refused must say how far it looked and what was
+    /// in the way -- "cannot site" and "looked one tile" must not read alike.
+    #[test]
+    fn a_search_that_finds_nothing_says_how_far_it_looked() {
+        let bp = Blueprint {
+            entities: vec![at_named(0.0, 0.0, "stone-furnace")],
+            version: 0,
+        };
+        let mut state = test_state();
+        // Wall off every tile within the search bound, faced away from the
+        // blueprint's own direction so none of them read as this block
+        // already standing (see `blocking_stone_furnace_at`'s doc).
+        for x in -3..=3 {
+            for y in -3..=3 {
+                state.create_entity(blocking_stone_furnace_at(x as f64 + 0.5, y as f64 + 0.5));
+            }
+        }
+        let err = search_site(&state, &bp, &Position::new(0.5, 0.5), 2).unwrap_err();
+        let text = format!("{err}");
+        assert!(
+            text.contains('2'),
+            "the refusal must say how far it searched: {text}"
+        );
+        assert!(
+            text.contains("stone-furnace"),
+            "the refusal must name what is in the way: {text}"
+        );
+    }
+
+    /// **Guardrail for `recover_anchor`'s `satisfied >= 2` floor.** A single
+    /// standing entity that happens to sit at one of this block's own offsets
+    /// must NOT be read as an anchor -- that is exactly the coincidence the
+    /// floor exists to refuse (see the doc on `recover_anchor` and
+    /// `the_anchor_satisfying_the_most_entities_wins` above, where an
+    /// unrelated single entity nearly won by default).
+    ///
+    /// If this test ever starts failing because recovery got demonstrably
+    /// BETTER -- some new, provably safe way to trust a single match -- that
+    /// is fine. If it fails because the threshold was simply lowered without
+    /// re-deriving the safety argument, the bug it prevents comes back: a
+    /// block with exactly one entity built would recover an anchor from a
+    /// stray match, and a genuinely one-entity block would get "confirmed"
+    /// rather than searched.
+    #[test]
+    fn one_standing_entity_is_not_enough_to_recover_an_anchor() {
+        let bp = Blueprint {
+            entities: vec![
+                at_named(0.0, 0.0, "stone-furnace"),
+                at_named(3.0, 0.0, "stone-furnace"),
+                at_named(6.0, 0.0, "stone-furnace"),
+                at_named(9.0, 0.0, "stone-furnace"),
+            ],
+            version: 0,
+        };
+        let mut state = test_state();
+        // Exactly ONE genuine entity of the block, standing at a real block
+        // offset (its first) -- not a decoy elsewhere, and nothing else on
+        // the ground.
+        state.create_entity(stone_furnace_at(20.5, 20.5));
+
+        assert!(
+            recover_anchor(&state, &bp).is_none(),
+            "one standing entity must not be trusted as an anchor: a lone \
+             match is exactly the shape of coincidence `satisfied >= 2` is \
+             meant to refuse, not merely risk losing a tie-break to"
+        );
+    }
+
+    /// **The regression test for Ruling A: siting is stable across a partial
+    /// build, from a seed that does not move.**
+    ///
+    /// `recover_anchor` cannot trust a block with exactly one entity built
+    /// (see the guardrail above), so that block falls straight back into
+    /// `search_site` on every replan. The search only answers the same way
+    /// twice if the seed it is handed is the same both times -- a roster
+    /// centroid moves as bots walk, which can re-order the rings and site the
+    /// SAME block a second time, silently, with no error and a production
+    /// curve that still rises. This resolves a site from a fixed seed, builds
+    /// ONE of the block's entities at it, and re-searches from the identical
+    /// seed: the anchor must not change, because placements only ever ADD
+    /// obstacles and `first_obstruction` treats this block's own
+    /// as-designed entities as clear ground rather than as something in its
+    /// own way.
+    #[test]
+    fn the_search_is_stable_across_a_partial_build() {
+        let bp = Blueprint {
+            entities: vec![
+                at_named(0.0, 0.0, "stone-furnace"),
+                at_named(3.0, 0.0, "stone-furnace"),
+                at_named(6.0, 0.0, "stone-furnace"),
+                at_named(9.0, 0.0, "stone-furnace"),
+            ],
+            version: 0,
+        };
+        // The stable seed Ruling A mandates for `Site::Anywhere`: the world
+        // origin, never the roster centroid.
+        let seed = Position::new(0.0, 0.0);
+        let mut state = test_state();
+
+        let first = search_site(&state, &bp, &seed, 30).expect("open ground exists");
+
+        // Build only the block's FIRST entity at the resolved anchor -- the
+        // exact one-entity window the guardrail above shows `recover_anchor`
+        // refuses to trust.
+        let e = &bp.entities[0];
+        let world = first.add(&e.offset);
+        state.create_entity(entity_for(&state, e, &world));
+        assert!(
+            recover_anchor(&state, &bp).is_none(),
+            "this test must exercise the SEARCH, not recovery -- one \
+             standing entity is still not enough to recover an anchor"
+        );
+
+        let second = search_site(&state, &bp, &seed, 30).expect("still sites the same block");
+        assert_eq!(
+            Pos::from(&first),
+            Pos::from(&second),
+            "a partial build must not move the site: a stable seed plus a \
+             monotonic obstacle set means the same anchor wins every time"
+        );
     }
 
     /// Bands are balanced by ENTITY COUNT, not by area: a block whose entities

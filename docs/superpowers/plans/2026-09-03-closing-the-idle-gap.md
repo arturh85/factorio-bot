@@ -541,6 +541,40 @@ accumulate one and say that it did — a row should carry both the number and
 how it was obtained, so nobody reads an accumulated figure as exact.
 Dispatched as the `machinecount` worktree.
 
+## THE ROADMAP BEYOND GREEN SCIENCE (owner-approved, 2026-09-06)
+
+Four things, in the order they are being taken. Each is a capability the
+foundation lacks, not a speedrun optimisation, and each was named by
+evidence in this record rather than by preference.
+
+1. **Standing goals — a rate sustained over a window.** "Six green science a
+   minute for two minutes with every bot idle." The verification is the
+   point: per-machine counters and interval attribution (`13d45c6b`,
+   `c7d663f1`) are what tell a factory meeting a rate from bots hand-feeding
+   one, and **before today the goal could not have been checked honestly at
+   all**. Goal kind and verification are built together or it passes while
+   roster-fed.
+2. **Exploration.** The bots chart nothing. This record already warns that
+   measured distances are what has been *seen*, not what exists; oil is the
+   immediate victim, since a pumpjack cannot be planned onto a patch nobody
+   has looked at, and block siting and any non-spawn map are the others.
+3. **Power as capacity over time, not a boolean.** No run yet has had a
+   generator before minute eight, and the eight-bot gap was labs sitting
+   dark for want of an edge to their pole. Electric smelting and
+   self-expanding solar need generation reasoned against demand as both
+   grow, and a network extended rather than replaced. Today it is a
+   `Powered` condition and a supply lookup.
+4. **Defence, which nobody had named.** Production makes pollution,
+   pollution brings biters, and every run so far ends before that matters. A
+   factory that expands itself does not have that luxury. Bot deaths are
+   handled in the mod; nothing decides to *prevent* them. It is also what
+   the companion and enemy use cases need most.
+
+Explicitly deferred: making runs continuous and event-driven. It is the
+right long-term shape for a companion bot and it changes the execution model
+underneath everything else, so standing goals and oil land against the
+current batch model first.
+
 ## THE MISSING FIFTH GOAL KIND: nothing means "keep this true"
 
 Named by the `second` session, 2026-09-05, and it is the cause of which the

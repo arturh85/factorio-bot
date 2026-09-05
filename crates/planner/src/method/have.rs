@@ -2614,6 +2614,9 @@ impl Method for Mine {
                 goal: goal.to_string(),
             });
         };
+        // Gathered by hand: the rehearsal's ledger, read by `chop_beats_mining`
+        // through `PlanState::gathering_ahead` -- see `crate::method::expand`.
+        ctx.state.note_gathering(ctx.chain_actor, item, need);
         let bot = ctx.state.bot(ctx.chain_actor);
         let from = bot.map(|b| b.position.clone()).unwrap_or_default();
         let reach = bot.map(|b| b.resource_reach_distance).unwrap_or(3.0);
@@ -2804,7 +2807,26 @@ pub struct Chop;
 /// the products cannot overflow the `u32`s they come from. Determinism here is
 /// not decoration -- this decides which method claims a goal, so a float that
 /// compared differently on two runs would produce two different plans.
-fn chop_beats_mining(state: &PlanState, item: &ItemId, need: u32) -> bool {
+///
+/// # Priced over the plan's demand, not the fragment's -- since 2026-09-05
+///
+/// The cost side is judged over the larger of `need` and
+/// [`PlanState::gathering_ahead`]: what the goal's holder is still going to
+/// gather of this item, according to the rehearsal `crate::method::expand`
+/// runs first. The holder's, not the roster's, because a swing's surplus
+/// lands in one inventory and feeds only that bot's later fragments.
+/// Coverage stays on `need` alone, since `expand` delivers `need` and no
+/// more.
+///
+/// Answering per fragment was measured on `producing:logistic-science-pack:6`
+/// over the reference dump: bot 1's coal came as `Have { coal, 1 }` six
+/// times over for six hand-smelt furnaces, each refused here at 360 ticks
+/// against 120, then two 24-coal rocks were swung for the cells anyway --
+/// 20 coal and 2,400 ticks hand-mined beside 10 rocks. The surplus of a
+/// swing is credited to the bot (see [`Chop`]), so the first fragment of a
+/// many-fragment demand paying for the rock is what makes the later
+/// fragments free; judged one at a time, none of them ever pays.
+fn chop_beats_mining(state: &PlanState, item: &ItemId, need: u32, whose: &Holder) -> bool {
     let sources = state.minable_sources(item);
     let mut supply: u32 = 0;
     // The worst ticks-per-item deal among the standing sources, as
@@ -2832,11 +2854,14 @@ fn chop_beats_mining(state: &PlanState, item: &ItemId, need: u32) -> bool {
     if supply < need {
         return false;
     }
+    // The holder's remaining demand for the item, never less than the
+    // fragment in front of us -- see the doc above.
+    let judged = need.max(state.gathering_ahead(whose, item));
     // `swing_yield` is non-zero: `EntityGraph::minables_yielding` admits an
     // entity only when its share of the bill is `> 0`.
-    let swings = u64::from(need.div_ceil(swing_yield));
+    let swings = u64::from(judged.div_ceil(swing_yield));
     let chopping = swings.saturating_mul(u64::from(swing_ticks));
-    let hand_mining = u64::from(need).saturating_mul(u64::from(mining_ticks(state, item)));
+    let hand_mining = u64::from(judged).saturating_mul(u64::from(mining_ticks(state, item)));
     chopping < hand_mining
 }
 
@@ -2846,7 +2871,10 @@ impl Method for Chop {
     }
 
     fn applicable(&self, goal: &Goal, state: &PlanState) -> bool {
-        let Some(Demand { item, need, .. }) = demand(goal, state) else {
+        let Some(Demand {
+            item, need, whose, ..
+        }) = demand(goal, state)
+        else {
             return false;
         };
         if need == 0 || !state.has_minable_source(item) {
@@ -2865,7 +2893,7 @@ impl Method for Chop {
         if !resource_supply_at_least(state, item, need) {
             return true;
         }
-        chop_beats_mining(state, item, need)
+        chop_beats_mining(state, item, need, whose)
     }
 
     fn expand(&self, goal: &Goal, ctx: &mut ExpansionCtx) -> Result<Vec<Step>, PlannerError> {
@@ -2881,6 +2909,9 @@ impl Method for Chop {
             });
         };
         let item = item.to_string();
+        // Gathered by hand, off a rock rather than a tile -- the same ledger
+        // `Mine::expand` writes, for the same reader.
+        ctx.state.note_gathering(ctx.chain_actor, &item, need);
         let bot = ctx.state.bot(ctx.chain_actor);
         let from = bot.map(|b| b.position.clone()).unwrap_or_default();
         let reach = bot.map(|b| b.resource_reach_distance).unwrap_or(3.0);
@@ -12355,6 +12386,105 @@ mod tests {
         );
     }
 
+    /// The same three-stone goal swings a rock once the plan is known to
+    /// want more stone than that.
+    ///
+    /// `chop_beats_mining` is priced over the larger of the fragment and
+    /// [`PlanState::gathering_ahead`] -- what the rehearsal `expand` runs
+    /// first says the plan still gathers of the item. Three stone alone ties
+    /// the swing (the test above); three stone as the first of four such
+    /// fragments is 480 ticks of hand mining against one 360-tick swing that
+    /// covers all of them, since the surplus is credited to the bot. The
+    /// forecast is installed by hand here, so the test is about the
+    /// comparison and not about the rehearsal; `crate::method::tests` pins
+    /// the rehearsal.
+    #[test]
+    fn a_stone_goal_too_small_on_its_own_chops_once_the_plan_wants_more() {
+        let bots = [BotId(1)];
+        let mut state = wooded_state(&bots, &[Position::new(5., 5.)]);
+        state.set_gathering_forecast(BTreeMap::from([((BotId(1), "stone".to_string()), 4)]));
+        let share = Holder::Share(BotId(1));
+        assert_eq!(
+            state.gathering_ahead(&share, "stone"),
+            4,
+            "control: nothing has been gathered yet, so the whole forecast is ahead"
+        );
+        let goal = Goal::Have {
+            item: "stone".into(),
+            count: 3,
+            whose: Holder::Share(BotId(1)),
+        };
+        assert!(
+            chop_beats_mining(&state, &"stone".to_string(), 3, &share),
+            "three of a forecast four: one swing beats four hand-mined stone"
+        );
+        assert!(
+            !chop_beats_mining(&state, &"stone".to_string(), 3, &Holder::Share(BotId(2))),
+            "the forecast is the holder's own: another bot's three stone still tie"
+        );
+        let steps = expand_with(&registry_for(&bots), &goal, &state);
+        assert_eq!(
+            chops(&steps).len(),
+            1,
+            "the first fragment swings the rock the plan's demand pays for: {steps:?}"
+        );
+        assert!(
+            !steps.iter().any(
+                |step| matches!(step, Step::Act(a) if matches!(a.kind, ActionKind::Mine { .. }))
+            ),
+            "and the patch is left alone: {steps:?}"
+        );
+        // Coverage is still the fragment's own: a forecast the standing
+        // rocks cannot cover as a whole does not stop a fragment they can.
+        state.set_gathering_forecast(BTreeMap::from([((BotId(1), "stone".to_string()), 10_000)]));
+        assert!(
+            chop_beats_mining(&state, &"stone".to_string(), 3, &share),
+            "a forecast beyond what the rocks hold still lets them supply the fragment"
+        );
+    }
+
+    /// What `Chop` and `Mine` record is what the forecast is made of: each
+    /// notes the demand it took, in the goal's own item, and nothing else
+    /// writes the ledger.
+    #[test]
+    fn mining_and_chopping_record_the_demand_they_took() {
+        let bots = [BotId(1)];
+        let state = wooded_state(&bots, &[Position::new(5., 5.)]);
+        let mut ctx = ExpansionCtx::new(state.fork(), BotId(1));
+        Mine.expand(
+            &Goal::Have {
+                item: "stone".into(),
+                count: 2,
+                whose: Holder::Share(BotId(1)),
+            },
+            &mut ctx,
+        )
+        .expect("two stone off the patch");
+        Chop.expand(
+            &Goal::Have {
+                item: "wood".into(),
+                count: 1,
+                whose: Holder::Share(BotId(1)),
+            },
+            &mut ctx,
+        )
+        .expect("one wood off a tree");
+        assert_eq!(
+            ctx.state.gathering_recorded(),
+            BTreeMap::from([
+                ((BotId(1), "stone".to_string()), 2),
+                ((BotId(1), "wood".to_string()), 1)
+            ]),
+            "the ledger holds each gathering method's demand in the goal's item, \
+             under the bot that gathers it, not the rock's whole bill"
+        );
+        assert_eq!(
+            ctx.state.gathering_ahead(&Holder::Share(BotId(1)), "stone"),
+            0,
+            "with no forecast nothing is ahead, whatever was recorded"
+        );
+    }
+
     /// The whole bill is credited, not only the item the goal named -- and the
     /// surplus is what the next goal reads.
     ///
@@ -13269,10 +13399,16 @@ mod owned_gathering {
         // 12% faster; with rocks it is 25% faster (28,951 against 38,606).
         // A future change that improves either ratio by making the roster
         // busier with work it does not need fails here.
+        // A tenth until 2026-09-05, when `expand` started rehearsing: the
+        // one-bot plan fell 29,260 -> 26,770 because its every coal fragment
+        // is now fed from one swing, while the four-bot plan barely moved
+        // (24,221 -> 24,286) -- its coal was already two rocks, and a swing's
+        // surplus feeds only the bot that swung. The roster is not busier
+        // with work it does not need; the solo plan got faster.
         let (_, _, solo) = rung_one_plan(&[BotId(1)]);
         assert!(
-            u64::from(plan.makespan) * 10 < u64::from(solo.makespan) * 9,
-            "four bots ({}) must beat one bot ({}) by more than a tenth",
+            u64::from(plan.makespan) * 20 < u64::from(solo.makespan) * 19,
+            "four bots ({}) must beat one bot ({}) by more than a twentieth",
             plan.makespan,
             solo.makespan
         );
@@ -13358,10 +13494,12 @@ mod owned_gathering {
     fn the_single_bot_rung_one_plan_is_untouched() {
         let (_, net, plan) = rung_one_plan(&[BotId(1)]);
         // 82 -> 86 on 2026-09-05: the small fragments after the trigger cell are hand-smelted again rather than queued 12,000 ticks behind its fifty plates -- the drain cap that offered a backlogged cell is gone (`produce::Drain`).
-        assert_eq!(net.len(), 86, "one bot's rung-1 action count");
+        // 86 -> 80 later on 2026-09-05: `expand` rehearses, so the first coal fragment is priced over the plan's whole coal and swings a rock; the coal fragments that were hand-mined one tile at a time are now satisfied out of that swing (`have::chop_beats_mining`).
+        assert_eq!(net.len(), 80, "one bot's rung-1 action count");
         // Moved by the lookahead scheduling key (51c7f695): a bound over the bot's other ready work replaces (end, id) as the primary key, and the plan overlaps the longer smelt under the shorter one.
         // 31482 -> 29260 on 2026-09-05: four more actions and a shorter plan -- no fragment waits on the cell's backlog, and `infer_edges` no longer serialises the chain's plate consumers behind every earlier producer.
-        assert_eq!(plan.makespan, 29260, "one bot's rung-1 makespan");
+        // 29260 -> 26770 later on 2026-09-05: the coal that was dug a tile at a time comes off the rock the plan swings at anyway (see the action count above).
+        assert_eq!(plan.makespan, 26770, "one bot's rung-1 makespan");
         assert!(
             net.actions().all(|a| net
                 .chain_of(a.id)

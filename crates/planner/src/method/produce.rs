@@ -1179,6 +1179,38 @@ fn hand_smelt_bot_ticks(state: &PlanState, spec: &CellSpec, need: u32) -> Ticks 
 /// **The drill's own mining time is excluded**, for the same reason
 /// [`hand_smelt_bot_ticks`] excludes the furnace's smelting time: once fuelled
 /// the bot walks away, and the drill mines unattended.
+///
+/// # Priced from raw even for a drill the holder already carries, and that
+/// # is load-bearing -- measured 2026-09-05
+///
+/// A freeplay character starts holding one burner drill and one stone
+/// furnace, and this prices both as nine plates mined and smelted from
+/// nothing. That is a lie about the bill -- the true fixed cost of a starter
+/// cell is two placements, three transfers and the coal -- and it was tried
+/// as a fix: price each of [`bill`]'s items net of `PlanState::available`
+/// for the goal's holder. Every starter drill then went on ore in the first
+/// minute, as the brief wanted, and the plans got worse on two of three
+/// goals over the reference dump with four bots:
+///
+/// | goal | as it is | priced net of stock |
+/// | --- | ---: | ---: |
+/// | `researched:automation` | 25,886 | 32,693 (utilisation 42% -> 28%) |
+/// | `producing:automation-science-pack:6` | 39,118 | 35,351 |
+/// | `producing:logistic-science-pack:6` | 97,232 | **127,801** |
+///
+/// The mechanism is not the price. This gate compares *bot-busy* ticks, and
+/// a cell wins that comparison for any share once its drill is free -- but a
+/// burner drill is 240 ticks a plate against 120 by hand, so a share served
+/// by one drill finishes *later* unless the bot has other work to fill the
+/// wait. On `researched:automation` it has none: every bot's share went on
+/// its own drill and every bot stood idle beside it. On green the wait moved
+/// bot 4's 78-plate share and, through the hand-smelt furnace it shares as a
+/// slot (`crate::method::have::Smelt`), bot 1's whole cell ladder behind it.
+/// The wrong price was keeping single-drill cells off the critical path by
+/// accident. What would make the true price safe is the count rung --
+/// enough drills per share that the cell is faster than hands on the clock,
+/// which the world-record replays reach with forty of them -- and until that
+/// exists this stays as it is, deliberately, with the number that says why.
 fn cell_setup_bot_ticks(state: &PlanState, spec: &CellSpec, need: u32) -> Ticks {
     let duration = spec.ticks_per_item.saturating_mul(need.saturating_add(1));
     let coal = fuel_for_duration(duration, DRILL_BURN_TICKS)
@@ -2977,13 +3009,17 @@ mod tests {
         let bots = [BotId(1)];
         let s = state(&bots);
         let net = plan(15).expect("the fixture can build a cell");
-        assert_eq!(net.len(), 21, "actions in a one-cell plan");
+        // 21 -> 20 on 2026-09-05: `expand` rehearses, and the one coal the
+        // furnace's first fuel load asked for is priced over the plan's whole
+        // coal and comes off the rock instead of a tile (`have::chop_beats_mining`).
+        assert_eq!(net.len(), 20, "actions in a one-cell plan");
         let sched = crate::schedule::schedule(&net, &s, &bots).expect("it schedules");
         // 5,800 -> 5,810 when the fuel load started carrying the smelting lag
         // (`have::every_fuel_load_gates_the_take_by_the_whole_smelting_time`).
         // Moved by the lookahead scheduling key (51c7f695): a bound over the bot's other ready work replaces (end, id) as the primary key, and the plan overlaps the longer smelt under the shorter one.
         // 5466 -> 3989 on 2026-09-05: `infer_edges` no longer orders every plate consumer on the chain after every earlier plate producer; the stated supply edge (`run_steps`) is the only one, and the drill's and the furnace's bills overlap.
-        assert_eq!(sched.makespan, 3989, "ticks for one bot to build one cell");
+        // 3989 -> 3732 later on 2026-09-05: the furnace's first coal comes off the rock the drill's coal is swung for anyway, so the tile it was dug from is never walked to (`expand` rehearses; `have::chop_beats_mining`).
+        assert_eq!(sched.makespan, 3732, "ticks for one bot to build one cell");
     }
 
     #[test]

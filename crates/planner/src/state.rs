@@ -1340,6 +1340,25 @@ pub struct PlanState {
     /// same reason. Empty in every fixture: nothing writes
     /// `FactorioWorld::enclosures` unless a real game refused a real walk.
     walled_in: BTreeMap<BotId, f64>,
+    /// How much of each raw item this expansion has so far sent to be
+    /// *gathered* -- picked off a tile or swung out of a rock -- summed over
+    /// every `Have`/`Produced` that reached `Mine` or `Chop`. Written by those
+    /// two methods' `expand` and read against [`Self::gathering_forecast`]
+    /// by [`Self::gathering_ahead`].
+    ///
+    /// Per bot, because a swing's surplus lands in one bot's inventory and
+    /// serves only that bot's later fragments: the demand a rock is judged
+    /// against is the gathering bot's, not the roster's. The reader
+    /// (`crate::method::have::chop_beats_mining`) is asked through
+    /// `Method::applicable`, which has no actor but does have the goal's
+    /// holder, and a `Have`'s holder is the bot that will gather it.
+    gathering_recorded: BTreeMap<(BotId, ItemId), u32>,
+    /// What a *rehearsal* of the same expansion gathered in total, item by
+    /// item -- see [`crate::method::expand`]. Empty during the rehearsal
+    /// itself and in every state built directly, so a method that reads
+    /// [`Self::gathering_ahead`] sees zero and answers for the fragment in
+    /// front of it, exactly as it did before the forecast existed.
+    gathering_forecast: BTreeMap<(BotId, ItemId), u32>,
 }
 
 impl PlanState {
@@ -1539,9 +1558,74 @@ impl PlanState {
             fuel,
             refused_walks,
             walled_in: BTreeMap::new(),
+            gathering_recorded: BTreeMap::new(),
+            gathering_forecast: BTreeMap::new(),
         };
         state.walled_in = state.find_walled_in();
         state
+    }
+
+    /// Record that `bot` has been sent to gather `need` of `item` by hand --
+    /// off a tile or off a rock. Called by `Mine::expand` and `Chop::expand`,
+    /// once each, at the head of their expansion, with the chain actor.
+    pub fn note_gathering(&mut self, bot: BotId, item: &str, need: u32) {
+        if need == 0 {
+            return;
+        }
+        let entry = self
+            .gathering_recorded
+            .entry((bot, item.to_string()))
+            .or_insert(0);
+        *entry = entry.saturating_add(need);
+    }
+
+    /// How much of `item` `whose` is still going to gather after what it has
+    /// gathered so far, according to the rehearsal's forecast; zero with no
+    /// forecast, and zero once the recorded total has caught up with it.
+    ///
+    /// A named holder reads its own bot's ledger; `Holder::Anyone` reads
+    /// the roster's, which over-states what any one bot will gather and so
+    /// errs towards the rock -- the direction a goal nobody in particular
+    /// owns can afford, since it is scattered into per-bot shares before any
+    /// gathering method sees it.
+    ///
+    /// This is what lets a gathering decision be made over the plan's
+    /// demand for the item rather than over one fragment of it: a
+    /// `Have { coal, 1 }` for a furnace's fuel is one of a dozen such
+    /// fragments, and priced alone none of them pays for a rock that covers
+    /// them all.
+    pub fn gathering_ahead(&self, whose: &Holder, item: &str) -> u32 {
+        let ahead = |bot: BotId| {
+            self.gathering_forecast
+                .get(&(bot, item.to_string()))
+                .copied()
+                .unwrap_or(0)
+                .saturating_sub(
+                    self.gathering_recorded
+                        .get(&(bot, item.to_string()))
+                        .copied()
+                        .unwrap_or(0),
+                )
+        };
+        match whose {
+            Holder::Bot(bot) | Holder::Share(bot) => ahead(*bot),
+            Holder::Anyone => self
+                .bots
+                .keys()
+                .map(|bot| ahead(*bot))
+                .fold(0u32, u32::saturating_add),
+        }
+    }
+
+    /// Everything [`Self::note_gathering`] has recorded, by bot and item.
+    pub fn gathering_recorded(&self) -> BTreeMap<(BotId, ItemId), u32> {
+        self.gathering_recorded.clone()
+    }
+
+    /// Install a rehearsal's totals as this state's forecast. Replaces any
+    /// forecast already set; the recorded ledger is untouched.
+    pub fn set_gathering_forecast(&mut self, forecast: BTreeMap<(BotId, ItemId), u32>) {
+        self.gathering_forecast = forecast;
     }
 
     /// Which of this state's bots are sealed into a pocket where they stand.

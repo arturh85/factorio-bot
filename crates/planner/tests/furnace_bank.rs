@@ -400,6 +400,13 @@ fn a_bank_shortens_the_schedule_and_never_lengthens_it() {
 /// 603 ticks the wrong side of the comparison. The work is the same 26
 /// actions and the same stone; the per-fragment coal decision is the open
 /// item, and it is `have::Chop`'s.
+///
+/// **Closed later on 2026-09-05, and the pin with it.** `expand` now
+/// rehearses, so the bank plan's first one-coal fragment is priced over the
+/// seventeen coal the plan gathers in all and swings at the rock the bare
+/// plan was always going to swing at; the three-coal fragment and the
+/// cell's thirteen ride on it. Fifty plates comes back under the general
+/// property: 15,472 with the bank against 15,982 bare.
 #[test]
 fn the_single_bot_path_never_gets_more_work() {
     for plates in [1u32, 5, 20, 50] {
@@ -411,19 +418,11 @@ fn the_single_bot_path_never_gets_more_work() {
         let bank_span = schedule(&bank, &bank_state, &[BotId(1)])
             .expect("schedulable")
             .makespan;
-        if plates == 50 {
-            assert_eq!(
-                (bare_span, bank_span),
-                (15982, 16585),
-                "fifty plates: the cell's coal, see the doc above"
-            );
-        } else {
-            assert!(
-                bank_span <= bare_span,
-                "{plates} plates: a standing bank made the solo run longer, \
-                 {bank_span} against {bare_span}"
-            );
-        }
+        assert!(
+            bank_span <= bare_span,
+            "{plates} plates: a standing bank made the solo run longer, \
+             {bank_span} against {bare_span}"
+        );
         assert!(
             stone_gathered(&bank) <= stone_gathered(&bare),
             "{plates} plates: a standing bank should never cost more stone"

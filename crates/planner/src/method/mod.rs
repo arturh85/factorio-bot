@@ -486,6 +486,13 @@ pub fn pick_chain_actor(state: &PlanState, preference: &[BotId]) -> Option<BotId
 /// Ordering edges are inferred at the end, on top of whatever explicit `Link`
 /// steps the methods emitted for dependencies inference cannot see.
 ///
+/// The expansion is run **twice**: a rehearsal that learns how much of each
+/// raw item the plan gathers by hand, then the plan itself with that total
+/// installed as [`PlanState::gathering_ahead`]'s forecast, so a per-fragment
+/// decision -- today, whether a rock beats the tile -- can be taken over the
+/// plan's whole demand. See the body for why nothing cheaper knows that
+/// number, and `have::chop_beats_mining` for what it changed.
+///
 /// Three rosters meet here and nothing else reconciles them: the one
 /// `registry_for` was built with, `chain_actor`, and the bots `state` was built
 /// with. A bot the state does not know has no position and no inventory, and
@@ -501,7 +508,43 @@ pub fn expand(
     if state.bot(chain_actor).is_none() {
         return Err(PlannerError::UnknownBot(chain_actor));
     }
-    let mut ctx = ExpansionCtx::new(state.fork(), chain_actor);
+    // **Rehearse, then plan.** The expansion is run twice: once to learn how
+    // much of each raw item the plan gathers by hand in total
+    // (`PlanState::gathering_recorded`), and once for real with that total
+    // installed as the forecast (`PlanState::set_gathering_forecast`), so a
+    // decision taken per fragment can be made over the plan's demand
+    // instead. One reader today, `have::chop_beats_mining`: a `Have { coal,
+    // 1 }` for a furnace's fuel never pays for a 24-coal rock on its own,
+    // and a plan made of a dozen such fragments hand-mined every one of them
+    // beside the rocks it swung at for its cells -- measured on
+    // `producing:logistic-science-pack:6`, 20 coal and 2,400 ticks.
+    //
+    // Nothing here knows the plan's demand for an item before the plan
+    // exists: the fragments come from cells, hand-smelts and fuel visits
+    // that are only stated as the expansion goes, so the demand is read off
+    // a finished expansion and nothing else. Both passes are deterministic
+    // -- the second differs from the first only through the forecast -- so
+    // the plan is still a pure function of its inputs. A rehearsal that
+    // fails leaves the forecast empty rather than failing the plan: the real
+    // pass reports whatever it meets, exactly as before, and a forecast is
+    // only ever advisory.
+    //
+    // The cost is one extra expansion. Scheduling, which is where a plan's
+    // time goes, is not repeated.
+    let forecast = {
+        let mut rehearsal = ExpansionCtx::new(state.fork(), chain_actor);
+        let mut scratch = ActionNetwork::new();
+        let rehearsed = goals
+            .iter()
+            .try_for_each(|goal| expand_goal(goal, &mut rehearsal, &mut scratch, registry));
+        match rehearsed {
+            Ok(()) => rehearsal.state.gathering_recorded(),
+            Err(_) => BTreeMap::new(),
+        }
+    };
+    let mut forecast_state = state.fork();
+    forecast_state.set_gathering_forecast(forecast);
+    let mut ctx = ExpansionCtx::new(forecast_state, chain_actor);
     let mut net = ActionNetwork::new();
     for goal in goals {
         expand_goal(goal, &mut ctx, &mut net, registry)?;
@@ -1261,6 +1304,76 @@ mod tests {
     use factorio_bot_core::test_utils::fixture_world;
     use std::collections::BTreeSet;
     use std::sync::Arc;
+
+    /// **`expand` rehearses.** One bot is asked to produce one stone, four
+    /// times over. Judged one at a time -- which is all a method sees --
+    /// no single stone pays for a 360-tick swing at the fixture's
+    /// `rock-huge` against 120 ticks of hand mining, so a single pass
+    /// hand-mines four tiles. The rehearsal records that the bot gathers
+    /// four stone; the plan itself then prices the first fragment over that
+    /// four, and swings.
+    ///
+    /// `Produced` rather than `Have`, so that the four are four demands: a
+    /// `Have` is a holding, and the second of four identical holdings is
+    /// already satisfied by the first. `Produced` ignores inventory by
+    /// design, which is also why only the first fragment swings here -- the
+    /// three behind it are each judged over what is still ahead, three then
+    /// two then one, and none of those pays. What this pins is the
+    /// mechanism: a fragment that would not pay alone pays as the head of a
+    /// demand.
+    #[test]
+    fn the_first_fragment_of_a_demand_swings_the_rock_the_whole_demand_pays_for() {
+        let bots = [BotId(1)];
+        let state = PlanState::from_world(Arc::new(fixture_world()), &bots);
+        let goals: Vec<Goal> = (0..4)
+            .map(|_| Goal::Produced {
+                item: "stone".into(),
+                count: 1,
+                whose: Holder::Bot(BotId(1)),
+                unlocks: None,
+            })
+            .collect();
+        let reg = crate::method::have::registry_for(&bots);
+        let is_chop = |a: &Action| matches!(a.kind, crate::action::ActionKind::Chop { .. });
+        let is_mine = |a: &Action| matches!(a.kind, crate::action::ActionKind::Mine { .. });
+
+        // The rehearsal alone, which is what a plan used to be.
+        let mut single = ExpansionCtx::new(state.fork(), BotId(1));
+        let mut single_net = ActionNetwork::new();
+        for goal in &goals {
+            expand_goal(goal, &mut single, &mut single_net, &reg).expect("expands");
+        }
+        assert_eq!(
+            single.state.gathering_recorded(),
+            std::collections::BTreeMap::from([((BotId(1), "stone".to_string()), 4)]),
+            "the rehearsal records the bot's whole demand"
+        );
+        assert!(
+            !single_net.actions().any(is_chop),
+            "control: judged fragment by fragment, nobody swings"
+        );
+        assert_eq!(single_net.actions().filter(|a| is_mine(a)).count(), 4);
+
+        let net = expand(&goals, &state, &reg, BotId(1)).expect("expands");
+        assert_eq!(
+            net.actions().filter(|a| is_chop(a)).count(),
+            1,
+            "the head of the demand swings the rock"
+        );
+        assert_eq!(
+            net.actions().filter(|a| is_mine(a)).count(),
+            3,
+            "and only that fragment left the patch alone"
+        );
+
+        // Two passes are still one function of the inputs.
+        let again = expand(&goals, &state, &reg, BotId(1)).expect("expands");
+        assert_eq!(
+            format!("{net:?}"),
+            format!("{again:?}"),
+            "the rehearsal changes nothing about determinism"
+        );
+    }
 
     /// The supply edge is stated from stock provenance, not inferred: a
     /// consumer whose ingredients were already in the bot's hands -- put
@@ -2114,17 +2227,27 @@ mod tests {
         // shorter for it (`have::the_single_bot_rung_one_plan_is_untouched`,
         // 31,482 -> 29,260). The iron figure does not move: the plates are
         // the same plates, dug by a hand instead of a drill.
+        //
+        // **Coal 33 -> 48, stone 24 -> 48, 86 actions -> 80 later on
+        // 2026-09-05**, when `expand` started rehearsing: the first coal
+        // fragment is priced over the plan's whole coal demand
+        // (`have::chop_beats_mining`) and swings a second rock, so the nine
+        // coal that were dug a tile at a time come out of that swing with
+        // fifteen to spare and twenty-four stone beside them. Units gathered
+        // up, actions and makespan down (`have::the_single_bot_rung_one_plan_is_untouched`,
+        // 29,260 -> 26,770) -- the same shape as the rock change above, for
+        // the same reason.
         assert_eq!(
             mined(&solo),
             BTreeMap::from([
-                ("coal".to_string(), 33),
+                ("coal".to_string(), 48),
                 ("copper-ore".to_string(), 29),
                 ("iron-ore".to_string(), 91),
-                ("stone".to_string(), 24),
+                ("stone".to_string(), 48),
             ]),
             "one bot's rung-1 bill"
         );
-        assert_eq!(solo.len(), 86, "one bot's rung-1 step count");
+        assert_eq!(solo.len(), 80, "one bot's rung-1 step count");
 
         // The defect, stated as the property it breaks. Four bots dig no more
         // than one bot does -- they may split it differently and they may
@@ -2278,9 +2401,11 @@ mod tests {
             },
         ];
         expand(&goals, &state, &reg, BotId(1)).unwrap();
+        // Twice over, since `expand` rehearses: each pass rebinds and
+        // restores on its own, and the second must see what the first saw.
         assert_eq!(
             *seen.borrow(),
-            vec![BotId(2), BotId(1)],
+            vec![BotId(2), BotId(1), BotId(2), BotId(1)],
             "a Bot-addressed goal rebinds, and the binding is restored afterwards"
         );
     }
@@ -2323,9 +2448,10 @@ mod tests {
             },
         ];
         expand(&goals, &state, &reg, BotId(1)).unwrap();
+        // Twice over -- `expand` rehearses; see the test above.
         assert_eq!(
             *seen.borrow(),
-            vec![BotId(2), BotId(1)],
+            vec![BotId(2), BotId(1), BotId(2), BotId(1)],
             "a Share-addressed production rebinds, and the binding is restored"
         );
     }

@@ -787,6 +787,12 @@ export type WalkFailureKind =
     | 'timeout'
     /** The bot had no character to walk with. Says nothing about the map: no path was searched. */
     | 'no_character'
+    /**
+     * The pathfinder found a route whose last waypoint is inside a collision
+     * box the entity graph knows, so the walk was refused before dispatch.
+     * The aim was wrong, not the map.
+     */
+    | 'destination_blocked'
     | 'other';
 
 /**

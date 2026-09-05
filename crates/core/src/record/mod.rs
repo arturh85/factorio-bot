@@ -1247,6 +1247,19 @@ pub enum WalkFailureKind {
     /// refused before dispatch, or from `on_player_died` failing the leg in
     /// flight. Says nothing about the map: no path was searched.
     NoCharacter,
+    /// The pathfinder found a route, and the route ends inside a collision
+    /// box the entity graph has seen -- so the walk was refused *before*
+    /// dispatch, by `judge_path` (crates/core/src/factorio/rcon.rs), as
+    /// `RconWalkEndsWhereNobodyCanStand`. Nothing was walked.
+    ///
+    /// Says the *aim* was wrong, not the map: there is a way there, and the
+    /// bot was sent to a point on it that a character cannot occupy -- a
+    /// neighbouring rock (`run-1788608011-14361`, bot 4, step 16, archived as
+    /// `other` until this variant existed), or a building the plan itself
+    /// put there. Since `approach_standing` the aim is chosen off every box
+    /// the graph knows, so a walk that still lands here is one the graph
+    /// learned about too late.
+    DestinationBlocked,
     /// A kind this build does not know, or one not worth a variant yet.
     #[serde(other)]
     Other,

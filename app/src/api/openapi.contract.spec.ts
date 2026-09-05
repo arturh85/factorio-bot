@@ -960,6 +960,7 @@ const SCHEMAS: Record<string, SchemaContract> = {
         stalled: true,
         timeout: true,
         no_character: true,
+        destination_blocked: true,
         other: true
     }),
     WalkFailure: objectContract<WalkFailure>({

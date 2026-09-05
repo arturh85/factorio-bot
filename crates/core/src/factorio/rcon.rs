@@ -1350,14 +1350,15 @@ fn mining_approach(
     reach: f64,
 ) -> (Position, f64) {
     match blocking_box_at(world, target) {
-        Some(rect) => {
-            let half_w = rect.width() / 2.;
-            let half_h = rect.height() / 2.;
-            let character = character_footprint(world, target);
-            let clearance =
-                half_w.hypot(half_h) + (character.width() / 2.).hypot(character.height() / 2.);
-            approach_annulus(target, clearance, reach + half_w.min(half_h), Some(here))
-        }
+        // `approach_standing` derives the same clearance from the same box,
+        // and on top of it keeps the aim off any *other* box on the ring.
+        Some(rect) => approach_standing(
+            world,
+            target,
+            0.0,
+            reach + (rect.width() / 2.).min(rect.height() / 2.),
+            Some(here),
+        ),
         None => (target.clone(), approach_radius(reach)),
     }
 }
@@ -1497,17 +1498,128 @@ pub fn approach_annulus(
     let width = (radius - min_radius).max(0.0);
     let slack = (width / 2.0).min(PATH_ENDPOINT_SLACK);
     let direction = approach_direction(target, from);
-    let aim = min_radius + slack;
-    let mut goal = vector_add(target, &vector_multiply(&direction, aim));
-    // Each pass moves both coordinates strictly further from the target's, so
-    // the measured distance strictly increases and the loop terminates. One
-    // pass normally suffices; the loop is here so correctness does not rest on
-    // "normally".
+    (aim_along(target, &direction, min_radius + slack), slack)
+}
+
+/// The point `aim` out from `target` along the unit vector `direction`,
+/// guaranteed to measure back at least `aim` from `target`.
+///
+/// Each pass of the loop moves both coordinates strictly further from the
+/// target's, so the measured distance strictly increases and the loop
+/// terminates. One pass normally suffices; the loop is here so correctness
+/// does not rest on "normally". See [`approach_annulus`] for why one ulp
+/// matters.
+fn aim_along(target: &Position, direction: &Position, aim: f64) -> Position {
+    let mut goal = vector_add(target, &vector_multiply(direction, aim));
     while calculate_distance(&goal, target) < aim {
         goal = Position::new(
             nudge_away(goal.x(), target.x()),
             nudge_away(goal.y(), target.y()),
         );
+    }
+    goal
+}
+
+/// How many bearings [`approach_standing`] tries on each ring before moving
+/// one tile further out. Sixteen is 22.5° apart: on the tightest ring in use
+/// (a stone furnace's 1.27-tile clearance plus a tile of slack) neighbouring
+/// candidates are ~0.9 tiles apart, finer than any collision box the graph
+/// holds, so a ring with any free arc at all has a candidate on it.
+const APPROACH_BEARINGS: usize = 16;
+
+/// The goal and path radius for a walk that must end **beside** `target`, on
+/// ground the entity graph cannot prove blocked.
+///
+/// [`approach_annulus`] answers the geometry -- a goal in the annulus
+/// `(min_radius, radius]`, on the side the bot is already on -- and knows
+/// nothing about the map. That is the right split for the arithmetic and the
+/// wrong one for the aim: the pathfinder is handed a *point*, and when that
+/// point is inside something, the path it returns ends inside it too, and
+/// [`judge_path`] refuses the walk before dispatch. Two ways that has
+/// happened, both on seed 31337 on 2026-09-05:
+///
+/// - **Into a neighbour.** `run-1788608011-14361`, bot 4, step 16: a chop of
+///   the `big-rock` at `[-19, 24.375]` with the annulus's inner bound of
+///   1.66. The bot stood at `[-10.5, -22.5]`, so the aim went 2.17 tiles up
+///   the line toward it, to `[-18.56, 22.24]` -- 0.7 tiles inside the
+///   *other* `big-rock` at `[-17.56, 21.5]`, which the same plan had bot 3
+///   chop 700 ticks later. The game returned a route ending exactly there,
+///   the judge refused it, and the batch lost a bot for 4,400 ticks.
+/// - **Into the target itself.** `run-1788608648-56109`, bot 1, step 36: an
+///   insert at the stone furnace at `[-13, -12]`, a plain disc (`min_radius`
+///   0, radius 5) whose centre *is* the furnace. The pathfinder, asked for a
+///   goal inside a building, answered `failed to path find` from
+///   `[-22.2, -9.7]` -- while five earlier walks to the same centre from
+///   other sides had been fine. Whatever the game's rule is, a goal nobody
+///   can stand on is the one input that makes it matter.
+///
+/// So: the inner bound is at least the clearance of whatever stands on
+/// `target` (the same sum of half-diagonals a `Place` walk carries), the
+/// first candidate is the annulus's own aim, and when the graph can prove
+/// that one blocked the search sweeps [`APPROACH_BEARINGS`] bearings round
+/// the ring -- alternating either side of the bot's bearing, so the winner is
+/// the nearest free one -- then one tile further out, until the ring no
+/// longer fits inside `radius` with its slack. The requested radius is the
+/// annulus's slack, so the path must end at the candidate and nowhere else.
+///
+/// **A goal this cannot clear is returned anyway**, exactly as
+/// [`approach_annulus`] would have aimed it. The graph only ever proves
+/// obstruction, never clearance (see [`StandingVerdict`]), so a ring with no
+/// provably-free point is not a ring with no free point, and refusing the
+/// walk here would refuse it on a guess; [`judge_path`] still gets the last
+/// word on the route the game actually returns.
+///
+/// A target with nothing on it and no inner bound -- ore, a chest's tile
+/// after it was picked up, a bare position -- is a plain disc and goes out
+/// untouched, so the game keeps resolving the ring for the walks it always
+/// has.
+pub fn approach_standing(
+    world: &FactorioWorld,
+    target: &Position,
+    min_radius: f64,
+    radius: f64,
+    from: Option<&Position>,
+) -> (Position, f64) {
+    let inner = match blocking_box_at(world, target) {
+        Some(rect) => {
+            let character = character_footprint(world, target);
+            let clearance = (rect.width() / 2.).hypot(rect.height() / 2.)
+                + (character.width() / 2.).hypot(character.height() / 2.);
+            min_radius.max(clearance)
+        }
+        None => min_radius,
+    };
+    let (goal, slack) = approach_annulus(target, inner, radius, from);
+    if inner.is_nan() || inner <= 0.0 {
+        return (goal, slack);
+    }
+    if standing_verdict(world, &goal) == StandingVerdict::NotProvablyBlocked {
+        return (goal, slack);
+    }
+    let towards = approach_direction(target, from);
+    let step = std::f64::consts::TAU / APPROACH_BEARINGS as f64;
+    let mut aim = inner + slack;
+    while aim + slack <= radius {
+        for k in 0..APPROACH_BEARINGS {
+            // 0, +1, -1, +2, -2, ...: the bot's own bearing first, then out
+            // either side of it, so the first free candidate is the nearest.
+            let turn = if k % 2 == 0 {
+                (k / 2) as isize
+            } else {
+                -(k.div_ceil(2) as isize)
+            } as f64
+                * step;
+            let (sin, cos) = turn.sin_cos();
+            let direction = Position::new(
+                towards.x() * cos - towards.y() * sin,
+                towards.x() * sin + towards.y() * cos,
+            );
+            let candidate = aim_along(target, &direction, aim);
+            if standing_verdict(world, &candidate) == StandingVerdict::NotProvablyBlocked {
+                return (candidate, slack);
+            }
+        }
+        aim += 1.0;
     }
     (goal, slack)
 }
@@ -2044,6 +2156,43 @@ fn is_stalled_walk(failure: &ActionFailure) -> bool {
             .error
             .downcast_ref::<RconError>()
             .is_some_and(|refused| walk_reports_stalled_leg(&refused.message))
+}
+
+/// The path radius [`FactorioRcon::move_player_timed`] falls back to when the
+/// route the game returned ends somewhere nobody can stand.
+///
+/// Half a tile: the pathfinder puts waypoints on tile centres, so any goal is
+/// within `sqrt(2)/2` of one and a request this tight still has an answer,
+/// while the answer can no longer be a different point of the disc.
+const TIGHT_PATH_RADIUS: f64 = 0.5;
+
+/// The radius to ask for again after `failure`, if asking again is worth
+/// anything -- `None` when it is not.
+///
+/// The one failure this answers is [`RconWalkEndsWhereNobodyCanStand`], and
+/// only when the goal *itself* is not the problem: the graph cannot prove the
+/// goal blocked, the request left the game room to stop elsewhere in the
+/// disc, and the game used that room to stop inside a building. Tightening
+/// the radius to [`TIGHT_PATH_RADIUS`] takes the room away. A goal the graph
+/// can prove blocked gets `None` -- a tighter request for it would be refused
+/// for the same reason, one path request later -- and so does a request that
+/// was already tight, or any other failure at all.
+fn tightened_radius(
+    world: &FactorioWorld,
+    goal: &Position,
+    radius: Option<f64>,
+    failure: &ActionFailure,
+) -> Option<f64> {
+    failure
+        .error
+        .downcast_ref::<RconWalkEndsWhereNobodyCanStand>()?;
+    if radius.unwrap_or(DEFAULT_PATH_RADIUS) <= TIGHT_PATH_RADIUS {
+        return None;
+    }
+    match standing_verdict(world, goal) {
+        StandingVerdict::NotProvablyBlocked => Some(TIGHT_PATH_RADIUS),
+        StandingVerdict::Blocked { .. } => None,
+    }
 }
 
 /// How many times one [`FactorioRcon::move_player_timed`] call may be put to the
@@ -3315,11 +3464,34 @@ impl FactorioRcon {
         radius: Option<f64>,
     ) -> Result<ActionTicks, ActionFailure> {
         let mut attempts_left = WALK_ATTEMPTS;
+        let mut radius = radius;
+        let mut tightened = false;
         loop {
             let outcome = self
                 .move_player_attempt(world, player_id, goal, radius)
                 .await;
             match outcome {
+                Err(failure)
+                    if !tightened
+                        && let Some(tight) = tightened_radius(world, goal, radius, &failure) =>
+                {
+                    // The goal is fine; the game chose to stop somewhere
+                    // else inside the disc, and that somewhere is inside a
+                    // building. Ask once more for the goal itself. Not a
+                    // `WALK_ATTEMPTS` attempt: nothing was walked, and this
+                    // is a different question, not the same one again.
+                    tightened = true;
+                    warn!(
+                        "#{} was routed to a spot nobody can stand on ({}), asking again for {}/{} at a radius of {} instead of {}",
+                        player_id,
+                        failure.error,
+                        goal.x(),
+                        goal.y(),
+                        tight,
+                        radius.unwrap_or(DEFAULT_PATH_RADIUS)
+                    );
+                    radius = Some(tight);
+                }
                 Err(failure) if attempts_left > 1 && is_stalled_walk(&failure) => {
                     attempts_left -= 1;
                     // The cause first, in a fixed shape, because this line is
@@ -8587,6 +8759,259 @@ mod mining_reach_tests {
         };
         world.update_chunk_entities(vec![rock]).unwrap();
         Arc::new(world)
+    }
+
+    /// The build reach a `Place` or insert walk carries: the character's
+    /// `build_distance` of 10, which `approach_radius` halves to a disc of 5.
+    const BUILD_REACH: f64 = 10.0;
+
+    /// `PlanState::placement_clearance("stone-furnace")`, re-derived from the
+    /// fixture prototypes as `approach_annulus_tests` does.
+    fn stone_furnace_clearance() -> f64 {
+        let prototypes = fixture_entity_prototypes();
+        let half_diagonal = |name: &str| {
+            let b = &prototypes
+                .get(name)
+                .expect("fixture prototype")
+                .collision_box;
+            (b.width() / 2.).hypot(b.height() / 2.)
+        };
+        half_diagonal("stone-furnace") + half_diagonal(CHARACTER_PROTOTYPE)
+    }
+
+    /// A world holding the fixture prototypes and a stone furnace on each of
+    /// `furnaces`, with the game's own collision box.
+    fn world_with(furnaces: &[Position]) -> Arc<FactorioWorld> {
+        let world = FactorioWorld::new();
+        let prototypes: Vec<FactorioEntityPrototype> = fixture_entity_prototypes()
+            .iter()
+            .map(|v| v.clone())
+            .collect();
+        world.update_entity_prototypes(prototypes).unwrap();
+        let entities = furnaces
+            .iter()
+            .map(|position| {
+                FactorioEntity::from_prototype(
+                    "stone-furnace",
+                    position.clone(),
+                    None,
+                    None,
+                    None,
+                    world.entity_prototypes.clone(),
+                )
+                .expect("the fixture has a stone-furnace prototype")
+            })
+            .collect();
+        world.update_chunk_entities(entities).unwrap();
+        Arc::new(world)
+    }
+
+    /// The two `big-rock`s of `run-1788608011-14361`, with the boxes the
+    /// game reported for them: `{{-1, -0.8984375}, {1, 1}}` around each
+    /// centre.
+    fn world_with_run_as_two_rocks() -> Arc<FactorioWorld> {
+        let world = FactorioWorld::new();
+        let prototypes: Vec<FactorioEntityPrototype> = fixture_entity_prototypes()
+            .iter()
+            .map(|v| v.clone())
+            .collect();
+        world.update_entity_prototypes(prototypes).unwrap();
+        let rock = |x: f64, y: f64| FactorioEntity {
+            name: "big-rock".into(),
+            entity_type: EntityType::SimpleEntity.to_string(),
+            position: Position::new(x, y),
+            bounding_box: Rect::new(
+                &Position::new(x - 1., y - 0.8984375),
+                &Position::new(x + 1., y + 1.),
+            ),
+            ..Default::default()
+        };
+        world
+            .update_chunk_entities(vec![rock(-17.5625, 21.5), rock(-19., 24.375)])
+            .unwrap();
+        Arc::new(world)
+    }
+
+    /// `run-1788608011-14361`, bot 4, step 16: a chop of the rock at
+    /// `[-19, 24.375]`, aimed from `[-10.5, -22.5]`. The annulus's own aim
+    /// lands inside the neighbouring rock at `[-17.56, 21.5]` -- the first
+    /// half of this test pins that, with the run's own numbers -- and the
+    /// game then returned a route ending there, which `judge_path` refused.
+    /// `approach_standing` must aim at a point on the ring the graph cannot
+    /// prove blocked, still inside the annulus.
+    #[test]
+    fn run_a_bot_4_is_aimed_off_the_neighbouring_rock() {
+        let world = world_with_run_as_two_rocks();
+        let target = Position::new(-19., 24.375);
+        let here = Position::new(-10.5, -22.5);
+        let rect = blocking_box_at(&world, &target).expect("the rock has a box");
+        let clearance =
+            (rect.width() / 2.).hypot(rect.height() / 2.) + 0.19921875f64.hypot(0.19921875);
+
+        // The mechanism: the plan's annulus put the aim 0.7 tiles inside the
+        // other rock. `here` is the ore tile bot 4 had just mined, not the
+        // exact spot it stood on, so the run's `[-18.56, 22.24]` is
+        // reproduced to within a tenth of a tile rather than exactly.
+        let (naive, _) = approach_annulus(&target, clearance, REACH, Some(&here));
+        assert!(
+            (naive.x() - -18.5613).abs() < 0.1 && (naive.y() - 22.2393).abs() < 0.1,
+            "the run's aim was [-18.56, 22.24], this reproduces {naive}"
+        );
+        assert!(matches!(
+            standing_verdict(&world, &naive),
+            StandingVerdict::Blocked { .. }
+        ));
+
+        let (goal, slack) = approach_standing(&world, &target, clearance, REACH, Some(&here));
+        assert_eq!(
+            standing_verdict(&world, &goal),
+            StandingVerdict::NotProvablyBlocked,
+            "aimed at {goal}"
+        );
+        let d = calculate_distance(&goal, &target);
+        assert!(d - slack + 1e-9 >= clearance, "{d} - {slack} < {clearance}");
+        assert!(d + slack <= REACH + 1e-9, "{d} + {slack} > {REACH}");
+        // Still on the bot's side of the rock: the winner is the nearest
+        // free bearing, not an arbitrary one.
+        assert!(goal.y() < target.y(), "aimed at {goal}, the bot is north");
+    }
+
+    /// `run-1788608648-56109`, bot 1, step 36: an insert at the stone furnace
+    /// at `[-13, -12]`, a plain disc whose centre is the furnace. The
+    /// pathfinder answered `failed to path find` from `[-22.2, -9.7]`. The
+    /// row of furnaces is the run's own (`map.jsonl`, keyframe at tick
+    /// 101,156). The aim must leave the furnace's box, stay within the
+    /// plan's reach of the centre, and stand clear of every other furnace
+    /// in the row.
+    #[test]
+    fn a_disc_walk_to_a_furnace_is_aimed_beside_it() {
+        let row = [
+            Position::new(-13., -12.),
+            Position::new(-15., -13.),
+            Position::new(-17., -12.),
+            Position::new(-19., -12.),
+            Position::new(-21., -11.),
+            Position::new(-23., -11.),
+        ];
+        let world = world_with(&row);
+        let target = Position::new(-13., -12.);
+        let here = Position::new(-22.21875, -9.70703125);
+
+        // Control: the disc as it was asked for is centred on the furnace.
+        let (naive, _) = approach_annulus(&target, 0.0, BUILD_REACH, Some(&here));
+        assert!(matches!(
+            standing_verdict(&world, &naive),
+            StandingVerdict::Blocked { .. }
+        ));
+
+        let (goal, slack) = approach_standing(&world, &target, 0.0, BUILD_REACH, Some(&here));
+        assert_eq!(
+            standing_verdict(&world, &goal),
+            StandingVerdict::NotProvablyBlocked,
+            "aimed at {goal}"
+        );
+        let d = calculate_distance(&goal, &target);
+        assert!(
+            d - slack + 1e-9 >= stone_furnace_clearance(),
+            "{d} - {slack} is inside the furnace's clearance"
+        );
+        assert!(d + slack <= BUILD_REACH + 1e-9);
+        // On the bot's side, south of the row.
+        assert!(goal.y() > target.y(), "aimed at {goal}");
+    }
+
+    /// Ore has no box and a disc has no inner bound, so nothing here has a
+    /// reason to move: the request goes out exactly as `approach_annulus`
+    /// always made it.
+    #[test]
+    fn a_disc_walk_onto_open_ground_is_untouched() {
+        let world = world_with(&[Position::new(-22., 18.)]);
+        let ore = Position::new(-31., -31.);
+        let here = Position::new(-28.6640625, -26.8046875);
+        assert_eq!(
+            approach_standing(&world, &ore, 0.0, BUILD_REACH, Some(&here)),
+            approach_annulus(&ore, 0.0, BUILD_REACH, Some(&here))
+        );
+    }
+
+    /// A ring the graph can prove blocked all the way round is returned as
+    /// the annulus would have aimed it -- the graph proves obstruction, not
+    /// clearance, and refusing here would refuse on a guess.
+    #[test]
+    fn a_ring_with_no_provably_free_point_falls_back_on_the_annulus() {
+        // Furnaces on every side of the target, close enough that the whole
+        // ring at clearance-plus-slack is inside one of them.
+        let target = Position::new(0., 0.);
+        let ring: Vec<Position> = (0..16)
+            .map(|k| {
+                let a = std::f64::consts::TAU * k as f64 / 16.;
+                Position::new(2.3 * a.cos(), 2.3 * a.sin())
+            })
+            .collect();
+        let mut all = vec![target.clone()];
+        all.extend(ring);
+        let world = world_with(&all);
+        let here = Position::new(10., 0.);
+        let clearance = stone_furnace_clearance();
+        let (goal, slack) = approach_standing(&world, &target, clearance, 3.0, Some(&here));
+        assert_eq!(
+            (goal, slack),
+            approach_annulus(&target, clearance, 3.0, Some(&here))
+        );
+    }
+
+    /// The second question `move_player_timed` asks after a route that ends
+    /// inside a box: only for that failure, only when the goal itself is
+    /// clear, and only when the request left the game room to stop elsewhere.
+    #[test]
+    fn a_route_ending_inside_a_box_is_asked_again_tightly_when_the_goal_is_clear() {
+        let world = world_with(&[Position::new(-22., 18.)]);
+        let refusal = || {
+            ActionFailure::not_dispatched(
+                RconWalkEndsWhereNobodyCanStand {
+                    goal_x: -24.,
+                    goal_y: 18.,
+                    end_x: -22.3,
+                    end_y: 18.2,
+                    blocker: "stone-furnace at [-22, 18]".into(),
+                }
+                .into(),
+            )
+        };
+        let clear = Position::new(-24., 18.);
+        assert_eq!(
+            tightened_radius(&world, &clear, Some(5.0), &refusal()),
+            Some(TIGHT_PATH_RADIUS)
+        );
+        // Factorio's own default of 1 is wider than tight, too.
+        assert_eq!(
+            tightened_radius(&world, &clear, None, &refusal()),
+            Some(TIGHT_PATH_RADIUS)
+        );
+        // Already tight: the game had no room, asking again changes nothing.
+        assert_eq!(
+            tightened_radius(&world, &clear, Some(TIGHT_PATH_RADIUS), &refusal()),
+            None
+        );
+        // The goal is the furnace: a tighter request for it is refused for
+        // the same reason.
+        assert_eq!(
+            tightened_radius(&world, &Position::new(-22., 18.), Some(5.0), &refusal()),
+            None
+        );
+        // Any other failure is somebody else's question.
+        let short = ActionFailure::not_dispatched(
+            RconWalkFallsShort {
+                goal_x: -24.,
+                goal_y: 18.,
+                end_x: -30.,
+                end_y: 18.,
+                shortfall: 6.,
+                tolerance: 2.,
+            }
+            .into(),
+        );
+        assert_eq!(tightened_radius(&world, &clear, Some(5.0), &short), None);
     }
 
     #[test]

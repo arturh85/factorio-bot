@@ -513,6 +513,14 @@ fn classify_walk_failure(error: &str) -> WalkFailure {
         // where *every* retry was refused. Still nothing learned about the
         // map, which is the whole distinction.
         WalkFailureKind::PathfinderBusy
+    } else if error.contains("a character cannot stand there") {
+        // Rust's own `RconWalkEndsWhereNobodyCanStand`: the game returned a
+        // route, `judge_path` found its last waypoint inside a collision box
+        // the graph knows, and nothing was dispatched. Above the `NoPath` arm
+        // because it is the opposite fact -- a path *was* found, and the aim
+        // was the problem. `run-1788608011-14361`'s refusal into a
+        // neighbouring rock was archived as `other` until this arm existed.
+        WalkFailureKind::DestinationBlocked
     } else if error.contains("the destination is unreachable")
         || error.contains("found no path")
         || error.contains("returned no path")
@@ -4132,6 +4140,23 @@ mod tests {
                      Error: player 2 has no character: dead, respawns in 587 ticks";
         let failure = classify_walk_failure(error);
         assert_eq!(failure.kind, WalkFailureKind::NoCharacter);
+        assert_eq!(failure.from, None);
+        assert_eq!(failure.destination, None);
+    }
+
+    /// `run-1788608011-14361`, bot 4, step 16, verbatim: `judge_path` refused
+    /// the route because its last waypoint was inside the neighbouring
+    /// big-rock's box. It was archived as `other`, which is the one answer a
+    /// classifier must not give to the most-refused walk of the day.
+    #[test]
+    fn a_walk_refused_for_ending_inside_a_box_is_destination_blocked() {
+        let error = "game rejected the command: the walk to \
+                     [-18.56129845185668, 22.239337181155513] would end at \
+                     [-18.55859375, 22.23828125], inside a collision box spanning \
+                     [-18.56, 20.6] to [-16.56, 22.5] — a character cannot stand \
+                     there, so the walk could only stall";
+        let failure = classify_walk_failure(error);
+        assert_eq!(failure.kind, WalkFailureKind::DestinationBlocked);
         assert_eq!(failure.from, None);
         assert_eq!(failure.destination, None);
     }

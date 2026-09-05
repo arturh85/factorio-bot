@@ -220,6 +220,23 @@ three bots one extra iron furnace (three actions) reorders bot 3's ready
 work and its `take 10 copper-ore from the wooden-chest` moves from 8,860 to
 13,473 with no furnace of its involved.
 
+## ✖ RUN 18 VOID — my own load rule, broken by me
+
+2026-09-06 00:13. Launched a four-client 1x green run at load **14.8**, an
+hour after telling every agent that a Factorio run waits for load below 6
+because a starved server makes a bad measurement. Load reached **93** while
+other agents compiled; all four clients failed to appear and the connect
+wait gave up with `0/4 have a character`. The run continued with a one-bot
+roster — the documented trap in `CLAUDE.md`, a *different plan* that is
+comparable to nothing — and was killed rather than allowed to produce a
+number.
+
+Nothing was lost but time, and the rule stands as written; I simply did not
+apply it to myself. The correction is procedural: **before a measured run,
+ask the other sessions and agents to hold builds, and confirm the box is
+quiet — do not merely glance at the load average**, which lags. Green at 1x
+on the drain-policy planner is still unmeasured.
+
 ## ✅ AUTOMATION: 6:05 ON RELEASE (`run-1788641738-65147`) — a new record, and the plan was right
 
 `just bench automation_speedrun.lua`, 2026-09-05 23:01, master `185faa11`,

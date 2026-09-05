@@ -6367,6 +6367,13 @@ pub fn registry_for(bots: &[BotId]) -> MethodRegistry {
         .with(Box::new(crate::method::assemble::BuildAssemblyCell {
             bots: bots.to_vec(),
         }))
+        // Claims `Goal::Built`, which nothing else claims. Mirrors
+        // `default_registry`'s placement (last) -- but `default_registry`
+        // itself is dead code outside `produce.rs`'s tests, so this is the
+        // registration that actually matters: `goal.plan` (Lua) and the
+        // `plan`/`score-map` CLIs all build their registry from this
+        // function, not from `default_registry`.
+        .with(Box::new(crate::method::blueprint::BuildBlock))
 }
 
 #[cfg(test)]

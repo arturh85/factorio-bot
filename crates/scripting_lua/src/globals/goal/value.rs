@@ -2,7 +2,7 @@
 //! handle into the interpreter or the running game.
 //!
 //! Every constructor (`goal.have`, `goal.researched`, `goal.producing`,
-//! `goal.all`) validates
+//! `goal.built`, `goal.all`) validates
 //! eagerly, so a mistake raises on the line that made it. [`goal_from_lua`]
 //! validates again on the way back to a planner `Goal`, because a Lua table
 //! is open: nothing stops a script from hand-building one that skips what a
@@ -12,16 +12,18 @@
 
 use super::goal_error;
 use factorio_bot_core::mlua::prelude::*;
+use factorio_bot_core::types::Position;
 use factorio_bot_planner::{BotId, Goal, Holder};
 
-/// Installs `have`, `researched`, `producing` and `all` on `table`.
+/// Installs `have`, `researched`, `producing`, `built` and `all` on `table`.
 ///
-/// All four share one metatable -- built once here and cloned (cheaply: a
-/// Lua table is refcounted) onto every value the four functions return -- so
+/// All five share one metatable -- built once here and cloned (cheaply: a
+/// Lua table is refcounted) onto every value the five functions return -- so
 /// `tostring(g)` renders the same way regardless of which of them built `g`.
 ///
-/// Called by `create_lua_goal_with`: these four *are* `goal.have`,
-/// `goal.researched`, `goal.producing` and `goal.all` as a script sees them.
+/// Called by `create_lua_goal_with`: these five *are* `goal.have`,
+/// `goal.researched`, `goal.producing`, `goal.built` and `goal.all` as a
+/// script sees them.
 pub(crate) fn install_goal_constructors(lua: &Lua, table: &LuaTable) -> LuaResult<()> {
     let metatable = lua.create_table()?;
     metatable.set(
@@ -86,6 +88,22 @@ pub(crate) fn install_goal_constructors(lua: &Lua, table: &LuaTable) -> LuaResul
         })?,
     )?;
 
+    let mt = metatable.clone();
+    table.set(
+        "built",
+        lua.create_function(move |lua, (blueprint, anchor): (LuaValue, LuaValue)| {
+            let blueprint = require_blueprint(blueprint)?;
+            let anchor = require_anchor(anchor)?;
+            let t = lua.create_table()?;
+            t.set("kind", "built")?;
+            t.set("blueprint", blueprint)?;
+            t.set("x", anchor.x())?;
+            t.set("y", anchor.y())?;
+            t.set_metatable(Some(mt.clone()))?;
+            Ok(t)
+        })?,
+    )?;
+
     table.set(
         "all",
         lua.create_function(move |lua, goals: LuaTable| {
@@ -136,6 +154,13 @@ pub(crate) fn goal_from_lua(value: &LuaTable) -> LuaResult<Goal> {
             item: require_item(value.get("item")?)?,
             per_minute: require_count(value.get("per_minute")?)?,
         }),
+        "built" => Ok(Goal::Built {
+            blueprint: require_blueprint(value.get("blueprint")?)?,
+            anchor: Position::new(
+                require_coordinate(value.get("x")?, "x")?,
+                require_coordinate(value.get("y")?, "y")?,
+            ),
+        }),
         "all" => {
             let goals = require_table_field(value.get("goals")?, "goals")?;
             let len = goals.raw_len();
@@ -168,6 +193,18 @@ fn render_goal(t: &LuaTable) -> LuaResult<String> {
             require_count(t.get("per_minute")?)?,
             require_item(t.get("item")?)?
         )),
+        "built" => {
+            let blueprint = require_blueprint(t.get("blueprint")?)?;
+            let anchor = Position::new(
+                require_coordinate(t.get("x")?, "x")?,
+                require_coordinate(t.get("y")?, "y")?,
+            );
+            Ok(format!(
+                "build {}-byte block at {}",
+                blueprint.len(),
+                anchor
+            ))
+        }
         "all" => {
             let goals = require_table_field(t.get("goals")?, "goals")?;
             let len = goals.raw_len();
@@ -189,10 +226,10 @@ fn require_kind(t: &LuaTable) -> LuaResult<String> {
     }
 }
 
-/// The four kinds a goal table may name. Fixed by this module -- no world is
+/// The five kinds a goal table may name. Fixed by this module -- no world is
 /// consulted to decide whether a `kind` is one of them, which is why an
 /// unknown one is a shape error rather than a semantic one.
-const KINDS: &[&str] = &["have", "researched", "producing", "all"];
+const KINDS: &[&str] = &["have", "researched", "producing", "built", "all"];
 
 /// [`require_kind`], plus the check that it names a kind that exists.
 fn require_known_kind(t: &LuaTable) -> LuaResult<String> {
@@ -244,6 +281,39 @@ fn require_item(value: LuaValue) -> LuaResult<String> {
 
 fn require_technology(value: LuaValue) -> LuaResult<String> {
     require_nonempty_string(value, "technology")
+}
+
+fn require_blueprint(value: LuaValue) -> LuaResult<String> {
+    require_nonempty_string(value, "blueprint")
+}
+
+/// One coordinate of an anchor, read back off a goal table's flat `x`/`y`
+/// fields -- see [`require_anchor`] for why the anchor is stored flat rather
+/// than as a nested table.
+fn require_coordinate(value: LuaValue, field: &str) -> LuaResult<f64> {
+    match value {
+        LuaValue::Integer(n) => Ok(n as f64),
+        LuaValue::Number(n) => Ok(n),
+        _ => Err(goal_error(format!("anchor {field} must be a number"))),
+    }
+}
+
+/// The `{ x = ..., y = ... }` table a caller passes to `goal.built`.
+///
+/// Stored on the goal table as flat `x`/`y` fields, not a nested `anchor`
+/// table, so a goal table's shape stays flat like every other constructor
+/// here (`have`'s `item`/`count`, `producing`'s `item`/`per_minute`).
+fn require_anchor(value: LuaValue) -> LuaResult<Position> {
+    match value {
+        LuaValue::Table(t) => Ok(Position::new(
+            require_coordinate(t.get("x")?, "x")?,
+            require_coordinate(t.get("y")?, "y")?,
+        )),
+        other => Err(goal_error(format!(
+            "anchor must be a table with x and y, got a {}",
+            other.type_name()
+        ))),
+    }
 }
 
 fn require_nonempty_string(value: LuaValue, what: &str) -> LuaResult<String> {
@@ -352,6 +422,9 @@ mod tests {
             // would put a float back on that path.
             (r#"goal.producing("iron-plate", 0)"#, "count"),
             (r#"goal.producing("iron-plate", 15.5)"#, "count"),
+            (r#"goal.built("", {x = 1, y = 1})"#, "blueprint"),
+            (r#"goal.built("0eNq...", nil)"#, "anchor"),
+            (r#"goal.built("0eNq...", {x = 1})"#, "y"),
             (r#"goal.all({})"#, "at least one"),
             (r#"goal.all({ 42 })"#, "goal"),
             (r#"goal.have("iron-plate", 1, { bot = 0 })"#, "bot"),
@@ -437,6 +510,40 @@ mod tests {
         )
         .exec()
         .expect("script");
+    }
+
+    #[test]
+    fn built_builds_an_inspectable_table_and_renders_its_anchor() {
+        let lua = lua_with_goal();
+        lua.load(
+            r#"
+            local g = goal.built("0eNq...", {x = 10, y = 10})
+            assert(g.kind == "built", "kind")
+            assert(g.blueprint == "0eNq...", "blueprint")
+            assert(g.x == 10, "x")
+            assert(g.y == 10, "y")
+            assert(tostring(g):find("10"), "tostring mentions the anchor")
+        "#,
+        )
+        .exec()
+        .expect("script");
+    }
+
+    #[test]
+    fn built_converts_to_the_planner_goal() {
+        let lua = lua_with_goal();
+        let g: LuaTable = lua
+            .load(r#"return goal.built("0eNq...", {x = 10, y = 10})"#)
+            .eval()
+            .expect("script");
+        let converted = goal_from_lua(&g).expect("converts");
+        assert_eq!(
+            converted,
+            Goal::Built {
+                blueprint: "0eNq...".into(),
+                anchor: Position::new(10.0, 10.0),
+            }
+        );
     }
 
     #[test]

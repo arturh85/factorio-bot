@@ -481,8 +481,8 @@ pub(crate) fn create_lua_goal_with(
 -- into an action network by the planner, assigned to bots by the scheduler,
 -- and then executed against the running game.
 --
--- Nothing here is a handle. `goal.have`, `goal.researched`, `goal.producing`
--- and `goal.all` build **goal values**: ordinary Lua tables you can read (`g.item`,
+-- Nothing here is a handle. `goal.have`, `goal.researched`, `goal.producing`,
+-- `goal.built` and `goal.all` build **goal values**: ordinary Lua tables you can read (`g.item`,
 -- `g.count`), print and pass around. `goal.plan` turns one into a
 -- **PlanValue**, which carries the schedule it was given and answers questions
 -- about it (`plan.makespan`, `plan.bots`, `plan.steps`, `plan:count{...}`,
@@ -506,7 +506,7 @@ local goal = {}
 
     let roster: Vec<BotId> = bots.into_iter().map(BotId).collect();
 
-    // `goal.have` / `goal.researched` / `goal.producing` / `goal.all`: the goal-value
+    // `goal.have` / `goal.researched` / `goal.producing` / `goal.built` / `goal.all`: the goal-value
     // constructors. Pure — they touch neither the world nor the planner, so
     // an unknown item is not an error here; it is one at `goal.plan`, which
     // is the first call that has a world to check it against.
@@ -584,6 +584,31 @@ end
 -- @treturn table a goal value
 -- @raise if the item name is empty, or the rate is not an integer >= 1
 function goal.producing(item_name, per_minute)
+end
+"#,
+        ),
+    )?;
+    map_table.set(
+        "__doc_entry_built",
+        String::from(
+            r#"
+--- builds a goal value: a designed blueprint stands at an anchor
+--
+-- Pure, like `goal.have`: the blueprint string is decoded, and an unsupported
+-- entity or a blueprint containing underground belts is refused, only at
+-- `goal.plan`, which is the first call with a world to check it against.
+--
+-- Planning it means *the entities the blueprint names that are not yet
+-- standing*, re-derived against the world on every expansion rather than
+-- remembered -- so replanning after a partial build finishes it rather than
+-- doubling it, and building an already-standing blueprint plans nothing at
+-- all. The entities are split into bands across the roster, one band per bot.
+-- @string blueprint_string the blueprint, in Factorio's exported string form
+-- @param anchor `types.Position` where the blueprint's own origin lands in the world
+-- @treturn table a goal value
+-- @raise if the blueprint string is empty, or the anchor is not a table with
+--   numeric x and y
+function goal.built(blueprint_string, anchor)
 end
 "#,
         ),
@@ -1647,8 +1672,8 @@ mod tests {
         lua.load(
             r#"
             local expected = { have=true, researched=true, producing=true,
-                               all=true, plan=true, run=true, start=true,
-                               holds=true, refusal=true }
+                               built=true, all=true, plan=true, run=true,
+                               start=true, holds=true, refusal=true }
             local actual = {}
             for k, v in pairs(goal) do
                 -- the __doc__ keys are strings consumed by the doc generator

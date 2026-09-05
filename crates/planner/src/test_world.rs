@@ -169,6 +169,42 @@ pub(crate) fn two_machines_behind_a_wall() -> PlanState {
     PlanState::from_world(Arc::new(world), &[])
 }
 
+/// [`open_world_with_two_machines`]'s two furnaces moved close together --
+/// `(0.5, 0.5)` and `(0.5, -2.5)`, three tiles apart on the same column --
+/// with three extra `stone-wall`s boxing in every one of the second
+/// furnace's cardinal neighbours except one: `(0.5, -3.5)` (north),
+/// `(1.5, -2.5)` (east) and `(-0.5, -2.5)` (west) are walled off, leaving
+/// only south, `(0.5, -1.5)`, open from the second furnace's own cell.
+///
+/// `(0.5, -1.5)` is also exactly where the *first* furnace's own belt lands:
+/// north of `(0.5, 0.5)` is its inserter `(0.5, -0.5)`, and north of that is
+/// its belt tile `(0.5, -1.5)` -- the same cell, found by an unrelated
+/// search (the second furnace's own inserter search) that has no way to know
+/// the first search already claimed it, unless `connect_steps` makes its
+/// four tile selections aware of each other.
+///
+/// This is the fixture for that: with the four selections properly aware of
+/// each other, the second furnace's inserter search finds every one of its
+/// neighbours either walled or already claimed and `connect_steps` refuses.
+/// Without that awareness, the search finds `(0.5, -1.5)` "free" (it is
+/// open ground; only the first furnace's own derivation knows otherwise) and
+/// `connect_steps` would emit a second `Place` for a tile the first
+/// furnace's belt already claimed.
+pub(crate) fn two_machines_sharing_a_neighbour() -> PlanState {
+    let world = fixture_world();
+    let entities = vec![
+        stone_furnace(&Position::new(0.5, 0.5)),
+        stone_furnace(&Position::new(0.5, -2.5)),
+        stone_wall(&Position::new(0.5, -3.5)),
+        stone_wall(&Position::new(1.5, -2.5)),
+        stone_wall(&Position::new(-0.5, -2.5)),
+    ];
+    world
+        .update_chunk_entities(entities)
+        .expect("a fixture world accepts two furnaces and three walls");
+    PlanState::from_world(Arc::new(world), &[])
+}
+
 /// One force, `player`, with a small technology tree.
 ///
 /// * `automation` — the real thing: no prerequisites, 10 units of one

@@ -254,8 +254,10 @@ per-minute rates over a trailing window, and runs are compared on that
 table first (dispatched as `rates`); `producing:X:N` must mean a sustained
 rate verified over a window, with the cell fed by drills and furnaces
 through inserters and belts rather than by hand — which is the consumer
-the peer's `connect` primitive has been waiting for; and the record's
-headline for a run becomes the curve, with the milestone tick second.
+the peer's `connect` primitive has been waiting for; and the record carries both, each where it fits: the curve for anything
+about sustained output, game ticks for a genuine first event such as a
+technology landing or a build-time comparison (owner: "continue using game
+time where it makes more sense than production / throughput rates").
 
 ## ⚠️ RUN 15: 18:46 (`run-1788621697-14165`) — slower than run 14, honestly
 

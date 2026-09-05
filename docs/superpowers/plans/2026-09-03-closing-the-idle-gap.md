@@ -80,6 +80,22 @@ honestly, as before. Also fixed on the way: `scripting_lua`'s
 `plan_cell` call was one argument behind `bdec88af` and failed
 `--all-targets` clippy on master.
 
+## ✅ GREEN FROM A FRESH WORLD IN 31:35 (`run-1788576604-65414`) — footprint fix confirmed live
+
+Git `399c041c` (footprint fix in; cell ladder not yet), fresh seed-31337 world.
+**Green cell at 31:35, witnessed at 32:15**; 470 of 470 actions; 140 of 140
+walks bar one stall; fleet utilisation 26.5%. No steam-engine refusal this
+time — the turned-box check classified the actor and the plant stood where
+the plan put it. The one stall (`leg 2 of 86 made no progress for 61 ticks …
+moved 1.04 tiles … nothing findable`) was **recovered in place by tier 1 —
+`planned 252 steps (best 606) -- recovered: rescheduled 1` — and the
+rescheduled batch finished 291 of 291**: the first time a tier-1 recovery
+after a walk refusal demonstrably reassigned work and completed. The walker's
+sub-tile-leg stall is under RCA (`walker-short-leg`).
+
+Fresh-world green across the night: **64:22 → 36:48 → 31:35**; planned for
+the next binary (cell ladder): 27:00.
+
 ## The cell ladder was three mechanisms, none of them "the previous cell's plates" (`de765de3`)
 
 My brief said each drill was built from the previous cell's plates. Wrong:
@@ -1855,7 +1871,7 @@ infrastructure for a 3h17m game, not a harder milestone.
 | red science producing **once** | never observed | witnessed six times, all inside 780 ticks |
 | red science producing **at a rate** | impossible to claim | **5 packs in 3,240 ticks (~5.5/min)**, twice |
 | green science, planning | did not expand at all | plans end to end |
-| green science, live | never run | **WITNESSED four times** — fresh world end to end in **36:48 / 37:26** (`run-1788574143-35250`), down from 64:22 the run before |
+| green science, live | never run | **WITNESSED five times** — fresh world end to end in **31:35 / 32:15** (`run-1788576604-65414`); 64:22 → 36:48 → 31:35 over the night |
 | furnaces per run | 42 | **8** |
 | recovery (`obs:recover`) | never executed in any run | **fires live** |
 

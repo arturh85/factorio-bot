@@ -220,6 +220,24 @@ three bots one extra iron furnace (three actions) reorders bot 3's ready
 work and its `take 10 copper-ore from the wooden-chest` moves from 8,860 to
 13,473 with no furnace of its involved.
 
+## The afternoon after 17:20: what headless mode found (2026-09-05, 15:00–18:00)
+
+Full log in `docs/superpowers/notes/2026-09-05-headless-experiments.md`. On
+master since run 14: aim avoids standing bots (`0f5f5170`); new workspaces
+seed scripts (`3cd57c70`) and are created on first run (`675f93b7`);
+character spawn spread, pinned-walker step-clear, push-out record
+(`f24c02a6`); boxed-in bench (`efc1931b`); **research names the poles and
+generator it draws through (`c83c5906`)** — the eight-bot execution gap was
+labs sitting dark for 8,500 ticks because `Condition::Powered` had no edge
+to the pole that powers them; the same hole was in the four-bot plan and
+landed by luck. Offline green for four bots is now **569 / 59,476**
+(+1,724 on a scheduler tie-break, the model being honest); eight bots
+53,326. Pending merge: the game clock stops while the planner thinks
+(planning wall time was the whole speed tax: 942 ticks at 5x, 1,837 at 10x,
+6,438 for green at 5x), gated to servers this process owns, recorded as
+`planning_timed`. Run 15 at 1x follows the merge; its number will exclude
+planning time and say so.
+
 ## ✅ GREEN FROM A FRESH WORLD IN 17:20 (`run-1788612263-27812`) — the merged afternoon, measured
 
 Run 14, 2026-09-05 14:44, master `53949434` (tail, character-identity,

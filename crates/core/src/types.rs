@@ -1524,6 +1524,39 @@ impl FactorioEntity {
             ..Default::default()
         }
     }
+    /// One half of an underground pair. **Which half is not expressible
+    /// here, and the parameter that pretended otherwise is gone.**
+    ///
+    /// Factorio calls the two halves `input` and `output`; they take the same
+    /// direction and are distinguished by `belt_to_ground_type`. This struct
+    /// has no field for it (checked: no `entity_data`, no
+    /// `belt_to_ground_type`, nothing else that fits -- see the struct above),
+    /// and the mod's `rcon_place_entity(player_id, item_name, position,
+    /// direction)` has no argument for it either. An earlier version of this
+    /// constructor took an `output: bool` and immediately discarded it with
+    /// `let _ = output;`, which is worse than not taking it: a caller reads
+    /// the signature as a promise the returned entity carries the half, and
+    /// it does not. The parameter comes back the day the placement path can
+    /// carry it; until then the two halves are told apart only by their
+    /// positions relative to each other.
+    ///
+    /// `method::connect` never emits these -- it calls `route_belt` with
+    /// `max_underground: None` for exactly this reason -- so nothing in the
+    /// tree calls this constructor today.
+    pub fn new_underground_belt(position: &Position, direction: Direction) -> FactorioEntity {
+        FactorioEntity {
+            name: EntityName::UndergroundBelt.to_string(),
+            entity_type: EntityType::UndergroundBelt.to_string(),
+            position: position.clone(),
+            // Same footprint as `new_transport_belt`'s: the real prototype's
+            // collision box is 0.796875 x 0.796875 (checked against
+            // `crates/core/tests/entity-prototype-fixtures.json`), and that
+            // sibling already rounds the same box to 0.8 x 0.8.
+            bounding_box: add_to_rect_turned(&Rect::from_wh(0.8, 0.8), position, direction),
+            direction: direction.to_u8().unwrap(),
+            ..Default::default()
+        }
+    }
     pub fn new_splitter(position: &Position, direction: Direction) -> FactorioEntity {
         FactorioEntity {
             name: EntityName::Splitter.to_string(),
@@ -1678,6 +1711,7 @@ pub enum EntityName {
     Inserter,
     BurnerMiningDrill,
     TransportBelt,
+    UndergroundBelt,
     Splitter,
     ElectricMiningDrill,
     Pumpjack,

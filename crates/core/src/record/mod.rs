@@ -334,6 +334,29 @@ pub enum EventKind {
         /// whenever nothing was dropped.
         #[serde(default)]
         waiting_total: u32,
+        /// How many walks have come to rest outside the reach of the action
+        /// they served and needed a corrective step, cumulative since the
+        /// actuator was built.
+        ///
+        /// A walk stops on the **outer** ring of its annulus — as far from the
+        /// target as the action's reach allows, less
+        /// [`crate::factorio::rcon::ARRIVAL_MARGIN`], which is worth
+        /// 8,200-10,200 ticks of a four-bot green run. That margin was
+        /// measured (128 probe walks; worst overshoot 0.301 tiles) and
+        /// measurement is not proof, so the executor re-checks reach after
+        /// every walk and this is how often it had to act.
+        ///
+        /// **It states no verdict either.** Zero says the margin is not being
+        /// tested and could be tightened; a number that grows says it is too
+        /// thin. Which of those is worth acting on is not decided here, and
+        /// nothing compares this against a threshold.
+        ///
+        /// `#[serde(default)]` so a run recorded before the outer ring existed
+        /// still opens — and reads zero, which for such a run is the truth:
+        /// its walks stopped on the inner ring and had no margin to be wrong
+        /// about.
+        #[serde(default)]
+        reach_corrections: u32,
     },
     ActionDispatched {
         id: u32,
@@ -679,6 +702,45 @@ pub enum EventKind {
         /// number that was actually used.
         searched_tiles: f64,
     },
+    /// The game said this bot cannot move, and the next plan will not send it
+    /// anywhere.
+    ///
+    /// After a walk the pathfinder refused, the executor asked the game for a
+    /// short path from the character in each of four directions
+    /// (`FactorioRcon::probe_player_hops`) and every one was refused. That
+    /// is the game's own verdict on the *character*, which neither
+    /// [`EventKind::BotEnclosed`] (a fill over this process's occupancy
+    /// model) nor a `no_path` walk (a verdict on one destination) can give:
+    /// in `run-1788614781-38058` bot 6 stood overlapping a furnace, the fill
+    /// said open, four walks said `no_path`, and seven plans in a row sent it
+    /// the same walk until the run halted `stuck` with seven healthy bots
+    /// idle.
+    ///
+    /// Unlike `bot_enclosed`, this one is acted on: `crates/planner`'s
+    /// `PlanState::from_world` reads the bench and gives the bot no step
+    /// that would need it to walk. It is lifted by [`EventKind::BotReleased`].
+    ///
+    /// Written by `record.enclosures()` from `FactorioWorld::benches`.
+    BotBenched {
+        bot: u32,
+        /// Where the character stood when every hop was refused. Observed.
+        position: Position,
+        /// How many hops were asked for and refused.
+        refused_hops: u32,
+        /// How far each hop was aimed, in tiles.
+        hop_tiles: f64,
+    },
+    /// A benched bot can move again, and the next plan may send it.
+    ///
+    /// Written by `record.enclosures()` when the executor lifted a bench:
+    /// `why` is `"walked"` when a walk for the bot succeeded, or `"probed"`
+    /// when the re-probe before a plan found a hop the game would path.
+    BotReleased {
+        bot: u32,
+        /// Where the bench had been earned.
+        position: Position,
+        why: String,
+    },
     /// A bot was walked clear of a placement that would otherwise have sealed
     /// it in -- the [`EventKind::BotEnclosed`] that did not happen.
     ///
@@ -763,6 +825,34 @@ pub enum EventKind {
         /// Where the new character stands -- the spawn point, ordinarily,
         /// which is not where the walk in flight was going.
         position: Option<Position>,
+    },
+    /// The mod completed a Factorio 2.0 *trigger* technology on a headless
+    /// run because the force had already done what the trigger names.
+    ///
+    /// A server-side character has no player, and the game fires `craft-item`
+    /// for machine output but never for a character's hand craft, and never
+    /// `build-entity` for a mod-placed entity
+    /// (`docs/superpowers/notes/2026-09-05-research-triggers.md`). So
+    /// `emulate_research_triggers` in `mods/BotBridge/control.lua` completes
+    /// such a technology from the counters it keeps, only once every
+    /// prerequisite is researched, and writes this line with the count that
+    /// earned it. It is the answer to "why does `on_research_finished` for
+    /// `automation-science-pack` appear with no research ever started?", and
+    /// a run whose log has the finish without this line is one in which the
+    /// game fired the trigger itself. Written by `record.research_triggers()`.
+    ResearchTriggerEmulated {
+        technology: String,
+        /// The trigger's `type`: `craft-item` or `build-entity`.
+        trigger: String,
+        /// The item a `craft-item` trigger counted; `null` for `build-entity`.
+        item: Option<String>,
+        /// The entity a `build-entity` trigger counted; `null` for `craft-item`.
+        entity: Option<String>,
+        /// What the trigger asked for.
+        needed: u32,
+        /// What the force had done when the sweep read it -- at least
+        /// `needed`, by construction.
+        count: u32,
     },
     /// The supervisor changed the roster it plans for.
     ///
@@ -901,6 +991,39 @@ pub enum EventKind {
         /// model, which is a legitimate reading and not an error to clamp
         /// away.
         unearned_ratio: Option<f64>,
+    },
+    /// What one `goal.plan` cost: wall time, and what the game clock did
+    /// while the planner thought.
+    ///
+    /// The planner is wall-clock work -- ~3 s for automation, ~20 s for green
+    /// -- and a game left running through it is charged `60 * speed` ticks
+    /// per second of thinking: 334 ticks for automation at 1x, 1,837 at 10x,
+    /// 6,438 for green at 5x (2026-09-05). That was the whole of the
+    /// "faster game, longer run" tax. `goal.plan` now pauses the clock around
+    /// expansion, and this event is the receipt: `tick_after - tick_before`
+    /// is what the run was charged, which is zero when `paused` held.
+    ///
+    /// Written by the plan itself rather than folded into `plan_created`,
+    /// which the driver script records later with the plan's steps: a plan
+    /// that raised has no `plan_created` and still cost time.
+    PlanningTimed {
+        /// Wall clock spent inside expansion and scheduling, including the
+        /// placement pre-check round trips.
+        planning_ms: u64,
+        /// Whether the game clock was stopped for the duration. `false` on a
+        /// build without RCON, or when the pause request failed -- in which
+        /// case `tick_after - tick_before` says what it cost.
+        paused: bool,
+        /// Why the clock was left running, when it was: `"attached server,
+        /// clock left running"` for a `--connect` / `--server` run, whose
+        /// game may be somebody's live multiplayer session, or `"pause
+        /// request failed"`. `None` whenever `paused` is true, and on a
+        /// build with no game to ask.
+        reason: Option<String>,
+        /// `game.tick` when planning began; `None` when nobody could ask.
+        tick_before: Option<u64>,
+        /// `game.tick` when planning ended; `None` when nobody could ask.
+        tick_after: Option<u64>,
     },
     RunFinished {
         outcome: String,
@@ -1260,6 +1383,18 @@ pub enum WalkFailureKind {
     /// the graph knows, so a walk that still lands here is one the graph
     /// learned about too late.
     DestinationBlocked,
+    /// The pathfinder refused the walk **and** refused every short hop from
+    /// where the character stands: the bot cannot leave its own tile, so the
+    /// destination is not what was unreachable. The executor's mobility probe
+    /// (`FactorioRcon::probe_player_hops`, judged by
+    /// `crates/executor::walk_memory::judge_mobility`) established it and
+    /// benched the bot; a `bot_benched` event sits beside this one.
+    ///
+    /// The opposite of what [`WalkFailureKind::NoPath`] is careful not to
+    /// claim. `run-1788614781-38058` produced four `no_path` rows for bot 6,
+    /// all to a destination other bots reached, before this kind existed to
+    /// say the bot was the problem.
+    BoxedIn,
     /// A kind this build does not know, or one not worth a variant yet.
     #[serde(other)]
     Other,

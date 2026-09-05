@@ -4447,6 +4447,27 @@ impl Method for Researched {
                 entity: LAB.into(),
                 kw: LAB_POWER_KW,
             });
+            // `Powered` says the lab's ground is supplied *in the state*,
+            // and the state holds every placement this plan has chosen
+            // whatever tick it was given -- so a pole the scheduler hands
+            // to a busy bot 6,500 ticks after the research still satisfies
+            // it. Naming the poles and the generator the supply comes
+            // through as `EntityAt` turns each into an edge from the
+            // placement that creates it, by inference, and into nothing for
+            // what the world already carries. `power_links` below covers a
+            // plant this research builds itself; this covers the one it
+            // found standing, which is the one a cell planned before it.
+            if let Some(area) = ctx.state.collision_area(LAB, pos) {
+                for (position, name) in ctx.state.powering_entities(&area) {
+                    let standing = Condition::EntityAt {
+                        pos: position,
+                        name,
+                    };
+                    if !pre.contains(&standing) {
+                        pre.push(standing);
+                    }
+                }
+            }
         }
         // No `HasItem`/`LoseItem` for the packs any more. They are spent by
         // the inserts above, which is where the game spends them: a lab
@@ -5220,13 +5241,16 @@ pub fn even_shares(
 ///   tier keeps, stated again here because this is a filter and that is a
 ///   reordering.
 pub(crate) fn participants_that_can_work(state: &PlanState, candidates: Vec<BotId>) -> Vec<BotId> {
-    if state.walled_in().is_empty() {
+    if !state.any_sidelined() {
         return candidates;
     }
+    // `may_own_work` folds in the bench (`PlanState::benched`): the game's
+    // own verdict that a bot cannot move, which `run-1788614781-38058` showed
+    // the walled-in fill can miss entirely.
     let able: Vec<BotId> = candidates
         .iter()
         .copied()
-        .filter(|bot| !state.is_walled_in(*bot))
+        .filter(|bot| state.may_own_work(*bot))
         .collect();
     if able.is_empty() { candidates } else { able }
 }
@@ -6965,6 +6989,52 @@ mod tests {
                 .any(|(from, _)| *from == place.id),
             "and the insert must wait for the lab to be standing"
         );
+    }
+
+    /// **`run-1788617269-96746`'s 13,000 ticks, as a test.** Eight character
+    /// bots at 5x: the assembler cell sited its plant and poles before the
+    /// research was expanded, so the research found its supply standing in
+    /// the plan state and stated nothing about it. The scheduler put the one
+    /// pole joining the labs to the steam engine, `[38.5, -7.5]`, at 49,411
+    /// on a busy bot and the research at 42,905; the labs sat `no_power` with
+    /// every pack inside from tick 48,900 to 61,200, and `research
+    /// logistic-science-pack` ran 8,474 ticks over its 7,500. `Powered` is a
+    /// state predicate no effect satisfies, so inference can draw no edge to
+    /// it; the research has to *name* the poles and the generator its power
+    /// comes through, as `EntityAt`, so that whichever action places them
+    /// is paired with it. Here the plant stands in the world, so the
+    /// conditions hold outright and cost no edge -- what is pinned is that
+    /// they are stated at all.
+    #[test]
+    fn a_research_names_the_poles_and_generator_its_power_comes_through() {
+        let bots = [BotId(1)];
+        let s = tech_state(&bots);
+        let net = expand(
+            &[Goal::Researched("automation".into())],
+            &s,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .expect("the goal expands against a powered fixture");
+        let research = net
+            .actions()
+            .find(|a| matches!(a.kind, ActionKind::Research { .. }))
+            .expect("the research itself");
+        // The fixture's plant, exactly as `test_world::with_steam_power`
+        // stands it: one pole, one engine.
+        for (name, position) in [
+            ("small-electric-pole", Position::new(10.5, 10.5)),
+            ("steam-engine", Position::new(12.5, 10.5)),
+        ] {
+            assert!(
+                research.pre.contains(&Condition::EntityAt {
+                    pos: position.clone(),
+                    name: name.into(),
+                }),
+                "the research must require the standing {name} at {position} its power comes through, got {:?}",
+                research.pre
+            );
+        }
     }
 
     /// The same world and the same goal give the same research plan, twice.
@@ -10849,8 +10919,9 @@ mod tests {
         assert!(
             matches!(
                 &err,
-                PlannerError::UnsupportedResearchTrigger { technology, trigger }
+                PlannerError::UnsupportedResearchTrigger { technology, trigger, act }
                     if technology == "steam-cracking" && trigger == "craft-fluid"
+                        && act == "craft 200 steam"
             ),
             "expected an UnsupportedResearchTrigger naming the kind, got {err:?}"
         );
@@ -11470,8 +11541,13 @@ mod tests {
             // Moved again on 2026-09-05, 9965 -> 9900: the trigger's lab craft is the lead supplier's own chain now (`Researched`'s trigger path), off the chain actor's timeline.
             // 9900 -> 7278 later on 2026-09-05: `infer_edges` leaves a chain's plate pairings to the stated supply edge (see `a_wider_ore_front_barely_moves_the_spread_it_used_to_unlock`).
             // 7278 -> 7156 on 2026-09-05: a bot with no furnace of its own on the patch builds one instead of queueing behind another bot's batch, and a smelt queues behind its own batch before a lighter furnace of somebody else's (`tests/furnace_reuse.rs`).
+            // 7156 -> 6982 on 2026-09-05: a candidate is committed no earlier in the round order than one on another bot that finishes before it starts (`schedule.rs`, the four-bot regression of run-1788621697-14165).
+            // 6982 -> 7346 on 2026-09-05: the walk model stopped crediting a bot for `radius` tiles it never saved (`schedule::travel_ticks`) and the speed constant came down from the prototype's 0.15 to the measured 0.14. The plan is the same plan, priced honestly; see `WALK_TILES_PER_TICK`.
+            // 7346 -> 7253 on 2026-09-05: a walk stops on the outer ring of the
+            // action's reach (`rcon::approach_aim`), so the last tiles of every
+            // approach are neither walked nor charged.
             plan.makespan,
-            7156,
+            7253,
             "15866 with the subtree on one bot, 12403 once the ore converged, \
              and 10011 once the furnaces themselves became other bots' \
              errands; {per_bot:?}"
@@ -11635,8 +11711,11 @@ mod tests {
             // Moved again on 2026-09-05, 9987 -> 9897, for the narrow fixture's reason: the trigger's lab craft is the lead supplier's; 3 ticks off the narrow fixture's 9900 now.
             // 9897 -> 6955 later on 2026-09-05: `infer_edges` leaves a chain's plate pairings to the stated supply edge, so the chains' consumers no longer wait for every earlier producer of the same item.
             // 6955 -> 7654 on 2026-09-05: each supplier stands a furnace of its own instead of queueing behind bot 1's (`tests/furnace_reuse.rs`); on this wide front that is three more furnace bills for smelts that were not on the critical path, and the narrow fixture above gains 122 by the same rule. The spread this test is about is unchanged: every bot still supplies the unlock.
+            // 7654 -> 7007 on 2026-09-05: the same round-order rule as the narrow fixture's 7156 -> 6982.
+            // 7007 -> 7321 on 2026-09-05: the walk model stopped crediting a bot for `radius` tiles it never saved (`schedule::travel_ticks`) and the speed constant came down from the prototype's 0.15 to the measured 0.14. The plan is the same plan, priced honestly; see `WALK_TILES_PER_TICK`.
+            // 7321 -> 7251 on 2026-09-05: the outer ring, as the narrow fixture.
             plan.makespan,
-            7654,
+            7251,
             "17122 before time-aware claims, 12428 after them, and 10053 once \
              R3 made a furnace somebody else's errand -- 42 ticks off the \
              narrow fixture's 10011: {per_bot:?}"
@@ -14534,7 +14613,13 @@ mod owned_gathering {
         // Moved by the lookahead scheduling key (51c7f695): a bound over the bot's other ready work replaces (end, id) as the primary key, and the plan overlaps the longer smelt under the shorter one.
         // 31482 -> 29260 on 2026-09-05: four more actions and a shorter plan -- no fragment waits on the cell's backlog, and `infer_edges` no longer serialises the chain's plate consumers behind every earlier producer.
         // 29260 -> 26770 later on 2026-09-05: the coal that was dug a tile at a time comes off the rock the plan swings at anyway (see the action count above).
-        assert_eq!(plan.makespan, 26770, "one bot's rung-1 makespan");
+        // 26770 -> 27522 on 2026-09-05: the walk model stopped crediting a bot for `radius` tiles it never saved (`schedule::travel_ticks`) and the speed constant came down from the prototype's 0.15 to the measured 0.14. Same plan, priced honestly; see `WALK_TILES_PER_TICK`.
+        // 27522 -> 27295 on 2026-09-05: a walk stops on the OUTER ring of the
+        // action's reach now, not the inner one, so the last few tiles of every
+        // approach are neither walked nor charged (`schedule::travel_ticks`,
+        // `rcon::approach_aim`). Same plan, shorter -- and the run gets shorter
+        // with it, which the honest-pricing change before it did not.
+        assert_eq!(plan.makespan, 27295, "one bot's rung-1 makespan");
         assert!(
             net.actions().all(|a| net
                 .chain_of(a.id)

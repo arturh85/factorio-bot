@@ -795,7 +795,8 @@ const SCHEMAS: Record<string, SchemaContract> = {
             since_last_dispatch_ms: {required: true, type: 'integer'},
             bots_in_flight: {required: true, type: 'array'},
             waiting: {required: false, arrayOf: 'WaitingStep'},
-            waiting_total: {required: false, type: 'integer'}
+            waiting_total: {required: false, type: 'integer'},
+            reach_corrections: {required: false, type: 'integer'}
         },
         action_dispatched: {
             id: {required: true, type: 'integer'},
@@ -855,6 +856,17 @@ const SCHEMAS: Record<string, SchemaContract> = {
             pocket_tiles: {required: true, type: 'number'},
             searched_tiles: {required: true, type: 'number'}
         },
+        bot_benched: {
+            bot: {required: true, type: 'integer'},
+            position: {required: true, ref: 'Position'},
+            refused_hops: {required: true, type: 'integer'},
+            hop_tiles: {required: true, type: 'number'}
+        },
+        bot_released: {
+            bot: {required: true, type: 'integer'},
+            position: {required: true, ref: 'Position'},
+            why: {required: true, type: 'string'}
+        },
         bot_stepped_aside: {
             bot: {required: true, type: 'integer'},
             from: {required: true, ref: 'Position'},
@@ -874,6 +886,16 @@ const SCHEMAS: Record<string, SchemaContract> = {
         bot_respawned: {
             bot: {required: true, type: 'integer'},
             position: {required: false, ref: 'Position', nullable: true}
+        },
+        // A trigger technology the mod completed on a headless run. `item`
+        // and `entity` are each null for the other trigger kind.
+        research_trigger_emulated: {
+            technology: {required: true, type: 'string'},
+            trigger: {required: true, type: 'string'},
+            item: {required: false, type: 'string', nullable: true},
+            entity: {required: false, type: 'string', nullable: true},
+            needed: {required: true, type: 'integer'},
+            count: {required: true, type: 'integer'}
         },
         roster_changed: {
             bots: {required: true, type: 'array'},
@@ -897,6 +919,16 @@ const SCHEMAS: Record<string, SchemaContract> = {
             model_resource_tiles: {required: true, type: 'integer'},
             model_enemy_structures: {required: true, type: 'integer'},
             unearned_ratio: {required: false, type: 'number', nullable: true}
+        },
+        // The planning receipt: wall time, and whether the game clock was
+        // stopped for it. Both ticks are nullable -- "nobody could ask" is
+        // not zero ticks charged.
+        planning_timed: {
+            planning_ms: {required: true, type: 'integer'},
+            paused: {required: true, type: 'boolean'},
+            reason: {required: false, type: 'string', nullable: true},
+            tick_before: {required: false, type: 'integer', nullable: true},
+            tick_after: {required: false, type: 'integer', nullable: true}
         },
         run_finished: {
             outcome: {required: true, type: 'string'},
@@ -961,6 +993,7 @@ const SCHEMAS: Record<string, SchemaContract> = {
         timeout: true,
         no_character: true,
         destination_blocked: true,
+        boxed_in: true,
         other: true
     }),
     WalkFailure: objectContract<WalkFailure>({

@@ -235,20 +235,32 @@ pub enum PlannerError {
     /// makespan that is quietly missing several steps is worse than a refusal,
     /// because a caller cannot tell it happened. Refusing names the technology
     /// and the trigger kind, so a caller can see exactly what is not modelled.
+    ///
+    /// `act` says what the game wants done, in the trigger's own words
+    /// (`build 1 asteroid-collector`, `capture a spawner`, `create a space
+    /// platform`), so a reader learns the *act* that is missing and not only
+    /// the kind. Shipped 2.1.17 has three such technologies --
+    /// `space-science-pack` (build an asteroid collector), `biter-egg-handling`
+    /// (capture a spawner) and `space-platform` (create one) -- and no action
+    /// in this project's executor or mod performs any of those acts, so the
+    /// refusal is about the world model, not about a missing emulation.
     #[error(
-        "{technology} is unlocked by a {trigger} trigger, which this planner cannot express as a goal"
+        "{technology} is unlocked by a {trigger} trigger -- {act} -- which this planner cannot \
+         express as a goal"
     )]
     #[diagnostic(
         code(planner::unsupported_research_trigger),
         help(
-            "only `craft-item` triggers can be planned; costing this one at zero would silently \
-             under-report the plan's makespan"
+            "only `craft-item` and `mine-entity` triggers can be planned; costing this one at \
+             zero would silently under-report the plan's makespan"
         )
     )]
     UnsupportedResearchTrigger {
         technology: String,
-        /// The trigger's `type` string, e.g. `mine-entity`.
+        /// The trigger's `type` string, e.g. `build-entity`.
         trigger: String,
+        /// The act the trigger names, as `ResearchTrigger` displays it.
+        act: String,
     },
 
     /// A `craft-item` trigger asking for an item whose recipe only this same

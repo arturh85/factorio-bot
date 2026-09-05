@@ -220,6 +220,371 @@ three bots one extra iron furnace (three actions) reorders bot 3's ready
 work and its `take 10 copper-ore from the wooden-chest` moves from 8,860 to
 13,473 with no furnace of its involved.
 
+## ✅✅✅ RUN 17: GREEN IN 14:26 (`run-1788635061-85457`) — best on both measures
+
+2026-09-05 21:19, master `a7e3b0eb`, four clients at 1x, seed 31337 `--new`,
+100% tick delivery, planning excluded (27.2 s, clock stopped).
+
+| | run 14 | run 16 | **run 17** |
+|---|---|---|---|
+| green cell | 17:20 | 15:19 | **14:26** (51,977) |
+| green witness | 18:00 | 15:57 | **15:02** |
+| plan | 569 / 57,752* | 569 / 52,554* | 569 / **52,819** |
+| executed / planned | 1.046* | 1.050* | **0.984** |
+| fleet utilisation | 60.9% | 67.4% | **69.5%** |
+| iron plate /min at 5 / 10 / 15 | 32 / 57 / 43 | 36 / 64 / 34 | **40 / 73 / 22** |
+| red packs /min at 5 / 10 | 0 / 8 | 0 / 13 | **0 / 17** |
+| reach corrections | — | — | **0** |
+
+\* plans before the walk model was corrected are ~22% under-priced; only run
+17's ratio is meaningful against 1.0.
+
+**The number moved because the model stopped lying, not because the bots got
+faster** (the peer session's phrasing, and it is the right one). 0.984 is
+the first time this project has been wrong in the safe direction: the plan
+is now slightly pessimistic rather than a fifth optimistic.
+
+Fresh-world green: 64:22 → 36:48 → 31:35 → 26:32 → 29:09 → 23:38 → 20:59 →
+17:20 → 18:46 → 15:19 → **14:26**. Zero failed actions, zero failed walks
+across 402 walk events, zero reach corrections — the 0.6-tile margin held
+in a client run as it did headless. Two paths reported a waypoint needing
+something destroyed and were routed around.
+
+The plateau is unchanged: production still stops at the plan's bill, and
+this run reaches it faster and at a higher rate than any before it. The
+self-fed cell remains the next objective.
+
+## ✅ AND THE CREDIT MADE REAL: a walk stops where the action can reach (`b6f6777f`)
+
+The other half of the walk RCA, and this one is a genuine speedup rather
+than an honest price. **The margin was measured, not guessed**:
+`scripts/walkprobe.lua`, 128 probe walks on seed 31337 across eight
+bearings and radii 0.5–5, resting positions read off the mod. Worst
+overshoot past the requested radius: **0.301 tiles**, and the mean is
+negative at every radius — bots usually stop short. The `R + 1.1` this
+codebase had carried since 2026-08-30, from a single walk, was about three
+times too pessimistic. Margin set to **0.6**, twice the measured maximum,
+because a stop box's diagonal worst case is 0.424 and 128 draws are not a
+proof; a post-arrival reach check makes being wrong cost one short step
+instead of a failed action.
+
+One rule drives both sides now (`approach_aim`): the planner charges and
+simulates to the same point the executor aims the game at, and a blocked
+outer ring degrades inward to exactly the old behaviour.
+
+| goal, `map.json` | 4 bots before → after | 8 bots |
+|---|---|---|
+| `researched:automation` | 21,943 → **21,776** (−0.8%) | 18,310 |
+| `producing:automation-science-pack:6` | 28,107 → **26,990** (−4.0%) | 19,573 |
+| `producing:logistic-science-pack:6` | 59,018 → **52,819** (−10.5%) | 49,229 |
+
+Action counts identical everywhere: the same plan, walked less. The saving
+scales with reach — a build's `(1.3, 10]` annulus gives up 6.1 tiles a
+trip, a mine's 2.7 disc only 1.4. Live at 5x: green 56,360 → **55,253**,
+executed/planned 0.987 → **0.999**, **zero failed actions and zero reach
+corrections over 242 walks** on the verbs that would complain first (74
+places, 69 inserts, 71 takes, 111 mines).
+
+What is left of walking is the trips themselves: 201 walks, 43,638 planned
+bot-ticks, mean 217 ticks ≈ 30 tiles. That is a siting and assignment
+question, not a walking one. Also found: the mine's own corrective walk
+(`too far away, moving first!`, 30 times in one run) exists only as a log
+line and deserves an event.
+
+## WHAT MULTIPLE BOTS ARE ACTUALLY WORTH, on the honest walk model
+
+The mis-credit flattered multi-bot plans specifically — walking is the part
+of a plan that does not parallelise, and every walk was a fifth too cheap —
+so **every four-bot-versus-one speedup this record has quoted is overstated
+by an unknown amount.** Rather than leave that as a caveat, here it is
+measured on `map.json` (seed 31337, t=0, `3d45f40e`, plan makespans in
+ticks; the fixture's own measured speedup fell 2.00× → 1.86× on the same
+change):
+
+| goal | 1 bot | 2 bots | 4 bots | 8 bots | 4-bot speedup |
+|---|---|---|---|---|---|
+| `researched:automation` | 27,348 | 23,115 | 21,943 | 18,416 | **1.25×** |
+| `producing:automation-science-pack:6` | 59,328 | 38,667 | 28,107 | 20,520 | **2.11×** |
+| `producing:logistic-science-pack:6` | 146,120 | 92,717 | 59,018 | 49,080 | **2.48×** |
+
+So bots pay off in proportion to how much independent gathering and
+crafting a goal contains, and barely at all for automation, which is short,
+local and gated on one research. Eight bots add 16% over four for green and
+27% for red. These are plan numbers on one map; the live four-bot green run
+is 15:19 against a one-bot run nobody has made recently.
+
+## THE WALK MODEL WAS 22–25% SHORT ON EVERY WALK (`3d45f40e`)
+
+Not a tail of stalls: 792 walks across four four-bot runs, **zero walk
+failures**, and the plan under-charged every one of them.
+
+1. **The unrealised `radius` credit — 8,200–10,200 ticks a run, 70–82% of
+   the error.** `travel_ticks` charged `(distance − radius) / speed`, but
+   nothing stops the bot at `radius`: `arrival_point` and the executor's
+   `approach_annulus` both stop it on the **inner** ring (`min_radius`, the
+   centre for a disc). In the record it is two clean spikes: every disc of
+   radius 2.7 came in exactly 18 ticks over, every disc of radius 10 exactly
+   66–67.
+2. **The speed constant — 2,200–3,500 ticks.** Implied speed pooled over
+   196,717 measured ticks is **0.1413** tiles/tick, not the prototype's
+   0.15: a polyline through tile centres, an 8-direction follower with a
+   0.3-tile arrival box, one RCON round trip per walk. Now 0.14, rounded
+   down so the model over-charges ~1% rather than under-charging.
+
+Ruled out with numbers: obstacle detours (5–8% residual), stalls (one
+step-aside in 192 walks), dispatch overhead.
+
+**The plans got longer and nothing got slower.** Green four bots
+52,554 → **59,018**; automation 21,735 → 21,943; eight-bot green 48,756 →
+49,080; action counts identical everywhere. Live at 5x the run was the same
+length to ten ticks (56,360 vs 56,370) and **executed/planned went 1.059 →
+0.998**, the walk term from +29% to −4.5%. Applied to the four historical
+runs the new model predicts each within ±3% where the old was 22–25% short.
+
+Two consequences worth stating. **Every four-bot-versus-one speedup quoted
+in this record was somewhat overstated** — the per-walk credit flattered
+multi-bot plans specifically, and the fixture's measured speedup fell from
+2.00× to 1.86×. And **the credit can be made real**: stopping a walk on the
+outer ring is worth ~8,000 ticks a run, which is a genuine speedup rather
+than an honest price. Dispatched as the `outerring` worktree; it needs the
+bot's resting position measured rather than inferred, since a walk aimed at
+the bound once rested 3.345 tiles out against a reach of 3.
+
+## ✅✅ RUN 16: GREEN IN 15:19, AND AHEAD ON RATES (`run-1788625945-57257`)
+
+2026-09-05 18:48, master `1e965ed7`, four clients at 1x, seed 31337 `--new`,
+debug build, 100% tick delivery, planning excluded (25.1 s, clock stopped).
+Best on both measures.
+
+| | run 14 | run 15 | **run 16** |
+|---|---|---|---|
+| green cell | 17:20 | 18:46 | **15:19** (55,152) |
+| green witness | 18:00 | 19:25 | **15:57** |
+| plan | 569 / 57,752 | 569 / 59,476 | 569 / **52,554** |
+| executed / planned | 1.046 | 1.137 | **1.050** |
+| fleet utilisation | 60.9% | 58.4% | **67.4%** |
+| failed | 1 walk | none | **none** |
+| iron plate /min at 5 / 10 / 15 | 32 / 57 / 43 | 33 / 60 / 40 | **36 / 64 / 34** |
+| red packs /min at 5 / 10 / 15 | 0 / 8 / 8 | 0 / 9 / 7 | **0 / 13 / 4** |
+
+Fresh-world green: 64:22 → 36:48 → 31:35 → 26:32 → 29:09 → 23:38 → 20:59 →
+17:20 → 18:46 → **15:19**. Automation's record for comparison is 6:11.
+
+**The plateau is unchanged and is now the whole story.** Copper stops at
+11:46 (189), red packs at 11:51 (85), circuits at 12:51 (66) — production
+ends four minutes before the run does, at exactly the plan's bill, because
+the cell is charged by hand. Run 16 reaches the same dead end sooner and
+with less waste. The next objective is the self-fed cell (drills and
+furnaces feeding the assemblers through belts and inserters, owned by the
+peer session via its `connect` primitive), measured as a sustained rate
+over a window rather than as six packs.
+
+## ✅ THE FOUR-BOT REGRESSION WAS TWO SCHEDULER MECHANISMS (`99ee93c1`)
+
+RCA of run 15 against run 14, traced round by round in `schedule.rs`:
+
+1. **A bot could be committed past a gap another bot's finish would fill.**
+   `schedule` commits one `(action, bot)` per round ranked by that bot's own
+   finish over its own ready work. With the research hung off the steam
+   engine (`c83c5906`), bot 4's `insert 4 iron-ore` — the fourth ore into
+   the furnace whose plates open the engine block — carried bound 50,713
+   while bot 1's cell takes carried 45,146 and won round after round; by the
+   time the insert was committed, bot 1's `free_at` had moved to 47,436 and
+   never moves back. Before the pole edge the insert's short tail got it
+   committed early **by accident**. Now a candidate is committed no earlier
+   than any other bot's choice that finishes before it starts acting.
+2. **Two researches were modelled as concurrent.** A force researches one
+   technology at a time; the plan dispatched `automation` while `logistic`
+   held the labs, so it settled at the first research's end plus its own
+   duration: 13,154 against a modelled 6,000 in run 15 (7,234 in run 14).
+   **5,920 of run 15's ~7,090 loss was that.** The scheduler now keeps the
+   force's research slot.
+
+| goal, `map.json`, four bots | run 14 era | run 15 era | now |
+|---|---|---|---|
+| `researched:automation` | 22,044 | 21,765 | **21,735** |
+| `producing:automation-science-pack:6` | 28,885 | 26,162 | **27,304** |
+| `producing:logistic-science-pack:6` | 57,752 | 59,476 | **52,554** |
+| eight bots, green | — | 53,326 | **48,756** |
+
+Headless validation (`workspace/headless-i/runs/run-1788625111-28152`, 4
+bots, 5x, quiet box): one plan 571 / 53,249, green at 56,370,
+executed/planned **1.059** against hl-09's 1.105; `logistic` settled exactly
+at its planned duration. Run 16 at 1x is the measured lane. **Neither mechanism ever failed an action.** No refusal, no lost action, no
+walk failure: both were invisible to every check the project had except the
+plan's own length, and a run that executed one of them faithfully looked
+perfect. That is the class of defect the rate framing exists to stop hiding,
+and it is the argument for comparing plans offline on every planner change,
+which is now required of every agent here. Left on the
+table: a strictly chronological commit order plans 51,303 but hands a shared
+research to the busy chain owner on ties; walk overruns (~11–12k per
+four-bot run) are the largest remaining slip and untouched; research
+durations still assume the lab count the method saw.
+
+## PER-MACHINE PRODUCTION COUNTERS (owner, 2026-09-05 22:00)
+
+Owner: "each single machine should have a counter how many items it produced
+in total." This replaces the attribution *inference* with arithmetic — what
+each machine made between two ticks is then simply known, and an interval's
+output splits into machine-made and roster-made without a verdict.
+
+State: crafting machines already carry the game's own `products_finished`
+in every `machines` sample, with a note in place that an assembler reading
+zero after twenty minutes is the blunt proof it produced nothing. **Mining
+drills have no lifetime counter in the API at all**, so the mod must
+accumulate one and say that it did — a row should carry both the number and
+how it was obtained, so nobody reads an accumulated figure as exact.
+Dispatched as the `machinecount` worktree.
+
+## ⚠️ A RISING CURVE IS NOT A WORKING FACTORY (2026-09-05, from the peer's review)
+
+The peer session's 179-entity furnace line was reported as smelting. Its
+reviewer found it **had no generator at all** — thirteen poles, no power,
+nothing cheated in. The furnaces smelt because ore and coal were carried
+into them by hand; the 48 inserters and 87 belts have never moved an item.
+They are correcting their note.
+
+**Our rate table would have shown exactly the same shape**, and this is the
+hole in it: `production.made` counts what machines produced, and a furnace
+hand-fed by a bot is a machine. A curve that rises while bots ferry ore is
+inventory moving, not a factory running. Every plateau in this record is
+that curve running out of hand-fed input.
+
+**Answered, with evidence (`c7d663f1`): our green runs are roster-fed.**
+The table now attributes every interval — roster busy %, feeding-action
+count, generation and draw, working readings of *producer* machines — and
+every item in every interval up to minute 15 in runs 14, 16, 17 and the
+headless run reads `roster-fed`. Verbatim from the tool at minute 5:
+`no generator: this output was hand-fed (254 feeding action(s), roster 90%
+busy)`. **No run had a generator at all before minute 8:26.** And every
+plateau in all four runs classifies as **input ran out**, not as a factory
+that stopped.
+
+One correction the agent found that matters more than the feature: **kW
+drawn is not evidence about items.** Every furnace here is a stone furnace
+and every drill a burner drill; the 120 kW at minute 10 goes to a lab and a
+steam engine. Counting power alone would have called these runs automated.
+The verdict counts only working readings of producer types, split electric
+from burner.
+
+What the record cannot answer: belts and inserters are not sampled at all,
+so the peer's "48 inserters never moved an item" has no equivalent here;
+five of the six feeding verbs settle in their dispatch tick, so the count
+is the signal and not the duration; an interval with both an electric
+assembler working and bots feeding is honestly reported `unclear`.
+
+The only automation these runs demonstrate is the green milestone's own
+witness: five packs in ninety seconds with every bot idle, covering the
+green cell alone.
+
+## THE RATE VIEW (owner, 2026-09-05 19:20): production stops at minute 15
+
+Owner: "maybe you should prioritize production rates at given times over raw
+run time." Read off `samples.jsonl` (`force.production.made`, cumulative, at
+fixed game minutes from `run_started`):
+
+| minute | run 13 iron / copper / red / green | run 14 | run 15 |
+|---|---|---|---|
+| 5 | 80 / 69 / 0 / 0 | 159 / 94 / 0 / 0 | 165 / 100 / 0 / 0 |
+| 10 | 326 / 133 / 18 / 0 | 442 / 146 / 42 / 0 | 463 / 152 / 47 / 0 |
+| 15 | 677 / 189 / 55 / 0 | 657 / 189 / 82 / 0 | 661 / 189 / 83 / 0 |
+| 20 | 677 / 189 / 85 / 0 | run ended at 18:00 | run ended at 19:25 |
+| end | 677 / 189 / 85 / 4 (21:39) | 670 / 189 / 85 / 6 (18:00) | 670 / 189 / 85 / 4 (19:22) |
+
+**Stated plainly: until a cell feeds itself, milestone time has been
+measuring plan length, not factory output.** Every conclusion in this record
+drawn on the makespan alone — including the run-to-run ordering of the last
+two days — compares how long the bots took to build the same dead cell.
+
+(Corrected by `just analyse --rates-md`: runs 14 and 15 never reached minute 20 from `run_started`; the row I first typed there was the end value. `--compare` now says: run 15 ahead at 5, 10 and 15; run 14 ahead at the end.)
+
+Three things the makespan table cannot show. (1) **Runs 14 and 15 are the
+same run on rates**, run 15 a little ahead through minute 12; the 17:20 vs
+18:46 difference is the last two minutes of a factory that has already
+stopped. (2) **Every run's production plateaus at minute ~15** at exactly
+the plan's bill — 670 iron plates, 189 copper, 85 red packs — because the
+planner builds a cell and then charges it by hand ("charge the feed chest
+with 6 iron-plate"); nothing feeds the cell after the charge, so the rate
+at minute 20 is zero. "Producing 6/min" is witnessed as six packs, not as
+a rate. (3) The world-record replays' curves rise through the same window
+(`docs/superpowers/notes/2026-09-04-world-record-replays.md`).
+
+Consequences, in order: the analyser reports production at fixed marks and
+per-minute rates over a trailing window, and runs are compared on that
+table first (dispatched as `rates`); `producing:X:N` must mean a sustained
+rate verified over a window, with the cell fed by drills and furnaces
+through inserters and belts rather than by hand — which is the consumer
+the peer's `connect` primitive has been waiting for; and the record carries both, each where it fits: the curve for anything
+about sustained output, game ticks for a genuine first event such as a
+technology landing or a build-time comparison (owner: "continue using game
+time where it makes more sense than production / throughput rates").
+
+## ⚠️ RUN 15: 18:46 (`run-1788621697-14165`) — slower than run 14, honestly
+
+2026-09-05 17:20, master `917fdcd2` (everything of the afternoon merged),
+four clients at 1x, seed 31337 `--new`, debug build, 100% tick delivery,
+**clock stopped for both plannings (26.4 s, 0 ticks charged)** — the first
+measured run under the 17cdd5f7 rule, so its number excludes planning and
+run 14's included ~1,983 ticks of it.
+
+| | run 14 | run 15 |
+|---|---|---|
+| green cell | 17:20 (62,408) | **18:46 (67,598)** |
+| plan | 569 / 57,752 (+ 9-step replan) | 569 / 59,476, one plan |
+| executed / planned | 1.046 (planning removed) | **1.137** |
+| failed | 1 walk | none |
+| fleet utilisation | 60.9% | 58.4% |
+
+So the pole-edge change (`c83c5906`) that took eight bots from 71,936 to
+67,636 at 5x costs four bots ~1,700 ticks of plan and ~3,900 ticks of
+execution at 1x. The number stands and 17:20 remains the best; the RCA is
+dispatched as the `fourbot` worktree: where the extra execution slip sits
+per bot against run 14, and whether the pole condition should be an edge
+(order) without being a scheduling tie the cell's plate take wins.
+
+## The afternoon after 17:20: what headless mode found (2026-09-05, 15:00–18:00)
+
+Full log in `docs/superpowers/notes/2026-09-05-headless-experiments.md`. On
+master since run 14: aim avoids standing bots (`0f5f5170`); new workspaces
+seed scripts (`3cd57c70`) and are created on first run (`675f93b7`);
+character spawn spread, pinned-walker step-clear, push-out record
+(`f24c02a6`); boxed-in bench (`efc1931b`); **research names the poles and
+generator it draws through (`c83c5906`)** — the eight-bot execution gap was
+labs sitting dark for 8,500 ticks because `Condition::Powered` had no edge
+to the pole that powers them; the same hole was in the four-bot plan and
+landed by luck. Offline green for four bots is now **569 / 59,476**
+(+1,724 on a scheduler tie-break, the model being honest); eight bots
+53,326. Pending merge: the game clock stops while the planner thinks
+(planning wall time was the whole speed tax: 942 ticks at 5x, 1,837 at 10x,
+6,438 for green at 5x), gated to servers this process owns, recorded as
+`planning_timed`. Run 15 at 1x follows the merge; its number will exclude
+planning time and say so.
+
+## ✅ GREEN FROM A FRESH WORLD IN 17:20 (`run-1788612263-27812`) — the merged afternoon, measured
+
+Run 14, 2026-09-05 14:44, master `53949434` (tail, character-identity,
+walk-into-rock, replan-reuses-site, belt-routing all merged; workspace tests
+green), four clients at 1x, seed 31337 `--new`, debug build. Validated first
+headless at 5x (hl-04: one plan, 0 failed, 18:54 at 5x) — the first run of
+the day to follow the offline → headless → 1x sequence.
+
+| | |
+|---|---|
+| green cell producing 6/min | **17:20** (62,408 ticks) |
+| green witness | **17:59** |
+| plans | 569 / 57,752, then 9 / 75 after one failed walk at tick 62,191 |
+| failed / lost | 0 / 0 actions; 1 walk |
+| planned vs executed | 57,752 vs 62,408 — 8.1% |
+| fleet utilisation | **60.9%** (was 44.9%) |
+| steps/bot | {1: 195, 2: 152, 3: 125, 4: 97} (was {278, 123, 115, 107}) |
+
+Fresh-world green: **64:22 → 36:48 → 31:35 → 26:32 → 29:09 → 23:38 → 20:59 →
+17:20.** The failed walk: bot 1 was aimed at (34.73, -7.89) for the
+assembler at (36.5, -5.5) while bot 3 stood idle at (34.25, -7.70) — the
+aim sits on a standing bot, the entity graph holds no characters, and the
+game answered no path. Dispatched as the `aimbots` worktree: the approach
+aim must avoid the roster's known positions the way it now avoids boxes.
+
 ## ✅ THE TAIL IS DEALT: offline green 71,167 → 57,752 (`f5f273bb`, branch `tail`)
 
 RCA of run 13's one-bot tail, three mechanisms, each with a number from its
@@ -2320,7 +2685,7 @@ infrastructure for a 3h17m game, not a harder milestone.
 | red science producing **once** | never observed | witnessed six times, all inside 780 ticks |
 | red science producing **at a rate** | impossible to claim | **5 packs in 3,240 ticks (~5.5/min)**, twice |
 | green science, planning | did not expand at all | plans end to end |
-| green science, live | never run | **WITNESSED nine times** — fresh world **20:59 / 21:38** (`run-1788604520-39283`), one plan, zero failures; 64:22 → 36:48 → 31:35 → 26:32 → 29:09 → 23:38 → 20:59 |
+| green science, live | never run | **WITNESSED thirteen times** — fresh world **14:26 / 15:02** (`run-1788635061-85457`), one 569-step plan, zero failures, 69.5% utilisation, executed/planned 0.984; 64:22 → … → 15:19 → 14:26 |
 | furnaces per run | 42 | **8** |
 | recovery (`obs:recover`) | never executed in any run | **fires live** |
 
@@ -3988,6 +4353,12 @@ That is the separate `Holder::Share` ceiling.
 ---
 
 ## Open items not on the critical path
+
+- **Oil's trigger is free.** Measured 2026-09-05 (`1f296b47`): the game fires
+  `mine-entity` triggers for a drill or pumpjack on the named resource, in
+  headless mode too, so `oil-processing` unlocks the moment a pumpjack
+  extracts crude. The oil rungs still open are the planner's: rate, fluid
+  cell, steel, exploration/radar, power — not the trigger.
 
 - **`FactorioEntity::new_stone_furnace` uses a 1.8 collision box**
   (`crates/core/src/types.rs` ~1655) while the repo's prototype fixture

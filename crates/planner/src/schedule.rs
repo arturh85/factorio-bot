@@ -1,35 +1,114 @@
 //! Assignment of a bot-free action network to concrete bots over time.
 
+use crate::action::ActionKind;
 use crate::error::PlannerError;
 use crate::ids::{ActionId, BotId, ChainId, Ticks};
 use crate::network::ActionNetwork;
 use crate::state::PlanState;
+use factorio_bot_core::factorio::rcon::{Approach, approach_aim_at};
 use factorio_bot_core::factorio::util::calculate_distance;
 use factorio_bot_core::types::Position;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// Character walking speed in tiles per tick (roughly 9 tiles/second).
-pub const WALK_TILES_PER_TICK: f64 = 0.15;
+/// Effective character walking speed in tiles per tick, **measured, not
+/// nominal**.
+///
+/// The character prototype runs at 0.15 tiles a tick and that is what this
+/// constant used to say. A run does not achieve it. Pooling the 792 measured
+/// walks of `run-1788625945-57257`, `run-1788612263-27812`,
+/// `headless-i/run-1788625111-28152` and `headless-a/run-1788611922-87269`
+/// (all seed 31337, four bots, no walk failures between them) against the
+/// straight-line distance the planner itself would charge gives **0.1413**
+/// tiles a tick: 185,268 modelled ticks against 196,717 measured.
+///
+/// The gap is not one thing and is not recoverable by planning:
+///
+/// - the path is a pathfinder route, walked as a polyline through waypoints on
+///   tile centres, so it is a little longer than the straight line the planner
+///   measures;
+/// - the mod's follower steers in 8 compass directions, one `walking_state`
+///   per tick, and consumes each leg only once it is inside a 0.3-by-0.3 box
+///   of that waypoint (`mods/BotBridge/control.lua`, `on_tick`), so goal-ward
+///   progress on a diagonal leg is not 0.15 tiles a tick;
+/// - one RCON round trip and one path request bracket every walk.
+///
+/// 0.14 rather than 0.1413 deliberately: the rounding goes **down**, so the
+/// model over-charges a walk by ~0.9% rather than under-charging it. A plan
+/// that is slightly pessimistic about travel schedules a bot to somewhere it
+/// can actually be; one that is optimistic hands the executor a deadline the
+/// game cannot meet, which is the failure this constant was changed to end.
+///
+/// This is the *only* travel speed in the planner — [`crate::score::walk_ticks`]
+/// and `method/power.rs` both go through it — so a future recalibration is one
+/// number here and the tests that name it.
+pub const WALK_TILES_PER_TICK: f64 = 0.14;
 
 /// Ticks to get `from` into the annulus `(min_radius, radius]` around `to`.
 /// Zero if already there.
 ///
 /// Two ways to be outside it: too far, as ever (walk in, toward `to`, until
-/// within `radius`); or, for a placement's annulus, too close — standing
+/// clear of `min_radius`); or, for a placement's annulus, too close — standing
 /// inside the footprint the disc used to accept at distance zero. That case
 /// walks the other way: away from `to`, until clear of `min_radius`. Every
 /// comparison against a bound goes through `total_cmp`, per the planner's
 /// determinism rule for float comparisons.
+///
+/// # The charge stops at `min_radius`, not at `radius`
+///
+/// `radius` decides **whether** a walk is needed. It does not decide how far
+/// the walk goes, and charging as if it did is what this function used to do:
+/// `(distance - radius) / speed`, a credit of `radius` tiles that nobody ever
+/// takes.
+///
+/// Nothing on either side of this function stops the bot at `radius`.
+/// [`arrival_point`] — the plan's own bookkeeping, applied by [`schedule`]
+/// immediately after this cost is charged — puts the bot at `min_radius` from
+/// the target, and at the *centre* for a disc. `approach_annulus` in
+/// `crates/core/src/factorio/rcon.rs`, which is what the executor actually
+/// aims the game at, does the same thing: a disc (`min_radius == 0.`) is aimed
+/// at `to` itself, and an annulus at `min_radius + slack` with `slack` capped
+/// at one tile. Both of them stop on the *inner* ring. Only the price stopped
+/// on the outer one.
+///
+/// So the model charged a bot for walking to a ring, then stood it in the
+/// middle, and the executor walked it to the middle too. Measured over the
+/// four seed-31337 runs named on [`WALK_TILES_PER_TICK`], that fiction is
+/// 8,200-10,200 ticks a run — **70-82% of the entire walk overrun**, and
+/// ~16% of a green run's whole planned makespan. It shows up in the record as
+/// two spikes and nothing else: every walk to a disc of radius 2.7 came in
+/// exactly 18 ticks over (`2.7 / 0.15`), and every walk to a disc of radius 10
+/// exactly 66-67 (`10 / 0.15`).
+///
+/// # It now charges to the outer ring, because that is where the bot stops
+///
+/// Charging to `min_radius` was honest about the executor of the day and
+/// expensive: a bot walked its target's whole reach for nothing, and the plan
+/// paid for every tile of it. The executor stops on the *outer* ring now
+/// ([`Approach::Outer`]), so this charges to the same place, through the same
+/// function — [`approach_aim`], which is the single rule both sides read.
+///
+/// That the two agree is the point. A model that charged the outer ring while
+/// the game walked to the inner one would be the same fiction with its sign
+/// flipped, and `executed/planned` is the number that would catch it: 0.998
+/// before this change, and it should stay there.
+///
+/// The residual — the `slack` the pathfinder is allowed either side of the
+/// aim, and the [`factorio_bot_core::factorio::rcon::ARRIVAL_MARGIN`] held back
+/// from the reach — is left to
+/// [`WALK_TILES_PER_TICK`]'s own margin rather than modelled: it is at most a
+/// tile and a half either way, and which way it falls is a fact about ground
+/// the planner cannot see.
 pub fn travel_ticks(from: &Position, to: &Position, min_radius: f64, radius: f64) -> Ticks {
     let distance = calculate_distance(from, to);
     if distance.total_cmp(&min_radius).is_ge() && distance.total_cmp(&radius).is_le() {
         return 0;
     }
-    if distance.total_cmp(&min_radius).is_lt() {
-        return ((min_radius - distance) / WALK_TILES_PER_TICK).ceil() as Ticks;
+    let (aim, _) = approach_aim_at(min_radius, radius, distance, Approach::Outer);
+    if distance.total_cmp(&aim).is_lt() {
+        return ((aim - distance) / WALK_TILES_PER_TICK).ceil() as Ticks;
     }
-    ((distance - radius) / WALK_TILES_PER_TICK).ceil() as Ticks
+    ((distance - aim) / WALK_TILES_PER_TICK).ceil() as Ticks
 }
 
 /// The position simulated as reached once a walk into `(min_radius, radius]`
@@ -43,7 +122,14 @@ pub fn travel_ticks(from: &Position, to: &Position, min_radius: f64, radius: f64
 /// replay uses this implementation rather than an open-coded `to.x() +
 /// min_radius`, which is precisely the sum the ulp correction below exists for.
 ///
-/// For a plain disc (`min_radius == 0.`) this is `to` itself: the centre
+/// **It is the outer ring now, not the inner one.** The distance comes from
+/// [`approach_aim`], the same function the executor aims the game with, so the
+/// simulated arrival and the real one describe the same ring. Only a band too
+/// narrow to hold [`factorio_bot_core::factorio::rcon::ARRIVAL_MARGIN`] -- and a
+/// disc small enough that the aim
+/// collapses to zero -- still lands where this used to.
+///
+/// For such a collapsed disc this is `to` itself: the centre
 /// trivially satisfies "within radius of `to`" for any non-negative radius,
 /// which is why a disc's walk has always simply moved the bot onto the
 /// target (see the call site in [`schedule`] this feeds — naming a point on
@@ -76,14 +162,20 @@ pub fn travel_ticks(from: &Position, to: &Position, min_radius: f64, radius: f64
 /// was added to prevent, while a point rounded outward is merely a fraction of
 /// a nanotile further away. One `next_up` normally suffices; the loop is there
 /// so correctness does not rest on "normally".
-pub fn arrival_point(to: &Position, min_radius: f64) -> Position {
-    if min_radius.total_cmp(&0.0).is_le() {
+pub fn arrival_point(to: &Position, from: &Position, min_radius: f64, radius: f64) -> Position {
+    let (aim, _) = approach_aim_at(
+        min_radius,
+        radius,
+        calculate_distance(from, to),
+        Approach::Outer,
+    );
+    if aim.total_cmp(&0.0).is_le() {
         return to.clone();
     }
-    // `x` starts strictly greater than `to.x()` (a positive `min_radius` was
-    // just established), so `next_up` moves it further away and the measured
+    // `x` starts strictly greater than `to.x()` (a positive `aim` was just
+    // established), so `next_up` moves it further away and the measured
     // distance strictly increases: the loop terminates.
-    let mut x = to.x() + min_radius;
+    let mut x = to.x() + aim;
     while calculate_distance(&Position::new(x, to.y()), to)
         .total_cmp(&min_radius)
         .is_lt()
@@ -176,6 +268,7 @@ impl Schedule {
     }
 }
 
+#[derive(Clone)]
 struct Candidate {
     action: ActionId,
     bot: BotId,
@@ -208,7 +301,10 @@ impl Candidate {
     /// The ranking key. Ascending, so the smallest wins: the candidate whose
     /// **bot would finish soonest, counting everything that bot still has
     /// ready**, then the one that itself finishes soonest, then the lowest
-    /// action id, then the lowest bot id.
+    /// action id, then the lowest bot id. It decides a bot's own next action
+    /// and which bot a shared action goes to; *when* a bot's choice is
+    /// committed relative to the other bots' is decided in `schedule`, by
+    /// time, because the bound is not comparable across bots.
     ///
     /// `end` alone used to be the first key — "earliest finish first" — which
     /// defers exactly the work that most needs starting: a far trip finishes
@@ -428,6 +524,17 @@ pub fn schedule(
     let mut done: BTreeSet<ActionId> = BTreeSet::new();
     let mut steps: Vec<ScheduledStep> = Vec::new();
     let mut chain_binding: BTreeMap<ChainId, BotId> = BTreeMap::new();
+    // When the force's research slot is free. A force researches one
+    // technology at a time, however many labs it has and whoever dispatches
+    // it, so two `Research` actions are a sequence in the game whatever the
+    // network says. `run-1788621697-14165` planned `research
+    // logistic-science-pack` (11,400) from 48,026 and `research automation`
+    // (6,000) from 52,063 on two bots; the game queued the second until the
+    // first finished at 61,346 and it settled 13,154 ticks after dispatch.
+    // Run 14 overlapped them by 2,867 and paid 1,534 the same way. Modelled
+    // here rather than as a network edge because which research goes first
+    // is a scheduling choice, not a dependency.
+    let mut research_free_at: Ticks = 0;
 
     while done.len() < net.len() {
         let ready: Vec<&crate::action::Action> = net
@@ -621,11 +728,67 @@ pub fn schedule(
                         None => 0,
                     };
                     let walk_start = free_at[&bot];
-                    let act_start = (walk_start + travel).max(deps_ready);
+                    let mut act_start = (walk_start + travel).max(deps_ready);
+                    if matches!(action.kind, ActionKind::Research { .. }) {
+                        act_start = act_start.max(research_free_at);
+                    }
                     let end = act_start + action.duration;
                     let walk_target = action.required_position();
+                    // A benched bot gets no pairing that would make it walk.
+                    //
+                    // This is the one exclusion in a function whose every
+                    // other memory is a preference, and it is an exclusion
+                    // on purpose: the bench is the game's own answer that
+                    // the character cannot leave its tile
+                    // (`PlanState::benched`), and `run-1788614781-38058`
+                    // is what treating that as a preference costs -- the
+                    // refusal ledger put bot 6 at the back of its tier, the
+                    // tier had one bot in it, and seven plans in a row sent
+                    // it the walk the game had already refused four times.
+                    // Where the bot already stands (`travel == 0`) it may
+                    // still act. The rejection is recorded like any other
+                    // infeasible pair, so a plan that has nobody else names
+                    // the bench in its error rather than dispatching a walk
+                    // it knows will fail.
+                    if travel > 0 && sim.is_benched(bot) {
+                        let at = sim
+                            .benched()
+                            .get(&bot)
+                            .map(Position::to_string)
+                            .unwrap_or_default();
+                        let candidate = Candidate {
+                            action: action.id,
+                            bot,
+                            remaining: remaining[&action.id],
+                            deps_ready,
+                            arrival: from.clone(),
+                            walk_target,
+                            walk_start,
+                            travel,
+                            act_start,
+                            end,
+                            bound: 0,
+                        };
+                        if best_rejected
+                            .as_ref()
+                            .is_none_or(|r| candidate.key() < r.candidate.key())
+                        {
+                            best_rejected = Some(Rejected {
+                                condition: format!(
+                                    "bot {bot} is benched at {at}: the game refused every \
+                                     short hop from where it stands, so it cannot be sent \
+                                     anywhere"
+                                ),
+                                owned_chain: owner.and(chain),
+                                candidate,
+                            });
+                        }
+                        continue;
+                    }
                     let arrival = match (&walk_target, travel > 0) {
-                        (Some((pos, min_radius, _)), true) => arrival_point(pos, *min_radius),
+                        (Some((pos, min_radius, radius)), true) => {
+                            arrival_point(pos, from, *min_radius, *radius)
+                        }
                         _ => from.clone(),
                     };
                     let candidate = Candidate {
@@ -670,8 +833,8 @@ pub fn schedule(
                         // still not a claim about where the bot will really
                         // end up, only the least committal point that could
                         // make this precondition true.
-                        if let Some((pos, min_radius, _)) = action.required_position() {
-                            trial.set_position(bot, arrival_point(&pos, min_radius));
+                        if let Some((pos, min_radius, radius)) = action.required_position() {
+                            trial.set_position(bot, arrival_point(&pos, from, min_radius, radius));
                         }
                     }
                     let failing = action.pre.iter().find(|c| !c.holds(&trial, bot));
@@ -715,7 +878,81 @@ pub fn schedule(
         for (candidate, bound) in feasible.iter_mut().zip(bounds) {
             candidate.bound = bound;
         }
-        let best = feasible.into_iter().min_by_key(Candidate::key);
+        // Each bot's own next action is the one under which its finish
+        // bound is least -- that is what the bound was built to decide, and
+        // it is decided here, one candidate per bot.
+        let mut best_per_bot: BTreeMap<BotId, Candidate> = BTreeMap::new();
+        for candidate in feasible {
+            match best_per_bot.get(&candidate.bot) {
+                Some(held) if held.key() <= candidate.key() => {}
+                _ => {
+                    best_per_bot.insert(candidate.bot, candidate);
+                }
+            }
+        }
+        let per_bot: Vec<Candidate> = best_per_bot.into_values().collect();
+
+        // Which bot's choice is *committed* this round is a different
+        // question, and the bound answers it badly: it is a statement about
+        // one bot's remaining work, so across bots it says only which bot
+        // has less to do. Committing by it alone let a bot with little ready
+        // work fix its timeline far into the future while another bot's
+        // near-term step -- the one whose successor would have filled the
+        // first bot's gap -- was still uncommitted, and `free_at` never
+        // moves back.
+        //
+        // # The gap, measured
+        //
+        // `run-1788621697-14165`, four clients at 1x, `producing:logistic-
+        // science-pack:6`, 569 actions: bot 1 stood free at 29,867 with
+        // nothing ready but `take 34 iron-plate from the cell`, whose plates
+        // would exist at 35,706, and was committed to it (bound 45,146),
+        // then to the next cell take at 41,526 (bound 45,146 again). Bot 4's
+        // `insert 4 iron-ore at [-6, -25]` -- ready since 21,016, acting at
+        // 27,522, bound 50,713 because the research hangs off that furnace's
+        // plates through the steam engine -- lost every round to those.
+        // When it was committed at last (six actions from the end of the
+        // round order), its successor `take 16 iron-plate from the furnace`,
+        // the first step of bot 1's engine block and ready at 30,796, found
+        // bot 1 free at 47,436. The engine went down at 47,996, the research
+        // that names it started at 48,026, and the plan was 59,476 where
+        // the same network had scheduled to 57,752 before the research named
+        // the engine (`1ba679b3`) -- not because the edge was wrong, but
+        // because the longer tail raised the insert's bound and so pushed it
+        // *later* in the round order. In the game, the two researches then
+        // overlapped by 7,363 planned ticks, which the force's single
+        // research slot turned into 7,454 ticks of queueing.
+        //
+        // # The rule
+        //
+        // A candidate is committed no earlier in the round order than any
+        // other bot's choice that *finishes before it starts acting*: as long
+        // as such a choice exists, that one is committed instead, ranked by
+        // the same key. Nothing a bot would do in its gap is decided before
+        // everything that could put work into that gap has been. Within a
+        // bot the lookahead still decides -- the coal-trip measurement in
+        // `lookahead_bound` is about a bot's own ordering and is untouched --
+        // and a shared action still goes to the bot the bound favours, since
+        // the other bot's candidate for it does not finish before it starts.
+        // Strict `<` on the finish: two zero-length choices at one tick
+        // would otherwise defer each other forever, and each step of the
+        // walk below lowers `act_start`, so it ends. On `map.json` the
+        // four-bot plan goes 59,476 -> 52,554 and the eight-bot plan 53,326
+        // -> 48,756, the research behind the pole and the engine in both;
+        // pinned by `tests/scheduling.rs`
+        // (`a_bot_is_not_committed_past_a_gap_another_bots_finish_could_fill`).
+        let mut best = per_bot.iter().min_by_key(|c| c.key()).cloned();
+        while let Some(w) = &best {
+            let earlier = per_bot
+                .iter()
+                .filter(|c| c.bot != w.bot && c.end < w.act_start)
+                .min_by_key(|c| c.key())
+                .cloned();
+            match earlier {
+                Some(e) => best = Some(e),
+                None => break,
+            }
+        }
 
         // Only when no bot can run any ready action is the plan actually stuck.
         let chosen = match best {
@@ -776,7 +1013,15 @@ pub fn schedule(
             // which is precisely why it must not be what the executor is
             // handed. Keeping it unchanged keeps every downstream tick, and
             // therefore every makespan, identical.
-            sim.set_position(chosen.bot, arrival_point(&target, min_radius));
+            let from = sim
+                .bot(chosen.bot)
+                .ok_or(PlannerError::UnknownBot(chosen.bot))?
+                .position
+                .clone();
+            sim.set_position(
+                chosen.bot,
+                arrival_point(&target, &from, min_radius, radius),
+            );
         }
 
         // No precondition check here: selection already proved every one of them
@@ -801,6 +1046,11 @@ pub fn schedule(
             chain_binding.insert(chain, chosen.bot);
         }
 
+        if matches!(action.kind, ActionKind::Research { .. }) {
+            // The slot is taken until this research is done; the next one
+            // starts no earlier, whichever bot dispatches it.
+            research_free_at = chosen.end;
+        }
         free_at.insert(chosen.bot, chosen.end);
         finished.insert(chosen.action, chosen.end);
         done.insert(chosen.action);
@@ -1002,8 +1252,11 @@ mod tests {
             "first step should be the walk"
         );
         assert!(matches!(result.steps[1].what, StepKind::Act { .. }));
-        // 30 tiles, radius 3: ceil(27 / 0.15) = 180 travel ticks, then 60 duration.
-        assert_eq!(result.makespan, 240);
+        // 30 tiles to a disc of radius 3: the walk ends on the outer ring,
+        // 1.4 tiles out, so ceil(28.6 / 0.14) = 205 travel ticks, then 60
+        // duration. The radius decides both whether a walk is needed and how
+        // far it goes.
+        assert_eq!(result.makespan, 265);
     }
 
     /// The tolerance a walk exists to satisfy travels with the walk.
@@ -1100,8 +1353,13 @@ mod tests {
             ),
         }
         assert!(matches!(result.steps[1].what, StepKind::Act { .. }));
-        // ceil(1.5 / 0.15) = 10 travel ticks, then the 60-tick action.
-        assert_eq!(result.makespan, 70);
+        // Out to the inner aim -- `min_radius` plus the slack the pathfinder
+        // is given either side of the goal -- and no further: a bot inside the
+        // bound is walked clear of it, never out to the outer ring. Then the
+        // 60-tick action.
+        let (aim, _) = approach_aim_at(1.5, 10.0, 0.0, Approach::Outer);
+        let walk = (aim / WALK_TILES_PER_TICK).ceil() as Ticks;
+        assert_eq!(result.makespan, walk + 60);
     }
 
     /// The other half of the same fix: a bot standing at a distance the
@@ -1197,13 +1455,23 @@ mod tests {
         // reached — which is what its own precondition check runs against, and
         // what rejected the plan in run-1788325660-10154 — must satisfy the
         // condition it was constructed for.
+        // The bot starts at the origin, 75 tiles out, which is where the
+        // walk is charged from and therefore what decides the ring it stops
+        // on.
+        let origin = Position::new(0., 0.);
         let mut arrived = state(&bots);
-        arrived.set_position(BotId(1), arrival_point(&target, STONE_FURNACE_CLEARANCE));
+        arrived.set_position(
+            BotId(1),
+            arrival_point(&target, &origin, STONE_FURNACE_CLEARANCE, 10.0),
+        );
         assert!(
             condition.holds(&arrived, BotId(1)),
             "the arrival the plan simulates must satisfy the condition it was \
              emitted for: landed {} from the target, inner bound {}",
-            calculate_distance(&arrival_point(&target, STONE_FURNACE_CLEARANCE), &target),
+            calculate_distance(
+                &arrival_point(&target, &origin, STONE_FURNACE_CLEARANCE, 10.0),
+                &target
+            ),
             STONE_FURNACE_CLEARANCE,
         );
     }
@@ -1225,11 +1493,22 @@ mod tests {
                 std::f64::consts::SQRT_2,
             ] {
                 let target = Position::new(f64::from(x), 18.);
-                let landed = arrival_point(&target, min_radius);
+                // **A band with no room in it**, so the aim is the inner
+                // bound itself and the sum is the historical one, exactly.
+                // With an ordinary band the outer ring puts the arrival a
+                // whole `slack` clear of `min_radius` and the ulp cannot
+                // reach it -- which is a stronger position to be in, and
+                // precisely why the hazard has to be pinned where it still
+                // lives rather than allowed to disappear from the suite.
+                // A band with barely any room in it, so the aim is the inner
+                // bound itself: `radius` is a hair above `min_radius`, which
+                // is what leaves the outward ulp nudge somewhere legal to go.
+                let radius = min_radius * 1.000_000_1;
+                let landed = arrival_point(&target, &Position::new(200., 200.), min_radius, radius);
                 let condition = Condition::AtPosition {
                     who: Actor::Role,
                     pos: target.clone(),
-                    radius: 10.0,
+                    radius,
                     min_radius,
                 };
                 let mut arrived = state(&bots);
@@ -1272,10 +1551,110 @@ mod tests {
             0,
             "the outer edge itself must count as arrived"
         );
-        // A hair inside the inner edge must still cost a walk out.
+        // A hair inside the inner edge must still cost a walk out -- out to
+        // the inner aim, which is `min_radius` plus the pathfinder's slack,
+        // and never out to the outer ring.
+        let (aim, _) = approach_aim_at(1.5, 10.0, 1.0, Approach::Outer);
         assert_eq!(
             travel_ticks(&Position::new(1.0, 0.), &to, 1.5, 10.0),
-            (0.5f64 / WALK_TILES_PER_TICK).ceil() as Ticks,
+            ((aim - 1.0) / WALK_TILES_PER_TICK).ceil() as Ticks,
+        );
+    }
+
+    /// The credit `travel_ticks` grants must be one the actuator actually
+    /// takes -- and it now takes the **outer** ring, which is what makes this
+    /// a saving rather than a bookkeeping change.
+    ///
+    /// A mine's disc has a radius of 2.7 (`resource_reach_distance`) or 3, and
+    /// every tile of it used to be walked and charged: `run-1788625945-57257`
+    /// and three siblings put 70-82% of the whole walk overrun in exactly this
+    /// difference. The aim is `radius - slack - ARRIVAL_MARGIN`, so a 30-tile
+    /// approach to a disc of radius 3 is charged for what is left after the
+    /// ring, not for the whole 30.
+    #[test]
+    fn a_disc_walk_is_charged_to_the_outer_ring() {
+        let to = Position::new(0., 0.);
+        let (aim, slack) = approach_aim_at(0., 3.0, 30.0, Approach::Outer);
+        // The band is 3 tiles less the 0.6 margin, and half of 2.4 is over
+        // the one-tile cap, so the slack is the cap.
+        assert_eq!(slack, 1.0);
+        assert_eq!(aim, 3.0 - slack - 0.6);
+        assert_eq!(
+            travel_ticks(&Position::new(30., 0.), &to, 0., 3.0),
+            ((30.0 - aim) / WALK_TILES_PER_TICK).ceil() as Ticks,
+            "a disc walk stops on the outer ring, so the last {aim} tiles are \
+             not walked and not charged"
+        );
+        // And the ring the charge stops on is a ring the action can act from:
+        // inside the radius even after the pathfinder's slack and the
+        // follower's stop box, and outside `min_radius`, which is zero here.
+        assert!(aim + slack + 0.6 <= 3.0 + 1e-9);
+        assert!(aim > 0.0);
+    }
+
+    /// The same for an annulus, whose inner bound the aim must still clear.
+    ///
+    /// A placement's band is `(clearance, build reach]` -- roughly `(1.3, 10]`
+    /// -- so the outer ring is nearly seven tiles further out than the inner
+    /// one, and that is seven tiles a bot no longer walks for every furnace it
+    /// places.
+    #[test]
+    fn an_annulus_walk_is_charged_to_the_outer_ring_and_clears_the_inner_one() {
+        let to = Position::new(0., 0.);
+        let (aim, slack) = approach_aim_at(1.5, 10.0, 30.0, Approach::Outer);
+        assert_eq!(aim, 10.0 - slack - 0.6);
+        assert!(
+            aim - slack >= 1.5,
+            "the exclusion zone is the bound that must hold"
+        );
+        assert_eq!(
+            travel_ticks(&Position::new(30., 0.), &to, 1.5, 10.0),
+            ((30.0 - aim) / WALK_TILES_PER_TICK).ceil() as Ticks,
+            "an annulus walk stops on the outer ring, not on the inner one"
+        );
+    }
+
+    /// A bot *inside* the inner bound walks out only as far as the bound
+    /// needs, never out to the outer ring.
+    ///
+    /// This is the one direction where the outer ring would be a cost rather
+    /// than a saving: a bot standing where a furnace is about to go has to
+    /// move, and marching it eight tiles away to do so would be worse than the
+    /// fiction this change removes. `approach_aim_at` caps the aim at the
+    /// bot's own distance for exactly this, and the executor's
+    /// `approach_annulus` applies the same cap against the same bound -- which
+    /// is why the two agree here rather than only on the far side.
+    #[test]
+    fn a_bot_inside_the_inner_bound_is_charged_only_the_way_out() {
+        let to = Position::new(0., 0.);
+        let (aim, _) = approach_aim_at(1.5, 10.0, 0.5, Approach::Outer);
+        assert!(
+            aim < 3.0,
+            "capped at the bot's own distance, not the ring: {aim}"
+        );
+        assert!(
+            aim >= 1.5,
+            "but never inside the bound it is walking out of"
+        );
+        assert_eq!(
+            travel_ticks(&Position::new(0.5, 0.), &to, 1.5, 10.0),
+            ((aim - 0.5) / WALK_TILES_PER_TICK).ceil() as Ticks,
+        );
+    }
+
+    /// The outer bound still decides *whether* a walk happens — the change
+    /// above is to the price, not to the test for arrival.
+    #[test]
+    fn the_outer_radius_still_decides_whether_a_walk_is_needed() {
+        let to = Position::new(0., 0.);
+        assert_eq!(
+            travel_ticks(&Position::new(10.0, 0.), &to, 0., 10.0),
+            0,
+            "inside the disc is still arrived, however the walk is priced"
+        );
+        assert!(
+            travel_ticks(&Position::new(10.5, 0.), &to, 0., 10.0) > 0,
+            "outside it is still a walk"
         );
     }
 
@@ -1349,23 +1728,25 @@ mod tests {
         let bots = [BotId(1)];
         let result = schedule(&net, &state(&bots), &bots).unwrap();
 
-        // 30 tiles, radius 3: ceil(27 / 0.15) = 180 travel ticks. The bot is free
-        // at 10 and the lag clears at 210, so it walks [10, 190] *during* the
-        // lag, waits 20 ticks, and acts [210, 270]. Idling first and walking
-        // afterwards would give 210 + 180 + 60 = 450.
+        // 30 tiles to a disc: ceil(30 / 0.14) = 215 travel ticks. The bot is
+        // free at 10 and the lag clears at 210, so it walks [10, 225] *during*
+        // the lag, and acts [225, 285]. Idling first and walking afterwards
+        // would give 210 + 215 + 60 = 485.
         let walk = result
             .steps
             .iter()
             .find(|s| matches!(s.what, StepKind::Walk { .. }))
             .expect("the bot must walk");
-        assert_eq!((walk.start, walk.end), (10, 190));
+        // 225 -> 215: the walk stops on the outer ring, so it is ten ticks
+        // shorter than the trip to the centre used to be.
+        assert_eq!((walk.start, walk.end), (10, 215));
         let act = result
             .steps
             .iter()
             .find(|s| matches!(&s.what, StepKind::Act { action, .. } if *action == remove))
             .expect("the removal is scheduled");
-        assert_eq!((act.start, act.end), (210, 270));
-        assert_eq!(result.makespan, 270);
+        assert_eq!((act.start, act.end), (215, 275));
+        assert_eq!(result.makespan, 275);
     }
 
     #[test]
@@ -1401,11 +1782,12 @@ mod tests {
 
         assert_eq!(result.assignment(p), Some(BotId(1)));
         // Bot 2 is the cheapest by time — zero travel, so it would finish at 20
-        // against bot 1's 667 — but it has no ore, so it is not a candidate at
+        // against bot 1's 735 — but it has no ore, so it is not a candidate at
         // all. Ranking without feasibility would bind it and fail the plan.
         assert_eq!(result.assignment(c), Some(BotId(1)));
-        // Bot 1 walks 97 tiles: ceil(97 / 0.15) = 647, then acts for 10.
-        assert_eq!(result.makespan, 667);
+        // Bot 1 walks to the disc's outer ring rather than its centre:
+        // ceil((100 - 1.4) / 0.14) = 705, then the two 10-tick acts.
+        assert_eq!(result.makespan, 725);
     }
 
     #[test]
@@ -1515,11 +1897,12 @@ mod tests {
             Some(BotId(2)),
             "the second chain must open on the bot carrying none, dear though it is"
         );
-        // The price of that: bot 2 walks 197 tiles (1314 ticks) and finishes at
-        // 1914, where piling both onto bot 1 would have finished at 1200. The
-        // chainless version of this network is `travel_cost_can_outweigh_an_idle_bot`,
-        // which still asserts 1200 — the preference applies only to chains.
-        assert_eq!(result.makespan, 1914);
+        // The price of that: bot 2 walks 200 tiles (ceil(200 / 0.14) = 1429
+        // ticks, less the outer ring) and finishes at 2019, where piling both onto bot 1 would have
+        // finished at 1200. The chainless version of this network is
+        // `travel_cost_can_outweigh_an_idle_bot`, which still asserts 1200 —
+        // the preference applies only to chains.
+        assert_eq!(result.makespan, 2019);
     }
 
     #[test]
@@ -1758,7 +2141,7 @@ mod tests {
         // Round 1: bot 1 is on the spot, finishing at 600.
         assert_eq!(result.assignment(first), Some(BotId(1)));
         // Round 2: bot 1 queues and finishes at 1200. Bot 2 is idle but must walk
-        // 197 tiles: ceil(197 / 0.15) = 1314 travel, so it would finish at 1914.
+        // 200 tiles: ceil(200 / 0.14) = 1429 travel, so it would finish at 2029.
         // A travel-blind scheduler would hand this to the idle bot and claim 600.
         assert_eq!(result.assignment(second), Some(BotId(1)));
         assert_eq!(result.makespan, 1200);
@@ -1791,10 +2174,11 @@ mod tests {
         let result = schedule(&net, &s, &bots).unwrap();
 
         assert_eq!(result.assignment(first), Some(BotId(1)));
-        // Bot 1 would queue to 1200. Bot 2 walks 27 tiles: ceil(27 / 0.15) = 180
-        // travel, finishing at 780. The idle bot wins this time.
+        // Bot 1 would queue to 1200. Bot 2 walks 30 tiles to the disc's outer
+        // ring: ceil(28.6 / 0.14) = 205 travel, finishing at 805. The idle bot
+        // still wins — the honest travel price did not overturn it.
         assert_eq!(result.assignment(second), Some(BotId(2)));
-        assert_eq!(result.makespan, 780);
+        assert_eq!(result.makespan, 805);
     }
 
     #[test]
@@ -1918,9 +2302,9 @@ mod tests {
             take_at(takes[1]),
             take_at(takes[0])
         );
-        // 1,760 under `(end, action, bot)`: both ore mines, then the coal,
-        // then everything else, and the long smelt waited out at the end.
-        assert_eq!(result.makespan, 1660);
+        // Under `(end, action, bot)` the order is: both ore mines, then the
+        // coal, then everything else, and the long smelt waited out at the end.
+        assert_eq!(result.makespan, 1728);
     }
 
     /// The obvious alternative — rank by [`critical_path`] alone — walks away
@@ -1983,6 +2367,6 @@ mod tests {
             })
             .collect();
         assert_eq!(&acts[..2], &coals[..], "both coals are mined in one trip");
-        assert_eq!(result.makespan, 1700);
+        assert_eq!(result.makespan, 1768);
     }
 }

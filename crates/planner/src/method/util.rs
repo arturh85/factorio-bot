@@ -889,7 +889,11 @@ pub enum TriggerRequirement {
 ///
 /// * [`PlannerError::UnsupportedResearchTrigger`] -- a kind with no goal
 ///   (`craft-fluid`, `build-entity`, orbit, spawner, platform, scripted, or
-///   one this build has never heard of);
+///   one this build has never heard of), named with the act it wants. The
+///   three shipped ones (`space-science-pack`, `biter-egg-handling`,
+///   `space-platform`) all want an act no action in this project performs;
+///   the mod's `build-entity` emulation is honest only because a bot has
+///   actually placed the entity, and no bot can place an asteroid collector;
 /// * [`PlannerError::UndescribedResearchTrigger`] -- a `mine-entity` with no
 ///   entity named, which is what every dump written before 2026-09-05 holds,
 ///   because the mod sent the bare type. A new dump fixes it; nothing in the
@@ -949,6 +953,7 @@ pub fn trigger_requirement(
         other => Err(PlannerError::UnsupportedResearchTrigger {
             technology: tech.name.clone(),
             trigger: other.kind().to_string(),
+            act: other.to_string(),
         }),
     }
 }

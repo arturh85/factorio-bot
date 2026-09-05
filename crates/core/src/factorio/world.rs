@@ -90,6 +90,39 @@ pub struct RespawnEvent {
     pub position: Option<Position>,
 }
 
+/// The payload of a `"research_trigger_emulated"` writeout: the mod completed
+/// a trigger technology on a headless run because the force had already done
+/// what the trigger names (`mods/BotBridge/control.lua`,
+/// `emulate_research_triggers`).
+///
+/// Two spellings of the count, because the mod writes the counter it read:
+/// `produced` for a `craft-item` trigger (production statistics or the
+/// hand-craft tally, whichever was larger) and `built` for a `build-entity`
+/// one. Both default so a line written by an older mod still parses; the
+/// record folds them into one `count`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct ResearchTriggerEvent {
+    pub technology: String,
+    /// The trigger's `type`: `craft-item` or `build-entity`.
+    pub trigger: String,
+    #[serde(default)]
+    pub item: Option<String>,
+    #[serde(default)]
+    pub entity: Option<String>,
+    pub needed: u32,
+    #[serde(default)]
+    pub produced: Option<u32>,
+    #[serde(default)]
+    pub built: Option<u32>,
+}
+
+impl ResearchTriggerEvent {
+    /// The count that earned the technology, whichever counter it came from.
+    pub fn count(&self) -> u32 {
+        self.produced.or(self.built).unwrap_or(0)
+    }
+}
+
 /// One entry of the death queue: a bot lost its character, or got one back.
 ///
 /// One queue for both rather than two, because the reader
@@ -677,6 +710,206 @@ impl StepAsideReason {
     }
 }
 
+/// How far from the character each mobility-probe hop is aimed, in tiles.
+///
+/// Three tiles: far enough that the target is outside the character's own
+/// tile and the one beside it, so reaching it proves the character can
+/// *leave*, and near enough that a free character in a corridor between two
+/// furnace rows still has some direction it can go. Paired with
+/// [`HOP_RADIUS`], each probe accepts anywhere from one to five tiles out.
+pub const HOP_DISTANCE: f64 = 3.0;
+
+/// The radius each hop's path request is allowed to stop short in.
+///
+/// Two tiles, so that a hop whose exact target happens to be inside a
+/// building is still satisfied by the ground beside it. A probe that had to
+/// land on one named point would read "the tile three east is a furnace" as
+/// "the character cannot move east".
+pub const HOP_RADIUS: f64 = 2.0;
+
+/// The four points a mobility probe asks the game for a path to, from
+/// `from`: [`HOP_DISTANCE`] tiles north, east, south and west, in that order.
+pub fn hop_targets(from: &Position) -> [Position; 4] {
+    [
+        Position::new(from.x(), from.y() - HOP_DISTANCE),
+        Position::new(from.x() + HOP_DISTANCE, from.y()),
+        Position::new(from.x(), from.y() + HOP_DISTANCE),
+        Position::new(from.x() - HOP_DISTANCE, from.y()),
+    ]
+}
+
+/// A character the *game* has said cannot move from where it stands, and
+/// which the next plan must therefore not send anywhere.
+///
+/// # What it claims, and who established it
+///
+/// After a walk the pathfinder refused, the executor asked the game for a
+/// short path from the character to each of [`hop_targets`], and every one
+/// of them came back `failed to path find`. That is the game's own verdict
+/// on the *character*, as distinct from a [`WalkRefusal`], which is the
+/// game's verdict on one (from, to) pair, and from an [`Enclosure`], which is
+/// this crate's flood fill over its occupancy model.
+///
+/// # Why a third ledger, when two already exist
+///
+/// Run `run-1788614781-38058` is the case. Bot 6 stood at
+/// `(-5.2, -29.1)`, overlapping a stone furnace another bot had placed at
+/// `[-5, -28]`. Every path request from it was refused -- four walks, always
+/// to a destination other bots reached. The walk ledger held the pair, and
+/// the fill said `Open`: the furnace's box grown by the character's half-box
+/// did not cover the tile centre the fill seeds from, so the model saw a
+/// free cell in a free region. The model was internally right and the
+/// character could not move. Seven plans sent it the same walk, and the run
+/// halted `stuck` with seven healthy bots idle.
+///
+/// The fill reasons from a model that holds no characters and rasterises to
+/// tile centres; the pathfinder reasons from the character's real box at its
+/// real position. Only the second can answer "can this character leave its
+/// tile", so that is what is asked, and this is where the answer is kept.
+///
+/// # It is a fact about a position, and it is released
+///
+/// A bench names the position it was earned at. A bot that has since moved --
+/// pushed clear by a step-aside, or by anything else -- is not the bot the
+/// game answered for, and `crates/planner`'s `PlanState::from_world` treats a
+/// bench more than [`WalkRefusal::SAME_PLACE_TOLERANCE`] from the bot's
+/// current position as not applying. The executor also *releases* a bench
+/// outright when a walk for that player succeeds, or when a re-probe before
+/// the next plan finds a hop the game will path -- see
+/// [`FactorioWorld::release_bench`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Bench {
+    /// The `game.tick` the verdict was stamped at, or `None` -- ordinarily
+    /// `None`, because a refused path request is answered before anything is
+    /// dispatched. Never defaulted to zero, for the reason
+    /// [`PlacementRefusal::tick`] gives.
+    pub tick: Option<u64>,
+    /// The Factorio player. A [`PlayerId`] rather than a bot id because this
+    /// crate has no bot ids; they are the same number.
+    pub player: PlayerId,
+    /// Where the character stood when every hop was refused.
+    pub at: Position,
+    /// How many hops were asked for and refused -- four, unless a probe is
+    /// ever narrowed. Carried so the record says how strong the claim is.
+    pub refused_hops: u8,
+    /// How far each hop was aimed, in tiles: [`HOP_DISTANCE`] as this build
+    /// had it.
+    pub hop_tiles: f64,
+}
+
+/// Why a bench was lifted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BenchRelease {
+    /// A walk for this player succeeded, so it can plainly move.
+    Walked,
+    /// A re-probe found a hop the game would path.
+    Probed,
+}
+
+impl BenchRelease {
+    /// The wire spelling, shared by the record's `EventKind::BotReleased`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BenchRelease::Walked => "walked",
+            BenchRelease::Probed => "probed",
+        }
+    }
+}
+
+/// One change to the bench ledger, queued for the record.
+///
+/// Ephemeral, like [`StepAside`]: the *state* of the ledger is what the next
+/// plan reads, and it is serialised with the world; the transitions are
+/// events for `record.enclosures()` to drain and are not.
+#[derive(Debug, Clone, PartialEq)]
+pub enum BenchChange {
+    Benched(Bench),
+    Released {
+        tick: Option<u64>,
+        player: PlayerId,
+        at: Position,
+        why: BenchRelease,
+    },
+}
+
+/// Every character the game has said cannot move, as of now, plus the
+/// changes nobody has recorded yet.
+///
+/// Keyed by player, because unlike the two append-only ledgers this one is a
+/// *current* state: a bot is benched or it is not, and the answer changes.
+#[derive(Debug, Default)]
+pub struct Benches {
+    active: BTreeMap<PlayerId, Bench>,
+    changes: Vec<BenchChange>,
+}
+
+/// Serialised as the bare list of active benches, in player order; the
+/// change queue is ephemeral and restarts empty on load.
+impl Serialize for Benches {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.active
+            .values()
+            .cloned()
+            .collect::<Vec<Bench>>()
+            .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Benches {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let rows: Vec<Bench> = Vec::deserialize(deserializer)?;
+        Ok(Benches {
+            active: rows.into_iter().map(|row| (row.player, row)).collect(),
+            changes: Vec::new(),
+        })
+    }
+}
+
+impl Benches {
+    /// Benches a player, or does nothing if it is already benched within
+    /// [`WalkRefusal::SAME_PLACE_TOLERANCE`] of this spot. Returns whether
+    /// anything changed.
+    ///
+    /// A bench earned somewhere else replaces the old one: the bot moved
+    /// between the two, so the old fact was about a position it no longer
+    /// occupies, and the record gets a fresh row saying where it is stuck now.
+    fn note(&mut self, bench: Bench) -> bool {
+        let same_spot = self.active.get(&bench.player).is_some_and(|known| {
+            (known.at.x - bench.at.x)
+                .hypot(known.at.y - bench.at.y)
+                .total_cmp(&WalkRefusal::SAME_PLACE_TOLERANCE)
+                .is_le()
+        });
+        if same_spot {
+            return false;
+        }
+        self.active.insert(bench.player, bench.clone());
+        self.changes.push(BenchChange::Benched(bench));
+        true
+    }
+
+    /// Lifts a player's bench, if it has one. Returns whether it had one.
+    fn release(&mut self, player: PlayerId, tick: Option<u64>, why: BenchRelease) -> bool {
+        let Some(bench) = self.active.remove(&player) else {
+            return false;
+        };
+        self.changes.push(BenchChange::Released {
+            tick,
+            player,
+            at: bench.at,
+            why,
+        });
+        true
+    }
+}
+
 /// What a container or machine was last observed to be holding.
 ///
 /// # Why this is not a field on the stored [`FactorioEntity`]
@@ -783,6 +1016,13 @@ pub struct FactorioWorld {
     /// mod stamped on its `writeout` line. Same shape and same reason as
     /// `teleports`: `OutputParser` pushes, `record.deaths()` drains.
     pub deaths: SyncMutex<Vec<(u64, BotLifeEvent)>>,
+    /// Trigger technologies the mod has completed on a headless run since the
+    /// last [`FactorioWorld::drain_research_triggers`], each tagged with the
+    /// game tick. Same shape as `deaths`: `OutputParser` pushes,
+    /// `record.research_triggers()` drains. Until this queue existed the
+    /// mod's line reached only the server log, and `events.jsonl` showed a
+    /// research finishing with no research ever started.
+    pub research_triggers: SyncMutex<Vec<(u64, ResearchTriggerEvent)>>,
     /// Sites the game has refused a build at, for the life of this world.
     ///
     /// Two readers, which is why it sits here rather than in either of them.
@@ -863,6 +1103,12 @@ pub struct FactorioWorld {
     /// since the last [`FactorioWorld::drain_step_asides`]. A queue, not
     /// knowledge -- see [`StepAside`].
     pub step_asides: SyncMutex<Vec<StepAside>>,
+    /// Characters the game itself has said cannot move from where they
+    /// stand, and which the next plan must not send anywhere -- see
+    /// [`Bench`] for the run that needed it and why neither ledger above
+    /// could have said so. Read by `crates/planner`'s `PlanState::from_world`,
+    /// written and released by `crates/executor`.
+    pub benches: SyncMutex<Benches>,
 }
 
 impl FactorioWorld {
@@ -1188,11 +1434,13 @@ impl FactorioWorld {
             flow_graph,
             teleports: SyncMutex::new(Vec::new()),
             deaths: SyncMutex::new(Vec::new()),
+            research_triggers: SyncMutex::new(Vec::new()),
             inventories: DashMap::new(),
             placement_refusals: SyncMutex::new(PlacementRefusals::default()),
             walk_refusals: SyncMutex::new(WalkRefusals::default()),
             enclosures: SyncMutex::new(Enclosures::default()),
             step_asides: SyncMutex::new(Vec::new()),
+            benches: SyncMutex::new(Benches::default()),
         }
     }
 
@@ -1225,6 +1473,17 @@ impl FactorioWorld {
     /// first.
     pub fn drain_deaths(&self) -> Vec<(u64, BotLifeEvent)> {
         std::mem::take(&mut *self.deaths.lock())
+    }
+
+    /// Queues a trigger technology the mod just completed, for
+    /// [`FactorioWorld::drain_research_triggers`] to pick up.
+    pub fn record_research_trigger(&self, tick: u64, event: ResearchTriggerEvent) {
+        self.research_triggers.lock().push((tick, event));
+    }
+
+    /// Takes every emulated trigger queued since the last drain, oldest first.
+    pub fn drain_research_triggers(&self) -> Vec<(u64, ResearchTriggerEvent)> {
+        std::mem::take(&mut *self.research_triggers.lock())
     }
 
     /// Remembers a build the game refused. Returns whether the site was new.
@@ -1287,6 +1546,40 @@ impl FactorioWorld {
     /// Every enclosure observed, oldest first. Non-destructive.
     pub fn enclosures(&self) -> Vec<Enclosure> {
         self.enclosures.lock().found.clone()
+    }
+
+    /// Benches a character the game has refused every short hop from where
+    /// it stands. Returns whether the ledger changed -- `false` when the
+    /// player was already benched at (about) this spot.
+    ///
+    /// Called from `walk_memory` (`crates/executor`) with the verdict of a
+    /// mobility probe, never from a fill over this crate's own model: see
+    /// [`Bench`] for why the model's answer is not admissible here.
+    pub fn record_bench(&self, bench: Bench) -> bool {
+        self.benches.lock().note(bench)
+    }
+
+    /// Lifts a player's bench because the game has shown it can move --
+    /// see [`BenchRelease`]. Returns whether it was benched.
+    pub fn release_bench(&self, player: PlayerId, tick: Option<u64>, why: BenchRelease) -> bool {
+        self.benches.lock().release(player, tick, why)
+    }
+
+    /// Every character currently benched, in player order. Non-destructive:
+    /// this is the planner's read, once per plan.
+    pub fn benches(&self) -> Vec<Bench> {
+        self.benches.lock().active.values().cloned().collect()
+    }
+
+    /// Whether this player is benched right now.
+    pub fn is_benched(&self, player: PlayerId) -> bool {
+        self.benches.lock().active.contains_key(&player)
+    }
+
+    /// Takes every bench change queued since the last drain, oldest first,
+    /// for the record.
+    pub fn drain_bench_changes(&self) -> Vec<BenchChange> {
+        std::mem::take(&mut self.benches.lock().changes)
     }
 
     /// The enclosures no record has been told about yet, oldest first, marking
@@ -1392,7 +1685,7 @@ impl Serialize for FactorioWorld {
     where
         S: Serializer,
     {
-        let mut state = serializer.serialize_struct("FactorioWorld", 13)?;
+        let mut state = serializer.serialize_struct("FactorioWorld", 14)?;
         state.serialize_field("players", &self.players)?;
         state.serialize_field("forces", &self.forces)?;
         state.serialize_field("graphics", &self.graphics)?;
@@ -1419,6 +1712,10 @@ impl Serialize for FactorioWorld {
         state.serialize_field("placement_refusals", &*self.placement_refusals.lock())?;
         state.serialize_field("walk_refusals", &*self.walk_refusals.lock())?;
         state.serialize_field("enclosures", &*self.enclosures.lock())?;
+        // The fifth ledger, the one the game wrote: a dump taken with a bot
+        // benched must plan with it benched, or the offline plan re-sends
+        // exactly the walk the live run halted on.
+        state.serialize_field("benches", &*self.benches.lock())?;
         state.end()
     }
 }
@@ -1442,6 +1739,7 @@ impl<'de> Deserialize<'de> for FactorioWorld {
             PlacementRefusals,
             WalkRefusals,
             Enclosures,
+            Benches,
         }
 
         impl<'de> Deserialize<'de> for Field {
@@ -1476,6 +1774,7 @@ impl<'de> Deserialize<'de> for FactorioWorld {
                             "placement_refusals" => Ok(Field::PlacementRefusals),
                             "walk_refusals" => Ok(Field::WalkRefusals),
                             "enclosures" => Ok(Field::Enclosures),
+                            "benches" => Ok(Field::Benches),
                             _ => Err(de::Error::unknown_field(value, FIELDS)),
                         }
                     }
@@ -1511,6 +1810,7 @@ impl<'de> Deserialize<'de> for FactorioWorld {
                 let mut placement_refusals: Option<PlacementRefusals> = None;
                 let mut walk_refusals: Option<WalkRefusals> = None;
                 let mut enclosures: Option<Enclosures> = None;
+                let mut benches: Option<Benches> = None;
 
                 while let Some(key) = map.next_key()? {
                     match key {
@@ -1592,6 +1892,12 @@ impl<'de> Deserialize<'de> for FactorioWorld {
                             }
                             enclosures = Some(map.next_value()?);
                         }
+                        Field::Benches => {
+                            if benches.is_some() {
+                                return Err(de::Error::duplicate_field("benches"));
+                            }
+                            benches = Some(map.next_value()?);
+                        }
                     }
                 }
                 let players = players.ok_or_else(|| de::Error::missing_field("players"))?;
@@ -1619,6 +1925,7 @@ impl<'de> Deserialize<'de> for FactorioWorld {
                 let placement_refusals = placement_refusals.unwrap_or_default();
                 let walk_refusals = walk_refusals.unwrap_or_default();
                 let enclosures = enclosures.unwrap_or_default();
+                let benches = benches.unwrap_or_default();
 
                 let entity_graph: Arc<EntityGraph> = Arc::new(entity_graph);
                 let flow_graph = Arc::new(FlowGraph::new(entity_graph.clone()));
@@ -1637,11 +1944,13 @@ impl<'de> Deserialize<'de> for FactorioWorld {
                     flow_graph,
                     teleports: Default::default(),
                     deaths: Default::default(),
+                    research_triggers: Default::default(),
                     inventories,
                     placement_refusals: SyncMutex::new(placement_refusals),
                     walk_refusals: SyncMutex::new(walk_refusals),
                     enclosures: SyncMutex::new(enclosures),
                     step_asides: Default::default(),
+                    benches: SyncMutex::new(benches),
                 })
             }
         }
@@ -1660,6 +1969,7 @@ impl<'de> Deserialize<'de> for FactorioWorld {
             "placement_refusals",
             "walk_refusals",
             "enclosures",
+            "benches",
         ];
         deserializer.deserialize_struct("FactorioWorld", FIELDS, FactorioWorldVisitor)
     }
@@ -1688,6 +1998,7 @@ impl Clone for FactorioWorld {
             // two independent recorders.
             teleports: SyncMutex::new(Vec::new()),
             deaths: SyncMutex::new(Vec::new()),
+            research_triggers: SyncMutex::new(Vec::new()),
             // Knowledge, like `placement_refusals` below and for the same
             // reason: what a chest was last seen holding does not stop being
             // our best reading because the world was cloned. Stale in exactly
@@ -1719,6 +2030,13 @@ impl Clone for FactorioWorld {
             }),
             // Ephemeral, like `teleports` above: an event, not knowledge.
             step_asides: SyncMutex::new(Vec::new()),
+            // Knowledge -- the game's own verdict on who can move -- with its
+            // change queue reset like the cursors above: a second recorder
+            // has been told about none of it.
+            benches: SyncMutex::new(Benches {
+                active: self.benches.lock().active.clone(),
+                changes: Vec::new(),
+            }),
             flow_graph: Arc::new(FlowGraph::new(_entity_graph)),
         }
     }
@@ -1748,11 +2066,13 @@ mod tests {
             next_action_id: Default::default(),
             teleports: Default::default(),
             deaths: Default::default(),
+            research_triggers: Default::default(),
             inventories: Default::default(),
             placement_refusals: Default::default(),
             walk_refusals: Default::default(),
             enclosures: Default::default(),
             step_asides: Default::default(),
+            benches: Default::default(),
             entity_graph: Arc::new(EntityGraph::new(
                 Arc::new(DashMap::new()),
                 Arc::new(DashMap::new()),

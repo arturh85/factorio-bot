@@ -568,6 +568,12 @@
                 "minimum": 0,
                 "type": "integer"
               },
+              "reach_corrections": {
+                "description": "How many walks have come to rest outside the reach of the action\nthey served and needed a corrective step, cumulative since the\nactuator was built.\n\nA walk stops on the **outer** ring of its annulus — as far from the\ntarget as the action's reach allows, less\n[`crate::factorio::rcon::ARRIVAL_MARGIN`], which is worth\n8,200-10,200 ticks of a four-bot green run. That margin was\nmeasured (128 probe walks; worst overshoot 0.301 tiles) and\nmeasurement is not proof, so the executor re-checks reach after\nevery walk and this is how often it had to act.\n\n**It states no verdict either.** Zero says the margin is not being\ntested and could be tightened; a number that grows says it is too\nthin. Which of those is worth acting on is not decided here, and\nnothing compares this against a threshold.\n\n`#[serde(default)]` so a run recorded before the outer ring existed\nstill opens — and reads zero, which for such a run is the truth:\nits walks stopped on the inner ring and had no margin to be wrong\nabout.",
+                "format": "int32",
+                "minimum": 0,
+                "type": "integer"
+              },
               "settled": {
                 "description": "How many have reached a verdict of any kind (succeeded, failed or\nlost).",
                 "format": "int32",
@@ -976,6 +982,75 @@
             "type": "object"
           },
           {
+            "description": "The game said this bot cannot move, and the next plan will not send it\nanywhere.\n\nAfter a walk the pathfinder refused, the executor asked the game for a\nshort path from the character in each of four directions\n(`FactorioRcon::probe_player_hops`) and every one was refused. That\nis the game's own verdict on the *character*, which neither\n[`EventKind::BotEnclosed`] (a fill over this process's occupancy\nmodel) nor a `no_path` walk (a verdict on one destination) can give:\nin `run-1788614781-38058` bot 6 stood overlapping a furnace, the fill\nsaid open, four walks said `no_path`, and seven plans in a row sent it\nthe same walk until the run halted `stuck` with seven healthy bots\nidle.\n\nUnlike `bot_enclosed`, this one is acted on: `crates/planner`'s\n`PlanState::from_world` reads the bench and gives the bot no step\nthat would need it to walk. It is lifted by [`EventKind::BotReleased`].\n\nWritten by `record.enclosures()` from `FactorioWorld::benches`.",
+            "properties": {
+              "bot": {
+                "format": "int32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "hop_tiles": {
+                "description": "How far each hop was aimed, in tiles.",
+                "format": "double",
+                "type": "number"
+              },
+              "kind": {
+                "enum": [
+                  "bot_benched"
+                ],
+                "type": "string"
+              },
+              "position": {
+                "$ref": "#/components/schemas/Position",
+                "description": "Where the character stood when every hop was refused. Observed."
+              },
+              "refused_hops": {
+                "description": "How many hops were asked for and refused.",
+                "format": "int32",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "bot",
+              "position",
+              "refused_hops",
+              "hop_tiles",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A benched bot can move again, and the next plan may send it.\n\nWritten by `record.enclosures()` when the executor lifted a bench:\n`why` is `\"walked\"` when a walk for the bot succeeded, or `\"probed\"`\nwhen the re-probe before a plan found a hop the game would path.",
+            "properties": {
+              "bot": {
+                "format": "int32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "enum": [
+                  "bot_released"
+                ],
+                "type": "string"
+              },
+              "position": {
+                "$ref": "#/components/schemas/Position",
+                "description": "Where the bench had been earned."
+              },
+              "why": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "bot",
+              "position",
+              "why",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
             "description": "A bot was walked clear of a placement that would otherwise have sealed\nit in -- the [`EventKind::BotEnclosed`] that did not happen.\n\nWritten by `record.enclosures()` from the queue `crates/executor`'s\npre-place check fills (`FactorioWorld::step_asides`). The check runs\nbefore every placement: with the footprint added to the occupancy\nmodel, would the fill around the character about to build it close?\nIn `run-1788552801-73005` it would have, and did -- bot 1 placed an\n`assembling-machine-1` from the one patch of ground whose every exit\ncrossed it, and stood there for 40 000 ticks.\n\nThis is a bot doing something the plan did not ask for. It is in the\nrecord so that a reader comparing the plan to what happened can see\nwhy a `place` was preceded by a walk the schedule has no step for.",
             "properties": {
               "bot": {
@@ -1110,6 +1185,58 @@
             },
             "required": [
               "bot",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The mod completed a Factorio 2.0 *trigger* technology on a headless\nrun because the force had already done what the trigger names.\n\nA server-side character has no player, and the game fires `craft-item`\nfor machine output but never for a character's hand craft, and never\n`build-entity` for a mod-placed entity\n(`docs/superpowers/notes/2026-09-05-research-triggers.md`). So\n`emulate_research_triggers` in `mods/BotBridge/control.lua` completes\nsuch a technology from the counters it keeps, only once every\nprerequisite is researched, and writes this line with the count that\nearned it. It is the answer to \"why does `on_research_finished` for\n`automation-science-pack` appear with no research ever started?\", and\na run whose log has the finish without this line is one in which the\ngame fired the trigger itself. Written by `record.research_triggers()`.",
+            "properties": {
+              "count": {
+                "description": "What the force had done when the sweep read it -- at least\n`needed`, by construction.",
+                "format": "int32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "entity": {
+                "description": "The entity a `build-entity` trigger counted; `null` for `craft-item`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "item": {
+                "description": "The item a `craft-item` trigger counted; `null` for `build-entity`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "kind": {
+                "enum": [
+                  "research_trigger_emulated"
+                ],
+                "type": "string"
+              },
+              "needed": {
+                "description": "What the trigger asked for.",
+                "format": "int32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "technology": {
+                "type": "string"
+              },
+              "trigger": {
+                "description": "The trigger's `type`: `craft-item` or `build-entity`.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "technology",
+              "trigger",
+              "needed",
+              "count",
               "kind"
             ],
             "type": "object"
@@ -1256,6 +1383,58 @@
               "bot_samples",
               "model_resource_tiles",
               "model_enemy_structures",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "What one `goal.plan` cost: wall time, and what the game clock did\nwhile the planner thought.\n\nThe planner is wall-clock work -- ~3 s for automation, ~20 s for green\n-- and a game left running through it is charged `60 * speed` ticks\nper second of thinking: 334 ticks for automation at 1x, 1,837 at 10x,\n6,438 for green at 5x (2026-09-05). That was the whole of the\n\"faster game, longer run\" tax. `goal.plan` now pauses the clock around\nexpansion, and this event is the receipt: `tick_after - tick_before`\nis what the run was charged, which is zero when `paused` held.\n\nWritten by the plan itself rather than folded into `plan_created`,\nwhich the driver script records later with the plan's steps: a plan\nthat raised has no `plan_created` and still cost time.",
+            "properties": {
+              "kind": {
+                "enum": [
+                  "planning_timed"
+                ],
+                "type": "string"
+              },
+              "paused": {
+                "description": "Whether the game clock was stopped for the duration. `false` on a\nbuild without RCON, or when the pause request failed -- in which\ncase `tick_after - tick_before` says what it cost.",
+                "type": "boolean"
+              },
+              "planning_ms": {
+                "description": "Wall clock spent inside expansion and scheduling, including the\nplacement pre-check round trips.",
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "reason": {
+                "description": "Why the clock was left running, when it was: `\"attached server,\nclock left running\"` for a `--connect` / `--server` run, whose\ngame may be somebody's live multiplayer session, or `\"pause\nrequest failed\"`. `None` whenever `paused` is true, and on a\nbuild with no game to ask.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "tick_after": {
+                "description": "`game.tick` when planning ended; `None` when nobody could ask.",
+                "format": "int64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "tick_before": {
+                "description": "`game.tick` when planning began; `None` when nobody could ask.",
+                "format": "int64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "planning_ms",
+              "paused",
               "kind"
             ],
             "type": "object"
@@ -3516,6 +3695,7 @@
           "timeout",
           "no_character",
           "destination_blocked",
+          "boxed_in",
           "other"
         ],
         "type": "string"

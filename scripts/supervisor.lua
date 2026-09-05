@@ -1106,6 +1106,9 @@ function Sup:step()
         -- itself (see the module comment), so it hands over the data rather
         -- than the call.
         local plan_for_recording = plan_for_record(plan_steps)
+        -- The tick the plan was made at, for `record.plan_created` to stamp
+        -- the event with. `nil` when the plan could not ask the game.
+        plan_for_recording.tick = plan.tick
 
         if steps == 0 then
             -- An empty plan is not satisfaction. It was the only signal this

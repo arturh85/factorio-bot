@@ -803,6 +803,12 @@ export type WalkFailureKind =
      * The aim was wrong, not the map.
      */
     | 'destination_blocked'
+    /**
+     * The pathfinder refused the walk **and** every short hop from where the
+     * character stands: the bot cannot leave its own tile, so the destination
+     * was not what was unreachable. A `bot_benched` event sits beside it.
+     */
+    | 'boxed_in'
     | 'other';
 
 /**
@@ -990,6 +996,13 @@ export type EventKind =
           /** How many were waiting before the list was capped. Equal to
            *  `waiting.length` when nothing was dropped. */
           waiting_total: number;
+          /** How many walks came to rest outside the reach of the action they
+           *  served and needed a corrective step, cumulative. A walk stops on
+           *  the outer ring of its annulus, holding back a measured margin for
+           *  the arrival itself; this says how often that margin was wrong.
+           *  It states no verdict -- zero means it could be tightened, a
+           *  rising number means it is too thin. */
+          reach_corrections: number;
       }
     | {
           kind: 'action_dispatched';
@@ -1169,6 +1182,37 @@ export type EventKind =
       }
     | {
           /**
+           * The game said this bot cannot move, and the next plan will not
+           * send it anywhere. After a refused walk the executor asked the
+           * pathfinder for a short hop in each of four directions from the
+           * character, and every one was refused -- the game's own verdict
+           * on the *character*, which neither `bot_enclosed` (a fill over
+           * the occupancy model) nor a `no_path` walk (a verdict on one
+           * destination) can give. Unlike `bot_enclosed`, this is acted on.
+           */
+          kind: 'bot_benched';
+          bot: number;
+          /** Where the character stood when every hop was refused. Observed. */
+          position: Position;
+          /** How many hops were asked for and refused. */
+          refused_hops: number;
+          /** How far each hop was aimed, in tiles. */
+          hop_tiles: number;
+      }
+    | {
+          /**
+           * A benched bot can move again, and the next plan may send it.
+           * `why` is `walked` when a walk for it succeeded, or `probed` when
+           * the re-probe before a plan found a hop the game would path.
+           */
+          kind: 'bot_released';
+          bot: number;
+          /** Where the bench had been earned. */
+          position: Position;
+          why: string;
+      }
+    | {
+          /**
            * A bot was walked clear of a placement that would otherwise have
            * sealed it in -- the `bot_enclosed` that did not happen. The
            * executor asks before every placement whether the footprint would
@@ -1218,6 +1262,27 @@ export type EventKind =
           bot: number;
           /** Where the new character stands -- the spawn point, ordinarily. */
           position: Position | null;
+      }
+    | {
+          /**
+           * The mod completed a Factorio 2.0 trigger technology on a
+           * headless run because the force had already done what the
+           * trigger names (a hand-crafted lab, a placed entity), once every
+           * prerequisite was researched. Explains an `on_research_finished`
+           * with no research ever started; absent on a client run, where
+           * the game fires every trigger itself.
+           */
+          kind: 'research_trigger_emulated';
+          technology: string;
+          /** `'craft-item'` or `'build-entity'`. */
+          trigger: string;
+          /** The item a `craft-item` trigger counted; `null` for `build-entity`. */
+          item: string | null;
+          /** The entity a `build-entity` trigger counted; `null` for `craft-item`. */
+          entity: string | null;
+          needed: number;
+          /** What the force had done when the sweep read it -- at least `needed`. */
+          count: number;
       }
     | {
           /**
@@ -1287,6 +1352,34 @@ export type EventKind =
            *  half is unknown or no bot has left the origin, and **not**
            *  floored at 1. */
           unearned_ratio: number | null;
+      }
+    | {
+          /** What one `goal.plan` cost: wall time, and what the game clock
+           *  did while the planner thought. The planner is wall-clock work
+           *  and a game left running through it was charged `60 * speed`
+           *  ticks per second of it -- 334 ticks for automation at 1x,
+           *  1,837 at 10x -- which was the whole of the "faster game, longer
+           *  run" tax. `goal.plan` now stops the clock around expansion;
+           *  this event is the receipt. Written by the plan itself, so a
+           *  plan that raised (and has no `plan_created`) still shows its
+           *  cost. */
+          kind: 'planning_timed';
+          /** Wall clock inside expansion and scheduling, pre-check round
+           *  trips included. */
+          planning_ms: number;
+          /** Whether the clock was stopped for the duration. `false` on a
+           *  build without RCON or when the pause request failed, in which
+           *  case `tick_after - tick_before` says what it cost. */
+          paused: boolean;
+          /** Why the clock was left running, when it was: `"attached
+           *  server, clock left running"` for a `--connect` / `--server` run
+           *  whose game may be somebody's live session, or `"pause request
+           *  failed"`. `null` whenever `paused` is true. */
+          reason: string | null;
+          /** `game.tick` when planning began; `null` when nobody could ask. */
+          tick_before: number | null;
+          /** `game.tick` when planning ended; `null` when nobody could ask. */
+          tick_after: number | null;
       }
     | {kind: 'run_finished'; outcome: string; elapsed_ticks: number}
     /** A kind this build does not know. The server never emits it, but a

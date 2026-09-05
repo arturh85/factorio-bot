@@ -478,14 +478,17 @@ pub fn pick_chain_actor(state: &PlanState, preference: &[BotId]) -> Option<BotId
     // The overwhelmingly common case, and the cheap one: no ledger, no
     // question. Stated rather than left to the `find` below so that a healthy
     // run provably takes the same path it always did.
-    if state.walled_in().is_empty() {
+    if !state.any_sidelined() {
         return Some(first);
     }
+    // Walled in or benched -- `PlanState::may_own_work` is the one question,
+    // and a benched bot (the game's own verdict that it cannot move) must not
+    // own the chain any more than a walled-in one may.
     Some(
         preference
             .iter()
             .copied()
-            .find(|bot| !state.is_walled_in(*bot))
+            .find(|bot| state.may_own_work(*bot))
             .unwrap_or(first),
     )
 }

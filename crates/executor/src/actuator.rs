@@ -149,6 +149,25 @@ pub trait Actuator: Send + Sync {
         min_radius: f64,
         radius: f64,
     ) -> Result<ActionTicks, ActuatorFailure>;
+
+    /// How many walks have come to rest outside the action's reach and needed
+    /// a corrective step, since this actuator was built.
+    ///
+    /// A walk stops on the *outer* ring of its annulus, holding back
+    /// `factorio_bot_core::factorio::rcon::ARRIVAL_MARGIN` for the arrival
+    /// itself. That margin is measured rather than proved, so this counter is
+    /// how a run says whether the measurement held: **zero means the margin
+    /// could be tightened, and a rising number means it is too thin.** It goes
+    /// into `EventKind::BatchProgress`, beside the other counters that state
+    /// facts and no verdict.
+    ///
+    /// Defaulted to zero rather than required, because an actuator with no
+    /// game underneath it has nothing to report and should not have to say so:
+    /// every stub in this workspace would otherwise grow a line about a
+    /// mechanism it does not have.
+    fn reach_corrections(&self) -> u64 {
+        0
+    }
     async fn mine(
         &self,
         bot: BotId,

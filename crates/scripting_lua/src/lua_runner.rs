@@ -127,6 +127,9 @@ pub async fn run_lua(
     // position and handed real work; see `Planner::roster`. A planning-only run
     // (`--clients 0`) seeds its own players before this point, so its roster
     // still comes back whole.
+    // Read before `planner` is borrowed for anything else: the seam only
+    // needs the fact, not the planner.
+    let server = planner.server;
     let all_bots = planner.roster(bot_count);
     let lua_code = lua_code.to_owned();
 
@@ -193,6 +196,7 @@ pub async fn run_lua(
                     real_world.clone(),
                     rcon.clone(),
                     all_bots.clone(),
+                    server,
                 )?;
                 // Cloned before `create_lua_globals` consumes them: recording
                 // needs the same roster and the same scripts root.

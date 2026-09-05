@@ -664,36 +664,61 @@ Three things that are **not** interchangeable between the modes:
   `game_speed`, written at run start from `<instance>/run-mode.json`.
   `just analyse` treats a difference as a note, not a refusal, but **do not
   compare a 5x headless run's timings against a 1x client run**.
-- **Trigger technologies are emulated, and only the `craft-item` ones.**
+- **Trigger technologies: the game fires `mine-entity` itself, the mod
+  emulates `craft-item` and `build-entity`, and prerequisites gate both.**
   Factorio 2.0 unlocks 32 technologies by *doing* — `automation-science-pack`
   by crafting one lab, `electronics` by 10 copper plates, `steam-power` by 50
-  iron plates — and the game fires those from **player** actions, which a
-  server-side character never performs. Left alone, a headless run crafts a
-  lab, places it, and still cannot craft red science: it halts `stuck` at
-  milestone 1 with a precondition that can never become true.
-  `emulate_research_triggers` completes such a technology when the force has
-  **already** produced what the trigger names, sweeping every 60 ticks, only
-  while character bots exist, and writing a `research_trigger_emulated` event
-  naming the counts that earned it. Two counters are consulted and **the larger
-  is taken, never the sum**: machine production (the force's statistics) and
-  hand crafts (`storage.crafted_tally`), because **a hand craft does not appear
-  in production statistics at all** — measured, and the reason the first
-  attempt unlocked both plate triggers and never the lab one.
-  The `mine-entity`, `build-entity`, `capture-spawner` and
-  `create-space-platform` triggers are **not** emulated. Since `ffc56270` the
-  mod does send their payload (`oil-processing` arrives as
-  `{"type":"mine-entity","entities":["crude-oil"],"count":1}`, verified on a
-  server-only dump), so the planner can refuse `oil-processing` by the next
-  rung rather than by the trigger, but emulating one honestly needs the
-  qualifying act to have actually happened, and a `mine-entity` trigger means
-  a real extractor mining a real patch. A headless run therefore still cannot
-  cross them.
-- **Nothing above 4 bots has been run.** `PlayerId` is `u8`, so 255 is the
-  arithmetic ceiling; before that, the mod polls **every bot every tick**
-  (whole main inventory, sorted signature, crafting-queue scan) and every
-  action is its own RCON round trip, so bot count is what costs tick rate.
-  Parallel *runs* are the cheap axis instead: a headless run needs only a
-  server, its own workspace and its own ports, so the limit is cores.
+  iron plates. All 32 were enumerated from a live server and each kind was
+  tested against a server-side character on 2026-09-05
+  (`docs/superpowers/notes/2026-09-05-research-triggers.md`):
+  - **`mine-entity` fires with no player at all** — a character bot chopping
+    a rock through `action_start_mining`, a fuelled burner drill and a
+    powered pumpjack each completed their technology. **Do not emulate it.**
+  - **`craft-item` fires for machine output and NOT for a hand craft**: with
+    the sweep switched off, a furnace's tenth copper plate earned
+    `electronics` by itself within ~400 ticks, while a lab hand-crafted
+    through `action_start_crafting` left `automation-science-pack` open for
+    4,000 ticks. `emulate_research_triggers` completes it when the force has
+    **already** produced what the trigger names, every 60 ticks, only while
+    character bots exist, writing a `research_trigger_emulated` event with
+    the counts. Two counters, **the larger taken, never the sum**: machine
+    production (the force's statistics -- redundant with the game, and only
+    ever ahead of it by under 400 ticks) and hand crafts
+    (`storage.crafted_tally`), because **a hand craft does not appear in
+    production statistics at all**. A 60-tick sweep beats the game's own
+    check, which is how the first measurement misread the furnace row --
+    switch the sweep off before concluding what the game does alone.
+  - **`build-entity` does not either** — `surface.create_entity{force=…}`,
+    which is every placement the mod makes, fires nothing with or without
+    `raise_built`. Emulated from `storage.built_tally`, filled in
+    `on_some_entity_created` for entities on the player force. The one
+    shipped use is `space-science-pack` (an asteroid collector), which
+    `can_place_entity` refuses on Nauvis even as a ghost, so the stub tests
+    are its only proof; no live run can cross it here.
+  - **Prerequisites gate the trigger and the act is remembered**: a rock
+    mined with `planet-discovery-vulcanus` open earned nothing; a stromatolite
+    mined *before* `planet-discovery-gleba` earned `heating-tower` right after
+    it. The sweep now skips a technology with an open prerequisite, which is
+    what stops `automation-science-pack` completing in the same sweep as, or
+    before, the two plate triggers it depends on.
+  - **`capture-spawner` and `create-space-platform` are refused by name** in
+    the planner (`UnsupportedResearchTrigger { act }`): no action in this
+    project performs the act, so an emulation would be a grant.
+  `remote.call("botbridge", "set_research_trigger_emulation", false)`
+  switches the sweep off for a measurement and records that it did.
+- **Eight bots have been run (2026-09-05), nothing above.** Eight characters
+  reach automation in one plan in ~5:26 and green in one plan in 19:58 at
+  5x on seed 31337 — but green's 693-action plan of 50,665 ticks executed
+  in 71,936 (1.42×, against 1.18× for four bots), so the plan is shorter
+  and the run is not: contention between bots on the ground is the open
+  cost. `PlayerId` is `u8`, so 255 is the arithmetic ceiling; before that,
+  the mod polls **every bot every tick** (whole main inventory, sorted
+  signature, crafting-queue scan) and every action is its own RCON round
+  trip, so bot count is what costs tick rate (eight bots still held 242 of
+  300 requested tps). Parallel *runs* are the cheap axis: two headless
+  instances on their own ports and workspaces each held ~220 tps and
+  finished in the wall time of one (`docs/superpowers/notes/
+  2026-09-05-headless-experiments.md`).
 
 ### Important Timing Considerations
 
@@ -735,11 +760,16 @@ Three things that are **not** interchangeable between the modes:
 #            authoritative answer to "did my edit ship". It used to be
 #            suppressed by `silent` (which every CLI path sets unless you
 #            pass --verbose) and so printed on no run at all.
-#            Same trap for scripts: workspace/scripts/ is a separate copy, and
-#            the CLI resolves a script by bare name against THAT copy, not the
-#            repo -- but scripts has no repo-checkout fallback at all (even in
-#            a debug build, a missing workspace/scripts/ is created empty, not
-#            seeded from the repo) and no equivalent log line yet.
+#            Scripts: a name resolves against <workspace>/scripts ONLY, never
+#            the CWD (`crates/core/src/scripts.rs::ensure_scripts_dir`, the
+#            single entry point; the CWD-probing `scripts_dir` is deleted).
+#            A missing OR EMPTY workspace/scripts/ is seeded by COPYING the
+#            checkout's scripts/ -- a copy, not a symlink, so a script's
+#            file_write / world.dump land in the workspace and not the repo.
+#            A populated one is left alone and only warned about when stale,
+#            so an edit to scripts/foo.lua in the repo does NOT run until you
+#            copy it over. Every run logs "Using scripts directory <absolute
+#            path> (<why>)", once, not gated on --verbose, beside the mods line.
 #            Data dir is ~/.local/share/factorio-bot-dev/
 #   release  mods and scripts are include_dir!-embedded into the binary at
 #            COMPILE TIME and extracted once into the workspace. Editing
@@ -805,6 +835,56 @@ game time, per-verb dispatch->settle ticks, `steps/bot`, `planned ticks/bot`,
 per-bot failed walks, frozen-position detection, repeated refused destinations,
 sample coverage, per-network power and per-machine status. It exists because
 the ad-hoc one-liners that produced those wrong answers were unrepeatable.
+
+**The first number is the production curve; the milestone tick is the second,
+and the record carries both** (owner rule, 2026-09-05: "prioritize production
+rates at given times over raw run time"). `just analyse` opens with cumulative
+production and /min at fixed game-time marks (5/10/15/20/25/30 min from
+`run_started`, `--marks` to change) plus a plateau detector, and the milestone
+spans follow as a peer section; the headline line carries both (`rates: iron
+32->57->43 /min at 5/10/15; ... | milestone 3 satisfied at 17:20`). Judge a
+`producing:`/rate goal on the curve and a `researched:`/first-event goal on
+the tick it flipped. Marks are game time, so a 5x headless run and a 1x client
+run are comparable *on rates* (not on wall time). `--rates-md` /
+`tools/rates_table.py` print the record's table -- generate it, do not type
+it. **Known limit as of 2026-09-05: production plateaus at the plan's bill.**
+In runs 13-15 iron stops at ~670 around minute 15 and red packs at 85, then
+nothing grows until the run ends: the cell makes what the plan asked for and no
+more, so a later mark measures the bill, not the factory.
+
+**A RISING PRODUCTION CURVE IS NOT EVIDENCE OF A WORKING FACTORY.**
+`production.made` counts what a *machine* produced, and a stone furnace a bot
+walked to and hand-loaded is a machine. A peer session's 179-entity furnace
+line was reported as smelting and had **no generator at all**: its 48 inserters
+and 87 belts had never moved an item, and every plate came from a bot carrying
+ore and coal in by hand. So the curve alone answers "did output rise", never
+"did a factory make it".
+
+**The attribution line under the table is what says who earned it.** Since
+2026-09-05 every mark interval reports the roster's busy %, the count of
+feeding-verb dispatches (`insert`/`stock`/`charge`/`fuel`/`take`/`mine` -- the
+count, because five of those six settle in the tick they dispatch and their
+share of *ticks* is ~0), the kW generated and drawn, and how many machine
+readings were `working` split into electric and burner producers. From those
+comes a verdict per item and interval: `roster-fed`, `factory`, or `unclear` --
+and `unclear` is said freely, because a wrong confident label is worse than an
+honest one. The headline carries it: `rates: iron 40->73->22 /min at 5/10/15
+(mostly roster-fed; no generator until 8:26)`. A plateau now says which kind it
+is -- input ran out, or the factory stopped -- from the machine statuses after
+it (`no_ingredients`/`no_fuel` versus `no_power`) and whether anybody was still
+feeding.
+
+**Our green runs are roster-fed, and the record now says so.** Runs 14, 16, 17
+and the headless run all read `roster-fed` at 5 and 10 minutes (and at 15
+except in run 17, where it is `unclear`): no
+generation at all for the first 8-10 minutes, and after that the 120 kW drawn
+went to a lab and a steam engine while every machine that made an item was a
+`stone-furnace` or a `burner-mining-drill` a bot hand-loaded. The only intervals
+that are not `roster-fed` are the last ones, where `assembling-machine-1` is
+working *and* bots are still feeding: `unclear`, honestly. The green milestone's
+witness -- 5 packs into the chest in 90 s with every bot idle -- remains the one
+place the runs prove automation, and it covers the green cell only. Quote
+"N plates/min" only with the attribution beside it.
 
 - **Game time, not wall clock.** `roster ready -> SATISFIED` on the clock
   includes client load and startup. One run read as 24.4 min on the clock and

@@ -183,6 +183,9 @@ fn stub_place(create_ok: bool, removes: i64) -> String {
                 return nil
             end,
             find_entity = function(name, pos) return nil end,
+            -- Open ground: the build-time footprint scan and the built-box
+            -- scan both find nobody.
+            find_entities_filtered = function(args) return {{}} end,
         }}
         local player = {{
             name = "bot1",
@@ -1021,7 +1024,10 @@ fn a_parked_character_bot_in_the_footprint_is_asked_to_walk_out_too() {
          Got {moved:?}"
     );
     let (idx, waypoint) = moved[0];
-    assert_eq!(idx, 3, "walked under its bot id, the one the executor addresses");
+    assert_eq!(
+        idx, 3,
+        "walked under its bot id, the one the executor addresses"
+    );
     assert!(
         !inside_footprint(waypoint),
         "{waypoint:?} is inside {FOOTPRINT:?}"
@@ -1128,7 +1134,11 @@ fn a_landing_inside_the_walkers_stopping_box_is_refused_and_the_next_exit_taken(
         &format!(r#"rcon_place_entity(1, "stone-furnace", {SITE}, 0)"#),
     );
     let moved = asked_to_move(&lua);
-    assert_eq!(moved.len(), 1, "the bot is still asked to move. Got {moved:?}");
+    assert_eq!(
+        moved.len(),
+        1,
+        "the bot is still asked to move. Got {moved:?}"
+    );
     let (_, (x, y)) = moved[0];
     let clear = x <= l - 0.5 || x >= r + 0.5 || y <= t - 0.5 || y >= b + 0.5;
     assert!(
@@ -1141,6 +1151,242 @@ fn a_landing_inside_the_walkers_stopping_box_is_refused_and_the_next_exit_taken(
         x >= l,
         "the west exit only ever offered a spot in the crack, so the walk has \
          to leave by another edge. Got ({x}, {y})"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Nothing is built over a character, and a character found inside a built
+// entity is moved out.
+// ---------------------------------------------------------------------------
+
+/// The same bystander as [`PARKED_BOT`], mid-walk: `storage.p[3].walking` is
+/// set, which is how `on_tick` drives a bot through a walk the executor is
+/// waiting on. The mod's step-aside declines to steer it (it is leaving), and
+/// the point here is that it is not built over while it is still there.
+const WALKING_BOT: &str = r#"
+    { name = "character", type = "character", player_index = 3,
+      position = { x = -21.47, y = 23.73 },
+      bounding_box = {
+        left_top = { x = -21.67, y = 23.43 },
+        right_bottom = { x = -21.27, y = 24.03 } } }
+"#;
+
+/// **A game that says yes with a character in the box is still refused.**
+/// `can_place_entity` collides with characters, but the build is the moment
+/// that matters, so the footprint is scanned again right before
+/// `create_entity` -- against the same turned box -- and a character there,
+/// walking or not, gets the transient wording and no entity on top of it.
+#[test]
+fn a_walking_character_in_the_footprint_at_build_time_is_not_built_over() {
+    let lua = run(
+        &stub_refused_place(ACTOR_AWAY, WALKING_BOT),
+        &format!(
+            "{STUB_SERIALISE}\n\
+             game.players[1].surface.can_place_entity = function() return true end\n\
+             storage.p[3].walking = {{ idx = 1, waypoints = {{ {{ x = -30, y = 23.73 }} }}, action_id = 9 }}\n"
+        ),
+        &format!(r#"rcon_place_entity(1, "stone-furnace", {SITE}, 0)"#),
+    );
+    // `create_entity` in this stub raises, so reaching here at all proves the
+    // build was never attempted.
+    assert_eq!(
+        one_line_reply(&lua),
+        "cannot place item 'stone-furnace' because a character is standing in the footprint",
+        "the transient wording: nothing durable is learned about the ground"
+    );
+    let walking_to: (f64, f64) = lua
+        .load("local w = storage.p[3].walking.waypoints[1] return { w.x, w.y }")
+        .eval::<mlua::Table>()
+        .map(|t| (t.get(1).unwrap(), t.get(2).unwrap()))
+        .expect("bot 3's walk");
+    assert_eq!(
+        walking_to,
+        (-30.0, 23.73),
+        "a bot already walking for the executor keeps its walk; replacing it \
+         would strand that action"
+    );
+}
+
+/// Enough of the API for a placement to succeed with a character bot inside
+/// the box the game actually built, and to record where that character is
+/// sent. The built box is what `LuaEntity.bounding_box` answers, at the
+/// position the entity has -- not the prototype box the pre-checks turned.
+fn stub_built_over(character_inside: bool) -> String {
+    let (cx, cy) = if character_inside {
+        (-21.3, 24.4)
+    } else {
+        (-16.39, 20.46)
+    };
+    format!(
+        r#"
+        _printed = {{}}
+        print = function(s) _printed[#_printed + 1] = tostring(s) end
+        _teleported_to = nil
+        local function json(v)
+            local t = type(v)
+            if t == "number" then return string.format("%.4g", v)
+            elseif t == "string" then return '"' .. v .. '"'
+            elseif t == "boolean" then return tostring(v)
+            elseif t == "nil" then return "null" end
+            local parts = {{}}
+            if #v > 0 then
+                for _, item in ipairs(v) do parts[#parts + 1] = json(item) end
+                return "[" .. table.concat(parts, ",") .. "]"
+            end
+            local keys = {{}}
+            for k in pairs(v) do keys[#keys + 1] = tostring(k) end
+            table.sort(keys)
+            for _, k in ipairs(keys) do parts[#parts + 1] = '"' .. k .. '":' .. json(v[k]) end
+            return "{{" .. table.concat(parts, ",") .. "}}"
+        end
+        helpers.table_to_json = json
+
+        local built = {{
+            name = "stone-furnace", type = "furnace", valid = true,
+            position = {{ x = -21, y = 24 }},
+            bounding_box = {{
+                left_top = {{ x = -21.9, y = 23.1 }},
+                right_bottom = {{ x = -20.1, y = 24.9 }} }},
+            destroy = function() error("a paid-for build stays") end,
+        }}
+        local bot6 = {{
+            name = "character", type = "character", valid = true, unit_number = 606,
+            position = {{ x = {cx}, y = {cy} }},
+            bounding_box = {{
+                left_top = {{ x = {cx} - 0.2, y = {cy} - 0.2 }},
+                right_bottom = {{ x = {cx} + 0.2, y = {cy} + 0.2 }} }},
+            teleport = function(p) _teleported_to = {{ x = p.x, y = p.y }}; return true end,
+        }}
+        local surface = {{
+            can_place_entity = function(args) return true end,
+            create_entity = function(args) return built end,
+            find_entity = function(name, pos) return nil end,
+            get_tile = function(x, y) return {{ valid = true, name = "grass-1" }} end,
+            find_non_colliding_position = function(name, center, radius, precision)
+                return {{ x = center.x + 1.5, y = center.y }}
+            end,
+            find_entities_filtered = function(args)
+                local a = args.area
+                if args.type ~= nil and args.type ~= "character" then return {{}} end
+                local b = bot6.bounding_box
+                if b.left_top.x <= a.right_bottom.x and b.right_bottom.x >= a.left_top.x
+                    and b.left_top.y <= a.right_bottom.y and b.right_bottom.y >= a.left_top.y then
+                    return {{ bot6 }}
+                end
+                return {{}}
+            end,
+        }}
+        local player = {{
+            index = 1,
+            name = "bot1",
+            connected = true,
+            character = {{}},
+            position = {{ x = -16.39, y = 20.46 }},
+            force = "player",
+            surface = surface,
+            get_item_count = function(name) return 1 end,
+            remove_item = function(items) return 1 end,
+        }}
+        prototypes = {{ item = {{
+            ["stone-furnace"] = {{ place_result = {{
+                name = "stone-furnace",
+                collision_box = {{
+                    left_top = {{ x = -0.9, y = -0.9 }},
+                    right_bottom = {{ x = 0.9, y = 0.9 }},
+                }},
+            }} }},
+        }} }}
+        storage = {{ p = {{ [1] = {{}}, [6] = {{}} }},
+                    bots = {{ [6] = {{ name = "bot-6", entity = {{
+                        valid = true, name = "character", type = "character",
+                        unit_number = 606, position = bot6.position }} }} }} }}
+        game = {{
+            tick = {tick},
+            players = {{ player }},
+            forces = {{ player = {{ print = noop }} }},
+        }}
+    "#,
+        tick = STUB_TICK,
+    )
+}
+
+/// The built box is scanned *after* `create_entity`, and a character in it is
+/// moved to where the game says a character fits -- the reply says so, and so
+/// does the record.
+///
+/// Reached only when a check before the build was wrong about what the game
+/// collides with, or the game built somewhere other than where it judged; in
+/// either case a server-side character left inside a furnace has every later
+/// path request refused (it is what ended `run-1788614781-38058` for bot 6,
+/// by a different road), and there is no legitimate action that gets it out.
+#[test]
+fn a_character_inside_the_built_entity_is_moved_out_and_the_reply_says_so() {
+    let lua = run(
+        &stub_built_over(true),
+        // The race this guards against is a pre-build scan that was wrong,
+        // so the pre-build scan is made wrong: it sees nobody, and the
+        // built box is the only place the character can still be found.
+        &format!("{STUB_SERIALISE}\ncharacter_in_footprint = function() return false end\n"),
+        &format!(r#"rcon_place_entity(1, "stone-furnace", {SITE}, 0)"#),
+    );
+    let moved_to: Option<(f64, f64)> = lua
+        .load("if _teleported_to == nil then return nil end return { _teleported_to.x, _teleported_to.y }")
+        .eval::<Option<mlua::Table>>()
+        .expect("_teleported_to")
+        .map(|t| (t.get(1).unwrap(), t.get(2).unwrap()));
+    assert_eq!(
+        moved_to,
+        Some((-21.3 + 1.5, 24.4)),
+        "the character is put where the game said it fits, searched from its \
+         own position"
+    );
+    let line = one_line_reply(&lua);
+    assert!(
+        line.starts_with('{') && line.contains("\"pushed_out\":[{"),
+        "the placement succeeded and the reply carries the move, got {line:?}"
+    );
+    assert!(
+        line.contains("\"bot\":6") && line.contains("\"to\":{\"x\":-19.8,\"y\":24.4}"),
+        "naming the bot and where it went, got {line:?}"
+    );
+    let printed: Vec<String> = lua
+        .load("return _printed")
+        .eval::<mlua::Table>()
+        .expect("_printed")
+        .sequence_values::<String>()
+        .map(|l| l.expect("a line"))
+        .collect();
+    let teleport = printed
+        .iter()
+        .find(|l| l.contains("§teleport§"))
+        .unwrap_or_else(|| {
+            panic!("the record must see the move as the teleport it is, got {printed:?}")
+        });
+    assert!(
+        teleport.contains("\"reason\":\"placement_pushed_out\"")
+            && teleport.contains("\"player_id\":6"),
+        "named so `record.teleports()` can tell it from a ghost or blueprint push, got {teleport}"
+    );
+}
+
+/// The control: a build with nobody inside moves nobody and answers the plain
+/// entity, exactly as before.
+#[test]
+fn a_build_with_nobody_inside_moves_nobody() {
+    let lua = run(
+        &stub_built_over(false),
+        STUB_SERIALISE,
+        &format!(r#"rcon_place_entity(1, "stone-furnace", {SITE}, 0)"#),
+    );
+    let moved: bool = lua
+        .load("return _teleported_to ~= nil")
+        .eval()
+        .expect("_teleported_to");
+    assert!(!moved, "nobody was in the box");
+    let line = one_line_reply(&lua);
+    assert!(
+        line.starts_with('{') && !line.contains("pushed_out"),
+        "and the reply is the entity alone, got {line:?}"
     );
 }
 
@@ -1170,6 +1416,8 @@ fn stub_place_underground(create_ok: bool) -> String {
                 return nil
             end,
             find_entity = function(name, pos) return nil end,
+            -- Open ground: the build-time footprint scan finds nobody.
+            find_entities_filtered = function(args) return {{}} end,
         }}
         local player = {{
             name = "bot1",

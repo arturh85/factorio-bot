@@ -14,7 +14,7 @@
 //! issued and honestly `null` before there has been one.
 
 use super::position_from_lua;
-use factorio_bot_core::factorio::world::{BotLifeEvent, FactorioWorld};
+use factorio_bot_core::factorio::world::{BenchChange, BotLifeEvent, FactorioWorld};
 use factorio_bot_core::mlua::prelude::*;
 use factorio_bot_core::paris::{info, warn};
 use factorio_bot_core::parking_lot::Mutex;
@@ -521,6 +521,15 @@ fn classify_walk_failure(error: &str) -> WalkFailure {
         // was the problem. `run-1788608011-14361`'s refusal into a
         // neighbouring rock was archived as `other` until this arm existed.
         WalkFailureKind::DestinationBlocked
+    } else if error.contains("the character is boxed in") {
+        // `RconActuator::walk`'s own wording, appended to a `found no path`
+        // refusal when the mobility probe that followed it
+        // (`walk_memory::judge_mobility`) found every short hop refused too.
+        // Above the `NoPath` arm because the string still carries that arm's
+        // wording -- the walk *was* refused -- and the finding is the
+        // opposite of what `NoPath` is careful to claim: the bot, not the
+        // destination, is what could not be reached from.
+        WalkFailureKind::BoxedIn
     } else if error.contains("the destination is unreachable")
         || error.contains("found no path")
         || error.contains("returned no path")
@@ -739,6 +748,17 @@ impl LiveRecord {
         }
         true
     }
+}
+
+/// Records an event at a tick the caller observed itself -- still never
+/// earlier than something already in the log. See [`RunRecorder::not_before`].
+fn record_at(slot: &Slot, tick: u64, kind: EventKind) -> LuaResult<()> {
+    let mut guard = slot.lock();
+    let recorder = guard
+        .as_mut()
+        .ok_or_else(|| record_error("no recording is running -- call record.start() first"))?;
+    let tick = recorder.not_before(tick);
+    recorder.record(tick, kind).map_err(record_error)
 }
 
 /// Records a *live* event: stamped with the game's clock, never earlier than
@@ -1340,6 +1360,12 @@ end
 -- is `plan`'s length and `makespan` the latest
 -- `planned_start + planned_duration` across every entry (0 for an empty plan).
 --
+-- `plan.tick`, when the table carries one, is the tick the event is stamped
+-- with: the tick `goal.plan` handed the plan back at (`PlanValue.tick`).
+-- Without it the event takes the last RCON reply's tick, which on a headless
+-- run is the run's start -- the plan then reads as made before the seconds of
+-- planning that went into it.
+--
 -- `bots` is the **roster the plan was expanded against** -- every bot the
 -- planner was allowed to give work to -- and it is the third argument because
 -- nothing else knows it. Pass `plan.bots`.
@@ -1388,17 +1414,25 @@ end
                         steps.push(planned);
                     }
                     let step_count = u32::try_from(steps.len()).unwrap_or(u32::MAX);
-                    record_live(
-                        &slot,
-                        &rcon,
-                        EventKind::PlanCreated {
-                            milestone_index: index,
-                            steps: step_count,
-                            makespan,
-                            bots: roster_from_lua(bots)?,
-                            plan: steps,
-                        },
-                    )
+                    // `plan.tick` is the tick `goal.plan` handed the plan
+                    // back at (`PlanValue.tick`, carried onto the shaped
+                    // table by `supervisor.lua`). Without it the event was
+                    // stamped with the last RCON reply's tick, which on a
+                    // headless run is the run's *start*: `plan_created`
+                    // read 415 while the game stood at 2,252, and the
+                    // planning time it hid was the whole speed tax.
+                    let made_at: Option<u64> = plan.get("tick")?;
+                    let kind = EventKind::PlanCreated {
+                        milestone_index: index,
+                        steps: step_count,
+                        makespan,
+                        bots: roster_from_lua(bots)?,
+                        plan: steps,
+                    };
+                    match made_at {
+                        Some(tick) => record_at(&slot, tick, kind),
+                        None => record_live(&slot, &rcon, kind),
+                    }
                 },
             )?,
         )?;
@@ -1929,9 +1963,19 @@ end
 -- `bot_stepped_aside` event saying so -- the enclosure that did not happen,
 -- and the reason a `place` was preceded by a walk the plan has no step for.
 --
+-- It also flushes the *game's* verdict on who can move. When the pathfinder
+-- refuses a walk, the executor asks it for a short hop in each of four
+-- directions from the character; every hop refused means the character
+-- cannot leave its own tile, and it is **benched** -- a `bot_benched` event
+-- here, and no step that needs it to walk in any later plan, until a walk
+-- for it succeeds or a re-probe before a plan finds a way out
+-- (`bot_released`, with `why`). This one *does* change a plan, and is the
+-- answer to `run-1788614781-38058`, where the fill above said "open" for a
+-- bot standing in a furnace and seven plans re-sent it the same walk.
+--
 -- Call it once per loop iteration, alongside `record.actions`,
--- `record.teleports` and `record.refusals`. Nothing here changes a plan.
--- These exist because `run-1788432181-42528` ran its whole budget with two of
+-- `record.teleports` and `record.refusals`. The fill's own events change
+-- no plan. These exist because `run-1788432181-42528` ran its whole budget with two of
 -- four bots frozen for 77% of it and no artefact said so, and because
 -- `run-1788552801-73005` walled its own bot 1 in with a placement and this
 -- function, on the finer grid it then used, wrote nothing.
@@ -2005,6 +2049,49 @@ end
                     // reach open ground", and a step-aside is the enclosure
                     // that did not happen. run-1788569499-05724 printed
                     // `WALLED IN: 1` for a bot that had just walked clear.
+                }
+                for change in world.drain_bench_changes() {
+                    // The game's verdict on who can move, and its reversal.
+                    // A bench is stamped by the refused walk that earned it,
+                    // which ordinarily is nothing (refused before dispatch);
+                    // a release by the walk or the probe that lifted it.
+                    // Counted like an enclosure: a benched bot is a bot that
+                    // can no longer reach open ground, by the game's own
+                    // word, and the driver's "WALLED IN: N" line is the one
+                    // place a person watching the run sees it. A release is
+                    // not counted, for the reason a step-aside is not.
+                    let (tick, event, counted) = match change {
+                        BenchChange::Benched(bench) => (
+                            bench.tick,
+                            EventKind::BotBenched {
+                                bot: u32::from(bench.player),
+                                position: bench.at,
+                                refused_hops: u32::from(bench.refused_hops),
+                                hop_tiles: bench.hop_tiles,
+                            },
+                            true,
+                        ),
+                        BenchChange::Released {
+                            tick,
+                            player,
+                            at,
+                            why,
+                        } => (
+                            tick,
+                            EventKind::BotReleased {
+                                bot: u32::from(player),
+                                position: at,
+                                why: why.as_str().to_string(),
+                            },
+                            false,
+                        ),
+                    };
+                    let tick =
+                        recorder.not_before(tick.unwrap_or_else(|| rcon.last_tick().unwrap_or(0)));
+                    recorder.record(tick, event).map_err(record_error)?;
+                    if counted {
+                        written += 1;
+                    }
                 }
                 Ok(written)
             })?,
@@ -2173,6 +2260,65 @@ end
                         },
                     };
                     recorder.record(tick, kind).map_err(record_error)?;
+                    written += 1;
+                }
+                Ok(written)
+            })?,
+        )?;
+    }
+
+    map_table.set(
+        "__doc_entry_research_triggers",
+        String::from(
+            r#"
+--- flushes the trigger technologies the mod has completed on a headless run
+-- Factorio 2.0 unlocks some technologies by *doing* -- craft a lab, smelt
+-- 50 iron plates -- and the game fires those from a player's actions. A
+-- server-side character has no player: the game still fires `mine-entity`
+-- and a furnace's `craft-item`, but never a hand craft's, and never
+-- `build-entity`. The mod's sweep completes those from its own counters once
+-- the act has happened and every prerequisite is researched, and each
+-- completion is queued as a `research_trigger_emulated` event naming the
+-- technology, the trigger kind, what was counted and how many against how
+-- many were needed. This flushes that queue into `events.jsonl`.
+--
+-- Call it once per loop iteration, alongside `record.actions` and
+-- `record.deaths`, and once more after the loop. A run with real players
+-- writes none of these: the game fires every trigger itself.
+-- @treturn number how many events were written
+-- @raise if no recording is running
+function record.research_triggers()
+end
+    "#,
+        ),
+    )?;
+    {
+        let slot = slot.clone();
+        let world = world.clone();
+        map_table.set(
+            "research_triggers",
+            lua.create_function(move |_lua, ()| {
+                let mut guard = slot.lock();
+                let recorder = guard.as_mut().ok_or_else(|| {
+                    record_error("no recording is running -- call record.start() first")
+                })?;
+                let mut written = 0u32;
+                for (tick, event) in world.drain_research_triggers() {
+                    let tick = recorder.not_before(tick);
+                    let count = event.count();
+                    recorder
+                        .record(
+                            tick,
+                            EventKind::ResearchTriggerEmulated {
+                                technology: event.technology,
+                                trigger: event.trigger,
+                                item: event.item,
+                                entity: event.entity,
+                                needed: event.needed,
+                                count,
+                            },
+                        )
+                        .map_err(record_error)?;
                     written += 1;
                 }
                 Ok(written)
@@ -2478,6 +2624,57 @@ mod tests {
     }
 
     // ------------------------------------------------------------- plan_created
+
+    /// **`plan.tick` is the event's tick.** Without it the event takes the
+    /// last RCON reply's tick, which on a headless run is the run's start --
+    /// `plan_created` read 415 while the game stood at 2,252, and the
+    /// planning time that hid was the whole speed tax. The stub RCON here
+    /// has never answered, so the only way this event can read 4,180 is
+    /// through the field.
+    #[test]
+    fn plan_created_is_stamped_with_the_tick_the_plan_was_made_at() {
+        let (lua, _tmp, run_dir) = recording_lua_for(vec![1, 2]);
+        lua.load(
+            r#"
+            local plan = {
+                { id = 1, bot = 1, action = "mine 10 iron-ore", deps = {},
+                  planned_start = 0, planned_duration = 300 },
+            }
+            plan.tick = 4180
+            record.plan_created(1, plan, { 1, 2 })
+            "#,
+        )
+        .exec()
+        .expect("plan_created runs");
+        assert_eq!(read_event_ticks(&run_dir), vec![4180]);
+        match &read_events(&run_dir)[0] {
+            EventKind::PlanCreated { steps, .. } => assert_eq!(*steps, 1),
+            other => panic!("expected plan_created, got {other:?}"),
+        }
+    }
+
+    /// Without the field the event falls back to the last observed tick, as
+    /// it always did -- and never to a tick earlier than the log already has.
+    #[test]
+    fn plan_created_without_a_tick_is_stamped_live() {
+        let (lua, _tmp, run_dir) = recording_lua_for(vec![1, 2]);
+        lua.load(
+            r#"
+            record.plan_created(1, {
+                { id = 1, bot = 1, action = "mine 10 iron-ore", deps = {},
+                  planned_start = 0, planned_duration = 300 },
+            }, { 1, 2 })
+            "#,
+        )
+        .exec()
+        .expect("plan_created runs");
+        let ticks = read_event_ticks(&run_dir);
+        assert_eq!(ticks.len(), 1);
+        assert!(
+            ticks[0] < 4180,
+            "no plan.tick, so not the planning clock's stamp: {ticks:?}"
+        );
+    }
 
     /// `bots` is the roster the plan was made for, not the bots it used.
     ///
@@ -4159,6 +4356,179 @@ mod tests {
         assert_eq!(failure.kind, WalkFailureKind::DestinationBlocked);
         assert_eq!(failure.from, None);
         assert_eq!(failure.destination, None);
+    }
+
+    /// `RconActuator::walk`'s wording for a walk the mobility probe found the
+    /// bot could not have made from anywhere: the `found no path` refusal is
+    /// still in the string, and the bench is the finding.
+    #[test]
+    fn a_walk_refused_from_a_boxed_in_character_is_boxed_in_not_no_path() {
+        let error = "game rejected the command: the game's pathfinder returned no path: \
+                     Error: failed to path find -- found no path from \
+                     (-5.203125/-29.09765625) to (12.5/-33.5) -- and the character is \
+                     boxed in: the game refused all 4 short hops of 3 tiles from where it \
+                     stands, so it is benched until it can move";
+        let failure = classify_walk_failure(error);
+        assert_eq!(failure.kind, WalkFailureKind::BoxedIn);
+        assert_eq!(
+            failure.from.map(|p| (p.x(), p.y())),
+            Some((-5.203125, -29.09765625)),
+            "the endpoints are still read off the same wording"
+        );
+        assert_eq!(
+            failure.destination.map(|p| (p.x(), p.y())),
+            Some((12.5, -33.5))
+        );
+    }
+
+    /// A bench and its release reach `events.jsonl` through
+    /// `record.enclosures()`, the way an enclosure does -- and the bench is
+    /// counted in the answer while the release is not, for the same reason a
+    /// step-aside is not.
+    #[test]
+    fn a_bench_and_its_release_reach_events_jsonl() {
+        use factorio_bot_core::factorio::world::{Bench, BenchRelease, HOP_DISTANCE};
+        let lua = crate::sandbox::new_sandboxed_lua().expect("sandbox");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let recorder = RunRecorder::start(tmp.path(), "run-1").expect("recorder starts");
+        let run_dir = recorder.dir().to_path_buf();
+        let slot: Slot = Arc::new(Mutex::new(Some(recorder)));
+        let world = Arc::new(FactorioWorld::new());
+
+        let table = create_lua_record_with_slot(
+            &lua,
+            Arc::new(FactorioRcon::new_empty()),
+            world.clone(),
+            tmp.path().join("scripts"),
+            vec![],
+            slot,
+        )
+        .expect("record table");
+        lua.globals().set("record", table).expect("install");
+
+        let at = Position::new(-5.203125, -29.09765625);
+        world.record_bench(Bench {
+            tick: Some(26_953),
+            player: 6,
+            at: at.clone(),
+            refused_hops: 4,
+            hop_tiles: HOP_DISTANCE,
+        });
+        let written: u32 = lua
+            .load("return record.enclosures()")
+            .eval()
+            .expect("record.enclosures() runs");
+        assert_eq!(
+            written, 1,
+            "a benched bot is a bot that cannot reach open ground"
+        );
+
+        world.release_bench(6, Some(40_000), BenchRelease::Walked);
+        let written: u32 = lua
+            .load("return record.enclosures()")
+            .eval()
+            .expect("record.enclosures() runs again");
+        assert_eq!(written, 0, "a release is written but not counted");
+
+        let events = read_events(&run_dir);
+        assert_eq!(events.len(), 2, "{events:?}");
+        match &events[0] {
+            EventKind::BotBenched {
+                bot,
+                position,
+                refused_hops,
+                hop_tiles,
+            } => {
+                assert_eq!(*bot, 6);
+                assert_eq!(position, &at);
+                assert_eq!(*refused_hops, 4);
+                assert_eq!(*hop_tiles, HOP_DISTANCE);
+            }
+            other => panic!("expected bot_benched, got {other:?}"),
+        }
+        match &events[1] {
+            EventKind::BotReleased { bot, position, why } => {
+                assert_eq!(*bot, 6);
+                assert_eq!(position, &at);
+                assert_eq!(why, "walked");
+            }
+            other => panic!("expected bot_released, got {other:?}"),
+        }
+        assert_eq!(read_event_ticks(&run_dir), vec![26_953, 40_000]);
+    }
+
+    /// The mod's `research_trigger_emulated` line through the real parser
+    /// into `events.jsonl`, both spellings of the count: `produced` for a
+    /// `craft-item` trigger, `built` for a `build-entity` one.
+    #[test]
+    fn an_emulated_trigger_reaches_events_jsonl_through_the_real_parser() {
+        let lua = crate::sandbox::new_sandboxed_lua().expect("sandbox");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let recorder = RunRecorder::start(tmp.path(), "run-1").expect("recorder starts");
+        let run_dir = recorder.dir().to_path_buf();
+        let slot: Slot = Arc::new(Mutex::new(Some(recorder)));
+        let world = Arc::new(FactorioWorld::new());
+
+        let table = create_lua_record_with_slot(
+            &lua,
+            Arc::new(FactorioRcon::new_empty()),
+            world.clone(),
+            tmp.path().join("scripts"),
+            vec![],
+            slot,
+        )
+        .expect("record table");
+        lua.globals().set("record", table).expect("install");
+
+        let mut parser = factorio_bot_core::process::output_parser::OutputParser::with_world(world);
+        parser
+            .parse(
+                22_680,
+                "research_trigger_emulated",
+                r#"{"technology":"automation-science-pack","trigger":"craft-item","item":"lab","needed":1,"produced":1}"#,
+            )
+            .expect("craft-item line parses");
+        parser
+            .parse(
+                30_000,
+                "research_trigger_emulated",
+                r#"{"technology":"space-science-pack","trigger":"build-entity","entity":"asteroid-collector","needed":1,"built":2}"#,
+            )
+            .expect("build-entity line parses");
+
+        let written: u32 = lua
+            .load("return record.research_triggers()")
+            .eval()
+            .expect("record.research_triggers() runs");
+        assert_eq!(written, 2);
+        let events = read_events(&run_dir);
+        assert_eq!(
+            events,
+            vec![
+                EventKind::ResearchTriggerEmulated {
+                    technology: "automation-science-pack".into(),
+                    trigger: "craft-item".into(),
+                    item: Some("lab".into()),
+                    entity: None,
+                    needed: 1,
+                    count: 1,
+                },
+                EventKind::ResearchTriggerEmulated {
+                    technology: "space-science-pack".into(),
+                    trigger: "build-entity".into(),
+                    item: None,
+                    entity: Some("asteroid-collector".into()),
+                    needed: 1,
+                    count: 2,
+                },
+            ]
+        );
+        assert_eq!(read_event_ticks(&run_dir), vec![22_680, 30_000]);
+        let again: u32 = lua
+            .load("return record.research_triggers()")
+            .eval()
+            .expect("record.research_triggers() runs on an empty queue");
+        assert_eq!(again, 0);
     }
 
     /// Drives the real mod->core->Lua road for a death, as

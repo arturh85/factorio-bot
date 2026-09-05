@@ -753,6 +753,7 @@ async fn beat_batch_progress(
     net: Arc<ActionNetwork>,
     sched: Arc<Schedule>,
     log: Arc<Mutex<ExecutionLog>>,
+    act: Arc<dyn Actuator>,
     mut finished_rx: watch::Receiver<bool>,
 ) {
     // Built once: the schedule does not change while it is being executed, and
@@ -855,6 +856,7 @@ async fn beat_batch_progress(
             bots_in_flight: snap.bots_in_flight,
             waiting: snap.waiting,
             waiting_total: snap.waiting_total,
+            reach_corrections: u32::try_from(act.reach_corrections()).unwrap_or(u32::MAX),
         });
     }
 }
@@ -890,6 +892,11 @@ fn spawn(
     let beat_log = log.clone();
     let beat_net = net.clone();
     let beat_sched = sched.clone();
+    // The heartbeat's one window onto the actuator, and the only reason it
+    // holds one: `reach_corrections` is a fact about the *game* the executor
+    // is driving, not about the log it writes, so there is nowhere else to
+    // read it from.
+    let beat_act = act.clone();
     let join = factorio_bot_core::tokio::spawn(async move {
         // Started inside the run's own task and awaited by it below, so it is
         // impossible for the heartbeat to outlive the batch it describes --
@@ -898,7 +905,7 @@ fn spawn(
         // task that wakes up to discover it has nowhere to write.
         let beat = live.map(|live| {
             factorio_bot_core::tokio::spawn(beat_batch_progress(
-                live, beat_net, beat_sched, beat_log, beat_rx,
+                live, beat_net, beat_sched, beat_log, beat_act, beat_rx,
             ))
         });
         // A run refused outright dispatched nothing, so the log stays exactly
@@ -1833,6 +1840,7 @@ mod tests {
             vec![1, 2],
             None,
             None,
+            None,
         )
         .expect("goal table");
         lua.globals().set("goal", table).expect("install");
@@ -2642,6 +2650,7 @@ mod tests {
             seeded_world_for(&[1, 2]),
             factory(Arc::new(stub)),
             vec![1, 2],
+            None,
             None,
             None,
         )

@@ -5,11 +5,22 @@ use crate::types::PlayerId;
 use miette::Diagnostic;
 use thiserror::Error;
 
+/// The configured workspace cannot be used because its **parent** directory
+/// does not exist.
+///
+/// A missing leaf is not an error: everything under a workspace is derived
+/// (instances from the archive, mods, scripts, runs), so a `workspace_path`
+/// naming a directory that is not there yet is a first run, and
+/// `setup_factorio_instance` creates it. What this refuses is the path whose
+/// parent is missing too -- a typo pointing somewhere else entirely, which
+/// creating silently would hide.
 #[derive(Error, Debug, Diagnostic)]
 #[error("failed to find workspace!")]
 #[diagnostic(
     code(factorio::workspace::not_found),
-    help("correct settings.workspace_path to a valid directory")
+    help(
+        "settings.workspace_path must name a directory whose parent exists; the workspace itself is created on first run"
+    )
 )]
 pub struct WorkspaceNotFound {}
 

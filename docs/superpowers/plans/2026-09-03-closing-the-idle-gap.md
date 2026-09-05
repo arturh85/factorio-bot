@@ -108,9 +108,14 @@ elsewhere on bot 1's timeline and added handling.
 (fingerprint `dfac0f4caa0a7500`) — the *old* map's t=0 dump, not seed 31337
 (`c161fa3f437221d0`). Every offline plan quoted since 2026-09-04 was made on
 the old map while every live run was on 31337. The offline and live numbers
-still moved together, but they are two maps. A seed-31337 t=0 dump is being
-written now (`workspace/scripts/map-31337-t0.json`) for offline work from
-here on; the old baseline stays as the historical reference.
+still moved together, but they are two maps. **Done, at the owner's instruction: `workspace/scripts/map.json` is now the
+seed-31337 t=0 dump** (four headless character bots, honest freeplay
+inventory, fingerprint `c161fa3f437221d0`), also kept as
+`map-31337-t0.json`; the old baseline remains `map-t0-baseline.json`. On the
+seed, the current planner plans automation **177 / 22,044 (6:07)**, red
+328 / 28,885, green **623 / 71,167 (19:46)** — against 21,903 / 31,675 /
+82,742 on the old map. A one-bot dump had read 8:48 for automation because
+bots 2–4 were fabricated with empty inventories.
 
 ## The supplier ranking was never consulted; the leak was in the rehearsal (`be29d33d`)
 

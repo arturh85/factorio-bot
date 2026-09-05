@@ -169,11 +169,19 @@ ticks, roster utilisation. **This is the loop to iterate in.** It has caught a
 13:05 planning ceiling, a green-science capability gap and a whole workstream's
 result without spending a run.
 
-`workspace/scripts/map-t0-baseline.json` is the **t=0 reference dump**
-(fingerprint `dfac0f4caa0a7500`, `researched:automation` = 205 actions / 30,077
-ticks). Anything overwriting `workspace/scripts/map.json` -- a seed search, a
-`--resume-from` dump -- destroys the baseline unless you copy it aside first.
-That has already happened once.
+**Since 2026-09-05 `workspace/scripts/map.json` is the seed-31337 t=0 dump**
+(fingerprint `c161fa3f437221d0`, four headless character bots with the
+honest freeplay inventory, `researched:automation` = 177 actions / 22,044
+ticks, `producing:logistic-science-pack:6` = 623 / 71,167), kept also as
+`map-31337-t0.json`. Before that it was the OLD map's baseline, which lives
+on as `map-t0-baseline.json` (fingerprint `dfac0f4caa0a7500`) -- every
+offline number in the 2026-09-03/04 record was made on that map while the
+live runs were on 31337. Regenerate with
+`factorio-bot lua dump_31337.lua --headless --bots 4 --seed 31337 --new`
+(the script is `world.dump("map-31337-t0.json")`); a one-bot dump plans the
+other three with fabricated empty inventories and reads 8:48 for automation.
+Anything overwriting `map.json` -- a seed search, a `--resume-from` dump --
+destroys it unless you copy it aside first. That has already happened once.
 
 **Three blind spots, each of which has produced a wrong "the bug is absent":**
 

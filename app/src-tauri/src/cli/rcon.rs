@@ -4,7 +4,8 @@ use clap::{Arg, ArgMatches, Command, value_parser};
 use factorio_bot_core::factorio::rcon::{FactorioRcon, RconSettings};
 use factorio_bot_core::miette::Result;
 use factorio_bot_core::parking_lot::RwLock;
-use factorio_bot_core::settings::FactorioSettings;
+use crate::settings::load_app_settings_with;
+use super::settings_overrides;
 use std::sync::Arc;
 
 impl Subcommand for ThisCommand {
@@ -37,7 +38,11 @@ async fn run(matches: &ArgMatches, _context: &mut Context) -> Result<()> {
     .expect("required by clap")
     .as_str();
   let server_host = matches.get_one::<String>("server").cloned();
-  let rcon_settings = RconSettings::new_from_config(&FactorioSettings::default(), server_host);
+  // The settings the operator named, not the defaults: a second instance
+  // lives on the port its settings file says, and dialling 4321 against it
+  // dies with a pool timeout that never mentions the port.
+  let app_settings = load_app_settings_with(&settings_overrides(matches))?;
+  let rcon_settings = RconSettings::new_from_config(&app_settings.factorio, server_host);
   let rcon = FactorioRcon::new(&rcon_settings, Arc::new(RwLock::new(false)))
     .await
     .unwrap();

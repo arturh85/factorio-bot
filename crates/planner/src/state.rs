@@ -2,6 +2,7 @@ use crate::action::InventorySlot;
 use crate::error::PlannerError;
 use crate::goal::Holder;
 use crate::ids::{ActionId, BotId, ChainId, ItemId, Ticks};
+use crate::method::produce::DrainPolicy;
 use crate::method::util::rotated_collision_box;
 use factorio_bot_core::constants::BOT_FORCE;
 use factorio_bot_core::factorio::util::{add_to_rect, calculate_distance};
@@ -896,6 +897,14 @@ impl std::fmt::Display for Occupant {
 #[derive(Clone)]
 pub struct PlanState {
     base: Arc<FactorioWorld>,
+    /// How freely a fragment may wait on a cell this plan already stood.
+    ///
+    /// Set by [`crate::plan_best`], which builds one plan under each policy
+    /// and keeps the shorter schedule. It lives here rather than in
+    /// `ExpansionCtx` because `Method::applicable` is handed a `PlanState`
+    /// and nothing else, and `applicable` and `expand` must answer from the
+    /// same policy or a method claims a goal it then refuses.
+    drain_policy: DrainPolicy,
     bots: BTreeMap<BotId, BotState>,
     /// Bots `from_world` was asked for that `base` has no player for.
     ///
@@ -1713,6 +1722,7 @@ impl PlanState {
             benched: BTreeMap::new(),
             gathering_recorded: BTreeMap::new(),
             gathering_forecast: BTreeMap::new(),
+            drain_policy: DrainPolicy::default(),
         };
         state.walled_in = state.find_walled_in();
         state.benched = state.find_benched();
@@ -1851,6 +1861,20 @@ impl PlanState {
 
     pub fn fork(&self) -> PlanState {
         self.clone()
+    }
+
+    /// How freely a fragment may wait on a standing cell -- see
+    /// [`DrainPolicy`] and [`crate::plan_best`].
+    pub fn drain_policy(&self) -> DrainPolicy {
+        self.drain_policy
+    }
+
+    /// The same state under another drain policy. Consuming, so a policy is
+    /// chosen once for a whole expansion rather than drifting inside one.
+    #[must_use]
+    pub fn with_drain_policy(mut self, policy: DrainPolicy) -> PlanState {
+        self.drain_policy = policy;
+        self
     }
 
     pub fn base(&self) -> &Arc<FactorioWorld> {

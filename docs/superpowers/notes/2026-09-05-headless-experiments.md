@@ -513,3 +513,22 @@ move: RCON served the placement pre-check while `game.tick_paused` held.
 start → first dispatch 36 ticks, execution span 21,722, `planning_timed`
 3,131 ms paused at tick 431, delivered 262 of 300 tps (87%), 0 failed.
 Three speeds now read 1.01 / 1.005 / 1.014 against their plans.
+
+**Two follow-ups from review.** (1) The pause is gated on the run
+**owning** the server: `Planner::server` is `ServerOwnership::Owned` from
+every constructor but the CLI's `--connect` and `--server <host>` branches,
+which use `Planner::attached`. An attached run — possibly someone's live
+multiplayer game, where `game.tick_paused` would freeze every human in it
+— plans with `ClockPolicy::LeaveRunning`, reads the tick either side of
+the plan instead, and its `planning_timed` carries `paused: false, reason:
+"attached server, clock left running"` (new `reason` field, `null` when
+paused). No explicit `--pause-while-planning` flag: ownership is the whole
+decision and the CLI already knows it, so a flag would only let an attached
+run opt into freezing someone else's game. (2) `plan_created.tick` was
+stale on headless runs (`FactorioRcon::last_tick`, unrefreshed since run
+start). `goal.plan` now returns the tick the clock answered on the way out
+as `plan.tick`; `supervisor.lua` carries it onto the shaped table and
+`record.plan_created` stamps the event with it, falling back to the live
+tick only when the plan has none. Tests: attached clock is read twice and
+never stopped; `plan.tick` is the clock's answer / `nil` with no clock;
+`record.plan_created` takes `plan.tick`.

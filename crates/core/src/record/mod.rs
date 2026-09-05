@@ -963,6 +963,12 @@ pub enum EventKind {
         /// build without RCON, or when the pause request failed -- in which
         /// case `tick_after - tick_before` says what it cost.
         paused: bool,
+        /// Why the clock was left running, when it was: `"attached server,
+        /// clock left running"` for a `--connect` / `--server` run, whose
+        /// game may be somebody's live multiplayer session, or `"pause
+        /// request failed"`. `None` whenever `paused` is true, and on a
+        /// build with no game to ask.
+        reason: Option<String>,
         /// `game.tick` when planning began; `None` when nobody could ask.
         tick_before: Option<u64>,
         /// `game.tick` when planning ended; `None` when nobody could ask.

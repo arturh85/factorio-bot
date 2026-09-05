@@ -1089,6 +1089,7 @@ def planning_rows(events: list[dict]) -> list[dict]:
                 "tick": e.get("tick"),
                 "planning_ms": e.get("planning_ms"),
                 "paused": bool(e.get("paused")),
+                "reason": e.get("reason"),
                 "charged": charged,
             }
         )
@@ -1814,7 +1815,10 @@ def report(a: dict, out=sys.stdout, top: int = 12) -> None:
             f"{sum(charged)} tick(s) charged to the run" if len(charged) == len(planning)
             else f"{sum(charged)} tick(s) charged over {len(charged)} of them, the rest unknown"
         )
-        clock = "clock stopped for all" if not unpaused else f"clock RUNNING for {unpaused}"
+        reasons = sorted({r["reason"] for r in planning if not r["paused"] and r.get("reason")})
+        clock = "clock stopped for all" if not unpaused else (
+            f"clock RUNNING for {unpaused}" + (f": {'; '.join(reasons)}" if reasons else "")
+        )
         p(f"  planning: {len(planning)} plan(s), {total_ms / 1000:.1f} s wall, "
           f"{charged_s} ({clock})")
 

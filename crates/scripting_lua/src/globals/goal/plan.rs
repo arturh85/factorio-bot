@@ -20,8 +20,8 @@
 
 use super::value::goal_from_lua;
 use super::{
-    BufferRefresher, PlacementChecker, TickPauser, expand_goal, goal_error, planner_error,
-    refuse_unknown_bots,
+    BufferRefresher, ClockCall, ClockPolicy, PlacementChecker, PlanningClockSeam, expand_goal,
+    goal_error, planner_error, refuse_unknown_bots,
 };
 use factorio_bot_core::factorio::rcon::PlacementQuery;
 use factorio_bot_core::factorio::world::FactorioWorld;
@@ -124,6 +124,15 @@ pub(crate) struct PlanValue {
     /// actuator: the reservation is made synchronously, the flip happens only
     /// once dispatch is certain.
     consumed: Arc<AtomicBool>,
+    /// The `game.tick` this plan was made at -- the clock's answer as
+    /// `goal.plan` handed the plan back -- exposed to Lua as `plan.tick` so
+    /// `record.plan_created` stamps the event with the moment the plan
+    /// existed rather than with the last RCON reply's tick, which on a
+    /// headless run was the run's *start* (`plan_created` read 415 while the
+    /// game stood at 2,252). `None` when nobody could ask: a planning-only
+    /// interpreter, or a recovery, which is proposed from a finished run's
+    /// observation rather than made against the clock.
+    made_at: Option<u64>,
 }
 
 /// A reservation on a plan: everything an about-to-start run needs, plus the
@@ -217,7 +226,14 @@ impl PlanValue {
             origin,
             seed: ExecutionLog::default(),
             consumed: Arc::new(AtomicBool::new(false)),
+            made_at: None,
         }
+    }
+
+    /// Stamps the plan with the tick it was made at. See [`PlanValue::made_at`].
+    pub(crate) fn made_at(mut self, tick: Option<u64>) -> Self {
+        self.made_at = tick;
+        self
     }
 
     /// A [`Recovery`] as the next plan to run -- **including which log that
@@ -301,6 +317,7 @@ impl PlanValue {
             origin,
             seed,
             consumed: Arc::new(AtomicBool::new(false)),
+            made_at: None,
         }
     }
 
@@ -405,7 +422,7 @@ pub(crate) fn install_goal_plan(
     default_roster: Vec<BotId>,
     checker: Option<PlacementChecker>,
     refresher: Option<BufferRefresher>,
-    pauser: Option<TickPauser>,
+    clock: Option<PlanningClockSeam>,
 ) -> LuaResult<()> {
     table.set(
         "plan",
@@ -414,7 +431,7 @@ pub(crate) fn install_goal_plan(
             let default_roster = default_roster.clone();
             let checker = checker.clone();
             let refresher = refresher.clone();
-            let pauser = pauser.clone();
+            let clock = clock.clone();
             async move {
                 let goal = goal_from_lua(&g)?;
                 let roster = resolve_roster(opts.as_ref(), &default_roster)?;
@@ -424,13 +441,13 @@ pub(crate) fn install_goal_plan(
                 let live = lua
                     .app_data_ref::<crate::globals::record::LiveRecord>()
                     .map(|live| live.clone());
-                let (net, scheduled) = plan_verified(
+                let (net, scheduled, made_at) = plan_verified(
                     &goal,
                     &world,
                     &roster,
                     checker.as_ref(),
                     refresher.as_ref(),
-                    pauser.as_ref(),
+                    clock.as_ref(),
                     live.as_ref(),
                 )
                 .await?;
@@ -448,7 +465,8 @@ pub(crate) fn install_goal_plan(
                         world: world.clone(),
                         roster,
                     }),
-                ))
+                )
+                .made_at(made_at))
             }
         })?,
     )?;
@@ -892,9 +910,9 @@ async fn plan_verified(
     roster: &[BotId],
     checker: Option<&PlacementChecker>,
     refresher: Option<&BufferRefresher>,
-    pauser: Option<&TickPauser>,
+    clock: Option<&PlanningClockSeam>,
     live: Option<&crate::globals::record::LiveRecord>,
-) -> LuaResult<(ActionNetwork, Schedule)> {
+) -> LuaResult<(ActionNetwork, Schedule, Option<u64>)> {
     // Once, before any expansion, and deliberately outside the loop below.
     //
     // What separates two rounds of that loop is the refusal ledger the
@@ -912,15 +930,20 @@ async fn plan_verified(
     // re-probes benched bots with path requests, which the game answers on a
     // later tick, and a paused game has no later tick. Everything the rounds
     // below ask (`can_place_entity`) is answered in the call itself.
-    let clock = PlanningClock::stop(pauser).await;
+    let running = PlanningClock::stop(clock).await;
     let planned = plan_rounds(goal, world, roster, checker).await;
     // Restarted on every exit path, a refusal included: a planner error must
     // never leave the game frozen behind it.
-    let timing = clock.restart(pauser).await;
+    let timing = running.restart(clock).await;
     if let Some(live) = live {
         live.record(timing.event());
     }
-    planned
+    // The tick the plan was made at is the clock's last answer -- the tick
+    // it restarted from, or, with the clock left running, the tick read on
+    // the way out. It travels on the plan so `record.plan_created` can stamp
+    // the event with it rather than with whatever RCON reply came last.
+    let made_at = timing.tick_after;
+    planned.map(|(net, sched)| (net, sched, made_at))
 }
 
 /// What one plan cost, as [`PlanningClock`] measured it.
@@ -928,6 +951,7 @@ async fn plan_verified(
 struct PlanningCost {
     planning_ms: u64,
     paused: bool,
+    reason: Option<&'static str>,
     tick_before: Option<u64>,
     tick_after: Option<u64>,
 }
@@ -937,6 +961,7 @@ impl PlanningCost {
         factorio_bot_core::record::EventKind::PlanningTimed {
             planning_ms: self.planning_ms,
             paused: self.paused,
+            reason: self.reason.map(str::to_owned),
             tick_before: self.tick_before,
             tick_after: self.tick_after,
         }
@@ -956,51 +981,80 @@ impl PlanningCost {
 struct PlanningClock {
     started: std::time::Instant,
     paused: bool,
+    reason: Option<&'static str>,
     tick_before: Option<u64>,
 }
 
 impl PlanningClock {
-    async fn stop(pauser: Option<&TickPauser>) -> Self {
+    async fn stop(clock: Option<&PlanningClockSeam>) -> Self {
         let started = std::time::Instant::now();
-        let (paused, tick_before) = match pauser {
-            None => (false, None),
-            Some(pause) => match pause(true).await {
-                Ok(tick) => (true, Some(tick)),
+        let (paused, reason, tick_before) = match clock.map(|seam| (seam, seam.policy)) {
+            None => (false, None, None),
+            // Not ours to stop: read the tick and leave the game alone.
+            Some((seam, ClockPolicy::LeaveRunning { reason })) => {
+                let tick = match (seam.calls)(ClockCall::Read).await {
+                    Ok(tick) => Some(tick),
+                    Err(err) => {
+                        factorio_bot_core::tracing::warn!(
+                            "could not read the game clock before planning: {err}"
+                        );
+                        None
+                    }
+                };
+                (false, Some(reason), tick)
+            }
+            Some((seam, ClockPolicy::Stop)) => match (seam.calls)(ClockCall::Stop).await {
+                Ok(tick) => (true, None, Some(tick)),
                 Err(err) => {
                     factorio_bot_core::tracing::warn!(
-                        "could not stop the game clock for planning; the run will be charged                          the planning time at game speed: {err}"
+                        "could not stop the game clock for planning; the run will be charged \
+                         the planning time at game speed: {err}"
                     );
-                    (false, None)
+                    (false, Some("pause request failed"), None)
                 }
             },
         };
         Self {
             started,
             paused,
+            reason,
             tick_before,
         }
     }
 
-    async fn restart(self, pauser: Option<&TickPauser>) -> PlanningCost {
+    async fn restart(self, clock: Option<&PlanningClockSeam>) -> PlanningCost {
         // Asked for even when the pause failed: the game reporting itself
         // running costs one round trip and rules out a clock left stopped by
-        // an earlier, interrupted plan.
-        let tick_after = match pauser {
+        // an earlier, interrupted plan. A clock that was only read is read
+        // again, never restarted: an attached server's pause state is not
+        // ours to touch in either direction.
+        let call = match clock.map(|seam| seam.policy) {
             None => None,
-            Some(pause) => match pause(false).await {
+            Some(ClockPolicy::LeaveRunning { .. }) => Some(ClockCall::Read),
+            Some(ClockPolicy::Stop) => Some(ClockCall::Restart),
+        };
+        let tick_after = match (clock, call) {
+            (Some(seam), Some(call)) => match (seam.calls)(call).await {
                 Ok(tick) => Some(tick),
                 Err(err) => {
                     factorio_bot_core::tracing::error!(
-                        "could not restart the game clock after planning: {err}"
+                        "could not {} the game clock after planning: {err}",
+                        if call == ClockCall::Read {
+                            "read"
+                        } else {
+                            "restart"
+                        }
                     );
                     None
                 }
             },
+            _ => None,
         };
         let planning_ms = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX);
         PlanningCost {
             planning_ms,
             paused: self.paused,
+            reason: self.reason,
             tick_before: self.tick_before,
             tick_after,
         }
@@ -1369,6 +1423,9 @@ impl LuaUserData for PlanValue {
     fn add_fields<F: LuaUserDataFields<Self>>(fields: &mut F) {
         fields.add_field_method_get("makespan", |_, this| -> LuaResult<Ticks> {
             Ok(this.schedule.makespan)
+        });
+        fields.add_field_method_get("tick", |_, this| -> LuaResult<Option<u64>> {
+            Ok(this.made_at)
         });
         fields.add_field_method_get("bots", |lua, this| {
             let t = lua.create_table()?;
@@ -1902,7 +1959,7 @@ mod tests {
         roster: &[u8],
         checker: Option<PlacementChecker>,
         refresher: Option<BufferRefresher>,
-        pauser: Option<TickPauser>,
+        clock: Option<PlanningClockSeam>,
     ) -> Lua {
         let lua = crate::sandbox::new_sandboxed_lua().expect("sandbox");
         lua.set_app_data(crate::lua_runner::PendingWork::default());
@@ -1913,32 +1970,48 @@ mod tests {
             roster.to_vec(),
             checker,
             refresher,
-            pauser,
+            clock,
         )
         .expect("goal table");
         lua.globals().set("goal", table).expect("install");
         lua
     }
 
-    /// A [`TickPauser`] that logs every state it was asked for, in order,
-    /// and answers with a clock that only moves while it is running.
+    /// A [`PlanningClockSeam`] that logs every call it was asked for, in
+    /// order, and answers with a clock that only moves while it is running.
     ///
-    /// The tick it reports is what a real game would: a pause answers with
-    /// the tick the clock stopped at, and a resume with the same tick, because
-    /// nothing advanced in between. `outcome` lets a test make the pause
-    /// request itself fail.
-    fn stub_pauser(
+    /// The tick it reports is what a real game would: a stop answers with the
+    /// tick the clock stopped at, a restart with the same tick because nothing
+    /// advanced in between, and a read with a clock that ticked on -- 4,000,
+    /// then 4,180. `outcome` lets a test make the request itself fail.
+    fn stub_clock(
+        policy: ClockPolicy,
         outcome: Result<(), &'static str>,
-    ) -> (TickPauser, Arc<std::sync::Mutex<Vec<bool>>>) {
+    ) -> (PlanningClockSeam, Arc<std::sync::Mutex<Vec<ClockCall>>>) {
         let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
         let log = calls.clone();
-        let pauser: TickPauser = Arc::new(move |paused: bool| {
-            log.lock().expect("pauser log").push(paused);
-            let outcome = outcome.map(|()| 4_000u64).map_err(|e| e.to_string());
-            Box::pin(async move { outcome })
-                as Pin<Box<dyn Future<Output = Result<u64, String>> + Send>>
-        });
-        (pauser, calls)
+        let seam = PlanningClockSeam {
+            calls: Arc::new(move |call: ClockCall| {
+                let mut log = log.lock().expect("clock log");
+                log.push(call);
+                let reads = log.iter().filter(|c| **c == ClockCall::Read).count() as u64;
+                let tick = match call {
+                    ClockCall::Read => 4_000 + 180 * reads.saturating_sub(1),
+                    ClockCall::Stop | ClockCall::Restart => 4_000,
+                };
+                let outcome = outcome.map(|()| tick).map_err(|e| e.to_string());
+                Box::pin(async move { outcome })
+                    as Pin<Box<dyn Future<Output = Result<u64, String>> + Send>>
+            }),
+            policy,
+        };
+        (seam, calls)
+    }
+
+    fn stub_pauser(
+        outcome: Result<(), &'static str>,
+    ) -> (PlanningClockSeam, Arc<std::sync::Mutex<Vec<ClockCall>>>) {
+        stub_clock(ClockPolicy::Stop, outcome)
     }
 
     // ------------------------------------------- goal.plan stops the clock
@@ -1962,8 +2035,99 @@ mod tests {
             .expect("plan");
         assert_eq!(
             *calls.lock().expect("pauser log"),
-            vec![true, false],
+            vec![ClockCall::Stop, ClockCall::Restart],
             "one pause before expansion and one resume after it"
+        );
+    }
+
+    /// **The plan knows the tick it was made at**, and it is the clock's
+    /// last answer -- so `record.plan_created` can stamp the event with the
+    /// moment the plan existed instead of the last RCON reply's tick, which
+    /// on a headless run was the run's start.
+    #[tokio::test]
+    async fn a_plan_carries_the_tick_it_was_made_at() {
+        let world = seeded_world_for(&[1, 2]);
+        let (clock, _) = stub_pauser(Ok(()));
+        let lua =
+            lua_with_world_checker_refresher_and_pauser(world, &[1, 2], None, None, Some(clock));
+        lua.load(
+            r#"
+            local p = goal.plan(goal.have("iron-plate", 8))
+            assert(p.tick == 4000, "plan.tick is the clock's answer, got " .. tostring(p.tick))
+            "#,
+        )
+        .exec_async()
+        .await
+        .expect("plan");
+    }
+
+    /// A plan made with no clock to ask reports `nil`, not zero.
+    #[tokio::test]
+    async fn a_plan_with_no_clock_has_no_tick() {
+        let lua = lua_with_world_and_checker(seeded_world_for(&[1, 2]), &[1, 2], None);
+        lua.load(
+            r#"
+            local p = goal.plan(goal.have("iron-plate", 8))
+            assert(p.tick == nil, "expected nil, got " .. tostring(p.tick))
+            "#,
+        )
+        .exec_async()
+        .await
+        .expect("plan");
+    }
+
+    /// **An attached server's clock is never stopped.** A `--connect` or
+    /// `--server <host>` run may be inside someone's live multiplayer game,
+    /// and `game.tick_paused` there freezes every human in it. The clock is
+    /// read on both sides of the plan instead -- so the plan still knows the
+    /// tick it was made at -- and nothing is ever asked to stop or restart.
+    #[tokio::test]
+    async fn an_attached_servers_clock_is_read_and_never_stopped() {
+        let world = seeded_world_for(&[1, 2]);
+        let (clock, calls) = stub_clock(
+            ClockPolicy::LeaveRunning {
+                reason: super::super::ATTACHED_SERVER_REASON,
+            },
+            Ok(()),
+        );
+        let lua =
+            lua_with_world_checker_refresher_and_pauser(world, &[1, 2], None, None, Some(clock));
+        lua.load(
+            r#"
+            local p = goal.plan(goal.have("iron-plate", 8))
+            assert(p.tick == 4180, "the tick read after planning, got " .. tostring(p.tick))
+            "#,
+        )
+        .exec_async()
+        .await
+        .expect("plan");
+        assert_eq!(
+            *calls.lock().expect("clock log"),
+            vec![ClockCall::Read, ClockCall::Read],
+            "two reads and no Stop or Restart -- the game is not ours"
+        );
+    }
+
+    /// The attached case's receipt: `planning_timed` says the clock ran and
+    /// why, with the ticks read either side.
+    #[test]
+    fn an_attached_plans_receipt_names_the_reason() {
+        let cost = PlanningCost {
+            planning_ms: 12,
+            paused: false,
+            reason: Some(super::super::ATTACHED_SERVER_REASON),
+            tick_before: Some(4_000),
+            tick_after: Some(4_180),
+        };
+        assert_eq!(
+            cost.event(),
+            factorio_bot_core::record::EventKind::PlanningTimed {
+                planning_ms: 12,
+                paused: false,
+                reason: Some("attached server, clock left running".to_owned()),
+                tick_before: Some(4_000),
+                tick_after: Some(4_180),
+            }
         );
     }
 
@@ -1988,7 +2152,7 @@ mod tests {
         );
         assert_eq!(
             *calls.lock().expect("pauser log"),
-            vec![true, false],
+            vec![ClockCall::Stop, ClockCall::Restart],
             "the resume is issued on the error path too"
         );
     }
@@ -2007,7 +2171,10 @@ mod tests {
             .exec_async()
             .await
             .expect("the plan is made with the clock running");
-        assert_eq!(*calls.lock().expect("pauser log"), vec![true, false]);
+        assert_eq!(
+            *calls.lock().expect("pauser log"),
+            vec![ClockCall::Stop, ClockCall::Restart]
+        );
     }
 
     /// The refresh runs *before* the clock stops: it re-probes benched bots
@@ -2024,19 +2191,24 @@ mod tests {
                 as Pin<Box<dyn Future<Output = Result<usize, String>> + Send>>
         });
         let seen = order.clone();
-        let pauser: TickPauser = Arc::new(move |paused: bool| {
-            seen.lock()
-                .expect("order")
-                .push(if paused { "pause" } else { "resume" });
-            Box::pin(async { Ok(1u64) })
-                as Pin<Box<dyn Future<Output = Result<u64, String>> + Send>>
-        });
+        let clock = PlanningClockSeam {
+            calls: Arc::new(move |call: ClockCall| {
+                seen.lock().expect("order").push(match call {
+                    ClockCall::Stop => "pause",
+                    ClockCall::Restart => "resume",
+                    ClockCall::Read => "read",
+                });
+                Box::pin(async { Ok(1u64) })
+                    as Pin<Box<dyn Future<Output = Result<u64, String>> + Send>>
+            }),
+            policy: ClockPolicy::Stop,
+        };
         let lua = lua_with_world_checker_refresher_and_pauser(
             world,
             &[1, 2],
             None,
             Some(refresher),
-            Some(pauser),
+            Some(clock),
         );
         lua.load(r#"p = goal.plan(goal.have("iron-plate", 8))"#)
             .exec_async()

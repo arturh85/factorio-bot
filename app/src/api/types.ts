@@ -1333,6 +1333,11 @@ export type EventKind =
            *  build without RCON or when the pause request failed, in which
            *  case `tick_after - tick_before` says what it cost. */
           paused: boolean;
+          /** Why the clock was left running, when it was: `"attached
+           *  server, clock left running"` for a `--connect` / `--server` run
+           *  whose game may be somebody's live session, or `"pause request
+           *  failed"`. `null` whenever `paused` is true. */
+          reason: string | null;
           /** `game.tick` when planning began; `null` when nobody could ask. */
           tick_before: number | null;
           /** `game.tick` when planning ended; `null` when nobody could ask. */

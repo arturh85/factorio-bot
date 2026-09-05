@@ -22,8 +22,9 @@ mod value;
 
 use factorio_bot_core::factorio::rcon::{FactorioRcon, PlacementQuery, PlacementVerdict};
 use factorio_bot_core::factorio::world::FactorioWorld;
+use factorio_bot_core::miette::miette;
 use factorio_bot_core::mlua::prelude::*;
-use factorio_bot_core::plan::planner::Planner;
+use factorio_bot_core::plan::planner::{Planner, ServerOwnership};
 use factorio_bot_executor::walk_memory::reprobe_benched;
 use factorio_bot_executor::{Actuator, RconActuator};
 use factorio_bot_planner::{
@@ -115,9 +116,38 @@ pub(crate) type PlacementChecker = Arc<
 pub(crate) type BufferRefresher =
     Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Result<usize, String>> + Send>> + Send + Sync>;
 
-/// How `goal.plan` stops the game clock while it thinks, and restarts it
-/// after. The argument is the state wanted; the answer is the `game.tick` at
-/// which the game granted it.
+/// What [`PlanningClockSeam`] is asked for. Every call answers with the
+/// `game.tick` at which the game granted it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ClockCall {
+    /// `game.tick_paused = true`.
+    Stop,
+    /// `game.tick_paused = false`.
+    Restart,
+    /// Read the clock and touch nothing.
+    Read,
+}
+
+/// Whether a plan may stop the clock at all.
+///
+/// The pause is gated on the run **owning** the server
+/// ([`ServerOwnership`]): a `--connect` or `--server <host>` run may be
+/// attached to someone's live multiplayer game, and `game.tick_paused`
+/// there freezes every human player in it. An attached run plans with the
+/// clock running, reads the tick around the plan instead, and records the
+/// reason on its `planning_timed` event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ClockPolicy {
+    Stop,
+    LeaveRunning { reason: &'static str },
+}
+
+/// The reason an attached run's `planning_timed` carries.
+pub(crate) const ATTACHED_SERVER_REASON: &str = "attached server, clock left running";
+
+/// How `goal.plan` reaches the game clock: stops it while it thinks and
+/// restarts it after, or -- when [`ClockPolicy::LeaveRunning`] -- only reads
+/// it, so the plan still knows the tick it was made at.
 ///
 /// # Why planning is done against a stopped clock
 ///
@@ -137,8 +167,17 @@ pub(crate) type BufferRefresher =
 /// the charge is visible rather than silent.
 ///
 /// [`EventKind::PlanningTimed`]: factorio_bot_core::record::EventKind::PlanningTimed
-pub(crate) type TickPauser =
-    Arc<dyn Fn(bool) -> Pin<Box<dyn Future<Output = Result<u64, String>> + Send>> + Send + Sync>;
+pub(crate) type ClockCalls = Arc<
+    dyn Fn(ClockCall) -> Pin<Box<dyn Future<Output = Result<u64, String>> + Send>> + Send + Sync,
+>;
+
+/// The clock and the rule for using it, handed to `goal.plan` together so
+/// that a policy can never be paired with a transport it was not made for.
+#[derive(Clone)]
+pub(crate) struct PlanningClockSeam {
+    pub(crate) calls: ClockCalls,
+    pub(crate) policy: ClockPolicy,
+}
 
 /// A planner or executor failure is the script's problem, not the process's.
 fn goal_error(err: impl std::fmt::Display) -> LuaError {
@@ -414,6 +453,7 @@ pub fn create_lua_goal(
     real_world: Arc<FactorioWorld>,
     rcon: Option<Arc<FactorioRcon>>,
     bots: Vec<u8>,
+    server: ServerOwnership,
 ) -> LuaResult<LuaTable> {
     // Cloned before the actuator factory takes ownership of `rcon`: the
     // pre-check, the buffer refresh and the actuator all need it and none of
@@ -496,17 +536,29 @@ pub fn create_lua_goal(
             }) as Pin<Box<dyn Future<Output = Result<usize, String>> + Send>>
         }) as BufferRefresher
     });
-    let pauser: Option<TickPauser> = pause_rcon.map(|rcon| {
-        Arc::new(move |paused: bool| {
+    let clock: Option<PlanningClockSeam> = pause_rcon.map(|rcon| PlanningClockSeam {
+        calls: Arc::new(move |call: ClockCall| {
             let rcon = rcon.clone();
             Box::pin(async move {
-                rcon.set_tick_paused(paused)
-                    .await
-                    .map_err(|err| err.to_string())
+                match call {
+                    ClockCall::Stop => rcon.set_tick_paused(true).await,
+                    ClockCall::Restart => rcon.set_tick_paused(false).await,
+                    ClockCall::Read => rcon
+                        .game_tick()
+                        .await
+                        .and_then(|t| t.ok_or_else(|| miette!("the game answered without a tick"))),
+                }
+                .map_err(|err| err.to_string())
             }) as Pin<Box<dyn Future<Output = Result<u64, String>> + Send>>
-        }) as TickPauser
+        }),
+        policy: match server {
+            ServerOwnership::Owned => ClockPolicy::Stop,
+            ServerOwnership::Attached => ClockPolicy::LeaveRunning {
+                reason: ATTACHED_SERVER_REASON,
+            },
+        },
     });
-    create_lua_goal_with(lua, plan_world, actuator, bots, checker, refresher, pauser)
+    create_lua_goal_with(lua, plan_world, actuator, bots, checker, refresher, clock)
 }
 
 /// [`create_lua_goal`] with the actuator supplied rather than built from RCON.
@@ -520,7 +572,7 @@ pub(crate) fn create_lua_goal_with(
     bots: Vec<u8>,
     placement_checker: Option<PlacementChecker>,
     buffer_refresher: Option<BufferRefresher>,
-    tick_pauser: Option<TickPauser>,
+    planning_clock: Option<PlanningClockSeam>,
 ) -> LuaResult<LuaTable> {
     let map_table = lua.create_table()?;
     map_table.set(
@@ -536,8 +588,9 @@ pub(crate) fn create_lua_goal_with(
 -- and `goal.all` build **goal values**: ordinary Lua tables you can read (`g.item`,
 -- `g.count`), print and pass around. `goal.plan` turns one into a
 -- **PlanValue**, which carries the schedule it was given and answers questions
--- about it (`plan.makespan`, `plan.bots`, `plan.steps`, `plan:count{...}`,
--- `plan:find{...}`, `plan:for_bot(id)`, `plan:graphviz()`,
+-- about it (`plan.makespan`, `plan.bots`, `plan.steps`, `plan.tick` -- the
+-- game tick the plan was made at, `nil` with no game to ask --
+-- `plan:count{...}`, `plan:find{...}`, `plan:for_bot(id)`, `plan:graphviz()`,
 -- `plan:gantt(title)`). `goal.start` and `goal.run` execute a plan and hand
 -- back a **RunValue** / an observation table rather than a number to look up
 -- later. A plan may be executed at most once.
@@ -721,7 +774,7 @@ end
         roster.clone(),
         placement_checker,
         buffer_refresher,
-        tick_pauser,
+        planning_clock,
     )?;
 
     // `goal.holds`

@@ -915,6 +915,7 @@ const SCHEMAS: Record<string, SchemaContract> = {
         planning_timed: {
             planning_ms: {required: true, type: 'integer'},
             paused: {required: true, type: 'boolean'},
+            reason: {required: false, type: 'string', nullable: true},
             tick_before: {required: false, type: 'integer', nullable: true},
             tick_after: {required: false, type: 'integer', nullable: true}
         },

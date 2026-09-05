@@ -1348,6 +1348,13 @@
                 "minimum": 0,
                 "type": "integer"
               },
+              "reason": {
+                "description": "Why the clock was left running, when it was: `\"attached server,\nclock left running\"` for a `--connect` / `--server` run, whose\ngame may be somebody's live multiplayer session, or `\"pause\nrequest failed\"`. `None` whenever `paused` is true, and on a\nbuild with no game to ask.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "tick_after": {
                 "description": "`game.tick` when planning ended; `None` when nobody could ask.",
                 "format": "int64",

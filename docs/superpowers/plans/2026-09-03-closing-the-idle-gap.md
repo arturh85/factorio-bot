@@ -257,9 +257,34 @@ empty ground generates a **9×9 chunk block centred on it**, so reveal is
 agent had assumed. On that pitch, ring 1 reaches past the oil in **1:37 of
 four-bot time**. Exploration is cheap; radar is not needed for the first oil.
 
-**And the honest negative result, which is the important part.** A live
-four-bot run walked a full ring to ±256 and **the census did not move by a
-single tile** — 466/462/940/387 before and after. Walking may not push the
+**SETTLED (`64a63253`): exploration is a mod-side capability, not a walking
+one.** A bot **cannot walk to ungenerated ground at all** — `rcon.move`
+refuses with `failed to path find` for every target past the generated edge
+(x=100 and 200 reached; 300, 400, 440, 480, 560, 600 all refused). The
+earlier ring only ever walked over ground the model already had, which is
+exactly why its census did not move. Generation is **placement-driven**,
+measured in one sequence on one server: baseline 400 chunks, frontier 320;
+spawning a character changes nothing; **teleporting one to (1500, 0) →
+481 chunks, frontier 1632**; **`request_to_generate_chunks` at (3000, 0) →
+683 chunks, frontier 3200**, with no character near it.
+
+So the planner primitive is unaffected and still right — it decides *where*
+to look, nearest-first, avoiding nests, at the correct cost — but it cannot
+make the ground exist. The next step is a mod verb wrapping
+`request_to_generate_chunks` plus one RCON binding, and **no planner work**.
+Radar is now more attractive than it looked, being the only mechanism that
+works today with no new mod surface. Its free-vision honesty needs its own
+look, bounded by the measured ±128 reveal radius.
+
+One methodological trap recorded with it: the mod's raw
+`action_start_walk_waypoints` **does not path**, so a bot dispatched
+straight at (600, 0) walks into the first obstacle and stops at x=63.7 —
+which would have read as "walking generates nothing" for entirely the wrong
+reason.
+
+**The earlier negative result, now explained.** A live four-bot run walked a
+full ring to ±256 and **the census did not move by a single tile** —
+466/462/940/387 before and after. Walking may not push the
 generation frontier at all; the 81-chunk block followed *placement or
 teleport* into virgin ground, not walking. `force.is_chunk_charted` is false
 everywhere, including under a character's own feet: a server-side character

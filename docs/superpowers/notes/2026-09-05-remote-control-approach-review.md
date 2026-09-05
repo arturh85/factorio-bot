@@ -65,8 +65,13 @@ entity headless, walks it, calls `mine_entity` and reads the inventory back.
 
 **2. The horizon is misnamed.** The owner's framing is "how far we can get in
 Space Age". The furthest honest live state is red science at a rate and green
-science `exhausted` at 200 steps. Automation at 8:17 is two minutes behind the
-human world record and that is a real result, but the automation chain is
+science `exhausted` at 200 steps. Automation at 6:11 on seed `31337`
+(`run-1788582657-14978`, 2026-09-05; 7:04 on the bench that morning, 8:17 the
+day before) is a real result and a real improvement. It is **not** a record
+comparison: the human 6:12 was set on a map nobody here can regenerate, while
+`31337` was chosen for having ore close to spawn, which flatters every timing.
+The two numbers are within a second of each other and measure different maps —
+quote them side by side only with that said. The automation chain is
 identical in Space Age and vanilla; nothing Space Age-specific has been
 touched. The human Space Age any% record is 3h17m. Between here and a rocket
 sit belts as a routed primitive (FLE's `connect_entities`, its slowest and
@@ -93,8 +98,10 @@ case; a per-step entity snapshot is not worth building until runs are cheap.
 1. **Decide the client question, then prototype it in one afternoon.** Headless
    characters plus a speed and pause knob in the executor. Keep the client mode
    for filmed runs. Every other item gets cheaper once this lands.
-2. **Run `just bench` once.** It has never been executed, so the benchmark
-   seed `31337` is unvalidated. Then shape the bench into FLE's lab-play form:
+2. **Shape `just bench` into a task suite.** It ran for the first time on
+   2026-09-05: automation in 7:04 game time on a fresh seed-`31337` map
+   (`run-1788565090-80288`, release, one plan, zero failures), so the seed is
+   validated. Next, give it FLE's lab-play form:
    a fixed start state, a success predicate, an action budget and a holdout
    window measured from production statistics. `score-map` already produces the
    offline half.

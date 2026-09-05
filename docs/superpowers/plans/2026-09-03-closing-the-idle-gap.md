@@ -441,6 +441,28 @@ same trap CLAUDE.md warns about from the other side — a pipeline reports
 the last command's status, so `plan | grep` was reporting grep's 0 over a
 101 all along.
 
+## ⚠️ DRILLS ARE FUELLED ONCE AND THEN STARVE
+
+Found while building the per-machine counters. In run 17's samples the ten
+burner drills read **`working` 416 times and `no_fuel` 818** — two thirds of
+every reading is a drill sitting dry. The plan does place and fuel them
+(`fuel the burner-mining-drill with 8 coal`, 58 fuel actions in the plan),
+but **each drill is fuelled once and never again**: 8 coal is 32 MJ against
+a 150 kW burner, about 12,800 ticks, and a green run is now 52,000. In the
+counter agent's own headless run every drill read `no_fuel` for the whole
+run and produced **zero**, so every ore was hand-mined there.
+
+Two things follow. The planner pays for ten placements and a fuel trip and
+then hand-mines anyway for most of the run, which is the expensive path it
+placed drills to avoid. And the drill-versus-hand decision is made without a
+fuel budget: a drill is worth its placement only for as long as its coal
+lasts, and nothing tops it up. The fix is not obviously "refuel more" —
+it may be fewer drills fuelled properly, or a drill that is only placed
+where a bot will pass again anyway.
+
+Not yet dispatched: it needs the per-machine drill counters to quantify what
+the drills actually contributed, which is the branch in flight.
+
 ## PER-MACHINE PRODUCTION COUNTERS (owner, 2026-09-05 22:00)
 
 Owner: "each single machine should have a counter how many items it produced

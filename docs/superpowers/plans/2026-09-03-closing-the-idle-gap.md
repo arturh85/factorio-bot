@@ -251,7 +251,12 @@ RCA of run 15 against run 14, traced round by round in `schedule.rs`:
 Headless validation (`workspace/headless-i/runs/run-1788625111-28152`, 4
 bots, 5x, quiet box): one plan 571 / 53,249, green at 56,370,
 executed/planned **1.059** against hl-09's 1.105; `logistic` settled exactly
-at its planned duration. Run 16 at 1x is the measured lane. Left on the
+at its planned duration. Run 16 at 1x is the measured lane. **Neither mechanism ever failed an action.** No refusal, no lost action, no
+walk failure: both were invisible to every check the project had except the
+plan's own length, and a run that executed one of them faithfully looked
+perfect. That is the class of defect the rate framing exists to stop hiding,
+and it is the argument for comparing plans offline on every planner change,
+which is now required of every agent here. Left on the
 table: a strictly chronological commit order plans 51,303 but hands a shared
 research to the busy chain owner on ties; walk overruns (~11–12k per
 four-bot run) are the largest remaining slip and untouched; research

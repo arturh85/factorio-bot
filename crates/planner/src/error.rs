@@ -689,4 +689,23 @@ pub enum PlannerError {
         tile: String,
         occupant: String,
     },
+
+    /// Siting searched out to its bound and every candidate footprint was
+    /// occupied.
+    ///
+    /// Distinct from [`PlannerError::BlockGroundOccupied`], which is about one
+    /// named anchor the CALLER chose. This one is about the planner's own
+    /// search, so it carries how far it looked — without that, "cannot site"
+    /// is indistinguishable from "looked one tile".
+    #[error(
+        "no clear site for a {entities}-entity block within {searched} tiles of {seed}; \
+         nearest obstruction: {nearest_obstruction}"
+    )]
+    #[diagnostic(code(planner::no_site_found))]
+    NoSiteFound {
+        entities: usize,
+        seed: String,
+        searched: i32,
+        nearest_obstruction: String,
+    },
 }

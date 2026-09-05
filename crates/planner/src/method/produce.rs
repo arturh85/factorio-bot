@@ -798,6 +798,19 @@ fn fuel_for(burn_ticks: Ticks) -> u32 {
     fuel_for_duration(CELL_FUELLED_TICKS, burn_ticks)
 }
 
+/// One burner to load: which machine, where it stands, how much coal, how
+/// long a coal lasts in it, and -- when the caller wants the plan to say so
+/// -- what it makes with that coal before it stops.
+#[derive(Clone, Copy)]
+struct Burner<'a> {
+    machine: &'a str,
+    position: &'a Position,
+    coal: u32,
+    burn_ticks: Ticks,
+    /// `(product, ticks per product)`, or `None` to leave the label plain.
+    runs_out: Option<(&'a str, Ticks)>,
+}
+
 /// Load `coal` into one machine's fuel slot, in as many visits as that slot
 /// allows, and return the ids in order.
 ///
@@ -813,19 +826,38 @@ fn fuel_for(burn_ticks: Ticks) -> u32 {
 /// running rather than starting it — so a take that waited on the last visit
 /// would be waiting for a stack of coal that has not been *burned* yet. The
 /// refuel visits are bot errands on the critical path of nothing.
+///
+/// # The last visit's label says when the machine stops
+///
+/// A burner runs exactly as long as the coal in it and then it stops, and a
+/// plan that does not say so reads as though the machine keeps going. Ten
+/// drills on `run-1788640611-64852` were each fuelled once — 6, 6, 6, 7, 8,
+/// 8, 8, 8, 10 and 11 coal — and each produced exactly what that load buys
+/// (39, 39, 39, 46, 53, 53, 53, 53, 66 and 73 ore) before ending `no_fuel`.
+/// That was the plan working as designed, but nothing in the plan, the
+/// record or the action list said a drill was expected to deliver 53 ore and
+/// stop, so the run's `no_fuel` statuses read as a fault. `runs_out` names
+/// the product and the cell's ticks per item; the final visit's label then
+/// carries the burn this machine has been bought and what it makes in it.
 fn fuel_steps(
     ctx: &mut ExpansionCtx,
-    machine: &str,
-    position: &Position,
-    coal: u32,
-    burn_ticks: Ticks,
+    burner: &Burner<'_>,
     reach: f64,
     extra_pre: &[Condition],
 ) -> (Vec<Step>, Vec<crate::ids::ActionId>) {
+    let &Burner {
+        machine,
+        position,
+        coal,
+        burn_ticks,
+        runs_out,
+    } = burner;
     let visits = crate::method::have::fuel_visits(&ctx.state, "coal", coal);
+    let burn = coal.saturating_mul(burn_ticks);
     let mut steps: Vec<Step> = Vec::with_capacity(visits.len() * 2);
     let mut ids: Vec<crate::ids::ActionId> = Vec::with_capacity(visits.len());
-    for &load in &visits {
+    let last = visits.len().saturating_sub(1);
+    for (visit, &load) in visits.iter().enumerate() {
         let id = ctx.ids.next();
         let mut pre = vec![
             Condition::AtPosition {
@@ -862,7 +894,19 @@ fn fuel_steps(
             }],
             duration: TRANSFER_TICKS,
             pinned: None,
-            label: format!("fuel the {} with {} coal", machine, load),
+            label: match runs_out {
+                Some((product, ticks_per_item)) if visit == last && ticks_per_item > 0 => {
+                    format!(
+                        "fuel the {} with {} coal ({} ticks, {} {}, then it stops)",
+                        machine,
+                        load,
+                        burn,
+                        burn / ticks_per_item,
+                        product,
+                    )
+                }
+                _ => format!("fuel the {} with {} coal", machine, load),
+            },
         })));
         ids.push(id);
     }
@@ -928,9 +972,9 @@ fn cell_steps(ctx: &mut ExpansionCtx, spec: &CellSpec, cells: &[Cell]) -> Vec<St
         place_steps(ctx, spec, cell, &mut steps);
         let fuel_ids = fuel_both(
             ctx,
+            spec,
             cell,
-            drill_coal,
-            furnace_coal,
+            (drill_coal, furnace_coal),
             &research_pre,
             reach,
             &mut steps,
@@ -1674,6 +1718,52 @@ fn cell_ledger(state: &PlanState, spec: &CellSpec) -> Vec<LiveCell> {
     out
 }
 
+/// How freely a fragment may wait on a cell this plan already stood.
+///
+/// # Why this is a choice at all, and why it cannot be made here
+///
+/// [`Drain`]'s bound weighs a *wall-clock* wait against a *bot-time* cost, and
+/// which of those is scarce is a property of the whole plan, not of the
+/// fragment asking. Measured over `workspace/scripts/map.json` on 2026-09-05,
+/// raising the bound moves a goal's makespan in whichever direction its
+/// roster has slack, and the baseline plan's own utilisation predicts the
+/// sign every time:
+///
+/// | goal, roster | utilisation | conservative | parallel |
+/// | --- | ---: | ---: | ---: |
+/// | `researched:automation`, 4 | 39.6% | **21,776** | 21,776 (one cell, unchanged) |
+/// | `producing:automation-science-pack:6`, 4 | 63.3% | **26,990** | 26,990 (one cell, unchanged) |
+/// | `producing:logistic-science-pack:6`, 4 | 72.0% | 52,819 | **49,051** |
+/// | `producing:logistic-science-pack:6`, 8 | 51.8% | **49,229** | 55,093 |
+///
+/// A goal with an idle roster is short of wall time, so a fragment that waits
+/// on a cell lengthens the plan; a goal with a busy one is short of bot time,
+/// so a fragment that hand-mines lengthens it. **No constant serves both**,
+/// and a flat multiplier tried on the same sweep bought green's four-bot
+/// number by giving up 5,927 ticks on `researched:automation` -- a goal whose
+/// plan has since been measured live at 6:05 with the execution 147 ticks
+/// over it. That is a measured record to give up, not a stale one.
+///
+/// So the policy is not decided here. [`crate::plan_best`] builds the plan
+/// under each policy and keeps the shorter schedule, which is the only
+/// arbiter that knows the utilisation -- it is reading a finished schedule
+/// rather than guessing at expansion time.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub enum DrainPolicy {
+    /// A fragment waits at most one cell-build's worth of backlog. What every
+    /// plan did before 2026-09-05, and still the right answer whenever the
+    /// roster has slack.
+    #[default]
+    Conservative,
+    /// A fragment waits up to one cell-build's worth of backlog **per cell
+    /// already standing**. A plan that has stood six cells is a plan whose
+    /// roster is busy -- the count is the plan's own signal that bot time,
+    /// not latency, is the scarce thing -- so waiting on the least-loaded of
+    /// the six beats mining a fragment's ore by hand and paying a seventh
+    /// drill's nine plates for it.
+    Parallel,
+}
+
 /// What the plan's live cells can do for a fragment.
 ///
 /// # The count lever, and what a fragment is allowed to see
@@ -1736,7 +1826,7 @@ struct Drain {
 impl Drain {
     fn new(state: &PlanState, spec: &CellSpec) -> Self {
         let live = cell_ledger(state, spec);
-        let bound = Self::bound(state, spec);
+        let bound = Self::bound(state, spec, live.len());
         // Under the bound, and only under it -- see the type's doc for the
         // cap this replaced.
         let eligible: Vec<LiveCell> = live.iter().filter(|c| c.queued < bound).cloned().collect();
@@ -1747,8 +1837,19 @@ impl Drain {
     /// stand: [`cell_setup_bot_ticks`] for one item, which is the cell's
     /// fixed cost with next to no coal in it. Vanilla, with rocks to hand:
     /// about 4,000 ticks, sixteen plates.
-    fn bound(state: &PlanState, spec: &CellSpec) -> Ticks {
-        cell_setup_bot_ticks(state, spec, 1)
+    ///
+    /// Under [`DrainPolicy::Parallel`] that fixed cost is multiplied by the
+    /// number of cells already standing, so a plan that has stood six of them
+    /// lets a fragment wait six cell-builds' worth of backlog rather than
+    /// one. See [`DrainPolicy`] for why the choice cannot be made here.
+    fn bound(state: &PlanState, spec: &CellSpec, live: usize) -> Ticks {
+        let fixed = cell_setup_bot_ticks(state, spec, 1);
+        match state.drain_policy() {
+            DrainPolicy::Conservative => fixed,
+            DrainPolicy::Parallel => {
+                fixed.saturating_mul(u32::try_from(live.max(1)).unwrap_or(u32::MAX))
+            }
+        }
     }
 }
 
@@ -2010,9 +2111,9 @@ fn drain_steps(
     }));
     let fuel_ids = fuel_both(
         ctx,
+        spec,
         &cell.cell,
-        drill_coal,
-        furnace_coal,
+        (drill_coal, furnace_coal),
         research_pre,
         reach,
         &mut steps,
@@ -2147,27 +2248,34 @@ fn place_steps(ctx: &mut ExpansionCtx, spec: &CellSpec, cell: &Cell, steps: &mut
 /// `fuel_steps` chains those by burn time, and nothing waits on them.
 fn fuel_both(
     ctx: &mut ExpansionCtx,
+    spec: &CellSpec,
     cell: &Cell,
-    drill_coal: u32,
-    furnace_coal: u32,
+    coal: (u32, u32),
     research_pre: &[Condition],
     reach: f64,
     steps: &mut Vec<Step>,
 ) -> Vec<ActionId> {
+    let (drill_coal, furnace_coal) = coal;
     let mut fuel_ids: Vec<ActionId> = Vec::new();
-    for (machine_name, position, coal, burn_ticks, feeds) in [
+    for (burner, feeds) in [
         (
-            DRILL,
-            cell.drill.clone(),
-            drill_coal,
-            DRILL_BURN_TICKS,
+            Burner {
+                machine: DRILL,
+                position: &cell.drill,
+                coal: drill_coal,
+                burn_ticks: DRILL_BURN_TICKS,
+                runs_out: Some((spec.item.as_str(), spec.ticks_per_item)),
+            },
             false,
         ),
         (
-            FURNACE,
-            cell.furnace.clone(),
-            furnace_coal,
-            COAL_BURN_TICKS,
+            Burner {
+                machine: FURNACE,
+                position: &cell.furnace,
+                coal: furnace_coal,
+                burn_ticks: COAL_BURN_TICKS,
+                runs_out: None,
+            },
             true,
         ),
     ] {
@@ -2183,15 +2291,7 @@ fn fuel_both(
             });
             extra_pre.extend(research_pre.iter().cloned());
         }
-        let (fuel, visits) = fuel_steps(
-            ctx,
-            machine_name,
-            &position,
-            coal,
-            burn_ticks,
-            reach,
-            &extra_pre,
-        );
+        let (fuel, visits) = fuel_steps(ctx, &burner, reach, &extra_pre);
         steps.extend(fuel);
         fuel_ids.extend(visits.first().copied());
     }
@@ -2263,9 +2363,9 @@ fn open_cell_steps(
     place_steps(ctx, spec, &cell, &mut steps);
     let fuel_ids = fuel_both(
         ctx,
+        spec,
         &cell,
-        drill_coal,
-        furnace_coal,
+        (drill_coal, furnace_coal),
         research_pre,
         reach,
         &mut steps,
@@ -3452,6 +3552,169 @@ mod tests {
         assert!(plan.makespan > 0);
     }
 
+    /// A burner drill runs exactly as long as the coal in it and then it
+    /// stops, and the plan says so on the visit that buys the last of it.
+    ///
+    /// This is the disclosure `run-1788640611-64852` had no way to make: ten
+    /// drills, one fuel visit each, every one of them ending `no_fuel` after
+    /// delivering precisely what its load bought (6 coal -> 39 ore, 8 -> 53,
+    /// 11 -> 73). The plan was right and unreadable. The numbers in the label
+    /// are checked against each other here rather than hard-coded, so the
+    /// label cannot drift away from the arithmetic that sizes the load.
+    #[test]
+    fn the_drills_last_fuel_visit_says_when_it_runs_out() {
+        let bots = vec![BotId(1)];
+        let s = state(&bots);
+        let net = expand(
+            &[Goal::Have {
+                item: "iron-plate".into(),
+                count: 50,
+                whose: Holder::Share(BotId(1)),
+            }],
+            &s,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .expect("fifty plates stand a cell");
+        let label = net
+            .actions()
+            .map(|a| a.label.clone())
+            .find(|l| l.starts_with("fuel the burner-mining-drill"))
+            .expect("the drill is fuelled");
+        let (head, tail) = label
+            .split_once(" coal (")
+            .expect("the last visit discloses what the load buys: {label}");
+        let coal: u32 = head
+            .rsplit(' ')
+            .next()
+            .and_then(|n| n.parse().ok())
+            .expect("the load is a number");
+        let fields: Vec<&str> = tail.trim_end_matches(')').split(", ").collect();
+        assert_eq!(fields.len(), 3, "ticks, yield, verdict: {label}");
+        assert_eq!(fields[2], "then it stops", "{label}");
+        let burn: u32 = fields[0]
+            .trim_end_matches(" ticks")
+            .parse()
+            .expect("the burn is a number");
+        assert_eq!(
+            burn,
+            coal * DRILL_BURN_TICKS,
+            "the disclosed burn is the load's own: {label}"
+        );
+        let (made, item) = fields[1].split_once(' ').expect("a count and an item");
+        assert_eq!(item, "iron-plate", "{label}");
+        assert_eq!(
+            made.parse::<u32>().expect("the yield is a number"),
+            burn / iron().ticks_per_item,
+            "the disclosed yield is what the cell makes in that burn: {label}"
+        );
+    }
+
+    /// Stand `count` cells the way `run_steps` would -- placements simulated,
+    /// so the ground under each drill is claimed and the ledger reads them as
+    /// live -- each carrying `queued` items of backlog.
+    fn stand_cells(spec: &CellSpec, bots: &[BotId], count: u32, queued: u32) -> ExpansionCtx {
+        let mut ctx = ExpansionCtx::new(state(bots), BotId(1));
+        ctx.state.gain(BotId(1), DRILL, count);
+        ctx.state.gain(BotId(1), FURNACE, count);
+        let cells = plan_cells(&ctx.state, &Position::new(0., 0.), spec, count, 1)
+            .expect("the fixture sites the cells");
+        for cell in &cells {
+            let mut steps = Vec::new();
+            place_steps(&mut ctx, spec, cell, &mut steps);
+            for step in &steps {
+                if let Step::Act(action) = step {
+                    for effect in &action.eff {
+                        effect
+                            .apply(&mut ctx.state, BotId(1))
+                            .expect("a placement's effects apply");
+                    }
+                }
+            }
+            let started_by = ctx.ids.next();
+            promise(&mut ctx, spec, cell, started_by, queued);
+        }
+        ctx
+    }
+
+    /// [`DrainPolicy::Parallel`] scales the bound by the cells that stand, so
+    /// two cells carrying a backlog one cell-build long -- refused outright
+    /// under the conservative policy -- are both offered.
+    ///
+    /// The backlog is computed from `cell_setup_bot_ticks` rather than written
+    /// down, so the test straddles the bound whatever the fixture's recipe
+    /// costs; a hard-coded count would silently stop testing anything the day
+    /// the fixture's prices moved.
+    #[test]
+    fn the_parallel_policy_scales_the_bound_by_the_cells_that_stand() {
+        let bots = vec![BotId(1)];
+        let spec = iron();
+        let fixed = cell_setup_bot_ticks(&state(&bots), &spec, 1);
+        // Just past one cell-build's backlog and well under two.
+        let queued = fixed.div_ceil(spec.ticks_per_item) + 1;
+        let ctx = stand_cells(&spec, &bots, 2, queued);
+
+        let conservative = Drain::new(&ctx.state, &spec);
+        assert_eq!(conservative.live.len(), 2, "both cells are live");
+        assert!(
+            conservative.eligible.is_empty(),
+            "one cell-build of backlog is past the conservative bound: {:?} against {fixed}",
+            conservative
+                .live
+                .iter()
+                .map(|c| c.queued)
+                .collect::<Vec<_>>()
+        );
+
+        let parallel = ctx.state.fork().with_drain_policy(DrainPolicy::Parallel);
+        assert_eq!(
+            Drain::new(&parallel, &spec).eligible.len(),
+            2,
+            "two cells standing buy two cell-builds' worth of patience"
+        );
+
+        // And a single cell is left exactly where it was: the policy can only
+        // widen the bound by the parallelism the plan actually has, which is
+        // why `researched:automation` -- one cell, 39.6% busy -- is untouched
+        // by it.
+        let solo = stand_cells(&spec, &bots, 1, queued)
+            .state
+            .fork()
+            .with_drain_policy(DrainPolicy::Parallel);
+        assert!(
+            Drain::new(&solo, &spec).eligible.is_empty(),
+            "one standing cell buys no extra patience under either policy"
+        );
+    }
+
+    /// [`crate::plan_best`] never returns a plan longer than the conservative
+    /// policy's, because the conservative policy is one of the two it builds
+    /// and a tie keeps the earlier one.
+    #[test]
+    fn plan_best_is_never_worse_than_the_policy_every_plan_used_to_have() {
+        let bots = vec![BotId(1), BotId(2), BotId(3), BotId(4)];
+        let s = state(&bots);
+        let goals = vec![Goal::Producing {
+            item: "iron-plate".into(),
+            per_minute: 15,
+        }];
+        let registry = registry_for(&bots);
+        let actor = BotId(1);
+        let conservative = {
+            let under = s.fork().with_drain_policy(DrainPolicy::Conservative);
+            let net = expand(&goals, &under, &registry, actor).expect("it expands");
+            schedule(&net, &under, &bots).expect("it schedules")
+        };
+        let (_, best) =
+            crate::plan_best(&goals, &s, &registry, actor, &bots).expect("a policy plans");
+        assert!(
+            best.makespan <= conservative.makespan,
+            "plan_best returned {} against the conservative {}",
+            best.makespan,
+            conservative.makespan
+        );
+    }
+
     /// A cell past the drain bound is not offered, however many cells stand.
     /// The cap that used to override the bound -- "two a bot, then every
     /// cell whatever its backlog" -- is gone; see [`Drain`] for the measured
@@ -3928,10 +4191,13 @@ mod tests {
         let mut ctx = crate::method::ExpansionCtx::new(s.fork(), BotId(1));
         let (steps, ids) = fuel_steps(
             &mut ctx,
-            DRILL,
-            &Position::new(0., 0.),
-            113,
-            DRILL_BURN_TICKS,
+            &Burner {
+                machine: DRILL,
+                position: &Position::new(0., 0.),
+                coal: 113,
+                burn_ticks: DRILL_BURN_TICKS,
+                runs_out: None,
+            },
             10.,
             &[],
         );

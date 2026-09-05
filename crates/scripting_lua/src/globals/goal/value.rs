@@ -13,7 +13,7 @@
 use super::goal_error;
 use factorio_bot_core::mlua::prelude::*;
 use factorio_bot_core::types::Position;
-use factorio_bot_planner::{BotId, Goal, Holder};
+use factorio_bot_planner::{BotId, Goal, Holder, Site};
 
 /// Installs `have`, `researched`, `producing`, `built` and `all` on `table`.
 ///
@@ -179,10 +179,10 @@ pub(crate) fn goal_from_lua(value: &LuaTable) -> LuaResult<Goal> {
         }),
         "built" => Ok(Goal::Built {
             blueprint: require_blueprint(value.get("blueprint")?)?,
-            anchor: Position::new(
+            site: Site::At(Position::new(
                 require_coordinate(value.get("x")?, "x")?,
                 require_coordinate(value.get("y")?, "y")?,
-            ),
+            )),
         }),
         "charted" => Ok(Goal::Charted {
             around: Position::new(
@@ -581,7 +581,7 @@ mod tests {
             converted,
             Goal::Built {
                 blueprint: "0eNq...".into(),
-                anchor: Position::new(10.0, 10.0),
+                site: Site::At(Position::new(10.0, 10.0)),
             }
         );
     }

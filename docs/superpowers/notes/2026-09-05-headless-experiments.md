@@ -1181,3 +1181,156 @@ today.
 `node_modules` and installing one was not worth a build slot on a busy box;
 the Rust snapshot test passes and `types.ts` / `openapi.contract.spec.ts` were
 updated in step, so the contract test is the one check outstanding.
+
+### refuel
+
+**The drills were never under-fuelled. They were fuelled exactly once, for
+exactly what the plan promised, and then they were supposed to stop.**
+`run-1788640611-64852` (seed 31337, 4 headless bots, 5x, green at 15:14) stood
+ten drills, dispatched ten drill `fuel` actions and no more — 6, 6, 6, 7, 8, 8,
+8, 8, 10 and 11 coal — and the per-machine counters give lifetime totals of 39,
+39, 39, 46, 53, 53, 53, 53, 66 and 73 ore. That is `coal × 1600 / 240` in every
+one of the ten cases. `open_cell_steps` sizes a cell's fuel as
+`ticks_per_item × (need + 1)`, so a 52-plate fragment buys 8 coal and gets 53
+ore; each drill delivered its promise and ended `no_fuel` because that is what
+the plan bought. Every drill reading `no_fuel` in the record's machine table was
+correct and looked like a fault.
+
+**The real mechanism is the drain bound, and it is a one-way door.** A cell is
+re-offered to a later fragment only through `Drain`, whose eligibility filter
+was `queued < cell_setup_bot_ticks(spec, 1)` — about 4,000 ticks, sixteen
+plates. A cell that has just promised its own fragment 52 plates carries
+`queued ≈ 12,480` and is therefore ineligible for the rest of the plan. So the
+next fragment paid a **whole fresh drill bill** — nine iron plates, themselves
+hand-mined and hand-smelted — instead of a coal top-up worth about 15 bot-ticks
+per 6.67 ore. Ten fragments, ten cells, ten single loads, and 345 hand-mined ore
+of which roughly 90 is the drills' own bills. The multi-visit refuel machinery
+(`fuel_steps` + `have::fuel_visits`) exists and is correct, but only fires above
+a 50-coal stack — 80,000 ticks — which no cell ever approaches.
+
+**A constant cannot serve every goal, and the sweep is what says so.** Offline
+on `workspace/scripts/map.json`, varying only the drain bound:
+
+| variant | automation 4b | red 4b | green 4b | green 4b split | green 8b |
+|---|---:|---:|---:|---:|---:|
+| bound ×1 (master) | **21,776** | **26,990** | 52,819 | 517 / 345 | **49,229** |
+| bound ×2 | 21,776 | 26,990 | 59,599 | 523 / 333 | 51,542 |
+| bound ×4 | 27,703 | 27,882 | 52,369 | 664 / 219 | **refuses to expand** |
+| always drain before opening | 21,776 | 26,990 | 58,237 | 510 / 300 | refuses |
+| drain-before-open, bound ×4 | 21,776 | 26,990 | 51,753 | 511 / 309 | 51,840 |
+| drain-before-open, bound ×8 | 21,776 | 26,990 | 58,237 | 517 / 309 | 42,313 |
+
+Non-monotone in the bound, and the sign of the effect flips between goals *and*
+between roster sizes on the same goal. **The baseline plan's own utilisation
+predicts it every time**: `researched:automation` plans 39.6% busy and green
+over eight bots plans 51.8% busy — both short of wall time, so a fragment that
+waits on a cell lengthens the plan — while green over four bots plans 72.0%
+busy and is short of bot time, so a fragment that hand-mines lengthens it. A
+bound loose enough to buy green's four-bot number gave up 5,927 ticks on
+`researched:automation`, whose plan has since been measured live at 6:05 with
+the execution 147 ticks over it.
+
+**So the choice is made by reading finished schedules, not by a constant.**
+`DrainPolicy` has two values — `Conservative` (the old bound) and `Parallel`
+(the bound multiplied by the number of cells already standing, on the argument
+that the cell count is the plan's own signal that its roster is busy) — and
+`factorio_bot_planner::plan_best` builds the plan under each and keeps the
+shorter schedule. Ties keep `Conservative`, so it can never return a longer plan
+than expansion alone would have; a policy that fails to expand is skipped rather
+than propagated, and the error surfaces only if every policy fails. The `plan`
+CLI, `score-map` and the Lua `goal.plan` path all go through it, so the offline
+loop and a live run make the same choice.
+
+| goal, roster | before | after |
+|---|---|---|
+| `researched:automation`, 4 | 176 / 21,776 | 176 / 21,776 |
+| `researched:automation`, 8 | 364 / 18,310 | 364 / 18,310 |
+| `producing:automation-science-pack:6`, 4 | 324 / 26,990 | 324 / 26,990 |
+| `producing:automation-science-pack:6`, 8 | 535 / 19,573 | 535 / 19,573 |
+| `producing:logistic-science-pack:6`, 4 | 569 / 52,819 | **452 / 49,051** |
+| `producing:logistic-science-pack:6`, 8 | 706 / 49,229 | 706 / 49,229 |
+
+Green over four bots: 3,768 ticks shorter, 117 fewer actions, six drills instead
+of ten, and the planned ore split moves from ~517 drilled / 345 hand-mined to
+~550 / 273. Everything else is byte-identical, which is the point — the
+conservative policy won those and it is still there to win them.
+
+**And the plan now says when a drill stops.** The last fuel visit to a cell's
+drill reads `fuel the burner-mining-drill with 8 coal (12800 ticks, 53
+iron-plate, then it stops)`. The arithmetic was always there; nothing said it
+out loud, so the record's `no_fuel` rows read as a fault rather than as the
+plan's own promise being kept.
+
+**Found and not fixed.**
+
+(a) **A raised drain bound makes `producing:logistic-science-pack:6` over eight
+bots refuse to expand**: `the goal did not expand: bot 2 has 27 iron-plate,
+needs 36` — `PlannerError::InsufficientItems` from `PlanState::lose`, an
+inventory-ledger fault and not the resource-tile variant (that one raises with
+`BotId(0)`). It reproduces on `workspace/scripts/map.json` with the bound at
+`4 × cell_setup_bot_ticks(spec, 1)`, and with unbounded drain-before-open; it
+does not reproduce at ×1, at ×2, on four bots, or on the other two goals.
+`plan_best` contains the blast radius — a policy that refuses is skipped and
+the other one's plan is returned — but it does not fix it. **Hypothesis, not a
+diagnosis**: `demand()` sizes `need` as a shortfall against
+`PlanState::available(whose, item)` while `drain_steps`' takes gain to
+`Actor::Role`, so every extra drain moves plates into a chain actor's inventory
+at expand time and shrinks a later shortfall; eight bots have more cross-bot
+chains than four, which is consistent with it surfacing only there. A plan that
+refuses to expand deserves its own investigation.
+
+(b) **`doc_guard::production_half` cuts a source file at its first column-zero
+`#[cfg(test)]`.** A test-gated `use` added near the top of
+`globals/goal/mod.rs` hid every `.set("name", ...)` below it, and the guard
+reported `goal.holds` and `goal.refusal` as installed at runtime but never
+registered — a true-sounding message about two bindings that were fine. The
+imports now sit below the registrations with a comment saying why. The guard is
+right to be strict; its truncation heuristic is what surprises.
+
+(c) **The count lever is still untouched.** Six drills for green is fewer, not
+more, and the world-record replays put 40–70 down in their first six minutes.
+`Drain`'s own doc argues that count ahead of demand is a *rate* decision for
+`BuildCell` to make, and nothing here changes that.
+
+#### refuel — live validation (`run-1788645306-91919`)
+
+Seed 31337, map `c161fa3f437221d0`, 4 headless character bots, 5x, commit
+`dd5b1bc7` clean, **release** profile, on its own instance (`headless-m`, ports
+4342/34222). `factory_stage3.lua`, both milestones satisfied, **zero failures of
+any kind**: 452 actions and 197 walks dispatched, 452 and 197 settled, no failed
+or lost actions, no failed or lost walks, no refusals.
+
+| | reference `run-1788640611-64852` | this run |
+|---|---:|---:|
+| plan makespan | 54,884 | **50,440** |
+| green satisfied, elapsed game ticks | 54,875 (15:14) | **52,781 (14:39)** |
+| execution over plan | 1.000× | 1.046× |
+| drills placed | 10 | 6 |
+| drill fuel actions | 10 | **12** |
+| ore from drills | 514 | **551** |
+| ore mined by hand | 345 | **273** |
+| total ore (furnace plates) | 859 | 824 |
+| drilled share | 59.8% | **66.9%** |
+
+**Five of the six drills were refuelled, and that is the whole mechanism made
+visible.** Fuel visits by drill position: `(-16,-33)` twice (ticks 2,745 and
+16,992), `(-13,-14)` twice (2,026 and 17,226), `(-9,-31)` twice (2,949 and
+28,417), `(-18,-37)` twice (20,714 and 25,914), `(-14,-33)` three times, and
+`(35,-52)` — the copper cell — once. In the reference run every one of the ten
+drills was fuelled exactly once and never revisited. The lifetime counters say
+the same thing from the other side: 126, 93, 93, 93, 93 and 53 ore, where 93 is
+6 coal (40) plus 8 coal (53) and only the single-visit copper drill lands on a
+one-load figure.
+
+**The planned split predicted the live one almost exactly**: 83 coal planned
+into drills, 83 dispatched, ~553 ore bought against 551 counted, and the plan's
+hand-mining bill of 273 ore came out at exactly 273. So the offline loop is
+predictive for this quantity and a future change to it can be judged without a
+run.
+
+**Two caveats on the comparison, neither of which moves the split.** The
+reference run was a **debug** build and this one is release, which changes wall
+time and can change tick-rate-dependent waiting, though both are quoted in game
+ticks; and the two ran on different instances, though on the same seed and the
+same verified map digest. The 3.8% improvement in the green tick is the softer
+number here — the split and the refuel visits are the hard ones.

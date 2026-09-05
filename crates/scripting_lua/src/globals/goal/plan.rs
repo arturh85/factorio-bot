@@ -20,8 +20,8 @@
 
 use super::value::goal_from_lua;
 use super::{
-    BufferRefresher, ClockCall, ClockPolicy, PlacementChecker, PlanningClockSeam, expand_goal,
-    goal_error, planner_error, refuse_unknown_bots,
+    BufferRefresher, ClockCall, ClockPolicy, PlacementChecker, PlanningClockSeam, goal_error,
+    planner_error, refuse_unknown_bots,
 };
 use factorio_bot_core::blueprint::UndergroundHalf;
 use factorio_bot_core::factorio::rcon::PlacementQuery;
@@ -30,10 +30,11 @@ use factorio_bot_core::mlua::prelude::*;
 use factorio_bot_core::types::Position;
 use factorio_bot_executor::{ExecutionLog, Recovery};
 use factorio_bot_planner::ids::{ActionId, BotId};
+use factorio_bot_planner::method::have::registry_for;
 use factorio_bot_planner::method::produce::{cell_spec, cells_for, cells_standing};
 use factorio_bot_planner::{
     ActionKind, ActionNetwork, Goal, InventorySlot, PlanState, Schedule, ScheduledStep, StepKind,
-    Ticks, graphviz, mermaid_gantt, pick_chain_actor, schedule,
+    Ticks, graphviz, mermaid_gantt, pick_chain_actor, plan_best,
 };
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -1089,8 +1090,19 @@ async fn plan_rounds(
             narrate_walled_in_bots(&state, roster);
             narrate_benched_bots(&state);
         }
-        let net = expand_goal(goal.clone(), world, roster)?;
-        let scheduled = schedule(&net, &state, roster).map_err(planner_error)?;
+        // Both drain policies, the shorter schedule kept -- see
+        // `factorio_bot_planner::plan_best`. A run has to make the same
+        // choice the offline `plan` CLI makes or the two stop agreeing.
+        let chain_actor = pick_chain_actor(&state, roster)
+            .ok_or_else(|| goal_error("no bots in this run; goals need at least one"))?;
+        let (net, scheduled) = plan_best(
+            std::slice::from_ref(goal),
+            &state,
+            &registry_for(roster),
+            chain_actor,
+            roster,
+        )
+        .map_err(planner_error)?;
 
         let Some(checker) = checker else {
             return Ok((net, scheduled));

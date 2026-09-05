@@ -2,14 +2,16 @@
 
 use crate::action::{Action, ActionKind, Actor, Condition, Effect};
 use crate::error::PlannerError;
-use crate::goal::{Goal, Holder};
+use crate::goal::{Goal, Holder, Site};
 use crate::method::have::PLACE_TICKS;
+use crate::method::util::nearest_resource_tile;
 use crate::method::{ExpansionCtx, Method, Step};
 use crate::state::PlanState;
 use factorio_bot_core::blueprint::{Blueprint, BlueprintEntity, UndergroundHalf, decode};
+use factorio_bot_core::factorio::util::calculate_distance;
 use factorio_bot_core::num_traits::FromPrimitive;
-use factorio_bot_core::types::{Direction, FactorioEntity, Pos, Position};
-use std::collections::BTreeMap;
+use factorio_bot_core::types::{Direction, FactorioEntity, Pos, Position, Rect};
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Which of a block's two axes the bands are cut across.
 ///
@@ -237,6 +239,365 @@ fn already_stands(state: &PlanState, e: &BlueprintEntity, world: &Position) -> S
     }
 }
 
+/// The anchor this block is ALREADY sited at, read back off the ground.
+///
+/// Siting must not be recomputed on a replan. `Goal::Built`'s whole shape
+/// assumes an anchor is stable -- "building it twice is a no-op rather than
+/// a second factory" -- and a search that re-runs against a world we have
+/// since built into can answer differently than it did last time. A block
+/// half-built at site A would then restart at site B: two half-factories, no
+/// error, and a production curve that still rises.
+///
+/// So the site is chosen exactly once, when the first entity goes down, and
+/// every later expansion rediscovers it from the entities themselves. This
+/// needs no new state and nothing to keep in sync, because `already_stands`
+/// answers the question backwards: each standing entity that matches a
+/// blueprint entity implies `standing.position - blueprint.offset`.
+///
+/// Scored by how many of the block's entities that candidate satisfies, so an
+/// unrelated entity of the same name cannot outvote the block itself.
+///
+/// **A single match is refused outright, never merely outvoted.** A fresh
+/// build has NOTHING standing at its real anchor, so a lone entity elsewhere
+/// that happens to share one name -- a power pole built for an unrelated
+/// purpose, say -- would otherwise be the only candidate in `votes` and win
+/// by default, with nothing to outvote it. That is not hypothetical: a power
+/// rig planted purely to unlock research (`test_world::with_steam_power`,
+/// a `small-electric-pole` and a `steam-engine` with no relation to any
+/// block) was read as one-sixth of `StarterSteamEngineBoiler` on a
+/// perfectly empty site, and the plan silently placed five of its six
+/// entities as if the sixth already stood -- while genuinely standing at
+/// nowhere near the requested anchor. Requiring at least two corroborating
+/// entities before trusting a recovery is what a single coincidence cannot
+/// pass; it is also **the honest limit this now has**: a one-entity
+/// blueprint can never be recovered (there is only ever one thing to match),
+/// and a two-or-more block whose FIRST entity alone has been built is read
+/// as nothing standing rather than as a one-entity partial build. Both are
+/// the conservative wrong answer -- re-siting a block that is genuinely one
+/// entity into its own build -- not the dangerous one this replaces.
+///
+/// Ties on the score are broken toward the LARGER key, not an arbitrary one:
+/// a block whose own entities are evenly spaced (offsets `0, 3, 6, 9`)
+/// standing only partly built (two of four, spaced by the same `3`) is
+/// satisfied equally by several candidate anchors -- shifting the guess by
+/// any multiple of that spacing re-lines-up the same two standing entities
+/// against a different pair of offsets. The larger key is the one that
+/// assigns the standing entities to the block's *earliest* offsets rather
+/// than a later, coincidentally-matching pair, which is the answer a caller
+/// who placed entities in blueprint order actually wants.
+///
+/// Votes are keyed by half-tile fixed point (`(x, y) * 2, rounded`), not by
+/// `Pos`: `Pos::from` floors to `(i32, i32)`, which is lossy for a fact this
+/// exact -- every legal Factorio entity centre is a multiple of 0.5, so an
+/// anchor at 10.0 and one at 10.5 would collapse into the same bucket. This
+/// is the identical shape of round-trip that once made mining fail for every
+/// ore on every map while every test passed, because `Pos` floors resource
+/// positions too.
+fn recover_anchor(state: &PlanState, bp: &Blueprint) -> Option<Position> {
+    let mut votes: BTreeMap<(i64, i64), usize> = BTreeMap::new();
+    for e in &bp.entities {
+        for candidate in state.entities_named(&e.name) {
+            // Candidate anchor: `e` is standing where `candidate` actually
+            // is, so the block's anchor -- if this is really it -- is offset
+            // back by `e.offset`.
+            let anchor = Position::new(
+                candidate.position.x() - e.offset.x(),
+                candidate.position.y() - e.offset.y(),
+            );
+            let satisfied = bp
+                .entities
+                .iter()
+                .filter(|b| {
+                    matches!(
+                        already_stands(state, b, &anchor.add(&b.offset)),
+                        Standing::AsDesigned
+                    )
+                })
+                .count();
+            // >= 2, not > 0: see the doc above -- a single matching entity
+            // is exactly the shape of coincidence this must refuse, not
+            // merely risk losing a tie-break to.
+            if satisfied >= 2 {
+                let key = (
+                    (anchor.x() * 2.0).round() as i64,
+                    (anchor.y() * 2.0).round() as i64,
+                );
+                votes.insert(key, satisfied);
+            }
+        }
+    }
+    votes
+        // Most entities satisfied wins; on a tie the larger key wins (see
+        // the doc above) -- deterministic either way, so the answer does not
+        // depend on iteration order.
+        .into_iter()
+        .max_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)))
+        .map(|(key, _)| Position::new(key.0 as f64 / 2.0, key.1 as f64 / 2.0))
+}
+
+/// Rings outward from `seed`, first clear footprint wins.
+///
+/// Deterministic by construction: rings ascend, and within a ring tiles are
+/// visited in `(x, y)` order. No RNG, no float comparison, no hash iteration —
+/// the planner is pure, and a site that varied between two plans of the same
+/// world would make every offline comparison meaningless.
+///
+/// The candidate test is `first_obstruction`, built on
+/// [`PlanState::siting_occupant`] — a NARROWER predicate than the
+/// `placement_occupant` `expand`'s own footprint pre-check uses, and
+/// deliberately so: see `siting_occupant`'s own doc for why a character must
+/// not be one of the things a search result depends on. The two are meant to
+/// agree on everything durable; where they differ, it is this one difference
+/// on purpose, not two copies drifting apart.
+///
+/// **`seed` must be replan-stable**, and so must every OTHER input the
+/// search's outcome can depend on — a fact this doc used to get half right.
+/// `recover_anchor` only trusts an anchor once two of the block's entities
+/// stand (see its own doc), so a block with exactly one entity built recovers
+/// nothing and falls back to this search. The seed itself: callers pass a
+/// fixed reference — the world origin for `Site::Anywhere`, the caller's own
+/// point for `Site::Near` — never anything that tracks where bots have
+/// walked to, because a seed that moves between expansions (a roster
+/// centroid, say) can re-order the rings and site the block a second time.
+/// The obstacle set the seed is searched against: entities are added by this
+/// plan and by the game, never removed by anything this method does, so
+/// `first_obstruction` (which skips this block's own entities standing as
+/// designed) sees every earlier ring still blocked on every later call.
+/// **Characters are the one source that is NOT append-only** — a bystander
+/// or one of this plan's own bots can stand in a candidate ring on one
+/// expansion and be gone (or a different one arrived) on the next, entirely
+/// outside this plan's control. `siting_occupant` is what keeps that from
+/// reaching the result: by excluding characters from the candidate test
+/// altogether, the only things the search can trip over are the sources that
+/// truly are monotonic, and the guarantee above holds without needing
+/// anything about where a person or a bot happens to be standing.
+///
+/// `pub`, matching `method::connect::connect_steps`: called from
+/// `resolve_site` below, and exercised directly by this module's own tests.
+pub fn search_site(
+    state: &PlanState,
+    bp: &Blueprint,
+    seed: &Position,
+    max_radius: i32,
+) -> Result<Position, PlannerError> {
+    let mut nearest: Option<String> = None;
+    for radius in 0..=max_radius {
+        for dy in -radius..=radius {
+            for dx in -radius..=radius {
+                // Ring, not disc: skip what an inner radius already tried.
+                if dx.abs() != radius && dy.abs() != radius {
+                    continue;
+                }
+                let anchor = Position::new(seed.x() + dx as f64, seed.y() + dy as f64);
+                match first_obstruction(state, bp, &anchor) {
+                    None => return Ok(anchor),
+                    Some(what) => {
+                        if nearest.is_none() {
+                            nearest = Some(what);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Err(PlannerError::NoSiteFound {
+        entities: bp.entities.len(),
+        seed: format!("{seed}"),
+        searched: max_radius,
+        nearest_obstruction: nearest
+            .unwrap_or_else(|| "nothing (the search bound was reached first)".to_string()),
+    })
+}
+
+/// The first thing standing in this block's way at `anchor`, if any.
+///
+/// An entity already standing AS DESIGNED is not an obstruction — it is this
+/// block, already partly built, which is exactly the case `recover_anchor`
+/// hands here.
+///
+/// Asks [`PlanState::siting_occupant`], not `placement_occupant`: a
+/// character is not durable ground, and this function's whole job is
+/// choosing an anchor that stays chosen (see `search_site`'s doc). The
+/// distinction matters only here -- `expand`'s own footprint pre-check, which
+/// builds at a fixed, already-chosen anchor, still uses `placement_occupant`
+/// and still refuses a character standing on it, by name.
+fn first_obstruction(state: &PlanState, bp: &Blueprint, anchor: &Position) -> Option<String> {
+    for e in &bp.entities {
+        let world = anchor.add(&e.offset);
+        if matches!(already_stands(state, e, &world), Standing::AsDesigned) {
+            continue;
+        }
+        let facing = Direction::from_u8(e.direction).unwrap_or(Direction::North);
+        if let Some(occupant) = state.siting_occupant(&e.name, &world, facing) {
+            return Some(occupant.to_string());
+        }
+    }
+    if let Some(why) = drills_are_fed(state, bp, anchor) {
+        return Some(why);
+    }
+    None
+}
+
+/// Does `area` cover a tile of some resource `drill` can actually extract?
+///
+/// Inverts the game's own rule ([`PlanState::extractors_for`]): a resource is
+/// mined by the machines whose `resource_categories` list its own
+/// `resource_category`. So for every resource name this world knows
+/// ([`PlanState::resource_names`]), this checks whether `drill` is one of
+/// that resource's extractors and, only then, whether `area` actually covers
+/// a tile of it -- `covers_resource` walks every tile under the box, and
+/// skipping it whenever the cheap category test alone already says no keeps
+/// this affordable over a world with many resource kinds.
+///
+/// A resource whose capture predates `resource_category` reads `None` there
+/// ([`PlanState::resource_category`]'s own doc), and `None` can never satisfy
+/// this: there is nothing to match a drill's `resource_categories` against,
+/// and treating an unresolved category as a match would be exactly the false
+/// acceptance this whole check exists to avoid.
+fn covers_resource_extractable_by(state: &PlanState, drill: &str, area: &Rect) -> bool {
+    state.resource_names().iter().any(|resource| {
+        state
+            .resource_category(resource)
+            .is_some_and(|category| state.extractors_for(&category).iter().any(|d| d == drill))
+            && state.covers_resource(area, resource)
+    })
+}
+
+/// Does every mining drill in this block have ore under it at `anchor`?
+///
+/// Returns the reason it does not, or `None` when they all do.
+///
+/// **Conservative on purpose.** A real electric mining drill mines a 5x5 area
+/// while its collision box is 3x3, and no mining radius reaches us -- nothing
+/// on the prototypes carries it. So this asks whether ore lies under the
+/// drill's own FOOTPRINT, which can reject a site where the drill would in
+/// fact reach ore just outside it. That direction is the safe one: a false
+/// refusal is a site not taken, a false acceptance is a drill that places
+/// perfectly and produces nothing, which is the failure this project has paid
+/// for repeatedly. Recorded so the next author knows it is a floor, not a
+/// measurement.
+fn drills_are_fed(state: &PlanState, bp: &Blueprint, anchor: &Position) -> Option<String> {
+    for e in &bp.entities {
+        if !state.stands_on_resources(&e.name) {
+            continue;
+        }
+        let world = anchor.add(&e.offset);
+        let facing = Direction::from_u8(e.direction).unwrap_or(Direction::North);
+        let Some(area) = state.collision_area_facing(&e.name, &world, facing) else {
+            continue;
+        };
+        if !covers_resource_extractable_by(state, &e.name, &area) {
+            return Some(format!(
+                "the {} at ({}, {}) would stand on no ore it can mine",
+                e.name,
+                world.x(),
+                world.y()
+            ));
+        }
+    }
+    None
+}
+
+/// How far siting looks before refusing, in tiles.
+///
+/// 48 covers the whole starting area of a fresh map without making a failed
+/// search scan 10,000 candidate anchors: the cost is O(radius^2) footprint
+/// scans, and each scan is O(entities).
+const SEARCH_RADIUS: i32 = 48;
+
+/// The nearest tile of ore this block's own mining drills can extract,
+/// measured from the world origin -- `None` when the block has no drill at
+/// all, or when no drill in it can reach any resource this world knows about.
+///
+/// **Why the origin, and not a roster position.** A bot's position moves
+/// between expansions; a resource patch and the origin do not. Measuring
+/// from anywhere else would make this seed re-order between replans exactly
+/// as a roster centroid would (see `search_site`'s own doc on why that is
+/// unacceptable) -- the origin is the only reference point this crate has
+/// that is guaranteed stable and does not require picking one drill's offset
+/// over another's.
+///
+/// **Why nearest ore matters, not merely "some ore exists".** On the
+/// benchmark map the nearest copper is 55 tiles from spawn while
+/// [`SEARCH_RADIUS`] is 48: a copper-drill block seeded at the origin could
+/// never reach it, scanning the whole bound and refusing with a message that
+/// blames occupied ground rather than a search radius that stopped seven
+/// tiles short. Seeding here instead collapses that search to a handful of
+/// rings around the patch itself.
+///
+/// Ties across resource kinds are broken the same way
+/// [`crate::method::util::nearest_resource_tile`] breaks ties within one
+/// kind -- distance, then `(x, y)` -- so the answer depends only on the
+/// world's resource layout, never on `resource_names`' iteration order.
+fn nearest_ore_seed(state: &PlanState, bp: &Blueprint) -> Option<Position> {
+    let origin = Position::new(0.0, 0.0);
+    let mut drills: BTreeSet<&str> = BTreeSet::new();
+    for e in &bp.entities {
+        if state.stands_on_resources(&e.name) {
+            drills.insert(e.name.as_str());
+        }
+    }
+    if drills.is_empty() {
+        return None;
+    }
+    let mut best: Option<Position> = None;
+    for resource in state.resource_names() {
+        let extractable = state.resource_category(&resource).is_some_and(|category| {
+            state
+                .extractors_for(&category)
+                .iter()
+                .any(|d| drills.contains(d.as_str()))
+        });
+        if !extractable {
+            continue;
+        }
+        let Some(tile) = nearest_resource_tile(state, &resource, &origin, 1) else {
+            continue;
+        };
+        best = Some(match best {
+            None => tile,
+            Some(current) => {
+                let ordering = calculate_distance(&origin, &tile)
+                    .total_cmp(&calculate_distance(&origin, &current))
+                    .then(tile.x().total_cmp(&current.x()))
+                    .then(tile.y().total_cmp(&current.y()));
+                if ordering == std::cmp::Ordering::Less {
+                    tile
+                } else {
+                    current
+                }
+            }
+        });
+    }
+    best
+}
+
+/// Where this block goes, resolved in one fixed order.
+///
+/// Recovery comes FIRST and unconditionally, even for `Site::At`: if the
+/// block is already partly built, the ground outranks anything the caller
+/// says, because the alternative is two half-blocks and no error.
+///
+/// `Site::Near(p)` searches from the caller's own point, which is stable by
+/// construction -- it came in with the goal, not off a bot's current
+/// position. `Site::Anywhere` seeds at the nearest ore patch this block's own
+/// drills can extract, falling back to the world origin for a block with no
+/// drill at all; both are stable across replans (see `nearest_ore_seed`'s own
+/// doc), which a roster centroid is not.
+fn resolve_site(state: &PlanState, bp: &Blueprint, site: &Site) -> Result<Position, PlannerError> {
+    if let Some(recovered) = recover_anchor(state, bp) {
+        return Ok(recovered);
+    }
+    match site {
+        Site::At(p) => Ok(p.clone()),
+        Site::Near(p) => search_site(state, bp, p, SEARCH_RADIUS),
+        Site::Anywhere => {
+            let seed = nearest_ore_seed(state, bp).unwrap_or_else(|| Position::new(0.0, 0.0));
+            search_site(state, bp, &seed, SEARCH_RADIUS)
+        }
+    }
+}
+
 /// Build a designed block by hand, one band per bot.
 pub struct BuildBlock;
 
@@ -250,12 +611,20 @@ impl Method for BuildBlock {
     }
 
     fn expand(&self, goal: &Goal, ctx: &mut ExpansionCtx) -> Result<Vec<Step>, PlannerError> {
-        let Goal::Built { blueprint, anchor } = goal else {
+        let Goal::Built { blueprint, site } = goal else {
             return Ok(Vec::new());
         };
         let bp: Blueprint = decode(blueprint).map_err(|e| PlannerError::BlueprintRefused {
             reason: format!("{e:?}"),
         })?;
+
+        // A recovered anchor wins over anything the caller says: standing
+        // entities are a fact about the world, and a `Site` is only ever a
+        // hint about where to start looking. This is what stops a replan
+        // from re-siting a block that is already partly built -- see
+        // `recover_anchor`'s own doc. `resolve_site` fills in `Near`/
+        // `Anywhere` from a stable seed when nothing is standing yet.
+        let anchor = resolve_site(&ctx.state, &bp, site)?;
 
         // This used to refuse the whole goal, by name, whenever it contained
         // an underground belt: neither `FactorioEntity` nor the mod's
@@ -436,6 +805,574 @@ mod tests {
         }
     }
 
+    /// A fresh, empty world with one bot -- the state `recover_anchor`'s own
+    /// tests build on, before any entity is stood on it.
+    fn test_state() -> PlanState {
+        use crate::ids::BotId;
+        use factorio_bot_core::test_utils::fixture_world;
+        use std::sync::Arc;
+
+        PlanState::from_world(Arc::new(fixture_world()), &[BotId(1)])
+    }
+
+    fn at_named(x: f64, y: f64, name: &str) -> BlueprintEntity {
+        BlueprintEntity {
+            name: name.to_string(),
+            offset: Position::new(x, y),
+            direction: 0,
+            underground_half: None::<UndergroundHalf>,
+        }
+    }
+
+    fn stone_furnace_at(x: f64, y: f64) -> FactorioEntity {
+        FactorioEntity::new_stone_furnace(&Position::new(x, y), Direction::North)
+    }
+
+    /// A stone furnace that can never be read as `Standing::AsDesigned`
+    /// against `at_named`'s default direction (0, i.e. `Direction::North`).
+    ///
+    /// **Why not `stone_furnace_at`.** `first_obstruction` treats an entity
+    /// standing exactly as a blueprint entity designs it (same name, same
+    /// tile, same facing) as friendly ground, not an obstruction -- that is
+    /// the whole point of the stability guarantee (Ruling A / the search
+    /// tests below). `stone_furnace_at` places its furnace facing
+    /// `Direction::North`, which is also `at_named`'s default `direction:
+    /// 0`, so a single-entity blueprint's own designed entity is
+    /// indistinguishable from that decoy: `search_site` would read it as
+    /// "this block, already built here" and stop instantly, never stepping
+    /// outward -- which silently defeats a test whose entire point is
+    /// forcing the search past a blocked seed. Facing a different way makes
+    /// it a genuine, unrelated obstacle instead.
+    fn blocking_stone_furnace_at(x: f64, y: f64) -> FactorioEntity {
+        FactorioEntity::new_stone_furnace(&Position::new(x, y), Direction::South)
+    }
+
+    /// **Recovery, not re-siting.** Two of a four-furnace block stand at an
+    /// anchor the caller never names again -- a replan must find them, not
+    /// choose somewhere new. This is the failure `Goal::Built` exists to make
+    /// unreachable: a block half-built at site A restarting at site B, with
+    /// no error and a production curve that still rises.
+    #[test]
+    fn a_partly_built_block_recovers_its_own_anchor_and_does_not_move() {
+        let bp = Blueprint {
+            entities: vec![
+                at_named(0.0, 0.0, "stone-furnace"),
+                at_named(3.0, 0.0, "stone-furnace"),
+                at_named(6.0, 0.0, "stone-furnace"),
+                at_named(9.0, 0.0, "stone-furnace"),
+            ],
+            version: 0,
+        };
+        let mut state = test_state();
+        // The block was sited at (20.5, 20.5) on a previous plan and two of
+        // its furnaces got built before the replan.
+        state.create_entity(stone_furnace_at(20.5, 20.5));
+        state.create_entity(stone_furnace_at(23.5, 20.5));
+
+        let recovered = recover_anchor(&state, &bp).expect("two standing furnaces imply an anchor");
+        assert_eq!(Pos::from(&recovered), Pos::from(&Position::new(20.5, 20.5)));
+    }
+
+    /// **Ruling B: recovery outranks even an explicit `Site::At`.** A caller
+    /// naming an anchor is a hint about where to start looking, not a fact --
+    /// standing entities are the fact. A goal replanned with the SAME
+    /// explicit anchor it was first built with must still resolve to where
+    /// the block actually stands if that has drifted from the caller's own
+    /// number (a stale goal, a hand-edited script), or the run ends up
+    /// building two half-blocks in two different places with no error.
+    #[test]
+    fn resolve_site_prefers_the_recovered_anchor_over_an_explicit_site_at() {
+        let bp = Blueprint {
+            entities: vec![
+                at_named(0.0, 0.0, "stone-furnace"),
+                at_named(3.0, 0.0, "stone-furnace"),
+                at_named(6.0, 0.0, "stone-furnace"),
+                at_named(9.0, 0.0, "stone-furnace"),
+            ],
+            version: 0,
+        };
+        let mut state = test_state();
+        // Actually standing at (20.5, 20.5) ...
+        state.create_entity(stone_furnace_at(20.5, 20.5));
+        state.create_entity(stone_furnace_at(23.5, 20.5));
+
+        // ... but the caller names a different anchor entirely.
+        let site = Site::At(Position::new(0.5, 0.5));
+
+        let resolved = resolve_site(&state, &bp, &site).expect("recovery answers even for At");
+        assert_eq!(
+            Pos::from(&resolved),
+            Pos::from(&Position::new(20.5, 20.5)),
+            "the ground outranks the caller's explicit anchor: building at \
+             (0.5, 0.5) here would start a second, unrelated furnace line"
+        );
+    }
+
+    #[test]
+    fn a_block_with_nothing_standing_recovers_no_anchor() {
+        let bp = Blueprint {
+            entities: vec![at_named(0.0, 0.0, "stone-furnace")],
+            version: 0,
+        };
+        let state = test_state();
+        assert!(recover_anchor(&state, &bp).is_none());
+    }
+
+    /// A decoy furnace unrelated to the block stands alone; the block's own
+    /// two furnaces stand together. The pair must outvote the single.
+    #[test]
+    fn the_anchor_satisfying_the_most_entities_wins() {
+        let bp = Blueprint {
+            entities: vec![
+                at_named(0.0, 0.0, "stone-furnace"),
+                at_named(3.0, 0.0, "stone-furnace"),
+            ],
+            version: 0,
+        };
+        let mut state = test_state();
+        state.create_entity(stone_furnace_at(-40.5, -40.5)); // decoy
+        state.create_entity(stone_furnace_at(10.5, 10.5));
+        state.create_entity(stone_furnace_at(13.5, 10.5));
+
+        let recovered = recover_anchor(&state, &bp).expect("the pair implies an anchor");
+        assert_eq!(Pos::from(&recovered), Pos::from(&Position::new(10.5, 10.5)));
+    }
+
+    /// The ring search itself: blocked at the seed tile, it must step
+    /// outward to the first clear footprint, and answer the same way twice.
+    #[test]
+    fn a_block_is_sited_on_the_first_clear_ring_and_is_deterministic() {
+        let bp = Blueprint {
+            entities: vec![at_named(0.0, 0.0, "stone-furnace")],
+            version: 0,
+        };
+        let mut state = test_state();
+        // Block the seed tile itself, so the search must step outward. Faced
+        // away from the blueprint's own (default) direction -- see
+        // `blocking_stone_furnace_at`'s doc for why a same-facing furnace
+        // would not do.
+        state.create_entity(blocking_stone_furnace_at(0.5, 0.5));
+
+        let first =
+            search_site(&state, &bp, &Position::new(0.5, 0.5), 20).expect("open ground exists");
+        let again = search_site(&state, &bp, &Position::new(0.5, 0.5), 20).expect("same answer");
+        assert_eq!(
+            Pos::from(&first),
+            Pos::from(&again),
+            "siting must be deterministic"
+        );
+        assert_ne!(Pos::from(&first), Pos::from(&Position::new(0.5, 0.5)));
+    }
+
+    /// A search bounded and refused must say how far it looked and what was
+    /// in the way -- "cannot site" and "looked one tile" must not read alike.
+    #[test]
+    fn a_search_that_finds_nothing_says_how_far_it_looked() {
+        let bp = Blueprint {
+            entities: vec![at_named(0.0, 0.0, "stone-furnace")],
+            version: 0,
+        };
+        let mut state = test_state();
+        // Wall off every tile within the search bound, faced away from the
+        // blueprint's own direction so none of them read as this block
+        // already standing (see `blocking_stone_furnace_at`'s doc).
+        for x in -3..=3 {
+            for y in -3..=3 {
+                state.create_entity(blocking_stone_furnace_at(x as f64 + 0.5, y as f64 + 0.5));
+            }
+        }
+        let err = search_site(&state, &bp, &Position::new(0.5, 0.5), 2).unwrap_err();
+        let text = format!("{err}");
+        assert!(
+            text.contains('2'),
+            "the refusal must say how far it searched: {text}"
+        );
+        assert!(
+            text.contains("stone-furnace"),
+            "the refusal must name what is in the way: {text}"
+        );
+    }
+
+    /// **A character in the search path must not move the sited anchor.**
+    ///
+    /// `occupant_of`'s six sources include live characters, and until this
+    /// fix `first_obstruction` (via `placement_occupant`) saw them like any
+    /// other obstacle. A character is the one source among those six that
+    /// moves with no plan action behind it at all -- a bystander (or one of
+    /// this plan's own bots) can stand in a candidate ring on one expansion
+    /// and be gone on the next, entirely outside what this plan controls.
+    /// That reaches the same two-half-factories failure `search_site`'s doc
+    /// already worried about for a moving SEED, but through a moving
+    /// OBSTACLE instead: an unrelated bot blocks the nearest ring, the
+    /// search steps outward, the bot walks off, and a later expansion (a
+    /// fresh `PlanState` off a later world snapshot) finds the near ring
+    /// clear and sites the block a second time.
+    ///
+    /// This proves the fix two ways: the anchor a bystander-free search picks
+    /// is unchanged once a bystander is standing exactly on it, AND the
+    /// ordinary placement predicate (what `expand`'s own footprint pre-check
+    /// uses once a block is actually being built) still sees that same
+    /// bystander as a real occupant -- so this is not "characters became
+    /// invisible everywhere", only "siting stopped depending on them".
+    #[test]
+    fn a_bystander_in_the_search_path_does_not_move_the_sited_anchor() {
+        use crate::ids::BotId;
+        use crate::state::Occupant;
+        use factorio_bot_core::test_utils::fixture_world;
+        use factorio_bot_core::types::FactorioPlayer;
+        use std::sync::Arc;
+
+        let bp = Blueprint {
+            entities: vec![at_named(0.0, 0.0, "stone-furnace")],
+            version: 0,
+        };
+        let seed = Position::new(0.5, 0.5);
+
+        // Baseline: nobody standing anywhere.
+        let empty = PlanState::from_world(Arc::new(fixture_world()), &[BotId(1)]);
+        let baseline = search_site(&empty, &bp, &seed, 10).expect("open ground exists");
+
+        // A bystander -- NOT this plan's own bot -- stands exactly on the
+        // tile the baseline search chose, as if it had walked there between
+        // one expansion and the next (modelled here as a second, later world
+        // snapshot, which is how two real expansions actually differ).
+        let occupied_world = fixture_world();
+        occupied_world.players.insert(
+            99,
+            FactorioPlayer {
+                player_id: 99,
+                position: baseline.clone(),
+                build_distance: 10,
+                reach_distance: 10,
+                resource_reach_distance: 4.0,
+                ..Default::default()
+            },
+        );
+        let occupied = PlanState::from_world(Arc::new(occupied_world), &[BotId(1)]);
+
+        // The ordinary placement predicate still sees the bystander -- this
+        // is a genuine occupant, not an empty test.
+        assert!(
+            matches!(
+                occupied.placement_occupant("stone-furnace", &baseline, Direction::North),
+                Some(Occupant::Character {
+                    on_roster: false,
+                    ..
+                })
+            ),
+            "the bystander must be a real occupant by the placement predicate \
+             `expand` uses, or this test proves nothing"
+        );
+
+        let with_bystander = search_site(&occupied, &bp, &seed, 10)
+            .expect("a bystander does not make siting fail, only irrelevant");
+        assert_eq!(
+            Pos::from(&baseline),
+            Pos::from(&with_bystander),
+            "a bystander standing in the search path must not move the sited \
+             anchor: a character walks away with no plan action behind it, \
+             so it cannot be part of what a stable search depends on"
+        );
+    }
+
+    /// A world with `iron-ore`/`electric-mining-drill` prototypes that know
+    /// their `resource_category`/`resource_categories` -- the shared
+    /// `fixture_world` predates both fields entirely
+    /// (`crates/core/tests/entity-prototype-fixtures.json` has no
+    /// `resource_categor` anywhere in it), so this sets them the same way
+    /// `test_world::world_with_oil`'s `categories` fixture and
+    /// `have.rs`'s `a_resource_category_the_character_does_not_mine_refuses_by_category`
+    /// already do for the same gap.
+    ///
+    /// Used, unmodified, as the base for BOTH the bare-ground and
+    /// ore-covered cases below, so the only difference between them is
+    /// whether ore actually sits on the ground -- not whether the category
+    /// data exists to judge it by.
+    fn drill_world() -> factorio_bot_core::factorio::world::FactorioWorld {
+        use factorio_bot_core::test_utils::fixture_world;
+
+        let world = fixture_world();
+        world
+            .entity_prototypes
+            .get_mut("iron-ore")
+            .expect("the fixture has an iron-ore prototype")
+            .resource_category = Some("basic-solid".to_string());
+        world
+            .entity_prototypes
+            .get_mut("electric-mining-drill")
+            .expect("the fixture has an electric-mining-drill prototype")
+            .resource_categories = Some(vec!["basic-solid".to_string()]);
+        world
+    }
+
+    /// **A drill over bare ground places perfectly and mines nothing.**
+    /// `MinerLine` is 13 `electric-mining-drill`s, so refusing a site with no
+    /// ore under any of them is not caution, it is the whole point of this
+    /// task.
+    ///
+    /// **Ore goes into the BASE world via `update_chunk_entities`, never
+    /// into the plan overlay via `PlanState::create_entity`.**
+    /// `covers_resource`/`resource_available` read `self.base.entity_graph`
+    /// only; `create_entity` writes solely into the overlay's `added` map,
+    /// which those two never consult (it exists for entities THIS plan
+    /// places, not for resources the map already has). An ore entity handed
+    /// to `create_entity` would be invisible to every check this test
+    /// exists to exercise, and the "ored" case below would refuse for
+    /// exactly the same reason as "bare" -- the opposite of a test that
+    /// would catch a wrong answer.
+    ///
+    /// **Ore at tile CENTRES**, as every real resource entity is
+    /// (`(-40.5, -48.5)`, never `(-41, -49)`) -- `FactorioEntity::new_resource`
+    /// is used rather than a bare `FactorioEntity { .. Default::default() }`
+    /// literal, because the latter leaves `entity_type` empty and
+    /// `EntityGraph::add` only routes an entity into the resource tree when
+    /// `entity_type == "resource"`; a default-typed entity would silently
+    /// land in the ordinary obstacle tree instead of being seen as ore at
+    /// all.
+    #[test]
+    fn a_drill_block_is_refused_on_bare_ground_and_accepted_over_ore() {
+        use crate::ids::BotId;
+        use std::sync::Arc;
+
+        let bp = Blueprint {
+            entities: vec![at_named(0.0, 0.0, "electric-mining-drill")],
+            version: 0,
+        };
+
+        let bare = PlanState::from_world(Arc::new(drill_world()), &[BotId(1)]);
+        assert!(
+            search_site(&bare, &bp, &Position::new(0.5, 0.5), 3).is_err(),
+            "a drill over no ore at all must be refused, not sited"
+        );
+
+        let ored_world = drill_world();
+        let mut ore = Vec::new();
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                ore.push(FactorioEntity::new_resource(
+                    &Position::new(2.5 + dx as f64, 2.5 + dy as f64),
+                    Direction::North,
+                    "iron-ore",
+                ));
+            }
+        }
+        ored_world
+            .update_chunk_entities(ore)
+            .expect("a fixture world accepts its own ore");
+        let ored = PlanState::from_world(Arc::new(ored_world), &[BotId(1)]);
+
+        let sited = search_site(&ored, &bp, &Position::new(0.5, 0.5), 6)
+            .expect("a drill must be sited onto the ore patch");
+        let area = ored
+            .collision_area_facing("electric-mining-drill", &sited, Direction::North)
+            .expect("the drill has a collision box");
+        assert!(
+            ored.covers_resource(&area, "iron-ore"),
+            "the chosen site {sited} does not cover ore"
+        );
+    }
+
+    /// **Ruling A's reason for existing, made concrete.** On the benchmark
+    /// map the nearest copper is 55 tiles from spawn while [`SEARCH_RADIUS`]
+    /// is 48: a drill block seeded at the world origin can never reach it --
+    /// the search exhausts its whole bound without the anchor ever landing
+    /// on ore. Ore placed here more than `SEARCH_RADIUS` from the origin
+    /// reproduces exactly that shape, so `resolve_site` under `Site::Anywhere`
+    /// only succeeds at all if it seeds `search_site` at the ore patch
+    /// itself, not at the origin.
+    #[test]
+    fn a_drill_block_anywhere_is_seeded_at_ore_the_origin_could_never_reach() {
+        use crate::ids::BotId;
+        use std::sync::Arc;
+
+        let bp = Blueprint {
+            entities: vec![at_named(0.0, 0.0, "electric-mining-drill")],
+            version: 0,
+        };
+
+        let world = drill_world();
+        // Centred well past SEARCH_RADIUS (48) from the origin in x alone --
+        // a search seeded at (0, 0) could not place even one ring on it.
+        let mut ore = Vec::new();
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                ore.push(FactorioEntity::new_resource(
+                    &Position::new(60.5 + dx as f64, 0.5 + dy as f64),
+                    Direction::North,
+                    "iron-ore",
+                ));
+            }
+        }
+        world
+            .update_chunk_entities(ore)
+            .expect("a fixture world accepts its own ore");
+        let state = PlanState::from_world(Arc::new(world), &[BotId(1)]);
+
+        let seed = nearest_ore_seed(&state, &bp).expect("the drill block has ore to seed from");
+        assert!(
+            calculate_distance(&Position::new(0.0, 0.0), &seed) > SEARCH_RADIUS as f64,
+            "the seed must be far enough from the origin that an origin-seeded \
+             search could never have reached it: {seed}"
+        );
+
+        let sited = resolve_site(&state, &bp, &Site::Anywhere)
+            .expect("seeding at the ore patch puts the far-away ore within reach");
+        let area = state
+            .collision_area_facing("electric-mining-drill", &sited, Direction::North)
+            .expect("the drill has a collision box");
+        assert!(
+            state.covers_resource(&area, "iron-ore"),
+            "the chosen site {sited} does not cover ore"
+        );
+    }
+
+    /// **Guardrail for `recover_anchor`'s `satisfied >= 2` floor.** A single
+    /// standing entity that happens to sit at one of this block's own offsets
+    /// must NOT be read as an anchor -- that is exactly the coincidence the
+    /// floor exists to refuse (see the doc on `recover_anchor` and
+    /// `the_anchor_satisfying_the_most_entities_wins` above, where an
+    /// unrelated single entity nearly won by default).
+    ///
+    /// If this test ever starts failing because recovery got demonstrably
+    /// BETTER -- some new, provably safe way to trust a single match -- that
+    /// is fine. If it fails because the threshold was simply lowered without
+    /// re-deriving the safety argument, the bug it prevents comes back: a
+    /// block with exactly one entity built would recover an anchor from a
+    /// stray match, and a genuinely one-entity block would get "confirmed"
+    /// rather than searched.
+    #[test]
+    fn one_standing_entity_is_not_enough_to_recover_an_anchor() {
+        let bp = Blueprint {
+            entities: vec![
+                at_named(0.0, 0.0, "stone-furnace"),
+                at_named(3.0, 0.0, "stone-furnace"),
+                at_named(6.0, 0.0, "stone-furnace"),
+                at_named(9.0, 0.0, "stone-furnace"),
+            ],
+            version: 0,
+        };
+        let mut state = test_state();
+        // Exactly ONE genuine entity of the block, standing at a real block
+        // offset (its first) -- not a decoy elsewhere, and nothing else on
+        // the ground.
+        state.create_entity(stone_furnace_at(20.5, 20.5));
+
+        assert!(
+            recover_anchor(&state, &bp).is_none(),
+            "one standing entity must not be trusted as an anchor: a lone \
+             match is exactly the shape of coincidence `satisfied >= 2` is \
+             meant to refuse, not merely risk losing a tie-break to"
+        );
+    }
+
+    /// **The regression test for Ruling A: siting is stable across a partial
+    /// build, from a seed that does not move.**
+    ///
+    /// `recover_anchor` cannot trust a block with exactly one entity built
+    /// (see the guardrail above), so that block falls straight back into
+    /// `search_site` on every replan. The search only answers the same way
+    /// twice if the seed it is handed is the same both times -- a roster
+    /// centroid moves as bots walk, which can re-order the rings and site the
+    /// SAME block a second time, silently, with no error and a production
+    /// curve that still rises. This resolves a site from a fixed seed, builds
+    /// ONE of the block's entities at it, and re-searches from the identical
+    /// seed: the anchor must not change, because placements only ever ADD
+    /// obstacles and `first_obstruction` treats this block's own
+    /// as-designed entities as clear ground rather than as something in its
+    /// own way.
+    #[test]
+    fn the_search_is_stable_across_a_partial_build() {
+        let bp = Blueprint {
+            entities: vec![
+                at_named(0.0, 0.0, "stone-furnace"),
+                at_named(3.0, 0.0, "stone-furnace"),
+                at_named(6.0, 0.0, "stone-furnace"),
+                at_named(9.0, 0.0, "stone-furnace"),
+            ],
+            version: 0,
+        };
+        // The stable seed Ruling A mandates for `Site::Anywhere`: the world
+        // origin, never the roster centroid.
+        let seed = Position::new(0.0, 0.0);
+        let mut state = test_state();
+
+        let first = search_site(&state, &bp, &seed, 30).expect("open ground exists");
+
+        // Build only the block's FIRST entity at the resolved anchor -- the
+        // exact one-entity window the guardrail above shows `recover_anchor`
+        // refuses to trust.
+        let e = &bp.entities[0];
+        let world = first.add(&e.offset);
+        state.create_entity(entity_for(&state, e, &world));
+        assert!(
+            recover_anchor(&state, &bp).is_none(),
+            "this test must exercise the SEARCH, not recovery -- one \
+             standing entity is still not enough to recover an anchor"
+        );
+
+        let second = search_site(&state, &bp, &seed, 30).expect("still sites the same block");
+        assert_eq!(
+            Pos::from(&first),
+            Pos::from(&second),
+            "a partial build must not move the site: a stable seed plus a \
+             monotonic obstacle set means the same anchor wins every time"
+        );
+    }
+
+    /// **The regression test for this entire sub-project.** `resolve_site` is
+    /// what `expand` actually calls, end to end -- recovery first, then the
+    /// `Site` match -- for a goal whose caller asked for `Site::Anywhere` and
+    /// gave no anchor at all. A block with exactly one entity built is
+    /// exactly the window `recover_anchor` refuses to trust (see the
+    /// guardrail above), so this exercises the real risk: if the seed
+    /// `resolve_site` hands to `search_site` moved between the two calls (a
+    /// roster centroid, say, which walks as bots do), the second call could
+    /// re-order the search rings and site the SAME block a second time, with
+    /// no error and a production curve that still rises.
+    #[test]
+    fn a_replan_after_partial_construction_keeps_the_same_site() {
+        let bp = Blueprint {
+            entities: vec![
+                at_named(0.0, 0.0, "stone-furnace"),
+                at_named(3.0, 0.0, "stone-furnace"),
+                at_named(6.0, 0.0, "stone-furnace"),
+                at_named(9.0, 0.0, "stone-furnace"),
+            ],
+            version: 0,
+        };
+        let mut state = test_state();
+        let site = Site::Anywhere;
+
+        let first = resolve_site(&state, &bp, &site).expect("a first site exists");
+
+        // Build one entity of the block, as a real run would, then replan.
+        let e = &bp.entities[0];
+        let world = first.add(&e.offset);
+        state.create_entity(entity_for(&state, e, &world));
+        assert!(
+            recover_anchor(&state, &bp).is_none(),
+            "this must exercise resolve_site's SEARCH path on the second \
+             call, not recovery -- one standing entity is still not enough \
+             to recover an anchor"
+        );
+
+        // The roster walks, between the two expansions, to somewhere far
+        // from where it started. This is the whole point of the test: a
+        // `roster_centroid` seed would move with the bot and could re-order
+        // the search rings on the second call. `test_state` seats exactly
+        // `BotId(1)`, so moving it is moving the whole roster.
+        use crate::ids::BotId;
+        state.set_position(BotId(1), Position::new(500.0, 500.0));
+
+        let second = resolve_site(&state, &bp, &site).expect("a second site exists");
+
+        assert_eq!(
+            Pos::from(&first),
+            Pos::from(&second),
+            "a partly-built block must not be re-sited: that builds it twice, in two places"
+        );
+    }
+
     /// Bands are balanced by ENTITY COUNT, not by area: a block whose entities
     /// bunch at one end must still divide into equal work, or one bot builds
     /// while three watch.
@@ -498,7 +1435,7 @@ mod tests {
         );
         let goal = Goal::Built {
             blueprint,
-            anchor: Position::new(0.0, 0.0),
+            site: Site::At(Position::new(0.0, 0.0)),
         };
 
         let steps = BuildBlock
@@ -595,7 +1532,7 @@ mod tests {
         );
         let goal = Goal::Built {
             blueprint,
-            anchor: Position::new(0.0, 0.0),
+            site: Site::At(Position::new(0.0, 0.0)),
         };
 
         let steps = BuildBlock
@@ -777,7 +1714,10 @@ mod tests {
         // And the goal it belongs to no longer plans as if the block were
         // finished. Before this fix `expand` returned Ok(vec![]) here -- the
         // exact silent freeze.
-        let goal = Goal::Built { blueprint, anchor };
+        let goal = Goal::Built {
+            blueprint,
+            site: Site::At(anchor),
+        };
         let err = BuildBlock
             .expand(&goal, &mut ctx)
             .expect_err("a wrong-facing entity is not silently accepted");
@@ -865,7 +1805,10 @@ mod tests {
             ..Default::default()
         });
 
-        let goal = Goal::Built { blueprint, anchor };
+        let goal = Goal::Built {
+            blueprint,
+            site: Site::At(anchor),
+        };
         let err = BuildBlock
             .expand(&goal, &mut ctx)
             .expect_err("occupied ground is refused before anything is emitted");
@@ -913,7 +1856,10 @@ mod tests {
             BotId(1),
         );
 
-        let goal = Goal::Built { blueprint, anchor };
+        let goal = Goal::Built {
+            blueprint,
+            site: Site::At(anchor),
+        };
         let err = BuildBlock
             .expand(&goal, &mut ctx)
             .expect_err("a bot standing on the footprint refuses the block");
@@ -952,7 +1898,10 @@ mod tests {
             ctx.state.create_entity(entity);
         }
 
-        let goal = Goal::Built { blueprint, anchor };
+        let goal = Goal::Built {
+            blueprint,
+            site: Site::At(anchor),
+        };
         let steps = BuildBlock
             .expand(&goal, &mut ctx)
             .expect("a fully-standing block plans cleanly");
@@ -1033,7 +1982,7 @@ mod tests {
 
         let goal = Goal::Built {
             blueprint,
-            anchor: Position::new(30.0, 30.0),
+            site: Site::At(Position::new(30.0, 30.0)),
         };
 
         let net = expand(&[goal], &state, &registry_for(&bots), BotId(1))

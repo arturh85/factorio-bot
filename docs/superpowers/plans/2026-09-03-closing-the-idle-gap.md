@@ -220,6 +220,184 @@ three bots one extra iron furnace (three actions) reorders bot 3's ready
 work and its `take 10 copper-ore from the wooden-chest` moves from 8,860 to
 13,473 with no furnace of its involved.
 
+## EXPLORATION: the map is far richer than the model, and walking may not reveal it
+
+Built as `Goal::Charted { around, radius }` → `method::scout::Scout` →
+`ActionKind::Survey` (branch `bots-that-chart`, `7388202a`, not merged):
+square Chebyshev rings walked nearest-first, no new mod verb.
+
+**"Charted" is the wrong word for what this project does, and it has misled
+both sessions.** Nothing in any run is ever charted: `force.is_chunk_charted`
+is false everywhere, including under a character's own feet. The model's
+resources are **ingested from `on_chunk_generated`**, so what it knows is
+what the game has *generated*, not what anyone has seen. The other session
+withdrew a claim of its own on this basis — "copper's nearest charted tile
+is 55 tiles" was really the nearest *ingested* tile — and the correction
+matters because the two words point at different APIs.
+
+**What the model cannot see.** At t=0 on seed 31337 there are **400 chunks
+generated and zero charted**, and the model's 2,255 resource tiles all come
+from generation. Against the map within ±672:
+
+| | t=0 model | actually there |
+|---|---:|---:|
+| iron / copper / coal / stone | 940 / 462 / 466 / 387 | 3,658 / 2,712 / 1,887 / 1,920 |
+| **crude oil** | **0** | **43** |
+| **uranium / enemy structures** | **0 / 0** | **559 / 154** |
+
+**Nearest crude oil is 372.5 tiles away; the nearest nest is 244.6.** So oil
+lies *beyond* the nest-free radius, and "avoid nests early" and "reach oil"
+are in tension — reaching the first oil means routing past nests, not
+merely away from them. That is a fact the defence lane and the oil lane both
+have to plan around, and it was not knowable before tonight.
+
+**The load-bearing constant, measured rather than assumed:** a character on
+empty ground generates a **9×9 chunk block centred on it**, so reveal is
+±128 tiles and the lattice pitch is **256**, eight times coarser than the
+agent had assumed. On that pitch, ring 1 reaches past the oil in **1:37 of
+four-bot time**. Exploration is cheap; radar is not needed for the first oil.
+
+**SETTLED (`64a63253`): exploration is a mod-side capability, not a walking
+one.** A bot **cannot walk to ungenerated ground at all** — `rcon.move`
+refuses with `failed to path find` for every target past the generated edge
+(x=100 and 200 reached; 300, 400, 440, 480, 560, 600 all refused). The
+earlier ring only ever walked over ground the model already had, which is
+exactly why its census did not move. Generation is **placement-driven**,
+measured in one sequence on one server: baseline 400 chunks, frontier 320;
+spawning a character changes nothing; **teleporting one to (1500, 0) →
+481 chunks, frontier 1632**; **`request_to_generate_chunks` at (3000, 0) →
+683 chunks, frontier 3200**, with no character near it.
+
+So the planner primitive is unaffected and still right — it decides *where*
+to look, nearest-first, avoiding nests, at the correct cost — but it cannot
+make the ground exist. The next step is a mod verb wrapping
+`request_to_generate_chunks` plus one RCON binding, and **no planner work**.
+Radar is now more attractive than it looked, being the only mechanism that
+works today with no new mod surface. Its free-vision honesty needs its own
+look, bounded by the measured ±128 reveal radius.
+
+One methodological trap recorded with it: the mod's raw
+`action_start_walk_waypoints` **does not path**, so a bot dispatched
+straight at (600, 0) walks into the first obstacle and stops at x=63.7 —
+which would have read as "walking generates nothing" for entirely the wrong
+reason.
+
+**The earlier negative result, now explained.** A live four-bot run walked a
+full ring to ±256 and **the census did not move by a single tile** —
+466/462/940/387 before and after. Walking may not push the
+generation frontier at all; the 81-chunk block followed *placement or
+teleport* into virgin ground, not walking. `force.is_chunk_charted` is false
+everywhere, including under a character's own feet: a server-side character
+charts nothing, and the model learns by generation. **The planner primitive
+is proven; the step from plan to new knowledge is not.** The open question
+is one run watching `surface.get_chunks()` while a bot walks outward, to
+separate "walking generates nothing" from "the ring landed in already
+generated ground". The alternatives are a mod-side `request_to_generate_chunks`
+or radar.
+
+Two bugs the build found in itself: skipping a cell on its **centre tile**
+skipped the one cell whose reveal contains the oil, so the spiral could
+never have found what it exists to find; and `holds` and `Scout` disagreed,
+so `charted:0:0:256` read as already satisfied with all eight ring-1 cells
+unvisited and planned nothing, silently. Threat avoidance — a 50-tile
+stand-off, refusing rather than returning an empty plan — is the **first
+non-test caller of the threat index**, which had none.
+
+## ✅ A CLAIM SPENT A WHOLE ORE TILE, FOREVER (`e430c015`)
+
+Why goals that planned with two bots refused with four — the default roster.
+Instrumented at the refusal itself: **940 tiles, 324 claimed, 616 crowded by
+`mining_tile_separation`, zero free, and 522,467 ore physically present**
+with six wanted. A mining claim spent a whole tile permanently, whoever made
+it and however little it took, and shares are per-bot, so a roster of *n*
+burned *n* tiles per shortfall. Adding a bot never made a share harder; it
+made one more claim, one shortfall earlier. **Wrong, not badly worded** — a
+better message would have been a better-worded mistake.
+
+The fix lets a runner draw again from **its own** claim, against what is
+left, where the world states the tile's amount. Provably safe by the
+argument `MiningClaim` already makes for crowding: a bot runs one action at
+a time, so two draws by one runner are disjoint whatever the schedule turns
+out to be. Every *other* runner is still refused, so the defect exclusivity
+existed for is untouched, and where the game never reported an amount the
+old rule stands verbatim — which is why every hand-built fixture is unmoved.
+
+| goal, four bots | before | after |
+|---|---|---|
+| `researched:automation` | 176 / 21,776 | 176 / 21,784 *(+8 ticks)* |
+| `producing:automation-science-pack:6` | 324 / 26,990 | 324 / **22,547 (−16%)** |
+| `producing:logistic-science-pack:6` | 569 / 52,819 | 451 / **48,829** |
+| `researched:engine`, `automation-2`, `fluid-handling`, `have:storage-tank:1` | **all refused** | **all plan** |
+
+Eight bots, checked before merging because the ladder uses them: all three
+standard goals still plan in seconds and all three makespans improve;
+green costs +53% planning wall time (3.3 s → 5.0 s) for a 5% shorter plan,
+which is a trade worth making at five seconds and would not be at five
+minutes.
+
+Two debits, neither rounded away. Automation is 8 ticks slower. The one-bot
+pumpjack is 7,160 ticks slower on 69 *fewer* actions — understood, not
+merely observed: the bot's own work got 579 ticks cheaper, and the whole
+regression is **+7,739 ticks of idle**, because fewer distinct claimed tiles
+means fewer furnace sites (31 → 26) so more batches queue behind each, and
+machine time for a lone bot is simply waiting. It reverses at three bots.
+
+Both debits point at the same unfixed thing: **furnace count is an accident
+of how many sites the ore ledger happened to hand out**, because a smelt
+builds its own furnace rather than queueing deliberately. That is also the
+four-bot cliff the fix exposes one layer deeper (`no ground for another
+furnace within 12 tiles`, with a three-bot plan placing **75 stone
+furnaces**). Furnace reuse wants its own task; raising the search radius is
+not the fix, since `PLANT_ADOPT_RADIUS` derives from it.
+
+## ✅✅✅ RUN 19: GREEN IN 13:29 (`run-1788647791-64290`) — best on every measure
+
+2026-09-06 00:50, master `80b048b5`, four clients at 1x, seed 31337 `--new`,
+**launched at load 0.82/6.87 on a floor the other session cleared and my own
+agents held**. 100% tick delivery, planning excluded (40.4 s, clock stopped).
+
+| | run 14 | run 17 | **run 19** |
+|---|---|---|---|
+| green cell | 17:20 | 14:26 | **13:29** (48,587) |
+| green witness | 18:00 | 15:02 | **14:07** |
+| plan | 569 / 57,752 | 569 / 52,819 | **452 / 49,050** |
+| executed / planned | 1.046 | 0.984 | **0.991** |
+| fleet utilisation | 60.9% | 69.5% | **67.4%** |
+| failed / lost / failed walks | 1 walk | 0 | **0 / 0 / 0 of 396** |
+| iron plate /min at 5 / 10 | 32 / 57 | 40 / 73 | **51 / 65** |
+| red packs /min at 10 | 8 | 17 | **17** |
+| ore drilled vs hand-mined | — | — | **551 / 273 (66.9%)**, six drills |
+
+Fresh-world green: 64:22 → … → 20:59 → 17:20 → 18:46 → 15:19 → 14:26 →
+**13:29**. Automation's record is 6:05.
+
+**The drill numbers came out exactly as the offline plan predicted** — 551
+drilled against a planned ~553, hand bill 273 against a planned 273 — which
+is the per-machine counters and the drain-policy planner agreeing to within
+two items on a measurement neither could make a week ago.
+
+The plateau is unchanged and remains the whole remaining story: rates read
+`roster-fed; no generator until 6:37`, and production still stops at the
+plan's bill. What changed tonight is that the plan is smaller, honest, and
+executed to within 0.9%.
+
+## ✖ RUN 18 VOID — my own load rule, broken by me
+
+2026-09-06 00:13. Launched a four-client 1x green run at load **14.8**, an
+hour after telling every agent that a Factorio run waits for load below 6
+because a starved server makes a bad measurement. Load reached **93** while
+other agents compiled; all four clients failed to appear and the connect
+wait gave up with `0/4 have a character`. The run continued with a one-bot
+roster — the documented trap in `CLAUDE.md`, a *different plan* that is
+comparable to nothing — and was killed rather than allowed to produce a
+number.
+
+Nothing was lost but time, and the rule stands as written; I simply did not
+apply it to myself. The correction is procedural: **before a measured run,
+ask the other sessions and agents to hold builds, and confirm the box is
+quiet — do not merely glance at the load average**, which lags. Green at 1x
+on the drain-policy planner is still unmeasured.
+
 ## ✅ AUTOMATION: 6:05 ON RELEASE (`run-1788641738-65147`) — a new record, and the plan was right
 
 `just bench automation_speedrun.lua`, 2026-09-05 23:01, master `185faa11`,
@@ -554,7 +732,15 @@ evidence in this record rather than by preference.
    one, and **before today the goal could not have been checked honestly at
    all**. Goal kind and verification are built together or it passes while
    roster-fed.
-2. **Exploration.** The bots chart nothing. This record already warns that
+2. **Exploration, as a square spiral** (owner, 2026-09-06). A character
+   reveals ground as it walks, so exploring *is* a walk pattern: Chebyshev
+   rings, which tile the plane exactly where circles cannot; a lattice of
+   standing points spaced by the **measured** reveal radius rather than an
+   assumed one; already-charted cells skipped; rings split across the
+   roster; and a predicate to stop on, since exploring is nearly always in
+   service of finding one thing. Nearest-first ordering falls out for free,
+   which is what we want — the first oil found is the nearest oil. The bots
+   chart nothing today. This record already warns that
    measured distances are what has been *seen*, not what exists; oil is the
    immediate victim, since a pumpjack cannot be planned onto a patch nobody
    has looked at, and block siting and any non-spawn map are the others.
@@ -564,11 +750,30 @@ evidence in this record rather than by preference.
    self-expanding solar need generation reasoned against demand as both
    grow, and a network extended rather than replaced. Today it is a
    `Powered` condition and a supply lookup.
-4. **Defence, which nobody had named.** Production makes pollution,
-   pollution brings biters, and every run so far ends before that matters. A
-   factory that expands itself does not have that luxury. Bot deaths are
-   handled in the mod; nothing decides to *prevent* them. It is also what
-   the companion and enemy use cases need most.
+4. **Threat, which nobody had named — and the near threat is walking, not
+   pollution.** Surveyed 2026-09-06: bots have already walked **156 tiles**
+   from spawn, the nearest enemy structure on seed 31337 is **253–520 tiles**
+   out, and a spawner calls for help within 50. Exploration, item 2, is
+   actively trying to close that gap. Pollution reaches nothing at today's
+   scale: the largest factory any run built averages **~38 pollution units a
+   minute** (range 25–60) against the **500–1,500 sustained for 45–90
+   minutes** needed to provoke a nest eight chunks out — which is precisely
+   the regime items 1 and 3 create. Evolution stays under 0.2 meanwhile, so
+   small biters only: the cheapest possible time to learn. Bot deaths are
+   handled in the mod; nothing decides to *prevent* them, and it is what the
+   companion and enemy use cases need most.
+
+   **Owner, 2026-09-06: arm the bots later; early game, avoid nests.** That
+   is nearly free — `EntityGraph.threats` already stores spawners and worms
+   and round-trips through the dump, and `threats_from`, `nearest_threat`
+   and `threat_census` have **zero non-test callers**. Perception exists;
+   nothing consults it. Avoidance is therefore folded into the exploration
+   work as its first caller: the lattice skips cells within a stand-off of a
+   known threat, a nest found mid-spiral excludes ground behind it before a
+   bot walks there, and a skipped cell is an event so refused ground is
+   visible rather than looking like the spiral stopped. Combat — shotguns,
+   grenades, turrets, ammunition — is deferred until avoidance is shown to
+   be insufficient, and that demonstration is the argument for it.
 
 Explicitly deferred: making runs continuous and event-driven. It is the
 right long-term shape for a companion bot and it changes the execution model
@@ -577,13 +782,18 @@ current batch model first.
 
 ## THE MISSING FIFTH GOAL KIND: nothing means "keep this true"
 
-Named by the `second` session, 2026-09-05, and it is the cause of which the
-plateau is the symptom. The goal vocabulary is `Have`, `Researched`,
-`Produced` and `Built`, and **all four are one-shot**. Nothing in it means
-*keep this true*, so no plan ever expands capacity, and every run's output
-stops at precisely the bill its plan was written for. Every finding in this
-record about production plateauing, hand-fed cells and roster-fed curves is
-that one absence seen from a different angle.
+Named by the `second` session, 2026-09-05, and **sharpened by checking it**:
+the vocabulary is six kinds, not four — `Have`, `Researched`, `Produced`,
+`Producing`, `Extracted`, `Built` — and `Producing { item, per_minute }`
+**is** a rate. It is satisfied *structurally*: `holds_producing` answers
+yes when enough drills stand on the right ore delivering into furnaces, and
+its own doc admits it says yes for a cell whose fuel ran out, whose output
+backed up, or whose patch is exhausted.
+
+So the gap is real but is not "no rate goal exists". It is that **capacity
+has never been what failed here** — supply has, and nothing observes a
+window of history. Every finding in this record about plateaus, hand-fed
+cells and roster-fed curves is that absence seen from a different angle.
 
 This is a fifth goal kind, not a repair to an existing one, and it is what
 makes a self-feeding factory expressible at all. Not taken tonight; it wants
@@ -2846,7 +3056,7 @@ infrastructure for a 3h17m game, not a harder milestone.
 | red science producing **once** | never observed | witnessed six times, all inside 780 ticks |
 | red science producing **at a rate** | impossible to claim | **5 packs in 3,240 ticks (~5.5/min)**, twice |
 | green science, planning | did not expand at all | plans end to end |
-| green science, live | never run | **WITNESSED thirteen times** — fresh world **14:26 / 15:02** (`run-1788635061-85457`), one 569-step plan, zero failures, 69.5% utilisation, executed/planned 0.984; 64:22 → … → 15:19 → 14:26 |
+| green science, live | never run | **WITNESSED fourteen times** — fresh world **13:29 / 14:07** (`run-1788647791-64290`), one 452-step plan, zero failures, executed/planned 0.991, 67% of ore drilled; 64:22 → … → 14:26 → 13:29 |
 | furnaces per run | 42 | **8** |
 | recovery (`obs:recover`) | never executed in any run | **fires live** |
 

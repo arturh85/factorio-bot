@@ -2352,6 +2352,29 @@
             "$ref": "#/components/schemas/Position",
             "description": "As the game reports it. A tile centre stays `-40.5`; nothing rounds."
           },
+          "produced": {
+            "description": "**This machine's lifetime item count** -- the number the rate work\nneeds, and the one thing that turns \"who made this output\" from an\ninference into arithmetic: between two samples, what each machine\nproduced is the difference of this field.\n\n**Items, not crafts.** A `copper-cable` craft yields two, so an\nassembler with `products_finished: 3` reports `produced: 6`. Both are\nhere on purpose; summing `products_finished` against\n`production.made` would be short by half for every recipe with a yield\nabove one and would read as lost output.\n\n`None` for a machine that makes no items (a lab, a boiler, a steam\nengine, a chest) and for a producer whose count cannot be obtained (a\npumpjack on an infinite resource). [`Self::produced_source`] says\nwhich, always.",
+            "format": "int64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "produced_shared": {
+            "description": "Set when this drill shared the resource tile it was credited for with\nanother tracked drill in the same tick. Both drills saw the same fall\nand both took credit, so their individual counts are upper bounds and\ntheir sum double-counts. Absent when that never happened.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "produced_source": {
+            "description": "How [`Self::produced`] was obtained, so that nobody reads an\naccumulated number as an exact one:\n\n* `game` -- `products_finished` times the recipe's yield. The game\n  counted it.\n* `accumulated` -- the mod counted it, per tick, from the fall in the\n  `amount` of the resource a mining drill is pointed at. Factorio\n  offers a drill no lifetime counter, no progress attribute and no\n  mined event, so there is nothing else to count with. Exact for a\n  drill alone on a finite patch; an upper bound when two drills share a\n  tile, which [`Self::produced_shared`] flags; a lower bound under\n  mining productivity research, which no run of this project has done.\n* `unavailable` -- a producer whose output this mechanism cannot see:\n  an infinite resource never falls. Reported rather than written as\n  zero, which would read as \"produced nothing\".\n* `not-a-producer` -- a lab, boiler, generator or chest. Said in the\n  row rather than by omitting a key, because an absent key cannot tell\n  \"makes nothing\" from \"the counter is missing\".\n\n`None` only for a run archived before per-machine counters existed.\nThat is the honest reading of an old archive and the one\n`tools/run_analysis.py` falls back on.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "products_finished": {
             "description": "`products_finished`: lifetime completed crafts. The blunt instrument,\nand often the fastest one -- an assembler still reporting `0` after\ntwenty minutes did not produce, whatever else its row says. Absent on a\nnon-crafting machine.",
             "format": "int64",

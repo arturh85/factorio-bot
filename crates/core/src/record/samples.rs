@@ -279,6 +279,53 @@ pub struct MachineSample {
     /// non-crafting machine.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub products_finished: Option<u64>,
+    /// **This machine's lifetime item count** -- the number the rate work
+    /// needs, and the one thing that turns "who made this output" from an
+    /// inference into arithmetic: between two samples, what each machine
+    /// produced is the difference of this field.
+    ///
+    /// **Items, not crafts.** A `copper-cable` craft yields two, so an
+    /// assembler with `products_finished: 3` reports `produced: 6`. Both are
+    /// here on purpose; summing `products_finished` against
+    /// `production.made` would be short by half for every recipe with a yield
+    /// above one and would read as lost output.
+    ///
+    /// `None` for a machine that makes no items (a lab, a boiler, a steam
+    /// engine, a chest) and for a producer whose count cannot be obtained (a
+    /// pumpjack on an infinite resource). [`Self::produced_source`] says
+    /// which, always.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub produced: Option<u64>,
+    /// How [`Self::produced`] was obtained, so that nobody reads an
+    /// accumulated number as an exact one:
+    ///
+    /// * `game` -- `products_finished` times the recipe's yield. The game
+    ///   counted it.
+    /// * `accumulated` -- the mod counted it, per tick, from the fall in the
+    ///   `amount` of the resource a mining drill is pointed at. Factorio
+    ///   offers a drill no lifetime counter, no progress attribute and no
+    ///   mined event, so there is nothing else to count with. Exact for a
+    ///   drill alone on a finite patch; an upper bound when two drills share a
+    ///   tile, which [`Self::produced_shared`] flags; a lower bound under
+    ///   mining productivity research, which no run of this project has done.
+    /// * `unavailable` -- a producer whose output this mechanism cannot see:
+    ///   an infinite resource never falls. Reported rather than written as
+    ///   zero, which would read as "produced nothing".
+    /// * `not-a-producer` -- a lab, boiler, generator or chest. Said in the
+    ///   row rather than by omitting a key, because an absent key cannot tell
+    ///   "makes nothing" from "the counter is missing".
+    ///
+    /// `None` only for a run archived before per-machine counters existed.
+    /// That is the honest reading of an old archive and the one
+    /// `tools/run_analysis.py` falls back on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub produced_source: Option<String>,
+    /// Set when this drill shared the resource tile it was credited for with
+    /// another tracked drill in the same tick. Both drills saw the same fall
+    /// and both took credit, so their individual counts are upper bounds and
+    /// their sum double-counts. Absent when that never happened.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub produced_shared: Option<bool>,
     /// For a mining drill, the resource it is mining. Absent for every other
     /// type, and absent for a drill over nothing -- which is what separates
     /// `no_minable_resources` on a depleted patch from a drill that was never
@@ -772,6 +819,46 @@ mod tests {
         assert_eq!(furnace.status.as_deref(), Some("no_fuel"));
         assert!(furnace.fuel.is_empty());
         assert_eq!(furnace.output["iron-plate"], 3);
+        // This line predates per-machine counters, and reads as such: `None`
+        // is "this archive cannot say", never "produced nothing".
+        assert_eq!(asm.produced, None);
+        assert_eq!(asm.produced_source, None);
+    }
+
+    /// The counters as the mod writes them today: a furnace counted by the
+    /// game, a drill the mod accumulated, and a lab that declares it makes no
+    /// items at all rather than leaving a reader to guess from a missing key.
+    #[test]
+    fn a_machines_sample_carries_per_machine_production() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write(
+            tmp.path(),
+            &[
+                r#"{"kind":"machines","schema":2,"tick":61500,"run":"r1","truncated":0,"machines":{"77":{"name":"stone-furnace","type":"furnace","position":{"x":-58.0,"y":13.0},"recipe":"iron-plate","products_finished":12,"produced":12,"produced_source":"game"},"91":{"name":"burner-mining-drill","type":"mining-drill","position":{"x":-13.0,"y":-14.0},"mining":"iron-ore","produced":48,"produced_source":"accumulated","produced_shared":true},"95":{"name":"lab","type":"lab","position":{"x":2.0,"y":2.0},"produced_source":"not-a-producer"}}}"#,
+            ],
+        );
+        let read = read_samples(&path).unwrap();
+        let SampleKind::Machines { machines, .. } = &read.samples[0].kind else {
+            panic!("expected a machines sample");
+        };
+
+        let furnace = &machines["77"];
+        assert_eq!(furnace.produced, Some(12));
+        assert_eq!(furnace.produced_source.as_deref(), Some("game"));
+
+        // A drill has no game counter of any kind, so its number is the mod's
+        // own accumulation -- and this one is flagged as sharing its tile,
+        // which makes it an upper bound rather than a count.
+        let drill = &machines["91"];
+        assert_eq!(drill.produced, Some(48));
+        assert_eq!(drill.produced_source.as_deref(), Some("accumulated"));
+        assert_eq!(drill.produced_shared, Some(true));
+
+        // A lab makes research, not items. It says so; it does not report 0,
+        // which would join the arithmetic as a producer that made nothing.
+        let lab = &machines["95"];
+        assert_eq!(lab.produced, None);
+        assert_eq!(lab.produced_source.as_deref(), Some("not-a-producer"));
     }
 
     #[test]

@@ -1099,6 +1099,11 @@ const SCHEMAS: Record<string, SchemaContract> = {
         crafting: {required: false, type: 'boolean', nullable: true},
         progress: {required: false, type: 'number', nullable: true},
         products_finished: {required: false, type: 'integer', nullable: true},
+        // Items, not crafts -- and `produced_source` is what stops an
+        // accumulated number being read as an exact one.
+        produced: {required: false, type: 'integer', nullable: true},
+        produced_source: {required: false, type: 'string', nullable: true},
+        produced_shared: {required: false, type: 'boolean', nullable: true},
         mining: {required: false, type: 'string', nullable: true},
         // The three inventories are `required: false` for the same reason
         // `PowerSample.networks` is: the *mod* omits an empty one to save

@@ -1213,6 +1213,12 @@ end
 
 function on_tick(event)
 	poll_character_bots(event.tick)
+	-- Per tick, and it has to be: a mining drill's output is only visible as
+	-- the fall in the `amount` of the tile it is working, and that tile is
+	-- destroyed when it empties. On the 300-tick sample beat the fall would be
+	-- read across tile changes and be wrong in both directions. Returns
+	-- immediately unless a sampling session is open. See `track_mining_drills`.
+	track_mining_drills(event.tick)
 	-- `client_local_data` used to be built here, and only here. It is
 	-- initialised at its declaration now; see the comment there for why. Do
 	-- not restore a lazy init: it would read as necessary and put the ordering
@@ -2395,6 +2401,330 @@ local function nonempty_counts(counts)
 	return counts
 end
 
+-- The key a machine is filed under, in the sample map and in
+-- `storage.machine_output`. `unit_number` is nil for a handful of entity
+-- kinds; none of the sampled types is one of them, but a key collision would
+-- silently drop a machine (or merge two machines' lifetime counters), so the
+-- fallback is a position that cannot collide rather than a guess.
+local function machine_key(entity)
+	local key = entity.unit_number
+	if key == nil then
+		key = entity.name .. "@" .. entity.position.x .. "," .. entity.position.y
+	end
+	return tostring(key)
+end
+
+-- Items one completed craft of `recipe` yields.
+--
+-- `products_finished` counts **crafts**, not items, and the two differ for
+-- every recipe with a yield above one -- `copper-cable` is 2. A run that
+-- summed `products_finished` and compared it to `production.made` for cables
+-- would be short by half and look like a lost-output bug.
+--
+-- The main product when the prototype names one, else the sum over products:
+-- no recipe this project plans has more than one product, and summing is the
+-- honest fallback rather than picking the first arbitrarily. `amount` is nil
+-- for a ranged product, where the midpoint is the only defensible guess and
+-- the result stops being exact -- said here rather than hidden.
+local function recipe_yield(recipe)
+	if recipe == nil then
+		return 1
+	end
+	local function amount_of(product)
+		if product.amount ~= nil then
+			return product.amount
+		end
+		if product.amount_min ~= nil and product.amount_max ~= nil then
+			return (product.amount_min + product.amount_max) / 2
+		end
+		return 1
+	end
+	local prototype = recipe.prototype
+	if prototype ~= nil and prototype.main_product ~= nil then
+		return amount_of(prototype.main_product)
+	end
+	local total = 0
+	for _, product in pairs(recipe.products or {}) do
+		total = total + amount_of(product)
+	end
+	if total <= 0 then
+		return 1
+	end
+	return total
+end
+
+-- Lifetime per-machine item counts.
+--
+-- `storage.machine_output[key] = { produced = <items>, crafts = <last
+-- products_finished>, target = <resource unit_number>, amount = <that
+-- resource's last seen amount> }`. Not cleared by `sampling_start`: the count
+-- is the machine's lifetime, and an interval's production is the difference
+-- between two samples, which the analysis takes. It IS cleared by
+-- `session_reset`, alongside every other cross-run leftover.
+local function machine_output_state(key)
+	storage.machine_output = storage.machine_output or {}
+	local state = storage.machine_output[key]
+	if state == nil then
+		state = { produced = 0 }
+		storage.machine_output[key] = state
+	end
+	return state
+end
+
+-- A crafting machine's lifetime item count, from the game's own craft counter.
+--
+-- Read on the machine-sample beat rather than per tick, which is sound because
+-- `products_finished` is monotonic and never resets: the only thing a coarser
+-- beat costs is the assumption that the recipe did not change *within* one
+-- 300-tick window, and a recipe change is a deliberate `set_recipe` action.
+--
+-- A machine first seen with a non-zero counter (a resumed savepoint, or a
+-- placement more than one beat before the first sample) has its whole backlog
+-- credited to the recipe it is set to now. That is the only attribution
+-- available and it is stated here rather than assumed away.
+local function crafting_machine_produced(entity, key, finished, recipe)
+	local state = machine_output_state(key)
+	local previous = state.crafts or 0
+	if finished > previous then
+		state.produced = state.produced + (finished - previous) * recipe_yield(recipe)
+	end
+	-- Never below: `products_finished` cannot fall, and if a Factorio version
+	-- ever made it, re-basing without crediting anything is the safe answer.
+	state.crafts = finished
+	return state.produced
+end
+
+-- How often the tracked-drill registry is rebuilt, in ticks.
+--
+-- The accumulator below has to run every tick (see `track_mining_drills`), but
+-- *finding* the drills does not: a `find_entities_filtered` per tick over a
+-- charted surface is a different order of cost from a dozen attribute reads.
+-- One second is the window in which a freshly placed drill is untracked, and
+-- it cannot cost an item: a burner drill mines 0.25 items/s and a drill mines
+-- nothing at all until a bot has fuelled or powered it, which is a later
+-- action than placing it.
+local DRILL_REGISTRY_REFRESH = 60
+
+-- The identity of a resource tile.
+--
+-- **`unit_number` is nil on a resource entity** -- measured against a live
+-- 2.1.17 server, not assumed: `d.mining_target.unit_number` comes back nil
+-- while `.amount` reads 290. The first version of this accumulator keyed the
+-- drill's target by `unit_number` and therefore never credited a single item;
+-- it reported 0 for a drill that had just mined 133 iron ore, and every stub
+-- test passed because the fixture gave its resource a unit number the game
+-- does not.
+--
+-- Position is the identity that exists. Resources sit at tile centres and one
+-- tile holds one resource entity, so `name@x,y` cannot collide.
+local function resource_key(resource)
+	return resource.name .. "@" .. resource.position.x .. "," .. resource.position.y
+end
+
+-- Every resource tile in a drill's reach, and its amount, recorded once when
+-- the drill is first tracked.
+--
+-- **This is what the accumulator watches -- not the drill's `mining_target`.**
+-- Three live measurements got it here, each one a smaller error than the last:
+--
+--   1. Keyed on `mining_target.unit_number`: 0 counted against 133 mined,
+--      because a resource entity has no unit number.
+--   2. Keyed on the target's position, compared against last tick's target:
+--      120 of 133. A drill works several tiles and switches between them, and
+--      each switch discards the item mined at the switch.
+--   3. Per-tile memory plus a primed baseline, still reading only the current
+--      target: 130 of 133. A drill can mine a tile and turn away in the same
+--      tick, so that tile's last item is unseen until it is pointed at again
+--      -- and if the drill stops for good (no fuel), it never is. One item per
+--      tile in the area, permanently, exactly the three that were missing.
+--
+-- Reading every tile in the area instead costs four attribute reads per drill
+-- per tick rather than one, on a set fixed at registration (a burner drill
+-- covers 4 tiles, the biggest 25) -- against a mod that already walks every
+-- bot's whole inventory every tick. It leaves nothing in flight.
+--
+-- One query per drill, once (`primed`), not per tick: the entity references
+-- are kept, so the per-tick work is `resource.amount` and nothing else.
+local function prime_drill_amounts(entity, key)
+	local state = machine_output_state(key)
+	if state.primed then
+		return
+	end
+	state.primed = true
+	state.amounts = state.amounts or {}
+	state.tiles = {}
+	local area = entity.mining_area
+	if area == nil then
+		return
+	end
+	for _, resource in pairs(entity.surface.find_entities_filtered({
+		area = area, type = "resource",
+	})) do
+		if resource.valid then
+			local tile = resource_key(resource)
+			state.tiles[tile] = resource
+			state.amounts[tile] = resource.amount
+		end
+	end
+end
+
+-- Rebuild the tracked set. Kept in `storage`, not in a file-local, because a
+-- file-local is rebuilt at a different moment on a peer that joined mid-game
+-- and the accumulator writes to `storage` -- which is the shape of a desync.
+local function refresh_drill_registry()
+	local registry = {}
+	for _, surface in pairs(game.surfaces) do
+		for _, entity in pairs(surface.find_entities_filtered({
+			type = "mining-drill", force = game.forces["player"],
+		})) do
+			if entity.valid then
+				local key = machine_key(entity)
+				registry[key] = entity
+				prime_drill_amounts(entity, key)
+			end
+		end
+	end
+	storage.drill_registry = registry
+end
+
+-- Per-drill production, accumulated, because Factorio counts nothing for a
+-- mining drill.
+--
+-- **What was measured, not remembered.** Factorio 2.1.17's `runtime-api.json`
+-- declares exactly three `MiningDrill` members on `LuaEntity` --
+-- `mining_area`, `mining_drill_filter_mode` and `mining_target`. There is no
+-- `mining_progress` attribute in this API version at all (only
+-- `bonus_mining_progress`, which is the productivity bar), no drill inventory
+-- define (`defines.inventory` has `mining_drill_modules` and nothing else),
+-- and no drill-mined event (`on_player_mined_*`, `on_robot_mined_*` and
+-- `on_resource_depleted` are the whole list). So neither a progress wrap nor
+-- an output-inventory delta is available to count with, and the resource's own
+-- `amount` is what remains.
+--
+-- **The rule.** One unit of a resource entity's `amount` is one item mined, so
+-- a decrease in the amount of the tile a drill is pointed at is that drill's
+-- output. Read every tick, not on the sample beat, because the tile a drill is
+-- working changes when it depletes and the decrease is invisible afterwards.
+--
+-- **What it is exact about, and what it is not:**
+--
+--   * A single drill on a finite patch is exact. The one item that would be
+--     lost -- the mine that takes the tile from 1 to 0 and destroys it, after
+--     which no `amount` can be read -- is credited from
+--     `on_resource_depleted`, which fires with the entity still identifiable.
+--   * **Two drills whose areas overlap on the same tile both see the same
+--     decrease and both take credit.** Their individual numbers are then upper
+--     bounds and their sum double-counts. This is detected rather than
+--     hidden: a drill sharing its target with another tracked drill in the
+--     same tick is flagged, and the flag reaches the record as
+--     `produced_shared`.
+--   * **An infinite resource (crude oil) never decreases below its minimum
+--     yield**, so a pumpjack's output is not countable this way at all. Such a
+--     drill reports `produced_source = "unavailable"` and no count, rather
+--     than a zero that reads like "produced nothing".
+--   * **Mining productivity yields items without consuming the resource**, so
+--     with that research the count is a lower bound. No run of this project
+--     has researched it; when one does, this comment is the thing to revisit.
+--   * Accumulation runs only while a sampling session is open, which is the
+--     whole of a recorded run and starts before any drill is placed.
+function track_mining_drills(tick)
+	if storage.sampling == nil then
+		return
+	end
+	if storage.drill_registry == nil or tick % DRILL_REGISTRY_REFRESH == 0 then
+		refresh_drill_registry()
+	end
+	-- First pass: how many tracked drills reach each tile. Two drills whose
+	-- areas overlap both see the same fall and both take credit, so their
+	-- individual numbers are upper bounds -- known before any credit is given,
+	-- and flagged on the rows it affects rather than silently summed.
+	local sharers = {}
+	for key, entity in pairs(storage.drill_registry) do
+		if not entity.valid then
+			storage.drill_registry[key] = nil
+		else
+			for tile in pairs(machine_output_state(key).tiles or {}) do
+				sharers[tile] = (sharers[tile] or 0) + 1
+			end
+		end
+	end
+	-- Second pass: every tile in every tracked drill's area, not just the one
+	-- the drill is pointed at. See `prime_drill_amounts` for why -- the
+	-- pointer moves in the same tick as the mine, so a pointer-only reading
+	-- leaves one item per tile permanently uncounted.
+	for key in pairs(storage.drill_registry) do
+		local state = machine_output_state(key)
+		state.amounts = state.amounts or {}
+		for tile, resource in pairs(state.tiles or {}) do
+			if not resource.valid then
+				-- Mined out: whatever was left on it when last read went into
+				-- this drill. `on_resource_depleted` normally gets there
+				-- first; this is the backstop for a tile that vanished
+				-- without one.
+				local remaining = state.amounts[tile]
+				if remaining ~= nil and remaining > 0 then
+					state.produced = state.produced + remaining
+				end
+				state.amounts[tile] = nil
+				state.tiles[tile] = nil
+			else
+				local amount = resource.amount
+				local previous = state.amounts[tile]
+				if previous ~= nil and amount < previous then
+					state.produced = state.produced + (previous - amount)
+					if (sharers[tile] or 0) > 1 then
+						state.shared = true
+					end
+				end
+				state.amounts[tile] = amount
+			end
+		end
+	end
+end
+
+-- The last item of a depleted tile, which no `amount` read can see.
+--
+-- `on_resource_depleted` fires with the resource at zero and still
+-- identifiable, so every drill that was pointed at it is credited with what it
+-- last read -- normally 1. Without this a run loses one item per depleted tile
+-- per drill, which is small and systematic, and systematic is the kind of
+-- error that ends up quoted.
+function on_resource_depleted(event)
+	if storage.sampling == nil or storage.drill_registry == nil then
+		return
+	end
+	local entity = event.entity
+	if entity == nil or not entity.valid then
+		return
+	end
+	local unit = resource_key(entity)
+	for key in pairs(storage.drill_registry) do
+		local state = machine_output_state(key)
+		local remaining = (state.amounts or {})[unit]
+		-- Whatever this drill last saw on that tile is what it went on to mine
+		-- out of it. Keyed by tile rather than by "the tile it is pointed at
+		-- now", because a drill depletes one tile and moves on within the same
+		-- tick, and the event arrives after it has moved.
+		if remaining ~= nil and remaining > 0 then
+			state.produced = state.produced + remaining
+		end
+		if state.amounts ~= nil then
+			state.amounts[unit] = nil
+		end
+	end
+end
+
+-- What the row reports for a drill: the accumulated count and how it was got.
+local function drill_produced(entity, key)
+	local state = machine_output_state(key)
+	local target = entity.mining_target
+	if state.produced == 0 and target ~= nil and target.valid
+		and target.prototype.infinite_resource then
+		return nil, "unavailable", nil
+	end
+	return state.produced, "accumulated", state.shared
+end
+
 -- One machine's row.
 --
 -- Everything read here is either `subclasses: None` on `LuaEntity` (so safe on
@@ -2403,7 +2733,7 @@ end
 -- and a dead server: `LuaEntity.crafting_progress` is declared for
 -- `CraftingMachine` only, exactly like the `mining_target` read that took a
 -- live run down from inside `sample_bots`.
-local function machine_row(entity)
+local function machine_row(entity, key)
 	local row = {
 		name = entity.name,
 		type = entity.type,
@@ -2438,9 +2768,19 @@ local function machine_row(entity)
 		-- assemblers report `products_finished = 0` after twenty minutes did
 		-- not produce, whatever else the row says.
 		row.products_finished = entity.products_finished
+		-- The owner's counter: lifetime ITEMS, not crafts. `products_finished`
+		-- above is the raw game value and stays; `produced` is that value
+		-- accumulated against each craft's yield, so a copper-cable assembler
+		-- reads 204 next to a `products_finished` of 102.
+		row.produced = crafting_machine_produced(entity, key, row.products_finished, recipe)
+		row.produced_source = "game"
 		row.input = nonempty_counts(machine_inventory(entity, CRAFTER_INPUT_INVENTORY))
 	elseif entity.type == "lab" then
 		row.input = nonempty_counts(machine_inventory(entity, LAB_INPUT_INVENTORY))
+		-- A lab consumes science and emits research, never an item, so it has
+		-- no lifetime item count and never will. Said in the row: a reader
+		-- must be able to tell "makes nothing" from "the counter is missing".
+		row.produced_source = "not-a-producer"
 	elseif entity.type == "mining-drill" then
 		-- Which patch it is on, so `no_minable_resources` can be told from a
 		-- drill that was never placed over ore at all.
@@ -2448,6 +2788,7 @@ local function machine_row(entity)
 		if target ~= nil and target.valid then
 			row.mining = target.name
 		end
+		row.produced, row.produced_source, row.produced_shared = drill_produced(entity, key)
 	elseif CONTAINER_TYPES[entity.type] then
 		-- Reported as `output`, not `input`: from the run's point of view a
 		-- chest is a thing the cell *draws from*, and putting it in the same
@@ -2467,6 +2808,15 @@ local function machine_row(entity)
 	local fuel = entity.get_fuel_inventory()
 	if fuel ~= nil and fuel.valid then
 		row.fuel = nonempty_counts(inventory_counts(fuel))
+	end
+	-- Everything the branches above did not claim: a boiler makes steam, a
+	-- steam engine makes electricity, a chest makes nothing. None of them puts
+	-- an item into `production.made`, so none of them has a lifetime item
+	-- count -- and the row says that in a field rather than by omitting one,
+	-- because "makes nothing" and "the counter is missing" are different
+	-- answers and an absent key cannot tell them apart.
+	if row.produced_source == nil then
+		row.produced_source = "not-a-producer"
 	end
 	return row
 end
@@ -2522,15 +2872,11 @@ local function sample_machines_body(tick)
 				seen = seen + 1
 				if written < MACHINE_SAMPLE_LIMIT then
 					written = written + 1
-					-- `unit_number` is nil for a handful of entity kinds; none
-					-- of the six types sampled here is one of them, but a key
-					-- collision would silently drop a machine, so the fallback
-					-- is a position that cannot collide rather than a guess.
-					local key = entity.unit_number
-					if key == nil then
-						key = entity.name .. "@" .. entity.position.x .. "," .. entity.position.y
-					end
-					machines[tostring(key)] = machine_row(entity)
+					-- See `machine_key`: the same key files this machine's
+					-- lifetime counters in `storage.machine_output`, so the
+					-- two must be derived in one place and not twice.
+					local key = machine_key(entity)
+					machines[key] = machine_row(entity, key)
 				end
 			end
 		end
@@ -2728,6 +3074,13 @@ function rcon_session_reset()
 	storage.sampling = nil
 	storage.telemetry_failures = nil
 	storage.telemetry_failing = nil
+	-- Lifetime per-machine counters, and the drill set they are accumulated
+	-- over. Cleared for the same reason the sampling session is: they are
+	-- keyed by `unit_number`, and a reset precedes a *different* world whose
+	-- unit numbers mean something else. A resumed run re-derives a crafting
+	-- machine's total from `products_finished`, which the game itself kept.
+	storage.machine_output = nil
+	storage.drill_registry = nil
 	-- The tick stamp first, as every call answers with; then the counts, which
 	-- are the point. A reset that dropped nothing is the expected answer on a
 	-- fresh world and the interesting one on a resumed world -- reporting it
@@ -3378,6 +3731,8 @@ script.on_event(defines.events.on_player_respawned, on_player_respawned)
 script.on_event(defines.events.on_sector_scanned, on_sector_scanned)
 script.on_event(defines.events.on_chunk_generated, on_chunk_generated)
 script.on_event(defines.events.on_player_mined_item, on_player_mined_item)
+-- The one item per depleted tile that `track_mining_drills` cannot see.
+script.on_event(defines.events.on_resource_depleted, on_resource_depleted)
 
 script.on_event(defines.events.on_biter_base_built, on_some_entity_created) --entity
 script.on_event(defines.events.on_built_entity, on_some_entity_created) --created_entity

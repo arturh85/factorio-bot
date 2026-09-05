@@ -288,3 +288,26 @@ Two things a researcher hits on the way, one fixed and one not:
   directory made by hand, the run printed `Using scripts directory
   ".../headless-c/scripts" (debug build; seeded by copying ".../scripts" …)`
   and ran. Before today this would have been `path not found`.
+
+### hl-06 — automation at 10x (`run-1788614294-64261`), and a correction
+
+| speed | run | automation | plan | executed/planned | wall from launch |
+|---|---|---|---|---|---|
+| 1x clients (release bench) | run-1788582657-14978 | 22,271 | 21,985 | 1.01 | ~8 min |
+| 5x headless (beside another run) | run-1788614064-08543 | 22,724 | 21,765 | 1.04 | ~2.5 min |
+| **10x headless, quiet box** | run-1788614294-64261 | **23,715 (6:35)** | 21,765 | 1.09 | **~80 s** |
+
+One plan, nothing failed, at every speed. 10x delivers roughly 360 of the
+600 ticks/s asked for on this box with four polled characters, and still
+gets automation done in eighty seconds of wall time.
+
+**Correction to hl-01's reading.** The settle→next-dispatch hop is not
+~10-20 ticks: restricted to hops under 60 ticks the median is **1 tick at
+1x, 5x and 10x** (n = 151 / 121 / 113). The larger "gaps" I summed earlier
+were legitimate waits (predecessors, lag, research). So the executor's
+dispatch path adds no per-action latency worth chasing, and the speed tax
+(+4% at 5x, +9% at 10x on automation; +6% at 5x on green) lives inside the
+long waits — the tick-polled lag wait sleeps a wall-clock estimate between
+readings, and at speed each sleep is worth more ticks. That is the mechanism
+to measure next, not the hop. The open item "per-action executor hop
+latency" in the state memory is withdrawn.

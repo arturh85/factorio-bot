@@ -713,37 +713,78 @@ mod tests {
         }
     }
 
-    /// **`holds` and `Scout` must be one predicate.** They were two, and the
-    /// disagreement was silent: `PlanState::charting`'s seventeen fixed
-    /// probes all land inside the +/-320 a seed-31337 map is created with, so
-    /// `charted:0:0:256` read as already-satisfied while the lattice still
-    /// had all eight ring-1 cells to visit -- and because `AlreadySatisfied`
-    /// is registered ahead of `Scout`, the goal planned nothing at all and
-    /// said nothing about it.
+    /// The seventeen points `PlanState::charting` probes around `origin` at
+    /// `radius`: the origin, then the eight compass directions at half the
+    /// radius and at the full radius. Mirrors `state.rs`'s own `COMPASS`.
+    fn charting_probe_points(origin: &Position, radius: f64) -> Vec<Position> {
+        const D: f64 = std::f64::consts::FRAC_1_SQRT_2;
+        const COMPASS: [(f64, f64); 8] = [
+            (1., 0.),
+            (D, D),
+            (0., 1.),
+            (-D, D),
+            (-1., 0.),
+            (-D, -D),
+            (0., -1.),
+            (D, -D),
+        ];
+        let mut points = vec![origin.clone()];
+        for scale in [0.5, 1.0] {
+            for (dx, dy) in COMPASS {
+                points.push(Position::new(
+                    origin.x() + dx * radius * scale,
+                    origin.y() + dy * radius * scale,
+                ));
+            }
+        }
+        points
+    }
+
+    /// **`holds` and `Scout` must be one predicate**, and this fixture is
+    /// built so that the two *disagree* unless they are.
+    ///
+    /// They were two, and the disagreement was silent:
+    /// `PlanState::charting`'s seventeen fixed probes all land inside the
+    /// +/-320 a seed-31337 map is created with, so `charted:0:0:256` read as
+    /// already-satisfied while the lattice still had all eight ring-1 cells to
+    /// visit -- and because `AlreadySatisfied` is registered ahead of `Scout`,
+    /// the goal planned nothing at all and said nothing about it.
+    ///
+    /// The world here charts **exactly the seventeen probe points and nothing
+    /// else**, so `charting(...).is_complete()` is true while the lattice is
+    /// entirely uncovered. An earlier version of this test charted a region
+    /// that left some probes blind too, which made both predicates answer
+    /// "not done" and let the bug through -- found by deliberately reverting
+    /// `holds` and watching this test pass.
     #[test]
     fn a_goal_reads_satisfied_exactly_when_the_lattice_has_nothing_left() {
-        // Charted over the seventeen-probe disc but not over the lattice:
-        // the shape the two predicates disagree on.
-        let inside: Vec<Position> = lattice(REVEAL_PITCH * 2.)
-            .into_iter()
-            .filter(|p| p.x().abs() <= 320. && p.y().abs() <= 320.)
-            .collect();
-        let state = state_of(world_charted_at(&inside));
-        let goal = goal_at(Position::new(0., 0.), REVEAL_PITCH);
-        let plan = survey_plan(&state, &Position::new(0., 0.), REVEAL_PITCH);
-        assert!(!plan.visit.is_empty(), "fixture precondition: work remains");
+        let origin = Position::new(0., 0.);
+        let radius = REVEAL_PITCH;
+        let state = state_of(world_charted_at(&charting_probe_points(&origin, radius)));
+
+        assert!(
+            state.charting(&origin, radius).is_complete(),
+            "fixture precondition: every one of the seventeen probes is charted"
+        );
+        let plan = survey_plan(&state, &origin, radius);
+        assert!(
+            !plan.visit.is_empty(),
+            "fixture precondition: the lattice still has cells to visit"
+        );
+
+        let goal = goal_at(origin, radius);
         assert_eq!(
             crate::method::have::holds(&goal, &state),
             Some(false),
-            "work remains, so the goal must not read as satisfied"
+            "work remains, so the goal must not read as satisfied -- if this \
+             says true, `holds` is asking `charting` instead of `Scout`"
         );
-        // And the registry must therefore route it to `scout`, not to
-        // `already-satisfied`.
         assert_eq!(
             crate::method::have::default_registry()
                 .find(&goal, &state, GoalSite::root())
                 .map(Method::name),
-            Some("scout")
+            Some("scout"),
+            "and the registry must route it to scout, not already-satisfied"
         );
     }
 

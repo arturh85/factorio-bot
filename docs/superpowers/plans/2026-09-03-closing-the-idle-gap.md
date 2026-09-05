@@ -80,6 +80,23 @@ honestly, as before. Also fixed on the way: `scripting_lua`'s
 `plan_cell` call was one argument behind `bdec88af` and failed
 `--all-targets` clippy on master.
 
+## The supplier ranking was never consulted; the leak was in the rehearsal (`be29d33d`)
+
+My brief said `furnace_suppliers` hands other bots' furnaces to bot 1. It
+hands nothing to anyone: on all three goals every furnace is placed by its own
+taker, because since the rock forecast a taker's first coal swing covers its
+whole demand and it holds the stone for every furnace after, so a handover
+saves a 30-tick craft against a 310-tick detour. The ranking is consulted only
+in the **rehearsal pass**, which has no forecast yet, hands a furnace away, and
+leaves the supplier's 5 stone + 1 coal on the forecast — which then tipped bot
+4 across the `chop_beats_mining` boundary (3 × 120 ties a 360 swing; 4 wins
+it) and cost automation the 422 ticks that were blamed on the ranking. Fixed
+where it lives: a rehearsal keeps every furnace with its taker, and the
+ranking reads the bot's whole planned load on owned chains
+(`PlanState::planned_ticks` replaces `planned_mining`). Plans byte-identical.
+Red's +5.2% is bot 1 waiting ~9,300 ticks on its own copper furnace — a bank
+width question, dispatched (`copper-bank`).
+
 ## Oil, first rung: a `mine-entity` trigger names its entity (`ffc56270`)
 
 The mod sent trigger technologies as a bare type because runtime-api.json

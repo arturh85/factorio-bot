@@ -228,3 +228,23 @@ integration tests (`tests/standing_site_reuse.rs`) fail before and pass
 after; eleven unit tests; planner suite and clippy green; t=0 plans for all
 three goals byte-identical. Open: parts placed with drift are passed over;
 partial-cell inserter facing is checked only through `delivers_into`.
+
+### hl-04 — green, 4 bots, 5x, everything merged (`run-1788611922-87269`)
+
+The A/B hl-03 was meant to be, now with `tail`, `character-identity`,
+`walk-into-rock`, `replan-reuses-site` and the peer's `belt-routing` on
+master, workspace tests green.
+
+| | hl-01 (before) | hl-04 (after) |
+|---|---|---|
+| plan | 623 / 71,167 | 569 / 57,752 |
+| green cell (5x) | 80,531 (22:22) | **68,051 (18:54)**, −15.5% |
+| green witness | 82,828 | 70,240 |
+| plans / failed / lost | 1 / 0 / 0 | 1 / 0 / 0 |
+| walks | 194 / 194 | 384 walk events, none failed |
+
+One pathfinder no-path early, recovered. Executed/planned is 1.18 here
+against 1.13 in hl-01, so the plan tightened more than the execution did;
+where the extra 10,000 ticks go is the next thing to read off the record
+(the 5x hop tax is ~9,000 of it on hl-01's numbers). Run 14 at 1x with
+clients is the honest measurement of the same master.

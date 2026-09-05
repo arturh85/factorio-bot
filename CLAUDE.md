@@ -289,6 +289,30 @@ BotBridge Mod (Factorio mod for RPC)
   `Goal` -> `expand()` -> `ActionNetwork` -> `schedule()` -> `Schedule`.
   Methods live in `method/`; `state.rs` overlays a `FactorioWorld` snapshot.
 
+  - **`method::connect`** (`connect_steps`, built on `graph::route::route_belt`
+    in `crates/core`) routes a `transport-belt` run between two tiles and
+    places the inserter at each end. **Belts only** — `route_belt` is always
+    called with `max_underground: None`, so a route needing to cross an
+    obstacle refuses (`ConnectRefusal::NoRoute`) rather than tunnelling
+    under it; underground belts are deliberately out of scope for this
+    version, not a bug. It **refuses before placing anything**: every
+    `ConnectRefusal` variant (`NoRoute`, `SpanTooLong`, `NotCardinal`) is
+    returned before any action is emitted, because a half-built belt run is
+    worse than none — items would sit on it with no bot left to carry them.
+    Inserter facing has **exactly one owner**, `inserter_facing()` in the same
+    module: it names the side the inserter *picks up from*, established
+    empirically elsewhere in this file (see the inserter-direction note under
+    Known Issues) and is the only place in the planner that computes it, so no
+    caller re-derives the convention.
+    **As of 2026-09-05 this module has no caller anywhere in the tree** —
+    `connect_steps`/`route_belt`/`ConnectRefusal` appear nowhere outside their
+    own tests, no `Goal` variant reaches it, and no CLI or Lua entry point
+    names it. It is tested in isolation (grid search, undergrounds-bounded,
+    inserter-facing, action-emission fixtures) but **cannot yet be exercised
+    by any live run or offline plan** — `plan --goal producing:...` produces a
+    byte-identical schedule with or without this code. See
+    `docs/superpowers/notes/2026-09-05-belt-routing-first-run.md`.
+
 - **crates/executor**: runs a `Schedule` across bots over RCON. Per-action
   completion signals (`tokio::sync::watch`, not polling), lag edges modelling
   machine time, pre-flight wait-graph cycle rejection, and recovery tiers in

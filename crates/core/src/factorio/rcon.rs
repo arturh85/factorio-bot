@@ -12,7 +12,9 @@ use crate::factorio::util::{
     str_to_lua, value_to_lua, vec_to_lua, vector_add, vector_multiply, vector_normalize,
     vector_substract,
 };
-use crate::factorio::world::{FactorioWorld, PlacementRefusal, RefusalSource};
+use crate::factorio::world::{
+    FactorioWorld, HOP_RADIUS, PlacementRefusal, RefusalSource, hop_targets,
+};
 use crate::graph::entity_graph::ResourceDepletion;
 use crate::settings::FactorioSettings;
 use crate::types::{
@@ -4960,6 +4962,51 @@ impl FactorioRcon {
                 Err(err)
             }
         }
+    }
+
+    /// Asks the game whether the character can leave the spot it stands on:
+    /// one short path request per [`hop_targets`] direction, each allowed to
+    /// stop within [`HOP_RADIUS`] tiles of its target. Returns every target
+    /// with the game's answer, in the order asked.
+    ///
+    /// # Why the game and not the occupancy model
+    ///
+    /// `crates/core::graph::enclosure` answers the same question from what
+    /// this process believes occupies the ground, and in
+    /// `run-1788614781-38058` it answered wrongly: bot 6 stood overlapping a
+    /// furnace, the model's fill from the tile centre found open ground, and
+    /// the pathfinder -- reasoning from the character's real box at its real
+    /// position -- refused every request from it. Only the game holds the
+    /// character's own collision state, so only the game is asked.
+    ///
+    /// # What each answer means
+    ///
+    /// This is a bare [`Self::player_path_attempt`] per hop, deliberately not
+    /// [`Self::player_path`]: the offset-goal fallback would rotate the target
+    /// around the point and could return a route to somewhere the hop never
+    /// asked for. A full queue is retried inside the attempt; a `failed to
+    /// path find` that survives it is the game's word that there is no route
+    /// from here to there. The *judgement* -- how many refusals make a
+    /// benched bot -- is `crates/executor`'s (`walk_memory::judge_mobility`),
+    /// which is where the walk that triggered the question failed.
+    ///
+    /// No mod change: `async_request_player_path` is the same remote call
+    /// every walk already makes.
+    pub async fn probe_player_hops(
+        &self,
+        world: &Arc<FactorioWorld>,
+        player_id: PlayerId,
+        from: &Position,
+    ) -> Vec<(Position, Result<()>)> {
+        let mut answers = Vec::with_capacity(4);
+        for target in hop_targets(from) {
+            let outcome = self
+                .player_path_attempt(world, player_id, &target, Some(HOP_RADIUS))
+                .await
+                .map(|_| ());
+            answers.push((target, outcome));
+        }
+        answers
     }
 
     pub async fn path(

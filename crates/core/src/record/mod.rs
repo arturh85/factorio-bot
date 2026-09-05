@@ -679,6 +679,45 @@ pub enum EventKind {
         /// number that was actually used.
         searched_tiles: f64,
     },
+    /// The game said this bot cannot move, and the next plan will not send it
+    /// anywhere.
+    ///
+    /// After a walk the pathfinder refused, the executor asked the game for a
+    /// short path from the character in each of four directions
+    /// (`FactorioRcon::probe_player_hops`) and every one was refused. That
+    /// is the game's own verdict on the *character*, which neither
+    /// [`EventKind::BotEnclosed`] (a fill over this process's occupancy
+    /// model) nor a `no_path` walk (a verdict on one destination) can give:
+    /// in `run-1788614781-38058` bot 6 stood overlapping a furnace, the fill
+    /// said open, four walks said `no_path`, and seven plans in a row sent it
+    /// the same walk until the run halted `stuck` with seven healthy bots
+    /// idle.
+    ///
+    /// Unlike `bot_enclosed`, this one is acted on: `crates/planner`'s
+    /// `PlanState::from_world` reads the bench and gives the bot no step
+    /// that would need it to walk. It is lifted by [`EventKind::BotReleased`].
+    ///
+    /// Written by `record.enclosures()` from `FactorioWorld::benches`.
+    BotBenched {
+        bot: u32,
+        /// Where the character stood when every hop was refused. Observed.
+        position: Position,
+        /// How many hops were asked for and refused.
+        refused_hops: u32,
+        /// How far each hop was aimed, in tiles.
+        hop_tiles: f64,
+    },
+    /// A benched bot can move again, and the next plan may send it.
+    ///
+    /// Written by `record.enclosures()` when the executor lifted a bench:
+    /// `why` is `"walked"` when a walk for the bot succeeded, or `"probed"`
+    /// when the re-probe before a plan found a hop the game would path.
+    BotReleased {
+        bot: u32,
+        /// Where the bench had been earned.
+        position: Position,
+        why: String,
+    },
     /// A bot was walked clear of a placement that would otherwise have sealed
     /// it in -- the [`EventKind::BotEnclosed`] that did not happen.
     ///
@@ -1260,6 +1299,18 @@ pub enum WalkFailureKind {
     /// the graph knows, so a walk that still lands here is one the graph
     /// learned about too late.
     DestinationBlocked,
+    /// The pathfinder refused the walk **and** refused every short hop from
+    /// where the character stands: the bot cannot leave its own tile, so the
+    /// destination is not what was unreachable. The executor's mobility probe
+    /// (`FactorioRcon::probe_player_hops`, judged by
+    /// `crates/executor::walk_memory::judge_mobility`) established it and
+    /// benched the bot; a `bot_benched` event sits beside this one.
+    ///
+    /// The opposite of what [`WalkFailureKind::NoPath`] is careful not to
+    /// claim. `run-1788614781-38058` produced four `no_path` rows for bot 6,
+    /// all to a destination other bots reached, before this kind existed to
+    /// say the bot was the problem.
+    BoxedIn,
     /// A kind this build does not know, or one not worth a variant yet.
     #[serde(other)]
     Other,

@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use factorio_bot_core::blueprint::UndergroundHalf;
 use factorio_bot_core::factorio::rcon::DestinationFull;
 pub use factorio_bot_core::factorio::ticks::ActionTicks;
 use factorio_bot_core::record::map::Placement;
@@ -161,12 +162,20 @@ pub trait Actuator: Send + Sync {
         recipe: &str,
         count: u32,
     ) -> Result<ActionTicks, ActuatorFailure>;
+    /// `underground_half` is `Some` only when `item` is one half of an
+    /// underground-belt pair (`FactorioEntity::underground_half`); every
+    /// other `Place` action passes `None`. Forwarded all the way to
+    /// `rcon_place_entity` (`mods/BotBridge/control.lua`), which sends it to
+    /// `surface.create_entity` as `type` -- the reason the two halves of a
+    /// pair can now be told apart at all. See
+    /// `FactorioEntity::new_underground_belt`.
     async fn place(
         &self,
         bot: BotId,
         item: &str,
         at: Position,
         direction: u8,
+        underground_half: Option<UndergroundHalf>,
     ) -> Result<ActionTicks, ActuatorFailure>;
     #[allow(clippy::too_many_arguments)]
     async fn insert(
@@ -468,6 +477,7 @@ mod tests {
                 _: &str,
                 _: Position,
                 _: u8,
+                _: Option<UndergroundHalf>,
             ) -> Result<ActionTicks, ActuatorFailure> {
                 unreachable!()
             }

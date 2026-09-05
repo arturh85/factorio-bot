@@ -6,6 +6,7 @@ use crate::goal::{Goal, Holder};
 use crate::ids::ItemId;
 use crate::method::have::PLACE_TICKS;
 use crate::method::{ExpansionCtx, Step};
+use factorio_bot_core::blueprint::UndergroundHalf;
 use factorio_bot_core::graph::enclosure::GRID;
 use factorio_bot_core::graph::route::{RouteError, TileKind, route_belt};
 use factorio_bot_core::types::{Direction, FactorioEntity, Position};
@@ -88,6 +89,35 @@ pub fn inserter_facing(from: &Position, to: &Position) -> Option<Direction> {
         });
     }
     None
+}
+
+/// Which `UndergroundHalf` a `route_belt` tile of each underground
+/// `TileKind` must build as, `None` for an ordinary surface `Belt` tile.
+///
+/// **Not called by `connect_steps` yet** -- its `TileKind::UndergroundEntry |
+/// TileKind::UndergroundExit` arm still panics on purpose, because
+/// `route_belt` is always called with `max_underground: None` and so can
+/// never produce one (see the `unreachable!()` there, and RULING 2 above
+/// `route_belt`'s call). Wiring that up -- threading a real
+/// `max_underground` through and replacing the panic with a call to this
+/// function -- is follow-on work. This function and its test exist now, on
+/// their own, so that day's edit has a pinned answer to consult rather than
+/// a chance to silently transpose the two halves and reproduce the "places
+/// perfectly, connects nothing" failure with types instead of without them.
+///
+/// The mapping itself comes from `route_belt`'s own comment
+/// (`crates/core/src/graph/route.rs`): "the earlier tile is where the pair
+/// DIVES" (`UndergroundEntry`) and "the later one is where it SURFACES"
+/// (`UndergroundExit`). Factorio's own two terms for those same moments are
+/// `input` (an item leaves the surface belt into the tunnel there) and
+/// `output` (it returns to one there) -- which is exactly `UndergroundHalf`'s
+/// two variants.
+pub fn underground_half_for_tile_kind(kind: TileKind) -> Option<UndergroundHalf> {
+    match kind {
+        TileKind::Belt => None,
+        TileKind::UndergroundEntry => Some(UndergroundHalf::Input),
+        TileKind::UndergroundExit => Some(UndergroundHalf::Output),
+    }
 }
 
 /// Why a connection could not be made. **Every variant is returned before
@@ -628,6 +658,31 @@ mod tests {
             inserter_facing(&Position::new(0.5, 0.5), &Position::new(2.5, 2.5)),
             None,
             "an inserter is cardinal; a diagonal is a caller bug, not a default"
+        );
+    }
+
+    /// **Pins the mapping `underground_half_for_tile_kind` documents but
+    /// nothing calls yet**, so a future edit wiring it into `connect_steps`
+    /// cannot silently transpose Entry/Exit and Input/Output -- the exact
+    /// shape of mistake that would place two `output` halves (or two
+    /// `input`s) and reproduce this project's defining failure with types
+    /// instead of without them.
+    #[test]
+    fn underground_tile_kinds_map_to_the_correct_half() {
+        assert_eq!(
+            underground_half_for_tile_kind(TileKind::UndergroundEntry),
+            Some(UndergroundHalf::Input),
+            "the tile where the pair DIVES is the input half"
+        );
+        assert_eq!(
+            underground_half_for_tile_kind(TileKind::UndergroundExit),
+            Some(UndergroundHalf::Output),
+            "the tile where the pair SURFACES is the output half"
+        );
+        assert_eq!(
+            underground_half_for_tile_kind(TileKind::Belt),
+            None,
+            "an ordinary surface belt tile is neither half"
         );
     }
 

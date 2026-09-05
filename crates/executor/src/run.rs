@@ -1235,8 +1235,14 @@ async fn perform<A: Actuator + ?Sized>(
         } => act.mine(bot, entity.as_str(), pos.clone(), *count).await,
         ActionKind::Craft { item, count } => act.craft(bot, item.as_str(), *count).await,
         ActionKind::Place { entity } => {
-            act.place(bot, &entity.name, entity.position.clone(), entity.direction)
-                .await
+            act.place(
+                bot,
+                &entity.name,
+                entity.position.clone(),
+                entity.direction,
+                entity.underground_half,
+            )
+            .await
         }
         ActionKind::Insert {
             pos,
@@ -1307,7 +1313,7 @@ mod tests {
             async fn walk(&self, bot: BotId, to: Position, min_radius: f64, radius: f64) -> Result<ActionTicks, ActuatorFailure>;
             async fn mine(&self, bot: BotId, item: &str, at: Position, count: u32) -> Result<ActionTicks, ActuatorFailure>;
             async fn craft(&self, bot: BotId, recipe: &str, count: u32) -> Result<ActionTicks, ActuatorFailure>;
-            async fn place(&self, bot: BotId, item: &str, at: Position, direction: u8) -> Result<ActionTicks, ActuatorFailure>;
+            async fn place(&self, bot: BotId, item: &str, at: Position, direction: u8, underground_half: Option<factorio_bot_core::blueprint::UndergroundHalf>) -> Result<ActionTicks, ActuatorFailure>;
             async fn insert(&self, bot: BotId, entity: &str, at: Position, slot: InventorySlot, item: &str, count: u32) -> Result<ActionTicks, ActuatorFailure>;
             async fn remove(&self, bot: BotId, entity: &str, at: Position, slot: InventorySlot, item: &str, count: u32) -> Result<ActionTicks, ActuatorFailure>;
             async fn research(&self, tech: &str, expected_ticks: u32) -> Result<ActionTicks, ActuatorFailure>;
@@ -1327,6 +1333,68 @@ mod tests {
     /// observation from a plan value at a glance.
     fn some_ticks() -> ActionTicks {
         ActionTicks::new(Some(900_001), Some(900_002))
+    }
+
+    /// **The executor link.** `perform`'s `ActionKind::Place` arm used to
+    /// drop `entity.underground_half` on the floor -- `act.place(bot,
+    /// &entity.name, entity.position.clone(), entity.direction)`, four
+    /// arguments, the half nowhere in them -- so a planned underground-belt
+    /// pair, whichever half the planner put on the entity, would have reached
+    /// `Actuator::place` (and from there `rcon_place_entity`) as `None` every
+    /// time: exactly the untyped double-placement the whole task exists to
+    /// prevent. This drives `perform` directly (no `Schedule`, no `run()`,
+    /// nothing else in between) with a `Place` action for the `Input` half
+    /// and asserts the mock actuator's `place()` is called with that same
+    /// `Some(UndergroundHalf::Input)`, not `None` and not `Output`.
+    #[tokio::test]
+    async fn a_place_actions_underground_half_reaches_the_actuator() {
+        use factorio_bot_core::blueprint::UndergroundHalf;
+
+        let mut act = MockAct::new();
+        act.expect_place()
+            .times(1)
+            .withf(|_bot, item, _at, _direction, half| {
+                item == "underground-belt" && *half == Some(UndergroundHalf::Input)
+            })
+            .returning(|_, _, _, _, _| Ok(some_ticks()));
+
+        let entity = FactorioEntity {
+            name: "underground-belt".to_string(),
+            underground_half: Some(UndergroundHalf::Input),
+            ..Default::default()
+        };
+        let kind = ActionKind::Place {
+            entity: Box::new(entity),
+        };
+
+        perform(&act, BotId(1), &kind, 0)
+            .await
+            .expect("the mock actuator accepted the placement");
+    }
+
+    /// The other side of the same guarantee: an ordinary placement -- no
+    /// underground half at all -- must reach the actuator as `None`, not as
+    /// some default `Some(_)` a careless refactor of the arm above could
+    /// introduce.
+    #[tokio::test]
+    async fn an_ordinary_place_action_carries_no_underground_half() {
+        let mut act = MockAct::new();
+        act.expect_place()
+            .times(1)
+            .withf(|_bot, item, _at, _direction, half| item == "stone-furnace" && half.is_none())
+            .returning(|_, _, _, _, _| Ok(some_ticks()));
+
+        let entity = FactorioEntity {
+            name: "stone-furnace".to_string(),
+            ..Default::default()
+        };
+        let kind = ActionKind::Place {
+            entity: Box::new(entity),
+        };
+
+        perform(&act, BotId(1), &kind, 0)
+            .await
+            .expect("the mock actuator accepted the placement");
     }
 
     // ---------------------------------------------------------------- fixtures
@@ -1844,6 +1912,7 @@ mod tests {
             _item: &str,
             _at: Position,
             _direction: u8,
+            _underground_half: Option<factorio_bot_core::blueprint::UndergroundHalf>,
         ) -> Result<ActionTicks, ActuatorFailure> {
             Ok(self.ticks_now())
         }

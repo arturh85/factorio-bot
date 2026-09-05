@@ -426,6 +426,7 @@ pub fn recover(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use factorio_bot_core::blueprint::UndergroundHalf;
     use factorio_bot_core::test_utils::fixture_world;
     use factorio_bot_core::types::Position;
     use factorio_bot_planner::action::{Action, ActionKind, Actor, Condition, Effect};
@@ -907,6 +908,7 @@ mod tests {
             _: &str,
             _: Position,
             _: u8,
+            _: Option<UndergroundHalf>,
         ) -> Result<crate::actuator::ActionTicks, crate::ActuatorFailure> {
             Ok(crate::actuator::ActionTicks::UNKNOWN)
         }

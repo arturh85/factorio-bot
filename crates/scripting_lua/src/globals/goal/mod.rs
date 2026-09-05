@@ -1187,6 +1187,7 @@ mod tests {
             _item: &str,
             _at: Position,
             _direction: u8,
+            _underground_half: Option<factorio_bot_core::blueprint::UndergroundHalf>,
         ) -> Result<ActionTicks, ActuatorFailure> {
             self.act().await
         }
@@ -1852,6 +1853,7 @@ mod tests {
             _item: &str,
             _at: Position,
             _direction: u8,
+            _underground_half: Option<factorio_bot_core::blueprint::UndergroundHalf>,
         ) -> Result<ActionTicks, ActuatorFailure> {
             self.note(bot)
         }

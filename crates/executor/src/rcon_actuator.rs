@@ -2,6 +2,7 @@ use crate::actuator::{ActionTicks, Actuator, ActuatorError, ActuatorFailure};
 use crate::pre_place::{PrePlace, STEP_ASIDE_RADIUS, judge_placement};
 use crate::walk_memory::{note_walk_refusal, pathfinder_found_nothing};
 use async_trait::async_trait;
+use factorio_bot_core::blueprint::UndergroundHalf;
 use factorio_bot_core::constants::BOT_FORCE;
 use factorio_bot_core::factorio::rcon::{
     ActionFailure, DestinationFull, Dispatch, FactorioRcon, approach_standing,
@@ -416,6 +417,7 @@ impl Actuator for RconActuator {
         item: &str,
         at: Position,
         direction: u8,
+        underground_half: Option<UndergroundHalf>,
     ) -> Result<ActionTicks, ActuatorFailure> {
         let p = self.player(bot)?;
         // Before anything is built: would this footprint seal in the
@@ -481,13 +483,16 @@ impl Actuator for RconActuator {
             position: at.clone(),
             direction,
         };
-        // `None`: the executor's `Actuator::place` does not yet carry which
-        // half of an underground-belt pair this is -- see
-        // `FactorioEntity::underground_half` and `method::connect`'s own
-        // `max_underground: None` for why the planner never emits one today.
         let (entity, ticks) = self
             .rcon
-            .place_entity_timed(p, item.to_string(), at, direction, None, &self.world)
+            .place_entity_timed(
+                p,
+                item.to_string(),
+                at,
+                direction,
+                underground_half,
+                &self.world,
+            )
             .await
             .map_err(classify)?;
         let actual = EntitySnapshot {

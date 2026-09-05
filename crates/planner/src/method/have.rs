@@ -992,12 +992,17 @@ struct FurnaceLoad {
 ///
 /// # How the bot is picked
 ///
-/// Least-loaded first, by [`PlanState::planned_mining`] — the raw units this
-/// expansion has already committed each bot to digging — with `BotId` breaking
-/// ties, and dealt round-robin down that order so a bank of several furnaces
-/// reaches several bots. Load is what makes it rotate *across* smelts too: a
-/// `Researched` expansion contains a dozen of them, and each one sees what the
-/// ones before it spent.
+/// Least-loaded first, by [`PlanState::planned_ticks`] — the bot-ticks this
+/// expansion has already committed each bot to, over every verb — with `BotId`
+/// breaking ties, and dealt round-robin down that order so a bank of several
+/// furnaces reaches several bots. Load is what makes it rotate *across* smelts
+/// too: a `Researched` expansion contains a dozen of them, and each one sees
+/// what the ones before it spent.
+///
+/// Every verb, because the key used to be mined units alone and a bot fed by
+/// rocks (`Chop`, 360 ticks a swing, no tile claimed) read as idle to it while
+/// carrying the most work on the roster -- `planned_ticks` gives the figures.
+/// The round-robin is untouched: the key changed, the deal did not.
 ///
 /// **The taker is a candidate like anyone else**, and that is what keeps this
 /// inert where it should be. With one bot in the roster it is the only
@@ -1023,7 +1028,7 @@ fn furnace_suppliers(state: &PlanState, taker: BotId, slots: usize) -> Vec<BotId
     }
     let mut order: Vec<(u32, BotId)> = participants_that_can_work(state, roster)
         .into_iter()
-        .map(|bot| (state.planned_mining(bot), bot))
+        .map(|bot| (state.planned_ticks(bot), bot))
         .collect();
     if order.is_empty() {
         return vec![taker; slots];
@@ -1441,8 +1446,29 @@ fn smelt_steps(
     // then *who* gets them (`furnace_suppliers`, a fact about the roster).
     // Dealing the round-robin over only the slots that pay is what keeps the
     // rotation even; overriding a pick afterwards would leave gaps in it.
+    //
+    // **Not while rehearsing.** The rehearsal `crate::method::expand` runs
+    // first exists to forecast, per bot, what the plan gathers; the real pass
+    // then prices every rock over that forecast. A handover is an answer to
+    // *who* gathers a furnace's five stone and one coal, and it is priced on
+    // the taker's shortfall -- which the forecast changes: with it, a taker
+    // that swung a rock for its first coal holds the stone for every furnace
+    // after, and no slot pays to move. Without it (the rehearsal's own
+    // state) the same taker hand-mines one coal per fragment, is short five
+    // stone at its second furnace, and hands it away; the supplier then
+    // gathers those five stone and that coal *into the forecast*, for a
+    // furnace the real pass keeps with the taker. Which supplier got the
+    // phantom followed `furnace_suppliers`' tie-break, and on the reference
+    // dump's `researched:automation` one such coal moved bot 4's forecast
+    // from 3 to 4 -- the exact boundary at which `chop_beats_mining` trades
+    // a 240-tick big-rock for a 360-tick huge-rock -- and the makespan from
+    // 21,818 to 22,240 without a single furnace changing hands in the real
+    // pass. So the rehearsal counts a furnace's gathering where the demand
+    // originates, and who runs the errand is decided once, on the forecast.
     let mut suppliers: Vec<Option<BotId>> = vec![None; bank.len()];
-    if let Some(taker) = taker_bot {
+    if let Some(taker) = taker_bot
+        && !ctx.rehearsing
+    {
         let worth: Vec<usize> = bank
             .iter()
             .enumerate()
@@ -10918,6 +10944,80 @@ mod tests {
         );
     }
 
+    /// A furnace placed by one bot for another's smelt: the placement's chain
+    /// owner differs from the owner of the take at the same furnace.
+    ///
+    /// Sharper than "a furnace placed by anyone but bot 1", which since every
+    /// bot stands a furnace of its own (`patch_furnace_budget`) counts those
+    /// too. `Remove` names the furnace by position exactly as `Place` does,
+    /// so the join is on the tile.
+    fn furnaces_handed_over(net: &ActionNetwork) -> usize {
+        let owner = |id| net.chain_of(id).and_then(|c| net.owner_of(c));
+        let takes: Vec<(Position, Option<BotId>)> = net
+            .actions()
+            .filter_map(|a| match &a.kind {
+                ActionKind::Remove { pos, .. } => Some((pos.clone(), owner(a.id))),
+                _ => None,
+            })
+            .collect();
+        net.actions()
+            .filter(|a| match &a.kind {
+                ActionKind::Place { entity } if entity.name == "stone-furnace" => {
+                    let by = owner(a.id);
+                    takes.iter().any(|(pos, taker)| {
+                        factorio_bot_core::factorio::util::calculate_distance(pos, &entity.position)
+                            < 0.5
+                            && *taker != by
+                    })
+                }
+                _ => false,
+            })
+            .count()
+    }
+
+    /// **The rehearsal hands no furnace over; the real pass still does.**
+    ///
+    /// The unlock fixture's goal expanded twice on the same state: once as
+    /// `expand` does it for real, and once as the rehearsal `expand` runs
+    /// first -- a context with `rehearsing` set, driven through the same
+    /// `expand_goal`. (The rung-one fixture would not do: its real pass hands
+    /// no furnace over either, every bot standing its own.) The control half pins that the fixture hands furnaces
+    /// over at all, so the rehearsal half is about the flag and nothing
+    /// else. Why the rehearsal must not: the handover block in `smelt_steps`
+    /// says so, with the measurement.
+    #[test]
+    fn a_rehearsal_hands_no_furnace_over_and_the_real_pass_still_does() {
+        let bots = vec![BotId(1), BotId(2), BotId(3), BotId(4)];
+        let state = unlock_state(&bots);
+        let goal = Goal::Have {
+            item: "automation-science-pack".into(),
+            count: 4,
+            whose: Holder::Anyone,
+        };
+        let real = expand(
+            std::slice::from_ref(&goal),
+            &state,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .expect("a trigger-unlocked pack plans");
+        assert!(
+            furnaces_handed_over(&real) > 0,
+            "control: the real pass of this fixture hands at least one furnace over"
+        );
+
+        let mut ctx = ExpansionCtx::new(state.fork(), BotId(1));
+        ctx.rehearsing = true;
+        let mut rehearsed = ActionNetwork::new();
+        crate::method::expand_goal(&goal, &mut ctx, &mut rehearsed, &registry_for(&bots))
+            .expect("the rehearsal expands");
+        assert_eq!(
+            furnaces_handed_over(&rehearsed),
+            0,
+            "the rehearsal keeps every furnace with its taker"
+        );
+    }
+
     /// **The wider ore front is no longer what makes the subtree spread.**
     ///
     /// Identical to `the_unlock_subtree_spreads_on_the_shared_fixture` in
@@ -13315,7 +13415,8 @@ mod owned_gathering {
     use crate::method::expand;
     use crate::network::ActionNetwork;
     use crate::schedule::{StepKind, schedule};
-    use crate::state::PlanState;
+    use crate::state::{ClaimRunner, PlanState};
+    use factorio_bot_core::test_utils::fixture_world;
     use std::collections::BTreeSet;
     use std::sync::Arc;
 
@@ -13506,10 +13607,76 @@ mod owned_gathering {
         );
     }
 
+    /// **A bot loaded with rock swings is not the first supplier.**
+    ///
+    /// The ranking key used to be `planned_mining`: raw units on the tiles a
+    /// bot's claims had stamped. A `Chop` stamps no tile, so once rocks
+    /// supplied the stone and the coal (`7e330a2c`) a bot whose whole load
+    /// was swings read as idle and was dealt the next furnace. One swing on
+    /// bot 1's own timeline is enough to move it to the back of the deal;
+    /// the control line pins that at zero load the tie-break still puts the
+    /// taker first, which is what keeps a first furnace inline.
+    #[test]
+    fn a_bot_loaded_with_rock_swings_is_not_the_first_supplier() {
+        let bots = [BotId(1), BotId(2), BotId(3)];
+        let mut state = PlanState::from_world(Arc::new(fixture_world()), &bots);
+        assert_eq!(
+            furnace_suppliers(&state, BotId(1), 3),
+            vec![BotId(1), BotId(2), BotId(3)],
+            "control: at zero load the tie-break is BotId, and the taker comes first"
+        );
+        state.set_claim_runner(Some(ClaimRunner::Bot(BotId(1))));
+        state.note_planned_ticks(360); // one huge-rock swing, no tile claimed
+        state.set_claim_runner(None);
+        assert_eq!(state.planned_ticks(BotId(1)), 360);
+        assert_eq!(
+            furnace_suppliers(&state, BotId(1), 3),
+            vec![BotId(2), BotId(3), BotId(1)],
+            "one swing is load: the bot that made it is dealt last"
+        );
+    }
+
+    /// **The rank is the bot's whole load on its own chains, and nothing
+    /// else.**
+    ///
+    /// Three things the key has to get right at once: a craft counts like a
+    /// mine (bot 1's one mine outranks bot 2's three crafts); work in an
+    /// unowned chain, or outside any chain, is nobody's load (bot 3 has 1,200
+    /// ticks of it and still ranks first); and the deal is round-robin down
+    /// that order, wrapping, so a bank wider than the roster reaches the
+    /// lightest bot twice.
+    #[test]
+    fn the_supplier_rank_is_the_whole_load_on_owned_chains_only() {
+        let bots = [BotId(1), BotId(2), BotId(3)];
+        let mut state = PlanState::from_world(Arc::new(fixture_world()), &bots);
+        state.set_claim_runner(Some(ClaimRunner::Bot(BotId(1))));
+        state.note_planned_ticks(120); // one hand-mined ore
+        state.set_claim_runner(Some(ClaimRunner::Bot(BotId(2))));
+        for _ in 0..3 {
+            state.note_planned_ticks(30); // three crafts
+        }
+        state.set_claim_runner(Some(ClaimRunner::Chain(crate::ids::ChainId(7))));
+        state.note_planned_ticks(600); // an unowned chain: whoever the scheduler binds
+        state.set_claim_runner(None);
+        state.note_planned_ticks(600); // outside any chain
+        assert_eq!(
+            (1..=3)
+                .map(|b| state.planned_ticks(BotId(b)))
+                .collect::<Vec<_>>(),
+            vec![120, 90, 0],
+            "owned chains only, every verb, integer ticks"
+        );
+        assert_eq!(
+            furnace_suppliers(&state, BotId(1), 4),
+            vec![BotId(3), BotId(2), BotId(1), BotId(3)],
+            "lightest first, then round-robin, wrapping"
+        );
+    }
+
     /// **The supplier pick reads mutable state, so it is pinned as a
     /// function.**
     ///
-    /// `furnace_suppliers` ranks bots by [`PlanState::planned_mining`], which
+    /// `furnace_suppliers` ranks bots by [`PlanState::planned_ticks`], which
     /// grows as the expansion proceeds — the *point* of it, since that is what
     /// rotates the furnaces of a dozen smelts across the roster instead of
     /// piling them on one bot. A ranking key that moves during an expansion is
@@ -13641,10 +13808,17 @@ mod owned_gathering {
                 placements_off_the_taker += 1;
             }
         }
+        // Since `patch_furnace_budget` every bot stands a furnace of its
+        // own, so this counts those as well as R3's handovers; on this
+        // fixture's real pass it is only those (see
+        // `tests::a_rehearsal_hands_no_furnace_over_and_the_real_pass_still_does`
+        // for the join that tells them apart, and the fixture that does hand
+        // over). What is asserted here is the agreement above, for every
+        // furnace placed by anyone but the chain owner.
         assert!(
             placements_off_the_taker > 0,
-            "R3's whole mechanism is a furnace placed inside the chain owner's \
-             plan by a different bot; none was"
+            "no furnace was placed by anyone but the chain owner, so the \
+             sizing-and-binding agreement above was checked on nothing"
         );
     }
 
@@ -14038,6 +14212,21 @@ mod stockpiling {
     /// reference map, where bot 1's chain binds, the same chest saves 3,275
     /// of 32,172 on this goal. The sign is what is asserted; the size is the
     /// fixture's.
+    ///
+    /// # 2026-09-05: the sign went, and it was the control's phantom coal
+    ///
+    /// Asserted `with < without` until the rehearsal stopped handing
+    /// furnaces over (`ExpansionCtx::rehearsing`; the handover block in
+    /// `smelt_steps` has the measurement) and this read **20,522 with the
+    /// chest against 20,510 without**. The chest plan did not move. The
+    /// treeless control went from 21,177 to 20,510, because its rehearsal
+    /// had handed a furnace to a supplier and put that furnace's coal on the
+    /// supplier's forecast, and the supplier swung a second `rock-huge` for
+    /// it. The margin the sign stood on was the control's phantom, not the
+    /// chest's worth. What the chest does is unchanged and is asserted in
+    /// its place: bot 1 plans 14,615 ticks with it against 15,746 without,
+    /// and the makespan -- which this fixture's lags bind, not bot 1 -- is
+    /// within one per cent either way.
     #[test]
     fn the_chest_makes_the_plan_shorter_where_the_patch_can_seat_it() {
         let bots = [BotId(1), BotId(2), BotId(3), BotId(4)];
@@ -14048,9 +14237,18 @@ mod stockpiling {
         let state = wide_treeless_rung_one(&bots);
         let (_, without) = plan_rung_one_on(&state, &bots);
 
+        let planned = |plan: &crate::schedule::Schedule, bot: BotId| -> Ticks {
+            plan.steps_for(bot).iter().map(|s| s.end - s.start).sum()
+        };
         assert!(
-            with_chest.makespan < without.makespan,
-            "the chest made the plan no shorter: {} with it, {} without",
+            planned(&with_chest, BotId(1)) < planned(&without, BotId(1)),
+            "the chest took no work off bot 1: {} planned with it, {} without",
+            planned(&with_chest, BotId(1)),
+            planned(&without, BotId(1))
+        );
+        assert!(
+            with_chest.makespan <= without.makespan.saturating_add(without.makespan / 100),
+            "the chest made the plan longer: {} with it, {} without",
             with_chest.makespan,
             without.makespan
         );

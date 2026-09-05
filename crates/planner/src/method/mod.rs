@@ -138,6 +138,16 @@ pub struct ExpansionCtx {
     /// Carried *into* [`Step::Owned`] rather than cleared there: a supplier's
     /// own production must not itself converge either.
     pub(crate) converging: bool,
+    /// True inside the rehearsal [`expand`] runs to build its gathering
+    /// forecast, false in the real pass and in every context built directly.
+    ///
+    /// Driver-owned like `converging`. Read by exactly one place,
+    /// `smelt_steps`' furnace handover, which keeps every furnace with its
+    /// taker while rehearsing: a handover moves a furnace's stone and coal
+    /// onto a supplier's forecast on a price the forecast itself changes,
+    /// and the real pass, which has the forecast, decides it once -- the
+    /// handover block says what that cost when the rehearsal decided too.
+    pub(crate) rehearsing: bool,
     pub depth: u32,
     /// Where each bot's items came from: for every `(bot, item)`, the
     /// actions that gained it for the role and how much of each gain is
@@ -178,6 +188,7 @@ impl ExpansionCtx {
             concurrency: None,
             stock: BTreeMap::new(),
             converging: false,
+            rehearsing: false,
             depth: 0,
         }
     }
@@ -533,6 +544,7 @@ pub fn expand(
     // time goes, is not repeated.
     let forecast = {
         let mut rehearsal = ExpansionCtx::new(state.fork(), chain_actor);
+        rehearsal.rehearsing = true;
         let mut scratch = ActionNetwork::new();
         let rehearsed = goals
             .iter()
@@ -1098,6 +1110,10 @@ fn run_steps(
                 for effect in &action.eff {
                     effect.apply(&mut ctx.state, binding)?;
                 }
+                // The load ledger a method reads to rank bots
+                // (`PlanState::planned_ticks`), fed here because this is the
+                // one place every action passes with its chain's runner set.
+                ctx.state.note_planned_ticks(action.duration);
                 // **The supply edge is stated, not inferred.** `infer_edges`
                 // pairs every producer of an item with every consumer of it
                 // and drops whichever pairing would close a cycle -- so with
@@ -2326,6 +2342,15 @@ mod tests {
         // unit is a rock's surplus or a supplier's own fuel, not the solo
         // bill dug twice -- iron and copper, the items a duplication would
         // show on, do not move.
+        //
+        // **Stone 93 -> 97 on 2026-09-05**, when the rehearsal stopped
+        // handing furnaces over (`ExpansionCtx::rehearsing`, and the
+        // handover block in `have::smelt_steps` for why). Bot 1's stone
+        // forecast now covers the furnaces it stands, so it swings a
+        // `rock-huge` (24 stone, beside the coal it wanted anyway) instead
+        // of digging one stone; bot 3 takes the `rock-big` bot 4 had, and
+        // bot 4 digs its five by hand. Rock surplus, not the solo bill dug
+        // twice: iron, copper and coal do not move.
         assert_eq!(
             mined(&fleet),
             BTreeMap::from([
@@ -2342,7 +2367,7 @@ mod tests {
                 // surplus that was already on the ground rather than out of
                 // more digging. See the exemption above for why any excess
                 // is bought rather than wasted.
-                ("stone".to_string(), 93),
+                ("stone".to_string(), 97),
             ]),
             "four bots' rung-1 bill"
         );

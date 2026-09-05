@@ -971,6 +971,13 @@ pub struct PlanState {
     /// batches from all four bots onto one furnace while two others stood
     /// with one long batch each -- see `method::have::adoptable_furnaces`.
     machine_load: BTreeMap<Pos, Ticks>,
+    /// Bot-ticks this expansion has already committed each bot to: the
+    /// nominal durations of every action emitted under a chain the bot owns,
+    /// summed. Written by the driver's `run_steps` through
+    /// [`Self::note_planned_ticks`] -- the one place every action passes --
+    /// and read by [`Self::planned_ticks`]. See that method for what it
+    /// deliberately leaves out.
+    planned_ticks: BTreeMap<BotId, Ticks>,
     /// Buffers this plan is *filling*, whose contents are therefore already
     /// spoken for.
     ///
@@ -1568,6 +1575,7 @@ impl PlanState {
             committed_machines: Default::default(),
             machine_queue: Default::default(),
             machine_load: Default::default(),
+            planned_ticks: Default::default(),
             stockpiled: Default::default(),
             claim_runner: None,
             force,
@@ -3537,39 +3545,62 @@ impl PlanState {
         self.claim_runner
     }
 
-    /// Raw units this expansion has already committed `bot` to digging.
+    /// Bot-ticks this expansion has already committed `bot` to.
     ///
     /// The one *load* figure this crate can honestly report while a plan is
     /// still being built. A method choosing between bots wants "who is least
-    /// busy", and there is no schedule yet to ask — but mining is 65.6% of the
-    /// measured action time of a rung-1 run (`run-1788465258-49050`), and
-    /// every mining action stamps the tile it commits with the serial timeline
-    /// it sits on (see [`MiningClaim`]). Summing the ore taken from the tiles
-    /// stamped `ClaimRunner::Bot(bot)` therefore counts the work this
-    /// expansion has *already* handed that bot, in the units that dominate it.
+    /// busy", and there is no schedule yet to ask -- but every action carries
+    /// its nominal duration, and the driver emits each one under a chain whose
+    /// owner is known ([`ClaimRunner::Bot`]) or not. Summing the durations
+    /// emitted under `bot`'s own chains counts the work this expansion has
+    /// *already* handed that bot, in every verb it has.
+    ///
+    /// # Why every verb, and not the mining alone
+    ///
+    /// This used to be `planned_mining`: the raw units on the tiles
+    /// `bot`'s claims had stamped, on the argument that mining was 65.6% of
+    /// a rung-1 run's action time (`run-1788465258-49050`). Since `7e330a2c`
+    /// a bot's stone and coal come off *rocks* -- one `Chop` of 360 ticks for
+    /// 24 to 50 units -- and a swing stamps no tile, so a bot whose load was
+    /// rock swings, furnace crafts and placements read as idle to the one
+    /// method that asks (`method::have::furnace_suppliers`). Measured on the
+    /// reference dump's `researched:automation`, in the rehearsal at the
+    /// first smelt with a slot to hand away: bot 2 read 53 units on the old
+    /// key while 2,670 ticks had been emitted under its chains -- 360 of
+    /// them mining, 660 swings, 1,380 crafts.
     ///
     /// # What it deliberately does not count
     ///
-    /// * A claim made in an **unowned** chain ([`ClaimRunner::Chain`]) or
+    /// * An action in an **unowned** chain ([`ClaimRunner::Chain`]) or
     ///   outside a chain, because nothing yet says which bot will run it.
     ///   Counting it against a guess would make the load figure disagree with
-    ///   the schedule, and the conservative reading — "not this bot's, as far
-    ///   as anyone can prove" — is the same one crowding already takes.
-    /// * Crafting, walking and machine time. A furnace's own smelting is not
-    ///   any bot's work at all, and a craft is two orders of magnitude cheaper
-    ///   than the mining that feeds it.
+    ///   the schedule, and the conservative reading -- "not this bot's, as far
+    ///   as anyone can prove" -- is the same one crowding takes.
+    /// * Walks and waits. The scheduler emits walks and finds waits; neither
+    ///   exists during expansion, so no expansion-time ledger can hold them.
+    /// * Machine time. A furnace's smelting is a lag edge, not any bot's
+    ///   action.
     ///
     /// So this is a *ranking* key, not a cost model: it is used to break ties
     /// between bots that are otherwise interchangeable, never to price a plan.
     ///
-    /// Deterministic by construction — an ordered walk of two `BTreeMap`s and
-    /// integer addition, no floats and no iteration over anything unordered.
-    pub fn planned_mining(&self, bot: BotId) -> u32 {
-        self.claimed
-            .iter()
-            .filter(|(_, claim)| claim.runner == Some(ClaimRunner::Bot(bot)))
-            .map(|(tile, _)| self.consumed.get(tile).copied().unwrap_or(0))
-            .sum()
+    /// Deterministic by construction -- one `BTreeMap` read, integer ticks.
+    pub fn planned_ticks(&self, bot: BotId) -> Ticks {
+        self.planned_ticks.get(&bot).copied().unwrap_or(0)
+    }
+
+    /// Add `duration` to the ledger [`Self::planned_ticks`] reads, against the
+    /// bot whose timeline the current chain provably sits on -- and against
+    /// nobody when there is none, for the reason that method gives.
+    ///
+    /// Called by the driver for every `Step::Act` it simulates, so the ledger
+    /// keeps pace with the network. Reads `claim_runner` rather than taking a
+    /// bot, so it cannot disagree with the claims about whose work this is.
+    pub fn note_planned_ticks(&mut self, duration: Ticks) {
+        if let Some(ClaimRunner::Bot(bot)) = self.claim_runner {
+            let entry = self.planned_ticks.entry(bot).or_insert(0);
+            *entry = entry.saturating_add(duration);
+        }
     }
 
     /// Has this plan already committed a batch of work to the machine at

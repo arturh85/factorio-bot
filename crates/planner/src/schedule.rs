@@ -10,18 +10,79 @@ use factorio_bot_core::types::Position;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// Character walking speed in tiles per tick (roughly 9 tiles/second).
-pub const WALK_TILES_PER_TICK: f64 = 0.15;
+/// Effective character walking speed in tiles per tick, **measured, not
+/// nominal**.
+///
+/// The character prototype runs at 0.15 tiles a tick and that is what this
+/// constant used to say. A run does not achieve it. Pooling the 792 measured
+/// walks of `run-1788625945-57257`, `run-1788612263-27812`,
+/// `headless-i/run-1788625111-28152` and `headless-a/run-1788611922-87269`
+/// (all seed 31337, four bots, no walk failures between them) against the
+/// straight-line distance the planner itself would charge gives **0.1413**
+/// tiles a tick: 185,268 modelled ticks against 196,717 measured.
+///
+/// The gap is not one thing and is not recoverable by planning:
+///
+/// - the path is a pathfinder route, walked as a polyline through waypoints on
+///   tile centres, so it is a little longer than the straight line the planner
+///   measures;
+/// - the mod's follower steers in 8 compass directions, one `walking_state`
+///   per tick, and consumes each leg only once it is inside a 0.3-by-0.3 box
+///   of that waypoint (`mods/BotBridge/control.lua`, `on_tick`), so goal-ward
+///   progress on a diagonal leg is not 0.15 tiles a tick;
+/// - one RCON round trip and one path request bracket every walk.
+///
+/// 0.14 rather than 0.1413 deliberately: the rounding goes **down**, so the
+/// model over-charges a walk by ~0.9% rather than under-charging it. A plan
+/// that is slightly pessimistic about travel schedules a bot to somewhere it
+/// can actually be; one that is optimistic hands the executor a deadline the
+/// game cannot meet, which is the failure this constant was changed to end.
+///
+/// This is the *only* travel speed in the planner — [`crate::score::walk_ticks`]
+/// and `method/power.rs` both go through it — so a future recalibration is one
+/// number here and the tests that name it.
+pub const WALK_TILES_PER_TICK: f64 = 0.14;
 
 /// Ticks to get `from` into the annulus `(min_radius, radius]` around `to`.
 /// Zero if already there.
 ///
 /// Two ways to be outside it: too far, as ever (walk in, toward `to`, until
-/// within `radius`); or, for a placement's annulus, too close — standing
+/// clear of `min_radius`); or, for a placement's annulus, too close — standing
 /// inside the footprint the disc used to accept at distance zero. That case
 /// walks the other way: away from `to`, until clear of `min_radius`. Every
 /// comparison against a bound goes through `total_cmp`, per the planner's
 /// determinism rule for float comparisons.
+///
+/// # The charge stops at `min_radius`, not at `radius`
+///
+/// `radius` decides **whether** a walk is needed. It does not decide how far
+/// the walk goes, and charging as if it did is what this function used to do:
+/// `(distance - radius) / speed`, a credit of `radius` tiles that nobody ever
+/// takes.
+///
+/// Nothing on either side of this function stops the bot at `radius`.
+/// [`arrival_point`] — the plan's own bookkeeping, applied by [`schedule`]
+/// immediately after this cost is charged — puts the bot at `min_radius` from
+/// the target, and at the *centre* for a disc. `approach_annulus` in
+/// `crates/core/src/factorio/rcon.rs`, which is what the executor actually
+/// aims the game at, does the same thing: a disc (`min_radius == 0.`) is aimed
+/// at `to` itself, and an annulus at `min_radius + slack` with `slack` capped
+/// at one tile. Both of them stop on the *inner* ring. Only the price stopped
+/// on the outer one.
+///
+/// So the model charged a bot for walking to a ring, then stood it in the
+/// middle, and the executor walked it to the middle too. Measured over the
+/// four seed-31337 runs named on [`WALK_TILES_PER_TICK`], that fiction is
+/// 8,200-10,200 ticks a run — **70-82% of the entire walk overrun**, and
+/// ~16% of a green run's whole planned makespan. It shows up in the record as
+/// two spikes and nothing else: every walk to a disc of radius 2.7 came in
+/// exactly 18 ticks over (`2.7 / 0.15`), and every walk to a disc of radius 10
+/// exactly 66-67 (`10 / 0.15`).
+///
+/// The residual credit — the `slack` the actuator adds beyond `min_radius` —
+/// is at most one tile, seven ticks, and is left to [`WALK_TILES_PER_TICK`]'s
+/// margin rather than imported here: `PATH_ENDPOINT_SLACK` is a fact about the
+/// pathfinder, and the planner is pure.
 pub fn travel_ticks(from: &Position, to: &Position, min_radius: f64, radius: f64) -> Ticks {
     let distance = calculate_distance(from, to);
     if distance.total_cmp(&min_radius).is_ge() && distance.total_cmp(&radius).is_le() {
@@ -30,7 +91,7 @@ pub fn travel_ticks(from: &Position, to: &Position, min_radius: f64, radius: f64
     if distance.total_cmp(&min_radius).is_lt() {
         return ((min_radius - distance) / WALK_TILES_PER_TICK).ceil() as Ticks;
     }
-    ((distance - radius) / WALK_TILES_PER_TICK).ceil() as Ticks
+    ((distance - min_radius) / WALK_TILES_PER_TICK).ceil() as Ticks
 }
 
 /// The position simulated as reached once a walk into `(min_radius, radius]`
@@ -1151,8 +1212,10 @@ mod tests {
             "first step should be the walk"
         );
         assert!(matches!(result.steps[1].what, StepKind::Act { .. }));
-        // 30 tiles, radius 3: ceil(27 / 0.15) = 180 travel ticks, then 60 duration.
-        assert_eq!(result.makespan, 240);
+        // 30 tiles to a disc: the walk ends on the centre, so ceil(30 / 0.14)
+        // = 215 travel ticks, then 60 duration. The radius decided that a walk
+        // was needed; it never shortened one.
+        assert_eq!(result.makespan, 275);
     }
 
     /// The tolerance a walk exists to satisfy travels with the walk.
@@ -1249,8 +1312,8 @@ mod tests {
             ),
         }
         assert!(matches!(result.steps[1].what, StepKind::Act { .. }));
-        // ceil(1.5 / 0.15) = 10 travel ticks, then the 60-tick action.
-        assert_eq!(result.makespan, 70);
+        // ceil(1.5 / 0.14) = 11 travel ticks, then the 60-tick action.
+        assert_eq!(result.makespan, 71);
     }
 
     /// The other half of the same fix: a bot standing at a distance the
@@ -1428,6 +1491,54 @@ mod tests {
         );
     }
 
+    /// The credit `travel_ticks` grants must be one the actuator actually
+    /// takes. It takes `min_radius`, never `radius`.
+    ///
+    /// `run-1788625945-57257` and three siblings measured this: 70-82% of the
+    /// whole walk overrun is the difference between these two numbers. See the
+    /// `travel_ticks` doc.
+    #[test]
+    fn a_disc_walk_is_charged_the_whole_distance_to_the_centre() {
+        let to = Position::new(0., 0.);
+        // A mine's disc: `min_radius == 0.`, so `arrival_point` is `to`
+        // itself and `approach_annulus` aims the goal at `to` itself. The
+        // walk is 30 tiles of walking, not 27.
+        assert_eq!(
+            travel_ticks(&Position::new(30., 0.), &to, 0., 3.0),
+            (30.0f64 / WALK_TILES_PER_TICK).ceil() as Ticks,
+            "a disc walk ends on the centre, so the whole distance is walked"
+        );
+    }
+
+    /// And the annulus keeps its credit, because that one is real: the
+    /// actuator aims at `min_radius + slack`, so stopping the charge at
+    /// `min_radius` is honest to within the slack.
+    #[test]
+    fn an_annulus_walk_is_charged_only_down_to_its_inner_ring() {
+        let to = Position::new(0., 0.);
+        assert_eq!(
+            travel_ticks(&Position::new(30., 0.), &to, 1.5, 10.0),
+            (28.5f64 / WALK_TILES_PER_TICK).ceil() as Ticks,
+            "an annulus walk stops on the inner ring, not on the outer one"
+        );
+    }
+
+    /// The outer bound still decides *whether* a walk happens — the change
+    /// above is to the price, not to the test for arrival.
+    #[test]
+    fn the_outer_radius_still_decides_whether_a_walk_is_needed() {
+        let to = Position::new(0., 0.);
+        assert_eq!(
+            travel_ticks(&Position::new(10.0, 0.), &to, 0., 10.0),
+            0,
+            "inside the disc is still arrived, however the walk is priced"
+        );
+        assert!(
+            travel_ticks(&Position::new(10.5, 0.), &to, 0., 10.0) > 0,
+            "outside it is still a walk"
+        );
+    }
+
     #[test]
     fn a_pinned_action_goes_to_its_bot() {
         let mut id_gen = ActionIdGen::new();
@@ -1498,23 +1609,23 @@ mod tests {
         let bots = [BotId(1)];
         let result = schedule(&net, &state(&bots), &bots).unwrap();
 
-        // 30 tiles, radius 3: ceil(27 / 0.15) = 180 travel ticks. The bot is free
-        // at 10 and the lag clears at 210, so it walks [10, 190] *during* the
-        // lag, waits 20 ticks, and acts [210, 270]. Idling first and walking
-        // afterwards would give 210 + 180 + 60 = 450.
+        // 30 tiles to a disc: ceil(30 / 0.14) = 215 travel ticks. The bot is
+        // free at 10 and the lag clears at 210, so it walks [10, 225] *during*
+        // the lag, and acts [225, 285]. Idling first and walking afterwards
+        // would give 210 + 215 + 60 = 485.
         let walk = result
             .steps
             .iter()
             .find(|s| matches!(s.what, StepKind::Walk { .. }))
             .expect("the bot must walk");
-        assert_eq!((walk.start, walk.end), (10, 190));
+        assert_eq!((walk.start, walk.end), (10, 225));
         let act = result
             .steps
             .iter()
             .find(|s| matches!(&s.what, StepKind::Act { action, .. } if *action == remove))
             .expect("the removal is scheduled");
-        assert_eq!((act.start, act.end), (210, 270));
-        assert_eq!(result.makespan, 270);
+        assert_eq!((act.start, act.end), (225, 285));
+        assert_eq!(result.makespan, 285);
     }
 
     #[test]
@@ -1550,11 +1661,12 @@ mod tests {
 
         assert_eq!(result.assignment(p), Some(BotId(1)));
         // Bot 2 is the cheapest by time — zero travel, so it would finish at 20
-        // against bot 1's 667 — but it has no ore, so it is not a candidate at
+        // against bot 1's 735 — but it has no ore, so it is not a candidate at
         // all. Ranking without feasibility would bind it and fail the plan.
         assert_eq!(result.assignment(c), Some(BotId(1)));
-        // Bot 1 walks 97 tiles: ceil(97 / 0.15) = 647, then acts for 10.
-        assert_eq!(result.makespan, 667);
+        // Bot 1 walks 100 tiles to the disc's centre: ceil(100 / 0.14) = 715
+        // (the radius no longer shortens the walk), then the two 10-tick acts.
+        assert_eq!(result.makespan, 735);
     }
 
     #[test]
@@ -1664,11 +1776,12 @@ mod tests {
             Some(BotId(2)),
             "the second chain must open on the bot carrying none, dear though it is"
         );
-        // The price of that: bot 2 walks 197 tiles (1314 ticks) and finishes at
-        // 1914, where piling both onto bot 1 would have finished at 1200. The
-        // chainless version of this network is `travel_cost_can_outweigh_an_idle_bot`,
-        // which still asserts 1200 — the preference applies only to chains.
-        assert_eq!(result.makespan, 1914);
+        // The price of that: bot 2 walks 200 tiles (ceil(200 / 0.14) = 1429
+        // ticks) and finishes at 2029, where piling both onto bot 1 would have
+        // finished at 1200. The chainless version of this network is
+        // `travel_cost_can_outweigh_an_idle_bot`, which still asserts 1200 —
+        // the preference applies only to chains.
+        assert_eq!(result.makespan, 2029);
     }
 
     #[test]
@@ -1907,7 +2020,7 @@ mod tests {
         // Round 1: bot 1 is on the spot, finishing at 600.
         assert_eq!(result.assignment(first), Some(BotId(1)));
         // Round 2: bot 1 queues and finishes at 1200. Bot 2 is idle but must walk
-        // 197 tiles: ceil(197 / 0.15) = 1314 travel, so it would finish at 1914.
+        // 200 tiles: ceil(200 / 0.14) = 1429 travel, so it would finish at 2029.
         // A travel-blind scheduler would hand this to the idle bot and claim 600.
         assert_eq!(result.assignment(second), Some(BotId(1)));
         assert_eq!(result.makespan, 1200);
@@ -1940,10 +2053,11 @@ mod tests {
         let result = schedule(&net, &s, &bots).unwrap();
 
         assert_eq!(result.assignment(first), Some(BotId(1)));
-        // Bot 1 would queue to 1200. Bot 2 walks 27 tiles: ceil(27 / 0.15) = 180
-        // travel, finishing at 780. The idle bot wins this time.
+        // Bot 1 would queue to 1200. Bot 2 walks 30 tiles to the disc's centre:
+        // ceil(30 / 0.14) = 215 travel, finishing at 815. The idle bot still
+        // wins — the honest travel price did not overturn it.
         assert_eq!(result.assignment(second), Some(BotId(2)));
-        assert_eq!(result.makespan, 780);
+        assert_eq!(result.makespan, 815);
     }
 
     #[test]
@@ -2067,9 +2181,9 @@ mod tests {
             take_at(takes[1]),
             take_at(takes[0])
         );
-        // 1,760 under `(end, action, bot)`: both ore mines, then the coal,
-        // then everything else, and the long smelt waited out at the end.
-        assert_eq!(result.makespan, 1660);
+        // Under `(end, action, bot)` the order is: both ore mines, then the
+        // coal, then everything else, and the long smelt waited out at the end.
+        assert_eq!(result.makespan, 1738);
     }
 
     /// The obvious alternative — rank by [`critical_path`] alone — walks away
@@ -2132,6 +2246,6 @@ mod tests {
             })
             .collect();
         assert_eq!(&acts[..2], &coals[..], "both coals are mined in one trip");
-        assert_eq!(result.makespan, 1700);
+        assert_eq!(result.makespan, 1778);
     }
 }

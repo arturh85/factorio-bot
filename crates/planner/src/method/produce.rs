@@ -3072,7 +3072,8 @@ mod tests {
         // Moved by the lookahead scheduling key (51c7f695): a bound over the bot's other ready work replaces (end, id) as the primary key, and the plan overlaps the longer smelt under the shorter one.
         // 5466 -> 3989 on 2026-09-05: `infer_edges` no longer orders every plate consumer on the chain after every earlier plate producer; the stated supply edge (`run_steps`) is the only one, and the drill's and the furnace's bills overlap.
         // 3989 -> 3732 later on 2026-09-05: the furnace's first coal comes off the rock the drill's coal is swung for anyway, so the tile it was dug from is never walked to (`expand` rehearses; `have::chop_beats_mining`).
-        assert_eq!(sched.makespan, 3732, "ticks for one bot to build one cell");
+        // 3732 -> 3895 on 2026-09-05: the walk model stopped crediting a bot for `radius` tiles it never saved (`schedule::travel_ticks`) and the speed constant came down from the prototype's 0.15 to the measured 0.14. Same plan, priced honestly; see `WALK_TILES_PER_TICK`.
+        assert_eq!(sched.makespan, 3895, "ticks for one bot to build one cell");
     }
 
     #[test]

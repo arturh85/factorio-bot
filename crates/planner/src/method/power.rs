@@ -105,8 +105,8 @@ pub const PLANT_COAL: u32 = 5;
 ///
 /// The walk is **already priced**. Every part of the plant carries a
 /// `Condition::AtPosition` at the plant site, so [`crate::schedule`] emits a
-/// walk for it and charges `distance / WALK_TILES_PER_TICK` -- 0.15 tiles per
-/// tick, so 67.8 tiles is 452 ticks. Against run 32's own clock (40,775 ticks
+/// walk for it and charges `distance / WALK_TILES_PER_TICK` -- 0.14 tiles per
+/// tick, so 67.8 tiles is 485 ticks. Against run 32's own clock (40,775 ticks
 /// to reach rung 7), a plant at 64 tiles costs 2.1% of the run in walking, at
 /// 128 tiles 4.2%, at 256 tiles 8.4%. None of those is "the bot spends the
 /// run walking", and no measurement says where that line is -- so the planner
@@ -174,8 +174,8 @@ const SHORE_SEARCH_RADIUS: i32 = 10;
 /// that a plant that exists is worth walking to. The comparison is not close:
 ///
 /// * adopting costs **one walk**, which [`crate::schedule`] already prices at
-///   `distance / WALK_TILES_PER_TICK` — 0.15 tiles a tick, so even 256 tiles is
-///   about 1,700 ticks;
+///   `distance / WALK_TILES_PER_TICK` — 0.14 tiles a tick, so even 256 tiles is
+///   about 1,830 ticks;
 /// * building costs an offshore pump, three pipes, a boiler and a steam engine
 ///   — about 45 iron plates, which have to be mined and smelted first, and in
 ///   every archived run that is *tens of thousands* of ticks — plus five coal

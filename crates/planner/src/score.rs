@@ -88,8 +88,8 @@ const WOOD: &str = "wood";
 /// and it is set at twice the water bound so that water is the tighter of the
 /// two constraints and stays the one that disqualifies a map.
 ///
-/// At [`WALK_TILES_PER_TICK`] a one-way walk of 256 tiles is 1,707 ticks
-/// (28 seconds), and rung 1 walks to ore repeatedly. A map whose iron is out
+/// At [`WALK_TILES_PER_TICK`] a one-way walk of 256 tiles is 1,829 ticks
+/// (30 seconds), and rung 1 walks to ore repeatedly. A map whose iron is out
 /// here is already a bad map; the radius exists so that a report says
 /// "nothing within 256 tiles" instead of scanning an entire charted continent
 /// to name a tile no plan would ever use.
@@ -616,7 +616,7 @@ mod tests {
     #[test]
     fn a_distance_is_priced_as_walking_at_the_planners_own_speed() {
         assert_eq!(walk_ticks(0.), 0);
-        assert_eq!(walk_ticks(15.), 100, "0.15 tiles a tick");
+        assert_eq!(walk_ticks(14.), 100, "0.14 tiles a tick");
         assert_eq!(walk_ticks(0.01), 1, "part of a tick is a tick");
         let score = fixture_score();
         for entry in &score.resources {

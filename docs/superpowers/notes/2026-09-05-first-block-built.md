@@ -651,11 +651,12 @@ length and the second not at all. Worse, the data answers the second
   generation: *power coverage is not power capacity* (see CLAUDE.md's Known
   Issues), and an unpowered inserter does not run slowly, it does not run.
 - **So the moving half of the block is unproven.** 87 transport-belt, 48
-  inserter, 2 splitter and 2 underground-belt -- **139 of 179 entities, 78% of
+  inserter, 2 splitter and 2 underground-belt -- **138 of 179 entities, 77% of
   the block** -- are proven to STAND at the right tile facing the right way
-  (read back off the live surface, 179/179) and **have never been shown to
-  move a single item**. Add the 3 `small-lamp` and it is 142 of 179 that
-  needed power this run never had.
+  (178 of 179 placed -- one transport-belt was never placed, a pathfinder
+  miss -- and all 178 read back off the live surface) and **have never been
+  shown to move a single item**. Add the 3 `small-lamp` and it is 141 of 179
+  that needed power this run never had.
 
 What Task 6 therefore establishes is: a 179-entity designed block is decoded,
 migrated, split across four bots, placed by hand, and read back correct; and

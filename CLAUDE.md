@@ -363,18 +363,19 @@ BotBridge Mod (Factorio mod for RPC)
     built (see `docs/superpowers/notes/2026-09-05-first-block-built.md`).
     Four things by name:
     - **"Proven live" means STANDING, and for the furnaces also SMELTING.
-      It does not mean anything MOVED.** 179/179 entities were read back
-      off the live surface at the right tile facing the right way, and the
-      furnaces smelt when fed by hand. But the plate count in that run is
-      the sum of the furnaces' own `output_inventory`, which rose
-      monotonically -- had the output inserters been emptying them it would
-      have flattened -- and it could not have been otherwise: `FurnaceLine`
-      carries 13 poles and **no generator at all**, and the run cheated in
-      no power source. Power coverage is not power capacity. So 87 belts,
-      48 inserters, 2 splitters and 2 underground belts -- **139 of 179
-      entities, 78% of the block** -- are proven to stand and have **never
-      been shown to move a single item**. Closing that needs power in the
-      blueprint and a source/sink to count at each end.
+      It does not mean anything MOVED.** 178 of 179 entities were placed
+      (one transport-belt was never placed, a pathfinder miss), and all 178
+      were read back off the live surface at the right tile facing the
+      right way, and the furnaces smelt when fed by hand. But the plate
+      count in that run is the sum of the furnaces' own `output_inventory`,
+      which rose monotonically -- had the output inserters been emptying
+      them it would have flattened -- and it could not have been otherwise:
+      `FurnaceLine` carries 13 poles and **no generator at all**, and the
+      run cheated in no power source. Power coverage is not power capacity.
+      So 87 belts, 48 inserters, 2 splitters and 2 underground belts --
+      **138 of 179 entities, 77% of the block** -- are proven to stand and
+      have **never been shown to move a single item**. Closing that needs
+      power in the blueprint and a source/sink to count at each end.
     - **It has no siting story, and refuses rather than guessing.** The
       block is placed at a fixed offset. Since 2026-09-05 `expand()` scans
       the whole footprint **before emitting anything** and refuses with

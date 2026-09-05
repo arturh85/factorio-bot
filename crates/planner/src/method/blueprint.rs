@@ -273,14 +273,39 @@ impl Method for BuildBlock {
         // An entity standing on the right tile facing the WRONG way is
         // neither: it is not built, and this method has no action that
         // rotates or removes it (`ActionKind` has `Place`, and its `Remove`
-        // is an inventory slot, not an entity). Emitting the placement anyway
-        // would dispatch a build the game refuses -- `can_place_entity` is
-        // asked without fast-replace (`rcon_place_entity`,
-        // mods/BotBridge/control.lua) -- and a refused build is *remembered*
-        // as a fact about that ground for the rest of the run
-        // (`note_placement_refusal`). So it is refused here, by name, saying
-        // both facings. What must never happen again is the third option:
-        // reading it as done.
+        // is an inventory slot, not an entity). That is the weaker of two
+        // reasons this is refused rather than re-emitted. The one that
+        // actually holds: a `Place` step's own `Condition::AreaFree` is
+        // evaluated by the exact same predicate this pre-check's
+        // `placement_occupant` uses (`is_area_free_facing` reduces to
+        // `occupant_of(..).is_none()`, and `placement_occupant` calls
+        // `occupant_of` directly) -- so a re-placement emitted over the
+        // standing entity could never be scheduled, and would fail at
+        // `schedule()` with exactly the opaque `PlannerError::ChainOwnerInfeasible`
+        // this ground pre-check exists to replace with a named tile. Whether
+        // the GAME itself would refuse a same-name re-placement was never
+        // established, and is not the reason for this refusal: the one
+        // checkable fact points the other way -- `rcon_place_entity`
+        // (mods/BotBridge/control.lua:3522) passes `fast_replace = true`
+        // with `build_check_type.manual`, so a live re-placement over a
+        // wrong-facing entity may well succeed. So it is refused here, by
+        // name, saying both facings. What must never happen again is the
+        // third option: reading it as done.
+        //
+        // Wiring up the re-placement instead is not the two-line change it
+        // looks like (a `Remove` step here plus a carve-out in the footprint
+        // scan below for the entity being replaced): `Condition::AreaFree`
+        // would still see the standing entity and refuse the `Place` at
+        // schedule time, so the carve-out would have to reach `AreaFree`
+        // too, or scheduling refuses it anyway.
+        //
+        // One more thing this refusal does not distinguish: a wrong-facing
+        // entity and an unrelated obstacle (a tree, water, a footprint the
+        // game already refused) both surface as
+        // `PlannerError::BlockGroundOccupied` -- "there is a tree in the
+        // way" and "the block is built wrong and nothing here can fix it"
+        // share an error code. The message text says which; the variant
+        // does not.
         let mut wanted: Vec<&BlueprintEntity> = Vec::new();
         for e in &bp.entities {
             let world = anchor.add(&e.offset);
@@ -694,12 +719,17 @@ mod tests {
     /// to protect.
     ///
     /// The correction is not a silent placement. `ActionKind` has no action
-    /// that rotates or removes a standing entity, and `rcon_place_entity`
-    /// asks `can_place_entity` without fast-replace, so a placement emitted
-    /// over the wrong-facing belt would be refused at dispatch AND remembered
-    /// as a fact about that ground for the rest of the run
-    /// (`note_placement_refusal`). So it is refused here, by name, saying
-    /// both facings -- what must never happen again is reading it as done.
+    /// that rotates or removes a standing entity -- but even if it did, a
+    /// `Place` emitted over the wrong-facing belt carries the same
+    /// `Condition::AreaFree` every other placement does, evaluated by the
+    /// same predicate as this method's ground pre-check, so it could never
+    /// be scheduled: the run would end on the opaque
+    /// `PlannerError::ChainOwnerInfeasible` the pre-check exists to replace.
+    /// (Whether the GAME would refuse the re-placement at dispatch was never
+    /// established -- `rcon_place_entity` passes `fast_replace = true`, so
+    /// the one checkable fact points the other way.) So it is refused here,
+    /// by name, saying both facings -- what must never happen again is
+    /// reading it as done.
     #[test]
     fn an_entity_facing_the_wrong_way_is_not_read_as_already_built() {
         use crate::ids::BotId;

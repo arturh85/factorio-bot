@@ -490,6 +490,7 @@ fn stub_refused_place(player_position: (f64, f64), occupants: &str) -> String {
             find_non_colliding_position = function(name, center, radius, precision)
                 _searched_from[#_searched_from + 1] = {{ x = center.x, y = center.y }}
                 if _nowhere_to_stand then return nil end
+                if _landing_for ~= nil then return _landing_for(center) end
                 return {{ x = center.x, y = center.y }}
             end,
             find_entities_filtered = function(args)
@@ -1098,5 +1099,47 @@ fn the_step_aside_aims_out_of_the_nearest_edge() {
         "the nearest edge is the western one (0.43 tiles away against 1.37 \
          eastward), and stepping sideways off the exit axis is extra walking \
          for nothing. Got ({x}, {y})"
+    );
+}
+
+/// **The crack between two machines.** `run-1788609725-78284`: bot 1 stood in
+/// the footprint of the assembler at `[39.5, -9.5]`, nearest exit west, and
+/// west was the 0.6-tile slack between that box and the assembler at
+/// `[36.5, -9.5]`. The target collided with the neighbour, so
+/// `find_non_colliding_position` answered with a spot in the crack -- outside
+/// the raw footprint, but inside the walker's 0.3 stopping box of it. Four
+/// step-aside walks each completed 0.3 tiles further along the crack and
+/// still in the way; the placement failed and the milestone replanned.
+///
+/// A landing has to clear the footprint by the character's half-box plus that
+/// stopping box, and when the nearest exit cannot offer one, the next one is
+/// asked -- here the game is told to snap anything west of the site back to
+/// 0.1 tiles clear of the edge, and the bot is sent out of a different edge.
+#[test]
+fn a_landing_inside_the_walkers_stopping_box_is_refused_and_the_next_exit_taken() {
+    let (l, t, r, b) = FOOTPRINT;
+    let lua = run(
+        &stub_refused_place(ACTOR_AWAY, PARKED_BOT),
+        &format!(
+            "{STUB_SERIALISE}\n_landing_for = function(c) \
+             if c.x < {l} then return {{ x = {l} - 0.1, y = c.y }} end \
+             return {{ x = c.x, y = c.y }} end\n"
+        ),
+        &format!(r#"rcon_place_entity(1, "stone-furnace", {SITE}, 0)"#),
+    );
+    let moved = asked_to_move(&lua);
+    assert_eq!(moved.len(), 1, "the bot is still asked to move. Got {moved:?}");
+    let (_, (x, y)) = moved[0];
+    let clear = x <= l - 0.5 || x >= r + 0.5 || y <= t - 0.5 || y >= b + 0.5;
+    assert!(
+        clear,
+        "the landing must clear {FOOTPRINT:?} by the 0.2 half-box plus the \
+         walker's 0.3 stopping box, or the character stops inside the \
+         footprint and the retry finds it exactly as occupied. Got ({x}, {y})"
+    );
+    assert!(
+        x >= l,
+        "the west exit only ever offered a spot in the crack, so the walk has \
+         to leave by another edge. Got ({x}, {y})"
     );
 }

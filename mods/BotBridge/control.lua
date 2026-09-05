@@ -3679,11 +3679,14 @@ end
 
 -- Where to send a character that is standing inside `bb`, and why that spot.
 --
--- Out through the **nearest** edge, plus the character's own half-width, plus
--- `PLACEMENT_STEP_ASIDE_MARGIN`. Nearest, because a step aside is meant to be
--- a step: crossing the whole footprint to leave by the far side is a longer
--- walk to no better place, and the run this exists for had its blocker 0.43
--- tiles from one edge and 1.37 from the other.
+-- Every exit, **nearest first**: out through an edge, plus the character's own
+-- half-width, plus `PLACEMENT_STEP_ASIDE_MARGIN`. Nearest, because a step
+-- aside is meant to be a step: crossing the whole footprint to leave by the
+-- far side is a longer walk to no better place, and the run this exists for
+-- had its blocker 0.43 tiles from one edge and 1.37 from the other. The
+-- others follow in order because the nearest exit is not always one the
+-- character can use -- see `step_aside_from_footprint` for the crack between
+-- two assemblers that made this a list.
 --
 -- Pure geometry, and deliberately so -- it makes no query and reads no state,
 -- which is what lets a test pin the choice without a game. Ties resolve
@@ -3694,33 +3697,83 @@ end
 -- from the prototype table: it is already in hand from the scan that found
 -- this character, it is exact, and `rcon_place_entity` must not depend on a
 -- prototype lookup that could be nil in the middle of a reply.
-function placement_step_aside_target(bb, character)
-	local pos = character.position
+function placement_step_aside_half_box(character)
 	local half_x, half_y = 0.2, 0.2
 	local box = character.bounding_box
 	if box ~= nil then
 		half_x = (box.right_bottom.x - box.left_top.x) / 2.0
 		half_y = (box.right_bottom.y - box.left_top.y) / 2.0
 	end
-	local out_west = pos.x - bb.left_top.x
-	local out_east = bb.right_bottom.x - pos.x
-	local out_north = pos.y - bb.left_top.y
-	local out_south = bb.right_bottom.y - pos.y
+	return half_x, half_y
+end
 
-	local best = out_west
-	local target = { x = bb.left_top.x - half_x - PLACEMENT_STEP_ASIDE_MARGIN, y = pos.y }
-	if out_east < best then
-		best = out_east
-		target = { x = bb.right_bottom.x + half_x + PLACEMENT_STEP_ASIDE_MARGIN, y = pos.y }
+function placement_step_aside_targets(bb, character)
+	local pos = character.position
+	local half_x, half_y = placement_step_aside_half_box(character)
+	local exits = {
+		{ out = pos.x - bb.left_top.x, order = 1,
+		  target = { x = bb.left_top.x - half_x - PLACEMENT_STEP_ASIDE_MARGIN, y = pos.y } },
+		{ out = bb.right_bottom.x - pos.x, order = 2,
+		  target = { x = bb.right_bottom.x + half_x + PLACEMENT_STEP_ASIDE_MARGIN, y = pos.y } },
+		{ out = pos.y - bb.left_top.y, order = 3,
+		  target = { x = pos.x, y = bb.left_top.y - half_y - PLACEMENT_STEP_ASIDE_MARGIN } },
+		{ out = bb.right_bottom.y - pos.y, order = 4,
+		  target = { x = pos.x, y = bb.right_bottom.y + half_y + PLACEMENT_STEP_ASIDE_MARGIN } },
+	}
+	table.sort(exits, function(a, b)
+		if a.out ~= b.out then return a.out < b.out end
+		return a.order < b.order
+	end)
+	local targets = {}
+	for i, e in ipairs(exits) do targets[i] = e.target end
+	return targets
+end
+
+function placement_step_aside_target(bb, character)
+	return placement_step_aside_targets(bb, character)[1]
+end
+
+-- The box a step-aside landing must stay out of: the footprint grown by the
+-- character's half-box and by the walker's stopping box.
+--
+-- The walker declares a leg done anywhere within 0.3 of its waypoint
+-- (`on_tick`), so a landing 0.1 tiles clear of the footprint is a character
+-- that stops 0.2 tiles inside it, and the retry finds the footprint exactly
+-- as occupied as before. Testing the landing against the raw box let that
+-- through: in `run-1788609725-78284` bot 1 stood in the assembler footprint
+-- at `[39.5, -9.5]`, its nearest exit was west, and west was the 0.6-tile
+-- crack between that box and the assembler at `[36.5, -9.5]`. The target
+-- itself collided with the neighbour, `find_non_colliding_position` answered
+-- with a spot in the crack, and four step-aside walks each *completed* --
+-- `action_completed ok 4712` -- 0.3 tiles further along the crack and still
+-- in the way, until the action had failed and the milestone had replanned.
+WALK_ARRIVAL_HALF = 0.3
+function placement_step_aside_clearance(bb, character)
+	local half_x, half_y = placement_step_aside_half_box(character)
+	return {
+		left_top = { x = bb.left_top.x - half_x - WALK_ARRIVAL_HALF, y = bb.left_top.y - half_y - WALK_ARRIVAL_HALF },
+		right_bottom = { x = bb.right_bottom.x + half_x + WALK_ARRIVAL_HALF, y = bb.right_bottom.y + half_y + WALK_ARRIVAL_HALF },
+	}
+end
+
+-- The first landing, nearest exit first, that the game says the character
+-- fits at and that clears the footprint by enough for the walker's stopping
+-- box, or nil when no exit offers one.
+function placement_step_aside_landing(surface, bb, character)
+	local clearance = placement_step_aside_clearance(bb, character)
+	for _, target in ipairs(placement_step_aside_targets(bb, character)) do
+		local landing = surface.find_non_colliding_position(
+			"character", target,
+			PLACEMENT_STEP_ASIDE_RADIUS, PLACEMENT_STEP_ASIDE_PRECISION)
+		-- Nil is the game saying the character fits nowhere near there; a
+		-- landing inside the clearance is a walk that costs time and
+		-- changes nothing. Either way, try the next edge before giving up:
+		-- better no walk than a walk that ends where it began.
+		if landing ~= nil and not position_in_rect(landing, clearance) then
+			return landing
+		end
 	end
-	if out_north < best then
-		best = out_north
-		target = { x = pos.x, y = bb.left_top.y - half_y - PLACEMENT_STEP_ASIDE_MARGIN }
-	end
-	if out_south < best then
-		target = { x = pos.x, y = bb.right_bottom.y + half_y + PLACEMENT_STEP_ASIDE_MARGIN }
-	end
-	return target
+	return nil
 end
 
 -- Asks every bot standing in a refused footprint to walk out of it.
@@ -3780,15 +3833,8 @@ function step_aside_from_footprint(surface, footprint, position, acting_player)
 			and blocker.connected and blocker.character ~= nil then
 			local state = storage.p[blocker_id]
 			if state ~= nil and state.walking == nil and state.mining == nil then
-				local target = placement_step_aside_target(bb, character)
-				local landing = surface.find_non_colliding_position(
-					"character", target,
-					PLACEMENT_STEP_ASIDE_RADIUS, PLACEMENT_STEP_ASIDE_PRECISION)
-				-- Nil is the game saying the character fits nowhere near
-				-- there, and a landing back inside the footprint is a walk
-				-- that costs time and changes nothing. Either way, better no
-				-- walk than a walk that ends in a leg timeout.
-				if landing ~= nil and not position_in_rect(landing, bb) then
+				local landing = placement_step_aside_landing(surface, bb, character)
+				if landing ~= nil then
 					start_walk_waypoints(PLACEMENT_STEP_ASIDE_ACTION_ID, blocker_id,
 						{ { landing.x, landing.y } }, true)
 				end

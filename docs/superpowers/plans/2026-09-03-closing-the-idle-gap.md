@@ -117,12 +117,12 @@ is where the pumpjack cell and fluid routing will go. Charting and extractor
 refusals fire *before* prerequisites, so 100 green packs are never planned in
 front of a missing well. The three science goals are byte-identical.
 
-**Untested live**: the mod side has never run inside Factorio; the bench is a
-scratch server with this mod, a `world.dump`, and `entities: ["crude-oil"]`
-under `oil-processing`. Corrections to my brief: `FactorioTechnology` is not
-in the OpenAPI contract, so nothing to mirror; `oil-gathering` is a
-prerequisite, so its lock is only reachable from a directly stated
-`Extracted` goal.
+**Verified live** (server-only run, `world.dump`): `oil-processing` arrives as
+`{"type":"mine-entity","entities":["crude-oil"],"count":1}`,
+`uranium-processing` as `["uranium-ore"]`, and `automation-science-pack` is
+unchanged (`craft-item`, `lab`, 1). The two baseline dumps still predate this
+and refuse as `UndescribedResearchTrigger`; a re-dump of the t=0 baseline is
+a deliberate step, not a side effect, because the fingerprint is charting.
 
 ## ✅ GREEN FROM A FRESH WORLD IN 23:38 (`run-1788594774-55056`) — the furnace-slot fix, executed
 

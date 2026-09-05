@@ -557,12 +557,15 @@ Three things that are **not** interchangeable between the modes:
   is taken, never the sum**: machine production (the force's statistics) and
   hand crafts (`storage.crafted_tally`), because **a hand craft does not appear
   in production statistics at all** — measured, and the reason the first
-  attempt unlocked both plate triggers and never the lab one. The 11
-  `mine-entity` triggers (**`oil-processing` among them**), `build-entity`,
-  `capture-spawner` and `create-space-platform` are **not** emulated:
-  `serialize_technology` sends no payload for them because the shipped
-  prototypes and the runtime API disagree about the field's shape, and
-  emulating a condition you cannot read is granting it.
+  The `mine-entity`, `build-entity`, `capture-spawner` and
+  `create-space-platform` triggers are **not** emulated. Since `ffc56270` the
+  mod does send their payload (`oil-processing` arrives as
+  `{"type":"mine-entity","entities":["crude-oil"],"count":1}`, verified on a
+  server-only dump), so the planner can refuse `oil-processing` by the next
+  rung rather than by the trigger, but emulating one honestly needs the
+  qualifying act to have actually happened, and a `mine-entity` trigger means
+  a real extractor mining a real patch. A headless run therefore still cannot
+  cross them.
 - **Nothing above 4 bots has been run.** `PlayerId` is `u8`, so 255 is the
   arithmetic ceiling; before that, the mod polls **every bot every tick**
   (whole main inventory, sorted signature, crafting-queue scan) and every

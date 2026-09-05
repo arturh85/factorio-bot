@@ -677,11 +677,16 @@ Three things that are **not** interchangeable between the modes:
 #            authoritative answer to "did my edit ship". It used to be
 #            suppressed by `silent` (which every CLI path sets unless you
 #            pass --verbose) and so printed on no run at all.
-#            Same trap for scripts: workspace/scripts/ is a separate copy, and
-#            the CLI resolves a script by bare name against THAT copy, not the
-#            repo -- but scripts has no repo-checkout fallback at all (even in
-#            a debug build, a missing workspace/scripts/ is created empty, not
-#            seeded from the repo) and no equivalent log line yet.
+#            Scripts: a name resolves against <workspace>/scripts ONLY, never
+#            the CWD (`crates/core/src/scripts.rs::ensure_scripts_dir`, the
+#            single entry point; the CWD-probing `scripts_dir` is deleted).
+#            A missing OR EMPTY workspace/scripts/ is seeded by COPYING the
+#            checkout's scripts/ -- a copy, not a symlink, so a script's
+#            file_write / world.dump land in the workspace and not the repo.
+#            A populated one is left alone and only warned about when stale,
+#            so an edit to scripts/foo.lua in the repo does NOT run until you
+#            copy it over. Every run logs "Using scripts directory <absolute
+#            path> (<why>)", once, not gated on --verbose, beside the mods line.
 #            Data dir is ~/.local/share/factorio-bot-dev/
 #   release  mods and scripts are include_dir!-embedded into the binary at
 #            COMPILE TIME and extracted once into the workspace. Editing

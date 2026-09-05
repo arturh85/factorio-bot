@@ -239,6 +239,11 @@ work and its `take 10 copper-ore from the wooden-chest` moves from 8,860 to
 \* plans before the walk model was corrected are ~22% under-priced; only run
 17's ratio is meaningful against 1.0.
 
+**The number moved because the model stopped lying, not because the bots got
+faster** (the peer session's phrasing, and it is the right one). 0.984 is
+the first time this project has been wrong in the safe direction: the plan
+is now slightly pessimistic rather than a fifth optimistic.
+
 Fresh-world green: 64:22 → 36:48 → 31:35 → 26:32 → 29:09 → 23:38 → 20:59 →
 17:20 → 18:46 → 15:19 → **14:26**. Zero failed actions, zero failed walks
 across 402 walk events, zero reach corrections — the 0.6-tile margin held
@@ -415,6 +420,27 @@ table: a strictly chronological commit order plans 51,303 but hands a shared
 research to the busy chain owner on ties; walk overruns (~11–12k per
 four-bot run) are the largest remaining slip and untouched; research
 durations still assume the lab count the method saw.
+
+## ⚠️ A RISING CURVE IS NOT A WORKING FACTORY (2026-09-05, from the peer's review)
+
+The peer session's 179-entity furnace line was reported as smelting. Its
+reviewer found it **had no generator at all** — thirteen poles, no power,
+nothing cheated in. The furnaces smelt because ore and coal were carried
+into them by hand; the 48 inserters and 87 belts have never moved an item.
+They are correcting their note.
+
+**Our rate table would have shown exactly the same shape**, and this is the
+hole in it: `production.made` counts what machines produced, and a furnace
+hand-fed by a bot is a machine. A curve that rises while bots ferry ore is
+inventory moving, not a factory running. Every plateau in this record is
+that curve running out of hand-fed input.
+
+The honest test is production **while the bots are idle** — which the green
+milestone already applies ("5 green packs reach the output chest in 90 s
+with every bot idle") but the rate table does not. Dispatched as the
+`ratehonest` worktree: mark each interval with what the bots were doing and
+what the power networks were carrying, so a curve says whether it was
+earned by the factory or by the roster.
 
 ## THE RATE VIEW (owner, 2026-09-05 19:20): production stops at minute 15
 

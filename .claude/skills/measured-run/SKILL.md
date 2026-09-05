@@ -27,6 +27,52 @@ failure; and a fresh map has charted almost nothing.
 If the question is about live game state, `factorio-bot rcon -s localhost` is
 faster than a run. See the `diagnose-run` skill.
 
+## 0.5 Can this run headless? Usually yes, and it is ~5x cheaper
+
+**`--headless` replaces the graphical clients with server-side `character`
+entities.** No client process, no window, no display, no GPU, and no connect
+wait: **the script starts 12 seconds after launch instead of minutes.** With
+`--game-speed 5` a measured acceptance run did **14.9 minutes of game time in
+3.0 minutes of wall clock** (`run-1788597952-96167`, 4 bots, seed 31337, all
+three `factory_stage2` milestones satisfied, `outcome: done`).
+
+```bash
+just headless factory_stage2.lua          # 4 character bots at 5x
+factorio-bot lua <script> --headless --bots 4 --game-speed 5
+```
+
+**Use headless for** iterating on the planner or executor, reproducing a
+failure, and anything where the answer is "did it work", not "how long did it
+take".
+
+**Use clients (`just bench`) for** a number you will quote, and for anything
+filmed — video is captured from a client window, so a headless run records
+everything except video and says so.
+
+**A run is all clients or all characters.** The mix is refused by name, in the
+mod and in core, before a process is spawned; a human joining while character
+bots exist is refused too.
+
+**Three things to know before trusting a headless result:**
+
+- **Never compare a 5x headless timing to a 1x client run.** Provenance records
+  `bot_mode` and `game_speed` for exactly this reason, and `just analyse`
+  prints a difference as a note rather than refusing.
+- **Trigger technologies are emulated, and only the `craft-item` ones.**
+  Factorio 2.0 unlocks 32 technologies by doing rather than researching, and
+  the game fires those from *player* actions a characterless bot never
+  performs — a headless run once crafted a lab, placed it, and still could not
+  craft red science. The mod now completes such a technology when the force has
+  already produced what the trigger names, writing a
+  `research_trigger_emulated` event each time. The 11 `mine-entity` triggers
+  (**including `oil-processing`**), plus `build-entity` and the two space ones,
+  are **not** emulated, because the mod cannot read their condition — so a
+  headless run still cannot cross them.
+- **Nothing above 4 bots has been run.** Bot ids are `u8`, so 255 is the
+  ceiling, and the mod polls every bot every tick (whole inventory read, sorted
+  signature, crafting-queue scan), so bot count is the first thing that would
+  cost tick rate.
+
 ## 1. Pre-flight — never skip
 
 ```bash

@@ -1738,6 +1738,15 @@
           "factorio_archive_path": {
             "type": "string"
           },
+          "factorio_port": {
+            "description": "The game port the server listens on; `None` means Factorio's default\n34197. Set it, with `rcon_port` and `workspace_path`, to run a second\ninstance beside a live one.",
+            "format": "int32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "map_exchange_string": {
             "type": "string"
           },

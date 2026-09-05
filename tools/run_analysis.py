@@ -147,6 +147,13 @@ PROVENANCE_SEVERITY = {
     "resumed_from": "refuse",
     "map": "unknown",
     "workspace": "flag",
+    # `bot_mode` / `game_speed` -- FLAG. Character bots and clients play with
+    #     the same reach, walk speed and craft times, and every timing is in
+    #     ticks, so the pair is comparable; but only a client run can be
+    #     filmed, and a run at speed 10 on a server that could not keep up
+    #     delivers fewer ticks per second than it planned for.
+    "bot_mode": "flag",
+    "game_speed": "flag",
 }
 PROVENANCE_FIELDS = tuple(PROVENANCE_SEVERITY)
 

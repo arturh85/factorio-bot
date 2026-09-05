@@ -128,6 +128,8 @@ export interface FactorioSettings {
     map_exchange_string: string;
     rcon_pass: string;
     rcon_port: number;
+    /** The game port the server listens on; null means Factorio's default 34197. */
+    factorio_port?: number | null;
     recreate: boolean;
     seed: string;
     workspace_path: string;

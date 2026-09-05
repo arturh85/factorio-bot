@@ -7,6 +7,7 @@ use crate::process::connect_wait::{ConnectWait, ConnectWatcher, missing_clients}
 use crate::process::instance_setup::setup_factorio_instance;
 use crate::process::output_reader::read_output;
 use crate::process::{InteractiveProcess, io_utils};
+use crate::record::run_mode::{BotMode, RunMode, write_run_mode};
 use crate::record::savepoint::{ResumeMarker, clear_resume_marker, write_resume_marker};
 use crate::settings::FactorioSettings;
 use crate::types::PlayerId;
@@ -68,6 +69,18 @@ pub struct FactorioParams {
     /// to do when the mod code has changed since it was written -- and the
     /// answer to the second has to be recorded whichever way it went.
     pub resume_from: Option<ResumeMarker>,
+    /// How many server-side character bots to create instead of clients.
+    ///
+    /// `0` is the ordinary run: bots are the graphical clients that connect.
+    /// Anything else is `--headless`: the mod creates that many `character`
+    /// entities (ids `1..=n`) on the server the moment it is up, no client is
+    /// spawned, and `client_count` must be `0` -- a run is all clients or all
+    /// characters, and [`FactorioInstance::start`] refuses the mix before
+    /// touching a process. See `crates/core/src/record/run_mode.rs` for why
+    /// the mode is recorded.
+    pub character_bots: u8,
+    /// `game.speed` to set once the roster is up; `1.0` leaves it alone.
+    pub game_speed: f64,
 }
 
 impl Default for FactorioParams {
@@ -84,6 +97,8 @@ impl Default for FactorioParams {
             silent: true,
             wait_until: FactorioStartCondition::Initialized,
             resume_from: None,
+            character_bots: 0,
+            game_speed: 1.0,
         }
     }
 }
@@ -98,6 +113,14 @@ impl FactorioInstance {
         settings: &FactorioSettings,
         params: FactorioParams,
     ) -> Result<FactorioInstance> {
+        if params.character_bots > 0 && params.client_count > 0 {
+            return Err(miette::miette!(
+                "--headless spawns {} character bot(s) and cannot also start {} graphical \
+                 client(s): a run is all clients or all characters",
+                params.character_bots,
+                params.client_count
+            ));
+        }
         let mut world: Option<Arc<FactorioWorld>> = None;
         let silent = Arc::new(parking_lot::RwLock::new(params.silent));
         let instance_name = params.instance_name.unwrap_or_else(|| "server".to_owned());
@@ -167,6 +190,19 @@ impl FactorioInstance {
             (Some(_), _) => None,
         };
         let resumed = resume_save.is_some();
+        // The run mode is a start-time fact of the instance, written next to
+        // the resume marker for `record.start()` to read into provenance.
+        if params.server_host.is_none() {
+            let mode = RunMode {
+                bot_mode: if params.character_bots > 0 {
+                    BotMode::Characters
+                } else {
+                    BotMode::Clients
+                },
+                game_speed: params.game_speed,
+            };
+            write_run_mode(&instance_dir, &mode).into_diagnostic()?;
+        }
 
         let rcon = match params.server_host {
             None => {
@@ -174,7 +210,13 @@ impl FactorioInstance {
                 let (_world, rcon, child, used_factorio_port) = Self::start_server(
                     &settings.workspace_path,
                     &rcon_settings,
-                    None,
+                    // Was `None`, so the game port from the settings file
+                    // reached `setup_factorio_instance` and never the
+                    // server's command line: every server listened on 34197
+                    // whatever `factorio_port` said, and a second instance
+                    // beside a live one died with "Host address is already
+                    // in use".
+                    factorio_port,
                     &instance_name,
                     // websocket_server,
                     params.write_logs,
@@ -290,6 +332,20 @@ impl FactorioInstance {
                 }
             }
 
+            // Character bots: created by the mod, on the server, now. They
+            // show up in `rcon_players` at once, so the connect watcher below
+            // finds them on its first poll; it is kept for its logging and
+            // for the case where the mod created fewer than asked.
+            if params.character_bots > 0 {
+                let ids = rcon.spawn_bots(params.character_bots).await?;
+                // Deliberately NOT gated on `silent`: this is the one line
+                // that says what the bots are, the same way the mods
+                // directory line says which mod shipped.
+                info!(
+                    "Using bot mode <bright-blue>characters</> ({} requested, ids {:?})",
+                    params.character_bots, ids
+                );
+            }
             // Wait for all clients to actually connect to the server
             // Clients take 20-30 seconds to load sprites and connect
             if params.client_count > 0 && !params.silent {
@@ -299,7 +355,11 @@ impl FactorioInstance {
                 );
             }
             let wait_started = Instant::now();
-            let expected_players = params.client_count as usize;
+            let expected_players = if params.character_bots > 0 {
+                params.character_bots as usize
+            } else {
+                params.client_count as usize
+            };
             // Give up on a *stall*, not on a clock: clients take 25-30 s to
             // load sprites and arrive one after another, so an absolute budget
             // abandons a run that is still assembling itself. See
@@ -374,6 +434,13 @@ impl FactorioInstance {
             }
 
             arrange_windows(params.client_count).await?;
+            if params.game_speed != 1.0 {
+                rcon.set_game_speed(params.game_speed).await?;
+                info!(
+                    "Using game speed <bright-blue>{}</> (wall-clock deadlines scale with it)",
+                    params.game_speed
+                );
+            }
             Ok(())
         }
         .await;

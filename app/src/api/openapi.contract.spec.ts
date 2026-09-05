@@ -548,6 +548,9 @@ const SCHEMAS: Record<string, SchemaContract> = {
     FactorioSettings: objectContract<FactorioSettings>({
         client_count: {required: true, type: 'integer'},
         factorio_archive_path: {required: true, type: 'string'},
+        // `Option<u16>` with `#[serde(default)]`: the game port, null for
+        // Factorio's default 34197.
+        factorio_port: {required: false, type: 'integer', nullable: true},
         map_exchange_string: {required: true, type: 'string'},
         rcon_pass: {required: true, type: 'string'},
         rcon_port: {required: true, type: 'integer'},

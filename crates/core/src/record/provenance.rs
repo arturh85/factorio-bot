@@ -114,6 +114,17 @@ pub struct Provenance {
     /// two different seeds, and for the same reason.
     #[serde(default)]
     pub resumed_from: Option<String>,
+    /// `"clients"` or `"characters"`: whether the bots were graphical clients
+    /// or server-side character entities (`--headless`). Play fidelity is
+    /// the same, so a comparison across the two is flagged, not refused. `None`
+    /// for runs older than the field and for attached servers.
+    #[serde(default)]
+    pub bot_mode: Option<String>,
+    /// `game.speed` as set at start. Timings are in ticks and do not change
+    /// with it; whether the server *kept up* with it is what a reader wants
+    /// to know when a run at speed 10 looks slower per tick than one at 1.
+    #[serde(default)]
+    pub game_speed: Option<f64>,
 }
 
 /// Which commit the code came from, and whether it had been edited.
@@ -276,6 +287,8 @@ mod tests {
             roster_requested: vec![1, 2, 3, 4],
             workspace: Some("/tmp/ws".into()),
             resumed_from: None,
+            bot_mode: Some("characters".into()),
+            game_speed: Some(5.0),
         };
         std::fs::write(
             dir.join(PROVENANCE_FILE),
@@ -334,5 +347,21 @@ mod tests {
     #[test]
     fn a_placement_row_is_not_a_keyframe_and_counts_nothing() {
         assert_eq!(keyframe_entity_counts(&MapKind::Unknown), None);
+    }
+}
+
+#[cfg(test)]
+mod run_mode_fields {
+    use super::*;
+
+    #[test]
+    fn an_archived_provenance_without_the_run_mode_fields_still_reads() {
+        let json = r#"{"schema":1,"run_id":"run-1","started_unix":0,"started_tick":0,
+            "seed":null,"map_exchange_string":null,"map":null,"factorio":null,"git":null,
+            "profile":"debug","roster_requested":[1],"workspace":null}"#;
+        let p: Provenance = serde_json::from_str(json).unwrap();
+        assert_eq!(p.bot_mode, None);
+        assert_eq!(p.game_speed, None);
+        assert_eq!(p.resumed_from, None);
     }
 }

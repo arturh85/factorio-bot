@@ -236,17 +236,11 @@ pub trait Actuator: Send + Sync {
     /// a wait computed for `1.0` fires while the furnace still has plates
     /// left to make, and the executor collects from a furnace too early.
     ///
-    /// **Stubbed at `1.0` deliberately.** A real answer needs an RCON round
-    /// trip through `FactorioRcon` (`crates/core`), which this crate does not
-    /// own and is not touching while another change is in flight there.
-    /// `crates/core::factorio::rcon::FactorioRcon` needs a dedicated method
-    /// to read `game.speed` — the same shape as the existing
-    /// `RconActuator::new`'s `DEFINES_QUERY` silent-command round trip — and
-    /// `RconActuator` (`crates/executor/src/rcon_actuator.rs`) should then
-    /// override this default to call it. Until that lands every schedule
-    /// keeps assuming normal speed, exactly as before this change, but the
-    /// assumption now lives in one named, overridable place instead of a bare
-    /// `60` a reader had to know to distrust.
+    /// **The default is `1.0`**, which is what every mock wants.
+    /// `RconActuator` (`crates/executor/src/rcon_actuator.rs`) overrides it
+    /// by asking the game through `FactorioRcon::game_speed`, so a run started
+    /// with `--game-speed` sizes its lag waits from the speed the world is
+    /// actually running at.
     ///
     /// A bare [`ActuatorError`], unlike the dispatches above: this asks the
     /// game a question rather than telling a bot to do something, so there is

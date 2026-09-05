@@ -447,6 +447,19 @@ const PARKED_STRANGER: &str = r#"
         left_top = { x = -21.67, y = 23.43 },
         right_bottom = { x = -21.27, y = 24.03 } } }
 "#;
+/// The same character as a **headless character bot**: no player behind it
+/// (`LuaEntity.player` is nil for every server-side character), only a
+/// `storage.bots` registry entry that names it by `unit_number`. Bot 3 of
+/// `run-1788608648-56109`, in effect -- the run whose three placements each
+/// failed after four refusals because nothing asked this character to move.
+const PARKED_CHARACTER_BOT: &str = r#"
+    { name = "character", type = "character", bot_id = 3, valid = true,
+      unit_number = 303,
+      position = { x = -21.47, y = 23.73 },
+      bounding_box = {
+        left_top = { x = -21.67, y = 23.43 },
+        right_bottom = { x = -21.27, y = 24.03 } } }
+"#;
 /// Something that is *not* going to walk away, in the same footprint.
 const TREE: &str = r#"
     { name = "tree-01", type = "tree", bounding_box = {
@@ -477,6 +490,7 @@ fn stub_refused_place(player_position: (f64, f64), occupants: &str) -> String {
             find_non_colliding_position = function(name, center, radius, precision)
                 _searched_from[#_searched_from + 1] = {{ x = center.x, y = center.y }}
                 if _nowhere_to_stand then return nil end
+                if _landing_for ~= nil then return _landing_for(center) end
                 return {{ x = center.x, y = center.y }}
             end,
             find_entities_filtered = function(args)
@@ -545,6 +559,26 @@ fn stub_refused_place(player_position: (f64, f64), occupants: &str) -> String {
                 e.player = blocker
                 players[e.player_index] = blocker
                 storage.p[e.player_index] = {{}}
+            end
+            -- A character bot: registered by `unit_number` through a
+            -- *different* Lua value from the one the footprint scan returns,
+            -- as the live game hands back a fresh `LuaEntity` per query.
+            if e.bot_id ~= nil then
+                storage.bots = storage.bots or {{}}
+                storage.bots[e.bot_id] = {{
+                    name = "bot-" .. e.bot_id,
+                    entity = {{
+                        valid = true,
+                        name = "character",
+                        type = "character",
+                        unit_number = e.unit_number,
+                        position = e.position,
+                        surface = surface,
+                        character_running_speed = 0.15,
+                        walking_state = {{ walking = false }},
+                    }},
+                }}
+                storage.p[e.bot_id] = {{}}
             end
         end
         game = {{
@@ -961,6 +995,39 @@ fn a_character_with_no_player_is_asked_nothing_and_does_not_raise() {
     );
 }
 
+/// **The headless defect.** `step_aside_from_footprint` used to identify the
+/// character it found by `LuaEntity.player`, which is nil for every character
+/// bot -- so a headless roster's blocker was a stranger to it, and it asked
+/// nobody to move. `run-1788608648-56109` (`--headless --bots 4`) refused a
+/// burner drill, an assembler and one more placement four times each over
+/// 543 ticks, failed all three, and ended `stuck` after four plans; the same
+/// plan family with graphical clients never refused one. The registry
+/// (`storage.bots`) is the identity seam, and `bot_of_character` resolves
+/// through it, so a character bot is asked to step aside exactly as a client
+/// bot is -- and under the same bot id.
+#[test]
+fn a_parked_character_bot_in_the_footprint_is_asked_to_walk_out_too() {
+    let lua = refuse(ACTOR_AWAY, PARKED_CHARACTER_BOT);
+    assert_eq!(
+        one_line_reply(&lua),
+        "cannot place item 'stone-furnace' because a character is standing in the footprint",
+        "still the transient wording, so the ledger learns nothing about the ground"
+    );
+    let moved = asked_to_move(&lua);
+    assert_eq!(
+        moved.len(),
+        1,
+        "the character bot has no player, and the registry is how it is found. \
+         Got {moved:?}"
+    );
+    let (idx, waypoint) = moved[0];
+    assert_eq!(idx, 3, "walked under its bot id, the one the executor addresses");
+    assert!(
+        !inside_footprint(waypoint),
+        "{waypoint:?} is inside {FOOTPRINT:?}"
+    );
+}
+
 /// The acting player keeps its own, better recovery and this path stays out of
 /// it. `§player_blocks_placement§` walks the actor around eight compass points
 /// and **retries the placement**, which beats a step-aside plus a failed action
@@ -1032,5 +1099,47 @@ fn the_step_aside_aims_out_of_the_nearest_edge() {
         "the nearest edge is the western one (0.43 tiles away against 1.37 \
          eastward), and stepping sideways off the exit axis is extra walking \
          for nothing. Got ({x}, {y})"
+    );
+}
+
+/// **The crack between two machines.** `run-1788609725-78284`: bot 1 stood in
+/// the footprint of the assembler at `[39.5, -9.5]`, nearest exit west, and
+/// west was the 0.6-tile slack between that box and the assembler at
+/// `[36.5, -9.5]`. The target collided with the neighbour, so
+/// `find_non_colliding_position` answered with a spot in the crack -- outside
+/// the raw footprint, but inside the walker's 0.3 stopping box of it. Four
+/// step-aside walks each completed 0.3 tiles further along the crack and
+/// still in the way; the placement failed and the milestone replanned.
+///
+/// A landing has to clear the footprint by the character's half-box plus that
+/// stopping box, and when the nearest exit cannot offer one, the next one is
+/// asked -- here the game is told to snap anything west of the site back to
+/// 0.1 tiles clear of the edge, and the bot is sent out of a different edge.
+#[test]
+fn a_landing_inside_the_walkers_stopping_box_is_refused_and_the_next_exit_taken() {
+    let (l, t, r, b) = FOOTPRINT;
+    let lua = run(
+        &stub_refused_place(ACTOR_AWAY, PARKED_BOT),
+        &format!(
+            "{STUB_SERIALISE}\n_landing_for = function(c) \
+             if c.x < {l} then return {{ x = {l} - 0.1, y = c.y }} end \
+             return {{ x = c.x, y = c.y }} end\n"
+        ),
+        &format!(r#"rcon_place_entity(1, "stone-furnace", {SITE}, 0)"#),
+    );
+    let moved = asked_to_move(&lua);
+    assert_eq!(moved.len(), 1, "the bot is still asked to move. Got {moved:?}");
+    let (_, (x, y)) = moved[0];
+    let clear = x <= l - 0.5 || x >= r + 0.5 || y <= t - 0.5 || y >= b + 0.5;
+    assert!(
+        clear,
+        "the landing must clear {FOOTPRINT:?} by the 0.2 half-box plus the \
+         walker's 0.3 stopping box, or the character stops inside the \
+         footprint and the retry finds it exactly as occupied. Got ({x}, {y})"
+    );
+    assert!(
+        x >= l,
+        "the west exit only ever offered a spot in the crack, so the walk has \
+         to leave by another edge. Got ({x}, {y})"
     );
 }

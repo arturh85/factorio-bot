@@ -342,23 +342,35 @@ fn recover_anchor(state: &PlanState, bp: &Blueprint) -> Option<Position> {
 /// the planner is pure, and a site that varied between two plans of the same
 /// world would make every offline comparison meaningless.
 ///
-/// The candidate test is `placement_occupant`, which is the SAME predicate
-/// `expand` already uses to refuse an anchor. Two predicates meant to agree,
-/// written twice, eventually disagree — and here a disagreement would site a
-/// block on ground the very next check refuses.
+/// The candidate test is `first_obstruction`, built on
+/// [`PlanState::siting_occupant`] — a NARROWER predicate than the
+/// `placement_occupant` `expand`'s own footprint pre-check uses, and
+/// deliberately so: see `siting_occupant`'s own doc for why a character must
+/// not be one of the things a search result depends on. The two are meant to
+/// agree on everything durable; where they differ, it is this one difference
+/// on purpose, not two copies drifting apart.
 ///
-/// **`seed` must be replan-stable.** `recover_anchor` only trusts an anchor
-/// once two of the block's entities stand (see its own doc), so a block with
-/// exactly one entity built recovers nothing and falls back to this search.
-/// Placements only ever ADD obstacles and `first_obstruction` skips this
-/// block's own entities standing as designed, so a search from the SAME seed
-/// always finds every earlier ring still blocked and returns the same
-/// anchor. A seed that moves between expansions (a roster centroid, say)
-/// breaks that: it can re-order the rings and site the block a second time,
-/// with no error and a production curve that still rises. Callers pass a
+/// **`seed` must be replan-stable**, and so must every OTHER input the
+/// search's outcome can depend on — a fact this doc used to get half right.
+/// `recover_anchor` only trusts an anchor once two of the block's entities
+/// stand (see its own doc), so a block with exactly one entity built recovers
+/// nothing and falls back to this search. The seed itself: callers pass a
 /// fixed reference — the world origin for `Site::Anywhere`, the caller's own
 /// point for `Site::Near` — never anything that tracks where bots have
-/// walked to.
+/// walked to, because a seed that moves between expansions (a roster
+/// centroid, say) can re-order the rings and site the block a second time.
+/// The obstacle set the seed is searched against: entities are added by this
+/// plan and by the game, never removed by anything this method does, so
+/// `first_obstruction` (which skips this block's own entities standing as
+/// designed) sees every earlier ring still blocked on every later call.
+/// **Characters are the one source that is NOT append-only** — a bystander
+/// or one of this plan's own bots can stand in a candidate ring on one
+/// expansion and be gone (or a different one arrived) on the next, entirely
+/// outside this plan's control. `siting_occupant` is what keeps that from
+/// reaching the result: by excluding characters from the candidate test
+/// altogether, the only things the search can trip over are the sources that
+/// truly are monotonic, and the guarantee above holds without needing
+/// anything about where a person or a bot happens to be standing.
 ///
 /// `pub`, matching `method::connect::connect_steps`: called from
 /// `resolve_site` below, and exercised directly by this module's own tests.
@@ -402,6 +414,13 @@ pub fn search_site(
 /// An entity already standing AS DESIGNED is not an obstruction — it is this
 /// block, already partly built, which is exactly the case `recover_anchor`
 /// hands here.
+///
+/// Asks [`PlanState::siting_occupant`], not `placement_occupant`: a
+/// character is not durable ground, and this function's whole job is
+/// choosing an anchor that stays chosen (see `search_site`'s doc). The
+/// distinction matters only here -- `expand`'s own footprint pre-check, which
+/// builds at a fixed, already-chosen anchor, still uses `placement_occupant`
+/// and still refuses a character standing on it, by name.
 fn first_obstruction(state: &PlanState, bp: &Blueprint, anchor: &Position) -> Option<String> {
     for e in &bp.entities {
         let world = anchor.add(&e.offset);
@@ -409,7 +428,7 @@ fn first_obstruction(state: &PlanState, bp: &Blueprint, anchor: &Position) -> Op
             continue;
         }
         let facing = Direction::from_u8(e.direction).unwrap_or(Direction::North);
-        if let Some(occupant) = state.placement_occupant(&e.name, &world, facing) {
+        if let Some(occupant) = state.siting_occupant(&e.name, &world, facing) {
             return Some(occupant.to_string());
         }
     }
@@ -974,6 +993,88 @@ mod tests {
         );
     }
 
+    /// **A character in the search path must not move the sited anchor.**
+    ///
+    /// `occupant_of`'s six sources include live characters, and until this
+    /// fix `first_obstruction` (via `placement_occupant`) saw them like any
+    /// other obstacle. A character is the one source among those six that
+    /// moves with no plan action behind it at all -- a bystander (or one of
+    /// this plan's own bots) can stand in a candidate ring on one expansion
+    /// and be gone on the next, entirely outside what this plan controls.
+    /// That reaches the same two-half-factories failure `search_site`'s doc
+    /// already worried about for a moving SEED, but through a moving
+    /// OBSTACLE instead: an unrelated bot blocks the nearest ring, the
+    /// search steps outward, the bot walks off, and a later expansion (a
+    /// fresh `PlanState` off a later world snapshot) finds the near ring
+    /// clear and sites the block a second time.
+    ///
+    /// This proves the fix two ways: the anchor a bystander-free search picks
+    /// is unchanged once a bystander is standing exactly on it, AND the
+    /// ordinary placement predicate (what `expand`'s own footprint pre-check
+    /// uses once a block is actually being built) still sees that same
+    /// bystander as a real occupant -- so this is not "characters became
+    /// invisible everywhere", only "siting stopped depending on them".
+    #[test]
+    fn a_bystander_in_the_search_path_does_not_move_the_sited_anchor() {
+        use crate::ids::BotId;
+        use crate::state::Occupant;
+        use factorio_bot_core::test_utils::fixture_world;
+        use factorio_bot_core::types::FactorioPlayer;
+        use std::sync::Arc;
+
+        let bp = Blueprint {
+            entities: vec![at_named(0.0, 0.0, "stone-furnace")],
+            version: 0,
+        };
+        let seed = Position::new(0.5, 0.5);
+
+        // Baseline: nobody standing anywhere.
+        let empty = PlanState::from_world(Arc::new(fixture_world()), &[BotId(1)]);
+        let baseline = search_site(&empty, &bp, &seed, 10).expect("open ground exists");
+
+        // A bystander -- NOT this plan's own bot -- stands exactly on the
+        // tile the baseline search chose, as if it had walked there between
+        // one expansion and the next (modelled here as a second, later world
+        // snapshot, which is how two real expansions actually differ).
+        let occupied_world = fixture_world();
+        occupied_world.players.insert(
+            99,
+            FactorioPlayer {
+                player_id: 99,
+                position: baseline.clone(),
+                build_distance: 10,
+                reach_distance: 10,
+                resource_reach_distance: 4.0,
+                ..Default::default()
+            },
+        );
+        let occupied = PlanState::from_world(Arc::new(occupied_world), &[BotId(1)]);
+
+        // The ordinary placement predicate still sees the bystander -- this
+        // is a genuine occupant, not an empty test.
+        assert!(
+            matches!(
+                occupied.placement_occupant("stone-furnace", &baseline, Direction::North),
+                Some(Occupant::Character {
+                    on_roster: false,
+                    ..
+                })
+            ),
+            "the bystander must be a real occupant by the placement predicate \
+             `expand` uses, or this test proves nothing"
+        );
+
+        let with_bystander = search_site(&occupied, &bp, &seed, 10)
+            .expect("a bystander does not make siting fail, only irrelevant");
+        assert_eq!(
+            Pos::from(&baseline),
+            Pos::from(&with_bystander),
+            "a bystander standing in the search path must not move the sited \
+             anchor: a character walks away with no plan action behind it, \
+             so it cannot be part of what a stable search depends on"
+        );
+    }
+
     /// A world with `iron-ore`/`electric-mining-drill` prototypes that know
     /// their `resource_category`/`resource_categories` -- the shared
     /// `fixture_world` predates both fields entirely
@@ -1254,6 +1355,14 @@ mod tests {
              call, not recovery -- one standing entity is still not enough \
              to recover an anchor"
         );
+
+        // The roster walks, between the two expansions, to somewhere far
+        // from where it started. This is the whole point of the test: a
+        // `roster_centroid` seed would move with the bot and could re-order
+        // the search rings on the second call. `test_state` seats exactly
+        // `BotId(1)`, so moving it is moving the whole roster.
+        use crate::ids::BotId;
+        state.set_position(BotId(1), Position::new(500.0, 500.0));
 
         let second = resolve_site(&state, &bp, &site).expect("a second site exists");
 

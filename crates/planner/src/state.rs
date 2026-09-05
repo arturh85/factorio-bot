@@ -2890,7 +2890,7 @@ impl PlanState {
     /// must get the strict answer to both, which a single name-shaped
     /// parameter could not express.
     fn is_area_clear_of(&self, area: &Rect, water_blocks: bool, resource_blocks: bool) -> bool {
-        self.occupant_of(area, water_blocks, resource_blocks)
+        self.occupant_of(area, water_blocks, resource_blocks, true)
             .is_none()
     }
 
@@ -2909,11 +2909,26 @@ impl PlanState {
     /// scheduling decision for a fact about the ground. Four runs across
     /// three anchors were spent distinguishing hypotheses that a named tile
     /// would have settled in one line.
+    ///
+    /// `characters_block` is the fourth of the six sources' own toggle, and
+    /// it exists for exactly one caller: [`PlanState::siting_occupant`],
+    /// used only while *choosing* an anchor (`method::blueprint::search_site`
+    /// via `first_obstruction`). A character is not durable ground -- it
+    /// walks away on its own, with no action and no plan commitment -- so a
+    /// bystander (or one of this plan's own bots) standing in a candidate
+    /// ring on one expansion and gone on the next must not change which ring
+    /// wins; see `search_site`'s own doc for why the search has to answer the
+    /// same way twice. Every other caller ([`PlanState::placement_occupant`]
+    /// included) passes `true`: once a block is actually being built at a
+    /// fixed anchor, a character standing on the footprint is exactly the
+    /// fact the caller needs told, cleared by walking rather than by moving
+    /// the block.
     fn occupant_of(
         &self,
         area: &Rect,
         water_blocks: bool,
         resource_blocks: bool,
+        characters_block: bool,
     ) -> Option<Occupant> {
         for entity in self.added.values() {
             if boxes_overlap(&self.footprint_of(entity), area) {
@@ -2979,16 +2994,24 @@ impl PlanState {
         // makes a character move out of the way, and believing one will is the
         // same wrong answer as not seeing it at all. Roster bots included:
         // being on the roster is not a promise that this plan will move you.
-        for (player, character) in &self.characters {
-            if boxes_overlap(character, area) {
-                // Whether it is one of the bots this plan is FOR is the whole
-                // difference between "someone is standing there" and "the
-                // thing you asked to build is under your own feet", which is
-                // what a researcher building a block near their roster hits.
-                return Some(Occupant::Character {
-                    player: *player,
-                    on_roster: self.bots.contains_key(&BotId(*player)),
-                });
+        //
+        // `characters_block` is this source's own toggle -- see this
+        // function's doc for the one caller (siting) that turns it off,
+        // because a character is the one source among these six that is
+        // known to move with no plan action at all.
+        if characters_block {
+            for (player, character) in &self.characters {
+                if boxes_overlap(character, area) {
+                    // Whether it is one of the bots this plan is FOR is the
+                    // whole difference between "someone is standing there"
+                    // and "the thing you asked to build is under your own
+                    // feet", which is what a researcher building a block
+                    // near their roster hits.
+                    return Some(Occupant::Character {
+                        player: *player,
+                        on_roster: self.bots.contains_key(&BotId(*player)),
+                    });
+                }
             }
         }
         // Footprints the game has already refused a build at. Not a model of
@@ -3039,6 +3062,46 @@ impl PlanState {
                 &area,
                 self.collides_with_water(name),
                 !self.stands_on_resources(name),
+                true,
+            ),
+            None => Some(Occupant::Unknown),
+        }
+    }
+
+    /// [`placement_occupant`](Self::placement_occupant), for choosing a site
+    /// rather than building at one already chosen -- the one caller that
+    /// needs to know what is on the ground and NOT know who happens to be
+    /// standing on it.
+    ///
+    /// A character is not durable ground: nothing else among the six sources
+    /// `occupant_of` checks can move with no plan action behind it, which is
+    /// exactly why `method::blueprint::search_site`'s stability argument
+    /// depends on this and not on `placement_occupant`. A bystander (or one
+    /// of this plan's own bots) standing in a candidate ring on one
+    /// expansion and gone -- or arrived -- on the next must not change which
+    /// ring the search picks; that is the identical two-half-factories
+    /// failure `search_site`'s own doc describes for a moving *seed*,
+    /// arriving instead through a moving *obstacle*. See `search_site`'s doc
+    /// for the full argument.
+    ///
+    /// `expand`'s own footprint pre-check (`BuildBlock::expand`, which builds
+    /// at a fixed, already-chosen anchor) still calls `placement_occupant`,
+    /// not this: once a block is actually going down, a character standing
+    /// on the footprint is precisely the fact the caller needs told, and
+    /// `Occupant::Character`'s `on_roster` flag exists so that fact can say
+    /// "cleared by walking, not by moving the block."
+    pub(crate) fn siting_occupant(
+        &self,
+        name: &str,
+        position: &Position,
+        direction: Direction,
+    ) -> Option<Occupant> {
+        match self.collision_area_facing(name, position, direction) {
+            Some(area) => self.occupant_of(
+                &area,
+                self.collides_with_water(name),
+                !self.stands_on_resources(name),
+                false,
             ),
             None => Some(Occupant::Unknown),
         }

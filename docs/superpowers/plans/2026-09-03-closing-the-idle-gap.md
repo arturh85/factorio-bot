@@ -278,6 +278,53 @@ unvisited and planned nothing, silently. Threat avoidance — a 50-tile
 stand-off, refusing rather than returning an empty plan — is the **first
 non-test caller of the threat index**, which had none.
 
+## ✅ A CLAIM SPENT A WHOLE ORE TILE, FOREVER (`e430c015`)
+
+Why goals that planned with two bots refused with four — the default roster.
+Instrumented at the refusal itself: **940 tiles, 324 claimed, 616 crowded by
+`mining_tile_separation`, zero free, and 522,467 ore physically present**
+with six wanted. A mining claim spent a whole tile permanently, whoever made
+it and however little it took, and shares are per-bot, so a roster of *n*
+burned *n* tiles per shortfall. Adding a bot never made a share harder; it
+made one more claim, one shortfall earlier. **Wrong, not badly worded** — a
+better message would have been a better-worded mistake.
+
+The fix lets a runner draw again from **its own** claim, against what is
+left, where the world states the tile's amount. Provably safe by the
+argument `MiningClaim` already makes for crowding: a bot runs one action at
+a time, so two draws by one runner are disjoint whatever the schedule turns
+out to be. Every *other* runner is still refused, so the defect exclusivity
+existed for is untouched, and where the game never reported an amount the
+old rule stands verbatim — which is why every hand-built fixture is unmoved.
+
+| goal, four bots | before | after |
+|---|---|---|
+| `researched:automation` | 176 / 21,776 | 176 / 21,784 *(+8 ticks)* |
+| `producing:automation-science-pack:6` | 324 / 26,990 | 324 / **22,547 (−16%)** |
+| `producing:logistic-science-pack:6` | 569 / 52,819 | 451 / **48,829** |
+| `researched:engine`, `automation-2`, `fluid-handling`, `have:storage-tank:1` | **all refused** | **all plan** |
+
+Eight bots, checked before merging because the ladder uses them: all three
+standard goals still plan in seconds and all three makespans improve;
+green costs +53% planning wall time (3.3 s → 5.0 s) for a 5% shorter plan,
+which is a trade worth making at five seconds and would not be at five
+minutes.
+
+Two debits, neither rounded away. Automation is 8 ticks slower. The one-bot
+pumpjack is 7,160 ticks slower on 69 *fewer* actions — understood, not
+merely observed: the bot's own work got 579 ticks cheaper, and the whole
+regression is **+7,739 ticks of idle**, because fewer distinct claimed tiles
+means fewer furnace sites (31 → 26) so more batches queue behind each, and
+machine time for a lone bot is simply waiting. It reverses at three bots.
+
+Both debits point at the same unfixed thing: **furnace count is an accident
+of how many sites the ore ledger happened to hand out**, because a smelt
+builds its own furnace rather than queueing deliberately. That is also the
+four-bot cliff the fix exposes one layer deeper (`no ground for another
+furnace within 12 tiles`, with a three-bot plan placing **75 stone
+furnaces**). Furnace reuse wants its own task; raising the search radius is
+not the fix, since `PLANT_ADOPT_RADIUS` derives from it.
+
 ## ✅✅✅ RUN 19: GREEN IN 13:29 (`run-1788647791-64290`) — best on every measure
 
 2026-09-06 00:50, master `80b048b5`, four clients at 1x, seed 31337 `--new`,

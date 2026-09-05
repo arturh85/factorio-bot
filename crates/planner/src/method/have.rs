@@ -10787,8 +10787,9 @@ mod tests {
         assert_eq!(
             // Moved by the lookahead scheduling key (51c7f695): a bound over the bot's other ready work replaces (end, id) as the primary key, and the plan overlaps the longer smelt under the shorter one.
             // Moved again on 2026-09-05, 9965 -> 9900: the trigger's lab craft is the lead supplier's own chain now (`Researched`'s trigger path), off the chain actor's timeline.
+            // 9900 -> 7278 later on 2026-09-05: `infer_edges` leaves a chain's plate pairings to the stated supply edge (see `a_wider_ore_front_barely_moves_the_spread_it_used_to_unlock`).
             plan.makespan,
-            9900,
+            7278,
             "15866 with the subtree on one bot, 12403 once the ore converged, \
              and 10011 once the furnaces themselves became other bots' \
              errands; {per_bot:?}"
@@ -10876,8 +10877,9 @@ mod tests {
         assert_eq!(
             // Moved by the lookahead scheduling key (51c7f695): a bound over the bot's other ready work replaces (end, id) as the primary key, and the plan overlaps the longer smelt under the shorter one.
             // Moved again on 2026-09-05, 9987 -> 9897, for the narrow fixture's reason: the trigger's lab craft is the lead supplier's; 3 ticks off the narrow fixture's 9900 now.
+            // 9897 -> 6955 later on 2026-09-05: `infer_edges` leaves a chain's plate pairings to the stated supply edge, so the chains' consumers no longer wait for every earlier producer of the same item.
             plan.makespan,
-            9897,
+            6955,
             "17122 before time-aware claims, 12428 after them, and 10053 once \
              R3 made a furnace somebody else's errand -- 42 ticks off the \
              narrow fixture's 10011: {per_bot:?}"
@@ -13355,9 +13357,11 @@ mod owned_gathering {
     #[test]
     fn the_single_bot_rung_one_plan_is_untouched() {
         let (_, net, plan) = rung_one_plan(&[BotId(1)]);
-        assert_eq!(net.len(), 82, "one bot's rung-1 action count");
+        // 82 -> 86 on 2026-09-05: the small fragments after the trigger cell are hand-smelted again rather than queued 12,000 ticks behind its fifty plates -- the drain cap that offered a backlogged cell is gone (`produce::Drain`).
+        assert_eq!(net.len(), 86, "one bot's rung-1 action count");
         // Moved by the lookahead scheduling key (51c7f695): a bound over the bot's other ready work replaces (end, id) as the primary key, and the plan overlaps the longer smelt under the shorter one.
-        assert_eq!(plan.makespan, 31482, "one bot's rung-1 makespan");
+        // 31482 -> 29260 on 2026-09-05: four more actions and a shorter plan -- no fragment waits on the cell's backlog, and `infer_edges` no longer serialises the chain's plate consumers behind every earlier producer.
+        assert_eq!(plan.makespan, 29260, "one bot's rung-1 makespan");
         assert!(
             net.actions().all(|a| net
                 .chain_of(a.id)

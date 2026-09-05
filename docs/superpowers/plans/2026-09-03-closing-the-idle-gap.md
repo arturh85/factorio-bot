@@ -564,11 +564,18 @@ evidence in this record rather than by preference.
    self-expanding solar need generation reasoned against demand as both
    grow, and a network extended rather than replaced. Today it is a
    `Powered` condition and a supply lookup.
-4. **Defence, which nobody had named.** Production makes pollution,
-   pollution brings biters, and every run so far ends before that matters. A
-   factory that expands itself does not have that luxury. Bot deaths are
-   handled in the mod; nothing decides to *prevent* them. It is also what
-   the companion and enemy use cases need most.
+4. **Threat, which nobody had named — and the near threat is walking, not
+   pollution.** Surveyed 2026-09-06: bots have already walked **156 tiles**
+   from spawn, the nearest enemy structure on seed 31337 is **253–520 tiles**
+   out, and a spawner calls for help within 50. Exploration, item 2, is
+   actively trying to close that gap. Pollution reaches nothing at today's
+   scale: the largest factory any run built averages **~38 pollution units a
+   minute** (range 25–60) against the **500–1,500 sustained for 45–90
+   minutes** needed to provoke a nest eight chunks out — which is precisely
+   the regime items 1 and 3 create. Evolution stays under 0.2 meanwhile, so
+   small biters only: the cheapest possible time to learn. Bot deaths are
+   handled in the mod; nothing decides to *prevent* them, and it is what the
+   companion and enemy use cases need most.
 
 Explicitly deferred: making runs continuous and event-driven. It is the
 right long-term shape for a companion bot and it changes the execution model
@@ -577,13 +584,18 @@ current batch model first.
 
 ## THE MISSING FIFTH GOAL KIND: nothing means "keep this true"
 
-Named by the `second` session, 2026-09-05, and it is the cause of which the
-plateau is the symptom. The goal vocabulary is `Have`, `Researched`,
-`Produced` and `Built`, and **all four are one-shot**. Nothing in it means
-*keep this true*, so no plan ever expands capacity, and every run's output
-stops at precisely the bill its plan was written for. Every finding in this
-record about production plateauing, hand-fed cells and roster-fed curves is
-that one absence seen from a different angle.
+Named by the `second` session, 2026-09-05, and **sharpened by checking it**:
+the vocabulary is six kinds, not four — `Have`, `Researched`, `Produced`,
+`Producing`, `Extracted`, `Built` — and `Producing { item, per_minute }`
+**is** a rate. It is satisfied *structurally*: `holds_producing` answers
+yes when enough drills stand on the right ore delivering into furnaces, and
+its own doc admits it says yes for a cell whose fuel ran out, whose output
+backed up, or whose patch is exhausted.
+
+So the gap is real but is not "no rate goal exists". It is that **capacity
+has never been what failed here** — supply has, and nothing observes a
+window of history. Every finding in this record about plateaus, hand-fed
+cells and roster-fed curves is that absence seen from a different angle.
 
 This is a fifth goal kind, not a repair to an existing one, and it is what
 makes a self-feeding factory expressible at all. Not taken tonight; it wants

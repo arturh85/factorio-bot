@@ -794,6 +794,40 @@ In runs 13-15 iron stops at ~670 around minute 15 and red packs at 85, then
 nothing grows until the run ends: the cell makes what the plan asked for and no
 more, so a later mark measures the bill, not the factory.
 
+**A RISING PRODUCTION CURVE IS NOT EVIDENCE OF A WORKING FACTORY.**
+`production.made` counts what a *machine* produced, and a stone furnace a bot
+walked to and hand-loaded is a machine. A peer session's 179-entity furnace
+line was reported as smelting and had **no generator at all**: its 48 inserters
+and 87 belts had never moved an item, and every plate came from a bot carrying
+ore and coal in by hand. So the curve alone answers "did output rise", never
+"did a factory make it".
+
+**The attribution line under the table is what says who earned it.** Since
+2026-09-05 every mark interval reports the roster's busy %, the count of
+feeding-verb dispatches (`insert`/`stock`/`charge`/`fuel`/`take`/`mine` -- the
+count, because five of those six settle in the tick they dispatch and their
+share of *ticks* is ~0), the kW generated and drawn, and how many machine
+readings were `working` split into electric and burner producers. From those
+comes a verdict per item and interval: `roster-fed`, `factory`, or `unclear` --
+and `unclear` is said freely, because a wrong confident label is worse than an
+honest one. The headline carries it: `rates: iron 40->73->22 /min at 5/10/15
+(mostly roster-fed; no generator until 8:26)`. A plateau now says which kind it
+is -- input ran out, or the factory stopped -- from the machine statuses after
+it (`no_ingredients`/`no_fuel` versus `no_power`) and whether anybody was still
+feeding.
+
+**Our green runs are roster-fed, and the record now says so.** Runs 14, 16, 17
+and the headless run all read `roster-fed` at 5 and 10 minutes (and at 15
+except in run 17, where it is `unclear`): no
+generation at all for the first 8-10 minutes, and after that the 120 kW drawn
+went to a lab and a steam engine while every machine that made an item was a
+`stone-furnace` or a `burner-mining-drill` a bot hand-loaded. The only intervals
+that are not `roster-fed` are the last ones, where `assembling-machine-1` is
+working *and* bots are still feeding: `unclear`, honestly. The green milestone's
+witness -- 5 packs into the chest in 90 s with every bot idle -- remains the one
+place the runs prove automation, and it covers the green cell only. Quote
+"N plates/min" only with the attribution beside it.
+
 - **Game time, not wall clock.** `roster ready -> SATISFIED` on the clock
   includes client load and startup. One run read as 24.4 min on the clock and
   21.4 min of game time.

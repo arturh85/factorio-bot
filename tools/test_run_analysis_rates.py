@@ -98,14 +98,25 @@ class ProductionRatesTest(unittest.TestCase):
         self.assertAlmostEqual(pl["at_minute"], 12.0)
         self.assertAlmostEqual(pl["idle_minutes"], 6.0)
         lines = ra.plateau_lines(self.r)
-        self.assertIn("iron-plate plateaus at 12:00 (144) -- production stopped 6.0 min before the run ended", lines)
+        # The plateau now says which kind it is, and with neither machine
+        # samples nor events it says the only honest thing.
+        self.assertIn(
+            "iron-plate plateaus at 12:00 (144) -- production stopped 6.0 min before the run "
+            "ended: UNCLEAR -- no machine samples and no bot activity after the plateau",
+            lines,
+        )
         # Still growing at the end: not a plateau. Never made: not a plateau.
         self.assertIsNone(self.r["plateaus"]["automation-science-pack"])
         self.assertIsNone(self.r["plateaus"]["copper-plate"])
 
     def test_headline_shape(self):
-        self.assertTrue(self.r["headline"].startswith("rates: iron 12->12->5 /min at 5/10/15; red packs 0->1->3; green 0 at 15, 0 at end 18:00"),
-                        self.r["headline"])
+        # The headline carries the attribution: these samples have no power at
+        # all and no events to say who fed anything, so it is `unclear`, and
+        # the fact that nothing ever generated is stated outright.
+        self.assertTrue(self.r["headline"].startswith(
+            "rates: iron 12->12->5 /min at 5/10/15 (unclear; no generator all run); "
+            "red packs 0->1->3; green 0 at 15, 0 at end 18:00"),
+            self.r["headline"])
 
     def test_no_force_samples_is_absence_not_zero(self):
         bots_only = [{"kind": "bots", "tick": ORIGIN + 60, "bots": []}]
@@ -148,6 +159,204 @@ class ProductionRatesTest(unittest.TestCase):
         self.assertIn("| 10 | 120 / 6 |", lines)
         self.assertIn("| 20 | run ended at 18:00 |", lines)
         self.assertEqual(lines[-1], "| end | 144 / 30 (18:00) |")
+
+
+def powered_force_sample(tick: int, made: dict | list, gen: float, con: float) -> dict:
+    s = force_sample(tick, made)
+    s["power"] = {
+        "generated_kw": gen,
+        "consumed_kw": con,
+        "satisfaction": 1.0 if gen >= con else 0.0,
+        "networks": {},
+    }
+    return s
+
+
+def machines_sample(tick: int, machines: dict) -> dict:
+    return {"schema": 2, "tick": tick, "kind": "machines", "machines": machines, "truncated": 0}
+
+
+def furnace(status: str, fuel: dict | None = None) -> dict:
+    """A stone furnace: a burner, identified as one by its fuel slot."""
+    return {
+        "name": "stone-furnace",
+        "type": "furnace",
+        "position": {"x": 0.0, "y": 0.0},
+        "status": status,
+        "products_finished": 1,
+        "input": {},
+        "output": {},
+        "fuel": fuel if fuel is not None else {"coal": 3},
+    }
+
+
+def assembler(status: str) -> dict:
+    """An assembling machine: electric, identified by its network id."""
+    return {
+        "name": "assembling-machine-1",
+        "type": "assembling-machine",
+        "position": {"x": 5.0, "y": 5.0},
+        "status": status,
+        "network": 1,
+        "recipe": "iron-gear-wheel",
+        "products_finished": 1,
+        "input": {},
+        "output": {},
+        "fuel": {},
+    }
+
+
+def lab(status: str) -> dict:
+    """A lab: electric, and NOT a producer -- it makes research, not items."""
+    return {
+        "name": "lab",
+        "type": "lab",
+        "position": {"x": 9.0, "y": 9.0},
+        "status": status,
+        "network": 1,
+        "input": {},
+        "output": {},
+        "fuel": {},
+    }
+
+
+def feeding_events(ticks: list[int], bot: int = 1, verb: str = "insert") -> list[dict]:
+    """Dispatch/settle pairs that settle in the tick they dispatch, as the real ones do."""
+    out = []
+    for i, t in enumerate(ticks):
+        out.append({"tick": t, "kind": "action_dispatched", "id": i, "bot": bot,
+                    "action": f"{verb} 10 iron-ore into stone-furnace"})
+        out.append({"tick": t, "kind": "action_settled", "id": i, "bot": bot,
+                    "status": "ok", "elapsed_ticks": 0})
+    return out
+
+
+def other_events(ticks: list[int], bot: int = 1) -> list[dict]:
+    out = []
+    for i, t in enumerate(ticks):
+        out.append({"tick": t, "kind": "action_dispatched", "id": 500 + i, "bot": bot,
+                    "action": "craft 1 iron-gear-wheel"})
+        out.append({"tick": t + 60, "kind": "action_settled", "id": 500 + i, "bot": bot,
+                    "status": "ok", "elapsed_ticks": 60})
+    return out
+
+
+class AttributionTest(unittest.TestCase):
+    """Who earned the output: the roster carrying ore, or a factory.
+
+    Each case is one five-minute interval with the same rising curve; only the
+    power and what the bots did differ, which is exactly the confusion this
+    block exists to end. A rising `production.made` looks identical in all of
+    them.
+    """
+
+    def rates(self, samples, events, marks=(5,), hi=None):
+        joined, _ = ra.join_actions(sorted(events, key=lambda e: e["tick"]))
+        act = ra.bot_activity(sorted(events, key=lambda e: e["tick"]), joined, [1])
+        return ra.production_rates(
+            samples, ORIGIN, hi or (ORIGIN + 5 * TPM), marks=marks, activity=act
+        )
+
+    def curve(self, gen=0.0, con=0.0, upto=5):
+        return [
+            powered_force_sample(ORIGIN + i * 300, {"iron-plate": i * 5}, gen, con)
+            for i in range(0, upto * 12 + 1)
+        ]
+
+    def test_no_generation_is_named_as_hand_fed(self):
+        r = self.rates(self.curve(), feeding_events([ORIGIN + 600 * i for i in range(1, 15)]))
+        item = r["marks"][0]["items"]["iron-plate"]
+        self.assertEqual(item["verdict"], "roster-fed")
+        self.assertIn("no generator: this output was hand-fed", item["why"])
+        self.assertTrue(r["marks"][0]["attribution"]["no_generator"])
+        self.assertIsNone(r["first_generation_tick"])
+        self.assertIn("no generator all run", r["headline"])
+        self.assertIn("roster-fed", r["headline"])
+
+    def test_no_generation_and_no_feeding_is_unclear_not_a_verdict(self):
+        r = self.rates(self.curve(), other_events([ORIGIN + 600 * i for i in range(1, 5)]))
+        item = r["marks"][0]["items"]["iron-plate"]
+        self.assertEqual(item["verdict"], "unclear")
+        self.assertIn("burner", item["why"])
+
+    def test_power_and_an_idle_roster_is_a_factory(self):
+        samples = self.curve(gen=900.0, con=150.0)
+        samples += [machines_sample(ORIGIN + i * 300, {"1": assembler("working")})
+                    for i in range(0, 61)]
+        r = self.rates(samples, other_events([ORIGIN + 600]))
+        item = r["marks"][0]["items"]["iron-plate"]
+        self.assertEqual(item["verdict"], "factory")
+        self.assertIn("electric producers worked", item["why"])
+        self.assertEqual(r["first_generation_tick"], ORIGIN)
+
+    def test_power_while_bots_insert_is_unclear(self):
+        samples = self.curve(gen=900.0, con=150.0)
+        samples += [machines_sample(ORIGIN + i * 300, {"1": assembler("working")})
+                    for i in range(0, 61)]
+        r = self.rates(samples, feeding_events([ORIGIN + 600 * i for i in range(1, 15)]))
+        item = r["marks"][0]["items"]["iron-plate"]
+        self.assertEqual(item["verdict"], "unclear")
+        self.assertIn("could be either", item["why"])
+        self.assertEqual(r["marks"][0]["attribution"]["roster"]["feed_actions"], 14)
+
+    def test_power_to_a_lab_while_burners_smelt_is_still_roster_fed(self):
+        """The peer session's case with the lights on: kW drawn, no electric producer."""
+        samples = self.curve(gen=900.0, con=120.0)
+        samples += [
+            machines_sample(ORIGIN + i * 300, {"1": furnace("working"), "2": lab("working")})
+            for i in range(0, 61)
+        ]
+        r = self.rates(samples, feeding_events([ORIGIN + 600 * i for i in range(1, 15)]))
+        item = r["marks"][0]["items"]["iron-plate"]
+        self.assertEqual(item["verdict"], "roster-fed")
+        self.assertIn("no ELECTRIC machine that makes items worked", item["why"])
+        self.assertIn("lab", item["why"])
+        att = r["marks"][0]["attribution"]["machines"]
+        self.assertEqual(att["working_electric"], 0)
+        self.assertGreater(att["working_burner"], 0)
+
+    def test_feed_tick_percentage_is_near_zero_while_the_count_is_not(self):
+        """Five of the six feeding verbs settle in their dispatch tick."""
+        r = self.rates(self.curve(), feeding_events([ORIGIN + 600 * i for i in range(1, 15)]))
+        act = r["marks"][0]["attribution"]["roster"]
+        self.assertEqual(act["feed_actions"], 14)
+        self.assertEqual(act["feed_ticks"], 0)
+        self.assertEqual(act["feed_pct"], 0.0)
+
+    def test_plateau_because_input_ran_out(self):
+        flat = [powered_force_sample(ORIGIN + i * 300, {"iron-plate": min(i, 12) * 5}, 900.0, 120.0)
+                for i in range(0, 121)]
+        flat += [machines_sample(ORIGIN + i * 300,
+                                 {"1": furnace("working" if i <= 12 else "no_ingredients", fuel={})})
+                 for i in range(0, 121)]
+        r = self.rates(flat, feeding_events([ORIGIN + 300]), marks=(5, 10),
+                       hi=ORIGIN + 10 * TPM)
+        pl = r["plateaus"]["iron-plate"]
+        self.assertEqual(pl["kind"], "input ran out")
+        self.assertIn("no_ingredients", pl["why"])
+        self.assertIn("INPUT RAN OUT", "".join(ra.plateau_lines(r)))
+
+    def test_plateau_because_the_factory_stopped(self):
+        flat = [powered_force_sample(ORIGIN + i * 300, {"iron-plate": min(i, 12) * 5},
+                                     900.0 if i <= 12 else 0.0, 120.0)
+                for i in range(0, 121)]
+        flat += [machines_sample(ORIGIN + i * 300,
+                                 {"1": assembler("working" if i <= 12 else "no_power")})
+                 for i in range(0, 121)]
+        r = self.rates(flat, feeding_events([ORIGIN + 300]), marks=(5, 10),
+                       hi=ORIGIN + 10 * TPM)
+        pl = r["plateaus"]["iron-plate"]
+        self.assertEqual(pl["kind"], "the factory stopped")
+        self.assertIn("no_power", pl["why"])
+
+    def test_report_prints_the_attribution_columns(self):
+        r = self.rates(self.curve(), feeding_events([ORIGIN + 600 * i for i in range(1, 15)]))
+        out = io.StringIO()
+        ra.report_rates(r, lambda line="": out.write(line + "\n"))
+        text = out.getvalue()
+        self.assertIn("feed acts", text)
+        self.assertIn("no generator: this output was hand-fed", text)
+        self.assertIn("verdict per item and interval", text)
 
 
 class CompareRatesTest(unittest.TestCase):

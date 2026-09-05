@@ -9,7 +9,7 @@
 //! Pure: no I/O, no clock, and a given grid always produces the same route.
 //! Ties are broken by a fixed cell order, never by hash iteration.
 
-use crate::graph::enclosure::{CELL, GRID, cell_index, cell_to_position};
+use crate::graph::enclosure::{GRID, cell_index, cell_to_position};
 use crate::types::{Direction, Position};
 use num_traits::ToPrimitive;
 use std::collections::BinaryHeap;
@@ -60,7 +60,6 @@ const TURN_PENALTY: u32 = 6;
 /// end of an underground pair (`surfaced`). A surfaced cell cannot launch
 /// another jump -- see the note on the underground move below -- so it is
 /// part of the state, not just an annotation on the route afterwards.
-#[derive(PartialEq)]
 struct Node {
     cost: u32,
     estimate: u32,
@@ -69,11 +68,26 @@ struct Node {
     surfaced: bool,
 }
 
+// `PartialEq` is written in terms of `Ord`, not derived. A derived one
+// compares `cost` and `estimate` separately, while `Ord` below compares only
+// their *sum* alongside the other three fields -- so two nodes with the same
+// total but a different split (cost 10/estimate 20 against 20/10) are
+// `Ord`-equal and derived-`PartialEq`-unequal at the same time. Nothing in
+// this file invokes `==` on a `Node`, so that inconsistency has never had a
+// chance to matter, but `BinaryHeap` is entitled to assume the two agree and
+// the cheapest fix is to make them one definition.
+//
 // `Direction` derives `PartialEq` only (see `types.rs`), not `Eq`, so `Node`
-// cannot derive `Eq` either. The derived `PartialEq` above never compares a
-// float (cost/estimate are `u32`, cell is `(usize, usize)`, facing and
-// surfaced are fieldless-discriminant/bool), so it is already reflexive,
-// symmetric and transitive -- a legitimate manual `Eq`.
+// cannot derive either trait. `cmp` never compares a float (cost/estimate are
+// `u32`, cell is `(usize, usize)`, facing goes through `dir_key` and surfaced
+// is a bool), so it is a genuine total order and this is a legitimate manual
+// `Eq`.
+impl PartialEq for Node {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == std::cmp::Ordering::Equal
+    }
+}
+
 impl Eq for Node {}
 
 impl Ord for Node {
@@ -420,6 +434,5 @@ fn reconstruct(
             tiles[i].kind = TileKind::UndergroundExit;
         }
     }
-    let _ = CELL;
     Route { tiles }
 }

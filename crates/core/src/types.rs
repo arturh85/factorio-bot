@@ -1524,31 +1524,29 @@ impl FactorioEntity {
             ..Default::default()
         }
     }
-    /// `output = true` is the surfacing half of the pair; Factorio calls the
-    /// two halves `input` and `output` and they take the same direction.
+    /// One half of an underground pair. **Which half is not expressible
+    /// here, and the parameter that pretended otherwise is gone.**
     ///
-    /// FIXME: `FactorioEntity` has no field to record which half this is
-    /// (checked: there is no `entity_data`, no `belt_to_ground_type`, nothing
-    /// else that fits -- see the struct above). `output` is accepted so a
-    /// caller can express intent and so the signature matches the two
-    /// distinct entities a route actually places, but it is otherwise
-    /// dropped here: the returned entity cannot be told apart from its mate
-    /// by inspecting it, only by its position relative to the other half. In
-    /// game, Factorio infers input/output automatically from direction and
-    /// the presence of a matching underground belt within range, so this may
-    /// not block placement -- but a caller that needs to *read back* which
-    /// half an entity is will need a new field on `FactorioEntity`, which is
-    /// out of scope for this constructor (it is a shared type used well
-    /// beyond routing).
-    pub fn new_underground_belt(
-        position: &Position,
-        direction: Direction,
-        output: bool,
-    ) -> FactorioEntity {
-        let _ = output; // see FIXME above: nowhere to carry this yet.
+    /// Factorio calls the two halves `input` and `output`; they take the same
+    /// direction and are distinguished by `belt_to_ground_type`. This struct
+    /// has no field for it (checked: no `entity_data`, no
+    /// `belt_to_ground_type`, nothing else that fits -- see the struct above),
+    /// and the mod's `rcon_place_entity(player_id, item_name, position,
+    /// direction)` has no argument for it either. An earlier version of this
+    /// constructor took an `output: bool` and immediately discarded it with
+    /// `let _ = output;`, which is worse than not taking it: a caller reads
+    /// the signature as a promise the returned entity carries the half, and
+    /// it does not. The parameter comes back the day the placement path can
+    /// carry it; until then the two halves are told apart only by their
+    /// positions relative to each other.
+    ///
+    /// `method::connect` never emits these -- it calls `route_belt` with
+    /// `max_underground: None` for exactly this reason -- so nothing in the
+    /// tree calls this constructor today.
+    pub fn new_underground_belt(position: &Position, direction: Direction) -> FactorioEntity {
         FactorioEntity {
-            name: "underground-belt".into(),
-            entity_type: "underground-belt".into(),
+            name: EntityName::UndergroundBelt.to_string(),
+            entity_type: EntityType::UndergroundBelt.to_string(),
             position: position.clone(),
             // Same footprint as `new_transport_belt`'s: the real prototype's
             // collision box is 0.796875 x 0.796875 (checked against
@@ -1713,6 +1711,7 @@ pub enum EntityName {
     Inserter,
     BurnerMiningDrill,
     TransportBelt,
+    UndergroundBelt,
     Splitter,
     ElectricMiningDrill,
     Pumpjack,

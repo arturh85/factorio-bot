@@ -220,6 +220,38 @@ three bots one extra iron furnace (three actions) reorders bot 3's ready
 work and its `take 10 copper-ore from the wooden-chest` moves from 8,860 to
 13,473 with no furnace of its involved.
 
+## THE RATE VIEW (owner, 2026-09-05 19:20): production stops at minute 15
+
+Owner: "maybe you should prioritize production rates at given times over raw
+run time." Read off `samples.jsonl` (`force.production.made`, cumulative, at
+fixed game minutes from `run_started`):
+
+| minute | run 13 iron / copper / red / green | run 14 | run 15 |
+|---|---|---|---|
+| 5 | 80 / 69 / 0 / 0 | 159 / 94 / 0 / 0 | 165 / 100 / 0 / 0 |
+| 10 | 326 / 133 / 18 / 0 | 442 / 146 / 42 / 0 | 463 / 152 / 47 / 0 |
+| 15 | 677 / 189 / 55 / 0 | 657 / 189 / 82 / 0 | 661 / 189 / 83 / 0 |
+| 20 | 677 / 189 / 85 / 0 | 670 / 189 / 85 / 6 | 670 / 189 / 85 / 4 |
+
+Three things the makespan table cannot show. (1) **Runs 14 and 15 are the
+same run on rates**, run 15 a little ahead through minute 12; the 17:20 vs
+18:46 difference is the last two minutes of a factory that has already
+stopped. (2) **Every run's production plateaus at minute ~15** at exactly
+the plan's bill — 670 iron plates, 189 copper, 85 red packs — because the
+planner builds a cell and then charges it by hand ("charge the feed chest
+with 6 iron-plate"); nothing feeds the cell after the charge, so the rate
+at minute 20 is zero. "Producing 6/min" is witnessed as six packs, not as
+a rate. (3) The world-record replays' curves rise through the same window
+(`docs/superpowers/notes/2026-09-04-world-record-replays.md`).
+
+Consequences, in order: the analyser reports production at fixed marks and
+per-minute rates over a trailing window, and runs are compared on that
+table first (dispatched as `rates`); `producing:X:N` must mean a sustained
+rate verified over a window, with the cell fed by drills and furnaces
+through inserters and belts rather than by hand — which is the consumer
+the peer's `connect` primitive has been waiting for; and the record's
+headline for a run becomes the curve, with the milestone tick second.
+
 ## ⚠️ RUN 15: 18:46 (`run-1788621697-14165`) — slower than run 14, honestly
 
 2026-09-05 17:20, master `917fdcd2` (everything of the afternoon merged),

@@ -77,8 +77,8 @@ fn every_blueprint_in_rcontest_lua_decodes() {
     // assignment style changes -- this test would otherwise pass while checking
     // nothing at all, which is the failure it was written to prevent.
     assert!(
-        blueprints.len() >= 5,
-        "expected at least the five known fixtures in {}, found {} -- if the \
+        blueprints.len() >= 6,
+        "expected at least the six known fixtures in {}, found {} -- if the \
          file's shape changed, fix this extractor rather than letting the test \
          quietly check nothing",
         path.display(),
@@ -122,4 +122,52 @@ fn every_blueprint_in_rcontest_lua_decodes() {
         path.display(),
         corrupt.join(", ")
     );
+}
+
+/// `SmeltingBlock`'s geometry is not arbitrary — it is lifted from
+/// `FurnaceLine`, which stood 176 of 179 entities correctly in a live game.
+///
+/// Pinned here because the value of that block is precisely that its offsets
+/// are *proven* rather than authored: a furnace is 2x2 and sits on integer
+/// coordinates while its inserters sit on half-integers, and getting that
+/// parity wrong yields a layout that places perfectly and does nothing. If
+/// someone "tidies" these numbers, this fails.
+#[test]
+fn the_smelting_block_keeps_the_geometry_it_inherited_from_furnaceline() {
+    let src = std::fs::read_to_string(rcontest_path()).expect("rcontest.lua readable");
+    let (_, text) = blueprint_assignments(&src)
+        .into_iter()
+        .find(|(name, _)| name == "SmeltingBlock")
+        .expect("SmeltingBlock is in rcontest.lua");
+    let bp = decode(&text).expect("SmeltingBlock decodes");
+
+    let mut seen: Vec<(String, f64, f64, u8)> = bp
+        .entities
+        .iter()
+        .map(|e| (e.name.clone(), e.offset.x(), e.offset.y(), e.direction))
+        .collect();
+    seen.sort_by(|a, b| a.3.cmp(&b.3).then(a.1.total_cmp(&b.1)).then(a.2.total_cmp(&b.2)));
+
+    // Both inserters are direction 0: the input picks from the north (the
+    // source chest) and drops south into the furnace; the output picks from
+    // the north (the furnace itself) and drops south into the sink. That is
+    // FurnaceLine's own arrangement, and an inserter's direction names the
+    // side it PICKS UP from.
+    let want: Vec<(&str, f64, f64, u8)> = vec![
+        ("iron-chest", 5.5, 0.5, 0),
+        ("burner-inserter", 5.5, 1.5, 0),
+        ("stone-furnace", 5.0, 3.0, 0),
+        ("burner-inserter", 5.5, 4.5, 0),
+        ("iron-chest", 5.5, 5.5, 0),
+    ];
+    assert_eq!(seen.len(), want.len(), "entity count changed: {seen:?}");
+    for (name, x, y, dir) in &want {
+        assert!(
+            seen.iter().any(|(n, sx, sy, sd)| n == name
+                && (sx - x).abs() < 1e-9
+                && (sy - y).abs() < 1e-9
+                && sd == dir),
+            "missing {name} at ({x}, {y}) facing {dir}; got {seen:?}"
+        );
+    }
 }

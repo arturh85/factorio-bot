@@ -12,6 +12,12 @@ blueprints = {
     -- `the_moving_block_decodes_to_its_nine_entities_with_every_direction_pinned`
     -- in crates/core/tests/blueprint_decode.rs.
     MovingBlock = "0eJyd0tGKwjAQBdD3/YplntPFpEm1+RURsTqwA3ZaJqkopf8uWxdZcCsh8xKYwLkM3BGa84C9EEfwI1DEFvyfnYILSqCOwbvK1LauXWmNLrVRgBwpEgbw24/P3xkf29ueh7ZBAa8V8KFF8EDScXH8xvCj9l2gOLMjXMGvvpyC2/xOCk4keHz8ria1bJun3QzCKAVxQIkorwF6KUCbdwnlMyHKgUPfSSwaPP9zgVkKsO98m+yXWb5L9m2WXyX7LstfJ/tVlr9Jb9A6r0F1Uv83y/2f6d003QHQziE+"
+    -- Geometry lifted from FurnaceLine, which stood 176/179 live. Only the
+    -- inserter prototype differs: the electric `inserter` is not enabled at
+    -- t=0 on seed 31337, which is why FurnaceLine cannot be built early.
+    -- Burner inserters self-fuel from the coal they carry, so this block
+    -- needs no electricity and no generator.
+    SmeltingBlock = "0eNqV0N8KgjAUBvB3OddT/LfAXfYKXUaE2qlG80y2GYn47k0FCTLIy32H89vH6aFULTZGkgPRg3RYg/jIGKiiROWzQ43KSbrtla4ePkdy0km0II79/OjO1NYlGhAxAypq9FvSaAqqO9qRarT1K5rGn14geMgZdCCikA8D+0KSBSlbQ2gCSRaN86OfUuwlBhdpsJqn0YqbLq51mjC4er2ocEWdzHStW7a9W/ZPN77pcHw83InBE42dpnyX5Fme8zRL4jROhuEN0/adUw==",
 }
 
 rcon.cheat_technology("automation")

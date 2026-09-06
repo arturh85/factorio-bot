@@ -3439,8 +3439,23 @@ mod block_demand_tests {
         assert_eq!(power.generation_kw, 0.0, "no engine, no generation");
     }
 
-    /// **A solar block reads as unpowered, deliberately — including the one
-    /// that demonstrably ran.**
+    /// **A solar block reads as unpowered — and the owner has OVERRULED that,
+    /// so this test pins behaviour that is on its way out.**
+    ///
+    /// Owner, 2026-09-06: *"for solar it should just assume the average output,
+    /// we have batteries to smooth out the power generation later."* That is
+    /// right, and the justification in `generation_kw` is weaker than it reads:
+    /// **the average is a constant.** 60 kW peak and its day/night average are
+    /// both fixed numbers, so crediting one costs nothing in determinism — a
+    /// planner given identical inputs still produces identical plans. Only the
+    /// *instantaneous* output varies, and what that actually threatens is a
+    /// brownout at night, which is a capacity-over-time question that
+    /// accumulators answer rather than a determinism question.
+    ///
+    /// Left green rather than inverted because `generation_kw` lives in
+    /// `state.rs`, which the other session is editing right now. When the
+    /// average lands this test inverts, and `a_block_carrying_its_own_
+    /// generation_powers_itself` gains a solar case.
     ///
     /// `generation_kw` credits deterministic sources only, and says why: a
     /// steam engine's 900 kW is the same at every hour, while a solar panel's
@@ -3448,13 +3463,11 @@ mod block_demand_tests {
     /// map clock says. A planner whose output must be identical for identical
     /// inputs cannot credit a number that is not.
     ///
-    /// This is pinned because it is a surprise waiting for the next reader, and
-    /// it already caught me. `electric_smelter_live.lua` powers its block with
-    /// **four hand-placed solar panels and makes 78 plates**, so the block runs
-    /// — and this planner would still refuse to plan it as self-powered. The
-    /// run's own header calls the panels apparatus rather than design, and this
-    /// is the reason that wording matters: solar is a fine way to prove a block
-    /// works and can never be a way to plan one.
+    /// The live evidence was always on the owner's side.
+    /// `electric_smelter_live.lua` powers its block with **four hand-placed
+    /// solar panels and makes 78 plates**, so the block plainly runs while this
+    /// planner refuses to plan it. A model that cannot express a thing the
+    /// hardware does is the model's problem.
     #[test]
     fn a_solar_block_reads_as_unpowered_on_purpose() {
         let s = state();
@@ -3470,8 +3483,9 @@ mod block_demand_tests {
         let power = blueprint_power(&s, &solar, &Position::new(0.0, 0.0));
         assert_eq!(
             power.generators, 0,
-            "solar panels and accumulators are absent from the generation table \
-             on purpose -- their output is not deterministic"
+            "solar and accumulators are absent from the generation table today; \
+             the owner has overruled the reason, so this asserts the current \
+             behaviour rather than endorsing it"
         );
         assert_eq!(power.generation_kw, 0.0);
         assert_eq!(

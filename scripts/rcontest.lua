@@ -53,6 +53,13 @@ blueprints = {
     -- therefore needs a SATURATED ore belt, not merely a longer one. See
     -- docs/superpowers/notes/2026-09-06-two-rows-off-one-belt.md.
     TwoRowSmelter = "0eNqd09FugyAUBuB34VobQbDiY3S7W5ZFu7OMRLEBuq5p+u7DNrNbiss5uxTC5y/H/8S6fg87Z2xgzYmZAANrfqxlrG876OPa42HcjIeHAfoALq6DDSYY8Kx5Ol0fji92P3Rxs+EZs+0A8VRwrfW70YU8KhO3G308NtrpbZ+sKVcqY0fWFCt1ztircbC97spzdscKNCspbIlmFYWVaLaisArNrilshWZrCrtGs5rC1miWFxRX411OcXkxw8aNNt++g/+jDXnEzynmVqxu7yy43FgP7lrIJesuYJGSBbkEl5C/4DoF09t1nzgJS9SVzmi5cKUKf6WzJVBXWuHl76pyFHwrlQ+jhfwt8u0WEuwFLZPfXePTaVI6jU2nl9OJAp9ubiIqnuDYeFPZFvMJ+mxxv7UoacPNRTKfpE8XmU/RxruQr/rHfJEB18QBTwmfM/YBzl/2VCW01FqVUvCSx80vMsr/aA==",
+    -- TwoRowSmelter with three ore loaders instead of one: the same six
+    -- furnaces, the same lanes and takeoffs, fed faster. Turns the starvation
+    -- finding from an inference into a measurement -- lowest:highest went from
+    -- 1:59 to 38:63, a spread ratio of 1.66, with the rows within 4 percent of
+    -- each other. See
+    -- docs/superpowers/notes/2026-09-06-saturation-and-ungenerated-ground.md.
+    SaturatedSmelter = "0eNqdlE1ugzAQRu/iNUT+wYC5RpZVVUEyVS2BiYypGkW5e02iJq3iJDPdgQc/Hh6+ObCun2HnrQusOTAbYGDNr7WM9W0HfVxbt2H2bYDteoA+gI8lcMEGCxNrXg7nm/2bm4cuFhuRMdcOEDcG37ppN/qQR9BC3I1T3Da65YVf8cmVztieNXyljxnbWg+bc7U4ZjdYicZKClahsYqCLdDYgoLVaKymYEs0tqRgKzS2omBrNLamYA0aayhYwfF54CQwIWikpIlr1KwfXb75gOlBevN4cUxhrtHqZu/A59ZN4M8D5B7rRpCnyAVKUD4T1HhBSRMsUYLqmWCFF1Q0wZo8SE6Sf8B1CmzoYI4BS4460gtUpY9UCvyRXlgSc6RS4sk/406gwNccTWF0kL9HfLuBBPYEVcnvLvB2hmSnsXbmgV1JGBWCpFdh9ZZxetevpvcW+VsbWnNzmfJTnN5dnJ8StPbe8ZP/6C9SUBEbvBi+ZuwT/HSq6VKawhitCimUiMVvK5iiXA==",
 }
 
 rcon.cheat_technology("automation")

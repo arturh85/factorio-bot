@@ -1249,12 +1249,30 @@ entry over a log line:
   size**: a fuel slot caps at 5 and then refuses more, so coal rides past the
   near arm to the next takeoff, while a furnace's ore input has no such small
   ceiling and the near arm absorbs everything. So "add more furnaces" is not the
-  scaling move — saturating the belt is. 48 stone furnaces saturate a yellow
+  scaling move — saturating the belt is, and that is **measured, not inferred**:
+  the same six furnaces fed by three loaders instead of one went from a
+  lowest:highest spread of **1:59 to 38:63, a ratio of 1.66**, with the two rows
+  balancing to within 4% (153 vs 147). 48 stone furnaces saturate a yellow
   belt (0.3125 plate/s each against 15 items/s), which is why real designs run a
   full belt into 48 rather than a partial belt into a few. A double-sided line
   does work: an inserter picks from **both** lanes, preferring the far one, so
   two rows meeting opposite lanes first self-correct once a furnace's ore slot
   fills. See `docs/superpowers/notes/2026-09-06-two-rows-off-one-belt.md`.
+- **Ungenerated ground reads as CLEAR, to the world model and to a live RCON
+  query alike — so siting far from explored territory is provisional.**
+  Factorio generates chunks lazily, and an ungenerated chunk genuinely contains
+  nothing: both are telling the truth, and it fills with trees the instant
+  something forces generation. Measured 2026-09-06: `goal.charted(40, 0, 30)`
+  planned **zero steps** (already charted) and `rcon.find_entities_in_radius`
+  reported **`0 entities`** in a 10-tile disc, then the build hit a tree at
+  (44.5, 0.5) once bots arrived — and the replan refused by name, correctly.
+  Zero entities in a 10-tile disc of a fresh map is the tell. **"Charted" is not
+  "generated", and no query can fix it: walk a bot there first, then site.**
+  Doing that turned four failed attempts into `done=true failed=0 lost=0
+  pending=0` on 33 entities, first pass. This is sharper than the existing
+  "a fresh map has charted almost nothing" note — the entities do not *exist*
+  yet, so there is nothing to see and nothing to be stale about. See
+  `docs/superpowers/notes/2026-09-06-saturation-and-ungenerated-ground.md`.
 - **Both SEARCHING forms of `goal.built` ignore characters, so a big block can
   wall the roster in.** Siting treats a character as non-blocking on purpose — a
   bot can walk away, so it should not veto a site — and only the explicit-anchor

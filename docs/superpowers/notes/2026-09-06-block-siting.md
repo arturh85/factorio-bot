@@ -279,13 +279,39 @@ times, and the batch stopped — leaving roughly fifty later placements never
 dispatched. Two bots also stalled walking, **blocked by the block's own
 entities** (`blocked by our own stone-furnace`, `blocked by our own inserter`).
 
+> **RETRACTED, 2026-09-06 05:45 — this run loaded a STALE MOD and its footprint
+> evidence is void.** At the run's branch HEAD (`bcadac64`, 02:57) the mod had
+> **no `describe_footprint_blockers` at all**; it arrived at 03:30 in
+> `5361c7d3`, half an hour later, together with the fix that waits for a busy
+> blocker instead of giving up in 1.8 s. So the refusal below is the behaviour
+> of an older mod, and the conclusion I drew from it — that the speedrun
+> session's footprint fix was incomplete — **was drawn from code I was not
+> running and is withdrawn.**
+>
+> **Provenance did not catch it and could not**: `git.commit` records the
+> *checkout's* HEAD, and I launched the worktree's binary from the main
+> checkout's directory, so the run recorded `191df2db` — a commit whose mod
+> *does* have the diagnostics — while loading the worktree's older copy. A
+> symlink target is not the same claim as the bytes that loaded. This is a third
+> blind spot beside the two `world.dump` ones already documented.
+>
+> **What survives is everything that does not depend on the mod version**: the
+> anchor, the 179 one-anchor-consistent placements, the clear footprint, and the
+> zero wrong directions and halves. **What does not survive is the footprint
+> refusal and the ~50-entity shortfall**, both of which are behaviour of a mod
+> version nobody is running any more. They must be re-measured before anything
+> is concluded from them.
+>
+> The habit that would have caught this costs nothing and is now the rule for
+> this note: **`readlink workspace/mods/BotBridge` before a run, and quote the
+> `Using mods directory` line in the write-up.**
+
 Three things follow, none of them about siting:
 
-1. **This is the footprint-refusal defect the speedrun session independently
-   hit tonight** on a 1× client run, where it cost a replan at milestone 1. It
-   was believed fixed for server-side characters by the mod's bot registry;
-   this run shows it failing **headless too**, so it is failing in both modes,
-   not one.
+1. ~~**This is the footprint-refusal defect the speedrun session independently
+   hit tonight**, failing headless too, so it is failing in both modes.~~
+   **Withdrawn** — see the retraction above. The refusal is real but it is an
+   old mod's refusal, and it says nothing about whether the current fix works.
 2. **A single unresolvable placement costs the whole remainder of a block.**
    Failing fast is defensible, but the blast radius here is 50 entities from
    one bot standing in one tile, and nothing retried or re-planned around it.

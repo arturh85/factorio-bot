@@ -117,9 +117,10 @@ behind.**
 ## Verification
 
 - **The three offline baselines are byte-identical**: 176 / 21,784 ·
-  316 / 22,463 · 442 / 47,542, release binary built from the same tree before
-  and after the change, on `workspace/scripts/map.json`, base commit
-  `297785e2`.
+  316 / 22,463 · 442 / 47,542, on `workspace/scripts/map.json`, measured
+  **twice** on release binaries built from the same tree with and without the
+  change -- once at the branch's original base `297785e2`, and again after
+  rebasing onto `870ead7e`, since master moved while this was in flight.
 - **Six tests, each falsified one at a time**, and each substitution asserted to
   have matched before the result was read:
   - ghosts out of `blocked_tree` -- filter removed, `1 != 0`, one test red;
@@ -135,8 +136,15 @@ behind.**
   it.
 - `cargo check --workspace --all-targets` and
   `cargo clippy --workspace --all-features --all-targets -- --deny warnings`
-  are clean. `cargo test --workspace` has one failure,
+  are clean, and `cargo test --workspace` is green on the rebased branch.
+
+  Before the rebase it had one failure,
   `method::power::block_headroom_tests::a_draw_past_the_layout_is_refused_by_the_layout_and_not_by_the_poles`,
-  which **fails identically on the unmodified base commit** and passes on the
-  newer master this branch was rebased onto -- pre-existing, and not this
-  change.
+  and **the obvious reading of that was wrong**. A first check ran it on a
+  worktree at the main checkout's `HEAD` -- which was **not** this branch's
+  base, master having moved -- where it passed, so the failure looked like
+  this change's doing. Run at the actual base commit `297785e2` it fails
+  identically with no change applied: pre-existing, and fixed by a master
+  commit that landed in between. **A baseline is only a baseline against a
+  stated commit**, and "HEAD" is not a stated commit when two worktrees
+  disagree about it.

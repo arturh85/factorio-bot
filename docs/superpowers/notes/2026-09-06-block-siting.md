@@ -456,3 +456,72 @@ Read several, and expect the refusal to be absent from some of them.
 inserters, 2 splitters and 2 underground belts are proven to **stand** and have
 never been shown to **move a single item**. Nothing in this run could show it,
 and nothing in it tried.
+
+---
+
+## Ghosts mark the site (Task 8) — built and proven live
+
+The owner asked for this directly: a ghost records the siting decision in the
+world *before any real entity exists*, and it makes a run legible, because the
+viewer shows the plan appear and then fill in.
+
+**Both prerequisites were answered live before a line was written** — the first
+time tonight that ordering was right:
+
+- **Ghosts do not expire.** `time_to_live` does not apply to an `entity-ghost`
+  at all ("Entity is not combat-robot, highlight-box, smoke, or sticker"), and
+  `LuaForce.ghost_time_to_live` does not exist in 2.1.17 either. *Absence of a
+  TTL property is not proof of immortality; no long-duration test was run.*
+- **A real placement consumes the ghost beneath it**: `ghost_before=1
+  real_placed=true ghost_after=0 ghost_still_valid=false`.
+- **A ghost reports `name = "entity-ghost"` with the real name in
+  `ghost_name`.** Matching on `ghost_name` rather than `.name` is what stops a
+  ghost being read as an already-built entity.
+
+### The live proof — `run-1788681431-44834`
+
+Headless, four bots, 5×, fresh seed-31337, **mod verified before the run**
+(the run's own line names `.worktrees/ghosts/mods/BotBridge`, matching the hash
+taken beforehand).
+
+- **The stamp is genuinely dispatched**: `kind=stamp_ghosts`, **exactly once**
+  on a fresh site. A ghost path nobody dispatches would be inert, and 2,452
+  green tests would not have noticed.
+- Siting again: anchor `(0.00, 0.00)` self-chosen, 179/179 placements
+  one-anchor-consistent, footprint verified clear.
+- **176/179 stood correct, zero wrong directions, zero wrong halves** — up from
+  129/179, the executor's blast-radius fix working: three failures cost three
+  entities where one failure previously cost fifty.
+
+### My assertion was wrong, and the truth is better
+
+The check asserted **"ghosts surviving the build: want 0"**. Three survived —
+and exactly three entities were missing, all `transport-belt`, at (16.5,10.5),
+(6.5,5.5) and (20.5,5.5).
+
+**The correspondence is the feature.** A real placement consumes the ghost
+beneath it, so a ghost survives precisely where its entity was never placed.
+**The leftovers are the remaining work, made visible** — which is the viewer
+benefit arriving in a form nobody designed for. The correct assertion is
+`ghosts_surviving == entities_missing`; zero is right only for a block that
+finished. I asserted the happy path and the run corrected me.
+
+### Two defects the work found, both of the "marker breaks the thing it marks" kind
+
+- **`occupant_of` treated a standing ghost as a colliding entity**, which would
+  have refused the real placement over its own marker. Fixed by excluding the
+  ghost name from both entity-scanning loops. Ghosts do not collide in
+  Factorio; the planner's model said otherwise.
+- **`place_blueprint` mines** any non-character, non-resource entity in its
+  build area **regardless of `only_ghosts`.** Safe today only because
+  `is_fresh_site` emits the stamp solely when `recover_anchor` finds nothing —
+  a planner-side promise the actuator cannot see or enforce. Documented in
+  `rcon_actuator.rs`, and it needs a hard look if `StampGhosts` ever gets a
+  second call site.
+
+### Not proven
+
+**That recovery reads a ghost in a live replan.** This run built in one pass, so
+the ghost path in `recover_anchor` was exercised only by unit tests — verified
+load-bearing by disabling it and watching exactly the ghost test fail, but not
+by a game. Proving it needs a run interrupted mid-block and re-planned.

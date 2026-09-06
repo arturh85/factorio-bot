@@ -1017,6 +1017,38 @@ gated on `silent` -- every CLI path sets `silent`, which is exactly how the
 Two further paths accept `--seed` and can never use it: `lua --connect` (never
 starts a server) and `--server <host>` (never sets one up).
 
+**A SEED IS NOT A MAP. The map-exchange string is what reproduces one**, and
+this project has never recorded one. A map is noise-generated from the seed
+*plus* the map-gen settings — resource frequency, size and richness, water,
+trees, cliffs — so the same seed under different settings is a different map,
+and so is the same seed on a Factorio version whose defaults moved. The
+exchange string encodes seed and settings together, which is why it is the
+identity and the seed is not.
+
+What is actually on disk here (checked 2026-09-06):
+
+```
+~/.local/share/factorio-bot{,-dev}/AppSettings.toml   map_exchange_string = ""
+workspace/server/map-exchange-string.txt              ABSENT
+workspace/blocks/server/map-exchange-string.txt       ABSENT
+workspace/*/server/map-gen-seed.txt                   31337
+```
+
+So every run so far is seed 31337 under **Factorio's defaults for its version**,
+`provenance.map_exchange_string` is `None` for all of them, and the resource
+fingerprint is the only map identity any of them carries.
+
+**Two live traps.** The repo's shipped `crates/core/src/data/AppSettings.toml`
+carries a **non-empty** exchange string that no workspace has applied — so a
+fresh setup from the repo default generates a *different* map on "seed 31337"
+than every number in this record was measured on. And the plumbing is one-way:
+`rcon.parse_map_exchange_string` and the mod's `rcon_parse_map_exchange_string`
+consume a string, and **nothing anywhere produces one from a live map**, though
+the counterpart of the `helpers.parse_map_exchange_string` the mod already calls
+would do it. Until that exists, "quote the seed with every number" is necessary
+and **not sufficient** — say the seed, the game version, and that settings were
+default.
+
 **The benchmark seed is `31337`**, chosen by an owner decision on 2026-09-04:
 *"lets do the seed search, like i said we don't need a perfect/optimal one,
 just a reasonable one where everything is close to the start."*

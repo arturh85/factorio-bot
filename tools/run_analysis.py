@@ -2034,6 +2034,416 @@ def feeding_dispatches(events: list[dict], lo: int, hi: int) -> int:
     return n
 
 
+# ---------------------------------------------------------------------------
+# THE HAND-CREDIT MASS BALANCE
+#
+# The lead-in in `sustained_rate` is a parameter that has to be sized per item,
+# per machine and per fuel, and getting it wrong fails TOWARDS A FALSE PASS:
+# `run-1788674059-90744` was called `sustained` on a lead-in of 9,600 ticks
+# sized against a furnace's ORE stack, while the only hand-delivered input was
+# COAL -- one charge worth 36,800 ticks, which is what the whole window ran on.
+# (`docs/superpowers/notes/2026-09-06-standing-goals-first-rung.md`.)
+#
+# The balance removes the parameter. Every hand delivery is a CREDIT of input,
+# stated as the most output it could ever explain; every item a machine makes
+# SPENDS that credit; and a window is sustained only when the machines made
+# more than the roster's outstanding credit can account for. Nothing here has
+# to be told how long a stack lasts, because the ledger measures the charge
+# instead of guessing when it runs out.
+# ---------------------------------------------------------------------------
+
+# The feeding verbs that put something INTO the world rather than take it out.
+#
+# A subset of :data:`FEEDING_VERBS`: `mine` and `take` move material into a
+# BOT's hands, which credits nothing -- a machine cannot produce from a bot's
+# inventory. `stock` and `charge` deliver into a chest rather than a machine,
+# and are credited anyway: an inserter can move a chest's contents into a
+# machine, so material a bot carried to a chest is still material a bot
+# carried.
+DELIVERY_VERBS = ("insert", "fuel", "stock", "charge")
+
+# What the roster burns. The only fuel this project has ever hand-delivered.
+FUEL_ITEM = "coal"
+
+# How long one coal keeps a machine running, in ticks -- MIRRORS THE PLANNER'S
+# OWN CONSTANTS and must be changed with them: `method::have::COAL_BURN_TICKS`
+# (2666) and `method::produce::DRILL_BURN_TICKS` (1600). Coal carries 4 MJ; a
+# stone furnace draws 90 kW (44.4 s) and a burner drill 150 kW (26.7 s).
+#
+# **Both are admitted approximations** in the Rust and stay approximations
+# here: they ignore a partial burn carried between crafts, and the mod does not
+# send `energy_usage`, so neither number can be read off the world. A machine
+# not named here is not guessed at -- see :func:`credit_for_delivery`.
+BURN_TICKS = {
+    "burner-mining-drill": 1600,
+    "stone-furnace": 2666,
+}
+
+# How long one unit of an item takes to come out of a machine, in ticks, so
+# that a fuel charge can be converted into the output it buys.
+#
+# Provenance, and it is checkable against the planner's own arithmetic: a
+# burner drill mines 0.25/s, which is 240 ticks an ore, and
+# `crates/planner/src/method/produce.rs` labels a 23-coal charge
+# "36800 ticks, 153 iron-plate" -- 36,800 / 240 = 153.3. A stone furnace runs
+# at speed 1 and iron, copper and stone brick all take 3.2 s, which is 192
+# ticks.
+#
+# A drill is listed against the PLATE as well as the ore because a drill
+# dropping into a furnace turns one ore into one plate: the coal in the drill
+# bounds the plates just as surely as the coal in the furnace does.
+FUEL_ITEM_TICKS = {
+    ("burner-mining-drill", "iron-ore"): 240,
+    ("burner-mining-drill", "iron-plate"): 240,
+    ("burner-mining-drill", "copper-ore"): 240,
+    ("burner-mining-drill", "copper-plate"): 240,
+    ("burner-mining-drill", "coal"): 240,
+    ("burner-mining-drill", "stone"): 240,
+    ("stone-furnace", "iron-plate"): 192,
+    ("stone-furnace", "copper-plate"): 192,
+    ("stone-furnace", "stone-brick"): 192,
+}
+
+# What one craft of an item takes, and how many it yields. Only the recipes a
+# hand delivery has ever been part of in this project, each stated rather than
+# read from a prototype dump the analyser does not have.
+#
+# An item with no entry here is refused (verdict `unknown`), never assumed to
+# be unexplainable: "the roster delivered something and I do not know what it
+# turns into" is not evidence of a standing supply.
+RECIPES = {
+    "iron-plate": {"inputs": {"iron-ore": 1}, "yield": 1},
+    "copper-plate": {"inputs": {"copper-ore": 1}, "yield": 1},
+    "stone-brick": {"inputs": {"stone": 2}, "yield": 1},
+    "iron-gear-wheel": {"inputs": {"iron-plate": 2}, "yield": 1},
+    "copper-cable": {"inputs": {"copper-plate": 1}, "yield": 2},
+    "electronic-circuit": {"inputs": {"iron-plate": 1, "copper-cable": 3}, "yield": 1},
+}
+
+# Labels name a machine loosely where the planner had only one in mind.
+# `method::have`'s smelt bank writes "fuel the furnace with N coal at P" and
+# builds stone furnaces; `method::produce` writes the prototype name outright.
+# A steel furnace under the same word would draw the same 90 kW but run at
+# speed 2, so this alias UNDER-credits it by half -- named here rather than
+# silently assumed, and harmless while nothing in the tree places one.
+MACHINE_ALIASES = {"furnace": "stone-furnace"}
+
+# The label shapes the planner writes for a delivery. Prose, and parsed as
+# prose only because every run archived before `EventKind::ActionDispatched`
+# carried a structured `delivery` has nothing else. A dispatch whose verb is a
+# delivery verb and whose label matches none of these is NOT skipped: it is
+# reported unreadable and takes the verdict to `unknown`.
+_DELIVERY_LABELS = (
+    # `fuel the stone-furnace with 23 coal (36800 ticks, 153 iron-plate, ...)`
+    # and `fuel the furnace with 14 coal at [x, y]`.
+    re.compile(r"^fuel the (?P<machine>[a-z0-9-]+) with (?P<count>\d+) (?P<item>[a-z0-9-]+)"),
+    # `insert 5 iron-ore into the lab at [x, y]`, `insert 10 iron-ore into stone-furnace`.
+    re.compile(
+        r"^insert (?P<count>\d+) (?P<item>[a-z0-9-]+) into (?:the )?(?P<machine>[a-z0-9-]+)"
+    ),
+    # `insert 50 iron-ore at [x, y]` -- the machine is not in the label. The
+    # recipe conversion does not need it; only a fuel credit does.
+    re.compile(r"^insert (?P<count>\d+) (?P<item>[a-z0-9-]+) at "),
+    # `stock the wooden-chest with 5 iron-plate`.
+    re.compile(r"^stock the (?P<machine>[a-z0-9-]+) with (?P<count>\d+) (?P<item>[a-z0-9-]+)"),
+    # `charge the input chest with 5 iron-plate`.
+    re.compile(r"^charge the (?P<machine>.+?) with (?P<count>\d+) (?P<item>[a-z0-9-]+)"),
+)
+
+
+def delivery_of(event: dict) -> dict | None:
+    """What one dispatched action handed to a machine or a chest.
+
+    ``None`` when the action delivered nothing -- a walk, a craft, a place, a
+    `mine` or a `take`. Otherwise a dict with ``item``, ``count``, ``machine``
+    (``None`` when the record does not say which) and ``source``.
+
+    ``item`` is ``None`` when the action IS a delivery and this function cannot
+    read what it delivered. That is a distinct answer from "nothing was
+    delivered" and callers must not collapse the two: an unreadable delivery is
+    unaccounted-for credit, and unaccounted-for credit can only be reported as
+    `unknown`.
+
+    ``source`` is ``"fields"`` when the event carried a structured ``delivery``
+    (every run recorded after that field landed) and ``"label"`` when it was
+    parsed out of the action's prose label, which is what the archived runs
+    have. Prose is the fallback, not the design.
+    """
+    if event.get("kind") != "action_dispatched":
+        return None
+    action = event.get("action") or ""
+    if verb_of(action) not in DELIVERY_VERBS:
+        return None
+    d = event.get("delivery")
+    if isinstance(d, dict) and d.get("item") is not None:
+        machine = d.get("entity")
+        return {
+            "item": d.get("item"),
+            "count": int(d.get("count") or 0),
+            "machine": MACHINE_ALIASES.get(machine, machine),
+            "source": "fields",
+            "label": action,
+        }
+    for pattern in _DELIVERY_LABELS:
+        m = pattern.match(action)
+        if not m:
+            continue
+        machine = m.groupdict().get("machine")
+        return {
+            "item": m.group("item"),
+            "count": int(m.group("count")),
+            "machine": MACHINE_ALIASES.get(machine, machine),
+            "source": "label",
+            "label": action,
+        }
+    return {"item": None, "count": 0, "machine": None, "source": "unreadable", "label": action}
+
+
+def credit_for_delivery(delivery: dict, item: str) -> dict:
+    """The most ``item`` one hand delivery could ever explain.
+
+    ``credit`` is a float, ``None`` when this delivery cannot be priced at all.
+    ``why`` names which of the three rules answered:
+
+    ``fuel``
+        Coal into a burner. The charge buys ``count * BURN_TICKS`` ticks of
+        running, and the machine turns a tick into output at a known rate. Coal
+        delivered to a chest, or into a machine this table does not know, is
+        priced at the **most generous** burner in :data:`BURN_TICKS` -- the
+        roster could have carried it anywhere, so the largest explanation is
+        the honest bound.
+    ``ingredient``
+        An input of ``item``'s own recipe, converted by the recipe. Machine
+        independent, which is why a label that names no machine can still be
+        priced.
+    ``unrelated``
+        Neither, and ``item``'s recipe is known: the delivery explains nothing
+        and is credited zero. A `stock the chest with 5 iron-gear-wheel` cannot
+        account for a plate.
+
+    **The direction of every approximation here is towards refusing**, because
+    the failure this replaces was a false pass. A credit that is too large only
+    ever makes a window harder to call sustained.
+    """
+    delivered = delivery.get("item")
+    if delivered is None:
+        return {"credit": None, "why": "unreadable", "detail": delivery.get("label")}
+    count = delivery.get("count") or 0
+    machine = delivery.get("machine")
+    if delivered == FUEL_ITEM:
+        burners = [machine] if machine in BURN_TICKS else list(BURN_TICKS)
+        best = None
+        for m in burners:
+            per_item = FUEL_ITEM_TICKS.get((m, item))
+            if per_item:
+                best = max(best or 0.0, count * BURN_TICKS[m] / per_item)
+        if best is None:
+            return {
+                "credit": None,
+                "why": "fuel-unpriced",
+                "detail": f"no burn rate for {item} at {machine or 'any known burner'}",
+            }
+        return {"credit": best, "why": "fuel", "detail": f"{count} {FUEL_ITEM} at {machine or 'the most generous burner'}"}
+    recipe = RECIPES.get(item)
+    if recipe is None:
+        return {
+            "credit": None,
+            "why": "recipe-unknown",
+            "detail": f"no recipe for {item} in RECIPES",
+        }
+    per_craft = recipe["inputs"].get(delivered)
+    if per_craft:
+        return {
+            "credit": count / per_craft * recipe["yield"],
+            "why": "ingredient",
+            "detail": f"{count} {delivered} at {per_craft} per {recipe['yield']} {item}",
+        }
+    return {"credit": 0.0, "why": "unrelated", "detail": f"{delivered} is not an input of {item}"}
+
+
+def hand_credit(events: list[dict], *, item: str, at_tick: int) -> dict:
+    """Everything the roster delivered up to ``at_tick``, priced in ``item``.
+
+    Credits are summed within a **stage** -- one ``(machine, delivered item)``
+    pair -- and the stages are then combined by **maximum, not sum**.
+
+    Two hand deliveries of the same coal to the same drill are two charges of
+    the same supply and add up. A drill's coal and a furnace's coal are two
+    *different* bounds on the same plates: neither adds to the other, and the
+    true bound is the smaller of them. Taking the larger is deliberate and is
+    the conservative direction -- it credits the roster with the most any of
+    its deliveries could explain, so an optimistic constant cannot turn into a
+    pass. (On `run-1788674059-90744` the two differ, 153 against 194, and the
+    verdict is the same either way.)
+    """
+    stages: collections.Counter = collections.Counter()
+    unreadable: list[str] = []
+    unpriced: list[str] = []
+    rows: list[dict] = []
+    for e in events:
+        tick = e.get("tick")
+        if tick is None or tick > at_tick:
+            continue
+        d = delivery_of(e)
+        if d is None:
+            continue
+        priced = credit_for_delivery(d, item)
+        row = {"tick": tick, **d, **priced}
+        rows.append(row)
+        if priced["credit"] is None:
+            (unreadable if priced["why"] == "unreadable" else unpriced).append(
+                priced.get("detail") or d.get("label") or "?"
+            )
+            continue
+        stages[(d["machine"], d["item"])] += priced["credit"]
+    credit = max(stages.values()) if stages else 0.0
+    return {
+        "credit": credit,
+        "by_stage": {f"{m or '?'}/{i}": c for (m, i), c in sorted(stages.items(), key=lambda kv: str(kv[0]))},
+        "deliveries": rows,
+        "unreadable": unreadable,
+        "unpriced": unpriced,
+        "sources": sorted({r["source"] for r in rows}),
+    }
+
+
+def hand_credit_balance(
+    samples: list[dict],
+    events: list[dict],
+    *,
+    item: str,
+    per_minute: int,
+    window_ticks: int,
+    at_tick: int,
+) -> dict:
+    """Did the machines make more than the roster's deliveries can account for?
+
+    **The check with no lead-in.** Same five verdicts as
+    :func:`sustained_rate`, reached by a ledger rather than by a stated
+    quiet period:
+
+    * ``credit`` -- the most output every hand delivery up to ``at_tick``
+      could ever explain (:func:`hand_credit`);
+    * ``spent`` -- what the machines made from the first sample up to the
+      window's start, which is credit already drawn down;
+    * ``outstanding = max(0, credit - spent)`` -- what a bot's hands can still
+      explain when the window opens;
+    * ``unexplained = machine_made - outstanding`` -- output the roster cannot
+      account for, which is the only output a standing supply claim may rest
+      on.
+
+    ``roster-fed`` when ``unexplained <= 0``, ``short`` when it is positive but
+    below the rate, ``sustained`` above it.
+
+    # What this cannot see
+
+    * **A machine loaded before the record began.** The ledger starts at the
+      first event; material already inside a machine at that moment is credit
+      nobody wrote down, and the balance will call its output unexplained.
+      Every run so far starts from a fresh world, where the machines do not
+      exist yet.
+    * **`BURN_TICKS` is approximate** -- it ignores a partial burn carried
+      between crafts, and the mod does not send `energy_usage`, so a machine
+      outside :data:`BURN_TICKS` cannot be priced at all rather than being
+      guessed at.
+    * **Which machine a chest's contents reached.** A `stock`/`charge` is
+      credited as if it went to the machine that turns it into the most
+      output.
+    * **Belted material is invisible, and that is the point**: nothing a belt
+      delivers appears in `action_dispatched`, so a factory that feeds itself
+      accumulates output against a credit that stops growing.
+    * **It says nothing about WHY** a window is short, exactly as
+      :func:`sustained_rate` does not.
+    """
+    lo = at_tick - window_ticks
+    mach = machine_production(samples, lo, at_tick)
+    before = machine_production(samples, 0, lo)
+    required = -(-per_minute * window_ticks // TICKS_PER_MINUTE)  # ceil, integer
+    machine_made = int((mach.get("by_item") or {}).get(item, 0))
+    spent = int((before.get("by_item") or {}).get(item, 0))
+    ledger = hand_credit(events, item=item, at_tick=at_tick)
+    credit = ledger["credit"]
+    outstanding = max(0.0, credit - spent)
+    unexplained = machine_made - outstanding
+    force = [s for s in samples if s.get("kind") == "force"]
+    base = end = None
+    for s in force:
+        tick = s.get("tick", 0)
+        if tick <= lo:
+            base = s
+        if tick <= at_tick:
+            end = s
+    force_delta = (_made(end) if end else {}).get(item, 0) - (
+        _made(base) if base else {}
+    ).get(item, 0)
+    out = {
+        "item": item,
+        "per_minute": per_minute,
+        "window_ticks": window_ticks,
+        "at_tick": at_tick,
+        "window": [lo, at_tick],
+        "required": required,
+        "machine_made": machine_made,
+        "force_made": force_delta,
+        "hand_credit": credit,
+        "spent_before_window": spent,
+        "outstanding_credit": outstanding,
+        "unexplained": unexplained,
+        "by_stage": ledger["by_stage"],
+        "deliveries": len(ledger["deliveries"]),
+        "credit_source": ledger["sources"],
+        "unreadable": ledger["unreadable"],
+        "unpriced": ledger["unpriced"],
+        "source": "counters" if mach.get("available") else "unavailable",
+        "why": "",
+    }
+    if not mach.get("available"):
+        out["verdict"] = "unknown"
+        out["why"] = (
+            "this run archived no per-machine `produced` counter, so there is nothing to "
+            "balance the roster's deliveries against"
+        )
+        return out
+    if ledger["unreadable"] or ledger["unpriced"]:
+        out["verdict"] = "unknown"
+        missing = ledger["unreadable"] + ledger["unpriced"]
+        out["why"] = (
+            f"{len(missing)} delivery(ies) could not be priced, so the roster's credit is a "
+            f"lower bound and no verdict rests on it: {'; '.join(missing[:3])}"
+        )
+        return out
+    if machine_made == 0 and force_delta > 0:
+        out["verdict"] = "hand-made"
+        out["why"] = (
+            f"no machine counter moved and the force made {force_delta} {item}: "
+            "hand crafting and hand mining pass through no machine"
+        )
+        return out
+    if unexplained <= 0:
+        out["verdict"] = "roster-fed"
+        out["why"] = (
+            f"the roster delivered enough to explain {credit:.0f} {item} and the machines had "
+            f"made {spent} before the window, leaving {outstanding:.0f} of hand credit "
+            f"outstanding against the {machine_made} made inside it: every item in this window "
+            "can be accounted for by something a bot carried"
+        )
+        return out
+    if unexplained < required:
+        out["verdict"] = "short"
+        out["why"] = (
+            f"{unexplained:.0f} of the {machine_made} made in the window are unexplained by hand "
+            f"credit, against the {required} that {per_minute}/min asks for; nothing here "
+            "observed why"
+        )
+        return out
+    out["verdict"] = "sustained"
+    out["why"] = (
+        f"machines made {machine_made} against {outstanding:.0f} of outstanding hand credit, so "
+        f"{unexplained:.0f} of it -- {required} were needed -- came from something no bot carried"
+    )
+    return out
+
+
 def sustained_rate(
     samples: list[dict],
     events: list[dict],
@@ -2118,6 +2528,18 @@ def sustained_rate(
         "feeding_in_lead_in": in_lead_in,
         "source": "counters" if mach.get("available") else "unavailable",
         "why": "",
+        # THE SECOND, STRONGER VERDICT, and deliberately not a replacement:
+        # this one is reported beside the lead-in's rather than instead of it
+        # until it has been shown right about more than one run. It takes no
+        # lead-in at all -- see :func:`hand_credit_balance`.
+        "balance": hand_credit_balance(
+            samples,
+            events,
+            item=item,
+            per_minute=per_minute,
+            window_ticks=window_ticks,
+            at_tick=at_tick,
+        ),
     }
     if not mach.get("available"):
         out["verdict"] = "unknown"
@@ -3397,6 +3819,11 @@ def report_sustain(rows: list[dict], p) -> None:
     p("  A feeding dispatch inside the window OR the lead-in disqualifies it: a stone")
     p("  furnace's input slot holds ~9,600 ticks of hand-fed running, so an idle window is")
     p("  equally consistent with a charged factory.")
+    p("  TWO VERDICTS ARE PRINTED. The first is that lead-in check, whose parameter has to be")
+    p("  sized per item, per machine and per fuel and fails towards a FALSE PASS when it is")
+    p("  too short. The second balances what the roster delivered against what the machines")
+    p("  made and needs no lead-in at all. Where they disagree, the balance is the one with")
+    p("  a number behind it -- `run-1788674059-90744` reads SUSTAINED / roster-fed.")
     for r in rows:
         lo, hi = r["window"]
         p(f"\n  {r['item']} {r['per_minute']}/min over {r['window_ticks']} ticks "
@@ -3406,6 +3833,17 @@ def report_sustain(rows: list[dict], p) -> None:
         p(f"    feeding dispatches: {r['feeding_in_window']} in window, "
           f"{r['feeding_in_lead_in']} in lead-in   (source: {r['source']})")
         p(f"    {r['why']}")
+        b = r.get("balance")
+        if b:
+            p(f"    hand-credit balance (no lead-in): {b['verdict'].upper()}")
+            stages = ", ".join(f"{k} {v:.0f}" for k, v in b["by_stage"].items()) or "none"
+            p(f"      credit {b['hand_credit']:.0f} from {b['deliveries']} delivery(ies) "
+              f"({stages}); spent {b['spent_before_window']} before the window; "
+              f"outstanding {b['outstanding_credit']:.0f}")
+            p(f"      machines made {b['machine_made']} in the window -> "
+              f"{b['unexplained']:.0f} unexplained, {b['required']} needed"
+              f"   (credit read from: {', '.join(b['credit_source']) or 'nothing'})")
+            p(f"      {b['why']}")
 
 
 def report(a: dict, out=sys.stdout, top: int = 12) -> None:

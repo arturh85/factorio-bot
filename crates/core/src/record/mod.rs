@@ -417,6 +417,31 @@ pub enum EventKind {
         /// chose that the game resolved elsewhere shows up as a mismatch
         /// between the two records, not inside this one field.
         target: Option<Position>,
+        /// What this action put INTO a machine or a chest, when it put
+        /// anything in. `None` for every action that delivers nothing -- a
+        /// walk, a craft, a place, a `mine`, a `take`.
+        ///
+        /// # Why the label was not enough
+        ///
+        /// The quantity was always in `action`, as prose: *"fuel the
+        /// stone-furnace with 23 coal (36800 ticks, 153 iron-plate, then it
+        /// stops)"*. Reading it back means parsing five different sentence
+        /// shapes written at five call sites in the planner, and a shape
+        /// nobody anticipated reads as "no delivery" rather than as an error.
+        ///
+        /// The **hand-credit mass balance** (`tools/run_analysis.py`) needs
+        /// these numbers to be right, because it accounts for what the roster
+        /// put in against what the machines made and reports `unknown` when a
+        /// single delivery cannot be priced. It is the check that replaces a
+        /// hand-sized lead-in parameter, which failed *towards a false pass*
+        /// on `run-1788674059-90744`
+        /// (`docs/superpowers/notes/2026-09-06-standing-goals-first-rung.md`).
+        ///
+        /// `#[serde(default)]` so every run archived before this field opens
+        /// unchanged, and reads `None` -- for those runs the analyser parses
+        /// the label and says which source it used.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        delivery: Option<Delivery>,
     },
     /// An action reached a verdict.
     ///
@@ -1105,6 +1130,39 @@ pub struct PlannedStep {
 /// list is sorted longest-wait-first so the entry a reader is looking for is
 /// the one that survives.
 pub const MAX_WAITING_REPORTED: usize = 8;
+
+/// What a bot's hands put into a machine or a chest, on
+/// [`EventKind::ActionDispatched::delivery`].
+///
+/// **The planner's intent, not the game's answer**, on the same terms as
+/// [`EventKind::ActionDispatched::target`]: it travels from
+/// `ActionKind::Insert`'s own fields, which is what the run asked for. The
+/// action's settle says whether the game did it; nothing here does.
+///
+/// One variant of one enum reaches this struct -- `ActionKind::Insert` --
+/// and it covers every hand delivery the planner can express, fuel included:
+/// a `fuel` action IS an `Insert` into `InventorySlot::Fuel`, and the label
+/// is the only place the two are spelled differently. `ActionKind::Remove`
+/// (a `take`) deliberately writes nothing here: it moves material *out* of a
+/// machine and into a bot, which credits no production.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct Delivery {
+    /// What was put in.
+    pub item: String,
+    /// How many. A count of items, never of stacks.
+    pub count: u32,
+    /// The prototype name of what received it -- `stone-furnace`,
+    /// `burner-mining-drill`, `wooden-chest`. Needed because the same coal
+    /// buys 26.7 s in a drill and 44.4 s in a furnace, so a fuel delivery
+    /// cannot be converted into output without knowing which.
+    pub entity: String,
+    /// Which inventory: the planner's own `InventorySlot` name, as
+    /// `goal.plan`'s steps publish it (`fuel`, `furnace_source`,
+    /// `assembler_input`, `chest`, ...) rather than Factorio's unified
+    /// `defines.inventory` key, so a reader can still tell a furnace's input
+    /// from an assembler's.
+    pub slot: String,
+}
 
 /// One step that is waiting rather than working, carried on
 /// [`EventKind::BatchProgress`].
@@ -2382,6 +2440,7 @@ mod tests {
                 bot: 2,
                 action: "mine".into(),
                 target: None,
+                delivery: None,
             },
             EventKind::ActionSettled {
                 id: 17,
@@ -2755,6 +2814,7 @@ mod finish_tests {
                 bot: 1,
                 action: "mine".into(),
                 target: None,
+                delivery: None,
             },
         )
         .unwrap();
@@ -3067,6 +3127,7 @@ mod finish_tests {
                     bot: 1,
                     action: "mine 4 iron-ore".into(),
                     target: None,
+                    delivery: None,
                 },
             )
             .unwrap();

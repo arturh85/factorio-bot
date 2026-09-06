@@ -70,6 +70,7 @@ import type {
     MapKind,
     MapRecord,
     PlannedStep,
+    Delivery,
     WaitingStep,
     Position,
     MachineSample,
@@ -805,7 +806,8 @@ const SCHEMAS: Record<string, SchemaContract> = {
             id: {required: true, type: 'integer'},
             bot: {required: true, type: 'integer'},
             action: {required: true, type: 'string'},
-            target: {required: false, ref: 'Position', nullable: true}
+            target: {required: false, ref: 'Position', nullable: true},
+            delivery: {required: false, ref: 'Delivery', nullable: true}
         },
         action_settled: {
             id: {required: true, type: 'integer'},
@@ -953,6 +955,15 @@ const SCHEMAS: Record<string, SchemaContract> = {
     // how long. `id` and `step_index` are nullable in opposite directions --
     // an action has the first, a walk the second -- so neither may be read as
     // "we failed to look it up".
+    // What a hand delivery carried, in numbers rather than in the prose of
+    // `action`. The hand-credit mass balance in `tools/run_analysis.py` reads
+    // these; without them it parses the label and says so.
+    Delivery: objectContract<Delivery>({
+        item: {required: true, type: 'string'},
+        count: {required: true, type: 'integer'},
+        entity: {required: true, type: 'string'},
+        slot: {required: true, type: 'string'}
+    }),
     WaitingStep: objectContract<WaitingStep>({
         id: {required: false, type: 'integer', nullable: true},
         step_index: {required: false, type: 'integer', nullable: true},

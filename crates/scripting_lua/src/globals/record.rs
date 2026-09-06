@@ -26,8 +26,8 @@ use factorio_bot_core::record::run_mode;
 use factorio_bot_core::record::savepoint;
 use factorio_bot_core::record::video::Resolution;
 use factorio_bot_core::record::{
-    ActionFailure, EventKind, FailureKind, PlannedStep, Provenance, RunRecorder, SatisfiedReason,
-    VideoOptions, VideoRecorder, WalkFailure, WalkFailureKind, git_provenance,
+    ActionFailure, Delivery, EventKind, FailureKind, PlannedStep, Provenance, RunRecorder,
+    SatisfiedReason, VideoOptions, VideoRecorder, WalkFailure, WalkFailureKind, git_provenance,
 };
 use factorio_bot_core::types::{AreaFilter, EntityType, PlayerId, Position, Rect};
 use std::collections::BTreeSet;
@@ -1571,6 +1571,35 @@ end
                         .as_ref()
                         .map(|t| position_from_lua(t, "target"))
                         .transpose()?;
+                    // What this step put INTO something, read off the PLAN
+                    // rather than off the label. `step_to_lua` publishes
+                    // `kind = "insert"` with `item`, `count`, `entity` and
+                    // `slot` for every `ActionKind::Insert`, which is every
+                    // hand delivery including fuel; nothing else here is one.
+                    //
+                    // Read defensively -- a caller may hand `record.actions`
+                    // a hand-built step table, and a missing field is a step
+                    // with no delivery rather than an error.
+                    let delivery = if step.get::<Option<String>>("kind")?.as_deref()
+                        == Some("insert")
+                    {
+                        match (
+                            step.get::<Option<String>>("item")?,
+                            step.get::<Option<u32>>("count")?,
+                            step.get::<Option<String>>("entity")?,
+                            step.get::<Option<String>>("slot")?,
+                        ) {
+                            (Some(item), Some(count), Some(entity), Some(slot)) => Some(Delivery {
+                                item,
+                                count,
+                                entity,
+                                slot,
+                            }),
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    };
 
                     if let Some(dispatched) = dispatched {
                         recorder
@@ -1581,6 +1610,7 @@ end
                                     bot,
                                     action: label,
                                     target,
+                                    delivery,
                                 },
                             )
                             .map_err(record_error)?;
@@ -3204,6 +3234,93 @@ mod tests {
             ticks[1] >= ticks[0],
             "a synthesized settle stamp is never earlier than its own dispatch, got {ticks:?}"
         );
+    }
+
+    /// A hand delivery carries its numbers, not just its prose.
+    ///
+    /// The quantity was always in the label — *"fuel the stone-furnace with 23
+    /// coal"* — and reading it back means parsing sentences. The **hand-credit
+    /// mass balance** (`tools/run_analysis.py`) has to price every delivery a
+    /// run made, and reports `unknown` rather than a verdict when it cannot,
+    /// so the numbers travel as fields. A `fuel` action is an `insert` into
+    /// the fuel slot: `step.kind` says `insert` and `step.slot` says which
+    /// inventory, exactly as `goal.plan` publishes them.
+    #[test]
+    fn an_insert_records_what_it_delivered() {
+        let (lua, _tmp, run_dir) = recording_lua();
+        let written: u32 = lua
+            .load(
+                r#"
+                local steps = {
+                    {
+                        id = 2, bot = 1, kind = "insert",
+                        label = "fuel the stone-furnace with 23 coal",
+                        entity = "stone-furnace", slot = "fuel",
+                        item = "coal", count = 23,
+                    },
+                }
+                local actions = {
+                    [2] = { status = "success", dispatched_tick = 4520, replied_tick = 4520 },
+                }
+                return record.actions(steps, actions)
+                "#,
+            )
+            .eval()
+            .expect("record.actions runs");
+        assert_eq!(written, 2);
+        let events = read_events(&run_dir);
+        match &events[0] {
+            EventKind::ActionDispatched { delivery, .. } => assert_eq!(
+                delivery.as_ref(),
+                Some(&Delivery {
+                    item: "coal".into(),
+                    count: 23,
+                    entity: "stone-furnace".into(),
+                    slot: "fuel".into(),
+                }),
+                "the delivery travels as numbers, not as a sentence to re-parse"
+            ),
+            other => panic!("expected action_dispatched, got {other:?}"),
+        }
+    }
+
+    /// Everything that is not an insert delivers nothing, and says so.
+    ///
+    /// A `take` moves material OUT of a machine and into a bot, which credits
+    /// no production; a `craft` and a `place` touch no machine inventory at
+    /// all. Recording a delivery for any of them would put credit in the
+    /// balance that the roster never handed over.
+    #[test]
+    fn a_take_or_a_craft_records_no_delivery() {
+        let (lua, _tmp, run_dir) = recording_lua();
+        let written: u32 = lua
+            .load(
+                r#"
+                local steps = {
+                    {
+                        id = 1, bot = 1, kind = "remove",
+                        label = "take 50 iron-plate from the stone-furnace",
+                        entity = "stone-furnace", slot = "furnace_result",
+                        item = "iron-plate", count = 50,
+                    },
+                    { id = 2, bot = 1, kind = "craft", label = "craft 1 stone-furnace",
+                      item = "stone-furnace", count = 1 },
+                }
+                local actions = {
+                    [1] = { status = "success", dispatched_tick = 10, replied_tick = 10 },
+                    [2] = { status = "success", dispatched_tick = 20, replied_tick = 20 },
+                }
+                return record.actions(steps, actions)
+                "#,
+            )
+            .eval()
+            .expect("record.actions runs");
+        assert_eq!(written, 4);
+        for event in read_events(&run_dir) {
+            if let EventKind::ActionDispatched { delivery, .. } = event {
+                assert_eq!(delivery, None, "only an insert delivers");
+            }
+        }
     }
 
     /// A failure the game never stamped a tick for still reaches the record.

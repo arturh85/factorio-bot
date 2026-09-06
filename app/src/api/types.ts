@@ -703,6 +703,31 @@ export interface PlannedStep {
  * same as `action_dispatched`'s, so the two join on `id` with no second
  * vocabulary to learn.
  */
+/**
+ * What a bot's hands put into a machine or a chest, on an
+ * `action_dispatched`.
+ *
+ * The planner's intent, not the game's answer: it comes from the plan's own
+ * insert action, and the matching `action_settled` is what says whether the
+ * game did it. A `take` carries none -- it moves material out of a machine
+ * and into a bot.
+ */
+export interface Delivery {
+    /** What was put in. */
+    item: string;
+    /** How many. A count of items, never of stacks. */
+    count: number;
+    /** The prototype name of what received it -- `stone-furnace`,
+     *  `burner-mining-drill`, `wooden-chest`. The same coal buys different
+     *  amounts of running in different machines, so a fuel delivery means
+     *  nothing without it. */
+    entity: string;
+    /** Which inventory, in the planner's vocabulary (`fuel`,
+     *  `furnace_source`, `assembler_input`, `chest`, ...) rather than
+     *  Factorio's unified `defines.inventory` key. */
+    slot: string;
+}
+
 export interface WaitingStep {
     /** The action id, joinable to `action_dispatched.id` and
      *  `PlannedStep.id`. `null` for a walk, which has no action id at all --
@@ -1056,6 +1081,11 @@ export type EventKind =
            *  game's resolution. `null` for `craft`/`research`, which act on
            *  no location; always present for `mine`/`place`/`insert`/`remove`. */
           target: Position | null;
+          /** What this action put INTO a machine or a chest, when it put
+           *  anything in. `null` for a walk, a craft, a place, a `mine` or a
+           *  `take` -- and absent on every run archived before the field
+           *  existed, whose quantities live only in the prose of `action`. */
+          delivery?: Delivery | null;
       }
     | {
           kind: 'action_settled';

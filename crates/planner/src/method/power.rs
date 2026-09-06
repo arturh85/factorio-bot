@@ -1138,19 +1138,27 @@ pub fn supply_for(
 /// `method::extract` passes the machine site it just chose. A bot's position
 /// is where its last walk left it.
 ///
-/// Measured on 2026-09-06, same seed, same binary, two dumps of the same map:
-///
-/// | dump | bots at | water from there | result |
-/// |---|---|---|---|
-/// | `map.json` (t=0) | `(0.5, -0.5)` | 48 tiles | plans, 176 actions |
-/// | `map-31337-explored.json` | `(255, 249)` | 355 tiles | **refuses** |
-///
-/// `score-map` reports water at **48.1 tiles on both dumps**: the lake did not
-/// move, the bots did. They had finished an exploration ring and parked, and
-/// every power-needing goal on the better-charted map then refused with *"a
+/// The failure this was built for: bots that had finished an exploration ring
+/// and parked at `(255, 249)`, where every power-needing goal refused with *"a
 /// power plant needs water, and the plan can see none within 128 tiles"* — a
-/// true statement about what was looked at, and a false impression of the map.
-/// The radii were not the fault and neither was the map; the anchor was.
+/// true statement about what was looked at, and a false impression of a map
+/// whose lake `score-map` reports at 48.1 tiles from the origin. The radii
+/// were not the fault and neither was the map; the anchor was.
+///
+/// **The worked example this doc used to give is no longer reproducible, and
+/// saying so is the honest form.** It tabulated `map-31337-explored.json` with
+/// its bots at `(255, 249)` as *"355 tiles from water, refuses"*. Re-measured
+/// on 2026-09-06 with `score-map --from 255,249`, the nearest water on that
+/// dump — and on `map.json` too — is **47.4 tiles**, inside even the cheap
+/// 64-tile scan, so neither dump refuses from there any more. Both dumps were
+/// rewritten that day by the exploration work (`map-31337-explored.json` at
+/// 13:01), and an exploration ring is exactly the thing that turns ungenerated
+/// ground into charted water. The 355 was presumably read off the dump as it
+/// stood earlier; it cannot be checked, because nothing kept that file.
+///
+/// The property is proven by fixture instead, which is what a test can hold:
+/// `the_caller_anchored_search_refuses_from_where_the_bot_parked` and
+/// `a_roster_that_walked_away_still_gets_a_plant_at_the_world_anchor`.
 ///
 /// # Why the origin, and why it is honest
 ///
@@ -1480,11 +1488,25 @@ pub fn plan_plant_for(state: &PlanState, from: &Position, kw: f64) -> Result<Pla
     // not by any comparison here.
     let water = match state.nearest_water_tile(from, PLANT_WATER_SCAN_RADIUS) {
         Some(near) => near,
-        None => state
-            .nearest_water_tile(from, PLANT_WATER_WIDE_SCAN_RADIUS)
-            .ok_or(PlannerError::PowerPlantNeedsWater {
-                radius: PLANT_WATER_WIDE_SCAN_RADIUS,
-            })?,
+        None => match state.nearest_water_tile(from, PLANT_WATER_WIDE_SCAN_RADIUS) {
+            Some(far) => far,
+            // Only on the refusal path, so the seventeen extra tile-tree
+            // probes cost nothing on a plan that works. They are what makes
+            // the refusal say whether it was *dry* or *blind*: an
+            // ungenerated chunk holds no tiles, so "no water here" and "no
+            // ground here at all" are the same `None` out of
+            // `nearest_water_tile` and only `charting` tells them apart.
+            None => {
+                let charting = state.charting(from, PLANT_WATER_WIDE_SCAN_RADIUS);
+                return Err(PlannerError::PowerPlantNeedsWater {
+                    radius: PLANT_WATER_WIDE_SCAN_RADIUS,
+                    anchor_x: from.x(),
+                    anchor_y: from.y(),
+                    covered_probes: charting.covered,
+                    probes: charting.probes,
+                });
+            }
+        },
     };
     let anchor = Pos::from(&water.position);
     let distance = calculate_distance(&tile_centre(&anchor), from);
@@ -3915,8 +3937,15 @@ mod capacity_tests {
     /// Far enough from that lake that **both** water scans miss it, and near
     /// enough to nothing else that the fixture has no other answer. 400 tiles
     /// north on the y axis is ~362 tiles from the lake against a wide scan of
-    /// 128 -- the same shape as the bots parked at (255, 249) on
-    /// `map-31337-explored.json`, 355 tiles from water the origin sees at 48.
+    /// 128 -- the same shape as a roster that walked away from spawn and can
+    /// no longer see the lake the origin sees at 48 tiles.
+    ///
+    /// This used to cite the bots parked at (255, 249) on
+    /// `map-31337-explored.json` as "355 tiles from water". Re-measured
+    /// 2026-09-06 (`score-map --from 255,249`), that dump reports **47.4**,
+    /// so the citation is dropped rather than repeated; see
+    /// [`plant_world_anchor`]. The fixture is what proves the property, and
+    /// it is unaffected.
     fn a_bot_that_walked_away() -> Position {
         Position::new(0., 400.)
     }
@@ -3992,6 +4021,127 @@ mod capacity_tests {
             matches!(err, PlannerError::PowerPlantNeedsWater { .. }),
             "got {err:?}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // A water refusal says where it stood, and how much of that disc it saw
+    //
+    // `nearest_water_tile` answers `None` for two states that are not the
+    // same thing: ground the mod wrote out that holds no water, and ground
+    // that was never generated and holds no tiles at all. Both used to reach
+    // the caller as the identical sentence.
+    // -----------------------------------------------------------------------
+
+    /// A dry world whose ground around `at` **has** been written out, to a
+    /// tile either side of the wide scan.
+    ///
+    /// The seventeen probes sit at `at`, and on the eight compass points at
+    /// half and at the full 128, so a square of half-width 129 covers every
+    /// one of them with a tile to spare. Grass, not water: the point of this
+    /// world is that the model has looked and there is nothing there.
+    ///
+    /// Built here rather than in `test_utils` because it is only this
+    /// question that needs it, and because `update_chunk_tiles` is additive
+    /// -- a world with a lake cannot have one removed.
+    fn a_charted_but_dry_world(at: &Position, half_width: i32) -> PlanState {
+        let world = factorio_bot_core::factorio::world::FactorioWorld::new();
+        world
+            .update_entity_prototypes(
+                fixture_world()
+                    .entity_prototypes
+                    .iter()
+                    .map(|e| e.value().clone())
+                    .collect(),
+            )
+            .expect("prototypes");
+        let (cx, cy) = (at.x().floor() as i32, at.y().floor() as i32);
+        let mut tiles = Vec::new();
+        for x in (cx - half_width)..=(cx + half_width) {
+            for y in (cy - half_width)..=(cy + half_width) {
+                tiles.push(factorio_bot_core::types::FactorioTile {
+                    position: Position::new(f64::from(x), f64::from(y)),
+                    name: "grass-1".to_owned(),
+                    player_collidable: false,
+                    color: None,
+                    surface: None,
+                });
+            }
+        }
+        world.update_chunk_tiles(tiles).expect("charted ground");
+        PlanState::from_world(Arc::new(world), &[BotId(1)])
+    }
+
+    /// Charted and dry: a statement about the **map**.
+    ///
+    /// Every probe found ground, so the refusal is not a gap in the dump and
+    /// no amount of walking will change it. 17 is `CHARTING_PROBES` (the
+    /// origin plus eight compass points at two radii), written out rather
+    /// than imported on this crate's own fixture rule.
+    #[test]
+    fn a_water_refusal_over_charted_ground_says_the_ground_was_dry() {
+        let at = Position::new(0., 0.);
+        let s = a_charted_but_dry_world(&at, 129);
+        let err = plan_plant(&s, &at).expect_err("grass is not water");
+        match err {
+            PlannerError::PowerPlantNeedsWater {
+                covered_probes,
+                probes,
+                ..
+            } => {
+                assert_eq!(
+                    (covered_probes, probes),
+                    (17, 17),
+                    "the whole 128-tile disc was written out, so the refusal is about the map"
+                );
+            }
+            other => panic!("got {other:?}"),
+        }
+    }
+
+    /// Blind: a statement about the **dump**.
+    ///
+    /// The fixture's only tiles are its lake, so 400 tiles north nothing has
+    /// ever been written out -- and this is the state that reads as "no
+    /// water" while saying nothing at all about whether there is water. The
+    /// anchor is asserted here too, because it is the caller's position and
+    /// not [`plant_world_anchor`], and a reader chasing a lake needs to know
+    /// which search refused.
+    #[test]
+    fn a_water_refusal_over_ungenerated_ground_says_it_was_blind() {
+        let world = factorio_bot_core::factorio::world::FactorioWorld::new();
+        world
+            .update_entity_prototypes(
+                fixture_world()
+                    .entity_prototypes
+                    .iter()
+                    .map(|e| e.value().clone())
+                    .collect(),
+            )
+            .expect("prototypes");
+        let s = PlanState::from_world(Arc::new(world), &[BotId(1)]);
+        let away = a_bot_that_walked_away();
+        let err = plan_plant(&s, &away).expect_err("no tiles at all is no water");
+        match err {
+            PlannerError::PowerPlantNeedsWater {
+                anchor_x,
+                anchor_y,
+                covered_probes,
+                probes,
+                ..
+            } => {
+                assert_eq!(
+                    (anchor_x, anchor_y),
+                    (away.x(), away.y()),
+                    "the refusal must name the position the search stood at"
+                );
+                assert_eq!(
+                    (covered_probes, probes),
+                    (0, 17),
+                    "no chunk here was ever written out, so this refusal is about the dump"
+                );
+            }
+            other => panic!("got {other:?}"),
+        }
     }
 
     /// A demand no plant can carry is **not** retried.

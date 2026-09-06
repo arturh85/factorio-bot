@@ -505,16 +505,63 @@ pub enum PlannerError {
     ///   fetches **no tiles at all**, so every question about terrain answers
     ///   "nothing there";
     /// * an owned run only knows the chunks the game has charted.
-    #[error("a power plant needs water, and the plan can see none within {radius} tiles")]
+    ///
+    /// # It says where it stood, and how much of that disc it could see
+    ///
+    /// Both additions are about the same failure: **absence of data read as
+    /// absence of water.**
+    ///
+    /// `radius` alone named a distance without an origin, so "none within 128
+    /// tiles" was a true sentence about an unstated place. The search has two
+    /// anchors — the caller's position, and [`crate::method::power`]'s world
+    /// anchor on the retry — and a reader chasing "but the lake is at 48
+    /// tiles" cannot tell which one refused. `anchor_x` / `anchor_y` say.
+    /// That ambiguity cost an hour on 2026-09-06.
+    ///
+    /// `covered_probes` / `probes` are [`crate::state::ChartingScore`] over
+    /// the same disc, and they carry the asymmetry this repo insists on
+    /// elsewhere (`EntityGraph::resource_fingerprint`, `runMatch.ts`):
+    ///
+    /// * `covered_probes == probes` — the ground was written out and it is
+    ///   dry. A statement about the **map**.
+    /// * `covered_probes < probes` — part of that disc was never generated,
+    ///   so nothing has ever been seen there and there is nothing to be
+    ///   stale about. A statement about the **dump**, and walking a bot into
+    ///   it and replanning can change the answer.
+    ///
+    /// Measured 2026-09-06: on `map.json` and `map-31337-explored.json` alike
+    /// the world anchor's disc is 17/17 covered, so this is a state the
+    /// current maps do not reach — but the same anchor at (255, 249) is 7/17,
+    /// and a refusal from there would have been the blind kind with no way to
+    /// say so. See `docs/superpowers/notes/2026-09-06-a-water-refusal-says-
+    /// where-it-stood.md`.
+    #[error(
+        "a power plant needs water, and the plan can see none within {radius} tiles of \
+         ({anchor_x:.1}, {anchor_y:.1}), where charted ground covers {covered_probes} of \
+         {probes} probes"
+    )]
     #[diagnostic(
         code(planner::power_plant_needs_water),
         help(
             "the plant is sited at the water because water is the one input that cannot be \
              carried; a world attached from a snapshot carries no tiles at all, and an owned run \
-             knows only the chunks the game has charted"
+             knows only the chunks the game has charted -- so all probes covered means the \
+             ground was there and it is dry, and fewer means part of that disc was never \
+             generated and walking a bot into it can change the answer"
         )
     )]
-    PowerPlantNeedsWater { radius: f64 },
+    PowerPlantNeedsWater {
+        radius: f64,
+        /// Where the search stood. Not always the caller's own position:
+        /// `method::power`'s retry re-asks from `plant_world_anchor()`.
+        anchor_x: f64,
+        anchor_y: f64,
+        /// Probes of the same disc that landed on ground the model has a tile
+        /// for, out of `probes`. Equal means charted and dry; fewer means
+        /// blind.
+        covered_probes: usize,
+        probes: usize,
+    },
 
     /// Water near enough, but no piece of its edge with room behind it.
     ///

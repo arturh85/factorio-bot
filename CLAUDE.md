@@ -341,16 +341,29 @@ BotBridge Mod (Factorio mod for RPC)
     from fixed offsets with the directions written out. All three agree
     today; a claim that this is "the only place in the planner that computes
     it" was overstated and is now corrected in the function's own doc.
-    **As of 2026-09-05 this module still has no caller anywhere in the tree**
-    — `connect_steps`/`route_belt`/`ConnectRefusal` appear nowhere outside
-    their own tests, no `Goal` variant reaches it, and no CLI or Lua entry
-    point names it, so `plan --goal producing:...` produces a byte-identical
-    schedule with or without it. **That absence is what hid the geometry
-    defect for four reviews**: nothing but a fixture ever exercised the code,
-    and the fixtures were written alongside it. Treat any claim that this
-    module is "complete and tested" as scoped to its own unit tests until a
-    real caller has placed a belt in a real game. See
-    `docs/superpowers/notes/2026-09-05-belt-routing-first-run.md`.
+    **It had no caller until 2026-09-06, and that absence is what hid the
+    geometry defect through four reviews** — nothing but a fixture ever
+    exercised the code, and the fixtures were written alongside it.
+
+    **It has one now, and it worked** (`84c3259a`, the self-fed cell). A
+    belted burner cell ran with **no bot in the loop for 27,249 ticks**, and
+    the rate table read **`factory`** at two intervals — the first
+    non-`roster-fed` attribution this project has ever produced, against
+    every interval of every previous run. 288 actions dispatched, 288
+    settled, zero failures, **`connect` refused nothing**, 63 belts and 8
+    burner inserters standing. The belts are shown to MOVE, not merely
+    stand: the source chest is empty in 88% of samples and the destination
+    chest in **100%**.
+
+    **One defect the first caller exposed**, which no unit test could have:
+    `connect_steps` hard-coded the electric `inserter`, which is **not
+    enabled at t=0** on seed 31337, so its first real caller would have
+    refused on the materials bill before geometry was ever reached. It takes
+    the prototype as a parameter now. A module with no caller cannot discover
+    that its bill is unbuildable.
+
+    See `docs/superpowers/notes/2026-09-05-belt-routing-first-run.md` and the
+    self-fed cell's own record.
 
   - **`Goal::Built` / `goal.built(blueprint, anchor)`** (`method::blueprint`,
     `BuildBlock`) places a **decoded Factorio blueprint by hand**, entity by

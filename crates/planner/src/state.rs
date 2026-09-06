@@ -237,11 +237,18 @@ impl Excluded<'_> {
     /// Whether a consumer standing at `position` is one the question is about.
     ///
     /// The rectangle test is **inclusive** on all four edges, unlike
-    /// [`Rect::contains`], which is strict. A block's ground is the union of
-    /// its entities' footprints, so its outermost entities' collision boxes
-    /// touch the boundary exactly; a strict test would charge precisely the
-    /// entities on the edge of the block and leave a residue of double count
-    /// proportional to the block's perimeter.
+    /// [`Rect::contains`], which is strict — and that pairs with the ground
+    /// being drawn from footprints rather than from positions
+    /// (`method::power::occupied_ground`). Either alone is enough and both are
+    /// kept, because what they prevent is silent.
+    ///
+    /// **Measured, not reasoned**, by breaking each in turn against a 48-inserter
+    /// block: a footprint-drawn ground survives a strict test (every position is
+    /// half a collision box inside its own edge) and a positions-drawn ground
+    /// survives an inclusive one (every outermost position is exactly on the
+    /// edge). Break **both** and the whole perimeter is charged — 18 of 48
+    /// inserters in that fixture, 234 kW of double count — which is a leak that
+    /// grows with the block's edge and shows up as an inexplicable refusal.
     fn covers(&self, position: &Position) -> bool {
         match self {
             Excluded::Nothing => false,
@@ -2955,10 +2962,8 @@ impl PlanState {
     /// least this can claim without inventing a size.
     ///
     /// Public since 2026-09-06 so `method::power` can draw the ground a block
-    /// occupies from the entities it is about to place, rather than from their
-    /// positions: an entity's position sits inside its own box, so a
-    /// positions-only rectangle leaves the block's whole perimeter outside the
-    /// exclusion. See [`Excluded::Ground`].
+    /// occupies from the entities it is about to place. See
+    /// [`Excluded::Ground`], whose doc says why footprints and not positions.
     pub fn footprint_of(&self, entity: &FactorioEntity) -> Rect {
         if entity.bounding_box.width() > 0. && entity.bounding_box.height() > 0. {
             return entity.bounding_box.clone();

@@ -1990,6 +1990,11 @@ def machine_production(samples: list[dict], lo: int, hi: int) -> dict:
             "key": key,
             "name": m.get("name"),
             "type": m.get("type"),
+            # Where this machine stands, so a caller can join it to an action's
+            # `target` -- which is the only thing that says WHICH machine a
+            # hand delivery reached. `None` for a row with no position, which
+            # no archived run has.
+            "position": m.get("position"),
             "item": item,
             "produced": delta,
             "source": source,
@@ -2151,6 +2156,56 @@ _DELIVERY_LABELS = (
 )
 
 
+def machine_pos_key(position: Any) -> tuple[float, float] | None:
+    """A machine's identity, as far as this analyser can establish one.
+
+    Both halves of the join name a place and nothing else: a sampled machine
+    carries ``position`` and a dispatched action carries ``target``. There is
+    no id in common -- the sample's key is the game's `unit_number`, which no
+    event records -- so position IS the identity, and two machines that ever
+    stood on the same tile are one machine here.
+
+    Rounded to three decimals because both sides are JSON floats. Factorio
+    positions are halves and quarters, so this rounding cannot merge two real
+    machines; it only removes a representation difference.
+    """
+    if not isinstance(position, dict):
+        return None
+    x, y = position.get("x"), position.get("y")
+    if x is None or y is None:
+        return None
+    return (round(float(x), 3), round(float(y), 3))
+
+
+def machine_instances(samples: list[dict], hi: int) -> dict:
+    """Every machine sampled up to ``hi``, by :func:`machine_pos_key`.
+
+    ``name`` is the prototype and ``item`` is the last thing the machine was
+    ever seen making up to ``hi`` -- the same rule :func:`machine_production`
+    uses, and for the same reason: an idle stone furnace reports no recipe at
+    all, so the final row alone would name nothing.
+
+    A machine that was removed and another built on its tile collapse into one
+    entry, the later one. Nothing in this project has done that, and a record
+    that did would need the `unit_number` this join does not have.
+    """
+    out: dict = {}
+    for s in samples:
+        if s.get("kind") != "machines" or s.get("tick", 0) > hi:
+            continue
+        for key, m in (s.get("machines") or {}).items():
+            where = machine_pos_key(m.get("position"))
+            if where is None:
+                continue
+            row = out.setdefault(where, {"key": key, "name": None, "item": None})
+            row["key"] = key
+            row["name"] = m.get("name") or row["name"]
+            made = m.get("recipe") or m.get("mining")
+            if made is not None:
+                row["item"] = made
+    return out
+
+
 def delivery_of(event: dict) -> dict | None:
     """What one dispatched action handed to a machine or a chest.
 
@@ -2168,12 +2223,27 @@ def delivery_of(event: dict) -> dict | None:
     (every run recorded after that field landed) and ``"label"`` when it was
     parsed out of the action's prose label, which is what the archived runs
     have. Prose is the fallback, not the design.
+
+    ``position`` is WHICH machine, and it does not come from ``delivery`` --
+    :rust:struct:`Delivery` carries `item`, `count`, `entity` and `slot` and no
+    position at all. It comes from the sibling field on the same event,
+    ``ActionDispatched::target``, which every `insert` carries by construction
+    ("Every `mine`, `place`, `insert` or `remove` action carries a real
+    position here, always" -- `crates/core/src/record/mod.rs`). Both archived
+    runs have it, including the older one whose deliveries are read from prose,
+    so no Rust change was needed to key credit by machine instance.
+
+    It is the **planner's intent**, exactly as `target` is: a bot sent to a
+    tile the game resolved elsewhere would not join to the machine's sampled
+    position, and an unjoined delivery is floating credit (see
+    :func:`hand_credit`), never a silently attributed one.
     """
     if event.get("kind") != "action_dispatched":
         return None
     action = event.get("action") or ""
     if verb_of(action) not in DELIVERY_VERBS:
         return None
+    where = machine_pos_key(event.get("target"))
     d = event.get("delivery")
     if isinstance(d, dict) and d.get("item") is not None:
         machine = d.get("entity")
@@ -2181,6 +2251,7 @@ def delivery_of(event: dict) -> dict | None:
             "item": d.get("item"),
             "count": int(d.get("count") or 0),
             "machine": MACHINE_ALIASES.get(machine, machine),
+            "position": where,
             "source": "fields",
             "label": action,
         }
@@ -2193,10 +2264,18 @@ def delivery_of(event: dict) -> dict | None:
             "item": m.group("item"),
             "count": int(m.group("count")),
             "machine": MACHINE_ALIASES.get(machine, machine),
+            "position": where,
             "source": "label",
             "label": action,
         }
-    return {"item": None, "count": 0, "machine": None, "source": "unreadable", "label": action}
+    return {
+        "item": None,
+        "count": 0,
+        "machine": None,
+        "position": where,
+        "source": "unreadable",
+        "label": action,
+    }
 
 
 def credit_for_delivery(delivery: dict, item: str) -> dict:
@@ -2261,21 +2340,55 @@ def credit_for_delivery(delivery: dict, item: str) -> dict:
     return {"credit": 0.0, "why": "unrelated", "detail": f"{delivered} is not an input of {item}"}
 
 
-def hand_credit(events: list[dict], *, item: str, at_tick: int) -> dict:
+def hand_credit(
+    events: list[dict], *, item: str, at_tick: int, instances: dict | None = None
+) -> dict:
     """Everything the roster delivered up to ``at_tick``, priced in ``item``.
 
-    Credits are summed within a **stage** -- one ``(machine, delivered item)``
-    pair -- and the stages are then combined by **maximum, not sum**.
+    Credits are summed within a **stage** -- one ``(machine, position,
+    delivered item)`` triple -- and combined from there by two different rules,
+    because two different questions are being asked.
 
-    Two hand deliveries of the same coal to the same drill are two charges of
-    the same supply and add up. A drill's coal and a furnace's coal are two
-    *different* bounds on the same plates: neither adds to the other, and the
-    true bound is the smaller of them. Taking the larger is deliberate and is
-    the conservative direction -- it credits the roster with the most any of
-    its deliveries could explain, so an optimistic constant cannot turn into a
-    pass. (On `run-1788674059-90744` the two differ, 153 against 194, and the
-    verdict is the same either way.)
+    **Within one machine instance, by maximum.** Coal and ore delivered to the
+    same furnace are two alternative bounds on that furnace's output, not two
+    supplies that add. The larger is taken, which is the direction that
+    refuses.
+
+    **Across machine instances, by sum**, but only for instances whose own
+    counter makes ``item``. Two furnaces smelting plates are two suppliers and
+    their outputs add; nothing else in the run can spend a furnace's coal.
+
+    # Attributed and floating credit
+
+    ``position`` comes from ``ActionDispatched::target`` (see
+    :func:`delivery_of`) and is joined against ``instances`` --
+    :func:`machine_instances` -- to decide which of the two a delivery is:
+
+    ``attributed``
+        The target is a sampled machine of the delivered-to prototype whose
+        own counter produces ``item``. Its credit belongs to that machine and
+        is drawn down by **that machine's** output, which is the whole point:
+        a plan that hand-smelts its belts in four other furnaces no longer
+        charges their coal against a fifth furnace's plates.
+    ``floating``
+        Everything else, and the honest name for it is *we do not know which
+        machine this reached*. A chest's `stock`/`charge` names a container,
+        and no record says which machine an inserter then fed. A drill's coal
+        is a bound on the **plates a furnace later makes from its ore**, so it
+        belongs to no plate-producing instance either. A target that joins to
+        no sampled machine at all lands here too.
+
+        Floating stages are combined by **maximum, not sum**: they are
+        alternative explanations of the same downstream output -- the chest's
+        ore and the drill's coal both bound the same plates -- and adding them
+        would invent supply that never existed. The balance draws this pool
+        down against **every** machine's production of ``item``, for the same
+        reason: whichever machine it reached, that machine's output spent it.
+
+    Returns ``attributed`` keyed by position, ``floating`` as one number, and
+    ``credit`` as their total -- an upper bound and never a measurement.
     """
+    instances = instances or {}
     stages: collections.Counter = collections.Counter()
     unreadable: list[str] = []
     unpriced: list[str] = []
@@ -2295,16 +2408,62 @@ def hand_credit(events: list[dict], *, item: str, at_tick: int) -> dict:
                 priced.get("detail") or d.get("label") or "?"
             )
             continue
-        stages[(d["machine"], d["item"])] += priced["credit"]
-    credit = max(stages.values()) if stages else 0.0
+        stages[(d["machine"], d["position"], d["item"])] += priced["credit"]
+
+    # One bound per machine instance: the largest of the stages standing at it.
+    per_instance: dict = {}
+    for (machine, where, delivered), credit in stages.items():
+        key = (machine, where)
+        per_instance[key] = max(per_instance.get(key, 0.0), credit)
+
+    attributed: dict = {}
+    floating = 0.0
+    floating_stages: dict = {}
+    for (machine, where), credit in per_instance.items():
+        seen = instances.get(where) if where is not None else None
+        if seen is not None and seen.get("name") == machine and seen.get("item") == item:
+            attributed[where] = credit
+        else:
+            floating = max(floating, credit)
+            floating_stages[f"{machine or '?'}@{_where(where)}"] = credit
+
     return {
-        "credit": credit,
-        "by_stage": {f"{m or '?'}/{i}": c for (m, i), c in sorted(stages.items(), key=lambda kv: str(kv[0]))},
+        "credit": sum(attributed.values()) + floating,
+        "attributed": attributed,
+        "floating": floating,
+        "floating_stages": floating_stages,
+        "by_stage": {
+            f"{m or '?'}@{_where(w)}/{i}": c
+            for (m, w, i), c in sorted(stages.items(), key=lambda kv: str(kv[0]))
+        },
         "deliveries": rows,
         "unreadable": unreadable,
         "unpriced": unpriced,
         "sources": sorted({r["source"] for r in rows}),
     }
+
+
+def _where(position: tuple | None) -> str:
+    """A position as it is printed, or ``?`` for a delivery that named none."""
+    return "?" if position is None else f"[{position[0]}, {position[1]}]"
+
+
+def _produced_by_position(production: dict, item: str) -> dict:
+    """``pos_key -> produced`` for the machines that made ``item``.
+
+    Reads :func:`machine_production`'s ``by_machine`` rather than its
+    ``by_item`` total, which is exactly the difference between "the furnaces
+    made 235" and "this furnace made 107".
+    """
+    out: dict = {}
+    for entry in production.get("by_machine") or ():
+        if entry.get("item") != item:
+            continue
+        where = machine_pos_key(entry.get("position"))
+        if where is None:
+            continue
+        out[where] = out.get(where, 0) + int(entry.get("produced") or 0)
+    return out
 
 
 def hand_credit_balance(
@@ -2323,14 +2482,32 @@ def hand_credit_balance(
     quiet period:
 
     * ``credit`` -- the most output every hand delivery up to ``at_tick``
-      could ever explain (:func:`hand_credit`);
+      could ever explain (:func:`hand_credit`), split into the part
+      ``attributed`` to a named machine instance and the ``floating`` part
+      that names no machine;
     * ``spent`` -- what the machines made from the first sample up to the
       window's start, which is credit already drawn down;
-    * ``outstanding = max(0, credit - spent)`` -- what a bot's hands can still
-      explain when the window opens;
-    * ``unexplained = machine_made - outstanding`` -- output the roster cannot
-      account for, which is the only output a standing supply claim may rest
-      on.
+    * ``outstanding`` -- what a bot's hands can still explain when the window
+      opens: ``max(0, credit - spent)`` **per machine instance**, plus
+      ``max(0, floating - spent)`` for the pool that names none;
+    * ``unexplained`` -- output the roster cannot account for, which is the
+      only output a standing supply claim may rest on. Also per instance:
+      ``sum over machines of max(0, made - outstanding)``, less the floating
+      pool, because a machine's plates can only be explained by what a bot put
+      into **that** machine.
+
+    # Why per instance, and what it changed
+
+    Credit used to pool by entity *prototype*. On `run-1788679826-02267` --
+    the first cell that ran with no bot in the loop -- that charged four
+    hand-smelting stone furnaces' coal against a fifth, belted one, and left
+    98 of credit outstanding against a window rated at 15/min: the cell would
+    have had to make 64/min to be believed, so **no self-feeding cell of that
+    size could ever have passed**, however well its belts worked. Keyed by
+    instance, the belted furnace's own 69 of coal credit is spent by its own
+    107 plates, its 11 plates in the window stand alone, and the run reads
+    `short` -- which is the truth about it: nothing takes the plates away and
+    it throttles on `full_output`.
 
     ``roster-fed`` when ``unexplained <= 0``, ``short`` when it is positive but
     below the rate, ``sustained`` above it.
@@ -2346,9 +2523,20 @@ def hand_credit_balance(
       between crafts, and the mod does not send `energy_usage`, so a machine
       outside :data:`BURN_TICKS` cannot be priced at all rather than being
       guessed at.
-    * **Which machine a chest's contents reached.** A `stock`/`charge` is
-      credited as if it went to the machine that turns it into the most
-      output.
+    * **Which machine a chest's contents reached.** A `stock`/`charge` names a
+      container, and no record says which machine an inserter then fed, so it
+      is floating credit: priced at the machine that turns it into the most
+      output, and allowed to explain any machine's production. The same is
+      true of a drill's coal, which bounds the plates some *other* machine
+      makes from its ore. `run-1788679826-02267` has 79 plates of floating
+      credit from one chest and 47 from two drills, and neither can be pinned
+      to a furnace by anything in the record.
+    * **A machine loaded before it was ever sampled.** A delivery whose
+      `target` joins to no sampled machine floats rather than being attributed
+      to a guess.
+    * **Two machines that stood on the same tile at different times** are one
+      machine to :func:`machine_pos_key`. The samples key on `unit_number`; no event
+      records it, so position is the only identity the join has.
     * **Belted material is invisible, and that is the point**: nothing a belt
       delivers appears in `action_dispatched`, so a factory that feeds itself
       accumulates output against a credit that stops growing.
@@ -2361,10 +2549,47 @@ def hand_credit_balance(
     required = -(-per_minute * window_ticks // TICKS_PER_MINUTE)  # ceil, integer
     machine_made = int((mach.get("by_item") or {}).get(item, 0))
     spent = int((before.get("by_item") or {}).get(item, 0))
-    ledger = hand_credit(events, item=item, at_tick=at_tick)
+    instances = machine_instances(samples, at_tick)
+    ledger = hand_credit(events, item=item, at_tick=at_tick, instances=instances)
     credit = ledger["credit"]
-    outstanding = max(0.0, credit - spent)
-    unexplained = machine_made - outstanding
+
+    # What each machine instance made, before the window and inside it.
+    made_at = _produced_by_position(mach, item)
+    spent_at = _produced_by_position(before, item)
+
+    # THE BALANCE, PER MACHINE. A machine's output can only be explained by
+    # what a bot put into THAT machine, so the accounting is done one instance
+    # at a time and the leftovers are summed -- not, as it was, pooled by
+    # prototype, where four hand-fed furnaces' coal explained a fifth
+    # furnace's plates.
+    outstanding = 0.0
+    unexplained = 0.0
+    per_machine: list[dict] = []
+    for where in sorted(set(ledger["attributed"]) | set(made_at) | set(spent_at)):
+        machine_credit = ledger["attributed"].get(where, 0.0)
+        machine_spent = spent_at.get(where, 0)
+        machine_in_window = made_at.get(where, 0)
+        left = max(0.0, machine_credit - machine_spent)
+        outstanding += left
+        # Surplus credit stays with its own machine rather than subsidising
+        # the one next to it. That is the correction, not an approximation:
+        # coal in furnace A cannot smelt furnace B's ore.
+        unexplained += max(0.0, machine_in_window - left)
+        per_machine.append({
+            "position": list(where),
+            "name": (instances.get(where) or {}).get("name"),
+            "credit": machine_credit,
+            "spent": machine_spent,
+            "outstanding": left,
+            "made": machine_in_window,
+        })
+
+    # The pool nothing can be attributed to, drawn down by every machine's
+    # production of `item`: whichever machine a chest's ore reached, that
+    # machine's output is what spent it.
+    floating_left = max(0.0, ledger["floating"] - spent)
+    outstanding += floating_left
+    unexplained -= floating_left
     force = [s for s in samples if s.get("kind") == "force"]
     base = end = None
     for s in force:
@@ -2390,6 +2615,11 @@ def hand_credit_balance(
         "outstanding_credit": outstanding,
         "unexplained": unexplained,
         "by_stage": ledger["by_stage"],
+        "attributed_credit": sum(ledger["attributed"].values()),
+        "floating_credit": ledger["floating"],
+        "floating_stages": ledger["floating_stages"],
+        "floating_outstanding": floating_left,
+        "per_machine": per_machine,
         "deliveries": len(ledger["deliveries"]),
         "credit_source": ledger["sources"],
         "unreadable": ledger["unreadable"],
@@ -2422,24 +2652,26 @@ def hand_credit_balance(
     if unexplained <= 0:
         out["verdict"] = "roster-fed"
         out["why"] = (
-            f"the roster delivered enough to explain {credit:.0f} {item} and the machines had "
-            f"made {spent} before the window, leaving {outstanding:.0f} of hand credit "
-            f"outstanding against the {machine_made} made inside it: every item in this window "
-            "can be accounted for by something a bot carried"
+            f"the roster delivered enough to explain {credit:.0f} {item} -- "
+            f"{out['attributed_credit']:.0f} of it to named machines and "
+            f"{out['floating_credit']:.0f} to no machine this record can name -- and each "
+            f"machine's own output in the window is inside its own outstanding credit: every "
+            "item in this window can be accounted for by something a bot carried"
         )
         return out
     if unexplained < required:
         out["verdict"] = "short"
         out["why"] = (
-            f"{unexplained:.0f} of the {machine_made} made in the window are unexplained by hand "
-            f"credit, against the {required} that {per_minute}/min asks for; nothing here "
-            "observed why"
+            f"{unexplained:.0f} of the {machine_made} made in the window are unexplained by the "
+            f"credit standing at the machines that made them, against the {required} that "
+            f"{per_minute}/min asks for; nothing here observed why"
         )
         return out
     out["verdict"] = "sustained"
     out["why"] = (
-        f"machines made {machine_made} against {outstanding:.0f} of outstanding hand credit, so "
-        f"{unexplained:.0f} of it -- {required} were needed -- came from something no bot carried"
+        f"machines made {machine_made} against {outstanding:.0f} of outstanding hand credit at "
+        f"the machines that made it, so {unexplained:.0f} -- {required} were needed -- came from "
+        "something no bot carried"
     )
     return out
 
@@ -3836,10 +4068,17 @@ def report_sustain(rows: list[dict], p) -> None:
         b = r.get("balance")
         if b:
             p(f"    hand-credit balance (no lead-in): {b['verdict'].upper()}")
-            stages = ", ".join(f"{k} {v:.0f}" for k, v in b["by_stage"].items()) or "none"
-            p(f"      credit {b['hand_credit']:.0f} from {b['deliveries']} delivery(ies) "
-              f"({stages}); spent {b['spent_before_window']} before the window; "
-              f"outstanding {b['outstanding_credit']:.0f}")
+            p(f"      credit {b['hand_credit']:.0f} from {b['deliveries']} delivery(ies): "
+              f"{b.get('attributed_credit', 0):.0f} at named machines, "
+              f"{b.get('floating_credit', 0):.0f} floating "
+              f"({', '.join(b.get('floating_stages') or {}) or 'nothing'})")
+            for m in b.get("per_machine") or ():
+                p(f"        {m['name'] or '?'} {m['position']}  credit {m['credit']:.0f}"
+                  f" - spent {m['spent']} = {m['outstanding']:.0f} outstanding;"
+                  f" made {m['made']} in the window")
+            p(f"      spent {b['spent_before_window']} before the window; floating pool leaves "
+              f"{b.get('floating_outstanding', 0):.0f}; outstanding "
+              f"{b['outstanding_credit']:.0f}")
             p(f"      machines made {b['machine_made']} in the window -> "
               f"{b['unexplained']:.0f} unexplained, {b['required']} needed"
               f"   (credit read from: {', '.join(b['credit_source']) or 'nothing'})")

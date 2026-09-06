@@ -135,26 +135,50 @@ So the belts and poles are now free to cross the patch, and what refuses is the
 **ore-coverage rule itself**: siting demands that *every one* of the 13 drills
 sits on ore, and no anchor within 48 tiles of the seed satisfies that.
 
-**This contradicts the Python oracle**, which found 359 anchors where all 13
-drills cover iron, the nearest 37.3 tiles from the origin — comfortably inside
-a 48-tile search from a seed at `[-12.5, -13.5]`. The oracle was already shown
-wrong once tonight (it modelled only drills, ignoring that belts and poles then
-also had to clear ore) but that objection is now gone, so the disagreement is
-live again and unresolved.
+### Resolved: `MinerLine` is unbuildable by policy, at any anchor
 
-One of three things is true and nobody has established which:
+The search's message names a drill, which pointed at the ore-coverage rule.
+Asking with an **explicit** anchor instead gives the real answer:
 
-- the oracle's ore model still differs from `covers_resource` over
-  `collision_area_facing` — it works in floored dump tiles and asks for one ore
-  tile under a 3×3 footprint;
-- the search does not actually reach the region the oracle found, despite the
-  distance appearing to fit;
-- the ore-coverage rule is stricter in practice than "one ore tile per drill".
+```
+goal.built(MinerLine, {x = -17, y = -34})
+  cannot build transport-belt at tile (-13.5, -33.5): ore, which this
+  planner will not bury
+```
 
-**`MinerLine` has never sited, so nothing regresses** — but this note should not
-be read as "siting handles drill blocks". It handles `FurnaceLine`. The drill
-case is open, and the refusal is at least now honest about which drill and why,
-which is more than it managed before.
+The same at `(-16.5, -33.5)`, one of the oracle's own 359 anchors. So it is not
+the coverage rule, not the oracle's tile model, not the search's reach — it is a
+**separate, deliberate policy: this planner will not build over ore.**
+
+That policy survives the `ore-does-not-block` fix and is right to. Ore stopped
+*colliding* with placements, because no buildable prototype carries the
+`resource` collision layer. But a belt laid over an ore tile still **buries** it
+— the ore cannot be mined until the belt is removed — and a planner that buries
+its own patch can plan itself into `NoApplicableMethod` for the very ore it
+needs. Collision is a fact about the game; burial is a judgement about
+consequences, and only the first was wrong.
+
+**So `MinerLine` cannot be built as designed, at any anchor, and that is a
+property of the fixture rather than of siting.** Its belt-and-pole corridor runs
+*between* its two drill columns, which is to say directly over the patch the
+drills are mining. A human building it accepts burying a strip of ore; this
+planner does not.
+
+Which of those is right is an open design question, not a defect:
+
+- **Keep the policy** and `MinerLine` needs redesigning — the belt run moved off
+  the patch, which costs inserter reach and makes it a different blueprint.
+- **Relax it for belts** and the planner may bury ore it later needs, which is
+  the failure the policy exists to prevent, and which would surface as an
+  unrelatable `NoApplicableMethod` a long way downstream.
+- **Make it a cost rather than a refusal** — bury ore only when nothing else
+  fits — which is the honest answer and much the largest piece of work.
+
+**Nothing regresses: `MinerLine` has never sited.** But this note should not be
+read as "siting handles drill blocks". It handles `FurnaceLine`, live, three
+times. The drill case is blocked on a policy question nobody has decided, and
+the refusal now names the exact tile and the exact reason, which is what makes
+the question answerable at all.
 
 ## Cost: the 96 seconds is not siting's
 

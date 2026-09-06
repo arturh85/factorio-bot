@@ -58,6 +58,23 @@ position.
 A green test proves nothing until it has been seen to go red for the right
 reason. Treat "it passes" as an unverified claim about the test.
 
+**And the rule has its own failure mode, found the same night by an agent
+following it.** A scripted forbidden-value substitution **silently matched
+nothing** against reflowed source, so the test passed — and a pass under
+substitution reads exactly like *"the forbidden value changes nothing, so
+the test is hollow"*, which was the opposite of the truth. The agent refused
+that green and redid the experiment by hand. Two guards follow:
+
+- **Assert the substitution actually matched** before drawing any conclusion
+  from what happened next.
+- **An unexpected green under substitution is a broken experiment, not a
+  finding.** Investigate the experiment first; only after it is shown to
+  have bitten may the green be read as evidence about the test.
+
+A fixture that agrees with its code is the first trap; a falsification
+performed as a ritual without its effect is the second, and it wears the
+costume of the cure.
+
 ## The sibling: a crate-scoped check cannot see a crate it does not compile
 
 Same night, same shape, different surface. A `PlannerError::NoSiteFound`

@@ -360,6 +360,52 @@ character bots; what differed was only the timing that made it bite. Still
 unproven on the clock: that a real 45-second wait beats a real replan. That
 needs a 1x client run of `factory_stage2.lua` on a quiet box.
 
+## ✅ FURNACE COUNT IS A DECISION NOW (`64377193`)
+
+`smelt_steps` (`method/have.rs`) decided growth from three arms. Two were
+bounded — `own_grow` self-limits once a taker queues a furnace at a patch,
+and the third is capped at one per bot. **`shared_grow` had no bound at
+all**: every roster-supplied smelt built a furnace whatever already stood
+there. Instrumenting the arms is what turned suspicion into evidence — on
+`have:pumpjack:1` at four bots, **184 of 231 growth decisions were
+`shared_grow` firing alone with the ground budget already exhausted**. It is
+deleted, and the siting refusal that used to be a hard stop is now a
+fallback onto a furnace `adoptable_furnaces` had already ranked.
+
+| goal, four bots | before | after |
+|---|---|---|
+| `researched:automation` | 176 / 21,784 / 11 furnaces | identical |
+| `producing:automation-science-pack:6` | 324 / 22,547 / 17 | **316 / 22,463 / 13** |
+| `producing:logistic-science-pack:6` | 451 / 48,829 / 22 | **442 / 47,542 / 18** |
+| `have:pumpjack:1` | 1,767 / 267,910 / **66** | **1,674 / 263,432 / 28** |
+
+Three regressions, in the same table rather than a footnote: pumpjack at
+three bots +2.7%, `oil-gathering` +2.5%, green at eight bots +1.8%.
+
+**Live (`run-1788659072-26571`, four character bots, 5x): all milestones
+first-iteration, zero failed or lost actions or walks, and 14 furnaces
+planned against 14 standing — exact.** Automation ran 1.003× its plan, the
+red cell 1.020×, and the witness saw red packs go 0 → 5 in 3,215 of 5,400
+ticks with every bot idle. Delivered 223 tps of 300, so the counts stand and
+the ticks are indicative.
+
+Two results from the rejected candidates are worth as much as the fix. The
+cost comparison — build only when the queue exceeds the price of a new
+furnace — makes automation **strictly better** at 161 actions and **3
+furnaces** for an identical makespan, but sends green +72%: it independently
+reproduces `bank_size`'s documented finding that this crate cannot price
+queueing against a build, so it is a known wall rather than a near miss. And
+"join the least-loaded queue instead of the taker's own" is **not a policy
+but a bug**: `own_count` derives from that very sort key, so switching the
+preference off makes the unrelated `own_grow` fire on every smelt.
+
+Still open, and the other half of the same defect: **the one-bot pumpjack is
+unchanged at 690,450 ticks and 21 furnaces**, because at a roster of one the
+budget is 1, so after the first furnace nothing grows and every smelt
+serialises. Fixing it means expressing "build inside a wait the bot is
+having anyway", which needs slack, an optional action, or a goal with no
+consumer — the crate has none of the three. Scheduler work.
+
 ## ⚠️ ORE BLOCKS EVERYTHING IN THE PLANNER, AND NOTHING IN THE GAME
 
 Found by the `second` session, 2026-09-06, with one `can_place_entity` query

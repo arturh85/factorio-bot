@@ -2551,7 +2551,7 @@ fn smelt_steps(
 /// and the plan is remade, the plates are sitting in that furnace **and the
 /// ore they were smelted from is gone from the ground**. Before this method,
 /// the replan could not see them: `PlanState` modelled no container contents,
-/// `FactorioWorld::on_some_entity_updated` was a no-op, and the only path that
+/// `FactorioSurface::on_some_entity_updated` was a no-op, and the only path that
 /// could read contents at all (`rcon_inventory_contents_at`) was reached only
 /// by the HTTP handler and the Lua binding, never by anything that plans. So
 /// the replan asked for the whole bill again, out of ore that no longer
@@ -13733,7 +13733,7 @@ mod tests {
     /// The rocks reach the planner through the door the mod's own events use.
     ///
     /// `fixture_world` builds its rocks with `FactorioEntity::new_rock` and
-    /// hands them to `FactorioWorld::update_chunk_entities` -- the same call
+    /// hands them to `FactorioSurface::update_chunk_entities` -- the same call
     /// `output_parser.rs` makes for every chunk the game reports -- rather
     /// than through `PlanState`'s overlay. That matters more than it looks:
     /// the overlay can only ever *hide* an entity from `EntityGraph::minables`

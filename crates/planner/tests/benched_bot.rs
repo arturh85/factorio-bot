@@ -59,7 +59,7 @@ fn bench(player: u8, at_pos: (f64, f64)) -> Bench {
 }
 
 /// A fixture world whose players stand where the run had them, carrying
-/// `benches` the way a run's `FactorioWorld` carries them into the next plan.
+/// `benches` the way a run's `FactorioSurface` carries them into the next plan.
 fn world_with(benches: &[Bench]) -> Arc<FactorioSurface> {
     let world = fixture_world();
     for (id, position) in [

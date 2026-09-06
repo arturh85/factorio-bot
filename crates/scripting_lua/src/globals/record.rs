@@ -4002,7 +4002,7 @@ mod tests {
     /// Drives the actual mod->core->Lua path, not just `record.teleports()`
     /// in isolation: a `writeout`-shaped line goes through
     /// `factorio_bot_core::process::output_parser::OutputParser` -- the same
-    /// parser that reads BotBridge's real stdout -- into a `FactorioWorld`
+    /// parser that reads BotBridge's real stdout -- into a `FactorioSurface`
     /// shared with the recording Lua sandbox, and only then is
     /// `record.teleports()` asked to drain it. A test that only exercised
     /// `record.teleports()` against a hand-built queue would leave the
@@ -4070,7 +4070,7 @@ mod tests {
         }
     }
 
-    /// `recording_lua()` builds its own `FactorioWorld` internally and does
+    /// `recording_lua()` builds its own `FactorioSurface` internally and does
     /// not hand it back, so this test can't push onto its queue -- it builds
     /// the same wiring `create_lua_record` does, just keeping the world
     /// around so it can call `record_teleport` directly. Complements

@@ -260,7 +260,7 @@ impl MapScore {
     ///
     /// # Why the origin is an argument and not read off the world
     ///
-    /// **A `FactorioWorld` carries no spawn point.** Nothing in the dump says
+    /// **A `FactorioSurface` carries no spawn point.** Nothing in the dump says
     /// where the game would put a fresh character, so a scorer that "found"
     /// one would be inventing it. The caller passes Factorio's map origin
     /// `(0, 0)` for a fresh map, or a player's position, or the site a run

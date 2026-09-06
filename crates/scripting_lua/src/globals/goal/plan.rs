@@ -504,7 +504,7 @@ const MAX_RESITE_ROUNDS: usize = 2;
 /// # Both outcomes are narrated, and that is the point
 ///
 /// A refresh that found nothing and a refresh that never happened leave
-/// **identical worlds and identical plans**: `FactorioWorld::inventories` is
+/// **identical worlds and identical plans**: `FactorioSurface::inventories` is
 /// empty either way, `PlanState::has_buffers` is false either way, and
 /// `Withdraw` claims nothing either way. Only one of those is a defect, and
 /// nothing about the resulting plan distinguishes them -- it re-mines, and if
@@ -930,7 +930,7 @@ async fn narrate_buffer_refresh(refresher: Option<&BufferRefresher>) {
 ///
 /// Expansion and scheduling are pure functions of the world snapshot and the
 /// roster. The only thing that changes between two rounds is the world: a
-/// refused site is written into `FactorioWorld::placement_refusals` by
+/// refused site is written into `FactorioSurface::placement_refusals` by
 /// [`FactorioRcon::can_place_entities`], and `PlanState::from_world` reads
 /// that ledger on the next `from_world`, so `free_area_near` stops offering
 /// the refused footprint. That is the whole reason a pre-check needed refusal
@@ -2466,7 +2466,7 @@ mod tests {
     /// the buffers before it plans.
     ///
     /// Without this call every piece of the buffer machinery is correct,
-    /// tested and inert: `FactorioWorld::inventories` stays empty,
+    /// tested and inert: `FactorioSurface::inventories` stays empty,
     /// `PlanState::has_buffers` answers `false`, `Withdraw` claims nothing,
     /// and the replan mines ore that may already be gone. That failure looks
     /// exactly like the code working, which is why the call is pinned rather

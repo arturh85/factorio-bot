@@ -442,7 +442,7 @@ mod tests {
 
     /// Builds the `world` table exactly the way a run does.
     ///
-    /// Every binding in this file closes over the one `Arc<FactorioWorld>`
+    /// Every binding in this file closes over the one `Arc<FactorioSurface>`
     /// given to `create_lua_world`, and `lua_runner` hands it that Arc once,
     /// before the chunk runs -- so taking the handle here through `Planner` in
     /// the same order is the point, not incidental setup. A test that passed

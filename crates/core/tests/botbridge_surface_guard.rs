@@ -257,7 +257,7 @@ fn nothing_from_another_surface_reaches_the_world_model() {
 /// The mod keeps no counter, because a counter would have to live in `storage`
 /// to survive a save/load, and a mod-side tally that resets on load is worse
 /// than none. Folding happens in Rust
-/// (`FactorioWorld::record_surface_chunk_dropped`), which is what turns a
+/// (`FactorioSurface::record_surface_chunk_dropped`), which is what turns a
 /// generated planet's tens of thousands of chunks into one row per surface.
 #[test]
 fn every_dropped_chunk_reports_itself() {

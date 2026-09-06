@@ -210,7 +210,7 @@ fn exhausted_tier_one(net: &ActionNetwork, log: &ExecutionLog) -> bool {
 /// chest briefly full — so re-running the same actions is worth a try. A
 /// `Place` whose footprint the game itself turned down is the opposite of
 /// that: `PlanState` carries the refusal forward for the rest of the run
-/// (`FactorioWorld::placement_refusals`), so a reschedule would dispatch a
+/// (`FactorioSurface::placement_refusals`), so a reschedule would dispatch a
 /// command we already believe cannot succeed, three times, before
 /// `MAX_TIER_ONE_ATTEMPTS` let the decision escalate to a re-expansion that
 /// would have sited it elsewhere on the first try.

@@ -1639,7 +1639,7 @@ mod tests {
     /// (`every_bot_the_bindings_dispatch_to_is_a_player_the_actuator_can_drive`'s
     /// `[3, 4]` case exists precisely to do that). This gives each id in
     /// `roster` the same inventory production seeding gives, directly through
-    /// the same `FactorioWorld` event the real seeding uses, so
+    /// the same `FactorioSurface` event the real seeding uses, so
     /// `PlanState::unknown_bots()` comes back empty for it — the property
     /// `goal.plan` now requires of every bot it is asked to plan for. A bare
     /// `fixture_world()` never seeds any player at all, so every bot named
@@ -1656,7 +1656,7 @@ mod tests {
     /// `seeded_world_for` cannot offer on its own when a test also needs to
     /// set up something else on the same world first (e.g. a research
     /// force), since `fixture_world()` cannot be seeded twice into two
-    /// different `FactorioWorld` values and then merged.
+    /// different `FactorioSurface` values and then merged.
     fn seed_players(world: &FactorioSurface, roster: &[u8]) {
         use factorio_bot_core::types::{EntityName, PlayerChangedMainInventoryEvent};
 
@@ -2645,7 +2645,7 @@ mod tests {
     /// the check cannot be hoisted to `create_lua_goal_with` or memoised on
     /// the roster: both bots are real players when the goal value is made,
     /// and bot 2 is only removed from the world afterwards -- from the same
-    /// `FactorioWorld` the run's `goal` table already closed over, so
+    /// `FactorioSurface` the run's `goal` table already closed over, so
     /// `goal.plan`'s `PlanState::from_world` call is the thing that has to
     /// notice.
     #[tokio::test]

@@ -133,7 +133,7 @@ async fn connect_to(server: &FakeServer) -> Arc<FactorioRcon> {
 }
 
 /// The action id the dispatch carried, read off the command the server was
-/// actually sent. Reading it back rather than assuming `FactorioWorld`'s
+/// actually sent. Reading it back rather than assuming `FactorioSurface`'s
 /// counter is at 1 keeps the test honest about *which* id the mod was told to
 /// bind the technology to — the whole point of the change.
 fn action_id_of(command: &str) -> u32 {

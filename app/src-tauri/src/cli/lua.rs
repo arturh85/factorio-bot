@@ -296,7 +296,7 @@ async fn run(matches: &ArgMatches, _context: &mut Context) -> Result<()> {
 
     // Read the world over RCON rather than leaving it empty.
     //
-    // This used to hand the planner a `FactorioWorld::new()` -- no recipes, no
+    // This used to hand the planner a `FactorioSurface::new()` -- no recipes, no
     // prototypes, no entity graph -- because all of that arrived by parsing the
     // stdout of a server *this process spawned*, which an attached session does
     // not have. Every world.* and goal.* call therefore found nothing, which is

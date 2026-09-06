@@ -49,7 +49,7 @@ fn refused(entity: &str, (x, y): (f64, f64)) -> PlacementRefusal {
 }
 
 /// A fixture world with `refusals` already recorded, the way a run's
-/// `FactorioWorld` carries them from one plan to the next.
+/// `FactorioSurface` carries them from one plan to the next.
 fn world_with(refusals: &[PlacementRefusal]) -> Arc<FactorioSurface> {
     let world = fixture_world();
     for refusal in refusals {

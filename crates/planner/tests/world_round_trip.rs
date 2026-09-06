@@ -3,7 +3,7 @@
 //!
 //! This is the property the whole offline-planning workstream rests on. A
 //! planner change costs a 20-minute live run to evaluate; dumping a
-//! `FactorioWorld` to a file and planning against the file makes that
+//! `FactorioSurface` to a file and planning against the file makes that
 //! evaluation sub-second. But an offline result is only worth having if it is
 //! *the same result* — if the two can differ, nobody can act on the cheap one,
 //! and the expensive one has to be run anyway.

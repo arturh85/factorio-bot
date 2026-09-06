@@ -208,7 +208,7 @@ struct MapVerdict {
 ///
 /// # Why an origin has to be given at all
 ///
-/// **A `FactorioWorld` carries no spawn point.** There is no field for it and
+/// **A `FactorioSurface` carries no spawn point.** There is no field for it and
 /// no way to derive one, so the default is Factorio's map origin `(0, 0)`,
 /// which is where a fresh character appears. A mid-run dump has every player
 /// somewhere else entirely, which is why the origin is echoed in the report

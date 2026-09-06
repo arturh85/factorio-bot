@@ -1204,7 +1204,7 @@ end
 -- **The force the bots act for, and only that one.**
 --
 -- This used to walk `game.forces`, which also holds `enemy` and `neutral`.
--- All three then reached `FactorioWorld::forces`, where
+-- All three then reached `FactorioSurface::forces`, where
 -- `crates/planner/src/state.rs` picks its acting force with
 -- `forces.keys().min()` -- which over that set returns `enemy`. In run 30 that
 -- happened at the first `on_research_finished` (tick 26,449) and covered
@@ -1217,7 +1217,7 @@ end
 -- is in the planner and is independent of this: every archived run record
 -- still contains three forces, so it has to be correct against those anyway.
 --
--- Nothing read the other two. The only readers of `FactorioWorld::forces` are
+-- Nothing read the other two. The only readers of `FactorioSurface::forces` are
 -- the planner and `crates/executor/src/rcon_actuator.rs`, which already names
 -- `"player"` and cites this emission as the reason it must not sort. And the
 -- RCON transport already did this: `WorldSnapshot::forces` carries exactly
@@ -3412,7 +3412,7 @@ end
 -- Two things happen here, and each closes a silence of its own.
 --
 -- **The writeout** is the record's only source for a death.
--- `output_parser.rs` queues it on `FactorioWorld` and `record.deaths()`
+-- `output_parser.rs` queues it on `FactorioSurface` and `record.deaths()`
 -- (crates/scripting_lua) drains it into `events.jsonl` as `bot_died` -- the
 -- same road a teleport takes. `cause` is `event.cause`'s name when the game
 -- names one (a worm, a biter, a train), `respawn_in` is `ticks_to_respawn` as

@@ -328,7 +328,7 @@ impl RefusalSource {
 /// record has already been told about.
 ///
 /// Append-only and **never drained**, unlike
-/// [`FactorioSurface::teleports`](FactorioWorld#structfield.teleports): a
+/// [`FactorioSurface::teleports`](FactorioSurface#structfield.teleports): a
 /// teleport is an event that needs writing once, while a refusal is a
 /// standing fact the planner has to re-read on every plan. The `reported`
 /// cursor is what lets `record.refusals()` write each one exactly once
@@ -1895,7 +1895,7 @@ impl FactorioSurface {
     /// writing no file while reporting success.
     ///
     /// What comes out is the input to offline planning: `serde_json::from_str`
-    /// into a `FactorioWorld`, then `PlanState::from_world`. Everything that
+    /// into a `FactorioSurface`, then `PlanState::from_world`. Everything that
     /// function reads round-trips; see
     /// `crates/planner/tests/world_round_trip.rs`.
     ///

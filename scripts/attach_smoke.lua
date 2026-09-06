@@ -5,7 +5,7 @@
 --
 --   factorio-bot lua attach_smoke.lua --connect --clients 0 --bots 1
 --
--- Every assertion here fails on the empty `FactorioWorld` that `--connect`
+-- Every assertion here fails on the empty `FactorioSurface` that `--connect`
 -- used to hand the planner, so passing it is evidence that the snapshot
 -- arrived and not merely that the script ran.
 print("start attach smoke")

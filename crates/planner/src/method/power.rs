@@ -1087,7 +1087,7 @@ pub enum Supply {
 ///
 /// # What it assumes
 ///
-/// **That the plant is running.** Nothing in `FactorioWorld` says whether a
+/// **That the plant is running.** Nothing in `FactorioSurface` says whether a
 /// steam engine has steam, whether the boiler has water, or whether its fuel
 /// slot is empty, so this counts nameplate capacity — the residual
 /// `electric_supply_kw` names in its own doc and `PLANT_COAL` names again.

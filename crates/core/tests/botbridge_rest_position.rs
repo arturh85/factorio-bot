@@ -203,7 +203,7 @@ fn stdout(lua: &Lua) -> Vec<String> {
 /// Matched on the wire form the Rust output reader parses
 /// (`crates/core/src/process/output_reader.rs`), not on some looser shape:
 /// a record that does not go out under that key reaches
-/// `FactorioWorld::player_changed_position` never.
+/// `FactorioSurface::player_changed_position` never.
 fn position_writeouts(lua: &Lua) -> Vec<String> {
     stdout(lua)
         .into_iter()

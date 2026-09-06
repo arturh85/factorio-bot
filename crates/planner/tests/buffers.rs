@@ -44,7 +44,7 @@ fn items(item: &str, count: u32) -> Vec<InventoryItemWithQuality> {
 ///
 /// The contents arrive the way the production path delivers them: as the reply
 /// shape of `inventory_contents_at`, handed to
-/// `FactorioWorld::observe_inventories`. Building them any other way would
+/// `FactorioSurface::observe_inventories`. Building them any other way would
 /// exercise a path no run takes.
 fn stock_a_furnace(world: &FactorioSurface, at: Position, item: &str, stock: u32) {
     world

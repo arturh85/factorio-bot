@@ -78,10 +78,21 @@ assembles the clap command; each subcommand is a `Subcommand` impl.
 | Entity graph | Spatial relationship of entities with distance weights | BotBridge entity snapshots | Find nearest resource patch, detect chokepoints |
 | Flow graph | Throughput along belts/inserters per side/resource | Recipe + machine stats + entity graph | Balance material flows, detect bottlenecks |
 
-Both live on `FactorioWorld` (`crates/core/src/factorio/world.rs`), which is what
-`crates/core/src/graph/{entity_graph,flow_graph}.rs` build. The planner reads
-them through `PlanState` (`crates/planner/src/state.rs`) rather than touching
-them directly.
+Both live on `FactorioSurface` (`crates/core/src/factorio/world.rs`), which is
+what `crates/core/src/graph/{entity_graph,flow_graph}.rs` build. The planner
+reads them through `PlanState` (`crates/planner/src/state.rs`) rather than
+touching them directly.
+
+**That type was called `FactorioWorld` until 2026-09-06**, and it was never a
+world: one entity graph, one flow graph, one set of tile-keyed overlays, all
+describing a single Factorio surface. `FactorioWorld` is now the aggregate
+above it, a `BTreeMap<SurfaceId, Arc<FactorioSurface>>`, so a graph is
+per-surface and a tile key cannot mean two places at once. Read the doc on
+`FactorioWorld` for which state is per-surface (everything spatial) and which
+is game- or force-global (prototypes, recipes, forces and their research, the
+action id counter) — and note that it holds exactly one surface today and
+refuses a second by name until those globals move off the surface. See
+`docs/superpowers/notes/2026-09-06-surfaces-survey.md`.
 
 There is **no task graph**. `crates/core/src/graph/task_graph.rs`,
 `plan/plan_builder.rs` and `plan/execute.rs` were deleted together with the Lua

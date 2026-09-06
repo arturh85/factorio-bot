@@ -3686,7 +3686,7 @@ mod tests {
     /// Every other test here stands its cell with `PlanState::create_entity`
     /// and `PlanState::set_recipe`, which write the overlay. A *replan* has no
     /// overlay: `PlanState::from_world` starts empty and everything standing
-    /// comes back out of `FactorioWorld`'s entity graph. So the overlay tests
+    /// comes back out of `FactorioSurface`'s entity graph. So the overlay tests
     /// could all pass while the predicate was unsatisfiable against a real
     /// world, and that is exactly what happened -- in `run-1788485718-45723`
     /// four consecutive replans each built a whole new cell, every action

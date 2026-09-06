@@ -103,7 +103,7 @@ fn ring_sides(around: &Position, radius: f64) -> [Vec<FactorioEntity>; 4] {
     sides
 }
 
-/// A `FactorioWorld` carrying run 13's own furnaces and ore, converted
+/// A `FactorioSurface` carrying run 13's own furnaces and ore, converted
 /// through the same fixture prototypes `enclosure_run13.rs` uses so each gets
 /// a real collision box, plus `extra` (a partial reconstructed ring).
 fn world_of(entities: &[Snapshot], extra: Vec<FactorioEntity>) -> FactorioSurface {

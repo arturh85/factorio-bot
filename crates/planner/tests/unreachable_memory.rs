@@ -96,7 +96,7 @@ fn refusal(player: u8, from: (f64, f64), to: &Position) -> WalkRefusal {
     }
 }
 
-/// A fixture world carrying `refusals`, the way a run's `FactorioWorld`
+/// A fixture world carrying `refusals`, the way a run's `FactorioSurface`
 /// carries them from one plan to the next.
 fn world_with(refusals: &[WalkRefusal]) -> Arc<FactorioSurface> {
     let world = fixture_world();
@@ -663,7 +663,7 @@ fn when_every_bot_is_walled_in_the_split_is_unchanged() {
 /// **Un-exclusion does not wait for the bot to move**, which matters because
 /// being unable to move is the condition.
 ///
-/// `FactorioWorld::enclosures` is append-only and never drained — a standing
+/// `FactorioSurface::enclosures` is append-only and never drained — a standing
 /// fact, not an event — so the observation for bot 2 and bot 3 is still in the
 /// ledger here. What is gone is the wall. `PlanState` re-runs the fill on every
 /// `from_world` and the second witness disagrees, so both bots are back in the

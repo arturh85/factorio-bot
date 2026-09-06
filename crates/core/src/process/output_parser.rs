@@ -557,7 +557,7 @@ impl OutputParser {
                         // run's own output. The tally is folded per surface
                         // and reaches `events.jsonl` as one row per surface
                         // per flush -- see
-                        // `FactorioWorld::record_surface_chunk_dropped`.
+                        // `FactorioSurface::record_surface_chunk_dropped`.
                         self.world.record_surface_chunk_dropped(tick, event);
                     }
                     Err(err) => {

@@ -273,7 +273,7 @@ fn note_pushed_out(player_id: PlayerId, line: &str) {
 ///
 /// Collapsing the second into the first cost `run-1788432181-42528` its
 /// furthest-ever run at tick 211399: `boiler_coal` sizes a top-up from demand
-/// alone, because nothing in `FactorioWorld` reports a fuel level, so it asked
+/// alone, because nothing in `FactorioSurface` reports a fuel level, so it asked
 /// for 17 coal into a boiler already holding 47. A fuel slot is one stack, the
 /// boiler took 3, and the executor read the mod's honest report as a verdict of
 /// failure and abandoned the rest of that bot's chain.
@@ -5181,7 +5181,7 @@ impl FactorioRcon {
         // every `serialize_entity`, but the only entity events it raises are
         // *created* (which fires at build time, before any recipe is on the
         // machine), *deleted*, and *updated* -- which the mod raises solely
-        // from `on_player_rotated_entity` and `FactorioWorld` handles as a
+        // from `on_player_rotated_entity` and `FactorioSurface` handles as a
         // no-op. So the planner replanned against machines whose stored recipe
         // was `None` for ever, and `Goal::Producing`, which counts machines by
         // the recipe on them, could never hold against a cell that really
@@ -8451,7 +8451,7 @@ mod transfer_guarantee_tests {
     /// `NoVerdict`.
     ///
     /// Note what does **not** happen here: nothing is written to
-    /// `FactorioWorld`'s placement-refusal ledger. A locked recipe is not
+    /// `FactorioSurface`'s placement-refusal ledger. A locked recipe is not
     /// ground to avoid; it is a plan that should never have been dispatched,
     /// and `crates/planner`'s `recipe_gate` already models it from the same
     /// `enabled` flag the world carries.
@@ -8798,7 +8798,7 @@ mod walk_destination_tests {
     use crate::types::FactorioEntityPrototype;
 
     /// A world holding the fixture prototypes and whatever entities the test
-    /// gives it, which is what `FactorioWorld::new` plus
+    /// gives it, which is what `FactorioSurface::new` plus
     /// `update_chunk_entities` gets us: `entity_prototypes` is shared with the
     /// entity graph, so the furnaces below get the game's own collision box.
     fn world_with(furnaces: &[Position]) -> Arc<FactorioSurface> {

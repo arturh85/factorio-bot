@@ -128,7 +128,7 @@ async fn connect_to(server: &FakeServer) -> Arc<FactorioRcon> {
 }
 
 /// The action id the dispatch carried, read off the command the server was
-/// actually sent, rather than assumed from `FactorioWorld`'s counter.
+/// actually sent, rather than assumed from `FactorioSurface`'s counter.
 fn action_id_of(command: &str) -> u32 {
     let args = command
         .split_once("'action_start_crafting', ")

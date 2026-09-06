@@ -18,7 +18,7 @@
 //! waits on the other.
 //!
 //! Checked before removing data somebody might depend on: **nothing reads the
-//! non-player forces.** The only readers of `FactorioWorld::forces` are the
+//! non-player forces.** The only readers of `FactorioSurface::forces` are the
 //! planner (which wants `player` and currently sorts for it) and
 //! `crates/executor/src/rcon_actuator.rs`, which already names `"player"` and
 //! documents this very emission as the reason it must not sort. And the RCON
@@ -160,7 +160,7 @@ fn only_the_force_the_bots_act_for_is_written_out() {
         records.len(),
         1,
         "game.forces holds enemy, neutral and player; emitting all three puts \
-         them all in FactorioWorld::forces, where the planner's \
+         them all in FactorioSurface::forces, where the planner's \
          `forces.keys().min()` returns `enemy`. Run 30 planned as enemy from \
          tick 26,449 and re-planned a lab for a technology `player` had \
          already researched. Got {records:?}"

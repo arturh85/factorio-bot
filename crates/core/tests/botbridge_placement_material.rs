@@ -852,6 +852,18 @@ fn asked_to_move(lua: &Lua) -> Vec<(u32, (f64, f64))> {
     .collect()
 }
 
+/// The sentence every character branch of the refusal prints, up to the clause
+/// that names the blockers.
+///
+/// It may not move: `FOOTPRINT_CHARACTER_REFUSAL`
+/// (`crates/core/src/factorio/rcon.rs`) matches this text to decide whether to
+/// retry, and `classify_failure` (`crates/scripting_lua/src/globals/record.rs`)
+/// reads it as `FailureKind::Blocked`. The clause after it is the new half —
+/// see `describe_footprint_blockers` in the mod, and
+/// `footprint_blocker_is_busy` on the reading side.
+const TRANSIENT_REFUSAL: &str =
+    "cannot place item 'stone-furnace' because a character is standing in the footprint";
+
 /// The footprint under test, `[-21, 24]` expanded by a stone furnace's
 /// `±0.9` box: what `can_place_entity` just judged.
 const FOOTPRINT: (f64, f64, f64, f64) = (-21.9, 23.1, -20.1, 24.9);
@@ -910,9 +922,11 @@ fn asking_a_blocker_to_move_does_not_change_what_the_reply_says() {
     let lua = refuse(ACTOR_AWAY, PARKED_BOT);
     let line = one_line_reply(&lua);
     assert_eq!(
-        line, "cannot place item 'stone-furnace' because a character is standing in the footprint",
+        line,
+        format!("{TRANSIENT_REFUSAL} (blockers: #3 stepping aside)"),
         "the transient/refusal distinction landed in 537adf30 is not this \
-         change's to move"
+         change's to move: the sentence is byte-identical up to the clause, \
+         which says what was done about the blocker"
     );
 }
 
@@ -969,6 +983,79 @@ fn a_blocker_that_is_mining_is_not_touched() {
     );
 }
 
+/// **The defect of `run-1788655528-63394`: the reply did not say that.**
+///
+/// Milestone 1, four graphical clients at 1x on seed 31337. Bot 2 walked to
+/// within build reach of the stone furnace at `[26, -48]` and dispatched the
+/// placement at tick 5887. Bot 1 was standing at `(26.29, -47.33)` — inside
+/// that 2x2 box — mining copper ore at `(27.5, -47.5)` under its own action
+/// from tick 5597; the run's `samples.jsonl` has it motionless with
+/// `mining: copper-ore` at ticks 5880, 5940 and 6000, and the mine settled
+/// successfully at 6079.
+///
+/// The mod was right to leave it alone: it was busy and it was leaving. But
+/// the refusal it printed said only that *a* character was there, so
+/// `place_entity_timed` could not tell it from a blocker that had just been
+/// asked to step aside — and spent that blocker's budget, four dispatches over
+/// 114 ticks, ending **78 ticks before bot 1's mine finished**. The action
+/// failed, milestone 1 replanned.
+///
+/// So the branch that decides not to move a blocker is also the branch that
+/// has to say why. This is the fixture for that sentence; the reading side is
+/// `footprint_blocker_is_busy` in `crates/core/src/factorio/rcon.rs`.
+///
+/// **This test's fixture and the code were written by the same task** — the
+/// occupant and its `storage.p[3].mining` are hand-built, not a dump. What
+/// anchors them to the real game is the run above: the state key is the one
+/// `on_tick` sets in `action_start_mining` and clears when the mine ends, and
+/// it is the same key `walk_stall_describe` already reports as `(mining)`.
+#[test]
+fn a_mining_blocker_is_named_as_mining_so_the_retry_can_wait_for_it() {
+    let lua = run(
+        &stub_refused_place(ACTOR_AWAY, PARKED_BOT),
+        &format!("{STUB_SERIALISE}\nstorage.p[3].mining = {{ action_id = 88, left = 3 }}\n"),
+        &format!(r#"rcon_place_entity(1, "stone-furnace", {SITE}, 0)"#),
+    );
+    assert_eq!(
+        one_line_reply(&lua),
+        format!("{TRANSIENT_REFUSAL} (blockers: #3 mining)"),
+        "a blocker the mod declined to steer because it is busy has to be \
+         named as busy, or the waiting side treats it as one that was just \
+         asked to walk away"
+    );
+}
+
+/// Two blockers, one busy and one asked aside, in one box: both are named, in
+/// the order the scan found them, so a reader of the run record sees the whole
+/// box and the retry sees the busy one.
+#[test]
+fn every_blocker_in_the_box_is_named() {
+    let second_bot = r#"
+        { name = "character", type = "character", player_index = 4,
+          position = { x = -20.6, y = 24.3 },
+          bounding_box = {
+            left_top = { x = -20.8, y = 24.0 },
+            right_bottom = { x = -20.4, y = 24.6 } } }
+    "#;
+    let lua = run(
+        &stub_refused_place(ACTOR_AWAY, &format!("{PARKED_BOT}, {second_bot}")),
+        &format!("{STUB_SERIALISE}\nstorage.p[4].mining = {{ action_id = 88, left = 3 }}\n"),
+        &format!(r#"rcon_place_entity(1, "stone-furnace", {SITE}, 0)"#),
+    );
+    assert_eq!(
+        one_line_reply(&lua),
+        format!("{TRANSIENT_REFUSAL} (blockers: #3 stepping aside, #4 mining)"),
+        "one clause, every character in the box, each with what it is doing"
+    );
+    let moved = asked_to_move(&lua);
+    assert_eq!(
+        moved.len(),
+        1,
+        "and only the idle one was asked to move: {moved:?}"
+    );
+    assert_eq!(moved[0].0, 3);
+}
+
 /// A tree does not walk. The step-aside must reach only the class of blocker
 /// that can act on the request, or it is a walk dispatched at scenery.
 #[test]
@@ -993,8 +1080,11 @@ fn a_character_with_no_player_is_asked_nothing_and_does_not_raise() {
     );
     assert_eq!(
         one_line_reply(&lua),
-        "cannot place item 'stone-furnace' because a character is standing in the footprint",
-        "and the reply is unaffected by there being nobody to move"
+        format!("{TRANSIENT_REFUSAL} (blockers: an unclaimed character)"),
+        "and the reply says so rather than implying somebody was asked: a \
+         character with no bot behind it is the one blocker that neither \
+         walks off nor can be walked, and the waiting side must not treat it \
+         as leaving"
     );
 }
 
@@ -1013,8 +1103,10 @@ fn a_parked_character_bot_in_the_footprint_is_asked_to_walk_out_too() {
     let lua = refuse(ACTOR_AWAY, PARKED_CHARACTER_BOT);
     assert_eq!(
         one_line_reply(&lua),
-        "cannot place item 'stone-furnace' because a character is standing in the footprint",
-        "still the transient wording, so the ledger learns nothing about the ground"
+        format!("{TRANSIENT_REFUSAL} (blockers: #3 stepping aside)"),
+        "still the transient wording, so the ledger learns nothing about the \
+         ground -- and the clause names the character bot by the same id the \
+         executor addresses it by"
     );
     let moved = asked_to_move(&lua);
     assert_eq!(
@@ -1067,8 +1159,10 @@ fn a_blocker_with_nowhere_to_stand_is_not_sent_walking() {
     );
     assert_eq!(
         one_line_reply(&lua),
-        "cannot place item 'stone-furnace' because a character is standing in the footprint",
-        "and the refusal is reported the same way either way"
+        format!("{TRANSIENT_REFUSAL} (blockers: #3 stuck)"),
+        "and the refusal says which it was. `stuck` is idle with nowhere the \
+         game will put it -- the one blocker class waiting cannot fix, and it \
+         must not read as `stepping aside`"
     );
 }
 
@@ -1191,8 +1285,10 @@ fn a_walking_character_in_the_footprint_at_build_time_is_not_built_over() {
     // build was never attempted.
     assert_eq!(
         one_line_reply(&lua),
-        "cannot place item 'stone-furnace' because a character is standing in the footprint",
-        "the transient wording: nothing durable is learned about the ground"
+        format!("{TRANSIENT_REFUSAL} (blockers: #3 walking)"),
+        "the transient wording: nothing durable is learned about the ground, \
+         and the clause says the blocker is walking -- which is what tells \
+         the retry to wait for it rather than spend four dispatches on it"
     );
     let walking_to: (f64, f64) = lua
         .load("local w = storage.p[3].walking.waypoints[1] return { w.x, w.y }")

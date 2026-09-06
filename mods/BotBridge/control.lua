@@ -4089,8 +4089,15 @@ function report_character_in_footprint(surface, footprint, bb, pos, player, item
 		-- classification was right and nothing acted on it: an idle bot in
 		-- a footprint was a transient with no end. See
 		-- `step_aside_from_footprint`.
-		step_aside_from_footprint(surface, footprint, pos, player)
-		rcon.print("cannot place item '"..item_name.."' because a character is standing in the footprint")
+		local found = step_aside_from_footprint(surface, footprint, pos, player)
+		-- The sentence stays byte-identical up to the parenthesis: it is what
+		-- `FOOTPRINT_CHARACTER_REFUSAL` matches and what `classify_failure`
+		-- reads as `FailureKind::Blocked`. The clause after it is new, and is
+		-- what lets the retry wait for a blocker that is busy rather than
+		-- spending one fixed budget on every kind of blocker alike. See
+		-- `describe_footprint_blockers`.
+		rcon.print("cannot place item '"..item_name.."' because a character is standing in the footprint"
+			..describe_footprint_blockers(found))
 		return true
 	end
 	return false
@@ -4413,8 +4420,14 @@ end
 -- reports the transient wording, and still teaches the refusal ledger nothing;
 -- the difference is that by the time anything asks again, the blocker is
 -- somewhere else.
+--
+-- **Returns what it found, one phrase per character**, so the caller can say
+-- it in the reply. The distinction between the blocker classes is already
+-- made here, one line above the walk that acts on it, and it is the whole of
+-- what the waiting side needs: see `describe_footprint_blockers`.
 function step_aside_from_footprint(surface, footprint, position, acting_player)
 	local bb = add_to_bounding_box(footprint, position)
+	local found = {}
 	for _, character in ipairs(surface.find_entities_filtered{ area = bb, type = "character" }) do
 		-- Resolved through `bot_of_character`, not `LuaEntity.player`: the
 		-- latter is nil for every character bot, and reading it here is what
@@ -4425,18 +4438,71 @@ function step_aside_from_footprint(surface, footprint, position, acting_player)
 		-- must not raise here -- a raise inside an RCON handler costs the
 		-- caller its whole reply.
 		local blocker_id, blocker = bot_of_character(character)
-		if blocker_id ~= nil and blocker_id ~= acting_player.index
-			and blocker.connected and blocker.character ~= nil then
-			local state = storage.p[blocker_id]
-			if state ~= nil and state.walking == nil and state.mining == nil then
-				local landing = placement_step_aside_landing(surface, bb, character)
-				if landing ~= nil then
-					start_walk_waypoints(PLACEMENT_STEP_ASIDE_ACTION_ID, blocker_id,
-						{ { landing.x, landing.y } }, true)
+		if blocker_id == nil then
+			found[#found + 1] = "an unclaimed character"
+		elseif blocker_id ~= acting_player.index then
+			if not (blocker.connected and blocker.character ~= nil) then
+				-- A bot the registry knows and the game cannot steer: a
+				-- disconnected client leaves its character standing.
+				found[#found + 1] = "#" .. blocker_id .. " gone"
+			else
+				local state = storage.p[blocker_id]
+				if state ~= nil and state.walking ~= nil then
+					found[#found + 1] = "#" .. blocker_id .. " walking"
+				elseif state ~= nil and state.mining ~= nil then
+					found[#found + 1] = "#" .. blocker_id .. " mining"
+				else
+					local landing = placement_step_aside_landing(surface, bb, character)
+					if landing ~= nil then
+						start_walk_waypoints(PLACEMENT_STEP_ASIDE_ACTION_ID, blocker_id,
+							{ { landing.x, landing.y } }, true)
+						found[#found + 1] = "#" .. blocker_id .. " stepping aside"
+					else
+						-- Idle, asked nothing, and going nowhere: every exit
+						-- the game offered was inside the clearance. Named
+						-- apart from `stepping aside` because it is the one
+						-- class that waiting cannot fix.
+						found[#found + 1] = "#" .. blocker_id .. " stuck"
+					end
 				end
 			end
 		end
 	end
+	return found
+end
+
+-- The clause `report_character_in_footprint` appends to the transient refusal:
+-- ` (blockers: #1 mining, #3 stepping aside)`, or nothing at all when the scan
+-- named nobody.
+--
+-- **What it is doing is the whole of the retry policy.** The refusal wording
+-- used to say only that *a* character was there, and
+-- `place_entity_timed` (crates/core/src/factorio/rcon.rs) therefore had one
+-- budget for two situations that need opposite answers: a blocker this
+-- function has just asked to walk aside is gone in tens of ticks, and a
+-- blocker it deliberately left alone -- `walking` or `mining` for an action of
+-- its own -- takes as long as that action does. `run-1788655528-63394` is the
+-- second: bot 1 stood at `(26.29, -47.33)` inside the stone furnace at
+-- `[26, -48]` while mining copper ore from tick 5597 to 6079, and the
+-- placement gave up at 6001 -- **78 ticks early** -- after four dispatches
+-- over 114 ticks, failing the action and replanning milestone 1.
+--
+-- The vocabulary is closed and each word is a verdict about *time*, which is
+-- the only thing the waiting side can act on:
+--
+--   `#N mining` / `#N walking`   busy for an action of its own, will leave
+--   `#N stepping aside`          a walk out has just been dispatched
+--   `#N stuck`                   idle and the game offered no landing
+--   `#N gone`                    claimed by the registry, not steerable
+--   `an unclaimed character`     no bot behind it at all
+--
+-- **No apostrophe anywhere in it**, deliberately: `classify_failure`
+-- (crates/scripting_lua/src/globals/record.rs) reads a missing item's name out
+-- of the first pair of single quotes in the message, and the item name in the
+-- sentence this is appended to is that pair.
+function describe_footprint_blockers(found)
+	if found == nil or #found == 0 then return "" end
+	return " (blockers: " .. table.concat(found, ", ") .. ")"
 end
 
 -- Answers, for a batch of candidate placements, whether the game would allow

@@ -548,6 +548,145 @@ const FOOTPRINT_CLEAR_ATTEMPTS: u32 = 4;
 /// is received.
 const FOOTPRINT_CLEAR_BACKOFF: Duration = Duration::from_millis(600);
 
+/// The clause the mod appends to [`FOOTPRINT_CHARACTER_REFUSAL`] naming each
+/// character it found and what that character is doing --
+/// ` (blockers: #1 mining, #3 stepping aside)`. See
+/// `describe_footprint_blockers` in `mods/BotBridge/control.lua`, which owns
+/// the vocabulary.
+const FOOTPRINT_BLOCKERS_CLAUSE: &str = " (blockers: ";
+
+/// The two words in that clause that mean **this blocker is leaving on its
+/// own**: it is walking or mining for an action of its own, which is exactly
+/// why `step_aside_from_footprint` declined to steer it.
+const FOOTPRINT_BUSY_WORDS: [&str; 2] = ["mining", "walking"];
+
+/// Whether the mod's footprint refusal names a blocker that is busy with an
+/// action of its own.
+///
+/// Read from **after** the refusal sentence, never from the whole line: the
+/// item name comes first and `burner-mining-drill` contains "mining". A line
+/// from a mod copy old enough to have no clause answers `false` and keeps the
+/// old fixed budget, which is the safe way round.
+fn footprint_blocker_is_busy(line: &str) -> bool {
+    let Some(rest) = line.split_once(FOOTPRINT_CHARACTER_REFUSAL) else {
+        return false;
+    };
+    let Some(clause) = rest.1.split_once(FOOTPRINT_BLOCKERS_CLAUSE) else {
+        return false;
+    };
+    let Some((blockers, _)) = clause.1.split_once(')') else {
+        return false;
+    };
+    blockers.split(", ").any(|blocker| {
+        FOOTPRINT_BUSY_WORDS
+            .iter()
+            .any(|word| blocker.rsplit(' ').next() == Some(word))
+    })
+}
+
+/// How long a placement keeps asking while the footprint holds a blocker that
+/// is busy with an action of its own.
+///
+/// # Why this is not [`FOOTPRINT_CLEAR_ATTEMPTS`]
+///
+/// That budget is sized for a *step aside* -- a walk of one or two tiles the
+/// mod dispatched as it refused, measured once at 53 ticks. A blocker the mod
+/// deliberately left alone is a different clock entirely: it is leaving when
+/// **its own action** finishes, and that action is a whole mine or a whole
+/// walk. Spending the step-aside budget on it asks four times inside two
+/// seconds and then declares a transient permanent.
+///
+/// `run-1788655528-63394` is that: bot 1 mined copper ore at `(27.5, -47.5)`
+/// from tick 5597 to 6079 while standing at `(26.29, -47.33)`, inside the
+/// stone furnace bot 2 was to place at `[26, -48]`. The placement was refused
+/// at 5887 and abandoned at 6001 -- **78 ticks before the blocker's own action
+/// ended** -- and milestone 1 lost the action and replanned.
+///
+/// # Where the number comes from
+///
+/// Measured over the 24 archived runs in `workspace/runs`: the longest
+/// successful `mine` action is **1,211 ticks** (20.2 s at 1x) and the longest
+/// successful walk leg **1,977 ticks** (32.9 s); the 95th percentiles are 725
+/// and 716. So 45 s covers every busy action ever observed here at 1x with
+/// margin, and is an eighth of the executor's 360 s `ACTION_RESULT_DEADLINE`,
+/// which is the deadline this must stay well inside. At a faster
+/// `--game-speed` it covers proportionally more game time, which is the
+/// direction that cannot hurt.
+///
+/// **It is a bound, not a promise.** A blocker that is still busy after this
+/// fails the placement exactly as it did before, with the clause naming what
+/// it was doing -- so the next reader gets the fact the run above did not
+/// leave behind.
+const FOOTPRINT_BUSY_BLOCKER_BUDGET: Duration = Duration::from_secs(45);
+
+/// How long to wait between attempts while a busy blocker is in the way.
+///
+/// Longer than [`FOOTPRINT_CLEAR_BACKOFF`], because the question is different:
+/// "has a two-tile walk landed yet" is worth asking every 0.6 s, "has a whole
+/// mine finished yet" is not. At this cadence
+/// [`FOOTPRINT_BUSY_BLOCKER_BUDGET`] costs about 22 extra RCON round trips in
+/// the worst case, against the milestone replan it is there to prevent.
+const FOOTPRINT_BUSY_BACKOFF: Duration = Duration::from_millis(2000);
+
+/// What [`FactorioRcon::place_entity_timed`] does with a footprint refusal it
+/// has just received.
+///
+/// Three answers rather than two, for the same reason the mod's branch has
+/// three: a blocker that is leaving on its own, a blocker that has just been
+/// asked to leave, and no more waiting. Decided in one place because the loop
+/// has two arms that reach the same refusal -- the plain one and the one after
+/// the actor has been walked aside -- and they must not drift.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FootprintWait {
+    /// The blocker is busy with an action of its own. Wait
+    /// [`FOOTPRINT_BUSY_BACKOFF`] and ask again **without** spending the
+    /// step-aside budget: once it goes idle, the step-aside attempts are still
+    /// there for it.
+    Busy,
+    /// Some other footprint refusal, with step-aside attempts left. Wait
+    /// [`FOOTPRINT_CLEAR_BACKOFF`] and spend one.
+    StepAside,
+    /// Not a footprint refusal, or the budgets are spent. Report it.
+    GiveUp,
+}
+
+impl FootprintWait {
+    /// `attempt` is how many step-aside attempts have already been spent and
+    /// `busy_waited` how long this placement has already waited on a busy
+    /// blocker.
+    fn decide(line: &str, attempt: u32, busy_waited: Duration) -> Self {
+        if !line.contains(FOOTPRINT_CHARACTER_REFUSAL) {
+            return Self::GiveUp;
+        }
+        if footprint_blocker_is_busy(line) && busy_waited < FOOTPRINT_BUSY_BLOCKER_BUDGET {
+            return Self::Busy;
+        }
+        if attempt + 1 < FOOTPRINT_CLEAR_ATTEMPTS {
+            return Self::StepAside;
+        }
+        Self::GiveUp
+    }
+
+    /// How long to wait before asking again, or `None` when there is no more
+    /// asking to do.
+    fn backoff(self) -> Option<Duration> {
+        match self {
+            Self::Busy => Some(FOOTPRINT_BUSY_BACKOFF),
+            Self::StepAside => Some(FOOTPRINT_CLEAR_BACKOFF),
+            Self::GiveUp => None,
+        }
+    }
+
+    /// Which budget this wait is drawn from: `true` spends
+    /// [`FOOTPRINT_BUSY_BLOCKER_BUDGET`], `false` spends one of
+    /// [`FOOTPRINT_CLEAR_ATTEMPTS`]. Asked rather than inferred from the
+    /// duration, so the two constants may take any values without the loop
+    /// quietly charging the wrong account.
+    fn spends_busy_budget(self) -> bool {
+        matches!(self, Self::Busy)
+    }
+}
+
 /// What a placement's retries cost, measured while they happen.
 ///
 /// # The zero this exists to stop reporting
@@ -620,10 +759,13 @@ impl PlacementAttempts {
         ActionTicks::new(self.first_dispatch, replied)
     }
 
-    /// Records one [`FOOTPRINT_CLEAR_BACKOFF`] wait. Called where the sleep
-    /// is, so the number reported is the wait that was actually taken.
-    fn backed_off(&mut self) {
-        self.waited = self.waited.saturating_add(FOOTPRINT_CLEAR_BACKOFF);
+    /// Records one wait. Called where the sleep is, with the duration actually
+    /// slept, so the number reported is the wait that was taken -- the two
+    /// backoffs differ ([`FOOTPRINT_BUSY_BACKOFF`] against
+    /// [`FOOTPRINT_CLEAR_BACKOFF`]) and a fixed constant here would report the
+    /// wrong one.
+    fn backed_off(&mut self, waited: Duration) {
+        self.waited = self.waited.saturating_add(waited);
     }
 
     /// Whether the loop went round at all.
@@ -4592,6 +4734,11 @@ impl FactorioRcon {
             None => String::from("nil"),
         };
         let mut attempt: u32 = 0;
+        // Kept apart from `attempt` on purpose: a blocker that is busy with an
+        // action of its own is on its own clock, and spending the step-aside
+        // budget while waiting for it leaves nothing for the step aside it may
+        // still need once it goes idle. See `FOOTPRINT_BUSY_BLOCKER_BUDGET`.
+        let mut busy_waited = Duration::ZERO;
         // Purely observational, and deliberately separate from `attempt`:
         // `attempt` is the budget that decides whether to go round again,
         // `attempts` is the measurement that reaches the run record. Keeping
@@ -4709,9 +4856,10 @@ impl FactorioRcon {
                                     RconPlayerBlockesPlacement {}.into(),
                                     refused_at,
                                 ))
-                            } else if line.contains(FOOTPRINT_CHARACTER_REFUSAL)
-                                && attempt + 1 < FOOTPRINT_CLEAR_ATTEMPTS
-                            {
+                            } else if let Some((wait, backoff)) = {
+                                let wait = FootprintWait::decide(line, attempt, busy_waited);
+                                wait.backoff().map(|backoff| (wait, backoff))
+                            } {
                                 // Both blockers at once: the actor was in the
                                 // expanded box (which is why the mod answered
                                 // with the sentinel, actor first) *and* someone
@@ -4722,9 +4870,13 @@ impl FactorioRcon {
                                 // which re-issues from the actor's new position
                                 // and gives the step-aside walk the mod has just
                                 // dispatched time to land.
-                                attempt += 1;
-                                attempts.backed_off();
-                                sleep(FOOTPRINT_CLEAR_BACKOFF).await;
+                                if wait.spends_busy_budget() {
+                                    busy_waited = busy_waited.saturating_add(backoff);
+                                } else {
+                                    attempt += 1;
+                                }
+                                attempts.backed_off(backoff);
+                                sleep(backoff).await;
                                 continue 'place;
                             } else {
                                 note_placement_refusal(
@@ -4757,12 +4909,18 @@ impl FactorioRcon {
                 ));
             }
             // The transient the mod has just acted on. Retried rather than
-            // reported, because the report is what threw the run away.
-            if line.contains(FOOTPRINT_CHARACTER_REFUSAL) && attempt + 1 < FOOTPRINT_CLEAR_ATTEMPTS
-            {
-                attempt += 1;
-                attempts.backed_off();
-                sleep(FOOTPRINT_CLEAR_BACKOFF).await;
+            // reported, because the report is what threw the run away. How
+            // long it is worth waiting depends on what the mod said the
+            // blocker is doing -- see `FootprintWait`.
+            let wait = FootprintWait::decide(line, attempt, busy_waited);
+            if let Some(backoff) = wait.backoff() {
+                if wait.spends_busy_budget() {
+                    busy_waited = busy_waited.saturating_add(backoff);
+                } else {
+                    attempt += 1;
+                }
+                attempts.backed_off(backoff);
+                sleep(backoff).await;
                 continue;
             }
             note_placement_refusal(world, tick, line, &item_name, &entity_position, direction);
@@ -9282,9 +9440,9 @@ mod placement_retry_measurement_tests {
         // refusal.
         let mut attempts = PlacementAttempts::default();
         attempts.dispatched(Some(15_727));
-        attempts.backed_off();
+        attempts.backed_off(FOOTPRINT_CLEAR_BACKOFF);
         attempts.dispatched(Some(15_780));
-        attempts.backed_off();
+        attempts.backed_off(FOOTPRINT_CLEAR_BACKOFF);
         attempts.dispatched(Some(15_837));
         let ticks = attempts.ticks(Some(15_837));
         assert_eq!(ticks, ActionTicks::new(Some(15_727), Some(15_837)));
@@ -9302,9 +9460,9 @@ mod placement_retry_measurement_tests {
     fn the_refusal_says_how_many_dispatches_it_survived() {
         let mut attempts = PlacementAttempts::default();
         attempts.dispatched(Some(15_727));
-        attempts.backed_off();
+        attempts.backed_off(FOOTPRINT_CLEAR_BACKOFF);
         attempts.dispatched(Some(15_780));
-        attempts.backed_off();
+        attempts.backed_off(FOOTPRINT_CLEAR_BACKOFF);
         attempts.dispatched(Some(15_837));
         let refusal = "cannot place stone-furnace: a character is standing in the footprint";
         let explained = attempts.explain(refusal, Some(15_837));
@@ -9322,6 +9480,163 @@ mod placement_retry_measurement_tests {
         );
     }
 
+    /// The refusal `run-1788655528-63394` lost milestone 1's furnace to, as
+    /// the mod writes it now. Bot 1 was mining copper ore from tick 5597 to
+    /// 6079 while standing inside the furnace's box at `[26, -48]`; the
+    /// placement was dispatched at 5887 and abandoned at 6001.
+    const MINING_BLOCKER_REFUSAL: &str = "cannot place item 'stone-furnace' because a character is standing in \
+         the footprint (blockers: #1 mining)";
+
+    /// **A blocker that is busy is on its own clock, and the four step-aside
+    /// attempts are not it.**
+    ///
+    /// The whole of the defect: 78 ticks after the placement gave up, bot 1's
+    /// mine finished and it walked away.
+    #[test]
+    fn a_blocker_busy_with_its_own_action_is_waited_for_past_the_step_aside_budget() {
+        assert!(footprint_blocker_is_busy(MINING_BLOCKER_REFUSAL));
+        // Every step-aside attempt already spent, which is where the run gave
+        // up.
+        let spent = FOOTPRINT_CLEAR_ATTEMPTS - 1;
+        assert_eq!(
+            FootprintWait::decide(MINING_BLOCKER_REFUSAL, spent, Duration::ZERO),
+            FootprintWait::Busy,
+            "the mod says this blocker is mining for an action of its own, so \
+             it is leaving; four dispatches over 1.8 s is not a reason to stop \
+             asking"
+        );
+        assert_eq!(
+            FootprintWait::decide(MINING_BLOCKER_REFUSAL, spent, Duration::ZERO).backoff(),
+            Some(FOOTPRINT_BUSY_BACKOFF)
+        );
+        assert!(
+            FOOTPRINT_BUSY_BLOCKER_BUDGET >= Duration::from_secs(33),
+            "the longest busy action measured across the 24 archived runs is a \
+             1,977-tick walk leg -- 32.9 s at 1x -- and a budget under it \
+             cannot cover the case this exists for"
+        );
+    }
+
+    /// And it is a bound. A blocker still busy after the budget falls back to
+    /// exactly the old behaviour rather than waiting forever, which is what
+    /// keeps this inside the executor's 360 s `ACTION_RESULT_DEADLINE`.
+    #[test]
+    fn a_busy_blocker_that_outlasts_the_budget_gives_up_as_before() {
+        assert_eq!(
+            FootprintWait::decide(
+                MINING_BLOCKER_REFUSAL,
+                FOOTPRINT_CLEAR_ATTEMPTS - 1,
+                FOOTPRINT_BUSY_BLOCKER_BUDGET
+            ),
+            FootprintWait::GiveUp
+        );
+        assert_eq!(
+            FootprintWait::decide(MINING_BLOCKER_REFUSAL, 0, FOOTPRINT_BUSY_BLOCKER_BUDGET),
+            FootprintWait::StepAside,
+            "the step-aside attempts are still there once the waiting ends: a \
+             blocker that finished its action and then parked is exactly the \
+             case they were written for"
+        );
+    }
+
+    /// Waiting on a busy blocker must not spend the step-aside budget, or the
+    /// bot that goes idle in the footprint after its mine finishes gets no
+    /// walk dispatched at it.
+    #[test]
+    fn waiting_for_a_busy_blocker_does_not_spend_a_step_aside_attempt() {
+        assert!(FootprintWait::Busy.spends_busy_budget());
+        assert!(!FootprintWait::StepAside.spends_busy_budget());
+    }
+
+    /// **The substring trap.** `burner-mining-drill` contains "mining", and
+    /// the item name is in the same sentence. Reading the whole line would
+    /// call every drill placement busy and wait 45 s for a blocker that has
+    /// just been asked to step aside and will be gone in tens of ticks.
+    #[test]
+    fn the_item_name_is_not_read_as_what_the_blocker_is_doing() {
+        let line = "cannot place item 'burner-mining-drill' because a character is standing in \
+                    the footprint (blockers: #3 stepping aside)";
+        assert!(
+            !footprint_blocker_is_busy(line),
+            "only the clause after the refusal names what the blocker is doing"
+        );
+        assert_eq!(
+            FootprintWait::decide(line, 0, Duration::ZERO),
+            FootprintWait::StepAside
+        );
+    }
+
+    /// A workspace whose `mods/BotBridge` predates the clause answers the old
+    /// wording, and must get the old behaviour rather than a new one keyed on
+    /// a sentence it never writes.
+    #[test]
+    fn a_refusal_with_no_blocker_clause_keeps_the_old_budget() {
+        let old = "cannot place item 'stone-furnace' because a character is standing in the \
+                   footprint";
+        assert!(!footprint_blocker_is_busy(old));
+        assert_eq!(
+            FootprintWait::decide(old, 0, Duration::ZERO),
+            FootprintWait::StepAside
+        );
+        assert_eq!(
+            FootprintWait::decide(old, FOOTPRINT_CLEAR_ATTEMPTS - 1, Duration::ZERO),
+            FootprintWait::GiveUp
+        );
+    }
+
+    /// Every other refusal is answered on the spot, as before: a ground
+    /// verdict is not waited out.
+    #[test]
+    fn a_refusal_that_is_not_about_a_character_is_never_waited_for() {
+        assert_eq!(
+            FootprintWait::decide(
+                "cannot place item 'stone-furnace' because surface.can_place_entity said 'no' \
+                 (in the footprint: tree-01; tile: grass-1)",
+                0,
+                Duration::ZERO
+            ),
+            FootprintWait::GiveUp
+        );
+    }
+
+    /// The other blocker words are not busy: a `stuck` bot is idle with
+    /// nowhere the game will put it, and an unclaimed character has no bot
+    /// behind it at all. Neither is leaving, and waiting 45 s for either buys
+    /// nothing.
+    #[test]
+    fn only_walking_and_mining_are_treated_as_leaving() {
+        let base =
+            "cannot place item 'stone-furnace' because a character is standing in the footprint";
+        for clause in [
+            "#3 stuck",
+            "#3 gone",
+            "an unclaimed character",
+            "#3 stepping aside",
+        ] {
+            let line = format!("{base} (blockers: {clause})");
+            assert!(!footprint_blocker_is_busy(&line), "{line}");
+        }
+        for clause in ["#1 mining", "#1 walking", "#3 stuck, #1 mining"] {
+            let line = format!("{base} (blockers: {clause})");
+            assert!(footprint_blocker_is_busy(&line), "{line}");
+        }
+    }
+
+    /// The retry note is appended after the clause and must not be read as a
+    /// blocker: it ends in `refused every time`, and `and refused every time`
+    /// is not a state word.
+    #[test]
+    fn the_retry_note_after_the_clause_is_not_read_as_a_blocker() {
+        let line = format!(
+            "{MINING_BLOCKER_REFUSAL}; dispatched 4 times over 114 game ticks (1.8s of waiting \
+             between attempts) and refused every time"
+        );
+        assert!(
+            footprint_blocker_is_busy(&line),
+            "the clause is still the clause with the note after it: {line}"
+        );
+    }
+
     #[test]
     fn the_appended_note_carries_no_single_quote() {
         // `classify_failure` reads a `MissingItem`'s item name out of the first
@@ -9331,7 +9646,7 @@ mod placement_retry_measurement_tests {
         // work is about.
         let mut attempts = PlacementAttempts::default();
         attempts.dispatched(Some(1));
-        attempts.backed_off();
+        attempts.backed_off(FOOTPRINT_CLEAR_BACKOFF);
         attempts.dispatched(Some(2));
         let note = attempts.describe(Some(2)).expect("a retry happened");
         assert!(!note.contains('\''), "{note}");
@@ -9344,7 +9659,7 @@ mod placement_retry_measurement_tests {
         // instantaneous while looking measured.
         let mut attempts = PlacementAttempts::default();
         attempts.dispatched(None);
-        attempts.backed_off();
+        attempts.backed_off(FOOTPRINT_CLEAR_BACKOFF);
         attempts.dispatched(Some(15_837));
         assert_eq!(attempts.ticks(Some(15_837)).dispatched, None);
         let note = attempts.describe(Some(15_837)).expect("a retry happened");

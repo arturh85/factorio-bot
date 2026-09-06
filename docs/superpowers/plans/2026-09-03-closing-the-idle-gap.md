@@ -391,6 +391,30 @@ The plateau is unchanged: `roster-fed; no generator until 6:21`, production
 stopping at the plan's bill. Everything tonight made the plan smaller and
 more honest; none of it made the factory feed itself.
 
+## ⚠️ A THIRD BLIND SPOT: provenance records the checkout, not the mod that loaded
+
+`run-1788663566-25023` recorded `git.commit = 191df2db`, clean — and **ran a
+mod from `.worktrees/headless`, stale at `133802b6`**, which has no
+`describe_footprint_blockers`, no `bot_of_character` and no
+`placement_step_aside_landing`. Established from the record, not guessed:
+the refusal in that run carries **no `(blockers: …)` clause at all**, and
+that clause is empty only when every character in the box is the acting bot
+— which was false, since the actor was bot 3 at (13.30, 3.20) and the
+blocker bot 4 at (20.02, 5.07). Bot 4 never moved between ticks 1380 and
+1920: what a mod that never asks looks like.
+
+**So that run's footprint evidence is void**, and both sessions had reasoned
+from it — I sized a 45-second busy budget partly on it, and the other
+session drew conclusions about its own block. What survives is the siting
+result itself, which does not depend on the mod version.
+
+This belongs beside the two `world.dump` blind spots this file already
+carries. **A run's `git.commit` is a claim about the checkout, not about the
+bytes the game loaded.** The cheap habit: `readlink workspace/mods/BotBridge`
+before a run and quote the `Using mods directory` line in the note. The real
+fix: record the resolved mods directory, and ideally the mod's content hash,
+since a symlink target is not the same claim as the bytes that loaded.
+
 ## ⚠️ THREE FINDINGS FROM THE BLOCK-SITING RUN, AND MY FOOTPRINT FIX IS INCOMPLETE
 
 From `run-1788663566-25023` (the `second` session, headless, four bots, 5x,

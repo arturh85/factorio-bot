@@ -534,6 +534,43 @@ pub enum PlannerError {
     )]
     PowerPlantNeedsShore { distance: f64, radius: f64 },
 
+    /// The demand asked for is more than one boiler's worth of steam engines.
+    ///
+    /// **Roadmap item 3's refusal: power modelled as capacity, not coverage.**
+    /// Until 2026-09-06 `method::power::plan_plant` took no `kw` at all — it
+    /// built one pump, three pipes, one boiler, one steam engine and one pole,
+    /// 900 kW, and handed it back for any demand whatever. Three of
+    /// `supply_for`'s four tiers checked the kilowatts asked for; the fourth,
+    /// the one that *builds*, did not. So a plan wanting 2,000 kW got a plant
+    /// short by 1,100 and an `Ok`, and the shortfall surfaced later as a
+    /// `Condition::Powered` that would not hold — the symptom, several layers
+    /// from the decision that caused it.
+    ///
+    /// The plant now sizes its engines from the demand. This is the bound on
+    /// that sizing: vanilla's boiler states `energy_consumption = "1.8MW"` and
+    /// a steam engine's 900 kW falls out of `fluid_usage_per_tick = 0.5` at
+    /// 165 °C, so **one boiler carries exactly two engines** — a fact about
+    /// the prototypes rather than a chosen constant. Past that a plant needs a
+    /// second boiler, which is a second water tap on the pipe run and
+    /// shoreline geometry this planner does not yet lay out.
+    ///
+    /// Refusing by name is the point. An undersized plant returned as success
+    /// is the *coverage is not capacity* failure one level up: everything
+    /// places, everything is wired, and the network browns out.
+    #[error(
+        "that needs {needed_kw} kW and the largest plant this planner lays out generates \
+         {plant_kw} kW"
+    )]
+    #[diagnostic(
+        code(planner::power_plant_too_small),
+        help(
+            "one boiler drives at most two steam engines (1.8 MW of boiler over 900 kW of \
+             engine); more generation than that needs a second boiler, and the planner does not \
+             yet site one"
+        )
+    )]
+    PowerPlantTooSmall { needed_kw: f64, plant_kw: f64 },
+
     /// The rate asked for needs more cells than one plan may build.
     ///
     /// A bound on work rather than a claim about what a map could hold. Siting

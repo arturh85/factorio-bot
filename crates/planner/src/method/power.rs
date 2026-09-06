@@ -20,13 +20,52 @@
 //! inside the pole's supply area anyway, and `Researched::lab_site` already
 //! searches around the supplying pole rather than around the bot.
 //!
-//! # Solar is excluded structurally
+//! # The plant is sized against the demand it is asked for
 //!
-//! `solar-energy` needs `logistic-science-pack`, which needs
-//! `automation-science-pack`, which is what the lab this plant powers is going
-//! to consume. Research needs power; solar power needs research. So the plant
-//! is a boiler and an engine, and `crate::state`'s `generation_kw` has no
-//! `solar-panel` arm on purpose.
+//! Until 2026-09-06 [`plan_plant`] took no kilowatts at all: one pump, three
+//! pipes, one boiler, one steam engine, one pole, 900 kW, handed back for any
+//! demand whatever. Three of [`supply_for`]'s four tiers checked the demand;
+//! the fourth — the one that *builds* — did not, so a plan wanting 2,000 kW
+//! got a plant short by 1,100 and an `Ok`. See
+//! `docs/superpowers/notes/2026-09-06-power-as-capacity-over-time.md`.
+//!
+//! [`engines_for`] now sizes the engine row from the demand, and
+//! [`MAX_ENGINES_PER_BOILER`] bounds it at the ratio the prototypes state:
+//! `PlannerError::PowerPlantTooSmall` above that, rather than an undersized
+//! plant reported as success.
+//!
+//! **The check is over the end state of the plan, and that is deliberate
+//! rather than a simplification.** Demand here is monotone non-decreasing —
+//! no method removes a consumer and none unsets a recipe — and so is supply,
+//! so the peak demand over any schedule *is* the final demand and a static
+//! sum is exactly the worst case a time-phased ledger would find. What
+//! phasing does matter for is generation arriving after the load that needs
+//! it, and that is a sequencing problem already solved by
+//! `PlanState::powering_entities` turning a `Condition::Powered`'s poles and
+//! generators into `Condition::EntityAt` preconditions. The note above records
+//! the monotonicity assumption so a future `Effect` that removes an entity
+//! knows to come back here.
+//!
+//! # Solar is excluded because it is not deterministic
+//!
+//! This module used to say solar was excluded *structurally*: `solar-energy`
+//! needs `logistic-science-pack`, which needs the lab the plant is powering,
+//! so research needs power and solar power needs research. That circle is
+//! real, and it is a good reason not to plan a **first** plant out of solar —
+//! but it is not a reason to refuse to count a panel a run already has, and a
+//! solar panel is entirely pre-oil (5 steel plate, 15 electronic circuit, 5
+//! copper plate), so the technology is reachable long before this argument
+//! suggests. The claim was overstated.
+//!
+//! The reason that actually binds is `crate::state`'s: **a panel's output is a
+//! function of the map clock.** Vanilla states `production = "60kW"`, which is
+//! peak; the Nauvis daily average is about 42 kW and the value at night is
+//! zero. This crate is pure and deterministic and has no in-game time of day
+//! among its inputs, so crediting 60 plans a base that is dead for a third of
+//! every day and crediting 42 plans one that browns out every night.
+//! `generation_kw` credits zero, which under-credits — the direction every
+//! other table in that file chooses for an unknown. The honest way in later is
+//! an accumulator-backed figure, which is a model rather than a table entry.
 
 use crate::action::{Action, ActionKind, Actor, Condition, Effect, InventorySlot};
 use crate::error::PlannerError;
@@ -50,7 +89,68 @@ pub const POLE: &str = "small-electric-pole";
 
 /// How many pipes one plant lays. Derived by [`layout`], asserted by a test —
 /// this is the bill, not the design.
+///
+/// Independent of the engine count: engines chain directly off each other's
+/// steam connection, so a second engine adds no pipe. See [`layout`].
 pub const PIPE_COUNT: u32 = 3;
+
+/// How many steam engines one boiler drives.
+///
+/// **Derived from two vanilla prototype numbers, not chosen**, which is why it
+/// is stated with them:
+///
+/// * `boiler` states `energy_consumption = "1.8MW"`
+///   (`base/prototypes/entity/entities.lua`, readable in this repo's
+///   `workspace/data`), and a boiler turns all of that into steam;
+/// * `steam-engine` states `fluid_usage_per_tick = 0.5`, `effectivity = 1` and
+///   `maximum_temperature = 165`. Steam carries 0.2 kJ per unit per degree, so
+///   165 °C against the 15 °C default is 30 kJ a unit, and
+///   `0.5 units/tick × 60 ticks/s × 30 kJ = 900 kW` — which is exactly the
+///   figure `crate::state`'s `generation_kw` credits an engine, arrived at
+///   from the other end.
+///
+/// 1.8 MW over 900 kW is two. A third engine needs a second boiler, which is a
+/// second water tap on the pipe run: real shoreline geometry, and out of scope
+/// for the change that introduced this constant. Past it [`plan_plant_for`]
+/// raises [`PlannerError::PowerPlantTooSmall`] rather than returning a plant
+/// that cannot carry what it was asked for.
+pub const MAX_ENGINES_PER_BOILER: u32 = 2;
+
+/// How many engines a plant carrying `kw` needs, or why it cannot be built.
+///
+/// Ceiling division, floor one: a plant with no engine generates nothing and
+/// is not a plant, so `kw = 0` — which is what the [`plan_plant`] compatibility
+/// wrapper passes — still asks for the single engine that has always been
+/// built.
+///
+/// The engine's output is read through
+/// [`PlanState::generator_output_kw`](crate::state::PlanState::generator_output_kw)
+/// rather than written down here, so the number a plant is *sized* against is
+/// the number `electric_supply_kw` will *credit* it. A second copy would be
+/// the same drift `PlanState::consumer_draw_kw` exists to prevent, with the
+/// halves swapped: a plant sized against 1,000 kW an engine would pass its own
+/// arithmetic and brown out the network.
+///
+/// A world whose prototypes this crate cannot price an engine from refuses,
+/// which is the direction an unknown generator errs in everywhere else.
+pub fn engines_for(state: &PlanState, kw: f64) -> Result<u32, PlannerError> {
+    let each = state
+        .generator_output_kw(ENGINE)
+        .ok_or(PlannerError::PowerPlantTooSmall {
+            needed_kw: kw,
+            plant_kw: 0.,
+        })?;
+    let wanted = (kw / each).ceil().max(1.);
+    // `total_cmp` rather than `>`: this crate orders every float that way.
+    if wanted.total_cmp(&f64::from(MAX_ENGINES_PER_BOILER)).is_gt() {
+        return Err(PlannerError::PowerPlantTooSmall {
+            needed_kw: kw,
+            plant_kw: each * f64::from(MAX_ENGINES_PER_BOILER),
+        });
+    }
+    // In range by the test above, and `wanted >= 1`.
+    Ok(wanted as u32)
+}
 
 /// How much coal goes into the boiler, in items.
 ///
@@ -341,8 +441,23 @@ pub struct Plant {
     pub standing: Vec<PlantPart>,
     /// Where the coal goes.
     pub boiler: Position,
-    /// The generator whose 900 kW the pole carries.
+    /// The first generator whose 900 kW the pole carries.
+    ///
+    /// Kept as a single position because every caller and test wants "the
+    /// engine" of the one-engine plant that has always been built. The whole
+    /// row, which is what the pole has to cover, is [`engines`](Self::engines);
+    /// this is its first entry.
     pub engine: Position,
+    /// Every generator in the row, in build order, nearest the boiler first.
+    ///
+    /// One entry for a plant sized against a demand under 900 kW, which is
+    /// every demand this planner asks for today. See [`engines_for`].
+    ///
+    /// **The pole is sited to cover all of them**, not just
+    /// [`engine`](Self::engine): a second engine the pole does not reach is
+    /// 900 kW standing on the ground and reported as 1,800, which is the
+    /// coverage-is-not-capacity failure this whole change exists to close.
+    pub engines: Vec<Position>,
     /// The pole that carries it, and the anchor the lab is then sited around.
     ///
     /// **The lab follows the plant, not the bot.** `Researched::lab_site`
@@ -416,7 +531,18 @@ fn shoreline_faces_water(tile: &Pos, facing: Direction, water: &BTreeSet<Pos>) -
 /// quarter turn about a tile centre takes tile centres to tile centres and
 /// tile corners to tile corners, and each building's direction turns with it.
 /// `every_facing_puts_every_building_on_its_own_grid` is that claim as a test.
-fn layout(pump: &Position, facing: Direction) -> Option<Vec<PlantPart>> {
+/// `engines` is how many steam engines stand in the row, at least one and at
+/// most [`MAX_ENGINES_PER_BOILER`]. **The extra engines cost no extra pipe**:
+/// a steam engine's two `ENGINE_STEAM` connections are one tile beyond each
+/// end of its own five-tile length, so consecutive engines whose centres are
+/// five apart along the row have each one's far connection landing inside the
+/// next one's body — which is how the game joins two engines placed end to
+/// end, and why [`PIPE_COUNT`] is independent of the engine count.
+///
+/// The row extends **away from the boiler**, i.e. further inland, along the
+/// same axis `ENGINE_STEAM[1]` already chose for the first engine. Extending
+/// the other way would put the second engine on top of the boiler.
+fn layout(pump: &Position, facing: Direction, engines: u32) -> Option<Vec<PlantPart>> {
     let lateral = turned((1., 0.), facing)?;
 
     let joint_pump = pump.add(&turned(PUMP_OUTPUT, facing)?);
@@ -430,7 +556,7 @@ fn layout(pump: &Position, facing: Direction) -> Option<Vec<PlantPart>> {
     let engine_facing = facing;
     let engine = subtract(&joint_engine, &turned(ENGINE_STEAM[1], engine_facing)?);
 
-    Some(vec![
+    let mut parts = vec![
         PlantPart {
             name: PUMP,
             position: pump.clone(),
@@ -456,12 +582,28 @@ fn layout(pump: &Position, facing: Direction) -> Option<Vec<PlantPart>> {
             position: joint_engine,
             direction: Direction::North,
         },
-        PlantPart {
+    ];
+    // The step from one engine to the next, which is the engine's own length,
+    // derived from `ENGINE_STEAM` rather than written as a bare 5 so that a
+    // wrong number there moves the row and fails a test.
+    //
+    // Both entries are *target* tiles, one beyond each end of the body, so
+    // their centres are `length + 1` tiles apart and the body is the tiles
+    // strictly between them: 3 - (-3) - 1 = 5.
+    let length = (ENGINE_STEAM[0].1 - ENGINE_STEAM[1].1).abs() - 1.;
+    // Away from the boiler. `ENGINE_STEAM[1]` is the connection the boiler's
+    // pipe reaches (it is what `engine` was placed against, just above), so
+    // `ENGINE_STEAM[0]`'s sign is the inland one.
+    let pitch = turned((0., length * ENGINE_STEAM[0].1.signum()), engine_facing)?;
+    for index in 0..engines {
+        let step = f64::from(index);
+        parts.push(PlantPart {
             name: ENGINE,
-            position: engine,
+            position: Position::new(engine.x() + pitch.x() * step, engine.y() + pitch.y() * step),
             direction: engine_facing,
-        },
-    ])
+        });
+    }
+    Some(parts)
 }
 
 fn subtract(a: &Position, b: &Position) -> Position {
@@ -575,7 +717,10 @@ pub fn supply_for(
     if let Some(plant) = complete_plant(state, from, kw) {
         return Ok(Supply::Build(plant));
     }
-    Ok(Supply::Build(plan_plant(state, from)?))
+    // The tier that used to ignore `kw` entirely, and the whole of roadmap
+    // item 3's defect: three tiers checked the demand and the one that builds
+    // did not.
+    Ok(Supply::Build(plan_plant_for(state, from, kw)?))
 }
 
 /// The rest of a plant that already has its pump down, if one stands within
@@ -653,7 +798,15 @@ fn finish(state: &PlanState, pump: &FactorioEntity, kw: f64) -> Option<Plant> {
     if !Direction::orthogonal().contains(&facing) {
         return None;
     }
-    let parts = layout(&pump.position, facing)?;
+    // Sized against the demand, exactly as a fresh plant is. A standing
+    // one-engine plant asked for 1,200 kW is checked against a two-engine
+    // layout, so the second engine's tile is either free -- and the plant is
+    // finished by adding it -- or occupied, and this pump is passed over.
+    // `engines_for`'s refusal is a `None` here rather than an error: this
+    // function's whole contract is "or the next pump along", and
+    // `plan_plant_for` raises the named error a moment later.
+    let engines = engines_for(state, kw).ok()?;
+    let parts = layout(&pump.position, facing, engines)?;
     let mut standing: Vec<PlantPart> = Vec::new();
     let mut missing: Vec<PlantPart> = Vec::new();
     for part in parts {
@@ -682,29 +835,49 @@ fn finish(state: &PlanState, pump: &FactorioEntity, kw: f64) -> Option<Plant> {
         .find(|part| part.name == BOILER)?
         .position
         .clone();
-    let engine_part = standing
+    // Both lists, because the row may be part standing and part missing: a
+    // one-engine plant being grown to two has its first engine in `standing`
+    // and its second in `missing`. The build order `layout` fixed is what
+    // orders them, so `engine` stays the one nearest the boiler however the
+    // row is split.
+    let engine_parts: Vec<&PlantPart> = layout(&pump.position, facing, engines)?
         .iter()
-        .chain(missing.iter())
-        .find(|part| part.name == ENGINE)?
-        .clone();
-    let engine = engine_part.position.clone();
+        .filter(|part| part.name == ENGINE)
+        .map(|part| {
+            standing
+                .iter()
+                .chain(missing.iter())
+                .find(|other| other.name == ENGINE && other.position == part.position)
+        })
+        .collect::<Option<Vec<&PlantPart>>>()?;
+    let engine = engine_parts.first()?.position.clone();
+    let engine_row: Vec<Position> = engine_parts
+        .iter()
+        .map(|part| part.position.clone())
+        .collect();
 
     let mut trial = state.fork();
     for part in &missing {
         trial.create_entity(entity_for(&trial, part));
     }
-    let engine_area = trial.collision_area_facing(ENGINE, &engine, engine_part.direction)?;
+    let engine_areas = engine_areas(&trial, &engine_parts)?;
+    let pole_origin = engine_row_centre(&engine_row);
 
-    // A pole that already reaches the engine, nearest first in
+    // A pole that already reaches **every** engine, nearest first in
     // `entities_within`'s fixed order; only otherwise one to place, sited
-    // exactly as `fit` sites it.
+    // exactly as `fit` sites it. All of them, not the first: a standing pole
+    // that covers one engine of two leaves the other generating into nothing.
     let pole_standing = trial
         .entities_within(
-            &engine,
+            &pole_origin,
             f64::from(crate::method::util::FREE_TILE_SEARCH_RADIUS) + 4.,
         )
         .into_iter()
-        .find(|entity| trial.pole_would_supply(&entity.name, &entity.position, &engine_area));
+        .find(|entity| {
+            engine_areas
+                .iter()
+                .all(|area| trial.pole_would_supply(&entity.name, &entity.position, area))
+        });
     let pole = match pole_standing {
         Some(entity) => {
             let position = entity.position.clone();
@@ -716,9 +889,7 @@ fn finish(state: &PlanState, pump: &FactorioEntity, kw: f64) -> Option<Plant> {
             position
         }
         None => {
-            let position = free_area_near_where(&trial, &engine, POLE, |candidate| {
-                trial.pole_would_supply(POLE, candidate, &engine_area)
-            })?;
+            let position = pole_site(&trial, &engine_areas, &pole_origin)?;
             let part = PlantPart {
                 name: POLE,
                 position: position.clone(),
@@ -744,6 +915,7 @@ fn finish(state: &PlanState, pump: &FactorioEntity, kw: f64) -> Option<Plant> {
         standing,
         boiler,
         engine,
+        engines: engine_row,
         pole,
         evacuate: Vec::new(),
     };
@@ -764,6 +936,29 @@ fn finish(state: &PlanState, pump: &FactorioEntity, kw: f64) -> Option<Plant> {
 /// come out of a ring search in a fixed order, and the four facings are tried
 /// north, east, south, west. Nothing here reads a quad tree's own order.
 pub fn plan_plant(state: &PlanState, from: &Position) -> Result<Plant, PlannerError> {
+    // `engines_for(0.)` is one, so this is exactly the plant this function has
+    // always sited. Kept so that every caller and test that does not care
+    // about sizing carries on not caring.
+    plan_plant_for(state, from, 0.)
+}
+
+/// [`plan_plant`], sized against a demand.
+///
+/// **The tier that was not checking its kilowatts.** [`supply_for`]'s first
+/// three tiers all ask whether the supply they found leaves `kw` of headroom;
+/// the fourth built a fixed 900 kW plant and returned it for any demand
+/// whatever, so a plan wanting 2,000 kW got a plant short by 1,100 and an
+/// `Ok`. That shortfall then surfaced as a `Condition::Powered` that would not
+/// hold — the symptom, several layers from the decision that caused it. See
+/// `docs/superpowers/notes/2026-09-06-power-as-capacity-over-time.md`.
+///
+/// The engine count comes from [`engines_for`], which refuses with
+/// [`PlannerError::PowerPlantTooSmall`] above [`MAX_ENGINES_PER_BOILER`]
+/// rather than returning an undersized plant. The refusal happens **before**
+/// any terrain is read, so a demand no plant can carry costs nothing to
+/// discover.
+pub fn plan_plant_for(state: &PlanState, from: &Position, kw: f64) -> Result<Plant, PlannerError> {
+    let engines = engines_for(state, kw)?;
     // The narrow search first, and the wide one **only** when it fails.
     // `nearest_water_tile` is linear in the tiles inside its radius, and since
     // `fa8dabf3` a fully charted map carries ~410,000 water tiles: reading a
@@ -813,7 +1008,7 @@ pub fn plan_plant(state: &PlanState, from: &Position) -> Result<Plant, PlannerEr
                     if !shoreline_faces_water(&tile, facing, &water_tiles) {
                         continue;
                     }
-                    if let Some(plant) = fit(state, &tile_centre(&tile), facing) {
+                    if let Some(plant) = fit(state, &tile_centre(&tile), facing, engines) {
                         return Ok(plant);
                     }
                 }
@@ -837,8 +1032,8 @@ pub fn plan_plant(state: &PlanState, from: &Position) -> Result<Plant, PlannerEr
 /// The pole is different, because *where* it goes depends on where the
 /// buildings ended up. It is sited on a fork carrying them, so its ring search
 /// cannot pick a tile the engine is standing on.
-fn fit(state: &PlanState, pump: &Position, facing: Direction) -> Option<Plant> {
-    let parts = layout(pump, facing)?;
+fn fit(state: &PlanState, pump: &Position, facing: Direction, engines: u32) -> Option<Plant> {
+    let parts = layout(pump, facing, engines)?;
     for part in &parts {
         if !state.is_area_free_facing(part.name, &part.position, part.direction) {
             return None;
@@ -849,17 +1044,19 @@ fn fit(state: &PlanState, pump: &Position, facing: Direction) -> Option<Plant> {
         .find(|part| part.name == BOILER)?
         .position
         .clone();
-    let engine_part = parts.iter().find(|part| part.name == ENGINE)?;
-    let engine = engine_part.position.clone();
+    let engine_parts: Vec<&PlantPart> = parts.iter().filter(|part| part.name == ENGINE).collect();
+    let engine = engine_parts.first()?.position.clone();
+    let engine_row: Vec<Position> = engine_parts
+        .iter()
+        .map(|part| part.position.clone())
+        .collect();
 
     let mut trial = state.fork();
     for part in &parts {
         trial.create_entity(entity_for(&trial, part));
     }
-    let engine_area = trial.collision_area_facing(ENGINE, &engine, engine_part.direction)?;
-    let pole = free_area_near_where(&trial, &engine, POLE, |candidate| {
-        trial.pole_would_supply(POLE, candidate, &engine_area)
-    })?;
+    let engine_areas = engine_areas(&trial, &engine_parts)?;
+    let pole = pole_site(&trial, &engine_areas, &engine_row_centre(&engine_row))?;
 
     let mut parts = parts;
     let pole_part = PlantPart {
@@ -877,6 +1074,7 @@ fn fit(state: &PlanState, pump: &Position, facing: Direction) -> Option<Plant> {
         standing: Vec::new(),
         boiler,
         engine,
+        engines: engine_row,
         pole,
         evacuate: Vec::new(),
     };
@@ -891,6 +1089,74 @@ fn fit(state: &PlanState, pump: &Position, facing: Direction) -> Option<Plant> {
         crate::enclosure::EnclosurePrevention::Refuse => return None,
     }
     Some(plant)
+}
+
+/// The collision area of every engine in the row, or `None` if the world
+/// cannot size one.
+///
+/// `None` rather than a shorter list: a plant whose second engine has no
+/// footprint is one whose pole cannot be checked against it, and an unsized
+/// entity is not one this planner commits to — the same answer `is_area_free`
+/// gives for an unknown prototype.
+fn engine_areas(state: &PlanState, engine_parts: &[&PlantPart]) -> Option<Vec<Rect>> {
+    engine_parts
+        .iter()
+        .map(|part| state.collision_area_facing(ENGINE, &part.position, part.direction))
+        .collect()
+}
+
+/// Where to put the plant's pole: a free tile whose supply area reaches
+/// **every** engine in the row.
+///
+/// # One implementation, because a second one would be the failure
+///
+/// Both [`fit`] and [`finish`] site a pole, and both used to ask their own
+/// question about their own engine. With a one-engine row those two questions
+/// are the same; with two they are not, and a pole that reaches the first
+/// engine and not the second is 900 kW standing on the ground while the plan
+/// reads 1,800 — placement and function are separate concerns, and this is
+/// the class of failure that places 100 % and does nothing.
+///
+/// So the rule lives here once. `areas` is every engine's collision box, and
+/// `all` over it is the whole of the rule: a candidate that misses one engine
+/// is not a site, however close it is.
+///
+/// The search starts at [`engine_row_centre`] rather than at any one engine.
+/// With one engine that is the engine, which is where this search has always
+/// started; with two it is the joint between them, which is the only stretch
+/// of ground a five-by-five supply area can overlap both from.
+///
+/// `None` when no tile in [`free_area_near_where`]'s ring search qualifies —
+/// which refuses the whole plant candidate, rather than building a row half
+/// of which generates into nothing.
+fn pole_site(state: &PlanState, areas: &[Rect], origin: &Position) -> Option<Position> {
+    free_area_near_where(state, origin, POLE, |candidate| {
+        areas
+            .iter()
+            .all(|area| state.pole_would_supply(POLE, candidate, area))
+    })
+}
+
+/// The point the pole search starts from: the centroid of the engine row.
+///
+/// **The single-engine path is unchanged by construction, not by luck** — the
+/// centroid of one position is that position, which is the origin
+/// [`free_area_near_where`] was always given. With two engines it is the joint
+/// between them, which is the only place a five-by-five supply area can
+/// overlap both.
+///
+/// The caller has already checked the row is non-empty ([`engines_for`] never
+/// answers zero); an empty row would divide by zero, so it answers the origin
+/// instead, which no plant is ever sited at.
+fn engine_row_centre(engines: &[Position]) -> Position {
+    if engines.is_empty() {
+        return Position::new(0., 0.);
+    }
+    let count = engines.len() as f64;
+    Position::new(
+        engines.iter().map(Position::x).sum::<f64>() / count,
+        engines.iter().map(Position::y).sum::<f64>() / count,
+    )
 }
 
 /// The `FactorioEntity` a part places.
@@ -950,7 +1216,23 @@ fn bill(plant: &Plant) -> Vec<(&'static str, u32)> {
             None => out.push((part.name, 1)),
         }
     }
-    out.push(("coal", PLANT_COAL));
+    // Per engine, because the boiler burns fuel in proportion to the steam its
+    // engines draw: a two-engine plant was sized for roughly twice the load
+    // and burns roughly twice the coal over the same window. A one-engine
+    // plant -- which is every plant this planner builds today -- bills the
+    // unchanged `PLANT_COAL`.
+    //
+    // The row is read off `parts` and `standing` together rather than off
+    // `parts` alone: the coal is for the whole plant, and a finished plant
+    // whose first engine already stands still has two engines drinking steam.
+    let engines = plant
+        .parts
+        .iter()
+        .chain(plant.standing.iter())
+        .filter(|part| part.name == ENGINE)
+        .count()
+        .max(1) as u32;
+    out.push(("coal", PLANT_COAL * engines));
     out
 }
 
@@ -1230,7 +1512,7 @@ mod tests {
         // the joints are what a wrong rotation breaks first -- and it breaks
         // *silently*, since every building still places.
         for facing in Direction::orthogonal() {
-            let parts = layout(&Position::new(0.5, 0.5), facing).expect("a cardinal layout");
+            let parts = layout(&Position::new(0.5, 0.5), facing, 1).expect("a cardinal layout");
             let at = |name: &str| {
                 parts
                     .iter()
@@ -1297,7 +1579,7 @@ mod tests {
         // legal at all four facings. That is a claim, and this is it.
         let s = state();
         for facing in Direction::orthogonal() {
-            for part in layout(&Position::new(10.5, 10.5), facing).expect("cardinal") {
+            for part in layout(&Position::new(10.5, 10.5), facing, 1).expect("cardinal") {
                 assert!(
                     on_its_grid(&s, &part),
                     "{facing:?}: {} at {} is off its build grid",
@@ -1314,7 +1596,7 @@ mod tests {
         // siblings, which is only sound because of this.
         let s = state();
         for facing in Direction::orthogonal() {
-            let parts = layout(&Position::new(10.5, 10.5), facing).expect("cardinal");
+            let parts = layout(&Position::new(10.5, 10.5), facing, 1).expect("cardinal");
             for (i, a) in parts.iter().enumerate() {
                 for b in parts.iter().skip(i + 1) {
                     let box_a = s
@@ -1494,7 +1776,7 @@ mod tests {
         for y in -40..40 {
             for x in -40..40 {
                 let pump = Position::new(f64::from(x) + 0.5, f64::from(y) + 0.5);
-                if let Some(plant) = fit(s, &pump, facing) {
+                if let Some(plant) = fit(s, &pump, facing, 1) {
                     return (pump, plant);
                 }
             }
@@ -1630,7 +1912,7 @@ mod tests {
                 );
             }
             assert!(
-                fit(&taken, &pump, facing).is_none(),
+                fit(&taken, &pump, facing, 1).is_none(),
                 "{facing:?}: the candidate whose engine would stand on the pole is refused"
             );
         }
@@ -2129,5 +2411,481 @@ mod tests {
             "adoption must reach further than construction can, or the planner \
              can still build what it could have adopted: {PLANT_ADOPT_RADIUS} <= {reach}"
         );
+    }
+}
+
+// -------------------------------------------------------------------------
+// Capacity: the plant is sized against the demand it is asked for.
+//
+// Every literal in this module is written out rather than read from the
+// constant under test, on the rule in
+// `docs/superpowers/notes/2026-09-06-fixtures-agree-with-their-code.md`:
+// a test asserting against the very constant the code reads proves nothing.
+// So 900, 1800, 5 and the five-tile pitch are typed, not imported.
+// -------------------------------------------------------------------------
+
+#[cfg(test)]
+mod capacity_tests {
+    use super::*;
+    use crate::ids::BotId;
+    use crate::state::PlanState;
+    use factorio_bot_core::test_utils::fixture_world;
+    use std::sync::Arc;
+
+    fn state() -> PlanState {
+        PlanState::from_world(Arc::new(fixture_world()), &[BotId(1)])
+    }
+
+    /// The vanilla figures this whole module is sized from, as literals.
+    ///
+    /// `steam-engine` 900 kW, and one boiler's 1.8 MW over it is two engines.
+    const ENGINE_KW_LITERAL: f64 = 900.;
+    const ONE_BOILER_KW_LITERAL: f64 = 1800.;
+
+    #[test]
+    fn the_engine_the_planner_credits_is_the_engine_vanilla_states() {
+        // The anchor for every other number here. If this drifts, the plant
+        // is sized against one figure and credited at another.
+        let s = state();
+        assert_eq!(
+            s.generator_output_kw(ENGINE),
+            Some(ENGINE_KW_LITERAL),
+            "a steam engine is 900 kW: fluid_usage_per_tick 0.5 x 60 ticks x \
+             (165 - 15) degrees x 0.2 kJ"
+        );
+    }
+
+    #[test]
+    fn a_demand_is_sized_into_engines_and_a_bigger_one_refuses_by_name() {
+        let s = state();
+        // Zero and anything up to one engine's worth is one engine -- the
+        // plant this module has always built.
+        assert_eq!(engines_for(&s, 0.).expect("zero"), 1);
+        assert_eq!(engines_for(&s, 60.).expect("a lab"), 1);
+        assert_eq!(engines_for(&s, 189.).expect("a red cell"), 1);
+        assert_eq!(engines_for(&s, 900.).expect("exactly one engine"), 1);
+        // Past one engine, two.
+        assert_eq!(engines_for(&s, 900.5).expect("a hair over"), 2);
+        assert_eq!(engines_for(&s, 1800.).expect("exactly two"), 2);
+        // Past one boiler's worth, a named refusal rather than a short plant.
+        let err = engines_for(&s, 1800.5).expect_err("more than one boiler drives");
+        match err {
+            PlannerError::PowerPlantTooSmall {
+                needed_kw,
+                plant_kw,
+            } => {
+                assert_eq!(needed_kw, 1800.5);
+                assert_eq!(plant_kw, ONE_BOILER_KW_LITERAL);
+            }
+            other => panic!("expected PowerPlantTooSmall, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_second_engine_stands_five_tiles_on_and_costs_no_extra_pipe() {
+        let s = state();
+        for facing in Direction::orthogonal() {
+            let one = layout(&Position::new(10.5, 10.5), facing, 1).expect("cardinal");
+            let two = layout(&Position::new(10.5, 10.5), facing, 2).expect("cardinal");
+
+            // Everything but the engines is untouched: same parts, same
+            // order, same tiles. A second engine that moved the boiler would
+            // move the plant under a caller that had already sited it.
+            let trunk = |parts: &[PlantPart]| -> Vec<(String, Position)> {
+                parts
+                    .iter()
+                    .filter(|part| part.name != ENGINE)
+                    .map(|part| (part.name.to_string(), part.position.clone()))
+                    .collect()
+            };
+            assert_eq!(trunk(&one), trunk(&two), "{facing:?}: the trunk moved");
+
+            let engines: Vec<&PlantPart> = two.iter().filter(|part| part.name == ENGINE).collect();
+            assert_eq!(engines.len(), 2, "{facing:?}");
+            assert_eq!(
+                engines[0].position,
+                one[one.len() - 1].position,
+                "{facing:?}: the first engine of two is the engine of one"
+            );
+            // Five tiles, the engine's own length, along one axis only.
+            let dx = (engines[1].position.x() - engines[0].position.x()).abs();
+            let dy = (engines[1].position.y() - engines[0].position.y()).abs();
+            assert!(
+                (dx + dy - 5.).abs() < 1e-9 && (dx < 1e-9 || dy < 1e-9),
+                "{facing:?}: engines are {dx} by {dy} apart, wanted 5 along one axis"
+            );
+            // Away from the boiler, not on top of it.
+            let boiler = two
+                .iter()
+                .find(|part| part.name == BOILER)
+                .expect("a boiler")
+                .position
+                .clone();
+            let near = calculate_distance(&engines[0].position, &boiler);
+            let far = calculate_distance(&engines[1].position, &boiler);
+            assert!(
+                far > near,
+                "{facing:?}: the row grew towards the boiler ({far} <= {near})"
+            );
+            // And each engine is on its own build grid, at every facing.
+            for part in &two {
+                assert!(
+                    on_its_grid(&s, part),
+                    "{facing:?}: {} at {} is off its build grid",
+                    part.name,
+                    part.position
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn two_engines_never_overlap_each_other_or_the_trunk() {
+        let s = state();
+        for facing in Direction::orthogonal() {
+            let parts = layout(&Position::new(10.5, 10.5), facing, 2).expect("cardinal");
+            for (i, a) in parts.iter().enumerate() {
+                for b in parts.iter().skip(i + 1) {
+                    let box_a = s
+                        .collision_area_facing(a.name, &a.position, a.direction)
+                        .expect("prototype");
+                    let box_b = s
+                        .collision_area_facing(b.name, &b.position, b.direction)
+                        .expect("prototype");
+                    assert!(
+                        !overlap(&box_a, &box_b),
+                        "{facing:?}: {} at {} overlaps {} at {}",
+                        a.name,
+                        a.position,
+                        b.name,
+                        b.position
+                    );
+                }
+            }
+        }
+    }
+
+    /// Box against box. A local copy: the sibling module's helper is private
+    /// to it, and this file's rule is that a test states its own geometry.
+    fn overlap(a: &Rect, b: &Rect) -> bool {
+        a.left_top.x() < b.right_bottom.x()
+            && a.right_bottom.x() > b.left_top.x()
+            && a.left_top.y() < b.right_bottom.y()
+            && a.right_bottom.y() > b.left_top.y()
+    }
+
+    /// The plant a demand of `kw` sites on the fixture's lake.
+    fn plant_for(kw: f64) -> (PlanState, Plant) {
+        let s = state();
+        let plant = plan_plant_for(&s, &Position::new(0., 0.), kw).expect("the fixture has a lake");
+        (s, plant)
+    }
+
+    /// A fork of `s` carrying every part of `plant` that is not standing yet.
+    fn with_parts(s: &PlanState, plant: &Plant) -> PlanState {
+        let mut built = s.fork();
+        for part in &plant.parts {
+            built.create_entity(entity_for(&built, part));
+        }
+        built
+    }
+
+    #[test]
+    fn an_unsized_plant_is_still_the_one_engine_plant() {
+        // The compatibility claim the three offline baselines rest on.
+        let s = state();
+        let old = plan_plant(&s, &Position::new(0., 0.)).expect("a lake");
+        let (_, sized) = plant_for(60.);
+        assert_eq!(old.engines.len(), 1);
+        assert_eq!(
+            old.parts, sized.parts,
+            "a 60 kW demand sites the same plant"
+        );
+        assert_eq!(old.pole, sized.pole);
+    }
+
+    #[test]
+    fn a_two_engine_plants_pole_supplies_both_engines() {
+        // **The silent failure this test exists for.** A pole sited against
+        // the first engine only leaves the second generating into nothing:
+        // every entity places, the plan reads 1,800 kW, and the network
+        // carries 900. Placement and function are separate concerns.
+        let (s, plant) = plant_for(1000.);
+        assert_eq!(plant.engines.len(), 2, "1,000 kW wants two engines");
+        let built = with_parts(&s, &plant);
+        for engine in &plant.engines {
+            let area = built
+                .collision_area(ENGINE, engine)
+                .expect("the engine has a prototype");
+            assert!(
+                built.pole_would_supply(POLE, &plant.pole, &area),
+                "the pole at {} does not reach the engine at {engine}",
+                plant.pole
+            );
+        }
+    }
+
+    /// A tile that a small pole covering the **first** engine of `plant`'s row
+    /// could stand on while leaving the **second** out of reach.
+    ///
+    /// The row runs along one axis with a five-tile pitch; a small pole's
+    /// supply area is five by five and an engine's box is 4.7 along its long
+    /// axis, so a pole four tiles behind the first engine reaches it and falls
+    /// short of the second by a clear margin. Pushed three tiles sideways so
+    /// it is not standing in the row itself.
+    ///
+    /// The test asserts both halves of that claim before using it, so a
+    /// fixture that had quietly stopped discriminating fails loudly instead of
+    /// passing vacuously.
+    fn a_tile_reaching_only_the_first_engine(state: &PlanState, plant: &Plant) -> Position {
+        let (a, b) = (&plant.engines[0], &plant.engines[1]);
+        let axis = Position::new((b.x() - a.x()) / 5., (b.y() - a.y()) / 5.);
+        let side = Position::new(-axis.y(), axis.x());
+        let decoy = Position::new(
+            a.x() - axis.x() * 4. + side.x() * 3.,
+            a.y() - axis.y() * 4. + side.y() * 3.,
+        );
+        let area = |engine: &Position| {
+            state
+                .collision_area(ENGINE, engine)
+                .expect("the engine has a prototype")
+        };
+        assert!(
+            state.pole_would_supply(POLE, &decoy, &area(a)),
+            "the decoy at {decoy} must reach the first engine, or it tests nothing"
+        );
+        assert!(
+            !state.pole_would_supply(POLE, &decoy, &area(b)),
+            "the decoy at {decoy} must NOT reach the second engine, or it tests nothing"
+        );
+        decoy
+    }
+
+    #[test]
+    fn a_pole_site_refuses_when_only_one_engine_can_be_reached() {
+        // **The discriminating test for `pole_site`'s rule.** On open ground
+        // the ring search starts at the joint between the engines and lands on
+        // a tile covering both by geometry, so weakening `all` to "the first
+        // engine" changes nothing there and the search proves nothing about
+        // the predicate. Here every tile that could reach both is taken, and
+        // tiles that reach only the first are left free -- so the rule is the
+        // only thing standing between the plant and a half-wired row.
+        let (s, plant) = plant_for(1000.);
+        let mut world = with_parts(&s, &plant);
+
+        let areas: Vec<Rect> = plant
+            .engines
+            .iter()
+            .map(|engine| {
+                world
+                    .collision_area(ENGINE, engine)
+                    .expect("the engine has a prototype")
+            })
+            .collect();
+        let origin = engine_row_centre(&plant.engines);
+
+        // Take every tile in the ring search that reaches both engines.
+        // `free_area_near_where` walks tile centres out to
+        // `FREE_TILE_SEARCH_RADIUS`, so this is exactly its candidate set.
+        let radius = crate::method::util::FREE_TILE_SEARCH_RADIUS;
+        let mut blocked = 0;
+        for dy in -radius..=radius {
+            for dx in -radius..=radius {
+                let candidate = Position::new(
+                    (origin.x().floor() as i32 + dx) as f64 + 0.5,
+                    (origin.y().floor() as i32 + dy) as f64 + 0.5,
+                );
+                let reaches_both = areas
+                    .iter()
+                    .all(|area| world.pole_would_supply(POLE, &candidate, area));
+                if reaches_both && world.is_area_free(POLE, &candidate) {
+                    world.create_entity(FactorioEntity {
+                        name: "stone-wall".to_string(),
+                        entity_type: "wall".to_string(),
+                        position: candidate,
+                        ..Default::default()
+                    });
+                    blocked += 1;
+                }
+            }
+        }
+        assert!(
+            blocked > 0,
+            "the fixture blocked nothing, so it tests nothing"
+        );
+
+        // A tile reaching only the first engine is still free -- so a rule
+        // asking about one engine would answer `Some` here.
+        let decoy = a_tile_reaching_only_the_first_engine(&world, &plant);
+        assert!(
+            world.is_area_free(POLE, &decoy),
+            "the decoy tile must be free, or the weakened rule could not take it \
+             either and this test proves nothing"
+        );
+
+        match pole_site(&world, &areas, &origin) {
+            None => {}
+            Some(chosen) => panic!(
+                "pole_site chose {chosen}, which cannot reach both engines: \
+                 every tile that could was taken"
+            ),
+        }
+    }
+
+    #[test]
+    fn a_standing_pole_reaching_only_one_engine_is_not_adopted_for_two() {
+        // The discriminating half. The test above asserts a property of the
+        // pole `fit` chose, and a ring search that starts at the joint between
+        // the engines lands on a tile covering both **by luck** -- so
+        // weakening the predicate to "covers the first engine" leaves it
+        // green. `finish` chooses among poles that already stand, which is
+        // where the predicate decides rather than the geometry.
+        let (s, plant) = plant_for(1000.);
+        assert_eq!(plant.engines.len(), 2);
+
+        // Every part of the two-engine plant except its second engine, plus a
+        // decoy pole that reaches the first engine and not the second.
+        let mut world = s.fork();
+        for part in &plant.parts {
+            if part.name == ENGINE && part.position == plant.engines[1] {
+                continue;
+            }
+            if part.name == POLE {
+                continue;
+            }
+            world.create_entity(entity_for(&world, part));
+        }
+        let decoy = a_tile_reaching_only_the_first_engine(&world, &plant);
+        world.create_entity(FactorioEntity {
+            name: POLE.to_string(),
+            entity_type: "electric-pole".to_string(),
+            position: decoy.clone(),
+            ..Default::default()
+        });
+
+        let finished = complete_plant(&world, &plant.engines[0], 1000.)
+            .expect("the standing pump names a plant to finish");
+        assert_ne!(
+            finished.pole, decoy,
+            "a pole covering one engine of two was adopted for a two-engine plant"
+        );
+        // And the pole it did choose reaches both.
+        let mut all = world.fork();
+        for part in &finished.parts {
+            all.create_entity(entity_for(&all, part));
+        }
+        for engine in &finished.engines {
+            let area = all
+                .collision_area(ENGINE, engine)
+                .expect("the engine has a prototype");
+            assert!(
+                all.pole_would_supply(POLE, &finished.pole, &area),
+                "the chosen pole at {} does not reach the engine at {engine}",
+                finished.pole
+            );
+        }
+    }
+
+    #[test]
+    fn a_two_engine_plant_reads_eighteen_hundred_kilowatts_at_its_own_pole() {
+        // Through `electric_supply_kw`, which is what `Condition::Powered`
+        // asks -- not through a count of engines, which would be this
+        // module's own arithmetic agreeing with itself.
+        let (s, plant) = plant_for(1000.);
+        let built = with_parts(&s, &plant);
+        let area = built
+            .collision_area(POLE, &plant.pole)
+            .expect("the pole has a prototype");
+        assert_eq!(
+            built.electric_supply_kw(&area),
+            ONE_BOILER_KW_LITERAL,
+            "two engines on one pole are 1,800 kW"
+        );
+
+        // And the one-engine plant still reads 900, so the number above is a
+        // consequence of the second engine and not of the fixture.
+        let (s1, one) = plant_for(60.);
+        let built1 = with_parts(&s1, &one);
+        let area1 = built1
+            .collision_area(POLE, &one.pole)
+            .expect("the pole has a prototype");
+        assert_eq!(built1.electric_supply_kw(&area1), ENGINE_KW_LITERAL);
+    }
+
+    #[test]
+    fn the_coal_bill_follows_the_engine_row() {
+        let (_, one) = plant_for(60.);
+        let (_, two) = plant_for(1000.);
+        let coal = |plant: &Plant| {
+            bill(plant)
+                .into_iter()
+                .find(|(name, _)| *name == "coal")
+                .expect("a plant bills coal")
+                .1
+        };
+        assert_eq!(coal(&one), 5, "one engine, five coal");
+        assert_eq!(coal(&two), 10, "two engines drink twice the steam");
+        // And the engine line of the bill is the row itself.
+        let engines = |plant: &Plant| {
+            bill(plant)
+                .into_iter()
+                .find(|(name, _)| *name == ENGINE)
+                .expect("a plant bills engines")
+                .1
+        };
+        assert_eq!(engines(&one), 1);
+        assert_eq!(engines(&two), 2);
+        // The pipe count does not move: engines chain off each other.
+        let pipes = |plant: &Plant| {
+            bill(plant)
+                .into_iter()
+                .find(|(name, _)| *name == PIPE)
+                .expect("a plant bills pipes")
+                .1
+        };
+        assert_eq!(pipes(&one), 3);
+        assert_eq!(pipes(&two), 3);
+    }
+
+    #[test]
+    fn the_tier_that_builds_refuses_a_demand_no_plant_carries() {
+        // The defect roadmap item 3 names: `supply_for`'s fourth tier used to
+        // ignore `kw` entirely and hand back a 900 kW plant for any demand.
+        let s = state();
+        let err = supply_for(&s, &Position::new(0., 0.), 64., 5000.)
+            .expect_err("5,000 kW is more than one boiler drives");
+        assert!(
+            matches!(err, PlannerError::PowerPlantTooSmall { .. }),
+            "expected PowerPlantTooSmall, got {err:?}"
+        );
+        // Named, not silent: the message carries both numbers.
+        let text = err.to_string();
+        assert!(
+            text.contains("5000") && text.contains("1800"),
+            "the refusal must name what was asked and what is available: {text}"
+        );
+    }
+
+    #[test]
+    fn a_demand_one_plant_carries_is_still_built_rather_than_refused() {
+        // The other side of the refusal, so the test above cannot pass by the
+        // function refusing everything.
+        let s = state();
+        match supply_for(&s, &Position::new(0., 0.), 64., 1500.) {
+            Ok(Supply::Build(plant)) => assert_eq!(plant.engines.len(), 2),
+            other => panic!("expected a two-engine plant to build, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_same_demand_sites_the_same_plant_twice() {
+        // Determinism, over the sized path: a centroid, a filter and a fold
+        // are all new here, and the crate's contract is that identical inputs
+        // give identical plans.
+        let (_, a) = plant_for(1000.);
+        let (_, b) = plant_for(1000.);
+        assert_eq!(a.parts, b.parts);
+        assert_eq!(a.pole, b.pole);
+        assert_eq!(a.engines, b.engines);
     }
 }

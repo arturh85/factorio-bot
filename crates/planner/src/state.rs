@@ -3866,6 +3866,26 @@ impl PlanState {
         consumer_kw(name)
     }
 
+    /// What one generator of `name` contributes, in kW, as
+    /// [`electric_supply_kw`](Self::electric_supply_kw) credits it.
+    ///
+    /// The [`generation_kw`] half of the pair
+    /// [`consumer_draw_kw`](Self::consumer_draw_kw) exposes, and exposed for
+    /// the same reason: a method that *sizes* generation against a demand has
+    /// to size it in the units the supply ledger will credit. `power.rs`
+    /// hardcoding a steam engine's 900 kW to decide how many engines a plant
+    /// needs would be a second copy of this table, and a plant sized against
+    /// the wrong copy passes its own arithmetic and browns out the network —
+    /// the same failure `consumer_draw_kw` exists to prevent, with the halves
+    /// swapped.
+    ///
+    /// `None` for a name the table does not carry. Unlike `consumer_kw`, that
+    /// is the **safe** direction: an unknown generator makes nothing, so a
+    /// caller sizing against it refuses rather than promising.
+    pub fn generator_output_kw(&self, name: &str) -> Option<f64> {
+        generation_kw(name)
+    }
+
     /// How much draw, in kW, is already committed on the network that reaches
     /// `area` — the *other* half of the question
     /// [`electric_supply_kw`](Self::electric_supply_kw) answers.

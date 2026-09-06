@@ -2,7 +2,7 @@
 //! handle into the interpreter or the running game.
 //!
 //! Every constructor (`goal.have`, `goal.researched`, `goal.producing`,
-//! `goal.built`, `goal.all`) validates
+//! `goal.sustain`, `goal.built`, `goal.all`) validates
 //! eagerly, so a mistake raises on the line that made it. [`goal_from_lua`]
 //! validates again on the way back to a planner `Goal`, because a Lua table
 //! is open: nothing stops a script from hand-building one that skips what a
@@ -86,6 +86,32 @@ pub(crate) fn install_goal_constructors(lua: &Lua, table: &LuaTable) -> LuaResul
             t.set_metatable(Some(mt.clone()))?;
             Ok(t)
         })?,
+    )?;
+
+    let mt = metatable.clone();
+    table.set(
+        "sustain",
+        lua.create_function(
+            move |lua, (item, per_minute, window_ticks): (LuaValue, LuaValue, LuaValue)| {
+                let item = require_item(item)?;
+                let per_minute = require_count(per_minute)?;
+                // **Required, with no default.** The same refusal as
+                // `supervisor.witness`'s `within_ticks`: the window is the
+                // number that decides what a failure means, and a library that
+                // guessed it would hand back a verdict nobody derived. A
+                // missing third argument raises here, on the line that made
+                // the goal, rather than at `goal.plan` -- `require_count`'s
+                // own message names the argument.
+                let window_ticks = require_count(window_ticks)?;
+                let t = lua.create_table()?;
+                t.set("kind", "sustain")?;
+                t.set("item", item)?;
+                t.set("per_minute", per_minute)?;
+                t.set("window_ticks", window_ticks)?;
+                t.set_metatable(Some(mt.clone()))?;
+                Ok(t)
+            },
+        )?,
     )?;
 
     let mt = metatable.clone();
@@ -194,6 +220,15 @@ pub(crate) fn goal_from_lua(value: &LuaTable) -> LuaResult<Goal> {
             item: require_item(value.get("item")?)?,
             per_minute: require_count(value.get("per_minute")?)?,
         }),
+        // A hand-built table with no `window_ticks` is refused here exactly as
+        // the constructor refuses a missing third argument: a standing goal
+        // with no window is `Goal::Producing`, which is capacity and not
+        // output, and guessing one would be answering a question nobody asked.
+        "sustain" => Ok(Goal::Sustain {
+            item: require_item(value.get("item")?)?,
+            per_minute: require_count(value.get("per_minute")?)?,
+            window_ticks: require_count(value.get("window_ticks")?)?,
+        }),
         "built" => Ok(Goal::Built {
             blueprint: require_blueprint(value.get("blueprint")?)?,
             site: site_from_table(value)?,
@@ -237,6 +272,14 @@ fn render_goal(t: &LuaTable) -> LuaResult<String> {
             require_count(t.get("per_minute")?)?,
             require_item(t.get("item")?)?
         )),
+        // Rendered exactly as `Goal::Display` renders it, unlike the two arms
+        // above -- see `sustain_render_goal_agrees_with_the_planner_goals_own_display`.
+        "sustain" => Ok(format!(
+            "sustain {} {}/min over {} ticks",
+            require_count(t.get("per_minute")?)?,
+            require_item(t.get("item")?)?,
+            require_count(t.get("window_ticks")?)?
+        )),
         "built" => {
             let blueprint = require_blueprint(t.get("blueprint")?)?;
             let where_ = match site_from_table(t)? {
@@ -277,10 +320,18 @@ fn require_kind(t: &LuaTable) -> LuaResult<String> {
     }
 }
 
-/// The five kinds a goal table may name. Fixed by this module -- no world is
+/// The kinds a goal table may name. Fixed by this module -- no world is
 /// consulted to decide whether a `kind` is one of them, which is why an
 /// unknown one is a shape error rather than a semantic one.
-const KINDS: &[&str] = &["have", "researched", "producing", "built", "all"];
+///
+/// **`charted` is missing from this list and that is a pre-existing defect**,
+/// found while adding `sustain` and left alone rather than fixed quietly:
+/// `goal.charted` is a constructor, `goal_from_lua` and `render_goal` both
+/// have an arm for it, and only `goal.all` consults `KINDS` -- so a charted
+/// goal works everywhere except inside a bundle, where it is rejected as an
+/// unknown kind. Fixing it is a one-word change that belongs to whoever owns
+/// exploration, with a test of its own.
+const KINDS: &[&str] = &["have", "researched", "producing", "sustain", "built", "all"];
 
 /// [`require_kind`], plus the check that it names a kind that exists.
 fn require_known_kind(t: &LuaTable) -> LuaResult<String> {
@@ -785,6 +836,96 @@ mod tests {
                 "{src}: render_goal and Goal::Display disagree"
             );
         }
+    }
+
+    /// The standing goal's Lua shape, and the window it refuses to guess.
+    #[test]
+    fn sustain_builds_an_inspectable_table_and_names_its_window() {
+        let lua = lua_with_goal();
+        lua.load(
+            r#"
+            local g = goal.sustain("iron-plate", 15, 7200)
+            assert(g.kind == "sustain", "kind")
+            assert(g.item == "iron-plate", "item")
+            assert(g.per_minute == 15, "per_minute")
+            assert(g.window_ticks == 7200, "window_ticks, in ticks")
+            assert(tostring(g) == "sustain 15 iron-plate/min over 7200 ticks", tostring(g))
+        "#,
+        )
+        .exec()
+        .expect("script");
+    }
+
+    /// No default window, on either side of the boundary.
+    ///
+    /// `supervisor.witness`'s `within_ticks` refuses one for the same reason:
+    /// the window decides what a failure means. A constructor that filled one
+    /// in would hand back a verdict nobody derived.
+    #[test]
+    fn sustain_refuses_a_goal_with_no_window() {
+        let lua = lua_with_goal();
+        assert!(
+            lua.load(r#"goal.sustain("iron-plate", 15)"#)
+                .exec()
+                .is_err(),
+            "a window is required at construction"
+        );
+        let t: LuaTable = lua
+            .load(r#"return { kind = "sustain", item = "iron-plate", per_minute = 15 }"#)
+            .eval()
+            .expect("table");
+        assert!(
+            goal_from_lua(&t).is_err(),
+            "and again on the way back, because a Lua table is open"
+        );
+    }
+
+    #[test]
+    fn sustain_converts_to_the_planner_goal() {
+        let lua = lua_with_goal();
+        let g: LuaTable = lua
+            .load(r#"return goal.sustain("iron-plate", 15, 7200)"#)
+            .eval()
+            .expect("script");
+        assert_eq!(
+            goal_from_lua(&g).expect("converts"),
+            Goal::Sustain {
+                item: "iron-plate".into(),
+                per_minute: 15,
+                window_ticks: 7200,
+            }
+        );
+    }
+
+    /// `render_goal` is a second, hand-maintained copy of `Goal::Display`, and
+    /// the two have already drifted for `have` and `producing`. This arm is
+    /// written to agree and is pinned so, so a diagnostic a script prints and
+    /// one the planner prints name the same goal.
+    #[test]
+    fn sustain_render_goal_agrees_with_the_planner_goals_own_display() {
+        let lua = lua_with_goal();
+        let t: LuaTable = lua
+            .load(r#"return goal.sustain("iron-plate", 15, 7200)"#)
+            .eval()
+            .expect("script");
+        assert_eq!(
+            render_goal(&t).expect("render_goal"),
+            goal_from_lua(&t).expect("goal_from_lua").to_string()
+        );
+    }
+
+    /// And it is in `KINDS`, so it may sit inside a bundle.
+    #[test]
+    fn a_sustain_goal_may_sit_inside_goal_all() {
+        let lua = lua_with_goal();
+        lua.load(
+            r#"
+            local g = goal.all { goal.sustain("iron-plate", 15, 7200) }
+            assert(#g.goals == 1, "one sub-goal")
+        "#,
+        )
+        .exec()
+        .expect("script");
     }
 
     #[test]

@@ -88,14 +88,25 @@ class SustainedRateTest(unittest.TestCase):
     def test_machines_made_the_rate_and_nobody_fed_them(self):
         """The only shape that may be called sustained.
 
-        15/min over 7,200 ticks is 30 plates; the furnace counts 75. No feeding
-        verb was dispatched inside the window or inside the lead-in before it,
-        so nothing a bot carried can explain the output.
+        15/min over 7,200 ticks is 30 plates; the furnace counts 120. No
+        feeding verb was dispatched inside the window or inside the lead-in
+        before it, so nothing a bot carried can explain the output.
+
+        **This number read 75 when the file was written as a specification,
+        and 75 is arithmetically impossible for this fixture.** The window is
+        7,200 ticks on a 300-tick beat -- 24 beats -- and the furnace counts
+        ``rate_per_beat`` each: 24 x 5 = 120. The sibling test below fixes the
+        same arithmetic at ``rate_per_beat=1`` and expects 24, which is the
+        same 24 beats, so the two expectations contradicted each other and
+        only one of them could be right. Corrected here rather than
+        accommodated in ``sustained_rate``, and called out in the
+        implementing session's report: a fixture is a statement about the
+        world, and this one was wrong about it.
         """
         r = sustained(counted_run(rate_per_beat=5))
         self.assertEqual(r["verdict"], "sustained")
         self.assertEqual(r["required"], 30)
-        self.assertEqual(r["machine_made"], 75)
+        self.assertEqual(r["machine_made"], 120)
         self.assertEqual(r["feeding_in_window"], 0)
         self.assertEqual(r["feeding_in_lead_in"], 0)
         self.assertEqual(r["source"], "counters")

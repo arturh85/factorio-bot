@@ -177,6 +177,17 @@ pub(crate) fn parse_goal(spec: &str) -> Result<Goal> {
       item: (*item).to_owned(),
       per_minute: count(n)?,
     }),
+    // `sustain:<item>:<rate>:<window-ticks>`. The window is a positional part
+    // and not an optional suffix: it has no default here for the same reason
+    // it has none in Lua or in `sustained_rate` -- the window is what decides
+    // what a failure means, and a shorthand that guessed one would hand back a
+    // verdict nobody derived. Ticks, because they are the only clock the
+    // record, the planner and the mod share.
+    ["sustain", item, n, window] if !item.is_empty() => Ok(Goal::Sustain {
+      item: (*item).to_owned(),
+      per_minute: count(n)?,
+      window_ticks: count(window)?,
+    }),
     // `charted:<x>:<y>:<radius>`. The one shorthand whose arguments are
     // coordinates rather than an item name, and it takes all three because
     // there is no sane default for *where*: spawn is only the right centre
@@ -189,6 +200,7 @@ pub(crate) fn parse_goal(spec: &str) -> Result<Goal> {
     _ => Err(miette!(
       "`{spec}` is not a goal. Expected have:<item>:<count>, \
        produced:<item>:<count>, producing:<item>:<per-minute>, \
+       sustain:<item>:<per-minute>:<window-ticks>, \
        charted:<x>:<y>:<radius> or researched:<technology> -- or --goal-json \
        for anything else."
     )),
@@ -454,6 +466,27 @@ mod tests {
         per_minute: 30
       }
     );
+    assert_eq!(
+      parse_goal("sustain:iron-plate:15:7200").unwrap(),
+      Goal::Sustain {
+        item: "iron-plate".into(),
+        per_minute: 15,
+        window_ticks: 7200
+      }
+    );
+  }
+
+  /// The window is not optional, and a `sustain` missing it is not silently
+  /// read as a `producing`.
+  #[test]
+  fn a_sustain_goal_without_a_window_is_refused() {
+    let err = parse_goal("sustain:iron-plate:15").unwrap_err().to_string();
+    assert!(
+      err.contains("sustain:<item>:<per-minute>:<window-ticks>"),
+      "the refusal names the shape it wanted: {err}"
+    );
+    assert!(parse_goal("sustain:iron-plate:15:forever").is_err());
+    assert!(parse_goal("sustain::15:7200").is_err(), "an item is required");
   }
 
   /// A misspelled goal is refused, not guessed at.

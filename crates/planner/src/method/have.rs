@@ -239,6 +239,29 @@ pub fn holds(goal: &Goal, state: &PlanState) -> Option<bool> {
             crate::method::produce::holds_producing(state, item, *per_minute)
                 || crate::method::assemble::holds_assembling(state, item, *per_minute),
         ),
+        // **The semantic decision of the standing-goal design.**
+        //
+        // `Some(true)` would be the lie the whole goal kind exists to stop: a
+        // structurally satisfied cell has been shown, live, to produce nothing
+        // at all -- an empty fuel slot, a backed-up output, a patch mined out
+        // -- and `AlreadySatisfied` is registered ahead of every other method,
+        // so a `Some(true)` here means an empty plan and a goal that claims
+        // itself. `Some(false)` would be its own lie: it asserts the goal is
+        // *unmet*, which nothing in `PlanState` can know either.
+        //
+        // `None` already means precisely the right thing in this crate: this
+        // goal names something no reading of the world settles. For
+        // `Produced` the unsettleable thing is an event; for `Sustain` it is a
+        // **window of history**, which a pure planner with no clock and no I/O
+        // is constitutionally unable to observe.
+        //
+        // Two consequences, both load-bearing and both pinned by
+        // `crates/planner/tests/standing_goals.rs`: nothing can report a
+        // sustain goal already satisfied, so every expansion -- including
+        // every replan -- must yield a plan or a named refusal and never an
+        // empty network; and therefore `method::sustain::Sustain` has to be
+        // idempotent against a world that already has the arrangement.
+        Goal::Sustain { .. } => None,
         // The model has no notion of "a machine is extracting from this
         // well": nothing in the overlay records an extractor standing on a
         // patch, and nothing observes output. Unanswerable, not unmet.
@@ -5030,6 +5053,12 @@ pub fn default_registry() -> MethodRegistry {
         .with(Box::new(crate::method::assemble::BuildAssemblyCell {
             bots: Vec::new(),
         }))
+        // Claims `Goal::Sustain`, which nothing else claims. It emits the
+        // capacity half as a `Goal::Producing` subgoal, so it has to sit
+        // wherever the two cell methods can still be reached -- registration
+        // order decides who claims a goal, not who claims a subgoal, so
+        // anywhere is correct and beside them is where it reads.
+        .with(Box::new(crate::method::sustain::Sustain))
         .with(Box::new(crate::method::blueprint::BuildBlock))
 }
 
@@ -6485,6 +6514,11 @@ pub fn registry_for(bots: &[BotId]) -> MethodRegistry {
         .with(Box::new(crate::method::assemble::BuildAssemblyCell {
             bots: bots.to_vec(),
         }))
+        // Claims `Goal::Sustain`, which nothing else claims. See
+        // `method::sustain`: it plans the capacity half and refuses the supply
+        // half by name, and it is never `already-satisfied`, because
+        // `holds` answers `None` for a standing rate.
+        .with(Box::new(crate::method::sustain::Sustain))
         // Claims `Goal::Built`, which nothing else claims. Mirrors
         // `default_registry`'s placement (last) -- but `default_registry`
         // itself is dead code outside `produce.rs`'s tests, so this is the

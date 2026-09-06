@@ -159,6 +159,56 @@ pub enum Goal {
         item: ItemId,
         per_minute: u32,
     },
+    /// `item` comes out of **machines** at `per_minute` or better, for
+    /// `window_ticks` continuously, with nothing a bot carried able to explain
+    /// it.
+    ///
+    /// The fifth kind, and the first one in this vocabulary that means *keep
+    /// this true*. Design note:
+    /// `docs/superpowers/notes/2026-09-06-standing-goals.md`.
+    ///
+    /// # Why it is not [`Goal::Producing`] with a window bolted on
+    ///
+    /// `Producing` is satisfied **structurally** — enough machines stand on
+    /// the right ore, delivering into one another — and its own doc admits
+    /// what that cannot see: a drill whose fuel ran out, a furnace whose
+    /// output backed up, a patch mined out from under a drill. It is a claim
+    /// about *capacity*, and capacity has never been the thing that failed in
+    /// a measured run here. Supply is: every run's rate table reads
+    /// `roster-fed`, and every plateau classifies as *input ran out*. Adding a
+    /// window to `Producing` would make one goal answer `Some(true)`
+    /// structurally *and* be measured over a window, which is exactly the
+    /// ambiguity the plateau came from.
+    ///
+    /// # This goal is a contract between two halves, and neither half is it
+    ///
+    /// The planner owes a **structure with no bot in the loop**: every input
+    /// of every counted machine has a standing deliverer, checkable at plan
+    /// time and refusable by name. The record owes a **measurement over a
+    /// window**: machine counters (`produced` / `produced_source`, not
+    /// `force.production.made`, which cannot tell a hand craft from a machine)
+    /// plus an idle roster, over the trailing `window_ticks` and a stated
+    /// lead-in before it. `tools/run_analysis.py`'s `sustained_rate` is that
+    /// half.
+    ///
+    /// A structure with no observation is `Producing`, which has been shown
+    /// standing and dead. An observation with no structural requirement is the
+    /// green witness, which has already passed on a hand-charged cell.
+    ///
+    /// # `window_ticks` has no default
+    ///
+    /// The same refusal as `supervisor.witness`'s `within_ticks`: the window
+    /// is the number that decides what a failure means, and a library that
+    /// guessed it would hand back a verdict nobody derived. Ticks, because
+    /// they are the only clock the record, the planner and the mod share.
+    ///
+    /// See [`crate::method::have::holds`] for why this answers `None`.
+    Sustain {
+        item: ItemId,
+        per_minute: u32,
+        /// The trailing window the rate must hold over, in game ticks.
+        window_ticks: crate::ids::Ticks,
+    },
     /// Cause something to be *extracted* from `entity` -- a resource a hand
     /// cannot work -- by a machine standing on it: a pumpjack on a crude-oil
     /// well, a drill on uranium ore with acid piped in.
@@ -247,6 +297,15 @@ impl std::fmt::Display for Goal {
             Goal::Producing { item, per_minute } => {
                 write!(f, "produce {} {}/min", per_minute, item)
             }
+            Goal::Sustain {
+                item,
+                per_minute,
+                window_ticks,
+            } => write!(
+                f,
+                "sustain {} {}/min over {} ticks",
+                per_minute, item, window_ticks
+            ),
             Goal::Extracted { entity, unlocks } => match unlocks {
                 Some(tech) => write!(f, "extract from {} to unlock {}", entity, tech),
                 None => write!(f, "extract from {}", entity),

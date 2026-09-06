@@ -341,6 +341,90 @@ function supervisor.is_witness(milestone)
     return type(milestone) == "table" and milestone.__witness == true
 end
 
+--- Build a **sustain** milestone: the rung a `Goal::Sustain` is measured over.
+--
+--     supervisor.sustain {
+--         item = "iron-plate", per_minute = 15,
+--         window_ticks = 7200, lead_in_ticks = 9600,
+--     }
+--
+-- Like `supervisor.witness` it dispatches nothing, and unlike it **it does not
+-- reach a verdict about the rate**. It cannot, and saying why is the point:
+--
+--   * The measurement a standing goal needs is over **per-machine lifetime
+--     counters** (`produced` / `produced_source`), and those ride on the mod's
+--     sampling stream into `samples.jsonl`. They are **not** on the entities
+--     `rcon.find_entities_in_radius` hands back -- `FactorioEntity` carries
+--     `output_inventory` and `fuel_inventory` and no counter at all -- so a
+--     script in the game cannot read them. `tools/run_analysis.py`'s
+--     `sustained_rate` reads them from the record afterwards.
+--   * An output-inventory count, which is what the witness uses, conflates
+--     *made* with *moved* and cannot tell a machine finishing a queue from one
+--     being resupplied. That is exactly the confusion a standing goal exists
+--     to end, so this rung must not inherit it.
+--
+-- What it therefore does is establish the **conditions** the measurement needs
+-- and nothing more: it holds the roster idle for `lead_in_ticks +
+-- window_ticks`, so that the record's trailing window and the lead-in before
+-- it contain no feeding dispatch this run could have made. Without the lead-in
+-- the window proves nothing: a stone furnace's input slot holds one stack of
+-- 50 ore at 3.2 s a plate -- 9,600 ticks of hand-fed running -- so every bot
+-- can be idle for a 90-second window and every item in it can come from a
+-- charge made before it began.
+--
+-- Neither duration has a default, for `within_ticks`' reason: they decide what
+-- a failure means. `lead_in_ticks` in particular **cannot** be derived from
+-- the record at all -- the mod does not report input slots -- so it is stated
+-- by the caller from the machines' input capacity and consumption rate.
+--
+-- It closes `satisfied` when the clock really advanced the whole span, and
+-- `stuck` (`supervisor::sustain_inconclusive`) when it did not. **`satisfied`
+-- here means "the window happened", never "the rate held"**, and the
+-- observation it carries says so in `verdict = "deferred"` along with the
+-- exact command that answers it. A record that answered a question nobody
+-- asked would be the confidently-wrong-object failure this project has already
+-- paid for twice.
+function supervisor.sustain(spec)
+    if type(spec) ~= "table" then
+        error("supervisor.sustain: expected a table of options")
+    end
+    if type(spec.item) ~= "string" or spec.item == "" then
+        error("supervisor.sustain: `item` must be a string naming an item")
+    end
+    local function positive_integer(key, default)
+        local v = spec[key]
+        if v == nil then
+            if default == nil then
+                error("supervisor.sustain: `" .. key .. "` is required and has no default")
+            end
+            return default
+        end
+        if type(v) ~= "number" or v <= 0 or v ~= math.floor(v) then
+            error("supervisor.sustain: `" .. key .. "` must be a positive integer")
+        end
+        return v
+    end
+    local window_ticks = positive_integer("window_ticks")
+    local lead_in_ticks = positive_integer("lead_in_ticks")
+    return {
+        __sustain = true,
+        item = spec.item,
+        per_minute = positive_integer("per_minute"),
+        window_ticks = window_ticks,
+        lead_in_ticks = lead_in_ticks,
+        probe_ticks = positive_integer("probe_ticks", 60),
+        -- Same cap and same reason as the witness's: a game whose clock is not
+        -- advancing must end the loop with a verdict of its own rather than
+        -- spinning, and hitting it is `inconclusive`, never a failed rate.
+        max_polls = positive_integer("max_polls", window_ticks + lead_in_ticks + 600),
+    }
+end
+
+--- Is this milestone a sustain window rather than a goal or a witness?
+function supervisor.is_sustain(milestone)
+    return type(milestone) == "table" and milestone.__sustain == true
+end
+
 local Sup = {}
 Sup.__index = Sup
 
@@ -783,6 +867,89 @@ function Sup:_witness(w)
         observation(before, after, now - t0, polls, #watched, missing))
 end
 
+--- Hold the roster idle for a lead-in plus a window, and close.
+--
+-- See `supervisor.sustain` for why this reaches no verdict about the rate. It
+-- has exactly two outcomes and neither of them is one:
+--
+--   * `satisfied` -- the game's clock advanced `lead_in_ticks + window_ticks`
+--     with nothing dispatched. The window happened; what came out of the
+--     machines during it is on the record, and `tools/run_analysis.py
+--     --sustain <item>:<rate>:<window>:<lead-in>` is what answers it.
+--   * `supervisor::sustain_inconclusive` -- the poll budget ran out before the
+--     span did, so the wait did not happen and nothing follows from it. The
+--     same refusal as `supervisor::witness_inconclusive` and for the same
+--     reason: a wait that did not happen is not a rate that did not hold.
+function Sup:_sustain(w)
+    local span = w.lead_in_ticks + w.window_ticks
+    local function observation(elapsed, polls, terminal)
+        return {
+            item = w.item, per_minute = w.per_minute,
+            window_ticks = w.window_ticks, lead_in_ticks = w.lead_in_ticks,
+            elapsed_ticks = elapsed, span_ticks = span, polls = polls,
+            from_tick = terminal and (terminal - elapsed) or nil,
+            at_tick = terminal,
+            -- Said out loud, on the record, because the field a reader will
+            -- assume this rung answers is the one it cannot.
+            verdict = "deferred",
+            answered_by = string.format(
+                "tools/run_analysis.py --sustain %s:%d:%d:%d <run-dir>",
+                w.item, w.per_minute, w.window_ticks, w.lead_in_ticks),
+        }
+    end
+    local function halt(code, message, obs)
+        self.refusal = { code = code, message = message }
+        self:_close("stuck")
+        self.state = "stuck"
+        return { action = "halted", state = "stuck", milestone_index = self.index,
+                 steps = 0, iteration = 0, refusal = self.refusal, sustain = obs }
+    end
+
+    -- A fault, not a verdict, exactly as the witness treats it: without a game
+    -- the run was built wrong and nothing about the world is established.
+    if type(rcon) ~= "table" or type(rcon.game_tick) ~= "function" then
+        error("supervisor: milestone " .. tostring(self.index) .. " is a sustain "
+            .. "window, but there is no game to wait in: `rcon` is missing "
+            .. "`game_tick`", 0)
+    end
+
+    local t0 = rcon.game_tick()
+    if type(t0) ~= "number" then
+        return halt("supervisor::sustain_inconclusive", string.format(
+            "milestone %d opens a %d-tick window for %s, but the game would not "
+            .. "say what tick it is, so the wait cannot be timed and nothing "
+            .. "follows from it", self.index, span, w.item),
+            observation(0, 0, nil))
+    end
+    local now, polls = t0, 0
+    while true do
+        polls = polls + 1
+        if polls > w.max_polls then
+            return halt("supervisor::sustain_inconclusive", string.format(
+                "milestone %d gave up after %d polls with only %d of %d ticks "
+                .. "elapsed: the game's clock is not advancing (paused, saving "
+                .. "or gone). No verdict about %s follows from a window that "
+                .. "did not happen",
+                self.index, polls - 1, now - t0, span, w.item),
+                observation(now - t0, polls - 1, now))
+        end
+        local ok, tick = pcall(rcon.game_tick)
+        if ok and type(tick) == "number" then now = tick end
+        if now - t0 >= span then break end
+    end
+
+    self:_close("satisfied")
+    self.state = "acquiring"
+    return { action = "satisfied", state = "acquiring", milestone_index = self.index,
+             steps = 0, iteration = 0,
+             -- `already_satisfied` for the witness's reason: `SatisfiedReason`
+             -- has two variants, both mirrored across the OpenAPI seam, and
+             -- this is the one that is not a lie -- nothing was planned and
+             -- nothing was asked to act.
+             reason = "already_satisfied",
+             sustain = observation(now - t0, polls, now) }
+end
+
 -- ---------------------------------------------------------------------------
 -- Recovery: continuing a plan instead of throwing it away
 -- ---------------------------------------------------------------------------
@@ -1037,6 +1204,12 @@ function Sup:step()
         -- different plans from one without.
         if supervisor.is_witness(self.milestone) then
             return self:_witness(self.milestone)
+        end
+        -- Same reasoning, one rung along: a sustain window dispatches nothing
+        -- and must not cost the planner an expansion either, or the run whose
+        -- window it opens would not be the run the plan described.
+        if supervisor.is_sustain(self.milestone) then
+            return self:_sustain(self.milestone)
         end
 
         -- Who is there to plan for, asked NOW rather than remembered from

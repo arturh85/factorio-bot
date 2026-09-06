@@ -355,6 +355,14 @@ impl std::error::Error for PlanRefusal {}
 ///   wants a research the script can plan first, and the planner's own
 ///   modelling ends there. `UnsupportedResearchTrigger` is their sibling and
 ///   was a verdict already.
+/// - [`SustainSupplyNotStanding`](PlannerError::SustainSupplyNotStanding) --
+///   the capacity for a standing rate stands and nothing delivers its inputs
+///   without a bot. A verdict about **this planner's modelling**, like
+///   `ExtractionNotModelled`: the goal is meaningful and the world may well
+///   allow it, but `method::connect` has no caller, so no plan can belt coal
+///   into a burner cell. A script acts on it by measuring what it has
+///   (`supervisor.sustain`) rather than by asking for a plan that cannot
+///   exist.
 fn refusal_for(err: &PlannerError) -> Option<PlanRefusal> {
     use miette::Diagnostic;
 
@@ -380,7 +388,8 @@ fn refusal_for(err: &PlannerError) -> Option<PlanRefusal> {
         | PlannerError::ExtractorLocked { .. }
         | PlannerError::ExtractionNotModelled { .. }
         | PlannerError::BlockGroundOccupied { .. }
-        | PlannerError::NoSiteFound { .. } => true,
+        | PlannerError::NoSiteFound { .. }
+        | PlannerError::SustainSupplyNotStanding { .. } => true,
 
         PlannerError::InsufficientItems { .. }
         | PlannerError::UnknownBot(_)
@@ -707,6 +716,58 @@ end
 -- @treturn table a goal value
 -- @raise if the item name is empty, or the rate is not an integer >= 1
 function goal.producing(item_name, per_minute)
+end
+"#,
+        ),
+    )?;
+    map_table.set(
+        "__doc_entry_sustain",
+        String::from(
+            r#"
+--- builds a goal value: an item keeps coming out of machines at a rate
+--
+-- The one goal in this vocabulary that means **keep this true**. Every other
+-- kind is one-shot or structural, which is why every measured run's production
+-- stops at exactly the bill its plan was written for.
+--
+-- Read it as: `item_name` comes out of *machines* at `per_minute` or better,
+-- continuously, for `window_ticks`, with nothing a bot carried able to explain
+-- it.
+--
+-- **`goal.holds` answers `nil` for it, always.** Not `true` and not `false`:
+-- satisfaction of a standing rate is a fact about a *window of history*, and
+-- the planner has no clock and no I/O to read one with. A bundle containing
+-- one is therefore never reported satisfied either.
+--
+-- **The planner only ever builds the arrangement.** Planning this plans the
+-- same capacity `goal.producing` does -- the cells that stand. When that
+-- capacity already stands, planning refuses by name
+-- (`planner::sustain_supply_not_standing`) rather than returning an empty
+-- plan, because the input that has no standing deliverer is a bot's hands: a
+-- burner cell's ore and coal arrive as `insert` actions, and belting them in
+-- needs a primitive nothing calls yet. One coal burns for ~1,600 ticks in a
+-- drill and ~2,666 in a furnace, so such a cell can sustain no window longer
+-- than a single fuel load.
+--
+-- **What decides it is the run's record, not this call.** Pair it with
+-- `supervisor.sustain`, a rung that dispatches nothing for
+-- `lead_in_ticks + window_ticks`, and read the answer with
+-- `tools/run_analysis.py --sustain <item>:<rate>:<window>:<lead-in>`: machine
+-- counters over the trailing window, plus zero feeding-verb dispatches in it
+-- and in the lead-in before it. The lead-in is not optional padding -- a stone
+-- furnace's input slot holds one stack, 9,600 ticks of hand-fed running, so a
+-- window with every bot idle is equally consistent with a factory that was
+-- charged by hand before it opened.
+--
+-- `window_ticks` has **no default**, deliberately: it is the number that
+-- decides what a failure means, and a library that guessed it would hand back
+-- a verdict nobody derived.
+-- @string item_name name of the item, e.g. "iron-plate"
+-- @number per_minute how many a minute are wanted; an integer >= 1
+-- @number window_ticks how long the rate must hold, in game ticks; an integer >= 1
+-- @treturn table a goal value
+-- @raise if the item name is empty, or either number is not an integer >= 1
+function goal.sustain(item_name, per_minute, window_ticks)
 end
 "#,
         ),
@@ -1913,6 +1974,7 @@ mod tests {
         lua.load(
             r#"
             local expected = { have=true, researched=true, producing=true,
+                               sustain=true,
                                built=true, charted=true, all=true, plan=true, run=true,
                                start=true, holds=true, refusal=true }
             local actual = {}

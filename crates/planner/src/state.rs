@@ -15,6 +15,7 @@ use factorio_bot_core::types::{
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// How far two collision boxes may reach into each other before it counts.
 ///
@@ -906,6 +907,29 @@ pub struct PlanState {
     /// and nothing else, and `applicable` and `expand` must answer from the
     /// same policy or a method claims a goal it then refuses.
     drain_policy: DrainPolicy,
+    /// Set the moment a decision taken under [`PlanState::drain_policy`]
+    /// would have come out differently under another policy.
+    ///
+    /// Written by `Drain::new` -- the one place a policy is ever read -- and
+    /// read by [`crate::plan_best`] after a *complete* expansion, where a
+    /// `false` is a proof rather than a guess: expansion is a deterministic
+    /// function of this state, so if every drain decision the whole
+    /// expansion took was policy-free, the next policy's expansion is
+    /// identical action for action and there is nothing to learn by running
+    /// it. That is what buys back the second pass on the goals where the
+    /// policies never disagree, which is most of them.
+    ///
+    /// Shared through `fork`/`clone` on purpose: an expansion forks its state
+    /// constantly (`expand` alone forks twice, once to rehearse), and a probe
+    /// that did not survive a fork would observe nothing. `Arc<AtomicBool>`
+    /// rather than `Cell` only so `PlanState` stays `Send + Sync`; the
+    /// expansion is single-threaded, so the ordering is immaterial and the
+    /// observation is deterministic.
+    ///
+    /// It records *that* a policy mattered, never which plan is better --
+    /// nothing here may decide a plan, or the arbiter would stop being the
+    /// finished schedule.
+    policy_probe: Arc<AtomicBool>,
     bots: BTreeMap<BotId, BotState>,
     /// Bots `from_world` was asked for that `base` has no player for.
     ///
@@ -1735,6 +1759,7 @@ impl PlanState {
             gathering_recorded: BTreeMap::new(),
             gathering_forecast: BTreeMap::new(),
             drain_policy: DrainPolicy::default(),
+            policy_probe: Arc::new(AtomicBool::new(false)),
         };
         state.walled_in = state.find_walled_in();
         state.benched = state.find_benched();
@@ -1887,6 +1912,34 @@ impl PlanState {
     pub fn with_drain_policy(mut self, policy: DrainPolicy) -> PlanState {
         self.drain_policy = policy;
         self
+    }
+
+    /// The same state with a fresh, unset [`PlanState::policy_probe`], so an
+    /// expansion's observation is its own rather than an earlier run's.
+    ///
+    /// Consuming and fresh-allocating for the same reason `with_drain_policy`
+    /// is consuming: the probe belongs to one expansion, and a probe carried
+    /// in from a caller would answer for a run nobody here made.
+    #[must_use]
+    pub fn with_fresh_policy_probe(mut self) -> PlanState {
+        self.policy_probe = Arc::new(AtomicBool::new(false));
+        self
+    }
+
+    /// Record that the decision just taken would have differed under another
+    /// [`DrainPolicy`]. Called by `Drain::new` and nowhere else.
+    pub(crate) fn note_policy_divergence(&self) {
+        self.policy_probe.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether any drain decision taken against this state (or any fork of
+    /// it, since the probe is shared) depended on the drain policy.
+    ///
+    /// **Only meaningful after a complete expansion.** A `false` read
+    /// part-way through says the policy has not mattered *yet*, which proves
+    /// nothing about the rest -- see the field's doc.
+    pub fn drain_policy_mattered(&self) -> bool {
+        self.policy_probe.load(Ordering::Relaxed)
     }
 
     pub fn base(&self) -> &Arc<FactorioWorld> {

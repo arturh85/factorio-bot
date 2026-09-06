@@ -69,9 +69,36 @@ pub use state::{BotState, Buffer, PlanState};
 /// over eight bots with `bot 2 has 27 iron-plate, needs 36` while the
 /// conservative plan for the same goal expands and schedules.
 ///
-/// The cost is one extra expansion and schedule per plan. That is wall-clock
-/// time with the game's clock stopped (`Planner::plan_pause`), not game time,
-/// and it buys a number the planner could not otherwise see.
+/// # The second pass is only paid when the policy actually decides something
+///
+/// The cost is one extra expansion and schedule *per policy that can differ*,
+/// and on most goals none can. `DrainPolicy` is read in exactly one place --
+/// `Drain::bound_from` -- and the two policies part only when a backlog
+/// falls between one cell-build and one per standing cell, which needs two
+/// cells standing at once and a backlog in that window. A goal that never
+/// stands a second cell (`researched:automation`,
+/// `producing:automation-science-pack:6`) and a goal that never smelts at all
+/// (a `Goal::Built` block) expand identically under both, and the old code
+/// paid full price to rediscover that.
+///
+/// So the expansion records whether any drain decision it took depended on
+/// the policy ([`PlanState::drain_policy_mattered`]), and a completed
+/// expansion that says no ends the search. That is a **proof, not a
+/// heuristic**: expansion is a deterministic function of the state, the
+/// policy is read nowhere else, and `schedule` does not read it at all, so
+/// an expansion in which no drain decision turned on the policy is the
+/// expansion every other policy would have produced, action for action.
+/// Hence the chosen plan is byte-identical to what this returned before --
+/// the saving is entirely in passes whose answer was already known.
+///
+/// A failed expansion proves nothing and ends nothing: the flag would then
+/// describe the fragment of a plan that was built before the refusal, so a
+/// policy that fails is skipped exactly as before and the next one is built
+/// in full.
+///
+/// What remains is wall-clock time with the game's clock stopped
+/// (`Planner::plan_pause`), not game time, and it buys a number the planner
+/// could not otherwise see.
 pub fn plan_best(
     goals: &[Goal],
     state: &PlanState,
@@ -81,12 +108,25 @@ pub fn plan_best(
 ) -> Result<(ActionNetwork, Schedule), PlannerError> {
     let mut best: Option<(ActionNetwork, Schedule)> = None;
     let mut first_error: Option<PlannerError> = None;
-    for policy in [DrainPolicy::Conservative, DrainPolicy::Parallel] {
-        let under = state.clone().with_drain_policy(policy);
-        let attempt = expand(goals, &under, registry, chain_actor)
-            .and_then(|net| schedule(&net, &under, roster).map(|plan| (net, plan)));
-        match attempt {
-            Ok((net, plan)) => {
+    for policy in DrainPolicy::ALL {
+        let under = state
+            .clone()
+            .with_drain_policy(policy)
+            .with_fresh_policy_probe();
+        let net = match expand(goals, &under, registry, chain_actor) {
+            Ok(net) => net,
+            Err(err) => {
+                first_error.get_or_insert(err);
+                continue;
+            }
+        };
+        // Read before scheduling and only off a *complete* expansion: this
+        // says every remaining policy expands to the network just built, so
+        // whatever the schedule then makes of it, there is nothing left to
+        // compare against. See this function's doc for why that is a proof.
+        let settled = !under.drain_policy_mattered();
+        match schedule(&net, &under, roster) {
+            Ok(plan) => {
                 if best
                     .as_ref()
                     .is_none_or(|(_, best)| plan.makespan < best.makespan)
@@ -95,10 +135,11 @@ pub fn plan_best(
                 }
             }
             Err(err) => {
-                if first_error.is_none() {
-                    first_error = Some(err);
-                }
+                first_error.get_or_insert(err);
             }
+        }
+        if settled {
+            break;
         }
     }
     match (best, first_error) {

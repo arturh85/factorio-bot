@@ -1791,6 +1791,19 @@ pub enum DrainPolicy {
     Parallel,
 }
 
+impl DrainPolicy {
+    /// Every policy, in the order [`crate::plan_best`] tries them: the
+    /// default first, so a tie keeps the behaviour every plan had before
+    /// policies existed.
+    ///
+    /// One list, read by `plan_best` (which policies to build) and by
+    /// `Drain::new` (which policies to compare against). Two lists would
+    /// let a new variant be planned and never probed, or probed and never
+    /// planned, and the second of those silently costs an expansion while
+    /// the first silently changes a plan.
+    pub const ALL: [DrainPolicy; 2] = [DrainPolicy::Conservative, DrainPolicy::Parallel];
+}
+
 /// What the plan's live cells can do for a fragment.
 ///
 /// # The count lever, and what a fragment is allowed to see
@@ -1801,7 +1814,7 @@ pub enum DrainPolicy {
 /// plates arrive four and six at a time -- so *count* cannot be decided here
 /// from demand. What a fragment can see is each live cell's **backlog**, and
 /// that decides one thing: a cell with more queued than a cell takes to
-/// stand ([`bound`](Self::bound)) is a cell this fragment would wait on
+/// stand ([`bound_from`](Self::bound_from)) is a cell this fragment would wait on
 /// longer than a hand would take, so it is not offered, and the fragment
 /// goes by hand unless it pays for a cell of its own.
 ///
@@ -1853,10 +1866,27 @@ struct Drain {
 impl Drain {
     fn new(state: &PlanState, spec: &CellSpec) -> Self {
         let live = cell_ledger(state, spec);
-        let bound = Self::bound(state, spec, live.len());
+        let fixed = cell_setup_bot_ticks(state, spec, 1);
+        let bound = Self::bound_from(fixed, state.drain_policy(), live.len());
         // Under the bound, and only under it -- see the type's doc for the
         // cap this replaced.
         let eligible: Vec<LiveCell> = live.iter().filter(|c| c.queued < bound).cloned().collect();
+        // Did the policy actually decide anything here? A different bound is
+        // not enough -- it only counts if some cell falls on the other side
+        // of it, because that is what changes the plan. `plan_best` reads
+        // this off a finished expansion to skip a second pass it can then
+        // prove identical, so the test is exact rather than conservative in
+        // either direction: claiming divergence that did not happen costs an
+        // expansion, and missing one that did would change a plan.
+        if !state.drain_policy_mattered() {
+            for other in DrainPolicy::ALL {
+                let alt = Self::bound_from(fixed, other, live.len());
+                if alt != bound && live.iter().any(|c| (c.queued < bound) != (c.queued < alt)) {
+                    state.note_policy_divergence();
+                    break;
+                }
+            }
+        }
         Drain { live, eligible }
     }
 
@@ -1869,9 +1899,13 @@ impl Drain {
     /// number of cells already standing, so a plan that has stood six of them
     /// lets a fragment wait six cell-builds' worth of backlog rather than
     /// one. See [`DrainPolicy`] for why the choice cannot be made here.
-    fn bound(state: &PlanState, spec: &CellSpec, live: usize) -> Ticks {
-        let fixed = cell_setup_bot_ticks(state, spec, 1);
-        match state.drain_policy() {
+    ///
+    /// The fixed cost and the policy are handed in rather than read off the
+    /// state, so one [`Drain::new`] can price every policy off a single
+    /// [`cell_setup_bot_ticks`] -- which is a siting search, not a constant,
+    /// and is what makes the divergence probe next to free.
+    fn bound_from(fixed: Ticks, policy: DrainPolicy, live: usize) -> Ticks {
+        match policy {
             DrainPolicy::Conservative => fixed,
             DrainPolicy::Parallel => {
                 fixed.saturating_mul(u32::try_from(live.max(1)).unwrap_or(u32::MAX))
@@ -3739,6 +3773,266 @@ mod tests {
             "plan_best returned {} against the conservative {}",
             best.makespan,
             conservative.makespan
+        );
+    }
+
+    /// The probe [`crate::plan_best`] skips its second pass on fires exactly
+    /// when the policy *decided* something, not merely when the bound moved.
+    ///
+    /// Both halves matter and neither is the other's converse. A probe that
+    /// missed a real divergence would let `plan_best` return the conservative
+    /// plan where it used to return the parallel one -- a changed plan, the
+    /// one thing this optimisation may not do. A probe that fired on every
+    /// second cell would buy nothing back.
+    #[test]
+    fn the_policy_probe_fires_only_where_the_policy_changes_the_offer() {
+        let bots = vec![BotId(1)];
+        let spec = iron();
+        let fixed = cell_setup_bot_ticks(&state(&bots), &spec, 1);
+        let straddling = fixed.div_ceil(spec.ticks_per_item) + 1;
+
+        // Two cells, backlog past one cell-build and under two: the case the
+        // policies genuinely disagree about (see
+        // `the_parallel_policy_scales_the_bound_by_the_cells_that_stand`).
+        for policy in DrainPolicy::ALL {
+            let s = stand_cells(&spec, &bots, 2, straddling)
+                .state
+                .fork()
+                .with_drain_policy(policy)
+                .with_fresh_policy_probe();
+            assert!(!s.drain_policy_mattered(), "a fresh probe is unset");
+            let drain = Drain::new(&s, &spec);
+            assert_eq!(drain.live.len(), 2, "both cells are live under {policy:?}");
+            assert!(
+                s.drain_policy_mattered(),
+                "two cells straddling the bound is the divergence itself, seen from {policy:?}"
+            );
+        }
+
+        // One cell: the bound is the same number under both policies, so
+        // there is nothing to diverge about however the backlog falls. This
+        // is the case `researched:automation` is in, and the reason it stops
+        // paying for a second expansion at all.
+        let solo = stand_cells(&spec, &bots, 1, straddling)
+            .state
+            .fork()
+            .with_fresh_policy_probe();
+        Drain::new(&solo, &spec);
+        assert!(
+            !solo.drain_policy_mattered(),
+            "one standing cell prices the same under every policy"
+        );
+
+        // Two cells with no backlog at all: the bound moves, but every cell
+        // is under both bounds, so the offer is the same list and the policy
+        // decided nothing. The probe must not fire on the moved bound alone.
+        let idle = stand_cells(&spec, &bots, 2, 0)
+            .state
+            .fork()
+            .with_fresh_policy_probe();
+        let drain = Drain::new(&idle, &spec);
+        assert_eq!(drain.live.len(), 2, "both cells are live");
+        assert_eq!(drain.eligible.len(), 2, "and both are offered either way");
+        assert!(
+            !idle.drain_policy_mattered(),
+            "a wider bound nothing falls between is not a divergence"
+        );
+    }
+
+    /// [`crate::plan_best`] returns exactly what building **every** policy and
+    /// keeping the shortest returns -- which is what it did before it learned
+    /// to stop early.
+    ///
+    /// The oracle here is the pre-2026-09-06 body of `plan_best`, written out
+    /// in full rather than called, so this compares the optimisation against
+    /// the thing it optimises rather than against itself. The network is
+    /// compared by its `Debug` rendering because `ActionNetwork` has no
+    /// `PartialEq`; that rendering covers every action, edge and chain.
+    ///
+    /// It also asserts that the goal set exercises **both** paths -- one goal
+    /// that stops early and one that does not. Without that this test would
+    /// go quietly vacuous the day the fixture stopped standing a second cell,
+    /// passing while comparing the shortcut against nothing.
+    #[test]
+    fn plan_best_returns_what_building_every_policy_returns() {
+        use crate::{MethodRegistry, Schedule};
+
+        fn exhaustive(
+            goals: &[Goal],
+            s: &PlanState,
+            registry: &MethodRegistry,
+            actor: BotId,
+            bots: &[BotId],
+        ) -> Option<(String, Schedule)> {
+            let mut best: Option<(String, Schedule)> = None;
+            for policy in DrainPolicy::ALL {
+                let under = s.fork().with_drain_policy(policy);
+                let Ok(net) = expand(goals, &under, registry, actor) else {
+                    continue;
+                };
+                let Ok(plan) = schedule(&net, &under, bots) else {
+                    continue;
+                };
+                if best
+                    .as_ref()
+                    .is_none_or(|(_, best)| plan.makespan < best.makespan)
+                {
+                    best = Some((format!("{net:?}"), plan));
+                }
+            }
+            best
+        }
+
+        let roster = vec![BotId(1), BotId(2), BotId(3), BotId(4)];
+        let actor = BotId(1);
+        let registry = registry_for(&roster);
+        let spec = iron();
+        // A backlog one cell-build long is what the two policies disagree
+        // about, and it takes two standing cells for the parallel bound to
+        // clear it -- the arrangement
+        // `the_parallel_policy_scales_the_bound_by_the_cells_that_stand`
+        // pins. The bare fixture world diverges at no rate and no roster
+        // size, which is why the divergent half of this test has to be
+        // staged rather than asked for.
+        let straddling =
+            cell_setup_bot_ticks(&state(&roster), &spec, 1).div_ceil(spec.ticks_per_item) + 1;
+
+        let mut stopped_early = 0;
+        let mut built_every_policy = 0;
+        let mut policies_disagreed = 0;
+        for (standing, per_minute) in [(0u32, 15u32), (0, 45), (1, 45), (2, 45), (2, 90)] {
+            let s = if standing == 0 {
+                state(&roster)
+            } else {
+                stand_cells(&spec, &roster, standing, straddling).state
+            };
+            let goals = vec![Goal::Producing {
+                item: "iron-plate".into(),
+                per_minute,
+            }];
+            let label = format!("{standing} cells standing, {per_minute}/min");
+
+            let (net, plan) = crate::plan_best(&goals, &s, &registry, actor, &roster)
+                .unwrap_or_else(|err| panic!("{label} plans: {err}"));
+            let (want_net, want_plan) = exhaustive(&goals, &s, &registry, actor, &roster)
+                .unwrap_or_else(|| panic!("{label} plans under some policy"));
+            assert_eq!(format!("{net:?}"), want_net, "the network for {label}");
+            assert_eq!(plan, want_plan, "the schedule for {label}");
+
+            // Which path did it take? Re-run the conservative expansion the
+            // way `plan_best` does and read its probe -- and, where the
+            // policy mattered, check the two plans really are different
+            // objects, so "both paths exercised" is not just a flag agreeing
+            // with itself.
+            let under = s
+                .fork()
+                .with_drain_policy(DrainPolicy::Conservative)
+                .with_fresh_policy_probe();
+            let conservative =
+                expand(&goals, &under, &registry, actor).expect("the conservative policy expands");
+            if under.drain_policy_mattered() {
+                built_every_policy += 1;
+                let parallel = expand(
+                    &goals,
+                    &s.fork().with_drain_policy(DrainPolicy::Parallel),
+                    &registry,
+                    actor,
+                )
+                .expect("the parallel policy expands");
+                if format!("{conservative:?}") != format!("{parallel:?}") {
+                    policies_disagreed += 1;
+                }
+            } else {
+                stopped_early += 1;
+            }
+        }
+        assert!(
+            stopped_early > 0 && built_every_policy > 0,
+            "the goal set must exercise both paths: {stopped_early} stopped early, \
+             {built_every_policy} built every policy"
+        );
+        assert!(
+            policies_disagreed > 0,
+            "at least one case must have two genuinely different plans to choose between, \
+             or the comparison above is comparing a plan with itself"
+        );
+    }
+
+    /// The claim [`crate::plan_best`]'s early exit rests on, stated directly:
+    /// **an expansion whose probe stayed unset is the expansion every other
+    /// policy would have produced.**
+    ///
+    /// The exhaustive comparison above cannot fail on a broken probe in this
+    /// fixture world, and that is a fact about the fixture rather than about
+    /// the code: staged over rosters of 1 to 8 and cell counts to 5, the
+    /// parallel policy here is never *shorter* -- it either ties or refuses
+    /// -- so `plan_best` picks the conservative plan whether it looks at the
+    /// second policy or not. The case where parallel wins is
+    /// `producing:logistic-science-pack:6` on `workspace/scripts/map.json`,
+    /// which is a 900 MB dump and out of this crate's reach.
+    ///
+    /// So this test does not ask which plan was chosen. It asks whether the
+    /// **licence to skip** is honest, which is the thing that could be wrong
+    /// and the thing the fixture can answer: wherever the probe says no
+    /// policy mattered, the other policy's expansion must be identical --
+    /// including identical in *refusing*, since a policy that refuses where
+    /// the other plans is the sharpest possible disagreement.
+    #[test]
+    fn an_unset_probe_promises_every_policy_expands_the_same() {
+        let spec = iron();
+        let actor = BotId(1);
+        let mut checked = 0;
+        let mut skipped = 0;
+        for n in [1u8, 2, 4] {
+            let roster: Vec<BotId> = (1..=n).map(BotId).collect();
+            let registry = registry_for(&roster);
+            let straddle =
+                cell_setup_bot_ticks(&state(&roster), &spec, 1).div_ceil(spec.ticks_per_item);
+            for standing in [0u32, 1, 2, 3, 5] {
+                for backlog in [1, straddle + 1, straddle * 2 + 1] {
+                    let s = if standing == 0 {
+                        state(&roster)
+                    } else {
+                        stand_cells(&spec, &roster, standing, backlog).state
+                    };
+                    for per_minute in [15u32, 45, 90] {
+                        let goals = vec![Goal::Producing {
+                            item: "iron-plate".into(),
+                            per_minute,
+                        }];
+                        let label = format!(
+                            "{n} bots, {standing} cells at {backlog} queued, {per_minute}/min"
+                        );
+                        let under = s
+                            .fork()
+                            .with_drain_policy(DrainPolicy::Conservative)
+                            .with_fresh_policy_probe();
+                        let conservative = expand(&goals, &under, &registry, actor);
+                        if under.drain_policy_mattered() {
+                            skipped += 1;
+                            continue;
+                        }
+                        let parallel = expand(
+                            &goals,
+                            &s.fork().with_drain_policy(DrainPolicy::Parallel),
+                            &registry,
+                            actor,
+                        );
+                        assert_eq!(
+                            format!("{conservative:?}"),
+                            format!("{parallel:?}"),
+                            "an unset probe promised these were the same expansion: {label}"
+                        );
+                        checked += 1;
+                    }
+                }
+            }
+        }
+        assert!(checked > 0, "no case reached the promise");
+        assert!(
+            skipped > 0,
+            "no case in the grid diverged, so nothing here distinguishes an honest \
+             probe from one that never fires"
         );
     }
 

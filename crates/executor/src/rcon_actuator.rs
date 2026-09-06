@@ -189,6 +189,12 @@ pub struct RconActuator {
     ///
     /// [`ARRIVAL_MARGIN`]: factorio_bot_core::factorio::rcon::ARRIVAL_MARGIN
     reach_corrections: AtomicU64,
+    /// How many times this run asked the game to create ground, and how many
+    /// chunks it got. The disclosure counter behind
+    /// [`Actuator::ground_generated`] -- see that method for why it exists.
+    ground_generated_calls: AtomicU64,
+    ground_generated_chunks: AtomicU64,
+    ground_generate_failures: AtomicU64,
 }
 
 impl RconActuator {
@@ -239,6 +245,9 @@ impl RconActuator {
             placements: Mutex::new(BTreeMap::new()),
             destinations_full: Mutex::new(BTreeMap::new()),
             reach_corrections: AtomicU64::new(0),
+            ground_generated_calls: AtomicU64::new(0),
+            ground_generated_chunks: AtomicU64::new(0),
+            ground_generate_failures: AtomicU64::new(0),
         })
     }
 
@@ -561,6 +570,38 @@ impl Actuator for RconActuator {
                 ticks: failure.ticks,
             },
         })
+    }
+
+    async fn generate_chunks(
+        &self,
+        around: &Position,
+        radius: u32,
+    ) -> Result<u64, ActuatorFailure> {
+        // Counted before the call, not after: the disclosure is that the run
+        // *asked*, and a call that found the ground already there -- or that
+        // failed -- is still a call a player could not have made.
+        self.ground_generated_calls.fetch_add(1, Ordering::Relaxed);
+        let made = match self.rcon.generate_chunks(around, radius).await {
+            Ok(made) => made,
+            Err(err) => {
+                self.ground_generate_failures
+                    .fetch_add(1, Ordering::Relaxed);
+                return Err(ActuatorFailure::from(ActuatorError::Rejected(format!(
+                    "could not generate ground around {around}: {err}"
+                ))));
+            }
+        };
+        self.ground_generated_chunks
+            .fetch_add(made.generated, Ordering::Relaxed);
+        Ok(made.generated)
+    }
+
+    fn ground_generated(&self) -> (u64, u64, u64) {
+        (
+            self.ground_generated_calls.load(Ordering::Relaxed),
+            self.ground_generated_chunks.load(Ordering::Relaxed),
+            self.ground_generate_failures.load(Ordering::Relaxed),
+        )
     }
 
     fn reach_corrections(&self) -> u64 {
@@ -1202,6 +1243,9 @@ mod tests {
             placements: Mutex::new(BTreeMap::new()),
             destinations_full: Mutex::new(BTreeMap::new()),
             reach_corrections: AtomicU64::new(0),
+            ground_generated_calls: AtomicU64::new(0),
+            ground_generated_chunks: AtomicU64::new(0),
+            ground_generate_failures: AtomicU64::new(0),
         };
         let f = tokio::runtime::Builder::new_current_thread()
             .enable_all()

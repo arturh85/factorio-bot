@@ -550,6 +550,22 @@
                 "minimum": 0,
                 "type": "integer"
               },
+              "ground_generate_calls": {
+                "description": "**The disclosure for the one act in this project a player cannot\nperform.** How many times this batch asked the game to *create\nground* (`generate_chunks`), how many chunks that actually made,\nand how many of those asks failed.\n\nIt is here rather than in `provenance.json` for the reason\n[`EventKind::VisionMeasured`] gives: provenance is written once at\nrun start, before any survey has run, and the manifest exists only\nfor runs that finished -- while a killed run still generated its\nground. This event is flushed per line, so the disclosure survives\nthe kill.\n\n**Why it is needed at all.** A bot cannot walk into ungenerated\nground: the pathfinder refuses. A human crosses that edge by\nwalking and the engine makes the ground as they go; a bot steered\nthrough `request_path` cannot, so exploration asks for the ground\nexplicitly. The ask is clamped mod-side to the reveal a character\nstanding there would have got for free, but it still arrives\n*before* the bot does, which is a small piece of free vision and is\ntherefore counted rather than argued about. See\n`docs/superpowers/notes/2026-09-06-exploration.md`.\n\n**States no verdict.** `ground_generate_calls: 0` is a run that\nnever explored -- every run before 2026-09-06. Calls with zero\nchunks and zero failures is ground that already existed; failures\nequal to calls is the verb not working, which is the case that\nwould otherwise be invisible because the executor has no logger.\n\n`#[serde(default)]` so every run recorded before this existed still\nopens, and reads zero -- which for those runs is the truth.",
+                "format": "int32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "ground_generate_failures": {
+                "format": "int32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "ground_generated_chunks": {
+                "format": "int32",
+                "minimum": 0,
+                "type": "integer"
+              },
               "in_flight": {
                 "description": "How many are in flight right now: dispatched, no verdict yet.",
                 "format": "int32",

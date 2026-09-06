@@ -168,6 +168,65 @@ pub trait Actuator: Send + Sync {
     fn reach_corrections(&self) -> u64 {
         0
     }
+
+    /// Ask the game to generate the ground around `around`, so a bot can walk
+    /// there. Answers how many chunks actually appeared.
+    ///
+    /// **This is the one act in this trait a human player cannot perform**, and
+    /// it exists because a bot cannot walk into ungenerated ground at all: the
+    /// pathfinder returns no path past the edge of the generated world, so a
+    /// survey aimed at unexplored ground is refused before it is dispatched.
+    /// Measured live on seed 31337 -- x=200 reached, x=300 through x=600 all
+    /// `failed to path find`. A player crosses that edge by walking, and the
+    /// engine makes the ground as they go; a bot driven through `request_path`
+    /// cannot, which is an artefact of how we steer a character rather than a
+    /// rule of the game.
+    ///
+    /// `radius` is in **chunks and is clamped mod-side to 4**, the reveal a
+    /// character standing there would have been given for free. The caller
+    /// cannot widen it.
+    ///
+    /// It charts nothing and reveals nothing to the force; the world model
+    /// still learns only through `on_chunk_generated`. What it does buy is
+    /// ground appearing slightly *before* the bot arrives rather than as it
+    /// does, which is why [`Actuator::ground_generated`] exists and why every
+    /// run that uses it says so.
+    ///
+    /// Defaulted to "generated nothing" for the same reason
+    /// [`Actuator::reach_corrections`] is defaulted: an actuator with no game
+    /// underneath it has no ground to make. A stub answering zero is honest --
+    /// it generated zero.
+    async fn generate_chunks(
+        &self,
+        _around: &Position,
+        _radius: u32,
+    ) -> Result<u64, ActuatorFailure> {
+        Ok(0)
+    }
+
+    /// How much ground this run has asked the game to create: the number of
+    /// [`Actuator::generate_chunks`] calls, the chunks they actually made, and
+    /// how many of those calls failed.
+    ///
+    /// **The disclosure counter.** A run that generated ground is not
+    /// comparable to one that did not, and the project's rule is that anything
+    /// a player could not do is recorded rather than argued about -- the way
+    /// `research_trigger_emulated` is. These two ride in
+    /// `EventKind::BatchProgress`, which already states facts and no verdict
+    /// and beats every 30 seconds, so the disclosure survives a killed run.
+    ///
+    /// The third number is what keeps a broken verb from reading as an
+    /// uneventful run: this crate has no logger, so a `generate_chunks` that
+    /// the server refuses -- an older BotBridge with no such function, say --
+    /// would otherwise be indistinguishable from ground that already existed.
+    /// `calls > 0, chunks == 0, failures == 0` is "the ground was already
+    /// there"; `failures == calls` is "this verb is not working".
+    ///
+    /// `(0, 0, 0)` means this run never asked, which is the honest reading for
+    /// every actuator that has no game under it.
+    fn ground_generated(&self) -> (u64, u64, u64) {
+        (0, 0, 0)
+    }
     async fn mine(
         &self,
         bot: BotId,

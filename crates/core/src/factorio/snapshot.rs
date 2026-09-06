@@ -74,6 +74,34 @@ pub struct WorldSnapshot {
     pub forces: Vec<FactorioForce>,
 }
 
+/// What one [`FactorioRcon::generate_chunks`] call actually bought.
+///
+/// **The disclosure record for the one non-player act in this codebase.**
+/// Generating ground is not something a human can ask for -- a player gets it
+/// by walking, as a side effect -- so a run that used it has to be able to say
+/// so afterwards, and this is what it says. `generated` is the honest number:
+/// the surface's own chunk count after minus before, not a count of what was
+/// requested, so re-asking over ground that already exists reports zero rather
+/// than claiming credit.
+///
+/// See `docs/superpowers/notes/2026-09-06-exploration.md` for the measurement
+/// that made the verb necessary and the argument for its bound.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct GeneratedChunks {
+    /// Where the reveal was centred, in tiles.
+    pub x: i64,
+    pub y: i64,
+    /// The radius the mod actually used, in chunks -- **after its own clamp**,
+    /// so a caller that asked for more can see it did not get it.
+    pub radius: u32,
+    pub chunks_before: u64,
+    pub chunks_after: u64,
+    /// `chunks_after - chunks_before`. Zero means the ground was already
+    /// there, which is a normal and common answer.
+    pub generated: u64,
+}
+
 impl WorldSnapshot {
     /// Whether this snapshot carries enough to plan with.
     ///

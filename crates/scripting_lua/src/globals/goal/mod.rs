@@ -604,7 +604,7 @@ pub(crate) fn create_lua_goal_with(
 -- and then executed against the running game.
 --
 -- Nothing here is a handle. `goal.have`, `goal.researched`, `goal.producing`,
--- `goal.built` and `goal.all` build **goal values**: ordinary Lua tables you can read (`g.item`,
+-- `goal.built`, `goal.charted` and `goal.all` build **goal values**: ordinary Lua tables you can read (`g.item`,
 -- `g.count`), print and pass around. `goal.plan` turns one into a
 -- **PlanValue**, which carries the schedule it was given and answers questions
 -- about it (`plan.makespan`, `plan.bots`, `plan.steps`, `plan.tick` -- the
@@ -754,6 +754,46 @@ end
 -- @raise if the blueprint string is empty, or the anchor is not a table with
 --   numeric x and y
 function goal.built(blueprint_string, anchor)
+end
+"#,
+        ),
+    )?;
+    map_table.set(
+        "__doc_entry_charted",
+        String::from(
+            r#"
+--- builds a goal value: the ground within a radius has been looked at
+--
+-- Pure, like `goal.have`. The exploration primitive: every other goal names
+-- something to end up *with*, and this one names ground to end up having
+-- *seen*.
+--
+-- It exists because `goal.plan` can refuse with `planner::not_charted` -- the
+-- item's resource is nowhere in the world model, and the refusal says where
+-- charted ground ends. No amount of crafting, research or building clears
+-- that refusal; somebody has to go and look. This is how a script asks for
+-- that, and the refusal's own message names the frontier to aim at.
+--
+-- Planning it emits one `survey` step per blind probe: seventeen points are
+-- checked -- the centre, then the eight compass directions at half the radius
+-- and at the full radius -- and a bot is walked to each one the model has no
+-- ground for. Charting is the *engine's* response to a character standing
+-- somewhere new, so a survey asks the game for nothing beyond the walk.
+--
+-- **A disc that is already charted plans nothing**, so a supervisor loop can
+-- re-issue this every round without paying for it twice, and `goal.holds`
+-- answers it directly.
+--
+-- **What it does not claim.** That anything is *there*. A survey that walks
+-- the whole disc and finds bare grass has succeeded -- and that is the useful
+-- outcome, because it turns "unexplored, so unknown" into "looked, and it is
+-- not there", which are genuinely different answers.
+-- @number x centre of the disc
+-- @number y centre of the disc
+-- @number radius how far out to look, in tiles; must be > 0
+-- @treturn table a goal value
+-- @raise if any argument is not a finite number, or the radius is not positive
+function goal.charted(x, y, radius)
 end
 "#,
         ),
@@ -1857,7 +1897,7 @@ mod tests {
         lua.load(
             r#"
             local expected = { have=true, researched=true, producing=true,
-                               built=true, all=true, plan=true, run=true,
+                               built=true, charted=true, all=true, plan=true, run=true,
                                start=true, holds=true, refusal=true }
             local actual = {}
             for k, v in pairs(goal) do

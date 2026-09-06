@@ -35,6 +35,7 @@ use clap::{Arg, ArgAction, ArgMatches, Command, value_parser};
 use factorio_bot_core::factorio::world::FactorioWorld;
 use factorio_bot_core::miette::{IntoDiagnostic, Result, miette};
 use factorio_bot_core::serde_json;
+use factorio_bot_core::types::Position;
 use factorio_bot_planner::goal::{Goal, Holder};
 use factorio_bot_planner::method::have::registry_for;
 use factorio_bot_planner::{BotId, PlanReport, PlanState, pick_chain_actor, plan_best};
@@ -48,8 +49,10 @@ Goal specs (--goal, repeatable; every one is planned together):
   produced:<item>:<count>    cause that many to come into existence
   producing:<item>:<rate>    stand up machinery yielding that many per minute
   researched:<technology>    finish that research
+  charted:<x>:<y>:<radius>   walk bots out until that disc has been looked at
 
   have:iron-plate:50   produced:stone-furnace:2   researched:automation
+  charted:0:0:256
 
 Anything the shorthand cannot say -- a goal held by one named bot, a nested
 Goal::All, a Produced that unlocks a technology -- goes in as --goal-json,
@@ -145,6 +148,18 @@ pub(crate) fn parse_goal(spec: &str) -> Result<Goal> {
       .parse::<u32>()
       .map_err(|_| miette!("`{raw}` in `{spec}` is not a count"))
   };
+  // Separate from `count` because a coordinate is signed and fractional and a
+  // count is neither. Rejecting non-finite input here rather than letting an
+  // `inf` radius reach `PlanState::charting`, where it would place every probe
+  // at infinity and report the map as uniformly blind.
+  let coord = |raw: &str| -> Result<f64> {
+    match raw.parse::<f64>() {
+      Ok(value) if value.is_finite() => Ok(value),
+      _ => Err(miette!(
+        "`{raw}` in `{spec}` is not a finite coordinate"
+      )),
+    }
+  };
   match parts.as_slice() {
     ["researched", tech] if !tech.is_empty() => Ok(Goal::Researched((*tech).to_owned())),
     ["have", item, n] if !item.is_empty() => Ok(Goal::Have {
@@ -162,10 +177,20 @@ pub(crate) fn parse_goal(spec: &str) -> Result<Goal> {
       item: (*item).to_owned(),
       per_minute: count(n)?,
     }),
+    // `charted:<x>:<y>:<radius>`. The one shorthand whose arguments are
+    // coordinates rather than an item name, and it takes all three because
+    // there is no sane default for *where*: spawn is only the right centre
+    // while nothing has moved, and this goal exists precisely for the plans
+    // that have.
+    ["charted", x, y, radius] => Ok(Goal::Charted {
+      around: Position::new(coord(x)?, coord(y)?),
+      radius: coord(radius)?,
+    }),
     _ => Err(miette!(
       "`{spec}` is not a goal. Expected have:<item>:<count>, \
-       produced:<item>:<count>, producing:<item>:<per-minute> or \
-       researched:<technology> -- or --goal-json for anything else."
+       produced:<item>:<count>, producing:<item>:<per-minute>, \
+       charted:<x>:<y>:<radius> or researched:<technology> -- or --goal-json \
+       for anything else."
     )),
   }
 }

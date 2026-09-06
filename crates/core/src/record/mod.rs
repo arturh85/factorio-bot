@@ -357,6 +357,42 @@ pub enum EventKind {
         /// about.
         #[serde(default)]
         reach_corrections: u32,
+        /// **The disclosure for the one act in this project a player cannot
+        /// perform.** How many times this batch asked the game to *create
+        /// ground* (`generate_chunks`), how many chunks that actually made,
+        /// and how many of those asks failed.
+        ///
+        /// It is here rather than in `provenance.json` for the reason
+        /// [`EventKind::VisionMeasured`] gives: provenance is written once at
+        /// run start, before any survey has run, and the manifest exists only
+        /// for runs that finished -- while a killed run still generated its
+        /// ground. This event is flushed per line, so the disclosure survives
+        /// the kill.
+        ///
+        /// **Why it is needed at all.** A bot cannot walk into ungenerated
+        /// ground: the pathfinder refuses. A human crosses that edge by
+        /// walking and the engine makes the ground as they go; a bot steered
+        /// through `request_path` cannot, so exploration asks for the ground
+        /// explicitly. The ask is clamped mod-side to the reveal a character
+        /// standing there would have got for free, but it still arrives
+        /// *before* the bot does, which is a small piece of free vision and is
+        /// therefore counted rather than argued about. See
+        /// `docs/superpowers/notes/2026-09-06-exploration.md`.
+        ///
+        /// **States no verdict.** `ground_generate_calls: 0` is a run that
+        /// never explored -- every run before 2026-09-06. Calls with zero
+        /// chunks and zero failures is ground that already existed; failures
+        /// equal to calls is the verb not working, which is the case that
+        /// would otherwise be invisible because the executor has no logger.
+        ///
+        /// `#[serde(default)]` so every run recorded before this existed still
+        /// opens, and reads zero -- which for those runs is the truth.
+        #[serde(default)]
+        ground_generate_calls: u32,
+        #[serde(default)]
+        ground_generated_chunks: u32,
+        #[serde(default)]
+        ground_generate_failures: u32,
     },
     ActionDispatched {
         id: u32,

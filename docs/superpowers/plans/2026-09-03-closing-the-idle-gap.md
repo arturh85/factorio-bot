@@ -551,12 +551,41 @@ structural: `MinerLine` cannot site at any radius because its belt-and-pole
 corridor runs over the ore its own drills need. **That is not a siting
 limitation, it is this defect.**
 
-Not fixed tonight, deliberately: it is a planner-wide behaviour change whose
-blast radius covers `connect`, `assemble` and `produce`, and it invalidates
-every offline number measured before it. It gets its own change with
-before/after figures rather than a rider on another branch. **This is the
-first candidate to check whenever a self-fed cell refuses for reasons that
-look like crowded terrain.**
+**Fixed (`21a698ff`), and the rule was established from three independent
+sources rather than from the one query.** In one sentence: *a resource
+entity's entire collision mask is the single `resource` layer and no
+buildable prototype carries that layer, so ore blocks no placement — only a
+mining drill **wants** to be on it.* The evidence: the shipped prototype
+data (`collision-mask-defaults.lua` gives resources `{layers={resource=true}}`
+and the layer is named by no entity anywhere in base, core, space-age,
+quality or elevated-rails); a live 2.1.17 capture where exactly 12 of 579
+masked prototypes name `resource` and all twelve **are** resources; and the
+original `can_place_entity` query. The control that settles the conflation:
+**a stone furnace's mask is character-for-character a burner drill's** —
+needing ore underfoot is not expressible in a mask at all, which is why
+`stands_on_resources` reads the entity *type* and must never be asked what
+blocks a placement.
+
+**The policy the wrong rule was hiding is real, and is now stated as a
+policy.** A furnace built on a patch tile makes that tile unminable, so a
+plan can eat its own ore: dropping the explicit filter in
+`free_area_near_where` or `produce::fit` fails a test with
+`NoApplicableMethod { goal: "have 40 iron-ore" }`. A ranked preference with
+a fallback was tried and is the wrong shape, because **the fallback fires
+exactly under pressure**. Running out of ground is recoverable; running out
+of ore is not.
+
+**Every offline number is unchanged** — all seven measured goals identical
+before and after, plus four extra probes hunting for a difference. Read
+honestly: the fix costs nothing, and what it unblocks has **no caller yet**,
+since `method::connect` is still uncalled and every cell on this map had
+non-ore ground in range. It is a correctness fix that clears the way for the
+self-fed cell rather than a speed-up.
+
+Still open, from the same work: a cell's furnace still may not stand on ore,
+so cells sit on the patch rim where tiles hold 3–10 ore against 200+ inside.
+Lifting that needs a reservation model for ore the plan will need, not a
+permission change.
 
 ## ✅ EXPLORATION WORKS, AND THE ORE REFUSAL IS GONE (`3bd49296`)
 

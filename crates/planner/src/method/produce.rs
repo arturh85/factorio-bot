@@ -4540,6 +4540,4 @@ mod tests {
              burns -- which is when the slot next has room"
         );
     }
-
-
 }

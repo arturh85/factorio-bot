@@ -1544,3 +1544,173 @@ documents this crate as unable to price. "Build a furnace inside a wait the bot
 is having anyway" needs a scheduler that can express slack, an optional action
 or a goal with no consumer, and has none of the three. It is a scheduler
 change, not a variation on this one.
+
+### plan_best
+
+2026-09-06. `plan_best` (`c49df17a`, mine) built the whole `expand()` +
+`schedule()` pipeline **once per `DrainPolicy`** and kept the shorter
+schedule. Its own doc admitted "one extra expansion and schedule per plan";
+nobody had measured that, and a peer session then did, on a 179-entity block:
+**~96 s with it against ~52 s without**. This is the fix, and the first thing
+it needed was to find out where the second pass's time actually goes.
+
+#### Where the time goes: four numbers, and the one that decides the fix
+
+Instrumented `plan` CLI, release, `workspace/scripts/map.json`, seed 31337
+t=0, one run each (a breakdown, not a headline):
+
+| case | policy | expand | schedule | policy mattered |
+|---|---|---:|---:|---|
+| `researched:automation`, 4 | Conservative | 0.234 s | 0.007 s | **no** |
+| | Parallel | 0.225 s | 0.007 s | no |
+| `producing:automation-science-pack:6`, 4 | Conservative | 0.732 s | 0.034 s | **no** |
+| | Parallel | 0.729 s | 0.036 s | no |
+| `producing:logistic-science-pack:6`, 4 | Conservative | 1.317 s | 0.170 s | **yes** |
+| | Parallel | 0.864 s | 0.079 s | yes |
+| `researched:automation`, 8 | Conservative | 0.650 s | 0.065 s | **no** |
+| `producing:logistic-science-pack:6`, 8 | Conservative | 2.576 s | 0.840 s | **yes** |
+| | Parallel | 1.937 s | 0.479 s | yes |
+| `goal.built(FurnaceLine)`, 4 | Conservative | 3.464 s | 0.752 s | **no** |
+| | Parallel | 3.461 s | 0.743 s | no |
+| `goal.built(FurnaceLine)`, 8 | Conservative | 21.684 s | 12.572 s | **no** |
+| | Parallel | 21.681 s | 12.610 s | no |
+
+**It does not split evenly, and that was worth checking**: on the big block
+expansion is 63% and scheduling 37%, so a fix that cached only the expansion
+would have left a third of the bill standing. But the number that decided the
+design is the last column, not the first two. **The hypothesis in the brief
+was right for every case except green.**
+
+`DrainPolicy` is read in exactly one place in the whole crate --
+`Drain::bound_from` -- and the two policies part only when a cell's backlog
+falls between one cell-build and one cell-build *per standing cell*. That
+needs two cells standing at once **and** a backlog in that window. A goal that
+never stands a second cell (automation, red) and a goal that never smelts at
+all (a `Goal::Built` block) meet neither condition, so both passes produce the
+identical `ActionNetwork` and the second one rediscovers the first one's
+answer at full price. Only green disagrees -- which is the goal `plan_best`
+was written for, and it still pays in full.
+
+#### The fix, and why it is a proof rather than a heuristic
+
+`Drain::new` now prices every policy off the single
+`cell_setup_bot_ticks` it already computes, and sets a probe on `PlanState`
+when some cell falls on the *other side* of another policy's bound. A moved
+bound alone does not count: what matters is whether the offered list changed.
+`plan_best` reads that probe off a **completed** expansion and stops there if
+it is unset.
+
+That is sound by induction over the sequence of `Drain::new` calls: expansion
+is a deterministic function of the state, so as long as every call so far
+produced the same eligible set under both policies, the next call sees the
+same state and does too. If no call ever diverged, the whole expansion is the
+one every other policy would have produced -- and `schedule` never reads the
+policy at all, so the schedule is identical as well. A **failed** expansion
+proves nothing and stops nothing: the flag would describe only the fragment
+built before the refusal, so a policy that refuses is skipped exactly as
+before.
+
+The probe is an `Arc<AtomicBool>` shared through `fork`/`clone` because an
+expansion forks its state constantly (`expand` forks twice -- it rehearses
+before it plans, so `plan_best` was running **four** expansions, not two).
+`Arc` rather than `Cell` only to keep `PlanState: Send + Sync`; expansion is
+single-threaded, so nothing here is non-deterministic, and the probe records
+*that* a policy mattered, never which plan is better.
+
+#### The chosen plan is unchanged, and it is checked rather than asserted
+
+`plan --steps` -- every scheduled step, per bot, with start and end tick --
+compared byte for byte between a binary built from `master` and one built
+from the merged branch, on the same tree, same dump:
+
+| case | actions | `diff` |
+|---|---:|---|
+| `researched:automation`, 4 | 176 | identical |
+| `producing:automation-science-pack:6`, 4 | 316 | identical |
+| `producing:logistic-science-pack:6`, 4 | 442 | identical |
+| `researched:automation`, 8 | 382 | identical |
+| `producing:logistic-science-pack:6`, 8 | 913 | identical |
+| `goal.built(FurnaceLine)` at (60,-100), 4 | 955 | identical |
+| `goal.built(FurnaceLine)` at (60,-100), 8 | 1796 | identical |
+
+Green is the case that matters here: it is the one goal on this map where the
+policies genuinely disagree, and it still returns the parallel plan (442
+actions, 47,542 ticks against the conservative 51,677), because its probe
+fires and the second pass is still built.
+
+#### Timing: both columns on the merged tree, interleaved
+
+Three passes, `before` then `after` within each pass, 1-minute load average
+recorded immediately before every one of the 48 runs (range 1.56-2.28, median
+1.84). Both binaries `--release --no-default-features --features cli,lua`,
+built from the *same* merged tree -- the branch merged with master at
+`048627e8` -- with only `crates/planner`'s three files differing. `load_only`
+is `have:wood:1`, already satisfied, so it measures reading the 865 MB dump
+and nothing else; subtract it to read the planning time.
+
+| case | before (median, range) | after (median, range) | speed-up |
+|---|---|---|---:|
+| `load_only` (dump parse) | 0.73 s [0.73-0.75] | 0.76 s [0.76-0.78] | 0.96x |
+| `researched:automation`, 4 | 1.29 s [1.23-1.31] | 1.02 s [1.00-1.04] | 1.26x |
+| `producing:automation-science-pack:6`, 4 | 1.98 s [1.95-2.18] | 1.40 s [1.39-1.43] | 1.41x |
+| `producing:logistic-science-pack:6`, 4 | 3.33 s [3.08-3.45] | 3.39 s [3.28-3.39] | 0.98x |
+| `researched:automation`, 8 | 2.07 s [2.03-2.08] | 1.41 s [1.41-1.51] | 1.47x |
+| `producing:logistic-science-pack:6`, 8 | 6.77 s [6.41-7.31] | 6.72 s [6.52-6.76] | 1.01x |
+| `goal.built(FurnaceLine)`, 4 | 8.57 s [8.50-8.65] | 4.62 s [4.62-5.05] | **1.85x** |
+| `goal.built(FurnaceLine)`, 8 | 69.73 s [69.45-70.34] | 35.71 s [35.46-36.14] | **1.95x** |
+
+**Publish what did not improve in the same table.** Green pays exactly what it
+paid before, at four bots and at eight, and it should: both plans are genuinely
+different and the shorter one can only be found by building both. The 0.98x and
+1.01x are noise around unchanged, not a regression -- the spread on the before
+column is wider than the difference. `load_only` reading 0.96x is the same
+noise on a run that does no planning at all.
+
+The block at eight bots is where this was worth doing: **69.7 s to 35.7 s**,
+and 34 s off every replan of a block. The peer session's 96/52 was the same
+effect measured under heavier load.
+
+#### The tests, and what the fixture could not be made to say
+
+Three tests, each watched failing under a substitution that was **asserted to
+have matched** before anything was concluded from it:
+
+1. `the_policy_probe_fires_only_where_the_policy_changes_the_offer` -- fires
+   on two cells straddling the bound, does not fire on one cell (same bound
+   under both policies) or on two idle cells (bound moves, nothing falls
+   between). Disabling the probe reddens the first case; making it fire on
+   the moved bound alone reddens the third.
+2. `an_unset_probe_promises_every_policy_expands_the_same` -- over a staged
+   grid of rosters 1/2/4, 0-5 standing cells and three backlogs, wherever the
+   probe stays unset the parallel expansion must render identically, *including
+   identically refusing*. Disabling the probe reddens it with
+   `an unset probe promised these were the same expansion: 1 bots, 2 cells at
+   19 queued, 45/min`.
+3. `plan_best_returns_what_building_every_policy_returns` -- compares against
+   the pre-change body of `plan_best`, written out in the test rather than
+   called, and guards its own vacuity: it fails unless the goal set exercises
+   both the early-exit and the build-everything path *and* at least one case
+   has two genuinely different plans to choose between.
+
+**And one thing the crate's fixture cannot say, which is worth recording
+because the obvious test looks stronger than it is.** The exhaustive
+comparison in (3) does **not** go red when the probe is broken. Staged across
+rosters of 1 to 8 and up to five standing cells, the parallel policy in
+`fixture_world` is never *shorter* -- it ties or refuses -- so `plan_best`
+picks the conservative plan whether or not it looks at the second policy. The
+case where parallel wins is `producing:logistic-science-pack:6` on
+`workspace/scripts/map.json`, an 865 MB dump this pure crate cannot reach. So
+the unit tests pin the **licence to skip** (2), which is the thing that could
+be wrong and which the fixture can answer, and the *chosen plan* is pinned
+offline by the byte-identical `plan --steps` table above -- green included.
+A test that passes for a reason its author did not intend is the failure mode
+this repository has paid for four times; naming which half of the claim each
+check actually carries is the cheapest guard against a fifth.
+
+This task wrote both the code and its fixtures. What the fixtures assume:
+that `stand_cells` produces cells the ledger reads as live with the backlog it
+was asked for (it drives `place_steps` and `promise`, the same calls
+`run_steps` makes), and that `fixture_world`'s prices are representative
+enough that a backlog computed from `cell_setup_bot_ticks` straddles the bound
+-- computed, not written down, so the fixture's prices can move without the
+test quietly stopping to test anything.

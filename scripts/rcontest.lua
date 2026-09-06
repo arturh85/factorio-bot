@@ -102,6 +102,20 @@ blueprints = {
     -- the furnaces are sited by the ore rather than by clear ground, the first
     -- block here where that is true.
     OreToPlate = "0eNqd09FugyAUgOF34VobD6BVX2K72N2yLNqebSSKDdBlTeO7j65L2k2anNNLIXwg+h9FP+xx54wNoj0KE3AU7dVYJoauxyGOPTh8mh6HLmAcRBtMMOhF+3w8Pxxe7X7s0YkWMmG7EeOS4Drrd5MLeSRO1m7ycdlkT1t9iVatykwcRFusyjkTW+Nwc56t52zBSjYLFFaxWUlhNZtVFLZks5rCVmy2pLBrNltR2JrNrilsw2ZrCgsF221ILr8zIIUGd5RGSg34rQEpNuDXBqTc4NJbv3cWXT4aa+x7vnVmGJa6PNt/YZ2Cq3vgkgBfmjNusvnmA33iGvLi6hdOMfX/8xnr0YU4t7CKWzWATMn0zOAWnHpxSc9Mslyg34S+2VnyKuQlNB8mi/lb3KDb4BKuftnUp5LqjgMq2gE184Bqnl8y8YnO/0yVlWx005RKS1Bxh/kb9fTEwQ==",
+    -- The chain done right: a REAL T junction, both inputs meeting at the top.
+    --
+    -- Ore arrives on its own belt from the west, coal on its own belt from the
+    -- east, and both sideload into the same stem tile from opposite sides -- so
+    -- each claims its own lane by geometry and neither can crowd the other.
+    --
+    -- `OreToPlate` had the drills dropping straight onto the main belt, which
+    -- fills BOTH lanes, with coal sideloading in downstream. A screenshot showed
+    -- the belt packed solid with ore and the coal branch backed up behind a
+    -- junction it could not enter. Moving the junction upstream barely helped
+    -- (17 -> 18 plates) because the topology was wrong, not the ordering. This
+    -- shape gives 78, and the coal chest drains 100 -> 11 where the broken one
+    -- left 55 unused.
+    OreToPlateTee = "0eNqd1dFuwiAUgOF34bo1Hgpt6UtsF94ty9K6s42kpQZwmTF996FeaCYm5+xSSL8S4adHMYx73HnrouiOwkacRHczVoixH3BMY08eN/Pz2EfcIKZxdNFGi0F0L8fLj8Ob208DetFBIVw/YXoq+t6F3exjmZQTt5tDemx2p7f9iK5e6UIcRLde6aUQ79bj9jLbLsUdK9ksUNiKzUoKq9hsRWE1m1UUtmazmsI2bLamsC2bbSisYbMthYU12zUkl98ZkEKDf5RGSg34rQEpNqDXBo+uHJVz6blJlkvvrWK59OAUy6UXp1kuPTnzyAWZ+1bQm2t5MD26hgdfo7N+duX2C0Pu+N6e3xxzTWzYe4e+tC6gj2nu3lpz9kqqv/JknXWf5bu345gJ4kyXQPiwa56s6HJN/zeaR3d6fruupYU4Oyw/kt9vMXNwL2p2s1r+8u5v2vz6DG99AMvyWohv9OE8pWtplDG6UhKq9IblFxoeVrE=",
 }
 
 rcon.cheat_technology("automation")

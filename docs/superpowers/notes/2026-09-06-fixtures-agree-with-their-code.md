@@ -279,3 +279,76 @@ Two rules follow, and they are not the same rule:
 So: **wire a caller early, even a poor one.** A primitive that has never been
 invoked from real code is not "done and waiting"; it is untested in the only
 way that counts.
+
+## Confirm the test RAN before you confirm it can fail
+
+The step before "make the test fail on purpose", and the one that nearly ate a
+whole fix on 2026-09-06.
+
+I added `bridge_resolves_tests` to `instance_setup.rs`, ran
+`cargo test -p factorio-bot-core --lib instance_setup`, and read:
+
+```
+test result: ok. 36 passed; 0 failed; 2 ignored; 0 measured; 530 filtered out
+```
+
+**None of the 36 were mine.** The filter matched the module path, the code was
+in the file, the guard it tested had compiled — the call site was in the
+binary — and the new test module was simply not in the test list. Had I read
+the green and moved on, I would have shipped a guard proven by nothing, and
+proven it *with a passing suite as the evidence*.
+
+What caught it was counting by name rather than reading the verdict:
+
+```
+grep -c "bridge_resolves_tests" <output>   # 0
+```
+
+**A suite that never compiled your test is greener than one that did.** Every
+other failure in this note is a test that ran and agreed with the wrong thing;
+this is the cheaper and more embarrassing one, where nothing ran at all and the
+summary line looked identical. `0 failed` counts what executed, and a test that
+does not exist in the binary cannot fail.
+
+So the order is:
+
+1. run the new test and **find it by name in the output**, with a count, not
+   by eye over a scrolling list;
+2. *then* break the code on purpose and confirm it fails;
+3. *then* restore and confirm it passes again.
+
+Step 1 is not implied by step 2. A falsification run also comes back green when
+the test is absent — the neutered code and the missing test produce the same
+`ok`, and I would have read that as "the falsification failed to reproduce"
+rather than "there is no test here."
+
+Related: **assert the substitution matched**, from the same night. A
+falsification whose `str.replace` matched zero occurrences also passes, for the
+same reason and with the same reassuring output. Both are the same defect
+wearing different clothes: *an empty operation reports success.*
+
+### And I hit the sibling trap in the same hour
+
+Having just written the section above, I ran the workspace suite as
+
+```
+cargo test --workspace 2>&1 | tail -30
+```
+
+in the background, and read `[exited with code 0]` as a green suite. **It was
+`tail`'s exit code**, the trap CLAUDE.md already documents — and worse, the
+captured file held only the last 30 lines, so the `grep -c` I had just
+prescribed for counting my own tests by name reported `0` because the unit-test
+section had been thrown away, not because the tests were missing.
+
+So the check I invented one hour earlier produced a *false alarm* on the very
+next run, for a third reason neither the check nor the trap it was written for
+covers: **the evidence was truncated before it was searched.**
+
+The fix is the same shape every time and worth stating as a rule of its own:
+**redirect to a file, capture `$?` from the command itself, and search the
+whole file.** Not a pipe, not a tail, not a summary line. Three defects in one
+night — a test that did not compile, a substitution that matched nothing, a
+pipeline reporting the wrong process — all reported success, and all three were
+caught by counting something in the full output rather than by reading a
+verdict.

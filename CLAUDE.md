@@ -807,6 +807,30 @@ Three things that are **not** interchangeable between the modes:
 #            point at. FACTORIO_BOT_REFRESH_MODS=1 refreshes the workspace
 #            copy from the embedded snapshot; it is a no-op in a debug build,
 #            which has no snapshot.
+#
+#            **BUT THE TWO PROFILES SHARE ONE WORKSPACE, and only one of
+#            them can repair it.** `link_bridge_mod` is
+#            `#[cfg(debug_assertions)]`, so a DEBUG run repoints
+#            workspace/mods/BotBridge at its own checkout every setup --
+#            correct for that run, and it silently fixes whatever the last
+#            run left. A RELEASE run has no repair path at all and skips
+#            extraction when workspace/mods exists, so it hands Factorio
+#            whatever is there. The dangerous sequence follows:
+#              1. a debug run from .worktrees/x points the link into x;
+#              2. x is removed when its branch merges -- `git worktree
+#                 remove` succeeds cleanly and warns about nothing;
+#              3. the next RELEASE run hangs at `start waiting` forever,
+#                 having written a level.zip with no bridge state that
+#                 poisons the workspace.
+#            **The drift is created by the profile that self-heals and paid
+#            for by the profile that cannot**, which is why nobody catches
+#            it by reasoning about their own habits: the run that creates it
+#            is never the run that suffers. Release is what every measured
+#            run uses.
+#            If you launch from a worktree, restore the link afterwards:
+#              ln -sfn <repo>/mods/BotBridge <repo>/workspace/mods/BotBridge
+#            The main checkout cannot be removed underneath a run; a
+#            worktree can. Happened twice in two days.
 #            Data dir is ~/.local/share/factorio-bot/
 #
 # Editing the mod against a release build costs two confusing runs. Ask.

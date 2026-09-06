@@ -220,6 +220,7 @@ mod tests {
             resource_category: None,
             resource_categories: None,
             mining_fluid: None,
+            mining_drill_radius: None,
         }
     }
 
@@ -421,6 +422,7 @@ mod tests {
             resource_category: None,
             resource_categories: None,
             mining_fluid: None,
+            mining_drill_radius: None,
         });
         assert!(
             !snapshot.is_plannable(),
@@ -464,6 +466,7 @@ mod tests {
             resource_category: None,
             resource_categories: None,
             mining_fluid: None,
+            mining_drill_radius: None,
         });
         snapshot.item_prototypes.push(FactorioItemPrototype {
             name: "iron-plate".into(),

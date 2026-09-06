@@ -443,6 +443,22 @@ function serialize_entity_prototype(entity)
     -- carries the `resource_categories` it supports, and mining is allowed iff
     -- the former is in the latter. Both halves are sent so the planner reads
     -- the rule off the prototypes instead of naming crude oil.
+    -- `mining_drill_radius`: how far a drill reaches BEYOND the tile it stands
+    -- on, which its collision box cannot say. Measured on a live 2.1.17 game:
+    -- a burner-mining-drill is 1.40x1.40 with a radius of 0.99, so its mining
+    -- area IS its own footprint; an electric-mining-drill is 2.70x2.70 with a
+    -- radius of 2.49, so it works a 5x5 -- a full tile ring beyond itself.
+    --
+    -- Without this the planner cannot express "a drill mines a tile it does
+    -- not stand on", and that single gap made two separate things needlessly
+    -- conservative: ore-aware siting asked whether ore lay under the drill's
+    -- own footprint because that was all the model offered, and the
+    -- will-not-bury placement rule could not tell a belt over ore a drill can
+    -- still reach from a belt over ore nobody can mine. For an electric drill
+    -- the outer ring stays mineable and burial there is not a cost at all;
+    -- for a burner drill it genuinely is, because its area is its footprint.
+    ok, val = pcall(function() return entity.mining_drill_radius end)
+    if ok then record.mining_drill_radius = val end
     ok, val = pcall(function() return entity.resource_category end)
     if ok then record.resource_category = val end
     ok, val = pcall(function()

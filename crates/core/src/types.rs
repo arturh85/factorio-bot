@@ -1291,6 +1291,30 @@ pub struct FactorioEntityPrototype {
     /// at runtime. This is the discriminator the game itself uses: a character
     /// or a drill mines a resource iff the category is in its own
     /// `resource_categories`.
+    /// How far a mining drill reaches **beyond the tile it stands on**, which
+    /// [`Self::collision_box`] cannot say. Measured on a live 2.1.17 game:
+    ///
+    /// | drill | footprint | `mining_drill_radius` |
+    /// |---|---|---|
+    /// | `burner-mining-drill` | 1.40 x 1.40 (2x2) | **0.99** |
+    /// | `electric-mining-drill` | 2.70 x 2.70 (3x3) | **2.49** |
+    ///
+    /// So a burner drill's mining area **is** its own footprint, while an
+    /// electric drill works a 5x5 -- a full tile ring beyond itself.
+    ///
+    /// Without this the planner cannot express "a drill mines a tile it does
+    /// not stand on", and that one gap made two unrelated behaviours
+    /// needlessly conservative: ore-aware siting asked whether ore lay under a
+    /// drill's own 3x3 because that was all the model offered, and the
+    /// will-not-bury placement rule could not distinguish a belt over ore a
+    /// drill can still reach from a belt over ore nobody can mine. With the
+    /// radius, burying the outer ring under an electric drill is **not a cost
+    /// at all**; under a burner drill it genuinely is.
+    ///
+    /// `default`, so a dump or snapshot written before this field existed
+    /// still loads, with `None` meaning *unknown reach* -- never zero reach.
+    #[serde(default)]
+    pub mining_drill_radius: Option<f64>,
     #[serde(default)]
     pub resource_category: Option<String>,
     /// The categories a `character` or `mining-drill` prototype can mine.
@@ -2113,6 +2137,7 @@ mod tests {
             resource_category: None,
             resource_categories: None,
             mining_fluid: None,
+            mining_drill_radius: None,
         }
     }
 

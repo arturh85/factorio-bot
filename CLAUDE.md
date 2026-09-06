@@ -1258,21 +1258,31 @@ entry over a log line:
   does work: an inserter picks from **both** lanes, preferring the far one, so
   two rows meeting opposite lanes first self-correct once a furnace's ore slot
   fills. See `docs/superpowers/notes/2026-09-06-two-rows-off-one-belt.md`.
-- **Ungenerated ground reads as CLEAR, to the world model and to a live RCON
-  query alike — so siting far from explored territory is provisional.**
-  Factorio generates chunks lazily, and an ungenerated chunk genuinely contains
-  nothing: both are telling the truth, and it fills with trees the instant
-  something forces generation. Measured 2026-09-06: `goal.charted(40, 0, 30)`
-  planned **zero steps** (already charted) and `rcon.find_entities_in_radius`
-  reported **`0 entities`** in a 10-tile disc, then the build hit a tree at
-  (44.5, 0.5) once bots arrived — and the replan refused by name, correctly.
-  Zero entities in a 10-tile disc of a fresh map is the tell. **"Charted" is not
-  "generated", and no query can fix it: walk a bot there first, then site.**
-  Doing that turned four failed attempts into `done=true failed=0 lost=0
-  pending=0` on 33 entities, first pass. This is sharper than the existing
-  "a fresh map has charted almost nothing" note — the entities do not *exist*
-  yet, so there is nothing to see and nothing to be stale about. See
-  `docs/superpowers/notes/2026-09-06-saturation-and-ungenerated-ground.md`.
+- **RETRACTED 2026-09-06: "ungenerated ground reads as clear".** This entry
+  claimed that a siting search picked a tile with a tree on it because the chunk
+  was not generated yet, and that "zero entities in a 10-tile disc of a fresh
+  map is the tell". **The premise is nonsense — open grass is perfectly
+  ordinary on a fresh map**, so an empty disc is evidence of nothing at all, and
+  the whole mechanism was built on top of it.
+  Measured with the discriminator that was in the bindings all along (`rcon.*`
+  asks the GAME, `world.*` asks the MODEL), on a fresh seed-31337 map:
+
+      before any walk    GAME=0  MODEL=0   planner ACCEPTS the anchor
+      after the walk     GAME=1  MODEL=0   planner ACCEPTS the anchor
+                         (the 1 is the scout itself)
+
+  **There is no tree at (44.5, 0.5).** Nothing appeared after the walk, and the
+  planner accepts that anchor on a clean world — so no chunk filled in and no
+  writeout gap is needed to explain anything either. What is left standing:
+  the refusals only ever happened on a **replan after a partial build**, so the
+  occupant was something those runs created; the cause is **unexplained** and is
+  deliberately left that way rather than replaced with a second story. And
+  walking a scout to the site first does help — but by putting the bots *near
+  the site* before the build, which fixes walk routing, not by making ground
+  real.
+  The general lesson is the one worth keeping: **an inference is not a
+  measurement, and the tell was a guess about Factorio terrain that a moment's
+  thought would have killed.**
 - **`method::blueprint` had NO enclosure guard until 2026-09-06, while
   `method::assemble` has had one — so the method that builds the LARGEST blocks
   was the unguarded one.** `BuildBlock::expand` now calls

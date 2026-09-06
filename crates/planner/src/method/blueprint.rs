@@ -1129,6 +1129,102 @@ impl Method for BuildBlock {
             });
         }
 
+        // A block that draws power needs a network with the headroom to run
+        // it, and until now `Goal::Built` never asked for one. That is the
+        // whole of the `FurnaceLine` failure: 179 entities placed correctly,
+        // 13 poles wired to each other, **no generator anywhere**, and 138 of
+        // them never moved an item while the build reported success.
+        //
+        // One call, not one per consumer. The block distributes for itself --
+        // measured, `FurnaceLine` is 13 of 13 poles in one component supplying
+        // 48 of 48 inserters -- so a single consumer stands for all of them and
+        // the job is one hop from a supply anchor. Calling `ensure_powered` per
+        // entity would emit 48 supply anchors and 48 pole runs; calling it once
+        // with the block's *bounding box* as `area` would be worse, because
+        // `pole_would_supply` is an overlap test and one pole touching a corner
+        // satisfies a 29x11 rectangle. The representative consumer's own box is
+        // the call's intended use, where overlap and coverage coincide.
+        let power_steps_and_ids = if power.demand.consumers > 0 {
+            // Deterministic by offset, never by iteration order: a replan that
+            // picked a different representative could site the plant somewhere
+            // else, and this method's whole contract is that a block stays put.
+            //
+            // The hop targets one of the block's OWN POLES where it has any,
+            // and only falls back to a consumer for a block that carries none.
+            // That is the difference between "run a pole line to this inserter"
+            // -- which asks for a new pole beside a machine the block already
+            // supplies -- and "join this block's network to a generator", which
+            // is the actual job. `blueprint_power` has already established that
+            // the block's poles are one component covering every consumer, so
+            // feeding any one of them feeds all of them.
+            let pole_first = |e: &&BlueprintEntity| {
+                let at = anchor.add(&e.offset);
+                let own = Rect::new(
+                    &Position::new(at.x() - 0.05, at.y() - 0.05),
+                    &Position::new(at.x() + 0.05, at.y() + 0.05),
+                );
+                ctx.state.pole_would_supply(&e.name, &at, &own)
+            };
+            let by_offset = |a: &&BlueprintEntity, b: &&BlueprintEntity| {
+                a.offset
+                    .x()
+                    .total_cmp(&b.offset.x())
+                    .then(a.offset.y().total_cmp(&b.offset.y()))
+            };
+            let rep = bp
+                .entities
+                .iter()
+                .filter(pole_first)
+                .min_by(by_offset)
+                .or_else(|| {
+                    bp.entities
+                        .iter()
+                        .filter(|e| ctx.state.consumer_draw_kw(&e.name).is_some())
+                        .min_by(by_offset)
+                })
+                .expect("consumers > 0 means at least one priced entity");
+            let rep_world = anchor.add(&rep.offset);
+            let facing = Direction::from_u8(rep.direction).unwrap_or(Direction::North);
+            let rep_area = ctx
+                .state
+                .collision_area_facing(&rep.name, &rep_world, facing)
+                .ok_or_else(|| PlannerError::BlueprintRefused {
+                    reason: format!(
+                        "the world has no prototype for {}, so its footprint \
+                         cannot be sized and its power cannot be checked",
+                        rep.name
+                    ),
+                })?;
+            // Everything the block is about to occupy, so a pole cannot be
+            // sited on ground this block will take. Not reserved in
+            // `ctx.state`: a refusal below leaves nothing behind.
+            let occupants: Vec<FactorioEntity> = wanted
+                .iter()
+                .map(|e| entity_for(&ctx.state, e, &anchor.add(&e.offset)))
+                .collect();
+            let kw = power.demand.kw;
+            let powering = crate::method::power::ensure_powered(
+                ctx,
+                &rep.name,
+                &rep_world,
+                &rep_area,
+                kw,
+                crate::method::extract::SUPPLY_SEARCH_RADIUS,
+                &occupants,
+            )?
+            .ok_or_else(|| PlannerError::BlueprintRefused {
+                reason: format!(
+                    "the block draws {kw:.0} kW and supply exists, but no run of \
+                     poles this planner will build carries it to {} at {rep_world}",
+                    rep.name
+                ),
+            })?;
+            (powering.steps, powering.ids)
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        let (power_steps, power_ids) = power_steps_and_ids;
+
         // Would building this block seal one of the bots into a pocket?
         //
         // **`method::blueprint` had no enclosure guard at all until now**,
@@ -1193,6 +1289,8 @@ impl Method for BuildBlock {
         // stops two bots working the same corner, which is the whole
         // structural reason a band exists in the first place.
         let mut steps = Vec::with_capacity(split.iter().map(Vec::len).sum());
+
+        steps.extend(power_steps);
 
         // Every bystander this block would seal in walks clear before any of
         // its own entities go down -- the same shape `method::power` and
@@ -1291,6 +1389,20 @@ impl Method for BuildBlock {
                 });
             }
         }
+        // Nothing of the block goes down before the plant that runs it. Every
+        // id, not just the generator's: an engine with no steam produces
+        // nothing and a boiler with no water makes no steam, so the block waits
+        // for the whole plant -- `Powering::ids` says so in its own doc.
+        for power_id in &power_ids {
+            for place_id in &place_ids {
+                steps.push(Step::Link {
+                    from: *power_id,
+                    to: *place_id,
+                    lag: 0,
+                });
+            }
+        }
+
         // An evacuation precedes every placement, not just its own band's:
         // the bot is being walked clear of the whole footprint, and any
         // entity of it could be the wall that traps them.

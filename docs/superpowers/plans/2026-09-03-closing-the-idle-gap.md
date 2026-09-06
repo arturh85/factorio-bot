@@ -303,6 +303,45 @@ unvisited and planned nothing, silently. Threat avoidance — a 50-tile
 stand-off, refusing rather than returning an empty plan — is the **first
 non-test caller of the threat index**, which had none.
 
+## ⚠️ ORE BLOCKS EVERYTHING IN THE PLANNER, AND NOTHING IN THE GAME
+
+Found by the `second` session, 2026-09-06, with one `can_place_entity` query
+against a live game at an ore tile (-42.5, -37.5):
+
+```
+belt = true    pole = true    drill = true
+```
+
+**A transport belt and an electric pole can both be built on ore.** Factorio's
+resources sit on the `resource` collision layer alone — the mod's own
+walk-stall comment says so: *"resources collide on the resource layer only,
+which is why a character walks straight through them"*.
+
+The planner disagrees. Every placement check computes
+`resource_blocks = !stands_on_resources(name)` (`crates/planner/src/state.rs`
+at 2828, 3104, 3143), so **ore blocks everything that is not a mining
+drill**. `stands_on_resources` was added because `is_area_free` "refused a
+drill everywhere on every map" — the right diagnosis, but it carved an
+exception for drills instead of correcting the general rule.
+
+**Why it has never been caught: it fails in the safe direction.** It refuses
+legal ground and never builds on illegal ground, so it produces `NoRoute`
+and `NoSiteFound`, never a broken factory. `is_area_free` and
+`placement_occupant` are what `method::connect` routes belts through and
+what `method::assemble` sites cells with, so a belt route that would legally
+cross a patch is refused, and a cell near any patch on any map is refused a
+site. It also explains a result the other session was about to record as
+structural: `MinerLine` cannot site at any radius because its belt-and-pole
+corridor runs over the ore its own drills need. **That is not a siting
+limitation, it is this defect.**
+
+Not fixed tonight, deliberately: it is a planner-wide behaviour change whose
+blast radius covers `connect`, `assemble` and `produce`, and it invalidates
+every offline number measured before it. It gets its own change with
+before/after figures rather than a rider on another branch. **This is the
+first candidate to check whenever a self-fed cell refuses for reasons that
+look like crowded terrain.**
+
 ## ✅ EXPLORATION WORKS, AND THE ORE REFUSAL IS GONE (`3bd49296`)
 
 `Goal::Charted { around, radius }` → `Scout` → `Survey`, plus a mod verb

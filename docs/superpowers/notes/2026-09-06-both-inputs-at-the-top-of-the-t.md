@@ -36,14 +36,39 @@ lane by geometry, so neither can crowd the other, whatever arrives first.
                              furnaces
 ```
 
-| design | plates | ore mined | coal used |
+### The first table was not like for like — corrected
+
+I first published this as **4.6x the plates**, from 17/18 against 78. That was
+not a rate comparison and I should not have written it as one:
+
+- the two sideload runs ended at a **plateau** — they stopped producing, so 17
+  and 18 are *terminal* values;
+- the T-junction run exhausted its **iteration cap** while still climbing, so 78
+  was a *non-terminal* value at an unknown tick.
+
+Worse, an iteration cap is not tick-bounded: on a faster machine more game ticks
+pass per RCON round trip, so the same 5,000 polls cover more game time. The other
+session has since measured its own agents starving a run to 44% of nominal for
+ninety seconds, so that is a real effect on this box.
+
+Re-measured with `scripts/chain_compare.lua`: one variant per run, each on a
+**fresh map from the same seed**, each sampled at the **same game-tick offset**
+from its own charge. Tick offsets do not care how fast wall-clock time runs.
+
+| design | plates in 6,300 ticks | ore mined | coal used |
 |---|---|---|---|
 | sideload downstream of the drills | 17 | 46 | 45 of 100 |
 | sideload upstream of the drills | 18 | 35 | 73 of 100 |
-| **both inputs at the top of the T** | **78** | **86** | **89 of 100** |
+| **both inputs at the top of the T** | **44** | 86 | 89 of 100 |
 
-**4.6x the plates**, and the coal figure is the independent confirmation: the
-broken design left 55 coal unused because it could not get past the junction.
+**2.6x, not 4.6x** — and the qualitative half is the stronger claim anyway: the
+sideload designs **stall** and stop, while the T was still climbing when the
+window closed (it reached 78 given longer). The coal figure is the independent
+confirmation: the broken design left 55 coal unused because it could not get
+past the junction.
+
+(The ore and coal figures are from the original longer runs and are not on the
+6,300-tick basis; they are directional, not comparable.)
 
 It also did not stall — the polling loop ran out of iterations rather than
 detecting a plateau, with 8 ore in transit against 29 stranded before.

@@ -577,3 +577,80 @@ stream, either by writing them out explicitly after a blueprint build or by
 including them in the world snapshot. Until then, `recover_anchor` falls through
 to the vote path on every real expansion, which is the behaviour that existed
 before Task 8 — so nothing regressed, and nothing was gained either.
+
+---
+
+## A block that MAKES — proven live
+
+`MovingBlock` showed a block moves items. `SmeltingBlock` shows a machine
+inside one consuming an item and producing a different one, with the arms
+either side moving them and nothing carried by hand.
+
+Headless, two bots, 5x, fresh seed-31337, on a **second instance**
+(`scratch/blocks.toml`, rcon 4360, `workspace/blocks`) running in parallel with
+the speedrun session's work rather than queueing behind it.
+
+- Plan: **6 steps** — five placements plus the ghost stamp. Sited itself; the
+  furnace stood at the blueprint's own `(5.0, 3.0)`.
+- Build: done, 0 failed, 0 lost, **0 pending**.
+- Everything within 10 tiles afterwards: `burner-inserter x2, iron-chest x2,
+  stone-furnace x1` — the whole block.
+
+| tick | source ore | sink plates |
+|---|---|---|
+| 444 | 50 | 0 |
+| 2,042 | 42 | 5 |
+| 4,453 | 29 | 18 |
+| 6,054 | 21 | 26 |
+| end | — | **28** |
+
+**About one plate per 200 ticks, against a stone furnace's own 192-tick smelt
+time.** The rate corroborates the mechanism rather than merely counting output:
+a hand-fed chest would not track the furnace's cadence.
+
+After the charge the script issued only read-only queries — no dispatch, no
+`insert`, nothing carried. (Stated as what the script did; this run wrote no
+`record`, so there is no event log to cite, unlike `run-1788685081-91006`.)
+
+### Why this block exists rather than FurnaceLine
+
+`FurnaceLine`'s 48 inserters are the **electric** `inserter`, which is not
+enabled at t=0 on seed 31337 — the defect the self-fed cell's first caller
+exposed in `connect_steps`. So the project's flagship fixture cannot be built
+early at all. `SmeltingBlock` is burner-only and needs no electricity and no
+generator.
+
+**Its geometry is inherited, not authored.** Every offset is lifted from
+`FurnaceLine`, which stood 176 of 179 entities correctly live: furnace on
+integer coordinates because it is 2x2, inserters on half-integers, both
+direction 0. Getting that parity wrong yields a layout that places perfectly
+and does nothing.
+
+### The limitation, which the run was built to measure
+
+**A burner-only block has a fuelled input side and a starving output side.**
+The input arm carries coal and self-fuels from it. The output arm carries iron
+plates, never coal, so it has no fuel source and runs exactly as long as the
+charge it is given — five coal here, disclosed in the script header. Scaling
+this block means either electric inserters (post-research) or a coal path to
+the output side. That is the same shape as the speedrun session's "one fuel
+charge" finding, arriving from the block end.
+
+### Four instrument errors this run made before it made a measurement
+
+Recorded because each produced a *plausible wrong number*, not an error:
+
+1. **Cheated the materials after planning.** The planner saw empty inventories
+   and solved gathering too: three furnaces rather than one, because it decided
+   to smelt the plates for the chests. The block's own placements then waited on
+   production a single batch never finished — and reported `done`.
+2. **Read `inventory` where a chest keeps `output_inventory`.** Reported an
+   empty chest holding 50 ore.
+3. **Indexed the inventory by item name.** Factorio 2.0 returns an *array* of
+   `{name, count, quality}`, not a map, so the lookup was nil — an empty chest
+   again, by a second route.
+4. **Measured a plateau in samples rather than ticks.** Eight identical readings
+   two ticks apart declared the output stopped, 16 ticks into a 192-tick smelt.
+   The same error as sampling 40 times in 36 ticks, one loop further along.
+
+Each read as "the block made nothing". None of them were about the block.

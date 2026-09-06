@@ -169,3 +169,26 @@ So: record the delivered tick rate in every run's note (`just analyse`
 prints it and flags below 80% of nominal), share the box freely for checks
 you expect to pass, and re-run on a quiet floor before believing any
 failure that arrived on a loaded one.
+
+## The rarer, opposite case: an independent oracle that disagrees
+
+Most of the night's defects were a check agreeing with its subject. One was
+the reverse and is worth naming, because the instinct to dismiss it is
+strong.
+
+The siting session wrote a Python oracle, independent of the Rust, that
+found **359 legal anchors** for a block the Rust refused to site. The
+disagreement was explained away by a known missing constraint in the oracle
+— and then that constraint was removed from the Rust by the ore fix, so the
+explanation evaporated and **the disagreement became live again**. Three
+candidates were named and none asserted.
+
+**An independent oracle disagreeing with the implementation is a finding,
+not noise.** The value of an oracle is exactly that it was not written to
+agree; when it stops disagreeing for a reason you have since deleted, the
+disagreement is new evidence rather than an old annoyance.
+
+**And a refusal that moves is a diagnosis; a refusal that vanishes is only a
+hope.** The ore fix did not clear this refusal, it changed it from "no route
+for the belts" to "no anchor puts every drill on ore" — which is more
+informative than a pass would have been.

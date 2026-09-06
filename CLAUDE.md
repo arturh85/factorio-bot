@@ -407,8 +407,32 @@ BotBridge Mod (Factorio mod for RPC)
       run cheated in no power source. Power coverage is not power capacity.
       So 87 belts, 48 inserters, 2 splitters and 2 underground belts --
       **138 of 179 entities, 77% of the block** -- are proven to stand and
-      have **never been shown to move a single item**. Closing that needs
-      power in the blueprint and a source/sink to count at each end.
+      have **never been shown to move a single item**.
+
+      **What was missing was one machine, and that is now measured** (peer
+      session, 2026-09-06, computed offline from the fixture with no world):
+      **13 of 13 poles wired into one component, 48 of 48 inserters inside a
+      pole's supply area, 624.0 kW of demand.** The block is *internally
+      complete* — its own poles connect and cover its own consumers. It was
+      never a coverage or a distribution problem, and nothing in the planner
+      was at fault: **nobody ever gave it a generator.** "13 poles and no
+      generator at all" meant exactly what it said.
+
+      So closing it needs **generation**, not power *in* the blueprint: one
+      hop from a supply anchor to any one of the block's own poles, which is
+      point-to-point and is what `method::power::ensure_powered` does. A
+      900 kW plant covers 624 kW with headroom.
+
+      **And 624 kW is the PRE-ELECTRIC number.** Those furnaces burn coal; the
+      draw is 48 inserters at 13 kW. Convert them to electric furnaces at
+      **180 kW each** and one yellow belt's worth (24 furnaces, see the
+      smelting ratios) is **4,320 kW** against a plant that tops out at 1.8 MW
+      with two engines. That is the owner's *"a second boiler is usually
+      needed after the electricity demands skyrocket once we start using
+      electric smelters"* with arithmetic under it, and it says the plant
+      ceiling binds on a block that exists rather than on a hypothetical one.
+      Design for growing the plant: `docs/superpowers/notes/
+      2026-09-06-one-place-that-decides-power.md`.
     - **It has no siting story, and refuses rather than guessing.** The
       block is placed at a fixed offset. Since 2026-09-05 `expand()` scans
       the whole footprint **before emitting anything** and refuses with

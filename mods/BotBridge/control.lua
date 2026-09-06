@@ -2371,9 +2371,33 @@ local function sample_force_body(tick)
 	-- Cumulative since game start, not per-interval -- Rust reads these as
 	-- running totals, same as the production statistics GUI does.
 	local made, consumed = {}, {}
-	local stats = force.get_item_production_statistics(game.surfaces[1])
-	for name, count in pairs(stats.input_counts) do made[name] = count end
-	for name, count in pairs(stats.output_counts) do consumed[name] = count end
+	-- SUMMED OVER EVERY SURFACE, not read off Nauvis.
+	--
+	-- `get_item_production_statistics` is per-surface, and this read
+	-- `game.surfaces[1]` while the power and machine samplers **in this same
+	-- sample line** already iterate `pairs(game.surfaces)`. Identical today,
+	-- because Space Age is enabled in this workspace but no run has ever left
+	-- Nauvis. The moment one does, `tools/run_analysis.py` would compute its
+	-- `roster-fed` / `factory` / `unclear` verdict from production on one
+	-- surface against machines on all of them -- two different populations,
+	-- with nothing in the record able to reveal the mismatch.
+	--
+	-- Found by the surfaces survey
+	-- (docs/superpowers/notes/2026-09-06-surfaces-survey.md) and fixed while
+	-- it is still a no-op, which is the only cheap moment it will ever have.
+	for _, surface in pairs(game.surfaces) do
+		local ok, stats = pcall(function()
+			return force.get_item_production_statistics(surface)
+		end)
+		if ok and stats ~= nil then
+			for name, count in pairs(stats.input_counts) do
+				made[name] = (made[name] or 0) + count
+			end
+			for name, count in pairs(stats.output_counts) do
+				consumed[name] = (consumed[name] or 0) + count
+			end
+		end
+	end
 
 	write_sample({
 		kind = "force",
@@ -5671,38 +5695,36 @@ function rcon_place_blueprint(player_id, blueprint, pos_x, pos_y, direction, for
 		end
 		::continue::
 	end
-	-- GHOSTS CANNOT BE STREAMED FROM HERE, and this is where the attempt was.
+	-- DEFERRED GHOST WRITEOUT, under test. See
+	-- docs/superpowers/notes/2026-09-06-ghosts-cannot-be-written-from-rcon.md
 	--
-	-- The gap is real: `result` goes back in the RCON reply body, which the
-	-- executor reads as this action's result and nothing else ever sees, while
-	-- the world model is fed by `writeout` on stdout. A script-driven
-	-- `build_blueprint` raises no `on_built_entity`, so no ghost this function
-	-- creates reaches the model. Measured live on a 9-entity block: 9 ghosts
-	-- standing in the game, 0 visible to the planner. That leaves
-	-- `method::blueprint`'s ghost recovery -- correct code with passing unit
-	-- tests -- unable to fire.
+	-- `writeout` from inside this function is swallowed: measured with a
+	-- non-ghost control that also never arrived, so it is the channel and not
+	-- the record. Factorio redirects console output to the RCON client while a
+	-- command is in flight, and `writeout` is one `print`.
 	--
-	-- **A `writeout` here does not close it, and fails silently.** Measured
-	-- 2026-09-06 with a control: a plain non-ghost record, written on the same
-	-- channel from the same loop in the same call, also never arrived. So it is
-	-- not the ghost record, not the filter and not deserialization --
-	-- `writeout` cannot escape a function invoked through `remote.call` from an
-	-- RCON command. That is the same mechanism this file already warns about
-	-- for `rcon.print`: Factorio redirects console output to the RCON client
-	-- for the duration of the command, so it lands in the reply body rather
-	-- than on stdout.
+	-- `todo_next_tick` is drained inside `on_tick`, an ordinary event handler
+	-- with ordinary stdout. Records are captured by value because the ghosts
+	-- may be revived or destroyed before the tick runs, and touching an invalid
+	-- entity raises.
 	--
-	-- Deferring it to `todo_next_tick_other`, so the write happens inside
-	-- `on_tick` where stdout is ordinary, was tried and **also did not
-	-- arrive** -- with the same non-ghost control, so the negative is about the
-	-- channel and not about the record. Why is not yet established; note that
-	-- that queue is drained only in an `elseif`, so a non-empty
-	-- `todo_next_tick` starves it.
-	--
-	-- Deliberately left UNIMPLEMENTED rather than leaving a call that looks
-	-- like a fix and is inert. The next thing to try is a channel that is known
-	-- to escape: a real event handler, or the sampling session's own writer.
-	-- See docs/superpowers/notes/2026-09-06-ghosts-cannot-be-written-from-rcon.md
+	-- `todo_next_tick` rather than `todo_next_tick_other`: the drain is an
+	-- `if/elseif`, so the "other" queue only runs on a tick where the first is
+	-- empty. That is a second way to get nothing, and this test is trying to
+	-- isolate one variable.
+	local ghost_records = {}
+	for _, entry in pairs(result) do
+		if entry.name == "entity-ghost" then
+			ghost_records[#ghost_records + 1] = helpers.table_to_json(entry)
+		end
+	end
+	if #ghost_records > 0 then
+		table.insert(todo_next_tick, function()
+			for _, record in ipairs(ghost_records) do
+				writeout(game.tick, "on_some_entity_created", record)
+			end
+		end)
+	end
 	if nothing == true then
 		rcon.print("Error: failed to build anything")
 	else
@@ -6385,10 +6407,27 @@ function emulate_research_triggers(tick)
 	if tick % RESEARCH_TRIGGER_PERIOD ~= 0 then return end
 	if storage.research_trigger_emulation_off then return end
 	local force = game.forces["player"]
-	local ok_stats, stats = pcall(function()
-		return force.get_item_production_statistics(game.surfaces[1])
-	end)
-	if not ok_stats or stats == nil then return end
+	-- Summed over every surface, for the same reason the force sampler is:
+	-- a research trigger asks what the FORCE has produced, and a plate smelted
+	-- on another planet counts. Reading Nauvis alone would leave a technology
+	-- unearned that the game itself considers earned -- and this sweep exists
+	-- precisely because the game does not fire the trigger for us, so nothing
+	-- downstream would notice the omission.
+	local counts = {}
+	local any = false
+	for _, surface in pairs(game.surfaces) do
+		local ok, s = pcall(function()
+			return force.get_item_production_statistics(surface)
+		end)
+		if ok and s ~= nil then
+			any = true
+			for name, count in pairs(s.input_counts) do
+				counts[name] = (counts[name] or 0) + count
+			end
+		end
+	end
+	if not any then return end
+	local stats = { input_counts = counts }
 	for name, tech in pairs(force.technologies) do
 		if not tech.researched and tech.enabled and prerequisites_researched(tech) then
 			local ok, trigger = pcall(function() return tech.prototype.research_trigger end)

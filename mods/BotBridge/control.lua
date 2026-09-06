@@ -5671,6 +5671,34 @@ function rcon_place_blueprint(player_id, blueprint, pos_x, pos_y, direction, for
 		end
 		::continue::
 	end
+	-- STREAM THE GHOSTS TO THE MODEL, not just to the caller.
+	--
+	-- `result` goes back in the RCON reply body, which the executor reads as
+	-- this action's result and nothing else ever sees. The planner's world
+	-- model is fed by `writeout`, and a blueprint build raises no
+	-- `on_built_entity` for a ghost, so until now **no ghost this function
+	-- created ever reached the model**. Measured 2026-09-06 on a 9-entity
+	-- block: 9 ghosts standing in the game, 0 visible to the planner.
+	--
+	-- That made `method::blueprint`'s ghost recovery -- correct code, with
+	-- passing tests -- unable to fire even once, because its unit tests build
+	-- ghosts directly into `PlanState`, which is precisely the step the live
+	-- path never performs. A reader with nothing to read.
+	--
+	-- Emitted under the same event name an ordinary creation uses, because the
+	-- Rust side already handles it: `on_some_entity_created` ->
+	-- `FactorioWorld::on_some_entity_created` -> `EntityGraph::add`, which
+	-- keeps anything with a non-zero bounding box, and `serialize_entity`
+	-- already carries `ghost_name`/`ghost_type` for exactly this shape.
+	-- `PlanState::ghosts_named_any` matches on `ghost_name`, never `name`.
+	--
+	-- Only entries still ghostly are sent: a ghost this call revived is a real
+	-- entity and was written out by the game's own event.
+	for _, entry in pairs(result) do
+		if entry.name == "entity-ghost" then
+			writeout(game.tick, "on_some_entity_created", helpers.table_to_json(entry))
+		end
+	end
 	if nothing == true then
 		rcon.print("Error: failed to build anything")
 	else

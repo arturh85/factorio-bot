@@ -266,6 +266,14 @@ pub fn holds(goal: &Goal, state: &PlanState) -> Option<bool> {
         // well": nothing in the overlay records an extractor standing on a
         // patch, and nothing observes output. Unanswerable, not unmet.
         Goal::Extracted { .. } => None,
+        // The same answer, for a stronger reason. `Extracted` is unanswerable
+        // because nothing observes a machine extracting; this one is
+        // unanswerable because the *arrangement* it names -- a tank with pipe
+        // reaching a working pumpjack -- is a fluid-network fact, and
+        // `PlanState` models no fluid network at all. `method::gather` adopts
+        // a standing tank rather than duplicating it, which is where the
+        // idempotence a `Some(true)` would have bought actually lives.
+        Goal::Gathered { .. } => None,
         Goal::Built { .. } => None,
         // A *state*, and one the model can answer exactly. Answering here as
         // well as inside `Scout` is what makes a charted disc
@@ -5041,6 +5049,10 @@ pub fn default_registry() -> MethodRegistry {
         .with(Box::new(Chop))
         .with(Box::new(Mine))
         .with(Box::new(crate::method::extract::Extract))
+        // Claims `Goal::Gathered`, which nothing else claims, so where it
+        // sits changes no other goal's method. Beside `Extract` because it is
+        // the rung above it and calls into it -- see `method::gather`.
+        .with(Box::new(crate::method::gather::Gather))
         // Claims `Goal::Charted`, which nothing else claims, so where it sits
         // changes no other goal's method. See `method::scout`.
         .with(Box::new(crate::method::scout::Scout))
@@ -6493,6 +6505,10 @@ pub fn registry_for(bots: &[BotId]) -> MethodRegistry {
         }))
         .with(Box::new(Mine))
         .with(Box::new(crate::method::extract::Extract))
+        // Claims `Goal::Gathered`, which nothing else claims, so where it
+        // sits changes no other goal's method. Beside `Extract` because it is
+        // the rung above it and calls into it -- see `method::gather`.
+        .with(Box::new(crate::method::gather::Gather))
         // Claims `Goal::Charted`, which nothing else claims, so where it sits
         // changes no other goal's method. See `method::scout`.
         .with(Box::new(crate::method::scout::Scout))

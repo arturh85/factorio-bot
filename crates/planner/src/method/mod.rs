@@ -5,6 +5,7 @@ pub mod assemble;
 pub mod blueprint;
 pub mod connect;
 pub mod extract;
+pub mod gather;
 pub mod have;
 pub mod power;
 pub mod produce;

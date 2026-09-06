@@ -6,7 +6,7 @@ use crate::method::produce::DrainPolicy;
 use crate::method::util::rotated_collision_box;
 use factorio_bot_core::constants::BOT_FORCE;
 use factorio_bot_core::factorio::util::{add_to_rect, calculate_distance};
-use factorio_bot_core::factorio::world::{FactorioWorld, WalkRefusal};
+use factorio_bot_core::factorio::world::{FactorioSurface, WalkRefusal};
 use factorio_bot_core::num_traits::FromPrimitive;
 use factorio_bot_core::types::{
     Direction, FactorioEntity, FactorioTechnology, FactorioTile, HandMiningObstacle, PlayerId, Pos,
@@ -170,7 +170,7 @@ fn pole_wire_reach(name: &str) -> Option<f64> {
 /// panels and accumulators are absent from this table and a solar base reads
 /// as unpowered.
 ///
-/// Nameplate capacity, not observed output: nothing in `FactorioWorld` says
+/// Nameplate capacity, not observed output: nothing in `FactorioSurface` says
 /// whether a steam engine has steam. See [`PlanState::electric_supply_kw`].
 fn generation_kw(name: &str) -> Option<f64> {
     match name {
@@ -418,7 +418,7 @@ const MAX_PLAUSIBLE_RESOURCE_REACH: f64 = 1000.;
 /// the world carries no `character` prototype — see that constant for why a
 /// world can lack one. Read rather than hardcoded because it is prototype data
 /// a mod can change, exactly like `character_mining_speed`'s.
-fn character_half_box(base: &FactorioWorld) -> (f64, f64) {
+fn character_half_box(base: &FactorioSurface) -> (f64, f64) {
     base.entity_prototypes
         .get("character")
         .map(|p| {
@@ -438,7 +438,7 @@ fn character_half_box(base: &FactorioWorld) -> (f64, f64) {
 /// the sum of their half-sides, so the extreme separation at which they still
 /// touch is corner to corner — that hypotenuse. It is the supremum of
 /// [`PlanState::character_stands_on_tile`], and a unit test says so.
-fn tile_occupancy_radius(base: &FactorioWorld) -> f64 {
+fn tile_occupancy_radius(base: &FactorioSurface) -> f64 {
     let (half_x, half_y) = character_half_box(base);
     (TILE_HALF_SIDE + half_x).hypot(TILE_HALF_SIDE + half_y)
 }
@@ -629,7 +629,7 @@ fn same_runner(a: Option<ClaimRunner>, b: Option<ClaimRunner>) -> bool {
 /// # What counts as a buffer, and where that is decided
 ///
 /// **Not here.** This crate believes whatever
-/// [`FactorioWorld::observed_inventories`] tells it, minus two checks it can
+/// [`FactorioSurface::observed_inventories`] tells it, minus two checks it can
 /// make locally (below). The decision about *which* containers the game is
 /// ever asked about belongs to whoever issues the RCON query --
 /// `crates/core`'s `Planner::refresh_buffers` -- because that is the code that
@@ -924,7 +924,7 @@ impl std::fmt::Display for Occupant {
 /// fields, so `fork` costs the overlay rather than a world copy.
 #[derive(Clone)]
 pub struct PlanState {
-    base: Arc<FactorioWorld>,
+    base: Arc<FactorioSurface>,
     /// How freely a fragment may wait on a cell this plan already stood.
     ///
     /// Set by [`crate::plan_best`], which builds one plan under each policy
@@ -1191,7 +1191,7 @@ pub struct PlanState {
     /// plans against has a single force, so the tie-break decides nothing in
     /// practice". That premise was false from the first research completion of
     /// every run. `writeout_forces` in `mods/BotBridge/control.lua` emits all
-    /// of `game.forces`, so `FactorioWorld::forces` gains `enemy` and
+    /// of `game.forces`, so `FactorioSurface::forces` gains `enemy` and
     /// `neutral` the moment the mod re-sends them, and `min()` returns
     /// **`enemy`** — a force that never researches anything. In run 30
     /// (`workspace/runs/run-1788365280-15443/`) that happened at tick 26,449,
@@ -1362,7 +1362,7 @@ pub struct PlanState {
     ///
     /// # Believed for the whole run
     ///
-    /// Read from `FactorioWorld::placement_refusals` on every
+    /// Read from `FactorioSurface::placement_refusals` on every
     /// [`PlanState::from_world`], and that ledger is never expired. Purity
     /// survives it: this is an input, read once at construction like every
     /// other field, and two `PlanState`s built from the same world and roster
@@ -1394,7 +1394,7 @@ pub struct PlanState {
     /// # Ordered, because the order is load-bearing
     ///
     /// A `BTreeMap<Pos, _>`, filled from
-    /// [`FactorioWorld::observed_inventories`], which sorts before it hands
+    /// [`FactorioSurface::observed_inventories`], which sorts before it hands
     /// anything over. A buffer overlay iterated in hash order would move
     /// emission order, which fixes `ActionId` allocation, which fixes
     /// `schedule`'s `(end, ActionId, BotId)` tie-break -- a correctness bug,
@@ -1402,7 +1402,7 @@ pub struct PlanState {
     ///
     /// # Empty in every fixture, and that is the inertness proof
     ///
-    /// Nothing writes to `FactorioWorld::inventories` unless a caller pulls
+    /// Nothing writes to `FactorioSurface::inventories` unless a caller pulls
     /// contents over RCON, so every existing test world has none of these and
     /// `Withdraw` claims nothing. That is why registering a new method ahead
     /// of `Smelt` and `Mine` moved no makespan.
@@ -1426,7 +1426,7 @@ pub struct PlanState {
     /// # Read once, like every other reading
     ///
     /// Seeded in [`PlanState::from_world`] from
-    /// [`FactorioWorld::observed_inventories`], under the same guard as
+    /// [`FactorioSurface::observed_inventories`], under the same guard as
     /// `buffers`: the entity the reading names must still be the entity
     /// standing on that tile. Empty in every fixture and in every offline
     /// dump, since `world.dump` never refreshes inventories -- so offline a
@@ -1462,7 +1462,7 @@ pub struct PlanState {
     ///
     /// # Empty in every fixture
     ///
-    /// Nothing writes to `FactorioWorld::walk_refusals` unless a real walk was
+    /// Nothing writes to `FactorioSurface::walk_refusals` unless a real walk was
     /// refused by a real game, so every existing test world has none of these
     /// and scheduling is bit-for-bit what it was.
     refused_walks: Vec<WalkRefusal>,
@@ -1475,7 +1475,7 @@ pub struct PlanState {
     /// A row is here only when *both* of these hold at the moment the plan is
     /// built:
     ///
-    /// * `FactorioWorld::enclosures` — written by
+    /// * `FactorioSurface::enclosures` — written by
     ///   `crates/executor::walk_memory::note_enclosure` — carries an
     ///   observation for this player within
     ///   [`WalkRefusal::SAME_PLACE_TOLERANCE`] of where the bot is *now*. That
@@ -1523,14 +1523,14 @@ pub struct PlanState {
     /// A `BTreeMap`, keyed by `BotId`, built from a ledger read once at
     /// construction — the same discipline `refused_walks` keeps, and for the
     /// same reason. Empty in every fixture: nothing writes
-    /// `FactorioWorld::enclosures` unless a real game refused a real walk.
+    /// `FactorioSurface::enclosures` unless a real game refused a real walk.
     walled_in: BTreeMap<BotId, f64>,
     /// Bots the *game* has said cannot move from where they stand, with the
     /// position each was benched at.
     ///
     /// # The witness is the game, and there is no second one
     ///
-    /// `FactorioWorld::benches` is written by `crates/executor`'s
+    /// `FactorioSurface::benches` is written by `crates/executor`'s
     /// `walk_memory::note_mobility` when the pathfinder has refused a walk
     /// **and** refused a short hop in every direction from the character.
     /// That is the game reasoning from the character's own collision box at
@@ -1583,7 +1583,7 @@ pub struct PlanState {
 }
 
 impl PlanState {
-    pub fn from_world(base: Arc<FactorioWorld>, bots: &[BotId]) -> PlanState {
+    pub fn from_world(base: Arc<FactorioSurface>, bots: &[BotId]) -> PlanState {
         let mut map = BTreeMap::new();
         let mut unknown_bots = BTreeSet::new();
         for id in bots {
@@ -1968,7 +1968,7 @@ impl PlanState {
         self.policy_probe.load(Ordering::Relaxed)
     }
 
-    pub fn base(&self) -> &Arc<FactorioWorld> {
+    pub fn base(&self) -> &Arc<FactorioSurface> {
         &self.base
     }
 
@@ -3882,7 +3882,7 @@ impl PlanState {
     /// * **Accumulators**, for the same reason once removed: they store what
     ///   solar generated.
     /// * **Whether the generator is actually running.** A steam engine with no
-    ///   steam produces nothing, and nothing in `FactorioWorld` says whether
+    ///   steam produces nothing, and nothing in `FactorioSurface` says whether
     ///   it has any. This counts nameplate capacity, so a boiler that is out
     ///   of fuel reads as powered. Naming it here because it is the residual
     ///   this function does *not* close.
@@ -5607,7 +5607,7 @@ mod tests {
     /// `EntityGraph::add` dropped `electric-pole` and `generator` before they
     /// reached the entity tree and nothing could read their name. That is the
     /// gap that made every live world score 0 kW and every research refuse.
-    /// This test goes through `FactorioWorld` instead, so it fails if that
+    /// This test goes through `FactorioSurface` instead, so it fails if that
     /// whitelist ever narrows again.
     #[test]
     fn a_power_plant_the_world_already_carries_reads_as_supply() {

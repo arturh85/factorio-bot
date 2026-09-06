@@ -50,7 +50,7 @@
 //! the three edits and their blast radius. Until then this is a hypothesis
 //! with good evidence about its inputs, not a working refusal.
 
-use factorio_bot_core::factorio::world::FactorioWorld;
+use factorio_bot_core::factorio::world::FactorioSurface;
 use factorio_bot_core::types::FactorioRecipe;
 use std::collections::BTreeMap;
 use thiserror::Error;
@@ -172,7 +172,7 @@ impl SubstanceTable {
     }
 
     /// Classify from a live or dumped world.
-    pub fn from_world(world: &FactorioWorld) -> Self {
+    pub fn from_world(world: &FactorioSurface) -> Self {
         // Collected rather than streamed because the recipe table is behind a
         // `DashMap` whose guards cannot be held across the closure boundary
         // `from_parts` wants, and because the result must not depend on the
@@ -415,7 +415,7 @@ impl FluidSource {
         }
     }
 
-    pub fn of_world(world: &FactorioWorld, fluid: &str) -> FluidSource {
+    pub fn of_world(world: &FactorioSurface, fluid: &str) -> FluidSource {
         let recipes: Vec<FactorioRecipe> = world
             .recipes
             .iter()

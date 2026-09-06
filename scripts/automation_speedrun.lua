@@ -270,7 +270,7 @@ end
 
 -- One last flush: a teleport queued after the final "ran" transition (e.g.
 -- during the raise the pcall above just caught) would otherwise sit in
--- `FactorioWorld`'s queue and never reach this run's `events.jsonl` at all.
+-- `FactorioSurface`'s queue and never reach this run's `events.jsonl` at all.
 record.teleports()
 -- And the same for a refusal, which is worse to lose: a run that died on its
 -- last placement is precisely the run whose refused site someone will want to

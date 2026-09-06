@@ -1,6 +1,6 @@
 use crate::error::{ApiResult, ErrorResponse};
 use crate::extract::ApiJson;
-use crate::game::{require_player, require_world};
+use crate::game::{require_player, require_surface};
 use crate::state::AppState;
 use axum::Json;
 use axum::extract::State;
@@ -46,7 +46,7 @@ pub async fn move_player(
 
     let instance = state.instance.read().await;
     let instance = instance.as_ref().ok_or_else(ErrorResponse::not_started)?;
-    let world = require_world(instance)?;
+    let world = require_surface(instance)?;
     // Validate the player id before mutating anything, see `require_player`.
     require_player(world, body.player_id)?;
     instance
@@ -92,7 +92,7 @@ pub async fn place_entity(
 
     let instance = state.instance.read().await;
     let instance = instance.as_ref().ok_or_else(ErrorResponse::not_started)?;
-    let world = require_world(instance)?;
+    let world = require_surface(instance)?;
     // Validate the player id before mutating anything, see `require_player`.
     require_player(world, body.player_id)?;
     // `None`: this HTTP endpoint has no request field for an underground
@@ -138,7 +138,7 @@ pub async fn cheat_item(
 ) -> ApiResult<FactorioPlayer> {
     let instance = state.instance.read().await;
     let instance = instance.as_ref().ok_or_else(ErrorResponse::not_started)?;
-    let world = require_world(instance)?;
+    let world = require_surface(instance)?;
     // Validate the player id before mutating anything, see `require_player`.
     require_player(world, body.player_id)?;
     instance
@@ -233,7 +233,7 @@ pub async fn insert_to_inventory(
 
     let instance = state.instance.read().await;
     let instance = instance.as_ref().ok_or_else(ErrorResponse::not_started)?;
-    let world = require_world(instance)?;
+    let world = require_surface(instance)?;
     // Validate the player id before mutating anything, see `require_player`.
     require_player(world, body.player_id)?;
     instance
@@ -285,7 +285,7 @@ pub async fn remove_from_inventory(
 
     let instance = state.instance.read().await;
     let instance = instance.as_ref().ok_or_else(ErrorResponse::not_started)?;
-    let world = require_world(instance)?;
+    let world = require_surface(instance)?;
     // Validate the player id before mutating anything, see `require_player`.
     require_player(world, body.player_id)?;
     instance

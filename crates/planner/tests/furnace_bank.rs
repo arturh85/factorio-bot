@@ -47,7 +47,7 @@ fn bank_sites(count: usize) -> Vec<Position> {
 }
 
 /// `fixture_world()` with `count` idle stone furnaces standing beside the iron.
-fn world_with_standing_furnaces(count: usize) -> Arc<FactorioWorldAlias> {
+fn world_with_standing_furnaces(count: usize) -> Arc<FactorioSurfaceAlias> {
     let world = fixture_world();
     for site in bank_sites(count) {
         world
@@ -57,9 +57,9 @@ fn world_with_standing_furnaces(count: usize) -> Arc<FactorioWorldAlias> {
     Arc::new(world)
 }
 
-type FactorioWorldAlias = factorio_bot_core::factorio::world::FactorioWorld;
+type FactorioSurfaceAlias = factorio_bot_core::factorio::world::FactorioSurface;
 
-fn plan_for(world: Arc<FactorioWorldAlias>, plates: u32) -> (ActionNetwork, PlanState) {
+fn plan_for(world: Arc<FactorioSurfaceAlias>, plates: u32) -> (ActionNetwork, PlanState) {
     let bots = [BotId(1)];
     let state = PlanState::from_world(world, &bots);
     let net = expand(

@@ -7,7 +7,7 @@ use std::{fs::File, sync::Arc};
 // use tokio::sync::mpsc::channel;
 
 use crate::factorio::rcon::{FactorioRcon, RconSettings};
-use crate::factorio::world::FactorioWorld;
+use crate::factorio::world::FactorioSurface;
 use crate::process::InteractiveProcess;
 use crate::process::output_parser::OutputParser;
 use crate::process::process_control::FactorioStartCondition;
@@ -22,7 +22,7 @@ pub async fn read_output(
     write_logs: bool,
     silent: Arc<RwLock<bool>>,
     wait_until: FactorioStartCondition,
-) -> Result<(Arc<FactorioWorld>, InteractiveProcess, FactorioRcon)> {
+) -> Result<(Arc<FactorioSurface>, InteractiveProcess, FactorioRcon)> {
     let log_file = Mutex::new(match write_logs {
         true => Some(File::create(log_path).into_diagnostic()?),
         false => None,

@@ -3,7 +3,7 @@ use imageproc::drawing::{Canvas, draw_hollow_rect_mut, draw_line_segment_mut};
 use crate::factorio::util::{
     scaled_draw_rect, vector_add, vector_multiply, vector_normalize, vector_substract,
 };
-use crate::factorio::world::FactorioWorld;
+use crate::factorio::world::FactorioSurface;
 use crate::graph::entity_graph::{BlockedQuadTree, ResourceQuadTree};
 use crate::types::{Position, Rect};
 use image::RgbaImage;
@@ -109,7 +109,7 @@ pub fn draw_resource_rects_mut<C>(
 /// `save_path` must already be resolved and bounded by the caller: this is
 /// reachable from the `world.draw` Lua binding, so the path in it is
 /// attacker-controlled. See `factorio_bot_core::scripts::resolve_write_path`.
-pub fn draw_world(world: Arc<FactorioWorld>, save_path: &Path) -> Result<()> {
+pub fn draw_world(world: Arc<FactorioSurface>, save_path: &Path) -> Result<()> {
     let image_width = 500.;
     let image_height = 500.;
     let bb_width = 200.;

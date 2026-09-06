@@ -1850,7 +1850,7 @@ mod tests {
     /// ore-covered cases below, so the only difference between them is
     /// whether ore actually sits on the ground -- not whether the category
     /// data exists to judge it by.
-    fn drill_world() -> factorio_bot_core::factorio::world::FactorioWorld {
+    fn drill_world() -> factorio_bot_core::factorio::world::FactorioSurface {
         use factorio_bot_core::test_utils::fixture_world;
 
         let world = fixture_world();
@@ -1951,7 +1951,7 @@ mod tests {
         drill_pos: Position,
         radius: Option<f64>,
         ore_tile_offset: (i32, i32),
-    ) -> (factorio_bot_core::factorio::world::FactorioWorld, Position) {
+    ) -> (factorio_bot_core::factorio::world::FactorioSurface, Position) {
         let world = drill_world();
         {
             let mut proto = world

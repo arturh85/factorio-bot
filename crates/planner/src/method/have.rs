@@ -2551,7 +2551,7 @@ fn smelt_steps(
 /// and the plan is remade, the plates are sitting in that furnace **and the
 /// ore they were smelted from is gone from the ground**. Before this method,
 /// the replan could not see them: `PlanState` modelled no container contents,
-/// `FactorioWorld::on_some_entity_updated` was a no-op, and the only path that
+/// `FactorioSurface::on_some_entity_updated` was a no-op, and the only path that
 /// could read contents at all (`rcon_inventory_contents_at`) was reached only
 /// by the HTTP handler and the Lua binding, never by anything that plans. So
 /// the replan asked for the whole bill again, out of ore that no longer
@@ -8152,8 +8152,8 @@ mod tests {
     /// state exactly which resources are charted.
     fn world_holding(
         entities: Vec<FactorioEntity>,
-    ) -> factorio_bot_core::factorio::world::FactorioWorld {
-        let world = factorio_bot_core::factorio::world::FactorioWorld::new();
+    ) -> factorio_bot_core::factorio::world::FactorioSurface {
+        let world = factorio_bot_core::factorio::world::FactorioSurface::new();
         world
             .update_entity_prototypes(
                 factorio_bot_core::test_utils::fixture_entity_prototypes()
@@ -13733,7 +13733,7 @@ mod tests {
     /// The rocks reach the planner through the door the mod's own events use.
     ///
     /// `fixture_world` builds its rocks with `FactorioEntity::new_rock` and
-    /// hands them to `FactorioWorld::update_chunk_entities` -- the same call
+    /// hands them to `FactorioSurface::update_chunk_entities` -- the same call
     /// `output_parser.rs` makes for every chunk the game reports -- rather
     /// than through `PlanState`'s overlay. That matters more than it looks:
     /// the overlay can only ever *hide* an entity from `EntityGraph::minables`
@@ -13745,7 +13745,7 @@ mod tests {
     /// Nothing here is asserted about the planner; this is the seam itself.
     #[test]
     fn rocks_reach_minable_sources_through_update_chunk_entities() {
-        let world = factorio_bot_core::factorio::world::FactorioWorld::new();
+        let world = factorio_bot_core::factorio::world::FactorioSurface::new();
         world
             .update_entity_prototypes(
                 factorio_bot_core::test_utils::fixture_entity_prototypes()
@@ -15005,7 +15005,7 @@ mod stockpiling {
 
     /// Rung 1's starting inventories, on whichever world a test wants them.
     fn rung_one_on(
-        world: factorio_bot_core::factorio::world::FactorioWorld,
+        world: factorio_bot_core::factorio::world::FactorioSurface,
         bots: &[BotId],
     ) -> PlanState {
         let mut state = PlanState::from_world(Arc::new(world), bots);
@@ -15026,8 +15026,8 @@ mod stockpiling {
     /// no chest, and `Stockpile` refuses. These four `tree-01`s are what turn
     /// the same fixture into one a stockpile can be built on.
     fn wooded(
-        world: factorio_bot_core::factorio::world::FactorioWorld,
-    ) -> factorio_bot_core::factorio::world::FactorioWorld {
+        world: factorio_bot_core::factorio::world::FactorioSurface,
+    ) -> factorio_bot_core::factorio::world::FactorioSurface {
         crate::test_world::with_trees(
             world,
             &[

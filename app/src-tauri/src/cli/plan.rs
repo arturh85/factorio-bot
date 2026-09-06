@@ -32,7 +32,7 @@
 use crate::cli::{Subcommand, SubcommandCallback};
 use crate::context::Context;
 use clap::{Arg, ArgAction, ArgMatches, Command, value_parser};
-use factorio_bot_core::factorio::world::FactorioWorld;
+use factorio_bot_core::factorio::world::FactorioSurface;
 use factorio_bot_core::miette::{IntoDiagnostic, Result, miette};
 use factorio_bot_core::serde_json;
 use factorio_bot_core::types::Position;
@@ -239,7 +239,7 @@ pub(crate) fn parse_roster(raw: &str) -> Result<Vec<BotId>> {
 ///
 /// Used when `--bots` is absent, so the default answer is "the roster the run
 /// that took this dump actually had" rather than a number invented here.
-pub(crate) fn roster_from(world: &FactorioWorld) -> Vec<BotId> {
+pub(crate) fn roster_from(world: &FactorioSurface) -> Vec<BotId> {
   let mut bots: Vec<BotId> = world
     .players
     .iter()
@@ -254,10 +254,10 @@ pub(crate) fn roster_from(world: &FactorioWorld) -> Vec<BotId> {
 /// `pub(crate)` because `score-map` reads the same file for the same reason
 /// and a second `serde_json::from_str` with a different error message would
 /// be a second answer to "is this a world dump".
-pub(crate) fn load_world(world_path: &std::path::Path) -> Result<Arc<FactorioWorld>> {
+pub(crate) fn load_world(world_path: &std::path::Path) -> Result<Arc<FactorioSurface>> {
   let raw = std::fs::read_to_string(world_path)
     .map_err(|err| miette!("could not read {}: {err}", world_path.display()))?;
-  let world: FactorioWorld = serde_json::from_str(&raw)
+  let world: FactorioSurface = serde_json::from_str(&raw)
     .map_err(|err| miette!("{} is not a world dump: {err}", world_path.display()))?;
   Ok(Arc::new(world))
 }

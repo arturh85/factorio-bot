@@ -389,7 +389,32 @@ BotBridge Mod (Factorio mod for RPC)
 - **crates/planner**: the goal planner. Pure and deterministic — no I/O, no
   async, no wall-clock, ordered collections only, floats via `total_cmp`.
   `Goal` -> `expand()` -> `ActionNetwork` -> `schedule()` -> `Schedule`.
-  Methods live in `method/`; `state.rs` overlays a `FactorioWorld` snapshot.
+  Methods live in `method/`; `state.rs` overlays a `FactorioSurface` snapshot.
+
+  **`FactorioWorld` was renamed to `FactorioSurface` on 2026-09-06, and the
+  name `FactorioWorld` now means something else.** The old type was never a
+  world — one `EntityGraph`, one `FlowGraph`, one set of `Pos`-keyed overlays,
+  all of them describing a single surface, so a chest at (10, 10) on Nauvis
+  and a chest at (10, 10) on a platform were the same key everywhere. The new
+  `FactorioWorld` (`crates/core/src/factorio/world.rs`) is the aggregate: a
+  `BTreeMap<SurfaceId, Arc<FactorioSurface>>`, one graph per surface, so the
+  aliasing is impossible by construction rather than by care. The surface does
+  **not** go on `Position` — a coordinate is only comparable within a surface,
+  and `p1 - p2` across two has no answer an `f64` can carry.
+
+  Two things to know before touching it. **It holds one surface and refuses
+  the second by name** (`SurfaceNotYetSeparable`): the game- and force-global
+  fields — recipes, prototypes, `forces` and their research, the action id
+  counter — still live on `FactorioSurface`, so a second surface would give
+  the run two copies of the research state. The type's own doc carries the
+  field-by-field split and names `players` and `benches` as genuinely
+  ambiguous. And **`only_surface()` is the porting seam, not `nauvis()`**: it
+  answers only while there is exactly one surface, so a caller that never said
+  which surface it meant stops working rather than silently getting Nauvis.
+  `FactorioInstance::surface()` and `require_surface` are its two users.
+  The mod's Nauvis guard in `mods/BotBridge/control.lua` is the matching half
+  upstream and must stay until callers are ported. See
+  `docs/superpowers/notes/2026-09-06-surfaces-survey.md`.
 
   - **`method::connect`** (`connect_steps`, built on `graph::route::route_belt`
     in `crates/core`) routes a `transport-belt` run between two **machines**

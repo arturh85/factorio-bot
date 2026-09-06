@@ -102,7 +102,7 @@ use crate::method::util::{CRAFTING_CATEGORY, SMELTING_CATEGORY};
 use crate::method::{ExpansionCtx, Method, Step};
 use crate::state::PlanState;
 use crate::substance::{Substance, SubstanceTable};
-use factorio_bot_core::factorio::world::FactorioWorld;
+use factorio_bot_core::factorio::world::FactorioSurface;
 use factorio_bot_core::types::FactorioRecipe;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -380,7 +380,7 @@ impl ProductIndex {
     }
 
     /// Index a live or dumped world.
-    pub fn from_world(world: &FactorioWorld) -> Self {
+    pub fn from_world(world: &FactorioSurface) -> Self {
         // Collected rather than streamed: the tables are `DashMap`s whose
         // guards cannot be held across `from_parts`, and the result must not
         // depend on the order they were walked in.
@@ -910,7 +910,7 @@ mod no_producer_driver_tests {
     use crate::goal::Holder;
     use crate::ids::BotId;
     use crate::method::{MethodRegistry, expand};
-    use factorio_bot_core::factorio::world::FactorioWorld;
+    use factorio_bot_core::factorio::world::FactorioSurface;
     use factorio_bot_core::serde_json;
     use factorio_bot_core::types::{FactorioItemPrototype, FactorioRecipe};
     use std::sync::Arc;
@@ -943,7 +943,7 @@ mod no_producer_driver_tests {
             }"#,
         )
         .expect("the item fixture parses");
-        let world = FactorioWorld::new();
+        let world = FactorioSurface::new();
         world.update_recipes(vec![recipe]).expect("update_recipes");
         world
             .update_item_prototypes(vec![item])
@@ -1045,7 +1045,7 @@ mod no_producer_driver_tests {
             }"#,
         )
         .expect("parses");
-        let world = FactorioWorld::new();
+        let world = FactorioSurface::new();
         world.update_recipes(vec![recipe]).expect("update_recipes");
         let state = PlanState::from_world(Arc::new(world), &[BotId(1)]);
         let registry = MethodRegistry::new().with(Box::new(NoProducer));

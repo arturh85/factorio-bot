@@ -15,7 +15,7 @@
 
 mod common;
 
-use factorio_bot_core::factorio::world::FactorioWorld;
+use factorio_bot_core::factorio::world::FactorioSurface;
 use factorio_bot_core::test_utils::fixture_world;
 use factorio_bot_core::types::{
     Direction, FactorioEntity, InventoryItemWithQuality, InventoryResponse, Position,
@@ -44,9 +44,9 @@ fn items(item: &str, count: u32) -> Vec<InventoryItemWithQuality> {
 ///
 /// The contents arrive the way the production path delivers them: as the reply
 /// shape of `inventory_contents_at`, handed to
-/// `FactorioWorld::observe_inventories`. Building them any other way would
+/// `FactorioSurface::observe_inventories`. Building them any other way would
 /// exercise a path no run takes.
-fn stock_a_furnace(world: &FactorioWorld, at: Position, item: &str, stock: u32) {
+fn stock_a_furnace(world: &FactorioSurface, at: Position, item: &str, stock: u32) {
     world
         .on_some_entity_created(FactorioEntity::new_stone_furnace(&at, Direction::North))
         .expect("the furnace is placed");
@@ -58,13 +58,13 @@ fn stock_a_furnace(world: &FactorioWorld, at: Position, item: &str, stock: u32) 
     }]);
 }
 
-fn world_with_stocked_furnace(item: &str, stock: u32) -> Arc<FactorioWorld> {
+fn world_with_stocked_furnace(item: &str, stock: u32) -> Arc<FactorioSurface> {
     let world = fixture_world();
     stock_a_furnace(&world, FURNACE, item, stock);
     Arc::new(world)
 }
 
-fn plan(world: Arc<FactorioWorld>, goals: &[Goal]) -> (ActionNetwork, PlanState) {
+fn plan(world: Arc<FactorioSurface>, goals: &[Goal]) -> (ActionNetwork, PlanState) {
     let bots = [BotId(1)];
     let state = PlanState::from_world(world, &bots);
     let net = expand(goals, &state, &registry_for(&bots), BotId(1)).expect("the goals expand");

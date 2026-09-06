@@ -21,7 +21,7 @@ pub const MAP_SETTINGS_FILENAME: &str = "map-settings.json";
 /// against another is the defect this constant exists to prevent, and it lives
 /// here because `crates/core` is the only place both can see.
 ///
-/// **It must not be picked by sorting `FactorioWorld::forces`.**
+/// **It must not be picked by sorting `FactorioSurface::forces`.**
 /// `writeout_forces` emits *all* of `game.forces`, so from the first
 /// `on_research_finished` of a run the world also holds `enemy` and `neutral`,
 /// whose technology tables describe nobody and are researched by nobody.

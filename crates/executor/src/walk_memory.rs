@@ -13,7 +13,7 @@
 //! 53 700, and was refused before dispatch every time.
 //!
 //! This module is the other end of that loop: the executor writes the refusal
-//! into [`FactorioWorld`], and `crates/planner`'s `PlanState::from_world`
+//! into [`FactorioSurface`], and `crates/planner`'s `PlanState::from_world`
 //! reads it back on the next plan. Neither crate can see the other; the world
 //! is what both can see, exactly as it is for placement refusals.
 //!
@@ -27,7 +27,7 @@
 use factorio_bot_core::errors::RconPathRequestFailed;
 use factorio_bot_core::factorio::rcon::{ActionFailure, FactorioRcon, path_request_was_busy};
 use factorio_bot_core::factorio::world::{
-    Bench, BenchRelease, Enclosure, FactorioWorld, HOP_DISTANCE, WalkRefusal,
+    Bench, BenchRelease, Enclosure, FactorioSurface, HOP_DISTANCE, WalkRefusal,
 };
 use factorio_bot_core::graph::enclosure::{Escape, SEARCH_RADIUS, escape_from};
 use factorio_bot_core::miette::Report;
@@ -101,7 +101,7 @@ pub fn judge_mobility(hops: &[(Position, Result<(), Report>)]) -> Mobility {
 /// `FactorioRcon::probe_player_hops` for the question.
 pub async fn probe_mobility(
     rcon: &FactorioRcon,
-    world: &Arc<FactorioWorld>,
+    world: &Arc<FactorioSurface>,
     player: PlayerId,
     at: &Position,
 ) -> Mobility {
@@ -117,7 +117,7 @@ pub async fn probe_mobility(
 /// gives: this ledger decides what the next plan may ask of a bot, and a
 /// decision that reaches no log is a decision nobody can audit.
 pub fn note_mobility(
-    world: &FactorioWorld,
+    world: &FactorioSurface,
     player: PlayerId,
     at: &Position,
     tick: Option<u64>,
@@ -185,7 +185,7 @@ pub fn note_mobility(
 /// This is how a bot pushed clear by something the plan did not ask for --
 /// another bot's step-aside, a recovery teleport, a mined-away wall -- gets
 /// back into the roster without waiting for a re-probe.
-pub fn note_walk_succeeded(world: &FactorioWorld, player: PlayerId, tick: Option<u64>) -> bool {
+pub fn note_walk_succeeded(world: &FactorioSurface, player: PlayerId, tick: Option<u64>) -> bool {
     let released = world.release_bench(player, tick, BenchRelease::Walked);
     if released {
         warn!(
@@ -207,7 +207,7 @@ pub fn note_walk_succeeded(world: &FactorioWorld, player: PlayerId, tick: Option
 /// can say the refusal has ended is the game. A bot whose position the world
 /// has lost is probed from where it was benched, which is the last place it
 /// was known to be.
-pub async fn reprobe_benched(rcon: &FactorioRcon, world: &Arc<FactorioWorld>) -> Vec<PlayerId> {
+pub async fn reprobe_benched(rcon: &FactorioRcon, world: &Arc<FactorioSurface>) -> Vec<PlayerId> {
     let mut released = Vec::new();
     for bench in world.benches() {
         let at = world
@@ -290,7 +290,7 @@ pub fn pathfinder_found_nothing(error: &Report) -> bool {
 /// distinction `CLAUDE.md` draws -- **they land on stderr, so a run capture
 /// that keeps only stdout will not have them**.
 pub fn note_walk_refusal(
-    world: &FactorioWorld,
+    world: &FactorioSurface,
     player: PlayerId,
     from: Option<&Position>,
     to: &Position,
@@ -374,7 +374,7 @@ pub fn note_walk_refusal(
 /// [`escape_from`] is called directly rather than through
 /// `enclosure_at`, which folds `Open` and `Unknown` into one `None` --
 /// exactly the collapse this needs to avoid.
-fn note_enclosure(world: &FactorioWorld, player: PlayerId, from: &Position, tick: Option<u64>) {
+fn note_enclosure(world: &FactorioSurface, player: PlayerId, from: &Position, tick: Option<u64>) {
     match escape_from(&world.entity_graph, from) {
         Escape::Enclosed { pocket_tiles } => {
             let fresh = world.record_enclosure(Enclosure {
@@ -450,7 +450,7 @@ mod tests {
 
     #[test]
     fn a_search_that_found_nothing_is_remembered() {
-        let world = FactorioWorld::new();
+        let world = FactorioSurface::new();
         assert!(note_walk_refusal(
             &world,
             3,
@@ -473,7 +473,7 @@ mod tests {
     /// The nuance the mod's own doc insists on: a full queue taught us nothing.
     #[test]
     fn a_full_request_queue_is_not_evidence_about_the_map() {
-        let world = FactorioWorld::new();
+        let world = FactorioSurface::new();
         assert!(!note_walk_refusal(
             &world,
             3,
@@ -487,7 +487,7 @@ mod tests {
     /// Nor is anything that is not the pathfinder answering.
     #[test]
     fn a_failure_that_is_not_the_pathfinder_teaches_nothing() {
-        let world = FactorioWorld::new();
+        let world = FactorioSurface::new();
         let timeout = ActionFailure::no_verdict(RconTimeout {}.into(), ActionTicks::at(Some(700)));
         assert!(!note_walk_refusal(
             &world,
@@ -505,7 +505,7 @@ mod tests {
     /// A refusal with no origin is not a narrower fact, it is a different one.
     #[test]
     fn a_refusal_with_nowhere_to_have_started_from_is_dropped() {
-        let world = FactorioWorld::new();
+        let world = FactorioSurface::new();
         assert!(!note_walk_refusal(
             &world,
             3,
@@ -522,7 +522,7 @@ mod tests {
 
     #[test]
     fn the_same_refusal_twice_teaches_nothing_the_second_time() {
-        let world = FactorioWorld::new();
+        let world = FactorioSurface::new();
         assert!(note_walk_refusal(
             &world,
             3,
@@ -543,7 +543,7 @@ mod tests {
     /// Seals `around` inside a ring of trees, exactly the way
     /// `crates/core`'s `enclosure_bounds` tests do, so a refusal raised from
     /// inside it has something real to find.
-    fn wall_in(world: &FactorioWorld, around: &Position) {
+    fn wall_in(world: &FactorioSurface, around: &Position) {
         let mut ring = Vec::new();
         let mut offset = -3.0;
         while offset <= 3.0 {
@@ -567,7 +567,7 @@ mod tests {
     /// that the bot was unable to move at all.
     #[test]
     fn a_refusal_from_inside_a_wall_also_names_the_enclosure() {
-        let world = FactorioWorld::new();
+        let world = FactorioSurface::new();
         wall_in(&world, &here());
         assert!(note_walk_refusal(
             &world,
@@ -587,7 +587,7 @@ mod tests {
     /// judgements and only their conjunction is a finding.
     #[test]
     fn a_refusal_from_open_ground_names_no_enclosure() {
-        let world = FactorioWorld::new();
+        let world = FactorioSurface::new();
         assert!(note_walk_refusal(
             &world,
             3,
@@ -609,7 +609,7 @@ mod tests {
     /// fill would have found the ring.
     #[test]
     fn a_busy_queue_names_no_enclosure_even_inside_a_wall() {
-        let world = FactorioWorld::new();
+        let world = FactorioSurface::new();
         wall_in(&world, &here());
         assert!(!note_walk_refusal(
             &world,
@@ -705,7 +705,7 @@ mod tests {
     /// The bench: a boxed-in verdict is written where the next plan reads.
     #[test]
     fn a_boxed_in_verdict_benches_the_bot_where_it_stands() {
-        let world = FactorioWorld::new();
+        let world = FactorioSurface::new();
         let verdict = Mobility::BoxedIn { refused_hops: 4 };
         assert!(note_mobility(&world, 6, &here(), None, &verdict));
         let benches = world.benches();
@@ -725,7 +725,7 @@ mod tests {
     #[test]
     fn a_bench_is_queued_for_the_record_once() {
         use factorio_bot_core::factorio::world::BenchChange;
-        let world = FactorioWorld::new();
+        let world = FactorioSurface::new();
         let verdict = Mobility::BoxedIn { refused_hops: 4 };
         note_mobility(&world, 6, &here(), Some(26_953), &verdict);
         note_mobility(&world, 6, &here(), Some(30_587), &verdict);
@@ -746,7 +746,7 @@ mod tests {
     #[test]
     fn a_free_verdict_releases_a_benched_bot() {
         use factorio_bot_core::factorio::world::{BenchChange, BenchRelease};
-        let world = FactorioWorld::new();
+        let world = FactorioSurface::new();
         note_mobility(
             &world,
             6,
@@ -777,7 +777,7 @@ mod tests {
     /// Unknown is not a verdict, and a bench survives it.
     #[test]
     fn an_unknown_verdict_leaves_the_bench_as_it_was() {
-        let world = FactorioWorld::new();
+        let world = FactorioSurface::new();
         note_mobility(
             &world,
             6,
@@ -795,7 +795,7 @@ mod tests {
     #[test]
     fn a_successful_walk_releases_the_bench() {
         use factorio_bot_core::factorio::world::{BenchChange, BenchRelease};
-        let world = FactorioWorld::new();
+        let world = FactorioSurface::new();
         note_mobility(
             &world,
             6,
@@ -826,7 +826,7 @@ mod tests {
     /// told where it is stuck now.
     #[test]
     fn a_bench_earned_elsewhere_replaces_the_old_one() {
-        let world = FactorioWorld::new();
+        let world = FactorioSurface::new();
         let verdict = Mobility::BoxedIn { refused_hops: 4 };
         note_mobility(&world, 6, &here(), None, &verdict);
         assert!(note_mobility(&world, 6, &there(), None, &verdict));

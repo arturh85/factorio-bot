@@ -29,28 +29,28 @@ async fn run(matches: ArgMatches, context: &mut Context) -> Result<Option<String
   if let Some(instance_state) = instance_state.as_ref() {
     match command {
       DumpType::World => {
-        if let Some(world) = instance_state.world.as_ref() {
+        if let Some(world) = instance_state.surface() {
           world.dump(save_path)?;
         } else {
           error!("no factorio world found??");
         }
       }
       DumpType::EntityPrototypes => {
-        if let Some(world) = instance_state.world.as_ref() {
+        if let Some(world) = instance_state.surface() {
           world.dump_entitiy_prototypes(save_path)?;
         } else {
           error!("no factorio world found??");
         }
       }
       DumpType::ItemPrototypes => {
-        if let Some(world) = instance_state.world.as_ref() {
+        if let Some(world) = instance_state.surface() {
           world.dump_item_prototypes(save_path)?;
         } else {
           error!("no factorio world found??");
         }
       }
       DumpType::Recipes => {
-        if let Some(world) = instance_state.world.as_ref() {
+        if let Some(world) = instance_state.surface() {
           world.dump_recipes(save_path)?;
         } else {
           error!("no factorio world found??");

@@ -2057,7 +2057,7 @@ impl EntityGraph {
     /// **The one write-back this graph has, and it exists because the graph is
     /// otherwise append-only.** Entities enter through [`Self::add`], which
     /// refuses a tile something already stands on ("failed to add ... blocked
-    /// by"), and `FactorioWorld::on_some_entity_updated` is a no-op that the
+    /// by"), and `FactorioSurface::on_some_entity_updated` is a no-op that the
     /// mod raises only on rotation. So a recipe -- which is put on a machine
     /// by an RCON call *after* it was built, never at build time -- had no
     /// route into the world model at all.
@@ -2165,14 +2165,14 @@ impl EntityGraph {
 /// **`Pos` cannot be a JSON object key.** It is a two-field tuple struct, and
 /// `serde_json` refuses the whole document with `key must be a string` the
 /// moment one appears in key position -- so `resources` and `minables`, the
-/// two maps keyed that way, made *every* `FactorioWorld` serialization of a
+/// two maps keyed that way, made *every* `FactorioSurface` serialization of a
 /// world containing a single ore tile fail. It never showed up because nothing
 /// wrote a world to disk: the only worlds that serialised were empty ones.
 ///
 /// So the inner map travels as a list of `[pos, value]` pairs. A
 /// `BTreeMap<Pos, _>` already iterates in tile order, and the outer names are
 /// sorted here, which makes this half of a dump byte-stable for a given world
-/// -- the same discipline [`crate::factorio::world::FactorioWorld::observed_inventories`]
+/// -- the same discipline [`crate::factorio::world::FactorioSurface::observed_inventories`]
 /// exists to enforce, and for the same reason.
 struct TileMaps<'a, V>(&'a DashMap<String, BTreeMap<Pos, V>>);
 
@@ -2294,7 +2294,7 @@ impl<'de> Deserialize<'de> for EntityGraph {
             type Value = EntityGraph;
 
             fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-                formatter.write_str("struct FactorioWorld")
+                formatter.write_str("struct EntityGraph")
             }
 
             fn visit_map<V>(self, mut map: V) -> Result<Self::Value, V::Error>
@@ -4106,7 +4106,7 @@ mod tests {
         assert!(graph.minable_positions("tree-01").is_empty());
     }
 
-    /// `Clone` carries the map. `FactorioWorld` clones its graph, so a map
+    /// `Clone` carries the map. `FactorioSurface` clones its graph, so a map
     /// this did not copy would leave a cloned world holding a forest it could
     /// not name.
     ///
@@ -4135,7 +4135,7 @@ mod tests {
     /// It could not until 2026-09-03. `resources` and `minables` key their
     /// inner maps by [`Pos`], a two-field tuple struct, and `serde_json`
     /// refuses the whole document with `key must be a string` when one turns
-    /// up as a key -- so `FactorioWorld`'s hand-written `Serialize`, which
+    /// up as a key -- so `FactorioSurface`'s hand-written `Serialize`, which
     /// delegates here, failed on any world that had ever seen an ore tile or a
     /// tree. Nothing noticed because nothing wrote a world to disk: the only
     /// graphs that ever serialised were empty ones. Offline planning is

@@ -4,7 +4,7 @@ use crate::globals::rcon::create_lua_rcon;
 use crate::globals::record::create_lua_record;
 use crate::globals::world::create_lua_world;
 use factorio_bot_core::factorio::rcon::FactorioRcon;
-use factorio_bot_core::factorio::world::FactorioWorld;
+use factorio_bot_core::factorio::world::FactorioSurface;
 use factorio_bot_core::mlua::prelude::*;
 use factorio_bot_core::parking_lot::Mutex;
 use factorio_bot_core::plan::planner::Planner;
@@ -37,7 +37,7 @@ pub(crate) fn binding_tables(
     lua: &Lua,
     cwd: &std::path::Path,
 ) -> LuaResult<Vec<(&'static str, LuaTable)>> {
-    let world = Arc::new(FactorioWorld::new());
+    let world = Arc::new(FactorioSurface::new());
     let rcon = Arc::new(FactorioRcon::new_empty());
     let stdout = Arc::new(Mutex::new(String::new()));
     let stderr = Arc::new(Mutex::new(String::new()));
@@ -544,7 +544,7 @@ mod tests {
     /// value that will not convert.
     fn goal_table_functions() -> std::collections::BTreeSet<String> {
         let lua = crate::sandbox::new_sandboxed_lua().expect("sandboxed lua");
-        let planner = Planner::new(Arc::new(FactorioWorld::new()), None);
+        let planner = Planner::new(Arc::new(FactorioSurface::new()), None);
         let goal_table = create_lua_goal(
             &lua,
             planner.plan_world.clone(),

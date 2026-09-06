@@ -3,6 +3,20 @@
 A survey, not an implementation. Nothing was changed. Every claim below cites a
 file and a line, read in this worktree at `0e411a34`.
 
+> **Since 2026-09-06, part of rung 1 is done, and one name below has moved.**
+> The type this note calls `FactorioWorld` — the single-surface container in
+> section 2(a) — is now called **`FactorioSurface`**, and `FactorioWorld` is
+> the new aggregate over it, a `BTreeMap<SurfaceId, Arc<FactorioSurface>>`
+> holding exactly one surface and refusing the second by name until the
+> game-global fields (recipes, prototypes, `forces` and their research, the
+> action id counter) move off the surface. `SurfaceId` exists as this note
+> recommended in section 4.2. **Everything else below still stands** — the
+> planner's `Pos`-keyed overlays, `travel_ticks`, the mod's surface-1
+> observation path, the record and the tools are all untouched — so read the
+> body as written, with `FactorioWorld` meaning today's `FactorioSurface`
+> wherever it names the container. The mod's guard at `control.lua:1865` is
+> deliberately still in place; it is what keeps the aliasing hypothetical.
+
 ## Verdict
 
 **This is not a refactor of everything, and it is not contained either. It is a

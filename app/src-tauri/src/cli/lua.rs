@@ -296,7 +296,7 @@ async fn run(matches: &ArgMatches, _context: &mut Context) -> Result<()> {
 
     // Read the world over RCON rather than leaving it empty.
     //
-    // This used to hand the planner a `FactorioWorld::new()` -- no recipes, no
+    // This used to hand the planner a `FactorioSurface::new()` -- no recipes, no
     // prototypes, no entity graph -- because all of that arrived by parsing the
     // stdout of a server *this process spawned*, which an attached session does
     // not have. Every world.* and goal.* call therefore found nothing, which is
@@ -346,7 +346,7 @@ async fn run(matches: &ArgMatches, _context: &mut Context) -> Result<()> {
     // `FactorioInstance` has no `Drop`, so a failing script leaked a Factorio
     // server holding the factorio and rcon ports. The next run then failed with
     // "Host address is already in use" instead of the real error.
-    let script_result = match instance_state.world.as_ref() {
+    let script_result = match instance_state.surface() {
       Some(world) => {
         info!("Factorio started, running script...");
         let mut planner = if attached_server {

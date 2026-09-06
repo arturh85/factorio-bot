@@ -1087,7 +1087,7 @@ pub enum Supply {
 ///
 /// # What it assumes
 ///
-/// **That the plant is running.** Nothing in `FactorioWorld` says whether a
+/// **That the plant is running.** Nothing in `FactorioSurface` says whether a
 /// steam engine has steam, whether the boiler has water, or whether its fuel
 /// slot is empty, so this counts nameplate capacity — the residual
 /// `electric_supply_kw` names in its own doc and `PLANT_COAL` names again.
@@ -2983,7 +2983,7 @@ mod tests {
         let world = fixture_world();
         // Same world, lake removed: `update_chunk_tiles` is additive, so the
         // graph is rebuilt from a world that never had one.
-        let dry = factorio_bot_core::factorio::world::FactorioWorld::new();
+        let dry = factorio_bot_core::factorio::world::FactorioSurface::new();
         dry.update_entity_prototypes(
             world
                 .entity_prototypes
@@ -4005,7 +4005,7 @@ mod capacity_tests {
     #[test]
     fn the_world_anchor_does_not_invent_water_in_a_dry_world() {
         let world = fixture_world();
-        let dry = factorio_bot_core::factorio::world::FactorioWorld::new();
+        let dry = factorio_bot_core::factorio::world::FactorioSurface::new();
         dry.update_entity_prototypes(
             world
                 .entity_prototypes
@@ -4044,7 +4044,7 @@ mod capacity_tests {
     /// question that needs it, and because `update_chunk_tiles` is additive
     /// -- a world with a lake cannot have one removed.
     fn a_charted_but_dry_world(at: &Position, half_width: i32) -> PlanState {
-        let world = factorio_bot_core::factorio::world::FactorioWorld::new();
+        let world = factorio_bot_core::factorio::world::FactorioSurface::new();
         world
             .update_entity_prototypes(
                 fixture_world()
@@ -4108,7 +4108,7 @@ mod capacity_tests {
     /// which search refused.
     #[test]
     fn a_water_refusal_over_ungenerated_ground_says_it_was_blind() {
-        let world = factorio_bot_core::factorio::world::FactorioWorld::new();
+        let world = factorio_bot_core::factorio::world::FactorioSurface::new();
         world
             .update_entity_prototypes(
                 fixture_world()

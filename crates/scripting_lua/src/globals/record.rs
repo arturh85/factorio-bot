@@ -14,7 +14,7 @@
 //! issued and honestly `null` before there has been one.
 
 use super::position_from_lua;
-use factorio_bot_core::factorio::world::{BenchChange, BotLifeEvent, FactorioWorld};
+use factorio_bot_core::factorio::world::{BenchChange, BotLifeEvent, FactorioSurface};
 use factorio_bot_core::mlua::prelude::*;
 use factorio_bot_core::paris::{info, warn};
 use factorio_bot_core::parking_lot::Mutex;
@@ -163,7 +163,7 @@ fn keyframe_relevant_types() -> Vec<String> {
 /// they would if each grew its own copy of this logic.
 async fn keyframe_snapshot(
     rcon: &factorio_bot_core::factorio::rcon::FactorioRcon,
-    world: &FactorioWorld,
+    world: &FactorioSurface,
     bounds: &factorio_bot_core::record::map::Bounds,
 ) -> LuaResult<(Vec<EntitySnapshot>, Vec<EntitySnapshot>, Vec<Divergence>)> {
     let rect = Rect::new(
@@ -873,7 +873,7 @@ async fn take_savepoint(
 pub fn create_lua_record(
     lua: &Lua,
     rcon: Arc<factorio_bot_core::factorio::rcon::FactorioRcon>,
-    world: Arc<FactorioWorld>,
+    world: Arc<FactorioSurface>,
     scripts_root: PathBuf,
     all_bots: Vec<PlayerId>,
 ) -> LuaResult<LuaTable> {
@@ -898,7 +898,7 @@ pub fn create_lua_record(
 fn create_lua_record_with_slot(
     lua: &Lua,
     rcon: Arc<factorio_bot_core::factorio::rcon::FactorioRcon>,
-    world: Arc<FactorioWorld>,
+    world: Arc<FactorioSurface>,
     scripts_root: PathBuf,
     all_bots: Vec<PlayerId>,
     slot: Slot,
@@ -2705,7 +2705,7 @@ mod tests {
         let table = create_lua_record_with_slot(
             &lua,
             Arc::new(FactorioRcon::new_empty()),
-            Arc::new(FactorioWorld::new()),
+            Arc::new(FactorioSurface::new()),
             tmp.path().join("scripts"),
             all_bots,
             slot,
@@ -3808,7 +3808,7 @@ mod tests {
         let recorder = RunRecorder::start(tmp.path(), "run-1").expect("recorder starts");
         let run_dir = recorder.dir().to_path_buf();
         let slot: Slot = Arc::new(Mutex::new(Some(recorder)));
-        let world = Arc::new(FactorioWorld::new());
+        let world = Arc::new(FactorioSurface::new());
 
         let table = create_lua_record_with_slot(
             &lua,
@@ -3893,7 +3893,7 @@ mod tests {
         let recorder = RunRecorder::start(tmp.path(), "run-1").expect("recorder starts");
         let run_dir = recorder.dir().to_path_buf();
         let slot: Slot = Arc::new(Mutex::new(Some(recorder)));
-        let world = Arc::new(FactorioWorld::new());
+        let world = Arc::new(FactorioSurface::new());
 
         let table = create_lua_record_with_slot(
             &lua,
@@ -3960,7 +3960,7 @@ mod tests {
             )
             .expect("a first event");
         let slot: Slot = Arc::new(Mutex::new(Some(recorder)));
-        let world = Arc::new(FactorioWorld::new());
+        let world = Arc::new(FactorioSurface::new());
 
         let table = create_lua_record_with_slot(
             &lua,
@@ -4002,7 +4002,7 @@ mod tests {
     /// Drives the actual mod->core->Lua path, not just `record.teleports()`
     /// in isolation: a `writeout`-shaped line goes through
     /// `factorio_bot_core::process::output_parser::OutputParser` -- the same
-    /// parser that reads BotBridge's real stdout -- into a `FactorioWorld`
+    /// parser that reads BotBridge's real stdout -- into a `FactorioSurface`
     /// shared with the recording Lua sandbox, and only then is
     /// `record.teleports()` asked to drain it. A test that only exercised
     /// `record.teleports()` against a hand-built queue would leave the
@@ -4014,7 +4014,7 @@ mod tests {
         let recorder = RunRecorder::start(tmp.path(), "run-1").expect("recorder starts");
         let run_dir = recorder.dir().to_path_buf();
         let slot: Slot = Arc::new(Mutex::new(Some(recorder)));
-        let world = Arc::new(FactorioWorld::new());
+        let world = Arc::new(FactorioSurface::new());
 
         let table = create_lua_record_with_slot(
             &lua,
@@ -4070,7 +4070,7 @@ mod tests {
         }
     }
 
-    /// `recording_lua()` builds its own `FactorioWorld` internally and does
+    /// `recording_lua()` builds its own `FactorioSurface` internally and does
     /// not hand it back, so this test can't push onto its queue -- it builds
     /// the same wiring `create_lua_record` does, just keeping the world
     /// around so it can call `record_teleport` directly. Complements
@@ -4086,7 +4086,7 @@ mod tests {
         let recorder = RunRecorder::start(tmp.path(), "run-1").expect("recorder starts");
         let run_dir = recorder.dir().to_path_buf();
         let slot: Slot = Arc::new(Mutex::new(Some(recorder)));
-        let world = Arc::new(FactorioWorld::new());
+        let world = Arc::new(FactorioSurface::new());
 
         let table = create_lua_record_with_slot(
             &lua,
@@ -4603,7 +4603,7 @@ mod tests {
         let recorder = RunRecorder::start(tmp.path(), "run-1").expect("recorder starts");
         let run_dir = recorder.dir().to_path_buf();
         let slot: Slot = Arc::new(Mutex::new(Some(recorder)));
-        let world = Arc::new(FactorioWorld::new());
+        let world = Arc::new(FactorioSurface::new());
 
         let table = create_lua_record_with_slot(
             &lua,
@@ -4684,7 +4684,7 @@ mod tests {
         let recorder = RunRecorder::start(tmp.path(), "run-1").expect("recorder starts");
         let run_dir = recorder.dir().to_path_buf();
         let slot: Slot = Arc::new(Mutex::new(Some(recorder)));
-        let world = Arc::new(FactorioWorld::new());
+        let world = Arc::new(FactorioSurface::new());
 
         let table = create_lua_record_with_slot(
             &lua,
@@ -4757,7 +4757,7 @@ mod tests {
         let recorder = RunRecorder::start(tmp.path(), "run-1").expect("recorder starts");
         let run_dir = recorder.dir().to_path_buf();
         let slot: Slot = Arc::new(Mutex::new(Some(recorder)));
-        let world = Arc::new(FactorioWorld::new());
+        let world = Arc::new(FactorioSurface::new());
 
         let table = create_lua_record_with_slot(
             &lua,
@@ -4832,7 +4832,7 @@ mod tests {
         let recorder = RunRecorder::start(tmp.path(), "run-1").expect("recorder starts");
         let run_dir = recorder.dir().to_path_buf();
         let slot: Slot = Arc::new(Mutex::new(Some(recorder)));
-        let world = Arc::new(FactorioWorld::new());
+        let world = Arc::new(FactorioSurface::new());
 
         let table = create_lua_record_with_slot(
             &lua,

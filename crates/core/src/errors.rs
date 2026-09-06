@@ -294,3 +294,28 @@ pub struct RconOutOfResourceReach {
     pub distance: f64,
     pub reach: f64,
 }
+
+/// A second surface was offered to a [`FactorioWorld`](crate::factorio::world::FactorioWorld)
+/// that cannot hold one yet.
+///
+/// The world's game- and force-global state -- recipes, prototypes, forces
+/// and their research, the action id counter -- still lives on
+/// [`FactorioSurface`](crate::factorio::world::FactorioSurface) rather than
+/// on the world, so accepting a second surface would give the run **two
+/// copies of the research state**: the aliasing bug the surface split exists
+/// to prevent, wearing different clothes. Refusing by name is the honest
+/// answer until those fields move; a container that silently forks what the
+/// force has researched would be discovered by a plan that thinks a
+/// technology is open on one planet and closed on the other.
+#[derive(Error, Debug, Diagnostic)]
+#[error("cannot hold surface [{offered}] beside [{held}] yet")]
+#[diagnostic(
+    code(factorio::world::surface_not_yet_separable),
+    help(
+        "game-global state (recipes, prototypes, forces and their research, the action id counter) still lives on FactorioSurface; move it onto FactorioWorld before a second surface can be held"
+    )
+)]
+pub struct SurfaceNotYetSeparable {
+    pub held: crate::types::SurfaceId,
+    pub offered: crate::types::SurfaceId,
+}

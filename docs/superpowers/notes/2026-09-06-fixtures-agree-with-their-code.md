@@ -106,3 +106,28 @@ what makes that affordable, and the middle rung is where all four surfaced.
 - **When a task writes both the code and its fixture, say so in the report**
   and name what the fixture assumes. That sentence is cheap and is the only
   warning a later reader gets.
+
+## The same asymmetry, one level up: what a loaded run proves
+
+A related rule settled between the two sessions the same night, because both
+had been applying a broader one than the evidence supports.
+
+**A validity check does not need a quiet machine; a measurement does.**
+Starvation corrupts a *number*. It cannot make a block stand in the wrong
+place: whether entities are where the plan said is equally true at 2 tps and
+at 300. So a run whose question is "did this work" may share the box, and
+only a run whose number someone will quote needs a clear floor.
+
+**But the licence is one-directional.** A starved server times actions out,
+trips executor deadlines and leaves entities unplaced, so a validity run
+that comes back *short* is ambiguous between "the code chose wrong" and "the
+box was loaded".
+
+- **A clean pass at any tick rate is trustworthy.**
+- **A failure at a bad tick rate is not** — the delivered rate is then part
+  of the diagnosis, not a footnote.
+
+So: record the delivered tick rate in every run's note (`just analyse`
+prints it and flags below 80% of nominal), share the box freely for checks
+you expect to pass, and re-run on a quiet floor before believing any
+failure that arrived on a loaded one.

@@ -884,8 +884,39 @@ Three things that are **not** interchangeable between the modes:
   cost. `PlayerId` is `u8`, so 255 is the arithmetic ceiling; before that,
   the mod polls **every bot every tick** (whole main inventory, sorted
   signature, crafting-queue scan) and every action is its own RCON round
-  trip, so bot count is what costs tick rate (eight bots still held 242 of
-  300 requested tps). Parallel *runs* are the cheap axis: two headless
+  trip, so bot count is what costs tick rate.
+
+  **Measured 2026-09-06: a bot costs ~16.3 us per tick, and at eight bots that
+  is 42% of all tick time.** `tools/measure_tick_cost.sh` with
+  `scripts/tickrate.lua`, idle roster, release build, seed 31337:
+
+  | roster | tps | us/tick |
+  |---|---|---|
+  | 1 | 5,145 | 194 |
+  | 4 | 4,147 | 241 |
+  | 8 | 3,242 | 308 |
+
+  Fit: **178 us base + 16.3 us per bot per tick**, with the two intervals
+  agreeing to 8% (15.6 and 16.8 us/bot), so the relationship is linear rather
+  than two points and a hope.
+
+  **The old figure here — "eight bots still held 242 of 300 requested tps" —
+  had no baseline**, so it said where eight bots ended up and could not say what
+  one costs. Anything quoted as a per-bot cost needs a 1/4/8 sweep behind it.
+
+  Three things that make the number readable, each of which was wrong in an
+  earlier attempt: startup is cancelled by **differencing two tick spans**
+  (60k and 180k) rather than estimated, because a single-span run was 17.5s
+  wall of which ~16s was server start; the probe's own RCON polling is in the
+  **base and not the slope**, verified by poll counts being identical across
+  rosters (12,000 short / 36,002 long for all three); and the roster is read
+  from `rcon.players()` and asserted, never taken from the `--bots` flag.
+
+  **Scale it before acting on it.** 130 us at eight bots is under 1% of a 60 Hz
+  tick, so this is invisible at 1x and only bites headless at high speed, where
+  the tick budget is whatever the CPU can do. That is the regime this project
+  iterates in, so it is worth fixing — as a throughput optimisation for our own
+  loop, not as a correctness or playability problem. Parallel *runs* are the cheap axis: two headless
   instances on their own ports and workspaces each held ~220 tps and
   finished in the wall time of one (`docs/superpowers/notes/
   2026-09-05-headless-experiments.md`).

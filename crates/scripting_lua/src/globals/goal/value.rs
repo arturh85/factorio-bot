@@ -331,7 +331,21 @@ fn require_kind(t: &LuaTable) -> LuaResult<String> {
 /// goal works everywhere except inside a bundle, where it is rejected as an
 /// unknown kind. Fixing it is a one-word change that belongs to whoever owns
 /// exploration, with a test of its own.
-const KINDS: &[&str] = &["have", "researched", "producing", "sustain", "built", "all"];
+// Every kind the table parser below accepts, and nothing else. `charted` was
+// missing from 2026-09-06 until the `sustain` work noticed it: the parser and
+// the renderer both handled it, so `goal.charted(...)` worked everywhere
+// EXCEPT inside `goal.all`, where `require_known_kind` rejected it as unknown.
+// A kind added to the parser and not to this list fails in exactly one place,
+// which is the hardest kind of gap to find.
+const KINDS: &[&str] = &[
+    "have",
+    "researched",
+    "producing",
+    "sustain",
+    "built",
+    "charted",
+    "all",
+];
 
 /// [`require_kind`], plus the check that it names a kind that exists.
 fn require_known_kind(t: &LuaTable) -> LuaResult<String> {
@@ -921,6 +935,23 @@ mod tests {
         lua.load(
             r#"
             local g = goal.all { goal.sustain("iron-plate", 15, 7200) }
+            assert(#g.goals == 1, "one sub-goal")
+        "#,
+        )
+        .exec()
+        .expect("script");
+    }
+
+    #[test]
+    fn a_charted_goal_may_sit_inside_goal_all() {
+        // Regression: `charted` was handled by the parser and the renderer but
+        // missing from `KINDS`, so this was the ONE place a charted goal was
+        // rejected — `goal.charted(...)` worked standalone and failed only
+        // when nested. Found while adding `sustain`, not by using it.
+        let lua = lua_with_goal();
+        lua.load(
+            r#"
+            local g = goal.all { goal.charted(0, 0, 256) }
             assert(#g.goals == 1, "one sub-goal")
         "#,
         )

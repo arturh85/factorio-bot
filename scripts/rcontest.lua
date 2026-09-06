@@ -76,6 +76,21 @@ blueprints = {
     -- 3 poles, all wired to each other, supplying all 6 arms: 78 kW, checked by
     -- `the_electric_smelter_distributes_its_own_power` rather than asserted.
     ElectricSmelter = "0eNqd1s1ugzAMAOB3yRkq8kcJ9z3BjtM0UeZpSCGgJJ1WVbz7Urq1nQqTvSOx8iWxYocj29k9jL5zkdVH1kXoWX0zljHb7MCmsQcLbfRd+9iDjeBTBFzsYgeB1U/H88fhxe37XQrWPGOu6SHNi75xYRx8zJNzAschpGmDO633yWq50Rk7sLrY6Cljr51Py8xRNWV3rECzisJKNKsprEKzJYXVaHZLYUs0W1HYLZo1FLZCs7yguObidn5wefsO4Y9Lm/NkLii8uDIugD8XzBpyt7FiieTkSzrv7hdcLcGCDhcoWKJyeUHlSi4VIpcXRKByqRHkT/FwlFgixIokXgsnxMFB/rb3rmlhYaMzKhdzV2ER8wdiCNlSmLOJgpAtnMjJvVajHhxBbrY4V5K7Lc5V5HaLczW93+Lga+GEvrE2h+//jHwcLKy/62udV2xpXnlTk0tc9T/udGmn54x9gA9zVJfCKGO0VIJLLqbpC6RSGTE=",
+    -- The front end: four burner drills delivering straight onto a belt with
+    -- NO INSERTER between them, because a mining drill drops onto the tile in
+    -- front of it. `MinerLine` encodes this shape and had never been built.
+    --
+    -- Drop tiles are derived, not eyeballed: `delivery_offset` gives a
+    -- burner-mining-drill (-0.35, -1.3) facing north, turned by direction, so a
+    -- drill at (2,y) facing east drops at (3.3, y-0.35) -- belt tile (3.5,
+    -- y-0.5). All four were checked that way before the string was encoded and
+    -- then confirmed live.
+    --
+    -- Built with NO site, on purpose, so `Site::Anywhere` reaches
+    -- `nearest_ore_seed`: the planner sited it on an iron patch 25 tiles from
+    -- spawn by itself and delivered 221 ore. That path had unit tests and had
+    -- never run in a game.
+    BurnerMinerLine = "0eNqd1M1qwzAMAOB30dkp8V/+jj1vTzDGSFqxGRIn2M5YCXn3Oc3Y1jYbdi8GS+izwbImaNoRB6O0g2oC5bCD6leMQFs32PrYfjQazaPyy4NffAa1U06hheppWjenFz12DRqoKAFdd+jrnKm1HXrjEu8s4NBbX9br5bwPqPhOEjhBle7kTOCoDB7WbDGTG5ZFszSE5dEsC2FFNMtDWBnNihA2i2ZlCJtHs1kIW0SzeQhbRrNFCEvTb7c5/6OkU1rp1+RoVNve4mzt3UtYbMH0HlgGwCwO/urfS5iyLZnfI+chsriWlbZonM/9+Xzl9fOlW/DPl1Om18nhDe1/M2eZZfMzgXc09pyWGStFWUouGOX+7vMnnmXOXw==",
 }
 
 rcon.cheat_technology("automation")

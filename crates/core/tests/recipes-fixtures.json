@@ -841,5 +841,31 @@
     "order": "b[steam-power]-a[boiler]",
     "group": "production",
     "subgroup": "energy"
+  },
+  "steel-plate": {
+    "name": "steel-plate",
+    "valid": true,
+    "enabled": false,
+    "category": "smelting",
+    "ingredients": [
+      {
+        "name": "iron-plate",
+        "ingredient_type": "item",
+        "amount": 5
+      }
+    ],
+    "products": [
+      {
+        "name": "steel-plate",
+        "product_type": "item",
+        "amount": 1,
+        "probability": 1.0
+      }
+    ],
+    "hidden": false,
+    "energy": 16.0,
+    "order": "a[smelting]-c[steel-plate]",
+    "group": "intermediate-products",
+    "subgroup": "raw-material"
   }
 }

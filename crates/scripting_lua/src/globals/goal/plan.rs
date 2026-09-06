@@ -569,6 +569,20 @@ const MAX_RESITE_ROUNDS: usize = 2;
 /// happens — see the logging note in `CLAUDE.md`.
 fn narrate_production_goals(goal: &Goal, state: &PlanState) {
     for p in production_progress(goal, state) {
+        if let Some(window) = p.sustain_window {
+            // Said before the count, not after it, because the count is the
+            // thing that would otherwise be misread. `Goal::Sustain` is
+            // satisfied by a window of history and nothing in this process can
+            // observe one; what follows is `Goal::Producing`'s answer, and
+            // capacity has never been the half that failed in a measured run
+            // here -- supply has.
+            factorio_bot_core::paris::info!(
+                "sustaining <bright-blue>{}</> {}/min over <bright-blue>{}</> ticks: what follows                  is CAPACITY, not output. Whether anything comes out over that window is settled                  by the run's own record (machine counters plus an idle roster), never here",
+                p.per_minute,
+                p.item,
+                window
+            );
+        }
         if p.standing == 0 {
             factorio_bot_core::paris::info!(
                 "no <bright-blue>{}</> cell stands yet: planning <bright-blue>{}</> of them for {} a minute",
@@ -818,6 +832,18 @@ struct Production {
     standing: u32,
     /// Complete cells `per_minute` needs in all.
     wanted: u32,
+    /// Set when this row came from a `Goal::Sustain`, carrying its window.
+    ///
+    /// **The row is then a statement about capacity and says so out loud.**
+    /// "How far along" is not answerable for a standing rate: satisfaction is
+    /// a fact about a window of history, which is why
+    /// `crate::method::have::holds` answers `None` for it and why nothing in
+    /// this process can settle it. What *is* answerable is the same question
+    /// `Goal::Producing` answers -- how many cells stand of how many the rate
+    /// needs -- so that is what is reported, with the window named and the
+    /// distinction stated, rather than a percentage that would read as
+    /// progress towards the goal itself.
+    sustain_window: Option<u32>,
 }
 
 /// The production goals in `goal`, with their progress — the whole decision
@@ -835,22 +861,36 @@ fn production_progress(goal: &Goal, state: &PlanState) -> Vec<Production> {
             .iter()
             .flat_map(|member| production_progress(member, state))
             .collect(),
-        Goal::Producing { item, per_minute } => {
-            let Some(spec) = cell_spec(state, item) else {
-                return Vec::new();
-            };
-            let Ok(wanted) = cells_for(*per_minute, spec.ticks_per_item) else {
-                return Vec::new();
-            };
-            vec![Production {
-                item: item.clone(),
-                per_minute: *per_minute,
-                standing: cells_standing(state, &spec),
-                wanted,
-            }]
-        }
+        Goal::Producing { item, per_minute } => production_row(state, item, *per_minute, None)
+            .into_iter()
+            .collect(),
+        Goal::Sustain {
+            item,
+            per_minute,
+            window_ticks,
+        } => production_row(state, item, *per_minute, Some(*window_ticks))
+            .into_iter()
+            .collect(),
         _ => Vec::new(),
     }
+}
+
+/// One row, shared by the two rate goals so the numbers cannot drift apart.
+fn production_row(
+    state: &PlanState,
+    item: &str,
+    per_minute: u32,
+    sustain_window: Option<u32>,
+) -> Option<Production> {
+    let spec = cell_spec(state, item)?;
+    let wanted = cells_for(per_minute, spec.ticks_per_item).ok()?;
+    Some(Production {
+        item: item.to_string(),
+        per_minute,
+        standing: cells_standing(state, &spec),
+        wanted,
+        sustain_window,
+    })
 }
 
 async fn narrate_buffer_refresh(refresher: Option<&BufferRefresher>) {
@@ -1594,6 +1634,7 @@ mod tests {
                 per_minute: 30,
                 standing: 0,
                 wanted: 2,
+                sustain_window: None,
             }]
         );
 
@@ -1643,8 +1684,36 @@ mod tests {
                 per_minute: 15,
                 standing: 1,
                 wanted: 1,
+                sustain_window: None,
             },
             "and the same cell satisfies the smaller rate outright"
+        );
+
+        // **The standing goal reports CAPACITY, and the row says which.** The
+        // numbers are `Goal::Producing`'s, unchanged and deliberately so:
+        // "how far along" is not answerable for a rate whose satisfaction is a
+        // window of history, and the honest answer is the question that *is*
+        // answerable, labelled as the different question it is. What must
+        // never happen is a percentage that reads as progress towards the
+        // standing goal itself.
+        assert_eq!(
+            production_progress(
+                &Goal::Sustain {
+                    item: "iron-plate".into(),
+                    per_minute: 15,
+                    window_ticks: 7200,
+                },
+                &state
+            )[0],
+            Production {
+                item: "iron-plate".into(),
+                per_minute: 15,
+                standing: 1,
+                wanted: 1,
+                sustain_window: Some(7200),
+            },
+            "a sustain row carries its window, which is what makes the narration \
+             say `CAPACITY, not output`"
         );
 
         // A goal no cell can make says nothing at all: `expand` refuses it by

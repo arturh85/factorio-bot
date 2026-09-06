@@ -2652,6 +2652,129 @@ mod tests {
         );
     }
 
+    // ---- Layer 7: the sustain window -- an idle window, not a verdict
+
+    /// The first rung's spec, as the run script writes it, but short enough to
+    /// poll through in a test: the shape is what is under test, not the size.
+    const SUSTAIN_SPEC: &str = r#"supervisor.sustain {
+        item = "iron-plate", per_minute = 15,
+        window_ticks = 120, lead_in_ticks = 180, probe_ticks = 60,
+    }"#;
+
+    fn drive_sustain(lua: &Lua) {
+        lua.load(
+            r#"
+            local sup = supervisor.new(supervisor.list { __spec }, {})
+            local seen
+            local guard = 0
+            repeat
+                local t = sup:step()
+                if t.action ~= "acquired" and t.action ~= "finished" then seen = t end
+                guard = guard + 1
+                if guard > 20 then error("a sustain milestone did not terminate") end
+            until sup:finished()
+            __action, __state = seen.action, seen.state
+            __code = seen.refusal and seen.refusal.code
+            __message = seen.refusal and seen.refusal.message
+            __s = seen.sustain
+            "#,
+        )
+        .exec()
+        .expect("the sustain milestone runs to a terminal state");
+    }
+
+    /// The property the whole rung rests on, and the same one the witness
+    /// rests on: it dispatches nothing, so no feeding verb this run could have
+    /// issued lands in the window or in the lead-in before it.
+    #[test]
+    fn a_sustain_window_dispatches_nothing_at_all() {
+        let lua = witness_harness(&format!("__spec = {SUSTAIN_SPEC}"));
+        drive_sustain(&lua);
+        let g = lua.globals();
+        assert_eq!(g.get::<i64>("__plan_calls").unwrap(), 0, "no expansion");
+        assert_eq!(g.get::<i64>("__run_calls").unwrap(), 0, "and nothing ran");
+        assert_eq!(
+            g.get::<i64>("__holds_calls").unwrap(),
+            0,
+            "nor is the planner asked, which for a standing rate answers None anyway"
+        );
+    }
+
+    /// **`satisfied` means the window happened, never that the rate held**, and
+    /// the observation says so rather than leaving a reader to assume.
+    ///
+    /// This is the `obs.done` failure in advance: a field that answers a
+    /// question nobody asked, confidently, about the wrong object. The rung
+    /// cannot read per-machine counters -- they are not on `FactorioEntity` --
+    /// so it names the command that can.
+    #[test]
+    fn an_elapsed_window_reports_deferred_and_names_what_answers_it() {
+        let lua = witness_harness(&format!("__spec = {SUSTAIN_SPEC}"));
+        drive_sustain(&lua);
+        let g = lua.globals();
+        assert_eq!(g.get::<String>("__action").unwrap(), "satisfied");
+        let obs: factorio_bot_core::mlua::Table = g.get("__s").expect("an observation");
+        assert_eq!(
+            obs.get::<String>("verdict").unwrap(),
+            "deferred",
+            "the rung must not claim a rate it cannot measure"
+        );
+        assert!(
+            obs.get::<i64>("elapsed_ticks").unwrap() >= 300,
+            "the whole lead-in plus window elapsed"
+        );
+        let answered: String = obs.get("answered_by").unwrap();
+        assert!(
+            answered.contains("--sustain iron-plate:15:120:180"),
+            "and it names the exact command that answers it: {answered}"
+        );
+    }
+
+    /// A clock that is not advancing is `inconclusive`, never a failed rate.
+    ///
+    /// The same distinction `supervisor::witness_inconclusive` draws: a window
+    /// that did not happen establishes nothing, and reporting it as a rate
+    /// that did not hold would be the mistake this whole design exists to
+    /// stop, one level up.
+    #[test]
+    fn a_clock_that_does_not_advance_is_inconclusive_not_a_failed_rate() {
+        let lua = witness_harness(&format!("__tick_step = 0\n__spec = {SUSTAIN_SPEC}"));
+        drive_sustain(&lua);
+        let g = lua.globals();
+        assert_eq!(g.get::<String>("__action").unwrap(), "halted");
+        assert_eq!(
+            g.get::<String>("__code").unwrap(),
+            "supervisor::sustain_inconclusive"
+        );
+        let msg: String = g.get("__message").unwrap();
+        assert!(
+            msg.contains("did not happen"),
+            "and says why nothing follows: {msg}"
+        );
+    }
+
+    /// Neither duration has a default, for `within_ticks`' reason.
+    #[test]
+    fn a_sustain_window_refuses_to_guess_its_durations() {
+        let lua = witness_harness("");
+        for (src, missing) in [
+            (
+                r#"supervisor.sustain { item = "iron-plate", per_minute = 15, lead_in_ticks = 9600 }"#,
+                "window_ticks",
+            ),
+            (
+                r#"supervisor.sustain { item = "iron-plate", per_minute = 15, window_ticks = 7200 }"#,
+                "lead_in_ticks",
+            ),
+        ] {
+            let err = lua.load(src).exec().expect_err(src).to_string();
+            assert!(
+                err.contains(missing) && err.contains("no default"),
+                "{src}: {err}"
+            );
+        }
+    }
+
     /// The roster option is checked at construction, like the source.
     #[test]
     fn a_roster_that_is_not_a_function_is_refused_at_construction() {

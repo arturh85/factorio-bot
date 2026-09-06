@@ -710,4 +710,41 @@ pub enum PlannerError {
         searched: i32,
         nearest_obstruction: String,
     },
+
+    /// The capacity for a [`Goal::Sustain`](crate::goal::Goal::Sustain)
+    /// stands, and nothing in this planner can make its inputs arrive without
+    /// a bot carrying them.
+    ///
+    /// **This refusal is the honest statement of a gap, not a bug.** A stage-1
+    /// burner cell is fed by hand: its ore and its coal are `insert` actions,
+    /// and an `insert` is an event with a completion, which is precisely what
+    /// a standing supply is not. `method::connect` (`connect_steps`,
+    /// `route_belt`, `inserter_facing`) is the primitive that would close it
+    /// and **has no caller anywhere in the tree**; until it has one, a
+    /// `Sustain` whose window outlives one hand charge cannot be planned and
+    /// saying so by name is better than planning a cell that will be measured
+    /// `roster-fed`.
+    ///
+    /// It is a *refusal* and not an empty plan for the reason
+    /// [`crate::method::have::holds`] gives: an empty network is this
+    /// planner's word for "done", and a standing rate is exactly what it
+    /// cannot know is done.
+    #[error(
+        "the capacity for {per_minute} {item}/min stands, but nothing delivers {inputs} to it \
+         without a bot: a standing supply over {window_ticks} ticks is not modelled"
+    )]
+    #[diagnostic(
+        code(planner::sustain_supply_not_standing),
+        help(
+            "a burner cell's ore and coal arrive as `insert` actions, which is a bot's hands; \
+             belting them in needs `method::connect`, which has no caller yet"
+        )
+    )]
+    SustainSupplyNotStanding {
+        item: ItemId,
+        per_minute: u32,
+        window_ticks: crate::ids::Ticks,
+        /// The inputs that have no standing deliverer, comma-separated.
+        inputs: String,
+    },
 }

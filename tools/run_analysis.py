@@ -810,6 +810,7 @@ def analyse(
     marks: tuple[float, ...] = DEFAULT_MARKS,
     rate_items: tuple[str, ...] = DEFAULT_RATE_ITEMS,
     rate_threshold: int = RATE_ITEM_THRESHOLD,
+    sustain_specs: tuple[dict, ...] = (),
 ) -> dict:
     run_id = os.path.basename(os.path.normpath(run_dir))
     result: dict[str, Any] = {"run_id": run_id, "dir": os.path.abspath(run_dir)}
@@ -963,6 +964,13 @@ def analyse(
         result["frozen"] = None
         result["production"] = None
         result["machines"] = None
+    # Evaluated at `hi`, the last tick this run has any record of, because a
+    # standing goal's window is a TRAILING one: it ends at the observation, not
+    # at a milestone mark. A run killed mid-batch therefore gets its window
+    # measured against where it actually stopped, which is the honest place.
+    result["sustain"] = [
+        sustained_rate(samples.rows, events, at_tick=hi, **spec) for spec in sustain_specs
+    ]
     return result
 
 
@@ -2002,6 +2010,177 @@ def machine_production(samples: list[dict], lo: int, hi: int) -> dict:
     out["by_name"] = {item: dict(c.most_common()) for item, c in by_name.items()}
     out["unavailable"] = dict(unavailable.most_common())
     return out
+
+
+def feeding_dispatches(events: list[dict], lo: int, hi: int) -> int:
+    """:data:`FEEDING_VERBS` dispatches in ``(lo, hi]``.
+
+    The **count**, not the ticks, and that is not a shortcut: five of the six
+    feeding verbs settle in the tick they dispatch, so their share of any
+    duration is ~0 and a tick-weighted measure would read a hand-fed factory
+    as idle. Read straight off ``action_dispatched`` rather than through
+    :func:`bot_activity`, because this question needs no join and no roster --
+    a dispatch with no bot field still happened.
+    """
+    n = 0
+    for e in events:
+        if e.get("kind") != "action_dispatched":
+            continue
+        tick = e.get("tick")
+        if tick is None or not (lo < tick <= hi):
+            continue
+        if verb_of(e.get("action") or "") in FEEDING_VERBS:
+            n += 1
+    return n
+
+
+def sustained_rate(
+    samples: list[dict],
+    events: list[dict],
+    *,
+    item: str,
+    per_minute: int,
+    window_ticks: int,
+    lead_in_ticks: int,
+    at_tick: int,
+) -> dict:
+    """Was ``item`` coming out of MACHINES at ``per_minute`` for the window?
+
+    The verification half of ``Goal::Sustain``. Design note:
+    ``docs/superpowers/notes/2026-09-06-standing-goals.md``.
+
+    Five answers, and four of them are refusals:
+
+    ``unknown``
+        The run has no machine counters (archived before ``13d45c6b``). Not
+        ``sustained``, which would be a claim nothing measured, and not
+        ``short``, which would report a failure that may not have happened.
+    ``hand-made``
+        No machine counter moved and the force's ``production.made`` did. Hand
+        crafting and hand mining pass through no machine and land in that
+        series indistinguishably, which is exactly why this check is not built
+        on it -- every rate table in this project is.
+    ``roster-fed``
+        A feeding verb was dispatched inside the window **or inside the
+        lead-in before it**. The lead-in is the half that is new: a stone
+        furnace's input slot holds one stack of 50 ore at 3.2 s a plate, so
+        9,600 ticks of hand-fed running fit inside it, and the existing green
+        witness's 5,400-tick every-bot-idle window sits comfortably inside a
+        single hand load. That witness proves the machines are *running*; it
+        cannot prove anything is *feeding* them.
+    ``short``
+        The machines made less than the window asks for. Named by the number
+        missed and **not** blamed on a cause: nothing here observed why.
+    ``sustained``
+        The only shape that may be called that.
+
+    # Why every argument is keyword-only and none has a default
+
+    ``window_ticks`` and ``lead_in_ticks`` are what decide what a failure
+    means, and a library that guessed either would hand back a verdict nobody
+    derived -- the same refusal as ``supervisor.witness``'s ``within_ticks``.
+    The lead-in in particular **cannot be derived from the record at all**: the
+    mod reports ``output_inventory`` and ``fuel_inventory`` and not input
+    slots, so nothing archived can say how much hand-delivered material was
+    still inside a machine when the window opened. The caller states it from
+    the machines' input capacity and consumption rate. Saying so is better than
+    computing it wrongly.
+    """
+    lo = at_tick - window_ticks
+    mach = machine_production(samples, lo, at_tick)
+    required = -(-per_minute * window_ticks // TICKS_PER_MINUTE)  # ceil, integer
+    machine_made = int((mach.get("by_item") or {}).get(item, 0))
+    in_window = feeding_dispatches(events, lo, at_tick)
+    in_lead_in = feeding_dispatches(events, lo - lead_in_ticks, lo)
+    force = [s for s in samples if s.get("kind") == "force"]
+    base = end = None
+    for s in force:
+        tick = s.get("tick", 0)
+        if tick <= lo:
+            base = s
+        if tick <= at_tick:
+            end = s
+    force_delta = (_made(end) if end else {}).get(item, 0) - (
+        _made(base) if base else {}
+    ).get(item, 0)
+    out = {
+        "item": item,
+        "per_minute": per_minute,
+        "window_ticks": window_ticks,
+        "lead_in_ticks": lead_in_ticks,
+        "at_tick": at_tick,
+        "window": [lo, at_tick],
+        "lead_in": [lo - lead_in_ticks, lo],
+        "required": required,
+        "machine_made": machine_made,
+        "force_made": force_delta,
+        "feeding_in_window": in_window,
+        "feeding_in_lead_in": in_lead_in,
+        "source": "counters" if mach.get("available") else "unavailable",
+        "why": "",
+    }
+    if not mach.get("available"):
+        out["verdict"] = "unknown"
+        out["why"] = (
+            "this run archived no per-machine `produced` counter, so nothing here can "
+            "say what the machines made; the force's own statistics cannot answer it, "
+            "because a hand craft lands in them indistinguishably"
+        )
+        return out
+    if machine_made == 0 and force_delta > 0:
+        out["verdict"] = "hand-made"
+        out["why"] = (
+            f"no machine counter moved and the force made {force_delta} {item}: "
+            "hand crafting and hand mining pass through no machine"
+        )
+        return out
+    if in_window or in_lead_in:
+        out["verdict"] = "roster-fed"
+        out["why"] = (
+            f"{in_window} feeding dispatch(es) inside the window and {in_lead_in} inside "
+            f"the {lead_in_ticks}-tick lead-in before it: something a bot carried can "
+            "explain the output"
+        )
+        return out
+    if machine_made < required:
+        out["verdict"] = "short"
+        out["why"] = (
+            f"machines made {machine_made} of the {required} that {per_minute}/min over "
+            f"{window_ticks} ticks asks for, {required - machine_made} short; nothing "
+            "here observed why"
+        )
+        return out
+    out["verdict"] = "sustained"
+    out["why"] = (
+        f"machines made {machine_made} of {required} required, and no feeding verb was "
+        f"dispatched in the window or in the {lead_in_ticks} ticks before it"
+    )
+    return out
+
+
+def parse_sustain_spec(spec: str) -> dict:
+    """``<item>:<per-minute>:<window-ticks>:<lead-in-ticks>``.
+
+    All four parts, positionally, because the last two have no default -- see
+    :func:`sustained_rate`.
+    """
+    parts = spec.split(":")
+    if len(parts) != 4 or not parts[0]:
+        raise ValueError(
+            f"--sustain wants <item>:<per-minute>:<window-ticks>:<lead-in-ticks>, got {spec!r}"
+        )
+    item, rate, window, lead_in = parts
+    try:
+        return {
+            "item": item,
+            "per_minute": int(rate),
+            "window_ticks": int(window),
+            "lead_in_ticks": int(lead_in),
+        }
+    except ValueError:
+        raise ValueError(
+            f"--sustain wants three integers after the item, got {spec!r}"
+        ) from None
 
 
 def attribute_from_counters(delta: int, produced: dict, item: str, activity: dict | None) -> dict:
@@ -3204,6 +3383,31 @@ def hr(title: str) -> str:
     return f"\n{title}\n{'-' * len(title)}"
 
 
+def report_sustain(rows: list[dict], p) -> None:
+    """The standing-rate checks the caller asked for, verdict first.
+
+    Printed only when `--sustain` was given: this is a question about a goal,
+    and a run that was never asked to sustain anything should not be reported
+    against a window nobody chose.
+    """
+    if not rows:
+        return
+    p(hr("STANDING RATES (--sustain)"))
+    p("  Machine counters only -- `production.made` cannot tell a hand craft from a machine.")
+    p("  A feeding dispatch inside the window OR the lead-in disqualifies it: a stone")
+    p("  furnace's input slot holds ~9,600 ticks of hand-fed running, so an idle window is")
+    p("  equally consistent with a charged factory.")
+    for r in rows:
+        lo, hi = r["window"]
+        p(f"\n  {r['item']} {r['per_minute']}/min over {r['window_ticks']} ticks "
+          f"(lead-in {r['lead_in_ticks']}): {r['verdict'].upper()}")
+        p(f"    window {lo} -> {hi}; needed {r['required']}, machines made {r['machine_made']}, "
+          f"force made {r['force_made']}")
+        p(f"    feeding dispatches: {r['feeding_in_window']} in window, "
+          f"{r['feeding_in_lead_in']} in lead-in   (source: {r['source']})")
+        p(f"    {r['why']}")
+
+
 def report(a: dict, out=sys.stdout, top: int = 12) -> None:
     p = lambda *args: print(*args, file=out)
 
@@ -3337,6 +3541,7 @@ def report(a: dict, out=sys.stdout, top: int = 12) -> None:
     # judged by what it makes per minute at fixed marks, and the milestone
     # tick is the second number.
     report_rates(a.get("rates") or {"present": False, "reason": "not computed"}, p, a.get("headline"))
+    report_sustain(a.get("sustain") or [], p)
 
     # A peer of the table above, not demoted: a producing/rate goal is judged
     # on the curve, a researched/first-event goal on the tick it flipped, and
@@ -4761,6 +4966,13 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--rates-json", action="store_true",
                     help="print only the production-at-marks block as JSON (one object, "
                          "or a list for several runs) -- for generating the record's tables")
+    ap.add_argument("--sustain", action="append", default=[],
+                    metavar="ITEM:PER_MINUTE:WINDOW_TICKS:LEAD_IN_TICKS",
+                    help="check a standing rate over a trailing window ending at the run's "
+                         "last recorded tick: machine counters only, plus zero feeding-verb "
+                         "dispatches in the window AND in the lead-in before it. Both "
+                         "durations are required and neither has a default -- see "
+                         "run_analysis.sustained_rate. Repeatable.")
     ap.add_argument("--rates-md", action="store_true",
                     help="print the production-at-marks table as Markdown, one column per "
                          "run (tools/rates_table.py is the same thing with more options)")
@@ -4771,6 +4983,11 @@ def main(argv: list[str]) -> int:
         print(f"--marks wants comma-separated minutes, got {args.marks!r}", file=sys.stderr)
         return 2
     args.rate_items = tuple(i.strip() for i in args.rate_items.split(",") if i.strip())
+    try:
+        args.sustain = tuple(parse_sustain_spec(spec) for spec in args.sustain)
+    except ValueError as err:
+        print(str(err), file=sys.stderr)
+        return 2
 
     if args.compare:
         if args.all or args.dirs:
@@ -4799,7 +5016,8 @@ def main(argv: list[str]) -> int:
         if not os.path.isdir(d):
             print(f"no such run directory: {d}", file=sys.stderr)
             continue
-        results.append(analyse(d, args.freeze_ticks, args.marks, args.rate_items, args.rate_threshold))
+        results.append(analyse(d, args.freeze_ticks, args.marks, args.rate_items,
+                               args.rate_threshold, args.sustain))
 
     if args.rates_json:
         rates = [{"run_id": a["run_id"], "headline": a.get("headline"), **(a.get("rates") or {})}

@@ -9,18 +9,14 @@
 //! the missing kind, and these are the four claims its implementation has to
 //! satisfy.
 //!
-//! # Why every test here is `#[ignore]`d
+//! # These were `#[ignore]`d until the kind existed
 //!
-//! They fail today — that is the point — and a red `cargo test -p
-//! factorio-bot-planner` would be a red suite for every other agent working in
-//! this checkout. `#[ignore]` keeps them visible and named in the default run
-//! (`4 ignored`) and runnable on demand:
-//!
-//! ```text
-//! nix develop -c cargo test -p factorio-bot-planner --test standing_goals -- --ignored
-//! ```
-//!
-//! Delete the `#[ignore]`s in the commit that lands the goal kind.
+//! They failed with the exact sentence *"unknown variant `Sustain`"*, and a red
+//! `cargo test -p factorio-bot-planner` would have been a red suite for every
+//! other agent working in this checkout, so they were kept visible and named in
+//! the default run (`4 ignored`) and runnable on demand. The `#[ignore]`s came
+//! off with `Goal::Sustain` itself, which is what the design note said to do;
+//! they now run by default and this comment is the record of why they did not.
 //!
 //! # Why the goals are built from JSON rather than written out
 //!
@@ -75,7 +71,6 @@ fn trivially_true() -> Goal {
 /// by a cell that has never produced anything. The window is what makes the
 /// claim durative, and it is the field the verification reads.
 #[test]
-#[ignore = "Goal::Sustain does not exist; see docs/superpowers/notes/2026-09-06-standing-goals.md"]
 fn sustain_names_an_item_a_rate_and_a_window() {
     let goal = sustain("iron-plate", 15, 7200);
     let back: Goal = serde_json::from_str(&serde_json::to_string(&goal).expect("serialises"))
@@ -106,7 +101,6 @@ fn sustain_names_an_item_a_rate_and_a_window() {
 /// that is an event; for `Sustain` it is a **window of history**, which a pure
 /// planner with no clock and no I/O is constitutionally unable to observe.
 #[test]
-#[ignore = "Goal::Sustain does not exist; see docs/superpowers/notes/2026-09-06-standing-goals.md"]
 fn the_planner_cannot_answer_a_sustain_goal_from_the_world() {
     assert_eq!(
         holds(&sustain("iron-plate", 15, 7200), &state()),
@@ -123,7 +117,6 @@ fn the_planner_cannot_answer_a_sustain_goal_from_the_world() {
 /// in it. A supervisor that reported such a ladder complete would be closing a
 /// milestone on the strength of the goals that were *not* the point of it.
 #[test]
-#[ignore = "Goal::Sustain does not exist; see docs/superpowers/notes/2026-09-06-standing-goals.md"]
 fn a_bundle_containing_a_sustain_is_never_claimed_satisfied() {
     let state = state();
     assert_eq!(
@@ -155,7 +148,6 @@ fn a_bundle_containing_a_sustain_is_never_claimed_satisfied() {
 /// the way `Goal::Built` does, or every replan builds a second cell beside the
 /// first. `tests/standing_site_reuse.rs` is the precedent and the warning.
 #[test]
-#[ignore = "Goal::Sustain does not exist; see docs/superpowers/notes/2026-09-06-standing-goals.md"]
 fn a_sustain_goal_is_never_already_satisfied() {
     let state = state();
     let roster = [BotId(1)];

@@ -391,6 +391,49 @@ The plateau is unchanged: `roster-fed; no generator until 6:21`, production
 stopping at the plan's bill. Everything tonight made the plan smaller and
 more honest; none of it made the factory feed itself.
 
+## ✅ `Sustain` EXISTS (`f8164862`) — and its first run passed for the wrong reason
+
+The fifth goal kind: `Sustain { item, per_minute, window_ticks }`, with
+`holds()` answering **`None`**, because satisfaction of a standing rate is a
+fact about a window of history and a pure planner has no clock. When capacity
+already stands, it **refuses by name** — `SustainSupplyNotStanding`, naming
+the inputs nothing delivers — rather than returning an empty network.
+`sustained_rate()` and `--sustain <item>:<rate>:<window>:<lead-in>` in the
+analyser are the other half; the goal and its verification were built
+together, as the design required.
+
+**The run returned `SUSTAINED`, and the agent refused to report it as a
+pass.** 30 machine-made plates of 30 required, 0 feeding dispatches in the
+window and 0 in the 9,600-tick lead-in, 94.8% of nominal tick rate. But the
+dispatch list ends at tick 4,521 with *fuel the burner-mining-drill with 23
+coal (36,800 ticks)*, and drill coal falls 22 → 12 across the run with
+nothing topping it up. **The whole window ran off one hand charge.**
+
+**The design's own acceptance sentence was satisfiable with no standing
+supply at all.** The lead-in had been sized against the furnace's *ore*
+stack — but ore is the input already standing, since the drill drops into the
+furnace. The hand-delivered input is **coal**, up to 80,000 ticks of it.
+Re-read from the same archive with an honest lead-in: 10,155 → `roster-fed`;
+36,800 → `roster-fed`, with both `fuel` dispatches inside it.
+
+The rule that follows: **a lead-in must exceed the drain of the
+longest-lasting hand-delivered input, not the first one that comes to mind.**
+The design's deferred hand-credit mass balance, which needs no lead-in
+parameter at all, is therefore the *next* rung rather than a later one.
+
+What the run does prove: the capacity half works end to end, and a
+planner-built cell ran flat out at its nominal 15/min for 7,200 uninterrupted
+ticks with every bot idle. **The gap between a cell that stands and a cell
+that feeds itself now has a number: one fuel charge.**
+
+Two side findings. A fixture was **arithmetically wrong** — expecting 75
+machine-made items where 24 beats × 5 is 120, contradicting its own sibling —
+and was corrected rather than accommodated. And `KINDS` in
+`goal/value.rs` omitted `charted`, so a charted goal worked everywhere except
+nested inside `goal.all`; fixed in `93e082fc`, and the falsification of that
+fix silently matched nothing on the first attempt, producing a meaningless
+green — caught by asserting the match count, exactly as the note now requires.
+
 ## ✅ A FAILED ACTION COSTS ITS DEPENDENTS, NOT THE BATCH (`0fedcb95`) — measured over eight runs
 
 Eight `furnace_run` block runs, same binary, same mod, **same 183-step plan

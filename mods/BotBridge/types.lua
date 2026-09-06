@@ -568,7 +568,39 @@ function serialize_entity_prototype(entity)
     return record
 end
 
-function serialize_entity(entity)
+-- `opts.omit_inventories` -- IDENTITY AND GEOMETRY IN BULK, CONTENTS ON DEMAND.
+--
+-- This function serves two very different callers. The RCON queries
+-- (`rcon_find_entities_filtered`, `find_entities_in_radius`, `world_snapshot`,
+-- `rcon_place_entity`'s reply) answer a question somebody asked about a handful
+-- of entities, and scripts genuinely read `output_inventory` off those --
+-- `scripts/furnace_run.lua`, `two_row_smelter_live.lua` and others count plates
+-- that way. They pass nothing and get the full record, unchanged.
+--
+-- `writeout_entities` is the other caller, and it is not a query: it ships
+-- EVERY entity of EVERY chunk through a line-oriented text protocol on stdout,
+-- once per chunk, for the whole map. Attaching each machine's
+-- `get_output_inventory()` and `get_fuel_inventory()` contents there is cheap
+-- on a fresh map -- measured at exactly **0 bytes across 50,256 records** in
+-- `workspace/server-log.txt`, because a map of trees and ore has no machine to
+-- own an inventory -- and is the entire world state, item by item, on a
+-- finished base.
+--
+-- **Nothing reads them off a bulk-ingested entity.** `EntityGraph::add` clones
+-- the whole entity into `entity_tree`, so the fields are stored, but they are
+-- a snapshot taken when the chunk was generated and `add` refuses to re-add
+-- over an occupied position -- so what is stored is permanently stale and no
+-- caller in `crates/planner`, `crates/executor` or `crates/server` looks at it.
+-- The planner's buffer model reads `FactorioSurface::inventories`, which is
+-- filled only by `observe_inventories` from the RCON reply to
+-- `inventory_contents_at`. That is the on-demand path, it already exists, and
+-- it is the one the owner's rule names:
+--
+--   "For an endgame base we cannot model each individual item produced, we'd
+--    need to simplify using flow rates too."
+--
+-- See docs/superpowers/notes/2026-09-06-identity-in-bulk-contents-on-demand.md.
+function serialize_entity(entity, opts)
     local record = table_properties(entity, {"name", "direction", "type", "position", "drop_position"}, {type = "entity_type", drop_position = "drop_position"})
     -- WHICH SURFACE, BY NAME. Carried, not yet used.
     --
@@ -588,13 +620,15 @@ function serialize_entity(entity)
     -- See docs/superpowers/notes/2026-09-06-surfaces-survey.md.
     record.surface = entity.surface and entity.surface.name or nil
     record.bounding_box = table_properties(entity.bounding_box, {"left_top", "right_bottom"}, {left_top = "left_top", right_bottom = "right_bottom"})
-    local output_inventory = entity.get_output_inventory()
-    if output_inventory ~= nil then
-        record.output_inventory = output_inventory.get_contents()
-    end
-    local fuel_inventory = entity.get_fuel_inventory()
-    if fuel_inventory ~= nil then
-        record.fuel_inventory = fuel_inventory.get_contents()
+    if not (opts and opts.omit_inventories) then
+        local output_inventory = entity.get_output_inventory()
+        if output_inventory ~= nil then
+            record.output_inventory = output_inventory.get_contents()
+        end
+        local fuel_inventory = entity.get_fuel_inventory()
+        if fuel_inventory ~= nil then
+            record.fuel_inventory = fuel_inventory.get_contents()
+        end
     end
 
     if entity.type == "resource" then

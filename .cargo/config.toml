@@ -1,5 +1,25 @@
 [build]
 rustflags = ["--cfg", "tokio_unstable"] # for tokio-console
 
+# Cap parallel codegen jobs per cargo invocation.
+#
+# Cargo defaults to one job per core, which is right for one build on an idle
+# box and badly wrong here: several agents work in separate `.worktrees/`
+# checkouts at once, each with its own `target/`, so five concurrent builds ask
+# for 5 x 20 = 100 parallel jobs on a 20-core machine. Measured 2026-09-06:
+# load average 85, 18 GB of swap in use against 30 GB of RAM, and no measured
+# run able to start because the five-minute load must be under 6.
+#
+# Four is deliberate rather than tuned: it is nproc/5, so the handful of
+# concurrent builds this repo actually sees land near the core count instead of
+# five times over it. A single build is slower in wall time and the box stays
+# usable, which is the trade we want -- an over-subscribed box swaps, and
+# swapping costs more than the parallelism bought.
+#
+# This does NOT bound test-time threads. `cargo test` runs each test binary
+# with one thread per core on top of this; pass `--test-threads` when a suite
+# is heavy.
+jobs = 4
+
 [alias]     # command aliases
 repl = "run --no-default-features --features repl,lua,tokio-console"

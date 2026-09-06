@@ -248,3 +248,34 @@ answers one that was never asked, and the reader cannot tell. When adding
 any field to a record, state precisely which object it describes — and if
 that object is not the one a reader will assume, either rename it or record
 the one they meant.
+
+## A module with no caller is a hypothesis
+
+The sharpest form of everything above, from the `second` session on the
+morning its belt router finally ran:
+
+> A module with no caller is a hypothesis. **No unit test could have found
+> that** — every fixture I wrote handed the module a world where the bill was
+> satisfiable, because I wrote both. A module with no caller cannot discover
+> that its bill is unbuildable, and my four clean reviews are the proof.
+
+The concrete defect: `connect_steps` hard-coded the **electric** `inserter`,
+which is not enabled at t=0 on seed 31337. Its first real caller would have
+refused on the **materials bill**, before geometry was ever reached — after
+four clean task reviews, a full suite, and a live direction test that proved
+its geometry. Nothing in the module's own world was wrong; the module had
+never been asked a question from outside it.
+
+Two rules follow, and they are not the same rule:
+
+- **Fixtures answer the questions their author thought of.** A module tested
+  only by its author's fixtures is tested against that author's model of the
+  world, which is the same model that produced the code.
+- **A caller asks questions the module's author did not.** The bill, the tech
+  tree at t=0, the entity that is not a valid pickup, the chest that cannot
+  host three runs — every one of those was forced by a refusal from outside,
+  not designed.
+
+So: **wire a caller early, even a poor one.** A primitive that has never been
+invoked from real code is not "done and waiting"; it is untested in the only
+way that counts.

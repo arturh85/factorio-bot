@@ -713,6 +713,26 @@ fn first_obstruction(state: &PlanState, bp: &Blueprint, anchor: &Position) -> Op
     None
 }
 
+/// # A drill can pass this check while standing mostly off the patch
+///
+/// This asks whether the mining area covers **some** extractable resource, not
+/// how much, and that is right for a feasibility check: a drill on one ore tile
+/// mines at the full nameplate rate, because Factorio does not scale a drill's
+/// speed by how many tiles it covers.
+///
+/// It is wrong as a **siting quality** measure, and nothing else measures that.
+/// A burner drill's 0.99 radius works its own 2x2 — four tiles — and a block
+/// sited live on 2026-09-06 put its two drills on **two** tiles and **one**.
+/// Same rate, but such a drill exhausts its ground up to four times faster, so
+/// the block needs re-siting far sooner than its nameplate suggests. A later
+/// run of a differently-shaped block landed a drill on all four (1,224 ore in
+/// reach against 150), which is the same siting code finding a better spot by
+/// luck of footprint rather than by preference.
+///
+/// So: the check is correct as specified, and the specification is what is
+/// missing. Coverage belongs beside the re-siting question rather than inside
+/// this boolean — turning it into a threshold would refuse blocks that work.
+///
 /// Does `area` cover a tile of some resource `drill` can actually extract?
 ///
 /// Inverts the game's own rule ([`PlanState::extractors_for`]): a resource is

@@ -716,6 +716,37 @@ wrote 2,164 JPEGs / 947 MB against 290 MB for the same 45 minutes of video, and
 `take_screenshot` renders *synchronously inside the game loop* where the video
 grabber reads a frame the GPU already drew.
 
+**One diagnostic frame, taken by hand, is a different thing and it works.**
+Nothing in the retirement removed `game.take_screenshot`, and the mod still
+exposes it: `remote.call('botbridge', 'screenshot', {...})` forwards straight to
+it. Verified 2026-09-06 to answer a question four separate measurements could
+not — where ore was sitting on a belt, which no binding can read.
+
+```bash
+# while a run is holding the game open
+factorio-bot rcon -s localhost --settings <settings> -- \
+  "/silent-command remote.call('botbridge','screenshot',{player=game.players[1], \
+   surface=game.surfaces[1], position={x,y}, resolution={1400,1400}, zoom=3, \
+   path='shot.png', show_entity_info=true})"
+```
+
+Three things that cost a run each to learn:
+
+- **A headless server cannot render.** The call reaches the game and *creates*
+  `script-output/`, then writes nothing. **The empty directory is the tell** —
+  there is no error anywhere.
+- **A graphical client can**, and the file lands in the **client's**
+  `script-output`, never the server's. So this needs `--clients 1` and
+  `DISPLAY=:0` (see the Platform Notes); the first such run extracts the client,
+  which is minutes.
+- **The script keeps the game alive.** When it returns the server dies, so a
+  script must hold the game open — a tick-wait loop at the end — for a frame to
+  be taken from outside.
+
+This is not a cadence and must not become one: the retirement above is about
+2,164 JPEGs for 947 MB and `take_screenshot` rendering *synchronously inside the
+game loop*. One frame, on demand, when something is invisible.
+
 Three unrelated things are still called "frame" and must survive a grep:
 entity-map **keyframes** (`map.jsonl`, `lib/runMap.ts`), **video frames**
 (`crates/core/src/record/video/`, `api/videoClock.ts`), and

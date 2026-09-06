@@ -1163,10 +1163,40 @@ entry over a log line:
   Audio still fails (`libasound.so.2`) unless `alsa-lib` is present; that is a
   warning, not a failure, and `flake.nix` includes it anyway to keep the log
   readable.
-- **Do not debug the mod with `rcon.print`**: its output lands in the RCON
-  reply body, and the executor reads that reply as the action's result — so a
-  debug line turns a successful action into a reported failure. Use
-  `writeout(...)` (stdout, parsed by `output_parser.rs`) instead.
+- **Nothing printed inside an RCON-invoked mod function reaches stdout — so
+  `writeout` does not work there either.** Factorio redirects console output to
+  the RCON client while a command is in flight, and `writeout` is exactly one
+  `print`. So a function reached through `remote.call` from an RCON command
+  **cannot put anything into the planner's world model**: its output goes into
+  the reply body, which the executor reads as the action's result and nothing
+  else ever sees.
+
+  This entry used to say "do not debug with `rcon.print`, use `writeout`
+  instead", which is right about `rcon.print` and **wrong about the remedy** —
+  both are the same channel in this context. That advice cost a ghost-streaming
+  fix that read correctly, passed five tests, and did nothing.
+
+  **Proven by a control, not by inspection** (2026-09-06): a plain non-ghost
+  record — a `stone-furnace` at a fixed position — written on the same channel
+  from the same loop in the same call also never arrived. One run:
+
+      entries in the RCON reply body:   9
+      ghosts standing in the GAME:      9
+      ghosts visible to the PLANNER:    0
+      non-ghost control record:         0   <- the one that settles it
+
+  That eliminates every hypothesis about the *record* at once — shape,
+  `ghost_name`, the emitting filter, the graph's whitelist, the bounding box.
+  It is the channel.
+
+  **Event-handler writeouts work fine**, in the same process and the same run:
+  the exploration census grows from `on_chunk_generated`. So the channel is
+  healthy in general and absent only from RCON context. **If you need something
+  an RCON-invoked function creates to reach the world model, have the mod notice
+  it from an event it already receives** — do not push harder from inside the
+  call. Deferring to `todo_next_tick_other` was tried and also produced nothing;
+  why is not established (one unverified candidate: it is drained in an
+  `elseif`, so a non-empty `todo_next_tick` starves it).
 - **An inserter's `direction` points at the side it PICKS UP from**, not the
   side it drops into. Established empirically (chest / burner-inserter / chest,
   then machine / inserter / chest): `direction = 12` ("west") is what moves

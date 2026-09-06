@@ -303,6 +303,40 @@ unvisited and planned nothing, silently. Threat avoidance — a 50-tile
 stand-off, refusing rather than returning an empty plan — is the **first
 non-test caller of the threat index**, which had none.
 
+## RUN 20: RED SCIENCE MEASURED AT 1x — 9:57 (`run-1788655528-63394`)
+
+2026-09-06 02:38, master `9ca5c7f4`, `factory_stage2.lua`, four clients at
+1x, seed 31337 `--new`, debug build, launched at load 0.50/1.65 on a floor
+the other session yielded. **Roster confirmed `[1,2,3,4]` in every plan**
+before quoting anything.
+
+| rung | ticks | |
+|---|---|---|
+| `researched:automation` | 24,650 | **6:50** |
+| `producing:automation-science-pack:6` | 35,835 | **9:57** |
+| witness | 39,099 | 10:51 |
+
+Three plans, 176 / 21,783 then 127 / 13,077 then 155 / 11,106. Against the
+sum of the first two, execution ran **2.8% over plan** — consistent with the
+0.9–1.6% the other measured runs now show.
+
+**A caveat that matters for comparing to the offline figure.** The offline
+`producing:automation-science-pack:6` number (22,547) plans the goal in one
+piece from t=0; the run plans it **rung by rung**, so its total is the sum
+of staged plans and is not the same quantity. The honest comparison is
+execution against the sum of the run's own plans, which is the 2.8% above.
+Automation's 6:50 here is likewise not the 6:05 record: that was release,
+this is debug, and this one replanned.
+
+**And a defect: the footprint refusal is not headless-only.** Milestone 1
+lost an action to *cannot place item 'stone-furnace' because a character is
+standing in the footprint*, refused four times over 114 ticks, forcing a
+replan. The `character-identity` work fixed exactly this for server-side
+characters by resolving them through the mod's bot registry; with graphical
+clients a bot **is** a real player, so a different path is failing to step
+the blocker aside. Not yet diagnosed. It cost this run one replan and it
+would silently cost any measured run the same.
+
 ## ⚠️ ORE BLOCKS EVERYTHING IN THE PLANNER, AND NOTHING IN THE GAME
 
 Found by the `second` session, 2026-09-06, with one `can_place_entity` query

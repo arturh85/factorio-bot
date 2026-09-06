@@ -391,6 +391,49 @@ The plateau is unchanged: `roster-fed; no generator until 6:21`, production
 stopping at the plan's bill. Everything tonight made the plan smaller and
 more honest; none of it made the factory feed itself.
 
+## ✅ A FAILED ACTION COSTS ITS DEPENDENTS, NOT THE BATCH (`0fedcb95`) — measured over eight runs
+
+Eight `furnace_run` block runs, same binary, same mod, **same 183-step plan
+of makespan 2,139**, only the executor arm differing. The mods line was
+verified in every one and quoted in the note.
+
+| | failed | **never dispatched** | standing |
+|---|---|---|---|
+| before | 0 / 1 / 2 / 1 | 0 / **14** / **7** / **4** | 179 / 164 / 170 / 174 |
+| after | 1 / 1 / 2 / 2 | **0 / 0 / 0 / 0** | 178 / 178 / 177 / 177 |
+
+**Before, four failures cost 29 entities. After, five failures cost five.** A
+failed or lost act no longer halts its bot; it publishes its own verdict and
+the dependency graph decides the blast radius, so a belt nobody built takes
+down the inserter that feeds it and nothing else. A failed *walk* still halts
+the bot, deliberately: its effect is the bot's position, which every later
+step depends on with no edge saying so — the one dependency the network
+genuinely does not hold.
+
+**And the run settled that the failure is a race, not a property of the
+plan**: identical seed, map and plan, and one of the eight hit no refusal at
+all. One clean run proves nothing about this class.
+
+### Two claims falsified by the agent's own runs, one of which I repeated
+
+1. **`stepping aside` does *not* draw the busy budget.** I wrote here and
+   said aloud that dispatching the step-aside sets `walking`, so the next
+   attempt reads `#N walking` and gets 45 s. Live, the clause reads
+   `#3 stepping aside` **four times running** — because a step aside is 1–2
+   tiles ≈ 13 ticks while `FOOTPRINT_CLEAR_BACKOFF` is 0.6 s = **180 ticks
+   at 5x**. The walk finishes, `walking` clears, and the next attempt finds
+   an idle bot and dispatches another step aside. Nobody did that arithmetic,
+   me included. **Retracted.**
+2. **The radius ladder does not fix what motivated it.** `#2 stuck` survives
+   the full four attempts in **three of the eight runs** with the ladder in
+   place. It is proven not to regress — failure counts match across before
+   and after — and nothing more. **What saved the block was the batch change,
+   not the ladder.**
+
+Next move, and the shape is now clear: the retry cadence should adapt to
+what the clause says rather than the search widening further. The backoff is
+simultaneously **longer than a step aside and shorter than nothing**.
+
 ## ⚠️ A THIRD BLIND SPOT: provenance records the checkout, not the mod that loaded
 
 `run-1788663566-25023` recorded `git.commit = 191df2db`, clean — and **ran a

@@ -1951,7 +1951,10 @@ mod tests {
         drill_pos: Position,
         radius: Option<f64>,
         ore_tile_offset: (i32, i32),
-    ) -> (factorio_bot_core::factorio::world::FactorioSurface, Position) {
+    ) -> (
+        factorio_bot_core::factorio::world::FactorioSurface,
+        Position,
+    ) {
         let world = drill_world();
         {
             let mut proto = world
@@ -3273,6 +3276,65 @@ mod block_demand_tests {
             (power.demand.kw - 624.0).abs() < 1e-9,
             "and the hop has to carry 624 kW, got {}",
             power.demand.kw
+        );
+    }
+
+    /// The electric smelter distributes its own power, and needs a generator.
+    ///
+    /// This is the block the whole `electronics` bootstrap was for. Every
+    /// prototype in it is research-gated, and `electronics` -- a trigger
+    /// technology fired by 10 copper plates -- unlocks both `inserter` and
+    /// `small-electric-pole`. A burner block earns that from its own output, so
+    /// the scaffolding builds its successor.
+    ///
+    /// The assertions are the two halves `blueprint_power` separates: the block
+    /// can distribute (its own poles are one component covering every arm), and
+    /// it draws a real number that a plant has to cover.
+    #[test]
+    fn the_electric_smelter_distributes_its_own_power() {
+        let s = state();
+        let bp = fixture("ElectricSmelter");
+        let power = blueprint_power(&s, &bp, &Position::new(0.0, 0.0));
+
+        assert_eq!(power.poles, 3, "three small poles");
+        assert_eq!(power.disconnected_poles, 0, "all wired to each other");
+        assert!(
+            power.uncovered.is_empty(),
+            "every arm must sit in some pole's supply area; uncovered: {:?}",
+            power.uncovered
+        );
+        assert_eq!(power.demand.consumers, 6, "six electric inserters");
+        assert!(
+            (power.demand.kw - 78.0).abs() < 1e-9,
+            "6 inserters at 13 kW is 78, got {}",
+            power.demand.kw
+        );
+
+        // It has an OUTPUT SIDE, which is what distinguishes it from every
+        // burner block here: those all end at the furnace because an arm
+        // carrying plates has no fuel source. Two arms south of the furnace row
+        // and a belt below them.
+        let at = |n: &str, x: f64, y: f64| {
+            bp.entities.iter().any(|e| {
+                e.name == n && (e.offset.x() - x).abs() < 1e-9 && (e.offset.y() - y).abs() < 1e-9
+            })
+        };
+        for x in [7.5f64, 8.5] {
+            assert!(at("inserter", x, 4.5), "output arm at x={x}");
+            assert!(
+                at("transport-belt", x, 5.5),
+                "output belt under the arm at x={x}"
+            );
+        }
+
+        // And nothing in it is buildable on a fresh force -- the opposite of
+        // the burner blocks. If this ever passes at t=0 the fixture has been
+        // quietly downgraded to burner parts.
+        assert!(
+            bp.entities
+                .iter()
+                .any(|e| e.name == "inserter" || e.name == "small-electric-pole"),
+            "this block is defined by needing electronics"
         );
     }
 

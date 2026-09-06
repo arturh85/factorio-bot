@@ -60,6 +60,22 @@ blueprints = {
     -- each other. See
     -- docs/superpowers/notes/2026-09-06-saturation-and-ungenerated-ground.md.
     SaturatedSmelter = "0eNqdlE1ugzAQRu/iNUT+wYC5RpZVVUEyVS2BiYypGkW5e02iJq3iJDPdgQc/Hh6+ObCun2HnrQusOTAbYGDNr7WM9W0HfVxbt2H2bYDteoA+gI8lcMEGCxNrXg7nm/2bm4cuFhuRMdcOEDcG37ppN/qQR9BC3I1T3Da65YVf8cmVztieNXyljxnbWg+bc7U4ZjdYicZKClahsYqCLdDYgoLVaKymYEs0tqRgKzS2omBrNLamYA0aayhYwfF54CQwIWikpIlr1KwfXb75gOlBevN4cUxhrtHqZu/A59ZN4M8D5B7rRpCnyAVKUD4T1HhBSRMsUYLqmWCFF1Q0wZo8SE6Sf8B1CmzoYI4BS4460gtUpY9UCvyRXlgSc6RS4sk/406gwNccTWF0kL9HfLuBBPYEVcnvLvB2hmSnsXbmgV1JGBWCpFdh9ZZxetevpvcW+VsbWnNzmfJTnN5dnJ8StPbe8ZP/6C9SUBEbvBi+ZuwT/HSq6VKawhitCimUiMVvK5iiXA==",
+    -- TJunctionSmelter's proven geometry with the two changes electricity buys:
+    -- the arms are `inserter` rather than `burner-inserter`, and the block has
+    -- an OUTPUT SIDE. That output side is the whole point. A burner arm
+    -- carrying iron plates never touches coal, so it has no fuel source and
+    -- stops when its hand charge burns out -- measured on SmeltingBlock, and
+    -- the reason every burner block here ends at the furnace.
+    --
+    -- Nothing in it is enabled on a fresh force: `inserter` and
+    -- `small-electric-pole` both arrive with `electronics`, a trigger
+    -- technology fired by 10 copper plates -- which a burner block earns from
+    -- its own output in about 37 seconds of game time (2026-09-06,
+    -- block_earns_electronics.lua). So the scaffolding builds its successor.
+    --
+    -- 3 poles, all wired to each other, supplying all 6 arms: 78 kW, checked by
+    -- `the_electric_smelter_distributes_its_own_power` rather than asserted.
+    ElectricSmelter = "0eNqd1s1ugzAMAOB3yRkq8kcJ9z3BjtM0UeZpSCGgJJ1WVbz7Urq1nQqTvSOx8iWxYocj29k9jL5zkdVH1kXoWX0zljHb7MCmsQcLbfRd+9iDjeBTBFzsYgeB1U/H88fhxe37XQrWPGOu6SHNi75xYRx8zJNzAschpGmDO633yWq50Rk7sLrY6Cljr51Py8xRNWV3rECzisJKNKsprEKzJYXVaHZLYUs0W1HYLZo1FLZCs7yguObidn5wefsO4Y9Lm/NkLii8uDIugD8XzBpyt7FiieTkSzrv7hdcLcGCDhcoWKJyeUHlSi4VIpcXRKByqRHkT/FwlFgixIokXgsnxMFB/rb3rmlhYaMzKhdzV2ER8wdiCNlSmLOJgpAtnMjJvVajHhxBbrY4V5K7Lc5V5HaLczW93+Lga+GEvrE2h+//jHwcLKy/62udV2xpXnlTk0tc9T/udGmn54x9gA9zVJfCKGO0VIJLLqbpC6RSGTE=",
 }
 
 rcon.cheat_technology("automation")

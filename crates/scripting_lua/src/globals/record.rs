@@ -2357,6 +2357,73 @@ end
     }
 
     map_table.set(
+        "__doc_entry_surface_chunks_dropped",
+        String::from(
+            r#"
+--- flushes the chunks the mod discarded for being on another surface
+-- This project supports exactly one surface. `on_chunk_generated` in the
+-- BotBridge mod returns early for any surface but Nauvis, because the world
+-- model keys entities, resources and tiles by position alone and a second
+-- surface's chunk would merge into Nauvis with no error anywhere. Space Age
+-- is enabled here, so that second surface is one rocket away.
+--
+-- The drop used to reach only the server log. This flushes it into
+-- `events.jsonl` as one `surface_chunk_dropped` row per surface, carrying how
+-- many chunks were discarded since the last call and one example chunk. A run
+-- that writes none of these never met a second surface, which is every run so
+-- far; a run that writes one planned against an incomplete world.
+--
+-- Call it beside `record.actions` and `record.deaths`.
+-- @treturn number how many events were written
+-- @raise if no recording is running
+function record.surface_chunks_dropped()
+end
+    "#,
+        ),
+    )?;
+    {
+        let slot = slot.clone();
+        let world = world.clone();
+        map_table.set(
+            "surface_chunks_dropped",
+            lua.create_function(move |_lua, ()| {
+                let mut guard = slot.lock();
+                let recorder = guard.as_mut().ok_or_else(|| {
+                    record_error("no recording is running -- call record.start() first")
+                })?;
+                let mut written = 0u32;
+                // **By first tick, not by name.** `RunRecorder::not_before`
+                // keeps `events.jsonl` non-decreasing in tick, so a row
+                // written out of order is silently stamped with the previous
+                // row's tick -- writing `gleba` (t=602) before `vulcanus`
+                // (t=600) made vulcanus's row read 602 and lost the fact that
+                // it was seen first. The map is keyed by name because that is
+                // the identity; the *order* has to be chronological.
+                let mut rows: Vec<_> = world.drain_surface_chunk_drops().into_iter().collect();
+                rows.sort_by(|(a_name, a), (b_name, b)| {
+                    a.first_tick.cmp(&b.first_tick).then(a_name.cmp(b_name))
+                });
+                for (surface, drops) in rows {
+                    let tick = recorder.not_before(drops.first_tick);
+                    recorder
+                        .record(
+                            tick,
+                            EventKind::SurfaceChunkDropped {
+                                surface: surface.to_string(),
+                                chunks: drops.chunks,
+                                first_left_top_x: drops.first_left_top.x,
+                                first_left_top_y: drops.first_left_top.y,
+                            },
+                        )
+                        .map_err(record_error)?;
+                    written += 1;
+                }
+                Ok(written)
+            })?,
+        )?;
+    }
+
+    map_table.set(
         "__doc_entry_roster_changed",
         String::from(
             r#"
@@ -4572,6 +4639,86 @@ mod tests {
             other => panic!("expected bot_released, got {other:?}"),
         }
         assert_eq!(read_event_ticks(&run_dir), vec![26_953, 40_000]);
+    }
+
+    /// The mod's `surface_chunk_dropped` lines through the real parser into
+    /// `events.jsonl`.
+    ///
+    /// **The whole point of this road is that it used to end nowhere.** The
+    /// mod printed a bare `"unknown surface"`, which carries no `§tick§key§`
+    /// envelope, so the drop reached the server log and no artefact: a run
+    /// that discarded a whole planet's chunks was indistinguishable, in every
+    /// file anyone reads, from one that never left Nauvis. Four chunks in,
+    /// two rows out -- one per surface, folded, with the first chunk and the
+    /// first tick of each.
+    #[test]
+    fn a_dropped_surface_reaches_events_jsonl_through_the_real_parser() {
+        let lua = crate::sandbox::new_sandboxed_lua().expect("sandbox");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let recorder = RunRecorder::start(tmp.path(), "run-1").expect("recorder starts");
+        let run_dir = recorder.dir().to_path_buf();
+        let slot: Slot = Arc::new(Mutex::new(Some(recorder)));
+        let world = Arc::new(FactorioWorld::new());
+
+        let table = create_lua_record_with_slot(
+            &lua,
+            Arc::new(FactorioRcon::new_empty()),
+            world.clone(),
+            tmp.path().join("scripts"),
+            vec![],
+            slot,
+        )
+        .expect("record table");
+        lua.globals().set("record", table).expect("install");
+
+        let mut parser = factorio_bot_core::process::output_parser::OutputParser::with_world(world);
+        for (tick, surface, x, y) in [
+            (600_u64, "vulcanus", -32, 64),
+            (601, "vulcanus", 0, 0),
+            (602, "gleba", 96, -96),
+        ] {
+            parser
+                .parse(
+                    tick,
+                    "surface_chunk_dropped",
+                    &format!(r#"{{"left_top":{{"x":{x},"y":{y}}},"surface":"{surface}"}}"#),
+                )
+                .expect("drop line parses");
+        }
+
+        let written: u32 = lua
+            .load("return record.surface_chunks_dropped()")
+            .eval()
+            .expect("record.surface_chunks_dropped() runs");
+        assert_eq!(written, 2, "two surfaces, not three chunks");
+        assert_eq!(
+            read_events(&run_dir),
+            vec![
+                EventKind::SurfaceChunkDropped {
+                    surface: "vulcanus".into(),
+                    chunks: 2,
+                    first_left_top_x: -32.0,
+                    first_left_top_y: 64.0,
+                },
+                EventKind::SurfaceChunkDropped {
+                    surface: "gleba".into(),
+                    chunks: 1,
+                    first_left_top_x: 96.0,
+                    first_left_top_y: -96.0,
+                },
+            ],
+            "chronological, not alphabetical -- vulcanus was seen first"
+        );
+        // Each row is stamped with the tick its surface first appeared, not
+        // the tick of the flush. This assertion is the one that caught the
+        // ordering: written name-first, gleba (602) went out ahead of
+        // vulcanus (600) and `not_before` silently restamped vulcanus 602.
+        assert_eq!(read_event_ticks(&run_dir), vec![600, 602]);
+        let again: u32 = lua
+            .load("return record.surface_chunks_dropped()")
+            .eval()
+            .expect("runs on an empty tally");
+        assert_eq!(again, 0, "the tally was drained");
     }
 
     /// The mod's `research_trigger_emulated` line through the real parser

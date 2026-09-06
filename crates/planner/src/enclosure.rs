@@ -71,7 +71,9 @@
 
 use crate::ids::BotId;
 use crate::state::PlanState;
-use factorio_bot_core::types::{Position, Rect};
+use factorio_bot_core::num_traits::FromPrimitive;
+use factorio_bot_core::types::{Direction, FactorioEntity, Position, Rect};
+use std::collections::BTreeSet;
 
 /// How far from the point being asked about the search looks, in tiles, on
 /// each axis. Identical to `crates/core::graph::enclosure::SEARCH_RADIUS`,
@@ -140,19 +142,154 @@ pub enum EnclosurePrevention {
     Refuse,
 }
 
-/// A generous upper bound on any cell or power plant's own half-diagonal,
-/// added to [`SEARCH_RADIUS`] when selecting which bots to check against a
-/// candidate footprint.
+/// How far outside a bot's own position an obstacle can sit and still change
+/// that bot's grid, in tiles on one axis.
 ///
-/// Bounded rather than "every bot in the world": a bot farther than
-/// `SEARCH_RADIUS` from every point of the footprint cannot have the
-/// footprint's parts land inside *its own* search window, so the two escape
-/// answers cannot differ for it regardless of what gets built. The largest
-/// shape sited today (the power plant: pump, three pipes, boiler, engine,
-/// pole) spans under 10 tiles from its own origin; 12 tiles of pad leaves
-/// room without widening the search to the whole map. If a future cell shape
-/// is wider than that, this constant is the one place to widen.
-const FOOTPRINT_PAD: f64 = 12.0;
+/// [`window`] is anchored to the *tile* grid rather than to the character, so
+/// the searched square runs from `floor(x) - SEARCH_RADIUS` to
+/// `floor(x) + SEARCH_RADIUS`: up to one whole tile further from the bot on
+/// one side than [`SEARCH_RADIUS`] alone. `rasterize` then grows every
+/// obstacle box by half a character before testing tile centres, and vanilla's
+/// character half-side is 0.199 -- [`CHARACTER_HALF_BOX_BOUND`] is the
+/// generous cap that keeps this a constant rather than a prototype lookup.
+/// An obstacle whose box is further than this from the bot on either axis
+/// cannot mark a single cell of that bot's window.
+const WINDOW_REACH: f64 = SEARCH_RADIUS + CELL + CHARACTER_HALF_BOX_BOUND;
+
+/// An upper bound on half the `character` collision box, in tiles. Vanilla is
+/// 0.199 (`crates/core::graph::enclosure`'s
+/// `VANILLA_CHARACTER_COLLISION_HALF_SIDE`) and a mod can only make this a
+/// *bound* question, not an exact one, so [`WINDOW_REACH`] takes a cap rather
+/// than reading the prototype: it is a narrowing radius, and being generous
+/// costs one more bot's escape fill, while being short is the silent miss
+/// this whole selection exists to avoid.
+const CHARACTER_HALF_BOX_BOUND: f64 = 0.5;
+
+/// An upper bound on half a single entity's collision-box *diagonal*, in
+/// tiles.
+///
+/// Used only to *narrow* the query below: an entity whose centre is further
+/// from the bot than the window's own half-diagonal plus this cannot have its
+/// box touch the window, so it need not be looked at. The exact test is the
+/// box against the window rect, done afterwards, so this being generous costs
+/// one comparison and being short is the only way a part could be missed.
+/// Vanilla's largest collision box is the rocket silo's, under 5 tiles on a
+/// half-side and so about 7 on a half-diagonal; 16 admits an entity of
+/// 22x22 tiles, which is not an entity.
+///
+/// The same narrowing-then-exact-test discipline
+/// `crates/core::graph::enclosure::grid_for` uses: `blocking_boxes_within`
+/// "admits boxes which merely come close; every one of them is tested exactly
+/// in `rasterize`".
+const MAX_ENTITY_HALF_SPAN: f64 = 16.0;
+
+/// Whether the candidate placement -- everything `trial` holds that `state`
+/// does not -- would touch the escape window of a bot standing at `at`.
+///
+/// # This is the selection, and it does not know how big a footprint is
+///
+/// It used to: `check` picked bots within `SEARCH_RADIUS + FOOTPRINT_PAD` of
+/// the placement's *origin*, and `FOOTPRINT_PAD = 12` was justified in its
+/// own doc by enumerating "the largest shape sited today (the power plant:
+/// pump, three pipes, boiler, **engine**, pole)" as spanning "under 10 tiles
+/// from its own origin". That enumeration was singular. On 2026-09-06
+/// `method::power::plan_plant` began sizing the engine row from demand up to
+/// `MAX_ENGINES_PER_BOILER` engines at a five-tile pitch, and the second
+/// engine reaches **14.008** tiles from the pump -- outside the 12 the pad
+/// admitted. Nothing could have noticed: the pad is read here and written
+/// there, and no test in either file computed one from the other. A bot only
+/// the second engine would wall in fell outside the window, was never
+/// examined, and was walled in with nothing reported.
+///
+/// So the question is asked the other way round. Rather than guessing how far
+/// a footprint reaches and padding a radius by it, each bot is asked whether
+/// the parts that actually exist touch the window that is actually searched.
+/// **No term of this depends on the shape being placed**, so no future
+/// resizing of a cell or a plant can make it wrong.
+///
+/// `trial` is `state.fork()` with the candidate created in it (see [`check`]),
+/// so the two share a base world and differ only by the candidate. Both are
+/// asked for the entities around `at` and the answers differenced -- two
+/// range queries and a set difference, rather than a point lookup per entity.
+fn candidate_touches_window(state: &PlanState, trial: &PlanState, at: &Position) -> bool {
+    let (searched, _) = window(at);
+    // A box touching the window has its centre no further than the window's
+    // own half-diagonal plus the box's own half-span.
+    let probe = WINDOW_REACH * std::f64::consts::SQRT_2 + MAX_ENTITY_HALF_SPAN;
+    let before: BTreeSet<(u64, u64, String)> = state
+        .entities_within(at, probe)
+        .iter()
+        .map(key_of)
+        .collect();
+    trial
+        .entities_within(at, probe)
+        .iter()
+        .filter(|entity| !before.contains(&key_of(entity)))
+        .any(|entity| touches(&searched, &footprint_of(trial, entity)))
+}
+
+/// Whether `area`, grown by the character half-box `rasterize` will grow it
+/// by, overlaps the searched `window`.
+///
+/// Conservative on purpose: overlapping the window is necessary for marking
+/// one of its cells and not quite sufficient (a box can clip a window's edge
+/// without covering any tile centre). The cost of the difference is one
+/// bot's escape fill returning the same answer twice.
+fn touches(window: &Rect, area: &Rect) -> bool {
+    area.left_top.x() - CHARACTER_HALF_BOX_BOUND <= window.right_bottom.x()
+        && area.right_bottom.x() + CHARACTER_HALF_BOX_BOUND >= window.left_top.x()
+        && area.left_top.y() - CHARACTER_HALF_BOX_BOUND <= window.right_bottom.y()
+        && area.right_bottom.y() + CHARACTER_HALF_BOX_BOUND >= window.left_top.y()
+}
+
+/// The identity two states agree on for one entity: where it stands and what
+/// it is. Positions come from the same clones on both sides, so their bits
+/// compare exactly; the name is carried because a `create_entity` may replace
+/// what stood on a tile with something else.
+fn key_of(entity: &FactorioEntity) -> (u64, u64, String) {
+    (
+        entity.position.x().to_bits(),
+        entity.position.y().to_bits(),
+        entity.name.clone(),
+    )
+}
+
+/// The box this entity blocks with, the same three ways `PlanState`'s own
+/// obstacle collection resolves it: the reported bounding box, else the
+/// prototype's collision box at the entity's facing, else the tile it stands
+/// on.
+fn footprint_of(state: &PlanState, entity: &FactorioEntity) -> Rect {
+    if entity.bounding_box.width() > 0. && entity.bounding_box.height() > 0. {
+        return entity.bounding_box.clone();
+    }
+    Direction::from_u8(entity.direction)
+        .and_then(|facing| state.collision_area_facing(&entity.name, &entity.position, facing))
+        .unwrap_or_else(|| {
+            let (x, y) = (entity.position.x().floor(), entity.position.y().floor());
+            Rect::new(&Position::new(x, y), &Position::new(x + 1., y + 1.))
+        })
+}
+
+/// The furthest of a box's four corners from `point`, in tiles. Only the
+/// measurement test below uses it: the selection above compares boxes against
+/// the window rather than distances against a radius.
+#[cfg(test)]
+fn corner_reach(point: &Position, area: &Rect) -> f64 {
+    let xs = [area.left_top.x(), area.right_bottom.x()];
+    let ys = [area.left_top.y(), area.right_bottom.y()];
+    let mut furthest: f64 = 0.;
+    for x in xs {
+        for y in ys {
+            furthest = furthest.max(distance(point, &Position::new(x, y)));
+        }
+    }
+    furthest
+}
+
+#[cfg(test)]
+fn distance(a: &Position, b: &Position) -> f64 {
+    (a.x() - b.x()).hypot(a.y() - b.y())
+}
 
 /// Check a candidate placement, already forked into `trial`, against every
 /// bot near `origin` known to `state`.
@@ -165,9 +302,41 @@ const FOOTPRINT_PAD: f64 = 12.0;
 /// answer flips from [`Escape::Open`] in `state` to [`Escape::Enclosed`] in
 /// `trial` is this placement's doing; a bot already enclosed, or still open
 /// either way, is left alone.
+///
+/// # Which bots are examined, and why no constant decides it
+///
+/// Every character `state` knows, filtered by whether this candidate could
+/// possibly change that bot's own answer -- [`candidate_touches_window`],
+/// which compares the parts `trial` actually holds against the window that
+/// bot is actually searched in. A bot the candidate cannot reach is skipped
+/// before either fill, so the cheap case stays cheap.
+///
+/// This replaced a radius, `SEARCH_RADIUS + FOOTPRINT_PAD` = 36 tiles from
+/// `origin`, whose pad was sized by hand against the shapes that existed the
+/// day it was written and went stale the moment `method::power` grew a second
+/// steam engine. See [`candidate_touches_window`] for that account. Two
+/// things about the replacement are worth stating in the negative:
+///
+/// * **it is not "every bot", though it iterates every bot.** The filter is
+///   exact rather than generous: it asks the question the two fills would
+///   have answered, cheaply, and only skips a bot whose two answers are
+///   provably identical.
+/// * **it no longer has a term for the footprint's size at all**, so nothing
+///   about a future cell or plant shape can make it wrong. The old form also
+///   compared a straight-line distance against a *square* window with no
+///   `sqrt(2)` anywhere in it, which was short by that factor for a bot on
+///   the diagonal; that error has no counterpart here, because nothing is
+///   compared against a radius any more.
+///
+/// [`PlanState::characters_near`] is passed an infinite radius rather than a
+/// large one because there is no honest finite number: any bound would be the
+/// same kind of claim about somebody else's geometry that this fix removes.
 pub fn check(state: &PlanState, trial: &PlanState, origin: &Position) -> EnclosurePrevention {
     let mut evacuations = Vec::new();
-    for (player, pos) in state.characters_near(origin, SEARCH_RADIUS + FOOTPRINT_PAD) {
+    for (player, pos) in state.characters_near(origin, f64::INFINITY) {
+        if !candidate_touches_window(state, trial, &pos) {
+            continue;
+        }
         let before = state.escape_from(&pos);
         let after = trial.escape_from(&pos);
         match (before, after) {
@@ -288,6 +457,107 @@ mod tests {
         assert_eq!(
             fill_from_center(&blocked),
             Escape::Enclosed { pocket_tiles: 9. }
+        );
+    }
+}
+
+/// What a real power plant's own geometry costs the selection window.
+///
+/// Separate from the tests above because these are the only ones that reach
+/// out of this module and site an actual plant: the window is here and the
+/// shape it has to cover is in `method::power`, and the whole defect this
+/// module was carrying was that no test in either file compared the two.
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod plant_reach {
+    use super::*;
+    use crate::ids::BotId;
+    use crate::method::power::{ENGINE, entity_for, plan_plant_for};
+    use factorio_bot_core::test_utils::fixture_world;
+    use std::sync::Arc;
+
+    /// The retired constant. `FOOTPRINT_PAD = 12` was justified by enumerating
+    /// "the largest shape sited today (the power plant: pump, three pipes,
+    /// boiler, **engine**, pole)" as spanning "under 10 tiles from its own
+    /// origin". Kept here as the literal the measurement is compared against.
+    const RETIRED_FOOTPRINT_PAD: f64 = 12.0;
+
+    fn state() -> PlanState {
+        PlanState::from_world(Arc::new(fixture_world()), &[BotId(1)])
+    }
+
+    /// A plant, sited on the fixture's lake, forked into a trial exactly as
+    /// `plan_plant_for` and `complete_plant` fork one before calling
+    /// [`check`], plus the pump it is measured from.
+    fn plant_trial(kw: f64) -> (PlanState, PlanState, Position, usize) {
+        let before = state();
+        let plant = plan_plant_for(&before, &Position::new(0., 0.), kw).expect("the fixture lake");
+        let pump = plant
+            .parts
+            .iter()
+            .find(|part| part.name == crate::method::power::PUMP)
+            .map(|part| part.position.clone())
+            .expect("a plant sited from scratch places its own pump");
+        let engines = plant.parts.iter().filter(|p| p.name == ENGINE).count();
+        let mut trial = before.fork();
+        for part in &plant.parts {
+            trial.create_entity(entity_for(&trial, part));
+        }
+        (before, trial, pump, engines)
+    }
+
+    /// The furthest corner of any entity the trial holds and the base world
+    /// does not, from `pump` -- the plant's own reach, measured off the
+    /// entities `plan_plant_for` sited.
+    fn reach_of(trial: &PlanState, pump: &Position) -> f64 {
+        let base = state();
+        let mut furthest: f64 = 0.;
+        for entity in trial.entities_within(pump, 64.) {
+            if base.entity_at(&entity.position).is_some() {
+                continue;
+            }
+            furthest = furthest.max(corner_reach(pump, &footprint_of(trial, &entity)));
+        }
+        furthest
+    }
+
+    /// The measurement the review of 2026-09-06 asked for, as two literals.
+    ///
+    /// A one-engine plant reaches 9.64 tiles from its pump and a two-engine
+    /// plant reaches 14.01 -- so the `12` that used to bound the selection
+    /// window covered the first and **not** the second, and a bot only the
+    /// second engine would wall in was never examined.
+    ///
+    /// Both numbers are asserted against literals rather than against
+    /// anything the code computes, so that a change to the engine pitch, the
+    /// engine prototype or the pole siting moves them and fails here. The
+    /// tolerance is a hundredth of a tile, which is smaller than any layout
+    /// change could be.
+    #[test]
+    fn a_second_engine_takes_a_plant_past_the_pad_that_used_to_bound_the_window() {
+        let (_, trial, pump, engines) = plant_trial(0.);
+        assert_eq!(engines, 1, "a plant sized against no demand has one engine");
+        let one = reach_of(&trial, &pump);
+        assert!(
+            (one - 9.639).abs() < 0.01,
+            "a one-engine plant reaches 9.639 tiles from its pump, got {one}"
+        );
+        assert!(
+            one < RETIRED_FOOTPRINT_PAD,
+            "which is what made `FOOTPRINT_PAD = 12` look generous"
+        );
+
+        let (_, trial, pump, engines) = plant_trial(1000.);
+        assert_eq!(engines, 2, "1,000 kW needs two 900 kW engines");
+        let two = reach_of(&trial, &pump);
+        assert!(
+            (two - 14.008).abs() < 0.01,
+            "a two-engine plant reaches 14.008 tiles from its pump, got {two}"
+        );
+        assert!(
+            two > RETIRED_FOOTPRINT_PAD,
+            "and 14.008 is outside the 12 tiles the retired constant admitted: \
+             this is the defect, measured"
         );
     }
 }

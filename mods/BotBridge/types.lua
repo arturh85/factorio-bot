@@ -119,6 +119,11 @@ function serialize_player(player)
     )
     local main_inventory = player.get_main_inventory()
     record.main_inventory = main_inventory.get_contents()
+    -- Where this bot IS, in the sense a coordinate cannot express. See
+    -- serialize_entity. A bot that dies on another surface respawns on Nauvis
+    -- (`create_bot_character(game.surfaces[1], ...)` in control.lua) and until
+    -- now nothing in the record could show that it had moved.
+    record.surface = player.surface and player.surface.name or nil
     return record
 end
 
@@ -493,6 +498,23 @@ end
 
 function serialize_entity(entity)
     local record = table_properties(entity, {"name", "direction", "type", "position", "drop_position"}, {type = "entity_type", drop_position = "drop_position"})
+    -- WHICH SURFACE, BY NAME. Carried, not yet used.
+    --
+    -- Space Age is enabled in this workspace, so a position alone does not
+    -- name a place: (10, 10) exists on Nauvis, on Vulcanus and on every
+    -- orbital platform. `LuaSurface.name` is unique among surfaces, while
+    -- `LuaSurface.index` is reused after a surface is deleted, so the name is
+    -- the identity that survives into a record somebody reads later.
+    --
+    -- Rust reads it as `FactorioEntity::surface: Option<SurfaceId>` with
+    -- `#[serde(default)]`, the same treatment `underground_half` got, so every
+    -- archived run and every world dump written before today still loads --
+    -- lacking the field, which reads as "the sender did not say" rather than
+    -- as a claim about Nauvis. Nothing keys on it yet: the entity graph is
+    -- still position-only and would alias two surfaces into one, which is what
+    -- `on_chunk_generated`'s guard prevents.
+    -- See docs/superpowers/notes/2026-09-06-surfaces-survey.md.
+    record.surface = entity.surface and entity.surface.name or nil
     record.bounding_box = table_properties(entity.bounding_box, {"left_top", "right_bottom"}, {left_top = "left_top", right_bottom = "right_bottom"})
     local output_inventory = entity.get_output_inventory()
     if output_inventory ~= nil then
@@ -564,6 +586,8 @@ end
 function serialize_tile(tile)
     local record = table_properties(tile, {"name", "position"})
     record.player_collidable = tile.collides_with('player')
+    -- The surface this tile is on, by NAME. See serialize_entity.
+    record.surface = tile.surface and tile.surface.name or nil
     return record
 end
 

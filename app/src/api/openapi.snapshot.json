@@ -1299,6 +1299,44 @@
             "type": "object"
           },
           {
+            "description": "The mod discarded generated chunks because they are not on Nauvis.\n\n**This project supports exactly one surface, and this is the line that\nsays when it met a second.** `on_chunk_generated` in\n`mods/BotBridge/control.lua` returns early for any surface but Nauvis,\nso those chunks' entities, resources and tiles never reach\n`EntityGraph`. The guard is deliberate -- the world model keys by\nposition alone, so a Vulcanus chunk would merge into Nauvis with no\nerror anywhere -- but until 2026-09-06 it was also invisible: it\nprinted a bare `\"unknown surface\"` with no `§tick§key§` envelope, which\nreached the server log and no artefact. A run that discarded a whole\nplanet read exactly like one that never left home.\n\n**Space Age is enabled in this workspace** (`workspace/mods/\nmod-list.json`), so every run ever measured here has been a Space Age\nrun that happened never to leave Nauvis. A single one of these rows\nmeans the world model this run planned against is incomplete, and any\nmap fingerprint, resource distance or `entity_at` answer from it\ndescribes Nauvis only. Written by `record.surface_chunks_dropped()`;\nsee `docs/superpowers/notes/2026-09-06-surfaces-survey.md`.",
+            "properties": {
+              "chunks": {
+                "description": "How many chunks were dropped for this surface since the last\nflush -- **not** the run's total, which is the sum over every row\nnaming this surface.",
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "first_left_top_x": {
+                "description": "One example: the top-left **tile** of the first chunk dropped in\nthis window -- (-32, 64), not chunk (-1, 2). A count alone cannot\nbe looked at; a coordinate can.",
+                "format": "double",
+                "type": "number"
+              },
+              "first_left_top_y": {
+                "format": "double",
+                "type": "number"
+              },
+              "kind": {
+                "enum": [
+                  "surface_chunk_dropped"
+                ],
+                "type": "string"
+              },
+              "surface": {
+                "description": "The surface that was refused, by name (`LuaSurface.name`, which is\nunique among surfaces; the *index* is reused after a deletion).",
+                "type": "string"
+              }
+            },
+            "required": [
+              "surface",
+              "chunks",
+              "first_left_top_x",
+              "first_left_top_y",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
             "description": "The supervisor changed the roster it plans for.\n\nThe roster used to be computed once at script start and never again.\n`scripts/supervisor.lua` now re-checks `rcon.players()` before every\nplan: a rostered bot that has had no character for longer than the\nbounded respawn wait is dropped, and one that was dropped and came\nback is picked up again. Written by `record.roster_changed()` from the\nsupervisor's `rerostered` transition, so the reader of a run whose\n`plan_created.bots` shrinks from four to three finds the line that\nsays why, rather than the silence run 30 left.\n\n**Only removals and returns, never additions.** A bot that was never\nin the roster this run started with is not picked up mid-run, because\n\"the first non-empty answer is the roster\" is the bug that froze run\n30 on `[2]`, and re-rostering must not reintroduce it.",
             "properties": {
               "bots": {
@@ -1699,6 +1737,17 @@
               "null"
             ]
           },
+          "surface": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/SurfaceId",
+                "description": "Which surface this entity stands on, as the mod read it from\n`LuaEntity.surface.name`.\n\n**`None` means the sender did not say, not \"Nauvis\".** Every world dump\nand run record written before this field existed lacks it, and while\nevery one of them is in fact a Nauvis-only run, that is a fact about\nthe mod's `on_chunk_generated` guard rather than something the archived\nbytes assert. So an 865 MB dump from yesterday still deserialises --\npinned by `crates/core/tests/surface_id.rs`.\n\nNothing keys on it yet -- the containers (`EntityGraph`, `PlanState`)\nare still position-only and would alias two surfaces into one. This\ncarries the fact so the record can be read; keying is the next rung."
+              }
+            ]
+          },
           "underground_half": {
             "oneOf": [
               {
@@ -1968,6 +2017,17 @@
             "description": "`double`, for mine. Documented as \"the resource reach distance of this\ncharacter **or max double** when not a character or player connected to\na character\", so this is out of integer range as well as fractional.",
             "format": "double",
             "type": "number"
+          },
+          "surface": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/SurfaceId",
+                "description": "Which surface this player's character stands on, from\n`LuaPlayer.surface.name`. `None` means the mod did not say -- see\n[`FactorioEntity::surface`].\n\nA bot that dies on another surface respawns on Nauvis today\n(`create_bot_character(game.surfaces[1], ...)`), and nothing in the\nplanner can express a bot being anywhere but \"the\" surface. This field\nis what makes that observable rather than invisible."
+              }
+            ]
           }
         },
         "required": [
@@ -2056,6 +2116,17 @@
           },
           "position": {
             "$ref": "#/components/schemas/Position"
+          },
+          "surface": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/SurfaceId",
+                "description": "Which surface this tile belongs to, from `LuaTile.surface.name`\n(verified present on `LuaTile` in `runtime-api.json` 2.1.17). `None`\nmeans the mod did not say -- see [`FactorioEntity::surface`].\n\n`rcon_find_tiles_filtered` asks `game.surfaces[1]` unconditionally\ntoday, so a shoreline found for a boiler is a *Nauvis* shoreline\nwhatever the bot asking is standing on. Carrying the answer's surface\nis what will let a later reader notice that."
+              }
+            ]
           }
         },
         "required": [
@@ -3395,6 +3466,10 @@
           "accepted"
         ],
         "type": "object"
+      },
+      "SurfaceId": {
+        "description": "Which surface something is on, identified by **name**.\n\nSpace Age is enabled in this workspace, so five planets and any number of\norbital platforms are one rocket away. Every run measured here so far has\nbeen a Space Age run that happened never to leave Nauvis, and the only\nthing that kept it that way is one `if` in `on_chunk_generated`\n(`mods/BotBridge/control.lua`) that drops a chunk from any other surface.\nSee `docs/superpowers/notes/2026-09-06-surfaces-survey.md`.\n\n**The name, not the index**, verified against\n`workspace/factorio-api-docs/runtime-api.json` (`application_version`\n2.1.17): `LuaSurface.name` is *\"unique among surfaces\"*, while\n`LuaSurface.index` *\"is assigned when a surface is created, and remains so\nuntil it is deleted. **Indexes of deleted surfaces can be reused.**\"* An\nindex is therefore an identity only within one save and only until a\ndeletion; a record somebody reads next year needs the name.\n\n**This does not go on [`Position`], deliberately.** A coordinate is only\never comparable within one surface, which `Position { x, y }` already says\ncorrectly; putting a surface on it would force `p1 - p2`, `Sub`,\n`manhattan_distance` and `PartialEq` to answer \"what is the distance\nbetween two planets?\", whose honest answer -- undefined -- cannot be\nreturned as an `f64`. The surface belongs on the **container**, which is\nrung one's successor, not on the value.",
+        "type": "string"
       },
       "TickKind": {
         "description": "What one `ticks.jsonl` line is.\n\nShort keys (`t`, `w`, `k`) because there are thousands of these lines and\nthis file's only job is to be a table.",

@@ -220,6 +220,19 @@ export interface FactorioEntity {
     ghost_type: string | null;
     /** Only present (non-null) for one half of an underground-belt pair. */
     underground_half: UndergroundHalf | null;
+    /**
+     * Which surface the entity stands on, by name (`LuaSurface.name`, unique
+     * among surfaces; the *index* is reused after a deletion).
+     *
+     * `null` means the sender did not say -- **not** "Nauvis". A world dump or
+     * run record written before 2026-09-06 lacks the field entirely, and while
+     * every one of them is a Nauvis-only run, that is a fact about the mod's
+     * `on_chunk_generated` guard, not about those bytes.
+     *
+     * Nothing renders it. This project is single-surface today; see
+     * `docs/superpowers/notes/2026-09-06-surfaces-survey.md`.
+     */
+    surface: string | null;
 }
 
 /**
@@ -1356,6 +1369,34 @@ export type EventKind =
           needed: number;
           /** What the force had done when the sweep read it -- at least `needed`. */
           count: number;
+      }
+    | {
+          /**
+           * The mod discarded generated chunks because they are not on
+           * Nauvis. This project supports exactly one surface: the world
+           * model keys entities, resources and tiles by position alone, so a
+           * second surface's chunk would merge into Nauvis with no error
+           * anywhere, and `on_chunk_generated` drops it instead.
+           *
+           * Space Age is enabled in this workspace, so a row here is
+           * possible, and it means the run planned against an incomplete
+           * world -- every map fingerprint and resource distance from it
+           * describes Nauvis only. No run so far has produced one.
+           */
+          kind: 'surface_chunk_dropped';
+          /** By name. `LuaSurface.index` is reused after a deletion. */
+          surface: string;
+          /**
+           * Chunks dropped for this surface **since the last flush**, not for
+           * the run: the run total is the sum over every row naming it.
+           */
+          chunks: number;
+          /**
+           * One example: the top-left **tile** of this window's first dropped
+           * chunk -- (-32, 64), not chunk (-1, 2).
+           */
+          first_left_top_x: number;
+          first_left_top_y: number;
       }
     | {
           /**

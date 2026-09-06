@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use crate::factorio::ticks::ActionOutcome;
 use crate::factorio::world::{
-    DeathEvent, FactorioWorld, ResearchTriggerEvent, RespawnEvent, TeleportEvent,
+    DeathEvent, FactorioWorld, ResearchTriggerEvent, RespawnEvent, SurfaceChunkDropEvent,
+    TeleportEvent,
 };
 // use crate::factorio::ws::{
 //     FactorioWebSocketServer, PlayerChangedMainInventoryMessage, PlayerChangedPositionMessage,
@@ -110,6 +111,22 @@ impl OutputParser {
                                 (chunk_position.x * 32 + (index % 32) as i32) as f64,
                                 (chunk_position.y * 32 + (index / 32) as i32) as f64,
                             ),
+                            // `None`, NOT `Some(nauvis)`, even though this
+                            // line can only be Nauvis today.
+                            //
+                            // The bulk `tiles` writeout is a compact text
+                            // format -- `x,y;x,y: name:0,name:1,...` -- with no
+                            // slot for a surface, and it is only reached at all
+                            // because `on_chunk_generated` drops every chunk
+                            // that is not on Nauvis. So the surface is a fact
+                            // about the *guard*, not about these bytes.
+                            // Filling it in here would put that inference
+                            // inside the data, where it would quietly become
+                            // false the day the guard is replaced by routing --
+                            // and nothing would catch it. `None` says "the
+                            // sender did not say", which is exactly true and
+                            // stays true.
+                            surface: None,
                         };
                         Some(tile)
                     })
@@ -526,6 +543,26 @@ impl OutputParser {
                     Err(err) => {
                         error!(
                             "<red>failed to deserialize research_trigger_emulated</>: {:?} '{}'",
+                            err, rest
+                        );
+                    }
+                }
+            }
+            "surface_chunk_dropped" => {
+                match serde_json::from_str::<SurfaceChunkDropEvent>(rest) {
+                    Ok(event) => {
+                        // No `info!` per line: `on_chunk_generated` fires once
+                        // per chunk and a generated planet is tens of
+                        // thousands of them, so narrating each would bury the
+                        // run's own output. The tally is folded per surface
+                        // and reaches `events.jsonl` as one row per surface
+                        // per flush -- see
+                        // `FactorioWorld::record_surface_chunk_dropped`.
+                        self.world.record_surface_chunk_dropped(tick, event);
+                    }
+                    Err(err) => {
+                        error!(
+                            "<red>failed to deserialize surface_chunk_dropped</>: {:?} '{}'",
                             err, rest
                         );
                     }

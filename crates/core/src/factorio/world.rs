@@ -6,7 +6,7 @@ use crate::types::{
     ActionId, FactorioEntity, FactorioEntityPrototype, FactorioForce, FactorioGraphic,
     FactorioItemPrototype, FactorioPlayer, FactorioRecipe, FactorioTile, InventoryResponse,
     PlayerChangedDistanceEvent, PlayerChangedMainInventoryEvent, PlayerChangedPositionEvent,
-    PlayerId, Pos, Position,
+    PlayerId, Pos, Position, SurfaceId,
 };
 use dashmap::DashMap;
 use image::RgbaImage;
@@ -121,6 +121,54 @@ impl ResearchTriggerEvent {
     pub fn count(&self) -> u32 {
         self.produced.or(self.built).unwrap_or(0)
     }
+}
+
+/// The payload of a `"surface_chunk_dropped"` writeout: `on_chunk_generated`
+/// in `mods/BotBridge/control.lua` refused a chunk because it is not on
+/// Nauvis.
+///
+/// **The refusal is deliberate and the disclosure is the point.** The world
+/// model keys entities, resources and tiles by position alone, so a chunk from
+/// a second surface would merge into Nauvis with no error anywhere -- wrong ore
+/// amounts, wrong `entity_at`, a `resource_fingerprint` that loses the
+/// overlapping tiles entirely. The guard prevents that; until now it also
+/// hid it, printing a bare `"unknown surface"` with no `§tick§key§` envelope,
+/// so it reached the server log and no record artefact at all. A run that
+/// silently discarded a whole planet's chunks looked identical to one that
+/// never visited it.
+///
+/// One line per dropped chunk on the wire, deliberately dumb -- the mod keeps
+/// no state, so this survives a save/load. The aggregation into one row per
+/// surface happens in [`FactorioWorld::record_surface_chunk_dropped`].
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct SurfaceChunkDropEvent {
+    /// The surface that was refused, by name -- see [`SurfaceId`].
+    pub surface: SurfaceId,
+    /// The refused chunk's top-left corner, in **tile** coordinates -- so
+    /// (-32, 64), not chunk (-1, 2).
+    ///
+    /// Named for what it is. `on_chunk_generated` hands the mod an `area`, and
+    /// the mod's own locals for `area.left_top` are called `chunk_x`/`chunk_y`;
+    /// a field called `chunk` carrying those numbers would be confidently
+    /// about the wrong object, which is the one record defect a reader cannot
+    /// detect.
+    pub left_top: Position,
+}
+
+/// Everything dropped for one surface since the last flush.
+///
+/// A count rather than a list: a generated planet is tens of thousands of
+/// chunks, and the reader's question is "was a surface discarded, which one,
+/// and how much of it", not "which tile". The first chunk is kept because a
+/// single example is what makes the row concrete.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SurfaceChunkDrops {
+    /// The tick of the *first* chunk dropped for this surface in this window.
+    pub first_tick: u64,
+    /// That first chunk's top-left corner, in tile coordinates.
+    pub first_left_top: Position,
+    /// How many chunks were dropped for this surface in this window.
+    pub chunks: u64,
 }
 
 /// One entry of the death queue: a bot lost its character, or got one back.
@@ -1023,6 +1071,17 @@ pub struct FactorioWorld {
     /// mod's line reached only the server log, and `events.jsonl` showed a
     /// research finishing with no research ever started.
     pub research_triggers: SyncMutex<Vec<(u64, ResearchTriggerEvent)>>,
+    /// Chunks the mod refused because they are not on Nauvis, aggregated per
+    /// surface since the last [`FactorioWorld::drain_surface_chunk_drops`].
+    ///
+    /// **A map, not a `Vec`, and that is the whole design.** The mod writes one
+    /// line per dropped chunk because keeping a counter there would mean
+    /// keeping it in `storage` across save/load; a generated planet is tens of
+    /// thousands of chunks, and tens of thousands of `events.jsonl` rows saying
+    /// the same thing is not a disclosure, it is a denial of service on the
+    /// reader. Folding here costs one map lookup per line and gives the record
+    /// one row per surface per flush, carrying the count.
+    pub surface_chunk_drops: SyncMutex<BTreeMap<SurfaceId, SurfaceChunkDrops>>,
     /// Sites the game has refused a build at, for the life of this world.
     ///
     /// Two readers, which is why it sits here rather than in either of them.
@@ -1152,6 +1211,11 @@ impl FactorioWorld {
                 item_pickup_distance: event.item_pickup_distance,
                 loot_pickup_distance: event.loot_pickup_distance,
                 resource_reach_distance: event.resource_reach_distance,
+                // Carried, not re-derived: a distance-changed event says
+                // nothing about where the bot is, so dropping the surface here
+                // would let a partial update erase a fact the roster already
+                // knew.
+                surface: existing_player.surface.clone(),
             }
         } else {
             FactorioPlayer {
@@ -1182,6 +1246,14 @@ impl FactorioWorld {
                 item_pickup_distance: existing_player.item_pickup_distance,
                 loot_pickup_distance: existing_player.loot_pickup_distance,
                 resource_reach_distance: existing_player.resource_reach_distance,
+                // **A position event does not carry a surface**, so this keeps
+                // the last one known rather than clearing it. That is the
+                // honest choice and also the limitation: a bot that crossed to
+                // another surface would report new coordinates under the old
+                // surface name until something re-reads the roster. Nothing
+                // can cross today; when something can, this line is one of the
+                // places that has to learn about it.
+                surface: existing_player.surface.clone(),
             }
         } else {
             FactorioPlayer {
@@ -1328,6 +1400,9 @@ impl FactorioWorld {
                 item_pickup_distance: existing_player.item_pickup_distance,
                 loot_pickup_distance: existing_player.loot_pickup_distance,
                 resource_reach_distance: existing_player.resource_reach_distance,
+                // An inventory event says nothing about place; carried, as
+                // above.
+                surface: existing_player.surface.clone(),
             }
         } else {
             FactorioPlayer {
@@ -1435,6 +1510,7 @@ impl FactorioWorld {
             teleports: SyncMutex::new(Vec::new()),
             deaths: SyncMutex::new(Vec::new()),
             research_triggers: SyncMutex::new(Vec::new()),
+            surface_chunk_drops: SyncMutex::new(BTreeMap::new()),
             inventories: DashMap::new(),
             placement_refusals: SyncMutex::new(PlacementRefusals::default()),
             walk_refusals: SyncMutex::new(WalkRefusals::default()),
@@ -1484,6 +1560,30 @@ impl FactorioWorld {
     /// Takes every emulated trigger queued since the last drain, oldest first.
     pub fn drain_research_triggers(&self) -> Vec<(u64, ResearchTriggerEvent)> {
         std::mem::take(&mut *self.research_triggers.lock())
+    }
+
+    /// Folds one refused chunk into the per-surface tally for
+    /// [`FactorioWorld::drain_surface_chunk_drops`] to pick up.
+    ///
+    /// The first chunk seen for a surface in this window is the one kept, with
+    /// its tick: it is the moment the surface first appeared, which is the
+    /// interesting one. Later chunks only raise the count.
+    pub fn record_surface_chunk_dropped(&self, tick: u64, event: SurfaceChunkDropEvent) {
+        let mut drops = self.surface_chunk_drops.lock();
+        drops
+            .entry(event.surface)
+            .and_modify(|seen| seen.chunks += 1)
+            .or_insert(SurfaceChunkDrops {
+                first_tick: tick,
+                first_left_top: event.left_top,
+                chunks: 1,
+            });
+    }
+
+    /// Takes every surface's dropped-chunk tally since the last drain, in
+    /// surface-name order.
+    pub fn drain_surface_chunk_drops(&self) -> BTreeMap<SurfaceId, SurfaceChunkDrops> {
+        std::mem::take(&mut *self.surface_chunk_drops.lock())
     }
 
     /// Remembers a build the game refused. Returns whether the site was new.
@@ -1945,6 +2045,7 @@ impl<'de> Deserialize<'de> for FactorioWorld {
                     teleports: Default::default(),
                     deaths: Default::default(),
                     research_triggers: Default::default(),
+                    surface_chunk_drops: Default::default(),
                     inventories,
                     placement_refusals: SyncMutex::new(placement_refusals),
                     walk_refusals: SyncMutex::new(walk_refusals),
@@ -1999,6 +2100,7 @@ impl Clone for FactorioWorld {
             teleports: SyncMutex::new(Vec::new()),
             deaths: SyncMutex::new(Vec::new()),
             research_triggers: SyncMutex::new(Vec::new()),
+            surface_chunk_drops: SyncMutex::new(BTreeMap::new()),
             // Knowledge, like `placement_refusals` below and for the same
             // reason: what a chest was last seen holding does not stop being
             // our best reading because the world was cloned. Stale in exactly
@@ -2067,6 +2169,7 @@ mod tests {
             teleports: Default::default(),
             deaths: Default::default(),
             research_triggers: Default::default(),
+            surface_chunk_drops: Default::default(),
             inventories: Default::default(),
             placement_refusals: Default::default(),
             walk_refusals: Default::default(),

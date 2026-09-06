@@ -29,6 +29,9 @@ fn water(x: i32, y: i32) -> FactorioTile {
         player_collidable: true,
         position: Position::new(f64::from(x), f64::from(y)),
         color: None,
+        // Nothing observed this tile, so it claims no surface. See
+        // `FactorioTile::surface`.
+        surface: None,
     }
 }
 

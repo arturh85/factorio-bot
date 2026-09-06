@@ -2889,6 +2889,7 @@ mod tests {
                     name: EntityName::Water.to_string(),
                     player_collidable: true,
                     color: None,
+                    surface: None,
                 }],
                 None,
             )
@@ -2914,6 +2915,10 @@ mod tests {
             player_collidable: FactorioTile::WATER_NAMES.contains(&name),
             name: name.into(),
             color: None,
+            // Fixture terrain asserts no surface -- see
+            // `FactorioTile::surface`. `EntityGraph` is still keyed by
+            // position alone, so nothing here would read it if it did.
+            surface: None,
         }
     }
 
@@ -3024,6 +3029,7 @@ mod tests {
                 name: "out-of-map".into(),
                 player_collidable: true,
                 color: None,
+                surface: None,
             },
         ]);
         assert!(graph.is_water_at(&Position::new(0.5, 0.5)));

@@ -1862,8 +1862,32 @@ function on_chunk_generated(event)
 	local chunk_xend = area.right_bottom.x
 	local chunk_yend = area.right_bottom.y
 
-	if surface ~= game.surfaces['nauvis'] then -- TODO we only support one surface
-		print("unknown surface")
+	-- ONE SURFACE, AND THE DROP IS NOW RECORDED RATHER THAN PRINTED.
+	--
+	-- This guard is the only thing standing between this system and silent
+	-- aliasing: the entity graph keys by position alone, so a chunk from a
+	-- second surface would merge into Nauvis with no error anywhere. Space Age
+	-- is enabled in this workspace, so the second surface is one rocket away.
+	--
+	-- It used to `print("unknown surface")`, which is NOT a writeout: it
+	-- carries no `§tick§key§` envelope, so it reached the server log and no
+	-- record artefact. A run that quietly discarded a whole planet's chunks
+	-- looked identical to one that never visited it. Now it writes out, so the
+	-- record can say what was dropped and how often -- the same disclosure
+	-- `research_trigger_emulated` and the `ground_generate_*` counters make.
+	--
+	-- See docs/superpowers/notes/2026-09-06-surfaces-survey.md.
+	--
+	-- `left_top`, NOT `chunk`. The locals above are named `chunk_x`/`chunk_y`
+	-- but hold `area.left_top`, which is a TILE coordinate -- the corner of the
+	-- chunk, so (-32, 64) rather than chunk (-1, 2). Reporting that under the
+	-- name `chunk` would be a field that is not blank but confidently about the
+	-- wrong object, which a reader cannot detect. The name says which.
+	if surface ~= game.surfaces['nauvis'] then
+		writeout(event.tick, "surface_chunk_dropped", helpers.table_to_json({
+			surface = surface.name,
+			left_top = { x = chunk_x, y = chunk_y },
+		}))
 		return
 	end
 
@@ -2461,10 +2485,14 @@ end
 -- kinds; none of the sampled types is one of them, but a key collision would
 -- silently drop a machine (or merge two machines' lifetime counters), so the
 -- fallback is a position that cannot collide rather than a guess.
+-- `unit_number` is globally unique across surfaces, so the primary key needs
+-- no qualification. The FALLBACK does: it is `name@x,y`, which collides across
+-- surfaces exactly as `resource_key` did.
 local function machine_key(entity)
 	local key = entity.unit_number
 	if key == nil then
-		key = entity.name .. "@" .. entity.position.x .. "," .. entity.position.y
+		key = entity.surface.name .. "|" .. entity.name
+			.. "@" .. entity.position.x .. "," .. entity.position.y
 	end
 	return tostring(key)
 end
@@ -2572,8 +2600,21 @@ local DRILL_REGISTRY_REFRESH = 60
 --
 -- Position is the identity that exists. Resources sit at tile centres and one
 -- tile holds one resource entity, so `name@x,y` cannot collide.
+-- SURFACE-QUALIFIED, because a tile coordinate is not a place.
+--
+-- This used to be `name@x,y` and carried a comment asserting that one tile
+-- holds one resource entity so the key cannot collide. True **per surface**,
+-- false across surfaces, and a reader would have believed it: iron ore at
+-- (10, 10) on Nauvis and iron ore at (10, 10) on Vulcanus are different tiles
+-- with the same key, so one drill's accumulator would count the other's ore.
+--
+-- Space Age is enabled in this workspace (`workspace/mods/mod-list.json`), so
+-- the only thing standing between here and that collision is one `if` in
+-- `on_chunk_generated`. See
+-- docs/superpowers/notes/2026-09-06-surfaces-survey.md.
 local function resource_key(resource)
-	return resource.name .. "@" .. resource.position.x .. "," .. resource.position.y
+	return resource.surface.name .. "|" .. resource.name
+		.. "@" .. resource.position.x .. "," .. resource.position.y
 end
 
 -- Every resource tile in a drill's reach, and its amount, recorded once when

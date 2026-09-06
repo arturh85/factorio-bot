@@ -268,3 +268,241 @@ fn the_same_footprint_far_from_any_bot_is_clear() {
         "a tree five hundred tiles from bot 3 cannot be what traps it"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The window, against the shape it is guarding
+// ---------------------------------------------------------------------------
+
+/// The pump of the plant `method::power` sites on `fixture_world`'s lake, and
+/// the tile that plant's **second** steam engine stands on when it is sized
+/// against 1,000 kW. Both read off `plan_plant_for` itself -- see
+/// `enclosure::plant_reach::a_second_engine_takes_a_plant_past_the_pad_that_used_to_bound_the_window`,
+/// which pins the same plant's reach at 14.008 tiles from this pump against
+/// the 12 the retired `FOOTPRINT_PAD` admitted.
+const PLANT_PUMP: (f64, f64) = (39.5, 37.5);
+const SECOND_ENGINE: (f64, f64) = (36.5, 26.5);
+
+/// A bystander 41.1 tiles from that pump.
+///
+/// Chosen against three inequalities, none of them read off the code:
+///
+/// * **further than 36 tiles from the pump**, which is where
+///   `SEARCH_RADIUS + FOOTPRINT_PAD` stopped looking, so the old selection
+///   never examined it;
+/// * **near enough that the second engine lands in its own search window** --
+///   the engine's grown box covers the tile centres `(35.5, 24.5)`,
+///   `(36.5, 24.5)` and `(37.5, 24.5)`, which are on the bottom edge of the
+///   48x48 window anchored at `(-4, -23)` for a bot standing here;
+/// * and the fixed check examines it, because it asks whether the parts
+///   `trial` holds touch *this bot's* window rather than whether the bot is
+///   inside a radius padded by a guess at how big a plant is.
+const BYSTANDER: (f64, f64) = (20.5, 1.0);
+
+/// The three tile centres the second engine's collision box covers on that
+/// window's own boundary -- the gap the pen below is built around.
+const GAP: [(f64, f64); 3] = [(35.5, 24.5), (36.5, 24.5), (37.5, 24.5)];
+
+/// A tree on every boundary tile centre of the 48x48 window whose lowest cell
+/// centre is `(low_x, low_y)`, except the centres in `gap`.
+///
+/// The window corner and the gap are passed as literals by each caller rather
+/// than computed from `crate::enclosure`'s own constants: a pen derived from
+/// the window function would agree with whatever that function did, which is
+/// the failure mode `docs/superpowers/notes/2026-09-06-fixtures-agree-with-/// their-code.md` is about.
+fn pen(low_x: f64, low_y: f64, gap: &[(f64, f64)]) -> Vec<FactorioEntity> {
+    let (high_x, high_y) = (low_x + 47., low_y + 47.);
+    let mut walls = Vec::new();
+    let mut x = low_x;
+    while x <= high_x {
+        let mut y = low_y;
+        while y <= high_y {
+            let on_edge = x == low_x || x == high_x || y == low_y || y == high_y;
+            if on_edge && !gap.contains(&(x, y)) {
+                walls.push(FactorioEntity::new_tree(&Position::new(x, y)));
+            }
+            y += 1.;
+        }
+        x += 1.;
+    }
+    // Four far trees so the window is inside the region `blocked_tree`
+    // models: an escape search that runs off the model answers `Unknown`,
+    // which this test must not be able to mistake for a catch.
+    for corner in [(0., -60.), (80., -60.), (0., 60.), (80., 60.)] {
+        walls.push(FactorioEntity::new_tree(&Position::new(corner.0, corner.1)));
+    }
+    walls
+}
+
+/// A world holding only `entities`, with the fixture prototypes so the steam
+/// engine below gets its real collision box.
+fn bare_world(entities: Vec<FactorioEntity>) -> FactorioWorld {
+    let prototypes = Arc::new(fixture_entity_prototypes());
+    let world = FactorioWorld::new();
+    world
+        .update_entity_prototypes(prototypes.iter().map(|v| v.clone()).collect())
+        .expect("prototypes load");
+    world
+        .update_chunk_entities(entities)
+        .expect("the pen loads");
+    world
+}
+
+/// A bot that only the **second** steam engine of a two-engine plant would
+/// wall in is examined.
+///
+/// # The defect this pins
+///
+/// `check` used to select bots with `SEARCH_RADIUS + FOOTPRINT_PAD` = 36
+/// tiles from the placement's origin, and `FOOTPRINT_PAD` was sized by hand
+/// against a plant with **one** steam engine. `method::power::plan_plant` now
+/// sizes the engine row from demand up to `MAX_ENGINES_PER_BOILER`, and the
+/// second engine stands five tiles further out: 14.008 tiles from the pump
+/// against the 12 the pad allowed. A bot in the 36-to-50-tile band was never
+/// asked, so **the placement passed prevention and the bot was walled in with
+/// nothing reported** -- the exact failure `enclosure::check` exists to
+/// prevent, and silent.
+///
+/// # Why the pen is this big, which is the defect's own shape
+///
+/// The bystander has to be more than 36 tiles from the *pump* and within a
+/// window's reach of the *engine*, and the engine is only 14 tiles from the
+/// pump -- so the bot is necessarily more than twenty tiles from the wall
+/// that closes on it, and the pocket is necessarily large. That is not the
+/// test being contrived; it is what the missed band physically contains. A
+/// bot in a four-tile pocket beside a plant was always inside the old window.
+///
+/// # What it asserts
+///
+/// Three calls, so that a green result cannot come from the geometry being
+/// wrong in a way that happens to look like a catch:
+///
+/// 1. checked against **itself**, nothing changes and nobody is named;
+/// 2. checked with the **bot** as the origin -- which every window, old or
+///    new, examines -- the enclosure is real and is refused;
+/// 3. checked with the **pump** as the origin, which is what
+///    `plan_plant_for` and `complete_plant` actually pass, the same answer
+///    must come back. Before the fix this was `Clear`.
+#[test]
+fn a_bot_only_the_second_engine_would_wall_in_is_examined() {
+    let bystander = Position::new(BYSTANDER.0, BYSTANDER.1);
+    let pump = Position::new(PLANT_PUMP.0, PLANT_PUMP.1);
+
+    let world = bare_world(pen(-3.5, -22.5, &GAP));
+    world.players.insert(
+        3,
+        FactorioPlayer {
+            player_id: 3,
+            position: bystander.clone(),
+            ..Default::default()
+        },
+    );
+    let before = PlanState::from_world(Arc::new(world), &[BotId(3)]);
+
+    assert_eq!(
+        EnclosurePrevention::Clear,
+        check(&before, &before, &pump),
+        "a placement of nothing traps nobody: the pen still has its gap"
+    );
+
+    let engine = FactorioEntity::from_prototype(
+        "steam-engine",
+        Position::new(SECOND_ENGINE.0, SECOND_ENGINE.1),
+        Some(Direction::North),
+        None,
+        None,
+        Arc::new(fixture_entity_prototypes()),
+    )
+    .expect("the fixture describes a steam-engine");
+    let mut trial = before.fork();
+    trial.create_entity(engine);
+
+    assert_eq!(
+        EnclosurePrevention::Refuse,
+        check(&before, &trial, &bystander),
+        "asked about the bot's own tile, the second engine plainly seals it in: \
+         the pen's only gap is the three tiles that engine covers, and with them \
+         blocked nothing in the window still reaches open ground"
+    );
+
+    assert_eq!(
+        EnclosurePrevention::Refuse,
+        check(&before, &trial, &pump),
+        "and the answer must not depend on the origin being the bot: the pump \
+         is what `plan_plant_for` passes, and this bot is 41.1 tiles from it -- \
+         outside the 36 the hand-sized `FOOTPRINT_PAD` admitted, which is how \
+         this came back `Clear` and built the wall"
+    );
+}
+
+/// A bystander on the **diagonal** from the plant, 42.8 tiles away.
+///
+/// The second half of the same selection defect, and older than the engine
+/// row. The searched window is a **square** 48 tiles across and
+/// `PlanState::characters_near` filters a **circle**, so a bot on the
+/// diagonal is nearer the footprint on each axis than its straight-line
+/// distance says: up to `sqrt(2)` times nearer. The old form added a pad to
+/// `SEARCH_RADIUS` and compared that to a straight-line distance directly,
+/// with no such factor anywhere in it.
+///
+/// This bot stands 42.8 tiles from the pump -- further than
+/// `WINDOW_REACH + 14.008` = 39.5, which is what a radius that measured the
+/// footprint correctly and still forgot the square would allow. The second
+/// engine's collision box covers four tile centres on this window's own
+/// boundary, and they are the pen's only gap. It is here so that a future
+/// change back to any radius-from-the-origin selection has to face the
+/// diagonal as well as the size.
+const DIAGONAL_BYSTANDER: (f64, f64) = (13.5, 3.5);
+
+/// Those four boundary centres, for the window whose lowest cell centre is
+/// `(-10.5, -20.5)`: the engine's grown box spans x `35.05..37.95` and y
+/// `23.95..29.05`, and this window's highest centres are x 36.5 and y 26.5.
+const DIAGONAL_GAP: [(f64, f64); 4] = [(36.5, 24.5), (36.5, 25.5), (36.5, 26.5), (35.5, 26.5)];
+
+#[test]
+fn a_bot_on_the_diagonal_is_examined_too() {
+    let bystander = Position::new(DIAGONAL_BYSTANDER.0, DIAGONAL_BYSTANDER.1);
+    let pump = Position::new(PLANT_PUMP.0, PLANT_PUMP.1);
+
+    let world = bare_world(pen(-10.5, -20.5, &DIAGONAL_GAP));
+    world.players.insert(
+        3,
+        FactorioPlayer {
+            player_id: 3,
+            position: bystander.clone(),
+            ..Default::default()
+        },
+    );
+    let before = PlanState::from_world(Arc::new(world), &[BotId(3)]);
+
+    assert_eq!(
+        EnclosurePrevention::Clear,
+        check(&before, &before, &pump),
+        "the pen still has its gap"
+    );
+
+    let engine = FactorioEntity::from_prototype(
+        "steam-engine",
+        Position::new(SECOND_ENGINE.0, SECOND_ENGINE.1),
+        Some(Direction::North),
+        None,
+        None,
+        Arc::new(fixture_entity_prototypes()),
+    )
+    .expect("the fixture describes a steam-engine");
+    let mut trial = before.fork();
+    trial.create_entity(engine);
+
+    assert_eq!(
+        EnclosurePrevention::Refuse,
+        check(&before, &trial, &bystander),
+        "asked about the bot's own tile, the engine seals the pen's only gap"
+    );
+
+    assert_eq!(
+        EnclosurePrevention::Refuse,
+        check(&before, &trial, &pump),
+        "and asked about the pump 42.8 tiles away on the diagonal, the same: a \
+         bound that measured a circle against a square window would stop at \
+         39.5 and never look"
+    );
+}

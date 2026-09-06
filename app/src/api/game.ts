@@ -183,7 +183,11 @@ export function parseFactorioEntity(value: unknown, path = '$'): FactorioEntity 
         recipe: asStringOrNull(obj.recipe, path + '.recipe'),
         ghost_name: asStringOrNull(obj.ghost_name, path + '.ghost_name'),
         ghost_type: asStringOrNull(obj.ghost_type, path + '.ghost_type'),
-        underground_half: asUndergroundHalfOrNull(obj.underground_half, path + '.underground_half')
+        underground_half: asUndergroundHalfOrNull(obj.underground_half, path + '.underground_half'),
+        // Which surface, by name. Absent on every capture and dump written
+        // before 2026-09-06, so `asStringOrNull` -- and `null` there means
+        // "the sender did not say", not "Nauvis".
+        surface: asStringOrNull(obj.surface, path + '.surface')
     };
 }
 

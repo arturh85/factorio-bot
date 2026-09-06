@@ -902,6 +902,14 @@ const SCHEMAS: Record<string, SchemaContract> = {
             needed: {required: true, type: 'integer'},
             count: {required: true, type: 'integer'}
         },
+        // A surface the mod refused chunks from. `chunks` is per flush, not
+        // per run.
+        surface_chunk_dropped: {
+            surface: {required: true, type: 'string'},
+            chunks: {required: true, type: 'integer'},
+            first_left_top_x: {required: true, type: 'number'},
+            first_left_top_y: {required: true, type: 'number'}
+        },
         roster_changed: {
             bots: {required: true, type: 'array'},
             left: {required: true, type: 'array'},

@@ -915,6 +915,40 @@ pub enum EventKind {
         /// `needed`, by construction.
         count: u32,
     },
+    /// The mod discarded generated chunks because they are not on Nauvis.
+    ///
+    /// **This project supports exactly one surface, and this is the line that
+    /// says when it met a second.** `on_chunk_generated` in
+    /// `mods/BotBridge/control.lua` returns early for any surface but Nauvis,
+    /// so those chunks' entities, resources and tiles never reach
+    /// `EntityGraph`. The guard is deliberate -- the world model keys by
+    /// position alone, so a Vulcanus chunk would merge into Nauvis with no
+    /// error anywhere -- but until 2026-09-06 it was also invisible: it
+    /// printed a bare `"unknown surface"` with no `§tick§key§` envelope, which
+    /// reached the server log and no artefact. A run that discarded a whole
+    /// planet read exactly like one that never left home.
+    ///
+    /// **Space Age is enabled in this workspace** (`workspace/mods/
+    /// mod-list.json`), so every run ever measured here has been a Space Age
+    /// run that happened never to leave Nauvis. A single one of these rows
+    /// means the world model this run planned against is incomplete, and any
+    /// map fingerprint, resource distance or `entity_at` answer from it
+    /// describes Nauvis only. Written by `record.surface_chunks_dropped()`;
+    /// see `docs/superpowers/notes/2026-09-06-surfaces-survey.md`.
+    SurfaceChunkDropped {
+        /// The surface that was refused, by name (`LuaSurface.name`, which is
+        /// unique among surfaces; the *index* is reused after a deletion).
+        surface: String,
+        /// How many chunks were dropped for this surface since the last
+        /// flush -- **not** the run's total, which is the sum over every row
+        /// naming this surface.
+        chunks: u64,
+        /// One example: the top-left **tile** of the first chunk dropped in
+        /// this window -- (-32, 64), not chunk (-1, 2). A count alone cannot
+        /// be looked at; a coordinate can.
+        first_left_top_x: f64,
+        first_left_top_y: f64,
+    },
     /// The supervisor changed the roster it plans for.
     ///
     /// The roster used to be computed once at script start and never again.

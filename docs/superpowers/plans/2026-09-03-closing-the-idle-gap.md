@@ -62,6 +62,54 @@ is true and hypothetical. With this save it becomes *"here is a world we can see
 one fifth of, and here is the number"*. That is a better argument for the
 container work than any amount of reasoning about coordinate collisions.
 
+### What to expect when it is loaded, and the one problem that comes first
+
+Asked by the owner: *"any chance our stuff could cope with a huge base? we for
+sure need to add many optimizations to have any chance, right?"* Probably yes —
+but the first issue is **correctness, not speed**, and one of them precedes every
+optimisation.
+
+**We may see nothing at all.** The world model is built from
+`on_chunk_generated`. **A loaded save has every chunk already generated**, so
+that event never fires for existing ground. The path that would carry a save
+into the model is the `initial_discovery` replay (`control.lua`, the
+`for chunk in ... get_chunks()` loop), which is also the thing that must move a
+whole base through a **line-oriented text protocol on stdout**. Confirm the
+replay actually runs on a loaded save *before* concluding anything from an empty
+model — an empty model and a broken ingest look identical.
+
+**The hard limit, and it is a correctness failure before a performance one:**
+
+    QuadTreeRect::new(Point2D::new(-5120., -5120.), Size2D::new(10240., 10240.))
+    entity_graph.rs:290 — construction-time, shared by THREE trees
+    (entity_tree, blocked_tree, resource_tree)
+
+A rocket base sprawls past ±5120. This does not degrade — entities land outside
+the tree's area and are **dropped or panic**, and which one is unknown. **Check
+this first.** It is also exactly the shape this repo keeps paying for: a bound
+that was ample for the map it was written against.
+
+| known figure | value |
+|---|---|
+| dump, near-empty t=0 map | **826 MB** (mostly tiles) |
+| dump, after one exploration ring | **1.45 GB** |
+| offline planning loop | **~4 s** |
+| largest block ever built | 179 entities |
+| bots per run | 4 |
+
+**The dump is where it will hurt in practice**, because that 4-second loop is
+where all iteration happens and every offline experiment pays it. Hundreds of
+thousands of entities in a multi-gigabyte JSON is a different regime.
+
+**The first load is a MEASUREMENT, not a demo.** The useful output is a list of
+what broke and in what order — better to optimise the thing that actually fell
+over than the three anyone would have predicted. Predictions were wrong three
+times on 2026-09-06 alone (the water search exposure, the enclosure window, and
+a tree that did not exist).
+
+Make it survivable rather than fast: **its own workspace, its own ports, a
+bounded timeout**, so a failure costs a log rather than a poisoned workspace.
+
 ### The hazard, and it is the workspace not the code
 
 CLAUDE.md: a server started without the bridge mod *"hangs at `start waiting`

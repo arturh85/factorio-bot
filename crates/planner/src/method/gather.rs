@@ -955,7 +955,7 @@ mod gather_tests {
     use super::*;
     use crate::ids::BotId;
     use crate::test_world::{OilFixture, PumpjackRecipe, world_with_oil};
-    use factorio_bot_core::factorio::world::FactorioWorld;
+    use factorio_bot_core::factorio::world::FactorioSurface;
     use factorio_bot_core::types::{FactorioFluidBoxConnection, FactorioFluidBoxPrototype};
     use std::collections::BTreeSet;
     use std::sync::Arc;
@@ -1092,7 +1092,7 @@ mod gather_tests {
     /// `crates/core/tests/live-2.1.17-world-snapshot.json` and from
     /// `workspace/scripts/map-31337-explored.json`, which agree.
     fn live_capture_state() -> PlanState {
-        let world: FactorioWorld = world_with_oil(OPEN);
+        let world: FactorioSurface = world_with_oil(OPEN);
         world
             .entity_prototypes
             .get_mut("pumpjack")
@@ -1118,7 +1118,7 @@ mod gather_tests {
     /// looks like one.
     #[test]
     fn a_connection_off_the_footprints_corner_is_refused() {
-        let world: FactorioWorld = world_with_oil(OPEN);
+        let world: FactorioSurface = world_with_oil(OPEN);
         world
             .entity_prototypes
             .get_mut("pumpjack")
@@ -1550,7 +1550,7 @@ mod gather_tests {
     /// planning a pumpjack whose output has nowhere to go.
     #[test]
     fn a_world_with_nothing_to_buffer_a_fluid_refuses_by_name() {
-        let world: FactorioWorld = world_with_oil(OPEN);
+        let world: FactorioSurface = world_with_oil(OPEN);
         world
             .entity_prototypes
             .get_mut("storage-tank")

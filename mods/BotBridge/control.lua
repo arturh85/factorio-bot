@@ -300,6 +300,32 @@ function on_init()
 	storage.pathfinding = {}
 	storage.pathfinding.map = {}
 	storage.n_clients = 1
+	-- AND the module local, because `on_load` will NOT run in this session.
+	--
+	-- The two are mutually exclusive by design. Quoting the shipped 2.1.17 API
+	-- docs (`LuaBootstrap::on_load`): "This is only called for mods that have
+	-- been part of the save previously". A save created without BotBridge --
+	-- somebody else's save, a world record, anything downloaded -- takes
+	-- `on_init` instead, and `my_client_id` used to be assigned in `on_load`
+	-- alone.
+	--
+	-- That is not cosmetic. `my_client_id` is what gates the readiness beacon
+	-- in `on_tick`, and that beacon is the ONLY thing the host waits for
+	-- before it opens RCON: `read_output` in
+	-- `crates/core/src/process/output_reader.rs` blocks on a stdout line
+	-- containing `my_client_id`, and only afterwards calls
+	-- `initialize_server` -> `whoami("server")` -> `on_whoami`, which is what
+	-- builds the initial-discovery replay. No beacon, no RCON, no discovery,
+	-- no world -- and no error either: the host simply sits at
+	-- `start waiting` for ever. It did, for 900 seconds, against a 6:39:53
+	-- world-record save while Factorio itself hosted the map perfectly
+	-- happily. See crates/core/tests/botbridge_ready_beacon.rs.
+	--
+	-- Every run this project has ever measured took the `on_load` path, which
+	-- is why this survived: our own map is created by a separate `--create`
+	-- invocation and then loaded by the server process, so by then the mod is
+	-- already part of the save.
+	my_client_id = storage.n_clients
 end
 
 function pos_str(pos)
@@ -1580,6 +1606,9 @@ function on_tick(event)
 					end
 				end
 				if delivered > 0 then
+					-- The yield landed: a change this mod did not make but
+					-- does observe, so the flag is exact here too.
+					mark_bot_inventory_dirty(idx)
 					m.left = m.left - delivered
 					if m.left <= 0 then
 						action_completed(event.tick, m.action_id)
@@ -1694,7 +1723,19 @@ function on_tick(event)
 	if event.tick % 120 == 0 then
 		local who = "?"
 		if client_local_data.whoami then who = client_local_data.whoami end
-		if my_client_id ~= nil and who == "?" then print("my_client_id="..my_client_id..", who="..who) end
+		-- THE READINESS BEACON. Not a debug line: `read_output`
+		-- (crates/core/src/process/output_reader.rs) blocks on a stdout line
+		-- containing `my_client_id` before it opens RCON at all, so this is
+		-- the handshake, and `who == "?"` is what stops it once the host has
+		-- introduced itself with `whoami`.
+		--
+		-- `tostring`, and no `~= nil` guard. It used to refuse to print when
+		-- `my_client_id` was nil, which made the signal go silent in exactly
+		-- the state nobody expected -- the "silence is not success" shape
+		-- CLAUDE.md enumerates, and worth 900 seconds of a stopped run. A
+		-- beacon reading `my_client_id=nil` still unblocks the host and still
+		-- says something true; `on_init` above is what makes it a number.
+		if who == "?" then print("my_client_id="..tostring(my_client_id)..", who="..who) end
 	end
 
 	-- periodically update the objects around the player to ensure that nothing is missed
@@ -3268,13 +3309,46 @@ function direction_str(d)
 	end
 end
 
+-- Entities `EntityGraph::add` throws away the instant they arrive.
+--
+-- `crates/core/src/graph/entity_graph.rs` opens its ingest loop with
+--
+--     if entity.entity_type == EntityType::FlyingText.to_string()
+--         || entity.entity_type == EntityType::Fish.to_string()
+--         || entity.bounding_box.width() == 0.
+--     { continue; }
+--
+-- so these reach no quad tree, no `minables`, no `threats` and no petgraph
+-- node. Serialising them is pure cost, and it is the ONLY "should not be sent"
+-- category that can be stated as a fact rather than a preference -- trees,
+-- rocks and cliffs all land in `blocked_tree` and the planner sites blocks
+-- against them, so they stay.
+--
+-- Measured against a real run's `workspace/server-log.txt` (seed 31337, 1,424
+-- chunks, 50,256 entity records, 10.5 MB of `entities` lines): **1,574 records
+-- and 2.59% of the bytes** were discarded on arrival, essentially all of them
+-- fish. On an endgame base the same predicate also covers every remnant,
+-- corpse and particle source, which a finished factory has in quantity and a
+-- fresh map has none of.
+--
+-- **Kept in step with the Rust gate by a test, not by care**:
+-- `crates/core/tests/botbridge_bulk_entities.rs` names both types and the
+-- zero-width rule. If the gate there changes, change this with it.
+local INGEST_DISCARDS = { ["flying-text"] = true, ["fish"] = true }
+
 function writeout_entities(tick, surface, area)
 	--if my_client_id ~= 1 then return end
 	local header = area.left_top.x..","..area.left_top.y..";"..area.right_bottom.x..","..area.right_bottom.y..":"
 	local objects = {}
 	for idx, ent in pairs(surface.find_entities(area)) do
 		if ent.type ~= "character" and area.left_top.x <= ent.position.x and ent.position.x < area.right_bottom.x and area.left_top.y <= ent.position.y and ent.position.y < area.right_bottom.y then
-			table.insert(objects, serialize_entity(ent))
+			local bb = ent.bounding_box
+			local zero_width = bb ~= nil and bb.right_bottom.x - bb.left_top.x == 0
+			if not INGEST_DISCARDS[ent.type] and not zero_width then
+				-- `omit_inventories`: identity and geometry in bulk, contents
+				-- on demand. See `serialize_entity`.
+				table.insert(objects, serialize_entity(ent, { omit_inventories = true }))
+			end
 		end
 	end
 	writeout(tick, "entities", header .. helpers.table_to_json(objects))
@@ -3962,6 +4036,8 @@ end
 -- game rejects an unknown `type` key on any prototype that has none, so
 -- sending it unconditionally would break every other placement.
 function rcon_place_entity(player_id, item_name, entity_position, direction, underground_half)
+	-- A placement pays for itself out of the bot's inventory. See above.
+	mark_bot_inventory_dirty(player_id)
 	local entproto = prototypes.item[item_name].place_result
 	local player = bot_handle(player_id)
 	-- Refused before anything else is asked, and stamped like every other
@@ -4702,6 +4778,11 @@ end
 
 
 function rcon_insert_to_inventory(player_id, entity_name, entity_pos, inventory_type, items)
+	-- Items leave this bot's inventory; scan it next tick rather than waiting
+	-- for its turn in the stagger. See `BOT_INVENTORY_POLL_PERIOD`. Marked on
+	-- entry, so a refusal below costs one redundant scan and never a missed
+	-- one.
+	mark_bot_inventory_dirty(player_id)
 	local player = bot_handle(player_id)
 	if player == nil then
 		rcon.print("Error: no such player: " .. tostring(player_id))
@@ -4763,6 +4844,8 @@ function rcon_insert_to_inventory(player_id, entity_name, entity_pos, inventory_
 end
 
 function rcon_remove_from_inventory(player_id, entity_name, entity_pos, inventory_type, items)
+	-- Whatever comes out of the entity goes into this bot. See above.
+	mark_bot_inventory_dirty(player_id)
 	local player = bot_handle(player_id)
 	if player == nil then
 		rcon.print("Error: no such player: " .. tostring(player_id))
@@ -4841,6 +4924,8 @@ end
 -- narration on this path: a debug line here would turn a success into a
 -- reported failure. Use `writeout` (stdout) if one is ever needed.
 function rcon_set_recipe(player_id, entity_name, entity_pos, recipe)
+	-- A recipe change evicts the machine's ingredients into the bot. See above.
+	mark_bot_inventory_dirty(player_id)
 	local player = bot_handle(player_id)
 	if player == nil then
 		rcon.print("Error: no such player: " .. tostring(player_id))
@@ -5486,6 +5571,11 @@ function rcon_action_start_crafting(action_id, player_id, recipe, count)
 	local waiting = craft_waiters(player.index, recipe, true)
 	table.insert(waiting, { id = action_id, remaining = count })
 
+	-- Ingredients leave the inventory and the queue becomes non-empty. Both
+	-- flags are set before the call, not after, because `begin_crafting` may
+	-- raise and the state it leaves behind still has to be polled.
+	mark_bot_inventory_dirty(player_id)
+	if is_character_bot(player_id) then storage.bots[player_id].craft_active = true end
 	local ret = player.begin_crafting{count=count, recipe=recipe}
 	if ret ~= count then
 		forget_craft_action(player.index, recipe, action_id)
@@ -5498,6 +5588,8 @@ function rcon_action_start_crafting(action_id, player_id, recipe, count)
 end
 
 function rcon_revive_ghost(player_id, name, x, y)
+	-- Reviving spends the item. See above.
+	mark_bot_inventory_dirty(player_id)
 	local player = get_player(player_id)
 	if player == nil then
 		return
@@ -5553,6 +5645,7 @@ end
 -- then assumed. `get_player` already reports an absent player, and that
 -- refusal now reaches the caller too.
 function rcon_cheat_item(player_id, item, count)
+	mark_bot_inventory_dirty(player_id)
 	local player = get_player(player_id)
 	if player == nil then
 		return
@@ -5638,6 +5731,10 @@ function blueprint_build_mode(force_build)
 end
 
 function rcon_place_blueprint(player_id, blueprint, pos_x, pos_y, direction, force_build, only_ghosts, inventory_player_ids)
+	-- A block is paid for out of a *list* of bots, and which of them actually
+	-- gave up an item is decided deep inside. Marking the whole roster costs
+	-- each bot one scan and is the honest statement of what is known here.
+	mark_bot_inventory_dirty(nil)
 	local player = get_player(player_id)
 	if player == nil then
 		return
@@ -6332,6 +6429,11 @@ function announce_character_bot(tick, id)
 	bot.last_pos = nil
 	bot.last_inventory = nil
 	bot.last_queue = nil
+	-- An announcement is unconditional: it must not wait for this bot's turn
+	-- in the stagger, and it must read the crafting queue once even on a bot
+	-- resumed from a savepoint mid-craft.
+	bot.inventory_dirty = true
+	bot.craft_active = true
 	poll_character_bot(tick, id, handle)
 end
 
@@ -6364,6 +6466,72 @@ function rcon_set_tick_paused(v)
 	game.tick_paused = (v == true or v == "true")
 	stamp_tick()
 	rcon.print(tostring(game.tick_paused))
+end
+
+-- ---------------------------------------------------------------------------
+-- How often a bot's main inventory is scanned, and why it is not every tick.
+--
+-- **This is a throughput change for headless iteration, not a correctness or
+-- playability fix.** Measured on 2026-09-06 by two-point differencing at
+-- 60,000 and 180,000 ticks (so ~16 s of server startup cancels exactly):
+-- 1 bot 5145 tps / 194 us per tick, 4 bots 4147 / 241, 8 bots 3242 / 308.
+-- That fits `178 us + 16.3 us per bot per tick`, so at eight bots 130 of the
+-- 308 us -- 42% of the tick -- was this scan. Against a 16,667 us real-time
+-- budget it is **under 1% at 60 Hz**: invisible in normal play, and a ceiling
+-- only for `--headless --game-speed N`, where the tick budget is whatever the
+-- CPU can do.
+--
+-- What cost it: `get_main_inventory().get_contents()` allocates, each stack
+-- builds a string, the signature is sorted and concatenated -- per bot, sixty
+-- times a second -- to notice changes that happen a handful of times a minute.
+--
+-- **Two mechanisms, and neither is safe alone.**
+--
+-- `inventory_dirty` is the exact one. Most of what changes a bot's inventory
+-- is something this mod *did*: an insert, a removal, a placement, a craft
+-- start, a craft completing, a mining yield landing. Those set the flag at the
+-- moment they happen, so the writeout is emitted on the very next tick -- no
+-- latency at all, and no dependence on counts.
+--
+-- The stagger is the backstop, and it is why the flag does not have to be
+-- complete. An inventory can change for reasons this mod did not cause, and an
+-- audit of every such path is exactly the kind that is silently incomplete.
+-- `tick % PERIOD == id % PERIOD` bounds the residual staleness to PERIOD ticks
+-- for every bot and makes the work per tick **constant in the number of bots**
+-- -- the property this project's notes record as missing ("bot count is what
+-- costs tick rate").
+--
+-- 30 ticks is half a second at 1x. It is longer than the roster (so at most
+-- one bot is scanned per tick up to 30 bots), and it is a bound on how stale
+-- the *world model's* view of an inventory can be -- never on an action
+-- settle: a craft settles through `poll_character_crafts` below, a walk
+-- through the position check above it, and a mining yield through the miner's
+-- own `inventory_before` accounting, none of which are staggered.
+--
+-- Rejected: gating on `get_item_count()` alone as the cheap pre-check. One
+-- iron out and one copper in on the same tick preserves the total exactly, and
+-- a missed inventory update is a stale world model -- correctness traded for
+-- tick rate. A count check *behind* the flag would be fine; as the only signal
+-- it is not.
+-- ---------------------------------------------------------------------------
+BOT_INVENTORY_POLL_PERIOD = 30
+
+-- "Something changed this bot's inventory; scan it next tick." `id == nil`
+-- means every bot, which is what a caller that touches several inventories at
+-- once (a blueprint paid for from a list of bots) says rather than guessing.
+--
+-- Tolerates a `player_id` that is a connected client rather than a character
+-- bot, and a `storage` that does not exist: the Rust stub interpreter loads
+-- this file with neither.
+function mark_bot_inventory_dirty(id)
+	local bots = character_bots()
+	if bots == nil then return end
+	if id == nil then
+		for _, bot in pairs(bots) do bot.inventory_dirty = true end
+		return
+	end
+	local bot = bots[id]
+	if bot ~= nil then bot.inventory_dirty = true end
 end
 
 -- The per-tick substitute for the four `on_player_*` events a character bot
@@ -6617,20 +6785,28 @@ function poll_character_bot(tick, id, handle)
 			position = { x = pos.x, y = pos.y },
 		}))
 	end
-	local contents = bot.entity.get_main_inventory().get_contents()
-	local sig = {}
-	for _, stack in pairs(contents) do
-		sig[#sig + 1] = stack.name .. ":" .. tostring(stack.count) .. ":" .. tostring(stack.quality)
-	end
-	table.sort(sig)
-	local key = table.concat(sig, ",")
-	if bot.last_inventory ~= key then
-		bot.last_inventory = key
-		writeout(tick, "on_player_main_inventory_changed", helpers.table_to_json({
-			player_id = id,
-			main_inventory = contents,
-		}))
-		recent_item_additions[id] = {}
+	-- Dirty flag or stagger; see `BOT_INVENTORY_POLL_PERIOD`. The `%` is on the
+	-- bot id so the roster's scans land on different ticks rather than all on
+	-- the same one, which is what keeps the per-tick cost flat as bots are
+	-- added.
+	if bot.inventory_dirty
+		or (tick % BOT_INVENTORY_POLL_PERIOD) == (id % BOT_INVENTORY_POLL_PERIOD) then
+		bot.inventory_dirty = false
+		local contents = bot.entity.get_main_inventory().get_contents()
+		local sig = {}
+		for _, stack in pairs(contents) do
+			sig[#sig + 1] = stack.name .. ":" .. tostring(stack.count) .. ":" .. tostring(stack.quality)
+		end
+		table.sort(sig)
+		local key = table.concat(sig, ",")
+		if bot.last_inventory ~= key then
+			bot.last_inventory = key
+			writeout(tick, "on_player_main_inventory_changed", helpers.table_to_json({
+				player_id = id,
+				main_inventory = contents,
+			}))
+			recent_item_additions[id] = {}
+		end
 	end
 	poll_character_crafts(tick, id, handle)
 end
@@ -6639,8 +6815,19 @@ end
 -- fed through `on_player_crafted_item` with the event shape the game would
 -- have used, so `settle_crafted_item` and the craft waiters see one path.
 -- Cancellation cannot happen without a player at the keyboard.
+--
+-- **This runs every tick while a craft is in flight, and must.** Batching it
+-- would add its period to *every* craft settle, and a plan has hundreds of
+-- crafts. What is skipped instead is the read itself when there is provably
+-- nothing to read: `handle.crafting_queue` is a whole-queue scan, and a
+-- character bot's queue can only become non-empty through `begin_crafting`,
+-- which only `rcon_action_start_crafting` calls -- there is no player at a
+-- keyboard to queue anything else. So "no craft was started and the queue was
+-- empty last tick" is an exact statement that the queue is still empty, not an
+-- approximation, and it costs no latency.
 function poll_character_crafts(tick, id, handle)
 	local bot = storage.bots[id]
+	if not bot.craft_active then return end
 	local now = {}
 	local queue = handle.crafting_queue
 	if queue ~= nil then
@@ -6659,9 +6846,14 @@ function poll_character_crafts(tick, id, handle)
 				end
 				tally_crafted_products(recipe, finished)
 			end
+			-- The products landed in the bot's inventory this tick.
+			mark_bot_inventory_dirty(id)
 		end
 	end
 	bot.last_queue = now
+	-- The queue has drained: nothing further can appear in it until another
+	-- `begin_crafting`, which sets the flag again.
+	if next(now) == nil then bot.craft_active = false end
 end
 
 -- What character bots have crafted by hand, per item, for the whole session.

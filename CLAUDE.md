@@ -354,6 +354,17 @@ BotBridge Mod (Factorio mod for RPC)
     "add a reader" and "refresh on entity add/remove" as one piece of work, not
     two: a reader without the refresh is worse than no reader, because a stale
     answer looks exactly like a current one.
+
+    **And the refresh cannot be "call `update()` again".** It appends to
+    `self.inner`, which is built once in `new()` and **never cleared**.
+    Re-running on an *unchanged* world is harmless — `get_or_create_flow_node`
+    dedupes by position via `node_at`, and `update_flow_edge` uses petgraph's
+    `update_edge`, which replaces a weight rather than adding a parallel edge.
+    On a *changed* world it is wrong in two ways: **a removed entity's node and
+    edges stay forever**, since nothing deletes; and **a position reused by a
+    different entity keeps the old `FlowNode`**, because `node_at` matches on
+    position alone and returns before the prototype is ever consulted. So the
+    refresh has to rebuild.
     Nothing in `crates/planner`, `crates/executor` or `crates/server` mentions
     it. So its numbers have never affected a decision, and **its hard-coded
     rates cannot be validated by any caller** — the same shape that let

@@ -184,6 +184,31 @@ placement.
 `update()` cannot simply be called more often — it accumulates. Two options,
 and the second is the recommendation:
 
+### The append is more specific than "stale nodes", and the specifics pick the fix
+
+Verified by the peer session (`5eb090d2`) after this note was written, and it
+**rules out the cheaper option**.
+
+Re-running `update()` on an **unchanged** world is **idempotent**:
+`get_or_create_flow_node` checks `node_at` first and reuses the node at that
+position, and `update_flow_edge` uses petgraph's `update_edge`, which replaces a
+weight rather than adding a parallel edge. **That is presumably why nobody
+noticed** — the obvious test, call it twice and compare, comes back clean.
+
+It is wrong on a **changed** world, in two ways, and only one of them is staleness:
+
+1. **A removed entity's node and edges stay forever.** `self.inner` is built once
+   in `new()` and nothing ever clears or deletes.
+2. **A position reused by a different entity keeps the old `FlowNode`.**
+   `node_at` matches on **position alone** and returns *before* the prototype is
+   consulted — so a furnace built where a chest stood **inherits the chest's flow
+   node**, with the chest's type and the chest's contents.
+
+**(2) is why the cheap refresh is not available.** A rebuild-on-read fixes both.
+A "patch the delta" refresh — visit what changed, leave the rest — fixes (1) and
+**silently keeps (2)**, which is worse than the current state because it would
+look maintained. Anyone optimising this later will reach for exactly that.
+
 - **A. Rebuild on demand, cached by an entity-graph generation counter.**
   `EntityGraph` gains a monotonic `generation: AtomicU64` bumped by `add`,
   `remove` and `connect`. `FlowGraph` records the generation it was built at;

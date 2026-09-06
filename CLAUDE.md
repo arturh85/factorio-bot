@@ -305,10 +305,16 @@ BotBridge Mod (Factorio mod for RPC)
   - `types.rs` - Shared data models
   - `factorio/rcon.rs` - RCON protocol implementation
   - `graph/entity_graph.rs` - Spatial entity relationships
-  - `graph/flow_graph.rs` - Material flow throughput. **Computed on every
-    world update and never read.** `flow_graph.update()` is called from
-    `process/output_parser.rs` and `factorio/snapshot.rs`, so it costs work on
-    every parser update — but no `condense()`, `node_at()`, `inner_graph()` or
+  - `graph/flow_graph.rs` - Material flow throughput. **Never read — but cheap, which I got
+    wrong first.** `flow_graph.update()` is called from
+    `process/output_parser.rs::on_init` and `factorio/snapshot.rs::attach_world`,
+    and an earlier version of this entry said that meant "work on every parser
+    update". It does not: `on_init` fires **once**, when Factorio logs
+    `initial discovery done`, and `attach_world` is the `--connect` path. The
+    traversal iterates only graph roots that are an offshore pump or a drill
+    with ore, of which a freshly-initialised world has essentially none. **So
+    there is no per-update cost to reclaim; the liability is dead code, not
+    CPU.** What is true is that no `condense()`, `node_at()`, `inner_graph()` or
     `graphviz_dot()` call exists anywhere outside the file and its own tests.
     Nothing in `crates/planner`, `crates/executor` or `crates/server` mentions
     it. So its numbers have never affected a decision, and **its hard-coded

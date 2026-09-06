@@ -749,3 +749,241 @@ fn every_key_serialize_entity_emits_is_a_field_of_factorio_entity() {
         "serialize_entity emits fourteen distinct keys across its branches; saw {seen:?}"
     );
 }
+
+/// A technology whose prototype carries `effects` verbatim as Lua source.
+fn technology_with_effects(lua: &Lua, effects: &str) -> Table {
+    lua.load(format!(
+        r#"
+        return {{
+            name = "steel-axe", enabled = true, upgrade = false, order = "c",
+            researched = false, level = 1, valid = true,
+            research_unit_count = 1, research_unit_energy = 0,
+            research_unit_ingredients = {{}},
+            prerequisites = {{ {{ name = "steel-processing" }} }},
+            prototype = {{ effects = {effects} }},
+        }}
+        "#
+    ))
+    .eval()
+    .expect("the technology table builds")
+}
+
+fn effects_of(lua: &Lua, effects: &str) -> Vec<(String, Option<f64>, Option<String>)> {
+    call(
+        lua,
+        "serialize_technology",
+        technology_with_effects(lua, effects),
+    )
+    .get::<Table>("effects")
+    .expect("serialize_technology sends an effects list")
+    .sequence_values::<Table>()
+    .map(|entry| {
+        let entry = entry.expect("an effect table");
+        (
+            entry
+                .get::<String>("kind")
+                .expect("every effect has a kind"),
+            entry
+                .get::<Option<f64>>("modifier")
+                .expect("modifier reads"),
+            entry.get::<Option<String>>("target").expect("target reads"),
+        )
+    })
+    .collect()
+}
+
+/// The shape `data/base/prototypes/technology.lua` writes for `steel-axe`:
+/// one `character-mining-speed` with `modifier = 1`.
+///
+/// **This is the datum the whole rate problem turned on.** The mod kept only
+/// `unlock-recipe`, so nothing downstream could know that this technology
+/// doubles hand mining, and the planner's inability to re-cost was a
+/// consequence rather than the cause.
+#[test]
+fn serialize_technology_sends_a_character_mining_speed_effect() {
+    let lua = botbridge_types();
+    assert_eq!(
+        effects_of(
+            &lua,
+            r#"{ { type = "character-mining-speed", modifier = 1 } }"#
+        ),
+        vec![("character-mining-speed".to_string(), Some(1.0), None)],
+    );
+}
+
+/// `unlock-recipe` still reaches `unlocked_recipes`, and now also appears in
+/// `effects` with its recipe as the target. Both keys are sent on purpose:
+/// every existing consumer reads the narrow one.
+#[test]
+fn serialize_technology_keeps_unlocked_recipes_and_lists_the_same_effect() {
+    let lua = botbridge_types();
+    let out = call(
+        &lua,
+        "serialize_technology",
+        technology_with_effects(
+            &lua,
+            r#"{ { type = "unlock-recipe", recipe = "steel-plate" },
+                 { type = "character-mining-speed", modifier = 1 } }"#,
+        ),
+    );
+    assert_eq!(
+        names(&out, "unlocked_recipes"),
+        vec!["steel-plate".to_string()],
+        "the narrow key must not have moved",
+    );
+    let effects: Vec<String> = out
+        .get::<Table>("effects")
+        .expect("effects")
+        .sequence_values::<Table>()
+        .map(|e| e.expect("effect").get::<String>("kind").expect("kind"))
+        .collect();
+    assert_eq!(
+        effects,
+        vec![
+            "unlock-recipe".to_string(),
+            "character-mining-speed".to_string()
+        ],
+        "effects carries the whole list, unlock-recipe included",
+    );
+}
+
+/// The two variants that do not spell their number `modifier`, and the
+/// boolean ones. Checked against `TechnologyModifier`'s variant parameter
+/// groups in `workspace/factorio-api-docs/runtime-api.json` at 2.1.17:
+/// `change-recipe-productivity` is `{change, recipe}`, `give-item` is
+/// `{count, item, quality}`, `mining-with-fluid` is `{modifier: boolean}`.
+#[test]
+fn serialize_technology_normalises_the_variants_that_spell_their_number_differently() {
+    let lua = botbridge_types();
+    assert_eq!(
+        effects_of(
+            &lua,
+            r#"{ { type = "change-recipe-productivity", change = 0.25, recipe = "sulfur" },
+                 { type = "give-item", count = 3, item = "iron-plate", quality = "normal" },
+                 { type = "mining-with-fluid", modifier = true },
+                 { type = "nothing", effect_description = "hello" } }"#
+        ),
+        vec![
+            (
+                "change-recipe-productivity".to_string(),
+                Some(0.25),
+                Some("sulfur".to_string())
+            ),
+            (
+                "give-item".to_string(),
+                Some(3.0),
+                Some("iron-plate".to_string())
+            ),
+            ("mining-with-fluid".to_string(), Some(1.0), None),
+            ("nothing".to_string(), None, None),
+        ],
+    );
+}
+
+/// The Lua the mod emits must load as the Rust type, which is the half a
+/// serialiser test alone cannot check.
+#[test]
+fn a_serialised_technology_effect_loads_as_the_rust_type() {
+    use factorio_bot_core::types::FactorioTechnology;
+    let lua = botbridge_types();
+    let out = call(
+        &lua,
+        "serialize_technology",
+        technology_with_effects(
+            &lua,
+            r#"{ { type = "character-mining-speed", modifier = 1 },
+                 { type = "unlock-recipe", recipe = "steel-plate" } }"#,
+        ),
+    );
+    let technology: FactorioTechnology = lua.from_value(Value::Table(out)).expect("deserialises");
+    assert_eq!(technology.effects.len(), 2);
+    assert_eq!(technology.effects[0].kind, "character-mining-speed");
+    assert_eq!(
+        technology.effects[0]
+            .modifier
+            .as_deref()
+            .copied()
+            .map(f64::from),
+        Some(1.0),
+    );
+    assert_eq!(technology.effects[1].target.as_deref(), Some("steel-plate"));
+}
+
+/// Every `LuaForce` rate bonus the mod now asks for reaches the record, and
+/// the record deserialises into `FactorioForce`.
+///
+/// The names come from `runtime-api.json` 2.1.17, class `LuaForce`. This test
+/// does not prove the game *has* them — nothing in a Rust suite can, and no
+/// run has yet been made with this mod — it proves the serialiser asks for
+/// each one by that name and forwards what it gets.
+#[test]
+fn serialize_force_sends_every_rate_bonus_it_asks_for() {
+    use factorio_bot_core::types::FactorioForce;
+    let lua = botbridge_types();
+    let force: Table = lua
+        .load(
+            r#"
+            return {
+                name = "player", index = 1, research_progress = 0.5,
+                current_research = nil,
+                manual_mining_speed_modifier = 1,
+                manual_crafting_speed_modifier = 0.25,
+                character_running_speed_modifier = 0.5,
+                laboratory_speed_modifier = 0.2,
+                laboratory_productivity_bonus = 0.1,
+                mining_drill_productivity_bonus = 0.3,
+                inserter_stack_size_bonus = 2,
+                bulk_inserter_capacity_bonus = 12,
+                belt_stack_size_bonus = 4,
+                worker_robots_speed_modifier = 0.35,
+                technologies = {},
+            }
+            "#,
+        )
+        .eval()
+        .expect("the force table builds");
+    let out = call(&lua, "serialize_force", force);
+    let force: FactorioForce = lua.from_value(Value::Table(out)).expect("deserialises");
+    let read =
+        |field: &Option<Box<noisy_float::types::R64>>| field.as_deref().copied().map(f64::from);
+    assert_eq!(read(&force.manual_mining_speed_modifier), Some(1.0));
+    assert_eq!(read(&force.manual_crafting_speed_modifier), Some(0.25));
+    assert_eq!(read(&force.character_running_speed_modifier), Some(0.5));
+    assert_eq!(read(&force.laboratory_speed_modifier), Some(0.2));
+    assert_eq!(read(&force.laboratory_productivity_bonus), Some(0.1));
+    assert_eq!(read(&force.mining_drill_productivity_bonus), Some(0.3));
+    assert_eq!(read(&force.inserter_stack_size_bonus), Some(2.0));
+    assert_eq!(read(&force.bulk_inserter_capacity_bonus), Some(12.0));
+    assert_eq!(read(&force.belt_stack_size_bonus), Some(4.0));
+    assert_eq!(read(&force.worker_robots_speed_modifier), Some(0.35));
+}
+
+/// A force payload captured before any of this existed — no `effects` key on
+/// the technology and no bonus keys on the force — must still load. There are
+/// 865 MB world dumps in this shape.
+#[test]
+fn a_payload_written_before_these_fields_existed_still_loads() {
+    use factorio_bot_core::types::FactorioForce;
+    let force: FactorioForce = serde_json::from_str(
+        r#"{
+          "name": "player", "force_id": 1,
+          "current_research": null, "research_progress": null,
+          "technologies": {
+            "automation": {
+              "name": "automation", "enabled": true, "upgrade": false,
+              "researched": false, "prerequisites": null,
+              "research_unit_ingredients": [], "research_unit_count": 10,
+              "research_unit_energy": 30.0, "order": "a", "level": 1,
+              "valid": true
+            }
+          }
+        }"#,
+    )
+    .expect("an old payload must still parse");
+    assert!(force.manual_crafting_speed_modifier.is_none());
+    assert!(force.laboratory_speed_modifier.is_none());
+    assert!(
+        force.technologies["automation"].effects.is_empty(),
+        "an absent effects key is an empty list, not a parse failure",
+    );
+}

@@ -11282,29 +11282,48 @@ mod tests {
         );
     }
 
-    /// The honest end of the ladder today: well charted, pumpjack mines it,
-    /// recipe open -- and no method sites one. Refused by the name of the
-    /// missing piece, not costed at zero.
+    /// Well charted, pumpjack mines it, recipe open: the ladder is out of
+    /// world-shaped refusals and the goal is **claimed**.
+    ///
+    /// **This test used to assert `ExtractionNotModelled` here**, and it is
+    /// the one assertion `method::extract`'s siting work had to move: nothing
+    /// sited a pumpjack until 2026-09-06 and now something does. What is left
+    /// at this rung on *this fixture* is an ordinary bill it cannot pay --
+    /// `fixture_world` has no way to make a steel plate, and a pumpjack costs
+    /// five. That is the right refusal and it comes from the ordinary
+    /// shortfall machinery, which is the point: the extraction ladder handed
+    /// the goal over rather than ending in a monument.
+    ///
+    /// The cell itself is tested in `method::extract`, where the bill is not
+    /// the wall.
     #[test]
-    fn an_extraction_goal_with_everything_in_place_names_the_unmodelled_cell() {
+    fn an_extraction_goal_with_everything_in_place_is_claimed_and_bills_the_machine() {
         let s = oil_state(OilFixture {
             pumpjack: PumpjackRecipe::LockedBy { researched: true },
             ..OIL
         });
+        assert!(
+            crate::method::extract::Extract.applicable(
+                &Goal::Extracted {
+                    entity: "crude-oil".into(),
+                    unlocks: Some("oil-processing".into()),
+                },
+                &s
+            ),
+            "with the well charted and the recipe open, the goal must be \
+             claimed rather than refused"
+        );
         let err = expand(
             &[Goal::Researched("oil-processing".into())],
             &s,
             &registry_for(&[BotId(1)]),
             BotId(1),
         )
-        .expect_err("nothing sites a pumpjack yet");
-        match &err {
-            PlannerError::ExtractionNotModelled { entity, extractor } => {
-                assert_eq!(entity, "crude-oil");
-                assert_eq!(extractor, "pumpjack");
-            }
-            other => panic!("expected ExtractionNotModelled, got {other}"),
-        }
+        .expect_err("this fixture cannot make a steel plate");
+        assert!(
+            err.to_string().contains("steel-plate"),
+            "the refusal should now be the pumpjack's own bill, got {err}"
+        );
     }
 
     /// `Goal::Extracted` stated directly -- what a script will say once it

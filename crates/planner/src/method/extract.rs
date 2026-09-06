@@ -7,9 +7,26 @@
 //! (verified live 2026-09-04). The game satisfies that trigger when a
 //! **pumpjack** extracts from a well.
 //!
-//! **No method sites a pumpjack yet**, so [`Extract`] claims nothing. What it
-//! does is answer [`crate::method::Method::refusal`] with the *next missing
-//! prerequisite*, in the order a reader can act on them:
+//! # What this method claims, and what it still refuses
+//!
+//! Since 2026-09-06 [`Extract`] **sites the extractor**: it picks a charted
+//! tile of the resource, crafts the machine, carries electric supply to it
+//! and places it there, hanging the technology's `Effect::Researched` on that
+//! placement the same way [`crate::method::have::attach_unlock`] hangs one on
+//! a craft or a mining action.
+//!
+//! **No fluid is modelled, on purpose.** `oil-processing`'s trigger is
+//! `{type = "mine-entity", entities = {"crude-oil"}}` and the game fires it
+//! natively when a pumpjack extracts -- it is one of the triggers
+//! `docs/superpowers/notes/2026-09-05-research-triggers.md` measured firing
+//! with no emulation at all, alongside a fuelled burner drill. So the goal is
+//! satisfied by *a powered pumpjack standing on a well and running*, and where
+//! the petroleum gas then goes is a separate problem with a separate owner.
+//! A pumpjack with nothing connected fills its own output fluidbox and stops,
+//! which is many extractions after the first.
+//!
+//! What it still answers [`crate::method::Method::refusal`] with is the *next
+//! missing prerequisite*, in the order a reader can act on them:
 //!
 //! 1. the entity is not charted anywhere the plan can see --
 //!    [`PlannerError::NotCharted`], with where charted ground ends;
@@ -28,15 +45,162 @@
 //! place. The last two are asked where the goal is reached, after those
 //! prerequisites have been planned, so that a research already in the plan
 //! is seen as done.
+//!
+//! **Tiers 1 to 3 still decide whether this method claims the goal at all**
+//! ([`Extract::applicable`]), which is what keeps them being answered by
+//! [`Method::refusal`] rather than by an expansion that has already started
+//! spending. Tier 4 changed meaning rather than disappearing: it is now what
+//! is said when the extractor is one this planner cannot **power** -- either
+//! because [`crate::state::PlanState::consumer_draw_kw`] does not name its
+//! draw, or because no run of poles this method can lay brings a generating
+//! network to it. Both are honest readings of "the cell is not modelled", and
+//! naming them keeps the variant reachable instead of leaving it as a
+//! monument.
+//!
+//! # Power, and the one thing that is *not* here
+//!
+//! A pumpjack is 90 kW electric ([`crate::state::PlanState::consumer_draw_kw`]
+//! carries the number). Power coverage is not power capacity, so this asks
+//! [`crate::method::power::supply_for`] -- which adopts a standing network
+//! with real headroom, finishes a half-built plant, or sites a new one at
+//! water -- and then re-checks the *consumer's own* [`Condition::Powered`],
+//! which is a headroom test and not a coverage test.
+//!
+//! Between that supply and the well there may be a gap, and on a real map
+//! there usually is: a well charted 300 tiles out is nowhere near a lake, and
+//! `method::power` sites its plant at the water because water is the one input
+//! that cannot be moved. So this lays a **straight run of small electric
+//! poles** from the supplying pole to a pole covering the extractor. It is
+//! deliberately the dumbest router that can be right:
+//!
+//! * the spacing is [`POLE_STEP`], comfortably inside a small pole's wire
+//!   reach, so tile snapping cannot silently break a link;
+//! * every pole stands on a tile [`PlanState::is_area_free`] accepts and the
+//!   game has not already refused a build at;
+//! * and the whole run is **verified by the game's own rule, not by this
+//!   module's arithmetic**: the final check is `Condition::Powered` evaluated
+//!   against a fork carrying every pole, which walks
+//!   [`crate::state::PlanState`]'s union-find over the poles' real wire
+//!   distances. If that says no, the run is refused rather than emitted.
+//!
+//! There is no medium or big pole, and no notion of what the wood costs. A run
+//! that cannot get past a lake refuses; it does not tunnel. That is the same
+//! scope line `method::connect` draws for underground belts, and for the same
+//! reason -- a half-built power line is worse than none.
+//!
+//! # The ceiling, measured: a well more than ~64 tiles from generation refuses
+//!
+//! **`crate::state`'s `POWER_SEARCH_RADIUS` is 64 tiles**, and it bounds the
+//! entities `PlanState::electric_supply_kw` will look at when answering
+//! `Condition::Powered` for a consumer. So a pole run longer than that carries
+//! power the *model* cannot see: the generator at the far end is outside the
+//! window, the condition answers "not powered", and this method refuses --
+//! correctly, because the scheduler checks the same condition and would refuse
+//! the placement anyway.
+//!
+//! It is a bound rather than a physical limit (its own doc says so: there is no
+//! "every entity" query on `EntityGraph`, and an unbounded scan per condition
+//! check would be a full pass over the map), but it is binding here, and it is
+//! the reason this method's reach is ~64 tiles rather than
+//! [`MAX_POLE_RUN`]'s ~380.
+//!
+//! Measured offline on the seed-31337 dump with a crude-oil patch charted into
+//! it (see `docs/superpowers/notes/2026-09-06-a-pumpjack-on-a-well.md`):
+//!
+//! | well | plant pole to well | result |
+//! |---|---:|---|
+//! | `[80.5, -39.5]` | ~52 tiles | **plans**: 10 poles, pumpjack placed |
+//! | `[150.5, 40.5]` | ~121 tiles | refuses, `ExtractionNotModelled` |
+//! | `[300.5, 100.5]` | ~281 tiles | refuses, `PowerPlantNeedsWater` (no lake) |
+//!
+//! `a_pole_chain_past_the_power_search_radius_is_not_seen` pins the fact
+//! itself, against `PlanState` rather than against this module, so it moves
+//! when that constant does. **Raising it is a change to `crate::state` and is
+//! not this module's to make.**
 
+use crate::action::{Action, ActionKind, Actor, Condition, Effect};
 use crate::error::PlannerError;
-use crate::goal::Goal;
-use crate::method::util::{RecipeGate, recipe_for, recipe_gate};
+use crate::goal::{Goal, Holder};
+use crate::ids::ActionId;
+use crate::method::have::PLACE_TICKS;
+use crate::method::power::{POLE, Supply, entity_for, plant_steps, supply_for};
+use crate::method::util::{RecipeGate, recipe_for, recipe_gate, tile_alignment_facing};
 use crate::method::{ExpansionCtx, Method, Step};
 use crate::state::PlanState;
-use factorio_bot_core::types::Position;
+use factorio_bot_core::factorio::util::calculate_distance;
+use factorio_bot_core::types::{Direction, Position};
 
-/// The refusal for [`Goal::Extracted`]. Claims nothing; see the module doc.
+/// How far from the extractor a *standing* network is looked for before one is
+/// built, in tiles.
+///
+/// The same number and the same reasoning as `method::have`'s
+/// `LAB_SEARCH_RADIUS` and `method::assemble`'s `ANCHOR_SEARCH_RADIUS`: it is
+/// only the cheap first tier of [`supply_for`], which widens to
+/// [`crate::method::power::PLANT_ADOPT_RADIUS`] on its own before it will
+/// build anything. Changing it moves work between tiers and changes no
+/// answer that tier 2 would not have given.
+pub const SUPPLY_SEARCH_RADIUS: f64 = 64.;
+
+/// `Direction::North` as the wire byte a `FactorioEntity` carries.
+///
+/// A pumpjack's facing decides where its output fluidbox points and nothing
+/// else about whether it extracts, so every placement here is north. Written
+/// as the constant rather than converted, because `Direction`'s numeric
+/// conversion is a `num_traits` method and importing that trait for one call
+/// reads as though the value were computed.
+const NORTH: u8 = 0;
+
+/// A small electric pole's copper-wire reach, in tiles, from vanilla 2.1.
+///
+/// **A second copy of a number `crate::state`'s `pole_wire_reach` already
+/// holds**, and that is worth saying out loud rather than hiding: that table
+/// is private and this module is not allowed to widen it. So the duplicate is
+/// pinned *behaviourally* instead of by inspection --
+/// `two_poles_a_wire_reach_apart_are_one_network` builds two poles at exactly
+/// this distance and at half a tile more, and asks
+/// [`crate::state::PlanState`] itself which pairs share a network. A test that
+/// merely compared this constant to a copy of itself would agree with the code
+/// that wrote it, which is the failure
+/// `docs/superpowers/notes/2026-09-06-fixtures-agree-with-their-code.md` is
+/// about.
+///
+/// Nothing in [`pole_run`] *depends* on it being right: the run's final check
+/// is the game's rule evaluated over a fork. Getting it wrong makes a run
+/// refuse, or lay more poles than it needed; it cannot make one that does not
+/// carry power read as one that does.
+pub const WIRE_REACH: f64 = 7.5;
+
+/// How far apart [`pole_run`] aims to put consecutive poles, in tiles.
+///
+/// Strictly less than [`WIRE_REACH`], and the margin is not decorative. A pole
+/// is placed on a tile, so a nominal point is snapped to a tile centre, and
+/// [`free_area_near_where`] may then move it a further ring or two to find
+/// free ground. At exactly the reach, either of those pushes the pair out of
+/// contact and the link is silently gone -- silently, because a broken wire
+/// looks exactly like a pole that is standing. 6.0 leaves 1.5 tiles of slack,
+/// which covers the half-tile of snapping plus one ring of search, and costs
+/// one extra pole per 30 tiles of run.
+pub const POLE_STEP: f64 = 6.;
+
+/// The longest pole run this method will lay, in poles.
+///
+/// **A bill bound, not a distance bound.** The walk is already priced by
+/// [`crate::schedule`], exactly as `method::power`'s `PLANT_WATER_SCAN_RADIUS`
+/// doc argues, so distance alone is a worse plan rather than an impossible
+/// one. What is *not* already priced is the wood: a small electric pole is
+/// half a wood plus a copper cable, a four-bot run starts with four wood, and
+/// everything beyond that is trees to be chopped. 64 poles is 32 wood and
+/// about 380 tiles of run at [`POLE_STEP`] -- past the 256-to-384 tiles at
+/// which seed 31337's first crude oil is charted, and far enough that a longer
+/// one wants a big-pole run and a real argument rather than a bigger number
+/// here.
+///
+/// Exceeding it is [`PlannerError::ExtractionNotModelled`], which is the
+/// truth: carrying power that far is a thing this planner does not model.
+pub const MAX_POLE_RUN: usize = 64;
+
+/// The refusal for [`Goal::Extracted`], and -- since 2026-09-06 -- the method
+/// that sites the extractor. See the module doc.
 pub struct Extract;
 
 impl Method for Extract {
@@ -44,17 +208,223 @@ impl Method for Extract {
         "extract"
     }
 
-    /// Never. Nothing here can stand an extractor up, and claiming the goal
-    /// only to refuse in `expand` would keep the driver from asking every
-    /// other method for a refusal first.
-    fn applicable(&self, _goal: &Goal, _state: &PlanState) -> bool {
-        false
+    /// Only when the world can answer tiers 1 to 3 of the ladder: the
+    /// resource is charted, something mines it, and that machine's recipe is
+    /// open or already being researched by this plan.
+    ///
+    /// **Deliberately not "when the whole thing would work."** Whether there
+    /// is clear ground on the patch and whether power can reach it are
+    /// findings this method has to *do the work* to discover, and a caller is
+    /// better served by `expand`'s named error than by a bare
+    /// `NoApplicableMethod` from the driver. The three tiers above are cheap
+    /// and are the ones whose answer belongs in [`Method::refusal`], because
+    /// they are the ones `Researched` asks before it plans a hundred science
+    /// packs.
+    fn applicable(&self, goal: &Goal, state: &PlanState) -> bool {
+        let Goal::Extracted { entity, .. } = goal else {
+            return false;
+        };
+        // `origin_of` needs a context; a refusal about charting is measured
+        // from the actor, but *whether* the resource is charted at all is not,
+        // and that is the only half applicability needs.
+        if !state.has_resource_patches(entity) {
+            return false;
+        }
+        let Ok(extractor) = extractor_for(state, entity) else {
+            return false;
+        };
+        let Some(recipe) = recipe_for(state, &extractor) else {
+            return false;
+        };
+        matches!(
+            recipe_gate(state, &recipe),
+            RecipeGate::Open | RecipeGate::PlannedResearch(_)
+        )
     }
 
-    fn expand(&self, goal: &Goal, _ctx: &mut ExpansionCtx) -> Result<Vec<Step>, PlannerError> {
-        Err(PlannerError::NoApplicableMethod {
-            goal: goal.to_string(),
-        })
+    fn expand(&self, goal: &Goal, ctx: &mut ExpansionCtx) -> Result<Vec<Step>, PlannerError> {
+        let Goal::Extracted { entity, unlocks } = goal else {
+            return Err(PlannerError::NoApplicableMethod {
+                goal: goal.to_string(),
+            });
+        };
+        let origin = origin_of(ctx);
+        // The ladder again, in full, and not only the half `applicable`
+        // checked: a method's `expand` is reachable from tests and from a
+        // future caller that never consulted `applicable`, and refusing here
+        // by name is cheaper than refusing later by accident.
+        if let Some(refusal) = world_refusal(&ctx.state, entity, &origin) {
+            return Err(refusal);
+        }
+        let extractor = extractor_for(&ctx.state, entity)?;
+        match recipe_for(&ctx.state, &extractor).map(|r| recipe_gate(&ctx.state, &r)) {
+            Some(RecipeGate::Open) | Some(RecipeGate::PlannedResearch(_)) => {}
+            Some(RecipeGate::NeedsResearch(technology)) => {
+                return Err(PlannerError::ExtractorLocked {
+                    entity: entity.clone(),
+                    extractor,
+                    technology,
+                });
+            }
+            Some(RecipeGate::Unobtainable) => {
+                return Err(PlannerError::NoExtractor {
+                    entity: entity.clone(),
+                    why: format!(
+                        "a {extractor} mines it, and its recipe is disabled with no technology \
+                         to unlock it"
+                    ),
+                });
+            }
+            None => {
+                return Err(PlannerError::NoExtractor {
+                    entity: entity.clone(),
+                    why: format!("a {extractor} mines it, and no recipe in this world makes one"),
+                });
+            }
+        }
+        // An extractor whose draw this planner does not know is one it cannot
+        // decide is powered, and `Condition::Powered` would read the silence
+        // as zero draw and pass. That is the one table in `crate::state` whose
+        // unknown name errs towards permitting, so this refuses on its behalf.
+        let Some(kw) = ctx.state.consumer_draw_kw(&extractor) else {
+            return Err(PlannerError::ExtractionNotModelled {
+                entity: entity.clone(),
+                extractor,
+            });
+        };
+
+        let site = choose_site(&ctx.state, entity, &extractor, &origin)?;
+        let Some(area) = ctx.state.collision_area(&extractor, &site) else {
+            // Unreachable in practice: `choose_site` only returns a tile
+            // `is_area_free_facing` accepted, which needs the same prototype.
+            return Err(PlannerError::ExtractionNotModelled {
+                entity: entity.clone(),
+                extractor,
+            });
+        };
+
+        let mut steps: Vec<Step> = Vec::new();
+        // The machine itself, first, for the same reason `power::plant_steps`
+        // bills before it places: a shortfall refuses before any ground is
+        // reserved.
+        steps.push(Step::Subgoal(Goal::Have {
+            item: extractor.clone(),
+            count: 1,
+            whose: Holder::Share(ctx.chain_actor),
+        }));
+
+        let mut power_ids: Vec<ActionId> = Vec::new();
+        let powered = Condition::Powered {
+            pos: site.clone(),
+            entity: extractor.clone(),
+            kw,
+        };
+        if !powered.holds(&ctx.state, ctx.chain_actor) {
+            let anchor = match supply_for(&ctx.state, &site, SUPPLY_SEARCH_RADIUS, kw)? {
+                Supply::Standing(anchor) => anchor,
+                Supply::Build(plant) => {
+                    let pole = plant.pole.clone();
+                    let (built, links) = plant_steps(ctx, &plant);
+                    steps.extend(built);
+                    power_ids.extend(links);
+                    pole
+                }
+            };
+            // The extractor's own ground goes into the fork *before* the pole
+            // search, so a pole cannot be sited on the tile the machine is
+            // about to stand on. It is not reserved in `ctx.state` yet --
+            // that happens with its `Place` below, so a refusal between here
+            // and there leaves nothing behind.
+            let mut trial = ctx.state.fork();
+            trial.create_entity(extractor_entity(&trial, &extractor, &site));
+            let run = pole_run(&mut trial, &anchor, &site, &area, &powered, ctx.chain_actor)?
+                .ok_or_else(|| PlannerError::ExtractionNotModelled {
+                    entity: entity.clone(),
+                    extractor: extractor.clone(),
+                })?;
+            for pole in run {
+                steps.push(Step::Subgoal(Goal::Have {
+                    item: POLE.into(),
+                    count: 1,
+                    whose: Holder::Share(ctx.chain_actor),
+                }));
+                let (step, id) = place_step(ctx, POLE, &pole);
+                steps.push(step);
+                power_ids.push(id);
+            }
+        }
+
+        let build = ctx
+            .state
+            .bot(ctx.chain_actor)
+            .map(|b| b.build_distance)
+            .unwrap_or(10.0);
+        let entity_to_place = extractor_entity(&ctx.state, &extractor, &site);
+        let place_id = ctx.ids.next();
+        let mut eff = vec![
+            Effect::LoseItem {
+                who: Actor::Role,
+                item: extractor.clone(),
+                count: 1,
+            },
+            Effect::CreateEntity(Box::new(entity_to_place.clone())),
+        ];
+        // The unlock rides on the placement, which is the action that makes
+        // the machine exist and therefore the last one this plan performs
+        // before the game's own trigger fires. `attach_unlock` cannot be used:
+        // it finds its action by an `Effect::GainItem` for the goal's item,
+        // and nothing here gains an item -- what comes out of a well is a
+        // fluid no inventory can hold, which is why `Goal::Extracted` is not a
+        // `Goal::Produced` in the first place.
+        if let Some(tech) = unlocks {
+            eff.push(Effect::Researched(tech.clone()));
+        }
+        steps.push(Step::Act(Box::new(Action {
+            id: place_id,
+            kind: ActionKind::Place {
+                entity: Box::new(entity_to_place.clone()),
+            },
+            pre: vec![
+                Condition::AtPosition {
+                    who: Actor::Role,
+                    pos: site.clone(),
+                    radius: build,
+                    min_radius: ctx.state.placement_clearance(&extractor).unwrap_or(0.0),
+                },
+                Condition::AreaFree {
+                    pos: site.clone(),
+                    entity: extractor.clone(),
+                    direction: NORTH,
+                },
+                Condition::HasItem {
+                    who: Actor::Role,
+                    item: extractor.clone(),
+                    count: 1,
+                },
+                // Coverage is not capacity: this is the headroom test, and it
+                // is what makes the plant or the pole run above load-bearing
+                // rather than decorative.
+                powered,
+            ],
+            eff,
+            duration: PLACE_TICKS,
+            pinned: None,
+            label: format!("place {extractor} at {site}"),
+        })));
+        ctx.state.create_entity(entity_to_place);
+
+        // Nothing satisfies `Condition::Powered`, so `infer_edges` draws no
+        // edge from the plant or the poles to the placement that needs them --
+        // the same gap `power::plant_steps` hands its ids back to close. The
+        // method holds both ends, so the method states the edges.
+        for id in power_ids {
+            steps.push(Step::Link {
+                from: id,
+                to: place_id,
+                lag: 0,
+            });
+        }
+        Ok(steps)
     }
 
     fn refusal(&self, goal: &Goal, ctx: &ExpansionCtx) -> Option<PlannerError> {
@@ -175,5 +545,1172 @@ pub(crate) fn refusal_for(state: &PlanState, entity: &str, origin: &Position) ->
             entity: entity.to_string(),
             extractor,
         },
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Siting
+// ---------------------------------------------------------------------------
+
+/// The `FactorioEntity` an extractor placement creates.
+///
+/// The same body as [`crate::method::power::entity_for`], and written out
+/// rather than called for one reason: `PlantPart::name` is a `&'static str`
+/// because a plant is made of six named constants, while an extractor's name
+/// is read out of the world at expansion time and has no static lifetime.
+/// `entity_for` is still used for the poles, which *are* a constant.
+///
+/// `entity_type` is read from the prototype rather than guessed -- a
+/// pumpjack's is `mining-drill`, which is not its name, and `EntityGraph::add`
+/// keys its whitelist on the pair.
+fn extractor_entity(
+    state: &PlanState,
+    name: &str,
+    position: &Position,
+) -> factorio_bot_core::types::FactorioEntity {
+    let entity_type = state
+        .base()
+        .entity_prototypes
+        .get(name)
+        .map(|proto| proto.entity_type.clone())
+        .unwrap_or_else(|| name.to_string());
+    factorio_bot_core::types::FactorioEntity {
+        name: name.to_string(),
+        entity_type,
+        position: position.clone(),
+        direction: NORTH,
+        ..Default::default()
+    }
+}
+
+/// Which charted tile of `entity` the extractor stands on.
+///
+/// **Nearest to the actor first, and every charted tile is a candidate.**
+/// There is no radius bound, for the reason `method::power`'s
+/// `PLANT_WATER_SCAN_RADIUS` doc sets out at length: the walk is already
+/// priced by [`crate::schedule`], so a distant well is a *worse plan* rather
+/// than an impossible one, and a bound here would refuse a journey the run
+/// makes routinely. The cost of looking is small -- crude oil is seven charted
+/// tiles on seed 31337 after one exploration ring, against iron's 2,452.
+///
+/// # Centred on the well, not beside it
+///
+/// A `mining-drill` works the tiles inside its own `mining_drill_radius`
+/// (`FactorioEntityPrototype::mining_drill_radius`, captured live since
+/// `14c54bbf`), and a **pumpjack's is 0.49** -- one tile, the one it is centred
+/// on, despite a 3x3 collision box. Reading the box as the working area places
+/// the machine on eight tiles that yield nothing. Centring on the resource tile
+/// is the choice that is right at *every* radius, including that one, so
+/// nothing here reads the field: it is `None` on every dump written before
+/// today (`workspace/scripts/map.json` included), and `None` means **unknown
+/// reach, never zero reach**. A siting rule that needed the number would give
+/// the right answer for a pumpjack by accident and the wrong one for
+/// everything else.
+///
+/// # The half-tile
+///
+/// [`crate::state::PlanState::resource_patches`] hands back tile **centres**:
+/// `EntityGraph`'s `resources` map is keyed by `Pos`, which floors, and
+/// `resource_patches` puts the `.5` back before the positions leave the
+/// process. A pumpjack's collision box is 2.4 tiles across, so its own
+/// placement grid is tile centres too -- the two agree, and the candidate is
+/// used exactly as it arrives. Rounding it would reintroduce the corner-for-
+/// centre bug that once made mining fail for every ore on every map while
+/// every test passed, because the test helper builds ore at integer positions,
+/// the one input for which the lossy round trip is lossless.
+/// [`the_sited_tile_is_a_resource_entitys_own_position`] is that claim as a
+/// test, asserted against a resource entity's position rather than against
+/// this function's own arithmetic.
+///
+/// Deterministic: `(distance, x, y)` with `total_cmp`, over patches whose own
+/// elements `PlanState::resource_patches` has already sorted.
+fn choose_site(
+    state: &PlanState,
+    entity: &str,
+    extractor: &str,
+    origin: &Position,
+) -> Result<Position, PlannerError> {
+    let mut tiles: Vec<(f64, Position)> = state
+        .resource_patches(entity)
+        .into_iter()
+        .flat_map(|patch| patch.elements)
+        .map(|position| (calculate_distance(&position, origin), position))
+        .collect();
+    tiles.sort_by(|a, b| {
+        a.0.total_cmp(&b.0)
+            .then(a.1.x.total_cmp(&b.1.x))
+            .then(a.1.y.total_cmp(&b.1.y))
+    });
+    let searched = tiles
+        .last()
+        .map(|(distance, _)| *distance)
+        .unwrap_or_default();
+    // A machine has to sit on its own build grid, and an even footprint's grid
+    // is tile *boundaries* while a resource entity is always a tile *centre*.
+    // The two coincide for a pumpjack (3x3, odd) and do not for a
+    // `burner-mining-drill` (2x2, even), so a centred burner drill is an
+    // illegal position rather than a tight fit. Refusing here is the honest
+    // answer: nothing in this method knows how to work a well from beside it.
+    let (grid_x, grid_y) = tile_alignment_facing(state, extractor, Direction::North);
+    let on_grid = |p: &Position| {
+        let fract = |v: f64, offset: f64| (v - offset).fract().abs() < 1. / 512.;
+        fract(p.x(), grid_x) && fract(p.y(), grid_y)
+    };
+    let mut obstruction: Option<String> = None;
+    for (_, tile) in &tiles {
+        if !on_grid(tile) {
+            obstruction.get_or_insert_with(|| {
+                format!(
+                    "a {extractor} does not stand on a tile centre, and a \
+                     resource entity is always at one"
+                )
+            });
+            continue;
+        }
+        if state.is_site_refused(extractor, tile) {
+            obstruction.get_or_insert_with(|| {
+                "a footprint the game already refused a build at".to_string()
+            });
+            continue;
+        }
+        if state.is_area_free_facing(extractor, tile, Direction::North) {
+            return Ok(tile.clone());
+        }
+        if let Some(occupant) = state.placement_occupant(extractor, tile, Direction::North) {
+            obstruction.get_or_insert_with(|| occupant.to_string());
+        }
+    }
+    Err(PlannerError::NoSiteFound {
+        entities: 1,
+        seed: origin.to_string(),
+        searched: searched.ceil() as i32,
+        nearest_obstruction: obstruction
+            .unwrap_or_else(|| format!("no {entity} tile is charted at all")),
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Carrying power to the site
+// ---------------------------------------------------------------------------
+
+/// The poles that join the network at `anchor` to the extractor standing at
+/// `site` with footprint `area`, in build order and **including** the pole
+/// that covers the extractor itself.
+///
+/// `trial` is mutated: every pole chosen is created in it, so the next ring
+/// search cannot pick a tile an earlier pole took. The caller passes a fork
+/// that already carries the extractor.
+///
+/// `Ok(None)` means "no run of at most [`MAX_POLE_RUN`] poles carries it",
+/// which the caller turns into [`PlannerError::ExtractionNotModelled`].
+/// `Err` is only what a `Have` shortfall would raise, which cannot happen
+/// here -- the bill is emitted by the caller.
+///
+/// # It refuses before it emits, and the refusal is the game's own rule
+///
+/// Nothing is returned unless `powered` -- the extractor's own
+/// [`Condition::Powered`], a headroom test -- holds against `trial` with every
+/// pole in it. That check walks [`crate::state::PlanState`]'s union-find over
+/// the poles' real wire distances and its own supply-area table, so a run that
+/// this module's [`POLE_STEP`] arithmetic thought was fine but the game would
+/// not wire together is refused rather than built. A half-built power line is
+/// worse than none: the machine stands, draws nothing, and reads as placed.
+fn pole_run(
+    trial: &mut PlanState,
+    anchor: &Position,
+    site: &Position,
+    area: &factorio_bot_core::types::Rect,
+    powered: &Condition,
+    actor: crate::ids::BotId,
+) -> Result<Option<Vec<Position>>, PlannerError> {
+    // The pole that covers the machine. Sited first, because it is the one
+    // whose position is constrained by something other than the run.
+    //
+    // A ring search of this module's own rather than `free_area_near_where`'s,
+    // for one reason: that helper **refuses any candidate covering ore**, and
+    // the tile this pole has to reach is by construction the middle of a
+    // resource patch. That rule is right for the buildings it was written for
+    // and wrong here -- a pole collides on nothing a resource carries, and the
+    // game builds one straight over a patch.
+    let head = {
+        let snapshot = trial.fork();
+        match ring_search(&snapshot, site, |candidate| {
+            snapshot.pole_would_supply(POLE, candidate, area)
+        }) {
+            Some(head) => head,
+            None => return Ok(None),
+        }
+    };
+    let Some(path) = route_poles(trial, anchor, &head) else {
+        return Ok(None);
+    };
+    for pole in &path {
+        trial.create_entity(entity_for(
+            trial,
+            &crate::method::power::PlantPart {
+                name: POLE,
+                position: pole.clone(),
+                direction: Direction::North,
+            },
+        ));
+    }
+
+    // The one check that matters, and the only one not made of this module's
+    // own arithmetic: the game's rule, over a fork carrying every pole.
+    if !powered.holds(trial, actor) {
+        return Ok(None);
+    }
+    Ok(Some(path))
+}
+
+/// How far a pole may be looked for around a nominal tile, in tiles.
+///
+/// The same 12 as `method::util::FREE_TILE_SEARCH_RADIUS`, which is what every
+/// other siting search in this crate uses; stated here because this module
+/// does its own ring search (see [`pole_run`] on why) and a search that quietly
+/// used a different radius from the rest of the crate would make "no room"
+/// mean two things.
+const POLE_SEARCH_RADIUS: i32 = 12;
+
+/// The nearest tile centre to `from`, outwards in fixed rings, on which a small
+/// electric pole could stand and which `accept` allows.
+///
+/// A pole is one tile, so its build grid is tile centres and the candidate is
+/// `floor + 0.5` -- the same half-tile convention as a resource entity, and
+/// the reason this can compare candidates against a well's own position without
+/// converting anything.
+fn ring_search(
+    state: &PlanState,
+    from: &Position,
+    accept: impl Fn(&Position) -> bool,
+) -> Option<Position> {
+    let base_x = from.x().floor() as i32;
+    let base_y = from.y().floor() as i32;
+    for radius in 0..=POLE_SEARCH_RADIUS {
+        for dy in -radius..=radius {
+            for dx in -radius..=radius {
+                if dx.abs() != radius && dy.abs() != radius {
+                    continue;
+                }
+                let candidate =
+                    Position::new(f64::from(base_x + dx) + 0.5, f64::from(base_y + dy) + 0.5);
+                if !state.is_area_free(POLE, &candidate) || state.is_site_refused(POLE, &candidate)
+                {
+                    continue;
+                }
+                if accept(&candidate) {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// How many pole sites [`route_poles`] may examine before giving up.
+///
+/// A budget rather than a bound on the answer: the search is best-first, so on
+/// open ground it walks almost straight to the head and spends a few dozen
+/// nodes for a run of ten poles. The budget is what stops a run that is walled
+/// in -- a lake across the whole approach, say -- from expanding a disc of
+/// candidates until somebody's patience runs out. It buys about
+/// [`MAX_POLE_RUN`] detours' worth of exploration, which is far more than any
+/// run this planner would want to build.
+const ROUTE_BUDGET: usize = 4_000;
+
+/// A run of pole sites from `anchor` to `head`, each within [`WIRE_REACH`] of
+/// the last, **excluding** the anchor and **including** the head.
+///
+/// # Why this is a search and not a straight line
+///
+/// It was a straight line for exactly one measurement. On the seed-31337 dump
+/// with a well charted at `[80.5, -40.5]`, the line from the power plant's pole
+/// ran into ground it could not stand on at `[54.3, -24.1]` and the whole cell
+/// refused -- on a map that is covered in trees, rocks and water, which is
+/// every real map. A router that only works on a billiard table is a router
+/// that always refuses.
+///
+/// So: best-first over pole sites, expanding the frontier node nearest the head
+/// first. Each node offers sixteen compass directions at three step lengths,
+/// which gives the search a way *around* an obstacle rather than only through
+/// it, and every candidate is a real free tile checked against the same state
+/// the placements will be made in.
+///
+/// Deterministic by construction: the frontier is ordered `(distance to head,
+/// x, y)` with `total_cmp`, the direction and step tables are fixed, and
+/// `visited` is a `BTreeSet` of integer tiles. Nothing reads a hash order.
+///
+/// **It is still not a good router.** It knows nothing about the cost of the
+/// wood it is spending, it will happily take a long way round, and it has no
+/// notion of sharing a run with another consumer. What it has is the property
+/// that matters here: it either returns a run every hop of which stands on
+/// ground the plan believes is free, or it returns nothing.
+fn route_poles(state: &PlanState, anchor: &Position, head: &Position) -> Option<Vec<Position>> {
+    /// The sixteen compass directions, as unit-ish vectors. Sixteen rather
+    /// than eight so a detour can leave at a shallow angle instead of turning
+    /// 45 degrees.
+    fn directions() -> Vec<(f64, f64)> {
+        (0..16)
+            .map(|i| {
+                let theta = std::f64::consts::TAU * f64::from(i) / 16.;
+                (theta.cos(), theta.sin())
+            })
+            .collect()
+    }
+    // Long steps first: the shorter ones exist to squeeze past an obstacle,
+    // not to be preferred. `POLE_STEP` itself is the nominal.
+    let steps = [POLE_STEP, POLE_STEP * 0.66, POLE_STEP * 0.4];
+
+    let tile = |p: &Position| (p.x().floor() as i32, p.y().floor() as i32);
+    let mut came_from: std::collections::BTreeMap<(i32, i32), Position> =
+        std::collections::BTreeMap::new();
+    let mut parent: std::collections::BTreeMap<(i32, i32), (i32, i32)> =
+        std::collections::BTreeMap::new();
+    let mut visited: std::collections::BTreeSet<(i32, i32)> = std::collections::BTreeSet::new();
+    let mut frontier: Vec<Position> = vec![anchor.clone()];
+    came_from.insert(tile(anchor), anchor.clone());
+    visited.insert(tile(anchor));
+    let mut examined = 0usize;
+
+    while !frontier.is_empty() {
+        examined += 1;
+        if examined > ROUTE_BUDGET {
+            return None;
+        }
+        // Nearest the head first, ties by x then y so the answer depends on
+        // the geometry and not on insertion order.
+        let (index, _) = frontier.iter().enumerate().min_by(|(_, a), (_, b)| {
+            calculate_distance(a, head)
+                .total_cmp(&calculate_distance(b, head))
+                .then(a.x.total_cmp(&b.x))
+                .then(a.y.total_cmp(&b.y))
+        })?;
+        let node = frontier.remove(index);
+
+        if calculate_distance(&node, head) <= WIRE_REACH {
+            // Walk the parents back, then reverse: the anchor is dropped (it
+            // already stands) and the head is appended.
+            let mut run: Vec<Position> = Vec::new();
+            let mut at = tile(&node);
+            while at != tile(anchor) {
+                run.push(came_from.get(&at)?.clone());
+                at = *parent.get(&at)?;
+            }
+            run.reverse();
+            if run.len() + 1 > MAX_POLE_RUN {
+                return None;
+            }
+            run.push(head.clone());
+            return Some(run);
+        }
+
+        for (dx, dy) in directions() {
+            for step in steps {
+                let nominal = Position::new(node.x() + dx * step, node.y() + dy * step);
+                let candidate = Position::new(nominal.x().floor() + 0.5, nominal.y().floor() + 0.5);
+                let key = tile(&candidate);
+                if visited.contains(&key) {
+                    continue;
+                }
+                if calculate_distance(&candidate, &node) > WIRE_REACH {
+                    continue;
+                }
+                if !state.is_area_free(POLE, &candidate) || state.is_site_refused(POLE, &candidate)
+                {
+                    continue;
+                }
+                visited.insert(key);
+                came_from.insert(key, candidate.clone());
+                parent.insert(key, tile(&node));
+                frontier.push(candidate);
+            }
+        }
+    }
+    None
+}
+
+/// One `Place` for a one-tile building, with the id the caller must order
+/// against.
+///
+/// The same shape `power::plant_steps` emits, minus the plant's bill: the
+/// caller states its own `Goal::Have` so a pole run's wood shortfall refuses
+/// through the ordinary machinery.
+fn place_step(ctx: &mut ExpansionCtx, name: &'static str, position: &Position) -> (Step, ActionId) {
+    let entity = entity_for(
+        &ctx.state,
+        &crate::method::power::PlantPart {
+            name,
+            position: position.clone(),
+            direction: Direction::North,
+        },
+    );
+    let build = ctx
+        .state
+        .bot(ctx.chain_actor)
+        .map(|b| b.build_distance)
+        .unwrap_or(10.0);
+    let id = ctx.ids.next();
+    let step = Step::Act(Box::new(Action {
+        id,
+        kind: ActionKind::Place {
+            entity: Box::new(entity.clone()),
+        },
+        pre: vec![
+            Condition::AtPosition {
+                who: Actor::Role,
+                pos: position.clone(),
+                radius: build,
+                min_radius: ctx.state.placement_clearance(name).unwrap_or(0.0),
+            },
+            Condition::AreaFree {
+                pos: position.clone(),
+                entity: name.into(),
+                direction: 0,
+            },
+            Condition::HasItem {
+                who: Actor::Role,
+                item: name.into(),
+                count: 1,
+            },
+        ],
+        eff: vec![
+            Effect::LoseItem {
+                who: Actor::Role,
+                item: name.into(),
+                count: 1,
+            },
+            Effect::CreateEntity(Box::new(entity.clone())),
+        ],
+        duration: PLACE_TICKS,
+        pinned: None,
+        label: format!("place {name} at {position}"),
+    }));
+    ctx.state.create_entity(entity);
+    (step, id)
+}
+
+#[cfg(test)]
+mod extract_siting_tests {
+    use super::*;
+    use crate::ids::BotId;
+    use crate::test_world::{OilFixture, PumpjackRecipe, world_with_oil};
+    use factorio_bot_core::types::{FactorioEntity, Rect};
+    use std::sync::Arc;
+
+    /// The world the oil ladder's tests already use, with the pumpjack recipe
+    /// open so siting is actually reached.
+    ///
+    /// **This fixture was not written for this code.** `world_with_oil` and its
+    /// twelve wells predate this method by a day and belong to the refusal
+    /// ladder's own tests; the wells are placed where a resumed workspace
+    /// (`run-1788538389-09170`) held them. That matters because
+    /// `docs/superpowers/notes/2026-09-06-fixtures-agree-with-their-code.md` is
+    /// about fixtures written by the author of the code they test. Two things
+    /// here still are mine and are named rather than buried: the decoy entities
+    /// in the occupied-well tests, and the two-pole world below.
+    const OPEN: OilFixture = OilFixture {
+        wells: true,
+        categories: true,
+        pumpjack: PumpjackRecipe::LockedBy { researched: true },
+        prerequisite: false,
+    };
+
+    fn oil_state(fixture: OilFixture) -> PlanState {
+        PlanState::from_world(Arc::new(world_with_oil(fixture)), &[BotId(1)])
+    }
+
+    fn goal() -> Goal {
+        Goal::Extracted {
+            entity: "crude-oil".into(),
+            unlocks: Some("oil-processing".into()),
+        }
+    }
+
+    fn places<'a>(steps: &'a [Step], name: &str) -> Vec<&'a Action> {
+        steps
+            .iter()
+            .filter_map(|step| match step {
+                Step::Act(action) => Some(action.as_ref()),
+                _ => None,
+            })
+            .filter(|action| {
+                matches!(&action.kind, ActionKind::Place { entity } if entity.name == name)
+            })
+            .collect()
+    }
+
+    // -- the constant this module duplicates ---------------------------------
+
+    /// [`WIRE_REACH`] is a copy of a private table in `crate::state`, so it is
+    /// pinned against **that table's behaviour** rather than against itself:
+    /// two poles exactly `WIRE_REACH` apart share a network, and two poles half
+    /// a tile further do not.
+    ///
+    /// The oracle is `PlanState::nearest_supply_anchor`, which does the
+    /// union-find over the poles' real reaches -- nothing in this test names
+    /// 7.5 except the constant under test. A comparison against a second copy
+    /// of the number would agree with the code that wrote it.
+    #[test]
+    fn two_poles_a_wire_reach_apart_are_one_network() {
+        // A steam engine, a pole covering it, and a second pole at `gap`.
+        // `nearest_supply_anchor` asked at the far pole answers only if the
+        // two poles are wired, because the generation is all at the near one.
+        let reachable = |gap: f64| {
+            let mut state = oil_state(OPEN).fork();
+            let engine = Position::new(-100.5, -100.5);
+            state.create_entity(FactorioEntity {
+                name: "steam-engine".into(),
+                entity_type: "generator".into(),
+                position: engine.clone(),
+                ..Default::default()
+            });
+            let near = Position::new(engine.x() + 2.5, engine.y());
+            state.create_entity(FactorioEntity {
+                name: POLE.into(),
+                entity_type: "electric-pole".into(),
+                position: near.clone(),
+                ..Default::default()
+            });
+            let far = Position::new(near.x() + gap, near.y());
+            state.create_entity(FactorioEntity {
+                name: POLE.into(),
+                entity_type: "electric-pole".into(),
+                position: far.clone(),
+                ..Default::default()
+            });
+            state.nearest_supply_anchor(&far, 0.5, 90.).is_some()
+        };
+        assert!(
+            reachable(0.),
+            "control: one pole on the engine carries 900 kW, or this test \
+             measures nothing"
+        );
+        assert!(
+            reachable(WIRE_REACH),
+            "two poles exactly WIRE_REACH apart must be wired, or every run \
+             this module lays is one pole too sparse"
+        );
+        assert!(
+            !reachable(WIRE_REACH + 0.5),
+            "two poles further apart than WIRE_REACH must NOT be wired, or the \
+             constant is smaller than the game's and this test proves nothing"
+        );
+    }
+
+    // -- siting --------------------------------------------------------------
+
+    /// The half-tile, asserted against a **resource entity's own position**
+    /// rather than against this module's arithmetic.
+    ///
+    /// `EntityGraph` keys resources by `Pos`, which floors, and
+    /// `resource_patches` restores the `.5`. A site that had been rounded would
+    /// be an integer position, which `surface.find_entity` matches nothing at
+    /// -- the defect that once made mining fail for every ore on every map.
+    #[test]
+    fn the_sited_tile_is_a_resource_entitys_own_position() {
+        let state = oil_state(OPEN);
+        let site = choose_site(&state, "crude-oil", "pumpjack", &Position::default())
+            .expect("the fixture charts twelve wells");
+        let wells: Vec<Position> = state
+            .base()
+            .entity_graph
+            .resource_patches("crude-oil")
+            .into_iter()
+            .flat_map(|patch| patch.elements)
+            .collect();
+        assert!(
+            wells.iter().any(|well| well == &site),
+            "the site {site} is not one of the charted wells {wells:?}"
+        );
+        assert!(
+            (site.x().fract().abs() - 0.5).abs() < 1e-9
+                && (site.y().fract().abs() - 0.5).abs() < 1e-9,
+            "a resource entity sits at a tile CENTRE; {site} is not one"
+        );
+    }
+
+    /// Nearest to the acting bot first, with `(distance, x, y)` breaking ties.
+    #[test]
+    fn the_nearest_charted_well_is_taken_first() {
+        let state = oil_state(OPEN);
+        let from = Position::new(200.5, 20.5);
+        let site = choose_site(&state, "crude-oil", "pumpjack", &from).expect("a well is charted");
+        let nearest = state
+            .base()
+            .entity_graph
+            .resource_patches("crude-oil")
+            .into_iter()
+            .flat_map(|patch| patch.elements)
+            .min_by(|a, b| {
+                calculate_distance(a, &from)
+                    .total_cmp(&calculate_distance(b, &from))
+                    .then(a.x.total_cmp(&b.x))
+            })
+            .expect("a well is charted");
+        assert_eq!(site, nearest, "asked from {from}");
+    }
+
+    /// A well with something standing on it is passed over, not built into.
+    #[test]
+    fn an_occupied_well_is_passed_over_for_the_next_one() {
+        let mut state = oil_state(OPEN).fork();
+        let first = choose_site(&state, "crude-oil", "pumpjack", &Position::default())
+            .expect("a well is charted");
+        // A decoy of a name no part of this method places, so nothing can read
+        // it as "the extractor is already there".
+        state.create_entity(FactorioEntity {
+            name: "wooden-chest".into(),
+            entity_type: "container".into(),
+            position: first.clone(),
+            bounding_box: Rect::new(
+                &Position::new(first.x() - 0.4, first.y() - 0.4),
+                &Position::new(first.x() + 0.4, first.y() + 0.4),
+            ),
+            ..Default::default()
+        });
+        let second = choose_site(&state, "crude-oil", "pumpjack", &Position::default())
+            .expect("eleven wells are left");
+        assert_ne!(second, first, "the occupied well was chosen again");
+    }
+
+    /// Every well occupied is a refusal that names what is on the ground, not
+    /// a silent choice of a tile the game would refuse.
+    #[test]
+    fn every_well_occupied_refuses_and_names_the_obstruction() {
+        let mut state = oil_state(OPEN).fork();
+        for well in state
+            .base()
+            .entity_graph
+            .resource_patches("crude-oil")
+            .into_iter()
+            .flat_map(|patch| patch.elements)
+            .collect::<Vec<_>>()
+        {
+            state.create_entity(FactorioEntity {
+                name: "wooden-chest".into(),
+                entity_type: "container".into(),
+                position: well.clone(),
+                bounding_box: Rect::new(
+                    &Position::new(well.x() - 0.4, well.y() - 0.4),
+                    &Position::new(well.x() + 0.4, well.y() + 0.4),
+                ),
+                ..Default::default()
+            });
+        }
+        let err = choose_site(&state, "crude-oil", "pumpjack", &Position::default())
+            .expect_err("every well is taken");
+        match &err {
+            PlannerError::NoSiteFound {
+                nearest_obstruction,
+                ..
+            } => assert!(
+                nearest_obstruction.contains("wooden-chest"),
+                "the refusal must name what is standing there, got \
+                 {nearest_obstruction}"
+            ),
+            other => panic!("expected NoSiteFound, got {other}"),
+        }
+    }
+
+    // -- the whole method ----------------------------------------------------
+
+    /// The deliverable: a pumpjack stands on a charted well, and it is placed
+    /// only where the plan can show it 90 kW of **headroom** -- coverage is not
+    /// capacity, so the precondition is `Condition::Powered` and not an
+    /// `EntityAt` for a pole.
+    #[test]
+    fn a_pumpjack_is_sited_on_a_well_and_its_placement_states_its_power() {
+        let state = oil_state(OPEN);
+        let mut ctx = ExpansionCtx::new(state.fork(), BotId(1));
+        let steps = Extract
+            .expand(&goal(), &mut ctx)
+            .expect("a charted well, an open recipe and a lake to power it from");
+        let placed = places(&steps, "pumpjack");
+        assert_eq!(placed.len(), 1, "exactly one pumpjack");
+        let site = placed[0]
+            .kind
+            .target_position()
+            .expect("a Place names a position");
+        let wells: Vec<Position> = state
+            .base()
+            .entity_graph
+            .resource_patches("crude-oil")
+            .into_iter()
+            .flat_map(|patch| patch.elements)
+            .collect();
+        assert!(wells.contains(&site), "{site} is not a charted well");
+        assert!(
+            placed[0].pre.iter().any(|c| matches!(
+                c,
+                Condition::Powered { pos, entity, kw }
+                    if pos == &site && entity == "pumpjack" && *kw == 90.
+            )),
+            "the placement must state its own 90 kW headroom: {:?}",
+            placed[0].pre
+        );
+    }
+
+    /// The unlock rides on the placement, because the placement is the last
+    /// thing this plan does before the game's own `mine-entity` trigger fires.
+    #[test]
+    fn the_unlock_rides_on_the_extractors_placement() {
+        let mut ctx = ExpansionCtx::new(oil_state(OPEN).fork(), BotId(1));
+        let steps = Extract.expand(&goal(), &mut ctx).expect("it plans");
+        let placed = places(&steps, "pumpjack");
+        assert!(
+            placed[0]
+                .eff
+                .contains(&Effect::Researched("oil-processing".into())),
+            "no Effect::Researched on the pumpjack placement: {:?}",
+            placed[0].eff
+        );
+        // And nowhere else: a second copy would let the technology be marked
+        // by an action that does not make the machine exist.
+        let carriers = steps
+            .iter()
+            .filter(|step| {
+                matches!(step, Step::Act(a)
+                if a.eff.contains(&Effect::Researched("oil-processing".into())))
+            })
+            .count();
+        assert_eq!(carriers, 1, "exactly one action carries the unlock");
+    }
+
+    /// A goal with no `unlocks` -- `goal.extracted("crude-oil")` from a script
+    /// -- plans the same cell and marks no technology.
+    #[test]
+    fn an_extraction_goal_with_no_unlock_marks_no_technology() {
+        let mut ctx = ExpansionCtx::new(oil_state(OPEN).fork(), BotId(1));
+        let steps = Extract
+            .expand(
+                &Goal::Extracted {
+                    entity: "crude-oil".into(),
+                    unlocks: None,
+                },
+                &mut ctx,
+            )
+            .expect("it plans");
+        assert_eq!(places(&steps, "pumpjack").len(), 1);
+        assert!(
+            !steps.iter().any(|step| matches!(step, Step::Act(a)
+                if a.eff.iter().any(|e| matches!(e, Effect::Researched(_))))),
+            "nothing asked for a technology, so nothing may mark one"
+        );
+    }
+
+    /// The machine is billed as a `Goal::Have`, so a roster that cannot make a
+    /// pumpjack refuses through the ordinary shortfall machinery rather than
+    /// planning a placement of something nobody holds.
+    #[test]
+    fn the_extractor_is_billed_before_it_is_placed() {
+        let mut ctx = ExpansionCtx::new(oil_state(OPEN).fork(), BotId(1));
+        let steps = Extract.expand(&goal(), &mut ctx).expect("it plans");
+        let first_bill = steps.iter().position(
+            |step| matches!(step, Step::Subgoal(Goal::Have { item, .. }) if item == "pumpjack"),
+        );
+        let placement = steps.iter().position(|step| {
+            matches!(step, Step::Act(a)
+                if matches!(&a.kind, ActionKind::Place { entity } if entity.name == "pumpjack"))
+        });
+        assert!(
+            matches!((first_bill, placement), (Some(bill), Some(place)) if bill < place),
+            "bill at {first_bill:?}, placement at {placement:?}"
+        );
+    }
+
+    /// Power is carried to the well, and every consecutive pole in the run is
+    /// inside a small pole's wire reach of the last.
+    ///
+    /// The run's own correctness is checked by `Condition::Powered` inside
+    /// [`pole_run`]; this asserts the *shape* the emitted steps have, which is
+    /// what a reader of the plan sees.
+    #[test]
+    fn the_poles_that_carry_power_to_the_well_are_within_reach_of_each_other() {
+        let mut ctx = ExpansionCtx::new(oil_state(OPEN).fork(), BotId(1));
+        let steps = Extract.expand(&goal(), &mut ctx).expect("it plans");
+        let poles: Vec<Position> = places(&steps, POLE)
+            .into_iter()
+            .filter_map(|action| action.kind.target_position())
+            .collect();
+        assert!(
+            poles.len() >= 2,
+            "the fixture's lake is ~20 tiles from its nearest well, so a \
+             single pole cannot span it; got {poles:?}"
+        );
+        for pair in poles.windows(2) {
+            let gap = calculate_distance(&pair[0], &pair[1]);
+            assert!(
+                gap <= WIRE_REACH,
+                "poles {} and {} are {gap} apart, past a small pole's \
+                 {WIRE_REACH}",
+                pair[0],
+                pair[1]
+            );
+        }
+        // Every pole is billed, or the plan places wood nobody chopped.
+        let billed = steps
+            .iter()
+            .filter(|step| matches!(step, Step::Subgoal(Goal::Have { item, .. }) if item == POLE))
+            .count();
+        assert_eq!(billed, poles.len(), "one Have per pole placed");
+    }
+
+    /// Power ordering is **stated**, because nothing satisfies
+    /// `Condition::Powered` and `infer_edges` can draw no edge to it. Without
+    /// these links the scheduler may hand the pumpjack to a bot that places it
+    /// before the pole run exists.
+    #[test]
+    fn every_power_placement_is_ordered_before_the_extractor() {
+        let mut ctx = ExpansionCtx::new(oil_state(OPEN).fork(), BotId(1));
+        let steps = Extract.expand(&goal(), &mut ctx).expect("it plans");
+        let place_id = places(&steps, "pumpjack")[0].id;
+        let linked: Vec<ActionId> = steps
+            .iter()
+            .filter_map(|step| match step {
+                Step::Link { from, to, .. } if *to == place_id => Some(*from),
+                _ => None,
+            })
+            .collect();
+        for pole in places(&steps, POLE) {
+            assert!(
+                linked.contains(&pole.id),
+                "pole {} is not ordered before the pumpjack",
+                pole.id.0
+            );
+        }
+        assert!(
+            !linked.is_empty(),
+            "no power placement is ordered before the extractor at all"
+        );
+    }
+
+    /// A pumpjack that is already standing and supplied is not built again.
+    ///
+    /// `holds` cannot answer a `Goal::Extracted`, so `AlreadySatisfied` never
+    /// claims one and every replan reaches this method. Re-siting on the *next*
+    /// well each time is the shape that built a second power plant in
+    /// `run-1788408407-02764`; here the standing machine simply occupies its
+    /// own tile, so this pins that a replan does not stack pumpjacks on the
+    /// well it already used.
+    #[test]
+    fn a_replan_does_not_place_a_second_pumpjack_on_the_same_well() {
+        let mut ctx = ExpansionCtx::new(oil_state(OPEN).fork(), BotId(1));
+        let first = Extract.expand(&goal(), &mut ctx).expect("it plans");
+        let first_site = places(&first, "pumpjack")[0]
+            .kind
+            .target_position()
+            .expect("a site");
+        // The same context, so `ctx.state` still carries what the first
+        // expansion reserved -- which is what a second subtree of one plan
+        // sees.
+        let second = Extract.expand(&goal(), &mut ctx).expect("it plans again");
+        let second_site = places(&second, "pumpjack")[0]
+            .kind
+            .target_position()
+            .expect("a site");
+        assert_ne!(
+            first_site, second_site,
+            "the reserved well was chosen twice"
+        );
+    }
+
+    // -- the refusals that are preserved -------------------------------------
+
+    /// Tier 3 is unchanged: a locked extractor recipe is refused by name and
+    /// this method does not claim the goal, so `Method::refusal` is what a
+    /// caller is told.
+    #[test]
+    fn a_locked_extractor_recipe_is_still_refused_and_unclaimed() {
+        let state = oil_state(OilFixture {
+            pumpjack: PumpjackRecipe::LockedBy { researched: false },
+            ..OPEN
+        });
+        assert!(
+            !Extract.applicable(&goal(), &state),
+            "a locked recipe must leave the goal unclaimed, or the refusal \
+             ladder is bypassed"
+        );
+        let ctx = ExpansionCtx::new(state.fork(), BotId(1));
+        match Extract.refusal(&goal(), &ctx) {
+            Some(PlannerError::ExtractorLocked { technology, .. }) => {
+                assert_eq!(technology, "oil-gathering")
+            }
+            other => panic!("expected ExtractorLocked, got {other:?}"),
+        }
+    }
+
+    /// Tier 1 is unchanged: an uncharted resource leaves the goal unclaimed
+    /// and the refusal says where charted ground ends.
+    #[test]
+    fn an_uncharted_resource_is_still_unclaimed_and_refused_as_not_charted() {
+        let state = oil_state(OilFixture {
+            wells: false,
+            ..OPEN
+        });
+        assert!(!Extract.applicable(&goal(), &state));
+        let ctx = ExpansionCtx::new(state.fork(), BotId(1));
+        assert!(matches!(
+            Extract.refusal(&goal(), &ctx),
+            Some(PlannerError::NotCharted { .. })
+        ));
+    }
+
+    /// An extractor whose electrical draw `crate::state`'s table does not name
+    /// cannot be shown to be powered -- `Condition::Powered` would read the
+    /// silence as "draws nothing" and pass. Tier 4 says so by name instead.
+    ///
+    /// The case is real rather than contrived: a `burner-mining-drill` sorts
+    /// before `electric-mining-drill`, so it is what `extractor_for` picks for
+    /// any `basic-solid` resource, and it burns coal rather than drawing kW.
+    #[test]
+    fn an_extractor_with_no_modelled_draw_is_refused_as_not_modelled() {
+        let world = world_with_oil(OPEN);
+        world
+            .entity_prototypes
+            .get_mut("iron-ore")
+            .expect("the fixture charts iron")
+            .resource_category = Some("basic-solid".into());
+        // `world_with_oil` only fills in the fluid pair and the character; the
+        // solid drills are an older capture with no categories at all, and a
+        // drill that lists none is never returned by `extractors_for`.
+        world
+            .entity_prototypes
+            .get_mut("burner-mining-drill")
+            .expect("the fixture has a burner drill")
+            .resource_categories = Some(vec!["basic-solid".into()]);
+        let state = PlanState::from_world(Arc::new(world), &[BotId(1)]);
+        assert_eq!(
+            extractor_for(&state, "iron-ore").expect("a drill mines iron"),
+            "burner-mining-drill",
+            "control: the fixture must actually pick the burner drill, or this \
+             test is about nothing"
+        );
+        assert!(
+            state.consumer_draw_kw("burner-mining-drill").is_none(),
+            "control: a burner drill must have no modelled electrical draw"
+        );
+        let mut ctx = ExpansionCtx::new(state.fork(), BotId(1));
+        let err = Extract
+            .expand(
+                &Goal::Extracted {
+                    entity: "iron-ore".into(),
+                    unlocks: None,
+                },
+                &mut ctx,
+            )
+            .expect_err("nothing here can say a burner drill is powered");
+        assert!(
+            matches!(&err, PlannerError::ExtractionNotModelled { extractor, .. }
+                if extractor == "burner-mining-drill"),
+            "got {err}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod power_reach_tests {
+    //! The ceiling this method's reach is set by, pinned against
+    //! [`crate::state::PlanState`] rather than against `method::extract`.
+    //!
+    //! It is here because it is what decides whether a charted well can be
+    //! powered at all, and because nothing else in the crate states it as a
+    //! test -- `POWER_SEARCH_RADIUS`'s own doc argues for it as a cost bound
+    //! and does not say what it costs. What it costs is this: a pole run is
+    //! useless past it, however many poles are in it.
+
+    use super::*;
+    use crate::ids::BotId;
+    use crate::test_world::{OilFixture, PumpjackRecipe, world_with_oil};
+    use factorio_bot_core::types::FactorioEntity;
+    use std::sync::Arc;
+
+    /// A chain of poles from a steam engine to a consumer stops carrying power
+    /// -- **as far as `Condition::Powered` can tell** -- somewhere between 50
+    /// and 100 tiles, whatever the poles do.
+    ///
+    /// Nothing here names 64. The test asserts the *shape* of the limit: near
+    /// works, far does not, and the poles are identical in both. If somebody
+    /// makes the network walk unbounded, the far case starts passing and this
+    /// test says so by failing -- which is the right way round, because that
+    /// change is what would let `method::extract` reach a real oil field.
+    #[test]
+    fn a_pole_chain_past_the_power_search_radius_is_not_seen() {
+        let carries = |span: f64| {
+            let world = world_with_oil(OilFixture {
+                wells: true,
+                categories: true,
+                pumpjack: PumpjackRecipe::LockedBy { researched: true },
+                prerequisite: false,
+            });
+            let mut state = PlanState::from_world(Arc::new(world), &[BotId(1)]).fork();
+            let engine = Position::new(-200.5, 200.5);
+            state.create_entity(FactorioEntity {
+                name: "steam-engine".into(),
+                entity_type: "generator".into(),
+                position: engine.clone(),
+                ..Default::default()
+            });
+            // Poles every 6 tiles, straight, from the engine to the
+            // consumer. Starting 2.5 tiles clear of the engine rather than on
+            // it: `PlanState`'s overlay is keyed by *tile*, so a pole created
+            // on the engine's own tile replaces the engine and the network
+            // silently has no generation at all. That is what made the first
+            // version of this test fail its own control.
+            let mut x = engine.x() + 2.5;
+            while x <= engine.x() + span + 3. {
+                state.create_entity(FactorioEntity {
+                    name: POLE.into(),
+                    entity_type: "electric-pole".into(),
+                    position: Position::new(x, engine.y()),
+                    ..Default::default()
+                });
+                x += 6.;
+            }
+            let consumer = Position::new(engine.x() + span, engine.y());
+            Condition::Powered {
+                pos: consumer,
+                entity: "pumpjack".into(),
+                kw: 90.,
+            }
+            .holds(&state, BotId(1))
+        };
+        assert!(
+            carries(30.),
+            "control: a short chain of poles must carry 900 kW, or this test \
+             measures nothing at all"
+        );
+        assert!(
+            !carries(150.),
+            "a 150-tile pole chain reads as powered, so `POWER_SEARCH_RADIUS` \
+             is no longer the ceiling on `method::extract`'s reach -- update \
+             the module doc's table and the note, this is good news"
+        );
+    }
+}
+
+#[cfg(test)]
+mod extractor_grid_tests {
+    //! An extractor has to be **centred on the well**, and not every
+    //! extractor's build grid allows that.
+
+    use super::*;
+    use crate::ids::BotId;
+    use crate::test_world::{OilFixture, PumpjackRecipe, world_with_oil};
+    use factorio_bot_core::types::FactorioEntity;
+    use std::sync::Arc;
+
+    fn state() -> PlanState {
+        PlanState::from_world(
+            Arc::new(world_with_oil(OilFixture {
+                wells: true,
+                categories: true,
+                pumpjack: PumpjackRecipe::LockedBy { researched: true },
+                prerequisite: false,
+            })),
+            &[BotId(1)],
+        )
+    }
+
+    /// A pumpjack works exactly the tile it stands on, so this method's whole
+    /// siting rule depends on its 3x3 footprint being **odd** -- an odd
+    /// footprint's build grid is tile centres, which is where every resource
+    /// entity sits.
+    ///
+    /// Compared in **tiles**, not in collision-box extents: Factorio sizes a
+    /// 2x2 box slightly under 2 tiles so neighbours do not touch, and a
+    /// predicate written against that shaved number measures the shaving.
+    #[test]
+    fn a_pumpjacks_build_grid_is_the_tile_centre_a_well_sits_on() {
+        let s = state();
+        assert_eq!(
+            crate::method::util::tile_alignment_facing(&s, "pumpjack", Direction::North),
+            (0.5, 0.5),
+            "a pumpjack must stand on a tile centre, or it cannot be centred \
+             on a well at all"
+        );
+        assert_eq!(
+            crate::method::util::tile_alignment_facing(&s, "burner-mining-drill", Direction::North),
+            (0., 0.),
+            "control: an even footprint's grid is tile boundaries, which is \
+             the case the guard below exists for"
+        );
+    }
+
+    /// The run's last check refuses a chain the *model* cannot see carrying
+    /// power, and this exercises it directly because no fixture can reach it
+    /// through `expand`.
+    ///
+    /// `pole_run` will happily lay poles from an anchor 150 tiles away -- the
+    /// route search only asks whether each tile is free -- and the resulting
+    /// chain is perfectly legal in the game. It is `crate::state`'s
+    /// `POWER_SEARCH_RADIUS` that cannot see the generator at the far end, and
+    /// the scheduler will check the same `Condition::Powered` later, so
+    /// emitting the run would put a pumpjack in the plan that nothing could
+    /// ever schedule. Refusing here turns that into a named refusal at
+    /// expansion time.
+    #[test]
+    fn a_run_whose_power_the_model_cannot_see_is_refused_rather_than_emitted() {
+        let mut trial = state().fork();
+        // A real, generating network -- but far away.
+        let engine = Position::new(-150.5, 20.5);
+        trial.create_entity(FactorioEntity {
+            name: "steam-engine".into(),
+            entity_type: "generator".into(),
+            position: engine.clone(),
+            ..Default::default()
+        });
+        let anchor = Position::new(engine.x() + 2.5, engine.y());
+        trial.create_entity(FactorioEntity {
+            name: POLE.into(),
+            entity_type: "electric-pole".into(),
+            position: anchor.clone(),
+            ..Default::default()
+        });
+        let site = choose_site(&trial, "crude-oil", "pumpjack", &Position::default())
+            .expect("a well is charted");
+        let area = trial
+            .collision_area("pumpjack", &site)
+            .expect("a pumpjack has a footprint");
+        trial.create_entity(extractor_entity(&trial, "pumpjack", &site));
+        let powered = Condition::Powered {
+            pos: site.clone(),
+            entity: "pumpjack".into(),
+            kw: 90.,
+        };
+        assert!(
+            calculate_distance(&anchor, &site) > 64.,
+            "control: the anchor must be outside POWER_SEARCH_RADIUS, or this \
+             test is about nothing; it is {} tiles away",
+            calculate_distance(&anchor, &site)
+        );
+        assert_eq!(
+            pole_run(&mut trial, &anchor, &site, &area, &powered, BotId(1))
+                .expect("no shortfall is possible here"),
+            None,
+            "a run the model cannot see carrying power must be refused"
+        );
+    }
+
+    /// An extractor whose grid is tile boundaries cannot be centred on a well,
+    /// and is refused by name rather than placed half a tile off where the
+    /// game would reject it.
+    #[test]
+    fn an_even_footprint_extractor_cannot_be_centred_on_a_well() {
+        let s = state();
+        let err = choose_site(&s, "crude-oil", "burner-mining-drill", &Position::default())
+            .expect_err("a 2x2 drill cannot stand on a tile centre");
+        match &err {
+            PlannerError::NoSiteFound {
+                nearest_obstruction,
+                ..
+            } => assert!(
+                nearest_obstruction.contains("tile centre"),
+                "the refusal must say why, got {nearest_obstruction}"
+            ),
+            other => panic!("expected NoSiteFound, got {other}"),
+        }
+        // Control: the same call for the pumpjack succeeds, so the refusal is
+        // about the grid and not about the wells.
+        assert!(choose_site(&s, "crude-oil", "pumpjack", &Position::default()).is_ok());
     }
 }

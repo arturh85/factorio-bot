@@ -1,0 +1,181 @@
+# Siting a block: what it does, and what is still unproven
+
+2026-09-06. Sub-project 2 of the blueprint work. Spec:
+`docs/superpowers/specs/2026-09-05-block-siting-design.md`.
+
+**Status: the live run has NOT happened yet.** Everything below is offline
+evidence plus unit tests. The section that would say "entities stood where the
+plan said" is empty on purpose, and this note should not be read as proof of a
+working feature until it is filled in.
+
+## What changed
+
+`Goal::Built` used to take a bare `anchor: Position` and refuse if that exact
+spot was occupied. It now takes a `Site`:
+
+```lua
+goal.built(bp, {x = 10, y = -20})        -- Site::At      exact, as before
+goal.built(bp, {near = {x = 0, y = -30}}) -- Site::Near    search from a hint
+goal.built(bp)                            -- Site::Anywhere search from a stable seed
+```
+
+Resolution runs in one fixed order on every expansion:
+
+1. **Recover** the anchor from the block's own entities already standing.
+2. Failing that, **search** rings outward from a seed, refusing any site whose
+   mining drills would not sit on ore.
+
+## The part that matters: recovery, and why the seed cannot move
+
+`Goal::Built` is re-expanded on **every replan**. If siting recomputed the
+anchor each time, and the world had changed because we had been building into
+it, a block half-built at site A could restart at site B — two half-factories,
+no error, and a production curve that still rises. That is this project's
+signature failure and it has shipped twice.
+
+Two mechanisms prevent it, and they are load-bearing together rather than
+separately:
+
+- **Recovery** reads the anchor back off standing entities, requiring **two**
+  of the block's entities to agree before it will answer. One is not enough: a
+  single unrelated entity of the same name silently mis-sited a real blueprint
+  in an existing fixture, and a wrongly *asserted* anchor is worse than a
+  searched one.
+- **A replan-stable seed** covers the window that leaves. With the two-entity
+  floor, a block with exactly ONE entity standing recovers nothing and falls
+  back to the search — so the search must return the same answer. It does,
+  because placements only ever ADD obstacles and the search skips the block's
+  own entities, so every earlier ring stays blocked. **That argument only holds
+  if the seed is fixed**, which is why `Site::Anywhere` seeds at the nearest
+  extractable ore patch (for a block with drills) or the world origin, and
+  never at the roster centroid: bots walk, and a moving centroid re-orders the
+  rings.
+
+A third hole was found by review: `occupant_of` counted **live characters** as
+obstacles, so an unrelated bot standing in a candidate ring blocked it, walked
+away, and a later expansion could pick that ring. Siting now asks about durable
+ground only (`siting_occupant`), while `expand`'s fixed-anchor pre-check still
+names a character — those are different questions. A bot in the way of *this
+anchor now* is exactly what a caller needs told; a bot standing where a block
+*might* go is noise.
+
+## Ore-awareness, and why it is deliberately conservative
+
+A drill on bare ground places perfectly, passes every geometry check, and
+produces nothing. So a site is refused unless **every mining drill has at least
+one ore tile under its own 3×3 footprint**.
+
+That is a floor, not a measurement: a real electric mining drill mines a 5×5
+area while colliding on 3×3, and no mining radius is available on the
+prototypes. So it can refuse a site where the drill would in fact reach ore just
+outside its box. **That direction is the safe one** — a false refusal costs a
+site, a false acceptance is a drill that produces nothing.
+
+## What is proven, and what is not
+
+**Proven offline:**
+
+- `FurnaceLine` (179 entities) sites and plans: 988 actions, makespan 55,547.
+- Determinism: the same world produces a byte-identical anchor across runs.
+- Replan stability, recovery-over-`Site::At`, the one-entity floor, and
+  bystander-immunity all have tests that have been **seen to fail** — each was
+  verified by deliberately breaking the code and watching the assertion mismatch
+  before restoring it.
+
+**NOT proven:**
+
+- **Nothing has been built in a live game from a sited anchor.** Section below
+  is empty.
+- **`MinerLine` does not site at all**, at radius 48, 64, 96 or 128.
+
+## `MinerLine`'s failure is a planner defect, not a limit of siting
+
+This was nearly recorded as structural — its belt-and-pole corridor runs between
+the two drill columns, over the same ore the drills need, and the planner
+refuses non-drill placement on ore. One read-only query against a live game:
+
+```
+ore at (-42.5,-37.5)  belt=true pole=true drill=true
+```
+
+**A transport belt and an electric pole can both be built on an ore tile.**
+Factorio's resources sit on the `resource` collision layer only — which is why a
+character walks straight through them, as the mod's own walk-stall comment says.
+
+The planner computes `resource_blocks = !stands_on_resources(name)` at every
+placement check, so ore blocks everything that is not a mining drill.
+`stands_on_resources` was added because `is_area_free` "refused a drill
+everywhere on every map" — the right diagnosis, but it carved an exception for
+drills instead of correcting the general rule.
+
+This is not blueprint-specific. `is_area_free` and `placement_occupant` are what
+`method::connect` routes belts through and what `method::assemble` sites cells
+with, so **a belt route that would legally cross a patch is refused as
+`NoRoute`, near any patch, on any map.** It fails in the safe direction —
+refusing legal ground, never building on illegal ground — which is exactly why
+nothing caught it: it produces "no route" and "no site", never a broken factory.
+
+Being fixed separately (`ore-does-not-block`), from prototype collision masks
+rather than from the single query above: *"a belt and a pole are legal on that
+ore tile"* is an observation; *"nothing collides with resources"* is a rule, and
+only the first was measured here.
+
+## Cost: the 96 seconds is not siting's
+
+A sited `FurnaceLine` plan takes ~96 s, and it is worth saying plainly that this
+was misattributed twice before it was measured.
+
+| | AFTER (siting, `Site::At`) | BEFORE (`293ec331`, bare anchor) |
+|---|---|---|
+| | 94.6 / 96.5 / 96.9 s | 52.0 / 51.9 / 51.8 s |
+
+Interleaved, three runs a side, load recorded per run, on a floor deliberately
+cleared. Spreads 2.5 % and 0.3 %, so the ~45 s gap is real. **The cause is
+`plan_best`**, which runs the whole expand-and-schedule pipeline twice — once
+per `DrainPolicy` — keeping the shorter schedule; 96/52 = 1.85. That feature
+does not exist at `293ec331`. Siting's own contribution, `recover_anchor`, is
+**under 10 ms per call**.
+
+`recover_anchor` *was* genuinely broken — it scanned the whole entity tree once
+per blueprint entity, 179 whole-world scans for `FurnaceLine`, worst observed
+call 7.86 s — and is fixed by scanning once and bucketing by name. That fix is
+worth keeping. It was simply never the 96 seconds.
+
+**The method failure is the transferable part.** The first experiment showed a
+fixed anchor still cost ~95 s and was read as exonerating the search and
+implicating recovery. But a fixed anchor *also* calls recovery, so it separated
+the search from everything-else and never separated recovery from the rest.
+**Ruling out one of three candidates convicts neither of the others.**
+
+## Siting is bounded by what the model has ingested — and that is now liftable
+
+Ore-aware siting chooses among the resources the model knows, which at t=0 on
+seed 31337 is a fraction of what exists: 940 iron tiles against 3,658 within
+±672, 462 copper against 2,712, no crude oil against 43, and **no enemy
+structures against 154**.
+
+Since `Goal::Charted` landed this is no longer a hard bound:
+
+```lua
+goal.charted(0, 0, 384)   -- widen what the model knows
+goal.built(FurnaceLine)   -- then site against the wider set
+```
+
+Two caveats must travel with that or the sentence misleads. The mechanism is a
+**mod-side generate call clamped to 4 chunks, not walking** — a bot cannot cross
+the generation frontier on foot at all. And the ground appears before any bot
+arrives, so a run that charts must quote `ground_generate_calls` /
+`ground_generated_chunks` / `ground_generate_failures`. "We made the ground
+exist" is the honest sentence; "the bots explored" is not.
+
+**Siting does not check for enemy structures.** A block can be sited into a
+biter base and the planner will not know. One charting ring puts 32 of them into
+the threat index, so the data now exists — the check does not.
+
+## The live run
+
+*(empty — to be filled in after a headless 5× run reads every entity back off
+the surface. Per the record's own standard, a placement count is not evidence:
+this project has twice shipped layouts that placed 100 % correctly and did
+nothing. The delivered tick rate belongs here too, since a clean pass at any
+tick rate is trustworthy while a failure on a loaded floor is ambiguous.)*

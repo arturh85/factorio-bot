@@ -557,8 +557,23 @@ impl FlowGraph {
     /// See `docs/superpowers/notes/2026-09-06-what-the-record-base-knows.md`.
     pub fn production_rates(&self) -> BTreeMap<String, f64> {
         self.ensure_current();
-        let graph = self.inner.read();
         let mut total: BTreeMap<String, f64> = BTreeMap::new();
+        for (_, made) in self.producer_nameplates() {
+            for (name, rate) in made {
+                *total.entry(name).or_insert(0.) += rate;
+            }
+        }
+        total
+    }
+
+    /// One entry per producing machine: what it makes, per item, in items per
+    /// second, **with unlimited ingredients**. The per-machine half of
+    /// [`FlowGraph::production_rates`], factored out because
+    /// [`FlowGraph::sustained_production_rates`] needs the machines and not
+    /// just the sum.
+    fn producer_nameplates(&self) -> Vec<(bool, BTreeMap<String, f64>)> {
+        let graph = self.inner.read();
+        let mut per_machine: Vec<(bool, BTreeMap<String, f64>)> = vec![];
         for node_index in graph.node_indices() {
             let Some(node) = graph.node_weight(node_index) else {
                 continue;
@@ -585,11 +600,206 @@ impl FlowGraph {
                     }
                 }
             }
-            for (name, rate) in best {
-                *total.entry(name).or_insert(0.) += rate;
+            if !best.is_empty() {
+                // A drill and a pump take their output from the GROUND, not
+                // from a recipe, so nothing may be charged against them. Coal
+                // is where that bites: `coal` has a synthesis recipe in Space
+                // Age, so charging every producer of an item through "the
+                // recipe that makes it" billed 559 coal drills for carbon and
+                // sulfur they never touch and reported the base making 46
+                // coal a minute against a real 4,096.
+                let crafts = matches!(
+                    node.entity_type,
+                    EntityType::Furnace | EntityType::AssemblingMachine
+                );
+                per_machine.push((crafts, best));
             }
         }
+        per_machine
+    }
+
+    /// What the base can actually keep making, once a machine is not allowed
+    /// to consume more of an item than the base makes of it.
+    ///
+    /// [`FlowGraph::production_rates`] is a **nameplate** figure: every
+    /// machine at 100%, ingredients assumed. This is the same figure with one
+    /// term added -- the one the world-record base said was the whole
+    /// remaining gap, `no_ingredients` idleness. Against that base it takes
+    /// iron plate from 1.25x the game's own statistics to 1.09x and green
+    /// circuits from 1.32x to 1.13x, and leaves copper cable exactly where it
+    /// was, which is the honest outcome there (see the note).
+    ///
+    /// # Why this is a WHOLE-BASE balance and not a per-machine duty cycle
+    ///
+    /// The obvious implementation is per machine: divide what
+    /// `sum_incoming_edge_weights` says is arriving at a machine's tile by
+    /// what its recipe eats. **That was built first and it is unsound**, and
+    /// the falsification is
+    /// `what_consumers_see_arriving_is_not_a_conserved_flow` in this file's
+    /// tests. On the world-record base the supply a consumer *sees* runs from
+    /// **0.02x to 1,194x** of the supply the graph says exists, because
+    /// [`FlowGraph::update_flow_edge`] writes a machine's whole output on each
+    /// of its outgoing edges and `sum_incoming_edge_weights` adds those up. It
+    /// is not a bound in either direction, so a duty cycle derived from it is
+    /// noise: shipping it moved iron plate by 2% and pushed steel plate from
+    /// 31% high to 24% low.
+    ///
+    /// Summed over the whole surface those routing errors cancel, because
+    /// [`FlowGraph::production_rates`] already takes a maximum per machine.
+    /// **This aggregation is also what makes the answer robust to the graph's
+    /// inability to route at all** -- ore that reaches a smelter by train, by
+    /// bot, or through a chest nothing feeds is counted in the base's supply
+    /// even though no edge carries it.
+    ///
+    /// # It throttles on shortage and never on surplus, deliberately
+    ///
+    /// Demand here is only what *modelled producers* consume. Everything else
+    /// a base does with an item -- a wall, a rocket, a lab, a chest somebody
+    /// fills -- is invisible, so demand is systematically understated and a
+    /// surplus proves nothing. A shortage is different: if the model can only
+    /// see 16,500 ore/min being mined, consumers needing 19,016 cannot all be
+    /// running. So supply below demand throttles the consumers, and supply
+    /// above demand does **not** throttle the producers -- the
+    /// `waiting_for_space_in_destination` half of idleness (194 drills on the
+    /// record base) is still not modelled here.
+    ///
+    /// An item **nothing in the model produces** is unknown, not absent, and
+    /// does not constrain anybody -- the same rule `runMatch.ts` applies to a
+    /// missing run id. Otherwise every machine fed a fluid, or fed from
+    /// another surface, would read as stopped.
+    ///
+    /// Deterministic: ordered collections throughout, and the iteration only
+    /// ever lowers a machine's scale, so it converges rather than oscillating
+    /// between two allocations that each look feasible.
+    pub fn sustained_production_rates(&self) -> BTreeMap<String, f64> {
+        self.ensure_current();
+        // The unit of throttling is a machine's OUTPUT, not the machine.
+        // A furnace this graph credits with copper plate and stone brick at
+        // once -- the mixed-belt artefact `update`'s furnace arm shares time
+        // between -- has two independent products, and a stone shortage must
+        // not throttle its copper. Gating the machine on the minimum over
+        // everything it touches took copper plate from 9% high to 12% low
+        // while the ore that feeds it was never short.
+        let nameplate = self.producer_nameplates();
+        // What the base makes of each item before anything is throttled. Used
+        // only to pick which recipe an item is being made BY -- see
+        // `recipe_making`.
+        let mut standing: BTreeMap<String, f64> = BTreeMap::new();
+        for (_, made) in &nameplate {
+            for (item, rate) in made {
+                *standing.entry(item.clone()).or_insert(0.) += rate;
+            }
+        }
+        let mut lines: Vec<(String, f64, BTreeMap<String, f64>)> = vec![];
+        for (crafts, made) in nameplate {
+            for (item, rate) in made {
+                let mut needs: BTreeMap<String, f64> = BTreeMap::new();
+                if crafts
+                    && let Some(recipe_name) = self.recipe_making(&item, &standing)
+                    && let Some(recipe) = self.recipes.get(&recipe_name)
+                    && let Some(product) = recipe.products.iter().find(|p| p.name == item)
+                    && product.amount > 0
+                {
+                    let crafts = rate / f64::from(product.amount);
+                    for ingredient in recipe.ingredients.iter().flatten() {
+                        *needs.entry(ingredient.name.clone()).or_insert(0.) +=
+                            crafts * f64::from(ingredient.amount);
+                    }
+                }
+                lines.push((item, rate, needs));
+            }
+        }
+
+        let mut scale = vec![1_f64; lines.len()];
+        // Bounded rather than "until it converges": the map only decreases, so
+        // it does converge, but a fixed cap means a pathological recipe cycle
+        // cannot hang a caller. 64 is far more than the depth of any vanilla
+        // chain.
+        for _ in 0..64 {
+            let mut supply: BTreeMap<String, f64> = BTreeMap::new();
+            let mut demand: BTreeMap<String, f64> = BTreeMap::new();
+            for (index, (item, rate, needs)) in lines.iter().enumerate() {
+                *supply.entry(item.clone()).or_insert(0.) += rate * scale[index];
+                for (ingredient, rate) in needs {
+                    *demand.entry(ingredient.clone()).or_insert(0.) += rate * scale[index];
+                }
+            }
+            let mut moved = false;
+            for (index, (_, _, needs)) in lines.iter().enumerate() {
+                let mut limit = scale[index];
+                for ingredient in needs.keys() {
+                    let have = supply.get(ingredient).copied().unwrap_or_default();
+                    let want = demand.get(ingredient).copied().unwrap_or_default();
+                    // Nobody in the model makes it: unknown, not zero.
+                    if have <= 0. {
+                        continue;
+                    }
+                    if want > have {
+                        limit = limit.min(scale[index] * have / want);
+                    }
+                }
+                if limit < scale[index] {
+                    scale[index] = limit;
+                    moved = true;
+                }
+            }
+            if !moved {
+                break;
+            }
+        }
+
+        let mut total: BTreeMap<String, f64> = BTreeMap::new();
+        for (index, (item, rate, _)) in lines.iter().enumerate() {
+            *total.entry(item.clone()).or_insert(0.) += rate * scale[index];
+        }
         total
+    }
+
+    /// The name of the recipe that makes `item`, for charging its ingredients.
+    ///
+    /// Only a recipe whose **first** product is `item` counts: a recipe is
+    /// named for its main output, and taking any recipe that mentions the item
+    /// among its products would charge a plate's ingredients to whatever
+    /// by-product happened to sort first.
+    ///
+    /// `recycling` is excluded by category. Space Age gives almost every item
+    /// a recycling recipe whose products are its own ingredients, so without
+    /// this a plate would be charged as if it were made by recycling something
+    /// that is made of plates -- a cycle, and a fictitious demand.
+    ///
+    /// Ties are broken by name and warned about, for the reason
+    /// [`FlowGraph::smelting_recipe_taking`] gives: `self.recipes` is a
+    /// `DashMap` whose iteration order is not stable.
+    fn recipe_making(&self, item: &str, standing: &BTreeMap<String, f64>) -> Option<String> {
+        let mut candidates: Vec<String> = self
+            .recipes
+            .iter()
+            .filter(|recipe| recipe.valid && recipe.category != "recycling")
+            .filter(|recipe| recipe.products.first().is_some_and(|p| p.name == item))
+            .map(|recipe| recipe.name.clone())
+            .collect();
+        candidates.sort();
+        if candidates.len() > 1 {
+            // The base makes what it has the ingredients for. Sorting alone
+            // picked `casting-iron` over `iron-plate` and charged every plate
+            // to molten iron, which nothing on Nauvis makes -- so the charge
+            // was against an item with no supply, and `sustained_production_
+            // rates` skips those as unknown. The whole iron and copper
+            // constraint silently did nothing, and the table still looked
+            // plausible because the numbers merely stayed at nameplate.
+            if let Some(supplied) = candidates.iter().find(|name| {
+                self.recipes.get(*name).is_some_and(|recipe| {
+                    recipe
+                        .ingredients
+                        .iter()
+                        .flatten()
+                        .all(|used| standing.get(&used.name).is_some_and(|rate| *rate > 0.))
+                })
+            }) {
+                return Some(supplied.clone());
+            }
+        }
+        candidates.first().cloned()
     }
 
     pub fn throughput_at(&self, position: &Position) -> FlowRates {
@@ -895,6 +1105,28 @@ impl FlowGraph {
     /// taken, and the ambiguity is warned about rather than hidden -- vanilla
     /// has none, a mod may.
     fn smelting_output(&self, machine: &str, input: &str) -> Option<FlowRate> {
+        let recipe_name = self.smelting_recipe_taking(input)?;
+        let recipe = self.recipes.get(&recipe_name)?;
+        let seconds = recipe.energy.to_f64().unwrap_or_default();
+        if seconds <= 0. {
+            warn!(
+                "recipe {} claims to take no time; no flow edge",
+                recipe_name
+            );
+            return None;
+        }
+        let product = recipe.products.first()?;
+        Some((
+            product.name.clone(),
+            f64::from(product.amount) * self.crafting_speed(machine) / seconds,
+        ))
+    }
+
+    /// The name of the smelting recipe that takes `input`, chosen the same way
+    /// for every caller so two of them cannot disagree about what a furnace is
+    /// doing. Ties broken by name and warned about -- see
+    /// [`FlowGraph::smelting_output`].
+    fn smelting_recipe_taking(&self, input: &str) -> Option<String> {
         let mut candidates: Vec<String> = self
             .recipes
             .iter()
@@ -917,20 +1149,7 @@ impl FlowGraph {
                 recipe_name
             );
         }
-        let recipe = self.recipes.get(recipe_name)?;
-        let seconds = recipe.energy.to_f64().unwrap_or_default();
-        if seconds <= 0. {
-            warn!(
-                "recipe {} claims to take no time; no flow edge",
-                recipe_name
-            );
-            return None;
-        }
-        let product = recipe.products.first()?;
-        Some((
-            product.name.clone(),
-            f64::from(product.amount) * self.crafting_speed(machine) / seconds,
-        ))
+        Some(recipe_name.clone())
     }
 
     pub fn graphviz_dot(&self) -> String {
@@ -1899,6 +2118,184 @@ mod tests {
         );
     }
 
+    /// A **steel** furnace on a chain one electric drill feeds: it can smelt
+    /// 0.625 ore/s and the drill mines 0.5, so a fifth of its time it has
+    /// nothing to smelt.
+    fn steel_furnace_fed_by_one_drill() -> Arc<EntityGraph> {
+        let mut steel = FactorioEntity::new_stone_furnace(&Position::new(1., 3.), Direction::South);
+        steel.name = "steel-furnace".to_string();
+        Arc::new(
+            entity_graph_from(vec![
+                FactorioEntity::new_resource(
+                    &Position::new(0.5, -1.5),
+                    Direction::South,
+                    &EntityName::IronOre.to_string(),
+                ),
+                FactorioEntity::new_electric_mining_drill(
+                    &Position::new(0.5, -1.5),
+                    Direction::South,
+                ),
+                FactorioEntity::new_transport_belt(&Position::new(0.5, 0.5), Direction::South),
+                FactorioEntity::new_inserter(&Position::new(0.5, 1.5), Direction::North),
+                steel,
+                FactorioEntity::new_inserter(&Position::new(0.5, 4.5), Direction::North),
+                FactorioEntity::new_transport_belt(&Position::new(0.5, 5.5), Direction::South),
+            ])
+            .unwrap(),
+        )
+    }
+
+    /// The whole point of `sustained_production_rates`: a machine cannot make
+    /// what its ingredients do not support, however fast its prototype says it
+    /// runs.
+    #[test]
+    fn a_base_makes_only_what_its_ore_supply_supports() {
+        let flow_graph = FlowGraph::new(steel_furnace_fed_by_one_drill());
+        let nameplate = flow_graph.production_rates();
+        assert_eq!(
+            nameplate.get("iron-plate").copied(),
+            Some(2. / 3.2),
+            "a steel furnace is crafting_speed 2 on a 3.2 s recipe: {nameplate:?}"
+        );
+        let sustained = flow_graph.sustained_production_rates();
+        let plate = sustained.get("iron-plate").copied().unwrap_or_default();
+        assert!(
+            (plate - 0.5).abs() < 1e-9,
+            "one drill mines 0.5 ore/s and one ore makes one plate, so 0.5 plate/s \
+             is the ceiling however fast the furnace is: got {plate}"
+        );
+    }
+
+    /// The ore itself is **not** throttled by its own consumers: a drill takes
+    /// its output from the ground, not from a recipe.
+    ///
+    /// The fixture gives `iron-ore` a synthesis recipe out of an ingredient
+    /// nothing makes, which is exactly the shape `coal` has in Space Age --
+    /// charging drills through "the recipe that makes what they make" reported
+    /// the world-record base at 46 coal/min against a real 4,096.
+    #[test]
+    fn the_ground_is_not_a_recipe() {
+        let recipes = crate::test_utils::fixture_recipes();
+        recipes.insert(
+            "iron-ore-synthesis".to_string(),
+            FactorioRecipe {
+                name: "iron-ore-synthesis".to_string(),
+                valid: true,
+                enabled: true,
+                category: "chemistry".to_string(),
+                // Iron PLATE, not an invented item, and three of them: the
+                // charge has to be for something the base really makes and
+                // really is short of, or the drill escapes the bill for the
+                // unrelated reason that an unknown ingredient never
+                // constrains -- and the test passes while testing nothing.
+                // It did exactly that until the substitution was run.
+                ingredients: Some(vec![crate::types::FactorioIngredient {
+                    name: "iron-plate".to_string(),
+                    ingredient_type: "item".to_string(),
+                    amount: 3,
+                }]),
+                products: vec![crate::types::FactorioProduct {
+                    name: "iron-ore".to_string(),
+                    product_type: "item".to_string(),
+                    amount: 1,
+                    probability: Box::new(noisy_float::types::r64(1.)),
+                }],
+                hidden: false,
+                energy: Box::new(noisy_float::types::r64(1.)),
+                order: String::new(),
+                group: String::new(),
+                subgroup: String::new(),
+            },
+        );
+        let entity_graph = EntityGraph::new(
+            Arc::new(crate::test_utils::fixture_entity_prototypes()),
+            Arc::new(recipes),
+        );
+        let mut steel = FactorioEntity::new_stone_furnace(&Position::new(1., 3.), Direction::South);
+        steel.name = "steel-furnace".to_string();
+        entity_graph
+            .add(
+                vec![
+                    FactorioEntity::new_resource(
+                        &Position::new(0.5, -1.5),
+                        Direction::South,
+                        &EntityName::IronOre.to_string(),
+                    ),
+                    FactorioEntity::new_electric_mining_drill(
+                        &Position::new(0.5, -1.5),
+                        Direction::South,
+                    ),
+                    FactorioEntity::new_transport_belt(&Position::new(0.5, 0.5), Direction::South),
+                    FactorioEntity::new_inserter(&Position::new(0.5, 1.5), Direction::North),
+                    steel,
+                    FactorioEntity::new_inserter(&Position::new(0.5, 4.5), Direction::North),
+                    FactorioEntity::new_transport_belt(&Position::new(0.5, 5.5), Direction::South),
+                ],
+                None,
+            )
+            .unwrap();
+        entity_graph.connect().unwrap();
+        let sustained = FlowGraph::new(Arc::new(entity_graph)).sustained_production_rates();
+        let ore = sustained.get("iron-ore").copied().unwrap_or_default();
+        assert!(
+            (ore - 0.5).abs() < 1e-9,
+            "the drill mines 0.5 ore/s out of the ground and owes nobody an \
+             ingredient for it: got {ore}"
+        );
+    }
+
+    /// Which recipe an item is charged to is decided by **what the base can
+    /// supply**, not by sorting.
+    ///
+    /// Space Age gives iron plate two recipes: `casting-iron`, from molten
+    /// iron, and `iron-plate`, from ore. `casting-iron` sorts first, and
+    /// charging every plate to molten iron -- which nothing on Nauvis makes,
+    /// and which `sustained_production_rates` therefore treats as unknown --
+    /// switched the entire iron and copper constraint off. Nothing looked
+    /// wrong: the rates simply stayed at nameplate.
+    #[test]
+    fn a_recipe_whose_ingredients_the_base_never_makes_is_not_the_one_charged() {
+        let recipes = crate::test_utils::fixture_recipes();
+        recipes.insert(
+            "casting-iron".to_string(),
+            FactorioRecipe {
+                name: "casting-iron".to_string(),
+                valid: true,
+                enabled: true,
+                category: "metallurgy".to_string(),
+                ingredients: Some(vec![crate::types::FactorioIngredient {
+                    name: "molten-iron".to_string(),
+                    ingredient_type: "fluid".to_string(),
+                    amount: 10,
+                }]),
+                products: vec![crate::types::FactorioProduct {
+                    name: "iron-plate".to_string(),
+                    product_type: "item".to_string(),
+                    amount: 2,
+                    probability: Box::new(noisy_float::types::r64(1.)),
+                }],
+                hidden: false,
+                energy: Box::new(noisy_float::types::r64(1.)),
+                order: String::new(),
+                group: String::new(),
+                subgroup: String::new(),
+            },
+        );
+        let flow_graph = FlowGraph::new(Arc::new(EntityGraph::new(
+            Arc::new(crate::test_utils::fixture_entity_prototypes()),
+            Arc::new(recipes),
+        )));
+        let standing: BTreeMap<String, f64> =
+            [("iron-ore".to_string(), 1.), ("iron-plate".to_string(), 1.)]
+                .into_iter()
+                .collect();
+        assert_eq!(
+            flow_graph.recipe_making("iron-plate", &standing).as_deref(),
+            Some("iron-plate"),
+            "`casting-iron` sorts first but nothing here makes molten iron"
+        );
+    }
+
     /// The chain `test_furnace` asserts the shape of, as a fixture.
     fn smelting_chain() -> EntityGraph {
         entity_graph_from(vec![
@@ -1944,10 +2341,90 @@ mod tests {
         let surface: crate::factorio::world::FactorioSurface =
             serde_json::from_str(&json).expect("the dump parses");
         let rates = surface.flow_graph.production_rates();
+        let sustained = surface.flow_graph.sustained_production_rates();
         println!("-- production_rates of {path} --");
+        println!(
+            "{:>28}  {:>14}  {:>14}",
+            "item", "nameplate/min", "sustained/min"
+        );
         for (name, rate) in &rates {
-            println!("{name:>28}  {:>12.1} /min", rate * 60.);
+            println!(
+                "{name:>28}  {:>14.1}  {:>14.1}",
+                rate * 60.,
+                sustained.get(name).copied().unwrap_or_default() * 60.
+            );
         }
         println!("{} items", rates.len());
+    }
+
+    /// **Can this graph's edge weights carry a back-pressure term at all?**
+    ///
+    /// A duty cycle is `what arrives / what the machine could eat`, so it is
+    /// only as good as "what arrives". This puts, per item, the total the
+    /// graph says is *produced* beside the total its consumers say is
+    /// *arriving*. In a conserved flow the second cannot exceed the first.
+    ///
+    /// It is not conserved, and the reason is by design:
+    /// [`FlowGraph::update_flow_edge`] writes a machine's **whole** output on
+    /// **each** of its outgoing edges -- which is what makes
+    /// [`FlowGraph::throughput_at`] right for any one consumer -- and
+    /// `sum_incoming_edge_weights` then adds those up. So one drill feeding
+    /// three arms of a line reads as three drills' worth at each arm.
+    /// [`FlowGraph::production_rates`] already compensates for this on the
+    /// *producer* side by taking a maximum rather than a sum; nothing does on
+    /// the consumer side, and there is nothing available to do it with.
+    ///
+    /// Printed rather than asserted, like its sibling: the ratio is a fact
+    /// about a particular base, and the conclusion drawn from it lives in
+    /// `docs/superpowers/notes/2026-09-07-a-machine-standing-still.md`.
+    #[test]
+    #[ignore = "needs a world dump named by FACTORIO_BOT_WORLD_DUMP"]
+    fn what_consumers_see_arriving_is_not_a_conserved_flow() {
+        let Ok(path) = std::env::var("FACTORIO_BOT_WORLD_DUMP") else {
+            panic!("set FACTORIO_BOT_WORLD_DUMP to a world.dump JSON");
+        };
+        let json = std::fs::read_to_string(&path).expect("the dump reads");
+        let surface: crate::factorio::world::FactorioSurface =
+            serde_json::from_str(&json).expect("the dump parses");
+        let produced = surface.flow_graph.production_rates();
+        // What every consuming machine believes is arriving at its own tile.
+        let mut arriving: BTreeMap<String, f64> = BTreeMap::new();
+        let mut consumers = 0_usize;
+        {
+            let graph = surface.flow_graph.inner_graph();
+            for node_index in graph.node_indices() {
+                let Some(node) = graph.node_weight(node_index) else {
+                    continue;
+                };
+                if !matches!(
+                    node.entity_type,
+                    EntityType::Furnace | EntityType::AssemblingMachine
+                ) {
+                    continue;
+                }
+                consumers += 1;
+                for (name, rate) in surface.flow_graph.sum_incoming_edge_weights(&node.position) {
+                    *arriving.entry(name).or_insert(0.) += rate;
+                }
+            }
+        }
+        println!("-- supply conservation over {consumers} consumers of {path} --");
+        println!(
+            "{:>28}  {:>12}  {:>12}  {:>8}",
+            "item", "produced/min", "arriving/min", "ratio"
+        );
+        for (name, seen) in &arriving {
+            let made = produced.get(name).copied().unwrap_or_default();
+            let ratio = if made > 0. {
+                format!("{:.2}", seen / made)
+            } else {
+                "-".to_string()
+            };
+            println!(
+                "{name:>28}  {:>12.1}  {:>12.1}  {ratio:>8}",
+                made * 60.,
+                seen * 60.
+            );
+        }
     }
 }

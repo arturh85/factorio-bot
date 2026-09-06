@@ -303,6 +303,56 @@ unvisited and planned nothing, silently. Threat avoidance — a 50-tile
 stand-off, refusing rather than returning an empty plan — is the **first
 non-test caller of the threat index**, which had none.
 
+## ✅ EXPLORATION WORKS, AND THE ORE REFUSAL IS GONE (`3bd49296`)
+
+`Goal::Charted { around, radius }` → `Scout` → `Survey`, plus a mod verb
+`rcon_generate_chunks` (`request_to_generate_chunks` **forced**, not queued —
+a queued chunk fails the pathfinder exactly as an ungenerated one does),
+called before the walk. **Clamped mod-side to 4 chunks**, the reveal a
+character standing there gets for free; asking for more silently gets four.
+
+**Proved end to end.** Before, `researched:oil-processing` refused with *no
+crude-oil is charted anywhere this plan can see*. After a single
+`goal.charted(0, 0, 384)` — 8 surveys, 3,609 planned ticks, four bots — it
+refuses with *a power plant needs water*, several rungs further up. The
+`NotCharted` refusal is gone.
+
+| | t=0 | after one ring |
+|---|---:|---:|
+| iron / copper / coal / stone | 940 / 462 / 466 / 387 | 2,452 / **1,400** / 853 / 895 |
+| **crude oil** | **0** | **7** |
+| **uranium / nests** | **0 / 0** | **559 / 32** |
+
+Copper — the gate on any standing copper goal — triples, and the threat
+index, which had no non-test caller before tonight, now holds 32 real
+structures for the next ring's stand-off.
+
+**The honesty position, stated plainly and carried in the record rather than
+in a comment.** A human walks into unexplored ground constantly and the
+engine makes it as they go; our bots cannot only because we steer them
+through `request_path`, which will not path into chunks that do not exist.
+That is an artefact of how we drive a character, not a rule of the game, and
+clamped to one character's reveal this restores parity a player already has.
+What is *not* honest is that the ground appears before the bot arrives —
+small, bounded, not nothing. So `BatchProgress` carries
+`ground_generate_calls`, `ground_generated_chunks` and
+`ground_generate_failures`: on the event, because provenance is written
+before any survey runs and the manifest only exists for runs that finished,
+while a killed run still generated its ground. **A speedrun time from a run
+that used this must be quoted with those counters beside it; for a
+no-asterisk headline the right mechanism is radar** — 20 red science, 300 kW,
+all paid in game, no new mod surface.
+
+**And the falsification rule caught one of its own tests.** Every new test
+was made to fail on purpose first — the clamp, the force flag, the negative
+floor, the centre-tile skip that had been hiding the cell containing the oil.
+But the `holds`/`Scout` agreement test **passed under falsification**: its
+fixture left some probes blind, so both predicates agreed on "not done" and
+it discriminated nothing. Rewritten to chart exactly the seventeen probe
+points, it now fails as it should. That is the sixth instance tonight of a
+test agreeing with what it was written beside, and the first caught by the
+rule rather than by a live run.
+
 ## ✅ A CLAIM SPENT A WHOLE ORE TILE, FOREVER (`e430c015`)
 
 Why goals that planned with two bots refused with four — the default roster.

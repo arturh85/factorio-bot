@@ -22,7 +22,7 @@
 //! so a single altered character usually destroys it rather than perturbing it.
 //! That is a good property: corruption is loud, *provided somebody decodes it*.
 
-use factorio_bot_core::blueprint::{decode, BlueprintError};
+use factorio_bot_core::blueprint::{BlueprintError, decode};
 use std::path::PathBuf;
 
 /// `<repo>/scripts/rcontest.lua`, resolved from this crate's manifest so the
@@ -146,7 +146,11 @@ fn the_smelting_block_keeps_the_geometry_it_inherited_from_furnaceline() {
         .iter()
         .map(|e| (e.name.clone(), e.offset.x(), e.offset.y(), e.direction))
         .collect();
-    seen.sort_by(|a, b| a.3.cmp(&b.3).then(a.1.total_cmp(&b.1)).then(a.2.total_cmp(&b.2)));
+    seen.sort_by(|a, b| {
+        a.3.cmp(&b.3)
+            .then(a.1.total_cmp(&b.1))
+            .then(a.2.total_cmp(&b.2))
+    });
 
     // Both inserters are direction 0: the input picks from the north (the
     // source chest) and drops south into the furnace; the output picks from
@@ -171,7 +175,6 @@ fn the_smelting_block_keeps_the_geometry_it_inherited_from_furnaceline() {
         );
     }
 }
-
 
 /// `TJunctionSmelter` merges ore and coal onto one belt the way Factorio does.
 ///

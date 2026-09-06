@@ -221,8 +221,14 @@ fn the_moving_block_decodes_to_its_nine_entities_with_every_direction_pinned() {
         assert_eq!(entity.name, *name);
         assert_eq!(entity.offset.x(), *x, "{name} x");
         assert_eq!(entity.offset.y(), *y, "{name} y");
-        assert_eq!(entity.direction, *direction, "{name} @ ({x}, {y}) direction");
-        assert!(entity.underground_half.is_none(), "no underground belts here");
+        assert_eq!(
+            entity.direction, *direction,
+            "{name} @ ({x}, {y}) direction"
+        );
+        assert!(
+            entity.underground_half.is_none(),
+            "no underground belts here"
+        );
     }
 }
 

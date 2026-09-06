@@ -27,9 +27,12 @@ fn captured_boxes() -> HashMap<String, (f64, f64)> {
             continue;
         };
         let (lt, rb) = (&cb["left_top"], &cb["right_bottom"]);
-        let (Some(x0), Some(y0), Some(x1), Some(y1)) =
-            (lt["x"].as_f64(), lt["y"].as_f64(), rb["x"].as_f64(), rb["y"].as_f64())
-        else {
+        let (Some(x0), Some(y0), Some(x1), Some(y1)) = (
+            lt["x"].as_f64(),
+            lt["y"].as_f64(),
+            rb["x"].as_f64(),
+            rb["y"].as_f64(),
+        ) else {
             continue;
         };
         out.insert(name.to_string(), (x1 - x0, y1 - y0));
@@ -51,10 +54,22 @@ fn every_helper_carries_the_collision_box_the_game_reports() {
     let at = Position::new(0.0, 0.0);
     let north = Direction::North;
     let subjects: Vec<(&str, FactorioEntity)> = vec![
-        ("stone-furnace", FactorioEntity::new_stone_furnace(&at, north)),
-        ("burner-mining-drill", FactorioEntity::new_burner_mining_drill(&at, north)),
-        ("electric-mining-drill", FactorioEntity::new_electric_mining_drill(&at, north)),
-        ("transport-belt", FactorioEntity::new_transport_belt(&at, north)),
+        (
+            "stone-furnace",
+            FactorioEntity::new_stone_furnace(&at, north),
+        ),
+        (
+            "burner-mining-drill",
+            FactorioEntity::new_burner_mining_drill(&at, north),
+        ),
+        (
+            "electric-mining-drill",
+            FactorioEntity::new_electric_mining_drill(&at, north),
+        ),
+        (
+            "transport-belt",
+            FactorioEntity::new_transport_belt(&at, north),
+        ),
         ("splitter", FactorioEntity::new_splitter(&at, north)),
     ];
 
@@ -66,7 +81,11 @@ fn every_helper_carries_the_collision_box_the_game_reports() {
         let (got_w, got_h) = (entity.bounding_box.width(), entity.bounding_box.height());
         // Exact: these are fixed constants on both sides, not measurements.
         if (got_w - want_w).abs() > 1e-9 || (got_h - want_h).abs() > 1e-9 {
-            let how = if got_w < *want_w { "TOO SMALL" } else { "too big" };
+            let how = if got_w < *want_w {
+                "TOO SMALL"
+            } else {
+                "too big"
+            };
             wrong.push(format!(
                 "{name}: helper {got_w:.7}x{got_h:.7}, game {want_w:.7}x{want_h:.7} ({how})"
             ));

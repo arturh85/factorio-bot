@@ -40,6 +40,24 @@ fn scripts_dir() -> PathBuf {
 #[test]
 fn every_script_in_the_repo_compiles_as_lua() {
     let dir = scripts_dir();
+
+    // The workspace forbids building an interpreter outside
+    // `scripting_lua::sandbox`, and rightly: that one runs *user* scripts
+    // reached from an unauthenticated HTTP API, so a second construction site
+    // would silently reopen every hole the sandbox closes.
+    //
+    // This one **never runs anything**. `into_function` below compiles a chunk
+    // and stops; no script is ever called, so `io`, `os`, `package` and the
+    // bytecode-accepting `load` are all unreachable — there is no execution for
+    // them to be reachable *from*. Syntax does not depend on the standard
+    // library, so a sandboxed interpreter would give an identical verdict.
+    //
+    // `new_sandboxed_lua` is `pub(crate)` and this is an integration test, i.e.
+    // a separate crate, so it cannot be reached from here in any case.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "compiles only, never executes; see the comment above"
+    )]
     let lua = Lua::new();
 
     let mut paths: Vec<PathBuf> = std::fs::read_dir(&dir)

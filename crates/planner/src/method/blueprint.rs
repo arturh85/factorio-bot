@@ -1171,10 +1171,7 @@ mod tests {
         state.create_entity(ghost_of("stone-furnace", 20.5, 20.5));
 
         let recovered = recover_anchor(&state, &bp).expect("a ghost is a site marker");
-        assert_eq!(
-            Pos::from(&recovered),
-            Pos::from(&Position::new(20.5, 20.5))
-        );
+        assert_eq!(Pos::from(&recovered), Pos::from(&Position::new(20.5, 20.5)));
     }
 
     /// The negative half of the test above: a ghost of the WRONG name, or one
@@ -1247,12 +1244,16 @@ mod tests {
             blueprint: blueprint_text.clone(),
             site: Site::At(Position::new(100.5, 100.5)),
         };
-        let first = BuildBlock.expand(&goal, &mut ctx).expect("a fresh block plans");
+        let first = BuildBlock
+            .expand(&goal, &mut ctx)
+            .expect("a fresh block plans");
 
         let stamps: Vec<&Action> = first
             .iter()
             .filter_map(|s| match s {
-                Step::Act(a) if matches!(a.kind, ActionKind::StampGhosts { .. }) => Some(a.as_ref()),
+                Step::Act(a) if matches!(a.kind, ActionKind::StampGhosts { .. }) => {
+                    Some(a.as_ref())
+                }
                 _ => None,
             })
             .collect();
@@ -1299,7 +1300,10 @@ mod tests {
         };
         let restamped: Blueprint = decode(stamped_text).expect("the stamped text still decodes");
         assert_eq!(restamped.entities.len(), bp.entities.len());
-        assert_eq!(Pos::from(stamped_anchor), Pos::from(&Position::new(100.5, 100.5)));
+        assert_eq!(
+            Pos::from(stamped_anchor),
+            Pos::from(&Position::new(100.5, 100.5))
+        );
 
         // Now apply the stamp's own effect on a fresh state -- ghosts of
         // every entity, standing -- and replan. The second expansion must
@@ -1311,10 +1315,14 @@ mod tests {
             resumed.create_entity(ghost_of(&e.name, world.x(), world.y()));
         }
         let mut ctx2 = ExpansionCtx::new(resumed, BotId(1));
-        let second = BuildBlock.expand(&goal, &mut ctx2).expect("a replan still plans");
+        let second = BuildBlock
+            .expand(&goal, &mut ctx2)
+            .expect("a replan still plans");
         let second_stamps = second
             .iter()
-            .filter(|s| matches!(s, Step::Act(a) if matches!(a.kind, ActionKind::StampGhosts { .. })))
+            .filter(
+                |s| matches!(s, Step::Act(a) if matches!(a.kind, ActionKind::StampGhosts { .. })),
+            )
             .count();
         assert_eq!(
             second_stamps, 0,
@@ -2575,9 +2583,9 @@ mod tests {
             blueprint,
             site: Site::Anywhere,
         };
-        let err = BuildBlock.expand(&goal, &mut ctx).expect_err(
-            "a real obstruction covering the whole search radius must still refuse",
-        );
+        let err = BuildBlock
+            .expand(&goal, &mut ctx)
+            .expect_err("a real obstruction covering the whole search radius must still refuse");
         assert!(
             matches!(err, PlannerError::NoSiteFound { .. }),
             "the sited path must still fail closed on real ground, not plan \

@@ -135,14 +135,36 @@ const FUEL_SEARCH_RADIUS: i32 = 12;
 /// from belting the same drill twice.
 const FED_RADIUS: f64 = 2.5;
 
-/// How far from a cell's drill its own buffer chest may stand before this
-/// method stops recognising it and sites a second one.
+/// How far from a cell's **furnace** its own buffer chest may stand before
+/// this method stops recognising it and sites a second one.
 ///
-/// `free_area_near` searches outward from the furnace, so a chest it chose is
-/// within a few tiles of the pair; six covers that with room and is still far
-/// short of the next cell, which `plan_cells` sites at least a drill and a
-/// furnace away.
-const LOCAL_BUFFER_RADIUS: f64 = 6.;
+/// **Measured, after a live run halted on the guess.** The first version
+/// searched from the *drill* with a radius of 6, reasoned from "a chest the
+/// siting search chose is within a few tiles of the pair". It is not:
+/// `free_area_near_where` searches from the **furnace** and the clearance test
+/// pushes it out of the cell's own crowding, so on seed 31337 the chest landed
+/// at `(-0.5, -30.5)` against a drill at `(-7, -27)` -- **7.38 tiles**, just
+/// outside. The re-plan therefore did not recognise the chest it had just
+/// built, sited a second one, and refused laying its belt over the first one's
+/// (`run-1788679468-60128`: 288 of 288 actions succeeded, 81 entities stood,
+/// and the milestone halted on `transport-belt fits at [7.5, -23.5] ... does
+/// not hold there`).
+///
+/// So it is anchored where the siting is anchored and bounded by the same
+/// `FREE_TILE_SEARCH_RADIUS + 1` the siting can reach, rather than by an
+/// estimate of where the siting would land. A radius that cannot cover the
+/// search it is meant to recognise is a bug however plausible the number
+/// looks; the next cell is at least a whole cell away, so nothing else falls
+/// inside it.
+///
+/// **The anchor is the load-bearing half, and the falsification says so.**
+/// Reverting the radius alone to 6 leaves
+/// `a_replan_over_the_arrangement_it_just_built_adds_nothing` green -- on the
+/// compact test fixture the chest lands inside 6 tiles of the furnace anyway.
+/// Reverting the *anchor* to the drill as well reproduces the live halt
+/// exactly, with the same shape of message. A falsification that changes only
+/// the plausible-looking number would have read as "this fix does nothing".
+const LOCAL_BUFFER_RADIUS: f64 = crate::method::util::FREE_TILE_SEARCH_RADIUS as f64 + 1.;
 
 /// Has the tile at `at` room for a chest that **three** belt runs leave from?
 ///
@@ -586,12 +608,29 @@ impl Method for Sustain {
         for cell in &cells {
             // A chest beside the cell, hauled to from the source. Reused when
             // one already stands, for the replan.
-            let local = match ctx
+            // The nearest chest that is not the SOURCE's own. Excluding it by
+            // name is load-bearing and not defensive: on a map whose two
+            // patches are close -- which is the only kind this arrangement
+            // works on -- the source buffer falls inside this radius, and
+            // without the exclusion the haul is planned from that chest to
+            // itself and refuses with `from` and `to` the same position.
+            // Found by the planner's own tests once the radius was widened.
+            let mut candidates: Vec<FactorioEntity> = ctx
                 .state
-                .entities_within(&cell.drill, LOCAL_BUFFER_RADIUS)
+                .entities_within(&cell.furnace, LOCAL_BUFFER_RADIUS)
                 .into_iter()
-                .find(|e| e.name == BUFFER)
-            {
+                .filter(|e| e.name == BUFFER && Pos::from(&e.position) != Pos::from(&source.buffer))
+                .collect();
+            // Nearest first, by an ordering that is total and float-free at
+            // the comparison -- `entities_within` sorts by (x, y), which is
+            // deterministic but is not "closest to the cell".
+            candidates.sort_by(|a, b| {
+                let d = |e: &FactorioEntity| {
+                    (e.position.x() - cell.furnace.x()).hypot(e.position.y() - cell.furnace.y())
+                };
+                d(a).total_cmp(&d(b))
+            });
+            let local = match candidates.into_iter().next() {
                 Some(existing) => existing.position,
                 None => {
                     let at = crate::method::util::free_area_near_where(
@@ -644,7 +683,8 @@ impl Method for Sustain {
                 per_minute: *per_minute,
                 window_ticks: *window_ticks,
                 inputs: format!(
-                    "nothing: the arrangement for {} and {FUEL} stands",
+                    "the whole arrangement stands -- the {} cell, its {FUEL} source, and a \
+                     belted deliverer for every burner -- so there is nothing left to build",
                     spec.ore
                 ),
             });
@@ -876,6 +916,58 @@ mod tests {
             "hand-delivered coal at the belted burners is {total}, which is more than the \
              ten-minute drill charge this rung exists to get away from: {charges:?}"
         );
+    }
+
+    /// **The regression the first live run bought.**
+    ///
+    /// `run-1788679468-60128` dispatched all 288 of its actions, settled every
+    /// one `success`, stood all 81 entities -- and then halted, because the
+    /// **re-plan** did not recognise the chest it had just built and tried to
+    /// lay a second belt run over the first. Nothing about the world was
+    /// wrong; the method was not idempotent against its own output.
+    ///
+    /// So: expand, put everything the plan places into the world, expand
+    /// again. The second answer must be the standing refusal and not another
+    /// belt -- which is what `have::holds` answering `None` obliges, and what
+    /// `supervisor.lua` turns into a satisfied milestone.
+    #[test]
+    fn a_replan_over_the_arrangement_it_just_built_adds_nothing() {
+        let roster = [BotId(1)];
+        let state = near_state();
+        let net = expand(&[goal()], &state, &registry_for(&roster), BotId(1))
+            .expect("iron and coal are within one belt window of each other");
+        let mut built = state.fork();
+        let mut placed = 0usize;
+        for action in net.actions() {
+            if let crate::action::ActionKind::Place { entity } = &action.kind {
+                built.create_entity((**entity).clone());
+                placed += 1;
+            }
+        }
+        // The substitution this test rests on has to have happened: an empty
+        // world would trivially "add nothing" for the wrong reason.
+        assert!(
+            placed > 30,
+            "the first expansion has to have built the arrangement: {placed} placements"
+        );
+        let again = expand(&[goal()], &built, &registry_for(&roster), BotId(1));
+        match again {
+            Err(PlannerError::SustainSupplyNotStanding { .. }) => {}
+            Err(other) => panic!(
+                "a replan over the finished arrangement must refuse by the STANDING name, \
+                 not by a fresh geometry failure: {other}"
+            ),
+            Ok(net) => {
+                let names: Vec<String> = net
+                    .actions()
+                    .filter_map(|a| match &a.kind {
+                        crate::action::ActionKind::Place { entity } => Some(entity.name.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                panic!("a replan built a second arrangement beside the first: {names:?}");
+            }
+        }
     }
 
     /// And on a map whose fuel is further away than one belt window reaches,

@@ -1,8 +1,8 @@
 # A cell that feeds itself: the mechanism, the price, and what is still a hand
 
 2026-09-06, branch `a-cell-that-feeds-itself` (worktree `selffed`), from
-master `e7de6707`, merged onto `2afe55d1` (the hand-credit balance). **Planned and tested offline; not yet run live.** Every
-number below is from `factorio-bot plan` against
+master `e7de6707`, merged onto `2afe55d1` (the hand-credit balance). **Run live, twice.** The offline
+numbers below are from `factorio-bot plan` against
 `workspace/scripts/map.json` (seed 31337, fingerprint `c161fa3f437221d0`)
 with a **release** build, or from that dump's own recipe table. Nothing here
 is a measurement of a running game, and the three claims that need one are
@@ -195,7 +195,135 @@ prints `ARRANGEMENT STANDS (the rate is NOT claimed here)`, because a reason
 word that a reader takes for a claim about the rate is the
 confidently-wrong-object failure this project has paid for twice.
 
-## Three claims that need a running game, and none of them is checked
+## THE RUN: all three unmeasured claims answered yes, and the rate is not held
+
+`run-1788679826-02267`, seed 31337 `--new`, 4 headless character bots at 5x,
+release, commit `040d4942`, **299 tps of 300 nominal (100%)** — so nothing
+below is a starvation artefact. `state=done`, all three milestones satisfied.
+
+```
+Using mods directory "/home/arturh/.../workspace/headless-v/mods"
+  (pre-existing workspace copy; editing mods/ does NOT update it -- see the
+   staleness warning above, or set FACTORIO_BOT_REFRESH_MODS=1 to refresh it)
+```
+The workspace had been created minutes earlier by `run-1788679468-60128` from
+the same release binary, and no mod byte changed between the two.
+
+**Build: 288 actions dispatched, 288 settled `success`, 0 failed, 0 lost, 0
+failed walks, 45 walks, 0 refusals.** 63 transport belts, 8 burner inserters,
+2 iron chests, 2 burner drills, the cell's stone furnace — every entity of the
+arrangement stood. The milestone closed in 15,001 ticks (4:10).
+
+### The three claims
+
+All three are answered **yes**, and by the same evidence: the roster fed
+*nothing at all* after tick 15,416, and the machines kept producing for the
+next 27,249 ticks.
+
+| interval | who made it | roster feeding |
+|---|---|---|
+| 5:00 | iron-plate 166 (all machine) | 174 feeding actions — `roster-fed` |
+| 10:00 | iron-plate 72, coal 75, iron-ore 71 (all machine) | **nothing** — `factory` |
+| end 11:48 | iron-plate 8, coal 28, iron-ore 56 (all machine) | **nothing** — `factory` |
+
+* **A burner inserter self-fuels from the coal it carries.** Eight arms were
+  placed with no charge of their own and were still moving coal 27,000 ticks
+  later. Nothing else can explain the two burners still burning.
+* **An arm fills another burner's fuel slot.** The coal drill was hand-charged
+  **one coal — 1,600 ticks — and mined 127 coal across ~35,000**; the cell's
+  furnace, hand-charged 1 coal (2,666 ticks), read `no_fuel` in only 15 of 125
+  samples.
+* **`method::connect`'s belts move items.** First time in this project's
+  history. The source chest was empty in 88% of samples and the cell's chest in
+  **100%** — coal arriving and being taken straight off, not accumulating.
+
+### And the rate is not held: `SHORT`, 11 of 30
+
+```
+iron-plate 15/min over 7200 ticks (lead-in 20000): SHORT
+  window 35779 -> 42979; needed 30, machines made 11, force made 11
+  feeding dispatches: 0 in window, 0 in lead-in
+```
+
+Not starvation — 100% of nominal. The cause is on the machine's own status
+line, and it is three things at once:
+
+```
+stone-furnace [-5.0, -27.0]  working 62% of samples, finished 118
+  status: {working: 80, no_ingredients: 19, no_fuel: 15, full_output: 15}
+```
+
+**`full_output` is the one this design already admitted and did nothing
+about**: nothing takes the plates away, so the cell throttles itself as its
+output slot fills — iron-plate machine production decays 166 → 72 → 8 across
+the run while coal and ore stay flat at ~16/min. A belt off the furnace is not
+a nicety, it is the difference between sustaining a window and sustaining a
+rate. `no_fuel` and `no_ingredients` are the supply arriving in bursts through
+a single-arm chest rather than continuously.
+
+### The balance: `ROSTER-FED`, and the reason is not this cell
+
+```
+hand-credit balance (no lead-in): ROSTER-FED
+  credit 333 from 90 delivery(ies)
+    (burner-mining-drill/coal 47, stone-furnace/coal 333,
+     stone-furnace/iron-ore 128, wooden-chest/iron-ore 79)
+  spent 235 before the window; outstanding 98
+  machines made 11 in the window -> -87 unexplained, 30 needed
+  (credit read from: fields)
+```
+
+**`ActionDispatched.delivery` survived first contact** — `credit read from:
+fields`, 90 populated records of the shape
+`{"item":"coal","count":1,"entity":"stone-furnace","slot":"fuel"}`. The prose
+fallback was never used.
+
+My projection was ~69 credit and the run says **333**, and the gap is a finding
+about the balance rather than about the cell: **credit is pooled by entity
+*prototype*, not by machine instance.** This plan hand-smelts ~95 plates of
+belt iron in four *other* stone furnaces, and all of their coal is credited
+against the one belted stone furnace's output. The consequence is worth stating
+in full, because it is not a matter of degree:
+
+> With 98 of credit outstanding at the window's open, a cell would have to make
+> **128 plates in 7,200 ticks — 64/min — to be called `sustained`**, from an
+> arrangement rated at 15. **No self-feeding stage-1 cell can pass this check
+> as it groups today**, however perfectly its belts work, because the plan that
+> builds it must hand-smelt its own belts in a machine of the same prototype.
+
+That is not an argument against the balance — it refused, and refusing is the
+direction it was built to fail in. It is a statement of what has to change for
+it to be able to say yes: credit by `(entity, position, item)`, so a hand-fed
+furnace's credit is spent by *that* furnace's output.
+
+So the honest verdict on this run is the one the coordinator's rule assigns:
+`roster-fed` is logical rather than rate-dependent — even at the full 30
+plates, `30 - 98` is still negative — and it is trustworthy. The `SHORT` beside
+it is real too, measured at 100% tick rate, and its cause is named.
+
+## The idempotence bug the first run bought
+
+`run-1788679468-60128`, the run before this one, **built the entire
+arrangement — 288 of 288 actions `success`, 81 entities standing — and then
+halted on the re-plan**: `transport-belt fits at [7.5, -23.5] facing 12 does
+not hold there`.
+
+Nothing was wrong with the world. The method did not recognise the chest it had
+just built: it searched from the cell's **drill** with a radius of 6, while
+`free_area_near_where` sites the chest from the **furnace** and the clearance
+test pushes it clear of the pair — 7.38 tiles away on this map. So the re-plan
+sited a second chest and refused laying its belt over the first one's.
+
+`a_replan_over_the_arrangement_it_just_built_adds_nothing` is that run as a
+test: expand, put every placement into the world, expand again, and require the
+standing refusal. **Its falsification is worth reading**: reverting the radius
+alone to 6 leaves it green, because on the compact test fixture the chest lands
+inside 6 tiles anyway. Only reverting the *anchor* as well reproduces the halt,
+with the same shape of message. A falsification that changed only the
+plausible-looking number would have read as "this fix does nothing" — which is
+the same trap as the tautological assertion below, wearing a different coat.
+
+## Three claims that need a running game (all now answered — kept for the record)
 
 Stated plainly because the branch is otherwise green and a green suite here
 proves less than usual — **this task wrote both the code and its fixtures**,

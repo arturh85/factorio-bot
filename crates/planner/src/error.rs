@@ -730,8 +730,8 @@ pub enum PlannerError {
     /// planner's word for "done", and a standing rate is exactly what it
     /// cannot know is done.
     #[error(
-        "the capacity for {per_minute} {item}/min stands, but nothing delivers {inputs} to it \
-         without a bot: a standing supply over {window_ticks} ticks is not modelled"
+        "{per_minute} {item}/min: {inputs}. Whether the rate held over {window_ticks} ticks \
+         is a window of history and no reading of the world settles it"
     )]
     #[diagnostic(
         code(planner::sustain_supply_not_standing),

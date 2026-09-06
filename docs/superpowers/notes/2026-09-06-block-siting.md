@@ -174,8 +174,86 @@ the threat index, so the data now exists — the check does not.
 
 ## The live run
 
-*(empty — to be filled in after a headless 5× run reads every entity back off
-the surface. Per the record's own standard, a placement count is not evidence:
-this project has twice shipped layouts that placed 100 % correctly and did
-nothing. The delivered tick rate belongs here too, since a clean pass at any
-tick rate is trustworthy while a failure on a loaded floor is ambiguous.)*
+`run-1788663566-25023`, headless, four character bots, game speed 5, seed 31337
+on a fresh map. `goal.built(FurnaceLine)` with **no anchor** — siting chose.
+
+**Siting is proven. The build did not finish, for a reason that is not siting.**
+Both halves are real and they are separable, so they are reported separately.
+
+### What siting did — proven
+
+- **Anchor chosen: `(0.00, 0.00)`**, with no anchor supplied by the caller.
+- **179 of 179 planned placements were consistent with that one anchor**, none
+  disagreed. The block was sited coherently, not approximately.
+- **The footprint was actually clear**: the script's own pre-scan found **0
+  non-resource, non-character entities inside the chosen footprint** before
+  `goal.run`. So the site was genuinely empty ground, not merely a spot the
+  planner failed to refuse — a distinction this project has been caught by
+  before.
+- Plan: 183 steps across 4 bots, makespan 1,405 ticks.
+
+### What stood — proven, and the direction migration holds
+
+**129 of 179 entities read back off the live surface at the right tile, with
+the right name, facing the right way**, including both underground belts with
+the correct half (`input`/`output`).
+
+**Zero wrong directions. Zero wrong halves.** Everything that was built was
+built correctly. That is the second independent confirmation of the 8-point to
+16-point direction migration, and the first at a **sited** anchor rather than a
+hand-chosen one.
+
+### What did not stand — and why it is not siting
+
+**50 entities are missing, and the cause is a single failed placement that
+aborted the rest of the batch.**
+
+```
+failure[1] id=130 status=failed
+  cannot place item 'transport-belt' because a character is standing in the
+  footprint; dispatched 4 times over 534 game ticks and refused every time
+```
+
+One bot stood where another needed to build, the placement was refused four
+times, and the batch stopped — leaving roughly fifty later placements never
+dispatched. Two bots also stalled walking, **blocked by the block's own
+entities** (`blocked by our own stone-furnace`, `blocked by our own inserter`).
+
+Three things follow, none of them about siting:
+
+1. **This is the footprint-refusal defect the speedrun session independently
+   hit tonight** on a 1× client run, where it cost a replan at milestone 1. It
+   was believed fixed for server-side characters by the mod's bot registry;
+   this run shows it failing **headless too**, so it is failing in both modes,
+   not one.
+2. **A single unresolvable placement costs the whole remainder of a block.**
+   Failing fast is defensible, but the blast radius here is 50 entities from
+   one bot standing in one tile, and nothing retried or re-planned around it.
+3. **The band split did not prevent bots blocking each other.** The spec's
+   claim is that bands are the structural reason two bots cannot trap each
+   other; `FurnaceLine` is 29 wide by 11 tall, so bands are vertical slabs ~7
+   tiles wide, and bots working adjacent slabs still meet at the boundary.
+   Bands stop bots *interleaving*; they do not stop them *colliding*.
+
+### How much to trust this
+
+The failures are **logical, not starvation**: a character occupying a tile is a
+refusal the game computes, not a timeout, and the refusal repeated across 534
+game ticks rather than expiring. So the missing 50 are a real defect and not an
+artefact of a loaded box.
+
+The honest caveat is that the floor was **not** quiet — another session's
+compiles were running, load ~20 at launch — and load plausibly makes bots
+slower to clear a contested tile, so it may have made the collision *more
+likely* without being its cause. Under the rule this record now keeps: a clean
+pass at any tick rate is trustworthy, and a failure on a loaded floor is
+ambiguous about frequency though not about existence. **The siting result above
+is a clean pass and stands; the 50-entity shortfall should be re-measured on a
+quiet floor before anyone quotes a rate for it.**
+
+### Still not proven, and worth repeating
+
+`FurnaceLine` carries 13 poles and **no generator at all**. The 87 belts, 48
+inserters, 2 splitters and 2 underground belts are proven to **stand** and have
+never been shown to **move a single item**. Nothing in this run could show it,
+and nothing in it tried.

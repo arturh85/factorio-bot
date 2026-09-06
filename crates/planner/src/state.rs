@@ -180,6 +180,82 @@ fn generation_kw(name: &str) -> Option<f64> {
     }
 }
 
+/// What a headroom question is *about*, and therefore what
+/// [`PlanState::electric_demand_kw_excluding`] must not charge against its own
+/// answer.
+///
+/// # Why an exclusion exists at all
+///
+/// A headroom test asks "is there room for this draw", and the draw it names
+/// is a draw that is *about to be* placed. The moment any of it is already in
+/// the plan overlay — and it always is, because a placement is created in a
+/// fork before the check that decides whether to keep it — the ledger charges
+/// it twice: once as standing demand and once as the `kw` being asked for. The
+/// predicate then answers differently on the second evaluation of an identical
+/// plan, which is a non-idempotent condition in a supervisor loop.
+///
+/// # Why a region, and not a list of positions
+///
+/// [`Consumer`](Excluded::Consumer) was the whole of this type for as long as
+/// every caller sited **one machine**. A caller siting a *block* — a decoded
+/// blueprint whose 179 entities are placed together and whose `kw` is their
+/// sum — has N things to exclude, and stating them as N positions has two
+/// costs a rectangle does not: the list has to be carried inside every
+/// [`Condition`](crate::action::Condition) built from it, cloned onto every
+/// precondition; and it is a list of *what has been placed so far*, so it
+/// changes as the block goes down, which is exactly the idempotence this type
+/// exists to protect.
+///
+/// A block's ground is a rectangle known before the first entity is placed and
+/// unchanged by placing them, so [`Ground`](Excluded::Ground) is O(1), stable
+/// under a partial build, and states the honest predicate: *the network can
+/// supply this draw beyond what is drawn by consumers that are not mine.*
+///
+/// It is sound only because the ground is the caller's own: `BuildBlock`
+/// refuses with `PlannerError::BlockGroundOccupied` before emitting anything
+/// if the footprint carries a foreign entity, so nothing inside the rectangle
+/// is somebody else's draw. A caller whose region may contain consumers its
+/// `kw` does not account for must not use this variant — it would over-state
+/// headroom, which is the one direction this file's tables never err in.
+#[derive(Clone, Copy, Debug, Default)]
+pub enum Excluded<'a> {
+    /// Charge every consumer on the network. What a question asked about
+    /// ground nobody is about to build on wants.
+    #[default]
+    Nothing,
+    /// One consumer, matched **by tile** through [`Pos`] — the machine being
+    /// asked about. The tile match is how
+    /// [`PlanState::create_entity`](PlanState::create_entity) keys the
+    /// overlay, and two consumers cannot stand on one tile anyway.
+    Consumer(&'a Position),
+    /// Every consumer standing inside a rectangle — the ground a block is
+    /// about to occupy, whose entire draw the question already names.
+    Ground(&'a Rect),
+}
+
+impl Excluded<'_> {
+    /// Whether a consumer standing at `position` is one the question is about.
+    ///
+    /// The rectangle test is **inclusive** on all four edges, unlike
+    /// [`Rect::contains`], which is strict. A block's ground is the union of
+    /// its entities' footprints, so its outermost entities' collision boxes
+    /// touch the boundary exactly; a strict test would charge precisely the
+    /// entities on the edge of the block and leave a residue of double count
+    /// proportional to the block's perimeter.
+    fn covers(&self, position: &Position) -> bool {
+        match self {
+            Excluded::Nothing => false,
+            Excluded::Consumer(pos) => Pos::from(*pos) == Pos::from(position),
+            Excluded::Ground(rect) => {
+                position.x() >= rect.left_top.x()
+                    && position.x() <= rect.right_bottom.x()
+                    && position.y() >= rect.left_top.y()
+                    && position.y() <= rect.right_bottom.y()
+            }
+        }
+    }
+}
+
 /// One electric network as seen from a patch of ground: the poles near it, the
 /// wire components they form, and which of those components reach the ground.
 ///
@@ -2877,7 +2953,13 @@ impl PlanState {
     /// stands on — is for entities put into the state directly with neither a
     /// bounding box nor a known prototype, and it under-reserves; it is the
     /// least this can claim without inventing a size.
-    fn footprint_of(&self, entity: &FactorioEntity) -> Rect {
+    ///
+    /// Public since 2026-09-06 so `method::power` can draw the ground a block
+    /// occupies from the entities it is about to place, rather than from their
+    /// positions: an entity's position sits inside its own box, so a
+    /// positions-only rectangle leaves the block's whole perimeter outside the
+    /// exclusion. See [`Excluded::Ground`].
+    pub fn footprint_of(&self, entity: &FactorioEntity) -> Rect {
         if entity.bounding_box.width() > 0. && entity.bounding_box.height() > 0. {
             return entity.bounding_box.clone();
         }
@@ -3907,6 +3989,22 @@ impl PlanState {
         total
     }
 
+    /// **Uncommitted** capacity, in kW, on the network that reaches `area`:
+    /// [`electric_supply_kw`](Self::electric_supply_kw) less
+    /// [`electric_demand_kw_excluding`](Self::electric_demand_kw_excluding).
+    ///
+    /// The arithmetic `Condition::Powered` and `Condition::BlockPowered` are
+    /// both made of, in one place, so the two cannot drift — and the number
+    /// `method::power` reports when it refuses, so a refusal quotes the
+    /// figure the refusal was actually decided by rather than a second
+    /// computation of it.
+    ///
+    /// Negative is a real answer: a network can already be committed past its
+    /// generation, and rounding that up to zero would hide it.
+    pub fn electric_headroom_kw(&self, area: &Rect, except: Excluded<'_>) -> f64 {
+        self.electric_supply_kw(area) - self.electric_demand_kw_excluding(area, except)
+    }
+
     /// What one machine of `name` draws, in kW, as the demand ledger charges it.
     ///
     /// The same [`consumer_kw`] table [`electric_demand_kw`](Self::electric_demand_kw)
@@ -3968,6 +4066,11 @@ impl PlanState {
     /// [`create_entity`](Self::create_entity) keys the overlay and two
     /// consumers cannot stand on one tile anyway.
     ///
+    /// **One position is not enough for a caller siting a whole block**, whose
+    /// own consumers are all in the overlay and all already counted in the
+    /// `kw` it asks for. [`electric_demand_kw_excluding`](Self::electric_demand_kw_excluding)
+    /// takes an [`Excluded`] instead; this is its one-consumer wrapper.
+    ///
     /// The walk is [`electric_supply_kw`](Self::electric_supply_kw)'s own —
     /// literally the same [`ElectricNetwork`], built by the same three steps —
     /// so there is one notion of "the same network" and not two. A budget
@@ -4004,16 +4107,27 @@ impl PlanState {
     /// name errs towards permitting rather than refusing, and its own doc
     /// comment says so.
     pub fn electric_demand_kw(&self, area: &Rect, except: Option<&Position>) -> f64 {
+        self.electric_demand_kw_excluding(
+            area,
+            except.map_or(Excluded::Nothing, Excluded::Consumer),
+        )
+    }
+
+    /// [`electric_demand_kw`](Self::electric_demand_kw) with the general
+    /// exclusion: the same walk, the same ledger, one notion of "the same
+    /// network", and [`Excluded`] instead of a single tile.
+    ///
+    /// The one-consumer form is the wrapper above rather than a second copy,
+    /// because two demand walks that could disagree would be worse than no
+    /// budget at all — the argument this function's own doc already makes
+    /// about supply and demand walking different networks, one level down.
+    pub fn electric_demand_kw_excluding(&self, area: &Rect, except: Excluded<'_>) -> f64 {
         let Some(net) = self.electric_network(area) else {
             return 0.;
         };
-        let skip = except.map(Pos::from);
         let mut total = 0.;
         for entity in &net.nearby {
-            if skip
-                .as_ref()
-                .is_some_and(|pos| *pos == Pos::from(&entity.position))
-            {
+            if except.covers(&entity.position) {
                 continue;
             }
             let Some(kw) = consumer_kw(&entity.name) else {

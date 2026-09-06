@@ -2049,15 +2049,26 @@ pub fn supply_anchor(
 /// reserved in `ctx.state` -- that happens with the caller's `Place` -- so a
 /// refusal between here and there leaves nothing behind.
 ///
+/// **They are also the exclusion the headroom test is asked about.** `kw` is
+/// their draw, so charging them as standing demand as well would count the
+/// block twice; see [`headroom_condition`] for the arithmetic that made a
+/// 624 kW block refuse on a 900 kW plant.
+///
 /// # Three answers, and the middle one is the interesting one
 ///
 /// * `Err` -- supply itself is impossible, and [`supply_for`] says why by
-///   name (`PowerPlantNeedsShore`, `PowerPlantTooSmall`, a `Have` shortfall).
+///   name (`PowerPlantNeedsShore`, `PowerPlantTooSmall`, a `Have` shortfall);
+///   **or the poles reach and what they reach is too small**, which is
+///   [`PlannerError::PowerHeadroomShort`] and is raised here rather than by
+///   the caller, because it is not a refusal about the site at all.
 /// * `Ok(None)` -- supply exists but **no run of at most [`MAX_POLE_RUN`]
 ///   poles carries it there**, or the model cannot see the finished run
-///   carrying power. The caller names its own refusal, because what an
-///   unreachable site means differs: `method::extract` calls it
-///   `ExtractionNotModelled`.
+///   carrying power. **Routing only**, since 2026-09-06: it used to cover the
+///   capacity case as well while its message named only this one, and a peer
+///   session wiring `Goal::Built` spent two iterations on pole geometry for a
+///   block whose poles routed perfectly. The caller names its own refusal,
+///   because what an unreachable site means differs: `method::extract` calls
+///   it `ExtractionNotModelled`.
 /// * `Ok(Some(_))` -- the steps, the ids and the condition. An
 ///   already-powered site answers this way too, with empty steps and empty
 ///   ids, so a caller never has to write the "already powered" branch itself.
@@ -2091,11 +2102,7 @@ pub fn ensure_powered(
     radius: f64,
     occupants: &[FactorioEntity],
 ) -> Result<Option<Powering>, PlannerError> {
-    let powered = Condition::Powered {
-        pos: site.clone(),
-        entity: consumer.into(),
-        kw,
-    };
+    let powered = headroom_condition(ctx, consumer, site, kw, occupants);
     if powered.holds(&ctx.state, ctx.chain_actor) {
         return Ok(Some(Powering {
             steps: Vec::new(),
@@ -2128,6 +2135,95 @@ pub fn ensure_powered(
         ids,
         powered,
     }))
+}
+
+/// The headroom condition [`ensure_powered`] checks and hands back: per-entity
+/// when the caller is siting one machine, per-block when it is siting a group.
+///
+/// # The exclusion is DERIVED from `occupants`, and that is the point
+///
+/// `ensure_powered`'s contract is that `kw` is the draw of what the caller is
+/// about to place, and `occupants` is *what the site will hold once the caller
+/// places it* — the same set, stated once. So the ground whose consumers must
+/// not be charged against `kw` is the ground those occupants stand on, and
+/// asking the caller for it separately would let the two drift: a caller could
+/// name a ground that is not the one whose pole-siting was protected, and the
+/// resulting condition would be true of a world nobody built. This is the same
+/// argument [`Powering`] makes for carrying the condition rather than letting
+/// a caller construct a second copy.
+///
+/// # Why a block needs it at all
+///
+/// The occupants are created in the routing fork **before** the headroom check
+/// — they have to be, or a pole is sited on ground the caller's own building is
+/// about to take. For one machine that costs nothing: `Condition::Powered`
+/// already excludes the consumer standing at `pos`. For a block it is the whole
+/// defect: `FurnaceLine`'s 48 inserters are in the fork, the ledger charges
+/// ~611 kW of them as *existing* demand, and the caller then asks for the
+/// block's 624 kW on top. 900 − 611 = 289 < 624 — refused by its own
+/// arithmetic on a plant with room to spare.
+///
+/// # A single occupant keeps the per-entity condition exactly
+///
+/// The ground of one machine contains one consumer — itself — so
+/// `Excluded::Ground` of its footprint and `Excluded::Consumer` of its tile
+/// name the same set. The per-entity branch is kept anyway, so that every
+/// existing caller emits the condition it always emitted, byte for byte, and
+/// nothing downstream (a precondition compared for equality, a `Display` in a
+/// report) sees a new shape it never asked for.
+fn headroom_condition(
+    ctx: &ExpansionCtx,
+    consumer: &str,
+    site: &Position,
+    kw: f64,
+    occupants: &[FactorioEntity],
+) -> Condition {
+    let per_entity = Condition::Powered {
+        pos: site.clone(),
+        entity: consumer.into(),
+        kw,
+    };
+    if occupants.len() < 2 {
+        return per_entity;
+    }
+    let Some(own_ground) = occupied_ground(&ctx.state, occupants) else {
+        return per_entity;
+    };
+    Condition::BlockPowered {
+        pos: site.clone(),
+        entity: consumer.into(),
+        kw,
+        own_ground,
+    }
+}
+
+/// The smallest rectangle covering every occupant's **footprint**, or `None`
+/// for an empty list.
+///
+/// Footprints and not positions. A consumer is excluded by where it *stands*,
+/// and an entity standing at the edge of the block has its position inside its
+/// own collision box but on or outside the box drawn through the positions
+/// alone — so a positions-only rectangle leaves a residue of double count all
+/// the way round the perimeter, which is the largest part of a thin block.
+fn occupied_ground(state: &PlanState, occupants: &[FactorioEntity]) -> Option<Rect> {
+    let mut bounds: Option<Rect> = None;
+    for occupant in occupants {
+        let box_ = state.footprint_of(occupant);
+        bounds = Some(match bounds {
+            None => box_,
+            Some(sofar) => Rect::new(
+                &Position::new(
+                    sofar.left_top.x().min(box_.left_top.x()),
+                    sofar.left_top.y().min(box_.left_top.y()),
+                ),
+                &Position::new(
+                    sofar.right_bottom.x().max(box_.right_bottom.x()),
+                    sofar.right_bottom.y().max(box_.right_bottom.y()),
+                ),
+            ),
+        });
+    }
+    bounds
 }
 
 // ---------------------------------------------------------------------------
@@ -2199,9 +2295,45 @@ pub(crate) fn pole_run(
     // The one check that matters, and the only one not made of this module's
     // own arithmetic: the game's rule, over a fork carrying every pole.
     if !powered.holds(trial, actor) {
+        // Two different failures wear this one `false`, and they send a reader
+        // to opposite ends of the map. Split them by the figures the decision
+        // was actually made of.
+        if let Some(err) = capacity_refusal(trial, powered) {
+            return Err(err);
+        }
         return Ok(None);
     }
     Ok(Some(path))
+}
+
+/// Which of the two failures a false headroom condition is, or `None` when it
+/// is the routing one.
+///
+/// **`supply_kw` above zero is the discriminator**, and it is the honest one:
+/// it says generation is wired to the ground the consumer stands on, which is
+/// precisely what a pole run exists to achieve. If it arrived and the sum is
+/// still short, the poles did their job and the plant did not — a fact about
+/// capacity, not about geometry, and one no amount of re-routing will change.
+/// At zero, nothing reached the site: the run failed to carry power, whatever
+/// this module's [`POLE_STEP`] arithmetic believed, and that is
+/// [`ensure_powered`]'s `Ok(None)`.
+///
+/// The numbers come from [`Condition::headroom_parts`], i.e. from the same
+/// ledger the decision was made by, so the message cannot quote a figure the
+/// refusal was not decided on.
+fn capacity_refusal(state: &PlanState, powered: &Condition) -> Option<PlannerError> {
+    let parts = powered.headroom_parts(state)?;
+    if parts.supply_kw.total_cmp(&0.).is_le() {
+        return None;
+    }
+    Some(PlannerError::PowerHeadroomShort {
+        entity: parts.entity.clone(),
+        site: parts.pos.to_string(),
+        needed_kw: parts.needed_kw,
+        supply_kw: parts.supply_kw,
+        committed_kw: parts.committed_kw,
+        headroom_kw: parts.headroom_kw(),
+    })
 }
 
 /// How far a pole may be looked for around a nominal tile, in tiles.

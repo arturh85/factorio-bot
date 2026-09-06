@@ -737,6 +737,59 @@ pub enum PlannerError {
     )]
     PowerPlantTooSmall { needed_kw: f64, plant_kw: f64 },
 
+    /// The poles reach, and what they reach is not big enough.
+    ///
+    /// # The two answers `Ok(None)` used to give at once
+    ///
+    /// [`ensure_powered`](crate::method::power::ensure_powered) had one
+    /// refusal for "supply exists but no pole run carries it there" and for
+    /// "a pole run carries it there and the network has no room", and its
+    /// message named only the first. A peer session wiring `Goal::Built` to
+    /// it spent **two iterations on pole geometry** for a block that routed
+    /// perfectly and was short of kilowatts; the discriminator that finally
+    /// split them was replacing the block's draw with a trivial 10 kW.
+    ///
+    /// "I cannot route to it" and "I routed to it and it is too small" send a
+    /// reader to completely different places — the first to the ground between
+    /// the plant and the site, the second to the plant. The second is not a
+    /// refusal about the site at all.
+    ///
+    /// # Why not `PowerPlantTooSmall`
+    ///
+    /// That one is a statement about the **layout**: the largest plant this
+    /// planner lays out cannot make `needed_kw`, true from every anchor on
+    /// every map, and raised before a single pole is sited. This one is a
+    /// statement about **one network at one moment**: a plant that would be
+    /// big enough on its own is already committed to other consumers, or the
+    /// site is joined to a standing network rather than to a fresh plant.
+    /// Adopting a small standing plant and building a large fresh one are
+    /// different remedies, so they are different errors.
+    ///
+    /// `committed_kw` excludes the draw being asked about — it is what the
+    /// ledger charges to consumers that are somebody else's, which is the
+    /// only figure that makes `supply_kw - committed_kw < needed_kw` read as
+    /// arithmetic the reader can check.
+    #[error(
+        "the network reaching {entity} at {site} generates {supply_kw} kW with {committed_kw} kW \
+         already committed elsewhere, leaving {headroom_kw} kW for a draw of {needed_kw} kW"
+    )]
+    #[diagnostic(
+        code(planner::power_headroom_short),
+        help(
+            "the poles route: this is capacity, not geometry. Build or grow a plant (one boiler \
+             drives at most two steam engines, 900 kW each), site this away from the consumers \
+             already on that network, or ask for less"
+        )
+    )]
+    PowerHeadroomShort {
+        entity: ItemId,
+        site: String,
+        needed_kw: f64,
+        supply_kw: f64,
+        committed_kw: f64,
+        headroom_kw: f64,
+    },
+
     /// The rate asked for needs more cells than one plan may build.
     ///
     /// A bound on work rather than a claim about what a map could hold. Siting

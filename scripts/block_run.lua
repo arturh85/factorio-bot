@@ -101,7 +101,12 @@ print(string.format("recorded: %d action events, %d walk events, %d teleports, %
 if n_enclosures > 0 then print("WALLED IN: see record.enclosures() above") end
 
 record.milestone_started(1, "MinerLine (37 entities) built at " .. ANCHOR.x .. "," .. ANCHOR.y)
-if obs.done and (obs.failed or 0) == 0 and (obs.lost or 0) == 0 then
+-- `obs.done` is true when the executor judges no further progress possible,
+-- NOT only when the plan is complete, so `done and failed == 0 and lost == 0`
+-- reports a satisfied milestone with actions never dispatched. A run of the
+-- block work recorded milestone 1 satisfied at 89 of 179 entities standing.
+-- `pending == 0` is the part that makes the claim true.
+if obs.done and (obs.failed or 0) == 0 and (obs.lost or 0) == 0 and (obs.pending or 0) == 0 then
   record.milestone_satisfied(1, 1, "plan_empty")
 else
   record.milestone_stuck(1, obs.done and "stuck" or "exhausted", obs.first_error, nil)

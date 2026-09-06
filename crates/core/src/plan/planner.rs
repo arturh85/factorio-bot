@@ -1,6 +1,6 @@
 #[cfg_attr(test, mockall_double::double)]
 use crate::factorio::rcon::FactorioRcon;
-use crate::factorio::world::FactorioWorld;
+use crate::factorio::world::FactorioSurface;
 use crate::types::{EntityName, PlayerChangedMainInventoryEvent, Pos, Position, RequestEntity};
 use miette::Result;
 use std::collections::BTreeMap;
@@ -151,17 +151,17 @@ pub enum ServerOwnership {
 
 pub struct Planner {
     pub rcon: Option<Arc<FactorioRcon>>,
-    pub real_world: Arc<FactorioWorld>,
+    pub real_world: Arc<FactorioSurface>,
     /// The same world as [`Planner::real_world`], not a copy of it. See the
     /// type's documentation for why this is a second name and not a second
     /// world.
-    pub plan_world: Arc<FactorioWorld>,
+    pub plan_world: Arc<FactorioSurface>,
     /// See [`ServerOwnership`].
     pub server: ServerOwnership,
 }
 
 impl Planner {
-    pub fn new(world: Arc<FactorioWorld>, rcon: Option<Arc<FactorioRcon>>) -> Planner {
+    pub fn new(world: Arc<FactorioSurface>, rcon: Option<Arc<FactorioRcon>>) -> Planner {
         Planner {
             rcon,
             plan_world: world.clone(),
@@ -171,7 +171,7 @@ impl Planner {
     }
 
     /// [`Planner::new`] for a server this process did not start.
-    pub fn attached(world: Arc<FactorioWorld>, rcon: Option<Arc<FactorioRcon>>) -> Planner {
+    pub fn attached(world: Arc<FactorioSurface>, rcon: Option<Arc<FactorioRcon>>) -> Planner {
         Planner {
             server: ServerOwnership::Attached,
             ..Self::new(world, rcon)
@@ -191,7 +191,7 @@ impl Planner {
     }
 
     /// The world to query. Live, and the only one.
-    pub fn world(&self) -> Arc<FactorioWorld> {
+    pub fn world(&self) -> Arc<FactorioSurface> {
         self.real_world.clone()
     }
 
@@ -231,7 +231,7 @@ impl Planner {
     ///
     /// # An entity the game does not answer for keeps its old reading
     ///
-    /// See [`FactorioWorld::observe_inventories`]. The mod skips a position
+    /// See [`FactorioSurface::observe_inventories`]. The mod skips a position
     /// where `surface.find_entity` finds nothing, so a query for five can come
     /// back with three, and the two missing ones mean "not found" rather than
     /// "empty". `PlanState::from_world` is what notices that the entity is
@@ -412,7 +412,7 @@ mod tests {
     /// value would fail here rather than sail through the second assertion.
     #[test]
     fn the_world_handed_to_the_bindings_tracks_the_real_world() {
-        let world = Arc::new(FactorioWorld::new());
+        let world = Arc::new(FactorioSurface::new());
         world
             .player_changed_position(moved_to(1, 0., 0.))
             .expect("seed the player");
@@ -466,7 +466,7 @@ mod tests {
     /// divergence.
     #[test]
     fn refreshing_does_not_orphan_a_handle_taken_earlier() {
-        let world = Arc::new(FactorioWorld::new());
+        let world = Arc::new(FactorioSurface::new());
         let mut planner = Planner::new(world.clone(), None);
         let taken_early = planner.world();
 
@@ -497,7 +497,7 @@ mod tests {
     /// game's own player list.
     #[test]
     fn a_client_that_never_connected_produces_no_bot() {
-        let world = Arc::new(FactorioWorld::new());
+        let world = Arc::new(FactorioSurface::new());
         for id in [1u8, 2, 3] {
             world
                 .player_changed_position(moved_to(id, -22.29, 35.34))
@@ -524,7 +524,7 @@ mod tests {
     /// wrong player for every step bot 3 owns.
     #[test]
     fn a_gap_in_the_middle_of_the_roster_stays_a_gap() {
-        let world = Arc::new(FactorioWorld::new());
+        let world = Arc::new(FactorioSurface::new());
         for id in [1u8, 3] {
             world
                 .player_changed_position(moved_to(id, 0., 0.))
@@ -543,7 +543,7 @@ mod tests {
     /// ghosts and reporting every action lost.
     #[test]
     fn a_run_whose_clients_all_failed_gets_no_bots_at_all() {
-        let planner = Planner::new(Arc::new(FactorioWorld::new()), None);
+        let planner = Planner::new(Arc::new(FactorioSurface::new()), None);
         assert!(planner.roster(4).is_empty());
     }
 
@@ -555,7 +555,7 @@ mod tests {
     /// stops inventing, planning-only runs silently plan for nobody.
     #[test]
     fn the_simulation_seam_still_invents_the_bots_it_is_asked_for() {
-        let world = Arc::new(FactorioWorld::new());
+        let world = Arc::new(FactorioSurface::new());
         let mut planner = Planner::new(world.clone(), None);
 
         assert_eq!(
@@ -603,7 +603,7 @@ mod tests {
     /// the answers where the planner reads them.
     #[tokio::test]
     async fn refreshing_buffers_asks_about_every_known_furnace_and_stores_the_reply() {
-        let world = Arc::new(FactorioWorld::new());
+        let world = Arc::new(FactorioSurface::new());
         world
             .on_some_entity_created(furnace_at(10., 10.))
             .expect("a furnace");
@@ -653,7 +653,7 @@ mod tests {
     /// zero says truthfully that nothing was refreshed.
     #[tokio::test]
     async fn refreshing_buffers_without_rcon_asks_nothing() {
-        let world = Arc::new(FactorioWorld::new());
+        let world = Arc::new(FactorioSurface::new());
         world
             .on_some_entity_created(furnace_at(10., 10.))
             .expect("a furnace");
@@ -677,7 +677,7 @@ mod tests {
     /// builds, or the test passes for the wrong reason.
     #[tokio::test]
     async fn a_container_that_is_not_a_buffer_entity_is_never_asked_about() {
-        let world = Arc::new(FactorioWorld::new());
+        let world = Arc::new(FactorioSurface::new());
         world
             .on_some_entity_created(crate::types::FactorioEntity {
                 name: "iron-chest".into(),
@@ -705,7 +705,7 @@ mod tests {
         // The discriminating half: with a furnace present the same world
         // *would* have something to ask about, so the zero above is really
         // about the chest and not about the graph being empty.
-        let world = Arc::new(FactorioWorld::new());
+        let world = Arc::new(FactorioSurface::new());
         world
             .on_some_entity_created(furnace_at(5., 5.))
             .expect("a furnace");

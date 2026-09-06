@@ -1157,7 +1157,7 @@ mod tests {
     use crate::ids::BotId;
     use crate::{expand, holds, registry_for};
     use factorio_bot_core::factorio::util::add_to_rect;
-    use factorio_bot_core::factorio::world::FactorioWorld;
+    use factorio_bot_core::factorio::world::FactorioSurface;
     use factorio_bot_core::test_utils::{fixture_world, spawn_ore};
     use factorio_bot_core::types::Rect;
     use std::sync::Arc;
@@ -1199,7 +1199,7 @@ mod tests {
     /// one input for which `EntityGraph`'s flooring round-trip is lossless, so
     /// a geometry defect that depends on the half-tile offset would not show
     /// here. The offline plan against `map.json` is the check that does see it.
-    fn world_with_coal_beside_the_iron() -> FactorioWorld {
+    fn world_with_coal_beside_the_iron() -> FactorioSurface {
         let world = fixture_world();
         let mut entities = Vec::new();
         spawn_ore(

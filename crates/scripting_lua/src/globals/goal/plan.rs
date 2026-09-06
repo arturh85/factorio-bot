@@ -25,7 +25,7 @@ use super::{
 };
 use factorio_bot_core::blueprint::UndergroundHalf;
 use factorio_bot_core::factorio::rcon::PlacementQuery;
-use factorio_bot_core::factorio::world::FactorioWorld;
+use factorio_bot_core::factorio::world::FactorioSurface;
 use factorio_bot_core::mlua::prelude::*;
 use factorio_bot_core::types::Position;
 use factorio_bot_executor::{ExecutionLog, Recovery};
@@ -87,7 +87,7 @@ const KNOWN_PREDICATE_KEYS: &[&str] = &[
 /// recovery re-plans for exactly the roster the plan it recovers was made for.
 pub(crate) struct PlanOrigin {
     pub(crate) goal: Goal,
-    pub(crate) world: Arc<FactorioWorld>,
+    pub(crate) world: Arc<FactorioSurface>,
     pub(crate) roster: Vec<BotId>,
 }
 
@@ -427,7 +427,7 @@ pub(super) fn resolve_roster(
 pub(crate) fn install_goal_plan(
     lua: &Lua,
     table: &LuaTable,
-    world: Arc<FactorioWorld>,
+    world: Arc<FactorioSurface>,
     default_roster: Vec<BotId>,
     checker: Option<PlacementChecker>,
     refresher: Option<BufferRefresher>,
@@ -955,7 +955,7 @@ async fn narrate_buffer_refresh(refresher: Option<&BufferRefresher>) {
 /// build is attempted", and does not close it.
 async fn plan_verified(
     goal: &Goal,
-    world: &Arc<FactorioWorld>,
+    world: &Arc<FactorioSurface>,
     roster: &[BotId],
     checker: Option<&PlacementChecker>,
     refresher: Option<&BufferRefresher>,
@@ -1114,7 +1114,7 @@ impl PlanningClock {
 /// split out so the clock around them has one entry and one exit.
 async fn plan_rounds(
     goal: &Goal,
-    world: &Arc<FactorioWorld>,
+    world: &Arc<FactorioSurface>,
     roster: &[BotId],
     checker: Option<&PlacementChecker>,
 ) -> LuaResult<(ActionNetwork, Schedule)> {
@@ -2163,7 +2163,7 @@ mod tests {
     /// tests exercise the same code path a headless run takes, not a special
     /// one.
     fn lua_with_world_and_checker(
-        world: Arc<FactorioWorld>,
+        world: Arc<FactorioSurface>,
         roster: &[u8],
         checker: Option<PlacementChecker>,
     ) -> Lua {
@@ -2171,7 +2171,7 @@ mod tests {
     }
 
     fn lua_with_world_checker_and_refresher(
-        world: Arc<FactorioWorld>,
+        world: Arc<FactorioSurface>,
         roster: &[u8],
         checker: Option<PlacementChecker>,
         refresher: Option<BufferRefresher>,
@@ -2180,7 +2180,7 @@ mod tests {
     }
 
     fn lua_with_world_checker_refresher_and_pauser(
-        world: Arc<FactorioWorld>,
+        world: Arc<FactorioSurface>,
         roster: &[u8],
         checker: Option<PlacementChecker>,
         refresher: Option<BufferRefresher>,
@@ -2720,7 +2720,7 @@ mod tests {
     /// nothing would let `plan_verified` loop forever on a world that never
     /// learns, and would be testing a checker nobody has.
     fn stub_checker(
-        world: Arc<FactorioWorld>,
+        world: Arc<FactorioSurface>,
         policy: Policy,
     ) -> (PlacementChecker, Arc<std::sync::Mutex<CheckerLog>>) {
         let log = Arc::new(std::sync::Mutex::new(CheckerLog::default()));

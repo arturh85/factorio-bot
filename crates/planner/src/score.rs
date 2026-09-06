@@ -537,11 +537,11 @@ fn grow(box_so_far: &Rect, point: &Position) -> Rect {
 mod tests {
     use super::*;
     use crate::ids::BotId;
-    use factorio_bot_core::factorio::world::FactorioWorld;
+    use factorio_bot_core::factorio::world::FactorioSurface;
     use factorio_bot_core::test_utils::fixture_world;
     use std::sync::Arc;
 
-    fn score_of(world: FactorioWorld, origin: Position) -> MapScore {
+    fn score_of(world: FactorioSurface, origin: Position) -> MapScore {
         let state = PlanState::from_world(Arc::new(world), &[BotId(1)]);
         MapScore::of(&state, &origin, DEFAULT_SEARCH_RADIUS)
     }
@@ -632,7 +632,7 @@ mod tests {
     /// exists to compare. The distance report is the only thing that says why.
     #[test]
     fn a_map_with_no_water_is_incomplete_and_says_water() {
-        let world = FactorioWorld::new();
+        let world = FactorioSurface::new();
         let score = score_of(world, Position::new(0., 0.));
         match &score.verdict {
             Verdict::Incomplete { missing } => {
@@ -704,7 +704,7 @@ mod tests {
     /// An incomplete verdict must not read as a claim about the map.
     #[test]
     fn an_incomplete_report_says_it_is_about_the_dump() {
-        let lines = score_of(FactorioWorld::new(), Position::new(0., 0.)).lines();
+        let lines = score_of(FactorioSurface::new(), Position::new(0., 0.)).lines();
         let rendered = lines.join("\n");
         assert!(rendered.contains("INCOMPLETE"), "{rendered}");
         assert!(

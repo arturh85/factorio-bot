@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::factorio::ticks::ActionOutcome;
 use crate::factorio::world::{
-    DeathEvent, FactorioWorld, ResearchTriggerEvent, RespawnEvent, SurfaceChunkDropEvent,
+    DeathEvent, FactorioSurface, ResearchTriggerEvent, RespawnEvent, SurfaceChunkDropEvent,
     TeleportEvent,
 };
 // use crate::factorio::ws::{
@@ -17,7 +17,7 @@ use crate::types::{
 use miette::{IntoDiagnostic, Result, miette};
 
 pub struct OutputParser {
-    world: Arc<FactorioWorld>,
+    world: Arc<FactorioSurface>,
     // websocket_server: Option<Addr<FactorioWebSocketServer>>,
 }
 
@@ -585,20 +585,20 @@ impl OutputParser {
     pub fn new() -> Self {
         OutputParser {
             // websocket_server,
-            world: Arc::new(FactorioWorld::new()),
+            world: Arc::new(FactorioSurface::new()),
         }
     }
 
     /// Like [`OutputParser::new`], but parsing into a world the caller
     /// already holds a handle to -- so a test can drive a `writeout`-shaped
     /// line through `parse` and then inspect (or hand to another crate) the
-    /// exact [`FactorioWorld`] it landed in, e.g. via
-    /// [`FactorioWorld::drain_teleports`].
-    pub fn with_world(world: Arc<FactorioWorld>) -> Self {
+    /// exact [`FactorioSurface`] it landed in, e.g. via
+    /// [`FactorioSurface::drain_teleports`].
+    pub fn with_world(world: Arc<FactorioSurface>) -> Self {
         OutputParser { world }
     }
 
-    pub fn world(&self) -> Arc<FactorioWorld> {
+    pub fn world(&self) -> Arc<FactorioSurface> {
         self.world.clone()
     }
 }

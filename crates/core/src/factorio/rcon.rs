@@ -14,7 +14,7 @@ use crate::factorio::util::{
     vector_substract,
 };
 use crate::factorio::world::{
-    FactorioWorld, HOP_RADIUS, PlacementRefusal, RefusalSource, hop_targets,
+    FactorioSurface, HOP_RADIUS, PlacementRefusal, RefusalSource, hop_targets,
 };
 use crate::graph::entity_graph::ResourceDepletion;
 use crate::settings::FactorioSettings;
@@ -835,7 +835,7 @@ impl PlacementAttempts {
 /// second matters as much as the first -- a refusal that survives the walk is
 /// the strongest evidence there is that the blocker is not the actor.
 fn note_placement_refusal(
-    world: &Arc<FactorioWorld>,
+    world: &Arc<FactorioSurface>,
     tick: Option<u64>,
     line: &str,
     item_name: &str,
@@ -944,7 +944,7 @@ fn parse_footprint_evidence(line: &str) -> (Vec<String>, Option<String>) {
 /// never refused — a silent, permanent error in the one direction that
 /// matters, since the ledger is never expired.
 fn accept_verdicts(
-    world: &Arc<FactorioWorld>,
+    world: &Arc<FactorioSurface>,
     queries: &[PlacementQuery],
     reply: PlacementVerdicts,
 ) -> Result<Vec<PlacementVerdict>> {
@@ -1208,7 +1208,7 @@ fn boxes_overlap(a: &Rect, b: &Rect) -> bool {
 /// `at`. That is deliberately a *weaker* question — "is this exact point inside
 /// a building" instead of "does a character fit here" — because guessing an
 /// extent we were never told would refuse walks on an invented number.
-fn character_footprint(world: &FactorioWorld, at: &Position) -> Rect {
+fn character_footprint(world: &FactorioSurface, at: &Position) -> Rect {
     match world.entity_prototypes.get(CHARACTER_PROTOTYPE) {
         Some(prototype) => add_to_rect(&prototype.collision_box, at),
         None => Rect::new(at, at),
@@ -1224,7 +1224,7 @@ fn character_footprint(world: &FactorioWorld, at: &Position) -> Rect {
 /// query is deliberately unfiltered by name and type: narrowing it is what
 /// reintroduced the forest-siting bug that `1b2b2149` was careful to leave
 /// alone.
-fn describe_blocker(world: &FactorioWorld, footprint: &Rect, blocker: &Rect) -> String {
+fn describe_blocker(world: &FactorioSurface, footprint: &Rect, blocker: &Rect) -> String {
     let named = world
         .entity_graph
         .find_entities_in_radius(footprint.center(), BLOCKER_NAMING_RADIUS, None, None)
@@ -1248,7 +1248,7 @@ fn describe_blocker(world: &FactorioWorld, footprint: &Rect, blocker: &Rect) -> 
 /// had three walks whose last waypoint was inside a stone furnace this same run
 /// had built; each burned four re-paths and a leg timeout on a destination that
 /// was unsatisfiable by arithmetic, and reported it as terrain.
-fn standing_verdict(world: &FactorioWorld, at: &Position) -> StandingVerdict {
+fn standing_verdict(world: &FactorioSurface, at: &Position) -> StandingVerdict {
     let footprint = character_footprint(world, at);
     let probe = Rect::new(
         &Position::new(
@@ -1310,7 +1310,7 @@ const ARRIVAL_HALF_WIDTH: f64 = 0.3;
 /// Each box is the character's own footprint at that position, grown by
 /// [`ARRIVAL_HALF_WIDTH`]. `walker` is left out: it is the bot being aimed,
 /// and its own position is on the near side of every ring it is aimed at.
-fn bystander_boxes(world: &FactorioWorld, walker: Option<PlayerId>) -> Vec<Rect> {
+fn bystander_boxes(world: &FactorioSurface, walker: Option<PlayerId>) -> Vec<Rect> {
     let mut boxes: Vec<(PlayerId, Rect)> = world
         .players
         .iter()
@@ -1337,7 +1337,7 @@ fn bystander_boxes(world: &FactorioWorld, walker: Option<PlayerId>) -> Vec<Rect>
 
 /// How far a character standing at `at` is from the nearest bystander's grown
 /// box: zero when it overlaps one, `f64::INFINITY` when there are none.
-fn bystander_clearance(world: &FactorioWorld, at: &Position, bystanders: &[Rect]) -> f64 {
+fn bystander_clearance(world: &FactorioSurface, at: &Position, bystanders: &[Rect]) -> f64 {
     let footprint = character_footprint(world, at);
     bystanders
         .iter()
@@ -1406,7 +1406,7 @@ pub struct RconWalkEndsWhereNobodyCanStand {
 ///    refusing a walk because the bot is *already* standing somewhere the
 ///    graph calls blocked would be a refusal about the past.
 fn judge_path(
-    world: &FactorioWorld,
+    world: &FactorioSurface,
     goal: &Position,
     radius: Option<f64>,
     waypoints: &[Position],
@@ -1532,7 +1532,7 @@ fn within_resource_reach(player: &Position, target: &Position, reach: f64) -> bo
 /// every entity a character cannot walk through. Ore has none: a resource
 /// does not collide with a character, so the tree never saw it, and `None`
 /// here means "the target is ground a character can stand on".
-fn blocking_box_at(world: &FactorioWorld, target: &Position) -> Option<Rect> {
+fn blocking_box_at(world: &FactorioSurface, target: &Position) -> Option<Rect> {
     let probe = Rect::new(
         &Position::new(
             target.x() - BLOCKER_PROBE_MARGIN,
@@ -1576,7 +1576,7 @@ fn distance_to_rect(from: &Position, rect: &Rect) -> f64 {
 /// (`RconActuator::close_reach_gap`): "is the bot near enough to act on this?"
 /// is one rule, and a second implementation of it beside this one would be a
 /// second answer.
-pub fn reach_distance(world: &FactorioWorld, from: &Position, target: &Position) -> f64 {
+pub fn reach_distance(world: &FactorioSurface, from: &Position, target: &Position) -> f64 {
     match blocking_box_at(world, target) {
         Some(rect) => distance_to_rect(from, &rect),
         None => calculate_distance(from, target),
@@ -1585,7 +1585,7 @@ pub fn reach_distance(world: &FactorioWorld, from: &Position, target: &Position)
 
 /// [`within_resource_reach`], measured by [`reach_distance`].
 fn within_mining_reach(
-    world: &FactorioWorld,
+    world: &FactorioSurface,
     player: &Position,
     target: &Position,
     reach: f64,
@@ -1612,7 +1612,7 @@ fn within_mining_reach(
 /// `walker` is the player doing the mining, so its own position is not
 /// counted as a bystander on the ring.
 fn mining_approach(
-    world: &FactorioWorld,
+    world: &FactorioSurface,
     here: &Position,
     target: &Position,
     reach: f64,
@@ -2091,7 +2091,7 @@ const APPROACH_BEARINGS: usize = 16;
 /// walks stopped before the outer ring existed, so a ring the graph faults
 /// degrades to the old behaviour rather than to nothing.
 pub fn approach_standing(
-    world: &FactorioWorld,
+    world: &FactorioSurface,
     target: &Position,
     min_radius: f64,
     radius: f64,
@@ -2739,7 +2739,7 @@ const TIGHT_PATH_RADIUS: f64 = 0.5;
 /// for the same reason, one path request later -- and so does a request that
 /// was already tight, or any other failure at all.
 fn tightened_radius(
-    world: &FactorioWorld,
+    world: &FactorioSurface,
     goal: &Position,
     radius: Option<f64>,
     failure: &ActionFailure,
@@ -3594,7 +3594,7 @@ impl FactorioRcon {
     /// failure.
     pub async fn research_timed(
         &self,
-        world: &Arc<FactorioWorld>,
+        world: &Arc<FactorioSurface>,
         technology_name: &str,
         expected_ticks: u32,
     ) -> Result<ActionTicks, ActionFailure> {
@@ -3672,7 +3672,7 @@ impl FactorioRcon {
         force_build: bool,
         only_ghosts: bool,
         inventory_player_ids: Vec<u8>,
-        world: &Arc<FactorioWorld>,
+        world: &Arc<FactorioSurface>,
     ) -> Result<Vec<FactorioEntity>> {
         let player = world.players.get(&player_id);
         if player.is_none() {
@@ -3754,7 +3754,7 @@ impl FactorioRcon {
         player_id: PlayerId,
         name: &str,
         position: &Position,
-        world: &Arc<FactorioWorld>,
+        world: &Arc<FactorioSurface>,
     ) -> Result<FactorioEntity> {
         let player = world.players.get(&player_id);
         if player.is_none() {
@@ -3858,7 +3858,7 @@ impl FactorioRcon {
     /// observed.
     async fn sleep_for_action_result(
         &self,
-        world: &Arc<FactorioWorld>,
+        world: &Arc<FactorioSurface>,
         action_id: ActionId,
         dispatched: Option<u64>,
     ) -> Result<ActionTicks, ActionFailure> {
@@ -3901,7 +3901,7 @@ impl FactorioRcon {
     /// Nothing else about the two differs.
     async fn sleep_for_action_result_until(
         &self,
-        world: &Arc<FactorioWorld>,
+        world: &Arc<FactorioSurface>,
         action_id: ActionId,
         dispatched: Option<u64>,
         deadline: Duration,
@@ -3945,7 +3945,7 @@ impl FactorioRcon {
 
     async fn sleep_for_path_request_result(
         &self,
-        world: &Arc<FactorioWorld>,
+        world: &Arc<FactorioSurface>,
         request_id: u32,
     ) -> Result<Vec<PathWaypoint>> {
         let wait_start = Instant::now();
@@ -3979,7 +3979,7 @@ impl FactorioRcon {
 
     pub async fn move_player(
         &self,
-        world: &Arc<FactorioWorld>,
+        world: &Arc<FactorioSurface>,
         player_id: PlayerId,
         goal: &Position,
         radius: Option<f64>,
@@ -4054,7 +4054,7 @@ impl FactorioRcon {
     /// therefore refused *before* it is walked, rather than stalling again.
     pub async fn move_player_timed(
         &self,
-        world: &Arc<FactorioWorld>,
+        world: &Arc<FactorioSurface>,
         player_id: PlayerId,
         goal: &Position,
         radius: Option<f64>,
@@ -4134,7 +4134,7 @@ impl FactorioRcon {
     /// stands now, against the world as it is now.
     async fn move_player_attempt(
         &self,
-        world: &Arc<FactorioWorld>,
+        world: &Arc<FactorioSurface>,
         player_id: PlayerId,
         goal: &Position,
         radius: Option<f64>,
@@ -4169,7 +4169,7 @@ impl FactorioRcon {
 
     pub async fn player_mine(
         &self,
-        world: &Arc<FactorioWorld>,
+        world: &Arc<FactorioSurface>,
         player_id: PlayerId,
         name: &str,
         position: &Position,
@@ -4233,7 +4233,7 @@ impl FactorioRcon {
     /// immediate refusal the executor can retry.
     pub async fn player_mine_timed(
         &self,
-        world: &Arc<FactorioWorld>,
+        world: &Arc<FactorioSurface>,
         player_id: PlayerId,
         name: &str,
         position: &Position,
@@ -4341,7 +4341,7 @@ impl FactorioRcon {
 
     pub async fn player_craft(
         &self,
-        world: &Arc<FactorioWorld>,
+        world: &Arc<FactorioSurface>,
         player_id: PlayerId,
         recipe: &str,
         count: u32,
@@ -4370,7 +4370,7 @@ impl FactorioRcon {
     /// correct claim, and not the same as a failure.
     pub async fn player_craft_timed(
         &self,
-        world: &Arc<FactorioWorld>,
+        world: &Arc<FactorioSurface>,
         player_id: PlayerId,
         recipe: &str,
         count: u32,
@@ -4591,7 +4591,7 @@ impl FactorioRcon {
     /// and is unchanged.
     pub async fn can_place_entities(
         &self,
-        world: &Arc<FactorioWorld>,
+        world: &Arc<FactorioSurface>,
         queries: &[PlacementQuery],
     ) -> Result<Vec<PlacementVerdict>> {
         if queries.is_empty() {
@@ -4625,7 +4625,7 @@ impl FactorioRcon {
         entity_position: Position,
         direction: u8,
         underground_half: Option<UndergroundHalf>,
-        world: &Arc<FactorioWorld>,
+        world: &Arc<FactorioSurface>,
     ) -> Result<FactorioEntity> {
         self.place_entity_timed(
             player_id,
@@ -4672,7 +4672,7 @@ impl FactorioRcon {
         entity_position: Position,
         direction: u8,
         underground_half: Option<UndergroundHalf>,
-        world: &Arc<FactorioWorld>,
+        world: &Arc<FactorioSurface>,
     ) -> Result<(FactorioEntity, ActionTicks), ActionFailure> {
         let player = world.players.get(&player_id);
         if player.is_none() {
@@ -4947,7 +4947,7 @@ impl FactorioRcon {
         inventory_type: u32,
         item_name: String,
         item_count: u32,
-        world: &Arc<FactorioWorld>,
+        world: &Arc<FactorioSurface>,
     ) -> Result<()> {
         self.insert_to_inventory_timed(
             player_id,
@@ -4979,7 +4979,7 @@ impl FactorioRcon {
         inventory_type: u32,
         item_name: String,
         item_count: u32,
-        world: &Arc<FactorioWorld>,
+        world: &Arc<FactorioSurface>,
     ) -> Result<TransferOutcome, ActionFailure> {
         let player = world.players.get(&player_id);
         if player.is_none() {
@@ -5025,7 +5025,7 @@ impl FactorioRcon {
         inventory_type: u32,
         item_name: String,
         item_count: u32,
-        world: &Arc<FactorioWorld>,
+        world: &Arc<FactorioSurface>,
     ) -> Result<()> {
         self.remove_from_inventory_timed(
             player_id,
@@ -5057,7 +5057,7 @@ impl FactorioRcon {
         inventory_type: u32,
         item_name: String,
         item_count: u32,
-        world: &Arc<FactorioWorld>,
+        world: &Arc<FactorioSurface>,
     ) -> Result<ActionTicks, ActionFailure> {
         let player = world.players.get(&player_id);
         if player.is_none() {
@@ -5146,7 +5146,7 @@ impl FactorioRcon {
         entity_name: String,
         entity_position: Position,
         recipe: String,
-        world: &Arc<FactorioWorld>,
+        world: &Arc<FactorioSurface>,
     ) -> Result<ActionTicks, ActionFailure> {
         let player = world.players.get(&player_id);
         if player.is_none() {
@@ -5447,7 +5447,7 @@ impl FactorioRcon {
     /// this line used to treat both the same.
     async fn player_path_attempt(
         &self,
-        world: &Arc<FactorioWorld>,
+        world: &Arc<FactorioSurface>,
         player_id: PlayerId,
         goal: &Position,
         radius: Option<f64>,
@@ -5474,7 +5474,7 @@ impl FactorioRcon {
     /// [`FactorioRcon::player_path_attempt`] for a path between two positions.
     async fn path_attempt(
         &self,
-        world: &Arc<FactorioWorld>,
+        world: &Arc<FactorioSurface>,
         start: &Position,
         goal: &Position,
         radius: Option<f64>,
@@ -5500,7 +5500,7 @@ impl FactorioRcon {
 
     pub async fn player_path(
         &self,
-        world: &Arc<FactorioWorld>,
+        world: &Arc<FactorioSurface>,
         player_id: PlayerId,
         goal: &Position,
         radius: Option<f64>,
@@ -5583,7 +5583,7 @@ impl FactorioRcon {
     /// every walk already makes.
     pub async fn probe_player_hops(
         &self,
-        world: &Arc<FactorioWorld>,
+        world: &Arc<FactorioSurface>,
         player_id: PlayerId,
         from: &Position,
     ) -> Vec<(Position, Result<()>)> {
@@ -5600,7 +5600,7 @@ impl FactorioRcon {
 
     pub async fn path(
         &self,
-        world: &Arc<FactorioWorld>,
+        world: &Arc<FactorioSurface>,
         start: &Position,
         goal: &Position,
         radius: Option<f64>,
@@ -5701,7 +5701,7 @@ impl FactorioRcon {
     #[allow(clippy::too_many_arguments)]
     pub async fn plan_path(
         &self,
-        world: &Arc<FactorioWorld>,
+        world: &Arc<FactorioSurface>,
         entity_name: &str,
         entity_type: &str,
         underground_entity_name: &str,
@@ -5736,7 +5736,7 @@ impl FactorioRcon {
 
     pub async fn find_offshore_pump_placement_options(
         &self,
-        world: &Arc<FactorioWorld>,
+        world: &Arc<FactorioSurface>,
         search_center: Position,
         pump_direction: Direction,
     ) -> Result<Vec<Pos>> {
@@ -5922,7 +5922,7 @@ impl RconSettings {
 /// Regression tests for the "reply arrives, executor never wakes" hang.
 ///
 /// `sleep_for_path_request_result` and `sleep_for_action_result` poll a
-/// [`DashMap`](dashmap::DashMap) on the shared [`FactorioWorld`] for a reply the
+/// [`DashMap`](dashmap::DashMap) on the shared [`FactorioSurface`] for a reply the
 /// stdout [`crate::process::output_parser::OutputParser`] inserts. They used to
 /// do that as `if let Some(x) = map.get(&id) { ...; map.remove(&id); }`, which
 /// holds the shard's read guard across a call that wants the same shard's write
@@ -5938,7 +5938,7 @@ impl RconSettings {
 mod wait_for_reply_tests {
     use super::*;
     use crate::factorio::ticks::ActionOutcome;
-    use crate::factorio::world::FactorioWorld;
+    use crate::factorio::world::FactorioSurface;
     use std::sync::mpsc;
 
     fn quiet_rcon() -> FactorioRcon {
@@ -5969,7 +5969,7 @@ mod wait_for_reply_tests {
 
     #[test]
     fn path_request_reply_wakes_the_waiter() {
-        let world = Arc::new(FactorioWorld::new());
+        let world = Arc::new(FactorioSurface::new());
         let waiter_world = world.clone();
         let waited =
             start(move || block_on(quiet_rcon().sleep_for_path_request_result(&waiter_world, 1)));
@@ -6002,7 +6002,7 @@ mod wait_for_reply_tests {
     #[test]
     fn a_pathfinder_refusal_is_reported_as_one_and_not_as_a_json_syntax_error() {
         for reason in ["Error: failed to path find", "Error: try again later!"] {
-            let world = Arc::new(FactorioWorld::new());
+            let world = Arc::new(FactorioSurface::new());
             let waiter_world = world.clone();
             let waited = start(move || {
                 block_on(quiet_rcon().sleep_for_path_request_result(&waiter_world, 3))
@@ -6029,7 +6029,7 @@ mod wait_for_reply_tests {
     /// And a reply that really is malformed JSON says what arrived.
     #[test]
     fn a_malformed_path_reply_quotes_what_it_received() {
-        let world = Arc::new(FactorioWorld::new());
+        let world = Arc::new(FactorioSurface::new());
         let waiter_world = world.clone();
         let waited =
             start(move || block_on(quiet_rcon().sleep_for_path_request_result(&waiter_world, 4)));
@@ -6053,7 +6053,7 @@ mod wait_for_reply_tests {
 
     #[test]
     fn action_result_reply_wakes_the_waiter() {
-        let world = Arc::new(FactorioWorld::new());
+        let world = Arc::new(FactorioSurface::new());
         let waiter_world = world.clone();
         let waited = start(move || {
             block_on(quiet_rcon().sleep_for_action_result(&waiter_world, 7, Some(4200)))
@@ -6092,7 +6092,7 @@ mod wait_for_reply_tests {
 
     #[test]
     fn failed_action_result_is_reported_and_consumed() {
-        let world = Arc::new(FactorioWorld::new());
+        let world = Arc::new(FactorioSurface::new());
         let waiter_world = world.clone();
         let waited = start(move || {
             block_on(quiet_rcon().sleep_for_action_result(&waiter_world, 8, Some(4200)))
@@ -6146,7 +6146,7 @@ mod wait_for_reply_tests {
 mod dispatch_evidence_tests {
     use super::*;
     use crate::factorio::ticks::ActionOutcome;
-    use crate::factorio::world::FactorioWorld;
+    use crate::factorio::world::FactorioSurface;
 
     fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
         tokio::runtime::Builder::new_current_thread()
@@ -6183,7 +6183,7 @@ mod dispatch_evidence_tests {
     /// fails inside `player_path`, which is exactly the pre-dispatch phase.
     #[test]
     fn move_player_timed_reports_nothing_when_it_fails_before_dispatching() {
-        let world = Arc::new(FactorioWorld::new());
+        let world = Arc::new(FactorioSurface::new());
         let failure = block_on(FactorioRcon::new_empty().move_player_timed(
             &world,
             1,
@@ -6210,7 +6210,7 @@ mod dispatch_evidence_tests {
     /// say an action is still out there.
     #[test]
     fn a_dispatched_action_that_never_answers_has_no_verdict() {
-        let world = Arc::new(FactorioWorld::new());
+        let world = Arc::new(FactorioSurface::new());
         let failure = block_on(FactorioRcon::new_empty().sleep_for_action_result_until(
             &world,
             3,
@@ -6240,7 +6240,7 @@ mod dispatch_evidence_tests {
     /// facts are recorded separately precisely so this comes out right.
     #[test]
     fn a_dispatch_the_game_did_not_stamp_is_still_a_dispatch() {
-        let world = Arc::new(FactorioWorld::new());
+        let world = Arc::new(FactorioSurface::new());
         let failure = block_on(FactorioRcon::new_empty().sleep_for_action_result_until(
             &world,
             4,
@@ -6261,7 +6261,7 @@ mod dispatch_evidence_tests {
     /// path.
     #[test]
     fn a_refused_dispatch_keeps_the_stamps_the_game_produced() {
-        let world = Arc::new(FactorioWorld::new());
+        let world = Arc::new(FactorioSurface::new());
         world.actions.insert(
             5,
             ActionOutcome {
@@ -6848,7 +6848,7 @@ mod placement_precheck_tests {
     /// plan; and a question the mod could not ask is not an answer.
     #[test]
     fn only_a_refusal_with_no_character_and_no_error_reaches_the_ledger() {
-        let world = Arc::new(FactorioWorld::new());
+        let world = Arc::new(FactorioSurface::new());
         let queries = vec![
             query("stone-furnace", 1., 1.),
             query("stone-furnace", 2., 2.),
@@ -6891,7 +6891,7 @@ mod placement_precheck_tests {
     /// ground nobody refused for the rest of the run. Nothing is recorded.
     #[test]
     fn a_reply_of_the_wrong_length_is_rejected_and_records_nothing() {
-        let world = Arc::new(FactorioWorld::new());
+        let world = Arc::new(FactorioSurface::new());
         let queries = vec![
             query("stone-furnace", 1., 1.),
             query("stone-furnace", 2., 2.),
@@ -6913,7 +6913,7 @@ mod placement_precheck_tests {
     /// entry, and the first one recorded is the one kept.
     #[test]
     fn a_site_already_in_the_ledger_is_not_recorded_twice() {
-        let world = Arc::new(FactorioWorld::new());
+        let world = Arc::new(FactorioSurface::new());
         let queries = vec![query("stone-furnace", 1., 1.)];
         let reply = PlacementVerdicts {
             tick: Some(10),
@@ -8567,10 +8567,10 @@ mod transfer_guarantee_tests {
 #[cfg(test)]
 mod placement_refusal_tests {
     use super::*;
-    use crate::factorio::world::FactorioWorld;
+    use crate::factorio::world::FactorioSurface;
 
-    fn world() -> Arc<FactorioWorld> {
-        Arc::new(FactorioWorld::new())
+    fn world() -> Arc<FactorioSurface> {
+        Arc::new(FactorioSurface::new())
     }
 
     /// The line four runs died on.
@@ -8801,8 +8801,8 @@ mod walk_destination_tests {
     /// gives it, which is what `FactorioWorld::new` plus
     /// `update_chunk_entities` gets us: `entity_prototypes` is shared with the
     /// entity graph, so the furnaces below get the game's own collision box.
-    fn world_with(furnaces: &[Position]) -> Arc<FactorioWorld> {
-        let world = FactorioWorld::new();
+    fn world_with(furnaces: &[Position]) -> Arc<FactorioSurface> {
+        let world = FactorioSurface::new();
         let prototypes: Vec<FactorioEntityPrototype> = fixture_entity_prototypes()
             .iter()
             .map(|v| v.clone())
@@ -9050,7 +9050,7 @@ mod walk_destination_tests {
     /// declining to refuse.
     #[test]
     fn an_unnameable_blocker_is_still_refused_and_reported_as_a_box() {
-        let world = FactorioWorld::new();
+        let world = FactorioSurface::new();
         let prototypes: Vec<FactorioEntityPrototype> = fixture_entity_prototypes()
             .iter()
             .map(|v| v.clone())
@@ -9124,8 +9124,8 @@ mod approach_annulus_tests {
     /// blocker shape run 10 reported: `FactorioEntity::new_tree` is a
     /// 0.8-by-0.8 box, and the entity tree never sees a tree, which is why the
     /// refusal named a box instead of a name.
-    fn world_with_tree(at: &Position) -> Arc<FactorioWorld> {
-        let world = FactorioWorld::new();
+    fn world_with_tree(at: &Position) -> Arc<FactorioSurface> {
+        let world = FactorioSurface::new();
         let prototypes: Vec<FactorioEntityPrototype> = fixture_entity_prototypes()
             .iter()
             .map(|v| v.clone())
@@ -9727,8 +9727,8 @@ mod mining_reach_tests {
     /// A world holding one `huge-rock` at (10, 10) with its live collision
     /// box, 3 by 2.2 -- the shape that refused run-1788551693-66583 -- and
     /// the fixture prototypes, so the character has a footprint.
-    fn world_with_a_huge_rock() -> Arc<FactorioWorld> {
-        let world = FactorioWorld::new();
+    fn world_with_a_huge_rock() -> Arc<FactorioSurface> {
+        let world = FactorioSurface::new();
         let prototypes: Vec<FactorioEntityPrototype> = fixture_entity_prototypes()
             .iter()
             .map(|v| v.clone())
@@ -9765,8 +9765,8 @@ mod mining_reach_tests {
 
     /// A world holding the fixture prototypes and a stone furnace on each of
     /// `furnaces`, with the game's own collision box.
-    fn world_with(furnaces: &[Position]) -> Arc<FactorioWorld> {
-        let world = FactorioWorld::new();
+    fn world_with(furnaces: &[Position]) -> Arc<FactorioSurface> {
+        let world = FactorioSurface::new();
         let prototypes: Vec<FactorioEntityPrototype> = fixture_entity_prototypes()
             .iter()
             .map(|v| v.clone())
@@ -9793,8 +9793,8 @@ mod mining_reach_tests {
     /// The two `big-rock`s of `run-1788608011-14361`, with the boxes the
     /// game reported for them: `{{-1, -0.8984375}, {1, 1}}` around each
     /// centre.
-    fn world_with_run_as_two_rocks() -> Arc<FactorioWorld> {
-        let world = FactorioWorld::new();
+    fn world_with_run_as_two_rocks() -> Arc<FactorioSurface> {
+        let world = FactorioSurface::new();
         let prototypes: Vec<FactorioEntityPrototype> = fixture_entity_prototypes()
             .iter()
             .map(|v| v.clone())
@@ -9937,8 +9937,8 @@ mod mining_reach_tests {
 
     /// The two assemblers bot 2 had placed in the 30 ticks before the walk,
     /// as the run's `map.jsonl` has them, plus the bots in `players`.
-    fn world_of_run_1788612263(players: &[(PlayerId, Position)]) -> Arc<FactorioWorld> {
-        let world = FactorioWorld::new();
+    fn world_of_run_1788612263(players: &[(PlayerId, Position)]) -> Arc<FactorioSurface> {
+        let world = FactorioSurface::new();
         let prototypes: Vec<FactorioEntityPrototype> = fixture_entity_prototypes()
             .iter()
             .map(|v| v.clone())

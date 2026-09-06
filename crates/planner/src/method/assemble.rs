@@ -2508,7 +2508,7 @@ mod tests {
     use crate::method::expand;
     use crate::method::have::registry_for;
     use crate::network::ActionNetwork;
-    use factorio_bot_core::factorio::world::FactorioWorld;
+    use factorio_bot_core::factorio::world::FactorioSurface;
     use factorio_bot_core::test_utils::fixture_world;
     use std::sync::Arc;
 
@@ -2520,7 +2520,7 @@ mod tests {
     /// Ingredients and energy are the **live 2.1.17** ones, asserted against
     /// the capture in `tests/red_science_cell.rs`. They are added `enabled` so
     /// these tests are about the layout rather than about the research ladder.
-    fn world() -> FactorioWorld {
+    fn world() -> FactorioSurface {
         let world = fixture_world();
         let green: factorio_bot_core::types::FactorioRecipe =
             factorio_bot_core::serde_json::from_str(

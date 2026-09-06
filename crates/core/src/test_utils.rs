@@ -4,7 +4,7 @@ use std::sync::Arc;
 use dashmap::DashMap;
 
 use crate::factorio::util::{add_to_rect, rect_fields};
-use crate::factorio::world::FactorioWorld;
+use crate::factorio::world::FactorioSurface;
 use crate::graph::entity_graph::EntityGraph;
 use crate::types::{
     Direction, EntityName, FactorioItemPrototype, FactorioRecipe, FactorioTile, Position, Rect,
@@ -125,7 +125,7 @@ pub fn spawn_water(tiles: &mut Vec<FactorioTile>, rect: Rect) {
 
 /// The shared fixture world: prototypes, recipes, four ore patches, rocks,
 /// trees, and a four-by-four lake centred on (40, 40).
-pub fn fixture_world() -> FactorioWorld {
+pub fn fixture_world() -> FactorioSurface {
     fixture_world_with_water(true)
 }
 
@@ -139,12 +139,12 @@ pub fn fixture_world() -> FactorioWorld {
 /// no longer makes water unreachable: the origin still sees it, which is the
 /// whole point of that fix. A test about an unreachable-water refusal
 /// therefore needs a world with no water in it, not a bot standing far away.
-pub fn fixture_world_without_water() -> FactorioWorld {
+pub fn fixture_world_without_water() -> FactorioSurface {
     fixture_world_with_water(false)
 }
 
-fn fixture_world_with_water(water: bool) -> FactorioWorld {
-    let world = FactorioWorld::new();
+fn fixture_world_with_water(water: bool) -> FactorioSurface {
+    let world = FactorioSurface::new();
     let entity_prototypes: Vec<FactorioEntityPrototype> = fixture_entity_prototypes()
         .iter()
         .map(|v| v.clone())

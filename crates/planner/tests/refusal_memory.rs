@@ -23,7 +23,7 @@
 //!
 //! The coordinates are the real runs', unchanged.
 
-use factorio_bot_core::factorio::world::{FactorioWorld, PlacementRefusal};
+use factorio_bot_core::factorio::world::{FactorioSurface, PlacementRefusal};
 use factorio_bot_core::test_utils::fixture_world;
 use factorio_bot_core::types::{PlayerChangedPositionEvent, Position};
 use factorio_bot_planner::method::util::free_area_near;
@@ -50,7 +50,7 @@ fn refused(entity: &str, (x, y): (f64, f64)) -> PlacementRefusal {
 
 /// A fixture world with `refusals` already recorded, the way a run's
 /// `FactorioWorld` carries them from one plan to the next.
-fn world_with(refusals: &[PlacementRefusal]) -> Arc<FactorioWorld> {
+fn world_with(refusals: &[PlacementRefusal]) -> Arc<FactorioSurface> {
     let world = fixture_world();
     for refusal in refusals {
         world.record_placement_refusal(refusal.clone());

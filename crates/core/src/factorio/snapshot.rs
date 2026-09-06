@@ -7,7 +7,7 @@
 //! and friends) and [`crate::process::output_parser::OutputParser`] parsed that
 //! stream. That works only for a child process this program spawned. Attaching
 //! to a server the owner is already playing on gave an empty
-//! [`FactorioWorld`]: no recipes, no prototypes, no entity graph, so
+//! [`FactorioSurface`]: no recipes, no prototypes, no entity graph, so
 //! `PlanState::collision_area` returned `None` for every name and the planner
 //! could not place anything.
 //!
@@ -32,7 +32,7 @@ use std::sync::Arc;
 
 #[cfg_attr(test, mockall_double::double)]
 use crate::factorio::rcon::FactorioRcon;
-use crate::factorio::world::FactorioWorld;
+use crate::factorio::world::FactorioSurface;
 use crate::types::{
     AreaFilter, FactorioEntityPrototype, FactorioForce, FactorioItemPrototype, FactorioRecipe,
     Position, Rect,
@@ -123,7 +123,7 @@ pub fn area_around(center: &Position, radius: f64) -> Rect {
     )
 }
 
-/// Builds a [`FactorioWorld`] by asking a running Factorio server over RCON.
+/// Builds a [`FactorioSurface`] by asking a running Factorio server over RCON.
 ///
 /// The counterpart to [`crate::process::output_reader::read_output`] for a
 /// server this process does not own. Four reads, all of them RCON:
@@ -157,8 +157,8 @@ pub fn area_around(center: &Position, radius: f64) -> Rect {
 ///   want it.
 /// * **No graphics.** The sprite atlas the map renderer uses, ~100 kB, is not
 ///   part of planning.
-pub async fn attach_world(rcon: &FactorioRcon, area: Option<Rect>) -> Result<Arc<FactorioWorld>> {
-    let world = Arc::new(FactorioWorld::new());
+pub async fn attach_world(rcon: &FactorioRcon, area: Option<Rect>) -> Result<Arc<FactorioSurface>> {
+    let world = Arc::new(FactorioSurface::new());
     let snapshot = rcon.world_snapshot().await?;
     if !snapshot.is_plannable() {
         return Err(miette::miette!(
@@ -499,7 +499,7 @@ mod tests {
             technologies: Box::default(),
         });
 
-        let world = FactorioWorld::new();
+        let world = FactorioSurface::new();
         world.apply_snapshot(snapshot).expect("apply_snapshot");
 
         assert_eq!(

@@ -1075,7 +1075,7 @@ mod tests {
     use crate::ids::BotId;
     use crate::state::{ClaimRunner, DEFAULT_RESOURCE_PER_TILE, PlanState};
     use factorio_bot_core::factorio::util::add_to_rect;
-    use factorio_bot_core::factorio::world::FactorioWorld;
+    use factorio_bot_core::factorio::world::FactorioSurface;
     use factorio_bot_core::serde_json;
     use factorio_bot_core::test_utils::fixture_world;
     use factorio_bot_core::types::{Direction, FactorioEntity, FactorioForce, Position, Rect};
@@ -2041,7 +2041,7 @@ mod tests {
     /// A machine an earlier plan left standing on the iron patch, reaching
     /// the world through the same door the mod's `on_some_entity_created`
     /// uses. `at` is the entity position; the box is the prototype's own.
-    fn world_with_standing(name: &str, entity_type: &str, at: Position) -> Arc<FactorioWorld> {
+    fn world_with_standing(name: &str, entity_type: &str, at: Position) -> Arc<FactorioSurface> {
         let world = fixture_world();
         let collision = world
             .entity_prototypes
@@ -2062,7 +2062,7 @@ mod tests {
 
     /// A burner drill at (-35, 36) covers the four iron tiles nearest the
     /// origin, `NEAREST_IRON` among them.
-    fn standing_drill() -> (Arc<FactorioWorld>, Position) {
+    fn standing_drill() -> (Arc<FactorioSurface>, Position) {
         let at = Position::new(-35., 36.);
         (
             world_with_standing("burner-mining-drill", "mining-drill", at.clone()),

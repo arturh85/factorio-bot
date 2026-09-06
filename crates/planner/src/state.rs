@@ -6,7 +6,7 @@ use crate::method::produce::DrainPolicy;
 use crate::method::util::rotated_collision_box;
 use factorio_bot_core::constants::BOT_FORCE;
 use factorio_bot_core::factorio::util::{add_to_rect, calculate_distance};
-use factorio_bot_core::factorio::world::{FactorioWorld, WalkRefusal};
+use factorio_bot_core::factorio::world::{FactorioSurface, WalkRefusal};
 use factorio_bot_core::num_traits::FromPrimitive;
 use factorio_bot_core::types::{
     Direction, FactorioEntity, FactorioTechnology, FactorioTile, HandMiningObstacle, PlayerId, Pos,
@@ -418,7 +418,7 @@ const MAX_PLAUSIBLE_RESOURCE_REACH: f64 = 1000.;
 /// the world carries no `character` prototype — see that constant for why a
 /// world can lack one. Read rather than hardcoded because it is prototype data
 /// a mod can change, exactly like `character_mining_speed`'s.
-fn character_half_box(base: &FactorioWorld) -> (f64, f64) {
+fn character_half_box(base: &FactorioSurface) -> (f64, f64) {
     base.entity_prototypes
         .get("character")
         .map(|p| {
@@ -438,7 +438,7 @@ fn character_half_box(base: &FactorioWorld) -> (f64, f64) {
 /// the sum of their half-sides, so the extreme separation at which they still
 /// touch is corner to corner — that hypotenuse. It is the supremum of
 /// [`PlanState::character_stands_on_tile`], and a unit test says so.
-fn tile_occupancy_radius(base: &FactorioWorld) -> f64 {
+fn tile_occupancy_radius(base: &FactorioSurface) -> f64 {
     let (half_x, half_y) = character_half_box(base);
     (TILE_HALF_SIDE + half_x).hypot(TILE_HALF_SIDE + half_y)
 }
@@ -629,7 +629,7 @@ fn same_runner(a: Option<ClaimRunner>, b: Option<ClaimRunner>) -> bool {
 /// # What counts as a buffer, and where that is decided
 ///
 /// **Not here.** This crate believes whatever
-/// [`FactorioWorld::observed_inventories`] tells it, minus two checks it can
+/// [`FactorioSurface::observed_inventories`] tells it, minus two checks it can
 /// make locally (below). The decision about *which* containers the game is
 /// ever asked about belongs to whoever issues the RCON query --
 /// `crates/core`'s `Planner::refresh_buffers` -- because that is the code that
@@ -924,7 +924,7 @@ impl std::fmt::Display for Occupant {
 /// fields, so `fork` costs the overlay rather than a world copy.
 #[derive(Clone)]
 pub struct PlanState {
-    base: Arc<FactorioWorld>,
+    base: Arc<FactorioSurface>,
     /// How freely a fragment may wait on a cell this plan already stood.
     ///
     /// Set by [`crate::plan_best`], which builds one plan under each policy
@@ -1394,7 +1394,7 @@ pub struct PlanState {
     /// # Ordered, because the order is load-bearing
     ///
     /// A `BTreeMap<Pos, _>`, filled from
-    /// [`FactorioWorld::observed_inventories`], which sorts before it hands
+    /// [`FactorioSurface::observed_inventories`], which sorts before it hands
     /// anything over. A buffer overlay iterated in hash order would move
     /// emission order, which fixes `ActionId` allocation, which fixes
     /// `schedule`'s `(end, ActionId, BotId)` tie-break -- a correctness bug,
@@ -1426,7 +1426,7 @@ pub struct PlanState {
     /// # Read once, like every other reading
     ///
     /// Seeded in [`PlanState::from_world`] from
-    /// [`FactorioWorld::observed_inventories`], under the same guard as
+    /// [`FactorioSurface::observed_inventories`], under the same guard as
     /// `buffers`: the entity the reading names must still be the entity
     /// standing on that tile. Empty in every fixture and in every offline
     /// dump, since `world.dump` never refreshes inventories -- so offline a
@@ -1583,7 +1583,7 @@ pub struct PlanState {
 }
 
 impl PlanState {
-    pub fn from_world(base: Arc<FactorioWorld>, bots: &[BotId]) -> PlanState {
+    pub fn from_world(base: Arc<FactorioSurface>, bots: &[BotId]) -> PlanState {
         let mut map = BTreeMap::new();
         let mut unknown_bots = BTreeSet::new();
         for id in bots {
@@ -1968,7 +1968,7 @@ impl PlanState {
         self.policy_probe.load(Ordering::Relaxed)
     }
 
-    pub fn base(&self) -> &Arc<FactorioWorld> {
+    pub fn base(&self) -> &Arc<FactorioSurface> {
         &self.base
     }
 

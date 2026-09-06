@@ -176,7 +176,7 @@ fn the_specs_621_kw_is_what_the_demand_ledger_says() {
 /// and energy taken from the capture asserted above, and it is added `enabled`
 /// so these tests are about the layout rather than about the research ladder
 /// (which `crates/planner/src/method/have.rs` already covers at length).
-fn world_that_can_build_an_assembler() -> factorio_bot_core::factorio::world::FactorioWorld {
+fn world_that_can_build_an_assembler() -> factorio_bot_core::factorio::world::FactorioSurface {
     let world = fixture_world();
     let recipe: FactorioRecipe = serde_json::from_str(
         r#"{

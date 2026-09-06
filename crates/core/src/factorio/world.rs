@@ -139,7 +139,7 @@ impl ResearchTriggerEvent {
 ///
 /// One line per dropped chunk on the wire, deliberately dumb -- the mod keeps
 /// no state, so this survives a save/load. The aggregation into one row per
-/// surface happens in [`FactorioWorld::record_surface_chunk_dropped`].
+/// surface happens in [`FactorioSurface::record_surface_chunk_dropped`].
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct SurfaceChunkDropEvent {
     /// The surface that was refused, by name -- see [`SurfaceId`].
@@ -328,7 +328,7 @@ impl RefusalSource {
 /// record has already been told about.
 ///
 /// Append-only and **never drained**, unlike
-/// [`FactorioWorld::teleports`](FactorioWorld#structfield.teleports): a
+/// [`FactorioSurface::teleports`](FactorioWorld#structfield.teleports): a
 /// teleport is an event that needs writing once, while a refusal is a
 /// standing fact the planner has to re-read on every plan. The `reported`
 /// cursor is what lets `record.refusals()` write each one exactly once
@@ -343,7 +343,7 @@ pub struct PlacementRefusals {
 ///
 /// A dumped world is read back by something that has been told about none of
 /// these -- an offline planner, a seed scorer, a resumed record -- so
-/// `reported` restarts at zero on load, exactly as [`FactorioWorld::clone`]
+/// `reported` restarts at zero on load, exactly as [`FactorioSurface::clone`]
 /// resets it and for the same reason it argues there: a second reader has
 /// heard nothing, and writing a site twice into two independent records is
 /// the honest answer. Nothing in `crates/planner` reads the cursor, so this
@@ -352,7 +352,7 @@ pub struct PlacementRefusals {
 ///
 /// Serializing the cursor would also hand a hostile file a `reported` past the
 /// end of `sites`, which the `sites[from..]` slice in
-/// [`FactorioWorld::unreported_placement_refusals`] would panic on. There is
+/// [`FactorioSurface::unreported_placement_refusals`] would panic on. There is
 /// nothing to gain by carrying it and a panic to lose.
 impl Serialize for PlacementRefusals {
     fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
@@ -704,7 +704,7 @@ impl Enclosures {
 /// against the record has to be able to see why -- the same reason a
 /// teleport or a refusal is written rather than logged.
 ///
-/// Ephemeral, like [`FactorioWorld::teleports`]: this is an event that
+/// Ephemeral, like [`FactorioSurface::teleports`]: this is an event that
 /// happened, not knowledge the next plan needs, so it is queued for
 /// `record.enclosures()` to drain and is never serialised with the world.
 #[derive(Debug, Clone, PartialEq)]
@@ -824,7 +824,7 @@ pub fn hop_targets(from: &Position) -> [Position; 4] {
 /// current position as not applying. The executor also *releases* a bench
 /// outright when a walk for that player succeeds, or when a re-probe before
 /// the next plan finds a hop the game will path -- see
-/// [`FactorioWorld::release_bench`].
+/// [`FactorioSurface::release_bench`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Bench {
     /// The `game.tick` the verdict was stamped at, or `None` -- ordinarily
@@ -989,7 +989,7 @@ impl Benches {
 ///
 /// The game reports `Vec<InventoryItemWithQuality>`; this keeps a
 /// `BTreeMap<item, count>` with quality summed away, exactly as
-/// [`FactorioWorld::player_changed_main_inventory`] does for a player. Both
+/// [`FactorioSurface::player_changed_main_inventory`] does for a player. Both
 /// readers ask "how much of X is in there", nothing here reasons about
 /// quality, and a map answers that without a linear scan. Ordered, so a
 /// caller that iterates gets the same order every time.
@@ -1025,7 +1025,7 @@ impl ObservedInventory {
     }
 }
 
-pub struct FactorioWorld {
+pub struct FactorioSurface {
     pub players: DashMap<PlayerId, FactorioPlayer>,
     pub forces: DashMap<String, FactorioForce>,
     pub graphics: DashMap<String, FactorioGraphic>,
@@ -1047,7 +1047,7 @@ pub struct FactorioWorld {
     pub entity_graph: Arc<EntityGraph>,
     pub flow_graph: Arc<FlowGraph>,
     /// Teleports the mod has reported since the last
-    /// [`FactorioWorld::drain_teleports`], each tagged with the game tick the
+    /// [`FactorioSurface::drain_teleports`], each tagged with the game tick the
     /// mod stamped on its `writeout` line.
     ///
     /// `OutputParser` (`crates/core/src/process/output_parser.rs`) parses the
@@ -1060,19 +1060,19 @@ pub struct FactorioWorld {
     /// for `action_completed`.
     pub teleports: SyncMutex<Vec<(u64, TeleportEvent)>>,
     /// Deaths and respawns the mod has reported since the last
-    /// [`FactorioWorld::drain_deaths`], each tagged with the game tick the
+    /// [`FactorioSurface::drain_deaths`], each tagged with the game tick the
     /// mod stamped on its `writeout` line. Same shape and same reason as
     /// `teleports`: `OutputParser` pushes, `record.deaths()` drains.
     pub deaths: SyncMutex<Vec<(u64, BotLifeEvent)>>,
     /// Trigger technologies the mod has completed on a headless run since the
-    /// last [`FactorioWorld::drain_research_triggers`], each tagged with the
+    /// last [`FactorioSurface::drain_research_triggers`], each tagged with the
     /// game tick. Same shape as `deaths`: `OutputParser` pushes,
     /// `record.research_triggers()` drains. Until this queue existed the
     /// mod's line reached only the server log, and `events.jsonl` showed a
     /// research finishing with no research ever started.
     pub research_triggers: SyncMutex<Vec<(u64, ResearchTriggerEvent)>>,
     /// Chunks the mod refused because they are not on Nauvis, aggregated per
-    /// surface since the last [`FactorioWorld::drain_surface_chunk_drops`].
+    /// surface since the last [`FactorioSurface::drain_surface_chunk_drops`].
     ///
     /// **A map, not a `Vec`, and that is the whole design.** The mod writes one
     /// line per dropped chunk because keeping a counter there would mean
@@ -1110,7 +1110,7 @@ pub struct FactorioWorld {
     /// chest's contents changed" that a mod could cheaply subscribe to, and
     /// the one event this crate does receive that carries an inventory —
     /// `on_some_entity_created`, through
-    /// [`FactorioWorld::on_some_entity_created`] — describes an entity at the
+    /// [`FactorioSurface::on_some_entity_created`] — describes an entity at the
     /// instant it was built, which for a chest or a furnace means an empty
     /// one. `on_some_entity_updated` is not the missing channel either: the
     /// mod raises it from exactly one subscription,
@@ -1125,13 +1125,13 @@ pub struct FactorioWorld {
     /// # Deterministic to read
     ///
     /// A `DashMap` iterates in hash order, which moves with the hash seed.
-    /// Every reader must go through [`FactorioWorld::observed_inventories`],
+    /// Every reader must go through [`FactorioSurface::observed_inventories`],
     /// which sorts by [`Pos`]; `crates/planner` reads it exactly once per
     /// plan, in [`PlanState::from_world`], and keys it into a `BTreeMap`.
     ///
     /// # Forgotten when the entity goes
     ///
-    /// [`FactorioWorld::on_some_entity_deleted`] clears the entry. A mined
+    /// [`FactorioSurface::on_some_entity_deleted`] clears the entry. A mined
     /// furnace hands its contents to whoever mined it, so leaving the reading
     /// standing would report items that are now in a player's pocket as
     /// still sitting on the ground — and a later build on that same tile
@@ -1141,7 +1141,7 @@ pub struct FactorioWorld {
     /// Destinations the game's pathfinder has refused a bot a route to, for
     /// the life of this world.
     ///
-    /// The walking half of [`FactorioWorld::placement_refusals`], and here for
+    /// The walking half of [`FactorioSurface::placement_refusals`], and here for
     /// the same reason: `crates/planner`'s `PlanState::from_world` reads it on
     /// every plan, and the crate that writes it (`crates/executor`) cannot see
     /// the crate that reads it. See [`WalkRefusal`] for what one claims, which
@@ -1159,7 +1159,7 @@ pub struct FactorioWorld {
     /// about before a run record says when it happens.
     pub enclosures: SyncMutex<Enclosures>,
     /// Characters walked clear of a placement that would have sealed them in,
-    /// since the last [`FactorioWorld::drain_step_asides`]. A queue, not
+    /// since the last [`FactorioSurface::drain_step_asides`]. A queue, not
     /// knowledge -- see [`StepAside`].
     pub step_asides: SyncMutex<Vec<StepAside>>,
     /// Characters the game itself has said cannot move from where they
@@ -1170,7 +1170,7 @@ pub struct FactorioWorld {
     pub benches: SyncMutex<Benches>,
 }
 
-impl FactorioWorld {
+impl FactorioSurface {
     pub fn update_entity_prototypes(
         &self,
         entity_prototypes: Vec<FactorioEntityPrototype>,
@@ -1285,12 +1285,12 @@ impl FactorioWorld {
     /// never produces one.
     ///
     /// Buffer contents are pulled instead, into
-    /// [`FactorioWorld::inventories`]. See that field for why there is no
+    /// [`FactorioSurface::inventories`]. See that field for why there is no
     /// event to push them.
     ///
     /// The direction the original TODO names is still not applied. Doing so
     /// means replacing the stored entity, which
-    /// [`FactorioWorld::observe_inventories`]'s own doc explains is not free
+    /// [`FactorioSurface::observe_inventories`]'s own doc explains is not free
     /// on this `EntityGraph`; it is left as it was rather than half-done.
     pub fn on_some_entity_updated(&self, _entity: FactorioEntity) -> Result<()> {
         // TODO: update entity direction
@@ -1312,7 +1312,7 @@ impl FactorioWorld {
     /// "not found", not "empty". Erasing them would turn a failed *lookup*
     /// into an observation of emptiness -- exactly the confusion this
     /// codebase has paid for elsewhere. A caller that knows an entity is gone
-    /// says so through [`FactorioWorld::forget_inventory`] or by deleting the
+    /// says so through [`FactorioSurface::forget_inventory`] or by deleting the
     /// entity.
     ///
     /// An entity that answers with *empty* inventories is recorded as empty,
@@ -1332,7 +1332,7 @@ impl FactorioWorld {
 
     /// Every inventory reading this world holds, ordered by tile.
     ///
-    /// The only way to read [`FactorioWorld::inventories`] -- the map itself
+    /// The only way to read [`FactorioSurface::inventories`] -- the map itself
     /// iterates in hash order, and `crates/planner` is required to be
     /// deterministic, so the sort belongs here where every reader gets it
     /// rather than in each reader.
@@ -1460,7 +1460,7 @@ impl FactorioWorld {
         Ok(())
     }
 
-    pub fn import(&mut self, world: Arc<FactorioWorld>) -> Result<()> {
+    pub fn import(&mut self, world: Arc<FactorioSurface>) -> Result<()> {
         for player in world.players.iter() {
             self.players.insert(player.player_id, player.clone());
         }
@@ -1494,7 +1494,7 @@ impl FactorioWorld {
             Arc::new(DashMap::new());
         let entity_graph = Arc::new(EntityGraph::new(entity_prototypes.clone(), recipes.clone()));
         let flow_graph = Arc::new(FlowGraph::new(entity_graph.clone()));
-        FactorioWorld {
+        FactorioSurface {
             image_cache,
             players,
             graphics,
@@ -1521,7 +1521,7 @@ impl FactorioWorld {
     }
 
     /// Queues a teleport `OutputParser` just parsed, for
-    /// [`FactorioWorld::drain_teleports`] to pick up.
+    /// [`FactorioSurface::drain_teleports`] to pick up.
     pub fn record_teleport(&self, tick: u64, event: TeleportEvent) {
         self.teleports.lock().push((tick, event));
     }
@@ -1532,7 +1532,7 @@ impl FactorioWorld {
     }
 
     /// Queues a death `OutputParser` just parsed, for
-    /// [`FactorioWorld::drain_deaths`] to pick up.
+    /// [`FactorioSurface::drain_deaths`] to pick up.
     pub fn record_death(&self, tick: u64, event: DeathEvent) {
         self.deaths.lock().push((tick, BotLifeEvent::Died(event)));
     }
@@ -1552,7 +1552,7 @@ impl FactorioWorld {
     }
 
     /// Queues a trigger technology the mod just completed, for
-    /// [`FactorioWorld::drain_research_triggers`] to pick up.
+    /// [`FactorioSurface::drain_research_triggers`] to pick up.
     pub fn record_research_trigger(&self, tick: u64, event: ResearchTriggerEvent) {
         self.research_triggers.lock().push((tick, event));
     }
@@ -1563,7 +1563,7 @@ impl FactorioWorld {
     }
 
     /// Folds one refused chunk into the per-surface tally for
-    /// [`FactorioWorld::drain_surface_chunk_drops`] to pick up.
+    /// [`FactorioSurface::drain_surface_chunk_drops`] to pick up.
     ///
     /// The first chunk seen for a surface in this window is the one kept, with
     /// its tick: it is the moment the surface first appeared, which is the
@@ -1633,7 +1633,7 @@ impl FactorioWorld {
     }
 
     /// Queues a step-aside the executor just made, for
-    /// [`FactorioWorld::drain_step_asides`] to pick up.
+    /// [`FactorioSurface::drain_step_asides`] to pick up.
     pub fn record_step_aside(&self, step: StepAside) {
         self.step_asides.lock().push(step);
     }
@@ -1777,15 +1777,15 @@ impl FactorioWorld {
     }
 }
 
-unsafe impl Send for FactorioWorld {}
-unsafe impl Sync for FactorioWorld {}
+unsafe impl Send for FactorioSurface {}
+unsafe impl Sync for FactorioSurface {}
 
-impl Serialize for FactorioWorld {
+impl Serialize for FactorioSurface {
     fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
-        let mut state = serializer.serialize_struct("FactorioWorld", 14)?;
+        let mut state = serializer.serialize_struct("FactorioSurface", 14)?;
         state.serialize_field("players", &self.players)?;
         state.serialize_field("forces", &self.forces)?;
         state.serialize_field("graphics", &self.graphics)?;
@@ -1820,7 +1820,7 @@ impl Serialize for FactorioWorld {
     }
 }
 
-impl<'de> Deserialize<'de> for FactorioWorld {
+impl<'de> Deserialize<'de> for FactorioSurface {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -1884,13 +1884,13 @@ impl<'de> Deserialize<'de> for FactorioWorld {
             }
         }
 
-        struct FactorioWorldVisitor;
+        struct FactorioSurfaceVisitor;
 
-        impl<'de> Visitor<'de> for FactorioWorldVisitor {
-            type Value = FactorioWorld;
+        impl<'de> Visitor<'de> for FactorioSurfaceVisitor {
+            type Value = FactorioSurface;
 
             fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-                formatter.write_str("struct FactorioWorld")
+                formatter.write_str("struct FactorioSurface")
             }
 
             fn visit_map<V>(self, mut map: V) -> Result<Self::Value, V::Error>
@@ -2029,7 +2029,7 @@ impl<'de> Deserialize<'de> for FactorioWorld {
 
                 let entity_graph: Arc<EntityGraph> = Arc::new(entity_graph);
                 let flow_graph = Arc::new(FlowGraph::new(entity_graph.clone()));
-                Ok(FactorioWorld {
+                Ok(FactorioSurface {
                     players,
                     forces,
                     graphics,
@@ -2072,17 +2072,17 @@ impl<'de> Deserialize<'de> for FactorioWorld {
             "enclosures",
             "benches",
         ];
-        deserializer.deserialize_struct("FactorioWorld", FIELDS, FactorioWorldVisitor)
+        deserializer.deserialize_struct("FactorioSurface", FIELDS, FactorioSurfaceVisitor)
     }
 }
 
-impl Clone for FactorioWorld {
+impl Clone for FactorioSurface {
     fn clone(&self) -> Self {
         let entity_prototypes = Arc::new((*self.entity_prototypes).clone());
         let recipes = Arc::new((*self.recipes).clone());
         let entity_graph = Arc::new((*self.entity_graph).clone());
         let _entity_graph = entity_graph.clone();
-        FactorioWorld {
+        FactorioSurface {
             entity_graph,
             recipes,
             entity_prototypes,
@@ -2155,7 +2155,7 @@ mod tests {
     #[test]
     #[allow(clippy::redundant_clone)]
     fn test_tile_boundaries_0() {
-        let world = FactorioWorld {
+        let world = FactorioSurface {
             players: Default::default(),
             forces: Default::default(),
             graphics: Default::default(),
@@ -2209,7 +2209,7 @@ mod tests {
 
     #[test]
     fn an_observed_inventory_sums_quality_away_and_reads_back_by_tile() {
-        let world = FactorioWorld::new();
+        let world = FactorioSurface::new();
         world.observe_inventories(vec![InventoryResponse {
             name: "stone-furnace".into(),
             position: Position::new(-40.5, 12.5),
@@ -2242,7 +2242,7 @@ mod tests {
 
     #[test]
     fn observed_inventories_come_back_in_tile_order() {
-        let world = FactorioWorld::new();
+        let world = FactorioSurface::new();
         // Inserted in an order that is neither sorted nor reverse-sorted, so a
         // `DashMap` iteration that happened to be right once cannot pass this.
         for (x, y) in [(5., 5.), (-3., 9.), (5., -1.), (-3., -1.)] {
@@ -2270,7 +2270,7 @@ mod tests {
 
     #[test]
     fn a_second_reading_replaces_the_first() {
-        let world = FactorioWorld::new();
+        let world = FactorioSurface::new();
         let at = Position::new(3., 4.);
         world.observe_inventories(vec![reply(
             "stone-furnace",
@@ -2295,7 +2295,7 @@ mod tests {
 
     #[test]
     fn an_entity_that_answered_empty_is_recorded_as_empty() {
-        let world = FactorioWorld::new();
+        let world = FactorioSurface::new();
         world.observe_inventories(vec![InventoryResponse {
             name: "stone-furnace".into(),
             position: Position::new(0., 0.),
@@ -2315,7 +2315,7 @@ mod tests {
     /// them.
     #[test]
     fn deleting_an_entity_forgets_its_contents() {
-        let world = FactorioWorld::new();
+        let world = FactorioSurface::new();
         let at = Position::new(6., 6.);
         let furnace = FactorioEntity::new_stone_furnace(&at, crate::types::Direction::North);
         world
@@ -2339,7 +2339,7 @@ mod tests {
     /// `teleports`.
     #[test]
     fn a_clone_keeps_what_it_last_saw_in_a_buffer() {
-        let world = FactorioWorld::new();
+        let world = FactorioSurface::new();
         world.observe_inventories(vec![reply(
             "stone-furnace",
             Position::new(1., 1.),
@@ -2379,7 +2379,7 @@ mod tests {
 
     #[test]
     fn a_refused_walk_is_remembered_for_the_bot_that_asked() {
-        let world = FactorioWorld::new();
+        let world = FactorioSurface::new();
         assert!(world.record_walk_refusal(walk_refusal(3, FROZEN, ORE_TILE)));
         let known = world.walk_refusals();
         assert_eq!(known.len(), 1);
@@ -2440,7 +2440,7 @@ mod tests {
 
     #[test]
     fn the_same_question_refused_twice_is_remembered_once() {
-        let world = FactorioWorld::new();
+        let world = FactorioSurface::new();
         assert!(world.record_walk_refusal(walk_refusal(3, FROZEN, ORE_TILE)));
         assert!(
             !world.record_walk_refusal(walk_refusal(3, FROZEN, ORE_TILE)),
@@ -2456,7 +2456,7 @@ mod tests {
     /// Cloned like `placement_refusals`, and for the same reason.
     #[test]
     fn a_clone_keeps_the_walks_the_game_refused() {
-        let world = FactorioWorld::new();
+        let world = FactorioSurface::new();
         world.record_walk_refusal(walk_refusal(3, FROZEN, ORE_TILE));
         assert_eq!(
             world.clone().walk_refusals().len(),
@@ -2476,7 +2476,7 @@ mod tests {
     /// the consequence (the plan is identical); this pins the mechanism.
     #[test]
     fn the_four_planner_ledgers_survive_a_json_round_trip() {
-        let world = FactorioWorld::new();
+        let world = FactorioSurface::new();
         world.observe_inventories(vec![
             reply(
                 "stone-furnace",
@@ -2512,7 +2512,7 @@ mod tests {
         });
 
         let json = serde_json::to_string(&world).expect("a world serialises");
-        let back: FactorioWorld = serde_json::from_str(&json).expect("and comes back");
+        let back: FactorioSurface = serde_json::from_str(&json).expect("and comes back");
 
         assert_eq!(back.observed_inventories(), world.observed_inventories());
         assert_eq!(back.placement_refusals(), world.placement_refusals());
@@ -2528,7 +2528,7 @@ mod tests {
     /// nothing.
     #[test]
     fn a_dump_written_without_the_ledgers_still_loads() {
-        let world = FactorioWorld::new();
+        let world = FactorioSurface::new();
         let mut value: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&world).expect("serialises"))
                 .expect("is an object");
@@ -2541,7 +2541,7 @@ mod tests {
         ] {
             assert!(object.remove(gone).is_some(), "{gone} was written");
         }
-        let back: FactorioWorld =
+        let back: FactorioSurface =
             serde_json::from_value(value).expect("an older dump is still readable");
         assert!(back.observed_inventories().is_empty());
         assert!(back.placement_refusals().is_empty());
@@ -2558,7 +2558,7 @@ mod tests {
     /// identical output.
     #[test]
     fn a_dump_lists_inventories_in_tile_order() {
-        let world = FactorioWorld::new();
+        let world = FactorioSurface::new();
         for (x, y) in [(5., 5.), (-3., 9.), (5., -1.), (-3., -1.)] {
             world.observe_inventories(vec![reply(
                 "stone-furnace",

@@ -11,7 +11,7 @@ use factorio_bot_core::factorio::rcon::{
     ActionFailure, Approach, DestinationFull, Dispatch, FactorioRcon, approach_standing,
     reach_distance,
 };
-use factorio_bot_core::factorio::world::{FactorioWorld, HOP_DISTANCE, StepAside, StepAsideReason};
+use factorio_bot_core::factorio::world::{FactorioSurface, HOP_DISTANCE, StepAside, StepAsideReason};
 use factorio_bot_core::record::map::{EntitySnapshot, Placement, drift_between};
 use factorio_bot_core::types::{PlayerId, Position};
 use factorio_bot_planner::{BotId, InventorySlot};
@@ -136,9 +136,9 @@ rcon.print(helpers.table_to_json(t))";
 ///   that waits for a `true` must not wait on this.
 ///
 /// A free function rather than a method so it can be tested against a
-/// hand-built [`FactorioWorld`]; [`RconActuator`] itself needs a live
+/// hand-built [`FactorioSurface`]; [`RconActuator`] itself needs a live
 /// [`FactorioRcon`] to exist.
-pub fn technology_researched_in(world: &FactorioWorld, tech: &str) -> Option<bool> {
+pub fn technology_researched_in(world: &FactorioSurface, tech: &str) -> Option<bool> {
     let force = world.forces.get(BOT_FORCE)?;
     force.technologies.get(tech).map(|t| t.researched)
 }
@@ -146,7 +146,7 @@ pub fn technology_researched_in(world: &FactorioWorld, tech: &str) -> Option<boo
 /// Drives a real Factorio game over RCON.
 pub struct RconActuator {
     rcon: Arc<FactorioRcon>,
-    world: Arc<FactorioWorld>,
+    world: Arc<FactorioSurface>,
     defines: InventoryDefines,
     /// The players the game reported as connected when this actuator was built.
     ///
@@ -202,7 +202,7 @@ impl RconActuator {
     /// that is not in it. It does **not** renumber: see [`BotId`].
     pub async fn new(
         rcon: Arc<FactorioRcon>,
-        world: Arc<FactorioWorld>,
+        world: Arc<FactorioSurface>,
     ) -> Result<Self, ActuatorError> {
         let mut connected: BTreeSet<PlayerId> = rcon
             .connected_players()
@@ -1009,7 +1009,7 @@ mod tests {
 
     #[test]
     fn the_bots_force_answers_for_a_technology_it_has_finished() {
-        let world = FactorioWorld::new();
+        let world = FactorioSurface::new();
         world
             .update_force(force_with("player", &[("automation-science-pack", true)]))
             .expect("force accepted");
@@ -1027,7 +1027,7 @@ mod tests {
         // map and taking the first name (which is what
         // `PlanState::from_world` does) picks `enemy` and answers "not
         // researched" forever. This is the test that would have caught it.
-        let world = FactorioWorld::new();
+        let world = FactorioSurface::new();
         world
             .update_force(force_with("player", &[("automation-science-pack", true)]))
             .expect("force accepted");
@@ -1046,7 +1046,7 @@ mod tests {
 
     #[test]
     fn a_world_that_has_read_no_force_yet_cannot_answer() {
-        let world = FactorioWorld::new();
+        let world = FactorioSurface::new();
         assert_eq!(
             technology_researched_in(&world, "automation-science-pack"),
             None
@@ -1057,7 +1057,7 @@ mod tests {
     fn a_technology_the_force_does_not_list_is_unknown_rather_than_unresearched() {
         // `Some(false)` here would make a caller wait out its whole budget for
         // a technology the game has never heard of.
-        let world = FactorioWorld::new();
+        let world = FactorioSurface::new();
         world
             .update_force(force_with("player", &[("electronics", true)]))
             .expect("force accepted");
@@ -1291,7 +1291,7 @@ mod tests {
     fn the_walk_dispatch_reports_a_pre_dispatch_failure_as_rejected_and_untimed() {
         let actuator = RconActuator {
             rcon: Arc::new(FactorioRcon::new_empty()),
-            world: Arc::new(FactorioWorld::new()),
+            world: Arc::new(FactorioSurface::new()),
             defines: InventoryDefines::default(),
             connected: [1u8].into_iter().collect(),
             placements: Mutex::new(BTreeMap::new()),

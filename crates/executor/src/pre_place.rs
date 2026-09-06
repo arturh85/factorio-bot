@@ -70,7 +70,7 @@
 //!   enclosure it might prevent -- detection still names one afterwards.
 
 use factorio_bot_core::factorio::util::calculate_distance;
-use factorio_bot_core::factorio::world::{FactorioWorld, StepAsideReason};
+use factorio_bot_core::factorio::world::{FactorioSurface, StepAsideReason};
 use factorio_bot_core::graph::enclosure::{
     Escape, blocks_character, character_half_box, escape_from, escape_with, step_aside_target,
 };
@@ -117,7 +117,7 @@ pub enum PrePlace {
 /// "it fired and found nothing" and "it fired and moved the bot" are three
 /// different things with one appearance from outside.
 pub fn judge_placement(
-    world: &FactorioWorld,
+    world: &FactorioSurface,
     player: PlayerId,
     name: &str,
     at: &Position,
@@ -292,7 +292,7 @@ pub fn judge_placement(
 /// `None` when the world has no prototype for it (a zero-width box is what
 /// `from_prototype` gives an unknown name, and a zero-width obstacle would
 /// model nothing).
-fn footprint_of(world: &FactorioWorld, name: &str, at: &Position, direction: u8) -> Option<Rect> {
+fn footprint_of(world: &FactorioSurface, name: &str, at: &Position, direction: u8) -> Option<Rect> {
     let entity = FactorioEntity::from_prototype(
         name,
         at.clone(),
@@ -366,9 +366,9 @@ mod tests {
         Position::new(31.5, -4.5)
     }
 
-    fn world_with_the_old_cell() -> FactorioWorld {
+    fn world_with_the_old_cell() -> FactorioSurface {
         let prototypes = Arc::new(fixture_entity_prototypes());
-        let world = FactorioWorld::new();
+        let world = FactorioSurface::new();
         world
             .update_entity_prototypes(prototypes.iter().map(|p| p.clone()).collect())
             .expect("prototypes load");

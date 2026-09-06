@@ -45,7 +45,7 @@ const MACHINE: &str = "assembling-machine-1";
 
 /// `fixture_world()` plus the `assembling-machine-1` recipe the 1.1 capture
 /// lacks -- the live 2.1.17 one, exactly as `red_science_cell.rs` adds it.
-fn world() -> factorio_bot_core::factorio::world::FactorioWorld {
+fn world() -> factorio_bot_core::factorio::world::FactorioSurface {
     let world = fixture_world();
     let recipe: FactorioRecipe = serde_json::from_str(
         r#"{

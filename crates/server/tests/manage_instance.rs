@@ -2,7 +2,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use factorio_bot_core::app_settings::AppSettings;
 use factorio_bot_core::factorio::rcon::FactorioRcon;
-use factorio_bot_core::factorio::world::FactorioWorld;
+use factorio_bot_core::factorio::world::FactorioSurface;
 use factorio_bot_core::parking_lot;
 use factorio_bot_core::process::process_control::{FactorioInstance, SharedFactorioInstance};
 use factorio_bot_server::state::AppState;
@@ -26,7 +26,7 @@ fn state_with(instance: SharedFactorioInstance) -> AppState {
 /// inventing a second version.
 fn empty_factorio_instance() -> FactorioInstance {
     FactorioInstance {
-        world: Some(Arc::new(FactorioWorld::new())),
+        world: Some(Arc::new(FactorioSurface::new())),
         rcon: Arc::new(FactorioRcon::new_empty()),
         server_process: None,
         client_processes: Vec::new(),

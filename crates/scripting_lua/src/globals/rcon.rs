@@ -6,7 +6,7 @@
 #![deny(clippy::unwrap_used, clippy::expect_used)]
 
 use factorio_bot_core::factorio::rcon::FactorioRcon;
-use factorio_bot_core::factorio::world::FactorioWorld;
+use factorio_bot_core::factorio::world::FactorioSurface;
 use factorio_bot_core::mlua::prelude::*;
 use factorio_bot_core::types::{AreaFilter, PlayerId, Position, RequestEntity};
 use std::sync::Arc;
@@ -27,7 +27,7 @@ fn rcon_error(err: impl std::fmt::Display) -> LuaError {
 pub fn create_lua_rcon(
     lua: &Lua,
     _rcon: Arc<FactorioRcon>,
-    _world: Arc<FactorioWorld>,
+    _world: Arc<FactorioSurface>,
 ) -> LuaResult<LuaTable> {
     let map_table = lua.create_table()?;
     map_table.set(

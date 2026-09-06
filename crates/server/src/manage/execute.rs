@@ -14,7 +14,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use factorio_bot_core::factorio::rcon::FactorioRcon;
-use factorio_bot_core::factorio::world::FactorioWorld;
+use factorio_bot_core::factorio::world::FactorioSurface;
 use factorio_bot_core::plan::planner::Planner;
 use factorio_bot_scripting::{OutputSink, Stream};
 // `Stream` above is the script's stdout/stderr discriminant, so the async
@@ -230,7 +230,7 @@ pub async fn post_execute(
 fn spawn_run(
     state: &AppState,
     handle: JobHandle,
-    world: Arc<FactorioWorld>,
+    world: Arc<FactorioSurface>,
     rcon: Arc<FactorioRcon>,
     scripts_root: PathBuf,
     source: ScriptSource,

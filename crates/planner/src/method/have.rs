@@ -8152,8 +8152,8 @@ mod tests {
     /// state exactly which resources are charted.
     fn world_holding(
         entities: Vec<FactorioEntity>,
-    ) -> factorio_bot_core::factorio::world::FactorioWorld {
-        let world = factorio_bot_core::factorio::world::FactorioWorld::new();
+    ) -> factorio_bot_core::factorio::world::FactorioSurface {
+        let world = factorio_bot_core::factorio::world::FactorioSurface::new();
         world
             .update_entity_prototypes(
                 factorio_bot_core::test_utils::fixture_entity_prototypes()
@@ -13745,7 +13745,7 @@ mod tests {
     /// Nothing here is asserted about the planner; this is the seam itself.
     #[test]
     fn rocks_reach_minable_sources_through_update_chunk_entities() {
-        let world = factorio_bot_core::factorio::world::FactorioWorld::new();
+        let world = factorio_bot_core::factorio::world::FactorioSurface::new();
         world
             .update_entity_prototypes(
                 factorio_bot_core::test_utils::fixture_entity_prototypes()
@@ -15005,7 +15005,7 @@ mod stockpiling {
 
     /// Rung 1's starting inventories, on whichever world a test wants them.
     fn rung_one_on(
-        world: factorio_bot_core::factorio::world::FactorioWorld,
+        world: factorio_bot_core::factorio::world::FactorioSurface,
         bots: &[BotId],
     ) -> PlanState {
         let mut state = PlanState::from_world(Arc::new(world), bots);
@@ -15026,8 +15026,8 @@ mod stockpiling {
     /// no chest, and `Stockpile` refuses. These four `tree-01`s are what turn
     /// the same fixture into one a stockpile can be built on.
     fn wooded(
-        world: factorio_bot_core::factorio::world::FactorioWorld,
-    ) -> factorio_bot_core::factorio::world::FactorioWorld {
+        world: factorio_bot_core::factorio::world::FactorioSurface,
+    ) -> factorio_bot_core::factorio::world::FactorioSurface {
         crate::test_world::with_trees(
             world,
             &[

@@ -1,7 +1,7 @@
 use crate::constants::SERVER_SETTINGS_FILENAME;
 use crate::errors::*;
 use crate::factorio::rcon::{FactorioRcon, RconSettings};
-use crate::factorio::world::FactorioWorld;
+use crate::factorio::world::FactorioSurface;
 use crate::process::arrange_windows::arrange_windows;
 use crate::process::connect_wait::{ConnectWait, ConnectWatcher, missing_clients};
 use crate::process::instance_setup::setup_factorio_instance;
@@ -23,7 +23,7 @@ use tokio::sync::RwLock;
 pub type SharedFactorioInstance = Arc<RwLock<Option<FactorioInstance>>>;
 
 pub struct FactorioInstance {
-    pub world: Option<Arc<FactorioWorld>>,
+    pub world: Option<Arc<FactorioSurface>>,
     pub rcon: Arc<FactorioRcon>,
     pub server_process: Option<InteractiveProcess>,
     pub client_processes: Vec<InteractiveProcess>,
@@ -121,7 +121,7 @@ impl FactorioInstance {
                 params.client_count
             ));
         }
-        let mut world: Option<Arc<FactorioWorld>> = None;
+        let mut world: Option<Arc<FactorioSurface>> = None;
         let silent = Arc::new(parking_lot::RwLock::new(params.silent));
         let instance_name = params.instance_name.unwrap_or_else(|| "server".to_owned());
         let rcon_settings = RconSettings::new(
@@ -506,7 +506,7 @@ impl FactorioInstance {
         // own `level.zip`, which is every ordinary run.
         resume_save: Option<PathBuf>,
     ) -> Result<(
-        Arc<FactorioWorld>,
+        Arc<FactorioSurface>,
         Arc<FactorioRcon>,
         InteractiveProcess,
         u16,

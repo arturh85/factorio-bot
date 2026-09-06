@@ -247,7 +247,7 @@ fn an_enclosure_names_the_bot_the_place_and_the_tick() {
 /// five.
 #[test]
 fn one_bot_stuck_in_one_place_is_recorded_once() {
-    let world = factorio_bot_core::factorio::world::FactorioWorld::new();
+    let world = factorio_bot_core::factorio::world::FactorioSurface::new();
     let row = |at: Position| Enclosure {
         tick: None,
         player: 3,

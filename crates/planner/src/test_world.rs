@@ -20,7 +20,7 @@ use crate::ids::BotId;
 use crate::method::ExpansionCtx;
 use crate::state::PlanState;
 use factorio_bot_core::factorio::util::add_to_rect;
-use factorio_bot_core::factorio::world::FactorioWorld;
+use factorio_bot_core::factorio::world::FactorioSurface;
 use factorio_bot_core::serde_json;
 use factorio_bot_core::test_utils::fixture_world;
 use factorio_bot_core::types::{Direction, FactorioEntity, FactorioForce, Position, Rect};
@@ -56,7 +56,7 @@ use std::sync::Arc;
 /// than an enlargement of one: overlapping `spawn_ore` would put two resource
 /// entities on one tile and the doubled amounts would be a second, silent
 /// change to the fixture.
-pub(crate) fn widen_ore_front(world: FactorioWorld) -> FactorioWorld {
+pub(crate) fn widen_ore_front(world: FactorioSurface) -> FactorioSurface {
     let mut entities = Vec::new();
     // Clear of the fixture's own iron (centred (-40, 40), 11 tiles across),
     // its copper and coal (y around 0) and its water (40, 40).
@@ -85,7 +85,7 @@ pub(crate) fn widen_ore_front(world: FactorioWorld) -> FactorioWorld {
 /// Added to the *base* world rather than through `PlanState::create_entity`:
 /// `minables` lives in `EntityGraph`, and the overlay only ever hides entities
 /// from it, never adds one.
-pub(crate) fn with_trees(world: FactorioWorld, positions: &[Position]) -> FactorioWorld {
+pub(crate) fn with_trees(world: FactorioSurface, positions: &[Position]) -> FactorioSurface {
     let entities: Vec<FactorioEntity> = positions
         .iter()
         .map(|position| FactorioEntity {
@@ -491,7 +491,7 @@ fn one_technology_force(name: &str, done: bool) -> FactorioForce {
 /// the acting force is looked up by name, so a caller can build the world run
 /// 30 actually had: `enemy`, `neutral` and `player`, with only `player`
 /// holding the technology.
-pub(crate) fn world_with_forces(forces: &[(&str, bool)]) -> FactorioWorld {
+pub(crate) fn world_with_forces(forces: &[(&str, bool)]) -> FactorioSurface {
     let world = fixture_world();
     for (name, done) in forces {
         world
@@ -507,7 +507,7 @@ pub(crate) fn world_with_forces(forces: &[(&str, bool)]) -> FactorioWorld {
 /// Ingredient-free on purpose: the depth an expansion reaches is the sum of the
 /// prerequisite recursion and the recipe nesting under each technology's
 /// science packs, and this fixture isolates the first by removing the second.
-pub(crate) fn world_with_prerequisite_chain(len: u32) -> FactorioWorld {
+pub(crate) fn world_with_prerequisite_chain(len: u32) -> FactorioSurface {
     let mut technologies = Vec::new();
     for level in 0..len {
         let prerequisites = if level + 1 < len {
@@ -569,7 +569,7 @@ pub(crate) fn world_with_prerequisite_chain(len: u32) -> FactorioWorld {
 /// tie-break is tested, and passing none is how the "disabled and nothing turns
 /// it on" case is. Each is prerequisite-free and pack-free, so the fixture
 /// isolates the unlock question from research cost and prerequisite depth.
-pub(crate) fn world_with_locked_recipe(recipe: &str, unlockers: &[&str]) -> FactorioWorld {
+pub(crate) fn world_with_locked_recipe(recipe: &str, unlockers: &[&str]) -> FactorioSurface {
     locked_recipe_world(recipe, unlockers, false)
 }
 
@@ -581,11 +581,11 @@ pub(crate) fn world_with_locked_recipe(recipe: &str, unlockers: &[&str]) -> Fact
 /// finished it before planning began. `recipe_gate` answers those two
 /// differently on purpose (`PlannedResearch` versus `Open`), so a test that
 /// wants the second cannot get there through the first.
-pub(crate) fn world_with_researched_unlocker(recipe: &str, unlockers: &[&str]) -> FactorioWorld {
+pub(crate) fn world_with_researched_unlocker(recipe: &str, unlockers: &[&str]) -> FactorioSurface {
     locked_recipe_world(recipe, unlockers, true)
 }
 
-fn locked_recipe_world(recipe: &str, unlockers: &[&str], researched: bool) -> FactorioWorld {
+fn locked_recipe_world(recipe: &str, unlockers: &[&str], researched: bool) -> FactorioSurface {
     let world = fixture_world();
 
     let mut locked = world
@@ -664,7 +664,7 @@ pub(crate) fn world_with_trigger(
     trigger_json: &str,
     locked_recipe: Option<&str>,
     unlocked_by: Option<&str>,
-) -> FactorioWorld {
+) -> FactorioSurface {
     let world = fixture_world();
 
     if let Some(recipe) = locked_recipe {
@@ -781,7 +781,7 @@ pub(crate) struct OilFixture {
 /// The oil ladder's last rung: `oil-processing`, a `mine-entity` trigger
 /// naming `crude-oil`, exactly as `data/base/prototypes/technology.lua`
 /// writes it -- plus whatever of the world around it `fixture` asks for.
-pub(crate) fn world_with_oil(fixture: OilFixture) -> FactorioWorld {
+pub(crate) fn world_with_oil(fixture: OilFixture) -> FactorioSurface {
     use factorio_bot_core::types::{Direction, FactorioRecipe};
 
     let world = fixture_world();
@@ -912,7 +912,7 @@ pub(crate) fn world_with_oil(fixture: OilFixture) -> FactorioWorld {
 /// ore onto one bot and asked another to load the furnace.
 ///
 /// The numbers are the real ones for both technologies.
-pub(crate) fn world_with_trigger_prerequisite() -> FactorioWorld {
+pub(crate) fn world_with_trigger_prerequisite() -> FactorioSurface {
     let json = r#"
     {
       "name": "player",
@@ -969,7 +969,7 @@ pub(crate) fn world_with_trigger_prerequisite() -> FactorioWorld {
 /// its prerequisites, so a test about *how* a long research is planned --
 /// dealt across the roster, in how many labs -- is not also a test about
 /// `automation` and the trigger under it.
-pub(crate) fn world_with_long_research(units: u64, unit_ticks: f64) -> FactorioWorld {
+pub(crate) fn world_with_long_research(units: u64, unit_ticks: f64) -> FactorioSurface {
     let json = format!(
         r#"
         {{
@@ -1007,7 +1007,7 @@ pub(crate) fn world_with_long_research(units: u64, unit_ticks: f64) -> FactorioW
 }
 
 /// `fixture_world()` plus the force above. Nothing else differs.
-pub(crate) fn world_with_technologies() -> FactorioWorld {
+pub(crate) fn world_with_technologies() -> FactorioSurface {
     let world = fixture_world();
     let force: FactorioForce =
         serde_json::from_str(FIXTURE_FORCE_JSON).expect("the fixture force must parse");
@@ -1040,9 +1040,9 @@ pub(crate) fn world_with_technologies() -> FactorioWorld {
 /// water refusal is reached before an empty map could produce a different one.
 /// A test using this world should assert the refusal **by variant**, so that
 /// the missing ore cannot pass for the missing water.
-pub(crate) fn world_with_technologies_and_no_water() -> FactorioWorld {
+pub(crate) fn world_with_technologies_and_no_water() -> FactorioSurface {
     let wet = world_with_technologies();
-    let dry = FactorioWorld::new();
+    let dry = FactorioSurface::new();
     dry.update_entity_prototypes(
         wet.entity_prototypes
             .iter()

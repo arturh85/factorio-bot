@@ -20,7 +20,7 @@
 
 use factorio_bot_core::factorio::rcon::{Dispatch, FactorioRcon, RconSettings};
 use factorio_bot_core::factorio::ticks::ActionOutcome;
-use factorio_bot_core::factorio::world::FactorioWorld;
+use factorio_bot_core::factorio::world::FactorioSurface;
 use parking_lot::RwLock;
 use std::collections::VecDeque;
 use std::net::SocketAddr;
@@ -158,7 +158,7 @@ fn action_id_of(command: &str) -> u32 {
 async fn research_reports_success_only_when_the_game_finishes_it() {
     let server = spawn_fake_server(vec![format!("§tick§{QUEUED_AT}")]).await;
     let rcon = connect_to(&server).await;
-    let world = Arc::new(FactorioWorld::new());
+    let world = Arc::new(FactorioSurface::new());
 
     let waiting = {
         let (rcon, world) = (rcon.clone(), world.clone());
@@ -218,7 +218,7 @@ async fn research_reports_success_only_when_the_game_finishes_it() {
 async fn a_completion_for_another_action_does_not_release_this_one() {
     let server = spawn_fake_server(vec![format!("§tick§{QUEUED_AT}")]).await;
     let rcon = connect_to(&server).await;
-    let world = Arc::new(FactorioWorld::new());
+    let world = Arc::new(FactorioSurface::new());
 
     let waiting = {
         let (rcon, world) = (rcon.clone(), world.clone());
@@ -256,7 +256,7 @@ async fn a_completion_for_another_action_does_not_release_this_one() {
 async fn a_refused_research_fails_at_once_rather_than_waiting() {
     let server = spawn_fake_server(vec!["Error: no such technology: nonsuch".to_string()]).await;
     let rcon = connect_to(&server).await;
-    let world = Arc::new(FactorioWorld::new());
+    let world = Arc::new(FactorioSurface::new());
 
     let failure = tokio::time::timeout(
         Duration::from_secs(5),

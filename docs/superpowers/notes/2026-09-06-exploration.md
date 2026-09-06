@@ -270,13 +270,28 @@ is past the nearest crude oil at 372.5. Exploration on this map is cheap — the
 spiral is affordable, and radar is not needed to reach the first oil. That was
 the open question the pitch measurement settled.
 
-The three pinned baselines are unchanged, as required:
+The three pinned baselines are unchanged **by this work**, measured on this
+branch before merging master:
 
 | goal | actions | makespan |
 |---|---:|---:|
 | `researched:automation` | 176 | 21,776 |
 | `producing:automation-science-pack:6` | 324 | 26,990 |
 | `producing:logistic-science-pack:6` | 569 | 52,819 |
+
+**After merging master** (`cce32d5b`, the block-siting session's five tasks)
+they move, and the movement is theirs rather than this branch's -- the table
+above is the same tree with only this branch's commits on it:
+
+| goal | actions | makespan |
+|---|---:|---:|
+| `researched:automation` | 176 | 21,784 |
+| `producing:automation-science-pack:6` | 324 | 22,547 |
+| `producing:logistic-science-pack:6` | **451** | **48,829** |
+
+Nothing in this branch participates in those goals: it adds `Goal::Charted`,
+`ActionKind::Survey` and a mod verb, and the only shared code it touches is one
+new arm in `holds()` for a goal none of those three goals contain.
 
 ---
 

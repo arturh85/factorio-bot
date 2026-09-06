@@ -26,6 +26,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// would see; it only keeps float noise from reading as one.
 const TOUCH_SLACK: f64 = 1. / 512.;
 
+/// The literal `FactorioEntity::name` every ghost reports, regardless of what
+/// it is a ghost OF -- verified live against Factorio 2.1.17. The entity it
+/// will become lives in `FactorioEntity::ghost_name` instead; see
+/// [`PlanState::ghosts_named_any`].
+pub const GHOST_ENTITY_NAME: &str = "entity-ghost";
+
 /// Half either side of a vanilla `character`'s collision box, used only when
 /// the world's own `entity_prototypes` carries no `character` entry at all.
 ///
@@ -3041,6 +3047,17 @@ impl PlanState {
     /// fixed anchor, a character standing on the footprint is exactly the
     /// fact the caller needs told, cleared by walking rather than by moving
     /// the block.
+    ///
+    /// **Ghosts are not one of the five sources either.** Measured live
+    /// against Factorio 2.1.17 before `ActionKind::StampGhosts` existed:
+    /// `only_ghosts = true` on `rcon_place_blueprint` validates no clearance
+    /// at all, and a real placement consumes the ghost beneath it cleanly
+    /// rather than being refused by it. A ghost the entity loops below found
+    /// by bounding box alone would report `Occupant::Entity("entity-ghost")`
+    /// -- blocking the exact `Place` the marker exists to make possible,
+    /// which is worse than not stamping at all. Skipped by name in both
+    /// entity loops, unconditionally: no caller of `occupant_of` should ever
+    /// want a ghost to collide.
     fn occupant_of(
         &self,
         area: &Rect,
@@ -3048,6 +3065,9 @@ impl PlanState {
         characters_block: bool,
     ) -> Option<Occupant> {
         for entity in self.added.values() {
+            if entity.name == GHOST_ENTITY_NAME {
+                continue;
+            }
             if boxes_overlap(&self.footprint_of(entity), area) {
                 return Some(Occupant::Entity(entity.name.clone()));
             }
@@ -3073,6 +3093,9 @@ impl PlanState {
                 .find_entities_in_radius(area.center(), radius, None, None)
         {
             if self.removed.contains(&Pos::from(&entity.position)) {
+                continue;
+            }
+            if entity.name == GHOST_ENTITY_NAME {
                 continue;
             }
             if boxes_overlap(&entity.bounding_box, area) {
@@ -3621,6 +3644,70 @@ impl PlanState {
                 continue;
             }
             out.entry(entity.name.clone()).or_default().push(entity.clone());
+        }
+        for bucket in out.values_mut() {
+            bucket.sort_by_key(|e| Pos::from(&e.position));
+        }
+        out
+    }
+
+    /// [`entities_named_any`](Self::entities_named_any)'s counterpart for
+    /// GHOSTS, bucketed by [`FactorioEntity::ghost_name`] rather than
+    /// [`FactorioEntity::name`].
+    ///
+    /// **A ghost's own `name` is always the literal `"entity-ghost"`, never
+    /// the entity it will become** -- verified live against Factorio 2.1.17:
+    /// a ghost reports `name = "entity-ghost"` with the real name in
+    /// `ghost_name`, a separation load-bearing enough that
+    /// `method::blueprint::already_stands` depends on it to avoid ever
+    /// reading a ghost as a built entity. Calling
+    /// [`entities_named_any`](Self::entities_named_any) with real entity
+    /// names (`"stone-furnace"`, say) therefore finds no ghost, ever, no
+    /// matter how many stand -- this is the method that looks at the field
+    /// that actually carries the design intent.
+    ///
+    /// Same one-pass-over-many-names shape as its sibling, and the same
+    /// dedup/order contract: an overlay ghost wins over a base one at the
+    /// same tile, `removed` hides a base one outright, and each name's
+    /// bucket is sorted by `Pos`.
+    pub fn ghosts_named_any(&self, names: &BTreeSet<String>) -> BTreeMap<String, Vec<FactorioEntity>> {
+        let mut out: BTreeMap<String, Vec<FactorioEntity>> = BTreeMap::new();
+        let mut seen: BTreeMap<String, BTreeSet<Pos>> = BTreeMap::new();
+        for entity in self.added.values() {
+            if entity.name != GHOST_ENTITY_NAME {
+                continue;
+            }
+            let Some(ghost_name) = entity.ghost_name.as_ref() else {
+                continue;
+            };
+            if !names.contains(ghost_name) {
+                continue;
+            }
+            seen
+                .entry(ghost_name.clone())
+                .or_default()
+                .insert(Pos::from(&entity.position));
+            out.entry(ghost_name.clone()).or_default().push(entity.clone());
+        }
+        let tree = self.base.entity_graph.inner_tree();
+        for (entity, _rect) in tree.iter().map(|(_, v)| v) {
+            if entity.name != GHOST_ENTITY_NAME {
+                continue;
+            }
+            let Some(ghost_name) = entity.ghost_name.as_ref() else {
+                continue;
+            };
+            if !names.contains(ghost_name) {
+                continue;
+            }
+            let key = Pos::from(&entity.position);
+            if self.removed.contains(&key) {
+                continue;
+            }
+            if !seen.entry(ghost_name.clone()).or_default().insert(key) {
+                continue;
+            }
+            out.entry(ghost_name.clone()).or_default().push(entity.clone());
         }
         for bucket in out.values_mut() {
             bucket.sort_by_key(|e| Pos::from(&e.position));

@@ -1463,6 +1463,17 @@ fn step_to_lua(lua: &Lua, net: &ActionNetwork, step: &ScheduledStep) -> LuaResul
                     t.set("kind", "survey")?;
                     t.set("pos", position_to_lua(lua, to)?)?;
                 }
+                // The block's marker, not a building: `pos` is the block's
+                // own anchor (`ActionKind::target_position`'s answer for this
+                // variant), and `blueprint` is the same encoded text
+                // `goal.built` was given -- a caller watching a run wants to
+                // know a stamp happened and where, not to decode the text
+                // itself.
+                ActionKind::StampGhosts { blueprint, anchor } => {
+                    t.set("kind", "stamp_ghosts")?;
+                    t.set("pos", position_to_lua(lua, anchor)?)?;
+                    t.set("blueprint", blueprint.clone())?;
+                }
             }
         }
     }

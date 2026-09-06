@@ -313,6 +313,34 @@ pub trait Actuator: Send + Sync {
         recipe: &str,
     ) -> Result<ActionTicks, ActuatorFailure>;
 
+    /// Stamp ghosts of `blueprint`'s entities at `anchor` --
+    /// `rcon_place_blueprint(..., only_ghosts = true)`, the same call
+    /// `Actuator::place` would make with `only_ghosts = false`.
+    ///
+    /// [`ActionKind::StampGhosts`]'s dispatch, and it exists to be **skippable
+    /// without consequence for correctness**: a ghost is a recovery marker and
+    /// a viewer cue, not a building. Nothing downstream of this needs it to
+    /// have run -- `method::blueprint::BuildBlock`'s real `Place` steps carry
+    /// their own preconditions and place correctly with or without a ghost
+    /// ever having stood there. That is what justifies defaulting this to a
+    /// no-op success rather than requiring every test actuator to grow a
+    /// stub for it, the same reasoning [`Actuator::generate_chunks`] already
+    /// rests on: an actuator with no game underneath has nothing to mark, and
+    /// [`RconActuator`](crate::rcon_actuator::RconActuator) is the one
+    /// implementation that overrides it to actually ask the game.
+    ///
+    /// `ActionTicks::UNKNOWN` on the default path is honest, not lazy: no
+    /// actuator without a game clock can say when a mark it never made would
+    /// have landed.
+    async fn stamp_ghosts(
+        &self,
+        _bot: BotId,
+        _blueprint: &str,
+        _anchor: Position,
+    ) -> Result<ActionTicks, ActuatorFailure> {
+        Ok(ActionTicks::UNKNOWN)
+    }
+
     /// The game's simulation speed multiplier — Factorio's own `game.speed`,
     /// where `1.0` is normal (60 ticks/second) and the game accepts anything
     /// from `0.01` up.

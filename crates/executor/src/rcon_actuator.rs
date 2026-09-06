@@ -739,6 +739,60 @@ impl Actuator for RconActuator {
         Ok(ticks)
     }
 
+    /// [`Actuator::stamp_ghosts`]: the existing `rcon_place_blueprint`, with
+    /// `only_ghosts = true` and no materials or inventory sourcing -- a
+    /// ghost costs nothing and belongs to nobody's pockets.
+    ///
+    /// **This is the FIRST caller of `FactorioRcon::place_blueprint` from the
+    /// executor.** Everything else this project has ever built with a
+    /// blueprint (`method::blueprint::BuildBlock`) places entity by entity
+    /// through [`Actuator::place`] instead; the bulk call was previously
+    /// reachable only from a Lua script (`rcon.place_blueprint`, see
+    /// `crates/scripting_lua/src/lua_docs.rs`). That matters for one reason:
+    /// `place_blueprint` mines, unconditionally and regardless of
+    /// `only_ghosts`, any non-character, non-resource entity its own build
+    /// area already contains -- correct for a real build clearing its own
+    /// footprint, but a live hazard here if this were ever dispatched over a
+    /// block that already has real entities standing in it. It is not,
+    /// today: `method::blueprint`'s `is_fresh_site` gate emits
+    /// `ActionKind::StampGhosts` exactly once, on the expansion where
+    /// `recover_anchor` finds NOTHING -- neither a ghost nor two real
+    /// entities -- so nothing this call's mining sweep could reach has been
+    /// placed yet. That gate is a planner-side promise, not something this
+    /// method can see or enforce; if a future caller ever dispatches this
+    /// action against a block that is already partly real, that promise is
+    /// what stands between a marker and a bot mining its own furnace.
+    ///
+    /// `game_tick` after the call, not from it: `place_blueprint` dispatches
+    /// through the untimed `remote_call` and reports no stamp of its own, so
+    /// there is no reply to read a dispatch/settle pair off the way
+    /// `place_entity_timed` does. Placement is synchronous either way, so a
+    /// tick read immediately after is the same number a stamp would have
+    /// carried.
+    async fn stamp_ghosts(
+        &self,
+        bot: BotId,
+        blueprint: &str,
+        anchor: Position,
+    ) -> Result<ActionTicks, ActuatorFailure> {
+        let p = self.player(bot)?;
+        self.rcon
+            .place_blueprint(
+                p,
+                blueprint.to_string(),
+                &anchor,
+                0,
+                false,
+                true,
+                Vec::new(),
+                &self.world,
+            )
+            .await
+            .map_err(|e| ActuatorError::Rejected(e.to_string()).at(ActionTicks::UNKNOWN))?;
+        let tick = self.rcon.game_tick().await.ok().flatten();
+        Ok(ActionTicks::at(tick))
+    }
+
     async fn insert(
         &self,
         bot: BotId,

@@ -7988,6 +7988,7 @@ mod tests {
                 ActionKind::SetRecipe { .. } => "set_recipe",
                 ActionKind::Evacuate { .. } => "evacuate",
                 ActionKind::Survey { .. } => "survey",
+                ActionKind::StampGhosts { .. } => "stamp_ghosts",
             })
             .collect();
         assert!(
@@ -8594,6 +8595,7 @@ mod tests {
                 ActionKind::SetRecipe { .. } => "set_recipe",
                 ActionKind::Evacuate { .. } => "evacuate",
                 ActionKind::Survey { .. } => "survey",
+                ActionKind::StampGhosts { .. } => "stamp_ghosts",
             })
             .collect();
         assert_eq!(kinds.iter().filter(|k| **k == "place").count(), 1);

@@ -722,6 +722,51 @@ pub enum ActionKind {
     Survey {
         to: Position,
     },
+    /// Place ghosts of every entity in `blueprint` at `anchor`, and nothing
+    /// else -- no material spent, no ground occupied.
+    ///
+    /// **Emitted once per block, before any [`ActionKind::Place`]**
+    /// (`method::blueprint::BuildBlock`), and never again: once a ghost
+    /// stands, `method::blueprint::recover_anchor`'s ghost pass finds it on
+    /// every later expansion and the block never re-enters the "nothing
+    /// stands, nothing is ghosted yet" state this exists to leave a mark in.
+    /// That is also what keeps this from being re-dispatched over a block
+    /// that is already partly real -- see the dispatch's own doc for why a
+    /// second stamp there would be more than merely redundant.
+    ///
+    /// The owner's reason for this (2026-09-06): it makes the siting decision
+    /// recoverable before a single real entity exists -- dissolving the
+    /// window `method::blueprint::recover_anchor`'s vote path cannot close
+    /// (`satisfied >= 2` means a block with exactly one entity built
+    /// recovers nothing) -- and it makes a run legible to watch: the plan
+    /// appears as ghosts, then fills in, instead of entities popping into
+    /// existence with no visible intent.
+    ///
+    /// # Why this is safe where a real placement would not be
+    ///
+    /// Ghosts do not collide (`only_ghosts = true` on `rcon_place_blueprint`
+    /// validates no clearance at all), so stamping never contests a
+    /// `Condition::AreaFree` or an [`crate::enclosure`] check, and this
+    /// action carries no precondition and no effect of its own -- it is
+    /// scheduled like [`ActionKind::Research`], to whichever bot is free
+    /// first, not bound into any band's chain. It must still run before the
+    /// band chains' own placements to mean what it says; the method that
+    /// emits it links this action's id to every `Place` id in the block with
+    /// [`crate::method::Step::Link`], the same way `method::power` orders an
+    /// evacuation ahead of every part of a plant.
+    StampGhosts {
+        /// The same encoded blueprint text `Goal::Built` carries -- decoded
+        /// again here rather than passed as a `Blueprint`, because an
+        /// `Action` is data that crosses the planner/executor boundary and
+        /// serialises to the run record; the mod's own `rcon_place_blueprint`
+        /// wants the encoded string in any case.
+        blueprint: String,
+        /// Where the blueprint's own offset `(0, 0)` lands -- the same anchor
+        /// `method::blueprint::resolve_site` resolved for the real build, so
+        /// a ghost and the real entity that later replaces it stand on
+        /// exactly the same tile.
+        anchor: Position,
+    },
 }
 
 impl ActionKind {
@@ -757,6 +802,7 @@ impl ActionKind {
             | ActionKind::SetRecipe { pos, .. } => Some(pos.clone()),
             ActionKind::Place { entity } => Some(entity.position.clone()),
             ActionKind::Evacuate { to } | ActionKind::Survey { to } => Some(to.clone()),
+            ActionKind::StampGhosts { anchor, .. } => Some(anchor.clone()),
             ActionKind::Craft { .. } | ActionKind::Research { .. } => None,
         }
     }
@@ -1177,7 +1223,16 @@ mod tests {
                 }),
             }
             .target_position(),
-            Some(pos)
+            Some(pos.clone())
+        );
+        assert_eq!(
+            ActionKind::StampGhosts {
+                blueprint: "0eNoAA...".into(),
+                anchor: pos.clone(),
+            }
+            .target_position(),
+            Some(pos),
+            "the stamp acts at the block's own anchor"
         );
         assert_eq!(
             ActionKind::Craft {
@@ -1196,6 +1251,18 @@ mod tests {
             None,
             "research acts on no location"
         );
+    }
+
+    #[test]
+    fn stamp_ghosts_survives_a_json_round_trip() {
+        use factorio_bot_core::serde_json;
+        let kind = ActionKind::StampGhosts {
+            blueprint: "0eNoAA...".into(),
+            anchor: Position::new(10.5, 20.5),
+        };
+        let json = serde_json::to_string(&kind).expect("serialises");
+        let back: ActionKind = serde_json::from_str(&json).expect("deserialises");
+        assert_eq!(back, kind);
     }
 
     #[test]

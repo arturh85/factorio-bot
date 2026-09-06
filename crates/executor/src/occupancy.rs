@@ -116,7 +116,12 @@ pub fn kind_occupancy(kind: &ActionKind) -> Occupancy {
         // Also walking. A survey occupies the bot for its whole duration --
         // the bot IS the instrument, and one that is halfway to a frontier
         // is not available for anything else.
-        | ActionKind::Survey { .. } => Occupancy::Exclusive,
+        | ActionKind::Survey { .. }
+        // One RCON call (`rcon_place_blueprint`, `only_ghosts = true`) that
+        // settles in its own dispatch tick, the same shape as `Place` --
+        // there is no background continuation on the character afterward for
+        // it to be "background" relative to.
+        | ActionKind::StampGhosts { .. } => Occupancy::Exclusive,
     }
 }
 
@@ -204,11 +209,15 @@ pub fn inventory_footprint(action: &Action) -> BTreeSet<ItemId> {
             items.insert(entity.name.clone());
         }
         // None of these spends an item. A survey buys information with time,
-        // which is exactly why it costs nothing here.
+        // which is exactly why it costs nothing here. A ghost is not a real
+        // entity and consumes no material -- `only_ghosts = true` validates
+        // no clearance and spends nothing, which is the whole point of a
+        // marker over a real build.
         ActionKind::Research { .. }
         | ActionKind::SetRecipe { .. }
         | ActionKind::Evacuate { .. }
-        | ActionKind::Survey { .. } => {}
+        | ActionKind::Survey { .. }
+        | ActionKind::StampGhosts { .. } => {}
     }
     items
 }
@@ -298,6 +307,10 @@ mod tests {
             },
             ActionKind::Evacuate {
                 to: Position::new(1., 1.),
+            },
+            ActionKind::StampGhosts {
+                blueprint: "0eNoAA...".into(),
+                anchor: Position::new(1., 1.),
             },
         ];
         let background: Vec<String> = kinds

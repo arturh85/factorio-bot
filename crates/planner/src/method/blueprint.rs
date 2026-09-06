@@ -3,6 +3,7 @@
 use crate::action::{Action, ActionKind, Actor, Condition, Effect};
 use crate::error::PlannerError;
 use crate::goal::{Goal, Holder, Site};
+use crate::ids::ActionId;
 use crate::method::have::PLACE_TICKS;
 use crate::method::util::nearest_resource_tile;
 use crate::method::{ExpansionCtx, Method, Step};
@@ -239,6 +240,58 @@ fn already_stands(state: &PlanState, e: &BlueprintEntity, world: &Position) -> S
     }
 }
 
+/// Recover the anchor from GHOSTS -- one match is enough, unlike the vote
+/// path below.
+///
+/// Answered live against Factorio 2.1.17 before this was written (see
+/// `docs/superpowers/plans/2026-09-05-block-siting.md`'s Task 8, Step 1):
+/// ghosts do not expire, and a real placement consumes the ghost beneath it
+/// cleanly, so a ghost standing at a blueprint offset is exactly as reliable
+/// a witness as the real entity it will become.
+///
+/// **Why no `satisfied >= 2` floor, where [`recover_anchor`]'s vote path
+/// needs one.** That floor exists to refuse a coincidence: an unrelated
+/// entity of the same name, built for some other purpose, standing at one of
+/// this block's own offsets by chance. A ghost cannot be that coincidence --
+/// [`ActionKind::StampGhosts`] is the only thing in this project that ever
+/// creates one, and it always stamps the WHOLE block at once, so a single
+/// surviving ghost of one of this block's entities means this exact block
+/// was already sited here. There is nothing to outvote.
+///
+/// Matched on name (via [`FactorioEntity::ghost_name`], never `.name` --
+/// see [`PlanState::ghosts_named_any`]'s own doc), tile, direction and
+/// underground half, the same fields [`already_stands`] compares for a real
+/// entity: a ghost standing at the right tile but facing the wrong way is
+/// not evidence of anything this block designed, any more than a
+/// wrongly-facing real entity is.
+///
+/// Deterministic: `bp.entities` is walked in blueprint order, and
+/// `ghosts_named_any`'s buckets are sorted by `Pos` -- the first blueprint
+/// entity (in list order) with a matching-orientation ghost anywhere wins,
+/// which is a fixed answer regardless of iteration order anywhere else.
+fn recover_anchor_from_ghosts(state: &PlanState, bp: &Blueprint) -> Option<Position> {
+    let names: BTreeSet<String> = bp.entities.iter().map(|e| e.name.clone()).collect();
+    let ghosts_by_name = state.ghosts_named_any(&names);
+    if ghosts_by_name.is_empty() {
+        return None;
+    }
+    for e in &bp.entities {
+        let Some(candidates) = ghosts_by_name.get(&e.name) else {
+            continue;
+        };
+        for ghost in candidates {
+            if ghost.direction != e.direction || ghost.underground_half != e.underground_half {
+                continue;
+            }
+            return Some(Position::new(
+                ghost.position.x() - e.offset.x(),
+                ghost.position.y() - e.offset.y(),
+            ));
+        }
+    }
+    None
+}
+
 /// The anchor this block is ALREADY sited at, read back off the ground.
 ///
 /// Siting must not be recomputed on a replan. `Goal::Built`'s whole shape
@@ -294,6 +347,12 @@ fn already_stands(state: &PlanState, e: &BlueprintEntity, world: &Position) -> S
 /// ore on every map while every test passed, because `Pos` floors resource
 /// positions too.
 fn recover_anchor(state: &PlanState, bp: &Blueprint) -> Option<Position> {
+    // Ghosts first, and unconditionally -- see `recover_anchor_from_ghosts`'s
+    // own doc for why one match is enough here where the vote path below
+    // needs two.
+    if let Some(anchor) = recover_anchor_from_ghosts(state, bp) {
+        return Some(anchor);
+    }
     // One traversal of the world for however many distinct names this block
     // has -- 7 for `FurnaceLine`'s 179 entities -- instead of one whole-world
     // scan per blueprint ENTITY (`entities_named` called 179 times, each a
@@ -645,6 +704,16 @@ impl Method for BuildBlock {
         // from re-siting a block that is already partly built -- see
         // `recover_anchor`'s own doc. `resolve_site` fills in `Near`/
         // `Anywhere` from a stable seed when nothing is standing yet.
+        //
+        // `is_fresh_site` is checked separately (a second, identical call --
+        // `recover_anchor` is pure and cheap, see its own doc) because it
+        // answers a different question than `resolve_site` does: not "where
+        // is this block", but "has anything -- ghost or real -- ever
+        // confirmed a site for it before". That is exactly the one-time
+        // window `ActionKind::StampGhosts` is emitted in: once a ghost
+        // stands, `recover_anchor`'s ghost pass finds it on every later
+        // expansion and this is never true again for this block.
+        let is_fresh_site = recover_anchor(&ctx.state, &bp).is_none();
         let anchor = resolve_site(&ctx.state, &bp, site)?;
 
         // This used to refuse the whole goal, by name, whenever it contained
@@ -764,6 +833,31 @@ impl Method for BuildBlock {
         // stops two bots working the same corner, which is the whole
         // structural reason a band exists in the first place.
         let mut steps = Vec::with_capacity(split.iter().map(Vec::len).sum());
+
+        // The block's ghosts, stamped once, before any `Place` -- see
+        // `ActionKind::StampGhosts`'s own doc. Not tied to any band's chain
+        // (no `Actor::Role` condition or effect), so nothing here orders it
+        // ahead of the placements by itself; the `Step::Link`s below do that
+        // explicitly, the same way `method::power` orders an evacuation
+        // ahead of every part of a plant.
+        let stamp_id = is_fresh_site.then(|| {
+            let id = ctx.ids.next();
+            steps.push(Step::Act(Box::new(Action {
+                id,
+                kind: ActionKind::StampGhosts {
+                    blueprint: blueprint.clone(),
+                    anchor: anchor.clone(),
+                },
+                pre: vec![],
+                eff: vec![],
+                duration: PLACE_TICKS,
+                pinned: None,
+                label: format!("stamp ghosts for the block at {anchor}"),
+            })));
+            id
+        });
+        let mut place_ids: Vec<ActionId> = Vec::new();
+
         for (band, indices) in split.iter().enumerate() {
             if indices.is_empty() {
                 continue;
@@ -800,12 +894,25 @@ impl Method for BuildBlock {
                 let world = anchor.add(&e.offset);
                 let entity = entity_for(&ctx.state, e, &world);
                 let note = format!("block band {band}");
-                block.push(place_step(ctx, entity, build, &note));
+                let step = place_step(ctx, entity, build, &note);
+                if let Step::Act(action) = &step {
+                    place_ids.push(action.id);
+                }
+                block.push(step);
             }
             steps.push(Step::Owned {
                 whose: Holder::Share(bot),
                 steps: block,
             });
+        }
+        if let Some(stamp_id) = stamp_id {
+            for place_id in &place_ids {
+                steps.push(Step::Link {
+                    from: stamp_id,
+                    to: *place_id,
+                    lag: 0,
+                });
+            }
         }
         Ok(steps)
     }
@@ -868,6 +975,25 @@ mod tests {
         FactorioEntity::new_stone_furnace(&Position::new(x, y), Direction::South)
     }
 
+    /// A ghost of `name` at `(x, y)`, facing north (direction 0) -- the shape
+    /// `ActionKind::StampGhosts`'s live dispatch produces and
+    /// `recover_anchor_from_ghosts` reads back.
+    ///
+    /// **`name` is `"entity-ghost"`, never the real name** -- that separation
+    /// (the real name lives in `ghost_name`) is what stops a ghost being read
+    /// as a built entity by `already_stands`, and it is load-bearing, not
+    /// incidental: faking a ghost as a same-named real entity would test
+    /// nothing about the code path this exists to exercise.
+    fn ghost_of(name: &str, x: f64, y: f64) -> FactorioEntity {
+        FactorioEntity {
+            name: crate::state::GHOST_ENTITY_NAME.to_string(),
+            entity_type: crate::state::GHOST_ENTITY_NAME.to_string(),
+            position: Position::new(x, y),
+            ghost_name: Some(name.to_string()),
+            ..Default::default()
+        }
+    }
+
     /// **Recovery, not re-siting.** Two of a four-furnace block stand at an
     /// anchor the caller never names again -- a replan must find them, not
     /// choose somewhere new. This is the failure `Goal::Built` exists to make
@@ -892,6 +1018,176 @@ mod tests {
 
         let recovered = recover_anchor(&state, &bp).expect("two standing furnaces imply an anchor");
         assert_eq!(Pos::from(&recovered), Pos::from(&Position::new(20.5, 20.5)));
+    }
+
+    /// **Task 8, Step 2's test, verbatim.** The whole point: the anchor is
+    /// known before ANY real entity exists, which is exactly the window
+    /// vote-based recovery cannot cover -- `recover_anchor`'s own vote path
+    /// needs two standing entities of this block's name and finds none here,
+    /// so a pass against the OLD code alone could never make this pass. Only
+    /// a genuine ghost-aware pass can.
+    #[test]
+    fn a_ghost_recovers_the_anchor_with_no_real_entity_standing() {
+        let bp = Blueprint {
+            entities: vec![
+                at_named(0.0, 0.0, "stone-furnace"),
+                at_named(3.0, 0.0, "stone-furnace"),
+            ],
+            version: 0,
+        };
+        let mut state = test_state();
+        state.create_entity(ghost_of("stone-furnace", 20.5, 20.5));
+
+        let recovered = recover_anchor(&state, &bp).expect("a ghost is a site marker");
+        assert_eq!(
+            Pos::from(&recovered),
+            Pos::from(&Position::new(20.5, 20.5))
+        );
+    }
+
+    /// The negative half of the test above: a ghost of the WRONG name, or one
+    /// facing the wrong way, is not evidence of anything this block designed
+    /// -- exactly as a wrongly-facing real entity is not, in `already_stands`.
+    #[test]
+    fn a_ghost_of_the_wrong_name_or_facing_does_not_recover_an_anchor() {
+        let bp = Blueprint {
+            entities: vec![at_named(0.0, 0.0, "stone-furnace")],
+            version: 0,
+        };
+
+        let mut wrong_name = test_state();
+        wrong_name.create_entity(ghost_of("wooden-chest", 20.5, 20.5));
+        assert!(
+            recover_anchor(&wrong_name, &bp).is_none(),
+            "a ghost of an unrelated entity must not recover this block's anchor"
+        );
+
+        let mut wrong_facing = test_state();
+        let mut furnace_ghost = ghost_of("stone-furnace", 20.5, 20.5);
+        furnace_ghost.direction = 8; // south; the blueprint entity above defaults to 0 (north)
+        wrong_facing.create_entity(furnace_ghost);
+        assert!(
+            recover_anchor(&wrong_facing, &bp).is_none(),
+            "a ghost facing the wrong way is not this block, already sited"
+        );
+    }
+
+    /// **`already_stands` must never read a ghost as the real thing** -- the
+    /// separation `ghost_name` exists to preserve. A ghost standing exactly
+    /// where a blueprint entity wants to be must still be reported as
+    /// nothing built, or a replan would think this block finished without a
+    /// single real entity on the ground.
+    #[test]
+    fn a_ghost_is_not_read_as_an_already_standing_entity() {
+        let mut state = test_state();
+        state.create_entity(ghost_of("stone-furnace", 0.5, 0.5));
+        let e = at_named(0.0, 0.0, "stone-furnace");
+        assert_eq!(
+            already_stands(&state, &e, &Position::new(0.5, 0.5)),
+            Standing::Nothing,
+            "a ghost is a marker, not a built entity"
+        );
+    }
+
+    /// **`BuildBlock::expand` stamps ghosts exactly once per block**: the
+    /// first expansion against a fresh site emits `ActionKind::StampGhosts`
+    /// ahead of every `Place`, linked to each of them; a replan against the
+    /// SAME block -- now recoverable by the ghost this expansion just
+    /// stamped -- must not emit a second one, or every replan would re-stamp
+    /// (and, live, re-dispatch `rcon_place_blueprint` over ground this block
+    /// already occupies).
+    #[test]
+    fn the_stamp_is_emitted_once_and_linked_ahead_of_every_place() {
+        use crate::ids::BotId;
+        use factorio_bot_core::test_utils::fixture_world;
+        use std::sync::Arc;
+
+        let blueprint_text = include_str!("../../../core/tests/blueprints/furnace_line.txt")
+            .trim()
+            .to_string();
+        let bp: Blueprint = decode(&blueprint_text).expect("the fixture blueprint decodes");
+
+        let mut ctx = ExpansionCtx::new(
+            PlanState::from_world(Arc::new(fixture_world()), &[BotId(1)]),
+            BotId(1),
+        );
+        let goal = Goal::Built {
+            blueprint: blueprint_text.clone(),
+            site: Site::At(Position::new(100.5, 100.5)),
+        };
+        let first = BuildBlock.expand(&goal, &mut ctx).expect("a fresh block plans");
+
+        let stamps: Vec<&Action> = first
+            .iter()
+            .filter_map(|s| match s {
+                Step::Act(a) if matches!(a.kind, ActionKind::StampGhosts { .. }) => Some(a.as_ref()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            stamps.len(),
+            1,
+            "exactly one stamp for a fresh block, not one per entity or per band"
+        );
+        let stamp_id = stamps[0].id;
+
+        let place_ids: BTreeSet<crate::ids::ActionId> = first
+            .iter()
+            .flat_map(|s| match s {
+                Step::Owned { steps, .. } => steps.as_slice(),
+                _ => &[],
+            })
+            .filter_map(|s| match s {
+                Step::Act(a) if matches!(a.kind, ActionKind::Place { .. }) => Some(a.id),
+                _ => None,
+            })
+            .collect();
+        assert!(!place_ids.is_empty(), "the fixture places real entities");
+
+        let links: BTreeSet<crate::ids::ActionId> = first
+            .iter()
+            .filter_map(|s| match s {
+                Step::Link { from, to, .. } if *from == stamp_id => Some(*to),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            links, place_ids,
+            "the stamp must be linked ahead of every place this expansion emits, not merely some"
+        );
+
+        // The stamp's own blueprint records what `entity_for` will place --
+        // decoding it back must recover the same entity count as the fixture.
+        let ActionKind::StampGhosts {
+            blueprint: stamped_text,
+            anchor: stamped_anchor,
+        } = &stamps[0].kind
+        else {
+            panic!("filtered on StampGhosts above");
+        };
+        let restamped: Blueprint = decode(stamped_text).expect("the stamped text still decodes");
+        assert_eq!(restamped.entities.len(), bp.entities.len());
+        assert_eq!(Pos::from(stamped_anchor), Pos::from(&Position::new(100.5, 100.5)));
+
+        // Now apply the stamp's own effect on a fresh state -- ghosts of
+        // every entity, standing -- and replan. The second expansion must
+        // recover the SAME anchor via the ghost pass and must NOT emit a
+        // second stamp.
+        let mut resumed = PlanState::from_world(Arc::new(fixture_world()), &[BotId(1)]);
+        for e in &bp.entities {
+            let world = Position::new(100.5 + e.offset.x(), 100.5 + e.offset.y());
+            resumed.create_entity(ghost_of(&e.name, world.x(), world.y()));
+        }
+        let mut ctx2 = ExpansionCtx::new(resumed, BotId(1));
+        let second = BuildBlock.expand(&goal, &mut ctx2).expect("a replan still plans");
+        let second_stamps = second
+            .iter()
+            .filter(|s| matches!(s, Step::Act(a) if matches!(a.kind, ActionKind::StampGhosts { .. })))
+            .count();
+        assert_eq!(
+            second_stamps, 0,
+            "a block the ghost pass can already recover must not be re-stamped"
+        );
     }
 
     /// **Ruling B: recovery outranks even an explicit `Site::At`.** A caller

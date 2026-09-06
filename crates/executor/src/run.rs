@@ -1325,6 +1325,10 @@ async fn perform<A: Actuator + ?Sized>(
             )
             .await
         }
+        ActionKind::StampGhosts { blueprint, anchor } => {
+            act.stamp_ghosts(bot, blueprint.as_str(), anchor.clone())
+                .await
+        }
     }
 }
 

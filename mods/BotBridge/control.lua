@@ -300,6 +300,32 @@ function on_init()
 	storage.pathfinding = {}
 	storage.pathfinding.map = {}
 	storage.n_clients = 1
+	-- AND the module local, because `on_load` will NOT run in this session.
+	--
+	-- The two are mutually exclusive by design. Quoting the shipped 2.1.17 API
+	-- docs (`LuaBootstrap::on_load`): "This is only called for mods that have
+	-- been part of the save previously". A save created without BotBridge --
+	-- somebody else's save, a world record, anything downloaded -- takes
+	-- `on_init` instead, and `my_client_id` used to be assigned in `on_load`
+	-- alone.
+	--
+	-- That is not cosmetic. `my_client_id` is what gates the readiness beacon
+	-- in `on_tick`, and that beacon is the ONLY thing the host waits for
+	-- before it opens RCON: `read_output` in
+	-- `crates/core/src/process/output_reader.rs` blocks on a stdout line
+	-- containing `my_client_id`, and only afterwards calls
+	-- `initialize_server` -> `whoami("server")` -> `on_whoami`, which is what
+	-- builds the initial-discovery replay. No beacon, no RCON, no discovery,
+	-- no world -- and no error either: the host simply sits at
+	-- `start waiting` for ever. It did, for 900 seconds, against a 6:39:53
+	-- world-record save while Factorio itself hosted the map perfectly
+	-- happily. See crates/core/tests/botbridge_ready_beacon.rs.
+	--
+	-- Every run this project has ever measured took the `on_load` path, which
+	-- is why this survived: our own map is created by a separate `--create`
+	-- invocation and then loaded by the server process, so by then the mod is
+	-- already part of the save.
+	my_client_id = storage.n_clients
 end
 
 function pos_str(pos)
@@ -1694,7 +1720,19 @@ function on_tick(event)
 	if event.tick % 120 == 0 then
 		local who = "?"
 		if client_local_data.whoami then who = client_local_data.whoami end
-		if my_client_id ~= nil and who == "?" then print("my_client_id="..my_client_id..", who="..who) end
+		-- THE READINESS BEACON. Not a debug line: `read_output`
+		-- (crates/core/src/process/output_reader.rs) blocks on a stdout line
+		-- containing `my_client_id` before it opens RCON at all, so this is
+		-- the handshake, and `who == "?"` is what stops it once the host has
+		-- introduced itself with `whoami`.
+		--
+		-- `tostring`, and no `~= nil` guard. It used to refuse to print when
+		-- `my_client_id` was nil, which made the signal go silent in exactly
+		-- the state nobody expected -- the "silence is not success" shape
+		-- CLAUDE.md enumerates, and worth 900 seconds of a stopped run. A
+		-- beacon reading `my_client_id=nil` still unblocks the host and still
+		-- says something true; `on_init` above is what makes it a number.
+		if who == "?" then print("my_client_id="..tostring(my_client_id)..", who="..who) end
 	end
 
 	-- periodically update the objects around the player to ensure that nothing is missed
@@ -3268,13 +3306,46 @@ function direction_str(d)
 	end
 end
 
+-- Entities `EntityGraph::add` throws away the instant they arrive.
+--
+-- `crates/core/src/graph/entity_graph.rs` opens its ingest loop with
+--
+--     if entity.entity_type == EntityType::FlyingText.to_string()
+--         || entity.entity_type == EntityType::Fish.to_string()
+--         || entity.bounding_box.width() == 0.
+--     { continue; }
+--
+-- so these reach no quad tree, no `minables`, no `threats` and no petgraph
+-- node. Serialising them is pure cost, and it is the ONLY "should not be sent"
+-- category that can be stated as a fact rather than a preference -- trees,
+-- rocks and cliffs all land in `blocked_tree` and the planner sites blocks
+-- against them, so they stay.
+--
+-- Measured against a real run's `workspace/server-log.txt` (seed 31337, 1,424
+-- chunks, 50,256 entity records, 10.5 MB of `entities` lines): **1,574 records
+-- and 2.59% of the bytes** were discarded on arrival, essentially all of them
+-- fish. On an endgame base the same predicate also covers every remnant,
+-- corpse and particle source, which a finished factory has in quantity and a
+-- fresh map has none of.
+--
+-- **Kept in step with the Rust gate by a test, not by care**:
+-- `crates/core/tests/botbridge_bulk_entities.rs` names both types and the
+-- zero-width rule. If the gate there changes, change this with it.
+local INGEST_DISCARDS = { ["flying-text"] = true, ["fish"] = true }
+
 function writeout_entities(tick, surface, area)
 	--if my_client_id ~= 1 then return end
 	local header = area.left_top.x..","..area.left_top.y..";"..area.right_bottom.x..","..area.right_bottom.y..":"
 	local objects = {}
 	for idx, ent in pairs(surface.find_entities(area)) do
 		if ent.type ~= "character" and area.left_top.x <= ent.position.x and ent.position.x < area.right_bottom.x and area.left_top.y <= ent.position.y and ent.position.y < area.right_bottom.y then
-			table.insert(objects, serialize_entity(ent))
+			local bb = ent.bounding_box
+			local zero_width = bb ~= nil and bb.right_bottom.x - bb.left_top.x == 0
+			if not INGEST_DISCARDS[ent.type] and not zero_width then
+				-- `omit_inventories`: identity and geometry in bulk, contents
+				-- on demand. See `serialize_entity`.
+				table.insert(objects, serialize_entity(ent, { omit_inventories = true }))
+			end
 		end
 	end
 	writeout(tick, "entities", header .. helpers.table_to_json(objects))

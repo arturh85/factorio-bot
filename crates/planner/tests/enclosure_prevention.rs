@@ -35,7 +35,7 @@ use factorio_bot_core::factorio::world::FactorioWorld;
 use factorio_bot_core::num_traits::FromPrimitive;
 use factorio_bot_core::test_utils::fixture_entity_prototypes;
 use factorio_bot_core::types::{Direction, FactorioEntity, FactorioPlayer, Position};
-use factorio_bot_planner::enclosure::{EnclosurePrevention, check};
+use factorio_bot_planner::enclosure::{EnclosurePrevention, Evacuation, check};
 use factorio_bot_planner::ids::BotId;
 use factorio_bot_planner::state::PlanState;
 use serde::Deserialize;
@@ -504,5 +504,195 @@ fn a_bot_on_the_diagonal_is_examined_too() {
         "and asked about the pump 42.8 tiles away on the diagonal, the same: a \
          bound that measured a circle against a square window would stop at \
          39.5 and never look"
+    );
+}
+
+/// `TwoRowSmelter`'s standing parts, minus the belt row: two furnace rows,
+/// the inserter rows that reach across the corridor between them, and the
+/// input chests. Decoded from the blueprint string in `scripts/rcontest.lua`.
+const SMELTER_WITHOUT_BELTS: [(&str, f64, f64, u8); 18] = [
+    ("iron-chest", 5.5, -3.5, 0),
+    ("burner-inserter", 5.5, -2.5, 0),
+    ("stone-furnace", 7.0, -2.0, 0),
+    ("stone-furnace", 9.0, -2.0, 0),
+    ("stone-furnace", 11.0, -2.0, 0),
+    ("iron-chest", 3.5, -1.5, 0),
+    ("burner-inserter", 3.5, -0.5, 0),
+    ("burner-inserter", 7.5, -0.5, 8),
+    ("burner-inserter", 9.5, -0.5, 8),
+    ("burner-inserter", 11.5, -0.5, 8),
+    ("burner-inserter", 7.5, 1.5, 0),
+    ("burner-inserter", 9.5, 1.5, 0),
+    ("burner-inserter", 11.5, 1.5, 0),
+    ("stone-furnace", 7.0, 3.0, 0),
+    ("stone-furnace", 9.0, 3.0, 0),
+    ("stone-furnace", 11.0, 3.0, 0),
+    ("transport-belt", 5.5, -1.5, 8),
+    ("transport-belt", 5.5, -0.5, 8),
+];
+
+/// The nine tiles of the belt row.
+const BELT_ROW: [f64; 9] = [3.5, 4.5, 5.5, 6.5, 7.5, 8.5, 9.5, 10.5, 11.5];
+
+/// The bot stands on the belt row between an input and an output inserter --
+/// the tile that read `pocket_tiles=1.0` live.
+fn corridor_bot() -> Position {
+    Position::new(7.5, 0.5)
+}
+
+fn smelter_state() -> PlanState {
+    let standing: Vec<Snapshot> = SMELTER_WITHOUT_BELTS
+        .iter()
+        .map(|(name, x, y, direction)| Snapshot {
+            name: (*name).to_string(),
+            position: Position::new(*x, *y),
+            direction: *direction,
+        })
+        .collect();
+    let world = world_of(&standing, Vec::new());
+    world.players.insert(
+        1,
+        FactorioPlayer {
+            player_id: 1,
+            position: corridor_bot(),
+            ..Default::default()
+        },
+    );
+    PlanState::from_world(Arc::new(world), &[BotId(1)])
+}
+
+fn row_of(name: &str) -> Vec<FactorioEntity> {
+    let prototypes = Arc::new(fixture_entity_prototypes());
+    BELT_ROW
+        .iter()
+        .map(|x| {
+            FactorioEntity::from_prototype(
+                name,
+                Position::new(*x, 0.5),
+                Some(Direction::East),
+                None,
+                None,
+                prototypes.clone(),
+            )
+            .expect("the fixture describes this entity")
+        })
+        .collect()
+}
+
+/// Prevention has to read the same walls detection does, and a belt is not
+/// one: laying `TwoRowSmelter`'s belt row over the tile a bot stands on must
+/// not evacuate or refuse anybody.
+///
+/// The bot is on the row between an input and an output inserter, so if a
+/// belt were a wall this would be a one-tile pocket -- the live reading. It
+/// is not: the bot walks along the row and out either end.
+#[test]
+fn laying_a_belt_row_under_a_bot_does_not_evacuate_it() {
+    let before = smelter_state();
+    let mut trial = before.fork();
+    for belt in row_of("transport-belt") {
+        trial.create_entity(belt);
+    }
+    assert_eq!(
+        EnclosurePrevention::Clear,
+        check(&before, &trial, &corridor_bot()),
+        "a character walks over a belt, so the belt row seals nothing"
+    );
+}
+
+/// The control: the same nine tiles, the same bot, the same fills -- but
+/// `iron-chest`, which a character does collide with. The guard must fire,
+/// proving the test above passes because of walkability and not because the
+/// planner stopped looking.
+#[test]
+fn the_same_row_in_chests_does_evacuate_the_bot() {
+    let before = smelter_state();
+    let mut trial = before.fork();
+    for chest in row_of("iron-chest") {
+        trial.create_entity(chest);
+    }
+    match check(&before, &trial, &corridor_bot()) {
+        EnclosurePrevention::Evacuate(evacuations) => {
+            assert_eq!(evacuations.len(), 1, "one bot to walk clear");
+            assert_eq!(evacuations[0].bot, BotId(1));
+            assert_eq!(
+                evacuations[0].pocket_tiles, 1.0,
+                "inserter north, inserter south, chest east and west"
+            );
+        }
+        EnclosurePrevention::Refuse => {}
+        EnclosurePrevention::Clear => {
+            panic!("a solid row of chests across the corridor does seal the bot in")
+        }
+    }
+}
+
+/// The other half of the same rule: a belt that is **already standing in the
+/// base world** is not a wall either.
+///
+/// The test above covers the plan's own tentative entities (`added`); this
+/// one covers the base world, which reaches the fill twice -- once by name
+/// through the entity tree and once as an anonymous rectangle through
+/// `blocking_boxes_within`, where it has to be subtracted rather than
+/// filtered.
+///
+/// A bot with a belt on each of its four sides is free. Drop four
+/// `iron-chest` on those same four tiles and it is not, which is what makes
+/// this test able to fail: if the standing belts were counted as walls the
+/// bot would already read `Enclosed`, no answer would *flip*, and `check`
+/// would return `Clear` -- the guard silently off, exactly the shape this
+/// whole branch is about.
+#[test]
+fn belts_already_standing_around_a_bot_are_not_a_pen() {
+    let prototypes = Arc::new(fixture_entity_prototypes());
+    let bot = Position::new(0.5, 0.5);
+    let neighbours = [(-0.5, 0.5), (1.5, 0.5), (0.5, -0.5), (0.5, 1.5)];
+    let standing: Vec<Snapshot> = neighbours
+        .iter()
+        .map(|(x, y)| Snapshot {
+            name: "transport-belt".to_string(),
+            position: Position::new(*x, *y),
+            direction: 4,
+        })
+        .collect();
+    let world = world_of(&standing, Vec::new());
+    world.players.insert(
+        1,
+        FactorioPlayer {
+            player_id: 1,
+            position: bot.clone(),
+            ..Default::default()
+        },
+    );
+    let before = PlanState::from_world(Arc::new(world), &[BotId(1)]);
+
+    let mut trial = before.fork();
+    for (x, y) in neighbours {
+        trial.create_entity(
+            FactorioEntity::from_prototype(
+                "iron-chest",
+                Position::new(x, y),
+                Some(Direction::North),
+                None,
+                None,
+                prototypes.clone(),
+            )
+            .expect("the fixture describes an iron-chest"),
+        );
+    }
+
+    // The bot walks OVER the belt at (1.5, 0.5) to reach (2.5, 0.5), which is
+    // still connected to open ground once the chests stand -- so the answer is
+    // an evacuation rather than a refusal, and the route it takes is itself
+    // the rule under test.
+    assert_eq!(
+        EnclosurePrevention::Evacuate(vec![Evacuation {
+            bot: BotId(1),
+            to: Position::new(2.5, 0.5),
+            pocket_tiles: 1.0,
+        }]),
+        check(&before, &trial, &bot),
+        "the bot was free among belts and is sealed by chests on the same four \
+         tiles"
     );
 }

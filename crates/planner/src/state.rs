@@ -3251,10 +3251,32 @@ impl PlanState {
     /// the six [`PlanState::is_area_clear_of`] does. See that module's own
     /// doc for why characters, refusals and resource tiles are all left out
     /// here on purpose.
+    ///
+    /// **A belt is not a wall.** Every source here is a *buildability* index
+    /// -- a belt in the way genuinely refuses a furnace -- and a character
+    /// walks straight over one. `factorio_bot_core::graph::enclosure::
+    /// blocks_character` is the predicate and carries the account; the
+    /// planner has to apply it as well as the executor, because prevention
+    /// and detection reading different walls is exactly the disagreement
+    /// `crate::enclosure`'s module doc exists to forbid.
+    ///
+    /// The plan's own tentative entities and the base world's entities are
+    /// filtered by name. `blocking_boxes_within` carries no name -- its
+    /// payload is a bare `is_minable` flag -- so the walkable boxes gathered
+    /// from the first two sources are subtracted from it instead.
     fn walkable_obstacles_within(&self, window: &Rect) -> Vec<Rect> {
+        let prototypes = self.base.entity_graph.entity_prototypes();
+        let blocks =
+            |name: &str| factorio_bot_core::graph::enclosure::blocks_character(&prototypes, name);
         let mut obstacles = Vec::new();
+        let mut walkable = Vec::new();
         for entity in self.added.values() {
-            obstacles.push(self.footprint_of(entity));
+            let footprint = self.footprint_of(entity);
+            if blocks(&entity.name) {
+                obstacles.push(footprint);
+            } else {
+                walkable.push(footprint);
+            }
         }
         let area_half_diagonal = (window.width() / 2.).hypot(window.height() / 2.);
         let radius = area_half_diagonal + self.max_prototype_half_diagonal + TOUCH_SLACK;
@@ -3266,14 +3288,22 @@ impl PlanState {
             if self.removed.contains(&Pos::from(&entity.position)) {
                 continue;
             }
-            obstacles.push(entity.bounding_box.clone());
+            if blocks(&entity.name) {
+                obstacles.push(entity.bounding_box.clone());
+            } else {
+                walkable.push(entity.bounding_box.clone());
+            }
         }
-        for blocked in self.base.entity_graph.blocking_boxes_within(window) {
-            if self.removed.contains(&Pos::from(&blocked.center())) {
+        let mut blocked = Vec::new();
+        for area in self.base.entity_graph.blocking_boxes_within(window) {
+            if self.removed.contains(&Pos::from(&area.center())) {
                 continue;
             }
-            obstacles.push(blocked);
+            blocked.push(area);
         }
+        obstacles.extend(factorio_bot_core::graph::enclosure::drop_walkable(
+            blocked, &walkable,
+        ));
         obstacles
     }
 

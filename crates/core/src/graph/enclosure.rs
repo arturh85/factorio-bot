@@ -72,6 +72,13 @@
 //!   the game has already refused a route from the same spot — see
 //!   `crates/executor/src/walk_memory.rs` — so a report is a conjunction of
 //!   two independent judgements about the same ground.
+//! * The occupancy model was also, until 2026-09-06, *wrong about what a wall
+//!   is*: `blocked_tree` is a buildability index and files a belt, so a belt
+//!   row across a corridor sealed it. That is the opposite error to the one
+//!   above — it produces [`Escape::Enclosed`] where the ground is open — and
+//!   it was worth `pocket_tiles=1.0` for a bot standing on `TwoRowSmelter`'s
+//!   belt row, which it could walk out of at either end. [`blocks_character`]
+//!   is the fix and the account.
 //! * The pathfinder is not a pure function of tile geometry; its abstract
 //!   layer and its handling of a start position that is itself inside a box
 //!   are not modelled here. Where this and the game disagree, the game's
@@ -80,8 +87,9 @@
 
 use crate::factorio::world::Enclosure;
 use crate::graph::entity_graph::EntityGraph;
-use crate::types::{PlayerId, Position, Rect};
-use std::collections::VecDeque;
+use crate::types::{FactorioEntityPrototype, PlayerId, Position, Rect};
+use dashmap::DashMap;
+use std::collections::{BTreeMap, VecDeque};
 
 /// Half the `character` collision box on each axis when the world carries no
 /// `character` prototype.
@@ -251,8 +259,13 @@ fn grid_for(
     // `blocking_boxes_within` is a narrowing pass that admits boxes which
     // merely come close; every one of them is tested exactly in `rasterize`,
     // and a box entirely outside the window clips away to nothing.
-    let obstacles = graph
-        .blocking_boxes_within(&window)
+    //
+    // It is also a *buildability* index, and this is a question about walking:
+    // `drop_walkable` takes the belts, splitters and loaders back out, because
+    // a character walks over them and a fill that does not know that invents
+    // pockets. See [`blocks_character`].
+    let walkable = walkable_boxes_within(graph, &window);
+    let obstacles = drop_walkable(graph.blocking_boxes_within(&window), &walkable)
         .into_iter()
         .chain(extra.iter().cloned());
     Some((rasterize(obstacles, origin, half_box), origin))
@@ -300,6 +313,134 @@ pub fn character_half_box(graph: &EntityGraph) -> (f64, f64) {
             VANILLA_CHARACTER_COLLISION_HALF_SIDE,
             VANILLA_CHARACTER_COLLISION_HALF_SIDE,
         ))
+}
+
+/// An upper bound on half a single entity's collision-box *diagonal*, in
+/// tiles, used only to narrow the entity query in [`walkable_boxes_within`].
+/// The same number and the same argument as `crates/planner::enclosure`'s
+/// constant of this name: vanilla's largest collision box is the rocket
+/// silo's, about 7 tiles on a half-diagonal, and 16 admits a 22x22 entity,
+/// which is not an entity. Being generous costs one exact test; being short
+/// is a silent miss.
+const MAX_ENTITY_HALF_SPAN: f64 = 16.0;
+
+/// Does a **character** collide with `name`, i.e. is it a wall to somebody
+/// walking?
+///
+/// # A belt is not a wall, and treating it as one invents pockets
+///
+/// `blocked_tree` is a *buildability* index: `EntityGraph::add` files every
+/// entity with a collision box into it except resources and rails, because a
+/// belt in the way genuinely refuses a furnace. **A character walks straight
+/// over a belt.** Read off a live 2.1.17 game
+/// (`crates/core/tests/live-2.1.17-world-snapshot.json`), `transport-belt`,
+/// `underground-belt`, `splitter`, `loader`, `linked-belt` and `lane-splitter`
+/// all declare `["water_tile", "floor", "transport_belt", "object",
+/// "meltable"]` — no player layer anywhere — while a `stone-furnace`, an
+/// `iron-chest` and a `burner-inserter` all carry `player`.
+///
+/// The fills in this module read `blocked_tree` directly, so until 2026-09-06
+/// **a belt row across a corridor sealed it**. `TwoRowSmelter` — a nine-tile
+/// belt row with a furnace row two tiles above and below and inserter pairs
+/// reaching across it — put a bot on the belt tile between an input and an
+/// output inserter and the fill answered `Enclosed { pocket_tiles: 1.0 }` for
+/// a bot that could walk out either end of the row. That is the reading in
+/// run `run-1788696963-13584`'s log, fourteen times, for a bot that never
+/// moved.
+///
+/// A false `Enclosed` is worse than a wrong number, because
+/// `crates/executor::pre_place` matches `(Escape::Enclosed, _)` and allows the
+/// placement: **one false enclosure disables the guard for that bot for the
+/// rest of the run**, one harmless-looking line at a time.
+///
+/// # Both spellings, and an unstated mask blocks
+///
+/// The same discipline as `PlanState::collides_with_water`, for the same
+/// reason: the entity-prototype fixture in this repo speaks Factorio 1.x
+/// (`player-layer`) and the live 2.1.17 capture speaks 2.0 (`player`).
+/// Matching one would make this true in tests and false in a run, or the
+/// reverse. A prototype with **no mask at all**, and a name with no prototype,
+/// both block — an unknown entity is not something this can wave a character
+/// through.
+pub fn blocks_character(prototypes: &DashMap<String, FactorioEntityPrototype>, name: &str) -> bool {
+    match prototypes.get(name) {
+        Some(prototype) => match &prototype.collision_mask {
+            Some(layers) => layers
+                .iter()
+                .any(|layer| layer == "player" || layer == "player-layer"),
+            None => true,
+        },
+        None => true,
+    }
+}
+
+/// Every box inside `window` that `blocked_tree` holds but a character walks
+/// over — belts, splitters and their kin — as the entity tree reports them.
+///
+/// Read from `entity_tree` rather than `blocked_tree` because the latter's
+/// payload is a bare `is_minable` flag: there is no name in it, so nothing
+/// there can be asked which layers it collides with. The two trees file the
+/// same `bounding_box` for an entity they both hold, which is what
+/// [`drop_walkable`] matches on.
+fn walkable_boxes_within(graph: &EntityGraph, window: &Rect) -> Vec<Rect> {
+    let prototypes = graph.entity_prototypes();
+    let radius = (window.width() / 2.).hypot(window.height() / 2.) + MAX_ENTITY_HALF_SPAN;
+    graph
+        .find_entities_in_radius(window.center(), radius, None, None)
+        .into_iter()
+        .filter(|entity| !blocks_character(&prototypes, &entity.name))
+        .map(|entity| entity.bounding_box)
+        .collect()
+}
+
+/// Quantise a box to Factorio's own 1/256-of-a-tile position grid, so two
+/// readings of the same entity's box compare equal.
+///
+/// `EntityGraph::blocking_boxes_within` already snaps what it returns to that
+/// grid (the quad tree stores `f32`), and every `MapPosition` the game reports
+/// is an exact multiple of 1/256, so this is exact recovery rather than
+/// approximation.
+fn box_key(area: &Rect) -> [i64; 4] {
+    const POSITION_GRID: f64 = 256.;
+    let snap = |v: f64| (v * POSITION_GRID).round() as i64;
+    [
+        snap(area.left_top.x()),
+        snap(area.left_top.y()),
+        snap(area.right_bottom.x()),
+        snap(area.right_bottom.y()),
+    ]
+}
+
+/// `boxes` with one occurrence of each box in `walkable` removed.
+///
+/// A multiset rather than a set: two entities may legitimately file the same
+/// rectangle (a walkable one and a blocking one cannot occupy the same tile in
+/// a real game, but nothing here depends on that), and removing *one*
+/// occurrence per walkable entity cannot delete a blocker that a coincidence
+/// of geometry made look like a belt.
+///
+/// Anything `blocked_tree` holds that the entity tree does not — a tree, a
+/// cliff, a unit, a water tile, an entity of a type `EntityGraph::add`'s
+/// whitelist does not admit — is untouched and keeps blocking. That is the
+/// conservative direction: the failure this exists to fix is a *false*
+/// enclosure, and leaving an obstacle in can only ever produce one more of
+/// those for a class we have no walkability evidence about.
+pub fn drop_walkable(mut boxes: Vec<Rect>, walkable: &[Rect]) -> Vec<Rect> {
+    if walkable.is_empty() {
+        return boxes;
+    }
+    let mut spare: BTreeMap<[i64; 4], usize> = BTreeMap::new();
+    for area in walkable {
+        *spare.entry(box_key(area)).or_default() += 1;
+    }
+    boxes.retain(|area| match spare.get_mut(&box_key(area)) {
+        Some(remaining) if *remaining > 0 => {
+            *remaining -= 1;
+            false
+        }
+        _ => true,
+    });
+    boxes
 }
 
 // ---------------------------------------------------------------------------

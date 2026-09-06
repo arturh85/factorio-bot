@@ -332,8 +332,14 @@ BotBridge Mod (Factorio mod for RPC)
   - `types.rs` - Shared data models
   - `factorio/rcon.rs` - RCON protocol implementation
   - `graph/entity_graph.rs` - Spatial entity relationships
-  - `graph/flow_graph.rs` - Material flow throughput. **Never read — but cheap, which I got
-    wrong first.** `flow_graph.update()` is called from
+  - `graph/flow_graph.rs` - Material flow throughput. **Validated against a
+    world-record base on 2026-09-07 and now within 1-32% of the game's own
+    production statistics.** Most of what this entry used to say about it was
+    true when written and is now wrong; the corrections are at the end of the
+    section, kept rather than deleted because the *reasoning* that was wrong is
+    the transferable part.
+
+    History, still accurate: `flow_graph.update()` is called from
     `process/output_parser.rs::on_init` and `factorio/snapshot.rs::attach_world`,
     and an earlier version of this entry said that meant "work on every parser
     update". It does not: `on_init` fires **once**, when Factorio logs
@@ -365,21 +371,62 @@ BotBridge Mod (Factorio mod for RPC)
     different entity keeps the old `FlowNode`**, because `node_at` matches on
     position alone and returns before the prototype is ever consulted. So the
     refresh has to rebuild.
-    Nothing in `crates/planner`, `crates/executor` or `crates/server` mentions
-    it. So its numbers have never affected a decision, and **its hard-coded
-    rates cannot be validated by any caller** — the same shape that let
-    `method::connect`'s geometry defect survive four reviews. It hard-codes
-    smelting as `1/3.2` per input in `furnace_output` while the *mining* path
-    directly above derives `mining_speed / mining_time` from prototypes, and
-    the assembler arm carries `product.amount / 3.2` with a `FIXME` on it.
-    Under the owner's ruling that rates must be **derived from prototype data
-    rather than copied**, because that is what survives mods, these are real
-    defects: a steel or electric furnace has `crafting_speed` 2 and this
-    reports 1x for both. The derivation is available —
-    `product.amount * crafting_speed / recipe.energy`, and the live 2.1.17 dump
-    carries `crafting_speed` on the entity and `energy` on the recipe. **Give
-    it a reader before or with the fix**, or the corrected numbers are as
-    unverifiable as the wrong ones.
+    **CORRECTED 2026-09-07 — three claims above are no longer true.** The
+    refresh is generation-keyed; `throughput_at` and `production_rates()` are
+    real readers; and `furnace_output` with its hard-coded `1/3.2` **does not
+    exist** — `smelting_output` derives `product.amount * crafting_speed /
+    recipe.energy` from prototypes. Do not act on the paragraphs above without
+    re-reading the file.
+
+    **The "give it a reader before the fix" instruction was right, and the
+    world-record save is what finally supplied one.** Against a 6:39:53 Space
+    Age base at tick ~1,447,000 (`docs/superpowers/notes/
+    2026-09-06-what-the-record-base-knows.md`):
+
+    | item | game /min | model /min | ratio |
+    |---|---:|---:|---:|
+    | copper-cable | 22,367 | 22,680 | 1.01 |
+    | copper-plate | 15,147 | 16,580 | 1.09 |
+    | iron-plate | 15,170 | 19,016 | 1.25 |
+    | electronic-circuit | 6,694 | 8,820 | 1.32 |
+
+    Four things that only a real base could have shown, each of which
+    contradicted an expectation held going in:
+
+    - **We OVER-predict.** The gap was expected in the other direction, on the
+      theory that modules and beacons we cannot model would make the real base
+      faster. **Falsified where the volume is**: all 1,222 furnaces and all 559
+      iron drills read `speed_bonus` and `productivity_bonus` of exactly 0.000,
+      and not one of the base's 2,226 modules sits in a furnace or an ore drill.
+    - **The dominant term is idleness, and nothing in the graph represents it**
+      — +16% to +23%, unbounded, against coverage at ~1.6% and force bonuses at
+      −9%. A machine standing still is invisible here; 194 drills were sitting
+      at `waiting_for_space_in_destination` during the measurement. **This, not
+      modules, is the next piece of work.**
+    - **The old `1/3.2` would have been exactly 2.0x low on every plate**, since
+      1,196 of the 1,222 furnaces are `steel-furnace` at `crafting_speed` 2. The
+      fix had landed but had never been *verified*; this is the verification.
+    - **A furnace was running every recipe at once.** The furnace arm added a
+      full-rate edge per smeltable input, so one furnace on a mixed belt
+      reported smelting iron AND copper AND stone at 100% each — stone-brick
+      read 7,125/min against the game's 450. Outputs now share the furnace's
+      time.
+
+    **And copper-cable's 1.01 is a coincidence, stated as one**: its +12% beacon
+    speed and +3% productivity nearly exactly cancel its 18% idle. This repo's
+    rule that a match is more suspicious than a 3x, measured for once rather
+    than asserted.
+
+    Two standing limits: the model holds **one surface** (Nauvis is 86.5% of the
+    base by entity count but 99% of plate and circuit production), and
+    `EntityGraph::add`'s whitelist deliberately excludes 763 entities including
+    **all 249 beacons**, which are therefore invisible by construction.
+
+    **A denominator artefact worth not repeating**: this base was reported for
+    weeks as "the model holds 12% of it". It holds **98.0% of the built base**.
+    The 12% divided by *every* entity within 1,000 tiles, 83% of which are ore
+    tiles — and ore lives in `EntityGraph::resources`, a `Pos`-keyed map, not in
+    `entity_tree`. Comparing against `entity_tree` could never have found them.
   - `process/` - Factorio process spawning/control
   - `plan/planner.rs` - `Planner`, the Lua runtime's context holder (rcon,
     real_world, plan_world). NOT a planner any more: the task-graph planner it

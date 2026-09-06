@@ -391,6 +391,56 @@ The plateau is unchanged: `roster-fed; no generator until 6:21`, production
 stopping at the plan's bill. Everything tonight made the plan smaller and
 more honest; none of it made the factory feed itself.
 
+## ⚠️ THREE FINDINGS FROM THE BLOCK-SITING RUN, AND MY FOOTPRINT FIX IS INCOMPLETE
+
+From `run-1788663566-25023` (the `second` session, headless, four bots, 5x,
+`goal.built(FurnaceLine)` with no anchor). Siting itself passed cleanly: one
+anchor, 179 consistent placements, 129 entities read back at the right tile
+with zero wrong directions and zero wrong halves.
+
+**1. `obs.done` is true while actions are still pending — and it fabricates
+success.** The executor answers `done` when it judges no further progress
+possible, not only when the plan is complete. A script gating a milestone on
+`done && failed == 0 && lost == 0` therefore records a **false
+satisfaction**: one block run reported milestone 1 satisfied at **89 of 179
+entities standing**. `pending == 0` is the missing clause. Fixed in
+`block_run.lua` and `furnace_run.lua` (`0eeb4cc4`); `siting_furnace_live.lua`
+was already fixed by its author.
+
+**The speedrun scripts were never exposed**, and the reason is worth
+keeping: `supervisor.lua` closes a milestone on a **world observation** —
+items actually arriving in a chest within a window — not on the executor's
+verdict. A gate that asks the world cannot be lied to by the executor's
+opinion of itself. Every green and red number in this record is witnessed
+that way.
+
+**2. My footprint fix (`c14c1fd9`) does not cover this case, and the fix was
+in the master they tested.** Their run still lost a placement to *a character
+is standing in the footprint*, refused 4 times over 534 ticks — and at 5x
+that is under two seconds of wall clock, so the 45-second busy budget never
+engaged. **Hypothesis, not a diagnosis:** the busy path only triggers for a
+blocker the mod reports as `mining` or `walking`; a blocker that is idle with
+**no landing** to step aside to is classified `stuck`, and for that the old
+give-up behaviour remains. A 179-entity block is exactly where free landings
+run out. It also corrects my earlier reasoning in the useful direction — this
+is not client-specific and never was, so **one shared cause is likelier than
+two**.
+
+**3. One unresolvable placement costs the rest of the block.** That single
+refusal ended the batch with **~50 of 179 placements never dispatched**.
+Failing fast is defensible; losing fifty entities because one bot stands on
+one tile is a blast radius nobody chose. Two bots also stalled walking,
+`blocked by our own stone-furnace` and `blocked by our own inserter` — **the
+block trapping its own builders**, which is the same shortage of free ground
+as (2).
+
+Also retracted by its author: **bands do not prevent bots colliding.** They
+stop bots interleaving, not two bots meeting at a slab seam, which is where
+these collisions happened. The 50-entity shortfall was measured on a loaded
+floor and needs a quiet re-run before anyone quotes a rate for it; the
+refusals themselves are logical rather than starvation, since a character
+occupying a tile is a refusal the game computes.
+
 ## ⚠️ `plan_best` DOUBLES PLANNING COST, AND THAT BILL COMES DUE ON BIG PLANS
 
 Measured by the `second` session on a 179-entity block, interleaved, three

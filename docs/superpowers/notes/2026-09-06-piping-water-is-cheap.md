@@ -235,3 +235,64 @@ before and after, on the same release binary built from this branch:
 They must be: on that dump the bots stand at the origin, so the local search
 wins on every call and the fallback never runs. The change is visible only
 where the old code refused.
+
+
+---
+
+## CORRECTION (2026-09-06, from the owner): the supply crossover does not exist
+
+The note above derives a **supply crossover at ~56 tiles** from the claim that
+wood is unmakeable — four bots, four wood, eight poles, ever. **That claim is
+false, and it was already false when this note was written.**
+
+**1. The planner can chop.** `crates/planner/src/method/have.rs` carries a
+`Chop` method — swinging at any standing minable entity, trees and rocks alike
+— and its own doc records the exact history this note reproduced: *"before this
+method every wood in a run was wood a bot had been holding since it spawned:
+four bots, four wood ... That cap was a property of this model and of nothing
+else."* A live run halted on it (`run-1788396958-07935`) and the method exists
+to remove it. So the constraint was real, was read from a real place, and had
+been lifted in a different file the pricing never consulted.
+
+**2. And wood is a tier-one artefact anyway.** The owner, who plays the game:
+*"wood is only needed for the very first tier of power poles, we will quickly
+research the better tiers which don't need wood at all."* Confirmed from
+`recipe.lua`:
+
+| pole | ingredients | wire reach |
+|---|---|---|
+| `small-electric-pole` | 1 wood + 2 copper-cable -> **2** | 7.5 |
+| `medium-electric-pole` | 4 iron-stick + 2 steel + 2 copper-cable -> 1 | **9.0** |
+| `big-electric-pole` | 8 iron-stick + 5 steel + 4 copper-cable -> 1 | 30.0 |
+
+No wood past tier one, and a longer reach. `electric-energy-distribution-1`
+(120 red + green) unlocks the medium pole and `iron-stick`, and it is already
+**on the oil ladder** — so by the time power is being run to a well 350 tiles
+out, the pole that needs no wood is available.
+
+**So "poles are supply-capped and pipe wins beyond 56 tiles" should be read as
+"you are still holding the starting pole".** It is a research problem, not a
+logistics one. The per-tile prices in the table above stand; the conclusion
+drawn from them does not.
+
+## And the siting problem is smaller than this note assumes
+
+The owner on how oil is actually played: *"usually one would at least have one
+fluid storage container thingy between the pumpjacks and the refineries. and
+yes we want to pump it home, or to a dedicated refining area."*
+
+So a wellhead needs a **pumpjack, a storage tank, and two long runs** — power
+out on poles, crude back through pipe. It does **not** need a refinery, and
+therefore does not need water, and therefore **does not need a power plant near
+the well at all**. The refusal this whole lane has been fighing — *"a power
+plant needs water, and the plan can see none within 128 tiles"* — is the
+planner solving a problem real play does not have: it tried to site a plant at
+the well because that is where the consumer was.
+
+The plant stays where the water is. The distance is crossed twice, by two
+different carriers, and both are cheap.
+
+**A consequence for the fluid work:** the tank is not an optimisation, it is
+the first thing that must exist before crude can be represented at all, since
+no character inventory can hold a fluid (see
+`2026-09-06-a-fluid-is-not-an-item.md`).

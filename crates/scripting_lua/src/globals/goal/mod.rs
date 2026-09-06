@@ -715,7 +715,7 @@ end
         "__doc_entry_built",
         String::from(
             r#"
---- builds a goal value: a designed blueprint stands at an anchor
+--- builds a goal value: a designed blueprint stands somewhere
 --
 -- Pure, like `goal.have`: the blueprint string is decoded only at
 -- `goal.plan`, which is the first call with a world to check it against.
@@ -736,24 +736,40 @@ end
 -- same way, and the same underground half: an entity turned the wrong way is
 -- *not* built, and is reported rather than skipped.
 --
--- **It has no siting story.** The block goes at the anchor you name. Four
--- things refuse it, each by name at `goal.plan`: a string that does not
--- decode; content the decoder does not understand (a tile, a recipe, a module
--- request, a circuit wire); an entity already standing on the right tile the
--- wrong way round, which nothing here can rotate or remove; and **ground that
--- is not clear** -- which names the tile and what is on it, including the
--- case of one of your own bots standing on the footprint, cleared by walking
--- rather than by moving the block.
+-- **Three ways to say where.** The second argument picks one:
+--
+--   * `goal.built(bp, { x = ..., y = ... })` -- this exact anchor, or refuse.
+--     The original behaviour: the block's own origin lands there and nowhere
+--     else.
+--   * `goal.built(bp, { near = { x = ..., y = ... } })` -- search outward from
+--     that point for a clear footprint.
+--   * `goal.built(bp)` -- no second argument at all: search outward from the
+--     roster's own centroid.
+--
+-- An anchor and a near hint are mutually exclusive; passing both raises. Only
+-- the first form can refuse for the ground being occupied at the one tile you
+-- named -- the other two search, and refuse only when nothing in range is
+-- clear (see `goal.plan`'s `NoSiteFound`, surfaced through `goal.refusal`).
+--
+-- Four other things refuse it, each by name at `goal.plan`: a string that does
+-- not decode; content the decoder does not understand (a tile, a recipe, a
+-- module request, a circuit wire); an entity already standing on the right
+-- tile the wrong way round, which nothing here can rotate or remove; and, for
+-- an explicit anchor, **ground that is not clear** -- which names the tile and
+-- what is on it, including the case of one of your own bots standing on the
+-- footprint, cleared by walking rather than by moving the block.
 --
 -- The entities are split into bands across the roster, one band per bot, cut
 -- across the block's longer axis so each band is a region a bot can work
 -- without crossing another's.
 -- @string blueprint_string the blueprint, in Factorio's exported string form
--- @param anchor `types.Position` where the blueprint's own origin lands in the world
+-- @tparam[opt] table site `{ x = ..., y = ... }` to demand this exact anchor,
+--   `{ near = { x = ..., y = ... } }` to search outward from a hint, or
+--   omitted entirely to search outward from the roster
 -- @treturn table a goal value
--- @raise if the blueprint string is empty, or the anchor is not a table with
---   numeric x and y
-function goal.built(blueprint_string, anchor)
+-- @raise if the blueprint string is empty, or `site` is neither of the two
+--   shapes above, or names both an anchor and a near hint
+function goal.built(blueprint_string, site)
 end
 "#,
         ),

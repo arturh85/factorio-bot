@@ -91,17 +91,34 @@ pub(crate) fn install_goal_constructors(lua: &Lua, table: &LuaTable) -> LuaResul
     let mt = metatable.clone();
     table.set(
         "built",
-        lua.create_function(move |lua, (blueprint, anchor): (LuaValue, LuaValue)| {
-            let blueprint = require_blueprint(blueprint)?;
-            let anchor = require_anchor(anchor)?;
-            let t = lua.create_table()?;
-            t.set("kind", "built")?;
-            t.set("blueprint", blueprint)?;
-            t.set("x", anchor.x())?;
-            t.set("y", anchor.y())?;
-            t.set_metatable(Some(mt.clone()))?;
-            Ok(t)
-        })?,
+        lua.create_function(
+            move |lua, (blueprint, opts): (LuaValue, Option<LuaValue>)| {
+                let blueprint = require_blueprint(blueprint)?;
+                let site = require_site(opts)?;
+                let t = lua.create_table()?;
+                t.set("kind", "built")?;
+                t.set("blueprint", blueprint)?;
+                // Written as flat `x`/`y` for `At` and a nested `near` table for
+                // `Near`, so [`site_from_table`] can tell the three apart on the
+                // way back -- see its own doc for why one function reads what
+                // both this constructor and a hand-built table write.
+                match site {
+                    Site::At(pos) => {
+                        t.set("x", pos.x())?;
+                        t.set("y", pos.y())?;
+                    }
+                    Site::Near(pos) => {
+                        let near = lua.create_table()?;
+                        near.set("x", pos.x())?;
+                        near.set("y", pos.y())?;
+                        t.set("near", near)?;
+                    }
+                    Site::Anywhere => {}
+                }
+                t.set_metatable(Some(mt.clone()))?;
+                Ok(t)
+            },
+        )?,
     )?;
 
     table.set(
@@ -156,10 +173,7 @@ pub(crate) fn goal_from_lua(value: &LuaTable) -> LuaResult<Goal> {
         }),
         "built" => Ok(Goal::Built {
             blueprint: require_blueprint(value.get("blueprint")?)?,
-            site: Site::At(Position::new(
-                require_coordinate(value.get("x")?, "x")?,
-                require_coordinate(value.get("y")?, "y")?,
-            )),
+            site: site_from_table(value)?,
         }),
         "all" => {
             let goals = require_table_field(value.get("goals")?, "goals")?;
@@ -195,15 +209,12 @@ fn render_goal(t: &LuaTable) -> LuaResult<String> {
         )),
         "built" => {
             let blueprint = require_blueprint(t.get("blueprint")?)?;
-            let anchor = Position::new(
-                require_coordinate(t.get("x")?, "x")?,
-                require_coordinate(t.get("y")?, "y")?,
-            );
-            Ok(format!(
-                "build {}-byte block at {}",
-                blueprint.len(),
-                anchor
-            ))
+            let where_ = match site_from_table(t)? {
+                Site::At(pos) => format!("at {pos}"),
+                Site::Near(pos) => format!("near {pos}"),
+                Site::Anywhere => "anywhere".to_string(),
+            };
+            Ok(format!("build {}-byte block {}", blueprint.len(), where_))
         }
         "all" => {
             let goals = require_table_field(t.get("goals")?, "goals")?;
@@ -288,8 +299,7 @@ fn require_blueprint(value: LuaValue) -> LuaResult<String> {
 }
 
 /// One coordinate of an anchor, read back off a goal table's flat `x`/`y`
-/// fields -- see [`require_anchor`] for why the anchor is stored flat rather
-/// than as a nested table.
+/// fields, or off the nested `near` table's own `x`/`y`.
 fn require_coordinate(value: LuaValue, field: &str) -> LuaResult<f64> {
     match value {
         LuaValue::Integer(n) => Ok(n as f64),
@@ -298,21 +308,59 @@ fn require_coordinate(value: LuaValue, field: &str) -> LuaResult<f64> {
     }
 }
 
-/// The `{ x = ..., y = ... }` table a caller passes to `goal.built`.
+/// `goal.built`'s optional second argument: `{x=, y=}` for [`Site::At`],
+/// `{near={x=, y=}}` for [`Site::Near`], or nothing at all for
+/// [`Site::Anywhere`].
 ///
-/// Stored on the goal table as flat `x`/`y` fields, not a nested `anchor`
-/// table, so a goal table's shape stays flat like every other constructor
-/// here (`have`'s `item`/`count`, `producing`'s `item`/`per_minute`).
-fn require_anchor(value: LuaValue) -> LuaResult<Position> {
-    match value {
-        LuaValue::Table(t) => Ok(Position::new(
-            require_coordinate(t.get("x")?, "x")?,
-            require_coordinate(t.get("y")?, "y")?,
-        )),
-        other => Err(goal_error(format!(
-            "anchor must be a table with x and y, got a {}",
+/// Delegates the table shape to [`site_from_table`] once the argument is
+/// known to be a table (or absent), so the constructor and a hand-built
+/// goal's own `goal_from_lua` conversion read the same two fields the same
+/// way -- this is the one place the *argument*, rather than the table
+/// `goal.built` goes on to build, is validated.
+fn require_site(opts: Option<LuaValue>) -> LuaResult<Site> {
+    match opts {
+        None => Ok(Site::Anywhere),
+        Some(LuaValue::Table(t)) => site_from_table(&t),
+        Some(other) => Err(goal_error(format!(
+            "goal.built's second argument must be a table ({{x=, y=}} or {{near={{x=, y=}}}}), \
+             got a {}",
             other.type_name()
         ))),
+    }
+}
+
+/// Reads a goal table's site fields back into a planner [`Site`]: a flat
+/// `x`/`y` means [`Site::At`], a nested `near` table means [`Site::Near`],
+/// and neither means [`Site::Anywhere`].
+///
+/// Shared by [`require_site`] (the constructor's own argument, already known
+/// to be a table), [`goal_from_lua`]'s `"built"` arm (a table built by the
+/// constructor above, or hand-built by a script) and `render_goal`'s
+/// `"built"` arm -- one function, so a constructed table, a hand-built one
+/// and its `tostring` can never disagree about which fields mean what. That
+/// agreement is exactly what a Task 1 review caught missing: `render_goal`
+/// used to be a second, hand-maintained copy that assumed every `"built"`
+/// table was `Site::At` and hardcoded "at" into the string, which would have
+/// rendered a sited block as though it were anchored.
+fn site_from_table(t: &LuaTable) -> LuaResult<Site> {
+    let has_anchor = !matches!(t.get("x")?, LuaValue::Nil);
+    let has_near = !matches!(t.get("near")?, LuaValue::Nil);
+    match (has_anchor, has_near) {
+        (true, true) => Err(goal_error(
+            "goal.built: an anchor (x/y) and a near hint (near) are mutually exclusive",
+        )),
+        (true, false) => Ok(Site::At(Position::new(
+            require_coordinate(t.get("x")?, "x")?,
+            require_coordinate(t.get("y")?, "y")?,
+        ))),
+        (false, true) => {
+            let near = require_table_field(t.get("near")?, "near")?;
+            Ok(Site::Near(Position::new(
+                require_coordinate(near.get("x")?, "x")?,
+                require_coordinate(near.get("y")?, "y")?,
+            )))
+        }
+        (false, false) => Ok(Site::Anywhere),
     }
 }
 
@@ -423,8 +471,16 @@ mod tests {
             (r#"goal.producing("iron-plate", 0)"#, "count"),
             (r#"goal.producing("iron-plate", 15.5)"#, "count"),
             (r#"goal.built("", {x = 1, y = 1})"#, "blueprint"),
-            (r#"goal.built("0eNq...", nil)"#, "anchor"),
+            // `nil` and an omitted argument are the same call from Lua's
+            // side, so both mean `Site::Anywhere` -- this is not a shape
+            // error, unlike every other case in this list.
             (r#"goal.built("0eNq...", {x = 1})"#, "y"),
+            (r#"goal.built("0eNq...", 5)"#, "table"),
+            (r#"goal.built("0eNq...", {near = 5})"#, "near"),
+            (
+                r#"goal.built("0eNq...", {x = 1, y = 1, near = {x = 2, y = 2}})"#,
+                "mutually exclusive",
+            ),
             (r#"goal.all({})"#, "at least one"),
             (r#"goal.all({ 42 })"#, "goal"),
             (r#"goal.have("iron-plate", 1, { bot = 0 })"#, "bot"),
@@ -543,6 +599,82 @@ mod tests {
                 blueprint: "0eNq...".into(),
                 site: Site::At(Position::new(10.0, 10.0)),
             }
+        );
+    }
+
+    #[test]
+    fn built_accepts_a_position_a_near_hint_or_neither() {
+        // The three forms must be *distinguished*, not just each individually
+        // producing a plausible-looking result: a constructor that answered
+        // `Site::Anywhere` for every input would still pass three separate
+        // "does this look right" assertions, so each case here asserts the
+        // exact variant a wrong implementation could not produce for all
+        // three at once.
+        let lua = lua_with_goal();
+
+        let at: LuaTable = lua
+            .load(r#"return goal.built("0eNq...", {x = 3, y = 4})"#)
+            .eval()
+            .expect("script");
+        assert_eq!(
+            goal_from_lua(&at).expect("converts"),
+            Goal::Built {
+                blueprint: "0eNq...".into(),
+                site: Site::At(Position::new(3.0, 4.0)),
+            },
+            "an explicit x/y must produce Site::At"
+        );
+
+        let near: LuaTable = lua
+            .load(r#"return goal.built("0eNq...", {near = {x = 3, y = 4}})"#)
+            .eval()
+            .expect("script");
+        assert_eq!(
+            goal_from_lua(&near).expect("converts"),
+            Goal::Built {
+                blueprint: "0eNq...".into(),
+                site: Site::Near(Position::new(3.0, 4.0)),
+            },
+            "a near hint must produce Site::Near"
+        );
+
+        let anywhere: LuaTable = lua
+            .load(r#"return goal.built("0eNq...")"#)
+            .eval()
+            .expect("script");
+        assert_eq!(
+            goal_from_lua(&anywhere).expect("converts"),
+            Goal::Built {
+                blueprint: "0eNq...".into(),
+                site: Site::Anywhere,
+            },
+            "no second argument at all must produce Site::Anywhere"
+        );
+
+        // `tostring` must agree with what was actually built -- this is the
+        // check that would have caught `render_goal` staying a hand-written
+        // copy that assumed every "built" table was `Site::At`.
+        let tostring: LuaFunction = lua.globals().get("tostring").expect("tostring exists");
+        assert!(
+            tostring
+                .call::<String>(at)
+                .expect("tostring")
+                .contains("at "),
+            "an anchored goal renders \"at\""
+        );
+        assert!(
+            tostring
+                .call::<String>(near)
+                .expect("tostring")
+                .contains("near "),
+            "a near-sited goal renders \"near\", not \"at\""
+        );
+        assert!(
+            tostring
+                .call::<String>(anywhere)
+                .expect("tostring")
+                .contains("anywhere"),
+            "an unsited goal renders \"anywhere\", not \"at\""
         );
     }
 

@@ -1464,6 +1464,33 @@ fixture: an ore patch ringed with water out to 14 tiles and one furnace
 standing *on the ore*, which is ground `free_area_near` can never site on and
 adoption can always find.
 
+#### The falsification rule has its own failure mode: the ritual without the effect
+
+Worth its own heading because anyone following
+`2026-09-06-fixtures-agree-with-their-code.md` mechanically will hit it.
+
+Substituting the forbidden value into a test is only evidence if the
+substitution **landed**. Re-adding `shared_grow` here was done with a scripted
+string replacement against source that `rustfmt` had since reflowed onto one
+line. The replacement matched nothing, the file was unchanged, and the test
+then ran against the *fixed* code and **passed** — which, read carelessly, is
+the exact shape of "I substituted the forbidden value and the test still
+passed, so the test is hollow". It would have been the opposite conclusion from
+the truth, drawn from a green.
+
+Two cheap guards, both used here: make the replacement **assert** that it
+matched (a silent no-op is the whole trap), and treat an unexpected *green*
+under substitution as a broken experiment to investigate rather than as a
+finding. The real failure, once the edit actually applied, was `left: 5,
+right: 4`.
+
+The same class caught the fixture one step earlier: the first version of
+`tests/furnace_ground.rs` went red with
+`NoApplicableMethod { goal: "have 5 iron-ore (bot 1)" }` — drowning the ore
+patch had made the ore unmineable, so the test was failing for a reason with
+nothing to do with furnace ground. A red is not self-justifying either; the
+*wording* of the failure is the evidence, not its existence.
+
 #### Found and not fixed
 
 **The one-bot pumpjack plan is unchanged at 690,450 ticks and 21 furnaces**,

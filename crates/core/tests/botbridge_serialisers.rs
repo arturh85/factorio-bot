@@ -48,8 +48,23 @@ fn botbridge_types() -> Lua {
     let inventory = lua.create_table().expect("table");
     inventory.set("crafter_input", CRAFTER_INPUT).expect("set");
     inventory.set("lab_input", LAB_INPUT).expect("set");
+    // `defines.transport_line`, which the serialiser INVERTS to name a lane.
+    // Deliberately not in index order and deliberately not the whole enum: the
+    // mapping under test is value -> name, so an order-dependent
+    // implementation reading it as a list would produce the wrong names here
+    // rather than accidentally the right ones.
+    let transport_line = lua.create_table().expect("table");
+    for (name, index) in [
+        ("right_line", 2),
+        ("left_line", 1),
+        ("left_underground_line", 3),
+        ("right_underground_line", 4),
+    ] {
+        transport_line.set(name, index).expect("set");
+    }
     let defines = lua.create_table().expect("table");
     defines.set("inventory", inventory).expect("set");
+    defines.set("transport_line", transport_line).expect("set");
     lua.globals().set("defines", defines).expect("set");
     lua.load(&source)
         .set_name("types.lua")
@@ -674,6 +689,45 @@ fn entity_table(lua: &Lua, name: &str, entity_type: &str, with_inventories: bool
             .expect("function")
     };
     entity.set("get_inventory", get_inventory).expect("set");
+    // Belt lanes, for the types that have them. `get_max_transport_line_index`
+    // is declared for `TransportBeltConnectable` only, so a furnace and a tree
+    // must not have the method at all -- giving every stub one would make the
+    // serialiser's guard untestable and let a read that raises on a real
+    // furnace pass here.
+    if matches!(
+        entity_type,
+        "transport-belt" | "underground-belt" | "splitter" | "loader" | "loader-1x1"
+    ) {
+        let lanes = if entity_type == "underground-belt" {
+            4
+        } else {
+            2
+        };
+        entity
+            .set(
+                "get_max_transport_line_index",
+                lua.create_function(move |_, ()| Ok(lanes))
+                    .expect("function"),
+            )
+            .expect("set");
+        entity
+            .set(
+                "get_transport_line",
+                lua.create_function(move |lua, index: i64| {
+                    // Lane 1 carries something and the rest run empty, so a
+                    // serialiser that reported only non-empty lanes, or only
+                    // the first, fails rather than looking right.
+                    let count = if index == 1 { 4 } else { 0 };
+                    let line = lua.create_table()?;
+                    let contents = inventory_holding(lua, "iron-ore", count)?
+                        .get::<Function>("get_contents")?;
+                    line.set("get_contents", contents)?;
+                    Ok(line)
+                })
+                .expect("function"),
+            )
+            .expect("set");
+    }
     entity
 }
 
@@ -811,8 +865,8 @@ fn every_key_serialize_entity_emits_is_a_field_of_factorio_entity() {
     // emit; a shrinking count would mean a branch stopped being exercised.
     assert_eq!(
         seen.len(),
-        15,
-        "serialize_entity emits fifteen distinct keys across its branches; saw {seen:?}"
+        16,
+        "serialize_entity emits sixteen distinct keys across its branches; saw {seen:?}"
     );
 }
 
@@ -1348,4 +1402,141 @@ fn the_supply_area_comes_from_the_method_and_not_the_attribute() {
         prototype_through_serde(&lua, beacon).supply_area_distance,
         Some(1.5),
     );
+}
+
+// --------------------------------------------------------------------------
+// Transport lines: what is riding on the belt, lane by lane.
+// --------------------------------------------------------------------------
+
+fn lanes_of(entity: &FactorioEntity) -> Vec<(String, Vec<(String, u32)>)> {
+    entity
+        .transport_lines
+        .as_ref()
+        .expect("a belt-connectable entity reports its lanes")
+        .iter()
+        .map(|line| {
+            (
+                line.line.clone(),
+                line.contents
+                    .iter()
+                    .map(|item| (item.name.clone(), item.count))
+                    .collect(),
+            )
+        })
+        .collect()
+}
+
+/// `LuaTransportLine::get_contents()` had blocked four separate questions
+/// here, the fourth a diagnosis: a run mined 46 ore, made 17 plates and
+/// stranded 29, and a full belt could be neither ruled in nor out because the
+/// belt's contents never left the game.
+///
+/// **The lanes are the point.** A `transport-belt` has two and which one an
+/// item is on decides whether an arm can take it -- an inserter drops on the
+/// far lane and a side-load arrives on the near one, and this project has
+/// measured a block where getting that backwards put ore and coal on a single
+/// lane and produced one plate. A single aggregated number over the whole belt
+/// would have been unable to say that.
+#[test]
+fn a_belts_lanes_are_reported_by_name_with_what_is_on_them() {
+    let lua = botbridge_types();
+    let belt = entity_through_serde(
+        &lua,
+        entity_table(&lua, "transport-belt", "transport-belt", false),
+    );
+
+    assert_eq!(
+        lanes_of(&belt),
+        vec![
+            ("left_line".to_string(), vec![("iron-ore".to_string(), 4)]),
+            ("right_line".to_string(), vec![]),
+        ],
+        "both lanes, named from defines.transport_line and in index order -- \
+         an empty lane is reported as an empty lane, not omitted, or a belt \
+         with one loaded lane would read the same as a belt with two",
+    );
+}
+
+/// The names come from inverting the game's own `defines.transport_line`, not
+/// from a list of strings written down beside the code. Index 3 is
+/// `left_underground_line` on an underground belt and a different lane on a
+/// splitter, so a caller handed a bare number would have to rebuild the
+/// mapping from the entity type -- which is inventing it.
+#[test]
+fn an_underground_belts_extra_lanes_are_named_too() {
+    let lua = botbridge_types();
+    let underground = entity_through_serde(
+        &lua,
+        entity_table(&lua, "underground-belt", "underground-belt", false),
+    );
+
+    let names: Vec<String> = lanes_of(&underground)
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
+    assert_eq!(
+        names,
+        vec![
+            "left_line",
+            "right_line",
+            "left_underground_line",
+            "right_underground_line"
+        ],
+        "four lanes, each under the game's own name for its index",
+    );
+}
+
+/// The other half of the distinction, and the reason the mod checks for the
+/// method rather than calling it: `get_max_transport_line_index` is declared
+/// for `TransportBeltConnectable` only, so reading it off a furnace raises --
+/// the same shape as the `crafting_progress` read that once took a live run
+/// down from inside a sampler.
+///
+/// `None` here, never an empty list: "this belt is running empty" and "this is
+/// not a belt" are precisely the two answers a belt diagnosis has to separate.
+#[test]
+fn an_entity_that_is_not_belt_connectable_reports_no_lanes() {
+    let lua = botbridge_types();
+
+    let furnace = entity_through_serde(&lua, furnace_holding(&lua, "iron-ore", 34));
+    assert_eq!(furnace.transport_lines, None);
+
+    let inserter = entity_through_serde(&lua, inserter_table(&lua));
+    assert_eq!(inserter.transport_lines, None);
+}
+
+/// A lane whose contents arrive as Lua's empty table must still be a lane.
+///
+/// `helpers.table_to_json({})` renders an empty Lua table as `{}` and not
+/// `[]`, so an empty lane reaches serde as an empty *map* where a sequence is
+/// declared. That is a hard error without
+/// `deserialize_helpers::vec_or_empty_map`, and it would surface only on a
+/// belt that happens to be running empty -- which is most belts, most of the
+/// time, and exactly the case somebody is diagnosing.
+#[test]
+fn an_empty_lane_survives_the_empty_table_json_renders_as_an_object() {
+    let entity: FactorioEntity = serde_json::from_str(
+        r#"{
+          "name": "transport-belt", "entity_type": "transport-belt",
+          "position": {"x": 0.5, "y": 0.5},
+          "bounding_box": {"left_top": {"x": 0.1, "y": 0.1},
+                           "right_bottom": {"x": 0.9, "y": 0.9}},
+          "direction": 0,
+          "transport_lines": [
+            {"line": "left_line", "contents": {}},
+            {"line": "right_line",
+             "contents": [{"name": "coal", "quality": "normal", "count": 2}]}
+          ]
+        }"#,
+    )
+    .expect("an empty lane rendered as {} must still parse");
+
+    let lanes = entity.transport_lines.expect("lanes");
+    assert_eq!(lanes[0].line, "left_line");
+    assert!(
+        lanes[0].contents.is_empty(),
+        "an empty object is an empty lane, not a parse failure and not a \
+         missing lane",
+    );
+    assert_eq!(lanes[1].contents.len(), 1);
 }

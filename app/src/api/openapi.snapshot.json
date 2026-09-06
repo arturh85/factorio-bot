@@ -1757,6 +1757,15 @@
               }
             ]
           },
+          "transport_lines": {
+            "items": {
+              "$ref": "#/components/schemas/TransportLine"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "underground_half": {
             "oneOf": [
               {
@@ -3570,6 +3579,26 @@
         "required": [
           "w",
           "k"
+        ],
+        "type": "object"
+      },
+      "TransportLine": {
+        "description": "One of a belt-like entity's transport lines, and what is riding on it.\n\nA belt is not an inventory and modelling it as one loses the thing that\nmakes it a belt: a `transport-belt` has **two** lanes, an\n`underground-belt` four and a `splitter` eight, and which lane an item is\non decides whether a furnace arm can reach it. Two of this project's own\nmeasured failures are lane failures -- an inserter drops on the belt's\n**far** lane while a side-loading belt lands on the **near** one, and\ngetting either backwards puts ore and coal on one lane where they crowd\neach other out while every entity still places 100% correctly.\n\n**Counts, not positions.** `LuaTransportLine` also offers\n`get_detailed_contents()`, which is every item with its position along the\nline; the owner's ruling at scale is *\"the direction and, for a whole\nchain, what types of items are on it\"*, so this carries\n`get_contents()` -- one aggregated count per item kind -- and no item\npositions at all.",
+        "properties": {
+          "contents": {
+            "description": "What is on this lane, by item kind. Empty is a real and ordinary\nanswer -- most lanes of most belts are empty most of the time -- and it\nis *not* the same as the lane not existing, which is expressed by the\nlane being absent from [`FactorioEntity::transport_lines`] entirely.",
+            "items": {
+              "$ref": "#/components/schemas/InventoryItemWithQuality"
+            },
+            "type": "array"
+          },
+          "line": {
+            "description": "`defines.transport_line`'s own name for this line: `left_line`,\n`right_line`, `left_underground_line`, `secondary_right_line`,\n`left_split_line` and so on.\n\n**The name, not the raw index**, because the index alone is\nuninterpretable: line 3 is `left_underground_line` on an\nunderground-belt and something else on a splitter, so a caller reading\na number would have to re-derive the mapping from the entity type and\nwould be inventing it. An index this build's `defines` cannot name\narrives as `unmapped_<n>` rather than as a bare number, the same way\n`machine_row` reports an unknown entity status.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "line"
         ],
         "type": "object"
       },

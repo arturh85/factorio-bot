@@ -651,6 +651,35 @@ local function input_inventory_index(entity_type)
     return nil
 end
 
+-- `defines.transport_line`'s own name for a line index, or `unmapped_<n>`.
+--
+-- Built by inverting `defines.transport_line`, so the names are the game's and
+-- not a list written down here that a Factorio version could quietly outgrow.
+-- An index this build cannot name still reaches the record, labelled as
+-- unresolved, rather than being written as a bare integer nobody can decode
+-- later -- the same rule `ENTITY_STATUS_NAMES` in control.lua follows.
+--
+-- The number alone is uninterpretable: line 3 is `left_underground_line` on an
+-- underground belt and a different lane on a splitter, so a caller handed the
+-- index would have to rebuild this mapping from the entity type and would be
+-- guessing at it.
+--
+-- `rawget(_G, "defines")` for the same reason `input_inventory_index` uses it:
+-- this file is loaded outside Factorio by the Rust tests.
+local transport_line_names = nil
+local function transport_line_name(index)
+    if transport_line_names == nil then
+        transport_line_names = {}
+        local defines_table = rawget(_G, "defines")
+        if defines_table ~= nil and defines_table.transport_line ~= nil then
+            for name, value in pairs(defines_table.transport_line) do
+                transport_line_names[value] = name
+            end
+        end
+    end
+    return transport_line_names[index] or ("unmapped_" .. tostring(index))
+end
+
 -- `opts.omit_inventories` -- IDENTITY AND GEOMETRY IN BULK, CONTENTS ON DEMAND.
 --
 -- This function serves two very different callers. The RCON queries
@@ -734,6 +763,50 @@ function serialize_entity(entity, opts)
             local input_inventory = entity.get_inventory(input_index)
             if input_inventory ~= nil then
                 record.input_inventory = input_inventory.get_contents()
+            end
+        end
+        -- WHAT IS RIDING ON THE BELT, LANE BY LANE.
+        --
+        -- The three reads above describe machines and say nothing at all about
+        -- the thing between them. `LuaTransportLine::get_contents()` has now
+        -- blocked four separate questions here, the fourth a diagnosis: a run
+        -- mined 46 ore, made 17 plates and stranded 29, and neither a full belt
+        -- nor an empty one could be ruled in or out because the belt's contents
+        -- had never left the game.
+        --
+        -- **Lanes, not one number.** A `transport-belt` has two, an
+        -- `underground-belt` four and a `splitter` eight, and which lane an
+        -- item is on is exactly what decides whether an arm can take it -- an
+        -- inserter drops on the FAR lane and a side-load arrives on the NEAR
+        -- one, and this project has already measured a block where getting
+        -- that backwards put ore and coal on one lane and produced a single
+        -- plate.
+        --
+        -- **Counts, not positions.** `get_detailed_contents()` would give every
+        -- item's position along the line; the owner's ruling at scale is the
+        -- direction and what types of items are on it, so this is the
+        -- aggregated `get_contents()` and nothing finer.
+        --
+        -- Guarded on `get_max_transport_line_index`, which is declared for
+        -- `TransportBeltConnectable` only: reading it off a furnace raises,
+        -- exactly like the `crafting_progress` read that once took a live run
+        -- down from inside a sampler. A non-belt gets no key rather than an
+        -- empty list, so "this belt is running empty" stays a different answer
+        -- from "this is not a belt".
+        if entity.get_max_transport_line_index ~= nil then
+            local ok, max_index = pcall(function()
+                return entity.get_max_transport_line_index()
+            end)
+            if ok and max_index ~= nil and max_index > 0 then
+                local lines = {}
+                for index = 1, max_index do
+                    local line = entity.get_transport_line(index)
+                    table.insert(lines, {
+                        line = transport_line_name(index),
+                        contents = line.get_contents(),
+                    })
+                end
+                record.transport_lines = lines
             end
         end
     end

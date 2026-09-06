@@ -180,6 +180,31 @@ export interface InventoryItemWithQuality {
 }
 
 /**
+ * One lane of a belt-like entity and what is on it. Mirrors `TransportLine` in
+ * `crates/core/src/types.rs`.
+ *
+ * A belt is not an inventory: a `transport-belt` has two lanes, an
+ * `underground-belt` four and a `splitter` eight, and which lane an item is on
+ * is what decides whether an inserter can take it.
+ */
+export interface TransportLine {
+    /**
+     * `defines.transport_line`'s own name for this lane -- `left_line`,
+     * `right_line`, `left_underground_line` and so on -- or `unmapped_<n>` for
+     * an index the running game's `defines` could not name.
+     */
+    line: string;
+    /**
+     * What is riding on this lane, by item kind. Counts only: item positions
+     * along the line are deliberately not carried.
+     *
+     * An empty array is an ordinary answer and means the lane is running
+     * empty -- not that the lane is missing.
+     */
+    contents: InventoryItemWithQuality[];
+}
+
+/**
  * Which half of an underground-belt pair a `FactorioEntity` is. Mirrors
  * `crate::blueprint::UndergroundHalf` in `crates/core/src/blueprint.rs`,
  * carried onto `FactorioEntity::underground_half` (task 5) so the two halves
@@ -223,6 +248,15 @@ export interface FactorioEntity {
      * furnace no ore ever reached looked identical from here.
      */
     input_inventory: InventoryItemWithQuality[] | null;
+    /**
+     * The lanes of a belt-like entity and what is riding on each, in
+     * `defines.transport_line` order.
+     *
+     * `null` for anything that is not belt-connectable. A belt running empty
+     * is *not* `null` -- it is a list of lanes with empty `contents`, and
+     * separating those two is the whole reason the field exists.
+     */
+    transport_lines: TransportLine[] | null;
     /** Only present (non-null) for `entity_type: "resource"`. */
     amount: number | null;
     /** Only present for crafting machines. */

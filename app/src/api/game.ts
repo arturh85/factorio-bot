@@ -12,7 +12,7 @@
  */
 
 import {request} from './http';
-import {FactorioEntity, InventoryItemWithQuality, Position, Rect, UndergroundHalf} from './types';
+import {FactorioEntity, InventoryItemWithQuality, Position, Rect, TransportLine, UndergroundHalf} from './types';
 
 export interface FindEntitiesQuery {
     position: Position;
@@ -166,6 +166,38 @@ function parseInventoryOrNull(value: unknown, path: string): InventoryItemWithQu
     fail(path, `expected an array (or an empty object standing in for one), got ${JSON.stringify(value)}`);
 }
 
+/**
+ * The lanes of a belt-like entity, or `null` for anything that is not one.
+ *
+ * An empty lane can reach here as `{}` for the same reason
+ * {@link parseInventoryOrNull} tolerates it -- BotBridge renders an empty Lua
+ * table as an object -- and most lanes of most belts are empty, so this is the
+ * common case rather than an edge one.
+ */
+function parseTransportLinesOrNull(value: unknown, path: string): TransportLine[] | null {
+    if (value === null || value === undefined) {
+        return null;
+    }
+    if (!Array.isArray(value)) {
+        const obj = asObject(value, path);
+        if (Object.keys(obj).length === 0) {
+            return [];
+        }
+        fail(path, `expected an array (or an empty object standing in for one), got ${JSON.stringify(value)}`);
+    }
+    return value.map((line, i) => {
+        const at = `${path}[${i}]`;
+        const obj = asObject(line, at);
+        return {
+            line: asString(obj.line, at + '.line'),
+            // `?? []` and not `parseInventoryOrNull`: a lane that is listed
+            // exists, so its contents are a list that may be empty and never a
+            // null. Keeping the two distinct is the point of the field.
+            contents: parseInventoryOrNull(obj.contents, at + '.contents') ?? []
+        };
+    });
+}
+
 /** Validates and narrows one already-`JSON.parse`d value into a `FactorioEntity`. */
 export function parseFactorioEntity(value: unknown, path = '$'): FactorioEntity {
     const obj = asObject(value, path);
@@ -183,6 +215,7 @@ export function parseFactorioEntity(value: unknown, path = '$'): FactorioEntity 
         // holding ore" from "no ore ever got here". `null` when the entity has
         // none and on every capture written before 2026-09-06.
         input_inventory: parseInventoryOrNull(obj.input_inventory, path + '.input_inventory'),
+        transport_lines: parseTransportLinesOrNull(obj.transport_lines, path + '.transport_lines'),
         amount: asNumberOrNull(obj.amount, path + '.amount'),
         recipe: asStringOrNull(obj.recipe, path + '.recipe'),
         ghost_name: asStringOrNull(obj.ghost_name, path + '.ghost_name'),

@@ -1783,6 +1783,48 @@ impl FactorioEntityPrototype {
     }
 }
 
+/// One of a belt-like entity's transport lines, and what is riding on it.
+///
+/// A belt is not an inventory and modelling it as one loses the thing that
+/// makes it a belt: a `transport-belt` has **two** lanes, an
+/// `underground-belt` four and a `splitter` eight, and which lane an item is
+/// on decides whether a furnace arm can reach it. Two of this project's own
+/// measured failures are lane failures -- an inserter drops on the belt's
+/// **far** lane while a side-loading belt lands on the **near** one, and
+/// getting either backwards puts ore and coal on one lane where they crowd
+/// each other out while every entity still places 100% correctly.
+///
+/// **Counts, not positions.** `LuaTransportLine` also offers
+/// `get_detailed_contents()`, which is every item with its position along the
+/// line; the owner's ruling at scale is *"the direction and, for a whole
+/// chain, what types of items are on it"*, so this carries
+/// `get_contents()` -- one aggregated count per item kind -- and no item
+/// positions at all.
+#[derive(
+    Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema, utoipa::ToSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub struct TransportLine {
+    /// `defines.transport_line`'s own name for this line: `left_line`,
+    /// `right_line`, `left_underground_line`, `secondary_right_line`,
+    /// `left_split_line` and so on.
+    ///
+    /// **The name, not the raw index**, because the index alone is
+    /// uninterpretable: line 3 is `left_underground_line` on an
+    /// underground-belt and something else on a splitter, so a caller reading
+    /// a number would have to re-derive the mapping from the entity type and
+    /// would be inventing it. An index this build's `defines` cannot name
+    /// arrives as `unmapped_<n>` rather than as a bare number, the same way
+    /// `machine_row` reports an unknown entity status.
+    pub line: String,
+    /// What is on this lane, by item kind. Empty is a real and ordinary
+    /// answer -- most lanes of most belts are empty most of the time -- and it
+    /// is *not* the same as the lane not existing, which is expressed by the
+    /// lane being absent from [`FactorioEntity::transport_lines`] entirely.
+    #[serde(default, deserialize_with = "deserialize_helpers::vec_or_empty_map")]
+    pub contents: Vec<InventoryItemWithQuality>,
+}
+
 #[derive(
     Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema, utoipa::ToSchema,
 )]
@@ -1839,6 +1881,25 @@ pub struct FactorioEntity {
         deserialize_with = "deserialize_helpers::option_vec_or_empty_map"
     )]
     pub input_inventory: Option<Vec<InventoryItemWithQuality>>,
+    // The lanes of a belt-like entity, in `defines.transport_line` order --
+    // see `TransportLine`, which carries the reasoning. `None` for anything
+    // that is not belt-connectable; a belt whose lanes are all empty is
+    // `Some` of a list of empty lanes, because "this belt is running empty"
+    // and "this is not a belt" are the two answers a belt diagnosis has to
+    // separate, and `LuaTransportLine::get_contents()` has blocked four
+    // distinct questions here for want of exactly that.
+    //
+    // A `schemars(description)` rather than a `///` for the same reason
+    // `direction` and `input_inventory` above have one: the doc reaches the
+    // Lua docs without enlarging the published API surface.
+    #[schemars(
+        description = "The lanes of a belt, underground-belt, splitter or loader, in `defines.transport_line` order, each with the items riding on it by kind. `null` for anything that is not belt-connectable; an empty lane list never occurs, but a lane with empty `contents` does and means the lane is running empty."
+    )]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_helpers::option_vec_or_empty_map"
+    )]
+    pub transport_lines: Option<Vec<TransportLine>>,
     pub amount: Option<u32>,        // only type = resource
     pub recipe: Option<String>,     // only CraftingMachines
     pub ghost_name: Option<String>, // only type = entity-ghost

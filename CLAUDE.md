@@ -931,6 +931,14 @@ Three things that are **not** interchangeable between the modes:
   agreeing to 8% (15.6 and 16.8 us/bot), so the relationship is linear rather
   than two points and a hope.
 
+  **Taken on a quiet box, and the number is only worth its conditions**:
+  `load_start=1.82`, `load_end=4.01` on 20 cores, with the harness refusing
+  outright above load 6 and waiting up to 30 minutes for the box to drop below
+  cores/4. **This is one of the few measurements here that a busy tree can
+  move** — game speed and tick rate are wall-clock quantities, so there is no
+  tick-bounded form of the question. Re-run it only on a quiet box, and state
+  the load beside any new figure.
+
   **The old figure here — "eight bots still held 242 of 300 requested tps" —
   had no baseline**, so it said where eight bots ended up and could not say what
   one costs. Anything quoted as a per-bot cost needs a 1/4/8 sweep behind it.
@@ -1092,6 +1100,28 @@ timeout 180 target/release/factorio-bot lua multi_client_test.lua -c 2
    one-bot run misread as a four-bot regression cost a good commit a revert.
 6. **Script runs** - clients should be connected by this point
 7. **Multi-bot coordination** verified via task graph execution
+
+**A measurement an iteration cap or a wall clock can move is a broken
+instrument, not a scheduling problem.** Bound a window in **game ticks** and it
+is immune to whatever else the box is doing — starvation only makes the wall
+clock longer, and the run still covers the ticks you asked for. Two failures on
+2026-09-06 came from ignoring this, both mine:
+
+- **`for _ = 1, 5000` polls is not a duration.** On a faster box more game ticks
+  pass per RCON round trip, so the same poll count covers more game time. A
+  block compared this way was published at **4.6x** and re-measured at **2.6x**
+  on a fixed 6,300-tick window.
+- **A terminal value against a non-terminal one is not a comparison.** Two runs
+  had plateaued — they had stopped producing — while the third was still
+  climbing when its cap closed. One number was finished and the other was not.
+- **And a shared mutable substrate is the same fault.** The first re-measure
+  built three variants on **one map in sequence**, so the second was sited on
+  ground the first had changed. One fresh map per variant.
+
+The exception is real and narrow: **anything whose subject IS the wall clock**
+— game-speed choice, tick rate, per-bot cost — has no tick-bounded form and does
+need a quiet box. That is a small set, and naming it is what stops every other
+measurement being pessimised into serial execution.
 
 ### Measuring a run, and the traps that have produced wrong answers
 

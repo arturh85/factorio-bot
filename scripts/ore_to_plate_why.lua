@@ -148,7 +148,12 @@ end
 local a, b, last, lastc = 0, 0, -1, t0
 local coal_left, armfuel = 0, {}
 local deadline = (type(t0) == "number") and (t0 + 30000) or nil
-for _ = 1, 5000 do
+-- Tick-bounded, not iteration-bounded. `for _ = 1, 5000` was a broken
+-- instrument: on a faster box more game ticks pass per RCON round trip, so the
+-- same poll count covers more game time -- which is how a 2.6x result got
+-- published as 4.6x. The deadline below is in GAME TICKS and is immune to
+-- whatever else the machine is doing.
+while true do
   local r = rcon.inventory_contents_at(ask)
   a = plates((type(r) == "table") and r[1] or nil)
   b = plates((type(r) == "table") and r[2] or nil)
@@ -222,4 +227,15 @@ else
   print("VERDICT: unclear. Ore remains and mining matches plates, so the drills")
   print("  themselves stopped -- fuel or a status this run cannot see.")
 end
+-- HOLD THE GAME OPEN so a screenshot can be taken from outside. The script is
+-- what keeps the server alive; when it returns the game dies, and a screenshot
+-- is the one way to SEE where the 29 stranded ore actually sits, since nothing
+-- reads a transport line.
+local hold_until = (type(rcon.game_tick()) == "number") and (rcon.game_tick() + 12000) or nil
+print("HOLDING the game open for a screenshot window")
+while hold_until do
+  local t = rcon.game_tick()
+  if type(t) ~= "number" or t > hold_until then break end
+end
+print("hold window closed")
 print("end ore to plate why")

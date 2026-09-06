@@ -543,11 +543,50 @@ and a run that replans four to seven times pays it every time; on a
 179-entity block that is 45 seconds each. Nobody saw it because green's
 plans are an order of magnitude smaller.
 
-Not a defect, a number that was missing. Options when someone takes it:
-run the second policy only when the first's schedule leaves meaningful
-slack; pick the policy from cheap plan statistics instead of building both;
-or cache the expansion, which is identical between the two and is the
-expensive half. Wants its own task with the 179-entity block as its measure.
+**Fixed (`c9547bc9`), and the investigation corrected my own framing twice.**
+It does **not** split evenly — on the big block expansion is 63% and
+scheduling 37%, so caching the expansion alone would have left a third of
+the bill. And `expand()` rehearses before it plans, so `plan_best` was
+running **four** expansions, not two.
+
+`DrainPolicy` is read in exactly one place (`Drain::bound_from`), and the
+policies part only when a cell's backlog falls between one cell-build and
+one per standing cell — which needs two cells standing. So `Drain::new` now
+sets a probe when a cell falls on the *other side* of another policy's
+bound, and `plan_best` reads it off a **completed** expansion and stops
+there if unset. Sound by induction: expansion is deterministic and
+`schedule` never reads the policy.
+
+Timing, both columns on one merged tree, interleaved, 48 runs at load
+1.56–2.28:
+
+| case | before | after | |
+|---|---|---|---|
+| automation, 4 | 1.29 s | 1.02 s | 1.26× |
+| red, 4 | 1.98 s | 1.40 s | 1.41× |
+| **green, 4** | 3.33 s | 3.39 s | **0.98×** |
+| automation, 8 | 2.07 s | 1.41 s | 1.47× |
+| **green, 8** | 6.77 s | 6.72 s | **1.01×** |
+| FurnaceLine, 4 | 8.57 s | 4.62 s | **1.85×** |
+| **FurnaceLine, 8** | **69.73 s** | **35.71 s** | **1.95×** |
+
+**Green pays exactly what it did, at both roster sizes, and should** — it is
+the one goal where the policies genuinely differ, and it still returns the
+parallel plan (47,542 against a conservative 51,677). Published beside the
+wins rather than under them.
+
+Plans proven unchanged rather than asserted: `plan --steps`, every step per
+bot with start and end ticks, diffed **byte for byte** between a master
+binary and a branch binary from the same tree, identical on all seven cases.
+
+**And an honest limit the agent flagged rather than leaving to be found:**
+the exhaustive unit test does *not* redden on a broken probe, because in the
+crate's fixture world the parallel policy never wins — it ties or refuses —
+so the only case where it wins is green on the 865 MB dump, out of a pure
+crate's reach. The unit tests therefore pin the *licence to skip*; the
+*chosen plan* is pinned by the offline table above.
+
+
 
 **The other session's own correction, worth recording as method:** it
 attributed this to `recover_anchor`, then implicitly to siting, before

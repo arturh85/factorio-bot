@@ -201,6 +201,28 @@ per blueprint entity, 179 whole-world scans for `FurnaceLine`, worst observed
 call 7.86 s — and is fixed by scanning once and bucketing by name. That fix is
 worth keeping. It was simply never the 96 seconds.
 
+### Re-measured after `plan_best` was fixed: 96 s → 48 s
+
+`c9547bc9` stops `plan_best` running the pipeline for both drain policies when
+nothing could have differed. Re-measured here, same command, same dump, three
+runs on a quiet floor: **48 s, 48 s, 48 s** — an exact halving, which is what
+removing one of two identical passes should produce.
+
+**And the remaining 48 s is planning, not I/O.** A trivial goal
+(`have:iron-plate:5`) against the same 865 MB dump takes **3 s**, twice. So
+loading the world costs 3 s and planning this block costs ~45 s. That is worth
+stating because the obvious suspicion — "it is just reading an 865 MB file" — is
+wrong, and would have sent the next person optimising the wrong thing.
+
+Two caveats on the number. The speedrun session measures the same fix at
+**8.57 s → 4.62 s** for `FurnaceLine` at four bots, an order of magnitude below
+this; the two are measuring different things (their figure is the planner
+in-process, this one is the whole CLI path) and **neither has been reconciled
+against the other.** And the investigation found the split is not what either of
+us guessed: on this block, expansion is 63 % and scheduling 37 %, and `expand()`
+rehearses before it plans, so `plan_best` was running **four** expansions rather
+than two.
+
 **The method failure is the transferable part.** The first experiment showed a
 fixed anchor still cost ~95 s and was read as exonerating the search and
 implicating recovery. But a fixed anchor *also* calls recovery, so it separated

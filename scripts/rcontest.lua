@@ -91,6 +91,17 @@ blueprints = {
     -- spawn by itself and delivered 221 ore. That path had unit tests and had
     -- never run in a game.
     BurnerMinerLine = "0eNqd1M1qwzAMAOB30dkp8V/+jj1vTzDGSFqxGRIn2M5YCXn3Oc3Y1jYbdi8GS+izwbImaNoRB6O0g2oC5bCD6leMQFs32PrYfjQazaPyy4NffAa1U06hheppWjenFz12DRqoKAFdd+jrnKm1HXrjEu8s4NBbX9br5bwPqPhOEjhBle7kTOCoDB7WbDGTG5ZFszSE5dEsC2FFNMtDWBnNihA2i2ZlCJtHs1kIW0SzeQhbRrNFCEvTb7c5/6OkU1rp1+RoVNve4mzt3UtYbMH0HlgGwCwO/urfS5iyLZnfI+chsriWlbZonM/9+Xzl9fOlW/DPl1Om18nhDe1/M2eZZfMzgXc09pyWGStFWUouGOX+7vMnnmXOXw==",
+    -- The whole t=0 chain in one blueprint: ore never touches a chest between
+    -- the ground and the plate. Drills WEST of the belt facing east drop on the
+    -- FAR (east) lane; coal joins from the WEST as a T-junction and sideloads
+    -- the NEAR (west) lane; the furnace arms sit EAST picking west, so they
+    -- meet coal first and fall back to ore once a fuel slot fills. Two
+    -- commodities, two lanes, one belt, nothing merging them but the belts.
+    --
+    -- Built with NO site, so the drills force it onto ore -- which also means
+    -- the furnaces are sited by the ore rather than by clear ground, the first
+    -- block here where that is true.
+    OreToPlate = "0eNqd09FugyAUgOF34VobD6BVX2K72N2yLNqebSSKDdBlTeO7j65L2k2anNNLIXwg+h9FP+xx54wNoj0KE3AU7dVYJoauxyGOPTh8mh6HLmAcRBtMMOhF+3w8Pxxe7X7s0YkWMmG7EeOS4Drrd5MLeSRO1m7ycdlkT1t9iVatykwcRFusyjkTW+Nwc56t52zBSjYLFFaxWUlhNZtVFLZks5rCVmy2pLBrNltR2JrNrilsw2ZrCgsF221ILr8zIIUGd5RGSg34rQEpNuDXBqTc4NJbv3cWXT4aa+x7vnVmGJa6PNt/YZ2Cq3vgkgBfmjNusvnmA33iGvLi6hdOMfX/8xnr0YU4t7CKWzWATMn0zOAWnHpxSc9Mslyg34S+2VnyKuQlNB8mi/lb3KDb4BKuftnUp5LqjgMq2gE184Bqnl8y8YnO/0yVlWx005RKS1Bxh/kb9fTEwQ==",
 }
 
 rcon.cheat_technology("automation")

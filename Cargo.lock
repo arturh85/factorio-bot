@@ -1304,7 +1304,9 @@ dependencies = [
 name = "factorio-bot-planner"
 version = "0.2.4-dev"
 dependencies = [
+ "base64 0.23.1",
  "factorio-bot-core",
+ "flate2",
  "miette",
  "serde",
  "serde_json",

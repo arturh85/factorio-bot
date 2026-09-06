@@ -497,10 +497,15 @@ pub fn search_site(
 ///
 /// Asks [`PlanState::siting_occupant`], not `placement_occupant`: a
 /// character is not durable ground, and this function's whole job is
-/// choosing an anchor that stays chosen (see `search_site`'s doc). The
-/// distinction matters only here -- `expand`'s own footprint pre-check, which
-/// builds at a fixed, already-chosen anchor, still uses `placement_occupant`
-/// and still refuses a character standing on it, by name.
+/// choosing an anchor that stays chosen (see `search_site`'s doc).
+/// `expand`'s own footprint pre-check uses the SAME predicate for exactly
+/// this anchor, for exactly this reason -- a character must not be able to
+/// veto ground this search already chose one line earlier. Where the anchor
+/// instead came from the caller (`Site::At`) or from recovery (the block is
+/// already partly built there, a fact about the world rather than a search
+/// result), the pre-check still uses `placement_occupant` and still refuses
+/// a character standing on it, by name: see `resolve_site`'s doc for which
+/// is which.
 fn first_obstruction(state: &PlanState, bp: &Blueprint, anchor: &Position) -> Option<String> {
     for e in &bp.entities {
         let world = anchor.add(&e.offset);
@@ -652,28 +657,53 @@ fn nearest_ore_seed(state: &PlanState, bp: &Blueprint) -> Option<Position> {
     best
 }
 
-/// Where this block goes, resolved in one fixed order.
+/// Where this block goes, resolved in one fixed order -- and whether that
+/// anchor was CHOSEN BY THE SEARCH (`true`) or is a fact the caller or the
+/// world already settled (`false`).
+///
+/// That bit is what `expand`'s footprint pre-check uses to decide which
+/// occupant predicate a character is checked against. `siting_occupant`
+/// (used only when this returns `true`) is deliberately blind to characters
+/// -- see `search_site`'s doc -- because a bystander standing in a candidate
+/// ring must not veto a site the search would otherwise pick, and must not
+/// make the search's answer depend on where bots happen to be standing. A
+/// caller-chosen or recovered anchor carries no such promise: nothing chose
+/// it FOR its ground being clear of bots, so a character actually standing
+/// there is exactly the fact `placement_occupant` exists to name. Refusing
+/// on `siting_occupant` too, for those two cases, would be the over-broad
+/// fix -- it would make `Site::At` silently build a block on top of a bot's
+/// own model. Getting this bit wrong in either direction reintroduces one of
+/// the two failures this module exists to keep apart: refusing ground the
+/// search itself just picked, or approving ground the caller (or the game)
+/// needed to be told was occupied.
 ///
 /// Recovery comes FIRST and unconditionally, even for `Site::At`: if the
 /// block is already partly built, the ground outranks anything the caller
-/// says, because the alternative is two half-blocks and no error.
+/// says, because the alternative is two half-blocks and no error. A
+/// recovered anchor is always `false` here -- it is a fact about the world,
+/// not a choice this expansion made.
 ///
 /// `Site::Near(p)` searches from the caller's own point, which is stable by
 /// construction -- it came in with the goal, not off a bot's current
 /// position. `Site::Anywhere` seeds at the nearest ore patch this block's own
 /// drills can extract, falling back to the world origin for a block with no
 /// drill at all; both are stable across replans (see `nearest_ore_seed`'s own
-/// doc), which a roster centroid is not.
-fn resolve_site(state: &PlanState, bp: &Blueprint, site: &Site) -> Result<Position, PlannerError> {
+/// doc), which a roster centroid is not. Both are `true`: the search chose
+/// the anchor in this call.
+fn resolve_site(
+    state: &PlanState,
+    bp: &Blueprint,
+    site: &Site,
+) -> Result<(Position, bool), PlannerError> {
     if let Some(recovered) = recover_anchor(state, bp) {
-        return Ok(recovered);
+        return Ok((recovered, false));
     }
     match site {
-        Site::At(p) => Ok(p.clone()),
-        Site::Near(p) => search_site(state, bp, p, SEARCH_RADIUS),
+        Site::At(p) => Ok((p.clone(), false)),
+        Site::Near(p) => Ok((search_site(state, bp, p, SEARCH_RADIUS)?, true)),
         Site::Anywhere => {
             let seed = nearest_ore_seed(state, bp).unwrap_or_else(|| Position::new(0.0, 0.0));
-            search_site(state, bp, &seed, SEARCH_RADIUS)
+            Ok((search_site(state, bp, &seed, SEARCH_RADIUS)?, true))
         }
     }
 }
@@ -714,7 +744,7 @@ impl Method for BuildBlock {
         // stands, `recover_anchor`'s ghost pass finds it on every later
         // expansion and this is never true again for this block.
         let is_fresh_site = recover_anchor(&ctx.state, &bp).is_none();
-        let anchor = resolve_site(&ctx.state, &bp, site)?;
+        let (anchor, sited_by_search) = resolve_site(&ctx.state, &bp, site)?;
 
         // This used to refuse the whole goal, by name, whenever it contained
         // an underground belt: neither `FactorioEntity` nor the mod's
@@ -808,10 +838,27 @@ impl Method for BuildBlock {
         // unresolved. Scanned over the whole footprint BEFORE a single step
         // is emitted, so nothing half-plans; and only over `wanted`, since an
         // entity already standing as designed occupies its own tile.
+        //
+        // **The character predicate matches whoever chose this anchor.** When
+        // `resolve_site` picked the ground itself (`sited_by_search`,
+        // `Site::Near`/`Site::Anywhere` with nothing to recover), this uses
+        // `siting_occupant` -- the same predicate the search already screened
+        // every candidate ring with -- so a character cannot veto ground the
+        // search chose one line earlier: the defect this module exists to
+        // fix (see `resolve_site`'s own doc). For a caller-chosen `Site::At`
+        // or a recovered anchor, this still uses `placement_occupant` and
+        // still names a standing character, because in both of those cases
+        // the ground was never screened for characters at all -- the caller
+        // needs telling.
         for e in &wanted {
             let world = anchor.add(&e.offset);
             let facing = Direction::from_u8(e.direction).unwrap_or(Direction::North);
-            if let Some(occupant) = ctx.state.placement_occupant(&e.name, &world, facing) {
+            let occupant = if sited_by_search {
+                ctx.state.siting_occupant(&e.name, &world, facing)
+            } else {
+                ctx.state.placement_occupant(&e.name, &world, facing)
+            };
+            if let Some(occupant) = occupant {
                 return Err(PlannerError::BlockGroundOccupied {
                     entity: e.name.clone(),
                     tile: format!("({}, {})", world.x(), world.y()),
@@ -923,6 +970,41 @@ mod tests {
     use super::*;
     use factorio_bot_core::blueprint::{BlueprintEntity, UndergroundHalf};
     use factorio_bot_core::types::Position;
+
+    /// Builds a real blueprint string (version byte, base64, zlib, JSON)
+    /// around a tiny hand-written entity list -- the same shape
+    /// `crates/core/tests/blueprint_decode.rs`'s own `encode_blueprint`
+    /// helper builds. Needed here (rather than reusing one of the fixture
+    /// `.txt` blueprints) because `Goal::Built` takes blueprint TEXT, not a
+    /// `Blueprint` struct, and the siting tests below need a block with NO
+    /// mining drill, so `Site::Anywhere` seeds the search at the world
+    /// origin rather than an ore patch -- see `nearest_ore_seed`'s doc.
+    fn encode_test_blueprint(entities: &[(&str, f64, f64)]) -> String {
+        use base64::Engine;
+        use std::io::Write;
+        let entity_json: Vec<String> = entities
+            .iter()
+            .enumerate()
+            .map(|(i, (name, x, y))| {
+                format!(
+                    r#"{{"entity_number":{},"name":"{name}","position":{{"x":{x},"y":{y}}},"direction":0}}"#,
+                    i + 1
+                )
+            })
+            .collect();
+        let envelope = format!(
+            r#"{{"blueprint":{{"version":1,"entities":[{}]}}}}"#,
+            entity_json.join(",")
+        );
+        let mut encoder =
+            flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder
+            .write_all(envelope.as_bytes())
+            .expect("in-memory zlib write cannot fail");
+        let compressed = encoder.finish().expect("in-memory zlib finish cannot fail");
+        let encoded = base64::engine::general_purpose::STANDARD.encode(compressed);
+        format!("0{encoded}")
+    }
 
     fn at(x: f64) -> BlueprintEntity {
         BlueprintEntity {
@@ -1216,12 +1298,18 @@ mod tests {
         // ... but the caller names a different anchor entirely.
         let site = Site::At(Position::new(0.5, 0.5));
 
-        let resolved = resolve_site(&state, &bp, &site).expect("recovery answers even for At");
+        let (resolved, sited_by_search) =
+            resolve_site(&state, &bp, &site).expect("recovery answers even for At");
         assert_eq!(
             Pos::from(&resolved),
             Pos::from(&Position::new(20.5, 20.5)),
             "the ground outranks the caller's explicit anchor: building at \
              (0.5, 0.5) here would start a second, unrelated furnace line"
+        );
+        assert!(
+            !sited_by_search,
+            "a recovered anchor is a fact about the world, not something \
+             this call's search chose"
         );
     }
 
@@ -1532,7 +1620,7 @@ mod tests {
              search could never have reached it: {seed}"
         );
 
-        let sited = resolve_site(&state, &bp, &Site::Anywhere)
+        let (sited, _) = resolve_site(&state, &bp, &Site::Anywhere)
             .expect("seeding at the ore patch puts the far-away ore within reach");
         let area = state
             .collision_area_facing("electric-mining-drill", &sited, Direction::North)
@@ -1660,7 +1748,7 @@ mod tests {
         let mut state = test_state();
         let site = Site::Anywhere;
 
-        let first = resolve_site(&state, &bp, &site).expect("a first site exists");
+        let (first, _) = resolve_site(&state, &bp, &site).expect("a first site exists");
 
         // Build one entity of the block, as a real run would, then replan.
         let e = &bp.entities[0];
@@ -1681,7 +1769,7 @@ mod tests {
         use crate::ids::BotId;
         state.set_position(BotId(1), Position::new(500.0, 500.0));
 
-        let second = resolve_site(&state, &bp, &site).expect("a second site exists");
+        let (second, _) = resolve_site(&state, &bp, &site).expect("a second site exists");
 
         assert_eq!(
             Pos::from(&first),
@@ -2184,6 +2272,109 @@ mod tests {
         assert!(
             message.contains("character 1") && message.contains("own bots"),
             "the refusal distinguishes a roster bot's body from a rock: {message}"
+        );
+    }
+
+    /// **The regression test for the defect this module exists to fix.**
+    ///
+    /// `Site::Anywhere` seeds the search at the world origin when the block
+    /// has no mining drill of its own (`nearest_ore_seed` returns `None` --
+    /// see its own doc), and that is exactly where a character bot spawns.
+    /// Siting rightly ignores the bot when choosing ground --
+    /// `search_site`'s whole stability argument depends on that -- but the
+    /// pre-check used to re-check the SAME anchor with `placement_occupant`,
+    /// which names a character, and refused the very ground siting had just
+    /// picked one line earlier. Measured live in `run-1788685081-91006`.
+    /// This fails on master with `BlockGroundOccupied` naming "character 1".
+    #[test]
+    fn a_character_at_the_origin_does_not_block_site_anywhere() {
+        use crate::ids::BotId;
+        use factorio_bot_core::test_utils::fixture_world;
+        use factorio_bot_core::types::FactorioPlayer;
+        use std::sync::Arc;
+
+        let blueprint = encode_test_blueprint(&[("stone-furnace", 0.0, 0.0)]);
+
+        let world = fixture_world();
+        world.players.insert(
+            1,
+            FactorioPlayer {
+                player_id: 1,
+                position: Position::new(0.0, 0.0),
+                build_distance: 10,
+                reach_distance: 10,
+                resource_reach_distance: 4.0,
+                ..Default::default()
+            },
+        );
+        let mut ctx = ExpansionCtx::new(
+            PlanState::from_world(Arc::new(world), &[BotId(1)]),
+            BotId(1),
+        );
+
+        let goal = Goal::Built {
+            blueprint,
+            site: Site::Anywhere,
+        };
+        let steps = BuildBlock.expand(&goal, &mut ctx).expect(
+            "a character standing on ground the search itself chose must not \
+             refuse the block -- that is exactly the defect this module fixes",
+        );
+        assert!(
+            !steps.is_empty(),
+            "a fresh block on open ground must actually place something"
+        );
+    }
+
+    /// **Guardrail: the sited path still refuses real ground, not just
+    /// characters.**
+    ///
+    /// Only a character is exempt from the sited-path ground check --
+    /// everything else `siting_occupant` recognises (a real entity, water, a
+    /// refused footprint) must still stop the search cold. A single entity
+    /// whose footprint is deliberately wider than the whole search radius
+    /// stands in for "there is nowhere left to go": if a fix mistakenly
+    /// disabled the ground check altogether whenever the anchor came from
+    /// search, rather than switching which predicate it used, this would
+    /// plan straight through a real obstruction instead of refusing.
+    #[test]
+    fn a_real_entity_still_blocks_the_search_sited_path() {
+        use crate::ids::BotId;
+        use factorio_bot_core::test_utils::fixture_world;
+        use std::sync::Arc;
+
+        let blueprint = encode_test_blueprint(&[("stone-furnace", 0.0, 0.0)]);
+
+        let mut ctx = ExpansionCtx::new(
+            PlanState::from_world(Arc::new(fixture_world()), &[BotId(1)]),
+            BotId(1),
+        );
+        // Wider than `SEARCH_RADIUS` in every direction -- nowhere within
+        // the search bound is left clear, so this stands in for a real,
+        // comprehensive obstruction rather than a single blocked tile the
+        // search could just step around.
+        ctx.state.create_entity(FactorioEntity {
+            name: "an-enormous-obstruction".into(),
+            entity_type: "simple-entity".into(),
+            position: Position::new(0.0, 0.0),
+            bounding_box: Rect::new(
+                &Position::new(-1000.0, -1000.0),
+                &Position::new(1000.0, 1000.0),
+            ),
+            ..Default::default()
+        });
+
+        let goal = Goal::Built {
+            blueprint,
+            site: Site::Anywhere,
+        };
+        let err = BuildBlock.expand(&goal, &mut ctx).expect_err(
+            "a real obstruction covering the whole search radius must still refuse",
+        );
+        assert!(
+            matches!(err, PlannerError::NoSiteFound { .. }),
+            "the sited path must still fail closed on real ground, not plan \
+             through it: {err:?}"
         );
     }
 

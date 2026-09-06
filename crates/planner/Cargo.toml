@@ -19,3 +19,9 @@ serde = { version = "1.0", features = ["derive"] }
 # Only for `tests/enclosure_prevention.rs`, which deserialises the same
 # run-13 fixture JSON `crates/core/tests/enclosure_run13.rs` does.
 serde_json = "1.0"
+# Only for `method::blueprint`'s own tests, to build a real blueprint string
+# (version byte, base64, zlib, JSON) around a tiny hand-written entity list --
+# the same encode helper `crates/core/tests/blueprint_decode.rs` uses, needed
+# here because `Goal::Built` takes blueprint TEXT, not a `Blueprint` struct.
+base64 = "0.23"
+flate2 = "1.0"

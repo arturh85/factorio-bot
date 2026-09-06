@@ -1524,17 +1524,25 @@ mod power_reach_tests {
     use factorio_bot_core::types::FactorioEntity;
     use std::sync::Arc;
 
-    /// A chain of poles from a steam engine to a consumer stops carrying power
-    /// -- **as far as `Condition::Powered` can tell** -- somewhere between 50
-    /// and 100 tiles, whatever the poles do.
+    /// A chain of poles carries power however long it is, and a chain that
+    /// stops carries nothing past the break.
     ///
-    /// Nothing here names 64. The test asserts the *shape* of the limit: near
-    /// works, far does not, and the poles are identical in both. If somebody
-    /// makes the network walk unbounded, the far case starts passing and this
-    /// test says so by failing -- which is the right way round, because that
-    /// change is what would let `method::extract` reach a real oil field.
+    /// **This test used to assert the opposite**, and its failure message said
+    /// so: *"a 150-tile pole chain reads as powered, so `POWER_SEARCH_RADIUS`
+    /// is no longer the ceiling on `method::extract`'s reach -- update the
+    /// module doc's table and the note, this is good news."* It was written to
+    /// pin a limitation and to instruct whoever removed it. That happened on
+    /// 2026-09-06: `PlanState::electric_entities` follows the wire out from
+    /// the consumer instead of searching one disc around it, so the ceiling is
+    /// gone and this test is inverted rather than deleted.
+    ///
+    /// Keeping the shape matters. It still asserts near *and* far with
+    /// identical poles, because a search that walks the wire is only correct
+    /// if it also **refuses** — one that counted any generator on the map
+    /// would pass a "far works" test on its own. The break case is what makes
+    /// this a test of connectivity rather than of optimism.
     #[test]
-    fn a_pole_chain_past_the_power_search_radius_is_not_seen() {
+    fn a_pole_chain_carries_however_long_it_is_but_a_broken_one_does_not() {
         let carries = |span: f64| {
             let world = world_with_oil(OilFixture {
                 wells: true,
@@ -1580,10 +1588,58 @@ mod power_reach_tests {
              measures nothing at all"
         );
         assert!(
-            !carries(150.),
-            "a 150-tile pole chain reads as powered, so `POWER_SEARCH_RADIUS` \
-             is no longer the ceiling on `method::extract`'s reach -- update \
-             the module doc's table and the note, this is good news"
+            carries(150.),
+            "a 150-tile chain of wired poles must carry power: the search \
+             follows the wire, not a radius"
+        );
+        assert!(
+            carries(400.),
+            "and 400 tiles too -- seed 31337's crude oil is 256-384 tiles out, \
+             which is the distance this exists to reach"
+        );
+    }
+
+    /// The other direction, and the one that stops the traversal being a
+    /// licence to count any generator on the map.
+    ///
+    /// Same engine, same consumer, but the pole chain stops a third of the way
+    /// there. Nothing bridges the gap, so nothing carries power.
+    #[test]
+    fn a_chain_that_stops_short_carries_nothing() {
+        let world = world_with_oil(OilFixture {
+            wells: true,
+            categories: true,
+            pumpjack: PumpjackRecipe::LockedBy { researched: true },
+            prerequisite: false,
+        });
+        let mut state = PlanState::from_world(Arc::new(world), &[BotId(1)]).fork();
+        let engine = Position::new(-200.5, 200.5);
+        state.create_entity(FactorioEntity {
+            name: "steam-engine".into(),
+            entity_type: "generator".into(),
+            position: engine.clone(),
+            ..Default::default()
+        });
+        // Poles for the first 50 tiles only; the consumer is at 150.
+        let mut x = engine.x() + 2.5;
+        while x <= engine.x() + 50. {
+            state.create_entity(FactorioEntity {
+                name: POLE.into(),
+                entity_type: "electric-pole".into(),
+                position: Position::new(x, engine.y()),
+                ..Default::default()
+            });
+            x += 6.;
+        }
+        let consumer = Position::new(engine.x() + 150., engine.y());
+        assert!(
+            !Condition::Powered {
+                pos: consumer,
+                entity: "pumpjack".into(),
+                kw: 90.,
+            }
+            .holds(&state, BotId(1)),
+            "the wire stops 100 tiles short, so the consumer is not on the network"
         );
     }
 }
@@ -1640,11 +1696,19 @@ mod extractor_grid_tests {
     /// power, and this exercises it directly because no fixture can reach it
     /// through `expand`.
     ///
-    /// `pole_run` will happily lay poles from an anchor 150 tiles away -- the
-    /// route search only asks whether each tile is free -- and the resulting
-    /// chain is perfectly legal in the game. It is `crate::state`'s
-    /// `POWER_SEARCH_RADIUS` that cannot see the generator at the far end, and
-    /// the scheduler will check the same `Condition::Powered` later, so
+    /// **Distance is no longer the reason, and that is the point of the
+    /// rewrite.** This test used to put the generator 150 tiles away and rely
+    /// on `POWER_SEARCH_RADIUS` being unable to see it. Since
+    /// `PlanState::electric_entities` follows the wire, a 150-tile run of
+    /// poles the plan itself laid *does* carry power, so that construction
+    /// stopped testing anything — it asserted a refusal that had become wrong.
+    ///
+    /// The check it guards is still real, so the cause was replaced rather
+    /// than the test deleted: here the anchor pole is **not wired to the
+    /// generator at all**, 40 tiles from it against a small pole's 7.5 wire
+    /// reach. `pole_run` will still happily lay a legal chain from that anchor
+    /// to the site — the route search only asks whether each tile is free —
+    /// and the scheduler checks the same `Condition::Powered` later, so
     /// emitting the run would put a pumpjack in the plan that nothing could
     /// ever schedule. Refusing here turns that into a named refusal at
     /// expansion time.
@@ -1659,7 +1723,9 @@ mod extractor_grid_tests {
             position: engine.clone(),
             ..Default::default()
         });
-        let anchor = Position::new(engine.x() + 2.5, engine.y());
+        // 40 tiles clear of the engine: far beyond a small pole's 7.5-tile
+        // wire reach, so this anchor is on no network at all.
+        let anchor = Position::new(engine.x() + 40., engine.y());
         trial.create_entity(FactorioEntity {
             name: POLE.into(),
             entity_type: "electric-pole".into(),
@@ -1678,10 +1744,20 @@ mod extractor_grid_tests {
             kw: 90.,
         };
         assert!(
-            calculate_distance(&anchor, &site) > 64.,
-            "control: the anchor must be outside POWER_SEARCH_RADIUS, or this \
-             test is about nothing; it is {} tiles away",
-            calculate_distance(&anchor, &site)
+            calculate_distance(&anchor, &engine) > 7.5,
+            "control: the anchor must be off the generator's network, or this \
+             test is about nothing; it is {} tiles from the engine",
+            calculate_distance(&anchor, &engine)
+        );
+        assert!(
+            !Condition::Powered {
+                pos: anchor.clone(),
+                entity: "pumpjack".into(),
+                kw: 90.,
+            }
+            .holds(&trial, BotId(1)),
+            "control: the anchor itself must be unpowered, or the run would be \
+             right to succeed"
         );
         assert_eq!(
             pole_run(&mut trial, &anchor, &site, &area, &powered, BotId(1))

@@ -1178,15 +1178,35 @@ def delivered_tick_rate(events: list[dict], game_speed: str | None) -> dict:
 
     Intervals shorter than ``MIN_RATE_INTERVAL_MS`` are dropped -- a
     heartbeat 30 ms after a dispatch measures noise, not a rate.
+
+    # The average is the number that hides the case we actually hit
+
+    A run-wide average answers "did this run get its speed" and cannot answer
+    "when did it stop getting it", which is the shape a cargo build in a
+    neighbouring worktree produces: clean, then starved, then clean again.
+    ``run-1788696619-00325`` is exactly that -- 60 tps for its first three
+    minutes, 27-50 tps for the next three and a half, 60 again at the end --
+    and its average is 83% of nominal, which is *above* ``STARVED_RATIO`` and
+    was reported with no flag at all. So every interval is kept here, and the
+    reader is given the profile rather than the mean of it.
+
+    ``boundary`` marks the one interval per batch whose two ends come from
+    different clocks: its tick is the batch's first dispatch and its wall
+    baseline is the batch epoch, which is earlier, so it reads systematically
+    slow. It is kept in the average, exactly as before, and excluded from
+    ``worst`` and from the sag spans -- a systematic bias must not be
+    reported as a sag, which is an accusation about the machine.
     """
-    samples: list[tuple[int, int]] = []  # (ticks, ms) per interval
+    samples: list[dict] = []
     origin: tuple[int, int] | None = None  # (tick, elapsed_ms) of the last point
+    from_beat = False  # was `origin` a heartbeat, or a dispatch?
     for e in events:
         kind = e.get("kind")
         if kind == "plan_created":
             origin = None
         elif kind in ("action_dispatched", "walk_dispatched") and origin is None:
             origin = (int(e.get("tick") or 0), 0)
+            from_beat = False
         elif kind == "batch_progress":
             tick = e.get("tick")
             ms = e.get("elapsed_ms")
@@ -1195,10 +1215,20 @@ def delivered_tick_rate(events: list[dict], game_speed: str | None) -> dict:
             if origin is not None:
                 dt, dms = tick - origin[0], ms - origin[1]
                 if dms >= MIN_RATE_INTERVAL_MS and dt >= 0:
-                    samples.append((dt, dms))
+                    samples.append(
+                        {
+                            "tick_lo": origin[0],
+                            "tick_hi": tick,
+                            "ticks": dt,
+                            "ms": dms,
+                            "tps": dt * 1000 / dms,
+                            "boundary": not from_beat,
+                        }
+                    )
             origin = (tick, ms)
-    ticks = sum(t for t, _ in samples)
-    ms = sum(m for _, m in samples)
+            from_beat = True
+    ticks = sum(s["ticks"] for s in samples)
+    ms = sum(s["ms"] for s in samples)
     delivered = ticks * 1000 / ms if ms else None
     try:
         speed = float(game_speed) if game_speed is not None else None
@@ -1206,6 +1236,46 @@ def delivered_tick_rate(events: list[dict], game_speed: str | None) -> dict:
         speed = None
     nominal = TICKS_PER_SECOND * speed if speed else None
     ratio = (delivered / nominal) if (delivered is not None and nominal) else None
+
+    judged = [s for s in samples if not s["boundary"]]
+    if nominal:
+        for s in samples:
+            s["ratio"] = s["tps"] / nominal
+        for s in judged:
+            s["sagged"] = s["ratio"] < STARVED_RATIO
+    worst = min(judged, key=lambda s: s["tps"]) if (judged and nominal) else None
+    sagging = [s for s in judged if s.get("sagged")]
+    judged_ms = sum(s["ms"] for s in judged)
+    sag_ms = sum(s["ms"] for s in sagging)
+
+    # Contiguous runs of sagging intervals, in the order they happened: this
+    # is what turns "8 of 14 intervals were slow" into "it was slow from 3:00
+    # to 6:30", which is the sentence a reader can act on.
+    spans: list[dict] = []
+    for s in judged:
+        if not s.get("sagged"):
+            spans.append({})  # a clean interval breaks the run
+            continue
+        if spans and spans[-1]:
+            span = spans[-1]
+            span["tick_hi"] = s["tick_hi"]
+            span["ticks"] += s["ticks"]
+            span["ms"] += s["ms"]
+            span["intervals"] += 1
+        else:
+            spans.append(
+                {
+                    "tick_lo": s["tick_lo"],
+                    "tick_hi": s["tick_hi"],
+                    "ticks": s["ticks"],
+                    "ms": s["ms"],
+                    "intervals": 1,
+                }
+            )
+    sag_spans = [s for s in spans if s]
+    for span in sag_spans:
+        span["tps"] = span["ticks"] * 1000 / span["ms"] if span["ms"] else None
+
     return {
         "intervals": len(samples),
         "ticks": ticks,
@@ -1213,8 +1283,87 @@ def delivered_tick_rate(events: list[dict], game_speed: str | None) -> dict:
         "delivered_tps": delivered,
         "nominal_tps": nominal,
         "ratio": ratio,
+        # The average fell short. Unchanged in meaning, so every reader that
+        # already keys on it keeps the answer it had.
         "starved": ratio is not None and ratio < STARVED_RATIO,
+        "detail": samples,
+        "judged_ms": judged_ms,
+        "worst": worst,
+        "sag_intervals": len(sagging),
+        "sag_ms": sag_ms,
+        "sag_share": (sag_ms / judged_ms) if judged_ms else None,
+        "sag_spans": sag_spans,
+        # The run did not get the speed it asked for *at some point*, which is
+        # a strictly weaker claim than `starved` and a strictly more useful
+        # one: a run can be clean on average and still have executed half its
+        # plan at half speed.
+        "sagged": bool(sagging),
     }
+
+
+def tick_rate_profile(rate: dict, tick_lo: int) -> list[str]:
+    """The delivered tick rate *over time*, not as one average.
+
+    Says something in both directions on purpose. A run that held its speed
+    gets one line saying so, because "no warning" and "nothing was checked"
+    are the pair this project has been bitten by four times; a run that did
+    not gets the span, the worst interval and the whole profile, because the
+    only reason to raise ``--game-speed`` is wall-clock savings and a reader
+    deciding whether 10x paid for itself needs to know which parts of the run
+    were even delivered at 10x.
+
+    ``*`` marks the batch-boundary interval (see ``delivered_tick_rate``):
+    kept in the profile because hiding a measurement is worse than labelling
+    it, and never judged.
+    """
+    detail = rate.get("detail") or []
+    nominal = rate.get("nominal_tps")
+    if not detail or not nominal:
+        return []
+    judged = [s for s in detail if not s["boundary"]]
+    if not judged:
+        return []
+
+    def at(tick: int) -> str:
+        return mmss(tick - tick_lo)
+
+    lines: list[str] = []
+    if not rate.get("sagged"):
+        lowest = min(judged, key=lambda s: s["tps"])
+        lines.append(
+            f"    speed held: every one of {len(judged)} judged interval(s) at or above "
+            f"{STARVED_RATIO * 100:.0f}% of nominal, lowest {lowest['tps']:.0f} tps "
+            f"({lowest['ratio'] * 100:.0f}%) at {at(lowest['tick_lo'])}"
+        )
+        return lines
+
+    worst = rate.get("worst") or {}
+    share = rate.get("sag_share")
+    lines.append(
+        f"    ! it did NOT hold that speed throughout: {rate['sag_intervals']} of "
+        f"{len(judged)} judged interval(s) under {STARVED_RATIO * 100:.0f}% of nominal, "
+        f"{rate['sag_ms'] / 1000:.0f} s"
+        + (f" = {share * 100:.0f}% of the measured time" if share else "")
+    )
+    if worst:
+        lines.append(
+            f"      worst {worst['tps']:.0f} tps ({worst['ratio'] * 100:.0f}% of nominal) "
+            f"over {at(worst['tick_lo'])} -> {at(worst['tick_hi'])} game time"
+        )
+    for span in rate.get("sag_spans") or []:
+        lines.append(
+            f"      sagged {at(span['tick_lo'])} -> {at(span['tick_hi'])} game time: "
+            f"{span['ms'] / 1000:.0f} s of wall at {span['tps']:.0f} tps average "
+            f"({span['intervals']} interval(s))"
+        )
+    lines.append("      profile (game time -> tps, * = batch-boundary interval, not judged):")
+    cells = [
+        f"{at(s['tick_lo'])} {s['tps']:.0f}{'*' if s['boundary'] else ''}"
+        for s in detail
+    ]
+    for i in range(0, len(cells), 6):
+        lines.append("        " + "  ".join(cells[i:i + 6]))
+    return lines
 
 
 def planning_rows(events: list[dict]) -> list[dict]:
@@ -4125,6 +4274,8 @@ def report(a: dict, out=sys.stdout, top: int = 12) -> None:
         p(f"  delivered tick rate: {rate['delivered_tps']:.0f} tps{against} over "
           f"{rate['intervals']} heartbeat interval(s), {rate['ticks']} ticks in "
           f"{rate['ms'] / 1000:.0f} s{flag}")
+        for line in tick_rate_profile(rate, a.get("tick_lo") or 0):
+            p(line)
     planning = a.get("planning") or []
     if planning:
         total_ms = sum(r.get("planning_ms") or 0 for r in planning)
@@ -4648,6 +4799,16 @@ def summary_line(a: dict) -> str:
         parts.append(f"deaths={len(d['deaths'])}")
     if d.get("roster_changes"):
         parts.append("!roster-changed")
+    # The delivered tick rate in the one-line form too, and in both of its
+    # forms: `!starved` is the run-wide average falling short, `!sagged` is a
+    # run whose average is fine and which spent part of itself slow. The
+    # second one is invisible in every other column -- every tick-denominated
+    # number in this listing reads the same either way.
+    rate = a.get("tick_rate") or {}
+    if rate.get("starved"):
+        parts.append(f"!starved={rate['ratio'] * 100:.0f}%")
+    elif rate.get("sagged"):
+        parts.append(f"!sagged={(rate.get('sag_share') or 0) * 100:.0f}%")
     v = a.get("vision") or {}
     if not v.get("present"):
         parts.append("vision=?")

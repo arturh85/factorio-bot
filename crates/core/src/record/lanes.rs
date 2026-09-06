@@ -180,6 +180,7 @@ mod tests {
                 bot,
                 action: action.into(),
                 target: None,
+                delivery: None,
             },
         )
     }

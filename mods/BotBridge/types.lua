@@ -536,6 +536,56 @@ function serialize_entity_prototype(entity)
     -- for a burner drill it genuinely is, because its area is its footprint.
     ok, val = pcall(function() return entity.mining_drill_radius end)
     if ok then record.mining_drill_radius = val end
+    -- BEACON AND POLE GEOMETRY. `FactorioEntityPrototype` carried nothing
+    -- electrical at all, which is why `crates/planner/src/method/power.rs`
+    -- writes `pole_supply_half_extent` out by hand as a table of vanilla
+    -- names and says in its own doc that sending this field is the follow-up
+    -- that deletes it. Two sessions were blocked on beacon spacing and both
+    -- correctly refused to invent a number.
+    --
+    -- **`get_supply_area_distance()` is a METHOD, not an attribute.** There is
+    -- no `supply_area_distance` on `LuaEntityPrototype` in 2.1.17 at all
+    -- (checked against `runtime-api.json`, not recalled) -- the same shape
+    -- that made `crafting_speed` arrive nil for all 1028 prototypes above: the
+    -- attribute read raises, `pcall` swallows it, and the field is simply
+    -- absent with nothing to say it should not be. No argument means normal
+    -- quality, which is what the planner plans for.
+    --
+    -- It answers for an `electric-pole` as well as a `beacon` -- half the side
+    -- of the square it supplies, so 2.5 for a small pole's 5x5.
+    ok, val = pcall(function() return entity.get_supply_area_distance() end)
+    if ok then record.supply_area_distance = val end
+    -- Beacon only: the fraction of a module's effect the receiver gets.
+    ok, val = pcall(function() return entity.distribution_effectivity end)
+    if ok then record.distribution_effectivity = val end
+    -- **Beacon effectiveness is NOT a single scalar in 2.0.** `profile` is an
+    -- array of multipliers indexed by how many beacons reach one receiver, so
+    -- the second beacon on a machine is worth a different amount from the
+    -- first. Sending only `distribution_effectivity` would let a caller
+    -- compute a per-beacon number that is right for exactly one beacon count
+    -- and silently wrong for every other, which is the shape of defect this
+    -- field exists to prevent rather than create.
+    --
+    -- Keyed `beacon_profile`, not `profile`: bare `profile` on a struct that
+    -- describes every prototype in the game says nothing about what it
+    -- profiles. `FactorioEntityPrototype` reads the same spelling -- a name
+    -- that matches nothing on the Rust struct is dropped by serde SILENTLY,
+    -- which has happened twice in this file (`pickupPosition`,
+    -- `belt_to_ground_type`), so the pairing is pinned by a test that goes the
+    -- whole way into the struct.
+    ok, val = pcall(function()
+        local profile = entity.profile
+        if profile == nil then return nil end
+        local multipliers = {}
+        for _, multiplier in ipairs(profile) do
+            table.insert(multipliers, multiplier)
+        end
+        -- nil rather than `{}` so an empty profile does not arrive as an empty
+        -- *map* -- `helpers.table_to_json` renders an empty Lua table as `{}`.
+        if #multipliers == 0 then return nil end
+        return multipliers
+    end)
+    if ok then record.beacon_profile = val end
     ok, val = pcall(function() return entity.resource_category end)
     if ok then record.resource_category = val end
     ok, val = pcall(function()

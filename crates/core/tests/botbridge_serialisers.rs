@@ -1197,3 +1197,155 @@ fn a_lab_sends_the_science_it_is_holding() {
         "whatever the stub was told to hold"
     );
 }
+
+// --------------------------------------------------------------------------
+// Beacon geometry: the numbers a block layout needs before it reserves ground.
+// --------------------------------------------------------------------------
+
+/// A `LuaEntityPrototype` for a beacon, shaped the way 2.1.17 really answers.
+///
+/// The two things this fixture is *about* are both easy to get wrong from
+/// memory, so both are written the way `runtime-api.json` describes them
+/// rather than the way the older API did:
+///
+///  - **`get_supply_area_distance()` is a method** and there is no
+///    `supply_area_distance` attribute at all, so this table has only the
+///    method. A serialiser reading the attribute gets nil, its `pcall`
+///    swallows the nothing, and the field goes missing in silence -- which is
+///    exactly what happened to `crafting_speed` on 1028 prototypes.
+///  - **`profile` is an ARRAY**, one multiplier per beacon count.
+fn beacon_prototype(lua: &Lua) -> Table {
+    let point = |x: f64, y: f64| {
+        let table = lua.create_table().expect("table");
+        table.set("x", x).expect("set");
+        table.set("y", y).expect("set");
+        table
+    };
+    let collision_box = lua.create_table().expect("table");
+    collision_box
+        .set("left_top", point(-1.2, -1.2))
+        .expect("set");
+    collision_box
+        .set("right_bottom", point(1.2, 1.2))
+        .expect("set");
+
+    let entity = lua.create_table().expect("table");
+    entity.set("name", "beacon").expect("set");
+    entity.set("type", "beacon").expect("set");
+    entity.set("collision_box", collision_box).expect("set");
+    entity
+        .set(
+            "get_supply_area_distance",
+            lua.create_function(|_, ()| Ok(1.5)).expect("function"),
+        )
+        .expect("set");
+    entity.set("distribution_effectivity", 1.5).expect("set");
+    let profile = lua.create_table().expect("table");
+    for (i, multiplier) in [1.0f64, 0.7, 0.55, 0.45].into_iter().enumerate() {
+        profile.set(i + 1, multiplier).expect("set");
+    }
+    entity.set("profile", profile).expect("set");
+    entity
+}
+
+fn prototype_through_serde(
+    lua: &Lua,
+    entity: Table,
+) -> factorio_bot_core::types::FactorioEntityPrototype {
+    let out = call(lua, "serialize_entity_prototype", entity);
+    let json: serde_json::Value = lua
+        .from_value(Value::Table(out))
+        .expect("the serialised prototype converts to json");
+    serde_json::from_value(json.clone()).unwrap_or_else(|err| panic!("{err} in {json}"))
+}
+
+/// `FactorioEntityPrototype` carried nothing electrical, so a block layout had
+/// no way to ask how far a beacon reaches or what it is worth --
+/// `crates/planner/src/method/power.rs` writes `pole_supply_half_extent` out
+/// as a hand-kept table of vanilla names for the same reason, and says in its
+/// own doc that sending this is the follow-up that deletes it. Picking a
+/// spacing from memory instead is the hard-coded-rate defect in another hat.
+///
+/// Goes the whole way into the struct rather than checking the Lua table,
+/// because a correctly spelled key can still reach no field: serde drops an
+/// unrecognised one in silence, and this file already records two live bugs of
+/// exactly that shape (`pickupPosition`, `belt_to_ground_type`).
+#[test]
+fn a_serialised_beacon_prototype_carries_its_geometry() {
+    let lua = botbridge_types();
+    let beacon = prototype_through_serde(&lua, beacon_prototype(&lua));
+
+    assert_eq!(
+        beacon.supply_area_distance,
+        Some(1.5),
+        "half the side of the square the beacon reaches -- read through \
+         get_supply_area_distance(), which is a method and has no attribute",
+    );
+    assert_eq!(beacon.distribution_effectivity, Some(1.5));
+    assert_eq!(
+        beacon.beacon_profile,
+        Some(vec![1.0, 0.7, 0.55, 0.45]),
+        "the profile is per BEACON COUNT: one number cannot express it, and a \
+         caller given only distribution_effectivity would compute a value \
+         right for exactly one beacon and silently wrong for the rest",
+    );
+}
+
+/// The other half of the distinction. A stone furnace has no supply area, no
+/// distribution effectivity and no profile, and all three must arrive `None` --
+/// not `Some(0.0)`, which would claim a beacon that reaches nowhere, and not
+/// an empty list, which would claim a profile with no entries.
+#[test]
+fn a_prototype_that_is_not_a_beacon_says_nothing_about_beacons() {
+    let lua = botbridge_types();
+    let point = |x: f64, y: f64| {
+        let table = lua.create_table().expect("table");
+        table.set("x", x).expect("set");
+        table.set("y", y).expect("set");
+        table
+    };
+    let collision_box = lua.create_table().expect("table");
+    collision_box
+        .set("left_top", point(-0.8, -0.8))
+        .expect("set");
+    collision_box
+        .set("right_bottom", point(0.8, 0.8))
+        .expect("set");
+    let furnace = lua.create_table().expect("table");
+    furnace.set("name", "stone-furnace").expect("set");
+    furnace.set("type", "furnace").expect("set");
+    furnace.set("collision_box", collision_box).expect("set");
+
+    let prototype = prototype_through_serde(&lua, furnace);
+    assert_eq!(prototype.supply_area_distance, None);
+    assert_eq!(prototype.distribution_effectivity, None);
+    assert_eq!(prototype.beacon_profile, None);
+}
+
+/// **The trap this fixture exists to hold shut.** A serialiser that reads
+/// `entity.supply_area_distance` -- the pre-2.0 attribute, which 2.1.17 does
+/// not have -- finds nothing on a real beacon and reports `None`, and the
+/// `pcall` around every prototype read means it does so without an error
+/// anywhere. So a beacon whose ONLY route to the number is the method must
+/// still answer; if this ever fails, the read went back to the attribute.
+#[test]
+fn the_supply_area_comes_from_the_method_and_not_the_attribute() {
+    let lua = botbridge_types();
+    let beacon = beacon_prototype(&lua);
+    // A beacon exactly as the live API presents it: the attribute is absent
+    // and only the method answers.
+    assert!(
+        matches!(
+            beacon
+                .get::<Value>("supply_area_distance")
+                .expect("attribute"),
+            Value::Nil
+        ),
+        "2.1.17 has no such attribute; a fixture that added one would make \
+         the attribute read pass and the live game fail",
+    );
+    assert_eq!(
+        prototype_through_serde(&lua, beacon).supply_area_distance,
+        Some(1.5),
+    );
+}

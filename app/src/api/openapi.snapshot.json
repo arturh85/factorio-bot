@@ -1780,6 +1780,17 @@
       },
       "FactorioEntityPrototype": {
         "properties": {
+          "beacon_profile": {
+            "description": "The beacon's `profile`: an extra multiplier applied to what a receiver\ngets, **indexed by how many beacons reach that receiver**. Factorio 2.0\nadded it, and it is the reason beacon effect is not a single scalar:\nthe second beacon on a machine is worth a different amount from the\nfirst.\n\nKept under a name that says what it profiles. `LuaEntityPrototype`\ncalls it `profile`, which on a struct describing every prototype in the\ngame says nothing; the mod emits `beacon_profile` to match, and\n`a_serialised_beacon_prototype_carries_its_geometry` pins the pairing,\nbecause serde drops an unrecognised key in silence and this repo has\npaid for that twice.",
+            "items": {
+              "format": "double",
+              "type": "number"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "collision_box": {
             "$ref": "#/components/schemas/Rect"
           },
@@ -1793,6 +1804,14 @@
             ]
           },
           "crafting_speed": {
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "distribution_effectivity": {
+            "description": "A **beacon's** `distribution_effectivity`: the fraction of a module's\neffect a receiver in range actually gets. `None` for anything that is\nnot a beacon.\n\nNot sufficient on its own -- see [`Self::beacon_profile`], which scales\nit by how many beacons reach the same machine.",
             "format": "double",
             "type": [
               "number",
@@ -1879,6 +1898,14 @@
             "description": "A `resource` prototype's category -- `basic-solid`, `basic-fluid`,\n`hard-solid` -- named `category` at data stage and `resource_category`\nat runtime. This is the discriminator the game itself uses: a character\nor a drill mines a resource iff the category is in its own\n`resource_categories`.",
             "type": [
               "string",
+              "null"
+            ]
+          },
+          "supply_area_distance": {
+            "description": "Half the side of the square this **electric pole or beacon** supplies,\nso `2.5` for a `small-electric-pole`'s 5x5. `LuaEntityPrototype`'s\nsubclasses for it are exactly `ElectricPole` and `Beacon`.\n\n**`None` is \"no supply area\", never zero.** A furnace has none; a\nbeacon with a zero one would be `Some(0.0)`, and a caller that wants to\nknow whether beacon ground is worth reserving must be able to tell\nthose apart. Every dump and snapshot written before this field existed\nalso reads `None`, i.e. \"the sender did not say\".\n\n# It is a method on the runtime API, and that is not a detail\n\nThere is no `supply_area_distance` **attribute** in 2.1.17 --\n`get_supply_area_distance(quality)` is the only way to it. Reading the\nattribute raises, the mod's `pcall` swallows it, and the field arrives\n`None` with nothing anywhere saying it should not have. That is exactly\nhow [`Self::crafting_speed`] arrived nil for all 1028 prototypes of a\nlive game while `mining_speed`, still an attribute, arrived fine.\n\n# What it is for\n\n`crates/planner/src/method/power.rs` hard-codes\n`pole_supply_half_extent` as a table of vanilla pole names, and says in\nits own doc that sending this field is the follow-up that deletes it.\n**Nothing reads this yet** -- carrying the datum and consuming it are\ntwo changes, and the second one moves plans.",
+            "format": "double",
+            "type": [
+              "number",
               "null"
             ]
           }

@@ -14,7 +14,11 @@ use miette::Result;
 
 pub fn entity_graph_from(entities: Vec<FactorioEntity>) -> Result<EntityGraph> {
     let prototypes = fixture_entity_prototypes();
-    let graph = EntityGraph::new(Arc::new(prototypes), Arc::new(DashMap::new()));
+    // The captured recipe table, not an empty one. `FlowGraph` derives every
+    // smelting and assembling rate from it, so a graph built with no recipes
+    // reports no output from any machine -- which is a fixture disagreeing
+    // with the game, not with the code.
+    let graph = EntityGraph::new(Arc::new(prototypes), Arc::new(fixture_recipes()));
     graph.add(entities, None)?;
     graph.connect()?;
     Ok(graph)

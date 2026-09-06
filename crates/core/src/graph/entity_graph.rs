@@ -26,6 +26,7 @@ use std::fmt;
 use std::ops::Deref;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 use tracing::{error, warn};
 
@@ -145,6 +146,31 @@ pub fn radius_from_origin(position: &Position) -> f64 {
 }
 
 pub struct EntityGraph {
+    /// Bumped once by every method that changes what this graph says about the
+    /// world: [`EntityGraph::add`], [`EntityGraph::remove`],
+    /// [`EntityGraph::connect`] and [`EntityGraph::set_recipe`].
+    /// [`EntityGraph::add_blueprint_entities`] bumps it through `add`.
+    ///
+    /// It exists for [`crate::graph::flow_graph::FlowGraph`], which is built
+    /// *from* this graph and has no other way to learn that its answer has
+    /// gone stale. Before it existed, the flow graph was walked twice in the
+    /// life of a world -- at `initial discovery done` and on a `--connect`
+    /// snapshot -- and never again, so every machine a run built was invisible
+    /// to it and the first reader would have got the world as at tick 0, with
+    /// no error and no warning. See
+    /// `docs/superpowers/notes/2026-09-06-the-flow-graph-has-no-caller-and-no-refresh.md`.
+    ///
+    /// It counts **mutations, not versions of the content**: a mutation that
+    /// changes nothing still bumps it, so a reader may rebuild for nothing.
+    /// That direction is the safe one -- the other loses correctness -- and a
+    /// rebuild is cheap, because the flow walk starts only from offshore pumps
+    /// and drills standing on ore.
+    ///
+    /// Not serialised. A graph loaded from a snapshot starts at 0, and
+    /// `FlowGraph`'s own counter starts at a sentinel no generation can equal,
+    /// so the first read after a load rebuilds rather than trusting whatever
+    /// was cached.
+    generation: AtomicU64,
     entity_graph: RwLock<EntityGraphInner>,
     blocked_tree: RwLock<BlockedQuadTree>,
     entity_tree: RwLock<EntityQuadTree>,
@@ -291,6 +317,7 @@ impl EntityGraph {
         EntityGraph {
             entity_prototypes,
             recipes,
+            generation: AtomicU64::new(0),
             entity_graph: RwLock::new(EntityGraphInner::new()),
             entity_tree: RwLock::new(QuadTree::new(max_area, false, 32, 128, 128, 8)),
             blocked_tree: RwLock::new(QuadTree::new(max_area, true, 8, 64, 1024, 8)),
@@ -302,6 +329,17 @@ impl EntityGraph {
             threats: DashMap::new(),
         }
     }
+    /// How many times this graph has been mutated. See [`EntityGraph`]'s
+    /// `generation` field for what it is for and what it does *not* promise.
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+
+    /// Called by every mutating method, at the point the mutation is complete.
+    fn bump_generation(&self) {
+        self.generation.fetch_add(1, Ordering::AcqRel);
+    }
+
     pub fn inner_graph(&self) -> RwLockReadGuard<'_, EntityGraphInner> {
         self.entity_graph.read()
     }
@@ -1446,6 +1484,9 @@ impl EntityGraph {
                 }
             }
         }
+        // The mutation is complete: anything built from this graph is now
+        // one generation behind. See `generation`.
+        self.bump_generation();
         Ok(())
     }
 
@@ -1759,6 +1800,9 @@ impl EntityGraph {
             tiles.remove(&(&entity.position).into());
         }
 
+        // The mutation is complete: anything built from this graph is now
+        // one generation behind. See `generation`.
+        self.bump_generation();
         Ok(())
     }
 
@@ -2045,6 +2089,9 @@ impl EntityGraph {
         //     inner.node_indices().count(),
         //     started.elapsed()
         // );
+        // The mutation is complete: anything built from this graph is now
+        // one generation behind. See `generation`.
+        self.bump_generation();
         Ok(())
     }
     pub fn entity_by_id(&self, id: ItemId) -> Option<FactorioEntity> {
@@ -2080,13 +2127,21 @@ impl EntityGraph {
             return false;
         };
         let mut tree = self.entity_tree.write();
-        match tree.get_mut(id) {
+        let set = match tree.get_mut(id) {
             Some(entity) => {
                 entity.recipe = Some(recipe.to_string());
                 true
             }
             None => false,
+        };
+        drop(tree);
+        if set {
+            // A recipe is what an assembling machine's flow edge is computed
+            // from, so this changes what the flow graph says exactly as a
+            // placement does.
+            self.bump_generation();
         }
+        set
     }
 
     /// [`node_at`] one offset step away along `direction`.
@@ -2411,6 +2466,11 @@ impl<'de> Deserialize<'de> for EntityGraph {
                 let threats = tile_maps_from(threats.unwrap_or_default());
 
                 Ok(EntityGraph {
+                    // Not a serialised field: a loaded graph is generation 0
+                    // and every `FlowGraph` reading it rebuilds on its first
+                    // read, because `FlowGraph`'s own counter starts at a
+                    // sentinel no generation can equal.
+                    generation: AtomicU64::new(0),
                     entity_graph: RwLock::new(entity_graph),
                     blocked_tree: RwLock::new(blocked_tree),
                     entity_tree: RwLock::new(entity_tree),
@@ -2446,6 +2506,7 @@ impl<'de> Deserialize<'de> for EntityGraph {
 impl Clone for EntityGraph {
     fn clone(&self) -> Self {
         EntityGraph {
+            generation: AtomicU64::new(self.generation()),
             entity_graph: RwLock::new(self.entity_graph.read().clone()),
             blocked_tree: RwLock::new(self.blocked_tree.read().clone()),
             entity_tree: RwLock::new(self.entity_tree.read().clone()),
@@ -2461,6 +2522,7 @@ impl Clone for EntityGraph {
     }
 
     fn clone_from(&mut self, source: &Self) {
+        self.generation = AtomicU64::new(source.generation());
         self.entity_graph = RwLock::new(source.entity_graph.read().clone());
         self.blocked_tree = RwLock::new(source.blocked_tree.read().clone());
         self.entity_tree = RwLock::new(source.entity_tree.read().clone());

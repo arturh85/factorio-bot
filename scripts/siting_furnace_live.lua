@@ -391,7 +391,14 @@ if n_enclosures > 0 then print("WALLED IN: see record.enclosures() above") end
 
 record.milestone_started(1, string.format(
   "FurnaceLine (179 entities) built at self-sited anchor (%.1f,%.1f)", anchor.x, anchor.y))
-if obs.done and (obs.failed or 0) == 0 and (obs.lost or 0) == 0 then
+-- NOTE (fixed after the first live run misreported this): `obs.done` alone
+-- does NOT mean the plan finished -- the executor can return `done=true`
+-- with `pending > 0` when it decides no further progress is possible (e.g.
+-- every remaining step belongs to a bot whose only path is permanently
+-- blocked). The first run here recorded a false "satisfied" at 89/179
+-- because this check ignored `obs.pending`. Require pending==0 AND every
+-- planned placement actually matched, not just failed==0/lost==0.
+if obs.done and (obs.failed or 0) == 0 and (obs.lost or 0) == 0 and (obs.pending or 0) == 0 then
   record.milestone_satisfied(1, 1, "plan_empty")
 else
   record.milestone_stuck(1, obs.done and "stuck" or "exhausted", obs.first_error, nil)

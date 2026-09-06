@@ -68,9 +68,11 @@
 //!
 //! Between that supply and the well there may be a gap, and on a real map
 //! there usually is: a well charted 300 tiles out is nowhere near a lake, and
-//! `method::power` sites its plant at the water because water is the one input
-//! that cannot be moved. So this lays a **straight run of small electric
-//! poles** from the supplying pole to a pole covering the extractor. It is
+//! `method::power` sites its plant **at** the water. (Its own module doc
+//! retracts the reason this line used to give -- "water is the one input that
+//! cannot be moved". Water moves, through pipes; siting at the shore is what
+//! that module does today, not something physics forces.) So this lays a
+//! **straight run of small electric poles** from the supplying pole to a pole covering the extractor. It is
 //! deliberately the dumbest router that can be right:
 //!
 //! * the spacing is [`POLE_STEP`], comfortably inside a small pole's wire
@@ -88,35 +90,44 @@
 //! scope line `method::connect` draws for underground belts, and for the same
 //! reason -- a half-built power line is worse than none.
 //!
-//! # The ceiling, measured: a well more than ~64 tiles from generation refuses
+//! # What bounds the reach -- and the ~64-tile ceiling that no longer does
 //!
-//! **`crate::state`'s `POWER_SEARCH_RADIUS` is 64 tiles**, and it bounds the
-//! entities `PlanState::electric_supply_kw` will look at when answering
-//! `Condition::Powered` for a consumer. So a pole run longer than that carries
-//! power the *model* cannot see: the generator at the far end is outside the
-//! window, the condition answers "not powered", and this method refuses --
-//! correctly, because the scheduler checks the same condition and would refuse
-//! the placement anyway.
+//! **The bill is the bound.** A run of more than [`MAX_POLE_RUN`] poles -- 64,
+//! about 380 tiles at [`POLE_STEP`] -- is
+//! [`PlannerError::ExtractionNotModelled`], and short of that a run refuses
+//! only when the ground refuses a pole or when no supply can be reached at
+//! all. Seed 31337's crude oil is charted at 256-384 tiles, which is inside
+//! that.
 //!
-//! It is a bound rather than a physical limit (its own doc says so: there is no
-//! "every entity" query on `EntityGraph`, and an unbounded scan per condition
-//! check would be a full pass over the map), but it is binding here, and it is
-//! the reason this method's reach is ~64 tiles rather than
-//! [`MAX_POLE_RUN`]'s ~380.
+//! **This section used to say the opposite, and it was wrong for a day.** It
+//! read *"a well more than ~64 tiles from generation refuses"*, from
+//! `crate::state`'s `POWER_SEARCH_RADIUS` being 64 tiles and
+//! being the *entire* extent of `PlanState::electric_supply_kw`'s search: a
+//! longer pole run carried power the model could not see, the condition
+//! answered "not powered", and this method refused. That was true when it was
+//! written. `PlanState::electric_entities` now **follows the wire** -- one
+//! `POWER_SEARCH_RADIUS` disc as a seed, then pole-by-pole expansion with no
+//! hop limit -- so a generator any number of poles away is found, and the
+//! radius bounds the seed disc rather than the reach. The constant's own doc
+//! carries that history, including why *raising* it was the obvious fix and
+//! the wrong one.
 //!
-//! Measured offline on the seed-31337 dump with a crude-oil patch charted into
-//! it (see `docs/superpowers/notes/2026-09-06-a-pumpjack-on-a-well.md`):
+//! `a_pole_chain_carries_however_long_it_is_but_a_broken_one_does_not`
+//! (`power_reach_tests`, below) is the pin, against `PlanState` rather than
+//! against this module: it asserts a long chain carries **and** that a broken
+//! one does not, so a search that simply counted every generator on the map
+//! would fail it.
 //!
-//! | well | plant pole to well | result |
-//! |---|---:|---|
-//! | `[80.5, -39.5]` | ~52 tiles | **plans**: 10 poles, pumpjack placed |
-//! | `[150.5, 40.5]` | ~121 tiles | refuses, `ExtractionNotModelled` |
-//! | `[300.5, 100.5]` | ~281 tiles | refuses, `PowerPlantNeedsWater` (no lake) |
-//!
-//! `a_pole_chain_past_the_power_search_radius_is_not_seen` pins the fact
-//! itself, against `PlanState` rather than against this module, so it moves
-//! when that constant does. **Raising it is a change to `crate::state` and is
-//! not this module's to make.**
+//! **The table that stood here was measured before that change and has not
+//! been redone** -- offline on the seed-31337 dump with a crude-oil patch
+//! charted into it (`docs/superpowers/notes/2026-09-06-a-pumpjack-on-a-well.md`),
+//! and it read: ~52 tiles plans with 10 poles; ~121 tiles refuses
+//! `ExtractionNotModelled`; ~281 tiles refuses `PowerPlantNeedsWater`. Rows two
+//! and three are **history, not behaviour**: the first was the ceiling that is
+//! gone, and the third predates `method::power`'s world-anchored retry, from
+//! which the origin does see a lake. Redoing it costs one `tools/inject_oil.py`
+//! dump and three `factorio-bot plan --world` runs; until someone does, quote
+//! it as a measurement of the old build.
 
 use crate::action::{Action, ActionKind, Actor, Condition, Effect};
 use crate::error::PlannerError;
@@ -1509,14 +1520,19 @@ mod extract_siting_tests {
 
 #[cfg(test)]
 mod power_reach_tests {
-    //! The ceiling this method's reach is set by, pinned against
-    //! [`crate::state::PlanState`] rather than against `method::extract`.
+    //! What a pole run reaches, pinned against [`crate::state::PlanState`]
+    //! rather than against `method::extract`.
     //!
     //! It is here because it is what decides whether a charted well can be
     //! powered at all, and because nothing else in the crate states it as a
     //! test -- `POWER_SEARCH_RADIUS`'s own doc argues for it as a cost bound
-    //! and does not say what it costs. What it costs is this: a pole run is
-    //! useless past it, however many poles are in it.
+    //! and does not say what it costs.
+    //!
+    //! **This header used to answer that with "a pole run is useless past it,
+    //! however many poles are in it", five lines above the test that says the
+    //! opposite.** Since `PlanState::electric_entities` began following the
+    //! wire, what it costs is a seed disc and nothing else: a chain carries as
+    //! far as it is unbroken.
 
     use super::*;
     use crate::ids::BotId;

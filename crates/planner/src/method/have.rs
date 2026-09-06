@@ -13423,7 +13423,8 @@ mod tests {
     /// patch.
     ///
     /// This test used to assert the opposite, under the name
-    /// `a_stone_goal_still_mines_the_patch_rather_than_smashing_a_rock`, and
+    /// `a_stone_goal_still_mines_the_patch_rather_than_smashing_a_rock` (doclint-allow:
+    /// the retired name is the point of the sentence), and
     /// called the ordering that produced it "the whole of the guard that keeps
     /// this method out of every existing plan". The guard was real; the
     /// outcome it defended was not worth defending. Hand mining is

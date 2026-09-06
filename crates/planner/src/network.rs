@@ -1096,8 +1096,8 @@ mod tests {
         // re-derives it — so this edge must stand even though the two
         // actions are in different chains. This is the regression this
         // task's original, too-broad exclusion would have produced (see
-        // `inference_does_not_link_across_chains` for the HasItem case that
-        // *should* drop).
+        // `inference_still_drops_a_role_scoped_item_condition_across_chains`
+        // for the HasItem case that *should* drop).
         let mut id_gen = ActionIdGen::new();
         let mut net = ActionNetwork::new();
         let pos = Position::new(5., 5.);

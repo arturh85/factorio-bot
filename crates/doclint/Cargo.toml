@@ -1,0 +1,15 @@
+[package]
+name = "factorio-bot-doclint"
+version = "0.2.4-dev"
+authors = ["Artur Hallmann <arturh@arturh.de>"]
+edition = "2024"
+description = "A name a comment cites must exist: the lint that makes a documentation claim testable"
+
+[package.metadata.release]
+tag = false
+push = false
+publish = false
+
+[dependencies]
+
+[dev-dependencies]

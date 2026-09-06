@@ -810,7 +810,8 @@ mod tests {
         );
     }
 
-    /// Renamed from `a_write_path_may_not_climb_out_and_back_in`, which said
+    /// Renamed from `a_write_path_may_not_climb_out_and_back_in` (doclint-allow:
+    /// the retired name is the point of the sentence), which said
     /// "may not" about a path the body asserts is *accepted*.
     #[test]
     fn a_write_path_that_climbs_out_and_back_in_resolves_to_where_it_lands() {

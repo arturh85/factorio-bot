@@ -1285,6 +1285,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "factorio-bot-doclint"
+version = "0.2.4-dev"
+
+[[package]]
 name = "factorio-bot-executor"
 version = "0.2.4-dev"
 dependencies = [

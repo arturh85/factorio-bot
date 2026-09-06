@@ -2,6 +2,7 @@
 members = [
     "app/src-tauri",
     "crates/core",
+    "crates/doclint",
     "crates/planner",
     "crates/executor",
     "crates/server",

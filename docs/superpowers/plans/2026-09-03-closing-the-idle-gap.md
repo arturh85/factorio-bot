@@ -11,6 +11,88 @@ four bots.
 
 ---
 
+## ✅✅✅ CREDIT BELONGS TO A MACHINE, NOT A PROTOTYPE (`828466d3`) — the balance stops being rigged
+
+The self-fed cell's second blocker, and the larger of the two. Merged after
+independent reproduction; the Python suite is 78 green (32 + 39 + 7) on the
+merge commit.
+
+**What was wrong.** The hand-credit mass balance pooled every delivery by
+`(entity_prototype, item)`. Every plate a bot handed to *any* stone furnace
+went into one number, and a cell was then measured against the whole pool.
+That is **structurally rigged against a working cell**: credit grew with
+every furnace the plan built, so the more the plan did, the less any single
+cell could prove. A cell rated at 15/min would have had to make ~64 to clear
+the pool its siblings filled. No amount of engineering on the cell could pass
+a test shaped like that — it is not a conservative instrument, it is one that
+gets *worse as the system gets better*.
+
+**What replaced it.** The stage key is `(machine, position, delivered item)`,
+with position taken from `ActionDispatched::target` — the sibling field of the
+same event, which every `insert` carries. **No Rust change was needed**, which
+is why this landed as a tools-only diff.
+
+- **Within one machine, by maximum** — coal and ore into one furnace are
+  alternative bounds on its output, not additive ones.
+- **Across machines, by sum**, and only for machines whose own counter makes
+  the goal item.
+- **The balance runs one machine at a time**: `outstanding_M = max(0,
+  credit_M − spent_M)` against *that* machine's pre-window production. Surplus
+  stays with its own machine and cannot subsidise a neighbour.
+- **A floating pool** for credit naming no machine that could have spent it (a
+  chest's `stock`, a drill's coal, a `target` joining to no sampled machine),
+  combined by **maximum, not sum** — alternative explanations of one output —
+  and drawn down by every machine's production.
+
+Every one of those four is the choice that *refuses*.
+
+**Both runs on one commit, reproduced on merged master rather than taken from
+the agent that wrote it:**
+
+| | `run-1788674059-90744` | `run-1788679826-02267` |
+|---|---|---|
+| verdict before → after | `roster-fed` → **`roster-fed`** | `roster-fed` → **`short`** |
+| credit | 194 → 348 | 333 → 412 |
+| spent before window | 40 | 235 |
+| outstanding | 154 → 268 | 98 → **136** |
+| made in window | 30 | 11 |
+| unexplained | −124 → −113 | −87 → **+11** |
+
+**The regression run still refuses, on *more* credit than before (348 vs
+194)** — the guard got stronger, not weaker, which is the only way this change
+is worth anything.
+
+**The belted run now refuses for the reason it deserves.** Its own furnace at
+`[-5, -27]` took one coal charge worth 69 plates and had already made 107 by
+the window's open, so it carries **zero outstanding credit**. Its 11 plates in
+the window are **the first output this project has recorded that the balance
+cannot attribute to a bot's hand**. It is `short` because 11 is not 30 — a
+fixable engineering problem — where before it was `roster-fed`, which was not
+fixable at all.
+
+Nothing was tuned to produce this. The run was `SHORT` on the lead-in check
+too, and the cause is `full_output` — the offtake belt, still open on its own
+branch.
+
+**Six falsifications, each asserted to have matched exactly once before its
+result was read.** Pooling by prototype reproduces 8 failures including
+`AssertionError: 'roster-fed' != 'short'` on the belted run — the defect
+reappearing by name. Also: attributing to whatever stands on the tile, letting
+surplus subsidise a neighbour, dropping the `target` position, summing the
+floating pool. The sixth, on the new sanity test, matched **6** where the
+author guessed 4 — the assertion caught the author, which is what it is for.
+
+**Still unattributable, and named rather than hidden:** a chest's contents (79
+plates here name a container and no machine; no event records which inserter
+moved them), a machine loaded before the record began, partial burns, and two
+machines occupying one tile at different times.
+
+**One defect worth keeping.** The first version defined a `pos_key` shadowing
+one 1,600 lines above it. All 31 tests passed — none call `frozen_bots` — and
+the CLI died on its first real archive. `ModuleSanityTest` now walks the module
+AST and refuses two top-level definitions of one name. *A passing suite cannot
+tell you the module still parses as one module.*
+
 ## A cell an earlier plan left standing is topped up and drained, not rebuilt
 
 The open end from `bdec88af` — "cells standing from an earlier plan are not

@@ -5931,18 +5931,33 @@ mod block_headroom_tests {
         let occupants = block(&s);
         let area = s.collision_area(HUB, &hub).expect("a prototype");
 
+        // **Derived from the ceiling, never written down.** This asked for a
+        // literal nine megawatts, which was past every layout on the day it
+        // was written and stopped being so the moment the plant grew to
+        // `BOILERS_PER_PUMP x MAX_ENGINES_PER_BOILER` engines = 36 MW. The
+        // test kept passing on the branch that grew the plant and on the
+        // branch that wrote this assertion, and only failed once they were
+        // merged -- `cargo check` cannot see it, because it compiles.
+        // The engine's output comes from the fixture's own prototype, not from
+        // a second literal beside the first one.
+        let each_kw = s.generator_output_kw(ENGINE).expect("an engine prototype");
+        let ceiling_kw = f64::from(BOILERS_PER_PUMP * MAX_ENGINES_PER_BOILER) * each_kw;
+        let past_every_layout = ceiling_kw + each_kw;
+
         let mut ctx = ExpansionCtx::new(s, BotId(1));
         let err = match ensure_powered(
             &mut ctx,
             HUB,
             &hub,
             &area,
-            9_000.,
+            past_every_layout,
             SUPPLY_RADIUS,
             &occupants,
         ) {
             Err(err) => err,
-            Ok(_) => panic!("nine megawatts is past every layout this planner lays out"),
+            Ok(_) => panic!(
+                "{past_every_layout} kW is one engine past a {ceiling_kw} kW ceiling and must refuse"
+            ),
         };
         assert!(
             matches!(err, PlannerError::PowerPlantTooSmall { .. }),

@@ -235,21 +235,48 @@ Three things follow, none of them about siting:
    tiles wide, and bots working adjacent slabs still meet at the boundary.
    Bands stop bots *interleaving*; they do not stop them *colliding*.
 
+### Reproduced three times, in separate processes and workspaces
+
+The run above is one of **three independent live runs** — two of them in a
+different workspace, on different ports, by a different process:
+
+| run | stood correct / 179 | wrong direction | wrong half | wrong entity |
+|---|---|---|---|---|
+| A | 129 | 0 | 0 | 0 |
+| B | 89 | 0 | 0 | 0 |
+| C | 129 | 0 | 0 | 0 |
+
+Two things this buys that one run could not:
+
+- **The anchor was `(0.0, 0.0)` in all three live runs and in the offline plan
+  against the world dump.** Deterministic across processes, workspaces and the
+  offline path — which is the property the whole design rests on, and it is now
+  evidence rather than an argument from the code.
+- **Every mismatch in every run was a plain MISSING entity.** Not once a wrong
+  direction, a wrong half, or a wrong entity. Whatever got built was built
+  correctly, three times over.
+
 ### How much to trust this
 
 The failures are **logical, not starvation**: a character occupying a tile is a
-refusal the game computes, not a timeout, and the refusal repeated across 534
-game ticks rather than expiring. So the missing 50 are a real defect and not an
-artefact of a loaded box.
+refusal the game computes, not a timeout, and it repeated across 534 game ticks
+rather than expiring.
 
-The honest caveat is that the floor was **not** quiet — another session's
-compiles were running, load ~20 at launch — and load plausibly makes bots
-slower to clear a contested tile, so it may have made the collision *more
-likely* without being its cause. Under the rule this record now keeps: a clean
-pass at any tick rate is trustworthy, and a failure on a loaded floor is
-ambiguous about frequency though not about existence. **The siting result above
-is a clean pass and stands; the 50-entity shortfall should be re-measured on a
-quiet floor before anyone quotes a rate for it.**
+But the floor was **not** quiet, and the numbers say so: **delivered tick rate
+was 63.8 % and 71.4 % of nominal**, both below the 80 % flag, with sibling
+worktrees compiling at load 13-31 even though no other Factorio was running.
+
+So the two halves of this result carry different weights, and the difference is
+the point:
+
+- **Siting and placement-correctness are trustworthy.** Three independent
+  reproductions, identical anchor, zero incorrect placements. Starvation cannot
+  make an entity stand in the wrong place.
+- **The completion count is real but load-modulated.** The defect exists at any
+  tick rate — 89/179 and 129/179 differ, and the *cause* is identical in all
+  three — but **its severity is not established.** Nobody should quote a
+  completion rate from these runs. A quiet floor would give a number; these give
+  a diagnosis.
 
 ### Still not proven, and worth repeating
 

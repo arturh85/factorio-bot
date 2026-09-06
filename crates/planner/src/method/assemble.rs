@@ -223,7 +223,7 @@ const ANCHOR_SEARCH_RADIUS: f64 = 64.0;
 
 /// How far from the supplying pole the boiler that feeds it is looked for.
 ///
-/// `crate::method::power::layout` builds the pump, the boiler, the engine and
+/// `crate::method::power::layout` builds the pump, the boilers, the engines and
 /// the pole as one rigid body a handful of tiles across, so a boiler within
 /// sixteen tiles of the pole a cell hangs off is that plant's boiler. It is a
 /// heuristic and it is named as one: a map with an unrelated boiler nearer
@@ -231,6 +231,28 @@ const ANCHOR_SEARCH_RADIUS: f64 = 64.0;
 /// into a fuel slot, so the cost of being wrong is a few coal in the wrong
 /// machine rather than a wrong plan.
 const BOILER_SEARCH_RADIUS: f64 = 16.0;
+
+/// How far past the nearest boiler [`boilers_near`] keeps collecting, in
+/// tiles.
+///
+/// **A plant is a chain now, and this is its length.** Since 2026-09-06
+/// `power::layout` stands up to `power::BOILERS_PER_PUMP` boilers end to end
+/// along the shore at `power::BOILER_PITCH_TILES`, so the last boiler of a
+/// full chain is `4 x 19 = 76` tiles from the first. A search that stopped at
+/// [`BOILER_SEARCH_RADIUS`] would find the near end of a long plant and fuel
+/// that, leaving the far end cold -- everything standing, everything wired,
+/// and a fraction of the nameplate delivered.
+///
+/// It is deliberately measured **from the nearest boiler**, not from the
+/// anchor: widening `BOILER_SEARCH_RADIUS` itself to 92 tiles would start
+/// sweeping in unrelated plants (`run-1788408407-02764`'s second pump stood 86
+/// tiles from the first, and a 92-tile disc from a cell between them reaches
+/// both). Anchoring on the nearest boiler and reaching one chain-length past
+/// it keeps the group to one plant on every map where two plants are further
+/// apart than a plant is long -- which is the case this planner creates,
+/// since `power::PLANT_ADOPT_RADIUS` is 256.
+const BOILER_CHAIN_SPAN: f64 = crate::method::power::BOILER_PITCH_TILES
+    * ((crate::method::power::BOILERS_PER_PUMP - 1) as f64);
 
 /// What the boiler burns, in kJ per unit, and how many of them fit in its one
 /// fuel slot.
@@ -1686,13 +1708,32 @@ fn boiler_coal(state: &PlanState, demand_kw: f64) -> u32 {
     u32::try_from(coal).unwrap_or(cap).min(cap)
 }
 
-/// The boiler this cell's power comes out of, if the plan can see one.
+/// Every boiler this cell's power comes out of, nearest first.
 ///
-/// `None` is not a refusal: a world powered by something this planner did not
+/// Empty is not a refusal: a world powered by something this planner did not
 /// build has no boiler to top up, and the cell is perfectly buildable on it.
-/// What `None` costs is the fuel guarantee, and that is stated in
+/// What empty costs is the fuel guarantee, and that is stated in
 /// [`CELL_CHARGE_TICKS`]'s doc rather than hidden here.
-fn boiler_near(state: &PlanState, anchor: &Position) -> Option<Position> {
+///
+/// # A list, because a plant is a chain
+///
+/// This returned *the* boiler until 2026-09-06, which was right while
+/// `power::Plant` carried exactly one. It now silently found *a* boiler of
+/// several, and topping one up out of four leaves three cold: the plant reads
+/// as built at its full nameplate and delivers a quarter of it. So the nearest
+/// boiler anchors a group and everything within [`BOILER_CHAIN_SPAN`] of *it*
+/// joins -- see that constant for why the reach hangs off the boiler rather
+/// than off `anchor`.
+///
+/// Deterministic: candidates are ordered by `(distance from the anchor, x, y)`
+/// with `total_cmp`, exactly as the single-boiler version was, so a one-boiler
+/// world gets the identical one-element answer.
+fn boilers_near(state: &PlanState, anchor: &Position) -> Vec<Position> {
+    let order = |a: &(f64, Position), b: &(f64, Position)| {
+        a.0.total_cmp(&b.0)
+            .then(a.1.x.total_cmp(&b.1.x))
+            .then(a.1.y.total_cmp(&b.1.y))
+    };
     let mut candidates: Vec<(f64, Position)> = state
         .entities_within(anchor, BOILER_SEARCH_RADIUS)
         .into_iter()
@@ -1704,12 +1745,23 @@ fn boiler_near(state: &PlanState, anchor: &Position) -> Option<Position> {
             )
         })
         .collect();
-    candidates.sort_by(|a, b| {
-        a.0.total_cmp(&b.0)
-            .then(a.1.x.total_cmp(&b.1.x))
-            .then(a.1.y.total_cmp(&b.1.y))
-    });
-    candidates.into_iter().next().map(|(_, position)| position)
+    candidates.sort_by(order);
+    let Some((_, nearest)) = candidates.first().cloned() else {
+        return Vec::new();
+    };
+    let mut chain: Vec<(f64, Position)> = state
+        .entities_within(&nearest, BOILER_CHAIN_SPAN)
+        .into_iter()
+        .filter(|entity| entity.name == BOILER)
+        .map(|entity| {
+            (
+                calculate_distance(&entity.position, anchor),
+                entity.position,
+            )
+        })
+        .collect();
+    chain.sort_by(order);
+    chain.into_iter().map(|(_, position)| position).collect()
 }
 
 /// A `Place` step for one part, with its site reserved as it is emitted.
@@ -1799,7 +1851,7 @@ fn cell_steps(
     spec: &AssemblySpec,
     cells: &[Cell],
     coal: u32,
-    boiler: Option<Position>,
+    boilers: &[Position],
     roster: &[BotId],
 ) -> Result<(Vec<Step>, Vec<ActionId>), PlannerError> {
     let mut steps: Vec<Step> = Vec::new();
@@ -2177,43 +2229,51 @@ fn cell_steps(
     // stack and at this cell's draw `power::PLANT_COAL`'s five coal is under
     // two minutes. Topping it up is what makes the difference between a cell
     // that stands and a cell a witness can watch.
-    if let (Some(boiler), true) = (boiler, coal > 0) {
-        let id = ctx.ids.next();
-        steps.push(Step::Act(Box::new(Action {
-            id,
-            kind: ActionKind::Insert {
-                pos: boiler.clone(),
-                entity: BOILER.into(),
-                slot: InventorySlot::Fuel,
-                item: "coal".into(),
-                count: coal,
-            },
-            pre: vec![
-                Condition::AtPosition {
-                    who: Actor::Role,
+    //
+    // **Every boiler of the chain, each with its share.** Topping up only the
+    // nearest -- which is what this did while `power::Plant` carried a single
+    // `boiler` -- leaves the rest of a grown plant cold, and a plant delivering
+    // a fraction of its nameplate while every entity stands is exactly the
+    // failure `Condition::Powered`'s capacity accounting exists to prevent.
+    if coal > 0 {
+        for boiler in boilers {
+            let id = ctx.ids.next();
+            steps.push(Step::Act(Box::new(Action {
+                id,
+                kind: ActionKind::Insert {
                     pos: boiler.clone(),
-                    radius: reach,
-                    min_radius: 0.0,
-                },
-                Condition::EntityAt {
-                    pos: boiler.clone(),
-                    name: BOILER.into(),
-                },
-                Condition::HasItem {
-                    who: Actor::Role,
+                    entity: BOILER.into(),
+                    slot: InventorySlot::Fuel,
                     item: "coal".into(),
                     count: coal,
                 },
-            ],
-            eff: vec![Effect::LoseItem {
-                who: Actor::Role,
-                item: "coal".into(),
-                count: coal,
-            }],
-            duration: TRANSFER_TICKS,
-            pinned: None,
-            label: format!("top the boiler up with {} coal", coal),
-        })));
+                pre: vec![
+                    Condition::AtPosition {
+                        who: Actor::Role,
+                        pos: boiler.clone(),
+                        radius: reach,
+                        min_radius: 0.0,
+                    },
+                    Condition::EntityAt {
+                        pos: boiler.clone(),
+                        name: BOILER.into(),
+                    },
+                    Condition::HasItem {
+                        who: Actor::Role,
+                        item: "coal".into(),
+                        count: coal,
+                    },
+                ],
+                eff: vec![Effect::LoseItem {
+                    who: Actor::Role,
+                    item: "coal".into(),
+                    count: coal,
+                }],
+                duration: TRANSFER_TICKS,
+                pinned: None,
+                label: format!("top the boiler up with {} coal", coal),
+            })));
+        }
     }
 
     Ok((steps, needs_power))
@@ -2445,9 +2505,9 @@ impl Method for BuildAssemblyCell {
         let (anchor, plant_steps_taken, power_links) =
             supply_anchor(ctx, &from, ANCHOR_SEARCH_RADIUS, want_kw)?;
         let cells = plan_cells(&ctx.state, &anchor, &spec, build)?;
-        let (coal, boiler) = fuel_for(&ctx.state, &anchor, &cells, &spec);
+        let (coal, boilers) = fuel_for(&ctx.state, &anchor, &cells, &spec);
         let roster = self.roster(ctx.chain_actor);
-        let (built, needs_power) = cell_steps(ctx, &spec, &cells, coal, boiler, &roster)?;
+        let (built, needs_power) = cell_steps(ctx, &spec, &cells, coal, &boilers, &roster)?;
         let mut steps = plant_steps_taken;
         steps.extend(built);
         // Every id, not just the generator's: an engine with no steam produces
@@ -2479,25 +2539,32 @@ fn fuel_for(
     anchor: &Position,
     cells: &[Cell],
     spec: &AssemblySpec,
-) -> (u32, Option<Position>) {
+) -> (u32, Vec<Position>) {
     let mut trial = state.fork();
     for cell in cells {
         if reserve_in(&mut trial, cell, spec).is_err() {
-            return (0, None);
+            return (0, Vec::new());
         }
     }
     let Some(ground) = cells.first().and_then(Cell::on_network_at) else {
-        return (0, None);
+        return (0, Vec::new());
     };
     let Some(area) = trial.collision_area(MACHINE, ground) else {
-        return (0, None);
+        return (0, Vec::new());
     };
     let demand = trial.electric_demand_kw(&area, None);
-    let boiler = boiler_near(state, anchor);
-    match boiler {
-        Some(boiler) => (boiler_coal(state, demand), Some(boiler)),
-        None => (0, None),
+    let boilers = boilers_near(state, anchor);
+    if boilers.is_empty() {
+        return (0, Vec::new());
     }
+    // **Split, not repeated.** The boilers of one chain share the network's
+    // load, so each carries `demand / n` of it and is charged for that -- a
+    // full charge each would put `n` times the coal the network burns into
+    // slots that hold one stack, and `boiler_coal`'s cap would then quietly
+    // truncate the difference rather than report it. With one boiler this is
+    // the identical arithmetic to the single-boiler version.
+    let share = demand / boilers.len() as f64;
+    (boiler_coal(state, share), boilers)
 }
 
 #[cfg(test)]
@@ -3491,6 +3558,91 @@ mod tests {
             coal,
             vec![8],
             "one top-up, sized from the network's own draw"
+        );
+    }
+
+    /// **Every boiler of a chain is topped up, not the nearest one.**
+    ///
+    /// The correctness bug this change had to avoid, from the assemble side:
+    /// `boiler_near` returned *the* boiler, which was right while
+    /// `power::Plant` carried exactly one and silently wrong the moment the
+    /// plant grew a chain. Coal in one boiler of four leaves three cold, the
+    /// plan reads as fully powered, and the cell it was built for stalls with
+    /// every entity standing.
+    ///
+    /// Four boilers on `power::BOILER_PITCH_TILES`, which is the chain
+    /// `power::layout` actually stands up, and the charge is **split** across
+    /// them rather than repeated: the network's draw is what is burnt,
+    /// however many slots it is burnt out of.
+    #[test]
+    fn every_boiler_of_a_chain_is_topped_up_and_the_charge_is_split() {
+        let bots = [BotId(1)];
+        let mut state = powered(&bots);
+        // Three more boilers alongside the fixture's one, on the real pitch.
+        let pitch = crate::method::power::BOILER_PITCH_TILES;
+        let entity_type = state
+            .base()
+            .entity_prototypes
+            .get(BOILER)
+            .map(|p| p.entity_type.clone())
+            .unwrap_or_else(|| BOILER.to_string());
+        for step in 1..4 {
+            state.create_entity(FactorioEntity {
+                name: BOILER.into(),
+                entity_type: entity_type.clone(),
+                position: Position::new(12.5 + pitch * f64::from(step), 14.5),
+                ..Default::default()
+            });
+        }
+
+        let found = boilers_near(&state, &Position::new(10.5, 10.5));
+        assert_eq!(
+            found.len(),
+            4,
+            "the whole chain, not the nearest boiler: found {found:?}"
+        );
+
+        let net = expand(
+            &[Goal::Producing {
+                item: PACK.into(),
+                per_minute: 6,
+            }],
+            &state,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .expect("a powered fixture can build a cell");
+        let mut fuelled: Vec<(Position, u32)> = net
+            .actions()
+            .filter_map(|a| match &a.kind {
+                ActionKind::Insert {
+                    pos,
+                    entity,
+                    slot: InventorySlot::Fuel,
+                    count,
+                    ..
+                } if entity == BOILER => Some((pos.clone(), *count)),
+                _ => None,
+            })
+            .collect();
+        fuelled.sort_by(|a, b| a.0.x.total_cmp(&b.0.x));
+        assert_eq!(
+            fuelled.len(),
+            4,
+            "four boilers stand and {} are fuelled: {fuelled:?}",
+            fuelled.len()
+        );
+        for boiler in &found {
+            assert!(
+                fuelled.iter().any(|(pos, _)| pos == boiler),
+                "the boiler at {boiler} is never topped up"
+            );
+        }
+        // Split, not repeated: one boiler took 8 coal for the whole 189 kW,
+        // so a quarter of that draw is 2 apiece rather than 8 apiece.
+        assert!(
+            fuelled.iter().all(|(_, count)| *count == 2),
+            "the charge should be the network's draw split four ways: {fuelled:?}"
         );
     }
 

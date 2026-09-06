@@ -1706,6 +1706,15 @@
               "null"
             ]
           },
+          "input_inventory": {
+            "items": {
+              "$ref": "#/components/schemas/InventoryItemWithQuality"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "name": {
             "type": "string"
           },
@@ -1748,6 +1757,15 @@
               }
             ]
           },
+          "transport_lines": {
+            "items": {
+              "$ref": "#/components/schemas/TransportLine"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "underground_half": {
             "oneOf": [
               {
@@ -1771,6 +1789,17 @@
       },
       "FactorioEntityPrototype": {
         "properties": {
+          "beacon_profile": {
+            "description": "The beacon's `profile`: an extra multiplier applied to what a receiver\ngets, **indexed by how many beacons reach that receiver**. Factorio 2.0\nadded it, and it is the reason beacon effect is not a single scalar:\nthe second beacon on a machine is worth a different amount from the\nfirst.\n\nKept under a name that says what it profiles. `LuaEntityPrototype`\ncalls it `profile`, which on a struct describing every prototype in the\ngame says nothing; the mod emits `beacon_profile` to match, and\n`a_serialised_beacon_prototype_carries_its_geometry` pins the pairing,\nbecause serde drops an unrecognised key in silence and this repo has\npaid for that twice.",
+            "items": {
+              "format": "double",
+              "type": "number"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "collision_box": {
             "$ref": "#/components/schemas/Rect"
           },
@@ -1784,6 +1813,14 @@
             ]
           },
           "crafting_speed": {
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "distribution_effectivity": {
+            "description": "A **beacon's** `distribution_effectivity`: the fraction of a module's\neffect a receiver in range actually gets. `None` for anything that is\nnot a beacon.\n\nNot sufficient on its own -- see [`Self::beacon_profile`], which scales\nit by how many beacons reach the same machine.",
             "format": "double",
             "type": [
               "number",
@@ -1870,6 +1907,14 @@
             "description": "A `resource` prototype's category -- `basic-solid`, `basic-fluid`,\n`hard-solid` -- named `category` at data stage and `resource_category`\nat runtime. This is the discriminator the game itself uses: a character\nor a drill mines a resource iff the category is in its own\n`resource_categories`.",
             "type": [
               "string",
+              "null"
+            ]
+          },
+          "supply_area_distance": {
+            "description": "Half the side of the square this **electric pole or beacon** supplies,\nso `2.5` for a `small-electric-pole`'s 5x5. `LuaEntityPrototype`'s\nsubclasses for it are exactly `ElectricPole` and `Beacon`.\n\n**`None` is \"no supply area\", never zero.** A furnace has none; a\nbeacon with a zero one would be `Some(0.0)`, and a caller that wants to\nknow whether beacon ground is worth reserving must be able to tell\nthose apart. Every dump and snapshot written before this field existed\nalso reads `None`, i.e. \"the sender did not say\".\n\n# It is a method on the runtime API, and that is not a detail\n\nThere is no `supply_area_distance` **attribute** in 2.1.17 --\n`get_supply_area_distance(quality)` is the only way to it. Reading the\nattribute raises, the mod's `pcall` swallows it, and the field arrives\n`None` with nothing anywhere saying it should not have. That is exactly\nhow [`Self::crafting_speed`] arrived nil for all 1028 prototypes of a\nlive game while `mining_speed`, still an attribute, arrived fine.\n\n# What it is for\n\n`crates/planner/src/method/power.rs` hard-codes\n`pole_supply_half_extent` as a table of vanilla pole names, and says in\nits own doc that sending this field is the follow-up that deletes it.\n**Nothing reads this yet** -- carrying the datum and consuming it are\ntwo changes, and the second one moves plans.",
+            "format": "double",
+            "type": [
+              "number",
               "null"
             ]
           }
@@ -3534,6 +3579,26 @@
         "required": [
           "w",
           "k"
+        ],
+        "type": "object"
+      },
+      "TransportLine": {
+        "description": "One of a belt-like entity's transport lines, and what is riding on it.\n\nA belt is not an inventory and modelling it as one loses the thing that\nmakes it a belt: a `transport-belt` has **two** lanes, an\n`underground-belt` four and a `splitter` eight, and which lane an item is\non decides whether a furnace arm can reach it. Two of this project's own\nmeasured failures are lane failures -- an inserter drops on the belt's\n**far** lane while a side-loading belt lands on the **near** one, and\ngetting either backwards puts ore and coal on one lane where they crowd\neach other out while every entity still places 100% correctly.\n\n**Counts, not positions.** `LuaTransportLine` also offers\n`get_detailed_contents()`, which is every item with its position along the\nline; the owner's ruling at scale is *\"the direction and, for a whole\nchain, what types of items are on it\"*, so this carries\n`get_contents()` -- one aggregated count per item kind -- and no item\npositions at all.",
+        "properties": {
+          "contents": {
+            "description": "What is on this lane, by item kind. Empty is a real and ordinary\nanswer -- most lanes of most belts are empty most of the time -- and it\nis *not* the same as the lane not existing, which is expressed by the\nlane being absent from [`FactorioEntity::transport_lines`] entirely.",
+            "items": {
+              "$ref": "#/components/schemas/InventoryItemWithQuality"
+            },
+            "type": "array"
+          },
+          "line": {
+            "description": "`defines.transport_line`'s own name for this line: `left_line`,\n`right_line`, `left_underground_line`, `secondary_right_line`,\n`left_split_line` and so on.\n\n**The name, not the raw index**, because the index alone is\nuninterpretable: line 3 is `left_underground_line` on an\nunderground-belt and something else on a splitter, so a caller reading\na number would have to re-derive the mapping from the entity type and\nwould be inventing it. An index this build's `defines` cannot name\narrives as `unmapped_<n>` rather than as a bare number, the same way\n`machine_row` reports an unknown entity status.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "line"
         ],
         "type": "object"
       },

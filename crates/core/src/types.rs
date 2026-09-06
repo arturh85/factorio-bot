@@ -1611,6 +1611,59 @@ pub struct FactorioEntityPrototype {
     /// has no pipe.
     #[serde(default)]
     pub mining_fluid: Option<String>,
+    /// Half the side of the square this **electric pole or beacon** supplies,
+    /// so `2.5` for a `small-electric-pole`'s 5x5. `LuaEntityPrototype`'s
+    /// subclasses for it are exactly `ElectricPole` and `Beacon`.
+    ///
+    /// **`None` is "no supply area", never zero.** A furnace has none; a
+    /// beacon with a zero one would be `Some(0.0)`, and a caller that wants to
+    /// know whether beacon ground is worth reserving must be able to tell
+    /// those apart. Every dump and snapshot written before this field existed
+    /// also reads `None`, i.e. "the sender did not say".
+    ///
+    /// # It is a method on the runtime API, and that is not a detail
+    ///
+    /// There is no `supply_area_distance` **attribute** in 2.1.17 --
+    /// `get_supply_area_distance(quality)` is the only way to it. Reading the
+    /// attribute raises, the mod's `pcall` swallows it, and the field arrives
+    /// `None` with nothing anywhere saying it should not have. That is exactly
+    /// how [`Self::crafting_speed`] arrived nil for all 1028 prototypes of a
+    /// live game while `mining_speed`, still an attribute, arrived fine.
+    ///
+    /// # What it is for
+    ///
+    /// `crates/planner/src/method/power.rs` hard-codes
+    /// `pole_supply_half_extent` as a table of vanilla pole names, and says in
+    /// its own doc that sending this field is the follow-up that deletes it.
+    /// **Nothing reads this yet** -- carrying the datum and consuming it are
+    /// two changes, and the second one moves plans.
+    #[serde(default)]
+    pub supply_area_distance: Option<f64>,
+    /// A **beacon's** `distribution_effectivity`: the fraction of a module's
+    /// effect a receiver in range actually gets. `None` for anything that is
+    /// not a beacon.
+    ///
+    /// Not sufficient on its own -- see [`Self::beacon_profile`], which scales
+    /// it by how many beacons reach the same machine.
+    #[serde(default)]
+    pub distribution_effectivity: Option<f64>,
+    /// The beacon's `profile`: an extra multiplier applied to what a receiver
+    /// gets, **indexed by how many beacons reach that receiver**. Factorio 2.0
+    /// added it, and it is the reason beacon effect is not a single scalar:
+    /// the second beacon on a machine is worth a different amount from the
+    /// first.
+    ///
+    /// Kept under a name that says what it profiles. `LuaEntityPrototype`
+    /// calls it `profile`, which on a struct describing every prototype in the
+    /// game says nothing; the mod emits `beacon_profile` to match, and
+    /// `a_serialised_beacon_prototype_carries_its_geometry` pins the pairing,
+    /// because serde drops an unrecognised key in silence and this repo has
+    /// paid for that twice.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_helpers::option_vec_or_empty_map"
+    )]
+    pub beacon_profile: Option<Vec<f64>>,
 }
 
 /// The resource categories a vanilla character mines, used when the world's
@@ -1730,6 +1783,48 @@ impl FactorioEntityPrototype {
     }
 }
 
+/// One of a belt-like entity's transport lines, and what is riding on it.
+///
+/// A belt is not an inventory and modelling it as one loses the thing that
+/// makes it a belt: a `transport-belt` has **two** lanes, an
+/// `underground-belt` four and a `splitter` eight, and which lane an item is
+/// on decides whether a furnace arm can reach it. Two of this project's own
+/// measured failures are lane failures -- an inserter drops on the belt's
+/// **far** lane while a side-loading belt lands on the **near** one, and
+/// getting either backwards puts ore and coal on one lane where they crowd
+/// each other out while every entity still places 100% correctly.
+///
+/// **Counts, not positions.** `LuaTransportLine` also offers
+/// `get_detailed_contents()`, which is every item with its position along the
+/// line; the owner's ruling at scale is *"the direction and, for a whole
+/// chain, what types of items are on it"*, so this carries
+/// `get_contents()` -- one aggregated count per item kind -- and no item
+/// positions at all.
+#[derive(
+    Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema, utoipa::ToSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub struct TransportLine {
+    /// `defines.transport_line`'s own name for this line: `left_line`,
+    /// `right_line`, `left_underground_line`, `secondary_right_line`,
+    /// `left_split_line` and so on.
+    ///
+    /// **The name, not the raw index**, because the index alone is
+    /// uninterpretable: line 3 is `left_underground_line` on an
+    /// underground-belt and something else on a splitter, so a caller reading
+    /// a number would have to re-derive the mapping from the entity type and
+    /// would be inventing it. An index this build's `defines` cannot name
+    /// arrives as `unmapped_<n>` rather than as a bare number, the same way
+    /// `machine_row` reports an unknown entity status.
+    pub line: String,
+    /// What is on this lane, by item kind. Empty is a real and ordinary
+    /// answer -- most lanes of most belts are empty most of the time -- and it
+    /// is *not* the same as the lane not existing, which is expressed by the
+    /// lane being absent from [`FactorioEntity::transport_lines`] entirely.
+    #[serde(default, deserialize_with = "deserialize_helpers::vec_or_empty_map")]
+    pub contents: Vec<InventoryItemWithQuality>,
+}
+
 #[derive(
     Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema, utoipa::ToSchema,
 )]
@@ -1761,6 +1856,50 @@ pub struct FactorioEntity {
         deserialize_with = "deserialize_helpers::option_vec_or_empty_map"
     )]
     pub fuel_inventory: Option<Vec<InventoryItemWithQuality>>,
+    // Deliberately a `schemars(description)` and not a `///`, like `direction`
+    // above: this type's OpenAPI schema is snapshotted, and the doc comment
+    // this field would otherwise carry belongs to the reader of the Lua docs.
+    // The long version is in `mods/BotBridge/types.lua`, at the read itself.
+    //
+    // What a machine has been GIVEN and not yet turned into anything: a
+    // furnace's ore, an assembler's ingredients, a lab's science. The sibling
+    // fields say what came out and what is burning, and without this one "the
+    // furnace holds ore and is not smelting it" is indistinguishable from "no
+    // ore ever arrived" -- a run that mined 46 ore for 17 plates could not say
+    // where the other 29 were.
+    //
+    // **`None` is not empty.** A belt, a chest or a tree has no input
+    // inventory and the mod sends no key at all, which arrives here as `None`;
+    // a furnace standing empty sends `{}`, which the tolerant deserializer
+    // below turns into `Some(vec![])`. Every record written before this field
+    // existed also reads as `None`, i.e. "the sender did not say".
+    #[schemars(
+        description = "What the machine has been given and not yet consumed -- a furnace's ore, an assembler's ingredients, a lab's science. `null` means the entity has no input inventory (or the sender predates the field); an empty list means it has one and it is empty."
+    )]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_helpers::option_vec_or_empty_map"
+    )]
+    pub input_inventory: Option<Vec<InventoryItemWithQuality>>,
+    // The lanes of a belt-like entity, in `defines.transport_line` order --
+    // see `TransportLine`, which carries the reasoning. `None` for anything
+    // that is not belt-connectable; a belt whose lanes are all empty is
+    // `Some` of a list of empty lanes, because "this belt is running empty"
+    // and "this is not a belt" are the two answers a belt diagnosis has to
+    // separate, and `LuaTransportLine::get_contents()` has blocked four
+    // distinct questions here for want of exactly that.
+    //
+    // A `schemars(description)` rather than a `///` for the same reason
+    // `direction` and `input_inventory` above have one: the doc reaches the
+    // Lua docs without enlarging the published API surface.
+    #[schemars(
+        description = "The lanes of a belt, underground-belt, splitter or loader, in `defines.transport_line` order, each with the items riding on it by kind. `null` for anything that is not belt-connectable; an empty lane list never occurs, but a lane with empty `contents` does and means the lane is running empty."
+    )]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_helpers::option_vec_or_empty_map"
+    )]
+    pub transport_lines: Option<Vec<TransportLine>>,
     pub amount: Option<u32>,        // only type = resource
     pub recipe: Option<String>,     // only CraftingMachines
     pub ghost_name: Option<String>, // only type = entity-ghost
@@ -2467,6 +2606,9 @@ mod tests {
             resource_category: None,
             resource_categories: None,
             mining_fluid: None,
+            supply_area_distance: None,
+            distribution_effectivity: None,
+            beacon_profile: None,
             mining_drill_radius: None,
         }
     }

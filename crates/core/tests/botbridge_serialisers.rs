@@ -12,8 +12,28 @@ use factorio_bot_core::blueprint::UndergroundHalf;
 use factorio_bot_core::types::{FactorioEntity, FactorioRecipe};
 use mlua::{Function, Lua, LuaSerdeExt, Table, Value};
 
+/// `defines.inventory.crafter_input` as this Factorio publishes it.
+///
+/// The *number* is not what any test here asserts -- the stubs below are
+/// written against this constant, so the tests prove that `types.lua` asks
+/// `get_inventory` for the index it named in `defines`, whatever that index
+/// is. What matters is that the name exists: 2.1.17 has `crafter_input` and
+/// has no `furnace_source` or `assembling_machine_input` at all.
+const CRAFTER_INPUT: i64 = 2;
+/// `defines.inventory.lab_input`, on the same terms as [`CRAFTER_INPUT`].
+const LAB_INPUT: i64 = 1;
+
 /// Loads the mod's serialisers. The path is the same live reference a debug
 /// build uses for `workspace/mods`.
+///
+/// A `defines` stub is installed because `serialize_entity` needs one to find
+/// an entity's INPUT inventory: `LuaEntity` has `get_output_inventory` and
+/// `get_fuel_inventory` but no input counterpart, so the index has to be
+/// named through `defines.inventory`. `types.lua` reaches it with
+/// `rawget(_G, "defines")` precisely so that this state -- a plain Lua 5.4
+/// interpreter that is not a game -- gets `nil` instead of an error; without
+/// the stub the input inventory would be unreachable from every test here and
+/// the field would be untested rather than tested.
 fn botbridge_types() -> Lua {
     let path =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../mods/BotBridge/types.lua");
@@ -25,6 +45,27 @@ fn botbridge_types() -> Lua {
     // file from this repository and no user input at all.
     #[allow(clippy::disallowed_methods)]
     let lua = Lua::new();
+    let inventory = lua.create_table().expect("table");
+    inventory.set("crafter_input", CRAFTER_INPUT).expect("set");
+    inventory.set("lab_input", LAB_INPUT).expect("set");
+    // `defines.transport_line`, which the serialiser INVERTS to name a lane.
+    // Deliberately not in index order and deliberately not the whole enum: the
+    // mapping under test is value -> name, so an order-dependent
+    // implementation reading it as a list would produce the wrong names here
+    // rather than accidentally the right ones.
+    let transport_line = lua.create_table().expect("table");
+    for (name, index) in [
+        ("right_line", 2),
+        ("left_line", 1),
+        ("left_underground_line", 3),
+        ("right_underground_line", 4),
+    ] {
+        transport_line.set(name, index).expect("set");
+    }
+    let defines = lua.create_table().expect("table");
+    defines.set("inventory", inventory).expect("set");
+    defines.set("transport_line", transport_line).expect("set");
+    lua.globals().set("defines", defines).expect("set");
     lua.load(&source)
         .set_name("types.lua")
         .exec()
@@ -629,7 +670,86 @@ fn entity_table(lua: &Lua, name: &str, entity_type: &str, with_inventories: bool
         };
         entity.set(getter, getter_fn).expect("set");
     }
+    // The INPUT inventory, which has no getter of its own: `serialize_entity`
+    // resolves an index through `defines.inventory` and calls
+    // `get_inventory(index)`. Answering `nil` for anything but the index the
+    // mod named is what makes this a check rather than a rubber stamp -- a
+    // serialiser that asked for the wrong inventory would get nothing and the
+    // key would silently not appear.
+    let get_inventory = if with_inventories {
+        lua.create_function(|lua, index: i64| {
+            if index != CRAFTER_INPUT && index != LAB_INPUT {
+                return Ok(Value::Nil);
+            }
+            Ok(Value::Table(inventory_holding(lua, "iron-ore", 34)?))
+        })
+        .expect("function")
+    } else {
+        lua.create_function(|_, _index: i64| Ok(Value::Nil))
+            .expect("function")
+    };
+    entity.set("get_inventory", get_inventory).expect("set");
+    // Belt lanes, for the types that have them. `get_max_transport_line_index`
+    // is declared for `TransportBeltConnectable` only, so a furnace and a tree
+    // must not have the method at all -- giving every stub one would make the
+    // serialiser's guard untestable and let a read that raises on a real
+    // furnace pass here.
+    if matches!(
+        entity_type,
+        "transport-belt" | "underground-belt" | "splitter" | "loader" | "loader-1x1"
+    ) {
+        let lanes = if entity_type == "underground-belt" {
+            4
+        } else {
+            2
+        };
+        entity
+            .set(
+                "get_max_transport_line_index",
+                lua.create_function(move |_, ()| Ok(lanes))
+                    .expect("function"),
+            )
+            .expect("set");
+        entity
+            .set(
+                "get_transport_line",
+                lua.create_function(move |lua, index: i64| {
+                    // Lane 1 carries something and the rest run empty, so a
+                    // serialiser that reported only non-empty lanes, or only
+                    // the first, fails rather than looking right.
+                    let count = if index == 1 { 4 } else { 0 };
+                    let line = lua.create_table()?;
+                    let contents = inventory_holding(lua, "iron-ore", count)?
+                        .get::<Function>("get_contents")?;
+                    line.set("get_contents", contents)?;
+                    Ok(line)
+                })
+                .expect("function"),
+            )
+            .expect("set");
+    }
     entity
+}
+
+/// A `LuaInventory` as `serialize_entity` uses it: `get_contents()` only,
+/// answering the 2.x list-of-`{name, count, quality}` shape. An empty
+/// `contents` is a real and different answer -- an inventory that exists and
+/// holds nothing -- so this takes a count rather than assuming one.
+fn inventory_holding(lua: &Lua, item: &str, count: u32) -> mlua::Result<Table> {
+    let contents = lua.create_table()?;
+    if count > 0 {
+        let slot = lua.create_table()?;
+        slot.set("name", item)?;
+        slot.set("count", count)?;
+        slot.set("quality", "normal")?;
+        contents.set(1, slot)?;
+    }
+    let inventory = lua.create_table()?;
+    inventory.set(
+        "get_contents",
+        lua.create_function(move |_, ()| Ok(contents.clone()))?,
+    )?;
+    Ok(inventory)
 }
 
 /// Every branch of `serialize_entity`'s `elseif` chain, as a table the
@@ -745,8 +865,8 @@ fn every_key_serialize_entity_emits_is_a_field_of_factorio_entity() {
     // emit; a shrinking count would mean a branch stopped being exercised.
     assert_eq!(
         seen.len(),
-        14,
-        "serialize_entity emits fourteen distinct keys across its branches; saw {seen:?}"
+        16,
+        "serialize_entity emits sixteen distinct keys across its branches; saw {seen:?}"
     );
 }
 
@@ -986,4 +1106,437 @@ fn a_payload_written_before_these_fields_existed_still_loads() {
         force.technologies["automation"].effects.is_empty(),
         "an absent effects key is an empty list, not a parse failure",
     );
+}
+
+// --------------------------------------------------------------------------
+// The input inventory: what the machine was GIVEN and has not consumed.
+// --------------------------------------------------------------------------
+
+/// A `furnace` whose input inventory holds `count` of `item`. `count = 0` is
+/// an inventory that exists and is empty, which is a different answer from
+/// having none at all and is asserted as such below.
+fn furnace_holding(lua: &Lua, item: &'static str, count: u32) -> Table {
+    let entity = entity_table(lua, "stone-furnace", "furnace", true);
+    entity
+        .set(
+            "get_inventory",
+            lua.create_function(move |lua, index: i64| {
+                if index != CRAFTER_INPUT {
+                    return Ok(Value::Nil);
+                }
+                Ok(Value::Table(inventory_holding(lua, item, count)?))
+            })
+            .expect("function"),
+        )
+        .expect("set");
+    entity
+}
+
+fn entity_through_serde(lua: &Lua, entity: Table) -> FactorioEntity {
+    let out = call(lua, "serialize_entity", entity);
+    let json: serde_json::Value = lua
+        .from_value(Value::Table(out))
+        .expect("the serialised entity converts to json");
+    serde_json::from_value(json.clone()).unwrap_or_else(|err| panic!("{err} in {json}"))
+}
+
+/// **The whole point of the field.** A peer session measured a production
+/// plateau, eliminated ore exhaustion, arm starvation and a full belt, and
+/// still could not say where 29 of 46 mined ore went -- because a furnace
+/// sitting on ore it was not smelting and a furnace no ore had ever reached
+/// serialised identically. Both had an empty `output_inventory` and neither
+/// said anything at all about its input.
+///
+/// So this asserts the *distinction*, not merely that a key arrives: the two
+/// furnaces differ only in what is in the input inventory, and the two
+/// `FactorioEntity`s must differ too. It goes the whole way through
+/// `LuaSerdeExt` and `serde_json` into the struct a caller actually reads,
+/// for the reason the `pickup_position` and `underground_half` tests above
+/// give: a correctly spelled key can still fail to reach a field, silently.
+#[test]
+fn a_furnace_holding_ore_is_distinguishable_from_one_that_never_received_any() {
+    let lua = botbridge_types();
+
+    let holding = entity_through_serde(&lua, furnace_holding(&lua, "iron-ore", 34));
+    let empty = entity_through_serde(&lua, furnace_holding(&lua, "iron-ore", 0));
+
+    let held = holding
+        .input_inventory
+        .as_ref()
+        .expect("a furnace has an input inventory, so this must be Some");
+    assert_eq!(held.len(), 1, "one item kind in {held:?}");
+    assert_eq!(held[0].name, "iron-ore");
+    assert_eq!(held[0].count, 34);
+
+    assert_eq!(
+        empty.input_inventory,
+        Some(Vec::new()),
+        "an empty input inventory is Some(empty) -- the furnace HAS one and it \
+         is empty, which is not the same claim as having none",
+    );
+    assert_ne!(
+        holding.input_inventory, empty.input_inventory,
+        "the two states this field exists to separate must not serialise alike",
+    );
+}
+
+/// The other half of the distinction, and the one that is easy to get wrong
+/// by being helpful: a belt has no input inventory, and that must arrive as
+/// `None` rather than as an empty list. Collapsing the two would rebuild the
+/// same ambiguity one layer up -- "this thing holds nothing" and "this thing
+/// cannot hold anything" would read alike again.
+#[test]
+fn an_entity_with_no_input_inventory_serialises_none_and_not_an_empty_list() {
+    let lua = botbridge_types();
+
+    let belt = entity_through_serde(
+        &lua,
+        entity_table(&lua, "transport-belt", "transport-belt", false),
+    );
+    assert_eq!(
+        belt.input_inventory, None,
+        "a belt has no input inventory; None means the sender did not say, \
+         Some(empty) would claim it has one and it is empty",
+    );
+
+    let inserter = entity_through_serde(&lua, inserter_table(&lua));
+    assert_eq!(inserter.input_inventory, None);
+}
+
+/// The mod must ask `get_inventory` for the index it resolved from
+/// `defines.inventory`, not for some other one. A furnace whose stub answers
+/// only for `CRAFTER_INPUT` gets its ore; one that answers only for a
+/// different index gets nothing -- which is exactly what a wrong define, or
+/// the removed `furnace_source`, would produce, and it would be silent.
+#[test]
+fn the_input_read_uses_the_index_defines_names() {
+    let lua = botbridge_types();
+
+    let wrong_index = entity_table(&lua, "stone-furnace", "furnace", true);
+    wrong_index
+        .set(
+            "get_inventory",
+            lua.create_function(|lua, index: i64| {
+                if index == CRAFTER_INPUT {
+                    return Ok(Value::Nil);
+                }
+                Ok(Value::Table(inventory_holding(lua, "iron-ore", 34)?))
+            })
+            .expect("function"),
+        )
+        .expect("set");
+
+    assert_eq!(
+        entity_through_serde(&lua, wrong_index).input_inventory,
+        None,
+        "reading any index but defines.inventory.crafter_input must find \
+         nothing, so that a wrong index cannot pass as an empty furnace",
+    );
+}
+
+/// A lab's input is its science packs, under a different `defines` index. The
+/// per-type dispatch is a place a third type can be quietly forgotten, so the
+/// second type it already handles is pinned.
+#[test]
+fn a_lab_sends_the_science_it_is_holding() {
+    let lua = botbridge_types();
+    let lab = entity_table(&lua, "lab", "lab", true);
+    let entity = entity_through_serde(&lua, lab);
+    let held = entity
+        .input_inventory
+        .expect("a lab has an input inventory");
+    assert_eq!(held.len(), 1);
+    assert_eq!(
+        held[0].name, "iron-ore",
+        "whatever the stub was told to hold"
+    );
+}
+
+// --------------------------------------------------------------------------
+// Beacon geometry: the numbers a block layout needs before it reserves ground.
+// --------------------------------------------------------------------------
+
+/// A `LuaEntityPrototype` for a beacon, shaped the way 2.1.17 really answers.
+///
+/// The two things this fixture is *about* are both easy to get wrong from
+/// memory, so both are written the way `runtime-api.json` describes them
+/// rather than the way the older API did:
+///
+///  - **`get_supply_area_distance()` is a method** and there is no
+///    `supply_area_distance` attribute at all, so this table has only the
+///    method. A serialiser reading the attribute gets nil, its `pcall`
+///    swallows the nothing, and the field goes missing in silence -- which is
+///    exactly what happened to `crafting_speed` on 1028 prototypes.
+///  - **`profile` is an ARRAY**, one multiplier per beacon count.
+fn beacon_prototype(lua: &Lua) -> Table {
+    let point = |x: f64, y: f64| {
+        let table = lua.create_table().expect("table");
+        table.set("x", x).expect("set");
+        table.set("y", y).expect("set");
+        table
+    };
+    let collision_box = lua.create_table().expect("table");
+    collision_box
+        .set("left_top", point(-1.2, -1.2))
+        .expect("set");
+    collision_box
+        .set("right_bottom", point(1.2, 1.2))
+        .expect("set");
+
+    let entity = lua.create_table().expect("table");
+    entity.set("name", "beacon").expect("set");
+    entity.set("type", "beacon").expect("set");
+    entity.set("collision_box", collision_box).expect("set");
+    entity
+        .set(
+            "get_supply_area_distance",
+            lua.create_function(|_, ()| Ok(1.5)).expect("function"),
+        )
+        .expect("set");
+    entity.set("distribution_effectivity", 1.5).expect("set");
+    let profile = lua.create_table().expect("table");
+    for (i, multiplier) in [1.0f64, 0.7, 0.55, 0.45].into_iter().enumerate() {
+        profile.set(i + 1, multiplier).expect("set");
+    }
+    entity.set("profile", profile).expect("set");
+    entity
+}
+
+fn prototype_through_serde(
+    lua: &Lua,
+    entity: Table,
+) -> factorio_bot_core::types::FactorioEntityPrototype {
+    let out = call(lua, "serialize_entity_prototype", entity);
+    let json: serde_json::Value = lua
+        .from_value(Value::Table(out))
+        .expect("the serialised prototype converts to json");
+    serde_json::from_value(json.clone()).unwrap_or_else(|err| panic!("{err} in {json}"))
+}
+
+/// `FactorioEntityPrototype` carried nothing electrical, so a block layout had
+/// no way to ask how far a beacon reaches or what it is worth --
+/// `crates/planner/src/method/power.rs` writes `pole_supply_half_extent` out
+/// as a hand-kept table of vanilla names for the same reason, and says in its
+/// own doc that sending this is the follow-up that deletes it. Picking a
+/// spacing from memory instead is the hard-coded-rate defect in another hat.
+///
+/// Goes the whole way into the struct rather than checking the Lua table,
+/// because a correctly spelled key can still reach no field: serde drops an
+/// unrecognised one in silence, and this file already records two live bugs of
+/// exactly that shape (`pickupPosition`, `belt_to_ground_type`).
+#[test]
+fn a_serialised_beacon_prototype_carries_its_geometry() {
+    let lua = botbridge_types();
+    let beacon = prototype_through_serde(&lua, beacon_prototype(&lua));
+
+    assert_eq!(
+        beacon.supply_area_distance,
+        Some(1.5),
+        "half the side of the square the beacon reaches -- read through \
+         get_supply_area_distance(), which is a method and has no attribute",
+    );
+    assert_eq!(beacon.distribution_effectivity, Some(1.5));
+    assert_eq!(
+        beacon.beacon_profile,
+        Some(vec![1.0, 0.7, 0.55, 0.45]),
+        "the profile is per BEACON COUNT: one number cannot express it, and a \
+         caller given only distribution_effectivity would compute a value \
+         right for exactly one beacon and silently wrong for the rest",
+    );
+}
+
+/// The other half of the distinction. A stone furnace has no supply area, no
+/// distribution effectivity and no profile, and all three must arrive `None` --
+/// not `Some(0.0)`, which would claim a beacon that reaches nowhere, and not
+/// an empty list, which would claim a profile with no entries.
+#[test]
+fn a_prototype_that_is_not_a_beacon_says_nothing_about_beacons() {
+    let lua = botbridge_types();
+    let point = |x: f64, y: f64| {
+        let table = lua.create_table().expect("table");
+        table.set("x", x).expect("set");
+        table.set("y", y).expect("set");
+        table
+    };
+    let collision_box = lua.create_table().expect("table");
+    collision_box
+        .set("left_top", point(-0.8, -0.8))
+        .expect("set");
+    collision_box
+        .set("right_bottom", point(0.8, 0.8))
+        .expect("set");
+    let furnace = lua.create_table().expect("table");
+    furnace.set("name", "stone-furnace").expect("set");
+    furnace.set("type", "furnace").expect("set");
+    furnace.set("collision_box", collision_box).expect("set");
+
+    let prototype = prototype_through_serde(&lua, furnace);
+    assert_eq!(prototype.supply_area_distance, None);
+    assert_eq!(prototype.distribution_effectivity, None);
+    assert_eq!(prototype.beacon_profile, None);
+}
+
+/// **The trap this fixture exists to hold shut.** A serialiser that reads
+/// `entity.supply_area_distance` -- the pre-2.0 attribute, which 2.1.17 does
+/// not have -- finds nothing on a real beacon and reports `None`, and the
+/// `pcall` around every prototype read means it does so without an error
+/// anywhere. So a beacon whose ONLY route to the number is the method must
+/// still answer; if this ever fails, the read went back to the attribute.
+#[test]
+fn the_supply_area_comes_from_the_method_and_not_the_attribute() {
+    let lua = botbridge_types();
+    let beacon = beacon_prototype(&lua);
+    // A beacon exactly as the live API presents it: the attribute is absent
+    // and only the method answers.
+    assert!(
+        matches!(
+            beacon
+                .get::<Value>("supply_area_distance")
+                .expect("attribute"),
+            Value::Nil
+        ),
+        "2.1.17 has no such attribute; a fixture that added one would make \
+         the attribute read pass and the live game fail",
+    );
+    assert_eq!(
+        prototype_through_serde(&lua, beacon).supply_area_distance,
+        Some(1.5),
+    );
+}
+
+// --------------------------------------------------------------------------
+// Transport lines: what is riding on the belt, lane by lane.
+// --------------------------------------------------------------------------
+
+fn lanes_of(entity: &FactorioEntity) -> Vec<(String, Vec<(String, u32)>)> {
+    entity
+        .transport_lines
+        .as_ref()
+        .expect("a belt-connectable entity reports its lanes")
+        .iter()
+        .map(|line| {
+            (
+                line.line.clone(),
+                line.contents
+                    .iter()
+                    .map(|item| (item.name.clone(), item.count))
+                    .collect(),
+            )
+        })
+        .collect()
+}
+
+/// `LuaTransportLine::get_contents()` had blocked four separate questions
+/// here, the fourth a diagnosis: a run mined 46 ore, made 17 plates and
+/// stranded 29, and a full belt could be neither ruled in nor out because the
+/// belt's contents never left the game.
+///
+/// **The lanes are the point.** A `transport-belt` has two and which one an
+/// item is on decides whether an arm can take it -- an inserter drops on the
+/// far lane and a side-load arrives on the near one, and this project has
+/// measured a block where getting that backwards put ore and coal on a single
+/// lane and produced one plate. A single aggregated number over the whole belt
+/// would have been unable to say that.
+#[test]
+fn a_belts_lanes_are_reported_by_name_with_what_is_on_them() {
+    let lua = botbridge_types();
+    let belt = entity_through_serde(
+        &lua,
+        entity_table(&lua, "transport-belt", "transport-belt", false),
+    );
+
+    assert_eq!(
+        lanes_of(&belt),
+        vec![
+            ("left_line".to_string(), vec![("iron-ore".to_string(), 4)]),
+            ("right_line".to_string(), vec![]),
+        ],
+        "both lanes, named from defines.transport_line and in index order -- \
+         an empty lane is reported as an empty lane, not omitted, or a belt \
+         with one loaded lane would read the same as a belt with two",
+    );
+}
+
+/// The names come from inverting the game's own `defines.transport_line`, not
+/// from a list of strings written down beside the code. Index 3 is
+/// `left_underground_line` on an underground belt and a different lane on a
+/// splitter, so a caller handed a bare number would have to rebuild the
+/// mapping from the entity type -- which is inventing it.
+#[test]
+fn an_underground_belts_extra_lanes_are_named_too() {
+    let lua = botbridge_types();
+    let underground = entity_through_serde(
+        &lua,
+        entity_table(&lua, "underground-belt", "underground-belt", false),
+    );
+
+    let names: Vec<String> = lanes_of(&underground)
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
+    assert_eq!(
+        names,
+        vec![
+            "left_line",
+            "right_line",
+            "left_underground_line",
+            "right_underground_line"
+        ],
+        "four lanes, each under the game's own name for its index",
+    );
+}
+
+/// The other half of the distinction, and the reason the mod checks for the
+/// method rather than calling it: `get_max_transport_line_index` is declared
+/// for `TransportBeltConnectable` only, so reading it off a furnace raises --
+/// the same shape as the `crafting_progress` read that once took a live run
+/// down from inside a sampler.
+///
+/// `None` here, never an empty list: "this belt is running empty" and "this is
+/// not a belt" are precisely the two answers a belt diagnosis has to separate.
+#[test]
+fn an_entity_that_is_not_belt_connectable_reports_no_lanes() {
+    let lua = botbridge_types();
+
+    let furnace = entity_through_serde(&lua, furnace_holding(&lua, "iron-ore", 34));
+    assert_eq!(furnace.transport_lines, None);
+
+    let inserter = entity_through_serde(&lua, inserter_table(&lua));
+    assert_eq!(inserter.transport_lines, None);
+}
+
+/// A lane whose contents arrive as Lua's empty table must still be a lane.
+///
+/// `helpers.table_to_json({})` renders an empty Lua table as `{}` and not
+/// `[]`, so an empty lane reaches serde as an empty *map* where a sequence is
+/// declared. That is a hard error without
+/// `deserialize_helpers::vec_or_empty_map`, and it would surface only on a
+/// belt that happens to be running empty -- which is most belts, most of the
+/// time, and exactly the case somebody is diagnosing.
+#[test]
+fn an_empty_lane_survives_the_empty_table_json_renders_as_an_object() {
+    let entity: FactorioEntity = serde_json::from_str(
+        r#"{
+          "name": "transport-belt", "entity_type": "transport-belt",
+          "position": {"x": 0.5, "y": 0.5},
+          "bounding_box": {"left_top": {"x": 0.1, "y": 0.1},
+                           "right_bottom": {"x": 0.9, "y": 0.9}},
+          "direction": 0,
+          "transport_lines": [
+            {"line": "left_line", "contents": {}},
+            {"line": "right_line",
+             "contents": [{"name": "coal", "quality": "normal", "count": 2}]}
+          ]
+        }"#,
+    )
+    .expect("an empty lane rendered as {} must still parse");
+
+    let lanes = entity.transport_lines.expect("lanes");
+    assert_eq!(lanes[0].line, "left_line");
+    assert!(
+        lanes[0].contents.is_empty(),
+        "an empty object is an empty lane, not a parse failure and not a \
+         missing lane",
+    );
+    assert_eq!(lanes[1].contents.len(), 1);
 }

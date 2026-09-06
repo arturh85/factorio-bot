@@ -153,6 +153,14 @@ const PRELUDE: &str = r#"
                 if contents == nil then return nil end
                 return { get_contents = function() return { coal = 3 } end }
             end,
+            -- The INPUT inventory, which has no getter of its own:
+            -- `serialize_entity` resolves an index out of `defines.inventory`
+            -- and calls `get_inventory(index)`. Owned by whatever owns the
+            -- other two, on the same terms.
+            get_inventory = function()
+                if contents == nil then return nil end
+                return { get_contents = function() return { ["iron-ore"] = 7 } end }
+            end,
         }
     end
 "#;
@@ -270,6 +278,14 @@ fn a_machine_is_sent_without_its_inventories() {
     );
     assert!(
         furnace
+            .get::<Option<Table>>("input_inventory")
+            .expect("get")
+            .is_none(),
+        "and so does the ore it is holding: `omit_inventories` covers all \
+         three, or the bulk path grows the whole world's item positions again"
+    );
+    assert!(
+        furnace
             .get::<Option<Table>>("bounding_box")
             .expect("get")
             .is_some(),
@@ -316,6 +332,16 @@ fn an_rcon_query_still_answers_with_the_contents() {
             .expect("get")
             .is_some(),
         "both halves, or a script counting fuel breaks instead"
+    );
+    assert_eq!(
+        record
+            .get::<Table>("input_inventory")
+            .expect("input_inventory -- the query path carries it too")
+            .get::<u32>("iron-ore")
+            .expect("iron-ore"),
+        7,
+        "all three, now: what the furnace holds is exactly the reading that \
+         separates `it has ore and is not smelting` from `no ore arrived`"
     );
 }
 

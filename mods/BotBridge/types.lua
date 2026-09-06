@@ -536,6 +536,56 @@ function serialize_entity_prototype(entity)
     -- for a burner drill it genuinely is, because its area is its footprint.
     ok, val = pcall(function() return entity.mining_drill_radius end)
     if ok then record.mining_drill_radius = val end
+    -- BEACON AND POLE GEOMETRY. `FactorioEntityPrototype` carried nothing
+    -- electrical at all, which is why `crates/planner/src/method/power.rs`
+    -- writes `pole_supply_half_extent` out by hand as a table of vanilla
+    -- names and says in its own doc that sending this field is the follow-up
+    -- that deletes it. Two sessions were blocked on beacon spacing and both
+    -- correctly refused to invent a number.
+    --
+    -- **`get_supply_area_distance()` is a METHOD, not an attribute.** There is
+    -- no `supply_area_distance` on `LuaEntityPrototype` in 2.1.17 at all
+    -- (checked against `runtime-api.json`, not recalled) -- the same shape
+    -- that made `crafting_speed` arrive nil for all 1028 prototypes above: the
+    -- attribute read raises, `pcall` swallows it, and the field is simply
+    -- absent with nothing to say it should not be. No argument means normal
+    -- quality, which is what the planner plans for.
+    --
+    -- It answers for an `electric-pole` as well as a `beacon` -- half the side
+    -- of the square it supplies, so 2.5 for a small pole's 5x5.
+    ok, val = pcall(function() return entity.get_supply_area_distance() end)
+    if ok then record.supply_area_distance = val end
+    -- Beacon only: the fraction of a module's effect the receiver gets.
+    ok, val = pcall(function() return entity.distribution_effectivity end)
+    if ok then record.distribution_effectivity = val end
+    -- **Beacon effectiveness is NOT a single scalar in 2.0.** `profile` is an
+    -- array of multipliers indexed by how many beacons reach one receiver, so
+    -- the second beacon on a machine is worth a different amount from the
+    -- first. Sending only `distribution_effectivity` would let a caller
+    -- compute a per-beacon number that is right for exactly one beacon count
+    -- and silently wrong for every other, which is the shape of defect this
+    -- field exists to prevent rather than create.
+    --
+    -- Keyed `beacon_profile`, not `profile`: bare `profile` on a struct that
+    -- describes every prototype in the game says nothing about what it
+    -- profiles. `FactorioEntityPrototype` reads the same spelling -- a name
+    -- that matches nothing on the Rust struct is dropped by serde SILENTLY,
+    -- which has happened twice in this file (`pickupPosition`,
+    -- `belt_to_ground_type`), so the pairing is pinned by a test that goes the
+    -- whole way into the struct.
+    ok, val = pcall(function()
+        local profile = entity.profile
+        if profile == nil then return nil end
+        local multipliers = {}
+        for _, multiplier in ipairs(profile) do
+            table.insert(multipliers, multiplier)
+        end
+        -- nil rather than `{}` so an empty profile does not arrive as an empty
+        -- *map* -- `helpers.table_to_json` renders an empty Lua table as `{}`.
+        if #multipliers == 0 then return nil end
+        return multipliers
+    end)
+    if ok then record.beacon_profile = val end
     ok, val = pcall(function() return entity.resource_category end)
     if ok then record.resource_category = val end
     ok, val = pcall(function()
@@ -566,6 +616,68 @@ function serialize_entity_prototype(entity)
     end
 
     return record
+end
+
+-- Which `defines.inventory` index holds this entity type's INPUT, or nil.
+--
+-- There is no `get_input_inventory()` on `LuaEntity` -- `get_output_inventory`
+-- and `get_fuel_inventory` exist and their input counterpart does not -- so
+-- the index has to be named per type, exactly as `machine_row` in control.lua
+-- does it.
+--
+-- Factorio 2.1.17 renamed the crafting-machine inventories: this install's
+-- `defines.inventory` has `crafter_input` and has **no** `furnace_source` or
+-- `assembling_machine_input` at all (checked against
+-- `workspace/factorio-api-docs/runtime-api.json`, not recalled). The fallback
+-- is for an older Factorio, and `nil` is a supported outcome -- the caller
+-- omits the field rather than passing nil to `get_inventory`.
+--
+-- `rawget(_G, "defines")` rather than a bare `defines`, because this file is
+-- also loaded outside Factorio: `crates/core/tests/botbridge_serialisers.rs`
+-- runs these serialisers in a plain Lua 5.4 state, where a bare global read
+-- of a table that does not exist is nil and indexing it raises. The tests
+-- install a `defines` stub shaped like the real one.
+local function input_inventory_index(entity_type)
+    local defines_table = rawget(_G, "defines")
+    if defines_table == nil or defines_table.inventory == nil then
+        return nil
+    end
+    local inventory = defines_table.inventory
+    if entity_type == "furnace" or entity_type == "assembling-machine" then
+        return inventory.crafter_input or inventory.assembling_machine_input
+    elseif entity_type == "lab" then
+        return inventory.lab_input
+    end
+    return nil
+end
+
+-- `defines.transport_line`'s own name for a line index, or `unmapped_<n>`.
+--
+-- Built by inverting `defines.transport_line`, so the names are the game's and
+-- not a list written down here that a Factorio version could quietly outgrow.
+-- An index this build cannot name still reaches the record, labelled as
+-- unresolved, rather than being written as a bare integer nobody can decode
+-- later -- the same rule `ENTITY_STATUS_NAMES` in control.lua follows.
+--
+-- The number alone is uninterpretable: line 3 is `left_underground_line` on an
+-- underground belt and a different lane on a splitter, so a caller handed the
+-- index would have to rebuild this mapping from the entity type and would be
+-- guessing at it.
+--
+-- `rawget(_G, "defines")` for the same reason `input_inventory_index` uses it:
+-- this file is loaded outside Factorio by the Rust tests.
+local transport_line_names = nil
+local function transport_line_name(index)
+    if transport_line_names == nil then
+        transport_line_names = {}
+        local defines_table = rawget(_G, "defines")
+        if defines_table ~= nil and defines_table.transport_line ~= nil then
+            for name, value in pairs(defines_table.transport_line) do
+                transport_line_names[value] = name
+            end
+        end
+    end
+    return transport_line_names[index] or ("unmapped_" .. tostring(index))
 end
 
 -- `opts.omit_inventories` -- IDENTITY AND GEOMETRY IN BULK, CONTENTS ON DEMAND.
@@ -628,6 +740,74 @@ function serialize_entity(entity, opts)
         local fuel_inventory = entity.get_fuel_inventory()
         if fuel_inventory ~= nil then
             record.fuel_inventory = fuel_inventory.get_contents()
+        end
+        -- WHAT THE MACHINE WAS GIVEN AND HAS NOT TURNED INTO ANYTHING YET.
+        --
+        -- The two reads above answer "what has it made" and "what is it
+        -- burning", and between them they leave a hole a day was spent in: a
+        -- furnace holding ore it is not smelting and a furnace no ore ever
+        -- reached serialise IDENTICALLY -- `output_inventory` empty,
+        -- `fuel_inventory` whatever, and nothing at all about the ore. A run
+        -- that mined 46 ore and got 17 plates could not say where the other
+        -- 29 went, and eliminating ore exhaustion, arm starvation and a full
+        -- belt by measurement still left the question open, because the one
+        -- inventory that would have answered it was never sent.
+        --
+        -- **`nil` and empty are different answers and must stay different.**
+        -- A belt has no input inventory at all and gets no key (`None` on the
+        -- Rust side); a furnace standing empty gets `{}`, which
+        -- `option_vec_or_empty_map` reads as `Some(empty)`. Collapsing those
+        -- would rebuild the same ambiguity one layer up.
+        local input_index = input_inventory_index(entity.type)
+        if input_index ~= nil then
+            local input_inventory = entity.get_inventory(input_index)
+            if input_inventory ~= nil then
+                record.input_inventory = input_inventory.get_contents()
+            end
+        end
+        -- WHAT IS RIDING ON THE BELT, LANE BY LANE.
+        --
+        -- The three reads above describe machines and say nothing at all about
+        -- the thing between them. `LuaTransportLine::get_contents()` has now
+        -- blocked four separate questions here, the fourth a diagnosis: a run
+        -- mined 46 ore, made 17 plates and stranded 29, and neither a full belt
+        -- nor an empty one could be ruled in or out because the belt's contents
+        -- had never left the game.
+        --
+        -- **Lanes, not one number.** A `transport-belt` has two, an
+        -- `underground-belt` four and a `splitter` eight, and which lane an
+        -- item is on is exactly what decides whether an arm can take it -- an
+        -- inserter drops on the FAR lane and a side-load arrives on the NEAR
+        -- one, and this project has already measured a block where getting
+        -- that backwards put ore and coal on one lane and produced a single
+        -- plate.
+        --
+        -- **Counts, not positions.** `get_detailed_contents()` would give every
+        -- item's position along the line; the owner's ruling at scale is the
+        -- direction and what types of items are on it, so this is the
+        -- aggregated `get_contents()` and nothing finer.
+        --
+        -- Guarded on `get_max_transport_line_index`, which is declared for
+        -- `TransportBeltConnectable` only: reading it off a furnace raises,
+        -- exactly like the `crafting_progress` read that once took a live run
+        -- down from inside a sampler. A non-belt gets no key rather than an
+        -- empty list, so "this belt is running empty" stays a different answer
+        -- from "this is not a belt".
+        if entity.get_max_transport_line_index ~= nil then
+            local ok, max_index = pcall(function()
+                return entity.get_max_transport_line_index()
+            end)
+            if ok and max_index ~= nil and max_index > 0 then
+                local lines = {}
+                for index = 1, max_index do
+                    local line = entity.get_transport_line(index)
+                    table.insert(lines, {
+                        line = transport_line_name(index),
+                        contents = line.get_contents(),
+                    })
+                end
+                record.transport_lines = lines
+            end
         end
     end
 

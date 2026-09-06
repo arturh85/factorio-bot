@@ -1706,6 +1706,15 @@
               "null"
             ]
           },
+          "input_inventory": {
+            "items": {
+              "$ref": "#/components/schemas/InventoryItemWithQuality"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "name": {
             "type": "string"
           },

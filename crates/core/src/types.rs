@@ -1761,6 +1761,31 @@ pub struct FactorioEntity {
         deserialize_with = "deserialize_helpers::option_vec_or_empty_map"
     )]
     pub fuel_inventory: Option<Vec<InventoryItemWithQuality>>,
+    // Deliberately a `schemars(description)` and not a `///`, like `direction`
+    // above: this type's OpenAPI schema is snapshotted, and the doc comment
+    // this field would otherwise carry belongs to the reader of the Lua docs.
+    // The long version is in `mods/BotBridge/types.lua`, at the read itself.
+    //
+    // What a machine has been GIVEN and not yet turned into anything: a
+    // furnace's ore, an assembler's ingredients, a lab's science. The sibling
+    // fields say what came out and what is burning, and without this one "the
+    // furnace holds ore and is not smelting it" is indistinguishable from "no
+    // ore ever arrived" -- a run that mined 46 ore for 17 plates could not say
+    // where the other 29 were.
+    //
+    // **`None` is not empty.** A belt, a chest or a tree has no input
+    // inventory and the mod sends no key at all, which arrives here as `None`;
+    // a furnace standing empty sends `{}`, which the tolerant deserializer
+    // below turns into `Some(vec![])`. Every record written before this field
+    // existed also reads as `None`, i.e. "the sender did not say".
+    #[schemars(
+        description = "What the machine has been given and not yet consumed -- a furnace's ore, an assembler's ingredients, a lab's science. `null` means the entity has no input inventory (or the sender predates the field); an empty list means it has one and it is empty."
+    )]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_helpers::option_vec_or_empty_map"
+    )]
+    pub input_inventory: Option<Vec<InventoryItemWithQuality>>,
     pub amount: Option<u32>,        // only type = resource
     pub recipe: Option<String>,     // only CraftingMachines
     pub ghost_name: Option<String>, // only type = entity-ghost

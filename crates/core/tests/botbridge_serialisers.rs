@@ -12,8 +12,28 @@ use factorio_bot_core::blueprint::UndergroundHalf;
 use factorio_bot_core::types::{FactorioEntity, FactorioRecipe};
 use mlua::{Function, Lua, LuaSerdeExt, Table, Value};
 
+/// `defines.inventory.crafter_input` as this Factorio publishes it.
+///
+/// The *number* is not what any test here asserts -- the stubs below are
+/// written against this constant, so the tests prove that `types.lua` asks
+/// `get_inventory` for the index it named in `defines`, whatever that index
+/// is. What matters is that the name exists: 2.1.17 has `crafter_input` and
+/// has no `furnace_source` or `assembling_machine_input` at all.
+const CRAFTER_INPUT: i64 = 2;
+/// `defines.inventory.lab_input`, on the same terms as [`CRAFTER_INPUT`].
+const LAB_INPUT: i64 = 1;
+
 /// Loads the mod's serialisers. The path is the same live reference a debug
 /// build uses for `workspace/mods`.
+///
+/// A `defines` stub is installed because `serialize_entity` needs one to find
+/// an entity's INPUT inventory: `LuaEntity` has `get_output_inventory` and
+/// `get_fuel_inventory` but no input counterpart, so the index has to be
+/// named through `defines.inventory`. `types.lua` reaches it with
+/// `rawget(_G, "defines")` precisely so that this state -- a plain Lua 5.4
+/// interpreter that is not a game -- gets `nil` instead of an error; without
+/// the stub the input inventory would be unreachable from every test here and
+/// the field would be untested rather than tested.
 fn botbridge_types() -> Lua {
     let path =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../mods/BotBridge/types.lua");
@@ -25,6 +45,12 @@ fn botbridge_types() -> Lua {
     // file from this repository and no user input at all.
     #[allow(clippy::disallowed_methods)]
     let lua = Lua::new();
+    let inventory = lua.create_table().expect("table");
+    inventory.set("crafter_input", CRAFTER_INPUT).expect("set");
+    inventory.set("lab_input", LAB_INPUT).expect("set");
+    let defines = lua.create_table().expect("table");
+    defines.set("inventory", inventory).expect("set");
+    lua.globals().set("defines", defines).expect("set");
     lua.load(&source)
         .set_name("types.lua")
         .exec()
@@ -629,7 +655,47 @@ fn entity_table(lua: &Lua, name: &str, entity_type: &str, with_inventories: bool
         };
         entity.set(getter, getter_fn).expect("set");
     }
+    // The INPUT inventory, which has no getter of its own: `serialize_entity`
+    // resolves an index through `defines.inventory` and calls
+    // `get_inventory(index)`. Answering `nil` for anything but the index the
+    // mod named is what makes this a check rather than a rubber stamp -- a
+    // serialiser that asked for the wrong inventory would get nothing and the
+    // key would silently not appear.
+    let get_inventory = if with_inventories {
+        lua.create_function(|lua, index: i64| {
+            if index != CRAFTER_INPUT && index != LAB_INPUT {
+                return Ok(Value::Nil);
+            }
+            Ok(Value::Table(inventory_holding(lua, "iron-ore", 34)?))
+        })
+        .expect("function")
+    } else {
+        lua.create_function(|_, _index: i64| Ok(Value::Nil))
+            .expect("function")
+    };
+    entity.set("get_inventory", get_inventory).expect("set");
     entity
+}
+
+/// A `LuaInventory` as `serialize_entity` uses it: `get_contents()` only,
+/// answering the 2.x list-of-`{name, count, quality}` shape. An empty
+/// `contents` is a real and different answer -- an inventory that exists and
+/// holds nothing -- so this takes a count rather than assuming one.
+fn inventory_holding(lua: &Lua, item: &str, count: u32) -> mlua::Result<Table> {
+    let contents = lua.create_table()?;
+    if count > 0 {
+        let slot = lua.create_table()?;
+        slot.set("name", item)?;
+        slot.set("count", count)?;
+        slot.set("quality", "normal")?;
+        contents.set(1, slot)?;
+    }
+    let inventory = lua.create_table()?;
+    inventory.set(
+        "get_contents",
+        lua.create_function(move |_, ()| Ok(contents.clone()))?,
+    )?;
+    Ok(inventory)
 }
 
 /// Every branch of `serialize_entity`'s `elseif` chain, as a table the
@@ -745,8 +811,8 @@ fn every_key_serialize_entity_emits_is_a_field_of_factorio_entity() {
     // emit; a shrinking count would mean a branch stopped being exercised.
     assert_eq!(
         seen.len(),
-        14,
-        "serialize_entity emits fourteen distinct keys across its branches; saw {seen:?}"
+        15,
+        "serialize_entity emits fifteen distinct keys across its branches; saw {seen:?}"
     );
 }
 
@@ -985,5 +1051,149 @@ fn a_payload_written_before_these_fields_existed_still_loads() {
     assert!(
         force.technologies["automation"].effects.is_empty(),
         "an absent effects key is an empty list, not a parse failure",
+    );
+}
+
+// --------------------------------------------------------------------------
+// The input inventory: what the machine was GIVEN and has not consumed.
+// --------------------------------------------------------------------------
+
+/// A `furnace` whose input inventory holds `count` of `item`. `count = 0` is
+/// an inventory that exists and is empty, which is a different answer from
+/// having none at all and is asserted as such below.
+fn furnace_holding(lua: &Lua, item: &'static str, count: u32) -> Table {
+    let entity = entity_table(lua, "stone-furnace", "furnace", true);
+    entity
+        .set(
+            "get_inventory",
+            lua.create_function(move |lua, index: i64| {
+                if index != CRAFTER_INPUT {
+                    return Ok(Value::Nil);
+                }
+                Ok(Value::Table(inventory_holding(lua, item, count)?))
+            })
+            .expect("function"),
+        )
+        .expect("set");
+    entity
+}
+
+fn entity_through_serde(lua: &Lua, entity: Table) -> FactorioEntity {
+    let out = call(lua, "serialize_entity", entity);
+    let json: serde_json::Value = lua
+        .from_value(Value::Table(out))
+        .expect("the serialised entity converts to json");
+    serde_json::from_value(json.clone()).unwrap_or_else(|err| panic!("{err} in {json}"))
+}
+
+/// **The whole point of the field.** A peer session measured a production
+/// plateau, eliminated ore exhaustion, arm starvation and a full belt, and
+/// still could not say where 29 of 46 mined ore went -- because a furnace
+/// sitting on ore it was not smelting and a furnace no ore had ever reached
+/// serialised identically. Both had an empty `output_inventory` and neither
+/// said anything at all about its input.
+///
+/// So this asserts the *distinction*, not merely that a key arrives: the two
+/// furnaces differ only in what is in the input inventory, and the two
+/// `FactorioEntity`s must differ too. It goes the whole way through
+/// `LuaSerdeExt` and `serde_json` into the struct a caller actually reads,
+/// for the reason the `pickup_position` and `underground_half` tests above
+/// give: a correctly spelled key can still fail to reach a field, silently.
+#[test]
+fn a_furnace_holding_ore_is_distinguishable_from_one_that_never_received_any() {
+    let lua = botbridge_types();
+
+    let holding = entity_through_serde(&lua, furnace_holding(&lua, "iron-ore", 34));
+    let empty = entity_through_serde(&lua, furnace_holding(&lua, "iron-ore", 0));
+
+    let held = holding
+        .input_inventory
+        .as_ref()
+        .expect("a furnace has an input inventory, so this must be Some");
+    assert_eq!(held.len(), 1, "one item kind in {held:?}");
+    assert_eq!(held[0].name, "iron-ore");
+    assert_eq!(held[0].count, 34);
+
+    assert_eq!(
+        empty.input_inventory,
+        Some(Vec::new()),
+        "an empty input inventory is Some(empty) -- the furnace HAS one and it \
+         is empty, which is not the same claim as having none",
+    );
+    assert_ne!(
+        holding.input_inventory, empty.input_inventory,
+        "the two states this field exists to separate must not serialise alike",
+    );
+}
+
+/// The other half of the distinction, and the one that is easy to get wrong
+/// by being helpful: a belt has no input inventory, and that must arrive as
+/// `None` rather than as an empty list. Collapsing the two would rebuild the
+/// same ambiguity one layer up -- "this thing holds nothing" and "this thing
+/// cannot hold anything" would read alike again.
+#[test]
+fn an_entity_with_no_input_inventory_serialises_none_and_not_an_empty_list() {
+    let lua = botbridge_types();
+
+    let belt = entity_through_serde(
+        &lua,
+        entity_table(&lua, "transport-belt", "transport-belt", false),
+    );
+    assert_eq!(
+        belt.input_inventory, None,
+        "a belt has no input inventory; None means the sender did not say, \
+         Some(empty) would claim it has one and it is empty",
+    );
+
+    let inserter = entity_through_serde(&lua, inserter_table(&lua));
+    assert_eq!(inserter.input_inventory, None);
+}
+
+/// The mod must ask `get_inventory` for the index it resolved from
+/// `defines.inventory`, not for some other one. A furnace whose stub answers
+/// only for `CRAFTER_INPUT` gets its ore; one that answers only for a
+/// different index gets nothing -- which is exactly what a wrong define, or
+/// the removed `furnace_source`, would produce, and it would be silent.
+#[test]
+fn the_input_read_uses_the_index_defines_names() {
+    let lua = botbridge_types();
+
+    let wrong_index = entity_table(&lua, "stone-furnace", "furnace", true);
+    wrong_index
+        .set(
+            "get_inventory",
+            lua.create_function(|lua, index: i64| {
+                if index == CRAFTER_INPUT {
+                    return Ok(Value::Nil);
+                }
+                Ok(Value::Table(inventory_holding(lua, "iron-ore", 34)?))
+            })
+            .expect("function"),
+        )
+        .expect("set");
+
+    assert_eq!(
+        entity_through_serde(&lua, wrong_index).input_inventory,
+        None,
+        "reading any index but defines.inventory.crafter_input must find \
+         nothing, so that a wrong index cannot pass as an empty furnace",
+    );
+}
+
+/// A lab's input is its science packs, under a different `defines` index. The
+/// per-type dispatch is a place a third type can be quietly forgotten, so the
+/// second type it already handles is pinned.
+#[test]
+fn a_lab_sends_the_science_it_is_holding() {
+    let lua = botbridge_types();
+    let lab = entity_table(&lua, "lab", "lab", true);
+    let entity = entity_through_serde(&lua, lab);
+    let held = entity
+        .input_inventory
+        .expect("a lab has an input inventory");
+    assert_eq!(held.len(), 1);
+    assert_eq!(
+        held[0].name, "iron-ore",
+        "whatever the stub was told to hold"
     );
 }

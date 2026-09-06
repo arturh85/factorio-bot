@@ -179,6 +179,10 @@ export function parseFactorioEntity(value: unknown, path = '$'): FactorioEntity 
         pickup_position: parsePositionOrNull(obj.pickup_position, path + '.pickup_position'),
         output_inventory: parseInventoryOrNull(obj.output_inventory, path + '.output_inventory'),
         fuel_inventory: parseInventoryOrNull(obj.fuel_inventory, path + '.fuel_inventory'),
+        // The third inventory, and the one that distinguishes "this furnace is
+        // holding ore" from "no ore ever got here". `null` when the entity has
+        // none and on every capture written before 2026-09-06.
+        input_inventory: parseInventoryOrNull(obj.input_inventory, path + '.input_inventory'),
         amount: asNumberOrNull(obj.amount, path + '.amount'),
         recipe: asStringOrNull(obj.recipe, path + '.recipe'),
         ghost_name: asStringOrNull(obj.ghost_name, path + '.ghost_name'),

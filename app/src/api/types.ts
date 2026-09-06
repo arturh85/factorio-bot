@@ -212,6 +212,17 @@ export interface FactorioEntity {
     pickup_position: Position | null;
     output_inventory: InventoryItemWithQuality[] | null;
     fuel_inventory: InventoryItemWithQuality[] | null;
+    /**
+     * What the machine has been given and not yet consumed -- a furnace's ore,
+     * an assembler's ingredients, a lab's science.
+     *
+     * `null` and `[]` are different answers and both are real. `null` means
+     * the entity has no input inventory at all (a belt, a chest, a tree) or
+     * the record predates the field; `[]` means it has one and it is empty.
+     * Without this field a furnace holding ore it is not smelting and a
+     * furnace no ore ever reached looked identical from here.
+     */
+    input_inventory: InventoryItemWithQuality[] | null;
     /** Only present (non-null) for `entity_type: "resource"`. */
     amount: number | null;
     /** Only present for crafting machines. */

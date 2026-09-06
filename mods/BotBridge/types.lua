@@ -568,6 +568,39 @@ function serialize_entity_prototype(entity)
     return record
 end
 
+-- Which `defines.inventory` index holds this entity type's INPUT, or nil.
+--
+-- There is no `get_input_inventory()` on `LuaEntity` -- `get_output_inventory`
+-- and `get_fuel_inventory` exist and their input counterpart does not -- so
+-- the index has to be named per type, exactly as `machine_row` in control.lua
+-- does it.
+--
+-- Factorio 2.1.17 renamed the crafting-machine inventories: this install's
+-- `defines.inventory` has `crafter_input` and has **no** `furnace_source` or
+-- `assembling_machine_input` at all (checked against
+-- `workspace/factorio-api-docs/runtime-api.json`, not recalled). The fallback
+-- is for an older Factorio, and `nil` is a supported outcome -- the caller
+-- omits the field rather than passing nil to `get_inventory`.
+--
+-- `rawget(_G, "defines")` rather than a bare `defines`, because this file is
+-- also loaded outside Factorio: `crates/core/tests/botbridge_serialisers.rs`
+-- runs these serialisers in a plain Lua 5.4 state, where a bare global read
+-- of a table that does not exist is nil and indexing it raises. The tests
+-- install a `defines` stub shaped like the real one.
+local function input_inventory_index(entity_type)
+    local defines_table = rawget(_G, "defines")
+    if defines_table == nil or defines_table.inventory == nil then
+        return nil
+    end
+    local inventory = defines_table.inventory
+    if entity_type == "furnace" or entity_type == "assembling-machine" then
+        return inventory.crafter_input or inventory.assembling_machine_input
+    elseif entity_type == "lab" then
+        return inventory.lab_input
+    end
+    return nil
+end
+
 -- `opts.omit_inventories` -- IDENTITY AND GEOMETRY IN BULK, CONTENTS ON DEMAND.
 --
 -- This function serves two very different callers. The RCON queries
@@ -628,6 +661,30 @@ function serialize_entity(entity, opts)
         local fuel_inventory = entity.get_fuel_inventory()
         if fuel_inventory ~= nil then
             record.fuel_inventory = fuel_inventory.get_contents()
+        end
+        -- WHAT THE MACHINE WAS GIVEN AND HAS NOT TURNED INTO ANYTHING YET.
+        --
+        -- The two reads above answer "what has it made" and "what is it
+        -- burning", and between them they leave a hole a day was spent in: a
+        -- furnace holding ore it is not smelting and a furnace no ore ever
+        -- reached serialise IDENTICALLY -- `output_inventory` empty,
+        -- `fuel_inventory` whatever, and nothing at all about the ore. A run
+        -- that mined 46 ore and got 17 plates could not say where the other
+        -- 29 went, and eliminating ore exhaustion, arm starvation and a full
+        -- belt by measurement still left the question open, because the one
+        -- inventory that would have answered it was never sent.
+        --
+        -- **`nil` and empty are different answers and must stay different.**
+        -- A belt has no input inventory at all and gets no key (`None` on the
+        -- Rust side); a furnace standing empty gets `{}`, which
+        -- `option_vec_or_empty_map` reads as `Some(empty)`. Collapsing those
+        -- would rebuild the same ambiguity one layer up.
+        local input_index = input_inventory_index(entity.type)
+        if input_index ~= nil then
+            local input_inventory = entity.get_inventory(input_index)
+            if input_inventory ~= nil then
+                record.input_inventory = input_inventory.get_contents()
+            end
         end
     end
 

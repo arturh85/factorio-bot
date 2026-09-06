@@ -168,6 +168,19 @@ release either way. Both numbers were right about their own binary; neither
 message said which. Quote release for anything anyone will act on, because
 whether a per-plan cost is a problem at all can change with the profile.
 
+**And then the ratio itself failed to transfer, one level along.** I offered
+that 7× to convert the other session's block figure; they built release and
+measured instead, and got **~4.4×** (48 s → 10–13 s, against my predicted
+4–5 s). A ratio measured on one goal does not transfer to another: **a
+conversion factor is a claim about a binary *and* a workload.** The
+difference mattered — 4–5 s would have made the cost a non-issue, whereas
+~10 s per expansion, paid on every replan, is 40–70 s for a run that
+replans four to seven times, and it is paid **precisely when things are
+going wrong**, since that is when replans happen.
+
+The general form, and the third time tonight this shape appeared: **do not
+extrapolate a measurement you could take.** Taking it cost them minutes.
+
 **A baseline is only a baseline against a stated commit.** Both sessions
 nearly made the mirror-image mistake within an hour: one about to compare a
 pre-change planner against a post-change one and attribute the difference to

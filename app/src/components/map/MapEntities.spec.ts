@@ -21,6 +21,7 @@ function entity(overrides: Partial<FactorioEntity>): FactorioEntity {
         ghost_name: null,
         ghost_type: null,
         underground_half: null,
+        surface: null,
         ...overrides
     };
 }

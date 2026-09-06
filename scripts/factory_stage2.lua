@@ -312,6 +312,15 @@ repeat
         -- hand.
         local ne = record.enclosures()
         if ne > 0 then print("   WALLED IN: " .. ne .. " bot(s) can no longer reach open ground") end
+        -- Surfaces the mod refused chunks from. Expected to be zero on every
+        -- run this project has made: the world model keys by position alone,
+        -- so `on_chunk_generated` drops any chunk that is not on Nauvis rather
+        -- than aliasing two planets onto one tile. Space Age IS enabled here,
+        -- so a non-zero count is possible, and it means this run planned
+        -- against an incomplete world -- worth a loud line, not a counter in a
+        -- summary nobody reads. Same cadence as the flushes above.
+        local ns = record.surface_chunks_dropped()
+        if ns > 0 then print("   OTHER SURFACE: chunks discarded from " .. ns .. " surface(s) -- this run's world model is Nauvis-only") end
         -- Grouped, because the four trouble counts are two axes and a flat
         -- list of four `x=n` pairs invites exactly the misreading this line
         -- used to produce: `failed` and `lost` name the same distinction for

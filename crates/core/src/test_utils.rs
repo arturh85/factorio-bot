@@ -116,6 +116,9 @@ pub fn spawn_water(tiles: &mut Vec<FactorioTile>, rect: Rect) {
             name: EntityName::Water.to_string(),
             player_collidable: true,
             color: None,
+            // A fixture observed nothing, so it asserts nothing about where it
+            // is. See `FactorioTile::surface`.
+            surface: None,
         });
     }
 }

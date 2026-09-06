@@ -497,6 +497,98 @@ fn round_to_u32(amount: f64) -> u32 {
 pub type PlayerId = u8;
 pub type ActionId = u32;
 
+/// Which surface something is on, identified by **name**.
+///
+/// Space Age is enabled in this workspace, so five planets and any number of
+/// orbital platforms are one rocket away. Every run measured here so far has
+/// been a Space Age run that happened never to leave Nauvis, and the only
+/// thing that kept it that way is one `if` in `on_chunk_generated`
+/// (`mods/BotBridge/control.lua`) that drops a chunk from any other surface.
+/// See `docs/superpowers/notes/2026-09-06-surfaces-survey.md`.
+///
+/// **The name, not the index**, verified against
+/// `workspace/factorio-api-docs/runtime-api.json` (`application_version`
+/// 2.1.17): `LuaSurface.name` is *"unique among surfaces"*, while
+/// `LuaSurface.index` *"is assigned when a surface is created, and remains so
+/// until it is deleted. **Indexes of deleted surfaces can be reused.**"* An
+/// index is therefore an identity only within one save and only until a
+/// deletion; a record somebody reads next year needs the name.
+///
+/// **This does not go on [`Position`], deliberately.** A coordinate is only
+/// ever comparable within one surface, which `Position { x, y }` already says
+/// correctly; putting a surface on it would force `p1 - p2`, `Sub`,
+/// `manhattan_distance` and `PartialEq` to answer "what is the distance
+/// between two planets?", whose honest answer -- undefined -- cannot be
+/// returned as an `f64`. The surface belongs on the **container**, which is
+/// rung one's successor, not on the value.
+#[derive(
+    Clone,
+    Debug,
+    Eq,
+    Hash,
+    Ord,
+    PartialEq,
+    PartialOrd,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+    utoipa::ToSchema,
+)]
+// `transparent` is explicit rather than necessary: serde already renders a
+// newtype struct as its inner value (verified, same standalone experiment as
+// the note on `FactorioEntity::surface`). It is stated so that the wire shape
+// -- a bare `"nauvis"`, which is what the mod emits -- is a declared contract
+// rather than an emergent one, and so that adding a second field to this type
+// fails loudly instead of silently reshaping every archived payload.
+#[serde(transparent)]
+pub struct SurfaceId(pub String);
+
+impl SurfaceId {
+    /// The starting planet, and the only surface anything in this project has
+    /// ever observed.
+    ///
+    /// This is a *constructor*, not an assumption: use it where the surface is
+    /// genuinely known to be Nauvis, never to fill in a surface the mod did
+    /// not report. Absence on the wire is modelled as `None`, because a record
+    /// that confidently says "nauvis" about a line whose surface was never
+    /// transmitted is worse than one that says nothing -- it answers a
+    /// question nobody asked and the reader cannot tell.
+    pub fn nauvis() -> Self {
+        SurfaceId(String::from("nauvis"))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Default for SurfaceId {
+    /// Nauvis. Every world this project builds is a Nauvis world today, and a
+    /// `Default` that had to be spelled out at 1,400 construction sites would
+    /// buy nothing.
+    fn default() -> Self {
+        SurfaceId::nauvis()
+    }
+}
+
+impl std::fmt::Display for SurfaceId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl From<String> for SurfaceId {
+    fn from(name: String) -> Self {
+        SurfaceId(name)
+    }
+}
+
+impl From<&str> for SurfaceId {
+    fn from(name: &str) -> Self {
+        SurfaceId(name.to_owned())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct FactorioPlayer {
@@ -519,6 +611,16 @@ pub struct FactorioPlayer {
     /// character **or max double** when not a character or player connected to
     /// a character", so this is out of integer range as well as fractional.
     pub resource_reach_distance: f64,
+    /// Which surface this player's character stands on, from
+    /// `LuaPlayer.surface.name`. `None` means the mod did not say -- see
+    /// [`FactorioEntity::surface`].
+    ///
+    /// A bot that dies on another surface respawns on Nauvis today
+    /// (`create_bot_character(game.surfaces[1], ...)`), and nothing in the
+    /// planner can express a bot being anywhere but "the" surface. This field
+    /// is what makes that observable rather than invisible.
+    #[serde(default)]
+    pub surface: Option<SurfaceId>,
 }
 
 impl Default for FactorioPlayer {
@@ -533,6 +635,10 @@ impl Default for FactorioPlayer {
             item_pickup_distance: 1.0,
             loot_pickup_distance: 2.0,
             resource_reach_distance: 3.0,
+            // Not `SurfaceId::nauvis()`: a synthesised roster has no observed
+            // surface, and saying "nauvis" here would be the default asserting
+            // something nobody measured.
+            surface: None,
         }
     }
 }
@@ -903,6 +1009,16 @@ pub struct FactorioTile {
     pub player_collidable: bool,
     pub position: Position,
     pub color: Option<[u8; 4]>,
+    /// Which surface this tile belongs to, from `LuaTile.surface.name`
+    /// (verified present on `LuaTile` in `runtime-api.json` 2.1.17). `None`
+    /// means the mod did not say -- see [`FactorioEntity::surface`].
+    ///
+    /// `rcon_find_tiles_filtered` asks `game.surfaces[1]` unconditionally
+    /// today, so a shoreline found for a boiler is a *Nauvis* shoreline
+    /// whatever the bot asking is standing on. Carrying the answer's surface
+    /// is what will let a later reader notice that.
+    #[serde(default)]
+    pub surface: Option<SurfaceId>,
 }
 
 impl FactorioTile {
@@ -1510,6 +1626,34 @@ pub struct FactorioEntity {
     /// written before this field existed still deserialises.
     #[serde(default)]
     pub underground_half: Option<crate::blueprint::UndergroundHalf>,
+    /// Which surface this entity stands on, as the mod read it from
+    /// `LuaEntity.surface.name`.
+    ///
+    /// **`None` means the sender did not say, not "Nauvis".** Every world dump
+    /// and run record written before this field existed lacks it, and while
+    /// every one of them is in fact a Nauvis-only run, that is a fact about
+    /// the mod's `on_chunk_generated` guard rather than something the archived
+    /// bytes assert. So an 865 MB dump from yesterday still deserialises --
+    /// pinned by `crates/core/tests/surface_id.rs`.
+    ///
+    /// Nothing keys on it yet -- the containers (`EntityGraph`, `PlanState`)
+    /// are still position-only and would alias two surfaces into one. This
+    /// carries the fact so the record can be read; keying is the next rung.
+    //
+    // **The `#[serde(default)]` is documentation, not mechanism.** A plain
+    // `//` comment because this struct's doc comments are published in
+    // `app/src/api/openapi.snapshot.json` and this is an internal note.
+    // Removing the attribute as a falsification changed nothing, and that
+    // green was nearly misread as "the test is hollow": serde already treats
+    // an `Option<T>` field as optional, verified against serde 1 in a
+    // standalone crate on 2026-09-06 -- a struct with a plain, unattributed
+    // `Option<Newtype>` deserialises a payload lacking that key to `None`. It
+    // is the `Option` that carries old dumps, here and on
+    // `underground_half`, whose own doc makes the same slightly-too-strong
+    // claim. Kept because it states the intent, and because the day this
+    // field stops being an `Option` it becomes load-bearing.
+    #[serde(default)]
+    pub surface: Option<SurfaceId>,
 }
 
 impl crate::aabb_quadtree::Spatial<Rect> for FactorioEntity {
@@ -1576,7 +1720,11 @@ impl FactorioEntity {
             name: EntityName::TransportBelt.to_string(),
             entity_type: EntityType::TransportBelt.to_string(),
             position: position.clone(),
-            bounding_box: add_to_rect_turned(&Rect::from_wh(0.796875, 0.796875), position, direction),
+            bounding_box: add_to_rect_turned(
+                &Rect::from_wh(0.796875, 0.796875),
+                position,
+                direction,
+            ),
             direction: direction.to_u8().unwrap(),
             ..Default::default()
         }
@@ -1625,7 +1773,11 @@ impl FactorioEntity {
             name: EntityName::Splitter.to_string(),
             entity_type: EntityType::Splitter.to_string(),
             position: position.clone(),
-            bounding_box: add_to_rect_turned(&Rect::from_wh(1.796875, 0.796875), position, direction),
+            bounding_box: add_to_rect_turned(
+                &Rect::from_wh(1.796875, 0.796875),
+                position,
+                direction,
+            ),
             direction: direction.to_u8().unwrap(),
             ..Default::default()
         }
@@ -1673,7 +1825,11 @@ impl FactorioEntity {
             name: EntityName::BurnerMiningDrill.to_string(),
             entity_type: EntityType::MiningDrill.to_string(),
             position: position.clone(),
-            bounding_box: add_to_rect_turned(&Rect::from_wh(1.3984375, 1.3984375), position, direction),
+            bounding_box: add_to_rect_turned(
+                &Rect::from_wh(1.3984375, 1.3984375),
+                position,
+                direction,
+            ),
             direction: direction.to_u8().unwrap(),
             drop_position: Position::new(-0.5, -1.296875)
                 .turn(direction)
@@ -1686,7 +1842,11 @@ impl FactorioEntity {
             name: EntityName::ElectricMiningDrill.to_string(),
             entity_type: EntityType::MiningDrill.to_string(),
             position: position.clone(),
-            bounding_box: add_to_rect_turned(&Rect::from_wh(2.6953125, 2.6953125), position, direction),
+            bounding_box: add_to_rect_turned(
+                &Rect::from_wh(2.6953125, 2.6953125),
+                position,
+                direction,
+            ),
             direction: direction.to_u8().unwrap(),
             drop_position: Position::new(0., -2.)
                 .turn(direction)
@@ -1737,7 +1897,11 @@ impl FactorioEntity {
             name: EntityName::StoneFurnace.to_string(),
             entity_type: EntityType::Furnace.to_string(),
             position: position.clone(),
-            bounding_box: add_to_rect_turned(&Rect::from_wh(1.3984375, 1.3984375), position, direction),
+            bounding_box: add_to_rect_turned(
+                &Rect::from_wh(1.3984375, 1.3984375),
+                position,
+                direction,
+            ),
             direction: direction.to_u8().unwrap(),
             ..Default::default()
         }

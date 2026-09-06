@@ -118,8 +118,16 @@ const PRELUDE: &str = r#"
         return false
     end
 
+    -- **Named, because every real surface is.** `machine_key`'s fallback and
+    -- `resource_key` are surface-qualified (`surface.name .. "|" .. name@x,y`),
+    -- so a stub without a `name` models a world that cannot exist and errors
+    -- the moment the mod reads it. The stub carries the field rather than the
+    -- mod tolerating its absence: a nil surface in a live game means something
+    -- is badly wrong, and a fallback to the unqualified key would silently
+    -- restore the cross-surface collision these keys exist to prevent.
     _surface = {
         index = 1,
+        name = "nauvis",
         find_entities_filtered = function(args)
             local out = {}
             if args.type == "resource" then
@@ -177,11 +185,17 @@ const PRELUDE: &str = r#"
     -- 0 reported for a drill that had just mined 133 iron ore. The fixture
     -- that hid it was this one, with a unit number the game does not give.
     -- A resource is identified by its position, and so is this.
+    --
+    -- **It carries a `surface`, because a resource entity has one.**
+    -- `resource_key` is `surface.name .. "|" .. name@x,y`: iron ore at (10, 10)
+    -- on Nauvis and iron ore at (10, 10) on Vulcanus are different tiles, and
+    -- the unqualified key called them the same one.
     function make_resource(x, y, name, amount, infinite)
         local r = {
             name = name,
             type = "resource",
             valid = true,
+            surface = _surface,
             position = { x = x, y = y },
             amount = amount,
             prototype = { infinite_resource = infinite == true },

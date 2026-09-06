@@ -8368,6 +8368,9 @@ mod tests {
                 name: "grass-1".into(),
                 player_collidable: false,
                 color: None,
+                // Fixture terrain; it observed no surface. See
+                // `FactorioTile::surface`.
+                surface: None,
             });
         }
         world

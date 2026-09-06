@@ -11,6 +11,71 @@ four bots.
 
 ---
 
+## ✅ `just bench` RAN FOR THE FIRST TIME — and it was measuring one bot
+
+2026-09-06. Two runs, and the first one is the interesting one.
+
+### Run A (`run-1788693799-62453`): the recipe's own defect
+
+`just bench automation_speedrun.lua`, seed 31337, release, 1x. Result:
+
+    roster: [1]        plan_created.bots = [1]
+    automation satisfied at 7:22
+    delivered tick rate 60/60 (100%), zero failed, zero lost
+
+**`--clients` defaults to `1`** (`app/src-tauri/src/cli/lua.rs`) and the recipe
+passed no client count, so **`just bench` has always been a one-bot run** while
+reading as the four-bot number everything is quoted against. Nothing stalled
+and no client failed to connect: one client was all that was ever requested.
+The run was correct; the expectation was not.
+
+It surfaced only because this was **the first execution of `just bench` ever** —
+CLAUDE.md said so in as many words, so the defect sat in an unexercised recipe.
+
+**I nearly reported 7:22 as a regression against 6:05.** That is exactly the
+error this repo already paid for in the other direction — *"a one-bot run
+misread as a four-bot regression cost a good commit a revert"* — and the
+`roster:` line in `just analyse` is the only reason it was caught.
+
+Fixed as `BENCH_CLIENTS := "4"` in the justfile, **stated rather than
+inherited**. A benchmark must state its roster: the roster is half of what the
+number means, and a default supplied it silently.
+
+**Asking is not getting.** The recipe now requests four; a stalled connect
+still degrades to whoever showed up and produces a different plan, so
+`plan_created.bots` must be checked on every run regardless.
+
+### Run B (`run-1788696619-00325`): automation at 6:06 with four bots
+
+    roster: [1, 2, 3, 4]     seed 31337, clients, release, 1x
+    automation satisfied at 6:06 game time
+    delivered tick rate 50 tps of 60 nominal (84%)
+
+Against the standing four-bot record of **6:05** (`run-1788641738-65147`, same
+seed, same mode, same nominal speed): **unchanged, within a second.**
+
+**The 84% tick rate does not move this number and it matters that it cannot.**
+The milestone is measured in *game* time, so a box that delivers 50 tps instead
+of 60 makes the run take longer on the clock and does not change what the game
+saw. Four graphical clients at 1x is simply more than this machine sustains at
+full rate. Quoting wall time here would have shown a regression that did not
+happen.
+
+**Map digests differ** (`c161fa3f437221d0` vs `a84f3443f66d7717`) and that is
+expected rather than disqualifying: the fingerprint covers **charted** tiles,
+which grow as bots explore, so two runs of the same generated map diverge as
+soon as they explore differently. Both were `--seed 31337 --new`, so the map is
+identical by construction. *Equal digests prove sameness; unequal ones prove
+nothing* — as this file's own note says.
+
+### The seed is validated, and that caveat is retired
+
+CLAUDE.md carried 31337 as unconfirmed, with a live concern that a map whose
+nearest shoreline does not fit a pump/boiler/engine has genuinely refused a run
+here (`the nearest water is 66.7 tiles away`). It did not happen: the map
+generated, the milestone was reached in both runs, and neither had a failed or
+lost action.
+
 ## THE OIL LANE OPENED: three merges, and the wall moved twice
 
 2026-09-06. Owner asked to start the post-exploration parts. Three agents on

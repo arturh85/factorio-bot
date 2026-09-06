@@ -294,9 +294,30 @@ fn already_stands(state: &PlanState, e: &BlueprintEntity, world: &Position) -> S
 /// ore on every map while every test passed, because `Pos` floors resource
 /// positions too.
 fn recover_anchor(state: &PlanState, bp: &Blueprint) -> Option<Position> {
+    // One traversal of the world for however many distinct names this block
+    // has -- 7 for `FurnaceLine`'s 179 entities -- instead of one whole-world
+    // scan per blueprint ENTITY (`entities_named` called 179 times, each a
+    // full scan of `inner_tree()`). See `entities_named_any`'s own doc: this
+    // is the fix for the measured ~95s `recover_anchor` cost on a
+    // fixed-anchor `Site::At` far from anything, where nothing of the block
+    // stands and the entire cost was 179 scans of a world with plenty in it.
+    let names: BTreeSet<String> = bp.entities.iter().map(|e| e.name.clone()).collect();
+    let by_name = state.entities_named_any(&names);
+    // Early out: nothing of this block stands anywhere, which is the normal
+    // case (a fresh build, or any replan before the first entity goes down).
+    // `by_name` holds no empty buckets (see its own doc), so an empty map
+    // here means every name came back with nothing -- cheap to check, and it
+    // skips the candidate/satisfied sweep below entirely rather than running
+    // it over zero candidates for the same answer.
+    if by_name.is_empty() {
+        return None;
+    }
     let mut votes: BTreeMap<(i64, i64), usize> = BTreeMap::new();
     for e in &bp.entities {
-        for candidate in state.entities_named(&e.name) {
+        let Some(candidates) = by_name.get(&e.name) else {
+            continue;
+        };
+        for candidate in candidates {
             // Candidate anchor: `e` is standing where `candidate` actually
             // is, so the block's anchor -- if this is really it -- is offset
             // back by `e.offset`.

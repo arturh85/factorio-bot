@@ -3513,6 +3513,63 @@ impl PlanState {
         out
     }
 
+    /// [`entities_named`](Self::entities_named) for many names at once, in
+    /// ONE traversal of the overlay and ONE of the base world's quad tree --
+    /// bucketed by name, so a caller that used to ask once per name (or,
+    /// worse, once per blueprint ENTITY, as `method::blueprint::recover_anchor`
+    /// did) asks once total instead.
+    ///
+    /// A 179-entity, 7-distinct-name blueprint drove `recover_anchor` to 179
+    /// whole-world scans -- once per entity, not even once per distinct name
+    /// -- which is what made a fixed-anchor `Site::At` a thousand tiles from
+    /// anything cost ~95s: the scan is over `inner_tree()`, the WHOLE base
+    /// world, regardless of how much of it is relevant. This is the fix: one
+    /// pass, testing membership in `names` (a `BTreeSet`, `O(log n)` per
+    /// entity) rather than equality with one string, and every distinct name
+    /// falls out of the same pass.
+    ///
+    /// Same dedup and ordering contract as `entities_named`, applied
+    /// per-name: an overlay entity wins over a base entity at the same tile,
+    /// `removed` hides a base entity outright, and each name's bucket is
+    /// sorted by `Pos`. A name absent from the result had nothing standing
+    /// under it anywhere -- the map holds no empty buckets, so
+    /// `by_name.is_empty()` after calling this is exactly "none of these
+    /// names has anything built yet".
+    pub fn entities_named_any(
+        &self,
+        names: &BTreeSet<String>,
+    ) -> BTreeMap<String, Vec<FactorioEntity>> {
+        let mut out: BTreeMap<String, Vec<FactorioEntity>> = BTreeMap::new();
+        let mut seen: BTreeMap<String, BTreeSet<Pos>> = BTreeMap::new();
+        for entity in self.added.values() {
+            if names.contains(&entity.name) {
+                seen
+                    .entry(entity.name.clone())
+                    .or_default()
+                    .insert(Pos::from(&entity.position));
+                out.entry(entity.name.clone()).or_default().push(entity.clone());
+            }
+        }
+        let tree = self.base.entity_graph.inner_tree();
+        for (entity, _rect) in tree.iter().map(|(_, v)| v) {
+            if !names.contains(&entity.name) {
+                continue;
+            }
+            let key = Pos::from(&entity.position);
+            if self.removed.contains(&key) {
+                continue;
+            }
+            if !seen.entry(entity.name.clone()).or_default().insert(key) {
+                continue;
+            }
+            out.entry(entity.name.clone()).or_default().push(entity.clone());
+        }
+        for bucket in out.values_mut() {
+            bucket.sort_by_key(|e| Pos::from(&e.position));
+        }
+        out
+    }
+
     /// The nearest pole to `from`, within `radius`, whose own supply area has
     /// at least `kw` of generation **left uncommitted** — i.e. somewhere a
     /// consumer could be built and actually run.

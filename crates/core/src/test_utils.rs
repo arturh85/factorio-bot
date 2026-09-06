@@ -120,7 +120,27 @@ pub fn spawn_water(tiles: &mut Vec<FactorioTile>, rect: Rect) {
     }
 }
 
+/// The shared fixture world: prototypes, recipes, four ore patches, rocks,
+/// trees, and a four-by-four lake centred on (40, 40).
 pub fn fixture_world() -> FactorioWorld {
+    fixture_world_with_water(true)
+}
+
+/// [`fixture_world`] with **no water anywhere**.
+///
+/// `update_chunk_tiles` is additive, so a lake cannot be removed from a world
+/// that has one -- a test that needs a genuinely dry map has to build it dry.
+///
+/// Water siting is anchored on the **world**, not on the caller
+/// (`method::power::plant_world_anchor`), so moving a bot away from the lake
+/// no longer makes water unreachable: the origin still sees it, which is the
+/// whole point of that fix. A test about an unreachable-water refusal
+/// therefore needs a world with no water in it, not a bot standing far away.
+pub fn fixture_world_without_water() -> FactorioWorld {
+    fixture_world_with_water(false)
+}
+
+fn fixture_world_with_water(water: bool) -> FactorioWorld {
     let world = FactorioWorld::new();
     let entity_prototypes: Vec<FactorioEntityPrototype> = fixture_entity_prototypes()
         .iter()
@@ -162,10 +182,12 @@ pub fn fixture_world() -> FactorioWorld {
         &EntityName::Stone.to_string(),
     );
 
-    spawn_water(
-        &mut tiles,
-        add_to_rect(&Rect::from_wh(4., 4.), &Position::new(40., 40.)),
-    );
+    if water {
+        spawn_water(
+            &mut tiles,
+            add_to_rect(&Rect::from_wh(4., 4.), &Position::new(40., 40.)),
+        );
+    }
     world.update_chunk_tiles(tiles).unwrap();
     world.update_chunk_entities(entities).unwrap();
     world

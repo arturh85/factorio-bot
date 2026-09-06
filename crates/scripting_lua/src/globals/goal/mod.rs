@@ -2769,21 +2769,26 @@ mod tests {
     async fn a_research_that_cannot_reach_the_water_raises_a_recognisable_refusal() {
         use factorio_bot_core::types::{FactorioForce, PlayerChangedPositionEvent, Position};
 
-        let world = fixture_world();
+        // **A world with no water at all**, not the shared fixture with the
+        // bot walked away from its lake.
+        //
+        // This test used to stand the bot at (-200, 40), 240 tiles from
+        // `fixture_world`'s lake and past every scan. That stopped producing a
+        // refusal on 2026-09-06, when `method::power::supply_for` learned to
+        // fall back to a **world-anchored** search: the lake is 57 tiles from
+        // the origin whatever the bot did, and siting off the roster's walk
+        // history was the defect being fixed (a charted dump whose bots parked
+        // 355 tiles out refused every power-needing goal while `score-map`
+        // reported water at 48 tiles).
+        //
+        // So the unreachable case is now exactly one thing -- a map with no
+        // water on it -- and that is what this builds. The classification seam
+        // the test exists for is unchanged.
+        let world = factorio_bot_core::test_utils::fixture_world_without_water();
         let force: FactorioForce = factorio_bot_core::serde_json::from_str(RESEARCH_FORCE_JSON)
             .expect("the research force fixture must parse");
         world.update_force(force).expect("update_force");
         seed_players(&world, &[1]);
-        // `fixture_world`'s lake is the 4x4 block of tiles at (38..=41) on
-        // both axes. From here it is ~240 tiles away -- beyond the wide scan,
-        // so the planner cannot find water at all.
-        //
-        // This used to stand at (-40, 40), ~80 tiles out, and assert the
-        // *distance* refusal. `e3ea04fe` deleted that refusal deliberately:
-        // the walk is already priced by `travel_ticks`, so a distant plant is a
-        // slower plan, not an impossible one, and a bound on top charged the
-        // same distance twice. Only the unreachable case is still a refusal,
-        // and this test now pins that one.
         world
             .player_changed_position(PlayerChangedPositionEvent {
                 player_id: 1,

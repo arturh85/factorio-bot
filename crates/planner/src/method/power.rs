@@ -6,15 +6,146 @@
 //! and `2026-09-02-building-power.md` designed but could not build, because
 //! the planner could not see water. It can since `9ca7229a`.
 //!
-//! # Why the plant is at the water and the coal is carried
+//! # Water moves, and the premise that said otherwise was wrong twice
 //!
-//! Water is the one input that cannot be moved. Coal is five items in an
-//! inventory. Siting the plant at the coal and running pipe to the lake costs
-//! `pipe-to-ground` at 15 iron plates per 10 tiles — a 60-tile separation
-//! roughly *doubles* rung 7's whole iron bill, which is about 98 plates — and
-//! scatters blocking entities across the ground the bots mine along. Siting it
-//! at the water costs one walk. The full arithmetic is in
-//! `docs/superpowers/notes/2026-09-02-building-power.md` §5.
+//! This module used to open with a paragraph that justified siting the plant
+//! on the shoreline and nowhere else:
+//!
+//! > *"Water is the one input that cannot be moved. Coal is five items in an
+//! > inventory. Siting the plant at the coal and running pipe to the lake
+//! > costs `pipe-to-ground` at 15 iron plates per 10 tiles — a 60-tile
+//! > separation roughly doubles rung 7's whole iron bill, which is about 98
+//! > plates. Siting it at the water costs one walk."*
+//!
+//! **Both halves are wrong**, and they are stated here rather than quietly
+//! deleted because a *design constraint* was justified by them: shoreline
+//! adjacency was treated as a physical law when it is a cost comparison, and
+//! everything built on top of that inherits the error.
+//!
+//! 1. **Water moves. Through pipes. That is what pipes are for.** A fluid
+//!    carried in a pipe run is as movable as coal in an inventory; the
+//!    difference is that the carrier is built once and then costs nothing,
+//!    where an item in an inventory costs a walk every time.
+//! 2. **The price quoted was the wrong item's, and it was the expensive
+//!    one.** Read off `base/prototypes/recipe.lua` and
+//!    `base/prototypes/entity/entities.lua`, both present in this repo under
+//!    `workspace/server/data`:
+//!
+//!    | recipe | ingredients | yields | tiles it spans | iron plates per tile |
+//!    |---|---|---|---|---|
+//!    | `pipe` | 1 iron-plate | **1** pipe | 1 | **1.00** |
+//!    | `pipe-to-ground` | 10 pipe + 5 iron-plate | **2** pieces | 12 | 1.25 |
+//!
+//!    A `pipe` is one iron plate and covers one tile, so plain pipe is
+//!    **1 plate per tile** — see [`PIPE_PLATES_PER_TILE`]. A `pipe-to-ground`
+//!    *pair* costs 15 plates (10 pipe at a plate each, plus 5) and its
+//!    prototype states `max_underground_distance = 10`, so the two ends stand
+//!    12 tiles apart end to end: 1.25 plates per tile, and it exists to
+//!    **cross an obstacle**, not to save material. See
+//!    [`PIPE_TO_GROUND_PLATES_PER_PAIR`].
+//!
+//!    So the old paragraph quoted the dearer of the two items as if it were
+//!    the price of piping, and *even that* number was misread: 15 plates buys
+//!    12 tiles, not 10. The honest figure for the route it was ruling out is
+//!    **1 plate a tile**, and a 60-tile pipe run is 60 plates, not 90.
+//!
+//! The owner's judgement, which is now this module's premise: *"piping water
+//! is not expensive! its usually a better option than restricting ourselves
+//! to places with water."*
+//!
+//! # Pricing the two routes honestly
+//!
+//! There are two ways to join a lake to a consumer, and neither is a
+//! constraint — they are alternatives with prices. Both need the same pump,
+//! boiler, engine and pole, so the plant's own ~45 plates cancel and only the
+//! **span** differs:
+//!
+//! * **pipe the water in.** The plant stands at the consumer; a pipe run of
+//!   `N` tiles reaches the lake. Cost: `N` iron plates
+//!   ([`pipe_run_plates`]).
+//! * **wire the power out.** The plant stands at the lake; a pole run of `N`
+//!   tiles carries the electricity. A `small-electric-pole` is
+//!   1 wood + 2 copper-cable for **two** poles, and copper-cable is
+//!   1 copper-plate for two cable — so one craft is **1 wood + 1 copper-plate
+//!   for 2 poles**. `maximum_wire_distance` is 7.5, so poles stand about
+//!   every 7 tiles: `ceil(N / 7)` poles, `ceil(poles / 2)` crafts
+//!   ([`pole_run_items`]).
+//!
+//! **There is no material crossover: the pole run is cheaper per tile at
+//! every distance.** 1.00 iron plate a tile against 1/14 wood + 1/14
+//! copper-plate — about 0.14 items a tile, a factor of seven. Any claim that
+//! piping is ruled out on price is false in the other direction too.
+//!
+//! **What binds is supply, not price.** Wood is the item this planner cannot
+//! make: a four-bot run starts with four (see [`PLANT_ADOPT_RADIUS`], which
+//! spends one on a pole and says so), and no method in this crate mines a
+//! tree. Four wood is eight poles is about **56 tiles of wire, ever** — and
+//! poles are wanted elsewhere. Iron plate is the item a run mines and smelts
+//! by the hundred, so the pipe route has no ceiling at all: the 355-tile
+//! separation that [`supply_for`]'s world-anchored fallback exists for is 355
+//! plates of pipe, expensive but *buildable*, against 51 poles that a
+//! four-wood run cannot craft.
+//!
+//! So the crossover is a **supply** crossover at roughly 56 tiles, and it is
+//! an artefact of this planner rather than of the game: teach it to mine a
+//! tree and the pole route wins everywhere on materials. Until then, wire
+//! short runs and pipe long ones. Neither is a law about where a plant may
+//! stand.
+//!
+//! # Three transports, and the rule that falls out of their prices
+//!
+//! Water and power are two of three things a plant has to join up. The third
+//! is **coal**, and once it is priced the objective changes shape. All three
+//! from `recipe.lua`, and all three asserted in
+//! `the_three_transports_are_the_recipes_own`:
+//!
+//! | move | recipe | per tile |
+//! |---|---|---|
+//! | power, by `small-electric-pole` | 1 wood + 2 copper-cable → **2** poles, every ~7 tiles | ~0.07 wood + ~0.07 copper plate |
+//! | water, by `pipe` | 1 iron-plate → 1 pipe, 1 tile | **1.0 iron plate** |
+//! | coal, by `transport-belt` | 1 iron-plate + 1 iron-gear-wheel (2 plates) → **2** belts | **1.5 iron plates** |
+//!
+//! **Belt is the dearest of the three and power is nearly free.** So the
+//! objective is not "put the plant at the water" and not "put the plant at the
+//! consumer" — it is **minimise the belted distance**. Consumer proximity
+//! barely enters it, because wire is an order of magnitude cheaper per tile
+//! than either other route.
+//!
+//! The rule, in one line: **wire the power, pipe the water, do not move the
+//! coal.**
+//!
+//! ## The caveat that decides which regime applies
+//!
+//! **In today's bootstrap the coal is not belted — a bot carries it**, which
+//! is exactly what the retracted premise meant by *"coal is five items in an
+//! inventory"* ([`PLANT_COAL`] is a single load, placed once). While that
+//! holds, moving coal costs no material at all, the belt row of the table does
+//! not apply, and siting at the water is free and correct. **Today's behaviour
+//! is therefore not wrong.**
+//!
+//! The rule above becomes decisive the moment coal delivery is *automated*,
+//! which is where the self-feeding cell work is heading. So the siting
+//! decision wants to know **whether this plant's coal is belted or carried**
+//! and pick accordingly — not to hard-code either answer. That conditional is
+//! designed, with the weighted objective over all three transports, in
+//! `docs/superpowers/notes/2026-09-06-piping-water-is-cheap.md`. It is
+//! deliberately **not built here**: it needs a pipe router and a belt-aware
+//! fuel model that this crate does not have, and half of it would silently
+//! assume one regime.
+//!
+//! **The plant is still built at the water today**, and [`supply_for`] wires
+//! the power out rather than piping the water in — which is legitimate,
+//! because that is the cheaper route in materials and because
+//! `PlanState::electric_supply_kw` follows the wire and can therefore *see*
+//! it. What is no longer claimed is that this is forced. Siting the plant
+//! away from the shore and piping to it is designed and costed in
+//! `docs/superpowers/notes/2026-09-06-piping-water-is-cheap.md`; it is not
+//! built, because it needs an obstacle-aware pipe router this crate does not
+//! have, and a half-built one is worse than none.
+//!
+//! The older arithmetic in
+//! `docs/superpowers/notes/2026-09-02-building-power.md` §5 rests on the
+//! retracted premise and should be read with this section beside it.
 //!
 //! The lab follows the plant rather than the other way round: it has to stand
 //! inside the pole's supply area anyway, and `Researched::lab_site` already
@@ -93,6 +224,137 @@ pub const POLE: &str = "small-electric-pole";
 /// Independent of the engine count: engines chain directly off each other's
 /// steam connection, so a second engine adds no pipe. See [`layout`].
 pub const PIPE_COUNT: u32 = 3;
+
+// ---------------------------------------------------------------------------
+// What a span costs, either way round
+//
+// The module doc's "Pricing the two routes honestly" is these numbers. They
+// are here, next to the bill, so that a reader deciding where to put a plant
+// finds the comparison in the code rather than in a note.
+// ---------------------------------------------------------------------------
+
+/// Iron plates one tile of plain `pipe` costs.
+///
+/// `recipe.lua`: `pipe` is `{iron-plate, 1}` for one pipe, and one pipe covers
+/// one tile. **One plate a tile**, which is the number the retracted premise
+/// in this module's doc should have quoted.
+pub const PIPE_PLATES_PER_TILE: u32 = 1;
+
+/// Iron plates one `pipe-to-ground` **pair** costs.
+///
+/// `recipe.lua`: `10 pipe + 5 iron-plate` yields **2** pieces, and a pipe is a
+/// plate, so a pair is 15 plates. Dearer per tile than plain pipe — it exists
+/// to cross an obstacle, not to save material.
+pub const PIPE_TO_GROUND_PLATES_PER_PAIR: u32 = 15;
+
+/// Tiles one `pipe-to-ground` pair spans, end to end.
+///
+/// `entities.lua` states `max_underground_distance = 10` on the underground
+/// connection, so the two ends may stand with ten tiles between them: 10 + the
+/// two ends themselves = 12. 15 plates over 12 tiles is 1.25 a tile, against
+/// [`PIPE_PLATES_PER_TILE`]'s 1.
+pub const PIPE_TO_GROUND_PAIR_SPAN_TILES: u32 = 12;
+
+/// A `small-electric-pole`'s `maximum_wire_distance`, in tiles.
+///
+/// `entities.lua`. This is the wire, not the supply area (2.5) — carrying
+/// power along a run is a wire question.
+pub const POLE_WIRE_REACH_TILES: f64 = 7.5;
+
+/// How far apart poles are assumed to stand along a run, in tiles.
+///
+/// [`POLE_WIRE_REACH_TILES`] rounded down to a whole tile, which is what a bot
+/// placing on the tile grid can actually achieve without measuring diagonals.
+pub const POLE_SPACING_TILES: f64 = 7.;
+
+/// Poles one craft of `small-electric-pole` yields.
+///
+/// `recipe.lua`: `1 wood + 2 copper-cable` yields **2**. The doubling is the
+/// easiest thing to miss here and it halves the bill.
+pub const POLES_PER_CRAFT: u32 = 2;
+
+/// Wood one craft of `small-electric-pole` costs.
+///
+/// **The binding constraint on the pole route**, and the reason the module doc
+/// calls the crossover a supply crossover rather than a price one: no method
+/// in this crate makes wood.
+pub const POLE_CRAFT_WOOD: u32 = 1;
+
+/// Copper plates one craft of `small-electric-pole` costs.
+///
+/// The recipe names 2 `copper-cable`, and `copper-cable` is 1 copper-plate for
+/// **two** cable — so one craft is one plate, not two.
+pub const POLE_CRAFT_COPPER_PLATES: u32 = 1;
+
+/// Iron plates one tile of `transport-belt` costs, times two.
+///
+/// `recipe.lua`: `1 iron-plate + 1 iron-gear-wheel` yields **2** belts, and an
+/// `iron-gear-wheel` is 2 iron-plates — so 3 plates buy 2 belts. Stored
+/// doubled because it is 1.5, and this crate keeps its bills in whole items:
+/// [`belt_run_plates`] halves it.
+///
+/// **The dearest of the three transports**, which is the whole of the owner's
+/// argument in the module doc: belt 1.5 a tile, pipe 1.0, pole ~0.14.
+pub const BELT_HALF_PLATES_PER_TILE: u32 = 3;
+
+/// Iron plates to belt an item `tiles` tiles.
+///
+/// Nothing in this crate belts coal to a boiler yet — [`PLANT_COAL`] is a
+/// single load a bot carries. This is here so the comparison the module doc
+/// makes is arithmetic rather than assertion, and so the day somebody does
+/// belt it, the number is already derived from the recipe.
+#[must_use]
+pub fn belt_run_plates(tiles: f64) -> u32 {
+    if tiles <= 0. {
+        return 0;
+    }
+    let halves = (tiles.ceil() as u32).saturating_mul(BELT_HALF_PLATES_PER_TILE);
+    halves.div_ceil(2)
+}
+
+/// Iron plates to pipe water `tiles` tiles.
+///
+/// Plain pipe, at [`PIPE_PLATES_PER_TILE`] a tile, rounded up: a fractional
+/// tile still costs a whole pipe. The plant's own [`PIPE_COUNT`] pipes are
+/// **not** included — this is the span, and the plant is billed either way
+/// round.
+///
+/// Nothing in this crate builds such a run yet; it is here so the comparison
+/// [`pole_run_items`] is half of can be made, and asserted, rather than
+/// asserted in prose. See the module doc.
+#[must_use]
+pub fn pipe_run_plates(tiles: f64) -> u32 {
+    if tiles <= 0. {
+        return 0;
+    }
+    (tiles.ceil() as u32).saturating_mul(PIPE_PLATES_PER_TILE)
+}
+
+/// Poles to carry power `tiles` tiles, and the `(wood, copper plates)` to
+/// craft them.
+///
+/// The plant's own pole is the anchor of the run and is already in the plant's
+/// bill, so it is not counted: a run of `tiles` needs `ceil(tiles / 7)` more
+/// poles, and poles come two to a craft.
+///
+/// Returned as three numbers rather than one so the caller sees **which**
+/// material it is spending. That is the whole point of the comparison: a
+/// 355-tile pipe run is 355 iron plates, which a run mines; the same distance
+/// in poles is 51 poles and 26 wood, which a four-bot run cannot obtain at
+/// all.
+#[must_use]
+pub fn pole_run_items(tiles: f64) -> (u32, u32, u32) {
+    if tiles <= 0. {
+        return (0, 0, 0);
+    }
+    let poles = (tiles / POLE_SPACING_TILES).ceil() as u32;
+    let crafts = poles.div_ceil(POLES_PER_CRAFT);
+    (
+        poles,
+        crafts.saturating_mul(POLE_CRAFT_WOOD),
+        crafts.saturating_mul(POLE_CRAFT_COPPER_PLATES),
+    )
+}
 
 /// How many steam engines one boiler drives.
 ///
@@ -659,6 +921,19 @@ pub enum Supply {
 ///    engine and the pipes between them"*. See [`complete_plant`].
 /// 4. **A plant.** Only when the planner can see no working supply at all
 ///    and nothing standing it could finish.
+/// 5. **All four again, from [`plant_world_anchor`].** Every tier above is
+///    anchored on `from`, which is the acting bot or the machine site --
+///    neither of which is a fact about the map. A roster that walked away
+///    from spawn made the planner unable to see a lake that had not moved,
+///    and refused every power-needing goal on a well-charted dump. See
+///    [`plant_world_anchor`] for the measurement and
+///    `retry_from_world_anchor` for which refusals are retried.
+///
+///    **The fallback is where the caller's pole run stops being free.** A
+///    plant at spawn and a consumer far away is a plan only because
+///    `PlanState::electric_supply_kw` follows the wire; the wire itself costs
+///    what [`pole_run_items`] says, and the module doc's "wire the power, pipe
+///    the water" section is the comparison that governs it.
 ///
 /// Tiers 1 and 2 are one question asked twice with a wider bound, and that is
 /// a pure cost split rather than a policy: [`PlanState::nearest_supply_anchor`]
@@ -720,7 +995,116 @@ pub fn supply_for(
     // The tier that used to ignore `kw` entirely, and the whole of roadmap
     // item 3's defect: three tiers checked the demand and the one that builds
     // did not.
-    Ok(Supply::Build(plan_plant_for(state, from, kw)?))
+    let roster_anchored = match plan_plant_for(state, from, kw) {
+        Ok(plant) => return Ok(Supply::Build(plant)),
+        Err(err) => err,
+    };
+    // Every tier above this line is anchored on `from`, which is the bot or
+    // the machine site -- and neither is a fact about the map. See
+    // `plant_world_anchor`.
+    retry_from_world_anchor(state, from, kw, roster_anchored)
+}
+
+/// The spawn tile, and the one anchor for a plant search that is a property of
+/// the **world** rather than of the roster's walk history.
+///
+/// # The defect this closes
+///
+/// Every tier of [`supply_for`] searches from `from`, and both callers pass
+/// something that moves: `method::have` passes the acting bot's position and
+/// `method::extract` passes the machine site it just chose. A bot's position
+/// is where its last walk left it.
+///
+/// Measured on 2026-09-06, same seed, same binary, two dumps of the same map:
+///
+/// | dump | bots at | water from there | result |
+/// |---|---|---|---|
+/// | `map.json` (t=0) | `(0.5, -0.5)` | 48 tiles | plans, 176 actions |
+/// | `map-31337-explored.json` | `(255, 249)` | 355 tiles | **refuses** |
+///
+/// `score-map` reports water at **48.1 tiles on both dumps**: the lake did not
+/// move, the bots did. They had finished an exploration ring and parked, and
+/// every power-needing goal on the better-charted map then refused with *"a
+/// power plant needs water, and the plan can see none within 128 tiles"* — a
+/// true statement about what was looked at, and a false impression of the map.
+/// The radii were not the fault and neither was the map; the anchor was.
+///
+/// # Why the origin, and why it is honest
+///
+/// Spawn is where freeplay puts the starting resources, where every run
+/// begins, and where a t=0 dump's bots stand — so a plant sited from here is
+/// the plant the planner would have found on the first tick, which is exactly
+/// the stability property a replan wants. It is also the only anchor available
+/// without inventing one: this crate is pure, has no map-gen settings, and the
+/// alternatives (a roster centroid, the goal's own site) are the same class of
+/// walk-history artefact this fixes.
+///
+/// **It is a fallback, not a preference.** The local search runs first and
+/// wins whenever it finds anything, so a plan whose bots are near water still
+/// builds beside them; this only replaces a refusal.
+///
+/// A function rather than a `const` only because `Position::new` is not
+/// `const fn`; the value is fixed.
+#[must_use]
+pub fn plant_world_anchor() -> Position {
+    Position::new(0., 0.)
+}
+
+/// [`supply_for`]'s last resort: ask the same questions again from
+/// [`plant_world_anchor`].
+///
+/// `roster_anchored` is the refusal the caller-anchored search produced. It is
+/// returned unchanged when the retry is not applicable or also fails, because
+/// two "no water within 128 tiles" errors are indistinguishable and the first
+/// is the one the caller's context explains.
+///
+/// # Which refusals are retried
+///
+/// Only the two that are statements about *where the search was standing* —
+/// [`PlannerError::PowerPlantNeedsWater`] and
+/// [`PlannerError::PowerPlantNeedsShore`]. [`PlannerError::PowerPlantTooSmall`]
+/// is a statement about the **demand**, true from every anchor on every map,
+/// and retrying it would read a quarter of a million terrain tiles to arrive
+/// at the identical error.
+///
+/// # And the power has to get back
+///
+/// A plant at spawn and a consumer 355 tiles away are only a plan because
+/// `PlanState::electric_supply_kw` **follows the wire** out from the consumer
+/// rather than searching one 64-tile disc, so a pole run of any length carries
+/// power the planner can see. Before that fix this fallback would have sited a
+/// plant the consumer could not be shown to draw from. The pole run itself is
+/// the caller's — nothing here emits it — and its price, against piping the
+/// water the other way, is [`pole_run_items`] and [`pipe_run_plates`].
+fn retry_from_world_anchor(
+    state: &PlanState,
+    from: &Position,
+    kw: f64,
+    roster_anchored: PlannerError,
+) -> Result<Supply, PlannerError> {
+    if !matches!(
+        roster_anchored,
+        PlannerError::PowerPlantNeedsWater { .. } | PlannerError::PowerPlantNeedsShore { .. }
+    ) {
+        return Err(roster_anchored);
+    }
+    // Already effectively anchored there: the retry would read the same
+    // terrain to reach the same refusal. `PLANT_WATER_SCAN_RADIUS` is the
+    // cheap tier's own bound, so inside it the two searches see the same
+    // lakes.
+    let anchor = plant_world_anchor();
+    if calculate_distance(&anchor, from) < f64::EPSILON {
+        return Err(roster_anchored);
+    }
+    if let Some(pole) = state.nearest_supply_anchor(&anchor, PLANT_ADOPT_RADIUS, kw) {
+        return Ok(Supply::Standing(pole));
+    }
+    if let Some(plant) = complete_plant(state, &anchor, kw) {
+        return Ok(Supply::Build(plant));
+    }
+    plan_plant_for(state, &anchor, kw)
+        .map(Supply::Build)
+        .map_err(|_| roster_anchored)
 }
 
 /// The rest of a plant that already has its pump down, if one stands within
@@ -2887,5 +3271,343 @@ mod capacity_tests {
         assert_eq!(a.parts, b.parts);
         assert_eq!(a.pole, b.pole);
         assert_eq!(a.engines, b.engines);
+    }
+
+    // -----------------------------------------------------------------------
+    // The world anchor
+    //
+    // The measured defect: siting was anchored on the caller -- a bot's
+    // position or a machine site -- and a roster that had walked away could
+    // no longer see a lake that had not moved. See `plant_world_anchor`.
+    // -----------------------------------------------------------------------
+
+    /// Where the fixture's one lake is. Read off
+    /// `the_wide_scan_finds_the_same_lake_the_cheap_one_does`, which owns the
+    /// claim.
+    const FIXTURE_LAKE: (f64, f64) = (40., 40.);
+
+    /// Far enough from that lake that **both** water scans miss it, and near
+    /// enough to nothing else that the fixture has no other answer. 400 tiles
+    /// north on the y axis is ~362 tiles from the lake against a wide scan of
+    /// 128 -- the same shape as the bots parked at (255, 249) on
+    /// `map-31337-explored.json`, 355 tiles from water the origin sees at 48.
+    fn a_bot_that_walked_away() -> Position {
+        Position::new(0., 400.)
+    }
+
+    fn pump_of(plant: &Plant) -> Position {
+        plant
+            .parts
+            .iter()
+            .find(|p| p.name == PUMP)
+            .expect("a plant has a pump")
+            .position
+            .clone()
+    }
+
+    /// The control: the caller-anchored search really does fail from there.
+    ///
+    /// Without this the next test could pass by the local search quietly
+    /// succeeding, and would then be asserting nothing about the fallback.
+    #[test]
+    fn the_caller_anchored_search_refuses_from_where_the_bot_parked() {
+        let s = state();
+        let err =
+            plan_plant(&s, &a_bot_that_walked_away()).expect_err("362 tiles is past both scans");
+        assert!(
+            matches!(err, PlannerError::PowerPlantNeedsWater { .. }),
+            "got {err:?}"
+        );
+    }
+
+    /// The defect, as a test: a roster that walked away still gets a plant.
+    ///
+    /// `supply_for` refused here before 2026-09-06, and every power-needing
+    /// goal on a charted dump refused with it.
+    #[test]
+    fn a_roster_that_walked_away_still_gets_a_plant_at_the_world_anchor() {
+        let s = state();
+        let supply = supply_for(&s, &a_bot_that_walked_away(), 64., 60.)
+            .expect("the lake the origin can see is still a lake");
+        let plant = match supply {
+            Supply::Build(plant) => plant,
+            other => panic!("nothing stands in the fixture, expected a build, got {other:?}"),
+        };
+        let lake = Position::new(FIXTURE_LAKE.0, FIXTURE_LAKE.1);
+        let edge = 2. + f64::from(SHORE_SEARCH_RADIUS);
+        assert!(
+            calculate_distance(&pump_of(&plant), &lake) <= edge,
+            "the pump landed at {} -- that is not the fixture's lake",
+            pump_of(&plant)
+        );
+    }
+
+    /// The fallback finds water, it does not invent it.
+    ///
+    /// A world with no water anywhere must still refuse by name, from the
+    /// world anchor as from anywhere else -- otherwise the retry would have
+    /// turned an honest refusal into a plan against nothing.
+    #[test]
+    fn the_world_anchor_does_not_invent_water_in_a_dry_world() {
+        let world = fixture_world();
+        let dry = factorio_bot_core::factorio::world::FactorioWorld::new();
+        dry.update_entity_prototypes(
+            world
+                .entity_prototypes
+                .iter()
+                .map(|e| e.value().clone())
+                .collect(),
+        )
+        .expect("prototypes");
+        let s = PlanState::from_world(Arc::new(dry), &[BotId(1)]);
+        let err = supply_for(&s, &a_bot_that_walked_away(), 64., 60.)
+            .expect_err("no water anywhere is still no water");
+        assert!(
+            matches!(err, PlannerError::PowerPlantNeedsWater { .. }),
+            "got {err:?}"
+        );
+    }
+
+    /// A demand no plant can carry is **not** retried.
+    ///
+    /// `PowerPlantTooSmall` is a statement about the demand, true from every
+    /// anchor on every map. Retrying it would read a quarter of a million
+    /// terrain tiles to arrive at the identical error, so the retry is gated
+    /// on the two refusals that are about *where the search stood*.
+    #[test]
+    fn a_demand_no_plant_can_carry_is_not_retried_from_the_world_anchor() {
+        let s = state();
+        let err = supply_for(&s, &a_bot_that_walked_away(), 64., 5_000.)
+            .expect_err("5,000 kW is more than one boiler's engines");
+        assert!(
+            matches!(err, PlannerError::PowerPlantTooSmall { .. }),
+            "got {err:?}"
+        );
+    }
+
+    /// **The fallback is a fallback.** A caller standing beside water gets the
+    /// plant its own search found, not the one the origin would have found.
+    ///
+    /// This is the property that keeps the three offline baselines still: on
+    /// `map.json` the bots stand at the origin and the local search wins on
+    /// every call, so the retry never runs at all.
+    #[test]
+    fn a_caller_that_can_site_locally_is_untouched_by_the_fallback() {
+        // Two lakes, so "local" and "world anchor" have different answers and
+        // the assertion can tell them apart -- the same construction
+        // `the_wide_scan_is_anchored_on_the_bot` uses, for the same reason.
+        let near_lake = Position::new(0., 270.);
+        let bot = Position::new(0., 200.);
+        let world = fixture_world();
+        let mut tiles = Vec::new();
+        factorio_bot_core::test_utils::spawn_water(
+            &mut tiles,
+            factorio_bot_core::factorio::util::add_to_rect(
+                &factorio_bot_core::types::Rect::from_wh(4., 4.),
+                &near_lake,
+            ),
+        );
+        world.update_chunk_tiles(tiles).expect("a second lake");
+        let two_lakes = PlanState::from_world(Arc::new(world), &[BotId(1)]);
+
+        let supply = supply_for(&two_lakes, &bot, 64., 60.).expect("the near lake is reachable");
+        let plant = match supply {
+            Supply::Build(plant) => plant,
+            other => panic!("expected a build, got {other:?}"),
+        };
+        let edge = 2. + f64::from(SHORE_SEARCH_RADIUS);
+        assert!(
+            calculate_distance(&pump_of(&plant), &near_lake) <= edge,
+            "the pump landed at {} -- the fallback overrode a local answer",
+            pump_of(&plant)
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // What a span costs, either way round
+    // -----------------------------------------------------------------------
+
+    /// The recipe numbers the module doc's retracted premise got wrong, read
+    /// off the fixture's own prototypes rather than off this file's prose.
+    ///
+    /// The old paragraph priced piping at `pipe-to-ground`, 15 iron plates per
+    /// **10** tiles. Two errors: plain pipe is the item you would use, and the
+    /// pair spans 12 tiles rather than 10.
+    #[test]
+    fn the_pipe_and_pole_costs_are_the_recipes_own() {
+        let s = state();
+        let recipe = |name: &str| {
+            s.base()
+                .recipes
+                .get(name)
+                .unwrap_or_else(|| panic!("the fixture carries {name}"))
+                .clone()
+        };
+        let ingredient = |name: &str, item: &str| -> u32 {
+            recipe(name)
+                .ingredients
+                .as_ref()
+                .unwrap_or_else(|| panic!("{name} has ingredients"))
+                .iter()
+                .find(|i| i.name == item)
+                .unwrap_or_else(|| panic!("{name} wants {item}"))
+                .amount
+        };
+
+        // pipe: 1 iron-plate -> 1 pipe, one tile.
+        assert_eq!(
+            ingredient(PIPE, "iron-plate"),
+            PIPE_PLATES_PER_TILE,
+            "a pipe is one iron plate and covers one tile"
+        );
+
+        // pipe-to-ground: 10 pipe + 5 iron-plate -> 2 pieces, and a pipe is a
+        // plate, so a pair is 15 plates.
+        let underground = "pipe-to-ground";
+        let pair = ingredient(underground, PIPE) * PIPE_PLATES_PER_TILE
+            + ingredient(underground, "iron-plate");
+        assert_eq!(
+            pair, PIPE_TO_GROUND_PLATES_PER_PAIR,
+            "a pipe-to-ground pair is 10 pipe (a plate each) plus 5 plates"
+        );
+
+        // small-electric-pole: 1 wood + 2 copper-cable -> 2, and copper-cable
+        // is 1 copper-plate -> 2 cable, so one craft is one copper plate.
+        assert_eq!(ingredient(POLE, "wood"), POLE_CRAFT_WOOD, "a craft's wood");
+        let cable = ingredient(POLE, "copper-cable");
+        let cable_per_plate = recipe("copper-cable")
+            .products
+            .iter()
+            .find(|p| p.name == "copper-cable")
+            .expect("copper-cable makes copper-cable")
+            .amount;
+        assert_eq!(
+            cable / cable_per_plate,
+            POLE_CRAFT_COPPER_PLATES,
+            "2 cable at 2 cable a plate is one copper plate, not two"
+        );
+    }
+
+    /// The three transports, priced off the recipes, in the order the module
+    /// doc's table gives them.
+    ///
+    /// This is the arithmetic behind *"wire the power, pipe the water, do not
+    /// move the coal"*: if belt were not the dearest, the rule would be
+    /// something else.
+    #[test]
+    fn the_three_transports_are_the_recipes_own() {
+        let s = state();
+        let ingredient = |name: &str, item: &str| -> u32 {
+            s.base()
+                .recipes
+                .get(name)
+                .unwrap_or_else(|| panic!("the fixture carries {name}"))
+                .ingredients
+                .as_ref()
+                .unwrap_or_else(|| panic!("{name} has ingredients"))
+                .iter()
+                .find(|i| i.name == item)
+                .unwrap_or_else(|| panic!("{name} wants {item}"))
+                .amount
+        };
+
+        // transport-belt: 1 iron-plate + 1 iron-gear-wheel -> 2 belts, and a
+        // gear is 2 plates. Three plates for two tiles.
+        let gear = "iron-gear-wheel";
+        let per_two = ingredient("transport-belt", "iron-plate")
+            + ingredient("transport-belt", gear) * ingredient(gear, "iron-plate");
+        assert_eq!(
+            per_two, BELT_HALF_PLATES_PER_TILE,
+            "a belt craft is 3 plates for 2 tiles"
+        );
+
+        // Per tile, over a distance long enough that the rounding in each
+        // function is noise: belt dearest, pipe next, poles nearly free.
+        let far = 700.;
+        let belt = f64::from(belt_run_plates(far)) / far;
+        let pipe = f64::from(pipe_run_plates(far)) / far;
+        let (_, wood, copper) = pole_run_items(far);
+        let poles = f64::from(wood + copper) / far;
+        assert!(
+            belt > pipe && pipe > poles,
+            "belt {belt}, pipe {pipe}, poles {poles} -- the module doc's whole \
+             argument is this ordering"
+        );
+        assert!(
+            (belt - 1.5).abs() < 0.01,
+            "belt should be about 1.5 plates a tile, got {belt}"
+        );
+    }
+
+    /// A `pipe-to-ground` pair is **dearer** per tile than plain pipe.
+    ///
+    /// The claim the retracted premise inverted. It exists to cross an
+    /// obstacle, not to save material.
+    #[test]
+    fn underground_pipe_is_dearer_per_tile_than_plain_pipe() {
+        let underground =
+            f64::from(PIPE_TO_GROUND_PLATES_PER_PAIR) / f64::from(PIPE_TO_GROUND_PAIR_SPAN_TILES);
+        assert!(
+            underground > f64::from(PIPE_PLATES_PER_TILE),
+            "pipe-to-ground is {underground} plates a tile against plain pipe's \
+             {PIPE_PLATES_PER_TILE}"
+        );
+    }
+
+    #[test]
+    fn a_pipe_run_costs_a_plate_a_tile() {
+        assert_eq!(pipe_run_plates(0.), 0);
+        assert_eq!(pipe_run_plates(1.), 1);
+        assert_eq!(pipe_run_plates(60.), 60, "the module doc's 60-tile example");
+        assert_eq!(pipe_run_plates(0.5), 1, "a part tile is still a whole pipe");
+        assert_eq!(pipe_run_plates(355.), 355, "the explored dump's separation");
+    }
+
+    #[test]
+    fn a_pole_run_comes_two_poles_to_a_craft() {
+        assert_eq!(pole_run_items(0.), (0, 0, 0));
+        // 7 tiles is one pole, and one craft makes two -- so one wood buys
+        // fourteen tiles.
+        assert_eq!(pole_run_items(7.), (1, 1, 1));
+        assert_eq!(pole_run_items(14.), (2, 1, 1), "two poles, still one craft");
+        assert_eq!(pole_run_items(15.), (3, 2, 2));
+        assert_eq!(pole_run_items(355.), (51, 26, 26));
+    }
+
+    /// **There is no material crossover, and the one that binds is supply.**
+    ///
+    /// Poles are about seven times cheaper per tile than pipe at every
+    /// distance -- so any claim that piping is ruled out *on price* is false.
+    /// What rules the pole route out is wood: a four-bot run starts with four
+    /// and this crate makes none, so eight poles is the whole budget and about
+    /// 56 tiles is the whole reach.
+    #[test]
+    fn the_crossover_is_wood_rather_than_price() {
+        for tiles in [7., 20., 56., 100., 355.] {
+            let plates = f64::from(pipe_run_plates(tiles));
+            let (poles, wood, copper) = pole_run_items(tiles);
+            let pole_items = f64::from(wood + copper);
+            assert!(
+                pole_items < plates,
+                "{tiles} tiles: {poles} poles cost {pole_items} items against \
+                 {plates} plates of pipe -- poles are supposed to be cheaper"
+            );
+        }
+
+        // Four wood is the roster's whole supply.
+        const STARTING_WOOD: u32 = 4;
+        let (_, wood_at_56, _) = pole_run_items(56.);
+        assert!(
+            wood_at_56 <= STARTING_WOOD,
+            "56 tiles wants {wood_at_56} wood and a four-bot run has {STARTING_WOOD}"
+        );
+        let (_, wood_at_57, _) = pole_run_items(57.);
+        assert!(
+            wood_at_57 > STARTING_WOOD,
+            "past 56 tiles the pole route must run out of wood, wanted {wood_at_57}"
+        );
+        // And the pipe route has no such ceiling: iron plate is what a run
+        // mines by the hundred.
+        assert_eq!(pipe_run_plates(357.), 357);
     }
 }

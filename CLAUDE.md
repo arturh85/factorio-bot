@@ -1288,6 +1288,19 @@ entry over a log line:
   the anchor depend on where a bot happens to stand and move the block on every
   replan (`a_bystander_in_the_search_path_does_not_move_the_sited_anchor` exists
   to forbid exactly that).
+
+  **It does NOT fix the live failure that found the gap, and that was verified
+  by re-running it.** `evacuation steps planned: 0`, same `pending=13`. The
+  guard is right to stay silent: `TwoRowSmelter` is an open-ended strip — a belt
+  row between two furnace rows — so a bot in the corridor can walk out either
+  end, and `enclosure::check` correctly finds no enclosure. **The live failure
+  is a walk failure**, not a ring: a walk resolved to a tile inside a furnace's
+  collision box and "the pathfinder never answered that there is no way there".
+  Only bot 1 reports `walled in`, 14 times, never having moved from `[0.5,
+  0.5]`. **A `pocket_tiles=1.0` reading for a bot standing in an open-ended
+  three-tile corridor is not credible as a fact about the map** and points at
+  the executor's enclosure *window* rather than at the ground — the same window
+  `26498dee` resized for a different reason. Open.
 - **Both SEARCHING forms of `goal.built` still ignore characters when CHOOSING
   the anchor, which is deliberate and now safe.** Siting treats a character as non-blocking on purpose — a
   bot can walk away, so it should not veto a site — and only the explicit-anchor

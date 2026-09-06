@@ -129,7 +129,45 @@ Deliberately **not** done: searching further. A wider scan grows as `R²` for a
 benefit that is speculative, and it would answer a different question from the
 one that was unanswerable.
 
-## 5. One caveat on the peer's own case, offered as a question not a correction
+## 5. RETRACTED BY ITS AUTHOR: there was no tree
+
+**The peer withdrew the whole finding (`a8460ee5`), and the retraction is
+sharper than my caveat below.** There is no tree at (44.5, 0.5) at all, so
+neither lazy generation nor the writeout gap I proposed is needed to explain
+anything.
+
+The load-bearing step was an assumption nobody stated: *"zero entities in a
+10-tile disc of a fresh map was the tell"* takes for granted that a fresh
+Factorio map is wall-to-wall trees. It is not — open grass is ordinary. So an
+empty disc is **evidence of nothing whatsoever**, and a mechanism was built on
+top of it and written into CLAUDE.md. The owner's summary: *"what, you thought
+everything will be 100% filled with trees? lol"*
+
+The discriminator was already in the bindings — `rcon.*` asks the **game**,
+`world.*` asks the **model** — so one run settled it:
+
+    before any walk    GAME=0  MODEL=0   planner ACCEPTS the anchor
+    after the walk     GAME=1  MODEL=0   planner ACCEPTS the anchor
+                       (the 1 is the scout itself)
+
+Nothing appeared after walking. **The tile is simply empty**, which also rules
+out my writeout-gap alternative — a better-reasoned hypothesis than the
+original, and still wrong.
+
+What survives: the refusals only ever occurred on a **replan after a partial
+build**, so the occupant was something those runs created themselves. Left
+**unexplained** rather than replaced with a second unmeasured story. And the
+scout walk does help — by putting bots near the site so walk routing succeeds,
+not by making ground real.
+
+**Nothing in sections 1-4 depends on any of this.** The exposure was measured
+against the dumps directly (409,600 tiles, hard-edged square, no holes) and the
+refusal now saying where it stood is right on its own terms. This section is
+kept because the reasoning that produced the retraction is worth more than the
+claim was — an unstated assumption about the *world*, underneath a careful
+chain about the *code*.
+
+### The caveat as originally written, before the retraction
 
 Their build hit a tree at **(44.5, 0.5)** — 44 tiles from spawn, which is well
 inside the 640×640 square a fresh `--create` generates. On seed 31337 at t=0

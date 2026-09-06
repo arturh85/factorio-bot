@@ -174,6 +174,58 @@ fn an_out_of_range_direction_is_folded_rather_than_doubled_past_the_scale() {
     assert_eq!(bp.entities[0].direction, 4, "20 folds to 4, not to 20");
 }
 
+/// **The nine-entity `MovingBlock` fixture (2026-09-06): a chest, a burner
+/// inserter, five belts, a burner inserter, a chest.** This is the block the
+/// "block that moves" work builds live -- pins its entity count, every
+/// entity's name and offset, and every direction, so a hand-edited blueprint
+/// string (or a future re-generation of it) cannot silently drift from the
+/// geometry the design table names.
+///
+/// `version` is `562949953421312` == `BLUEPRINT_VERSION_2_0`
+/// (`2u64 << 48`), so directions are read on the 16-point scale with no
+/// doubling -- unlike `furnace_line.txt` / `miner_line.txt`, which are 1.x
+/// fixtures and exist specifically to prove the doubling path. Both
+/// inserters carry `direction = 12` (west, per
+/// `blueprint_direction`/`Direction::West`), which the CLAUDE.md "Known
+/// Issues" note establishes as PICKS UP FROM THE WEST -- i.e. moves items
+/// west to east -- confirmed here by construction: the first inserter's
+/// west neighbour is the source chest and its east neighbour is the belt
+/// run; the second inserter's west neighbour is the last belt and its east
+/// neighbour is the destination chest. Every belt is `direction = 4`
+/// (east), which is the direction the whole line actually carries items.
+#[test]
+fn the_moving_block_decodes_to_its_nine_entities_with_every_direction_pinned() {
+    let bp = decode(include_str!("blueprints/moving_block.txt").trim()).expect("decodes");
+    assert_eq!(bp.version, 562949953421312, "fixture is a 2.0+ blueprint");
+    assert_eq!(bp.entities.len(), 9);
+
+    let c = counts(&bp);
+    assert_eq!(c.get("iron-chest"), Some(&2));
+    assert_eq!(c.get("burner-inserter"), Some(&2));
+    assert_eq!(c.get("transport-belt"), Some(&5));
+
+    // (name, x, y, direction), in the design table's own order.
+    let expected: Vec<(&str, f64, f64, u8)> = vec![
+        ("iron-chest", 0.5, 0.5, 0),
+        ("burner-inserter", 1.5, 0.5, 12),
+        ("transport-belt", 2.5, 0.5, 4),
+        ("transport-belt", 3.5, 0.5, 4),
+        ("transport-belt", 4.5, 0.5, 4),
+        ("transport-belt", 5.5, 0.5, 4),
+        ("transport-belt", 6.5, 0.5, 4),
+        ("burner-inserter", 7.5, 0.5, 12),
+        ("iron-chest", 8.5, 0.5, 0),
+    ];
+    assert_eq!(bp.entities.len(), expected.len());
+    for (entity, (name, x, y, direction)) in bp.entities.iter().zip(expected.iter()) {
+        assert_eq!(entity.name, *name);
+        assert_eq!(entity.offset.x(), *x, "{name} x");
+        assert_eq!(entity.offset.y(), *y, "{name} y");
+        assert_eq!(entity.direction, *direction, "{name} @ ({x}, {y}) direction");
+        assert!(entity.underground_half.is_none(), "no underground belts here");
+    }
+}
+
 /// **A few kilobytes must not be allowed to become gigabytes.**
 /// `POST /api/v1/scripts/execute` is unauthenticated and a script hands any
 /// string it likes to `goal.built`, so the zlib stream reaching `decode` is

@@ -352,3 +352,54 @@ night — a test that did not compile, a substitution that matched nothing, a
 pipeline reporting the wrong process — all reported success, and all three were
 caught by counting something in the full output rather than by reading a
 verdict.
+
+## A falsification that comes back GREEN is not a passed check
+
+The strongest result of 2026-09-06, because it happened **three times, in three
+different hands, on three unrelated pieces of code**, and in each case the
+green reading was the defect.
+
+**1. The test that never compiled.** `cargo test --lib instance_setup` reported
+`36 passed` and none of the 36 were the new module. Caught by `grep -c` on the
+module name.
+
+**2. The test that agreed with broken arithmetic.** `mining_drill_radius`:
+`tiles()` was deliberately broken from `ceil` to `floor`, and
+`only_the_electric_drill_reaches_beyond_its_own_tiles` **stayed green**. It
+asserted only *relations* — that the electric drill's worked tiles exceed its
+footprint, and exceed it by two — and `floor` happens to preserve both on these
+numbers (4 > 2, and 4 == 2 + 2). A relation between two wrong numbers is not
+evidence. Fixed by asserting the absolute counts: 2, 2, 3, 5.
+
+**3. The test that asserted geometry instead of the rule.** In
+`power-as-capacity-over-time`, two of nine falsifications came back green:
+weakening the pole-siting rule to "reaches the first engine" changed nothing,
+because the ring search starts at the joint and lands on a both-covering tile
+*by geometry* whatever the rule says. The test asserted a property of the
+returned tile, not of the rule meant to guarantee it. Fixed by extracting one
+`pole_site` implementation and rewriting the fixture to block every
+both-reaching tile while leaving a first-only tile free.
+
+### The three ways a falsification lies, and they are distinct
+
+| the break was… | and the test passed because… | caught by |
+|---|---|---|
+| never compiled in | the test does not exist in the binary | counting tests by name |
+| compiled, ran, agreed | the assertion is weaker than the claim | asserting absolute values |
+| compiled, ran, irrelevant | the property holds for another reason | making the fixture hostile |
+
+**The third is the dangerous one**, because the test is real, runs, and is
+about the right subject — it simply cannot distinguish the rule from the
+accident. A fixture that satisfies the property incidentally can never falsify
+the rule, no matter how the rule is broken. The fix is always to make the
+fixture *hostile*: arrange the world so that only the rule can produce the
+answer, and assert the fixture's own preconditions so it fails loudly rather
+than vacuously when someone later changes it.
+
+### The rule
+
+**When a falsification comes back green, do not conclude the code is
+load-bearing. Conclude the test is not.** Then find out which of the three it
+is before writing another line. Every one of these was found by an author
+falsifying their own work, which is the only reason they are in this note
+rather than in a run record six weeks from now.

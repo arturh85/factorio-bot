@@ -572,7 +572,7 @@ fn ore_for(spec: &CellSpec, items: u32) -> u32 {
 /// site too: a `Producing` goal refuels for ever, so the least a site has to
 /// hold is one load's worth, and `cell_room_to_spare` reserves sites on that
 /// definition. Vanilla iron: 150.
-fn rate_cell_ore(spec: &CellSpec) -> u32 {
+pub(crate) fn rate_cell_ore(spec: &CellSpec) -> u32 {
     let cycles = CELL_FUELLED_TICKS / spec.ticks_per_item.max(1);
     ore_for(spec, cycles)
 }
@@ -719,8 +719,21 @@ pub fn plan_cells(
 /// a `BTreeSet` of tiles, so the unstable order `resource_patches` may return
 /// equal-sized patches in cannot reach the answer.
 pub fn cells_standing(state: &PlanState, spec: &CellSpec) -> u32 {
+    standing_cells(state, spec).len() as u32
+}
+
+/// The cells [`cells_standing`] counts, as cells.
+///
+/// Same predicate, same order, same dedupe -- the count is now literally this
+/// list's length, so the two cannot disagree about how much factory stands.
+/// It exists because [`crate::method::sustain`] has to *connect* the cells
+/// that already stand rather than merely know how many there are: a replan
+/// that could only count would either belt nothing (it sees the goal's
+/// capacity met) or build a second cell beside the first, which is the failure
+/// `tests/standing_site_reuse.rs` was written for.
+pub fn standing_cells(state: &PlanState, spec: &CellSpec) -> Vec<Cell> {
     let mut counted: BTreeSet<Pos> = BTreeSet::new();
-    let mut count = 0u32;
+    let mut found: Vec<Cell> = Vec::new();
     for patch in state.resource_patches(&spec.ore) {
         let centre = Position::new(
             (patch.rect.left_top.x() + patch.rect.right_bottom.x()) / 2.,
@@ -747,18 +760,22 @@ pub fn cells_standing(state: &PlanState, spec: &CellSpec) -> u32 {
             if !state.covers_resource(&area, &spec.ore) {
                 continue;
             }
-            let fed = state
+            let furnace = state
                 .entities_within(&drill.position, CELL_PAIR_RADIUS)
                 .into_iter()
-                .any(|target| {
+                .find(|target| {
                     target.name == FURNACE && state.delivers_into(&drill.position, &target.position)
                 });
-            if fed {
-                count += 1;
+            if let Some(furnace) = furnace {
+                found.push(Cell {
+                    drill: drill.position.clone(),
+                    facing: Direction::from_u8(drill.direction).unwrap_or(Direction::North),
+                    furnace: furnace.position.clone(),
+                });
             }
         }
     }
-    count
+    found
 }
 
 /// Does `Goal::Producing { item, per_minute }` hold, structurally, right now?
@@ -817,12 +834,6 @@ fn bill(count: u32, coal: u32) -> Vec<(&'static str, u32)> {
 /// `duration` ticks.
 fn fuel_for_duration(duration: Ticks, burn_ticks: Ticks) -> u32 {
     duration.div_ceil(burn_ticks.max(1)).max(1)
-}
-
-/// How much coal one machine of `burn_ticks` per coal takes to run
-/// [`CELL_FUELLED_TICKS`].
-fn fuel_for(burn_ticks: Ticks) -> u32 {
-    fuel_for_duration(CELL_FUELLED_TICKS, burn_ticks)
 }
 
 /// One burner to load: which machine, where it stands, how much coal, how
@@ -962,9 +973,138 @@ fn fuel_steps(
 /// checks it both placements have run — which is the whole reason it goes on
 /// that action rather than on a placement, where it could not yet be true.
 fn cell_steps(ctx: &mut ExpansionCtx, spec: &CellSpec, cells: &[Cell]) -> Vec<Step> {
+    cell_steps_fuelled(ctx, spec, cells, CELL_FUELLED_TICKS)
+}
+
+/// Place **one drill** on `ore`, charge it for `fuelled_ticks`, and nothing
+/// else.
+///
+/// [`cell_steps_fuelled`] always places a drill *and* a furnace, because that
+/// pair is what a smelting cell is. A fuel source is a drill and a **chest**:
+/// the drill mines coal and drops it into a buffer an inserter can take from,
+/// since a mining drill is not itself a valid pickup for an arm. So the
+/// placement and the ignition charge are shared with the cell path -- same
+/// action shape, same `ConsumeResource` effects, same `fuel_steps` -- and the
+/// chest is placed by the caller.
+///
+/// `ore` is a parameter rather than read off a `CellSpec` because there is no
+/// spec for coal: `cell_spec` admits only items with a *smelting* recipe, and
+/// coal has none. Passing the wrong one would emit `ConsumeResource` against a
+/// resource the drill does not stand on, which nothing downstream would catch.
+pub(crate) fn drill_only_steps(
+    ctx: &mut ExpansionCtx,
+    at: &Position,
+    facing: Direction,
+    fuelled_ticks: Ticks,
+    ore: &str,
+) -> Vec<Step> {
     let mut steps: Vec<Step> = Vec::new();
-    let drill_coal = fuel_for(DRILL_BURN_TICKS);
-    let furnace_coal = fuel_for(COAL_BURN_TICKS);
+    let coal = fuel_for_duration(fuelled_ticks, DRILL_BURN_TICKS);
+    for (item, amount) in [(DRILL, 1u32), ("coal", coal)] {
+        steps.push(Step::Subgoal(Goal::Have {
+            item: item.into(),
+            count: amount,
+            whose: Holder::Share(ctx.chain_actor),
+        }));
+    }
+    let build = ctx
+        .state
+        .bot(ctx.chain_actor)
+        .map(|b| b.build_distance)
+        .unwrap_or(10.0);
+    let entity = machine(&ctx.state, DRILL, at, facing);
+    let min_radius = ctx.state.placement_clearance(DRILL).unwrap_or(0.0);
+    let mut eff = vec![
+        Effect::LoseItem {
+            who: Actor::Role,
+            item: DRILL.into(),
+            count: 1,
+        },
+        Effect::CreateEntity(Box::new(entity.clone())),
+    ];
+    if let Some(area) = ctx.state.collision_area_facing(DRILL, at, facing) {
+        for tile in footprint_tiles(&area) {
+            let pos = Position::from(&tile);
+            if ctx.state.resource_available(&pos, ore) > 0 {
+                eff.push(Effect::ConsumeResource {
+                    pos,
+                    item: ore.into(),
+                    count: 0,
+                });
+            }
+        }
+    }
+    steps.push(Step::Act(Box::new(Action {
+        id: ctx.ids.next(),
+        kind: ActionKind::Place {
+            entity: Box::new(entity.clone()),
+        },
+        pre: vec![
+            Condition::AtPosition {
+                who: Actor::Role,
+                pos: at.clone(),
+                radius: build,
+                min_radius,
+            },
+            Condition::AreaFree {
+                pos: at.clone(),
+                entity: DRILL.into(),
+                direction: entity.direction,
+            },
+            Condition::HasItem {
+                who: Actor::Role,
+                item: DRILL.into(),
+                count: 1,
+            },
+        ],
+        eff,
+        duration: PLACE_TICKS,
+        pinned: None,
+        label: format!("place {DRILL} at {at} -- mine the {ore} the belts carry"),
+    })));
+    ctx.state.create_entity(entity);
+    let reach = ctx
+        .state
+        .bot(ctx.chain_actor)
+        .map(|b| b.reach_distance)
+        .unwrap_or(10.0);
+    let burner = Burner {
+        machine: DRILL,
+        position: at,
+        coal,
+        burn_ticks: DRILL_BURN_TICKS,
+        runs_out: None,
+    };
+    let (fuel, _) = fuel_steps(ctx, &burner, reach, &[]);
+    steps.extend(fuel);
+    steps
+}
+
+/// [`cell_steps`], with the hand charge sized by the caller.
+///
+/// **The parameter exists because the default charge is what made a `Sustain`
+/// pass for the wrong reason.** `CELL_FUELLED_TICKS` is ten minutes, which is
+/// 23 coal in the drill and 14 in the furnace; the run that returned
+/// `SUSTAINED` on 2026-09-06 ran its whole window off exactly that, and the
+/// analyser could only tell because someone read the dispatch list. A cell
+/// whose coal arrives by belt wants an **ignition** charge instead -- enough
+/// to turn over until the first belted coal lands, and no more -- so that the
+/// window's output cannot be explained by what a bot carried.
+///
+/// It is a duration and not a coal count so that both machines keep being
+/// sized by their own burn rate ([`fuel_for_duration`]), which is the only
+/// place either constant is applied. `fuel_for_duration` floors at one coal,
+/// so no budget can produce a machine with an empty slot and no bot ever
+/// coming back.
+pub(crate) fn cell_steps_fuelled(
+    ctx: &mut ExpansionCtx,
+    spec: &CellSpec,
+    cells: &[Cell],
+    fuelled_ticks: Ticks,
+) -> Vec<Step> {
+    let mut steps: Vec<Step> = Vec::new();
+    let drill_coal = fuel_for_duration(fuelled_ticks, DRILL_BURN_TICKS);
+    let furnace_coal = fuel_for_duration(fuelled_ticks, COAL_BURN_TICKS);
     let count = cells.len() as u32;
 
     // A smelting recipe the force has not unlocked will not run in a furnace,

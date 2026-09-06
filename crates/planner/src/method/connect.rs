@@ -9,11 +9,18 @@ use crate::method::{ExpansionCtx, Step};
 use factorio_bot_core::blueprint::UndergroundHalf;
 use factorio_bot_core::graph::enclosure::GRID;
 use factorio_bot_core::graph::route::{RouteError, TileKind, route_belt};
-use factorio_bot_core::types::{Direction, FactorioEntity, Position};
+use factorio_bot_core::types::{Direction, FactorioEntity, Position, Rect};
 
 /// The belt this module lays, and the item whose bill it states.
 const BELT: &str = "transport-belt";
-/// The inserter at each end, and the item whose bill it states.
+/// The inserter at each end when a caller does not name one.
+///
+/// **Not craftable at stage 1**, which is the whole reason
+/// [`connect_steps_with`] exists. `inserter`'s recipe takes an
+/// `electronic-circuit` and reads `enabled: false` on a freeplay force —
+/// checked against seed 31337's own t=0 dump, not assumed — so a plan that
+/// places one before `electronics` is researched refuses on the bill. A
+/// `burner-inserter` is 1 iron plate and 1 gear and is enabled from the start.
 const INSERTER: &str = "inserter";
 
 /// Half the collision box of the *largest* thing this module places, on each
@@ -377,6 +384,58 @@ fn first_free_perimeter(
         .collect())
 }
 
+/// Every collision box the *plan* has added inside `area`, so a second
+/// connection cannot be routed over the first one's belt.
+///
+/// # Why this had to change, and what it fixes
+///
+/// This module's own doc used to state as a limitation that obstacles came
+/// from the base world alone and that "a caller chaining two connections in
+/// the same plan must not treat the first call's output as ground truth for
+/// the second". That limitation was survivable while nothing called this
+/// function at all. A cell that feeds itself needs **four** connections in one
+/// expansion — the coal drill's own refuel loop, and the runs to the smelting
+/// cell's two burner machines — and without this every one of them would be
+/// routed against an empty grid and place belts on top of each other. They
+/// would place perfectly and move nothing, which is this project's defining
+/// failure.
+///
+/// # The box a plan-placed entity is measured by
+///
+/// **Its prototype's, not its `bounding_box` field.** `method::produce`'s
+/// `machine()` builds a cell's drill and furnace with `bounding_box:
+/// Default::default()` — a degenerate zero box — because nothing had ever
+/// asked it for one. Trusting that field would make a stone furnace this same
+/// plan just placed occupy nothing at all, and the belt would be routed
+/// straight through it. So the prototype is consulted first
+/// ([`crate::state::PlanState::collision_area_facing`]) and the entity's own
+/// box is the fallback for the things that carry a real one (the belts and
+/// inserters this module itself emits).
+fn overlay_boxes(ctx: &ExpansionCtx, area: &Rect) -> Vec<Rect> {
+    let centre = Position::new(
+        (area.left_top.x() + area.right_bottom.x()) / 2.,
+        (area.left_top.y() + area.right_bottom.y()) / 2.,
+    );
+    // The circumradius of the window, so nothing inside the rectangle is
+    // missed by a radius query: half the diagonal of a square of this side.
+    let radius = (area.width() / 2.).hypot(area.height() / 2.);
+    ctx.state
+        .entities_within(&centre, radius)
+        .into_iter()
+        .filter_map(|entity| {
+            <Direction as factorio_bot_core::num_traits::FromPrimitive>::from_u8(entity.direction)
+                .and_then(|facing| {
+                    ctx.state
+                        .collision_area_facing(&entity.name, &entity.position, facing)
+                })
+                .or_else(|| {
+                    let box_ = &entity.bounding_box;
+                    (box_.width() > 0. && box_.height() > 0.).then(|| box_.clone())
+                })
+        })
+        .collect()
+}
+
 /// One `Place` action, with the preconditions and effects every other method
 /// in this crate emits for one -- see `method::power`'s plant parts, which
 /// this deliberately mirrors field for field.
@@ -471,6 +530,34 @@ pub fn connect_steps(
     to: &FactorioEntity,
     item: &ItemId,
 ) -> Result<Vec<Step>, ConnectRefusal> {
+    connect_steps_with(ctx, from, to, item, INSERTER)
+}
+
+/// [`connect_steps`], with the inserter prototype named by the caller.
+///
+/// The only reason this is a parameter: `inserter` is not craftable on a
+/// freeplay force at t=0 (see [`INSERTER`]), and stage 1 has no electricity to
+/// run one with even if it were. A stage-1 caller passes `burner-inserter`,
+/// which is enabled from the start, costs 1 iron plate and 1 gear, and — the
+/// property this arrangement rests on — **takes its own fuel out of the coal
+/// it is moving**, so a coal belt needs no separate supply for the arms that
+/// unload it.
+///
+/// That last sentence is a claim about the *game*, not about this crate, and
+/// nothing here can check it. It is measured in the live run, by reading the
+/// placed inserters' `fuel_inventory` over RCON.
+///
+/// Geometry, bill and refusals are identical either way: both prototypes have
+/// the same collision box, the same one-tile reach, and the same convention
+/// that `direction` names the side the arm picks up from
+/// (`crate::state`'s `inserter_reach` already lists them together).
+pub fn connect_steps_with(
+    ctx: &mut ExpansionCtx,
+    from: &FactorioEntity,
+    to: &FactorioEntity,
+    item: &ItemId,
+    inserter: &str,
+) -> Result<Vec<Step>, ConnectRefusal> {
     let (area, origin) = enclosure::window(&from.position);
     // `mut`: the two machine footprints and the six tiles derived below (an
     // anchor, an inserter and a belt cell at each end) all claim their cells
@@ -480,7 +567,8 @@ pub fn connect_steps(
             .base()
             .entity_graph
             .blocking_boxes_within(&area)
-            .into_iter(),
+            .into_iter()
+            .chain(overlay_boxes(ctx, &area)),
         origin,
         (PLACEMENT_HALF_BOX, PLACEMENT_HALF_BOX),
     );
@@ -570,12 +658,13 @@ pub fn connect_steps(
         whose: Holder::Share(ctx.chain_actor),
     }));
     steps.push(Step::Subgoal(Goal::Have {
-        item: INSERTER.into(),
+        item: inserter.into(),
         count: 2,
         whose: Holder::Share(ctx.chain_actor),
     }));
 
-    let load = FactorioEntity::new_inserter(&src_inserter_pos, load_facing);
+    let load =
+        FactorioEntity::new_named_inserter(inserter.to_string(), &src_inserter_pos, load_facing);
     let note = format!("load {item} out of {}", from.name);
     steps.push(place_step(ctx, load, build, &note));
 
@@ -594,7 +683,8 @@ pub fn connect_steps(
         steps.push(place_step(ctx, entity, build, &note));
     }
 
-    let unload = FactorioEntity::new_inserter(&dst_inserter_pos, unload_facing);
+    let unload =
+        FactorioEntity::new_named_inserter(inserter.to_string(), &dst_inserter_pos, unload_facing);
     let note = format!("unload {item} into {}", to.name);
     steps.push(place_step(ctx, unload, build, &note));
 

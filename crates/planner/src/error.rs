@@ -730,8 +730,8 @@ pub enum PlannerError {
     /// planner's word for "done", and a standing rate is exactly what it
     /// cannot know is done.
     #[error(
-        "the capacity for {per_minute} {item}/min stands, but nothing delivers {inputs} to it \
-         without a bot: a standing supply over {window_ticks} ticks is not modelled"
+        "{per_minute} {item}/min: {inputs}. Whether the rate held over {window_ticks} ticks \
+         is a window of history and no reading of the world settles it"
     )]
     #[diagnostic(
         code(planner::sustain_supply_not_standing),
@@ -746,5 +746,50 @@ pub enum PlannerError {
         window_ticks: crate::ids::Ticks,
         /// The inputs that have no standing deliverer, comma-separated.
         inputs: String,
+    },
+
+    /// No ground within reach holds a drill that could mine the cell's fuel
+    /// and drop it into a buffer.
+    ///
+    /// Distinct from [`PlannerError::NoPatchForCell`], which means the map
+    /// carries none of the resource at all: this one means the patch is there
+    /// and no *site* on it takes a drill with a free tile in front of it.
+    #[error(
+        "no site within {radius} tiles of the {fuel} patch takes a drill with a buffer in front \
+         of it, so the cell has no standing fuel source"
+    )]
+    #[diagnostic(
+        code(planner::sustain_no_fuel_source),
+        help(
+            "the drill needs {fuel} under its whole footprint and one clear tile at its drop \
+             point for the buffer chest"
+        )
+    )]
+    SustainNoFuelSource { fuel: ItemId, radius: i32 },
+
+    /// The fuel could be mined and buffered, and no belt run joins the buffer
+    /// to a machine that has to burn it.
+    ///
+    /// **This is the refusal the first rung was most likely to produce and it
+    /// is a measurement, not a failure**: `method::connect` refuses rather
+    /// than tunnelling where a route needs an underground pair, and its search
+    /// window is `2 * enclosure::SEARCH_RADIUS` tiles across, so two patches
+    /// further apart than that cannot be joined by one call however clear the
+    /// ground is. The message carries the primitive's own sentence.
+    #[error("nothing can carry {fuel} from the buffer at {from} to the {machine} at {to}: {why}")]
+    #[diagnostic(
+        code(planner::sustain_no_route_for_fuel),
+        help(
+            "a belt run is planned in one window centred on the buffer; a machine outside it, or \
+             one an obstacle walls off, cannot be fed without an underground pair, which this \
+             planner deliberately does not place"
+        )
+    )]
+    SustainNoRouteForFuel {
+        fuel: ItemId,
+        machine: String,
+        from: String,
+        to: String,
+        why: String,
     },
 }

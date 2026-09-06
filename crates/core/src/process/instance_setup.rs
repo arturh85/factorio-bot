@@ -499,6 +499,90 @@ fn link_bridge_mod(repo_mods: &Path, workspace_mods_path: &Path) -> Result<Strin
     }
 }
 
+/// Refuses the run when `<mods>/BotBridge` does not resolve to a readable
+/// directory, instead of letting Factorio hang on it.
+///
+/// **This is the failure the rest of this module's warnings cannot catch, and
+/// the only one that costs a whole night.** A server with no bridge mod does
+/// not fail: it hangs at `start waiting` forever, and writes a `level.zip`
+/// with no bridge state, which poisons every later run on that workspace
+/// because Factorio migrates only on a version bump and `info.json` is pinned
+/// at 0.0.1. So the check has to happen *before* a process is spawned, and it
+/// has to be an error rather than a warning -- a warning here scrolls past
+/// and the operator learns about it from a hang twenty minutes later.
+///
+/// # Why the self-repairing symlink is not enough
+///
+/// `link_bridge_mod` re-points this at the running binary's own checkout on
+/// every setup, so a debug run always repairs whatever the last one left. But
+/// it is `#[cfg(debug_assertions)]`: **a release build has no repair path at
+/// all**, and the release branch of `resolve_workspace_mods` skips extraction
+/// entirely when the directory already exists. That asymmetry is exactly the
+/// hole the observed sequence falls through:
+///
+/// 1. a debug run launched from `.worktrees/x` points the link at
+///    `.worktrees/x/mods/BotBridge` -- correct, and by design, for that run;
+/// 2. the worktree is removed once its branch merges. `git worktree remove`
+///    succeeds cleanly; the damage lands somewhere it does not look;
+/// 3. the next **release** run -- which is what every measured run uses --
+///    finds a populated `workspace/mods`, extracts nothing, repairs nothing,
+///    and hands Factorio a dangling symlink.
+///
+/// Nothing in that sequence is a mistake anybody makes twice on purpose, and
+/// it happened twice in two days here. A `readlink` before a run catches a bad
+/// state; it does not stop the next run creating one.
+///
+/// # What counts as resolving
+///
+/// `info.json` must be readable, because that is what Factorio itself reads to
+/// decide a directory is a mod. Checking `is_dir()` alone would pass a symlink
+/// pointing at some unrelated surviving directory, and checking only that the
+/// link resolves would pass an empty one left by a half-finished copy.
+fn ensure_bridge_mod_resolves(workspace_mods_path: &Path) -> Result<()> {
+    let bridge = workspace_mods_path.join(BRIDGE_MOD_NAME);
+    let info = bridge.join("info.json");
+    if fs::metadata(&info).is_ok_and(|meta| meta.is_file()) {
+        return Ok(());
+    }
+
+    // Name the link's target when there is one: a dangling symlink is the
+    // common case here, and the path it points at is the whole diagnosis.
+    let detail = match fs::read_link(&bridge) {
+        Ok(target) if !target.exists() => format!(
+            "it is a symlink to {target:?}, and there is nothing there -- most likely a git \
+             worktree that has since been removed"
+        ),
+        Ok(target) => {
+            format!("it is a symlink to {target:?}, which exists but holds no readable info.json")
+        }
+        Err(_) if bridge.exists() => {
+            String::from("it exists but holds no readable info.json, so Factorio will not load it")
+        }
+        Err(_) => String::from("there is nothing at that path at all"),
+    };
+
+    // Naming the profile is not decoration. The operator who meets this is on
+    // release, and the run that broke it was a debug run they may not have
+    // made -- so "this build does not repair the link" is the sentence that
+    // turns a puzzle into an instruction.
+    let profile = if cfg!(debug_assertions) {
+        "This is a debug build, which normally repairs this link itself on every setup, so \
+         something is wrong beyond a stale link"
+    } else {
+        "This is a RELEASE build, which never repairs this link -- only a debug run does, and \
+         a debug run launched from a git worktree is what points it into one"
+    };
+
+    Err(miette!(
+        "{BRIDGE_MOD_NAME} does not resolve at {bridge:?}: {detail}. {profile}. Refusing to \
+         start, because a Factorio server with no bridge mod does not fail -- it hangs at \
+         `start waiting` forever and writes a save with no bridge state, which poisons every \
+         later run on this workspace. Repair it by pointing {bridge:?} at a checkout's \
+         mods/{BRIDGE_MOD_NAME}, or re-extract the workspace copy with \
+         FACTORIO_BOT_REFRESH_MODS=1 on a release build."
+    ))
+}
+
 /// Makes sure `mod-list.json` still enables the bridge mod, returning a note
 /// for the mods line when it had to change something.
 ///
@@ -685,6 +769,10 @@ pub async fn setup_factorio_instance(
     let (workspace_mods_path, mut mods_source) =
         resolve_workspace_mods(workspace_path.join(PathBuf::from(MODS_FOLDERNAME)))?;
     let workspace_mods_path = fs::canonicalize(workspace_mods_path).into_diagnostic()?;
+    // Before `ensure_bridge_mod_enabled`, deliberately: enabling a mod in
+    // `mod-list.json` whose files do not resolve produces exactly the silent
+    // hang this refuses, and would report "re-enabled" while doing it.
+    ensure_bridge_mod_resolves(&workspace_mods_path)?;
     if let Some(note) = ensure_bridge_mod_enabled(&workspace_mods_path) {
         mods_source = format!("{mods_source}; {note}");
     }
@@ -1494,6 +1582,124 @@ mod workspace_dir_tests {
         let err = ensure_workspace_dir(&resolved(&file)).expect_err("a file is not a workspace");
         assert!(err.downcast_ref::<WorkspaceNotFound>().is_some());
         assert!(file.is_file(), "the file must be left alone");
+    }
+}
+
+/// `ensure_bridge_mod_resolves` is the pre-flight that turns a silent hang
+/// into a refusal, so these tests are about the *refusal*, in both profiles.
+///
+/// It is deliberately not in `mods_source_tests`: that module is
+/// `#[cfg(all(test, debug_assertions))]` because it is about the symlink a
+/// debug build maintains, and **the release build is the one with no repair
+/// path** -- gating these the same way would leave the profile that actually
+/// needs the guard untested.
+#[cfg(test)]
+mod bridge_resolves_tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    /// A mods directory holding a real bridge mod, as a run expects to find.
+    fn mods_dir_with_bridge(root: &Path) -> PathBuf {
+        let mods = root.join("mods");
+        let bridge = mods.join(BRIDGE_MOD_NAME);
+        fs::create_dir_all(&bridge).unwrap();
+        fs::write(bridge.join("info.json"), br#"{"name":"BotBridge"}"#).unwrap();
+        mods
+    }
+
+    #[test]
+    fn a_real_bridge_directory_resolves() {
+        let dir = tempdir().unwrap();
+        let mods = mods_dir_with_bridge(dir.path());
+
+        ensure_bridge_mod_resolves(&mods).expect("a directory with info.json is a mod");
+    }
+
+    /// The observed failure, end to end: a worktree run points the link into
+    /// the worktree, the worktree is removed, the link outlives it.
+    ///
+    /// The assertion is on the *target being named*. A refusal that says only
+    /// "BotBridge does not resolve" sends the reader looking at the mod; the
+    /// path is what says a removed worktree took it.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_into_a_removed_worktree_is_refused_and_names_it() {
+        let dir = tempdir().unwrap();
+        let mods = dir.path().join("mods");
+        fs::create_dir_all(&mods).unwrap();
+
+        let worktree_bridge = dir.path().join(".worktrees/ghosts/mods/BotBridge");
+        fs::create_dir_all(&worktree_bridge).unwrap();
+        fs::write(worktree_bridge.join("info.json"), b"{}").unwrap();
+        std::os::unix::fs::symlink(&worktree_bridge, mods.join(BRIDGE_MOD_NAME)).unwrap();
+
+        // It resolves while the worktree stands -- the link is not the defect.
+        ensure_bridge_mod_resolves(&mods).expect("a live worktree link is fine");
+
+        fs::remove_dir_all(dir.path().join(".worktrees")).unwrap();
+
+        let err = ensure_bridge_mod_resolves(&mods).expect_err("a dangling link must be refused");
+        let msg = format!("{err}");
+        assert!(msg.contains("ghosts"), "must name the dead target: {msg}");
+        assert!(
+            msg.contains("worktree"),
+            "must say what that path usually means: {msg}"
+        );
+    }
+
+    #[test]
+    fn a_missing_bridge_is_refused() {
+        let dir = tempdir().unwrap();
+        let mods = dir.path().join("mods");
+        fs::create_dir_all(&mods).unwrap();
+
+        let err = ensure_bridge_mod_resolves(&mods).expect_err("no bridge mod at all");
+        assert!(format!("{err}").contains(BRIDGE_MOD_NAME));
+    }
+
+    /// The case `is_dir()` alone would wave through: the directory is there
+    /// and empty, which is what a half-finished copy leaves behind.
+    #[test]
+    fn a_directory_without_info_json_is_refused() {
+        let dir = tempdir().unwrap();
+        let mods = dir.path().join("mods");
+        fs::create_dir_all(mods.join(BRIDGE_MOD_NAME)).unwrap();
+
+        let err = ensure_bridge_mod_resolves(&mods).expect_err("an empty directory is not a mod");
+        assert!(format!("{err}").contains("info.json"));
+    }
+
+    /// The refusal has to say what happens if it is ignored, because the
+    /// symptom (a server sitting at `start waiting`) names nothing that would
+    /// lead anybody back here.
+    #[test]
+    fn the_refusal_explains_the_hang_it_prevents() {
+        let dir = tempdir().unwrap();
+        let mods = dir.path().join("mods");
+        fs::create_dir_all(&mods).unwrap();
+
+        let err = ensure_bridge_mod_resolves(&mods).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("start waiting"), "{msg}");
+        assert!(msg.contains("FACTORIO_BOT_REFRESH_MODS"), "{msg}");
+    }
+
+    /// The refusal names the build profile, because the operator who meets it
+    /// is on release and the run that broke the link was a debug run they may
+    /// not have made. Asserted per-profile so neither branch can rot.
+    #[test]
+    fn the_refusal_names_the_build_profile() {
+        let dir = tempdir().unwrap();
+        let mods = dir.path().join("mods");
+        fs::create_dir_all(&mods).unwrap();
+
+        let msg = format!("{}", ensure_bridge_mod_resolves(&mods).unwrap_err());
+        if cfg!(debug_assertions) {
+            assert!(msg.contains("debug build"), "{msg}");
+        } else {
+            assert!(msg.contains("RELEASE build"), "{msg}");
+            assert!(msg.contains("worktree"), "must point at the cause: {msg}");
+        }
     }
 }
 

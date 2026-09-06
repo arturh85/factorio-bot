@@ -72,7 +72,7 @@
 use factorio_bot_core::factorio::util::calculate_distance;
 use factorio_bot_core::factorio::world::{FactorioWorld, StepAsideReason};
 use factorio_bot_core::graph::enclosure::{
-    Escape, character_half_box, escape_from, escape_with, step_aside_target,
+    Escape, blocks_character, character_half_box, escape_from, escape_with, step_aside_target,
 };
 use factorio_bot_core::num_traits::FromPrimitive;
 use factorio_bot_core::tracing::{info, warn};
@@ -143,6 +143,22 @@ pub fn judge_placement(
         );
         return PrePlace::Proceed;
     };
+
+    // A belt, a splitter or a loader is not a wall and never was: a character
+    // walks over one, and the game lets a player build one under their own
+    // feet. Neither question below has an answer worth asking about such a
+    // placement -- it cannot seal anybody in, and standing on its tile is not
+    // a refusal -- so the check declines by name rather than emitting a walk
+    // nobody needs. See `graph::enclosure::blocks_character`.
+    if !blocks_character(&world.entity_prototypes, name) {
+        info!(
+            player,
+            name,
+            "pre-place check skipped: a character does not collide with this entity, so \
+             placing it can neither seal anyone in nor be refused for standing on it"
+        );
+        return PrePlace::Proceed;
+    }
 
     let (half_x, half_y) = character_half_box(&world.entity_graph);
     // Where a step aside may land, for either reason: outside the footprint
@@ -431,6 +447,31 @@ mod tests {
             judge_placement(&world, 1, "assembling-machine-1", &the_site(), 0),
             PrePlace::Proceed
         );
+    }
+
+    /// A belt is not a wall, and a character may stand on the tile it goes
+    /// on: neither question this check asks has an answer for one.
+    ///
+    /// Put bot 1 exactly on the tile the belt is about to occupy -- the
+    /// `character_overlaps` branch, which for any *colliding* entity walks
+    /// the bot out of the box first -- and the answer must still be
+    /// `Proceed`. The control below is the same placement made of `pipe`,
+    /// a one-tile box that does collide.
+    #[test]
+    fn placing_a_belt_under_the_character_is_not_a_step_aside() {
+        let world = world_with_the_old_cell();
+        let site = Position::new(28.5, -4.5);
+        world.players.get_mut(&1).unwrap().position = site.clone();
+        assert_eq!(
+            judge_placement(&world, 1, "transport-belt", &site, 4),
+            PrePlace::Proceed
+        );
+        match judge_placement(&world, 1, "pipe", &site, 0) {
+            PrePlace::StepAside { reason, .. } => {
+                assert_eq!(reason, StepAsideReason::Footprint);
+            }
+            other => panic!("a pipe does collide with a character, got {other:?}"),
+        }
     }
 
     /// A bot already walled in is not this placement's doing, and the

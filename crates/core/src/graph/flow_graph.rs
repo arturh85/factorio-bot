@@ -67,6 +67,26 @@ impl FlowGraph {
         }
     }
 
+    /// Walks the entity graph from every source root and writes flow edges.
+    ///
+    /// # This is called twice in the life of a world, and never again
+    ///
+    /// The only callers are `OutputParser::on_init` — once, when Factorio logs
+    /// `initial discovery done` — and `factorio::snapshot`, the `--connect`
+    /// path. **Nothing calls it when an entity is created or destroyed**,
+    /// although `FactorioWorld::on_some_entity_created` /
+    /// `on_some_entity_deleted` keep `entity_graph` current continuously. So
+    /// the entity graph is live and the graph built from it is frozen at
+    /// initialisation: every machine a run builds is invisible here, and the
+    /// first reader would get tick 0 with no error and no warning — a stale
+    /// answer shaped exactly like a current one.
+    ///
+    /// Calling this more often is **not** the fix: it writes into `self.inner`
+    /// and never clears it, so a second call on a changed world adds nodes
+    /// beside the stale ones. See
+    /// `docs/superpowers/notes/2026-09-06-the-flow-graph-has-no-caller-and-no-refresh.md`
+    /// for the design (a generation counter on `EntityGraph` and a rebuild on
+    /// read) and for why it ships with a reader or not at all.
     pub fn update(&self) -> Result<()> {
         let _started = Instant::now();
         let inner = self.entity_graph.inner_graph();
@@ -716,6 +736,35 @@ impl Default for FlowEdge {
 /// 16 s. The steel arm divided by 3.2 like the others, overstating steel
 /// throughput 5x against the comment that sits directly above the call site
 /// and states the 16 s correctly.
+///
+/// # These are hard-coded rates, which this project's own rule forbids
+///
+/// The rule is the owner's and is about mods before it is about drift: rates
+/// get derived from the game's own data **because that is what survives
+/// mods**. This function derives nothing. It is wrong three ways, only one of
+/// which is the arithmetic:
+///
+/// * it ignores `crafting_speed`, so a `steel-furnace` or `electric-furnace`
+///   (both 2) is reported at 1x;
+/// * it matches on [`EntityName`], so a modded ore is not smelted slowly, it
+///   is `warn!("invalid furnace input")` and no edge at all;
+/// * its own test asserts the same constants it reads, so under a rebalance
+///   the code and the check move together and the suite stays green.
+///
+/// The replacement is one expression, and both fields are in the live 2.1.17
+/// dump: `product.amount * crafting_speed / recipe.energy`, off `self.recipes`
+/// which `FlowGraph` already holds. The mining arm forty lines above already
+/// derives correctly from prototypes (`mining_speed / mining_time`), so the
+/// file does this right in one place out of three.
+///
+/// **It is left alone on purpose.** Nothing outside this file reads any
+/// result of this graph, and `update()` is called only at world
+/// initialisation and never again — so a corrected number here would be
+/// exactly as unverifiable as the wrong one, and would be computed from the
+/// world as it stood at tick 0. Fixing the rate, giving the graph a caller and
+/// refreshing it on entity change are **one piece of work**, and doing any
+/// part alone leaves something worse than this. The design is written up in
+/// `docs/superpowers/notes/2026-09-06-the-flow-graph-has-no-caller-and-no-refresh.md`.
 fn furnace_output(input: &EntityName) -> Option<FlowRate> {
     match input {
         EntityName::IronOre => Some((EntityName::IronPlate.to_string(), 1. / 3.2)),
@@ -742,6 +791,18 @@ mod tests {
     /// 16 seconds while every arm, steel included, divided by 3.2 -- steel
     /// throughput came out 5x too high. Someone hit the trap, wrote the note,
     /// and did not write the check.
+    ///
+    /// **This check asserts the constants the function reads**, which is the
+    /// fourth failure shape in
+    /// `docs/superpowers/notes/2026-09-06-fixtures-agree-with-their-code.md`:
+    /// it caught the 5x because the two disagreed once, and it can never catch
+    /// a rebalance, a `crafting_speed` of 2, or a modded ore, because the code
+    /// and the fixture would move together. It is kept as-is only because
+    /// [`furnace_output`] is kept as-is; both go together, and what replaces
+    /// this must assert against captured game data
+    /// (`crates/core/tests/recipes-fixtures.json` carries `iron-plate` and
+    /// `stone-brick` as live smelting recipes) and against the *derivation* --
+    /// double a recipe's `energy` and require the rate to halve.
     #[test]
     fn steel_smelts_five_times_slower_than_iron() {
         assert_eq!(

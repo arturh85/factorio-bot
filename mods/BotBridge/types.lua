@@ -139,7 +139,35 @@ function serialize_force(force)
         -- manual_mining_speed_modifier: hand mining runs at
         -- character.mining_speed * (1 + this). Vanilla's steel-axe research
         -- sets it to 1, doubling it, so the planner cannot assume a constant.
-        {"name", "index", "research_progress", "manual_mining_speed_modifier"},
+        --
+        -- The rest are its siblings: every LuaForce attribute that scales a
+        -- rate rather than a distance or a slot count. A rate in this project
+        -- is `prototype x force bonus x module effect` and only the first
+        -- factor was ever carried, which made every rate a constant that
+        -- research could not move. Sending them does not by itself make the
+        -- planner read them -- today only manual_mining_speed_modifier is
+        -- read -- but a datum that never leaves the game cannot be read at
+        -- all, and that was the actual root cause.
+        --
+        -- Every name here was checked against
+        -- workspace/factorio-api-docs/runtime-api.json (2.1.17), class
+        -- LuaForce: all are non-optional read attributes, `double` except
+        -- belt_stack_size_bonus and bulk_inserter_capacity_bonus which are
+        -- `uint32`. table_properties pcalls each one, so a name this game
+        -- version does not have is dropped rather than raised.
+        {
+            "name", "index", "research_progress",
+            "manual_mining_speed_modifier",
+            "manual_crafting_speed_modifier",
+            "character_running_speed_modifier",
+            "laboratory_speed_modifier",
+            "laboratory_productivity_bonus",
+            "mining_drill_productivity_bonus",
+            "inserter_stack_size_bonus",
+            "bulk_inserter_capacity_bonus",
+            "belt_stack_size_bonus",
+            "worker_robots_speed_modifier",
+        },
         {index = "force_id", research_progress = "research_progress"}
     )
     if force.current_research ~= nil then
@@ -267,16 +295,60 @@ function serialize_technology(technology)
     -- behaviour, which broke goal.researched for every technology that
     -- unlocks anything) or visible but unreachable, which would be worse --
     -- plans that can never execute.
+    --
+    -- `record.effects` beside it is the WHOLE list, unlock-recipe included.
+    -- Discarding every other effect is why nothing downstream could know that
+    -- `steel-axe` grants `character-mining-speed +1` -- the planner was not
+    -- ignoring the datum, it had never been sent one. `unlocked_recipes` is
+    -- kept as its own key rather than derived on the Rust side because every
+    -- existing consumer reads it and every archived payload has it; the
+    -- duplication buys a seam that does not move.
+    --
+    -- The shape is flattened deliberately. `TechnologyModifier`
+    -- (runtime-api.json 2.1.17) is a table tagged by `type` with 51 variant
+    -- groups, and 44 of them carry exactly one field, `modifier`. Mirroring
+    -- 51 variants into Rust would make every future Factorio version and
+    -- every mod that adds a modifier type a deserialisation failure, which is
+    -- the opposite of what carrying this data is for. So: `kind` is the
+    -- `type` string verbatim, `modifier` is the number, and `target` is
+    -- whichever single string field the variant uses to name what it acts on.
+    --
+    -- The two variants that do not spell their number `modifier`:
+    -- `change-recipe-productivity` uses `change` (plus `recipe`), and
+    -- `give-item` has `count` (plus `item`). Boolean modifiers -- seven
+    -- variants, e.g. `mining-with-fluid` -- become 1 or 0 rather than being
+    -- dropped, so "this technology enables it" survives as a number.
+    -- `nothing` carries only a LocalisedString and reaches Rust as kind alone.
     local unlocked = {}
+    local all_effects = {}
     local ok, effects = pcall(function() return technology.prototype.effects end)
     if ok and effects ~= nil then
         for _, effect in pairs(effects) do
             if effect.type == "unlock-recipe" and effect.recipe ~= nil then
                 table.insert(unlocked, effect.recipe)
             end
+            if effect.type ~= nil then
+                local entry = {kind = effect.type}
+                local amount = effect.modifier
+                if amount == nil then amount = effect.change end
+                if amount == nil then amount = effect.count end
+                if type(amount) == "boolean" then
+                    amount = amount and 1 or 0
+                end
+                if type(amount) == "number" then
+                    entry.modifier = amount
+                end
+                -- Exactly one of these is present per variant; the order is
+                -- only a way to ask for all of them at once.
+                entry.target = effect.recipe or effect.ammo_category
+                    or effect.turret_id or effect.item or effect.quality
+                    or effect.space_location
+                table.insert(all_effects, entry)
+            end
         end
     end
     record.unlocked_recipes = unlocked
+    record.effects = all_effects
 
     -- How this technology is unlocked, when it is NOT unlocked by science
     -- packs.

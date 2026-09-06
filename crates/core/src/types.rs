@@ -1285,6 +1285,87 @@ pub struct FactorioTechnology {
     /// here and the real cost is whatever the trigger names.
     #[serde(default)]
     pub research_trigger: Option<ResearchTrigger>,
+    /// Every effect the technology's prototype declares, `unlock-recipe`
+    /// included.
+    ///
+    /// [`Self::unlocked_recipes`] above is the same data narrowed to the one
+    /// effect kind that had a reader. This is the rest of it, and the reason
+    /// it exists is that **a rate is `prototype x force bonus x module
+    /// effect` and only the first factor was ever carried**. The mod kept
+    /// `unlock-recipe` and threw the other 50 modifier kinds away, so nothing
+    /// downstream could know that vanilla's `steel-axe` grants
+    /// `character-mining-speed +1` and halves the cost of every hand mine
+    /// scheduled after it. That was not a planner oversight — the planner had
+    /// never been told.
+    ///
+    /// Both keys are sent. The duplication is deliberate: every archived
+    /// payload and every existing consumer reads `unlocked_recipes`, and a
+    /// seam that does not move is worth more than the handful of bytes.
+    ///
+    /// `#[serde(default)]` with `vec_or_empty_map` for the same two reasons
+    /// its neighbours have it: 865 MB world dumps written before this field
+    /// existed must still load, and the mod's `table_to_json` renders an
+    /// empty Lua table as `{}` rather than `[]`.
+    #[serde(default, deserialize_with = "deserialize_helpers::vec_or_empty_map")]
+    pub effects: Vec<FactorioTechnologyEffect>,
+}
+
+/// One entry of a technology's `effects` list — a `TechnologyModifier`, in
+/// the runtime API's terms — flattened to three fields.
+///
+/// # Why flat, and not 51 variants
+///
+/// `TechnologyModifier` in `workspace/factorio-api-docs/runtime-api.json`
+/// (2.1.17) is a table tagged by `type`, with **51 variant parameter groups**,
+/// of which 44 carry exactly one field, `modifier`. [`ResearchTrigger`] next
+/// door is a tagged enum because it has eight variants with genuinely
+/// different shapes and each one drives a different planner decision. This has
+/// neither property. Mirroring 51 variants would turn every new Factorio
+/// version and every mod that adds a modifier type into a shape this build
+/// cannot express — the exact failure carrying the data is meant to end. The
+/// owner's standing rule applies directly: derive rates from the game's own
+/// data *because that is what survives mods*.
+///
+/// So `kind` is the `type` string verbatim, and a reader matches on the
+/// strings it knows and ignores the rest. An unknown kind is data, not an
+/// error.
+// No `JsonSchema` / `ToSchema`, matching `FactorioTechnology` which owns it:
+// neither is published through the OpenAPI seam, and deriving them here would
+// add a schema nothing hands out — which `documented_type_schemas()` fails the
+// build over.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Hash, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct FactorioTechnologyEffect {
+    /// The `ModifierType` string as the game spells it — `"unlock-recipe"`,
+    /// `"character-mining-speed"`, `"laboratory-speed"`, and 48 others in
+    /// 2.1.17 base. Kebab-case, because that is what Factorio sends; it is
+    /// not renamed on the way through.
+    pub kind: String,
+    /// The number the effect adds, where the variant has one.
+    ///
+    /// 44 of the 51 variants spell it `modifier`. `change-recipe-productivity`
+    /// spells it `change` and `give-item` spells it `count`; the mod
+    /// normalises both to this field. The seven boolean variants (e.g.
+    /// `mining-with-fluid`) arrive as `1` or `0` rather than being dropped, so
+    /// "this technology enables it" survives as a number a reader can test.
+    /// `None` is a variant with no number at all — `unlock-recipe`,
+    /// `unlock-quality`, `nothing`.
+    ///
+    /// `R64` rather than `f64` because [`FactorioTechnology`] derives `Hash`
+    /// and `Eq`, the same reason `FactorioRecipe::energy` is one.
+    #[serde(default)]
+    pub modifier: Option<Box<R64>>,
+    /// What the effect acts on, where the variant names one: the `recipe` of
+    /// an `unlock-recipe` or a `change-recipe-productivity`, the
+    /// `ammo_category` of a `gun-speed`, the `turret_id` of a
+    /// `turret-attack`, the `item` of a `give-item`, the `quality` of an
+    /// `unlock-quality`, the `space_location` of an `unlock-space-location`.
+    ///
+    /// One flat field rather than six because exactly one of them is present
+    /// per variant and `kind` already says which. `None` for the 44 variants
+    /// that target nothing but the force itself.
+    #[serde(default)]
+    pub target: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Hash, Eq)]
@@ -1311,6 +1392,70 @@ pub struct FactorioForce {
     /// which the planner reads as the documented default of `0`.
     #[serde(default)]
     pub manual_mining_speed_modifier: Option<Box<R64>>,
+    /// The other force bonuses that scale a **rate**.
+    ///
+    /// `manual_mining_speed_modifier` above was the only one of these the mod
+    /// ever sent, so `FactorioForce` had six fields and one rate term. Every
+    /// other rate in the system was a prototype constant treated as
+    /// permanent, which is a mod-compatibility defect as much as a modelling
+    /// one: a mod that grants crafting speed through research is invisible to
+    /// a model that only ever reads the prototype.
+    ///
+    /// **Carried, not yet read.** Today only mining speed reaches a duration
+    /// ([`factorio_bot_planner::method::util::character_mining_speed`]);
+    /// `research_ticks_in_labs` has no speed term at all, no inserter or belt
+    /// throughput is costed, and no drill rate is. Sending the data does not
+    /// fix any of those. It removes the reason none of them *could* be fixed.
+    ///
+    /// Every name is `LuaForce`'s own, checked against
+    /// `workspace/factorio-api-docs/runtime-api.json` at 2.1.17 — all
+    /// non-optional read attributes there, `double` except the two `uint32`
+    /// ones noted below. `Option` + `#[serde(default)]` throughout, so that
+    /// dumps written before this field existed still load; `None` means "the
+    /// world did not report one", which a reader treats as the documented
+    /// default of `0`, exactly as `manual_mining_speed_modifier` does.
+    ///
+    /// `R64` for the same reason its neighbours are: this type derives `Hash`
+    /// and `Eq`.
+    #[serde(default)]
+    pub manual_crafting_speed_modifier: Option<Box<R64>>,
+    /// `LuaForce::character_running_speed_modifier`. Walking is ~21% of a
+    /// reference run and is charged at one fixed tiles-per-tick
+    /// (`schedule::WALK_TILES_PER_TICK`), which this would scale. See
+    /// [`Self::manual_crafting_speed_modifier`] for the shared rationale.
+    #[serde(default)]
+    pub character_running_speed_modifier: Option<Box<R64>>,
+    /// `LuaForce::laboratory_speed_modifier`. Six base technologies grant it
+    /// (`research-speed-1..6`).
+    #[serde(default)]
+    pub laboratory_speed_modifier: Option<Box<R64>>,
+    /// `LuaForce::laboratory_productivity_bonus`. No base technology grants
+    /// it in 2.1.17; carried because a mod can.
+    #[serde(default)]
+    pub laboratory_productivity_bonus: Option<Box<R64>>,
+    /// `LuaForce::mining_drill_productivity_bonus`. Extra output per
+    /// operation rather than a faster swing — a smaller bill, not a shorter
+    /// duration. Four base technologies, the fourth infinite.
+    #[serde(default)]
+    pub mining_drill_productivity_bonus: Option<Box<R64>>,
+    /// `LuaForce::inserter_stack_size_bonus`. Two base technologies.
+    #[serde(default)]
+    pub inserter_stack_size_bonus: Option<Box<R64>>,
+    /// `LuaForce::bulk_inserter_capacity_bonus`. Eight base technologies take
+    /// it to 12. A `uint32` in the runtime API; kept as `R64` so that the
+    /// whole group has one shape and a mod reporting a fraction cannot make
+    /// the world unreadable.
+    #[serde(default)]
+    pub bulk_inserter_capacity_bonus: Option<Box<R64>>,
+    /// `LuaForce::belt_stack_size_bonus`. Also a `uint32`; see
+    /// [`Self::bulk_inserter_capacity_bonus`].
+    #[serde(default)]
+    pub belt_stack_size_bonus: Option<Box<R64>>,
+    /// `LuaForce::worker_robots_speed_modifier`. Six base technologies. No
+    /// bot in this project is a construction robot, so this is carried for
+    /// completeness of the rate group rather than for a reader.
+    #[serde(default)]
+    pub worker_robots_speed_modifier: Option<Box<R64>>,
     pub technologies: Box<BTreeMap<String, FactorioTechnology>>,
 }
 

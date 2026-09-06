@@ -337,7 +337,7 @@ fn plan_from_dump(
   } else {
     Vec::new()
   };
-  Ok((PlanReport::of(&net, &scheduled, &bots), notes, listing))
+  Ok((PlanReport::of(&net, &scheduled, &bots, &state), notes, listing))
 }
 
 /// Every scheduled step, per bot, with the gap that precedes it.

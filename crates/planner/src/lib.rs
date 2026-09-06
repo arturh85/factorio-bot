@@ -6,6 +6,7 @@ pub mod ids;
 pub mod method;
 pub mod network;
 pub mod products;
+pub mod rates;
 pub mod render;
 pub mod report;
 pub mod schedule;
@@ -29,6 +30,7 @@ pub use method::produce::DrainPolicy;
 pub use method::{ExpansionCtx, GoalSite, Method, MethodRegistry, Step};
 pub use method::{MAX_EXPANSION_DEPTH, expand, pick_chain_actor};
 pub use network::{ActionNetwork, Edge};
+pub use rates::{RateDisclosure, RateResearch};
 pub use render::{graphviz, mermaid_gantt, ticks_to_timestamp};
 pub use report::{BotReport, PlanReport};
 pub use schedule::{

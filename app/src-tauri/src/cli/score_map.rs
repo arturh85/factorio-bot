@@ -334,7 +334,7 @@ fn plan_for(
     bots,
   )
   .map_err(|err| format!("the goal did not expand: {err}"))?;
-  Ok(PlanReport::of(&net, &scheduled, bots))
+  Ok(PlanReport::of(&net, &scheduled, bots, state))
 }
 
 /// The verdict as lines a person reads.

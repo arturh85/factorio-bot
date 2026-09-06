@@ -247,8 +247,10 @@ fn note_pushed_out(player_id: PlayerId, line: &str) {
 /// that moved. Anything left over is a verdict of failure — including a
 /// zero-move, which is the case worth naming, because a zero-move that came
 /// back green would be indistinguishable from a completed transfer to anything
-/// downstream. See `transfer_success_means_items_moved` below, which drives the
-/// real mod source to prove it.
+/// downstream. See `transfer_guarantee_tests` below -- and inside it
+/// `a_remove_that_moved_nothing_is_a_failure`, `an_insert_that_moved_nothing_is_a_failure`
+/// and their discriminator `a_transfer_that_moved_everything_asked_for_succeeds`
+/// -- which drive the real mod source to prove it.
 ///
 /// The two mechanisms this rests on are the mod's complaint path and this
 /// function; breaking either silently downgrades every transfer's `Success` to
@@ -399,8 +401,10 @@ impl std::fmt::Display for DestinationFull {
 /// (`crates/scripting_lua/src/globals/record.rs`), which builds the
 /// `FailureKind::PartialTransfer` detail for the failures that survive.
 /// The suffix was appended rather than folded into that wording so both
-/// readers keep working; `a_short_source_still_fails_and_keeps_the_counts_the_record_parses`
-/// below is the pin.
+/// readers keep working; `the_shortfall_wording_carries_both_readers_numbers`
+/// below is the pin on the wording, and
+/// `a_short_source_is_a_failure_even_when_the_destination_was_also_full` is the
+/// pin on the verdict.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct InsertShortfall {
     item: String,

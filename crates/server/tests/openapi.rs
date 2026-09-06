@@ -326,7 +326,8 @@ async fn query_parameters_are_published_as_query_parameters() {
 /// parameter anywhere in the spec is the `ApiQuery` inference bug resurfacing
 /// on a handler that `QUERY_OPERATIONS` above does not yet know about.
 ///
-/// Renamed from `no_operation_publishes_a_path_parameter`, which asserted the
+/// Renamed from `no_operation_publishes_a_path_parameter` (doclint-allow: the
+/// retired name is the point of the sentence), which asserted the
 /// stronger "none at all". That premise stopped holding when `GET
 /// /api/v1/jobs/{id}` landed; the guard was narrowed to an allow-list rather
 /// than relaxed, so it still fails on an *unexpected* path parameter.

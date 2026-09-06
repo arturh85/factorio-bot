@@ -92,6 +92,38 @@ pub fn seconds_to_ticks(seconds: f64) -> Ticks {
     (seconds * TICKS_PER_SECOND).ceil() as Ticks
 }
 
+/// The recipe **named** `item`, or `None`.
+///
+/// # This is a lookup by recipe name, and a product is not a recipe
+///
+/// The recipe table is keyed by recipe name. Passing a *product* name works
+/// only where the two coincide, and answers `None` -- silently -- where they
+/// do not. Measured on `crates/core/tests/live-2.1.17-world-snapshot.json`:
+/// 394 of 662 recipes are not named after any of their own products, and **62
+/// products have no same-named recipe at all**, including every raw resource
+/// (`iron-ore`, `coal`, `stone`, `wood`), every early fluid (`crude-oil`,
+/// `petroleum-gas`, `light-oil`, `heavy-oil`, `steam`, `water`) and items the
+/// planner will want later (`solid-fuel`, `uranium-235`).
+///
+/// # Why every caller here is nonetheless correct today
+///
+/// Over the two categories this planner runs -- [`CRAFTING_CATEGORY`] and
+/// [`SMELTING_CATEGORY`] -- that same capture says the product-to-recipe map
+/// is **one-to-one, total, and name-preserving**: 194 products, none made by
+/// two recipes, none lacking a same-named recipe, and no recipe with more than
+/// one product (asserted in `tests/product_index_live_capture.rs`). Every
+/// caller lands inside that set: `have`, `produce` and `assemble` gate the
+/// result on one of the two categories, and `extract`'s lookup is for a
+/// *machine* -- a drill, a pumpjack -- whose recipe is `crafting` and
+/// self-named like any other.
+///
+/// So this function is exact over exactly the set the planner can reach, and
+/// wrong immediately outside it -- which is why widening either category gate
+/// must move to [`crate::products::ProductIndex`] in the same commit.
+///
+/// [`crate::products::ProductIndex::sole_recipe_producing`] is the honest
+/// lookup: keyed by product, one-to-many in both directions, and it refuses by
+/// name in three tiers instead of answering `None`.
 pub fn recipe_for(state: &PlanState, item: &str) -> Option<FactorioRecipe> {
     state.base().recipes.get(item).map(|r| r.clone())
 }

@@ -5,6 +5,7 @@ pub mod goal;
 pub mod ids;
 pub mod method;
 pub mod network;
+pub mod products;
 pub mod render;
 pub mod report;
 pub mod schedule;

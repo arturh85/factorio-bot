@@ -858,4 +858,28 @@ pub enum PlannerError {
         at: String,
         why: String,
     },
+
+    /// No recipe this planner can run produces the item that was asked for.
+    ///
+    /// **Deliberately not a `NoApplicableMethod`.** That variant says "nobody
+    /// here knows how", which for a fluid is read as "this is hard" rather
+    /// than "the recipe that makes it is one no character and no furnace can
+    /// run". The wrapped [`crate::products::ProductRefusal`] carries the three
+    /// ordered tiers and names every producing recipe with its category, which
+    /// is the whole diagnosis.
+    ///
+    /// The refusal exists because the lookup underneath it used to be
+    /// `recipes.get(item)` -- a product looked up by *recipe* name, which
+    /// answers `None` for all 62 products in vanilla 2.1.17 that no recipe is
+    /// named after, every fluid among them. See `crate::products`.
+    #[error("{0}")]
+    #[diagnostic(
+        code(planner::product_not_makeable),
+        help(
+            "this planner runs `crafting` (a character's hands) and `smelting` (a furnace) and \
+             nothing else; a product made only by an oil refinery, a chemical plant or a foundry \
+             needs a method that stands one up first"
+        )
+    )]
+    ProductNotMakeable(#[from] crate::products::ProductRefusal),
 }

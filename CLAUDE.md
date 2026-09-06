@@ -316,6 +316,17 @@ BotBridge Mod (Factorio mod for RPC)
     there is no per-update cost to reclaim; the liability is dead code, not
     CPU.** What is true is that no `condense()`, `node_at()`, `inner_graph()` or
     `graphviz_dot()` call exists anywhere outside the file and its own tests.
+
+    **And it never refreshes, which is the trap for whoever makes it relevant.**
+    Those two calls are the *only* ones: nothing updates the flow graph when an
+    entity is placed, mined or destroyed. `entity_graph` is maintained
+    continuously through the parser, and the flow graph built from it is not —
+    so every machine a run builds is invisible to it, and the moment somebody
+    reads it they get the world **as it was at tick 0**, silently and with no
+    error. The owner has said this file should become relevant soon, so treat
+    "add a reader" and "refresh on entity add/remove" as one piece of work, not
+    two: a reader without the refresh is worse than no reader, because a stale
+    answer looks exactly like a current one.
     Nothing in `crates/planner`, `crates/executor` or `crates/server` mentions
     it. So its numbers have never affected a decision, and **its hard-coded
     rates cannot be validated by any caller** — the same shape that let

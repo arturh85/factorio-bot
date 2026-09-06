@@ -1,7 +1,7 @@
 # A cell that feeds itself: the mechanism, the price, and what is still a hand
 
 2026-09-06, branch `a-cell-that-feeds-itself` (worktree `selffed`), from
-master `e7de6707`. **Planned and tested offline; not yet run live.** Every
+master `e7de6707`, merged onto `2afe55d1` (the hand-credit balance). **Planned and tested offline; not yet run live.** Every
 number below is from `factorio-bot plan` against
 `workspace/scripts/map.json` (seed 31337, fingerprint `c161fa3f437221d0`)
 with a **release** build, or from that dump's own recipe table. Nothing here
@@ -129,6 +129,52 @@ nothing archived can settle it. The hand-credit mass balance on
 `sustain-mass-balance` is what removes the parameter, and this arrangement is
 exactly the case it should be judged by.
 
+## What now judges it: the hand-credit balance, not the lead-in
+
+`367fdc15` landed the mass balance while this branch was being written, and
+the branch was merged onto it (`2afe55d1`) before anything was measured. It
+changes what this cell has to beat, and for the better:
+
+* **The lead-in is no longer the acceptance parameter.** The balance takes
+  none. `scripts/selffed_run.lua` still states one, because
+  `supervisor.sustain` uses it to decide *how long the roster stays idle*
+  before the window, and because the old check still prints beside the new one
+  — but nothing rests on the number any more.
+* **Belted material is invisible to the balance by design.** That asymmetry is
+  the mechanism, and it is exactly why a belted cell can pass where a
+  hand-charged one cannot. This arrangement is the first thing built to
+  exploit it.
+
+**Projection, from the plan's own hand deliveries — to be confirmed or
+falsified by the run, not quoted as a result.** The balance prices each hand
+delivery at the most output it could ever explain and combines stages by
+maximum:
+
+| stage | coal by hand | priced as iron-plate |
+|---|---|---|
+| the cell's drill | 6 | 6 x 1,600 / 240 = **40** |
+| the cell's furnace | 5 | 5 x 2,666 / 192 = **~69** |
+| combined (max) | | **~69 credit** |
+
+Against the archived run's **194**. And the term that should clear it is
+`spent`: the cell runs through the whole build tail and the 20,000-tick idle
+lead-in before the window opens, which at 15/min is ~83 plates of machine
+production — more than the credit — so `outstanding` should reach 0 and all 30
+plates in the window should be `unexplained`, which is `sustained`.
+
+**If that is what the run reports, it is the first time the balance has been
+shown passing anything**: it has only ever been shown right about a refusal,
+because until now no cell fed itself. So the run's report must carry the
+balance's own four numbers — credit, spent, outstanding, unexplained — and not
+just the verdict word.
+
+One thing to watch that has never been exercised by a real run:
+`ActionDispatched.delivery` (item, count, entity, slot) has only ever been
+written through a Lua test. If it comes out empty or wrong, the balance falls
+back to reading the prose label, and **that is a finding to report rather than
+something to work around** — a `credit read from: label` line where `delivery`
+was expected means the new field did not survive its first contact with a run.
+
 ## The one refusal that is not a halt
 
 `Goal::Sustain` builds an arrangement and then, on the re-plan that finds all
@@ -179,6 +225,7 @@ cp scripts/selffed_run.lua scripts/supervisor.lua <workspace>/scripts/
 factorio-bot lua selffed_run.lua --headless --bots 4 --game-speed 5 \
     --seed 31337 --new --settings scratch/headless-v.toml
 tools/run_analysis.py --sustain iron-plate:15:7200:20000 <run-dir>
+# reports BOTH: the lead-in check and the hand-credit balance beneath it.
 ```
 
 Quote the `Using mods directory` and `Using scripts directory` lines from it.

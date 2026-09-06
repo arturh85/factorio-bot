@@ -792,4 +792,33 @@ pub enum PlannerError {
         to: String,
         why: String,
     },
+
+    /// The cell stands and nothing can take its product away.
+    ///
+    /// **Measured, in `run-1788679826-02267`.** A belted burner cell ran for
+    /// 27,249 ticks with no bot in the loop and still came back `SHORT`, at
+    /// 100% of nominal tick rate, because its furnace's own status line read
+    /// `working 80, no_ingredients 19, no_fuel 15, full_output 15`: with
+    /// nothing emptying the output slot, iron-plate production decayed
+    /// 166 -> 72 -> 8 across the run while coal and ore held flat. A cell with
+    /// no offtake sustains a *window*, not a rate.
+    ///
+    /// So this is a refusal and not a silently-omitted improvement: an
+    /// arrangement that cannot be emptied is one this method knows will
+    /// throttle, and saying so by name is worth more than building it anyway.
+    #[error("the {machine} at {at} makes {item} and nothing within reach can take it away: {why}")]
+    #[diagnostic(
+        code(planner::sustain_no_offtake),
+        help(
+            "an offtake is one inserter on the machine's perimeter with a container on the tile \
+             beyond it, plus a belt run that keeps that inserter fuelled; all three need free \
+             ground that is not the machine's own"
+        )
+    )]
+    SustainNoOfftake {
+        item: ItemId,
+        machine: String,
+        at: String,
+        why: String,
+    },
 }

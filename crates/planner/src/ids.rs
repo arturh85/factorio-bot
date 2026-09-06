@@ -4,6 +4,24 @@ use serde::{Deserialize, Serialize};
 pub type Ticks = u32;
 
 /// An item or entity prototype name, e.g. `"iron-plate"`.
+///
+/// # It cannot name a fluid, and that is deliberate
+///
+/// This alias is the **key of a character's inventory map**
+/// (`BotState::inventory: BTreeMap<ItemId, u32>`), so a name appearing here is
+/// a claim that a bot could be holding some. No character inventory can hold a
+/// fluid in any amount -- not `crude-oil`, not `water`, not 0.5 of one -- so
+/// making this an enum with a `Fluid` variant would state the opposite of the
+/// truth while compiling perfectly. See
+/// `docs/superpowers/notes/2026-09-06-a-fluid-is-not-an-item.md` §3(B).
+///
+/// [`crate::substance`] is where a name is classified instead: it answers
+/// item / fluid / *unknown* from the world's own recipe and prototype tables,
+/// and carries the refusal for asking a bot to carry a fluid. A fluid is a
+/// different kind of **storage**, not a different kind of number -- the
+/// planner's `u32` is adequate for every amount the game reports (no vanilla
+/// recipe declares a fractional one), and no float appears anywhere in that
+/// module.
 pub type ItemId = String;
 
 /// A bot, identified by the **Factorio player id** it drives.

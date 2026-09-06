@@ -46,6 +46,11 @@ FIXTURE = os.path.join(HERE, "fixtures", "run-1788674059-90744")
 LIVE_ARCHIVE = os.path.join(
     os.path.dirname(HERE), "..", "..", "workspace", "headless-t", "runs", "run-1788674059-90744"
 )
+# The belted cell: the run that showed credit pooling by prototype.
+BELTED_FIXTURE = os.path.join(HERE, "fixtures", "run-1788679826-02267")
+BELTED_ARCHIVE = os.path.join(
+    os.path.dirname(HERE), "..", "..", "workspace", "headless-v", "runs", "run-1788679826-02267"
+)
 
 ITEM = "iron-plate"
 PER_MINUTE = 15
@@ -167,19 +172,48 @@ class ArchivedRunTest(unittest.TestCase):
         iron-plate, then it stops") -- an oracle written by neither this
         function nor its author. 14 coal x 2,666 / 192 = 194.4.
 
-        The two are alternative bounds on the same plates and the larger is
-        taken; the verdict is `roster-fed` under either, which is asserted
-        below so the choice is visible rather than load-bearing.
+        Both are read from the run's prose labels, and **both labels carry the
+        machine's position**, which is what the instance grouping joins on.
         """
         stages = self.new["by_stage"]
-        self.assertEqual(sorted(stages), ["burner-mining-drill/coal", "stone-furnace/coal"])
-        self.assertAlmostEqual(stages["burner-mining-drill/coal"], 153.33, places=1)
-        self.assertAlmostEqual(stages["stone-furnace/coal"], 194.40, places=1)
-        self.assertAlmostEqual(self.new["hand_credit"], 194.40, places=1)
-        # Under the smaller bound as well: 153 - 40 spent = 113 outstanding
-        # against 30 made in the window.
-        self.assertGreater(153.33 - self.new["spent_before_window"], self.new["machine_made"])
+        self.assertEqual(
+            sorted(stages),
+            ["burner-mining-drill@[-13.0, -14.0]/coal", "stone-furnace@[-13.0, -12.0]/coal"],
+        )
+        self.assertAlmostEqual(stages["burner-mining-drill@[-13.0, -14.0]/coal"], 153.33, places=1)
+        self.assertAlmostEqual(stages["stone-furnace@[-13.0, -12.0]/coal"], 194.40, places=1)
         self.assertEqual(self.new["credit_source"], ["label"])
+
+    def test_the_furnaces_coal_is_attributed_and_the_drills_floats(self):
+        """The drill mines ore; the plates come out of the furnace.
+
+        So the furnace's 194 is credit against *that furnace's* counter, and
+        the drill's 153 -- a bound on the plates some other machine makes from
+        its ore -- can be pinned to no plate-producing instance and floats.
+        Both refuse; only one of them belongs to a machine.
+        """
+        self.assertAlmostEqual(self.new["attributed_credit"], 194.40, places=1)
+        self.assertAlmostEqual(self.new["floating_credit"], 153.33, places=1)
+        self.assertEqual(
+            list(self.new["floating_stages"]), ["burner-mining-drill@[-13.0, -14.0]"]
+        )
+        self.assertAlmostEqual(self.new["hand_credit"], 347.73, places=1)
+
+    def test_the_one_furnace_is_balanced_against_its_own_output(self):
+        """Every plate in this run came out of one machine, and it is named.
+
+        194 of credit, 40 plates spent before the window, 154 still standing,
+        30 made inside it: the window is inside its own machine's credit
+        without borrowing any from the drill or the pool.
+        """
+        rows = self.new["per_machine"]
+        self.assertEqual([r["position"] for r in rows], [[-13.0, -12.0]])
+        row = rows[0]
+        self.assertEqual(row["name"], "stone-furnace")
+        self.assertEqual(row["spent"], 40)
+        self.assertEqual(row["made"], 30)
+        self.assertAlmostEqual(row["outstanding"], 154.40, places=1)
+        self.assertGreater(row["outstanding"], row["made"])
 
     def test_every_delivery_in_the_run_was_priced(self):
         """An unpriced delivery would have made the verdict `unknown`.
@@ -389,6 +423,322 @@ class BalanceTest(unittest.TestCase):
         r = balance(samples)
         self.assertEqual(r["verdict"], "unknown")
         self.assertEqual(r["source"], "unavailable")
+
+
+class InstanceGroupingTest(unittest.TestCase):
+    """Credit belongs to a machine, not to a prototype.
+
+    Two stone furnaces standing apart: one hand-fed and eating its own credit,
+    one fed by something the record cannot see. Under the old grouping the
+    hand-fed one's coal explained the belted one's plates, because both are
+    `stone-furnace`. Every fixture in this class was written by the author of
+    the change under test and assumes the analyser's sample shape; the
+    archived runs above were not, and are the evidence.
+    """
+
+    HAND = (10.0, 10.0)
+    BELT = (20.0, 20.0)
+
+    def two_furnaces(self, hand_made, belt_made, beats: int = 300) -> list[dict]:
+        """`hand_made(beat)` and `belt_made(beat)` plates, at two positions."""
+        out = []
+        for i in range(beats + 1):
+            tick = ORIGIN + i * BEAT
+            a = counted_furnace(hand_made(i))
+            a["position"] = {"x": self.HAND[0], "y": self.HAND[1]}
+            b = counted_furnace(belt_made(i))
+            b["position"] = {"x": self.BELT[0], "y": self.BELT[1]}
+            out.append(force_sample(tick, {ITEM: hand_made(i) + belt_made(i)}))
+            out.append(machines_sample(tick, {"1": a, "2": b}))
+        return out
+
+    def charge(self, count: int, where):
+        """One hand delivery of ore into the furnace at ``where``."""
+        e = delivery_event(
+            ORIGIN,
+            f"insert {count} iron-ore into stone-furnace",
+            {"item": "iron-ore", "count": count, "entity": "stone-furnace", "slot": "furnace_source"},
+        )
+        e["target"] = {"x": where[0], "y": where[1]}
+        return e
+
+    def test_a_hand_fed_furnace_does_not_explain_its_neighbours_output(self):
+        """THE DEFECT. 900 ore into one furnace; the other one makes 120.
+
+        The hand-fed furnace makes 3 plates a beat and has smelted 900 by the
+        window, so its charge is spent and nothing of it is left. The second
+        furnace makes 5 a beat -- 120 in the window -- and was never touched.
+        Pooling by prototype leaves 900 - 1,980 = 0... but the pooled `spent`
+        is both furnaces' output, so the arithmetic that mattered was the
+        credit: one charge covering two machines.
+
+        Here the second furnace's 120 stand alone, which is `sustained`.
+        """
+        r = balance(
+            self.two_furnaces(lambda i: i * 3, lambda i: i * 5),
+            [self.charge(900, self.HAND)],
+        )
+        self.assertEqual(r["attributed_credit"], 900.0)
+        self.assertEqual(r["floating_credit"], 0.0)
+        rows = {tuple(m["position"]): m for m in r["per_machine"]}
+        self.assertEqual(rows[self.HAND]["credit"], 900.0)
+        self.assertEqual(rows[self.BELT]["credit"], 0.0)
+        self.assertEqual(rows[self.BELT]["made"], 120)
+        self.assertEqual(rows[self.BELT]["outstanding"], 0.0)
+        self.assertEqual(r["unexplained"], 120.0)
+        self.assertEqual(r["verdict"], "sustained")
+
+    def test_a_delivery_with_no_position_is_attributed_to_nobody(self):
+        """The same charge, stripped of its `target`, must not pick a machine.
+
+        Every archived run has a position on every `insert`, but a record that
+        lost one must fall back to the pool rather than to a guess -- and the
+        pool refuses more, not less, because it can explain any machine.
+
+        Same samples and same delivery as the test above; the only difference
+        is the missing position, which is the substitution this test exists to
+        make.
+        """
+        blind = self.charge(900, self.HAND)
+        del blind["target"]
+        self.assertNotIn("target", blind)
+        r = balance(self.two_furnaces(lambda i: i * 3, lambda i: i * 5), [blind])
+        self.assertEqual(r["attributed_credit"], 0.0)
+        self.assertEqual(r["floating_credit"], 900.0)
+        rows = {tuple(m["position"]): m for m in r["per_machine"]}
+        self.assertEqual(rows[self.HAND]["credit"], 0.0)
+        self.assertEqual(rows[self.BELT]["credit"], 0.0)
+        # 1,620 plates were made before the window, so the pool is empty and
+        # the window's 120 + 72 stand unexplained -- `sustained`, and reached
+        # without ever pinning the charge to a furnace.
+        self.assertEqual(r["floating_outstanding"], 0.0)
+        self.assertEqual(r["verdict"], "sustained")
+
+    def test_surplus_credit_stays_with_its_own_machine(self):
+        """A furnace with credit to spare does not subsidise the one next door.
+
+        The hand-fed furnace gets 5,000 ore and makes nothing at all, so 5,000
+        of credit stands at it forever. The belted furnace makes 120 in the
+        window from nothing anyone carried, and that is `sustained` -- under
+        the pooled grouping the 5,000 would have swallowed it whole.
+        """
+        r = balance(
+            self.two_furnaces(lambda i: 0, lambda i: i * 5),
+            [self.charge(5000, self.HAND)],
+        )
+        rows = {tuple(m["position"]): m for m in r["per_machine"]}
+        self.assertEqual(rows[self.HAND]["outstanding"], 5000.0)
+        self.assertEqual(rows[self.BELT]["outstanding"], 0.0)
+        self.assertEqual(r["outstanding_credit"], 5000.0)
+        self.assertEqual(r["unexplained"], 120.0)
+        self.assertEqual(r["verdict"], "sustained")
+
+    def test_a_charge_bigger_than_its_own_machines_output_still_refuses(self):
+        """The direction is kept: credit that IS at the machine still refuses.
+
+        1,500 ore into the belted furnace, which makes 1,080 before the window
+        and 120 inside it. 420 of its own credit is still standing, so its
+        output explains nothing about a standing supply.
+        """
+        r = balance(
+            self.two_furnaces(lambda i: 0, lambda i: i * 5),
+            [self.charge(1500, self.BELT)],
+        )
+        rows = {tuple(m["position"]): m for m in r["per_machine"]}
+        self.assertEqual(rows[self.BELT]["spent"], 1080)
+        self.assertEqual(rows[self.BELT]["outstanding"], 420.0)
+        self.assertEqual(r["unexplained"], 0.0)
+        self.assertEqual(r["verdict"], "roster-fed")
+
+    def test_a_target_that_matches_no_sampled_machine_floats(self):
+        """An unjoined delivery is not attributed to a guess.
+
+        A position no machine ever stood on -- a machine placed and removed
+        before the first sample, or a planner intent the game resolved
+        elsewhere. It becomes floating credit, which can explain any machine's
+        output: the direction that refuses.
+        """
+        r = balance(
+            self.two_furnaces(lambda i: 0, lambda i: i * 1),
+            [self.charge(500, (99.0, 99.0))],
+        )
+        self.assertEqual(r["attributed_credit"], 0.0)
+        self.assertEqual(r["floating_credit"], 500.0)
+        self.assertEqual(r["verdict"], "roster-fed")
+
+    def test_a_chests_credit_names_no_machine_and_floats(self):
+        """`stock`/`charge` names a container, and containers make nothing.
+
+        The chest is at a real sampled position, but its `item` is never
+        `iron-plate`, so its credit cannot be pinned to a plate-producing
+        machine and joins the floating pool.
+        """
+        samples = self.two_furnaces(lambda i: 0, lambda i: i * 5)
+        chest = {
+            "name": "wooden-chest",
+            "type": "container",
+            "position": {"x": 30.0, "y": 30.0},
+            "status": "normal",
+            "produced_source": "not-a-producer",
+            "input": {},
+            "output": {},
+            "fuel": {},
+        }
+        for s in samples:
+            if s.get("kind") == "machines":
+                s["machines"]["3"] = chest
+        e = delivery_event(
+            ORIGIN,
+            "stock the wooden-chest with 200 iron-ore",
+            {"item": "iron-ore", "count": 200, "entity": "wooden-chest", "slot": "chest"},
+        )
+        e["target"] = {"x": 30.0, "y": 30.0}
+        r = balance(samples, [e])
+        self.assertEqual(r["attributed_credit"], 0.0)
+        self.assertEqual(r["floating_credit"], 200.0)
+        # 1,080 plates were made before the window, which is more than the
+        # chest could ever have explained, so the pool is empty by then.
+        self.assertEqual(r["floating_outstanding"], 0.0)
+        self.assertEqual(r["verdict"], "sustained")
+
+
+class BeltedCellTest(unittest.TestCase):
+    """`run-1788679826-02267`: the first cell that ran with no bot in the loop.
+
+    **This fixture is not mine either.** ``tools/fixtures/run-1788679826-02267``
+    is the archived run copied out of ``workspace/headless-v/runs/`` unchanged
+    except that its 711 ``bots`` sample rows were dropped -- recorded on
+    `0831cc3c`, before this change existed, by a session that reported the
+    defect rather than fixing it
+    (``docs/superpowers/notes/2026-09-06-a-cell-that-feeds-itself.md``).
+
+    Pooled by prototype it read `roster-fed` on 333 of credit, 98 of it still
+    outstanding: a cell rated at 15/min would have had to make 64/min to be
+    believed. Keyed by instance it reads `short`, 11 of 30 -- which is the
+    truth about it, because nothing takes its plates away and it throttles on
+    `full_output`.
+    """
+
+    AT = 42979
+    WINDOW = 7200
+
+    def setUp(self):
+        self.samples, self.events = load(BELTED_FIXTURE)
+        self.r = ra.hand_credit_balance(
+            self.samples,
+            self.events,
+            item=ITEM,
+            per_minute=PER_MINUTE,
+            window_ticks=self.WINDOW,
+            at_tick=self.AT,
+        )
+
+    def test_it_is_short_rather_than_roster_fed(self):
+        """11 plates in the window, 30 asked for, and none of them explained.
+
+        `short` is a refusal too. Nothing here was tuned to make it pass, and
+        the reason it does not is the one the run's own machine line gives:
+        `full_output` on 15 of 129 samples.
+        """
+        self.assertEqual(self.r["verdict"], "short")
+        self.assertEqual(self.r["machine_made"], 11)
+        self.assertEqual(self.r["unexplained"], 11.0)
+        self.assertEqual(self.r["required"], 30)
+
+    def test_the_belted_furnace_ate_its_own_credit(self):
+        """[-5, -27]: 69 of hand coal against 107 plates of its own, before.
+
+        This is the whole change in one row. That furnace received one coal
+        charge worth 69 plates and had made 107 by the time the window opened,
+        so it has nothing outstanding and its 11 plates stand alone. The four
+        other furnaces' 264 of coal is credit at *their* positions, where it is
+        drawn down by *their* 128 plates.
+        """
+        rows = {tuple(m["position"]): m for m in self.r["per_machine"]}
+        belted = rows[(-5.0, -27.0)]
+        self.assertAlmostEqual(belted["credit"], 69.43, places=1)
+        self.assertEqual(belted["spent"], 107)
+        self.assertEqual(belted["outstanding"], 0.0)
+        self.assertEqual(belted["made"], 11)
+        self.assertEqual(
+            sorted(rows),
+            sorted([
+                (-14.0, -13.0), (-10.0, -17.0), (-10.0, -15.0), (-9.0, -13.0), (-5.0, -27.0),
+            ]),
+        )
+        self.assertEqual(sum(1 for m in self.r["per_machine"] if m["made"]), 1)
+
+    def test_what_is_still_unattributable(self):
+        """79 plates from a chest and 47 from two drills, pinned to nothing.
+
+        The chest names a container and no record says which machine an
+        inserter fed from it; a drill's coal bounds the plates some furnace
+        later makes from its ore. Combined by maximum, not sum -- they are
+        alternative explanations of the same plates -- and drawn down by all
+        235 plates made before the window, which empties the pool here.
+        """
+        self.assertAlmostEqual(self.r["floating_credit"], 79.0, places=1)
+        self.assertEqual(
+            sorted(self.r["floating_stages"]),
+            [
+                "burner-mining-drill@[-7.0, -27.0]",
+                "burner-mining-drill@[16.0, -28.0]",
+                "wooden-chest@[-10.5, -13.5]",
+            ],
+        )
+        self.assertEqual(self.r["floating_outstanding"], 0.0)
+
+    def test_every_delivery_was_priced_and_read_from_fields(self):
+        """90 structured `delivery` records, and the prose fallback unused.
+
+        An unpriced delivery would have made this `unknown`, which is a
+        different refusal from `short` and not a measurement.
+        """
+        self.assertEqual(self.r["deliveries"], 90)
+        self.assertEqual(self.r["credit_source"], ["fields"])
+        self.assertEqual(self.r["unreadable"], [])
+        self.assertEqual(self.r["unpriced"], [])
+
+    def test_the_fixture_agrees_with_the_live_archive(self):
+        """The trimmed fixture and the run it was cut from give one answer."""
+        if not os.path.isdir(BELTED_ARCHIVE):
+            self.skipTest(f"no live archive at {BELTED_ARCHIVE}")
+        samples, events = load(BELTED_ARCHIVE)
+        live = ra.hand_credit_balance(
+            samples,
+            events,
+            item=ITEM,
+            per_minute=PER_MINUTE,
+            window_ticks=self.WINDOW,
+            at_tick=self.AT,
+        )
+        for field in ("verdict", "machine_made", "hand_credit", "unexplained"):
+            self.assertEqual(live[field], self.r[field], field)
+
+
+class ModuleSanityTest(unittest.TestCase):
+    """No two top-level functions in `run_analysis` share a name.
+
+    Written because this change shipped a `pos_key` that shadowed an existing
+    one 1,600 lines above it. Every test in this file passed -- none of them
+    call `frozen_bots` -- and the CLI died on the first run against a real
+    archive. A silent redefinition is invisible to a suite that does not
+    happen to exercise the loser.
+    """
+
+    def test_no_top_level_name_is_defined_twice(self):
+        import ast
+
+        tree = ast.parse(open(ra.__file__, encoding="utf-8").read())
+        seen: dict[str, int] = {}
+        clashes = []
+        for node in tree.body:
+            if not isinstance(node, (ast.FunctionDef, ast.ClassDef)):
+                continue
+            if node.name in seen:
+                clashes.append(f"{node.name} at lines {seen[node.name]} and {node.lineno}")
+            seen[node.name] = node.lineno
+        self.assertEqual(clashes, [])
 
 
 class NoLeadInTest(unittest.TestCase):

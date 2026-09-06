@@ -46,6 +46,34 @@ the patch**, and a block sited this way needs re-siting much sooner than its
 nameplate suggests. Worth knowing before anyone reads "the drills stopped" as a
 throughput fact.
 
+## And the coal hypothesis is refuted too, measured
+
+"The belt backed up" was still an inference, so I tested the likelier
+alternative: the furnace arms are burner inserters that self-fuel from the coal
+lane, and an empty coal lane would stop them and strand ore exactly like this,
+with the furnaces still reading full fuel.
+
+```
+at the plateau: coal chest=55   arm fuel=1/1/1
+```
+
+**Wrong.** All three arms hold fuel and the chest still holds 55 of its 100
+coal. And the arithmetic says the belt is not full either: 45 coal left the
+chest, 10 sits in the furnaces and 3 in the arms, so about 32 coal plus the 29
+ore are on a belt whose lanes hold roughly 56 each.
+
+So three things are now eliminated by measurement rather than argued away —
+**ore exhaustion, arm starvation, and a full belt** — and the mechanism is still
+not established. What would settle it cannot be seen:
+
+- **a transport line's contents**, so ore on the belt cannot be located;
+- **a furnace's input slot**, because the mod sends `output_inventory` and
+  `fuel_inventory` and nothing else, so "the furnace has ore and is not smelting
+  it" is indistinguishable from "no ore ever arrived".
+
+Two missing readings, one of which is a two-line addition to a struct that
+already carries the other two.
+
 ## What this makes of the belt blind spot
 
 Three separate questions this session have ended at the same wall, and this is

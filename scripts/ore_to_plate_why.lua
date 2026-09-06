@@ -123,22 +123,63 @@ local function plates(e)
   end
   return 0
 end
+-- Also read the ARMS and the COAL CHEST. "The belt backed up" is still an
+-- inference; a likelier and testable mechanism is that the coal ran out. The
+-- furnace arms are burner inserters that self-fuel from the coal lane, so an
+-- empty coal chest starves them, they stop swinging, and ore strands on the
+-- belt with the furnaces still showing full fuel -- which is exactly the
+-- reading that plateau produced.
+local arms = rcon.find_entities_in_radius(drills[1].position, 30, "burner-inserter")
+if type(arms) ~= "table" then arms = {} end
+table.sort(arms, function(a, b) return a.position.y < b.position.y end)
+print("arms found: " .. #arms)
+
 local ask = {}
 for _, f in ipairs(furnaces) do
   ask[#ask + 1] = { name = "stone-furnace", x = f.position.x, y = f.position.y }
 end
+local COAL_IDX = #ask + 1
+ask[COAL_IDX] = { name = "iron-chest", x = chests[1].position.x, y = chests[1].position.y }
+local ARM0 = #ask
+for _, a in ipairs(arms) do
+  ask[#ask + 1] = { name = "burner-inserter", x = a.position.x, y = a.position.y }
+end
 
 local a, b, last, lastc = 0, 0, -1, t0
+local coal_left, armfuel = 0, {}
 local deadline = (type(t0) == "number") and (t0 + 30000) or nil
 for _ = 1, 5000 do
   local r = rcon.inventory_contents_at(ask)
   a = plates((type(r) == "table") and r[1] or nil)
   b = plates((type(r) == "table") and r[2] or nil)
   local t = rcon.game_tick()
+  coal_left = 0
+  do
+    local ce = (type(r) == "table") and r[COAL_IDX] or nil
+    if type(ce) == "table" and type(ce.output_inventory) == "table" then
+      for _, sl in ipairs(ce.output_inventory) do
+        if type(sl) == "table" and sl.name == "coal" then coal_left = sl.count or 0 end
+      end
+    end
+  end
+  armfuel = {}
+  for k = 1, #arms do
+    local ae = (type(r) == "table") and r[ARM0 + k] or nil
+    local f = 0
+    if type(ae) == "table" and type(ae.fuel_inventory) == "table" then
+      for _, sl in ipairs(ae.fuel_inventory) do
+        if type(sl) == "table" and sl.name == "coal" then f = sl.count or 0 end
+      end
+    end
+    armfuel[k] = f
+  end
   if (a + b) ~= last then lastc = (type(t) == "number") and t or lastc end
   last = a + b
   if (a + b) > 0 and type(t) == "number" and (t - lastc) > 3000 then
-    print("plateau at tick " .. tostring(t) .. " with " .. (a + b) .. " plates") break
+    print("plateau at tick " .. tostring(t) .. " with " .. (a + b) .. " plates")
+    print("  at the plateau: coal chest=" .. coal_left
+      .. "  arm fuel=" .. table.concat(armfuel, "/"))
+    break
   end
   if deadline and type(t) == "number" and t > deadline then
     print("deadline at " .. tostring(t - t0) .. " ticks with " .. (a + b) .. " plates") break
@@ -157,6 +198,15 @@ for i, d in ipairs(drills) do
 end
 print(string.format("TOTAL ore mined from the ground: %d;  still in reach: %d", mined, left_total))
 print(string.format("plates in the furnaces: %d + %d = %d", a, b, a + b))
+print(string.format("coal left in the chest: %d;  arm fuel: %s",
+  coal_left, table.concat(armfuel, "/")))
+local dead_arms = 0
+for _, f in ipairs(armfuel) do if f == 0 then dead_arms = dead_arms + 1 end end
+if dead_arms > 0 then
+  print("  " .. dead_arms .. " of " .. #armfuel .. " arms have NO FUEL -- a burner arm")
+  print("  self-fuels from the coal it carries, so an empty coal lane stops it and")
+  print("  strands whatever is on the belt behind it.")
+end
 print("")
 if left_total == 0 then
   print("VERDICT: EXHAUSTION. The drills mined out every tile they can reach. A")

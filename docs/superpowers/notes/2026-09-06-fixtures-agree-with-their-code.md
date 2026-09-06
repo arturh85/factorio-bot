@@ -396,7 +396,38 @@ fixture *hostile*: arrange the world so that only the rule can produce the
 answer, and assert the fixture's own preconditions so it fails loudly rather
 than vacuously when someone later changes it.
 
+### A FOURTH cause, and it points the opposite way: the break was not a break
+
+Added the same day by the peer session, who nearly discarded a good test over
+it. All three above are "the test is vacuous". This one is not.
+
+They rewrote **both** occupancy predicates to prove a siting test was
+load-bearing. It stayed green — the exact symptom. But the defect under test
+was the **disagreement between the two predicates**, so changing both restored
+their agreement and *hid the bug the test was written to catch*. Flipping only
+one made it fail immediately, with the real error.
+
+So the symptom is shared and the diagnosis is not:
+
+| green falsification means… | and the fix is… |
+|---|---|
+| the test never ran | count tests by name |
+| the assertion is weaker than the claim | assert absolute values |
+| the property holds for another reason | make the fixture hostile |
+| **your break was not a break** | **check the break moved something** |
+
+The fourth is the one that punishes a *thorough* falsifier. Breaking more of
+the code is the instinct, and here breaking both halves of a pair is precisely
+what restores the invariant. A defect that lives in the *relationship* between
+two things cannot be exposed by changing both.
+
 ### The rule
+
+**A green falsification means either the test is vacuous or your break was not
+a break — and you cannot tell which without confirming the break changed
+behaviour.** So falsify by breaking exactly one thing, and when nothing goes
+red, first ask whether the edit could have been self-cancelling before
+concluding anything about the test.
 
 **When a falsification comes back green, do not conclude the code is
 load-bearing. Conclude the test is not.** Then find out which of the three it

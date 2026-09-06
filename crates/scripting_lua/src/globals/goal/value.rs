@@ -343,7 +343,15 @@ fn require_site(opts: Option<LuaValue>) -> LuaResult<Site> {
 /// table was `Site::At` and hardcoded "at" into the string, which would have
 /// rendered a sited block as though it were anchored.
 fn site_from_table(t: &LuaTable) -> LuaResult<Site> {
-    let has_anchor = !matches!(t.get("x")?, LuaValue::Nil);
+    // Either coordinate commits to the anchor branch, not just `x`: a table
+    // with only `y` set is anchor-shaped and malformed, not an unrelated
+    // shape that happens to fall through to `Anywhere`. Checking `x` alone
+    // let `{y = 1}` slip past both branches into `(false, false)` --
+    // `Site::Anywhere`, with the stray `y` silently discarded and no
+    // diagnostic at all, which is the worst outcome this function can
+    // produce: a malformed request answered with a different, valid goal
+    // instead of an error.
+    let has_anchor = !matches!(t.get("x")?, LuaValue::Nil) || !matches!(t.get("y")?, LuaValue::Nil);
     let has_near = !matches!(t.get("near")?, LuaValue::Nil);
     match (has_anchor, has_near) {
         (true, true) => Err(goal_error(
@@ -676,6 +684,67 @@ mod tests {
                 .contains("anywhere"),
             "an unsited goal renders \"anywhere\", not \"at\""
         );
+    }
+
+    #[test]
+    fn built_refuses_an_anchor_missing_either_coordinate() {
+        // A table naming only one of `x`/`y` is anchor-shaped, and the whole
+        // point of committing to the anchor branch on *either* key is that
+        // `{y = 1}` must not fall through the gap between "has an anchor"
+        // and "has a near hint" into `Site::Anywhere` -- silently discarding
+        // the stray `y` and answering with a different, valid goal instead
+        // of an error. Both directions are checked, and the message is
+        // checked, not just that one was raised: a caller needs to be told
+        // which coordinate is missing.
+        let lua = lua_with_goal();
+
+        let err = lua
+            .load(r#"goal.built("0eNq...", {x = 1})"#)
+            .exec()
+            .expect_err("missing y")
+            .to_string();
+        assert!(
+            err.contains("anchor y must be a number"),
+            "{err} does not name the missing y"
+        );
+
+        let err = lua
+            .load(r#"goal.built("0eNq...", {y = 1})"#)
+            .exec()
+            .expect_err("missing x")
+            .to_string();
+        assert!(
+            err.contains("anchor x must be a number"),
+            "{err} does not name the missing x"
+        );
+    }
+
+    #[test]
+    fn built_render_goal_agrees_with_the_planner_goals_own_display() {
+        // Scoped to `built` only. `render_goal` is a second, hand-maintained
+        // copy of `Goal::Display`, and the two have already drifted once for
+        // a different kind: `render_goal`'s `"have"` arm omits the
+        // `Holder`/`whose` field that `Goal::Display` includes, so
+        // `tostring` tells a script author something different from what
+        // the planner's own error messages say. This pins agreement for the
+        // `"built"` arm this task touched, and only that arm -- widening it
+        // to `"have"` would fail immediately on a defect nobody on this
+        // branch owns.
+        let lua = lua_with_goal();
+        for src in [
+            r#"return goal.built("0eNq...", {x = 3, y = 4})"#,
+            r#"return goal.built("0eNq...", {near = {x = 3, y = 4}})"#,
+            r#"return goal.built("0eNq...")"#,
+        ] {
+            let t: LuaTable = lua.load(src).eval().expect(src);
+            let rendered = render_goal(&t).expect("render_goal");
+            let goal = goal_from_lua(&t).expect("goal_from_lua");
+            assert_eq!(
+                rendered,
+                goal.to_string(),
+                "{src}: render_goal and Goal::Display disagree"
+            );
+        }
     }
 
     #[test]

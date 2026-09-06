@@ -290,10 +290,40 @@ pub async fn run(
 /// stays exactly as it was: it now rejects a little more than it strictly must,
 /// which is the safe direction for a check whose failure mode is a hung run.
 ///
-/// Stops that bot at its first failure: later steps in a chain depend on
-/// earlier ones, and pressing on would issue commands whose preconditions the
-/// game no longer satisfies. Every stop publishes a verdict for the steps it
-/// will now never reach, so waiters elsewhere are released.
+/// # A failed action costs that action and what depends on it, not the batch
+///
+/// This loop used to stop the bot at its **first** failure, on the argument
+/// that later steps in a chain depend on earlier ones. That is true of the
+/// steps that depend on it and false of the rest, and the difference is
+/// expensive: in `run-1788663566-25023` one transport-belt refused because
+/// bot 4 was standing on its tile ended the batch and left **~50 of a
+/// 179-entity block never dispatched**. Losing fifty entities to one occupied
+/// tile is a blast radius nobody chose.
+///
+/// So a failed or lost `Act` no longer stops the bot. It publishes its own
+/// verdict, exactly as before, and the bot moves on to its next step. What
+/// depends on the failure is abandoned by the mechanism that already exists
+/// for it: [`await_preds`] reads the predecessor's signal and returns
+/// [`PredOutcome::Abandoned`], so a belt nobody built takes down the inserter
+/// that feeds it — and takes down nothing else. **The dependency graph
+/// decides the blast radius**; this loop does not second-guess it. A step
+/// abandoned that way publishes `Failed` for itself, which propagates the
+/// same way one further hop.
+///
+/// The consequence to be honest about: an edge the network is *missing* used
+/// to be masked by the bot stopping, and is now not. Two things narrow that.
+/// `crate::occupancy` still holds the inventory ordering within a bot, since
+/// nothing here reorders steps. And the failure is still recorded and still
+/// counts towards `recover`'s escalation budget, so a batch that fails
+/// repeatedly replans rather than grinding on.
+///
+/// # A failed WALK still stops the bot, and deliberately
+///
+/// A walk carries no signal, so nothing downstream can read its verdict — and
+/// its effect is the bot's *position*, which every later step of the slice
+/// depends on without any edge saying so. Pressing on there would dispatch
+/// every remaining action from wherever the bot got stuck. That is the one
+/// dependency the network genuinely does not hold, so it stays a stop.
 async fn run_bot_signalled<'a>(
     act: &'a dyn Actuator,
     bot: BotId,
@@ -330,15 +360,11 @@ async fn run_bot_signalled<'a>(
                     WaitKind::BackgroundConflict { on: queued.action },
                 )
             });
-        let clear = settle_background(&mut flight, |queued| {
+        settle_background(&mut flight, |queued| {
             shares_inventory(&queued.footprint, &footprint)
         })
         .await;
         drop(conflict);
-        if let Err(stop) = clear {
-            halt(&mine, stop, &mut flight, senders);
-            return;
-        }
 
         if let Some(action) = act_id(step)
             && net
@@ -352,7 +378,6 @@ async fn run_bot_signalled<'a>(
             // predecessor is exactly the time the old loop threw away.
             flight.push(InFlight {
                 action,
-                index: i,
                 footprint,
                 fut: Box::pin(run_action(act, bot, step, net, log, senders, receivers)),
             });
@@ -361,27 +386,28 @@ async fn run_bot_signalled<'a>(
 
         // The exclusive step, driven alongside whatever is still in flight, so
         // a queued craft keeps making progress while the character works.
-        let (outcome, background_stop) = match &step.what {
-            StepKind::Walk { .. } => drive(&mut flight, run_walk(act, bot, i, step, log)).await,
+        match &step.what {
+            // A walk is the one step whose failure still stops the bot: its
+            // effect is a position no signal carries. See this function's
+            // doc.
+            StepKind::Walk { .. } => {
+                if drive(&mut flight, run_walk(act, bot, i, step, log))
+                    .await
+                    .is_err()
+                {
+                    halt(&mine, i, &mut flight, senders);
+                    return;
+                }
+            }
+            // A failed action has published its own verdict; whatever waits on
+            // it abandons itself, and whatever does not keeps going.
             StepKind::Act { .. } => {
                 drive(
                     &mut flight,
                     run_action(act, bot, step, net, log, senders, receivers),
                 )
-                .await
+                .await;
             }
-        };
-        // This step's own verdict first, and only then a background one: this
-        // step was already in the game's hands, so its outcome is both the
-        // more specific reason to stop and the one whose signal has already
-        // been published.
-        if let Err(halted) = outcome {
-            halt(&mine, halted.at(i), &mut flight, senders);
-            return;
-        }
-        if let Some(stop) = background_stop {
-            halt(&mine, stop, &mut flight, senders);
-            return;
         }
     }
 
@@ -390,56 +416,16 @@ async fn run_bot_signalled<'a>(
     // report as `Lost` crafts the game was in the middle of finishing — and
     // release their waiters as abandoned, which would take down bots that were
     // about to succeed.
-    let drained = settle_background(&mut flight, |_| true).await;
-    if let Err(stop) = drained {
-        halt(&mine, stop, &mut flight, senders);
-    }
+    settle_background(&mut flight, |_| true).await;
 }
 
 /// A background action a bot queued and walked away from.
 struct InFlight<'a> {
     action: ActionId,
-    /// Where it sits in the bot's slice, so that when it fails it can say which
-    /// of the remaining steps it takes down with it. The bot may be several
-    /// steps further on by then, which is exactly why the index has to be
-    /// carried rather than read off the loop.
-    index: usize,
     /// What it may move in or out of the bot's inventory. See
     /// [`crate::occupancy`].
     footprint: BTreeSet<ItemId>,
-    fut: Pin<Box<dyn Future<Output = Result<(), Halt>> + Send + 'a>>,
-}
-
-/// How much of a bot's remaining slice a stop takes with it.
-///
-/// Two variants because the two stops differ in exactly one thing: whether a
-/// verdict has already been published for the step that stopped.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Halt {
-    /// Nothing was published for this step — its predecessors were abandoned,
-    /// or the network does not hold it — so abandonment starts *at* it.
-    ThisStep,
-    /// The game judged this step and the verdict is already on its signal, so
-    /// abandonment starts one past it.
-    NextStep,
-}
-
-impl Halt {
-    fn at(self, index: usize) -> Stop {
-        Stop {
-            from: match self {
-                Halt::ThisStep => index,
-                Halt::NextStep => index.saturating_add(1),
-            },
-        }
-    }
-}
-
-/// A [`Halt`] pinned to the step it happened at: the first index of the bot's
-/// slice that will now never run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Stop {
-    from: usize,
+    fut: Pin<Box<dyn Future<Output = ()> + Send + 'a>>,
 }
 
 /// The items a step may move in or out of its bot's inventory.
@@ -456,26 +442,23 @@ fn footprint_of(net: &ActionNetwork, step: &ScheduledStep) -> BTreeSet<ItemId> {
 }
 
 /// Poll every in-flight background action once, dropping the ones that
-/// finished from the set, and report the first reason to stop the bot.
+/// finished from the set.
 ///
-/// Removing before reporting matters: the caller that gets a `Stop` goes on to
-/// [`halt`], which publishes `Lost` for everything *still* in flight, and an
-/// action that has just published its own verdict must not be overwritten.
-fn poll_background(flight: &mut Vec<InFlight<'_>>, cx: &mut Context<'_>) -> Option<Stop> {
-    let mut stop: Option<Stop> = None;
+/// It reports nothing, because there is nothing left for the caller to decide:
+/// a background action that failed has already published its own verdict, and
+/// what waits on that verdict abandons itself through [`await_preds`]. This
+/// used to hand back a reason to stop the whole bot, which is the batch-wide
+/// blast radius `run_bot_signalled` documents having given up.
+fn poll_background(flight: &mut Vec<InFlight<'_>>, cx: &mut Context<'_>) {
     let mut i = 0;
     while i < flight.len() {
         match flight[i].fut.as_mut().poll(cx) {
-            Poll::Ready(outcome) => {
-                let done = flight.remove(i);
-                if stop.is_none() {
-                    stop = outcome.err().map(|halted| halted.at(done.index));
-                }
+            Poll::Ready(()) => {
+                flight.remove(i);
             }
             Poll::Pending => i += 1,
         }
     }
-    stop
 }
 
 /// Keep the background set running until nothing `blocking` names is left in
@@ -485,58 +468,49 @@ fn poll_background(flight: &mut Vec<InFlight<'_>>, cx: &mut Context<'_>) -> Opti
 /// the actions that could disturb what is about to start. Everything else is
 /// polled either way — a craft that shares no items keeps making progress
 /// while a conflicting one is waited out.
-async fn settle_background<'a, F>(flight: &mut Vec<InFlight<'a>>, blocking: F) -> Result<(), Stop>
+async fn settle_background<'a, F>(flight: &mut Vec<InFlight<'a>>, blocking: F)
 where
     F: Fn(&InFlight<'a>) -> bool,
 {
     std::future::poll_fn(|cx| {
-        if let Some(stop) = poll_background(flight, cx) {
-            return Poll::Ready(Err(stop));
-        }
+        poll_background(flight, cx);
         if flight.iter().any(&blocking) {
             Poll::Pending
         } else {
-            Poll::Ready(Ok(()))
+            Poll::Ready(())
         }
     })
     .await
 }
 
-/// Run `fut` to completion while the background set keeps making progress,
-/// handing back both outcomes.
+/// Run `fut` to completion while the background set keeps making progress.
 ///
 /// A background failure does **not** cancel `fut`: by the time it is noticed
 /// `fut` may already be a command the game has, and dropping it there would
 /// turn a dispatch with a verdict coming into one nobody will ever hear about.
-/// The caller acts on `fut`'s own outcome first and on this second.
-async fn drive<'a, T>(
-    flight: &mut Vec<InFlight<'a>>,
-    fut: impl Future<Output = T>,
-) -> (T, Option<Stop>) {
+async fn drive<'a, T>(flight: &mut Vec<InFlight<'a>>, fut: impl Future<Output = T>) -> T {
     let mut fut = Box::pin(fut);
-    let mut stopped: Option<Stop> = None;
-    let out = std::future::poll_fn(|cx| {
+    std::future::poll_fn(|cx| {
         // The background set first, so a craft queued a moment ago reaches the
         // game ahead of the exclusive step that follows it. Correctness does
         // not rest on that ordering — disjoint footprints are what make the
         // two safe in either order, see `crate::occupancy` — but the plan's
         // order is still the best order to ask the game for.
-        if let Some(stop) = poll_background(flight, cx)
-            && stopped.is_none()
-        {
-            stopped = Some(stop);
-        }
+        poll_background(flight, cx);
         fut.as_mut().poll(cx)
     })
-    .await;
-    (out, stopped)
+    .await
 }
 
 /// Stop this bot: give up on everything it queued, and release every waiter on
 /// the steps it will now never reach.
+///
+/// `from` is the first index of the bot's slice that will now never run. Only
+/// a failed walk reaches here — see [`run_bot_signalled`] — and a walk
+/// publishes no verdict of its own, so abandonment starts *at* it.
 fn halt(
     mine: &[&ScheduledStep],
-    stop: Stop,
+    from: usize,
     flight: &mut Vec<InFlight<'_>>,
     senders: &BTreeMap<ActionId, watch::Sender<Status>>,
 ) {
@@ -551,7 +525,7 @@ fn halt(
     }
     let dropped: BTreeSet<ActionId> = flight.iter().map(|queued| queued.action).collect();
     flight.clear();
-    abandon_rest(&mine[stop.from.min(mine.len())..], senders, &dropped);
+    abandon_rest(&mine[from.min(mine.len())..], senders, &dropped);
 }
 
 /// One `Walk` step.
@@ -567,7 +541,7 @@ async fn run_walk(
     index: usize,
     step: &ScheduledStep,
     log: &Mutex<ExecutionLog>,
-) -> Result<(), Halt> {
+) -> Result<(), ()> {
     // Unreachable by construction: the caller matched the step kind before
     // choosing this. Answering `Ok` rather than panicking keeps a future
     // mis-wiring a step that did not happen instead of a run that aborts.
@@ -623,7 +597,7 @@ async fn run_walk(
             }
             // A walk carries no signal of its own, so the step it was going to
             // enable is abandoned along with the rest.
-            Err(Halt::ThisStep)
+            Err(())
         }
     }
 }
@@ -643,18 +617,27 @@ async fn run_action(
     log: &Mutex<ExecutionLog>,
     senders: &BTreeMap<ActionId, watch::Sender<Status>>,
     receivers: &BTreeMap<ActionId, watch::Receiver<Status>>,
-) -> Result<(), Halt> {
+) {
     // Unreachable by construction, as in `run_walk`.
     let Some(action) = act_id(step) else {
-        return Ok(());
+        return;
     };
     if let PredOutcome::Abandoned = await_preds(act, bot, net, action, log, receivers).await {
-        return Err(Halt::ThisStep);
+        // Nothing was dispatched, so nothing is written to the log -- but the
+        // signal has to carry a verdict, because the bot no longer stops here
+        // and nobody else will ever publish one for this action. Without it a
+        // dependent of *this* step waits forever on a `Pending` that has no
+        // writer left. `abandon_rest` used to do this for the whole slice at
+        // once; abandoning one action at a time is the same propagation, one
+        // hop per step.
+        publish(senders, action, Status::Failed);
+        return;
     }
     lock(log).start(action, step.start);
     let Some(a) = net.action(action) else {
         lock(log).fail(action, step.start, "action not in network".to_string());
-        return Err(Halt::ThisStep);
+        publish(senders, action, Status::Failed);
+        return;
     };
     // `perform` awaits, so the guard is taken and dropped around it, never
     // held across it.
@@ -707,7 +690,6 @@ async fn run_action(
                 }
             }
             publish(senders, action, Status::Success);
-            Ok(())
         }
         Err(f) => {
             // The observation first, same order as the success path and for
@@ -742,7 +724,6 @@ async fn run_action(
                 action,
                 if lost { Status::Lost } else { Status::Failed },
             );
-            Err(Halt::NextStep)
         }
     }
 }
@@ -1466,7 +1447,7 @@ mod tests {
     }
 
     /// The action scheduled right after the mine in `walk_then_mine_fixture`.
-    /// Exists so `a_failed_step_is_logged_and_stops_that_bot` has something
+    /// Exists so `a_failed_action_abandons_the_step_that_depends_on_it` has something
     /// to prove was *never attempted* — a fixture whose failing step is last
     /// cannot distinguish "stops" from "there was nothing left to do".
     fn craft_action_id() -> ActionId {
@@ -2149,6 +2130,10 @@ mod tests {
             Err(ActuatorError::Rejected("no ore here".into())
                 .at(ActionTicks::new(Some(900_101), Some(900_140))))
         });
+        // The craft does not depend on the mine, so since a failed action
+        // costs only its dependents it is still dispatched. Nothing here is
+        // about the craft; it just has to be allowed to happen.
+        act.expect_craft().returning(|_, _, _| Ok(some_ticks()));
 
         let (net, sched) = walk_then_mine_fixture();
         let log = run(&act, &sched, &net).await.expect("the run should start");
@@ -2211,6 +2196,9 @@ mod tests {
         act.expect_walk().returning(|_, _, _, _| Ok(some_ticks()));
         act.expect_mine()
             .returning(|_, _, _, _| Err(ActuatorError::Rejected("out of reach".into()).into()));
+        // Independent of the mine, so it still runs. See
+        // `a_failed_action_does_not_take_down_an_independent_later_step`.
+        act.expect_craft().returning(|_, _, _| Ok(some_ticks()));
 
         let (net, sched) = walk_then_mine_fixture();
         let log = run(&act, &sched, &net).await.expect("the run should start");
@@ -2239,9 +2227,11 @@ mod tests {
         act.expect_mine().returning(|_, _, _, _| {
             Err(ActuatorError::NoVerdict("unreadable action_completed status".into()).into())
         });
-        // The bot still stops: an outcome nobody knows is no basis for running
-        // the step that depended on it.
-        act.expect_craft().times(0);
+        // The craft does not depend on the mine, so it is dispatched: an
+        // outcome nobody knows is no basis for running the step that *depended*
+        // on it, and this one does not. See
+        // `a_lost_action_still_abandons_the_step_that_depends_on_it`.
+        act.expect_craft().returning(|_, _, _| Ok(some_ticks()));
 
         let (net, sched) = walk_then_mine_fixture();
         let log = run(&act, &sched, &net).await.expect("the run should start");
@@ -2256,23 +2246,32 @@ mod tests {
             log.failed().is_empty(),
             "no verdict arrived, so nothing may be reported as having failed"
         );
-        assert_eq!(
-            log.status(craft_action_id()),
-            Status::Pending,
-            "the rest of the bot's slice was never dispatched"
-        );
     }
 
+    /// **A failed action costs that action, not the batch.**
+    ///
+    /// `run-1788663566-25023`: one transport-belt refused because a bot of
+    /// ours was standing on its tile ended the batch and left ~50 of a
+    /// 179-entity block never dispatched. The mine and the craft in this
+    /// fixture share no edge, so nothing about the craft was made untrue by
+    /// the mine failing, and the bot has no business skipping it.
+    ///
+    /// **The fixture and the code changed in the same task**, which the
+    /// fixtures note warns about — so the pair matters more than either half.
+    /// This one asserts an independent step *runs*;
+    /// `a_failed_action_abandons_the_step_that_depends_on_it` asserts a
+    /// dependent one does not, over the identical fixture plus one edge. A
+    /// change that made the loop ignore dependencies would pass this and fail
+    /// that.
     #[tokio::test]
-    async fn a_failed_step_is_logged_and_stops_that_bot() {
+    async fn a_failed_action_does_not_take_down_an_independent_later_step() {
         let mut act = MockAct::new();
         act.expect_walk().returning(|_, _, _, _| Ok(some_ticks()));
         act.expect_mine()
             .returning(|_, _, _, _| Err(ActuatorError::Rejected("out of reach".into()).into()));
-        // The craft step follows the failing mine in the schedule. If the run
-        // loop pressed on after the failure instead of stopping, this is what
-        // it would dispatch next.
-        act.expect_craft().times(0);
+        act.expect_craft()
+            .times(1)
+            .returning(|_, _, _| Ok(some_ticks()));
 
         let (net, sched) = walk_then_mine_fixture();
         let log = run(&act, &sched, &net)
@@ -2282,9 +2281,125 @@ mod tests {
         assert_eq!(log.failed(), vec![mine_action_id()]);
         assert_eq!(
             log.status(craft_action_id()),
+            Status::Success,
+            "the craft depends on nothing that failed, so losing it would be \
+             fifty entities lost to one occupied tile"
+        );
+    }
+
+    /// The other half of the rule: what the network says depends on the
+    /// failure is abandoned, and by the mechanism that already existed for it
+    /// — `await_preds` reading the predecessor's own signal.
+    ///
+    /// The same fixture as
+    /// `a_failed_action_does_not_take_down_an_independent_later_step` with one
+    /// edge added, so the edge is the only difference between running and not.
+    /// A belt nobody built is a real dependency for the inserter that feeds
+    /// it, and this is that case.
+    #[tokio::test]
+    async fn a_failed_action_abandons_the_step_that_depends_on_it() {
+        let mut act = MockAct::new();
+        act.expect_walk().returning(|_, _, _, _| Ok(some_ticks()));
+        act.expect_mine()
+            .returning(|_, _, _, _| Err(ActuatorError::Rejected("out of reach".into()).into()));
+        act.expect_craft().times(0);
+
+        let (mut net, sched) = walk_then_mine_fixture();
+        net.link(mine_action_id(), craft_action_id(), 0);
+        let log = run(&act, &sched, &net)
+            .await
+            .expect("the run should have started");
+
+        assert_eq!(log.failed(), vec![mine_action_id()]);
+        assert_eq!(
+            log.status(craft_action_id()),
             Status::Pending,
-            "the run loop must stop at the first failure, not merely record it \
-             and press on"
+            "abandoned, not attempted: nothing was dispatched, so the log has \
+             nothing to record. `expect_craft().times(0)` above is what says \
+             it did not run; the verdict lives on the signal, and \
+             `an_abandoned_step_still_releases_a_bot_waiting_behind_it` is \
+             what proves the signal was published"
+        );
+    }
+
+    /// A **lost** predecessor abandons its dependent too. `Lost` is not
+    /// `Failed` — recovery counts one and not the other — but neither is a
+    /// precondition anybody can vouch for.
+    #[tokio::test]
+    async fn a_lost_action_still_abandons_the_step_that_depends_on_it() {
+        let mut act = MockAct::new();
+        act.expect_walk().returning(|_, _, _, _| Ok(some_ticks()));
+        act.expect_mine().returning(|_, _, _, _| {
+            Err(ActuatorError::NoVerdict("unreadable action_completed status".into()).into())
+        });
+        act.expect_craft().times(0);
+
+        let (mut net, sched) = walk_then_mine_fixture();
+        net.link(mine_action_id(), craft_action_id(), 0);
+        let log = run(&act, &sched, &net)
+            .await
+            .expect("the run should have started");
+
+        assert_eq!(log.status(mine_action_id()), Status::Lost);
+        assert_eq!(log.status(craft_action_id()), Status::Pending);
+    }
+
+    /// **The deadlock this change could have introduced, asserted against.**
+    ///
+    /// A bot used to abandon its whole remaining slice in one sweep
+    /// (`abandon_rest`), which published a verdict for every action it would
+    /// never reach. Continuing past a failure retires that sweep, so each
+    /// abandoned step has to publish its own verdict as it is reached — and a
+    /// step that abandons *silently* strands whoever waits on it forever.
+    ///
+    /// Three actions in a chain across two bots: bot 0's mine fails, bot 0's
+    /// craft waits on the mine, and bot 1's second mine waits on the craft. If
+    /// the craft published nothing, bot 1 would wait out the 60-second
+    /// deadline `within_deadline` imposes.
+    #[tokio::test(start_paused = true)]
+    async fn an_abandoned_step_still_releases_a_bot_waiting_behind_it() {
+        let mut net = ActionNetwork::new();
+        net.add(mine_of(first_action_id(), "iron-ore"));
+        net.add(Action {
+            id: second_action_id(),
+            kind: ActionKind::Craft {
+                item: "iron-gear-wheel".into(),
+                count: 1,
+            },
+            pre: vec![],
+            eff: vec![],
+            duration: 30,
+            pinned: None,
+            label: "craft 1 iron-gear-wheel".into(),
+        });
+        net.add(mine_of(third_action_id(), "copper-ore"));
+        net.link(first_action_id(), second_action_id(), 0);
+        net.link(second_action_id(), third_action_id(), 0);
+
+        let sched = Schedule {
+            steps: vec![
+                act_step(first_action_id(), BotId(0), 0, 60),
+                act_step(second_action_id(), BotId(0), 60, 90),
+                act_step(third_action_id(), BotId(1), 90, 150),
+            ],
+            makespan: 150,
+        };
+
+        let mut script = Script::default();
+        script.fail_mine.insert("iron-ore".to_string());
+        let act = RecordingAct::new(script);
+        let log = within_deadline(run(&act, &sched, &net))
+            .await
+            .expect("the run should have started");
+
+        assert_eq!(log.failed(), vec![first_action_id()]);
+        assert_eq!(
+            act.mine_starts().len(),
+            1,
+            "only the failing mine was dispatched: the copper mine two hops \
+             behind it must not run on a precondition nobody can vouch for. \
+             Got {:?}",
+            act.mine_starts()
         );
     }
 
@@ -2567,7 +2682,10 @@ mod tests {
         let log = run(&act, &sched, &empty_net)
             .await
             .expect("the run should have started");
-        assert_eq!(log.failed(), vec![mine_action_id()]);
+        // Both scheduled actions are missing from the network, and each is now
+        // its own failure: the bot no longer stops at the first one, so the
+        // second is reached and judged rather than silently skipped.
+        assert_eq!(log.failed(), vec![mine_action_id(), craft_action_id()]);
     }
 
     #[tokio::test]
@@ -2747,8 +2865,12 @@ mod tests {
             .expect("the run should have started");
 
         assert_eq!(log.failed(), vec![ActionId(99)]);
-        assert_eq!(log.status(first_action_id()), Status::Pending);
-        assert_eq!(log.status(second_action_id()), Status::Pending);
+        // Nothing links action 99 to action 0, so bot 0 goes on to run it --
+        // and bot 1, which waits on action 0, is released by its success
+        // rather than by an abandonment. The name still holds: the point was
+        // always that bot 1 does not hang on a signal with no writer.
+        assert_eq!(log.status(first_action_id()), Status::Success);
+        assert_eq!(log.status(second_action_id()), Status::Success);
     }
 
     #[tokio::test(start_paused = true)]

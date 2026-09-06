@@ -724,14 +724,45 @@ end
 --- the footprint clear.
 PLACEMENT_STEP_ASIDE_MARGIN = 0.4
 
---- The search radius and precision handed to `find_non_colliding_position`
---- when placing that target. Half a tile is the coarsest step that can always
---- find the gap beside an occupied position -- a character's collision box is
---- about 0.4 tiles across -- and a few tiles is room for a handful of stacked
---- bots and no more. A radius of 0 would search forever **[V]**, so it may not
---- be zero.
-PLACEMENT_STEP_ASIDE_RADIUS = 4
+--- The search precision handed to `find_non_colliding_position` when placing
+--- that target. Half a tile is the coarsest step that can always find the gap
+--- beside an occupied position -- a character's collision box is about 0.4
+--- tiles across.
 PLACEMENT_STEP_ASIDE_PRECISION = 0.5
+
+--- The ladder of radii `placement_step_aside_landing` walks, nearest first.
+---
+--- A radius of 0 would search forever **[V]**, so none of these may be zero.
+---
+--- **A dense block runs out of near ground, and that is the whole of defect
+--- (A).** The single radius this replaces was 4, sized for "a handful of
+--- stacked bots" on open ground. Inside a 179-entity `FurnaceLine` -- 2x2 furnaces
+--- packed against belt lanes -- there may be no spot a character fits within
+--- four tiles of any exit at all, and `find_non_colliding_position` then
+--- answers nil for every edge. The blocker is classified `stuck`, nothing
+--- asks it to move, and `FootprintWait::decide`
+--- (crates/core/src/factorio/rcon.rs) spends the four step-aside attempts on
+--- a situation waiting cannot change: `run-1788663566-25023` refused a
+--- transport-belt at `[20.5, 5.5]` four times over 534 ticks with bot 4
+--- parked at `(20.02, 5.07)`, which never moved once in the 540 ticks either
+--- side of it.
+---
+--- So the search escalates instead of giving up: still the nearest exit
+--- first, still the nearest spot the game will offer, but if no exit has one
+--- within four tiles the whole ring is asked again at twelve and then at
+--- thirty-two -- far enough to leave a block of this size entirely.
+---
+--- **The ladder cannot change an answer the old radius already had.**
+--- `find_non_colliding_position` searches outward from its target, so a spot
+--- found at radius 4 is found at radius 4 whatever follows it in this list,
+--- and radius 4 is asked of every exit before radius 12 is asked of any. It
+--- can only turn a `stuck` into a longer walk.
+---
+--- Bounded by construction: three radii times four exits is twelve questions
+--- and then `stuck`, which is still the honest answer when the block really
+--- has no room in it. Ordered nearest-first, so it is a ladder and not a
+--- search.
+PLACEMENT_STEP_ASIDE_RADII = { 4, 12, 32 }
 
 --- The action id an internal step-aside walk is dispatched under.
 ---
@@ -4364,16 +4395,23 @@ end
 -- box, or nil when no exit offers one.
 function placement_step_aside_landing(surface, bb, character)
 	local clearance = placement_step_aside_clearance(bb, character)
-	for _, target in ipairs(placement_step_aside_targets(bb, character)) do
-		local landing = surface.find_non_colliding_position(
-			"character", target,
-			PLACEMENT_STEP_ASIDE_RADIUS, PLACEMENT_STEP_ASIDE_PRECISION)
-		-- Nil is the game saying the character fits nowhere near there; a
-		-- landing inside the clearance is a walk that costs time and
-		-- changes nothing. Either way, try the next edge before giving up:
-		-- better no walk than a walk that ends where it began.
-		if landing ~= nil and not position_in_rect(landing, clearance) then
-			return landing
+	local targets = placement_step_aside_targets(bb, character)
+	-- Radius outermost, exits innermost: every edge is asked at the near
+	-- radius before any edge is asked at a wider one, so the nearest landing
+	-- still wins and widening only ever adds answers. See
+	-- `PLACEMENT_STEP_ASIDE_RADII`.
+	for _, radius in ipairs(PLACEMENT_STEP_ASIDE_RADII) do
+		for _, target in ipairs(targets) do
+			local landing = surface.find_non_colliding_position(
+				"character", target, radius, PLACEMENT_STEP_ASIDE_PRECISION)
+			-- Nil is the game saying the character fits nowhere within this
+			-- radius of there; a landing inside the clearance is a walk that
+			-- costs time and changes nothing. Either way, try the next edge
+			-- before widening: better no walk than a walk that ends where it
+			-- began.
+			if landing ~= nil and not position_in_rect(landing, clearance) then
+				return landing
+			end
 		end
 	end
 	return nil

@@ -491,9 +491,13 @@ fn stub_refused_place(player_position: (f64, f64), occupants: &str) -> String {
             find_entity = function(name, pos) return nil end,
             get_tile = function(x, y) return {{ valid = true, name = "grass-1" }} end,
             find_non_colliding_position = function(name, center, radius, precision)
-                _searched_from[#_searched_from + 1] = {{ x = center.x, y = center.y }}
+                _searched_from[#_searched_from + 1] =
+                    {{ x = center.x, y = center.y, radius = radius }}
                 if _nowhere_to_stand then return nil end
-                if _landing_for ~= nil then return _landing_for(center) end
+                -- The radius is handed on as a second argument, so a test can
+                -- model ground that is only free further out. Every existing
+                -- `_landing_for` takes one argument and ignores it.
+                if _landing_for ~= nil then return _landing_for(center, radius) end
                 return {{ x = center.x, y = center.y }}
             end,
             find_entities_filtered = function(args)
@@ -1246,6 +1250,89 @@ fn a_landing_inside_the_walkers_stopping_box_is_refused_and_the_next_exit_taken(
         "the west exit only ever offered a spot in the crack, so the walk has \
          to leave by another edge. Got ({x}, {y})"
     );
+}
+
+/// **Defect (A): a dense block runs out of near ground, and `stuck` is the
+/// one blocker class nothing waits for.**
+///
+/// `run-1788663566-25023` refused a transport-belt at `[20.5, 5.5]` four
+/// times over 534 ticks with bot 4 parked at `(20.02, 5.07)` inside a
+/// 179-entity `FurnaceLine`. An idle blocker with no landing is reported
+/// `stuck`; `footprint_blocker_is_busy` (crates/core/src/factorio/rcon.rs)
+/// answers false for that word, so the placement spends the four step-aside
+/// attempts on a situation waiting cannot change and fails.
+///
+/// The ground four tiles out of a packed block can genuinely be full. This
+/// models exactly that: every spot within the old single radius is refused
+/// and only a wider search is answered. The blocker must be walked out of the
+/// block rather than called `stuck`.
+///
+/// **This test wrote its own fixture**, in the sense the fixtures note warns
+/// about: the "free at twelve tiles, full at four" ground is a claim about a
+/// dense block, not a reading off one. What it does not assume is the
+/// vocabulary — `stuck` and `stepping aside` are the mod's own words, checked
+/// against the same `TRANSIENT_REFUSAL` the reading side matches.
+#[test]
+fn a_blocker_with_no_near_landing_is_walked_further_rather_than_called_stuck() {
+    let lua = run(
+        &stub_refused_place(ACTOR_AWAY, PARKED_BOT),
+        &format!(
+            "{STUB_SERIALISE}\n_landing_for = function(c, radius) \
+             if radius < 12 then return nil end \
+             return {{ x = c.x - 10, y = c.y }} end\n"
+        ),
+        &format!(r#"rcon_place_entity(1, "stone-furnace", {SITE}, 0)"#),
+    );
+    let moved = asked_to_move(&lua);
+    assert_eq!(
+        moved.len(),
+        1,
+        "the block has no room within four tiles, and the bot has to leave it \
+         rather than stand there being called stuck. Got {moved:?}"
+    );
+    assert_eq!(
+        one_line_reply(&lua),
+        format!("{TRANSIENT_REFUSAL} (blockers: #3 stepping aside)"),
+        "and the clause has to say `stepping aside`, which is what makes the \
+         next attempt see `#3 walking` and draw on the busy budget instead of \
+         the four step-aside attempts"
+    );
+    let radii = searched_radii(&lua);
+    assert!(
+        radii.contains(&4.0),
+        "the near radius is still asked first -- widening may only ever add \
+         answers, never move one. Got {radii:?}"
+    );
+    assert!(
+        radii.iter().any(|r| *r > 4.0),
+        "and the search has to widen when every exit at the near radius came \
+         back nil. Got {radii:?}"
+    );
+}
+
+/// **The near radius wins when it has an answer.** A ladder that reordered
+/// the search would send a bot across the map when a spot beside it was free,
+/// and `find_non_colliding_position` searching outward from its target is
+/// what makes the widening safe.
+#[test]
+fn a_landing_within_the_near_radius_is_taken_without_widening() {
+    let lua = refuse(ACTOR_AWAY, PARKED_BOT);
+    assert_eq!(
+        searched_radii(&lua),
+        vec![4.0],
+        "one bot, one exit, one radius: nothing may widen once the game has \
+         offered a landing"
+    );
+}
+
+/// Every radius `find_non_colliding_position` was asked for, in order.
+fn searched_radii(lua: &Lua) -> Vec<f64> {
+    lua.load("local o = {} for i, p in ipairs(_searched_from) do o[i] = p.radius end return o")
+        .eval::<mlua::Table>()
+        .expect("_searched_from")
+        .sequence_values::<f64>()
+        .map(|r| r.expect("a radius"))
+        .collect()
 }
 
 // ---------------------------------------------------------------------------

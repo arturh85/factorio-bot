@@ -917,6 +917,57 @@ impl Method for BuildBlock {
             }
         }
 
+        // Would building this block seal one of the bots into a pocket?
+        //
+        // **`method::blueprint` had no enclosure guard at all until now**,
+        // while `method::assemble` has had one for its cells -- so the method
+        // that builds the LARGEST blocks in this project (179 entities, for
+        // `FurnaceLine`) was the one with no check, and the small cells were
+        // guarded. A 27-entity block sited from the roster's own seed found
+        // that gap live: the executor reported `the character is already
+        // walled in here ... pocket_tiles=1.0`, a walk ended inside a
+        // furnace's collision box, and the build stopped with 13 of 29 steps
+        // never dispatched while still reporting `done=true`.
+        //
+        // The executor's own `pre_place` cannot cover this. It judges only the
+        // character *doing* the placing (`world.players.get(&player)`), so one
+        // bot walling in another is invisible to it -- and once a bot is
+        // enclosed, every later placement reads as "already walled in, this
+        // placement does not change that" and is allowed. Bystanders are the
+        // planner's job, which is exactly what `enclosure::check` is for.
+        //
+        // Deliberately NOT fixed by making the search avoid characters: the
+        // anchor must not depend on where a bot happens to stand, or a replan
+        // moves the block every time somebody walks. That invariant has its
+        // own test (`a_bystander_in_the_search_path_does_not_move_the_sited_
+        // anchor`) and this fix preserves it -- the anchor is unchanged and
+        // the bots walk, which is what `Site::At`'s refusal text has always
+        // promised ("cleared by walking, not by moving the block").
+        let evacuations = {
+            let mut trial = ctx.state.fork();
+            for e in &wanted {
+                let world = anchor.add(&e.offset);
+                let entity = entity_for(&ctx.state, e, &world);
+                trial.create_entity(entity);
+            }
+            match crate::enclosure::check(&ctx.state, &trial, &anchor) {
+                crate::enclosure::EnclosurePrevention::Clear => Vec::new(),
+                crate::enclosure::EnclosurePrevention::Evacuate(evacuations) => evacuations,
+                // Every way out of the pocket runs through the block itself,
+                // so no walk can fix it and only not building here can. A
+                // named refusal beats a build that reports done with a third
+                // of its steps never dispatched.
+                crate::enclosure::EnclosurePrevention::Refuse => {
+                    return Err(PlannerError::BlockGroundOccupied {
+                        entity: "the block".to_string(),
+                        tile: format!("({}, {})", anchor.x(), anchor.y()),
+                        occupant: "would seal a bot into a pocket with no way out that                                    does not run through the block itself"
+                            .to_string(),
+                    });
+                }
+            }
+        };
+
         let owned: Vec<BlueprintEntity> = wanted.iter().map(|e| (*e).clone()).collect();
         // Sorted (`bot_ids` reads a `BTreeMap`'s keys), so band `i` naming
         // `roster[i]` is a deterministic, replan-stable assignment.
@@ -930,6 +981,23 @@ impl Method for BuildBlock {
         // stops two bots working the same corner, which is the whole
         // structural reason a band exists in the first place.
         let mut steps = Vec::with_capacity(split.iter().map(Vec::len).sum());
+
+        // Every bystander this block would seal in walks clear before any of
+        // its own entities go down -- the same shape `method::power` and
+        // `method::assemble` use, ordered by the `Step::Link`s below rather
+        // than by position in this vector.
+        let evacuation_ids: Vec<ActionId> = evacuations
+            .iter()
+            .map(|evacuation| {
+                let (step, id) = crate::method::util::evacuation_step(
+                    ctx,
+                    evacuation,
+                    &format!("the block at {anchor}"),
+                );
+                steps.push(step);
+                id
+            })
+            .collect();
 
         // The block's ghosts, stamped once, before any `Place` -- see
         // `ActionKind::StampGhosts`'s own doc. Not tied to any band's chain
@@ -1007,6 +1075,25 @@ impl Method for BuildBlock {
                 steps.push(Step::Link {
                     from: stamp_id,
                     to: *place_id,
+                    lag: 0,
+                });
+            }
+        }
+        // An evacuation precedes every placement, not just its own band's:
+        // the bot is being walked clear of the whole footprint, and any
+        // entity of it could be the wall that traps them.
+        for evacuation_id in &evacuation_ids {
+            for place_id in &place_ids {
+                steps.push(Step::Link {
+                    from: *evacuation_id,
+                    to: *place_id,
+                    lag: 0,
+                });
+            }
+            if let Some(stamp_id) = stamp_id {
+                steps.push(Step::Link {
+                    from: *evacuation_id,
+                    to: stamp_id,
                     lag: 0,
                 });
             }
@@ -2749,5 +2836,136 @@ mod tests {
         // The round trip a live caller actually takes: `expand` alone proves
         // the network is buildable, `schedule` proves it is also runnable.
         schedule(&net, &state, &bots).expect("the plan schedules");
+    }
+}
+
+#[cfg(test)]
+mod enclosure_guard_tests {
+    use super::*;
+    use crate::ids::BotId;
+    use factorio_bot_core::test_utils::fixture_world;
+    use factorio_bot_core::types::FactorioPlayer;
+    use std::sync::Arc;
+
+    /// A block that closes a ring around one of this plan's own bots must walk
+    /// it clear before the walls go up — or refuse, if there is no way out.
+    ///
+    /// **`method::blueprint` had no enclosure guard at all** until this test's
+    /// fix, while `method::assemble` has had one for its cells. So the method
+    /// that builds the largest blocks in the project was the unguarded one. A
+    /// 27-entity block found it live: `the character is already walled in here
+    /// ... pocket_tiles=1.0`, and the build reported `done=true` with 13 of 29
+    /// steps never dispatched.
+    ///
+    /// The executor's `pre_place` cannot cover this — it judges only the
+    /// character *doing* the placing, so one bot walling in another is
+    /// invisible to it, and once a bot is enclosed every later placement reads
+    /// as "already walled in, not this placement's doing" and is allowed.
+    ///
+    /// The fixture is a closed ring of eight 2x2 furnaces whose interior is the
+    /// 2x2 tile square at the origin. Consecutive furnaces touch, so there is
+    /// no gap to walk through; a bot at (0.5, 0.5) is inside it.
+    #[test]
+    fn a_block_that_rings_a_bot_evacuates_it_or_refuses() {
+        let blueprint_text = include_str!("../../../core/tests/blueprints/ring_block.txt")
+            .trim()
+            .to_string();
+
+        let world = fixture_world();
+        // Bot 1 stands in the ring's interior. This is a bot ON THE ROSTER, not
+        // a bystander: the case a researcher building a block near their own
+        // bots actually hits.
+        world.players.insert(
+            1,
+            FactorioPlayer {
+                player_id: 1,
+                position: Position::new(0.5, 0.5),
+                build_distance: 10,
+                reach_distance: 10,
+                resource_reach_distance: 4.0,
+                ..Default::default()
+            },
+        );
+        let state = PlanState::from_world(Arc::new(world), &[BotId(1)]);
+
+        // The bot really is where the test says, or nothing below means
+        // anything — the same guard the bystander test uses.
+        assert!(
+            state
+                .characters_near(&Position::new(0.0, 0.0), 5.0)
+                .iter()
+                .any(|(player, _)| *player == 1),
+            "bot 1 must be standing at the ring's centre for this to be the \
+             enclosure case at all"
+        );
+
+        let mut ctx = ExpansionCtx::new(state, BotId(1));
+        let goal = Goal::Built {
+            blueprint: blueprint_text,
+            site: Site::At(Position::new(0.0, 0.0)),
+        };
+
+        match BuildBlock.expand(&goal, &mut ctx) {
+            Ok(steps) => {
+                let evacuations: Vec<&Action> = steps
+                    .iter()
+                    .filter_map(|s| match s {
+                        Step::Act(a) if matches!(a.kind, ActionKind::Evacuate { .. }) => {
+                            Some(a.as_ref())
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                assert!(
+                    !evacuations.is_empty(),
+                    "a block that rings bot 1 must emit an Evacuate before its \
+                     placements; got {} steps and none of them evacuate anyone",
+                    steps.len()
+                );
+                // Pinned to the bot being rescued, not to whoever builds — the
+                // whole point of `evacuation_step`'s `pinned` field.
+                assert_eq!(
+                    evacuations[0].pinned,
+                    Some(BotId(1)),
+                    "the evacuation must be pinned to the bot it rescues"
+                );
+                // And it must precede every placement, or the walls can go up
+                // first and the walk becomes impossible.
+                let place_ids: Vec<ActionId> = steps
+                    .iter()
+                    .flat_map(|s| match s {
+                        Step::Owned { steps, .. } => steps.clone(),
+                        other => vec![other.clone()],
+                    })
+                    .filter_map(|s| match s {
+                        Step::Act(a) if matches!(a.kind, ActionKind::Place { .. }) => Some(a.id),
+                        _ => None,
+                    })
+                    .collect();
+                assert!(!place_ids.is_empty(), "the block must place something");
+                for place_id in &place_ids {
+                    assert!(
+                        steps.iter().any(|s| matches!(
+                            s,
+                            Step::Link { from, to, .. }
+                                if *from == evacuations[0].id && to == place_id
+                        )),
+                        "every placement must be linked after the evacuation; \
+                         {place_id:?} is not"
+                    );
+                }
+            }
+            Err(PlannerError::BlockGroundOccupied { occupant, .. }) => {
+                // The other legal outcome: every way out runs through the block
+                // itself, so no walk can help. A named refusal is the correct
+                // answer and is what the fix returns for that case.
+                assert!(
+                    occupant.contains("seal a bot into a pocket"),
+                    "a refusal here must name the enclosure, not something \
+                     else; got {occupant}"
+                );
+            }
+            Err(other) => panic!("expected an evacuation or an enclosure refusal, got {other:?}"),
+        }
     }
 }

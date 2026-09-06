@@ -1273,8 +1273,23 @@ entry over a log line:
   "a fresh map has charted almost nothing" note — the entities do not *exist*
   yet, so there is nothing to see and nothing to be stale about. See
   `docs/superpowers/notes/2026-09-06-saturation-and-ungenerated-ground.md`.
-- **Both SEARCHING forms of `goal.built` ignore characters, so a big block can
-  wall the roster in.** Siting treats a character as non-blocking on purpose — a
+- **`method::blueprint` had NO enclosure guard until 2026-09-06, while
+  `method::assemble` has had one — so the method that builds the LARGEST blocks
+  was the unguarded one.** `BuildBlock::expand` now calls
+  `crate::enclosure::check` against a fork with the whole block created, and
+  emits `ActionKind::Evacuate` (pinned to the bystander, linked ahead of every
+  placement and the ghost stamp) or refuses by name when no way out exists.
+  **The executor's `pre_place` cannot cover this**: it judges only the character
+  *doing* the placing, so one bot walling in another is invisible to it, and
+  once a bot is enclosed every later placement reads as `already walled in ...
+  this placement does not change that` and is allowed. Fixed the way the
+  refusal text always promised — "cleared by walking, not by moving the block" —
+  and deliberately NOT by making the search avoid characters, which would make
+  the anchor depend on where a bot happens to stand and move the block on every
+  replan (`a_bystander_in_the_search_path_does_not_move_the_sited_anchor` exists
+  to forbid exactly that).
+- **Both SEARCHING forms of `goal.built` still ignore characters when CHOOSING
+  the anchor, which is deliberate and now safe.** Siting treats a character as non-blocking on purpose — a
   bot can walk away, so it should not veto a site — and only the explicit-anchor
   form refuses for a bot on the footprint. That holds until the block is large
   enough to enclose the bots it was sited around: a 27-entity block spanning

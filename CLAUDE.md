@@ -136,6 +136,33 @@ wrong answer in this repo rather than an error you would notice.
   `git diff --no-ext-diff` when something machine-readable is wanted, or
   `git revert`.
 
+**A backtick in `git commit -m "..."` is COMMAND SUBSTITUTION, and it silently
+deletes what it cannot run.** `-m` is passed in double quotes, so the shell
+expands backticks before git ever sees the string. A message written as
+
+```
+Gating runs on load with `bc`, which is not installed here.
+```
+
+lands in the log as `Gating runs on load with , which is not installed here.` —
+the word gone, the sentence still grammatical, and `zsh: command not found: bc`
+scrolling past in output nobody re-reads. This happened **four times in one
+session** to four different commits, each time removing exactly the identifier
+the sentence was about, because prose about code is mostly backticked
+identifiers. Two of them silently dropped the names of the technologies a
+finding was about.
+
+Write the message to a file with a **quoted** heredoc and use `git commit -F`:
+
+```bash
+cat > /tmp/msg <<'EOF'
+fix(thing): `identifier` survives here
+EOF
+git commit -F /tmp/msg -- <paths>
+```
+
+`<<'EOF'` (quoted delimiter) suppresses every expansion; `<<EOF` does not.
+
 **A pipeline reports the LAST command's exit code, not the interesting one.**
 `cargo test --workspace | grep -E "^test result"` exits 0 whenever *grep*
 matched something, even with a failing test in the output. That has already

@@ -727,12 +727,15 @@ pub enum PlannerError {
     #[diagnostic(
         code(planner::power_plant_too_small),
         help(
-            "this is a limit of the LAYOUT, not of the game: one boiler drives at most two \
-             steam engines (1.8 MW of boiler over 900 kW of engine), and this planner lays out \
-             exactly one boiler in a rigid pump-pipes-boiler-engines row. The water behind one \
-             offshore pump would carry about twenty boilers and forty engines -- ~36 MW -- \
-             because the pump moves 1200 water/s and a boiler burns 60/s (verified against \
-             base/prototypes/entity/entities.lua). Ask for less, or site a second plant"
+            "this is now a limit of the WATER, not of the layout: one offshore pump moves \
+             1200 water/s and a boiler burns 60/s, so one pump carries twenty boilers and \
+             forty engines -- about 36 MW. A twenty-first boiler would stand on the shore \
+             with nothing to boil. (Both figures read from base/prototypes/entity/\
+             entities.lua; one boiler still drives at most two engines, 1.8 MW of boiler \
+             over 900 kW of engine.) Until 2026-09-06 this said the opposite -- the planner \
+             laid out exactly one boiler and the ceiling was 1.8 MW, a fact about our row \
+             rather than about the game. Ask for less, or site a second plant against \
+             different water"
         )
     )]
     PowerPlantTooSmall { needed_kw: f64, plant_kw: f64 },

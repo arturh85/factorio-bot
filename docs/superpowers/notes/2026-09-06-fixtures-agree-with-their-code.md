@@ -200,6 +200,46 @@ prints it and flags below 80% of nominal), share the box freely for checks
 you expect to pass, and re-run on a quiet floor before believing any
 failure that arrived on a loaded one.
 
+## One level out: instrumentation is code, and mine failed open
+
+Every entry above is a check that was **weak**. This one is a check that was
+**absent and reported as present**, which is a different and worse shape — and
+it was in my own measuring harness rather than in the code under test.
+
+Measuring what a bot costs in tick rate needs a quiet machine: this repo already
+records that a cargo build in a worktree starved a server to 2-10 tps and froze
+a walking bot. So the runs were gated on 1-minute load:
+
+```bash
+if [ "$(echo "$L < 4" | bc -l)" = "1" ]; then break; fi
+```
+
+**`bc` is not installed here.** Every comparison therefore evaluated false, the
+guard waited its whole window, and then measured anyway — on a box that had
+climbed from load 24 to 37 while it waited. The same missing `bc` meant no wall
+times were computed, so the run produced no usable number in either direction.
+Forty `command not found` lines went into a log nobody was reading.
+
+**A guard that cannot run must refuse, not shrug.** The failure is exactly
+`only_ghosts = true` validating nothing, the `Using mods directory` line that
+printed on no run at all, and `0 uncovered` passing because the loop never ran —
+except that those are in the product and this was in the instrument.
+
+The rule that follows is narrow and worth stating on its own:
+
+- **Instrumentation is code and gets the same bar.** A harness, a probe, a
+  timing gate, a load check — falsify it before trusting a number it produced.
+  Spending a day rigorously falsifying the *code's* checks while never
+  falsifying the harness is precisely how this happened.
+- **Self-test a comparator in BOTH directions before using it.** A comparator
+  stuck at false and one stuck at true are both broken, and asserting one
+  direction catches half of them. The fix here asserts `lt(1,2)` is true *and*
+  `lt(2,1)` is false, and refuses to measure if either fails.
+- **A refusal must say what it could not do.** The rewrite prints "load still N
+  after 600s -- a tick-rate number taken here would measure the build farm, not
+  the bots" instead of a figure. Absence of a number is a result; a number taken
+  under unknown conditions is not.
+
 ## The rarer, opposite case: an independent oracle that disagrees
 
 Most of the night's defects were a check agreeing with its subject. One was

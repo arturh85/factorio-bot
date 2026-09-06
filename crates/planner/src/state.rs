@@ -87,14 +87,34 @@ pub const INPUT_OVERLOAD: u32 = 20;
 /// `mods/BotBridge/control.lua` falls back to.
 const VANILLA_RESOURCE_REACH: f64 = 2.7;
 
-/// How far from an entity [`PlanState::electric_supply_kw`] looks for the poles
-/// and generators that might power it, in tiles.
+/// How far from an entity [`PlanState::electric_supply_kw`] looks for the
+/// **first** poles that might power it, in tiles.
 ///
-/// A bound, not a physical limit: `EntityGraph` offers no "every entity"
-/// query, and an unbounded scan on every condition check would be a full pass
-/// over the map. 64 tiles comfortably contains a boiler-and-engine plant next
-/// to the thing it powers, and a plant beyond it reads as absent — a refusal
-/// rather than a false promise.
+/// This is the seed of a traversal, not the extent of the search. Once a pole
+/// is found the search continues along the wire from it (see
+/// [`PlanState::electric_entities`]), so a generator any number of poles away
+/// is reachable. `EntityGraph` still offers no "every entity" query, and this
+/// keeps the common case — a plant beside the thing it powers — to a single
+/// disc.
+///
+/// # Why it stopped being the whole search
+///
+/// It was 64 tiles and it was the entire extent, honestly documented as "a
+/// bound, not a physical limit". Then oil arrived. **A pole run longer than 64
+/// tiles carried power that [`crate::Condition::Powered`] could not see**, and
+/// the scheduler checks the same condition, so it was a real ceiling and not a
+/// verification artefact. Measured on seed 31337: a well at ~52 tiles planned;
+/// at ~121, ~130 and ~140 it refused; at ~281 it refused for want of water.
+/// Seed 31337's crude oil is 256–384 tiles out, so oil could not be planned at
+/// all.
+///
+/// **Raising the constant was the obvious fix and the wrong one.** It trades a
+/// false refusal for a full-map scan on every condition check, and any
+/// constant is wrong for some map: 64 is wrong for this oil, and its
+/// replacement is wrong for the next map. **The bound was a disc around the
+/// consumer, while the thing that carries power is the wire.** The connectivity
+/// pass below was never the defect — a generator ten poles away was simply
+/// never a candidate for it to find.
 const POWER_SEARCH_RADIUS: f64 = 64.;
 
 /// Half the side of a pole's supply area, by pole name, from vanilla 2.1.
@@ -170,8 +190,8 @@ fn generation_kw(name: &str) -> Option<f64> {
 /// subtracted from a supply computed over a different network is worse than no
 /// demand at all.
 struct ElectricNetwork {
-    /// Every entity within [`POWER_SEARCH_RADIUS`] of the ground asked about,
-    /// in the fixed order [`PlanState::entities_within`] returns.
+    /// Every entity [`PlanState::electric_entities`] reached by following the
+    /// wire out from the ground asked about, in tile order.
     nearby: Vec<FactorioEntity>,
     /// Each pole's supply box, in that same order.
     poles: Vec<Rect>,
@@ -3624,11 +3644,12 @@ impl PlanState {
         let mut seen: BTreeMap<String, BTreeSet<Pos>> = BTreeMap::new();
         for entity in self.added.values() {
             if names.contains(&entity.name) {
-                seen
-                    .entry(entity.name.clone())
+                seen.entry(entity.name.clone())
                     .or_default()
                     .insert(Pos::from(&entity.position));
-                out.entry(entity.name.clone()).or_default().push(entity.clone());
+                out.entry(entity.name.clone())
+                    .or_default()
+                    .push(entity.clone());
             }
         }
         let tree = self.base.entity_graph.inner_tree();
@@ -3643,7 +3664,9 @@ impl PlanState {
             if !seen.entry(entity.name.clone()).or_default().insert(key) {
                 continue;
             }
-            out.entry(entity.name.clone()).or_default().push(entity.clone());
+            out.entry(entity.name.clone())
+                .or_default()
+                .push(entity.clone());
         }
         for bucket in out.values_mut() {
             bucket.sort_by_key(|e| Pos::from(&e.position));
@@ -3670,7 +3693,10 @@ impl PlanState {
     /// dedup/order contract: an overlay ghost wins over a base one at the
     /// same tile, `removed` hides a base one outright, and each name's
     /// bucket is sorted by `Pos`.
-    pub fn ghosts_named_any(&self, names: &BTreeSet<String>) -> BTreeMap<String, Vec<FactorioEntity>> {
+    pub fn ghosts_named_any(
+        &self,
+        names: &BTreeSet<String>,
+    ) -> BTreeMap<String, Vec<FactorioEntity>> {
         let mut out: BTreeMap<String, Vec<FactorioEntity>> = BTreeMap::new();
         let mut seen: BTreeMap<String, BTreeSet<Pos>> = BTreeMap::new();
         for entity in self.added.values() {
@@ -3683,11 +3709,12 @@ impl PlanState {
             if !names.contains(ghost_name) {
                 continue;
             }
-            seen
-                .entry(ghost_name.clone())
+            seen.entry(ghost_name.clone())
                 .or_default()
                 .insert(Pos::from(&entity.position));
-            out.entry(ghost_name.clone()).or_default().push(entity.clone());
+            out.entry(ghost_name.clone())
+                .or_default()
+                .push(entity.clone());
         }
         let tree = self.base.entity_graph.inner_tree();
         for (entity, _rect) in tree.iter().map(|(_, v)| v) {
@@ -3707,7 +3734,9 @@ impl PlanState {
             if !seen.entry(ghost_name.clone()).or_default().insert(key) {
                 continue;
             }
-            out.entry(ghost_name.clone()).or_default().push(entity.clone());
+            out.entry(ghost_name.clone())
+                .or_default()
+                .push(entity.clone());
         }
         for bucket in out.values_mut() {
             bucket.sort_by_key(|e| Pos::from(&e.position));
@@ -4019,6 +4048,74 @@ impl PlanState {
         out
     }
 
+    /// Every entity that could be on `centre`'s electric network, found by
+    /// **following the wire** rather than by drawing a bigger circle.
+    ///
+    /// Seeds with one [`POWER_SEARCH_RADIUS`] disc around `centre`, then
+    /// repeatedly expands from each pole it has found by that pole's own wire
+    /// reach, until a pass adds no new pole. A generator at the far end of a
+    /// ten-pole run is therefore found, and one standing alone beyond the last
+    /// pole is not — which is exactly the physical rule.
+    ///
+    /// # There is no hop limit, deliberately
+    ///
+    /// A cap was suggested, with the sound reasoning that if the search ever
+    /// stopped on its own bound that should be *visible* rather than looking
+    /// like "no supply" — otherwise a constant-shaped false refusal is merely
+    /// replaced by a traversal-shaped one, which is harder to spot.
+    ///
+    /// The better answer to "make the bound observable" is to have no bound.
+    /// **Termination is guaranteed by finiteness, not by a cap**: every pass
+    /// expands only from poles not expanded before, the world holds finitely
+    /// many, so the frontier empties. Nothing here can stop early, so there is
+    /// no early stop to report, and no constant that some future map makes
+    /// wrong.
+    ///
+    /// The cost is bounded by **the size of the connected pole network**, which
+    /// is the thing that actually carries the power, rather than by a guess
+    /// about map scale. The common case — a lab beside its plant, no pole
+    /// chain — finds no pole to expand from beyond the first disc and
+    /// terminates in one pass, so putting this on every condition check costs
+    /// what the old single disc cost.
+    ///
+    /// Order is deterministic: entities are accumulated into a [`BTreeMap`]
+    /// keyed by tile, so the result does not depend on the order poles were
+    /// discovered in. This crate's determinism rule is not negotiable, and a
+    /// traversal is exactly where insertion order would leak in.
+    fn electric_entities(&self, centre: &Position) -> Vec<FactorioEntity> {
+        let mut found: BTreeMap<Pos, FactorioEntity> = BTreeMap::new();
+        let mut expanded: BTreeSet<Pos> = BTreeSet::new();
+
+        for entity in self.entities_within(centre, POWER_SEARCH_RADIUS) {
+            found.insert(Pos::from(&entity.position), entity);
+        }
+
+        loop {
+            // The poles found so far that have not yet been expanded from.
+            // Collected before expanding so the borrow ends, and sorted by
+            // tile because `found` is a BTreeMap.
+            let frontier: Vec<(Pos, Position, f64)> = found
+                .iter()
+                .filter_map(|(key, entity)| {
+                    if expanded.contains(key) {
+                        return None;
+                    }
+                    let reach = pole_wire_reach(&entity.name)?;
+                    Some((key.clone(), entity.position.clone(), reach))
+                })
+                .collect();
+            if frontier.is_empty() {
+                return found.into_values().collect();
+            }
+            for (key, position, reach) in frontier {
+                expanded.insert(key);
+                for entity in self.entities_within(&position, reach) {
+                    found.entry(Pos::from(&entity.position)).or_insert(entity);
+                }
+            }
+        }
+    }
+
     /// Steps 1 and 2 of [`electric_supply_kw`](Self::electric_supply_kw):
     /// which poles are near `area`, which of them are wired together, and
     /// which of those components reach `area` at all.
@@ -4029,7 +4126,7 @@ impl PlanState {
             (area.left_top.x() + area.right_bottom.x()) / 2.,
             (area.left_top.y() + area.right_bottom.y()) / 2.,
         );
-        let nearby = self.entities_within(&centre, POWER_SEARCH_RADIUS);
+        let nearby = self.electric_entities(&centre);
 
         // 1. Poles, with the supply box and wire reach the vanilla prototypes
         //    give them.
@@ -5348,6 +5445,128 @@ mod tests {
     fn lab_area(s: &PlanState, pos: Position) -> Rect {
         s.collision_area("lab", &pos)
             .expect("the fixture has a lab")
+    }
+
+    /// A chain of poles carries power however long it is.
+    ///
+    /// **This is the whole point of the change and the case the old code got
+    /// wrong.** A pole run past `POWER_SEARCH_RADIUS` carried power that
+    /// `Condition::Powered` could not see, and the scheduler checks the same
+    /// condition, so it was a real ceiling. Seed 31337's crude oil is 256–384
+    /// tiles from spawn, which is four to six times the old bound.
+    ///
+    /// Poles are spaced 7 tiles, inside a small pole's 7.5 wire reach. 60
+    /// poles reach ~420 tiles, well past the old 64.
+    fn chained(poles: usize, spacing: f64) -> (PlanState, Position) {
+        let mut s = state();
+        for i in 0..poles {
+            s.create_entity(FactorioEntity {
+                name: "small-electric-pole".into(),
+                position: Position::new(spacing * i as f64, 0.),
+                ..Default::default()
+            });
+        }
+        // The engine sits at the far end, beside the last pole.
+        let far = spacing * (poles - 1) as f64;
+        s.create_entity(FactorioEntity {
+            name: "steam-engine".into(),
+            position: Position::new(far, 2.),
+            ..Default::default()
+        });
+        (s, Position::new(0., 0.))
+    }
+
+    #[test]
+    fn a_generator_at_the_far_end_of_a_long_pole_run_is_found() {
+        let (s, consumer) = chained(60, 7.);
+        let distance = 7. * 59.;
+        assert!(
+            distance > 64. * 4.,
+            "the fixture must reach well past the old bound: {distance}"
+        );
+
+        let kw = s.electric_supply_kw(&lab_area(&s, consumer));
+        assert_eq!(
+            kw, 900.,
+            "a steam engine {distance} tiles away, wired the whole way, must count"
+        );
+    }
+
+    /// The other half, and the one that stops this being "count everything".
+    ///
+    /// A generator beyond the last pole is **not** on the network, however
+    /// close the poles get to it. Without this the traversal would be a
+    /// licence to count any generator on the map.
+    #[test]
+    fn a_generator_past_the_last_pole_is_not_found() {
+        let (mut s, consumer) = chained(60, 7.);
+        // A second engine far beyond the end of the wire, unreachable.
+        s.create_entity(FactorioEntity {
+            name: "steam-engine".into(),
+            position: Position::new(7. * 200., 0.),
+            ..Default::default()
+        });
+
+        let kw = s.electric_supply_kw(&lab_area(&s, consumer));
+        assert_eq!(
+            kw, 900.,
+            "only the wired engine counts; the isolated one must not"
+        );
+    }
+
+    /// A gap wider than the wire reach breaks the run, and everything past the
+    /// break stops counting. The physical rule, asserted rather than assumed.
+    #[test]
+    fn a_gap_wider_than_the_wire_reach_breaks_the_chain() {
+        let mut s = state();
+        // Two poles by the consumer, then a gap of 20 (over a small pole's
+        // 7.5), then poles leading to the engine.
+        for x in [0., 7.] {
+            s.create_entity(FactorioEntity {
+                name: "small-electric-pole".into(),
+                position: Position::new(x, 0.),
+                ..Default::default()
+            });
+        }
+        for x in [27., 34., 41.] {
+            s.create_entity(FactorioEntity {
+                name: "small-electric-pole".into(),
+                position: Position::new(x, 0.),
+                ..Default::default()
+            });
+        }
+        s.create_entity(FactorioEntity {
+            name: "steam-engine".into(),
+            position: Position::new(41., 2.),
+            ..Default::default()
+        });
+
+        let kw = s.electric_supply_kw(&lab_area(&s, Position::new(0., 0.)));
+        assert_eq!(
+            kw, 0.,
+            "the engine is past a 20-tile gap, wider than a small pole's 7.5 reach"
+        );
+    }
+
+    /// The common case must stay one pass: a plant beside its consumer finds
+    /// no pole to expand from beyond the first disc.
+    ///
+    /// Asserted because the traversal is on every `Powered` check, and a
+    /// change that made the cheap case walk the map would be a real
+    /// regression that no correctness test would notice.
+    #[test]
+    fn a_plant_beside_its_consumer_needs_no_traversal() {
+        let s = powered(
+            Some(Position::new(10.5, 10.5)),
+            Some(Position::new(12.5, 10.5)),
+        );
+        let near = s.electric_entities(&Position::new(10.5, 10.5));
+        let one_disc = s.entities_within(&Position::new(10.5, 10.5), POWER_SEARCH_RADIUS);
+        assert_eq!(
+            near.len(),
+            one_disc.len(),
+            "with every pole already inside the seed disc, the traversal must add nothing"
+        );
     }
 
     /// The end-to-end one: a power plant the **world** already carries, not

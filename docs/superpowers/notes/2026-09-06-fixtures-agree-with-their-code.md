@@ -144,6 +144,27 @@ box was loaded".
 - **A failure at a bad tick rate is not** — the delivered rate is then part
   of the diagnosis, not a footnote.
 
+**Two fragile runs cannot share a floor; they have to queue.** A validity
+check can share with anything, including another validity check. But
+starvation makes a 96-second plan read as 137 — the same case measured 99.5 s
+and 137.7 s in one night, 38% apart, from load alone — so two *timing*
+measurements are noise to each other and must be sequenced, whoever asked
+first.
+
+**A baseline is only a baseline against a stated commit.** Both sessions
+nearly made the mirror-image mistake within an hour: one about to compare a
+pre-change planner against a post-change one and attribute the difference to
+its own work, the other about to do the same in reverse. Every figure in a
+record that does not name the commit it was taken on is weaker than it
+looks.
+
+**And publish what got worse in the same table as what got better.** From
+the `second` session, whose sentence this is: *"a result that only lists
+what got better is the same shape as a test that only checks the happy
+path."* Tonight's furnace change improved red and green and cost two to
+three percent on three deeper goals; a table showing only the first half
+would have been accurate and misleading.
+
 So: record the delivered tick rate in every run's note (`just analyse`
 prints it and flags below 80% of nominal), share the box freely for checks
 you expect to pass, and re-run on a quiet floor before believing any

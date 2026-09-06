@@ -1286,21 +1286,37 @@ pub struct FactorioEntityPrototype {
     // Every one is `default`, so a dump or a snapshot written before these
     // existed still loads with `None`, and `hand_mining_obstacle` says what it
     // can and cannot conclude from that.
-    /// A `resource` prototype's category -- `basic-solid`, `basic-fluid`,
-    /// `hard-solid` -- named `category` at data stage and `resource_category`
-    /// at runtime. This is the discriminator the game itself uses: a character
-    /// or a drill mines a resource iff the category is in its own
-    /// `resource_categories`.
     /// How far a mining drill reaches **beyond the tile it stands on**, which
     /// [`Self::collision_box`] cannot say. Measured on a live 2.1.17 game:
     ///
-    /// | drill | footprint | `mining_drill_radius` |
-    /// |---|---|---|
-    /// | `burner-mining-drill` | 1.40 x 1.40 (2x2) | **0.99** |
-    /// | `electric-mining-drill` | 2.70 x 2.70 (3x3) | **2.49** |
+    /// | entity | footprint | radius | tiles worked |
+    /// |---|---|---|---|
+    /// | `burner-mining-drill` | 2x2 | 0.99 | **2x2**, its own footprint |
+    /// | `electric-mining-drill` | 3x3 | 2.49 | **5x5**, a ring beyond it |
+    /// | `pumpjack` | 3x3 | 0.49 | **1x1**, a single tile |
     ///
-    /// So a burner drill's mining area **is** its own footprint, while an
-    /// electric drill works a 5x5 -- a full tile ring beyond itself.
+    /// A **pumpjack is a `mining-drill` too**, and the tightest-reaching one:
+    /// it must be centred on the crude-oil well itself, and its 3x3 box
+    /// overstates its reach by eight tiles.
+    ///
+    /// # Compare in TILES, never in collision-box extents
+    ///
+    /// `radius > collision_box_half_width` is wrong for **every** drill in the
+    /// game. A burner drill's 0.99 exceeds its half-width of 0.699, so that
+    /// test says it reaches beyond itself -- it does not: 2 x 0.99 = 1.98,
+    /// which is the 2x2 its box already occupies. Factorio sizes a 2x2 box
+    /// slightly under 2 so neighbours do not touch, and comparing a radius
+    /// against that shaved number measures the shaving. Ceil both sides to
+    /// tiles first. This was caught by a test written the wrong way round; see
+    /// `crates/core/tests/mining_drill_radius.rs`.
+    ///
+    /// # The field has two names
+    ///
+    /// `resource_searching_radius` in the prototype definitions,
+    /// `mining_drill_radius` on the runtime API. Grepping the data files for
+    /// the runtime name finds nothing, which looks exactly like the field not
+    /// existing. Both sources were read: `entity/mining-drill.lua` lines 1757,
+    /// 1853 and 1900, and a live 2.1.17 RCON probe, agreeing.
     ///
     /// Without this the planner cannot express "a drill mines a tile it does
     /// not stand on", and that one gap made two unrelated behaviours
@@ -1315,6 +1331,11 @@ pub struct FactorioEntityPrototype {
     /// still loads, with `None` meaning *unknown reach* -- never zero reach.
     #[serde(default)]
     pub mining_drill_radius: Option<f64>,
+    /// A `resource` prototype's category -- `basic-solid`, `basic-fluid`,
+    /// `hard-solid` -- named `category` at data stage and `resource_category`
+    /// at runtime. This is the discriminator the game itself uses: a character
+    /// or a drill mines a resource iff the category is in its own
+    /// `resource_categories`.
     #[serde(default)]
     pub resource_category: Option<String>,
     /// The categories a `character` or `mining-drill` prototype can mine.

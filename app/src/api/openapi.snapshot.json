@@ -1775,6 +1775,14 @@
               "null"
             ]
           },
+          "mining_drill_radius": {
+            "description": "How far a mining drill reaches **beyond the tile it stands on**, which\n[`Self::collision_box`] cannot say. Measured on a live 2.1.17 game:\n\n| entity | footprint | radius | tiles worked |\n|---|---|---|---|\n| `burner-mining-drill` | 2x2 | 0.99 | **2x2**, its own footprint |\n| `electric-mining-drill` | 3x3 | 2.49 | **5x5**, a ring beyond it |\n| `pumpjack` | 3x3 | 0.49 | **1x1**, a single tile |\n\nA **pumpjack is a `mining-drill` too**, and the tightest-reaching one:\nit must be centred on the crude-oil well itself, and its 3x3 box\noverstates its reach by eight tiles.\n\n# Compare in TILES, never in collision-box extents\n\n`radius > collision_box_half_width` is wrong for **every** drill in the\ngame. A burner drill's 0.99 exceeds its half-width of 0.699, so that\ntest says it reaches beyond itself -- it does not: 2 x 0.99 = 1.98,\nwhich is the 2x2 its box already occupies. Factorio sizes a 2x2 box\nslightly under 2 so neighbours do not touch, and comparing a radius\nagainst that shaved number measures the shaving. Ceil both sides to\ntiles first. This was caught by a test written the wrong way round; see\n`crates/core/tests/mining_drill_radius.rs`.\n\n# The field has two names\n\n`resource_searching_radius` in the prototype definitions,\n`mining_drill_radius` on the runtime API. Grepping the data files for\nthe runtime name finds nothing, which looks exactly like the field not\nexisting. Both sources were read: `entity/mining-drill.lua` lines 1757,\n1853 and 1900, and a live 2.1.17 RCON probe, agreeing.\n\nWithout this the planner cannot express \"a drill mines a tile it does\nnot stand on\", and that one gap made two unrelated behaviours\nneedlessly conservative: ore-aware siting asked whether ore lay under a\ndrill's own 3x3 because that was all the model offered, and the\nwill-not-bury placement rule could not distinguish a belt over ore a\ndrill can still reach from a belt over ore nobody can mine. With the\nradius, burying the outer ring under an electric drill is **not a cost\nat all**; under a burner drill it genuinely is.\n\n`default`, so a dump or snapshot written before this field existed\nstill loads, with `None` meaning *unknown reach* -- never zero reach.",
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
           "mining_fluid": {
             "description": "`mineable_properties.required_fluid`: the fluid that must be piped in\nto mine this at all. Uranium ore needs sulfuric acid, and a character\nhas no pipe.",
             "type": [

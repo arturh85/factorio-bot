@@ -796,7 +796,10 @@ const SCHEMAS: Record<string, SchemaContract> = {
             bots_in_flight: {required: true, type: 'array'},
             waiting: {required: false, arrayOf: 'WaitingStep'},
             waiting_total: {required: false, type: 'integer'},
-            reach_corrections: {required: false, type: 'integer'}
+            reach_corrections: {required: false, type: 'integer'},
+            ground_generate_calls: {required: false, type: 'integer'},
+            ground_generated_chunks: {required: false, type: 'integer'},
+            ground_generate_failures: {required: false, type: 'integer'}
         },
         action_dispatched: {
             id: {required: true, type: 'integer'},

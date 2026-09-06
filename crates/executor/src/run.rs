@@ -1297,6 +1297,53 @@ async fn perform<A: Actuator + ?Sized>(
         // a verdict gets exactly one of these") would have nothing to record
         // against the dispatch the scheduler already wrote down.
         ActionKind::Evacuate { to } => act.walk(bot, to.clone(), 0.0, EVACUATE_RADIUS).await,
+        // Same shape as `Evacuate` and for the same reason: the scheduler has
+        // already walked the bot here to satisfy this action's own
+        // `AtPosition`, and there is nothing else to ask the game for --
+        // charting is the *engine's* response to a character standing
+        // somewhere new, not a verb anybody calls. The re-confirmation walk is
+        // what gives the action a verdict to record.
+        //
+        // The radius is the planner's own `SURVEY_RADIUS` rather than
+        // `EVACUATE_RADIUS`: a survey buys chunks, and half a chunk of slack
+        // costs no ground. Asking for evacuation's precision here would fail
+        // walks over float noise for no gain.
+        ActionKind::Survey { to } => {
+            // **Generate before walking, or the walk cannot happen at all.**
+            // A bot cannot path into ungenerated ground -- measured on seed
+            // 31337, where x=200 is reached and x=300 through x=600 all fail
+            // with `failed to path find` -- so a survey aimed at unexplored
+            // ground is refused before it is dispatched unless the ground is
+            // made first. This is the one call in the executor a human player
+            // could not make, it is clamped mod-side to the reveal a character
+            // gets by standing somewhere, and `Actuator::ground_generated`
+            // counts it into `EventKind::BatchProgress` so a run discloses it.
+            //
+            // A failure here is **not** fatal to the action: the ground may
+            // already exist, and the walk is the thing that decides whether
+            // the survey worked. Logged and stepped past, so a server whose
+            // BotBridge predates this verb still walks its surveys over ground
+            // it already has rather than failing every one of them.
+            // A failure here is **not** fatal to the action: the ground may
+            // already exist, and the walk is what decides whether the survey
+            // worked. It is not silent either -- this crate has no logger by
+            // design, so the failure is *counted*
+            // (`Actuator::ground_generated`'s third number) and reaches
+            // `EventKind::BatchProgress`. A run against a server whose
+            // BotBridge predates this verb therefore reads as "asked N times,
+            // failed N times, made 0 chunks" rather than as a run that simply
+            // found no new ground.
+            let _ = act
+                .generate_chunks(to, factorio_bot_planner::method::scout::SURVEY_CHUNK_RADIUS)
+                .await;
+            act.walk(
+                bot,
+                to.clone(),
+                0.0,
+                factorio_bot_planner::method::scout::SURVEY_RADIUS,
+            )
+            .await
+        }
     }
 }
 

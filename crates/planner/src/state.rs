@@ -4752,6 +4752,55 @@ impl PlanState {
         }
     }
 
+    /// Whether the model has ground for the tile under `point`.
+    ///
+    /// One probe of [`Self::charting`], on its own: the same one-tile query
+    /// against the tile tree, with the same meaning. A hit means the mod
+    /// wrote that chunk's tiles out (`writeout_tiles`), so the chunk is
+    /// charted -- **not** that anything interesting stands there, and a miss
+    /// means the chunk was never written out rather than that the ground is
+    /// empty.
+    ///
+    /// Exists so [`crate::method::scout`] can ask cell by cell over its
+    /// lattice, where `charting`'s fixed seventeen probes are the wrong
+    /// shape.
+    #[must_use]
+    pub fn is_charted(&self, point: &Position) -> bool {
+        !self
+            .base
+            .entity_graph
+            .tiles_within(&tile_box(point))
+            .is_empty()
+    }
+
+    /// The nearest charted enemy structure to `from` -- its name, its
+    /// position and how far away it is -- or `None` when the model holds
+    /// none.
+    ///
+    /// A read of [`factorio_bot_core::graph::entity_graph::EntityGraph::nearest_threat`],
+    /// lifted onto `PlanState` so a method can ask it the way it asks
+    /// [`Self::charting`], rather than reaching past the state into the graph.
+    ///
+    /// # `None` is *unknown*, never *safe*
+    ///
+    /// This is the same asymmetry [`Self::charting`] has and it matters more
+    /// here, because the caller is [`crate::method::scout::Scout`] -- which
+    /// asks precisely while sending a bot towards ground **nothing has
+    /// charted**, so `None` is the expected answer at the frontier and is the
+    /// one place it must not be read as an all-clear. The stand-off this
+    /// feeds can only ever avoid nests somebody has already seen; the ring
+    /// beyond the frontier is unknown by construction, which is the argument
+    /// for exploring one ring at a time and re-planning, and not for
+    /// exploring further on the strength of an empty answer.
+    ///
+    /// Distances are Euclidean (`calculate_distance`), matching
+    /// `EntityGraph`'s own measurement -- deliberately not
+    /// `Position::distance`, which is Manhattan despite the name.
+    #[must_use]
+    pub fn nearest_threat(&self, from: &Position) -> Option<(String, Position, f64)> {
+        self.base.entity_graph.nearest_threat(from)
+    }
+
     /// [`Self::charting`] with the frontier and the resource census attached:
     /// the sentence a `NotCharted` refusal carries.
     ///

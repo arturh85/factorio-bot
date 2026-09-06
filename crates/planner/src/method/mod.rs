@@ -8,6 +8,7 @@ pub mod extract;
 pub mod have;
 pub mod power;
 pub mod produce;
+pub mod scout;
 pub mod util;
 
 use crate::action::{Action, Actor, Condition, Effect};

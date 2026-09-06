@@ -1031,6 +1031,21 @@ export type EventKind =
            *  It states no verdict -- zero means it could be tightened, a
            *  rising number means it is too thin. */
           reach_corrections: number;
+          /** The disclosure for the one act in this project a player cannot
+           *  perform: how many times this batch asked the game to *create
+           *  ground* (`generate_chunks`), how many chunks that made, and how
+           *  many asks failed. A bot cannot walk into ungenerated ground --
+           *  the pathfinder refuses -- so exploration asks for it explicitly,
+           *  clamped to the reveal a character standing there would have got
+           *  for free.
+           *
+           *  States no verdict. `ground_generate_calls: 0` is a run that never
+           *  explored, which is every run before 2026-09-06. Calls with no
+           *  chunks and no failures is ground that already existed; failures
+           *  equal to calls is the verb not working. */
+          ground_generate_calls: number;
+          ground_generated_chunks: number;
+          ground_generate_failures: number;
       }
     | {
           kind: 'action_dispatched';

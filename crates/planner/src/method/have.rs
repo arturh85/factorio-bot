@@ -244,6 +244,30 @@ pub fn holds(goal: &Goal, state: &PlanState) -> Option<bool> {
         // patch, and nothing observes output. Unanswerable, not unmet.
         Goal::Extracted { .. } => None,
         Goal::Built { .. } => None,
+        // A *state*, and one the model can answer exactly. Answering here as
+        // well as inside `Scout` is what makes a charted disc
+        // `already-satisfied` -- so a replan over ground the last plan
+        // charted expands to nothing and walks nobody, which is the property
+        // that lets a supervisor loop re-issue the goal every round without
+        // paying for it twice.
+        //
+        // **It asks `Scout`'s own question, not `PlanState::charting`'s.**
+        // The two disagree, and letting them was a live bug: `charting` is
+        // seventeen fixed probes, and on the seed-31337 t=0 dump every one of
+        // them lands inside the +/-320 the map was created with for any
+        // radius up to ~320. So `charted:0:0:256` read as *satisfied* while
+        // `Scout`'s lattice still had all eight ring-1 cells to visit, and
+        // the goal silently planned nothing -- `AlreadySatisfied` is
+        // registered first, so it never even reached `Scout`. One predicate,
+        // in one place, is the only way these cannot drift.
+        //
+        // Note what this does *not* claim: that anything was found there. See
+        // `Goal::Charted`.
+        Goal::Charted { around, radius } => Some(
+            crate::method::scout::survey_plan(state, around, *radius)
+                .visit
+                .is_empty(),
+        ),
         Goal::All(goals) => {
             let mut answer = Some(true);
             for g in goals {
@@ -4930,6 +4954,9 @@ pub fn default_registry() -> MethodRegistry {
         .with(Box::new(Chop))
         .with(Box::new(Mine))
         .with(Box::new(crate::method::extract::Extract))
+        // Claims `Goal::Charted`, which nothing else claims, so where it sits
+        // changes no other goal's method. See `method::scout`.
+        .with(Box::new(crate::method::scout::Scout))
         .with(Box::new(Researched { bots: Vec::new() }))
         .with(Box::new(crate::method::produce::BuildCell))
         // Its sibling, and disjoint from it by construction: `BuildCell`
@@ -6373,6 +6400,9 @@ pub fn registry_for(bots: &[BotId]) -> MethodRegistry {
         }))
         .with(Box::new(Mine))
         .with(Box::new(crate::method::extract::Extract))
+        // Claims `Goal::Charted`, which nothing else claims, so where it sits
+        // changes no other goal's method. See `method::scout`.
+        .with(Box::new(crate::method::scout::Scout))
         // Roster-aware since 2026-09-05: the pack bill is dealt across these
         // bots and each delivers its share to the lab itself. See the
         // method's `expand`.
@@ -7859,6 +7889,7 @@ mod tests {
                 ActionKind::Research { .. } => "research",
                 ActionKind::SetRecipe { .. } => "set_recipe",
                 ActionKind::Evacuate { .. } => "evacuate",
+                ActionKind::Survey { .. } => "survey",
             })
             .collect();
         assert!(
@@ -8464,6 +8495,7 @@ mod tests {
                 ActionKind::Research { .. } => "research",
                 ActionKind::SetRecipe { .. } => "set_recipe",
                 ActionKind::Evacuate { .. } => "evacuate",
+                ActionKind::Survey { .. } => "survey",
             })
             .collect();
         assert_eq!(kinds.iter().filter(|k| **k == "place").count(), 1);

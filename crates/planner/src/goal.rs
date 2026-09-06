@@ -193,6 +193,40 @@ pub enum Goal {
         /// Where the block goes: a fixed anchor, a hint, or nothing.
         site: Site,
     },
+    /// The ground within `radius` of `around` has been *looked at*.
+    ///
+    /// The exploration primitive, and deliberately the smallest one that is
+    /// honest. Every other goal here names a thing to end up with; this one
+    /// names ground to end up having seen, because the refusal it answers --
+    /// [`crate::PlannerError::NotCharted`] -- is the one refusal in the crate
+    /// that no amount of crafting, research or building can clear. A plan
+    /// that needs copper it has never seen cannot want copper harder; it has
+    /// to send somebody to look.
+    ///
+    /// # Why a disc and not a resource name
+    ///
+    /// "Chart me some crude oil" is not a goal a planner can honestly claim:
+    /// whether a well exists out there is exactly the thing nobody knows
+    /// until the ground is charted, so a method claiming it would be
+    /// promising an outcome it cannot deliver and would have no terminating
+    /// condition when the map genuinely has none. A disc is checkable before
+    /// and after -- [`crate::state::PlanState::charting`] answers it with the
+    /// same seventeen probes `NotCharted` already reports against -- so the
+    /// goal is satisfied by an act the bots actually performed rather than by
+    /// the map's luck.
+    ///
+    /// # It is satisfied by *charting*, not by finding
+    ///
+    /// A survey that walks the whole disc and comes back having seen no
+    /// copper has **succeeded**. That is the correct answer to "go and look",
+    /// and it converts `NotCharted` ("unexplored, so unknown") into the
+    /// genuinely different `NoApplicableMethod` ("looked, and it is not
+    /// there") -- which is the whole value of the distinction piece 1 of
+    /// `docs/superpowers/specs/2026-09-04-exploration-design.md` drew.
+    Charted {
+        around: Position,
+        radius: f64,
+    },
     All(Vec<Goal>),
 }
 
@@ -224,6 +258,9 @@ impl std::fmt::Display for Goal {
                     Site::Anywhere => "anywhere".to_string(),
                 };
                 write!(f, "build {}-byte block {}", blueprint.len(), where_)
+            }
+            Goal::Charted { around, radius } => {
+                write!(f, "chart within {:.0} tiles of {}", radius, around)
             }
             Goal::All(goals) => write!(f, "all of {} goals", goals.len()),
         }

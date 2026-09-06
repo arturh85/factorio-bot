@@ -4860,6 +4860,82 @@ function rcon_world_snapshot()
 	}))
 end
 
+-- The furthest a single `generate_chunks` call may reach, in chunks.
+--
+-- **Four**, which is the reveal a character gets for free by standing
+-- somewhere. Measured on a live 2.1.17 server rather than assumed: a character
+-- placed on virgin ground causes the engine to generate a 9x9 block of chunks
+-- centred on it -- `x 42..50, y 42..50` for a character at (1500, 1500), and
+-- `x -51..-43, y 42..50` for one at (-1500, 1500), 81 chunks both times.
+--
+-- The clamp is the whole honesty argument for this verb, so it lives in the
+-- mod where it cannot be argued away by a caller: one call buys exactly the
+-- ground a character standing at that point would have been given, and no
+-- more. A caller wanting a wider area has to walk a bot and ask again, which
+-- is the cost a player pays.
+local GENERATE_CHUNKS_MAX_RADIUS = 4
+
+-- Ask the engine to generate the ground around a position.
+--
+-- **Why this exists.** A bot cannot walk into ungenerated ground: the game's
+-- pathfinder returns no path for any destination past the edge of the
+-- generated world, so `rcon.move` refuses before dispatching anything.
+-- Measured on seed 31337, whose fresh map is 400 chunks spanning
+-- `[-320, 320)`: x=100 and x=200 are reached, x=300 through x=600 all fail
+-- with `failed to path find`, and a five-leg tour of the four diagonals
+-- refused every leg. So exploration cannot be done by walking alone, and this
+-- is the missing half.
+--
+-- **Why it is not the cheat it looks like.** A *human* player walks into
+-- unexplored ground all the time -- they hold a key, and the engine generates
+-- the ground around them as they go. Our bots cannot only because we drive
+-- them through `request_path`, which will not path into chunks that do not
+-- exist. That is an artefact of how we control a character, not a rule of the
+-- game. Clamped to `GENERATE_CHUNKS_MAX_RADIUS`, this restores the parity a
+-- player already has, one reveal at a time.
+--
+-- **What is still not honest about it**, and why the caller records it: the
+-- ground is generated *before* the bot gets there rather than as it arrives,
+-- so a plan can see one reveal further than a player would at the same moment.
+-- That is small and bounded, and it is disclosed rather than argued away --
+-- the executor writes an event naming every call. See
+-- `docs/superpowers/notes/2026-09-06-exploration.md`.
+--
+-- It charts nothing: `force.is_chunk_charted` is false for every chunk this
+-- makes, exactly as it is for ground a character is standing on. The world
+-- model learns through `on_chunk_generated`, which this fires.
+function rcon_generate_chunks(x, y, radius)
+	local surface = game.surfaces[1]
+	if radius == nil or radius > GENERATE_CHUNKS_MAX_RADIUS then
+		radius = GENERATE_CHUNKS_MAX_RADIUS
+	end
+	if radius < 0 then
+		radius = 0
+	end
+	local before = 0
+	for _ in surface.get_chunks() do
+		before = before + 1
+	end
+	surface.request_to_generate_chunks({x, y}, radius)
+	-- Synchronously, so the reply describes ground that exists rather than
+	-- ground that has been queued: the caller's next act is to walk a bot
+	-- there, and a queued chunk would fail the pathfinder exactly as an
+	-- ungenerated one does.
+	surface.force_generate_chunk_requests()
+	local after = 0
+	for _ in surface.get_chunks() do
+		after = after + 1
+	end
+	rcon.print(helpers.table_to_json({
+		x = x,
+		y = y,
+		radius = radius,
+		chunks_before = before,
+		chunks_after = after,
+		generated = after - before,
+	}))
+end
+
 -- The action ids waiting on each technology: `research_actions()[name]` is an
 -- array of ids, all of which settle when that technology finishes.
 --
@@ -6446,6 +6522,7 @@ remote.add_interface("botbridge", {
 	set_tick_paused=rcon_set_tick_paused,
 	player_force=rcon_player_force,
 	world_snapshot=rcon_world_snapshot,
+	generate_chunks=rcon_generate_chunks,
 	add_research=rcon_add_research,
 	player_info=rcon_player_info,
 	place_entity=rcon_place_entity,

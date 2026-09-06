@@ -5,7 +5,7 @@ use crate::errors::{
     RconRadiusLimitReached, RconReplyNotJson, RconTimeout, RconUnexpectedEmptyResponse,
     RconUnexpectedOutput, RconWalkFallsShort,
 };
-use crate::factorio::snapshot::WorldSnapshot;
+use crate::factorio::snapshot::{GeneratedChunks, WorldSnapshot};
 use crate::factorio::ticks::{ActionTicks, take_tick_stamp};
 use crate::factorio::util::{
     add_to_rect, blueprint_build_area, build_entity_path, calculate_distance, hashmap_to_lua,
@@ -4341,6 +4341,60 @@ impl FactorioRcon {
     /// this client does not do. [`FactorioRcon::remote_call_json`] is what
     /// makes that limit *loud* instead of silent if a bigger base, a wider
     /// radius or more mods ever push a reply past it.
+    /// Ask the engine to generate the ground around a position.
+    ///
+    /// **This is the half of exploration that walking cannot do.** A bot
+    /// cannot walk into ungenerated ground: the game's pathfinder returns no
+    /// path for any destination past the edge of the generated world, so
+    /// [`FactorioRcon::move_player`] refuses before dispatching anything.
+    /// Measured live on seed 31337, whose fresh map is 400 chunks spanning
+    /// `[-320, 320)` -- x=100 and x=200 reached, x=300 through x=600 all
+    /// `failed to path find`, and a five-leg tour of the diagonals refused
+    /// every leg.
+    ///
+    /// # It is bounded, and the bound is the point
+    ///
+    /// `radius` is in **chunks** and the mod clamps it to 4, which is the
+    /// reveal a character standing there would have been given for free (a
+    /// character placed on virgin ground generates a 9x9 block centred on it,
+    /// 81 chunks, measured at two locations). The clamp is enforced mod-side
+    /// so no caller can widen it; asking for more silently gets four.
+    ///
+    /// # It is not `force.chart`
+    ///
+    /// It reveals nothing to the force -- `is_chunk_charted` stays false for
+    /// every chunk it makes, exactly as it does for ground a character is
+    /// standing on. The world model learns only what `on_chunk_generated`
+    /// writes out, which is the same channel every other chunk arrives
+    /// through.
+    ///
+    /// # It is still not free, and the caller must record it
+    ///
+    /// The ground appears *before* the bot reaches it rather than as it
+    /// arrives, so a plan can see one reveal further than a player would at
+    /// the same moment. Small and bounded, but real: every call must reach
+    /// the run record, the way `research_trigger_emulated` does. See
+    /// `docs/superpowers/notes/2026-09-06-exploration.md`.
+    pub async fn generate_chunks(
+        &self,
+        position: &Position,
+        radius: u32,
+    ) -> Result<GeneratedChunks> {
+        let json = self
+            .remote_call_json(
+                "generate_chunks",
+                vec![
+                    position.x().to_string(),
+                    position.y().to_string(),
+                    radius.to_string(),
+                ],
+            )
+            .await?;
+        serde_json::from_str(json.as_str())
+            .into_diagnostic()
+            .wrap_err_with(|| format!("failed to parse the generate_chunks reply: {json}"))
+    }
+
     pub async fn world_snapshot(&self) -> Result<WorldSnapshot> {
         let json = self.remote_call_json("world_snapshot", vec![]).await?;
         serde_json::from_str(json.as_str())

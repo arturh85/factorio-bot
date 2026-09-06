@@ -58,6 +58,28 @@ position.
 A green test proves nothing until it has been seen to go red for the right
 reason. Treat "it passes" as an unverified claim about the test.
 
+## The sibling: a crate-scoped check cannot see a crate it does not compile
+
+Same night, same shape, different surface. A `PlannerError::NoSiteFound`
+variant was added three tasks before anyone noticed that
+`crates/scripting_lua/src/globals/goal/mod.rs:355` matches `PlannerError`
+exhaustively. **Three tasks passed and two reviews signed off**, because
+every brief said `cargo test -p factorio-bot-planner` — so the crate that
+breaks was never compiled once. The Global Constraints did say
+`--workspace`, but no task *step* ever did, which made the constraint
+decorative.
+
+**A task that adds a variant to a shared enum must build every crate that
+matches on it.** A crate-scoped check cannot see a break in a crate it does
+not compile, and neither can a crate-scoped review. If a brief names a
+crate-scoped command in its steps, that is the command that will be run,
+whatever the preamble says.
+
+Known exhaustive matches in this workspace, as of 2026-09-06: over
+`PlannerError`, only `goal/mod.rs:355` — everything else uses a wildcard or
+`matches!`. Over `Goal`, three: `method/have.rs`'s `holds()`,
+`scripting_lua/globals/goal/value.rs`, and `server/game/control.rs`.
+
 ## What actually caught them
 
 Measurement against the live game, every time. Not review, not more tests,

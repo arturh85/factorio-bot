@@ -489,6 +489,175 @@ pub fn search_site(
     })
 }
 
+/// What a whole block draws from an electric network, and what it could not
+/// price.
+///
+/// `FurnaceLine` is why this exists. CLAUDE.md records that it stands with
+/// "no generator at all" and that 138 of its 179 entities have never moved an
+/// item — but it has never said what the block *draws*, so "it needs power"
+/// has been a qualitative claim about the project's flagship fixture.
+///
+/// # `unpriced` is not a rounding error
+///
+/// [`PlanState::consumer_draw_kw`] answers `None` for two different things and
+/// cannot tell them apart: a machine deliberately absent from the table because
+/// it is a *burner* (a stone furnace draws 90 kW of coal, and an entry here
+/// would be a number in the wrong units), and a prototype the table simply does
+/// not name. Its own doc is explicit that this is the one table in `state.rs`
+/// whose unknown name errs towards **permitting** — an unmodelled machine on
+/// the network is headroom that is not there.
+///
+/// So this returns the names it could not price rather than folding them into
+/// zero. A caller sizing a plant can then say "624 kW plus six prototypes I
+/// cannot account for" instead of "624 kW", which are different claims.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct BlockDemand {
+    /// Total kW of the entities the demand table does name.
+    pub kw: f64,
+    /// How many entities that total came from.
+    pub consumers: usize,
+    /// Distinct prototype names the table does not carry, deduplicated and
+    /// ordered. Every burner in the block lands here too, which is correct and
+    /// is why the field is named for what it *is* rather than for "unknown".
+    pub unpriced: std::collections::BTreeSet<String>,
+}
+
+/// Sum [`PlanState::consumer_draw_kw`] over a decoded blueprint.
+///
+/// Counts every entity the blueprint names, standing or not: this answers
+/// "what will this block draw once built", not "what does it draw now".
+pub(crate) fn blueprint_demand(state: &PlanState, bp: &Blueprint) -> BlockDemand {
+    let mut demand = BlockDemand::default();
+    for e in &bp.entities {
+        match state.consumer_draw_kw(&e.name) {
+            Some(kw) => {
+                demand.kw += kw;
+                demand.consumers += 1;
+            }
+            None => {
+                demand.unpriced.insert(e.name.clone());
+            }
+        }
+    }
+    demand
+}
+
+/// Whether a block can distribute the power it draws, using only its own poles.
+///
+/// **This is a property of the blueprint, not of the world**, which is why it
+/// lives here rather than in `method::power`. A block whose poles do not reach
+/// its own machines is defective: the planner should say so by name, not
+/// compensate by running extra poles through somebody's layout.
+///
+/// Establishing that also settles what the planner owes a block. Measured on
+/// `FurnaceLine`: its 13 poles form **one** wired component and supply **all
+/// 48** of its inserters. So the block distributes for itself, and the only
+/// thing it has ever lacked is generation — "13 poles and no generator at all".
+/// That reduces powering a block to **one hop**, from a supply anchor to any
+/// one of the block's own poles, which is the point-to-point problem
+/// [`crate::method::power::ensure_powered`] already solves. No region-covering
+/// variant is needed, and asking for one would have been the wrong request.
+#[derive(Debug, Clone)]
+pub(crate) struct BlockPower {
+    pub demand: BlockDemand,
+    pub poles: usize,
+    /// Poles unreachable by wire from the first pole. Non-zero means the
+    /// block's own network is in pieces, so powering one piece leaves the
+    /// others dark however good the hop is.
+    pub disconnected_poles: usize,
+    /// Consumers no pole of this block supplies, by name and offset.
+    pub uncovered: Vec<(String, Position)>,
+}
+
+impl BlockPower {
+    /// Can this block distribute its own draw once any one of its poles is fed?
+    pub fn distributes_itself(&self) -> bool {
+        self.demand.consumers == 0 || (self.disconnected_poles == 0 && self.uncovered.is_empty())
+    }
+}
+
+/// Analyse a decoded blueprint's own power distribution at `anchor`.
+///
+/// Connectivity uses [`crate::method::power::POLE_WIRE_REACH_TILES`], the small
+/// pole's reach. A block mixing pole types would need each pole's own reach;
+/// every fixture here uses `small-electric-pole` only, and a medium pole reaches
+/// **further**, so this errs towards reporting a split that is not there rather
+/// than towards missing one — the safe direction for a check whose job is to
+/// refuse.
+///
+/// Coverage asks [`PlanState::pole_would_supply`] per consumer, with the
+/// consumer's own collision box as the area. That is the call's intended use:
+/// overlap and coverage coincide for a single entity, and diverge only when a
+/// whole region is passed as the area.
+pub(crate) fn blueprint_power(state: &PlanState, bp: &Blueprint, anchor: &Position) -> BlockPower {
+    use crate::method::power::{POLE, POLE_WIRE_REACH_TILES};
+
+    // Identify poles through [`PlanState::pole_would_supply`] rather than by
+    // name: it answers `false` for any prototype whose supply extent this crate
+    // does not know, so testing a candidate against its own tile recognises
+    // EVERY pole type the planner models, not just `POLE`. `power.rs` compares
+    // `name == POLE` because it places small poles; a blueprint may carry any.
+    let poles: Vec<Position> = bp
+        .entities
+        .iter()
+        .filter(|e| {
+            let at = anchor.add(&e.offset);
+            let own_tile = Rect::new(
+                &Position::new(at.x() - 0.05, at.y() - 0.05),
+                &Position::new(at.x() + 0.05, at.y() + 0.05),
+            );
+            state.pole_would_supply(&e.name, &at, &own_tile)
+        })
+        .map(|e| anchor.add(&e.offset))
+        .collect();
+
+    // One flood over the wire graph. `poles` is small (13 for the largest
+    // fixture here), so an O(n^2) walk costs nothing and needs no union-find.
+    let mut reached = vec![false; poles.len()];
+    if !poles.is_empty() {
+        reached[0] = true;
+        let mut stack = vec![0usize];
+        while let Some(i) = stack.pop() {
+            for j in 0..poles.len() {
+                if !reached[j] && calculate_distance(&poles[i], &poles[j]) <= POLE_WIRE_REACH_TILES
+                {
+                    reached[j] = true;
+                    stack.push(j);
+                }
+            }
+        }
+    }
+    let disconnected_poles = reached.iter().filter(|r| !**r).count();
+
+    let mut uncovered = Vec::new();
+    for e in &bp.entities {
+        if state.consumer_draw_kw(&e.name).is_none() {
+            continue;
+        }
+        let world = anchor.add(&e.offset);
+        let facing = Direction::from_u8(e.direction).unwrap_or(Direction::North);
+        let Some(area) = state.collision_area_facing(&e.name, &world, facing) else {
+            // No prototype, so no box to test. Not "covered": the same case
+            // `siting_occupant` answers `Unknown` for.
+            uncovered.push((e.name.clone(), world));
+            continue;
+        };
+        if !poles
+            .iter()
+            .any(|p| state.pole_would_supply(POLE, p, &area))
+        {
+            uncovered.push((e.name.clone(), world));
+        }
+    }
+
+    BlockPower {
+        demand: blueprint_demand(state, bp),
+        poles: poles.len(),
+        disconnected_poles,
+        uncovered,
+    }
+}
+
 /// The first thing standing in this block's way at `anchor`, if any.
 ///
 /// An entity already standing AS DESIGNED is not an obstruction — it is this
@@ -915,6 +1084,49 @@ impl Method for BuildBlock {
                     occupant: occupant.to_string(),
                 });
             }
+        }
+
+        // Can this block distribute the power it draws, using its own poles?
+        //
+        // A blueprint whose poles do not reach its own machines is **defective**
+        // and is refused by name rather than compensated for: nothing here may
+        // run extra poles through somebody's layout, and a block that stands
+        // with half its consumers dark is the `FurnaceLine` failure shape --
+        // placed 100% correctly, drawing nothing, reading as success.
+        //
+        // Checked against the whole blueprint rather than only what is missing:
+        // a pole already standing is still doing the distributing.
+        //
+        // Both real fixtures pass, measured rather than assumed --
+        // `FurnaceLine` 13 poles / 0 disconnected / 0 uncovered, `MinerLine`
+        // 3 poles / 0 uncovered with the drills' real 3x3 boxes. So this
+        // refuses nothing that works today.
+        let power = blueprint_power(&ctx.state, &bp, &anchor);
+        if !power.distributes_itself() {
+            let mut why = Vec::new();
+            if power.disconnected_poles > 0 {
+                why.push(format!(
+                    "{} of its {} poles are not wired to the rest, so feeding one \
+                     leaves the others dark",
+                    power.disconnected_poles, power.poles
+                ));
+            }
+            if !power.uncovered.is_empty() {
+                let (name, at) = &power.uncovered[0];
+                why.push(format!(
+                    "{} of its {} electric consumers sit outside every pole's \
+                     supply area (first: {name} at {at})",
+                    power.uncovered.len(),
+                    power.demand.consumers
+                ));
+            }
+            return Err(PlannerError::BlueprintRefused {
+                reason: format!(
+                    "the block draws {:.0} kW but cannot distribute it: {}",
+                    power.demand.kw,
+                    why.join("; ")
+                ),
+            });
         }
 
         // Would building this block seal one of the bots into a pocket?
@@ -2966,6 +3178,214 @@ mod enclosure_guard_tests {
                 );
             }
             Err(other) => panic!("expected an evacuation or an enclosure refusal, got {other:?}"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod block_demand_tests {
+    use super::*;
+    use crate::ids::BotId;
+    use factorio_bot_core::test_utils::fixture_world;
+    use std::sync::Arc;
+
+    fn state() -> PlanState {
+        PlanState::from_world(Arc::new(fixture_world()), &[BotId(1)])
+    }
+
+    fn fixture(name: &str) -> Blueprint {
+        let src = std::fs::read_to_string(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .and_then(|p| p.parent())
+                .expect("crates/planner -> crates -> repo root")
+                .join("scripts/rcontest.lua"),
+        )
+        .expect("rcontest.lua readable");
+        let needle = format!("{name} = \"");
+        let start = src
+            .find(&needle)
+            .unwrap_or_else(|| panic!("{name} in rcontest.lua"))
+            + needle.len();
+        let end = start + src[start..].find('"').expect("closing quote");
+        decode(&src[start..end]).unwrap_or_else(|e| panic!("{name} decodes: {e:?}"))
+    }
+
+    /// The number CLAUDE.md has always described qualitatively.
+    ///
+    /// `FurnaceLine` is 48 electric inserters at 13 kW of duty cycle each. It
+    /// carries 13 poles and **no generator**, which is why 138 of its 179
+    /// entities have never moved an item — coverage without capacity. Pinning
+    /// the figure turns "it needs power" into a number a plant can be sized
+    /// against.
+    #[test]
+    fn furnace_line_draws_624_kw_and_carries_nothing_that_makes_any() {
+        let demand = blueprint_demand(&state(), &fixture("FurnaceLine"));
+        assert_eq!(demand.consumers, 48, "48 electric inserters");
+        assert!(
+            (demand.kw - 624.0).abs() < 1e-9,
+            "48 inserters at 13 kW is 624, got {}",
+            demand.kw
+        );
+        // Everything else in the block is passive or burner-fuelled: belts,
+        // furnaces, poles, lamps, splitters, underground belts. None of them
+        // draws from a network, and none of them makes any either.
+        for name in &demand.unpriced {
+            assert!(
+                !matches!(name.as_str(), "steam-engine" | "solar-panel" | "boiler"),
+                "{name} would be generation, and the whole point of this \
+                 fixture is that it has none"
+            );
+        }
+    }
+
+    /// `FurnaceLine` distributes for itself. The only thing it lacks is a
+    /// machine that makes power.
+    ///
+    /// This is the measurement that decided the API question with the other
+    /// session: if a block's own poles did NOT cover it, powering a block would
+    /// mean covering a region, and `ensure_powered`'s `boxes_overlap` rule
+    /// would silently satisfy a 29x11 bbox from one corner. They do cover it,
+    /// so it is one hop to any one of these poles and the existing API is
+    /// right.
+    ///
+    /// It also re-reads the FurnaceLine finding. CLAUDE.md records 138 of 179
+    /// entities never moving an item as though the block were at fault; the
+    /// block is fine, and **one missing generator** is the whole story.
+    #[test]
+    fn furnace_line_distributes_its_own_power_and_only_lacks_a_generator() {
+        let s = state();
+        let bp = fixture("FurnaceLine");
+        let power = blueprint_power(&s, &bp, &Position::new(0.0, 0.0));
+
+        assert_eq!(power.poles, 13, "the block ships 13 poles");
+        assert_eq!(
+            power.disconnected_poles, 0,
+            "all 13 must be one wired component, or feeding one leaves the rest dark"
+        );
+        assert!(
+            power.uncovered.is_empty(),
+            "every consumer must sit in some pole's supply area; uncovered: {:?}",
+            power.uncovered
+        );
+        assert!(power.distributes_itself());
+        assert!(
+            (power.demand.kw - 624.0).abs() < 1e-9,
+            "and the hop has to carry 624 kW, got {}",
+            power.demand.kw
+        );
+    }
+
+    /// A block that draws power and carries no pole is refused by name.
+    ///
+    /// The guard has to FIRE, not merely exist. Every fixture in the tree
+    /// passes it -- `FurnaceLine` and `MinerLine` both distribute for
+    /// themselves -- so without a deliberately defective blueprint the check
+    /// would be indistinguishable from one that never runs, which is the
+    /// failure shape this session catalogued four causes of.
+    ///
+    /// One electric inserter, no pole: 13 kW it cannot distribute.
+    #[test]
+    fn a_block_that_draws_power_with_no_pole_is_refused_by_name() {
+        let text = include_str!("../../../core/tests/blueprints/unpowered_inserter.txt")
+            .trim()
+            .to_string();
+        let mut ctx = ExpansionCtx::new(state(), BotId(1));
+        let goal = Goal::Built {
+            blueprint: text,
+            site: Site::At(Position::new(0.0, 0.0)),
+        };
+        match BuildBlock.expand(&goal, &mut ctx) {
+            Err(PlannerError::BlueprintRefused { reason }) => {
+                assert!(
+                    reason.contains("13 kW") && reason.contains("supply area"),
+                    "the refusal must name the draw and what is wrong; got: {reason}"
+                );
+            }
+            Err(other) => panic!("expected a distribution refusal, got {other:?}"),
+            Ok(steps) => panic!(
+                "a block drawing 13 kW with no pole must be refused, not planned \
+                 into {} steps",
+                steps.len()
+            ),
+        }
+    }
+
+    /// `MinerLine` is the fixture that decides whether a coverage refusal can
+    /// be a hard error, so its real numbers are pinned rather than estimated.
+    ///
+    /// A hand approximation using a 0.8-wide box said 7 of its 13 drills were
+    /// uncovered. An `electric-mining-drill` is **3x3**, and coverage is an
+    /// overlap test against the machine's own box, so the approximation was
+    /// measuring the wrong rectangle. This asserts what the real boxes give.
+    #[test]
+    fn miner_line_coverage_is_measured_with_the_real_collision_boxes() {
+        let s = state();
+        let power = blueprint_power(&s, &fixture("MinerLine"), &Position::new(0.0, 0.0));
+        eprintln!(
+            "MinerLine: consumers={} kw={} poles={} disconnected={} uncovered={}",
+            power.demand.consumers,
+            power.demand.kw,
+            power.poles,
+            power.disconnected_poles,
+            power.uncovered.len()
+        );
+        for u in &power.uncovered {
+            eprintln!("  uncovered: {} at {}", u.0, u.1);
+        }
+        assert_eq!(power.demand.consumers, 13, "13 electric mining drills");
+        assert_eq!(power.poles, 3, "3 small electric poles");
+    }
+
+    /// A burner block has nothing to distribute, and must not read as a
+    /// distribution failure for having no poles.
+    #[test]
+    fn a_burner_block_distributes_itself_vacuously() {
+        let s = state();
+        let power = blueprint_power(&s, &fixture("TJunctionSmelter"), &Position::new(0.0, 0.0));
+        assert_eq!(power.poles, 0);
+        assert_eq!(power.demand.consumers, 0);
+        assert!(
+            power.distributes_itself(),
+            "zero consumers and zero poles is not a defect -- it is a block \
+             that needs no electricity"
+        );
+    }
+
+    /// The burner blocks must price at exactly zero, or a plant would be
+    /// planned for a line that needs no electricity at all.
+    ///
+    /// This is the case that makes `unpriced` worth returning: every entity in
+    /// these blocks lands there, and folding that into "0 kW" would look
+    /// identical to a block whose consumers are simply unknown.
+    #[test]
+    fn the_burner_blocks_draw_nothing_and_price_every_entity_as_unpriced() {
+        for name in ["TJunctionSmelter", "TwoRowSmelter", "MovingBlock"] {
+            let bp = fixture(name);
+            let demand = blueprint_demand(&state(), &bp);
+            assert_eq!(
+                demand.kw, 0.0,
+                "{name} is burner-only and must draw nothing"
+            );
+            assert_eq!(demand.consumers, 0, "{name} has no electric consumer");
+            assert!(
+                !demand.unpriced.is_empty(),
+                "{name} must report its burner prototypes as unpriced rather \
+                 than as an empty block"
+            );
+            // The distinction the struct exists for: these are burners, not
+            // unknowns, and the table's `None` cannot tell us which.
+            for proto in &demand.unpriced {
+                assert!(
+                    matches!(
+                        proto.as_str(),
+                        "stone-furnace" | "burner-inserter" | "transport-belt" | "iron-chest"
+                    ),
+                    "{name} contains {proto}, which is neither a known burner \
+                     nor priced -- if it is electric this block is not what it \
+                     claims to be"
+                );
+            }
         }
     }
 }

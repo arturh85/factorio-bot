@@ -362,7 +362,17 @@ impl std::error::Error for PlanRefusal {}
 ///   allow it, but `method::connect` has no caller, so no plan can belt coal
 ///   into a burner cell. A script acts on it by measuring what it has
 ///   (`supervisor.sustain`) rather than by asking for a plan that cannot
-///   exist.
+///   exist. Since the belted-fuel rung it means the narrower thing its own
+///   message says: the whole arrangement stands and there is nothing left to
+///   build, which is still not satisfaction -- only the record can say
+///   whether the rate held.
+/// - [`SustainNoFuelSource`](PlannerError::SustainNoFuelSource) and
+///   [`SustainNoRouteForFuel`](PlannerError::SustainNoRouteForFuel) -- the two
+///   ways a self-feeding cell fails to be placeable on a given map: no site on
+///   the fuel patch takes a drill with a buffer in front of it, and no belt run
+///   joins that buffer to a machine that has to burn it. Both are verdicts
+///   about **the ground**, and both name it: the second carries
+///   `method::connect`'s own sentence, including the blocked tiles.
 fn refusal_for(err: &PlannerError) -> Option<PlanRefusal> {
     use miette::Diagnostic;
 
@@ -389,7 +399,9 @@ fn refusal_for(err: &PlannerError) -> Option<PlanRefusal> {
         | PlannerError::ExtractionNotModelled { .. }
         | PlannerError::BlockGroundOccupied { .. }
         | PlannerError::NoSiteFound { .. }
-        | PlannerError::SustainSupplyNotStanding { .. } => true,
+        | PlannerError::SustainSupplyNotStanding { .. }
+        | PlannerError::SustainNoFuelSource { .. }
+        | PlannerError::SustainNoRouteForFuel { .. } => true,
 
         PlannerError::InsufficientItems { .. }
         | PlannerError::UnknownBot(_)

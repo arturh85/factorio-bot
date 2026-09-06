@@ -210,6 +210,113 @@ fn the_live_world_snapshot_contains_factorio_2_x_prototypes() {
     }
 }
 
+/// **Ore blocks nothing: the rule, read off the game's own prototypes.**
+///
+/// A resource entity's entire collision mask is the single `resource` layer,
+/// and no buildable prototype carries that layer — so Factorio lets a belt, a
+/// pole, a furnace or an assembler be built straight over an ore patch, and
+/// only a mining drill *wants* to be. The planner encoded the opposite for
+/// months (`PlanState::occupant_of` refused ore to everything but a drill),
+/// which failed in the safe direction and so surfaced only as `NoRoute` and
+/// `NoSiteFound`; see `docs/superpowers/notes/2026-09-06-ore-does-not-block.md`.
+///
+/// This is the evidence, not an illustration of it: 1,028 prototypes captured
+/// verbatim from a live 2.1.17 game, of which 579 declare a mask, of which
+/// exactly 12 name `resource` — and all 12 *are* resources, each with
+/// `["resource"]` and nothing else. A stone furnace's mask is character for
+/// character a burner mining drill's, which is why the drill's need for ore
+/// underfoot cannot be read off a mask at all.
+#[test]
+fn nothing_buildable_collides_with_the_resource_layer() {
+    let snapshot: WorldSnapshot = serde_json::from_str(WORLD_SNAPSHOT).expect("parses");
+    let masked: Vec<&FactorioEntityPrototype> = snapshot
+        .entity_prototypes
+        .iter()
+        .filter(|prototype| prototype.collision_mask.is_some())
+        .collect();
+    assert_eq!(snapshot.entity_prototypes.len(), 1028);
+    assert_eq!(
+        masked.len(),
+        579,
+        "how many prototypes declare a mask at all"
+    );
+
+    let on_the_resource_layer: Vec<&FactorioEntityPrototype> = masked
+        .iter()
+        .copied()
+        .filter(|prototype| {
+            prototype
+                .collision_mask
+                .as_ref()
+                .is_some_and(|layers| layers.iter().any(|layer| layer == "resource"))
+        })
+        .collect();
+
+    assert_eq!(
+        on_the_resource_layer.len(),
+        12,
+        "every prototype naming the resource layer: {:?}",
+        on_the_resource_layer
+            .iter()
+            .map(|prototype| prototype.name.as_str())
+            .collect::<Vec<_>>()
+    );
+    for prototype in &on_the_resource_layer {
+        assert_eq!(
+            prototype.entity_type, "resource",
+            "{} carries the resource layer without being a resource, so ore \
+             would block it and the rule below is wrong",
+            prototype.name
+        );
+        assert_eq!(
+            prototype.collision_mask.as_deref(),
+            Some(["resource".to_string()].as_slice()),
+            "{} is a resource whose mask is more than the resource layer",
+            prototype.name
+        );
+    }
+
+    // The control: the machine that must stand ON ore and one that has no
+    // business there declare the same mask, so nothing about standing on ore
+    // is expressible in a mask.
+    let mask_of = |name: &str| {
+        snapshot
+            .entity_prototypes
+            .iter()
+            .find(|prototype| prototype.name == name)
+            .unwrap_or_else(|| panic!("{name} is in a live 2.1 game"))
+            .collision_mask
+            .clone()
+            .unwrap_or_else(|| panic!("{name} declares a mask"))
+    };
+    assert_eq!(
+        mask_of("burner-mining-drill"),
+        mask_of("stone-furnace"),
+        "a drill and a furnace collide with exactly the same layers"
+    );
+    for buildable in [
+        "transport-belt",
+        "underground-belt",
+        "small-electric-pole",
+        "burner-inserter",
+        "assembling-machine-1",
+        "stone-furnace",
+        "wooden-chest",
+        "pipe",
+        "boiler",
+        "offshore-pump",
+        "straight-rail",
+        "stone-wall",
+        "burner-mining-drill",
+        "pumpjack",
+    ] {
+        assert!(
+            !mask_of(buildable).iter().any(|layer| layer == "resource"),
+            "{buildable} would be blocked by ore"
+        );
+    }
+}
+
 /// The two recipe defects, on a real recipe.
 ///
 /// 2.1 has no `Product::probability` and no `LuaRecipe::category`; the mod

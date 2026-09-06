@@ -10162,20 +10162,23 @@ mod tests {
         // searches at most 12 tiles out, so 20 catches the regression this
         // guards: the anchor slipping back towards the bot's start, 49.5 away.
         //
-        // It is structural, not tight. The measured `to_ore` here is
-        // **sqrt(2) ~= 1.414** — the ring search leaves the ore tile it starts
-        // on, because `is_position_free` now counts ore as occupying its tile,
-        // and settles on the first free diagonal neighbour — and no
-        // ore-anchored siting can exceed ~17. So this bound discriminates
-        // ore-anchored from origin-anchored and nothing finer.
+        // It is structural, not tight: no ore-anchored siting can exceed ~17,
+        // so this bound discriminates ore-anchored from origin-anchored and
+        // nothing finer.
+        //
+        // **Zero is allowed, and used to be forbidden here.** The furnace may
+        // now stand on the ore tile the search started from: the game builds
+        // over a patch (nothing buildable carries the `resource` collision
+        // layer) and this planner refused to until `ore-does-not-block`, which
+        // is what made the measured distance sqrt(2) — one diagonal step off
+        // the anchor — rather than 0. Burying ore a plan means to mine is still
+        // forbidden, by `covers_claimed_resource`, which is a claim about the
+        // plan and not about the ground.
         assert!(
             to_ore < 20.,
             "the furnace must be within reach of the ore, not merely nearer it: {}",
             to_ore
         );
-        // Zero would mean the furnace sits on the ore tile, which the game
-        // refuses to build on however well the plan's arithmetic works out.
-        assert!(to_ore > 0., "the furnace was sited on the ore tile itself");
     }
 
     #[test]

@@ -860,9 +860,6 @@ pub enum Occupant {
     /// researcher building a block near their own bots hits, and it is
     /// cleared by walking, not by moving the block.
     Character { player: PlayerId, on_roster: bool },
-    /// Ore. Occupancy by policy rather than by collision -- see
-    /// [`PlanState::occupant_of`]'s ore paragraph.
-    Resource,
     /// A footprint the game itself already refused a build at, this run.
     Refused,
     /// The world has no prototype for the entity, so its footprint cannot be
@@ -888,7 +885,6 @@ impl std::fmt::Display for Occupant {
                 player,
                 on_roster: false,
             } => write!(f, "character {player} is standing on it"),
-            Occupant::Resource => write!(f, "ore, which this planner will not bury"),
             Occupant::Refused => write!(f, "a footprint the game already refused a build at"),
             Occupant::Unknown => write!(f, "an entity this world has no prototype for"),
         }
@@ -2456,28 +2452,26 @@ impl PlanState {
 
     /// Is `name` a machine that has to stand **on** a resource to work?
     ///
-    /// The sibling of [`collides_with_water`](Self::collides_with_water), and
-    /// it exists for the same reason: [`is_area_clear_of`] counts a source of
-    /// occupancy that one class of entity is not subject to, and refusing that
-    /// class every site it could ever have is a total failure rather than a
-    /// rare one. A mining drill is *defined* by standing on ore, so before
-    /// this, `is_area_free` refused a drill everywhere on every map. Nothing
-    /// had noticed because the only thing this planner had ever placed was a
-    /// stone furnace, which wants to be *near* ore and never on it.
+    /// **This is a question about the machine, not about the ground, and it
+    /// decides no placement.** A drill that is not on ore mines nothing; that
+    /// is what this answers, and it is why `method::blueprint`'s
+    /// `drills_are_fed` and `nearest_ore_seed` ask it. Whether ore *blocks* a
+    /// placement is a different question with a different answer, and until
+    /// `ore-does-not-block` this predicate was used for both — see
+    /// [`occupant_of`](Self::occupant_of), which no longer counts ore at all.
+    ///
+    /// The conflation was expensive and silent, because it failed safe: ore
+    /// refused legal ground, so it surfaced as `NoRoute` and `NoSiteFound`
+    /// rather than as a factory that would not build. A belt route across a
+    /// patch was refused; a cell near any patch was refused a site; and
+    /// `MinerLine` could not site at any radius, because its own belt-and-pole
+    /// corridor ran over the ore its drills need.
     ///
     /// **Read from the prototype's `entity_type`, and deliberately not from
-    /// its `collision_mask`.** The mask is how `collides_with_water` decides,
-    /// and it cannot decide this one: **no building carries the `resource`
-    /// layer**. A stone furnace's 2.1.17 mask is `is_lower_object`,
-    /// `is_object`, `water_tile`, `item`, `object`, `player`, `meltable` —
-    /// exactly a drill's — and a resource entity collides on the `resource`
-    /// layer alone, so *Factorio itself would let a furnace be built on an ore
-    /// patch*. The rule `is_area_clear_of` enforces is therefore a **policy**
-    /// of this planner's — do not bury the patch you are about to mine; see
-    /// `cf89b493`, which moved siting off the copper patch edge — and not a
-    /// reading of the game's collision rules. A mask-derived predicate would
-    /// answer `true` for every building and quietly delete the policy instead
-    /// of exempting one machine from it.
+    /// its `collision_mask`.** The mask says only what the entity collides
+    /// with, and needing ore underfoot is not a collision — a drill's 2.1.17
+    /// mask is `is_lower_object`, `is_object`, `water_tile`, `item`, `object`,
+    /// `player`, `meltable`, character for character a stone furnace's.
     ///
     /// `entity_type` is the game's own classification and both captures in
     /// this repo agree on it, unlike the mask layer names: `mining-drill` in
@@ -2486,12 +2480,9 @@ impl PlanState {
     /// `big-mining-drill` and `pumpjack` — every one of which stands on a
     /// resource, crude oil included.
     ///
-    /// An entity the world has no prototype for gets **no** exemption, the
-    /// same direction `collides_with_water` falls in: an unknown name is not
-    /// something this can vouch for, and the two mistakes do not cost the
-    /// same. A wrongly exempted entity is a machine buried on an ore patch
-    /// that nothing later can explain; a wrongly blocked one is a refusal with
-    /// a site one tile over.
+    /// An entity the world has no prototype for answers `false`: an unknown
+    /// name is not something this can vouch for, and the callers all read a
+    /// `true` as licence to site *at* ore.
     pub fn stands_on_resources(&self, name: &str) -> bool {
         match self.base.entity_prototypes.get(name) {
             Some(proto) => proto.entity_type == "mining-drill",
@@ -2603,10 +2594,10 @@ impl PlanState {
     /// a failure, not an observation.
     /// Does `area` cover at least one tile that still holds `item`?
     ///
-    /// The question a mining drill's site has to answer, and the mirror of the
-    /// one [`PlanState::is_area_clear_of`] asks: that one refuses ground with
-    /// ore under it for everything except a drill, and this one *requires* it
-    /// for the drill. A drill placed one tile off the patch places 100 % and
+    /// The question a mining drill's site has to answer, and the one
+    /// [`PlanState::is_area_clear_of`] never asks: that one says only whether
+    /// something is in the way (ore is not), while this one *requires* ore for
+    /// the drill. A drill placed one tile off the patch places 100 % and
     /// mines nothing, which is the same silent failure as a drill facing the
     /// wrong way.
     ///
@@ -2623,6 +2614,33 @@ impl PlanState {
         tiles_under(area)
             .iter()
             .any(|tile| self.resource_available(&Position::from(tile), item) > 0)
+    }
+
+    /// Does `area` cover any resource tile at all?
+    ///
+    /// **A preference, never a refusal.** Ore blocks no placement -- see
+    /// [`occupant_of`](Self::occupant_of) -- so this is not asked by anything
+    /// that decides whether a build is legal. It is asked by
+    /// [`crate::method::util::free_area_near_where`], which searches the rings
+    /// twice: once for a site that covers no ore, and only then for any site
+    /// that fits. So a furnace still lands beside a patch rather than on it
+    /// whenever there is ground beside the patch, and lands on it rather than
+    /// nowhere when there is not.
+    ///
+    /// That split is what the old rule could not express. Refusing ore
+    /// outright was the same answer to "prefer not to" and "may not", and the
+    /// second answer is the one the game never gives: the cost was `NoRoute`,
+    /// `NoSiteFound` and a `MinerLine` that could not site at any radius.
+    ///
+    /// Presence, not quantity, and not claims: a tile whose ore this plan has
+    /// drained is still ore in the ground, and whether a *mine* has spoken for
+    /// it is the narrower question [`covers_claimed_resource`](Self::covers_claimed_resource)
+    /// answers -- that one is a refusal, because burying ore a plan has already
+    /// promised a bot is a contradiction rather than a preference.
+    pub fn covers_any_resource(&self, area: &Rect) -> bool {
+        tiles_under(area)
+            .iter()
+            .any(|tile| self.base.entity_graph.any_resource_at(tile))
     }
 
     /// Does `area` cover a resource tile this plan has already committed to a
@@ -2695,7 +2713,8 @@ impl PlanState {
     ///
     /// A drop point resolves to the *tile* it lands in, so the question is
     /// whether that tile is one of the tiles the target covers — the same
-    /// `tiles_under` this state already uses to ask whether ore is in the way.
+    /// `tiles_under` this state already uses to ask which resource tiles a
+    /// footprint would cover.
     /// The furnace covers both of its tiles, the drop lands in one of them, and
     /// the 1/1280 never comes up.
     ///
@@ -2822,11 +2841,7 @@ impl PlanState {
         direction: Direction,
     ) -> bool {
         match self.collision_area_facing(name, position, direction) {
-            Some(area) => self.is_area_clear_of(
-                &area,
-                self.collides_with_water(name),
-                !self.stands_on_resources(name),
-            ),
+            Some(area) => self.is_area_clear_of(&area, self.collides_with_water(name)),
             None => false,
         }
     }
@@ -2900,43 +2915,34 @@ impl PlanState {
     /// instead of one placement. See
     /// [`refused`](PlanState#structfield.refused).
     fn is_area_clear(&self, area: &Rect) -> bool {
-        self.is_area_clear_of(area, true, true)
+        self.is_area_clear_of(area, true)
     }
 
-    /// [`is_area_clear`](Self::is_area_clear), with water and ore optionally
-    /// not counted as obstacles.
+    /// [`is_area_clear`](Self::is_area_clear), with water optionally not
+    /// counted as an obstacle.
     ///
-    /// Both flags are the caller's answer to "is the thing being sited here
-    /// subject to this source of occupancy", and each is consulted by exactly
-    /// one of the six sources. Everything else keeps blocking either way: an
-    /// entity, a character or a refused footprint standing on a lake or on an
-    /// ore patch still blocks, whatever the pump's mask or the drill's type
-    /// says about tiles.
+    /// `water_blocks` is the caller's answer to "is the thing being sited here
+    /// subject to this source of occupancy", and it is consulted by exactly
+    /// one of the five sources. Everything else keeps blocking either way: an
+    /// entity, a character or a refused footprint standing on a lake still
+    /// blocks, whatever the pump's mask says about tiles.
     ///
-    /// `water_blocks` — the water is identified by name through
-    /// `EntityGraph::is_water_at`, not by the blocking box's own payload,
-    /// which carries a bare `is_minable` flag and no name at all. A box's
-    /// centre is the tile it came from — a tile's blocking box is exactly that
-    /// tile's 1x1 square — which is the same key the `removed` lookup one line
-    /// above already uses on the very same rectangle.
+    /// The water is identified by name through `EntityGraph::is_water_at`, not
+    /// by the blocking box's own payload, which carries a bare `is_minable`
+    /// flag and no name at all. A box's centre is the tile it came from — a
+    /// tile's blocking box is exactly that tile's 1x1 square — which is the
+    /// same key the `removed` lookup one line above already uses on the very
+    /// same rectangle.
     ///
-    /// `resource_blocks` — see
-    /// [`stands_on_resources`](Self::stands_on_resources), which is the only
-    /// thing that ever answers it `false`, and which explains why the answer
-    /// comes from the prototype's `entity_type` rather than from its
-    /// collision mask like water's does. Two arguments rather than one bundled
-    /// "what is being sited": the tile-granularity caller
-    /// ([`is_position_free`](Self::is_position_free)) has no entity to name and
-    /// must get the strict answer to both, which a single name-shaped
-    /// parameter could not express.
-    fn is_area_clear_of(&self, area: &Rect, water_blocks: bool, resource_blocks: bool) -> bool {
-        self.occupant_of(area, water_blocks, resource_blocks, true)
-            .is_none()
+    /// **There is no `resource_blocks` twin, because ore is not an obstacle.**
+    /// See [`occupant_of`](Self::occupant_of).
+    fn is_area_clear_of(&self, area: &Rect, water_blocks: bool) -> bool {
+        self.occupant_of(area, water_blocks, true).is_none()
     }
 
     /// [`is_area_clear_of`](Self::is_area_clear_of), but SAYING WHAT IS THERE.
     ///
-    /// The same six sources in the same order, because it is the same
+    /// The same five sources in the same order, because it is the same
     /// function -- `is_area_clear_of` is now `occupant_of(..).is_none()`, so
     /// the two cannot drift into disagreeing about whether ground is clear
     /// while disagreeing about why.
@@ -2950,7 +2956,26 @@ impl PlanState {
     /// three anchors were spent distinguishing hypotheses that a named tile
     /// would have settled in one line.
     ///
-    /// `characters_block` is the fourth of the six sources' own toggle, and
+    /// **Ore is not one of the sources.** In Factorio a resource entity's
+    /// entire collision mask is the single `resource` layer, and no buildable
+    /// prototype carries that layer: of the 579 prototypes in the live 2.1.17
+    /// snapshot (`crates/core/tests/live-2.1.17-world-snapshot.json`) exactly
+    /// 12 name it, and all 12 *are* resources; the 1.x fixture agrees across
+    /// the `resource-layer` → `resource` rename. So the game lets a belt, a
+    /// pole, a furnace or an assembler be built on an ore patch, and a live
+    /// `can_place_entity` at an ore tile confirms it. Until
+    /// `ore-does-not-block` this function refused ore to everything but a
+    /// mining drill, which was **a policy stated as a collision rule** — "do not bury the
+    /// patch you are about to mine" — and it failed in the safe direction, so
+    /// nothing caught it: it refused legal ground as `NoRoute` and
+    /// `NoSiteFound` and never built anywhere illegal. What survives of the
+    /// policy is the part that was always the real requirement and is checked
+    /// where it belongs: [`covers_claimed_resource`](Self::covers_claimed_resource)
+    /// keeps a plan from building over ore that same plan has promised a bot
+    /// will hand-mine, and `method::blueprint`'s `drills_are_fed` keeps a
+    /// drill on ore it can extract.
+    ///
+    /// `characters_block` is the fourth of the five sources' own toggle, and
     /// it exists for exactly one caller: [`PlanState::siting_occupant`],
     /// used only while *choosing* an anchor (`method::blueprint::search_site`
     /// via `first_obstruction`). A character is not durable ground -- it
@@ -2967,7 +2992,6 @@ impl PlanState {
         &self,
         area: &Rect,
         water_blocks: bool,
-        resource_blocks: bool,
         characters_block: bool,
     ) -> Option<Occupant> {
         for entity in self.added.values() {
@@ -3063,20 +3087,9 @@ impl PlanState {
                 return Some(Occupant::Refused);
             }
         }
-        // Ore. Not in the entity tree — `EntityGraph::add` routes a resource
-        // into `resources`/`resource_tree` only — so it has to be asked for by
-        // tile, and it is occupancy by *policy* rather than by collision: the
-        // game would let a furnace be built on an ore patch, and this planner
-        // will not, because burying the patch it is about to mine is a
-        // placement nothing later can undo cheaply. `resource_blocks` is the
-        // one exemption, and it is a mining drill's alone.
-        if resource_blocks
-            && tiles_under(area)
-                .iter()
-                .any(|tile| self.base.entity_graph.any_resource_at(tile))
-        {
-            return Some(Occupant::Resource);
-        }
+        // Ore is deliberately NOT a sixth source: a resource collides on the
+        // `resource` layer alone and nothing buildable carries it, so the game
+        // builds straight over a patch. See this function's doc.
         None
     }
 
@@ -3085,7 +3098,7 @@ impl PlanState {
     ///
     /// The naming twin of [`is_area_free_facing`](Self::is_area_free_facing),
     /// and it answers with the same tolerances: water blocks only what
-    /// collides with water, ore blocks everything but a mining drill.
+    /// collides with water, and ore blocks nothing at all.
     ///
     /// `Some(Occupant::Unknown)` -- not `None` -- when the world carries no
     /// prototype for `name`: `collision_area_facing` cannot size the
@@ -3098,12 +3111,7 @@ impl PlanState {
         direction: Direction,
     ) -> Option<Occupant> {
         match self.collision_area_facing(name, position, direction) {
-            Some(area) => self.occupant_of(
-                &area,
-                self.collides_with_water(name),
-                !self.stands_on_resources(name),
-                true,
-            ),
+            Some(area) => self.occupant_of(&area, self.collides_with_water(name), true),
             None => Some(Occupant::Unknown),
         }
     }
@@ -3113,7 +3121,7 @@ impl PlanState {
     /// needs to know what is on the ground and NOT know who happens to be
     /// standing on it.
     ///
-    /// A character is not durable ground: nothing else among the six sources
+    /// A character is not durable ground: nothing else among the five sources
     /// `occupant_of` checks can move with no plan action behind it, which is
     /// exactly why `method::blueprint::search_site`'s stability argument
     /// depends on this and not on `placement_occupant`. A bystander (or one
@@ -3137,12 +3145,7 @@ impl PlanState {
         direction: Direction,
     ) -> Option<Occupant> {
         match self.collision_area_facing(name, position, direction) {
-            Some(area) => self.occupant_of(
-                &area,
-                self.collides_with_water(name),
-                !self.stands_on_resources(name),
-                false,
-            ),
+            Some(area) => self.occupant_of(&area, self.collides_with_water(name), false),
             None => Some(Occupant::Unknown),
         }
     }
@@ -3288,7 +3291,7 @@ impl PlanState {
     /// Whether the game has already refused this exact placement.
     ///
     /// Narrower than [`PlanState::is_area_free`], which answers "is anything
-    /// in the way" from six sources at once. This asks only about the one
+    /// in the way" from five sources at once. This asks only about the one
     /// source that is a verdict rather than a model, so a caller can tell
     /// "the plan no longer fits the world" from "the game said no to this",
     /// and treat the second as durable. `crates/executor`'s `recover` uses it
@@ -3402,9 +3405,11 @@ impl PlanState {
     /// *particular* entity fits — a placement wants [`is_area_free`], which
     /// knows how big the thing being placed is.
     ///
-    /// Presence, not quantity: a tile whose ore this plan has drained to zero is
-    /// still an ore tile in the ground, so it stays occupied. `remove_entity`
-    /// frees a placed entity's tile, but it does not clear ore.
+    /// **Ore is not occupancy.** A resource collides on the `resource` layer
+    /// alone and nothing buildable carries it, so an ore tile is clear ground
+    /// as far as any placement is concerned; whether the plan has *promised*
+    /// that ore to a mining action is a separate question with a separate
+    /// answer, [`covers_claimed_resource`](Self::covers_claimed_resource).
     pub fn is_position_free(&self, position: &Position) -> bool {
         self.is_area_clear(&tile_area(&Pos::from(position)))
     }
@@ -4447,10 +4452,11 @@ impl PlanState {
     ///
     /// * **Entities this plan has placed.** Nothing ever placed anything on
     ///   ore during a gathering goal until `11fabe43` added `PlaceDrill`, and
-    ///   a burner mining drill is the one entity `is_area_clear_of` lets stand
-    ///   on a patch (see [`PlanState::stands_on_resources`]) — so the plan
-    ///   acquired the ability to bury the ore it was about to mine, and this
-    ///   ledger did not learn about it. Run `run-1788455754-92581` is what
+    ///   `is_area_clear_of` lets anything stand on a patch, because the game
+    ///   does (see [`PlanState::occupant_of`]) — so the plan acquired the
+    ///   ability to bury the ore it was about to mine, and this ledger did not
+    ///   learn about it. That makes this ledger, not a placement rule, the
+    ///   thing standing between a plan and its own ore. Run `run-1788455754-92581` is what
     ///   that cost: one plan carried `place burner-mining-drill at [-34, -23]`
     ///   and `mine 4 iron-ore` at `(-33.5, -22.5)`, a tile inside that drill's
     ///   own footprint, and the mine died on `expected iron-ore at
@@ -5796,10 +5802,9 @@ mod tests {
     /// ever placed was a stone furnace, which wants to be near ore and never
     /// on it.
     ///
-    /// The exemption follows the offshore pump's water exemption (`fa8dabf3`)
-    /// — the same `is_area_clear_of` parameter, decided from the prototype and
-    /// nothing else — and is narrower on purpose: see the sibling test below
-    /// for what it must not touch.
+    /// Since `ore-does-not-block` this is no longer an exemption but the
+    /// general answer: ore occupies nothing, for a drill or for anything else.
+    /// See the sibling test below.
     #[test]
     fn a_mining_drill_may_stand_on_the_ore_it_mines() {
         let s = state();
@@ -5813,44 +5818,65 @@ mod tests {
         );
     }
 
-    /// The exemption is a drill's, and only a drill's.
+    /// **Ore blocks nothing, because nothing collides with it.**
     ///
-    /// **Ore is not an obstacle in the game.** No building's `collision_mask`
-    /// carries the `resource` layer in 2.1.17 (checked against
-    /// `crates/core/tests/live-2.1.17-world-snapshot.json`) and a resource
-    /// entity collides on that layer alone, so Factorio would let a furnace be
-    /// built on an ore patch. The rule this planner has is a *policy* — do not
-    /// bury the patch you are about to mine, which is why `cf89b493` moved
-    /// siting off the copper patch edge — and a policy has to be exempted as
-    /// narrowly as it is stated.
+    /// A resource entity's whole collision mask is the `resource` layer and no
+    /// buildable prototype carries that layer — 12 of 1,028 live 2.1.17
+    /// prototypes name it and all 12 are resources, asserted in
+    /// `crates/core/tests/live_2_1_payloads.rs`'s
+    /// `nothing_buildable_collides_with_the_resource_layer` — so the game
+    /// builds a belt, a pole, a furnace or an assembler straight over a patch,
+    /// which a live `can_place_entity` confirms.
     ///
-    /// That is also why the predicate cannot be read off the collision mask
-    /// the way `collides_with_water` is: a mask-derived answer would exempt
-    /// every building on the list and quietly delete the rule.
+    /// This planner refused all of that until `ore-does-not-block`, as a
+    /// *policy* ("do not bury the patch you are about to mine") stated as if it
+    /// were a collision rule. It failed in the safe direction and so was never
+    /// caught: legal ground came back as `NoRoute` and `NoSiteFound`, a belt
+    /// route could not cross a patch, and `MinerLine` could not site at any
+    /// radius because its own belt-and-pole corridor ran over the ore its
+    /// drills need. What survives of the policy is
+    /// [`PlanState::covers_claimed_resource`], which is the part that was
+    /// always the real requirement: do not build over ore *this plan has
+    /// promised a bot will mine*.
     #[test]
-    fn ore_still_blocks_everything_that_is_not_a_drill() {
+    fn ore_blocks_nothing_because_nothing_collides_with_it() {
         let s = state();
         assert!(
-            !s.is_area_free("stone-furnace", &on_the_iron()),
-            "a furnace sited on ore is still wrong"
+            s.is_area_free("stone-furnace", &on_the_iron()),
+            "the game allows a furnace on ore, so the planner must"
         );
         assert!(
-            !s.is_area_free("assembling-machine-1", &on_the_iron()),
-            "and so is an assembler"
+            s.is_area_free("assembling-machine-1", &on_the_iron()),
+            "and an assembler"
         );
         assert!(
-            !s.is_position_free(&on_the_iron()),
-            "and the tile-granularity question names no entity at all, so it \
-             cannot be told a drill is asking: ore keeps blocking it"
+            s.is_area_free("transport-belt", &on_the_iron()),
+            "a belt crossing a patch is the routing case this cost us"
+        );
+        assert!(
+            s.is_area_free("small-electric-pole", &on_the_iron()),
+            "and a pole beside it is the other half of a MinerLine corridor"
+        );
+        assert!(
+            s.is_position_free(&on_the_iron()),
+            "the tile-granularity question names no entity, and now needs to \
+             name none: ore occupies no tile"
+        );
+        assert_eq!(
+            s.placement_occupant("stone-furnace", &on_the_iron(), Direction::North),
+            None,
+            "and nothing is named as being in the way, because nothing is"
         );
     }
 
-    /// The drill is exempted from ore and from nothing else.
+    /// Ore stopping being an obstacle does not make anything else stop being
+    /// one.
     ///
-    /// Without this the change could be "a drill fits anywhere", which would
-    /// pass the test above and put drills in lakes and inside other machines.
+    /// Without this the change could be "a footprint on ore fits whatever else
+    /// is there", which would pass the test above and put machines in lakes and
+    /// inside each other.
     #[test]
-    fn the_drills_exemption_is_ore_and_only_ore() {
+    fn dropping_ore_drops_only_ore() {
         let mut s = state();
         assert!(
             !s.is_area_free("burner-mining-drill", &Position::new(-20., -20.)),
@@ -5864,22 +5890,20 @@ mod tests {
         assert!(
             !s.is_area_free("burner-mining-drill", &on_the_iron()),
             "and a machine already standing on the ore is still in the way — \
-             the exemption is about the ground, not about the drill"
+             ore is not an obstacle, but everything standing on it still is"
         );
     }
 
-    /// `stands_on_resources` mirrors [`PlanState::collides_with_water`]'s
-    /// fallback, in the same direction: an entity the world has no prototype
-    /// for gets **no** exemption.
+    /// `stands_on_resources` answers a question about the MACHINE — does it
+    /// need ore underfoot to work — and an entity the world has no prototype
+    /// for answers `false`.
     ///
-    /// An unknown name is not something this can vouch for, and the cost of
-    /// the two mistakes is not symmetric — a wrongly exempted entity is a
-    /// machine buried on an ore patch that nothing later can explain, while a
-    /// wrongly blocked one is a refusal with a site one tile over. (In
-    /// practice an unknown prototype never reaches the question: `is_area_free`
-    /// has already refused it for having no size.)
+    /// An unknown name is not something this can vouch for, and its callers
+    /// (`method::blueprint`'s `drills_are_fed` and `nearest_ore_seed`) read a
+    /// `true` as licence to site *at* ore. It decides no placement: since
+    /// `ore-does-not-block` nothing in `occupant_of` consults it.
     #[test]
-    fn an_unknown_entity_gets_no_exemption() {
+    fn stands_on_resources_names_the_machines_that_need_ore_underfoot() {
         let s = state();
         assert!(s.stands_on_resources("burner-mining-drill"));
         assert!(s.stands_on_resources("electric-mining-drill"));
@@ -6274,8 +6298,17 @@ mod tests {
         assert!(a.entity_at(&pos).is_none());
     }
 
+    /// A tile holding ore is free ground, and the ore is still there.
+    ///
+    /// Both halves matter. The planner counted an ore tile as occupied until
+    /// `ore-does-not-block`, which is what refused a belt route across a patch
+    /// -- `Condition::PositionFree` is the belt lane's own check
+    /// (`method::assemble`) -- while the game builds over ore happily. And the
+    /// ore does not stop existing because nothing blocks on it: the ledger that
+    /// says how much is there is untouched, which is what a drill sited here
+    /// will ask.
     #[test]
-    fn a_tile_holding_ore_is_not_free() {
+    fn a_tile_holding_ore_is_free_ground() {
         let a = state();
         let ore = a
             .resource_patches("iron-ore")
@@ -6285,11 +6318,11 @@ mod tests {
             .expect("fixture has iron ore");
         assert!(a.resource_available(&ore, "iron-ore") > 0);
         // Resources never reach the entity tree, so `entity_at` is blind to
-        // them; occupancy must still see them.
+        // them -- and occupancy is too, on purpose.
         assert!(a.entity_at(&ore).is_none());
         assert!(
-            !a.is_position_free(&ore),
-            "ore tile {:?} was reported free",
+            a.is_position_free(&ore),
+            "ore tile {:?} was reported occupied",
             ore
         );
     }

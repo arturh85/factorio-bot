@@ -4,8 +4,9 @@
 a 179-entity `FurnaceLine`): a placement blocked by one of our own bots, and
 the ~50 placements that died with it.
 
-**Status: no live run yet.** Everything below is the record, the code, and unit
-tests. The before/after on entities-standing is empty on purpose.
+**Measured live**, eight headless runs at 5x on seed 31337, four with the
+change and four without, mods symlink verified against this worktree on every
+one.
 
 ## (A) The run is not evidence about the busy-blocker fix — the fix was not loaded
 
@@ -31,15 +32,26 @@ acting bot was 3, at `(13.30, 3.20)`; the blocker was bot 4, at
 no clause at all.
 
 `provenance.json` records commit `191df2db`, clean, and that commit's
-`mods/BotBridge/control.lua` **does** have the clause — but provenance records
-the *checkout's* HEAD, and `workspace/mods/BotBridge` is a symlink to whichever
-worktree set up last. `.worktrees/headless` is stale at `133802b6`, whose
-`control.lua` has no `describe_footprint_blockers`, no `bot_of_character` and
-no `placement_step_aside_landing` at all. Bot 4 did not move once between ticks
-1380 and 1920, which is what a mod that never asks looks like.
+`mods/BotBridge/control.lua` **does** have the clause. The other session then
+checked its own run rather than accepting the account, and it is worse than a
+stale symlink: **at that run's own branch HEAD, `control.lua` contained zero
+occurrences of `describe_footprint_blockers`** — the function landed half an
+hour later. The clause was not empty; it did not exist.
 
-**Provenance's `git.commit` is not the mod that ran.** That is a third blind
-spot alongside the two `world.dump` ones, and nothing in the record closes it.
+**Provenance's `git.commit` is not the mod that ran.** The worktree's binary
+was launched from the main checkout's directory, so provenance was *accurate
+about the thing it measures and silent about the thing that mattered* — not
+blank, but confidently about the wrong object. That is a third blind spot
+beside the two `world.dump` ones, and it silently invalidated evidence two
+sessions reasoned from: a 45-second budget was sized partly on that run, and
+the other session drew conclusions about its own block from it. Both may still
+be true; neither is measured.
+
+**What a run would have to record for this to be impossible**: the *resolved*
+mods directory (the symlink target, not the checkout), and ideally a content
+hash of the mod as loaded — a symlink target is not the same claim as the
+bytes that loaded. Until then, the `Using mods directory` line is the only
+answer, and it has to be read on every run rather than inferred.
 
 ### The gap is real anyway, and it is `stuck` — but `stepping aside` is fine
 
@@ -52,10 +64,22 @@ Reading the vocabulary against `FootprintWait::decide`:
 | `#N stuck` | no | never |
 | `#N gone`, `an unclaimed character` | no | never |
 
-`stepping aside` looks uncovered and is not: `start_walk_waypoints` sets
-`storage.p[id].walking`, so the *next* attempt reads `#N walking` and draws on
-the 45 s budget. The classes waiting cannot fix are `stuck`, `gone` and
-`an unclaimed character`, and only `stuck` is common.
+**The `stepping aside` row is wrong, and the runs below are what corrected
+it.** The code reading was: `start_walk_waypoints` sets
+`storage.p[id].walking`, so the next attempt reads `#N walking` and draws the
+45 s budget. Live, the clause reads `#3 stepping aside` **four times in a
+row**. The reason is arithmetic nobody did: a step aside is one or two tiles,
+about 13 ticks at 0.15 tiles/tick, while `FOOTPRINT_CLEAR_BACKOFF` is 0.6 s —
+**180 ticks at 5x**. The walk finishes, `walking` clears, and the next attempt
+finds an idle bot and dispatches another step aside. So `stepping aside` gets
+the four-attempt budget, not the busy one, and a blocker that keeps coming back
+is refused in 399 ticks.
+
+Corrected table: the only class that reliably draws the busy budget is a
+blocker busy with an action of *its own*. `stuck`, `gone` and
+`an unclaimed character` never do, and `stepping aside` does so only if the
+walk is still running when the next attempt lands — which at these backoffs it
+usually is not.
 
 ### The fix: escalate the search instead of giving up
 
@@ -79,8 +103,14 @@ case where the game put a building on someone, not as a way past a refusal.
 ## (B) One unresolvable placement no longer costs the rest of the block
 
 `run_bot_signalled` stopped the bot at its first failure and `abandon_rest`
-published `Failed` for every remaining step in its slice. That is why one belt
-took ~50 undispatched placements with it.
+published `Failed` for every remaining step in its slice.
+
+**The justification is the dependency graph, not a measurement.** The "~50 of
+179 never dispatched" figure this task was briefed with is **void** — it came
+from `run-1788663566-25023`, whose mod predates `describe_footprint_blockers`
+existing at all (see (A)). The argument does not need it: the network already
+knows what depends on what, and halting a bot on a failed action discards work
+the graph says is independent. Everything below is measured here instead.
 
 A failed or lost `Act` now publishes its own verdict and the bot moves on.
 **The dependency graph decides the blast radius**: `await_preds` reads the
@@ -116,10 +146,59 @@ checked to have matched each time:
 
 **These tasks wrote both the code and the fixtures.** The stub-game ground
 ("free at twelve tiles, full at four") is a claim about a dense block, not a
-reading off one; only a live block run can settle it. The executor pair is
+reading off one — and the live runs did **not** settle it in the ladder's
+favour: `#2 stuck` survived four attempts three times with the ladder in
+place. The executor pair is
 stronger: the independent-step test and the dependent-step test share one
 fixture and differ by a single `net.link`, so a loop that ignored dependencies
 would pass one and fail the other.
+
+## Measured: eight `furnace_run.lua` runs, headless, 4 bots, 5x, seed 31337
+
+`FurnaceLine`, 179 entities, anchor `(60,-100)`-ish, materials cheated (the
+script discloses it). Identical binary and identical mod on both sides; the
+**only** difference is the executor's `StepKind::Act` arm. Every run logged
+
+```
+Using mods directory "…/workspace/headless-r/mods" (debug build; BotBridge is
+a symlink to "…/.worktrees/blocked/mods/BotBridge", so an edit there is what
+the game loads)
+```
+
+| | failed | **never dispatched** | standing | delivered tps |
+|---|---|---|---|---|
+| before 1 | 0 | 0 | 179 | 295 (98%) |
+| before 2 | 1 | **14** | 164 | 269 (90%) |
+| before 3 | 2 | **7** | 170 | 299 (100%) |
+| before 4 | 1 | **4** | 174 | 284 (95%) |
+| after 1 | 1 | 0 | 178 | 210 (70%) |
+| after 2 | 1 | 0 | 178 | 314 (105%) |
+| after 3 | 2 | 0 | 177 | 300 (100%) |
+| after 4 | 2 | 0 | 177 | 301 (100%) |
+
+`pending` in the run's own `done=…` line is what "never dispatched" reads; the
+after runs' `action_dispatched` count is 179 of 179 planned.
+
+**A failed placement now costs exactly one entity.** Before: four failures cost
+4 + 25 = 29 entities across four runs. After: five failures cost five.
+
+Two things this table also settles, neither of them flattering:
+
+- **The failure is a race, not a property of the plan.** Same seed, same map,
+  same 183-step plan of makespan 2,139, and `before 1` hit no refusal at all.
+  A single run that comes back clean proves nothing here; four did not.
+- **`#2 stuck` still happens with the ladder in place** — four attempts, full
+  budget, in three of the eight runs. The ladder did not eliminate `stuck` in
+  this block; the game offered no landing outside the clearance even at radius
+  32. What the ladder is proven to do is not regress anything (the after runs'
+  failure counts match the before runs'), and what actually saved the block was
+  (B). **(A)'s fix is unproven against the case that motivated it.**
+
+Delivered tick rate is computed from whole-second log timestamps over a 7-13 s
+window, so it is ±15% and should be read as "at or near nominal", not quoted.
+Per the standing rule, these are clean-enough passes at a good tick rate; the
+one 70% reading is the first run on a cold workspace and its result is a pass,
+which is trustworthy at any rate.
 
 ## Offline plans, on the merged tree (master `32282b11`)
 

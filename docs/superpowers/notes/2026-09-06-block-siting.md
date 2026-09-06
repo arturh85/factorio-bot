@@ -120,6 +120,42 @@ rather than from the single query above: *"a belt and a pole are legal on that
 ore tile"* is an observation; *"nothing collides with resources"* is a rule, and
 only the first was measured here.
 
+### That fix landed, and `MinerLine` still does not site
+
+Re-measured against `21a698ff`, after ore stopped blocking placement. The
+refusal changed, which is informative — it is no longer about the corridor:
+
+```
+no clear site for a 37-entity block within 48 tiles of [-12.5, -13.5];
+nearest obstruction: the electric-mining-drill at (-7, -12)
+would stand on no ore it can mine
+```
+
+So the belts and poles are now free to cross the patch, and what refuses is the
+**ore-coverage rule itself**: siting demands that *every one* of the 13 drills
+sits on ore, and no anchor within 48 tiles of the seed satisfies that.
+
+**This contradicts the Python oracle**, which found 359 anchors where all 13
+drills cover iron, the nearest 37.3 tiles from the origin — comfortably inside
+a 48-tile search from a seed at `[-12.5, -13.5]`. The oracle was already shown
+wrong once tonight (it modelled only drills, ignoring that belts and poles then
+also had to clear ore) but that objection is now gone, so the disagreement is
+live again and unresolved.
+
+One of three things is true and nobody has established which:
+
+- the oracle's ore model still differs from `covers_resource` over
+  `collision_area_facing` — it works in floored dump tiles and asks for one ore
+  tile under a 3×3 footprint;
+- the search does not actually reach the region the oracle found, despite the
+  distance appearing to fit;
+- the ore-coverage rule is stricter in practice than "one ore tile per drill".
+
+**`MinerLine` has never sited, so nothing regresses** — but this note should not
+be read as "siting handles drill blocks". It handles `FurnaceLine`. The drill
+case is open, and the refusal is at least now honest about which drill and why,
+which is more than it managed before.
+
 ## Cost: the 96 seconds is not siting's
 
 A sited `FurnaceLine` plan takes ~96 s, and it is worth saying plainly that this

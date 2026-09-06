@@ -305,7 +305,26 @@ BotBridge Mod (Factorio mod for RPC)
   - `types.rs` - Shared data models
   - `factorio/rcon.rs` - RCON protocol implementation
   - `graph/entity_graph.rs` - Spatial entity relationships
-  - `graph/flow_graph.rs` - Material flow throughput
+  - `graph/flow_graph.rs` - Material flow throughput. **Computed on every
+    world update and never read.** `flow_graph.update()` is called from
+    `process/output_parser.rs` and `factorio/snapshot.rs`, so it costs work on
+    every parser update — but no `condense()`, `node_at()`, `inner_graph()` or
+    `graphviz_dot()` call exists anywhere outside the file and its own tests.
+    Nothing in `crates/planner`, `crates/executor` or `crates/server` mentions
+    it. So its numbers have never affected a decision, and **its hard-coded
+    rates cannot be validated by any caller** — the same shape that let
+    `method::connect`'s geometry defect survive four reviews. It hard-codes
+    smelting as `1/3.2` per input in `furnace_output` while the *mining* path
+    directly above derives `mining_speed / mining_time` from prototypes, and
+    the assembler arm carries `product.amount / 3.2` with a `FIXME` on it.
+    Under the owner's ruling that rates must be **derived from prototype data
+    rather than copied**, because that is what survives mods, these are real
+    defects: a steel or electric furnace has `crafting_speed` 2 and this
+    reports 1x for both. The derivation is available —
+    `product.amount * crafting_speed / recipe.energy`, and the live 2.1.17 dump
+    carries `crafting_speed` on the entity and `energy` on the recipe. **Give
+    it a reader before or with the fix**, or the corrected numbers are as
+    unverifiable as the wrong ones.
   - `process/` - Factorio process spawning/control
   - `plan/planner.rs` - `Planner`, the Lua runtime's context holder (rcon,
     real_world, plan_world). NOT a planner any more: the task-graph planner it

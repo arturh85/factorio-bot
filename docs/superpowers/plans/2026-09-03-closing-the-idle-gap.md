@@ -418,8 +418,39 @@ Re-read from the same archive with an honest lead-in: 10,155 → `roster-fed`;
 
 The rule that follows: **a lead-in must exceed the drain of the
 longest-lasting hand-delivered input, not the first one that comes to mind.**
-The design's deferred hand-credit mass balance, which needs no lead-in
-parameter at all, is therefore the *next* rung rather than a later one.
+
+**And the parameter is now gone (`367fdc15`).** A hand-credit mass balance
+replaces it: every hand delivery is a **credit** of output priced at the
+*most* it could ever explain, every machine-made item **spends** that credit,
+and a window is `sustained` only when the machines made more than the
+roster's outstanding credit accounts for. `hand_credit_balance()` takes no
+lead-in and **refuses one with a `TypeError`** — a function that accepted and
+ignored it would read as though the number still mattered.
+
+Four decisions worth keeping. Credit is an **upper bound, never a best
+guess**, so every approximation pushes towards refusing — the opposite
+direction from the failure it replaces. Stages combine by **max**, because a
+drill's coal and a furnace's coal are alternative bounds on the same plates.
+The ledger **draws credit down as it is spent**, which a lead-in structurally
+cannot do. And an unpriceable delivery is `unknown`, never skipped.
+
+On the archived run, unchanged bytes: lead-in check `SUSTAINED`, balance
+**`ROSTER-FED`** — credit 194 from two deliveries, 40 spent before the
+window, 154 outstanding against 30 machine-made, so **−124 unexplained**.
+The 23-coal charge prices at 153 plates from **the planner's own label**
+("36800 ticks, 153 iron-plate"), an oracle written by neither that code nor
+its author.
+
+A real blocking gap was closed on the way: feeding actions recorded their
+quantities **only as prose**, in five sentence shapes at five call sites.
+`ActionDispatched` now carries a `delivery` field, `#[serde(default)]` so
+archived runs open unchanged, and the snapshot seam fired from both ends as
+designed.
+
+**The lead-in has not retired, on the agent's own evidence:** the balance has
+been shown right about one *refusal* and has never been shown passing a cell
+that genuinely feeds itself, because no such cell exists yet. Both verdicts
+print until one does.
 
 What the run does prove: the capacity half works end to end, and a
 planner-built cell ran flat out at its nominal 15/min for 7,200 uninterrupted

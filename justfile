@@ -43,8 +43,24 @@ BENCHMARK_SEED := "31337"
 # The seed has NOT been validated by a run yet. A map whose nearest shoreline
 # does not fit a pump/boiler/engine has genuinely refused a run here; confirm
 # this one produces a viable map before quoting any number against it.
+# The roster a quoted benchmark uses. FOUR, stated here rather than inherited.
+#
+# `--clients` defaults to 1 in the CLI (app/src-tauri/src/cli/lua.rs), and this
+# recipe used to pass no client count at all -- so `just bench` was a ONE-BOT
+# run while reading as the project's benchmark. Its first ever execution
+# (2026-09-06, run-1788693799-62453) produced `roster: [1]`, `plan_created.bots
+# = [1]`, and a 7:22 automation milestone that is not comparable to the 6:05
+# four-bot record. Nothing failed and nothing stalled: one client was all that
+# was ever requested.
+#
+# That is the failure this repo warns about from the other direction --
+# "a one-bot run misread as a four-bot regression cost a good commit a revert"
+# -- and the defaulting is what made it silent. A benchmark must state its
+# roster, because the roster is half of what the number means.
+BENCH_CLIENTS := "4"
+
 bench SCRIPT *ARGS:
-    cargo run --release --no-default-features --features cli,lua -- lua {{SCRIPT}} --seed {{BENCHMARK_SEED}} --new {{ARGS}}
+    cargo run --release --no-default-features --features cli,lua -- lua {{SCRIPT}} --seed {{BENCHMARK_SEED}} --new --clients {{BENCH_CLIENTS}} {{ARGS}}
 
 # Headless: bots are server-side characters, no graphical client, world at
 # 5x. Seconds to start instead of minutes; same record, no video. Use it to

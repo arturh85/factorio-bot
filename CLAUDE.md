@@ -1051,10 +1051,31 @@ was silently ignored until `61ec7364`.
 This was a scan, not a search: 16 seeds, ranked, first acceptable winner taken.
 It is not an optimum and no one should describe it as one.
 
-`just bench <script>` is that run. **It has not yet been executed once**, so the
-seed is unvalidated: a map whose nearest shoreline does not fit a pump/boiler/
-engine has genuinely refused a run here (`the nearest water is 66.7 tiles
-away`). Confirm it before quoting any number against it.
+`just bench <script>` is that run, and **it was executed for the first time on
+2026-09-06** (`run-1788693799-62453`). Two results from that first execution.
+
+**The seed is validated.** The map generated, the run reached its milestone,
+the delivered tick rate was 60 of 60 nominal, and there were zero failed and
+zero lost actions. The shoreline concern that motivated the caveat -- a map
+whose nearest water does not fit a pump/boiler/engine has genuinely refused a
+run here (`the nearest water is 66.7 tiles away`) -- did not materialise on
+31337.
+
+**And the recipe was measuring one bot.** `--clients` defaults to `1`
+(`app/src-tauri/src/cli/lua.rs`) and the recipe passed no client count, so
+`just bench` ran a **one-bot roster** while reading as the project's benchmark:
+`roster: [1]`, `plan_created.bots = [1]`, automation at 7:22 against the 6:05
+four-bot record. Nothing stalled and no client failed to connect -- one client
+was all that was ever requested, so the run was correct and the expectation was
+not.
+
+Fixed by `BENCH_CLIENTS := "4"` in the justfile, stated there rather than
+inherited from a default. **A benchmark must state its roster**, because the
+roster is half of what the number means; this repo already warns about the same
+confusion from the other direction, where "a one-bot run misread as a four-bot
+regression cost a good commit a revert". Check `plan_created.bots` on the next
+bench run too -- the recipe now asks for four, and asking is not the same as
+getting.
 
 **What a run now records about its map** (`crates/core/src/record/provenance.rs`):
 `provenance.json`, written at run *start* rather than at finish. That timing is

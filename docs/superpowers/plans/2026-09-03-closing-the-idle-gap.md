@@ -11,6 +11,74 @@ four bots.
 
 ---
 
+## OWNER PROPOSAL: load a world-record save, in two stages
+
+2026-09-06. The owner's idea, and the sharpest test available to this project:
+**load a world-record run's save and point factorio-bot at it.** Both current
+world records are Space Age runs, so such a save carries several planets, orbital
+platforms, and tens of thousands of entities.
+
+### Why it is worth more than any fixture we could write
+
+**Every number this project has is from a nearly-empty map.** The largest block
+built is 179 entities; runs carry four bots; `map.json` is 826 MB of a *t=0*
+world that is almost entirely terrain. Between that and a finished factory lies
+every scaling assumption in the system, none of them tested:
+
+* `EntityGraph`'s quad trees at real density, and its **±5120-tile world bound**
+  against a base that sprawls further;
+* `world.dump` size, and with it the **4-second offline planning loop** that all
+  iteration depends on;
+* `tools/run_analysis.py`, which reads every sample and event, sized against runs
+  producing a few hundred;
+* **planning against a world that already contains a factory** — every method
+  assumes it builds from near-nothing, so a finished base is the strongest
+  possible test of whether a standing cell is reused or rebuilt.
+
+### Stage 1 is available NOW, and is safe, because the guard holds
+
+The mod still drops non-Nauvis chunks. So loading a multi-planet save yields a
+**Nauvis-only view**, not silent aliasing — a correct, conservative failure. And
+since this morning it is a *recorded* one: `surface_chunk_dropped` reaches the
+record, folded per surface. **Its first real use would be this.**
+
+What stage 1 answers, with no new code:
+
+* how many surfaces a real endgame save actually has;
+* how much of it we are blind to, by surface, from the record;
+* whether the graph, the dump and the analysis survive **Nauvis alone** at that
+  density.
+
+### Stage 2, after the containers are keyed by surface
+
+Load it again and see the whole thing. **Stage 1's dropped-chunk counts become
+stage 2's acceptance test** — we would know exactly what should appear, per
+surface, rather than checking that nothing obviously broke.
+
+### And it gives the surface work a real target
+
+Rung one is justified today by *"a second surface would alias silently"*, which
+is true and hypothetical. With this save it becomes *"here is a world we can see
+one fifth of, and here is the number"*. That is a better argument for the
+container work than any amount of reasoning about coordinate collisions.
+
+### The hazard, and it is the workspace not the code
+
+CLAUDE.md: a server started without the bridge mod *"hangs at `start waiting`
+forever after writing a level.zip with no bridge state, which poisons every
+later run"* — Factorio migrates only on a version bump and `info.json` is pinned
+at 0.0.1. A foreign save is exactly the shape that can leave a workspace holding
+a level file our mod never initialised.
+
+**So: its own workspace, its own ports, and the benchmark map untouched.** The
+per-instance settings files already exist for this
+(`workspace/headless-{a..x}.toml`).
+
+One correction to my own first answer, recorded because it was wrong: I said
+this could be decoupled from the surface work since a pre-Space-Age save has one
+surface. Both records are Space Age, so it is **both tests at once** — and that
+is better, not worse.
+
 ## ✅ `just bench` RAN FOR THE FIRST TIME — and it was measuring one bot
 
 2026-09-06. Two runs, and the first one is the interesting one.

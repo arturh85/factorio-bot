@@ -328,14 +328,37 @@ execution against the sum of the run's own plans, which is the 2.8% above.
 Automation's 6:50 here is likewise not the 6:05 record: that was release,
 this is debug, and this one replanned.
 
-**And a defect: the footprint refusal is not headless-only.** Milestone 1
-lost an action to *cannot place item 'stone-furnace' because a character is
-standing in the footprint*, refused four times over 114 ticks, forcing a
-replan. The `character-identity` work fixed exactly this for server-side
-characters by resolving them through the mod's bot registry; with graphical
-clients a bot **is** a real player, so a different path is failing to step
-the blocker aside. Not yet diagnosed. It cost this run one replan and it
-would silently cost any measured run the same.
+**And a defect, now diagnosed and fixed (`c14c1fd9`): the placement gave up
+on a blocker that was about to leave.** Milestone 1 lost an action to
+*cannot place item 'stone-furnace' because a character is standing in the
+footprint*, refused four times over 114 ticks, forcing a replan.
+
+**Not an identity failure** — my first guess, and wrong. From the run's own
+record: bot 1 was motionless at (26.29, −47.33) **mining copper ore**, a
+third of a tile inside the furnace's 2×2 box at [26, −48], and its mine
+**settled successfully at tick 6079 — 78 ticks after the placement gave up
+at 6001.** The blocker was leaving and nobody waited.
+
+Two causes, both correct in isolation. `step_aside_from_footprint`
+deliberately steers only a blocker that is neither walking nor mining, since
+overwriting either strands the executor action waiting on it. And the
+refusal said only "a character is standing in the footprint", so the caller
+could not tell a *busy* blocker from one it had already dispatched a
+step-aside walk at — while `FOOTPRINT_CLEAR_ATTEMPTS = 4 × 600 ms` was sized
+from a single 53-tick observation of that walk.
+
+The fix names what it found — `… in the footprint (blockers: #1 mining,
+#3 stepping aside)`, a closed vocabulary appended after a byte-identical
+sentence so the existing failure classification is untouched — and a busy
+blocker is re-asked on its own **45-second** budget that does not spend a
+step-aside attempt. 45 s is measured, not chosen: across 24 archived runs the
+longest successful mine is 1,211 ticks and the longest walk leg 1,977
+(32.9 s at 1x), p95s 725 and 716.
+
+**It was never client-specific.** `storage.p[].mining` is set identically for
+character bots; what differed was only the timing that made it bite. Still
+unproven on the clock: that a real 45-second wait beats a real replan. That
+needs a 1x client run of `factory_stage2.lua` on a quiet box.
 
 ## ⚠️ ORE BLOCKS EVERYTHING IN THE PLANNER, AND NOTHING IN THE GAME
 

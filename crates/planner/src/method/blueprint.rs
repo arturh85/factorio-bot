@@ -548,19 +548,69 @@ fn covers_resource_extractable_by(state: &PlanState, drill: &str, area: &Rect) -
     })
 }
 
-/// Does every mining drill in this block have ore under it at `anchor`?
+/// The rectangle a mining drill named `name`, standing at `position`, can
+/// actually pull ore from -- as opposed to
+/// [`collision_area_facing`](PlanState::collision_area_facing), which is
+/// only the ground it occupies.
+///
+/// Reads `FactorioEntityPrototype::mining_drill_radius` directly off the
+/// world's own prototype table (`state.base().entity_prototypes`, not
+/// `state.collision_area_facing`, which only ever answers about the
+/// collision box). When the field is present, the area is a square
+/// centred on `position`, **`direction` does not rotate it** -- a mining
+/// drill's reach is the same distance on every side regardless of which way
+/// it faces, unlike its collision box -- and sized by ceiling the *doubled*
+/// radius to a whole number of tiles: `(2 * radius).ceil()`. Doubling
+/// before ceiling, not ceiling the radius and doubling that, is the
+/// difference between the right answer and a whole tile too generous, and
+/// ceiling at all (rather than comparing the raw float to a footprint half
+/// -width) is what keeps a burner drill's shaved-under-2 collision box
+/// from reading as reach beyond itself -- see the doc on
+/// `FactorioEntityPrototype::mining_drill_radius` for the two measurements
+/// this was checked against (burner: 0.99 -> 2x2, same as its own
+/// footprint; electric: 2.49 -> 5x5, one tile beyond its 3x3 footprint).
+///
+/// `None` on the prototype -- every capture before `mining_drill_radius`
+/// existed, and any capture since that simply never asked -- means
+/// *unknown reach*, never *zero reach*: this falls back to
+/// [`collision_area_facing`](PlanState::collision_area_facing) exactly as
+/// this function did before the field existed, rather than shrinking every
+/// old dump's drills to a reach of nothing.
+fn mining_area(
+    state: &PlanState,
+    name: &str,
+    position: &Position,
+    direction: Direction,
+) -> Option<Rect> {
+    let radius = state
+        .base()
+        .entity_prototypes
+        .get(name)
+        .and_then(|proto| proto.mining_drill_radius);
+    match radius {
+        Some(radius) => {
+            let side = (radius * 2.0).ceil();
+            let half = side / 2.0;
+            Some(Rect::new(
+                &Position::new(position.x() - half, position.y() - half),
+                &Position::new(position.x() + half, position.y() + half),
+            ))
+        }
+        None => state.collision_area_facing(name, position, direction),
+    }
+}
+
+/// Does every mining drill in this block have ore it can actually extract,
+/// standing at `anchor`?
 ///
 /// Returns the reason it does not, or `None` when they all do.
 ///
-/// **Conservative on purpose.** A real electric mining drill mines a 5x5 area
-/// while its collision box is 3x3, and no mining radius reaches us -- nothing
-/// on the prototypes carries it. So this asks whether ore lies under the
-/// drill's own FOOTPRINT, which can reject a site where the drill would in
-/// fact reach ore just outside it. That direction is the safe one: a false
-/// refusal is a site not taken, a false acceptance is a drill that places
-/// perfectly and produces nothing, which is the failure this project has paid
-/// for repeatedly. Recorded so the next author knows it is a floor, not a
-/// measurement.
+/// Asks [`mining_area`] rather than the drill's own footprint, so a drill
+/// whose `mining_drill_radius` reaches past its collision box (every
+/// electric mining drill, one tile on every side) is fed by ore beside it
+/// and not only ore under it. A drill with no known radius still gets the
+/// old, conservative answer -- see [`mining_area`]'s own doc for why
+/// *unknown* and *zero* must not be conflated.
 fn drills_are_fed(state: &PlanState, bp: &Blueprint, anchor: &Position) -> Option<String> {
     for e in &bp.entities {
         if !state.stands_on_resources(&e.name) {
@@ -568,7 +618,7 @@ fn drills_are_fed(state: &PlanState, bp: &Blueprint, anchor: &Position) -> Optio
         }
         let world = anchor.add(&e.offset);
         let facing = Direction::from_u8(e.direction).unwrap_or(Direction::North);
-        let Some(area) = state.collision_area_facing(&e.name, &world, facing) else {
+        let Some(area) = mining_area(state, &e.name, &world, facing) else {
             continue;
         };
         if !covers_resource_extractable_by(state, &e.name, &area) {
@@ -1574,6 +1624,163 @@ mod tests {
         assert!(
             ored.covers_resource(&area, "iron-ore"),
             "the chosen site {sited} does not cover ore"
+        );
+    }
+
+    /// Places one iron-ore tile at `ore_offset` tiles from `drill_pos`
+    /// (both in whole tiles) and returns a world where an
+    /// `electric-mining-drill` or `burner-mining-drill` at `drill_pos`,
+    /// with `radius` as its `mining_drill_radius`, can be asked whether it
+    /// is fed.
+    ///
+    /// **Ore at a tile CENTRE** (`drill_pos + ore_offset`, itself built from
+    /// whole-tile inputs so the centre lands on a half-integer) -- never an
+    /// integer position. `EntityGraph` keys resources by a flooring `Pos`,
+    /// so an integer position is the one input for which that round-trip is
+    /// lossless and would prove nothing about a real map; this is the exact
+    /// mistake the task brief calls out.
+    fn drill_reach_world(
+        drill_name: &str,
+        drill_pos: Position,
+        radius: Option<f64>,
+        ore_tile_offset: (i32, i32),
+    ) -> (factorio_bot_core::factorio::world::FactorioWorld, Position) {
+        let world = drill_world();
+        {
+            let mut proto = world
+                .entity_prototypes
+                .get_mut(drill_name)
+                .unwrap_or_else(|| panic!("the fixture has a {drill_name} prototype"));
+            proto.resource_categories = Some(vec!["basic-solid".to_string()]);
+            proto.mining_drill_radius = radius;
+        }
+        let ore_center = Position::new(
+            (drill_pos.x().floor() as i32 + ore_tile_offset.0) as f64 + 0.5,
+            (drill_pos.y().floor() as i32 + ore_tile_offset.1) as f64 + 0.5,
+        );
+        world
+            .update_chunk_entities(vec![FactorioEntity::new_resource(
+                &ore_center,
+                Direction::North,
+                "iron-ore",
+            )])
+            .expect("a fixture world accepts its own ore");
+        (world, drill_pos)
+    }
+
+    /// **The behaviour change this task exists to make.** An electric
+    /// mining drill's `mining_drill_radius` (2.49, measured live) reaches a
+    /// full tile past its 3x3 collision box, so ore one tile beyond the
+    /// footprint -- covered by neither `collision_area_facing` nor the old,
+    /// footprint-only `drills_are_fed` -- must now read as fed.
+    ///
+    /// The drill sits at (0.5, 0.5), a tile CENTRE, which is the correct
+    /// alignment for its odd (3x3) footprint (`method::util::tile_alignment`
+    /// -- an even footprint sits on a tile boundary, an odd one on a tile
+    /// centre). Its footprint then spans tiles x,y in {-1, 0, 1}; ore at
+    /// tile (2, 0) -- one tile outside that box on the east side -- is
+    /// inside the 5x5 mining area (tiles {-2..=2}) but not the footprint.
+    ///
+    /// **This must fail without the fix**: reverting `drills_are_fed` to
+    /// ask `collision_area_facing` instead of `mining_area` refuses this
+    /// site, because ore at tile (2, 0) is outside the 3x3 footprint.
+    #[test]
+    fn an_electric_drill_is_fed_by_ore_adjacent_but_not_underneath() {
+        let (world, drill_pos) = drill_reach_world(
+            "electric-mining-drill",
+            Position::new(0.5, 0.5),
+            Some(2.49),
+            (2, 0),
+        );
+        let bp = Blueprint {
+            entities: vec![at_named(0.0, 0.0, "electric-mining-drill")],
+            version: 0,
+        };
+        let state = PlanState::from_world(std::sync::Arc::new(world), &[crate::ids::BotId(1)]);
+        assert_eq!(
+            drills_are_fed(&state, &bp, &drill_pos),
+            None,
+            "an electric drill's mining area reaches one tile past its own \
+             footprint and must be fed by ore sitting there"
+        );
+    }
+
+    /// **The burner drill's own reach does not widen anything.** Its
+    /// `mining_drill_radius` (0.99, measured live) is, doubled and ceiled,
+    /// exactly its own 2x2 footprint -- see the table in this function's
+    /// module-level doc and in `FactorioEntityPrototype::mining_drill_radius`.
+    /// Ore placed one tile beyond a burner drill the same way the electric
+    /// drill's test places it must still refuse.
+    ///
+    /// The drill sits at (2.0, 2.0), an integer position, which is the
+    /// correct alignment for its even (2x2) footprint. Its footprint (and,
+    /// since the radius does not widen it, its mining area) spans tiles
+    /// x, y in {1, 2}; ore at tile (3, 2) -- one tile past the east edge --
+    /// is outside both.
+    #[test]
+    fn a_burner_drill_is_not_fed_by_ore_adjacent_but_not_underneath() {
+        let (world, drill_pos) = drill_reach_world(
+            "burner-mining-drill",
+            Position::new(2.0, 2.0),
+            Some(0.99),
+            (1, 0),
+        );
+        let bp = Blueprint {
+            entities: vec![at_named(0.0, 0.0, "burner-mining-drill")],
+            version: 0,
+        };
+        let state = PlanState::from_world(std::sync::Arc::new(world), &[crate::ids::BotId(1)]);
+        assert!(
+            drills_are_fed(&state, &bp, &drill_pos).is_some(),
+            "a burner drill's mining area is its own footprint in tiles, so \
+             ore one tile beyond it must still be refused"
+        );
+    }
+
+    /// **`None` means unknown reach, never zero reach.** Every dump written
+    /// before `mining_drill_radius` existed carries `null` for the field;
+    /// treating that as zero would make this change silently MORE
+    /// conservative than the code it replaces on every one of them. With no
+    /// radius the check must fall back to exactly the old footprint
+    /// behaviour: ore under the footprint feeds the drill, and this must
+    /// hold even at the same off-footprint offset the radius-aware test
+    /// above uses (proving the fallback does not fabricate a radius from
+    /// thin air either).
+    #[test]
+    fn a_drill_with_unknown_radius_falls_back_to_its_footprint_not_zero_reach() {
+        let (world, drill_pos) = drill_reach_world(
+            "electric-mining-drill",
+            Position::new(0.5, 0.5),
+            None,
+            (0, 0),
+        );
+        let bp = Blueprint {
+            entities: vec![at_named(0.0, 0.0, "electric-mining-drill")],
+            version: 0,
+        };
+        let state = PlanState::from_world(std::sync::Arc::new(world), &[crate::ids::BotId(1)]);
+        assert_eq!(
+            drills_are_fed(&state, &bp, &drill_pos),
+            None,
+            "ore under the footprint must still feed a drill with unknown \
+             mining_drill_radius -- None is not the same as a real reach of \
+             zero, but it is also not a licence to treat the footprint as \
+             unfed"
+        );
+
+        let (world_adjacent, drill_pos) = drill_reach_world(
+            "electric-mining-drill",
+            Position::new(0.5, 0.5),
+            None,
+            (2, 0),
+        );
+        let state_adjacent =
+            PlanState::from_world(std::sync::Arc::new(world_adjacent), &[crate::ids::BotId(1)]);
+        assert!(
+            drills_are_fed(&state_adjacent, &bp, &drill_pos).is_some(),
+            "with no known radius, ore one tile past the footprint must \
+             still be refused -- unknown reach is handled conservatively, \
+             it is not silently widened"
         );
     }
 

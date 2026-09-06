@@ -3676,7 +3676,9 @@ mod capacity_tests {
 
     /// **There is no crossover of any kind, and 56 tiles is not special.**
     ///
-    /// This replaces `the_crossover_is_wood_rather_than_price`, which typed
+    /// This replaces `the_crossover_is_wood_rather_than_price` (doclint-allow:
+    /// deliberately names the deleted test, which is the point of the
+    /// sentence), which typed
     /// `const STARTING_WOOD: u32 = 4` into itself and asserted arithmetic
     /// about `pole_run_items` against that literal. Registering ten `Chop`s
     /// would not have moved it: it was a fixture satisfying its own assertion

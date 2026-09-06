@@ -15,7 +15,7 @@ use petgraph::dot::{Config, Dot};
 use petgraph::graph::NodeIndex;
 use petgraph::stable_graph::StableGraph;
 use petgraph::visit::{Bfs, Control, DfsEvent, EdgeRef, depth_first_search};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -339,12 +339,37 @@ impl FlowGraph {
                                 // anything else a furnace does not smelt, and
                                 // fuel falls out of the data rather than out of
                                 // a name.
-                                let mut output: FlowRates = vec![];
-                                for (name, _rate) in &incoming {
-                                    if let Some(rate) =
+                                //
+                                // **A furnace runs one recipe at a time**, so
+                                // its outputs share its time rather than each
+                                // getting the whole of it. This used to add a
+                                // full-rate edge per smeltable input, which on
+                                // a mixed belt reported one furnace smelting
+                                // iron *and* copper *and* stone at 100% each.
+                                // Measured against the 6:39:53 world-record
+                                // save on 2026-09-06: stone-brick came out at
+                                // 7,125/min against the game's 450, because
+                                // stone reaches furnaces the game has set to
+                                // iron. The share is the input's share of the
+                                // smeltable ore arriving -- the only signal
+                                // this graph has about what the furnace spends
+                                // its time on, since `EntityType::Furnace`
+                                // carries no recipe.
+                                let smeltable: Vec<(&String, f64, FlowRate)> = incoming
+                                    .iter()
+                                    .filter_map(|(name, rate)| {
                                         self.smelting_output(&source_node.entity_name, name)
-                                    {
-                                        self.add_production_rate(&mut output, rate);
+                                            .map(|out| (name, *rate, out))
+                                    })
+                                    .collect();
+                                let arriving: f64 = smeltable.iter().map(|(_, rate, _)| rate).sum();
+                                let mut output: FlowRates = vec![];
+                                if arriving > 0. {
+                                    for (_, rate, (product, full)) in &smeltable {
+                                        self.add_production_rate(
+                                            &mut output,
+                                            (product.clone(), full * rate / arriving),
+                                        );
                                     }
                                 }
                                 self.update_flow_edge(
@@ -501,6 +526,72 @@ impl FlowGraph {
     ///
     /// Read a number from here as **an upper bound under ideal distribution**,
     /// and never as evidence that a line is working.
+    /// What every producer standing in this graph makes, per item name, in
+    /// items per second -- the whole-base question, where [`FlowGraph::throughput_at`]
+    /// answers one tile at a time.
+    ///
+    /// A producer is a mining drill, a furnace, an assembling machine or an
+    /// offshore pump: the four arms of [`FlowGraph::update`] that *originate* a
+    /// rate. Belts, inserters, pipes and splitters only carry one, so counting
+    /// them would count the same items again at every tile they cross.
+    ///
+    /// # A machine is counted once, not once per outgoing edge
+    ///
+    /// [`FlowGraph::update_flow_edge`] writes a machine's **whole** output on
+    /// **each** of its outgoing edges -- that is what makes
+    /// `throughput_at` correct for any one of its consumers. A drill that both
+    /// drops onto a belt and has an inserter picking out of it therefore has
+    /// two edges of 0.5 ore/s, and it mines 0.5, not 1.0. So this takes the
+    /// **maximum** per item across a node's outgoing edges rather than the sum.
+    /// The world-record base has 1,544 drills and 1,222 furnaces, and summing
+    /// would have inflated every one of them that feeds two things.
+    ///
+    /// # It is a CAPACITY, and the gap to a real base is not one thing
+    ///
+    /// Every caveat on [`FlowGraph::throughput_at`] applies and compounds here:
+    /// no back-pressure, no buffers, and nothing that models a machine standing
+    /// idle. Measured against the 6:39:53 Space Age world record save on
+    /// 2026-09-06, this number is an **upper bound that the base runs at 87-95%
+    /// of**, and it omits force bonuses (mining productivity was +10% there) and
+    /// module and beacon effects entirely, neither of which this project models.
+    /// See `docs/superpowers/notes/2026-09-06-what-the-record-base-knows.md`.
+    pub fn production_rates(&self) -> BTreeMap<String, f64> {
+        self.ensure_current();
+        let graph = self.inner.read();
+        let mut total: BTreeMap<String, f64> = BTreeMap::new();
+        for node_index in graph.node_indices() {
+            let Some(node) = graph.node_weight(node_index) else {
+                continue;
+            };
+            if !matches!(
+                node.entity_type,
+                EntityType::MiningDrill
+                    | EntityType::Furnace
+                    | EntityType::AssemblingMachine
+                    | EntityType::OffshorePump
+            ) {
+                continue;
+            }
+            let mut best: BTreeMap<String, f64> = BTreeMap::new();
+            for edge in graph.edges_directed(node_index, petgraph::Direction::Outgoing) {
+                let rates: Vec<&FlowRate> = match edge.weight() {
+                    FlowEdge::Single(vec) => vec.iter().collect(),
+                    FlowEdge::Double(left, right) => left.iter().chain(right.iter()).collect(),
+                };
+                for (name, rate) in rates {
+                    let slot = best.entry(name.clone()).or_insert(0.);
+                    if rate.total_cmp(slot).is_gt() {
+                        *slot = *rate;
+                    }
+                }
+            }
+            for (name, rate) in best {
+                *total.entry(name).or_insert(0.) += rate;
+            }
+        }
+        total
+    }
+
     pub fn throughput_at(&self, position: &Position) -> FlowRates {
         self.ensure_current();
         if self.node_at(position).is_none() {
@@ -1656,5 +1747,207 @@ mod tests {
 }
 "#,
         );
+    }
+
+    /// The whole-graph aggregate over the chain `test_furnace` builds: one
+    /// drill and one furnace, five belts and two inserters between them.
+    ///
+    /// The two numbers are the two the chain's own edge labels carry -- 0.5
+    /// ore/s off the drill, 0.3125 plate/s out of a `crafting_speed` 1 furnace
+    /// on a 3.2 s recipe -- so this asserts the aggregate and not a second
+    /// arithmetic.
+    ///
+    /// **The carriers are what this is really about.** Five belts and two
+    /// inserters carry that same 0.5 ore/s and 0.3125 plate/s along the chain.
+    /// Counting a tile because a rate is written on it would report 3 ore/s and
+    /// 0.9375 plate/s out of a base with one drill in it.
+    #[test]
+    fn belts_and_inserters_carry_a_rate_and_do_not_add_to_it() {
+        let flow_graph = FlowGraph::new(Arc::new(smelting_chain()));
+        let rates = flow_graph.production_rates();
+        assert_eq!(
+            rates,
+            BTreeMap::from([
+                ("iron-ore".to_string(), 0.5),
+                ("iron-plate".to_string(), 0.3125),
+            ]),
+            "one drill and one furnace, whatever stands between them"
+        );
+    }
+
+    /// A drill that feeds two things mines once.
+    ///
+    /// [`FlowGraph::update_flow_edge`] writes the producer's whole output on
+    /// **every** outgoing edge, which is what makes `throughput_at` right for
+    /// each consumer and makes a naive sum wrong for the producer. This drill
+    /// drops onto a belt *and* has an inserter reaching into it -- two edges of
+    /// 0.5 ore/s off one drill that mines 0.5.
+    ///
+    /// Asserted through `throughput_at` as well, so a failure says which half
+    /// broke: if the two edges were not both 0.5 the fixture would not be
+    /// exercising the case at all, and the aggregate would pass for the wrong
+    /// reason.
+    #[test]
+    fn a_drill_feeding_two_things_is_counted_once() {
+        let entity_graph = Arc::new(
+            entity_graph_from(vec![
+                FactorioEntity::new_resource(
+                    &Position::new(0.5, -1.5),
+                    Direction::South,
+                    &EntityName::IronOre.to_string(),
+                ),
+                FactorioEntity::new_electric_mining_drill(
+                    &Position::new(0.5, -1.5),
+                    Direction::South,
+                ),
+                FactorioEntity::new_transport_belt(&Position::new(0.5, 0.5), Direction::South),
+                // Reaches into the drill from the north and drops onto a belt
+                // of its own: the second consumer.
+                FactorioEntity::new_inserter(&Position::new(0.5, -3.5), Direction::South),
+                FactorioEntity::new_transport_belt(&Position::new(0.5, -4.5), Direction::North),
+            ])
+            .unwrap(),
+        );
+        let flow_graph = FlowGraph::new(entity_graph);
+        assert_eq!(
+            rate_of(
+                &flow_graph.throughput_at(&Position::new(0.5, 0.5)),
+                "iron-ore"
+            ),
+            Some(0.5),
+            "the belt below the drill is offered the drill's whole output"
+        );
+        assert_eq!(
+            rate_of(
+                &flow_graph.throughput_at(&Position::new(0.5, -3.5)),
+                "iron-ore"
+            ),
+            Some(0.5),
+            "and so is the inserter above it -- two edges of 0.5 is the case under test"
+        );
+        assert_eq!(
+            flow_graph.production_rates(),
+            BTreeMap::from([("iron-ore".to_string(), 0.5)]),
+            "one drill mines 0.5 ore/s however many things it feeds"
+        );
+    }
+
+    /// A furnace fed two ores smelts one furnace's worth between them, not one
+    /// furnace's worth of each.
+    ///
+    /// Found by running this graph over the 6:39:53 world-record save rather
+    /// than by reading the code: `stone-brick` came out at **7,125/min against
+    /// the game's 450**, because the model saw stone reaching furnaces the game
+    /// had set to iron and gave each of them a full brick edge on top of its
+    /// full plate edge.
+    ///
+    /// The sum is what is asserted, because it is the physical claim -- a stone
+    /// furnace is one machine and 0.3125 items/s is all of it. How the share
+    /// splits between two ores arriving down one belt is a modelling choice
+    /// (this graph splits by arrival rate); how much comes out in total is not.
+    #[test]
+    fn a_furnace_fed_two_ores_still_only_runs_one_at_a_time() {
+        let entity_graph = Arc::new(
+            entity_graph_from(vec![
+                FactorioEntity::new_resource(
+                    &Position::new(0.5, -1.5),
+                    Direction::South,
+                    &EntityName::IronOre.to_string(),
+                ),
+                FactorioEntity::new_electric_mining_drill(
+                    &Position::new(0.5, -1.5),
+                    Direction::South,
+                ),
+                FactorioEntity::new_resource(
+                    &Position::new(0.5, 2.5),
+                    Direction::North,
+                    &EntityName::Stone.to_string(),
+                ),
+                FactorioEntity::new_electric_mining_drill(
+                    &Position::new(0.5, 2.5),
+                    Direction::North,
+                ),
+                // Both drills drop onto the same tile: one mixed belt.
+                FactorioEntity::new_transport_belt(&Position::new(0.5, 0.5), Direction::East),
+                FactorioEntity::new_transport_belt(&Position::new(1.5, 0.5), Direction::East),
+                FactorioEntity::new_inserter(&Position::new(2.5, 0.5), Direction::West),
+                FactorioEntity::new_stone_furnace(&Position::new(4., 0.5), Direction::North),
+                // The furnace needs a consumer: a rate is written on an
+                // outgoing edge, and a machine nothing takes from has none.
+                FactorioEntity::new_inserter(&Position::new(5.5, 0.5), Direction::West),
+                FactorioEntity::new_transport_belt(&Position::new(6.5, 0.5), Direction::East),
+            ])
+            .unwrap(),
+        );
+        let flow_graph = FlowGraph::new(entity_graph);
+        let arriving = flow_graph.throughput_at(&Position::new(4., 0.5));
+        assert!(
+            rate_of(&arriving, "iron-ore").is_some() && rate_of(&arriving, "stone").is_some(),
+            "both ores must actually reach the furnace or this asserts nothing: {arriving:?}"
+        );
+        let rates = flow_graph.production_rates();
+        let plate = rates.get("iron-plate").copied().unwrap_or_default();
+        let brick = rates.get("stone-brick").copied().unwrap_or_default();
+        assert!(
+            plate > 0. && brick > 0.,
+            "the furnace is fed both, so it makes some of both: {rates:?}"
+        );
+        assert!(
+            (plate + brick - 0.3125).abs() < 1e-9,
+            "one stone furnace on 3.2 s recipes makes 0.3125 items/s in total, \
+             not 0.3125 of each: iron-plate {plate}, stone-brick {brick}"
+        );
+    }
+
+    /// The chain `test_furnace` asserts the shape of, as a fixture.
+    fn smelting_chain() -> EntityGraph {
+        entity_graph_from(vec![
+            FactorioEntity::new_resource(
+                &Position::new(0.5, -1.5),
+                Direction::South,
+                &EntityName::IronOre.to_string(),
+            ),
+            FactorioEntity::new_electric_mining_drill(&Position::new(0.5, -1.5), Direction::South),
+            FactorioEntity::new_transport_belt(&Position::new(0.5, 0.5), Direction::South),
+            FactorioEntity::new_inserter(&Position::new(0.5, 1.5), Direction::North),
+            FactorioEntity::new_stone_furnace(&Position::new(1., 3.), Direction::South),
+            FactorioEntity::new_inserter(&Position::new(0.5, 4.5), Direction::North),
+            FactorioEntity::new_transport_belt(&Position::new(0.5, 5.5), Direction::South),
+            FactorioEntity::new_transport_belt(&Position::new(0.5, 6.5), Direction::South),
+            FactorioEntity::new_transport_belt(&Position::new(0.5, 7.5), Direction::South),
+        ])
+        .unwrap()
+    }
+
+    /// The falsification harness for every rate in this file, run against a
+    /// **real** base rather than a fixture this repository wrote.
+    ///
+    /// Ignored by default and gated on `FACTORIO_BOT_WORLD_DUMP` naming a
+    /// `world.dump` JSON, because the dump it was built for is 2.8 GB and lives
+    /// in a workspace, not in the repository. It prints rather than asserts: the
+    /// point is to put this graph's number beside one the game reported, and
+    /// what the difference *means* is the analysis in
+    /// `docs/superpowers/notes/2026-09-06-what-the-record-base-knows.md`, not a
+    /// threshold.
+    ///
+    /// ```text
+    /// FACTORIO_BOT_WORLD_DUMP=workspace/wrload/scripts/wr-census.json \
+    ///   cargo test -p factorio-bot-core --release flow_graph -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "needs a world dump named by FACTORIO_BOT_WORLD_DUMP"]
+    fn production_rates_of_a_dumped_world() {
+        let Ok(path) = std::env::var("FACTORIO_BOT_WORLD_DUMP") else {
+            panic!("set FACTORIO_BOT_WORLD_DUMP to a world.dump JSON");
+        };
+        let json = std::fs::read_to_string(&path).expect("the dump reads");
+        let surface: crate::factorio::world::FactorioSurface =
+            serde_json::from_str(&json).expect("the dump parses");
+        let rates = surface.flow_graph.production_rates();
+        println!("-- production_rates of {path} --");
+        for (name, rate) in &rates {
+            println!("{name:>28}  {:>12.1} /min", rate * 60.);
+        }
+        println!("{} items", rates.len());
     }
 }

@@ -1256,6 +1256,40 @@ function Sup:step()
             -- prefix bolted on. The original error object -- and the traceback
             -- mlua wrapped it in -- survives for the driver's own pcall.
             if refusal == nil then error(planned, 0) end
+            -- ONE refusal is not a halt, and it is the one a standing goal
+            -- ends on when it succeeds.
+            --
+            -- `Goal::Sustain` builds an arrangement -- a coal drill, a buffer,
+            -- belts, burner inserters, the smelting cell -- and then, on the
+            -- re-plan that finds all of it standing, refuses with
+            -- `planner::sustain_supply_not_standing` rather than returning an
+            -- empty plan. That refusal is deliberate and is argued in
+            -- `crates/planner/src/method/sustain.rs`: an empty plan is this
+            -- planner's word for "done", `goal.holds` answers nil for a
+            -- sustain, and whether the RATE held is a fact about a window of
+            -- history that no reading of the world settles. So the planner
+            -- has two honest answers -- "here is what is still missing" and
+            -- "nothing is missing and I cannot tell you whether it worked" --
+            -- and only the first is a stuck milestone.
+            --
+            -- The milestone therefore closes `satisfied`, and the reason word
+            -- it borrows (`already_satisfied`) is about **the buildable half
+            -- only**: the world already holds every entity this goal can
+            -- plan. It says nothing about the rate, and nothing here should be
+            -- read as saying so -- `t.sustain_built` carries the refusal's own
+            -- sentence so a driver prints what actually happened instead of
+            -- the reason word. The verdict belongs to
+            -- `tools/run_analysis.py --sustain`, exactly as
+            -- `supervisor.sustain`'s does.
+            if refusal.code == "planner::sustain_supply_not_standing" then
+                self:_close("satisfied")
+                self.state = "acquiring"
+                return { action = "satisfied", state = "acquiring",
+                         milestone_index = self.index, steps = 0,
+                         iteration = self.iterations,
+                         reason = "already_satisfied",
+                         sustain_built = { message = refusal.message } }
+            end
             self.refusal = refusal
             -- `stuck`, not `stuck_silent`: that one means "no progress and
             -- nothing to show for it", and this milestone has the planner's

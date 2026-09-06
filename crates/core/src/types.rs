@@ -1586,8 +1586,30 @@ impl FactorioEntity {
         }
     }
     pub fn new_inserter(position: &Position, direction: Direction) -> FactorioEntity {
+        FactorioEntity::new_named_inserter(EntityName::Inserter.to_string(), position, direction)
+    }
+
+    /// An inserter of a **named** prototype, for the callers that cannot use
+    /// the electric one.
+    ///
+    /// `inserter` is not craftable at t=0 — its recipe takes an
+    /// `electronic-circuit` and reads `enabled: false` on a freeplay force,
+    /// checked against seed 31337's own dump — whereas `burner-inserter` is
+    /// (1 iron plate, 1 gear). Anything a stage-1 plan places therefore has to
+    /// name the prototype rather than inherit `new_inserter`'s.
+    ///
+    /// Every other field is shared, and deliberately so: both prototypes have
+    /// the same 0.78 collision box, the same one-tile reach, and the same
+    /// convention that `direction` names the side the arm **picks up** from.
+    /// A burner inserter differs only in where its energy comes from, which
+    /// is not a field this type carries.
+    pub fn new_named_inserter(
+        inserter: String,
+        position: &Position,
+        direction: Direction,
+    ) -> FactorioEntity {
         FactorioEntity {
-            name: EntityName::Inserter.to_string(),
+            name: inserter,
             entity_type: EntityType::Inserter.to_string(),
             position: position.clone(),
             bounding_box: add_to_rect_turned(&Rect::from_wh(0.78, 0.78), position, direction),

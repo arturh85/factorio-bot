@@ -364,6 +364,26 @@ the point:
   completion rate from these runs. A quiet floor would give a number; these give
   a diagnosis.
 
+**Both of these have since been superseded, and the update is worth more than
+the original.** The speedrun session ran eight `furnace_run` block builds on an
+identical 183-step plan — same binary, same mod, only the executor arm differing
+— and established two things this note could not:
+
+- **The refusal is a RACE, not a property of the plan.** One of the eight runs
+  hit no refusal at all, on the same seed, map and plan. So a single clean block
+  run proves nothing about this class, and neither did my three unclean ones:
+  they bound the *cause*, never the frequency. "Load-modulated" was too generous
+  a description of what I had — a race is modulated by scheduling, of which load
+  is only one input.
+- **A failed action now costs its dependents rather than the batch**
+  (`0fedcb95`): before, four failures cost 29 entities; after, five failures
+  cost five, with every planned action dispatched. So the blast radius I flagged
+  from my void run was real, but it is now *measured* rather than inherited from
+  evidence that did not survive.
+
+The consequence for anyone re-running the sited block: **do not read one run.**
+Read several, and expect the refusal to be absent from some of them.
+
 ### Still not proven, and worth repeating
 
 `FurnaceLine` carries 13 poles and **no generator at all**. The 87 belts, 48

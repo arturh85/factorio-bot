@@ -171,9 +171,29 @@ result without spending a run.
 
 **Since 2026-09-05 `workspace/scripts/map.json` is the seed-31337 t=0 dump**
 (fingerprint `c161fa3f437221d0`, four headless character bots with the
-honest freeplay inventory, `researched:automation` = 177 actions / 22,044
-ticks, `producing:logistic-science-pack:6` = 623 / 71,167), kept also as
-`map-31337-t0.json`. Before that it was the OLD map's baseline, which lives
+honest freeplay inventory), kept also as `map-31337-t0.json`.
+
+**The baselines this file used to quote here were stale, and quoting them at
+all was the mistake.** It said `researched:automation` = 177 actions / 22,044
+ticks and `producing:logistic-science-pack:6` = 623 / 71,167. Measured
+2026-09-06 against `master`: automation is **176 / 21,784**, confirmed twice
+independently. Green has moved more than once and two builds disagreed on the
+same day -- 442 / 47,542 from two agents on merged `7ebe707d`, against
+451 / 48,829 from a release binary compiled a few commits earlier. Neither is
+wrong; **the plan legitimately changes as the planner improves**, which is the
+whole point of the work, and a number pinned in prose goes stale silently
+while looking authoritative.
+
+So: **re-measure, do not quote from here.** One command, about 4 seconds:
+
+```bash
+target/release/factorio-bot plan --world workspace/scripts/map.json \
+    --goal researched:automation --bots 1,2,3,4
+```
+
+Take the three baselines before and after a planner change on the *same
+binary*, and state the commit beside them. A baseline compared across two
+builds measures the builds, not the change -- that is exactly the trap above. Before that it was the OLD map's baseline, which lives
 on as `map-t0-baseline.json` (fingerprint `dfac0f4caa0a7500`) -- every
 offline number in the 2026-09-03/04 record was made on that map while the
 live runs were on 31337. Regenerate with

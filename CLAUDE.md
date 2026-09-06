@@ -404,11 +404,25 @@ BotBridge Mod (Factorio mod for RPC)
       integer division allows", which `div_ceil` was not, and it reported a
       6-entity block as "3/4/3/0", which are **step** counts, not bands --
       the bands were 2/2/2/0. The axis was also wrong until 2026-09-05: the
-      sort was by x unconditionally, so over `MinerLine` (4 wide, 20 tall)
-      bands 0, 1 and 2 all occupied x = 3.5 and band 0 spanned the whole
-      height the other two were segments of -- three bots interleaved in a
-      one-tile corridor, while the spec claimed "a bot never crosses
-      another's band".
+      sort was by x unconditionally, so over `MinerLine` bands 0, 1 and 2
+      all occupied x = 3.5 and band 0 spanned the whole height the other
+      two were segments of -- three bots interleaved in a one-tile
+      corridor, while the spec claimed "a bot never crosses another's
+      band".
+
+      **A third number here was wrong until 2026-09-06: `MinerLine` is not
+      "4 wide, 20 tall".** Decoded from the fixture itself, it is **5 x 21**
+      by position bounding box (x[1.5,5.5], y[0.5,20.5]) with its 13 drills
+      in **two columns** at x = 1.5 and x = 5.5 -- so once 3x3 collision
+      boxes are counted the block covers 8 tiles of width, not 4. Any
+      reasoning about band splits or footprints that used 4x20 was reasoning
+      about a block that does not exist.
+
+      **The fixture is the authority, not this prose.** Decode the blueprint
+      before quoting its shape; the tests do. Three documented constants in
+      this file turned out wrong in a single day -- these dimensions, the
+      `R + 1.1` walk margin (measured at 0.6), and the walk speed 0.15
+      (measured 0.1413).
 
 - **crates/executor**: runs a `Schedule` across bots over RCON. Per-action
   completion signals (`tokio::sync::watch`, not polling), lag edges modelling
@@ -790,6 +804,18 @@ cargo build --release --no-default-features --features cli,lua  # release: timin
 # --clients is how many Factorio processes to spawn; --bots is how many bots
 # to plan for. They used to be one flag, which made `-c 0` plan for zero bots
 # and `-c 1` demand a display. Planning only needs bots.
+#
+# **It still starts a SERVER.** `--clients 0` means no graphical *client*; the
+# run goes through the same "Factorio started, running script..." path as any
+# other, so a script under it can talk RCON and mutate a live game. That is
+# usually what you want -- it is why `initiate_missing_players_with_default_
+# inventory` exists on this path -- but it is NOT the process-free option, and
+# reading this heading as "no game at all" has already sent one agent looking
+# for a planning path that does not spawn Factorio.
+#
+# For genuinely process-free planning -- no Factorio, no RCON, no workspace --
+# use `plan` against a dumped world (see "Evaluate a planner change OFFLINE
+# first" above): `factorio-bot plan --world <dump> --goal ...`.
 factorio-bot lua goal_smoke.lua --clients 0 --bots 4
 
 # Run multi-client test with adequate timeout (180s recommended)

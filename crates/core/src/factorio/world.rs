@@ -1025,6 +1025,181 @@ impl ObservedInventory {
     }
 }
 
+/// Every surface this process knows about, keyed by [`SurfaceId`].
+///
+/// # Why the container carries the surface and [`Position`] does not
+///
+/// A coordinate is only ever comparable within one surface, which
+/// `Position { x, y }` already says correctly. Putting a surface *on* the
+/// value would force `p1 - p2`, `Sub`, `manhattan_distance` and `PartialEq`
+/// to answer "how far is Nauvis from Vulcanus?", whose honest answer --
+/// undefined -- cannot be returned as an `f64`. So the surface goes on the
+/// container, and every `Pos`-keyed map inside a [`FactorioSurface`] keeps
+/// its integer tile key unchanged, because there is a **separate map per
+/// surface**. A chest at (10, 10) on Nauvis and a chest at (10, 10) on a
+/// platform cannot collide, by construction rather than by care. See
+/// `docs/superpowers/notes/2026-09-06-surfaces-survey.md`.
+///
+/// # What is per-surface and what is not
+///
+/// This is the design decision this type exists to record, and getting it
+/// wrong in the other direction is a subtler version of the same aliasing
+/// bug: **duplicated global state lets two surfaces disagree about what is
+/// researched.**
+///
+/// **Per-surface** -- everything spatial, and everything a `Pos` keys:
+///
+/// | Field of [`FactorioSurface`] | Why |
+/// |---|---|
+/// | `entity_graph` | Four quadtrees over one ±5120 coordinate space, plus `resources`/`minables`/`threats` as `BTreeMap<Pos, _>`. This is the aliasing case itself. |
+/// | `flow_graph` | Derived from exactly one entity graph. |
+/// | `inventories` | `DashMap<Pos, ObservedInventory>`. |
+/// | `placement_refusals`, `walk_refusals`, `enclosures`, `step_asides` | Every one is a fact about a *place*: a site the game refused, a spot a walk could not leave. None of it says anything about the same coordinates elsewhere. |
+///
+/// **Game- or force-global** -- must exist once per world, never once per
+/// surface:
+///
+/// | Field | Why |
+/// |---|---|
+/// | `forces` | A force's technologies and research progress are force-wide; `LuaForce::technologies` is not surface-indexed. Two copies is the disagree-about-research bug by name. |
+/// | `recipes`, `entity_prototypes`, `item_prototypes`, `graphics`, `image_cache` | Prototype data, loaded once per save from the mod set. It does not vary by surface. (Recipe *availability* varies by force, not by surface.) |
+/// | `actions`, `next_action_id`, `path_requests` | One id space for the session. Two counters would hand two surfaces the same `action_id`, and the executor's completion signal is keyed on exactly that. |
+/// | `research_triggers` | Force-level facts, like `forces`. |
+/// | `teleports`, `deaths` | A teleport *crosses* surfaces -- that is what makes it a teleport -- so it belongs to neither endpoint. Respawn likewise: the mod respawns a dead bot on `game.surfaces[1]` wherever it died. |
+/// | `surface_chunk_drops` | Already keyed by [`SurfaceId`], and it is about surfaces this world deliberately does **not** hold. It could only ever belong to the aggregate. |
+///
+/// **Genuinely ambiguous, and said so rather than guessed:**
+///
+/// * `players`. A bot has one identity across the whole game and stands on
+///   exactly one surface at a time; [`FactorioPlayer`] already carries a
+///   `surface: Option<SurfaceId>`. The map is keyed by `PlayerId`, so it
+///   cannot alias -- but `crates/planner`'s `PlanState` reads it as "the
+///   bots I may give steps to", which is a per-surface question. Splitting
+///   it per surface would mean *moving* a row when a bot crosses, an
+///   operation nothing in this project can currently perform. Left global,
+///   flagged here.
+/// * `benches`. Keyed by `PlayerId` like `players`, but the fact it holds
+///   ("this bot cannot move from *here*") is positional. It follows
+///   `players` for now, for the same reason.
+///
+/// # One surface today, and it refuses to hold two
+///
+/// The split above is **written down and not yet enforced by the types**:
+/// every field named global still lives on [`FactorioSurface`], so a second
+/// surface added here would duplicate them. [`FactorioWorld::insert_surface`]
+/// therefore **refuses** a second surface by name
+/// ([`SurfaceNotYetSeparable`](crate::errors::SurfaceNotYetSeparable))
+/// rather than accepting one and quietly forking the research state. A
+/// refusal that names the reason is worth more than a container that is
+/// silently wrong; this repo has paid for the other choice enough times to
+/// have a rule about it. Lifting the refusal means moving the global fields
+/// off the surface first, which is a mechanical change of its own and is
+/// deliberately not in this commit.
+///
+/// The mod's Nauvis guard in `mods/BotBridge/control.lua` is the matching
+/// half upstream: no non-Nauvis chunk reaches Rust at all, and what it drops
+/// is recorded in `surface_chunk_drops`.
+pub struct FactorioWorld {
+    surfaces: BTreeMap<SurfaceId, Arc<FactorioSurface>>,
+}
+
+impl FactorioWorld {
+    /// A world holding exactly the one surface it was handed, under `id`.
+    pub fn new(id: SurfaceId, surface: Arc<FactorioSurface>) -> Self {
+        let mut surfaces = BTreeMap::new();
+        surfaces.insert(id, surface);
+        FactorioWorld { surfaces }
+    }
+
+    /// A world holding one Nauvis surface. The shape every run has had so
+    /// far, said out loud instead of assumed.
+    pub fn nauvis_only(surface: Arc<FactorioSurface>) -> Self {
+        FactorioWorld::new(SurfaceId::nauvis(), surface)
+    }
+
+    /// The surface under `id`, or `None` when this world has never seen it.
+    ///
+    /// `None` means **not observed**, never "empty": the mod drops every
+    /// chunk that is not on Nauvis, so an unknown surface is a surface
+    /// nothing was ever told about.
+    pub fn surface(&self, id: &SurfaceId) -> Option<&Arc<FactorioSurface>> {
+        self.surfaces.get(id)
+    }
+
+    /// The Nauvis surface, when this world has one.
+    pub fn nauvis(&self) -> Option<&Arc<FactorioSurface>> {
+        self.surface(&SurfaceId::nauvis())
+    }
+
+    /// The one surface this world holds, for callers written before there
+    /// could be more than one.
+    ///
+    /// **This is the porting seam, and it is deliberately not `nauvis()`.**
+    /// A caller reaching through here is one that has not yet been told
+    /// which surface it means; it returns `None` on an empty world and would
+    /// have to be looked at again on a world with two, which is exactly the
+    /// review the later rungs need. `nauvis()` is for a caller that genuinely
+    /// means Nauvis.
+    pub fn only_surface(&self) -> Option<&Arc<FactorioSurface>> {
+        let mut surfaces = self.surfaces.values();
+        let first = surfaces.next()?;
+        // Not `is_empty`-style: a second surface cannot exist today, and if
+        // one ever does this must stop answering rather than pick one.
+        match surfaces.next() {
+            None => Some(first),
+            Some(_) => None,
+        }
+    }
+
+    /// Every surface id this world holds, in name order.
+    pub fn surface_ids(&self) -> impl Iterator<Item = &SurfaceId> {
+        self.surfaces.keys()
+    }
+
+    /// How many surfaces this world holds. One, today, always.
+    pub fn len(&self) -> usize {
+        self.surfaces.len()
+    }
+
+    /// True when nothing has been observed yet.
+    pub fn is_empty(&self) -> bool {
+        self.surfaces.is_empty()
+    }
+
+    /// Adds a surface, or refuses because the world's global state has not
+    /// been separated from the surface's yet.
+    ///
+    /// Re-inserting the id this world already holds is accepted and replaces
+    /// it -- that is one surface being refreshed, not two coexisting. Any
+    /// *other* id is refused: see the type's doc for what would be
+    /// duplicated and why a refusal is the honest answer.
+    pub fn insert_surface(
+        &mut self,
+        id: SurfaceId,
+        surface: Arc<FactorioSurface>,
+    ) -> Result<(), crate::errors::SurfaceNotYetSeparable> {
+        if !self.surfaces.contains_key(&id)
+            && let Some(held) = self.surfaces.keys().next()
+        {
+            return Err(crate::errors::SurfaceNotYetSeparable {
+                held: held.clone(),
+                offered: id,
+            });
+        }
+        self.surfaces.insert(id, surface);
+        Ok(())
+    }
+}
+
+/// One surface's model of the game -- **and, for now, the game-global state
+/// beside it.**
+///
+/// This type was called `FactorioWorld` until 2026-09-06 and was never a
+/// world: one `EntityGraph`, one `FlowGraph`, one set of `Pos`-keyed
+/// overlays, all of them describing a single surface. [`FactorioWorld`] is
+/// now the aggregate that owns surfaces, and its doc carries the field-by-
+/// field argument for which of the fields below are per-surface and which
+/// are global. Read it before adding a field here.
 pub struct FactorioSurface {
     pub players: DashMap<PlayerId, FactorioPlayer>,
     pub forces: DashMap<String, FactorioForce>,

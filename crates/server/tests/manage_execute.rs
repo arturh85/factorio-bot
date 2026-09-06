@@ -18,7 +18,7 @@ use axum::body::Body;
 use axum::http::{Request, Response, StatusCode, header};
 use factorio_bot_core::app_settings::AppSettings;
 use factorio_bot_core::factorio::rcon::FactorioRcon;
-use factorio_bot_core::factorio::world::FactorioSurface;
+use factorio_bot_core::factorio::world::{FactorioSurface, FactorioWorld};
 use factorio_bot_core::parking_lot;
 use factorio_bot_core::process::process_control::FactorioInstance;
 // `OutputSink` is what puts `JobHandle::line` in scope: the event-stream tests
@@ -37,7 +37,9 @@ use tower::ServiceExt;
 /// than inventing a third version.
 fn empty_factorio_instance() -> FactorioInstance {
     FactorioInstance {
-        world: Some(Arc::new(FactorioSurface::new())),
+        world: Some(Arc::new(FactorioWorld::nauvis_only(Arc::new(
+            FactorioSurface::new(),
+        )))),
         rcon: Arc::new(FactorioRcon::new_empty()),
         server_process: None,
         client_processes: Vec::new(),

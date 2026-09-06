@@ -1,6 +1,6 @@
 use factorio_bot_core::app_settings::AppSettings;
 use factorio_bot_core::factorio::rcon::FactorioRcon;
-use factorio_bot_core::factorio::world::FactorioSurface;
+use factorio_bot_core::factorio::world::{FactorioSurface, FactorioWorld};
 use factorio_bot_core::parking_lot;
 use factorio_bot_core::process::process_control::{FactorioInstance, SharedFactorioInstance};
 use factorio_bot_server::webserver::start_with_shutdown;
@@ -60,7 +60,9 @@ async fn server_returns_when_the_shutdown_future_resolves() {
 /// constructible in a unit test without spawning Factorio.
 fn empty_factorio_instance() -> FactorioInstance {
     FactorioInstance {
-        world: Some(Arc::new(FactorioSurface::new())),
+        world: Some(Arc::new(FactorioWorld::nauvis_only(Arc::new(
+            FactorioSurface::new(),
+        )))),
         rcon: Arc::new(FactorioRcon::new_empty()),
         server_process: None,
         client_processes: Vec::new(),

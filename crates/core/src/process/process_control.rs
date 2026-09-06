@@ -1,7 +1,7 @@
 use crate::constants::SERVER_SETTINGS_FILENAME;
 use crate::errors::*;
 use crate::factorio::rcon::{FactorioRcon, RconSettings};
-use crate::factorio::world::FactorioSurface;
+use crate::factorio::world::{FactorioSurface, FactorioWorld};
 use crate::process::arrange_windows::arrange_windows;
 use crate::process::connect_wait::{ConnectWait, ConnectWatcher, missing_clients};
 use crate::process::instance_setup::setup_factorio_instance;
@@ -23,7 +23,7 @@ use tokio::sync::RwLock;
 pub type SharedFactorioInstance = Arc<RwLock<Option<FactorioInstance>>>;
 
 pub struct FactorioInstance {
-    pub world: Option<Arc<FactorioSurface>>,
+    pub world: Option<Arc<FactorioWorld>>,
     pub rcon: Arc<FactorioRcon>,
     pub server_process: Option<InteractiveProcess>,
     pub client_processes: Vec<InteractiveProcess>,
@@ -35,6 +35,23 @@ pub struct FactorioInstance {
     pub client_count: u8,
     pub map_exchange_string: Option<String>,
     pub seed: Option<String>,
+}
+
+impl FactorioInstance {
+    /// The one surface this instance's world holds.
+    ///
+    /// **The porting seam for callers written before there could be more than
+    /// one**, and it is `only_surface` rather than `nauvis` on purpose: every
+    /// caller here asks about *a* surface without saying which, so on the day
+    /// a world holds two this returns `None` and the caller has to say. A
+    /// caller that genuinely means Nauvis should ask the world for Nauvis.
+    ///
+    /// `None` also covers the ordinary case of an instance with no world at
+    /// all -- a `--connect` session builds its own -- which every existing
+    /// caller already handled.
+    pub fn surface(&self) -> Option<&Arc<FactorioSurface>> {
+        self.world.as_ref()?.only_surface()
+    }
 }
 
 pub struct FactorioParams {
@@ -121,7 +138,7 @@ impl FactorioInstance {
                 params.client_count
             ));
         }
-        let mut world: Option<Arc<FactorioSurface>> = None;
+        let mut world: Option<Arc<FactorioWorld>> = None;
         let silent = Arc::new(parking_lot::RwLock::new(params.silent));
         let instance_name = params.instance_name.unwrap_or_else(|| "server".to_owned());
         let rcon_settings = RconSettings::new(
@@ -226,7 +243,7 @@ impl FactorioInstance {
                 )
                 .await?;
                 factorio_port = Some(used_factorio_port);
-                world = Some(_world);
+                world = Some(Arc::new(FactorioWorld::nauvis_only(_world)));
                 // report_child_death(child);
                 server_child = Some(child);
                 if !params.silent {

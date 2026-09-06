@@ -2,7 +2,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use factorio_bot_core::app_settings::AppSettings;
 use factorio_bot_core::factorio::rcon::FactorioRcon;
-use factorio_bot_core::factorio::world::FactorioSurface;
+use factorio_bot_core::factorio::world::{FactorioSurface, FactorioWorld};
 use factorio_bot_core::process::process_control::FactorioInstance;
 use factorio_bot_server::state::AppState;
 use factorio_bot_server::webserver::build_router;
@@ -106,7 +106,9 @@ async fn get_is_not_allowed_on_mutating_routes() {
 fn unknown_player_state() -> AppState {
     AppState::new(
         Arc::new(RwLock::new(Some(FactorioInstance {
-            world: Some(Arc::new(FactorioSurface::new())),
+            world: Some(Arc::new(FactorioWorld::nauvis_only(Arc::new(
+                FactorioSurface::new(),
+            )))),
             rcon: Arc::new(FactorioRcon::new_empty()),
             server_process: None,
             client_processes: Vec::new(),

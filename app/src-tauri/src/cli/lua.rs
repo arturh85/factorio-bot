@@ -346,7 +346,7 @@ async fn run(matches: &ArgMatches, _context: &mut Context) -> Result<()> {
     // `FactorioInstance` has no `Drop`, so a failing script leaked a Factorio
     // server holding the factorio and rcon ports. The next run then failed with
     // "Host address is already in use" instead of the real error.
-    let script_result = match instance_state.world.as_ref() {
+    let script_result = match instance_state.surface() {
       Some(world) => {
         info!("Factorio started, running script...");
         let mut planner = if attached_server {

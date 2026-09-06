@@ -172,11 +172,17 @@ pub async fn post_execute(
         let instance = instance
             .as_ref()
             .ok_or_else(|| ErrorResponse::not_running("not started"))?;
-        let world = instance
+        // The script runs against one surface, and says which by not saying:
+        // `only_surface` answers only while the world holds exactly one, so a
+        // multi-surface world would refuse here rather than hand a script
+        // whichever surface sorted first.
+        let surface = instance
             .world
-            .clone()
+            .as_ref()
+            .and_then(|world| world.only_surface())
+            .cloned()
             .ok_or_else(|| ErrorResponse::not_running("the running instance has no world"))?;
-        (world, instance.rcon.clone())
+        (surface, instance.rcon.clone())
     };
 
     let bot_count = match request.bot_count {

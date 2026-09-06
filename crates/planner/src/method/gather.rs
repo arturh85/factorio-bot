@@ -53,8 +53,12 @@
 //! near end fills up and stops with nothing to show for the iron.
 //!
 //! 1. everything [`crate::method::extract`] refuses -- the resource is not
-//!    charted, nothing mines it, its extractor is locked, no well tile is
-//!    free, or no power reaches one;
+//!    charted, nothing mines it, no well tile is free, or no power reaches
+//!    one. **With one rung subtracted, since 2026-09-06: an extractor whose
+//!    recipe is merely *not yet researched* is not refused here, it is
+//!    billed.** See [`site_extractor_billing_the_unlock`], which says why the
+//!    research subgoal is `have.rs`'s to emit and not this module's, and
+//!    which rung stays a refusal because no research can clear it;
 //! 2. no prototype in this world buffers a fluid, or none carries one --
 //!    [`PlannerError::NoFluidBuffer`], found by `entity_type` rather than by
 //!    the name `storage-tank`, so a modded tank answers and a capture that
@@ -194,7 +198,7 @@ impl Method for Gather {
         if let Some(refusal) = extract::world_refusal(&ctx.state, entity, &origin) {
             return Err(refusal);
         }
-        let sited = extract::site_extractor(&ctx.state, entity, &origin)?;
+        let sited = site_extractor_billing_the_unlock(&ctx.state, entity, &origin)?;
 
         // Tier 2.
         let tank = buffer_prototype(&ctx.state, entity, &sited.name)?;
@@ -278,6 +282,82 @@ impl Method for Gather {
             entity,
             &extract::origin_of(ctx),
         ))
+    }
+}
+
+/// [`extract::site_extractor`], with a locked extractor recipe treated as a
+/// **subgoal of this plan** rather than as a refusal.
+///
+/// # Why this exists
+///
+/// Every other goal kind in this planner bills the technology that unlocks
+/// what it needs. `Goal::Have { pumpjack }` is the control: `have.rs`'s
+/// `HandCraft` reads [`crate::method::util::RecipeGate::NeedsResearch`],
+/// emits `Step::Subgoal(Goal::Researched(tech))` and states
+/// `Condition::Researched(tech)` on the craft. Measured offline against
+/// `map-31337-explored.json` on 2026-09-06, `have:pumpjack:1` plans and
+/// `gathered:crude-oil` refused with
+/// [`PlannerError::ExtractorLocked`](crate::error::PlannerError::ExtractorLocked)
+/// -- naming `oil-gathering`, a technology that plans on that same dump in
+/// 1,587 actions. So the fact was stated as an impossibility while the
+/// planner could satisfy it.
+///
+/// # Why the *research* is not emitted here
+///
+/// **Because nothing about extraction needs it.** A pumpjack in a bot's
+/// inventory can be placed whatever the force has researched; the recipe gate
+/// binds the *craft*, and the craft is already asked for -- as
+/// `Goal::Have { item: extractor }`, the first step
+/// [`extract::extractor_steps`] emits. Billing the research a second time
+/// here would be a second encoding of a rule `have.rs` already owns, and the
+/// two would agree only until one of them changed. It would also be wrong in
+/// the one case that matters: a roster already holding a pumpjack owes the
+/// research nothing, and `Have` is the only thing that knows.
+///
+/// The ordering edge comes with it. `HandCraft` states
+/// `Condition::Researched` on the craft, the craft's `Effect::GainItem`
+/// satisfies the placement's `Condition::HasItem`, and `infer_edges` draws
+/// both -- so the pumpjack cannot be placed before the technology it was
+/// crafted under.
+///
+/// # What is still refused, and it is a different fact
+///
+/// Only the `NeedsResearch` rung is converted. Everything else
+/// `site_extractor` says comes back untouched, including
+/// `NoExtractor { why: "... disabled with no technology to unlock it" }` --
+/// the [`RecipeGate::Unobtainable`](crate::method::util::RecipeGate::Unobtainable)
+/// case, which is "nothing in this game unlocks this" and is not a research
+/// this plan could ever do. A technology that exists but is itself
+/// unreachable refuses too, from where that is known: expanding the
+/// `Goal::Researched` the craft emits, in that goal's own words.
+///
+/// [`Gather::refusal`] is left alone deliberately: it delegates to
+/// `extract::refusal_for`, which can still name `ExtractorLocked` -- but it
+/// is only consulted when **no** method claims the goal, and
+/// [`Gather::applicable`] does not consult the recipe gate, so for a
+/// `Goal::Gathered` this method always claims and the locked rung is never
+/// reached from there.
+fn site_extractor_billing_the_unlock(
+    state: &PlanState,
+    entity: &str,
+    origin: &Position,
+) -> Result<extract::SitedExtractor, PlannerError> {
+    match extract::site_extractor(state, entity, origin) {
+        Err(PlannerError::ExtractorLocked { technology, .. }) => {
+            // The overlay, on a fork, is how "an action in this plan will
+            // have done it" is said -- `PlanState::is_world_researched` stays
+            // false, so `recipe_gate` reads `PlannedResearch` rather than
+            // `Open` and the distinction that `run-1788338409-63794` cost is
+            // preserved. The fork is thrown away: `sited` is a tile, a
+            // footprint and a draw, none of which research changes, and the
+            // real `ctx.state` must still read `NeedsResearch` when
+            // `extractor_steps`' `Goal::Have` reaches `HandCraft` -- that is
+            // the thing that bills it.
+            let mut planned = state.fork();
+            planned.set_researched(&technology);
+            extract::site_extractor(&planned, entity, origin)
+        }
+        other => other,
     }
 }
 
@@ -954,6 +1034,7 @@ fn place_step(ctx: &mut ExpansionCtx, entity: FactorioEntity, note: &str) -> Ste
 mod gather_tests {
     use super::*;
     use crate::ids::BotId;
+    use crate::method::util::{RecipeGate, recipe_for, recipe_gate};
     use crate::test_world::{OilFixture, PumpjackRecipe, world_with_oil};
     use factorio_bot_core::factorio::world::FactorioSurface;
     use factorio_bot_core::types::{FactorioFluidBoxConnection, FactorioFluidBoxPrototype};
@@ -1587,5 +1668,153 @@ mod gather_tests {
             !Gather.applicable(&goal(), &ctx.state),
             "and the method does not claim the goal at all"
         );
+    }
+
+    // -- the unlock ----------------------------------------------------------
+
+    /// The same fixture with the pumpjack recipe **locked**, which is the
+    /// world seed 31337 actually presents at t=0.
+    const LOCKED: OilFixture = OilFixture {
+        pumpjack: PumpjackRecipe::LockedBy { researched: false },
+        ..OPEN
+    };
+
+    /// The gate `method::extract` reads, asked of a state directly.
+    fn pumpjack_gate(state: &PlanState) -> RecipeGate {
+        let recipe = recipe_for(state, "pumpjack").expect("the fixture has a pumpjack recipe");
+        recipe_gate(state, &recipe)
+    }
+
+    /// **The gap this module had until 2026-09-06.** A technology that has not
+    /// been researched yet is a subgoal everywhere else in this planner --
+    /// `have:pumpjack:1` plans and bills `oil-gathering` -- and `gathered:`
+    /// alone stated it as a refusal.
+    ///
+    /// The fixture's own precondition is asserted first, so that a later
+    /// change making `LOCKED` no longer locked fails here loudly instead of
+    /// leaving this test passing about nothing.
+    #[test]
+    fn a_locked_extractor_recipe_is_billed_rather_than_refused() {
+        let state = oil_state(LOCKED);
+        assert_eq!(
+            pumpjack_gate(&state),
+            RecipeGate::NeedsResearch("oil-gathering".into()),
+            "the fixture must present a recipe this force has not unlocked"
+        );
+
+        let mut ctx = ExpansionCtx::new(state.fork(), BotId(1));
+        let steps = Gather
+            .expand(&goal(), &mut ctx)
+            .expect("the research is a subgoal, not a refusal");
+
+        // Absolute, not a relation: one pumpjack is placed, and the machine
+        // whose recipe is locked is asked for by name. That `Have` is the
+        // whole billing mechanism -- see `site_extractor_billing_the_unlock`.
+        assert_eq!(
+            placed(&steps, "pumpjack").len(),
+            1,
+            "the plan stands exactly one pumpjack"
+        );
+        assert!(
+            steps.iter().any(|step| matches!(
+                step,
+                Step::Subgoal(Goal::Have { item, count, .. })
+                    if item == "pumpjack" && *count == 1
+            )),
+            "the extractor is billed as `Have`, which is what carries the unlock"
+        );
+
+        // And the plan is the one the open world produces: unlocking is the
+        // only difference, so nothing about the siting, the tank or the pipe
+        // run may move.
+        let mut open_ctx = ExpansionCtx::new(oil_state(OPEN).fork(), BotId(1));
+        let open = Gather
+            .expand(&goal(), &mut open_ctx)
+            .expect("the open fixture plans");
+        assert_eq!(
+            steps.len(),
+            open.len(),
+            "a locked recipe changes what is billed, not what is built"
+        );
+        assert_eq!(
+            placed(&steps, "storage-tank"),
+            placed(&open, "storage-tank"),
+            "the tank is sited identically"
+        );
+        assert_eq!(
+            placed_labelled(&steps, "pipe", RUN_NOTE),
+            placed_labelled(&open, "pipe", RUN_NOTE),
+            "and so is the pipe run"
+        );
+    }
+
+    /// **The research must still be owed when the `Have` subgoal is
+    /// expanded.** `site_extractor_billing_the_unlock` gets past the gate on a
+    /// **fork**; were it to mark `ctx.state` instead, `recipe_gate` would
+    /// answer `PlannedResearch` for `have.rs`'s `HandCraft`, which emits no
+    /// research subgoal for that -- and nothing in the plan would ever
+    /// research `oil-gathering`. The plan would look bigger and be
+    /// unexecutable.
+    #[test]
+    fn siting_past_the_lock_does_not_mark_the_research_as_planned() {
+        let state = oil_state(LOCKED);
+        let mut ctx = ExpansionCtx::new(state.fork(), BotId(1));
+        Gather
+            .expand(&goal(), &mut ctx)
+            .expect("the locked fixture plans");
+        assert_eq!(
+            pumpjack_gate(&ctx.state),
+            RecipeGate::NeedsResearch("oil-gathering".into()),
+            "the plan still owes the research after siting, so `Have` will bill it"
+        );
+        assert!(
+            !ctx.state.is_researched("oil-gathering"),
+            "and nothing in this plan has claimed to have done it"
+        );
+    }
+
+    /// The other half of the distinction, and it is a different fact: a recipe
+    /// **no technology unlocks** is not "not yet researched", it is
+    /// unreachable, and no subgoal can change that. Refused by name, with the
+    /// reason in the message.
+    #[test]
+    fn a_recipe_no_technology_unlocks_is_still_refused_by_name() {
+        let world = world_with_oil(LOCKED);
+        // Strip the unlock from `oil-gathering`, leaving the recipe disabled
+        // and nothing in the tree able to turn it on.
+        let mut force = world
+            .forces
+            .get("player")
+            .expect("the oil fixture has a player force")
+            .clone();
+        force
+            .technologies
+            .get_mut("oil-gathering")
+            .expect("the locked fixture carries oil-gathering")
+            .unlocked_recipes
+            .clear();
+        world.update_force(force).expect("the force is well-formed");
+
+        let state = PlanState::from_world(Arc::new(world), &[BotId(1)]);
+        assert_eq!(
+            pumpjack_gate(&state),
+            RecipeGate::Unobtainable,
+            "the fixture must present a recipe nothing unlocks"
+        );
+
+        let mut ctx = ExpansionCtx::new(state, BotId(1));
+        let refusal = Gather
+            .expand(&goal(), &mut ctx)
+            .expect_err("nothing in this world can make a pumpjack");
+        match &refusal {
+            PlannerError::NoExtractor { entity, why } => {
+                assert_eq!(entity, "crude-oil");
+                assert!(
+                    why.contains("no technology to unlock it"),
+                    "the message must say why it is unreachable, got {why}"
+                );
+            }
+            other => panic!("expected NoExtractor, got {other:?}"),
+        }
     }
 }

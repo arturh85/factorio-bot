@@ -389,6 +389,7 @@ fn refusal_for(err: &PlannerError) -> Option<PlanRefusal> {
         | PlannerError::ResearchNeedsRoom { .. }
         | PlannerError::PowerPlantNeedsWater { .. }
         | PlannerError::PowerPlantNeedsShore { .. }
+        | PlannerError::PowerPlantTooSmall { .. }
         | PlannerError::UnsupportedResearchTrigger { .. }
         | PlannerError::SelfUnlockingResearchTrigger { .. }
         | PlannerError::PreconditionUnsatisfied { .. }

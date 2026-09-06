@@ -11,6 +11,124 @@ four bots.
 
 ---
 
+## THE OIL LANE OPENED: three merges, and the wall moved twice
+
+2026-09-06. Owner asked to start the post-exploration parts. Three agents on
+disjoint files; all three landed, master green (exit 0 from cargo's own status,
+3,147 lines, 87 result blocks, zero failures, each new family confirmed **by
+name** in the untruncated output: 13 capacity, 14 substance, 6 bridge-resolve,
+6 drill-radius).
+
+**Where oil actually stands, measured rather than assumed.** Planning
+`researched:oil-processing` against the t=0 dump refuses at tier 1 -- *"no
+crude-oil is charted anywhere this plan can see ... charted ground covers 17 of
+17 probes within 256 tiles"*. After one exploration ring that refusal is gone
+and the next wall is **`a power plant needs water, and the plan can see none
+within 128 tiles`**. So the sequence is exploration, then power at distance,
+then a pumpjack, then fluids -- and only the first is done.
+
+### ✅ A fluid is a kind of STORAGE, not a kind of quantity (`ab7ea057`)
+
+The obvious move was a `Quantity{Items(u32), Fluid(f64)}` and it is wrong.
+**No vanilla recipe declares a fractional amount** -- `grep -cE 'amount *= *
+[0-9]+\.[0-9]' recipe.lua` returns **0** -- so the number was never the broken
+part. What does not exist is anywhere to *put* one: not a character inventory,
+not any of the seven `InventorySlot` variants, not a `Buffer`, and neither
+`Insert` nor `Remove` can move one. A bot cannot carry 100 crude-oil, and a bot
+also cannot carry *any*.
+
+So **no float anywhere**, which is a stronger answer to this crate's
+determinism rule than introducing one and ordering it with `total_cmp`.
+`ItemId` stays `String` and its doc now says why: it is a *storage key*, so an
+enum with a `Fluid` variant would state the opposite of the truth while
+compiling perfectly. `substance.rs` answers item / fluid / **unknown** -- a real
+third answer, never guessed -- from the world's own tables.
+
+**The module has no caller, and says so in its own doc**, because this repo
+paid for the opposite with `connect_steps`. Wiring it needs three edits in
+contested files and was deliberately not done.
+
+Open, and wants its own task: **`recipe_for` looks a product up by *recipe
+name***, so it answers `None` for every fluid in the game -- which is why a
+fluid goal fails *quietly* today. Multi-product recipes (`advanced-oil-
+processing`, three fluid outputs) have no home in the index at all.
+
+### ✅ A power plant is sized to the demand, or refuses by name (`864f20cd`)
+
+Most of "capacity, not coverage" was **already in the tree** and my brief
+understated it: `electric_supply_kw` walks coverage -> wire connectivity ->
+generator nameplate, and `Condition::Powered` is `supply − demand ≥ kw`, a
+network budget.
+
+**The residual was one call, and it is a live bug.** `supply_for` has four
+tiers; three check the `kw` asked for and the fourth did not --
+`plan_plant` had no `kw` parameter at all and returned a fixed 900 kW plant for
+any demand. **Ask for 2,000 and you get `Ok` plus a plant short by 1,100**,
+surfacing much later as a `Condition::Powered` that never holds. It has not
+bitten because today's callers ask 60 (lab) and ~189 (red cell). **A pumpjack
+with a refinery and two chemical plants crosses 900** -- so this was found
+exactly one rung before it would have bitten, and blocks are where it bites
+hardest because a block asks for its whole bill at once.
+
+`MAX_ENGINES_PER_BOILER = 2` is **derived, not chosen**: boiler
+`energy_consumption = 1.8 MW` over an engine's 900 kW. Engines chain off
+`ENGINE_STEAM`, so a second costs no extra pipe. The pole is sited to supply
+*every* engine -- a pole reaching engine 1 of 2 is 900 kW on the ground while
+the plan reads 1,800.
+
+**Static end-of-plan check, not time-phased, and the reason is a proof
+obligation rather than a preference:** demand here is monotone
+non-decreasing -- no method removes a consumer, none unsets a recipe -- so the
+static sum *is* the worst case a phased ledger would find. Written down so a
+future removing `Effect` knows to revisit.
+
+**My "solar is excluded structurally" claim was overstated and is corrected in
+place.** A panel is entirely pre-oil, so the research circularity is at most a
+reason not to build a *first* plant from solar, never a reason to refuse to
+count one. What actually binds is the map clock: `production = "60kW"` is peak,
+the daily average ~42, night 0, and this crate has no time-of-day input.
+
+**No eighth `Goal` kind** -- proposed and not implemented, as instructed.
+`Goal::Powered { kw, near }` is coherent, but power is a *precondition*, not an
+end, and two ways to ask one question disagree eventually.
+
+### ✅ A drill mines what it does not stand on (`14c54bbf`, `6e3dbebe`)
+
+`mining_drill_radius` was never captured, and that single gap made two
+unrelated behaviours conservative for the same reason -- neither author knowing
+it was one cause. Now on the mod and `FactorioEntityPrototype`.
+
+| entity | footprint | radius | tiles worked |
+|---|---|---|---|
+| `burner-mining-drill` | 2x2 | 0.99 | **2x2** -- its own footprint |
+| `electric-mining-drill` | 3x3 | 2.49 | **5x5** -- a ring beyond |
+| `pumpjack` | 3x3 | 0.49 | **1x1** -- a single tile |
+
+**A pumpjack is a `mining-drill` too, and the tightest-reaching one**: it must
+be centred on the well itself, and its 3x3 box overstates its reach by eight
+tiles. That makes siting a search over *well tiles*, not over free ground.
+
+**Compare in TILES, never in box extents.** `radius > collision_half_width` is
+wrong for **every** drill in the game: a burner's 0.99 exceeds its half-width
+of 0.699, yet 2 x 0.99 = 1.98 is the 2x2 its box already occupies. Factorio
+sizes a 2x2 box slightly under 2 so neighbours do not touch, so that comparison
+measures the shaving. Found because the test was written the wrong way round
+and failed.
+
+**The field has two names**: `resource_searching_radius` at data stage,
+`mining_drill_radius` at runtime. Grepping the data files for the runtime name
+finds nothing, which looks exactly like the field not existing. Both sources
+were read and agree.
+
+### ✖ And the seam caught me: my field stole another field's doc comment
+
+Inserted above `resource_category`'s doc, so those five lines became *my*
+field's documentation and `resource_category` published with none. **It
+compiled, and every unit test passed.** Only the OpenAPI snapshot seam sees the
+artefact somebody else consumes. `app/src/api/types.ts` needed no mirror -- the
+frontend does not declare that schema -- and the contract spec passed unchanged
+at 277 tests.
+
 ## OWNER DECISION: exploration is a short committed break for the whole roster
 
 Settled with the owner on 2026-09-06, after I proposed two wrong shapes and was

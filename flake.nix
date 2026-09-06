@@ -82,7 +82,7 @@
           # Only native/system libraries live here; the language toolchains are
           # pinned in mise.toml (rust, node, pnpm).
           default = pkgs.mkShell {
-            nativeBuildInputs = with pkgs; [ pkg-config ]
+            nativeBuildInputs = with pkgs; [ pkg-config sccache ]
               ++ lib.optionals stdenv.hostPlatform.isLinux
                    ([ patchelf file chromium ] ++ captureTools);
 
@@ -103,6 +103,46 @@
             # fails there; Xwayland works. Set here rather than documented,
             # because a documented workaround is one every session rediscovers.
             SDL_VIDEODRIVER = if stdenv.hostPlatform.isLinux then "x11" else "";
+
+            # Compilation cache SHARED ACROSS WORKTREES, which is the whole
+            # point: agents work in separate `.worktrees/` checkouts, each with
+            # its own `target/`, so identical dependency crates were compiling
+            # once per worktree. Measured 2026-09-06: 163 GB of build artefacts
+            # across nine target directories, and a load average of 85 on a
+            # 20-core box with five builds running.
+            #
+            # sccache and NOT a shared `CARGO_TARGET_DIR`, deliberately. One
+            # target directory would make every worktree write the same
+            # `target/debug/factorio-bot`, so an offline `plan` or `score-map`
+            # would silently run whichever branch built last and attribute its
+            # numbers to the wrong code. That is the same family as the stale
+            # mod that voided two findings, and worse: the mod at least logs a
+            # `Using mods directory` line, while a binary path logs nothing.
+            # Per-worktree targets are wasteful, and the waste is what buys
+            # attributability. sccache caches the *artefacts*, not the output
+            # path, so each worktree keeps its own binary.
+            # WHAT IT CAN AND CANNOT CACHE, measured rather than assumed.
+            # sccache refuses incremental compilation, and both profiles in
+            # `Cargo.toml` set `incremental = true`. A first build reported:
+            #
+            #   Non-cacheable reasons:  incremental 2, missing input 2
+            #
+            # So the workspace's OWN crates are never cached, and dependencies
+            # -- which cargo builds non-incrementally -- are. That split is the
+            # one we want and is why `incremental` stays on: incremental serves
+            # the inner edit-rebuild loop inside one worktree, sccache serves
+            # the cross-worktree cost of recompiling the same dependency tree
+            # nine times. They cover different halves and do not compete.
+            #
+            # It also settles a change that was queued and is now NOT being
+            # made: dropping `[profile.dev.package."*"] opt-level = "z"`. That
+            # was proposed to cut the from-scratch dependency build, which is
+            # exactly the cost sccache now pays once globally instead of once
+            # per worktree -- while `opt-level = "z"` keeps dependency code
+            # fast at test runtime, which matters when a test parses an 865 MB
+            # world dump. Fixing the cost at its real cause removed the reason
+            # to trade that away.
+            RUSTC_WRAPPER = "${pkgs.sccache}/bin/sccache";
 
             # app/e2e/smoke.mjs drives this through playwright-core, which
             # never downloads a browser of its own.

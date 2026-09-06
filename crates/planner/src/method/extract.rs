@@ -75,7 +75,7 @@
 //! **straight run of small electric poles** from the supplying pole to a pole covering the extractor. It is
 //! deliberately the dumbest router that can be right:
 //!
-//! * the spacing is [`POLE_STEP`], comfortably inside a small pole's wire
+//! * the spacing is [`power::POLE_STEP`](crate::method::power::POLE_STEP), comfortably inside a small pole's wire
 //!   reach, so tile snapping cannot silently break a link;
 //! * every pole stands on a tile [`PlanState::is_area_free`] accepts and the
 //!   game has not already refused a build at;
@@ -92,8 +92,8 @@
 //!
 //! # What bounds the reach -- and the ~64-tile ceiling that no longer does
 //!
-//! **The bill is the bound.** A run of more than [`MAX_POLE_RUN`] poles -- 64,
-//! about 380 tiles at [`POLE_STEP`] -- is
+//! **The bill is the bound.** A run of more than [`power::MAX_POLE_RUN`](crate::method::power::MAX_POLE_RUN) poles -- 64,
+//! about 380 tiles at [`power::POLE_STEP`](crate::method::power::POLE_STEP) -- is
 //! [`PlannerError::ExtractionNotModelled`], and short of that a run refuses
 //! only when the ground refuses a pole or when no supply can be reached at
 //! all. Seed 31337's crude oil is charted at 256-384 tiles, which is inside
@@ -132,9 +132,12 @@
 use crate::action::{Action, ActionKind, Actor, Condition, Effect};
 use crate::error::PlannerError;
 use crate::goal::{Goal, Holder};
+#[cfg(test)]
 use crate::ids::ActionId;
 use crate::method::have::PLACE_TICKS;
-use crate::method::power::{POLE, Supply, entity_for, plant_steps, supply_for};
+use crate::method::power::ensure_powered;
+#[cfg(test)]
+use crate::method::power::{POLE, WIRE_REACH, pole_run};
 use crate::method::util::{RecipeGate, recipe_for, recipe_gate, tile_alignment_facing};
 use crate::method::{ExpansionCtx, Method, Step};
 use crate::state::PlanState;
@@ -146,7 +149,7 @@ use factorio_bot_core::types::{Direction, Position};
 ///
 /// The same number and the same reasoning as `method::have`'s
 /// `LAB_SEARCH_RADIUS` and `method::assemble`'s `ANCHOR_SEARCH_RADIUS`: it is
-/// only the cheap first tier of [`supply_for`], which widens to
+/// only the cheap first tier of [`power::supply_for`](crate::method::power::supply_for), which widens to
 /// [`crate::method::power::PLANT_ADOPT_RADIUS`] on its own before it will
 /// build anything. Changing it moves work between tiers and changes no
 /// answer that tier 2 would not have given.
@@ -160,55 +163,6 @@ pub const SUPPLY_SEARCH_RADIUS: f64 = 64.;
 /// conversion is a `num_traits` method and importing that trait for one call
 /// reads as though the value were computed.
 const NORTH: u8 = 0;
-
-/// A small electric pole's copper-wire reach, in tiles, from vanilla 2.1.
-///
-/// **A second copy of a number `crate::state`'s `pole_wire_reach` already
-/// holds**, and that is worth saying out loud rather than hiding: that table
-/// is private and this module is not allowed to widen it. So the duplicate is
-/// pinned *behaviourally* instead of by inspection --
-/// `two_poles_a_wire_reach_apart_are_one_network` builds two poles at exactly
-/// this distance and at half a tile more, and asks
-/// [`crate::state::PlanState`] itself which pairs share a network. A test that
-/// merely compared this constant to a copy of itself would agree with the code
-/// that wrote it, which is the failure
-/// `docs/superpowers/notes/2026-09-06-fixtures-agree-with-their-code.md` is
-/// about.
-///
-/// Nothing in [`pole_run`] *depends* on it being right: the run's final check
-/// is the game's rule evaluated over a fork. Getting it wrong makes a run
-/// refuse, or lay more poles than it needed; it cannot make one that does not
-/// carry power read as one that does.
-pub const WIRE_REACH: f64 = 7.5;
-
-/// How far apart [`pole_run`] aims to put consecutive poles, in tiles.
-///
-/// Strictly less than [`WIRE_REACH`], and the margin is not decorative. A pole
-/// is placed on a tile, so a nominal point is snapped to a tile centre, and
-/// [`free_area_near_where`] may then move it a further ring or two to find
-/// free ground. At exactly the reach, either of those pushes the pair out of
-/// contact and the link is silently gone -- silently, because a broken wire
-/// looks exactly like a pole that is standing. 6.0 leaves 1.5 tiles of slack,
-/// which covers the half-tile of snapping plus one ring of search, and costs
-/// one extra pole per 30 tiles of run.
-pub const POLE_STEP: f64 = 6.;
-
-/// The longest pole run this method will lay, in poles.
-///
-/// **A bill bound, not a distance bound.** The walk is already priced by
-/// [`crate::schedule`], exactly as `method::power`'s `PLANT_WATER_SCAN_RADIUS`
-/// doc argues, so distance alone is a worse plan rather than an impossible
-/// one. What is *not* already priced is the wood: a small electric pole is
-/// half a wood plus a copper cable, a four-bot run starts with four wood, and
-/// everything beyond that is trees to be chopped. 64 poles is 32 wood and
-/// about 380 tiles of run at [`POLE_STEP`] -- past the 256-to-384 tiles at
-/// which seed 31337's first crude oil is charted, and far enough that a longer
-/// one wants a big-pole run and a real argument rather than a bigger number
-/// here.
-///
-/// Exceeding it is [`PlannerError::ExtractionNotModelled`], which is the
-/// truth: carrying power that far is a thing this planner does not model.
-pub const MAX_POLE_RUN: usize = 64;
 
 /// The refusal for [`Goal::Extracted`], and -- since 2026-09-06 -- the method
 /// that sites the extractor. See the module doc.
@@ -324,46 +278,34 @@ impl Method for Extract {
             whose: Holder::Share(ctx.chain_actor),
         }));
 
-        let mut power_ids: Vec<ActionId> = Vec::new();
-        let powered = Condition::Powered {
-            pos: site.clone(),
-            entity: extractor.clone(),
+        // The one place that decides power, shared with `method::assemble`
+        // and `method::blueprint`. The extractor's own ground is handed over
+        // as an occupant so a pole cannot be sited on the tile the machine is
+        // about to stand on; it is not reserved in `ctx.state` until the
+        // `Place` below, so a refusal between here and there leaves nothing
+        // behind.
+        //
+        // `Ok(None)` is "no pole run of at most `MAX_POLE_RUN` carries power
+        // here, or the model cannot see the finished run carrying it".
+        // Carrying power that far is a thing this planner does not model,
+        // which is what the refusal says.
+        let occupant = extractor_entity(&ctx.state, &extractor, &site);
+        let powering = ensure_powered(
+            ctx,
+            &extractor,
+            &site,
+            &area,
             kw,
-        };
-        if !powered.holds(&ctx.state, ctx.chain_actor) {
-            let anchor = match supply_for(&ctx.state, &site, SUPPLY_SEARCH_RADIUS, kw)? {
-                Supply::Standing(anchor) => anchor,
-                Supply::Build(plant) => {
-                    let pole = plant.pole.clone();
-                    let (built, links) = plant_steps(ctx, &plant);
-                    steps.extend(built);
-                    power_ids.extend(links);
-                    pole
-                }
-            };
-            // The extractor's own ground goes into the fork *before* the pole
-            // search, so a pole cannot be sited on the tile the machine is
-            // about to stand on. It is not reserved in `ctx.state` yet --
-            // that happens with its `Place` below, so a refusal between here
-            // and there leaves nothing behind.
-            let mut trial = ctx.state.fork();
-            trial.create_entity(extractor_entity(&trial, &extractor, &site));
-            let run = pole_run(&mut trial, &anchor, &site, &area, &powered, ctx.chain_actor)?
-                .ok_or_else(|| PlannerError::ExtractionNotModelled {
-                    entity: entity.clone(),
-                    extractor: extractor.clone(),
-                })?;
-            for pole in run {
-                steps.push(Step::Subgoal(Goal::Have {
-                    item: POLE.into(),
-                    count: 1,
-                    whose: Holder::Share(ctx.chain_actor),
-                }));
-                let (step, id) = place_step(ctx, POLE, &pole);
-                steps.push(step);
-                power_ids.push(id);
-            }
-        }
+            SUPPLY_SEARCH_RADIUS,
+            std::slice::from_ref(&occupant),
+        )?
+        .ok_or_else(|| PlannerError::ExtractionNotModelled {
+            entity: entity.clone(),
+            extractor: extractor.clone(),
+        })?;
+        steps.extend(powering.steps);
+        let power_ids = powering.ids;
+        let powered = powering.powered;
 
         let build = ctx
             .state
@@ -698,306 +640,6 @@ fn choose_site(
         nearest_obstruction: obstruction
             .unwrap_or_else(|| format!("no {entity} tile is charted at all")),
     })
-}
-
-// ---------------------------------------------------------------------------
-// Carrying power to the site
-// ---------------------------------------------------------------------------
-
-/// The poles that join the network at `anchor` to the extractor standing at
-/// `site` with footprint `area`, in build order and **including** the pole
-/// that covers the extractor itself.
-///
-/// `trial` is mutated: every pole chosen is created in it, so the next ring
-/// search cannot pick a tile an earlier pole took. The caller passes a fork
-/// that already carries the extractor.
-///
-/// `Ok(None)` means "no run of at most [`MAX_POLE_RUN`] poles carries it",
-/// which the caller turns into [`PlannerError::ExtractionNotModelled`].
-/// `Err` is only what a `Have` shortfall would raise, which cannot happen
-/// here -- the bill is emitted by the caller.
-///
-/// # It refuses before it emits, and the refusal is the game's own rule
-///
-/// Nothing is returned unless `powered` -- the extractor's own
-/// [`Condition::Powered`], a headroom test -- holds against `trial` with every
-/// pole in it. That check walks [`crate::state::PlanState`]'s union-find over
-/// the poles' real wire distances and its own supply-area table, so a run that
-/// this module's [`POLE_STEP`] arithmetic thought was fine but the game would
-/// not wire together is refused rather than built. A half-built power line is
-/// worse than none: the machine stands, draws nothing, and reads as placed.
-fn pole_run(
-    trial: &mut PlanState,
-    anchor: &Position,
-    site: &Position,
-    area: &factorio_bot_core::types::Rect,
-    powered: &Condition,
-    actor: crate::ids::BotId,
-) -> Result<Option<Vec<Position>>, PlannerError> {
-    // The pole that covers the machine. Sited first, because it is the one
-    // whose position is constrained by something other than the run.
-    //
-    // A ring search of this module's own rather than `free_area_near_where`'s,
-    // for one reason: that helper **refuses any candidate covering ore**, and
-    // the tile this pole has to reach is by construction the middle of a
-    // resource patch. That rule is right for the buildings it was written for
-    // and wrong here -- a pole collides on nothing a resource carries, and the
-    // game builds one straight over a patch.
-    let head = {
-        let snapshot = trial.fork();
-        match ring_search(&snapshot, site, |candidate| {
-            snapshot.pole_would_supply(POLE, candidate, area)
-        }) {
-            Some(head) => head,
-            None => return Ok(None),
-        }
-    };
-    let Some(path) = route_poles(trial, anchor, &head) else {
-        return Ok(None);
-    };
-    for pole in &path {
-        trial.create_entity(entity_for(
-            trial,
-            &crate::method::power::PlantPart {
-                name: POLE,
-                position: pole.clone(),
-                direction: Direction::North,
-            },
-        ));
-    }
-
-    // The one check that matters, and the only one not made of this module's
-    // own arithmetic: the game's rule, over a fork carrying every pole.
-    if !powered.holds(trial, actor) {
-        return Ok(None);
-    }
-    Ok(Some(path))
-}
-
-/// How far a pole may be looked for around a nominal tile, in tiles.
-///
-/// The same 12 as `method::util::FREE_TILE_SEARCH_RADIUS`, which is what every
-/// other siting search in this crate uses; stated here because this module
-/// does its own ring search (see [`pole_run`] on why) and a search that quietly
-/// used a different radius from the rest of the crate would make "no room"
-/// mean two things.
-const POLE_SEARCH_RADIUS: i32 = 12;
-
-/// The nearest tile centre to `from`, outwards in fixed rings, on which a small
-/// electric pole could stand and which `accept` allows.
-///
-/// A pole is one tile, so its build grid is tile centres and the candidate is
-/// `floor + 0.5` -- the same half-tile convention as a resource entity, and
-/// the reason this can compare candidates against a well's own position without
-/// converting anything.
-fn ring_search(
-    state: &PlanState,
-    from: &Position,
-    accept: impl Fn(&Position) -> bool,
-) -> Option<Position> {
-    let base_x = from.x().floor() as i32;
-    let base_y = from.y().floor() as i32;
-    for radius in 0..=POLE_SEARCH_RADIUS {
-        for dy in -radius..=radius {
-            for dx in -radius..=radius {
-                if dx.abs() != radius && dy.abs() != radius {
-                    continue;
-                }
-                let candidate =
-                    Position::new(f64::from(base_x + dx) + 0.5, f64::from(base_y + dy) + 0.5);
-                if !state.is_area_free(POLE, &candidate) || state.is_site_refused(POLE, &candidate)
-                {
-                    continue;
-                }
-                if accept(&candidate) {
-                    return Some(candidate);
-                }
-            }
-        }
-    }
-    None
-}
-
-/// How many pole sites [`route_poles`] may examine before giving up.
-///
-/// A budget rather than a bound on the answer: the search is best-first, so on
-/// open ground it walks almost straight to the head and spends a few dozen
-/// nodes for a run of ten poles. The budget is what stops a run that is walled
-/// in -- a lake across the whole approach, say -- from expanding a disc of
-/// candidates until somebody's patience runs out. It buys about
-/// [`MAX_POLE_RUN`] detours' worth of exploration, which is far more than any
-/// run this planner would want to build.
-const ROUTE_BUDGET: usize = 4_000;
-
-/// A run of pole sites from `anchor` to `head`, each within [`WIRE_REACH`] of
-/// the last, **excluding** the anchor and **including** the head.
-///
-/// # Why this is a search and not a straight line
-///
-/// It was a straight line for exactly one measurement. On the seed-31337 dump
-/// with a well charted at `[80.5, -40.5]`, the line from the power plant's pole
-/// ran into ground it could not stand on at `[54.3, -24.1]` and the whole cell
-/// refused -- on a map that is covered in trees, rocks and water, which is
-/// every real map. A router that only works on a billiard table is a router
-/// that always refuses.
-///
-/// So: best-first over pole sites, expanding the frontier node nearest the head
-/// first. Each node offers sixteen compass directions at three step lengths,
-/// which gives the search a way *around* an obstacle rather than only through
-/// it, and every candidate is a real free tile checked against the same state
-/// the placements will be made in.
-///
-/// Deterministic by construction: the frontier is ordered `(distance to head,
-/// x, y)` with `total_cmp`, the direction and step tables are fixed, and
-/// `visited` is a `BTreeSet` of integer tiles. Nothing reads a hash order.
-///
-/// **It is still not a good router.** It knows nothing about the cost of the
-/// wood it is spending, it will happily take a long way round, and it has no
-/// notion of sharing a run with another consumer. What it has is the property
-/// that matters here: it either returns a run every hop of which stands on
-/// ground the plan believes is free, or it returns nothing.
-fn route_poles(state: &PlanState, anchor: &Position, head: &Position) -> Option<Vec<Position>> {
-    /// The sixteen compass directions, as unit-ish vectors. Sixteen rather
-    /// than eight so a detour can leave at a shallow angle instead of turning
-    /// 45 degrees.
-    fn directions() -> Vec<(f64, f64)> {
-        (0..16)
-            .map(|i| {
-                let theta = std::f64::consts::TAU * f64::from(i) / 16.;
-                (theta.cos(), theta.sin())
-            })
-            .collect()
-    }
-    // Long steps first: the shorter ones exist to squeeze past an obstacle,
-    // not to be preferred. `POLE_STEP` itself is the nominal.
-    let steps = [POLE_STEP, POLE_STEP * 0.66, POLE_STEP * 0.4];
-
-    let tile = |p: &Position| (p.x().floor() as i32, p.y().floor() as i32);
-    let mut came_from: std::collections::BTreeMap<(i32, i32), Position> =
-        std::collections::BTreeMap::new();
-    let mut parent: std::collections::BTreeMap<(i32, i32), (i32, i32)> =
-        std::collections::BTreeMap::new();
-    let mut visited: std::collections::BTreeSet<(i32, i32)> = std::collections::BTreeSet::new();
-    let mut frontier: Vec<Position> = vec![anchor.clone()];
-    came_from.insert(tile(anchor), anchor.clone());
-    visited.insert(tile(anchor));
-    let mut examined = 0usize;
-
-    while !frontier.is_empty() {
-        examined += 1;
-        if examined > ROUTE_BUDGET {
-            return None;
-        }
-        // Nearest the head first, ties by x then y so the answer depends on
-        // the geometry and not on insertion order.
-        let (index, _) = frontier.iter().enumerate().min_by(|(_, a), (_, b)| {
-            calculate_distance(a, head)
-                .total_cmp(&calculate_distance(b, head))
-                .then(a.x.total_cmp(&b.x))
-                .then(a.y.total_cmp(&b.y))
-        })?;
-        let node = frontier.remove(index);
-
-        if calculate_distance(&node, head) <= WIRE_REACH {
-            // Walk the parents back, then reverse: the anchor is dropped (it
-            // already stands) and the head is appended.
-            let mut run: Vec<Position> = Vec::new();
-            let mut at = tile(&node);
-            while at != tile(anchor) {
-                run.push(came_from.get(&at)?.clone());
-                at = *parent.get(&at)?;
-            }
-            run.reverse();
-            if run.len() + 1 > MAX_POLE_RUN {
-                return None;
-            }
-            run.push(head.clone());
-            return Some(run);
-        }
-
-        for (dx, dy) in directions() {
-            for step in steps {
-                let nominal = Position::new(node.x() + dx * step, node.y() + dy * step);
-                let candidate = Position::new(nominal.x().floor() + 0.5, nominal.y().floor() + 0.5);
-                let key = tile(&candidate);
-                if visited.contains(&key) {
-                    continue;
-                }
-                if calculate_distance(&candidate, &node) > WIRE_REACH {
-                    continue;
-                }
-                if !state.is_area_free(POLE, &candidate) || state.is_site_refused(POLE, &candidate)
-                {
-                    continue;
-                }
-                visited.insert(key);
-                came_from.insert(key, candidate.clone());
-                parent.insert(key, tile(&node));
-                frontier.push(candidate);
-            }
-        }
-    }
-    None
-}
-
-/// One `Place` for a one-tile building, with the id the caller must order
-/// against.
-///
-/// The same shape `power::plant_steps` emits, minus the plant's bill: the
-/// caller states its own `Goal::Have` so a pole run's wood shortfall refuses
-/// through the ordinary machinery.
-fn place_step(ctx: &mut ExpansionCtx, name: &'static str, position: &Position) -> (Step, ActionId) {
-    let entity = entity_for(
-        &ctx.state,
-        &crate::method::power::PlantPart {
-            name,
-            position: position.clone(),
-            direction: Direction::North,
-        },
-    );
-    let build = ctx
-        .state
-        .bot(ctx.chain_actor)
-        .map(|b| b.build_distance)
-        .unwrap_or(10.0);
-    let id = ctx.ids.next();
-    let step = Step::Act(Box::new(Action {
-        id,
-        kind: ActionKind::Place {
-            entity: Box::new(entity.clone()),
-        },
-        pre: vec![
-            Condition::AtPosition {
-                who: Actor::Role,
-                pos: position.clone(),
-                radius: build,
-                min_radius: ctx.state.placement_clearance(name).unwrap_or(0.0),
-            },
-            Condition::AreaFree {
-                pos: position.clone(),
-                entity: name.into(),
-                direction: 0,
-            },
-            Condition::HasItem {
-                who: Actor::Role,
-                item: name.into(),
-                count: 1,
-            },
-        ],
-        eff: vec![
-            Effect::LoseItem {
-                who: Actor::Role,
-                item: name.into(),
-                count: 1,
-            },
-            Effect::CreateEntity(Box::new(entity.clone())),
-        ],
-        duration: PLACE_TICKS,
-        pinned: None,
-        label: format!("place {name} at {position}"),
-    }));
-    ctx.state.create_entity(entity);
-    (step, id)
 }
 
 #[cfg(test)]

@@ -550,9 +550,37 @@ pub enum PlannerError {
     /// that sizing: vanilla's boiler states `energy_consumption = "1.8MW"` and
     /// a steam engine's 900 kW falls out of `fluid_usage_per_tick = 0.5` at
     /// 165 °C, so **one boiler carries exactly two engines** — a fact about
-    /// the prototypes rather than a chosen constant. Past that a plant needs a
-    /// second boiler, which is a second water tap on the pipe run and
-    /// shoreline geometry this planner does not yet lay out.
+    /// the prototypes rather than a chosen constant.
+    ///
+    /// # 1.8 MW is this planner's ceiling and **not the game's**
+    ///
+    /// Saying only "one boiler drives two engines" reads as though 1.8 MW were
+    /// a fact about Factorio. It is not. Verified against
+    /// `workspace/server/data/base/prototypes/entity/entities.lua` on
+    /// 2026-09-06:
+    ///
+    /// * `offshore-pump` states `pumping_speed = 20`, which is fluid units per
+    ///   **tick** — 1,200 water/s;
+    /// * `boiler` states `energy_consumption = "1.8MW"` and
+    ///   `target_temperature = 165`. Water carries 0.2 kJ per unit per degree,
+    ///   so 150 °C above the 15 °C default is 30 kJ a unit and a boiler burns
+    ///   1.8 MW / 30 kJ = **60 water/s**.
+    ///
+    /// 1,200 over 60 is **one pump to 20 boilers to 40 engines, about 36 MW**.
+    /// So the water behind a single offshore pump supports twenty times what
+    /// this planner will lay out, and what refuses here is the *layout*: the
+    /// plant is a rigid row (pump, [`PIPE_COUNT`](crate::method::power::PIPE_COUNT)
+    /// pipes, one boiler, up to
+    /// [`MAX_ENGINES_PER_BOILER`](crate::method::power::MAX_ENGINES_PER_BOILER)
+    /// engines) rotated as one body about the pump's tile centre, and `Plant`
+    /// carries exactly one `boiler` position that `plant_steps` fuels once.
+    ///
+    /// **An owner-supplied figure of "1 pump : 200 boilers : 400 engines" does
+    /// not survive the prototypes** — it is ten times the measured ratio, and
+    /// the arithmetic above is written out so the next reader can check it
+    /// rather than pick between two numbers. Growing the plant is designed in
+    /// `docs/superpowers/notes/2026-09-06-one-place-that-decides-power.md` and
+    /// deliberately not built here.
     ///
     /// Refusing by name is the point. An undersized plant returned as success
     /// is the *coverage is not capacity* failure one level up: everything
@@ -564,9 +592,12 @@ pub enum PlannerError {
     #[diagnostic(
         code(planner::power_plant_too_small),
         help(
-            "one boiler drives at most two steam engines (1.8 MW of boiler over 900 kW of \
-             engine); more generation than that needs a second boiler, and the planner does not \
-             yet site one"
+            "this is a limit of the LAYOUT, not of the game: one boiler drives at most two \
+             steam engines (1.8 MW of boiler over 900 kW of engine), and this planner lays out \
+             exactly one boiler in a rigid pump-pipes-boiler-engines row. The water behind one \
+             offshore pump would carry about twenty boilers and forty engines -- ~36 MW -- \
+             because the pump moves 1200 water/s and a boiler burns 60/s (verified against \
+             base/prototypes/entity/entities.lua). Ask for less, or site a second plant"
         )
     )]
     PowerPlantTooSmall { needed_kw: f64, plant_kw: f64 },

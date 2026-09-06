@@ -111,7 +111,7 @@ use crate::ids::{ActionId, BotId, ItemId, Ticks};
 use crate::method::have::{
     HANDOVER_WALK_TICKS, PLACE_TICKS, TRANSFER_TICKS, participants_that_can_work,
 };
-use crate::method::power::{POLE, Supply, plant_steps, supply_for};
+use crate::method::power::{POLE, supply_anchor};
 use crate::method::produce::cells_for;
 use crate::method::util::{
     CRAFTING_CATEGORY, RecipeGate, ingredients_of, output_per_craft, recipe_for, recipe_gate,
@@ -2436,19 +2436,14 @@ impl Method for BuildAssemblyCell {
         // plan a second offshore pump, boiler and steam engine 86 tiles from a
         // working plant it had just researched `automation` on. See
         // `power::PLANT_ADOPT_RADIUS`.
-        let mut plant_steps_taken: Vec<Step> = Vec::new();
-        let mut power_links: Vec<ActionId> = Vec::new();
+        //
+        // Only the *supply* half of `power::ensure_powered` is wanted here.
+        // This method does not lay poles: it chooses where the cells stand
+        // *from* the anchor, so the anchor is an input to siting rather than
+        // somewhere a run has to reach. `supply_anchor` is the half both share.
         let want_kw = cell_demand_kw(&ctx.state, &spec) * f64::from(build);
-        let anchor = match supply_for(&ctx.state, &from, ANCHOR_SEARCH_RADIUS, want_kw)? {
-            Supply::Standing(anchor) => anchor,
-            Supply::Build(plant) => {
-                let anchor = plant.pole.clone();
-                let (built, links) = plant_steps(ctx, &plant);
-                plant_steps_taken = built;
-                power_links = links;
-                anchor
-            }
-        };
+        let (anchor, plant_steps_taken, power_links) =
+            supply_anchor(ctx, &from, ANCHOR_SEARCH_RADIUS, want_kw)?;
         let cells = plan_cells(&ctx.state, &anchor, &spec, build)?;
         let (coal, boiler) = fuel_for(&ctx.state, &anchor, &cells, &spec);
         let roster = self.roster(ctx.chain_actor);

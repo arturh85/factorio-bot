@@ -376,6 +376,29 @@ pub fn pole_run_items(tiles: f64) -> (u32, u32, u32) {
 /// for the change that introduced this constant. Past it [`plan_plant_for`]
 /// raises [`PlannerError::PowerPlantTooSmall`] rather than returning a plant
 /// that cannot carry what it was asked for.
+///
+/// # The 1.8 MW ceiling is this planner's, and the water is nowhere near it
+///
+/// Read alone, "one boiler drives two engines" invites 1.8 MW to be heard as a
+/// fact about Factorio. It is not, and the gap is two orders of magnitude
+/// wide. Verified against `workspace/server/data/base/prototypes/entity/
+/// entities.lua` on 2026-09-06: `offshore-pump` states `pumping_speed = 20`,
+/// which is fluid units per **tick** -- 1,200 water/s -- and a boiler burning
+/// 1.8 MW to lift water 150 °C at 0.2 kJ/unit/°C consumes 60 water/s. So one
+/// offshore pump feeds **20 boilers and 40 engines, about 36 MW**.
+///
+/// What refuses at 1.8 MW is the *layout*, not the water: [`Plant`] carries a
+/// single `boiler` position, [`plant_steps`] fuels it once, and `layout` is
+/// a rigid pump-pipes-boiler-engines row rotated as one body about the pump's
+/// tile centre. Growing it is designed in
+/// `docs/superpowers/notes/2026-09-06-one-place-that-decides-power.md` and
+/// deliberately not built there: it changes `Plant`'s shape, the coal bill,
+/// the shore-fitting search and `method::assemble`'s `fuel_for`, which is more
+/// than a constant's worth of change.
+///
+/// An owner-supplied ratio of "1 pump : 200 boilers : 400 engines" is ten
+/// times the measured one; the arithmetic is written out above so the next
+/// reader can check it rather than pick between two numbers.
 pub const MAX_ENGINES_PER_BOILER: u32 = 2;
 
 /// How many engines a plant carrying `kw` needs, or why it cannot be built.
@@ -1780,6 +1803,509 @@ pub fn plant_steps(ctx: &mut ExpansionCtx, plant: &Plant) -> (Vec<Step>, Vec<Act
     })));
 
     (steps, order_research_after)
+}
+
+// ---------------------------------------------------------------------------
+// One place that decides power
+// ---------------------------------------------------------------------------
+
+/// A small electric pole's copper-wire reach, in tiles, from vanilla 2.1.
+///
+/// **A second copy of a number [`crate::state::PlanState`]'s `pole_wire_reach`
+/// already holds** -- and, since this section moved here from
+/// `method::extract` on 2026-09-06, a third one sits eight hundred lines above
+/// it as [`POLE_WIRE_REACH_TILES`]. That is worth saying out loud rather than
+/// hiding. The state table is private and this module is not allowed to widen
+/// it, so the duplicate is pinned *behaviourally* instead of by inspection --
+/// `method::extract`'s `two_poles_a_wire_reach_apart_are_one_network` builds
+/// two poles at exactly this distance and at half a tile more, and asks
+/// [`crate::state::PlanState`] itself which pairs share a network. A test that
+/// merely compared this constant to a copy of itself would agree with the code
+/// that wrote it, which is the failure
+/// `docs/superpowers/notes/2026-09-06-fixtures-agree-with-their-code.md` is
+/// about. [`POLE_WIRE_REACH_TILES`] is deliberately *not* folded into this:
+/// they hold the same number today, but one is the reach a wire spans and the
+/// other is what [`pole_run_items`]' bill arithmetic is written against, and
+/// merging them would make a future change to either silently change both.
+///
+/// Nothing in `pole_run` *depends* on it being right: the run's final check
+/// is the game's rule evaluated over a fork. Getting it wrong makes a run
+/// refuse, or lay more poles than it needed; it cannot make one that does not
+/// carry power read as one that does.
+pub const WIRE_REACH: f64 = 7.5;
+
+/// How far apart `pole_run` aims to put consecutive poles, in tiles.
+///
+/// Strictly less than [`WIRE_REACH`], and the margin is not decorative. A pole
+/// is placed on a tile, so a nominal point is snapped to a tile centre, and
+/// the ring search may then move it a further ring or two to find free ground.
+/// At exactly the reach, either of those pushes the pair out of contact and
+/// the link is silently gone -- silently, because a broken wire looks exactly
+/// like a pole that is standing. 6.0 leaves 1.5 tiles of slack, which covers
+/// the half-tile of snapping plus one ring of search, and costs one extra pole
+/// per 30 tiles of run.
+pub const POLE_STEP: f64 = 6.;
+
+/// The longest pole run [`ensure_powered`] will lay, in poles.
+///
+/// **A bill bound, not a distance bound.** The walk is already priced by
+/// [`crate::schedule`], exactly as [`PLANT_WATER_SCAN_RADIUS`]' doc argues, so
+/// distance alone is a worse plan rather than an impossible one. What is *not*
+/// already priced is the wood: a small electric pole is half a wood plus a
+/// copper cable, a four-bot run starts with four wood, and everything beyond
+/// that is trees to be chopped. 64 poles is 32 wood and about 380 tiles of run
+/// at [`POLE_STEP`] -- past the 256-to-384 tiles at which seed 31337's first
+/// crude oil is charted, and far enough that a longer one wants a big-pole run
+/// and a real argument rather than a bigger number here.
+///
+/// Exceeding it makes [`ensure_powered`] answer `Ok(None)`, which each caller
+/// turns into its own named refusal.
+pub const MAX_POLE_RUN: usize = 64;
+
+/// What [`ensure_powered`] hands back: the steps that make the site powered,
+/// the ids the caller must order its own placement after, and the
+/// [`Condition::Powered`] those steps were chosen to satisfy.
+///
+/// The condition travels with the steps on purpose. It is the *same* value the
+/// run was checked against inside `pole_run`, so a caller that puts it on
+/// its `Place` as a precondition cannot state a different draw, a different
+/// prototype or a different tile from the one the poles were laid for. Two
+/// independently constructed copies would be free to drift.
+pub struct Powering {
+    /// Plant, pole bills and pole placements, in build order.
+    pub steps: Vec<Step>,
+    /// Every action id the consumer's own placement must be ordered after.
+    ///
+    /// Every id, not just the generator's: an engine with no steam produces
+    /// nothing and a boiler with no water makes no steam, so the consumer
+    /// waits for the whole plant. Nothing satisfies [`Condition::Powered`], so
+    /// `infer_edges` draws no edge on its own -- the caller holds both ends
+    /// and the caller states them.
+    pub ids: Vec<ActionId>,
+    /// The headroom test the caller should put on its placement.
+    pub powered: Condition,
+}
+
+/// Somewhere with the capacity to run `kw`: a network that already stands, or
+/// a plant built inline.
+///
+/// The half of the power decision that both [`ensure_powered`] and
+/// `method::assemble` need. It returns the **anchor** -- a position on a
+/// powered network -- together with the steps that build the plant when one
+/// had to be built, and the ids everything downstream must be ordered after.
+///
+/// A standing network answers with no steps and no ids: there is nothing to
+/// wait for.
+///
+/// It has to be inline rather than a subgoal in both callers, for the same
+/// reason: a subgoal is expanded after the method returns, and the site is
+/// chosen *from* the anchor, so a caller planned against a state with no plant
+/// in it has nowhere to be.
+pub fn supply_anchor(
+    ctx: &mut ExpansionCtx,
+    from: &Position,
+    radius: f64,
+    kw: f64,
+) -> Result<(Position, Vec<Step>, Vec<ActionId>), PlannerError> {
+    match supply_for(&ctx.state, from, radius, kw)? {
+        Supply::Standing(anchor) => Ok((anchor, Vec::new(), Vec::new())),
+        Supply::Build(plant) => {
+            let anchor = plant.pole.clone();
+            let (steps, ids) = plant_steps(ctx, &plant);
+            Ok((anchor, steps, ids))
+        }
+    }
+}
+
+/// **The one place that decides power for a site.** If `consumer` standing at
+/// `site` with footprint `area` and draw `kw` is not already powered, find
+/// supply within `radius` and lay a pole run to it.
+///
+/// `occupants` is what the site will hold once the caller places it: they are
+/// created in the routing fork *before* the pole search, so a pole cannot be
+/// sited on ground the caller's own building is about to take. They are not
+/// reserved in `ctx.state` -- that happens with the caller's `Place` -- so a
+/// refusal between here and there leaves nothing behind.
+///
+/// # Three answers, and the middle one is the interesting one
+///
+/// * `Err` -- supply itself is impossible, and [`supply_for`] says why by
+///   name (`PowerPlantNeedsShore`, `PowerPlantTooSmall`, a `Have` shortfall).
+/// * `Ok(None)` -- supply exists but **no run of at most [`MAX_POLE_RUN`]
+///   poles carries it there**, or the model cannot see the finished run
+///   carrying power. The caller names its own refusal, because what an
+///   unreachable site means differs: `method::extract` calls it
+///   `ExtractionNotModelled`.
+/// * `Ok(Some(_))` -- the steps, the ids and the condition. An
+///   already-powered site answers this way too, with empty steps and empty
+///   ids, so a caller never has to write the "already powered" branch itself.
+///
+/// # It refuses before it emits
+///
+/// Nothing is returned unless the [`Condition::Powered`] holds against a fork
+/// carrying every pole -- the game's own rule, walked over
+/// [`crate::state::PlanState`]'s union-find, not this module's [`POLE_STEP`]
+/// arithmetic. A half-built power line is worse than none: the machine stands,
+/// draws nothing, and reads as placed. The plant's own steps are emitted
+/// before that check, which is the one place this differs from
+/// `method::connect`'s all-or-nothing promise -- a plant is worth having on
+/// its own, a half-run of poles is not.
+///
+/// # Why it takes `kw` rather than computing it
+///
+/// A blueprint's draw is the sum over its decoded entity list
+/// (`state.rs`'s `consumer_kw`), a cell's is `cell_demand_kw` times the number
+/// of cells, and an extractor's is one `consumer_draw_kw` lookup. Only the
+/// caller knows which. What this function guarantees is that whatever number
+/// arrives is the number [`supply_for`] sizes the plant against *and* the
+/// number the returned [`Condition::Powered`] tests for -- so coverage and
+/// capacity cannot disagree.
+pub fn ensure_powered(
+    ctx: &mut ExpansionCtx,
+    consumer: &str,
+    site: &Position,
+    area: &Rect,
+    kw: f64,
+    radius: f64,
+    occupants: &[FactorioEntity],
+) -> Result<Option<Powering>, PlannerError> {
+    let powered = Condition::Powered {
+        pos: site.clone(),
+        entity: consumer.into(),
+        kw,
+    };
+    if powered.holds(&ctx.state, ctx.chain_actor) {
+        return Ok(Some(Powering {
+            steps: Vec::new(),
+            ids: Vec::new(),
+            powered,
+        }));
+    }
+
+    let (anchor, mut steps, mut ids) = supply_anchor(ctx, site, radius, kw)?;
+
+    let mut trial = ctx.state.fork();
+    for occupant in occupants {
+        trial.create_entity(occupant.clone());
+    }
+    let Some(run) = pole_run(&mut trial, &anchor, site, area, &powered, ctx.chain_actor)? else {
+        return Ok(None);
+    };
+    for pole in run {
+        steps.push(Step::Subgoal(Goal::Have {
+            item: POLE.into(),
+            count: 1,
+            whose: Holder::Share(ctx.chain_actor),
+        }));
+        let (step, id) = place_step(ctx, POLE, &pole);
+        steps.push(step);
+        ids.push(id);
+    }
+    Ok(Some(Powering {
+        steps,
+        ids,
+        powered,
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// Carrying power to the site
+// ---------------------------------------------------------------------------
+
+/// The poles that join the network at `anchor` to the extractor standing at
+/// `site` with footprint `area`, in build order and **including** the pole
+/// that covers the extractor itself.
+///
+/// `trial` is mutated: every pole chosen is created in it, so the next ring
+/// search cannot pick a tile an earlier pole took. The caller passes a fork
+/// that already carries the extractor.
+///
+/// `Ok(None)` means "no run of at most [`MAX_POLE_RUN`] poles carries it",
+/// which the caller turns into [`PlannerError::ExtractionNotModelled`].
+/// `Err` is only what a `Have` shortfall would raise, which cannot happen
+/// here -- the bill is emitted by the caller.
+///
+/// # It refuses before it emits, and the refusal is the game's own rule
+///
+/// Nothing is returned unless `powered` -- the extractor's own
+/// [`Condition::Powered`], a headroom test -- holds against `trial` with every
+/// pole in it. That check walks [`crate::state::PlanState`]'s union-find over
+/// the poles' real wire distances and its own supply-area table, so a run that
+/// this module's [`POLE_STEP`] arithmetic thought was fine but the game would
+/// not wire together is refused rather than built. A half-built power line is
+/// worse than none: the machine stands, draws nothing, and reads as placed.
+pub(crate) fn pole_run(
+    trial: &mut PlanState,
+    anchor: &Position,
+    site: &Position,
+    area: &factorio_bot_core::types::Rect,
+    powered: &Condition,
+    actor: crate::ids::BotId,
+) -> Result<Option<Vec<Position>>, PlannerError> {
+    // The pole that covers the machine. Sited first, because it is the one
+    // whose position is constrained by something other than the run.
+    //
+    // A ring search of this module's own rather than `free_area_near_where`'s,
+    // for one reason: that helper **refuses any candidate covering ore**, and
+    // the tile this pole has to reach is by construction the middle of a
+    // resource patch. That rule is right for the buildings it was written for
+    // and wrong here -- a pole collides on nothing a resource carries, and the
+    // game builds one straight over a patch.
+    let head = {
+        let snapshot = trial.fork();
+        match ring_search(&snapshot, site, |candidate| {
+            snapshot.pole_would_supply(POLE, candidate, area)
+        }) {
+            Some(head) => head,
+            None => return Ok(None),
+        }
+    };
+    let Some(path) = route_poles(trial, anchor, &head) else {
+        return Ok(None);
+    };
+    for pole in &path {
+        trial.create_entity(entity_for(
+            trial,
+            &crate::method::power::PlantPart {
+                name: POLE,
+                position: pole.clone(),
+                direction: Direction::North,
+            },
+        ));
+    }
+
+    // The one check that matters, and the only one not made of this module's
+    // own arithmetic: the game's rule, over a fork carrying every pole.
+    if !powered.holds(trial, actor) {
+        return Ok(None);
+    }
+    Ok(Some(path))
+}
+
+/// How far a pole may be looked for around a nominal tile, in tiles.
+///
+/// The same 12 as `method::util::FREE_TILE_SEARCH_RADIUS`, which is what every
+/// other siting search in this crate uses; stated here because this module
+/// does its own ring search (see `pole_run` on why) and a search that quietly
+/// used a different radius from the rest of the crate would make "no room"
+/// mean two things.
+const POLE_SEARCH_RADIUS: i32 = 12;
+
+/// The nearest tile centre to `from`, outwards in fixed rings, on which a small
+/// electric pole could stand and which `accept` allows.
+///
+/// A pole is one tile, so its build grid is tile centres and the candidate is
+/// `floor + 0.5` -- the same half-tile convention as a resource entity, and
+/// the reason this can compare candidates against a well's own position without
+/// converting anything.
+fn ring_search(
+    state: &PlanState,
+    from: &Position,
+    accept: impl Fn(&Position) -> bool,
+) -> Option<Position> {
+    let base_x = from.x().floor() as i32;
+    let base_y = from.y().floor() as i32;
+    for radius in 0..=POLE_SEARCH_RADIUS {
+        for dy in -radius..=radius {
+            for dx in -radius..=radius {
+                if dx.abs() != radius && dy.abs() != radius {
+                    continue;
+                }
+                let candidate =
+                    Position::new(f64::from(base_x + dx) + 0.5, f64::from(base_y + dy) + 0.5);
+                if !state.is_area_free(POLE, &candidate) || state.is_site_refused(POLE, &candidate)
+                {
+                    continue;
+                }
+                if accept(&candidate) {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// How many pole sites [`route_poles`] may examine before giving up.
+///
+/// A budget rather than a bound on the answer: the search is best-first, so on
+/// open ground it walks almost straight to the head and spends a few dozen
+/// nodes for a run of ten poles. The budget is what stops a run that is walled
+/// in -- a lake across the whole approach, say -- from expanding a disc of
+/// candidates until somebody's patience runs out. It buys about
+/// [`MAX_POLE_RUN`] detours' worth of exploration, which is far more than any
+/// run this planner would want to build.
+const ROUTE_BUDGET: usize = 4_000;
+
+/// A run of pole sites from `anchor` to `head`, each within [`WIRE_REACH`] of
+/// the last, **excluding** the anchor and **including** the head.
+///
+/// # Why this is a search and not a straight line
+///
+/// It was a straight line for exactly one measurement. On the seed-31337 dump
+/// with a well charted at `[80.5, -40.5]`, the line from the power plant's pole
+/// ran into ground it could not stand on at `[54.3, -24.1]` and the whole cell
+/// refused -- on a map that is covered in trees, rocks and water, which is
+/// every real map. A router that only works on a billiard table is a router
+/// that always refuses.
+///
+/// So: best-first over pole sites, expanding the frontier node nearest the head
+/// first. Each node offers sixteen compass directions at three step lengths,
+/// which gives the search a way *around* an obstacle rather than only through
+/// it, and every candidate is a real free tile checked against the same state
+/// the placements will be made in.
+///
+/// Deterministic by construction: the frontier is ordered `(distance to head,
+/// x, y)` with `total_cmp`, the direction and step tables are fixed, and
+/// `visited` is a `BTreeSet` of integer tiles. Nothing reads a hash order.
+///
+/// **It is still not a good router.** It knows nothing about the cost of the
+/// wood it is spending, it will happily take a long way round, and it has no
+/// notion of sharing a run with another consumer. What it has is the property
+/// that matters here: it either returns a run every hop of which stands on
+/// ground the plan believes is free, or it returns nothing.
+fn route_poles(state: &PlanState, anchor: &Position, head: &Position) -> Option<Vec<Position>> {
+    /// The sixteen compass directions, as unit-ish vectors. Sixteen rather
+    /// than eight so a detour can leave at a shallow angle instead of turning
+    /// 45 degrees.
+    fn directions() -> Vec<(f64, f64)> {
+        (0..16)
+            .map(|i| {
+                let theta = std::f64::consts::TAU * f64::from(i) / 16.;
+                (theta.cos(), theta.sin())
+            })
+            .collect()
+    }
+    // Long steps first: the shorter ones exist to squeeze past an obstacle,
+    // not to be preferred. `POLE_STEP` itself is the nominal.
+    let steps = [POLE_STEP, POLE_STEP * 0.66, POLE_STEP * 0.4];
+
+    let tile = |p: &Position| (p.x().floor() as i32, p.y().floor() as i32);
+    let mut came_from: std::collections::BTreeMap<(i32, i32), Position> =
+        std::collections::BTreeMap::new();
+    let mut parent: std::collections::BTreeMap<(i32, i32), (i32, i32)> =
+        std::collections::BTreeMap::new();
+    let mut visited: std::collections::BTreeSet<(i32, i32)> = std::collections::BTreeSet::new();
+    let mut frontier: Vec<Position> = vec![anchor.clone()];
+    came_from.insert(tile(anchor), anchor.clone());
+    visited.insert(tile(anchor));
+    let mut examined = 0usize;
+
+    while !frontier.is_empty() {
+        examined += 1;
+        if examined > ROUTE_BUDGET {
+            return None;
+        }
+        // Nearest the head first, ties by x then y so the answer depends on
+        // the geometry and not on insertion order.
+        let (index, _) = frontier.iter().enumerate().min_by(|(_, a), (_, b)| {
+            calculate_distance(a, head)
+                .total_cmp(&calculate_distance(b, head))
+                .then(a.x.total_cmp(&b.x))
+                .then(a.y.total_cmp(&b.y))
+        })?;
+        let node = frontier.remove(index);
+
+        if calculate_distance(&node, head) <= WIRE_REACH {
+            // Walk the parents back, then reverse: the anchor is dropped (it
+            // already stands) and the head is appended.
+            let mut run: Vec<Position> = Vec::new();
+            let mut at = tile(&node);
+            while at != tile(anchor) {
+                run.push(came_from.get(&at)?.clone());
+                at = *parent.get(&at)?;
+            }
+            run.reverse();
+            if run.len() + 1 > MAX_POLE_RUN {
+                return None;
+            }
+            run.push(head.clone());
+            return Some(run);
+        }
+
+        for (dx, dy) in directions() {
+            for step in steps {
+                let nominal = Position::new(node.x() + dx * step, node.y() + dy * step);
+                let candidate = Position::new(nominal.x().floor() + 0.5, nominal.y().floor() + 0.5);
+                let key = tile(&candidate);
+                if visited.contains(&key) {
+                    continue;
+                }
+                if calculate_distance(&candidate, &node) > WIRE_REACH {
+                    continue;
+                }
+                if !state.is_area_free(POLE, &candidate) || state.is_site_refused(POLE, &candidate)
+                {
+                    continue;
+                }
+                visited.insert(key);
+                came_from.insert(key, candidate.clone());
+                parent.insert(key, tile(&node));
+                frontier.push(candidate);
+            }
+        }
+    }
+    None
+}
+
+/// One `Place` for a one-tile building, with the id the caller must order
+/// against.
+///
+/// The same shape `power::plant_steps` emits, minus the plant's bill: the
+/// caller states its own `Goal::Have` so a pole run's wood shortfall refuses
+/// through the ordinary machinery.
+fn place_step(ctx: &mut ExpansionCtx, name: &'static str, position: &Position) -> (Step, ActionId) {
+    let entity = entity_for(
+        &ctx.state,
+        &crate::method::power::PlantPart {
+            name,
+            position: position.clone(),
+            direction: Direction::North,
+        },
+    );
+    let build = ctx
+        .state
+        .bot(ctx.chain_actor)
+        .map(|b| b.build_distance)
+        .unwrap_or(10.0);
+    let id = ctx.ids.next();
+    let step = Step::Act(Box::new(Action {
+        id,
+        kind: ActionKind::Place {
+            entity: Box::new(entity.clone()),
+        },
+        pre: vec![
+            Condition::AtPosition {
+                who: Actor::Role,
+                pos: position.clone(),
+                radius: build,
+                min_radius: ctx.state.placement_clearance(name).unwrap_or(0.0),
+            },
+            Condition::AreaFree {
+                pos: position.clone(),
+                entity: name.into(),
+                direction: 0,
+            },
+            Condition::HasItem {
+                who: Actor::Role,
+                item: name.into(),
+                count: 1,
+            },
+        ],
+        eff: vec![
+            Effect::LoseItem {
+                who: Actor::Role,
+                item: name.into(),
+                count: 1,
+            },
+            Effect::CreateEntity(Box::new(entity.clone())),
+        ],
+        duration: PLACE_TICKS,
+        pinned: None,
+        label: format!("place {name} at {position}"),
+    }));
+    ctx.state.create_entity(entity);
+    (step, id)
 }
 
 #[cfg(test)]
@@ -3610,4 +4136,202 @@ mod capacity_tests {
         // mines by the hundred.
         assert_eq!(pipe_run_plates(357.), 357);
     }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod ensure_powered_tests {
+    //! [`ensure_powered`] is the one place that decides power for a site, and
+    //! these are the two things a caller relies on that no baseline can show.
+    //!
+    //! The three offline plan reports pin that the extraction was *pure* --
+    //! they are byte-identical across it -- but they only exercise the paths
+    //! `researched:automation` and the two `producing:` goals happen to take.
+    //! What a third caller (`method::blueprint`) needs is stated here instead:
+    //! **an already-powered site costs nothing**, and **an unpowered one comes
+    //! back genuinely powered rather than merely covered**.
+
+    use super::*;
+    use crate::ids::BotId;
+    use factorio_bot_core::test_utils::fixture_world;
+    use std::sync::Arc;
+
+    /// A 75 kW consumer -- `assembling-machine-1`, the draw
+    /// `crate::action`'s own power tests use.
+    const CONSUMER: &str = "assembling-machine-1";
+    const CONSUMER_KW: f64 = 75.;
+
+    fn state() -> PlanState {
+        PlanState::from_world(Arc::new(fixture_world()), &[BotId(1)])
+    }
+
+    /// A site a standing plant already covers with headroom needs **no steps
+    /// and no ids at all**.
+    ///
+    /// This is the branch every caller would otherwise have to write for
+    /// itself, and the one whose absence doubles a factory on a replan: a
+    /// method that emitted a plant here would build a second one beside a
+    /// working one. The ids matter as much as the steps -- a caller orders its
+    /// own placement after every id it is handed, so a spurious id is a
+    /// spurious edge.
+    #[test]
+    fn an_already_powered_site_costs_no_steps_and_no_ids() {
+        let s = state();
+        let plant = plan_plant(&s, &Position::new(0., 0.)).expect("the fixture has a lake");
+        let mut built = s.fork();
+        for part in &plant.parts {
+            built.create_entity(entity_for(&built, part));
+        }
+        let site = plant.pole.clone();
+        let area = built
+            .collision_area(CONSUMER, &site)
+            .expect("the consumer has a prototype");
+
+        // Control: the site really is powered before the call, or this test
+        // is about the other branch.
+        assert!(
+            Condition::Powered {
+                pos: site.clone(),
+                entity: CONSUMER.into(),
+                kw: CONSUMER_KW,
+            }
+            .holds(&built, BotId(1)),
+            "control: a 900 kW plant must already carry 75 kW at its own pole"
+        );
+
+        let mut ctx = ExpansionCtx::new(built, BotId(1));
+        let powering = ensure_powered(
+            &mut ctx,
+            CONSUMER,
+            &site,
+            &area,
+            CONSUMER_KW,
+            SUPPLY_RADIUS,
+            &[],
+        )
+        .expect("a standing plant is never a refusal")
+        .expect("and it is never unreachable");
+
+        assert!(
+            powering.steps.is_empty(),
+            "a powered site must cost nothing, got {} steps: {:?}",
+            powering.steps.len(),
+            powering.steps
+        );
+        assert!(
+            powering.ids.is_empty(),
+            "a powered site must hand back no ids to order against, got {:?}",
+            powering.ids
+        );
+    }
+
+    /// An unpowered site comes back **powered**, judged by the game's own
+    /// rule against the state the call left behind.
+    ///
+    /// Not "some steps were emitted", and not "a pole stands within reach":
+    /// coverage is not capacity, and this crate has paid for that distinction
+    /// twice. The assertion is `Condition::Powered` -- a headroom test walking
+    /// `PlanState`'s union-find over real wire distances -- evaluated on
+    /// `ctx.state` after the call, which carries every plant part and every
+    /// pole the run laid.
+    #[test]
+    fn an_unpowered_site_comes_back_powered_and_not_merely_covered() {
+        let s = state();
+        // Far enough from the lake that a plant has to be built *and* a run
+        // of poles has to reach back to it.
+        let site = Position::new(60.5, 60.5);
+        let area = s
+            .collision_area(CONSUMER, &site)
+            .expect("the consumer has a prototype");
+        let unpowered = Condition::Powered {
+            pos: site.clone(),
+            entity: CONSUMER.into(),
+            kw: CONSUMER_KW,
+        };
+        assert!(
+            !unpowered.holds(&s, BotId(1)),
+            "control: the fixture must have no generation at {site}, or this \
+             test is about the other branch"
+        );
+
+        let mut ctx = ExpansionCtx::new(s, BotId(1));
+        let powering = ensure_powered(
+            &mut ctx,
+            CONSUMER,
+            &site,
+            &area,
+            CONSUMER_KW,
+            SUPPLY_RADIUS,
+            &[],
+        )
+        .expect("the fixture has a lake to site a plant on")
+        .expect("and open ground to run poles over");
+
+        assert!(
+            !powering.steps.is_empty(),
+            "an unpowered site must cost something"
+        );
+        assert!(
+            !powering.ids.is_empty(),
+            "the caller must be given something to order its placement after"
+        );
+
+        // **The overlay is not the plan.** `plant_steps` creates its parts in
+        // `ctx.state` as well as emitting them, so a version that built the
+        // plant into the overlay and then dropped its steps on the floor still
+        // passes the `Powered` check below -- verified by breaking exactly that
+        // and watching this test stay green. What the run actually performs is
+        // the steps, so the generator has to be *in* them.
+        let placed: Vec<&str> = powering
+            .steps
+            .iter()
+            .filter_map(|step| match step {
+                Step::Act(action) => match &action.kind {
+                    ActionKind::Place { entity } => Some(entity.name.as_str()),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        assert!(
+            placed.contains(&ENGINE),
+            "the plant the site depends on must be in the emitted steps, not \
+             only in the planning overlay; placed {placed:?}"
+        );
+        assert!(
+            placed.contains(&POLE),
+            "and so must the run that carries it there; placed {placed:?}"
+        );
+
+        // Every placement handed back is one the caller must wait for. An id
+        // missing here is an edge nobody draws, which `infer_edges` cannot
+        // recover because nothing satisfies `Condition::Powered`.
+        let ids: Vec<ActionId> = powering.ids.clone();
+        for step in &powering.steps {
+            if let Step::Act(action) = step
+                && matches!(action.kind, ActionKind::Place { .. })
+            {
+                assert!(
+                    ids.contains(&action.id),
+                    "{} is placed but its id is not one the caller is told to \
+                     order against",
+                    action.label
+                );
+            }
+        }
+
+        assert!(
+            powering.powered.holds(&ctx.state, BotId(1)),
+            "the site must be POWERED afterwards, not merely covered -- \
+             {} steps and {} ids bought nothing",
+            powering.steps.len(),
+            powering.ids.len()
+        );
+    }
+
+    /// The same radius `method::extract` passes, restated here rather than
+    /// imported from it: these tests are about `ensure_powered`, and reaching
+    /// into a caller for a constant would make a change there fail here for a
+    /// reason that has nothing to do with this code.
+    const SUPPLY_RADIUS: f64 = 64.;
 }

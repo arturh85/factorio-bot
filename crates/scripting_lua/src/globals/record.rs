@@ -27,7 +27,8 @@ use factorio_bot_core::record::savepoint;
 use factorio_bot_core::record::video::Resolution;
 use factorio_bot_core::record::{
     ActionFailure, Delivery, EventKind, FailureKind, PlannedStep, Provenance, RunRecorder,
-    SatisfiedReason, VideoOptions, VideoRecorder, WalkFailure, WalkFailureKind, git_provenance,
+    SatisfiedReason, VideoOptions, VideoRecorder, WalkFailure, WalkFailureKind,
+    choose_map_exchange_string, git_provenance,
 };
 use factorio_bot_core::types::{AreaFilter, EntityType, PlayerId, Position, Rect};
 use std::collections::BTreeSet;
@@ -1081,6 +1082,23 @@ end
                     let instance = workspace.join("server");
                     let run_mode = run_mode::read_run_mode(&instance);
                     let seed = read_map_gen_seed(&instance);
+                    // Asked here, at run start, beside the seed -- provenance is
+                    // written before anything can fail so a killed run still has
+                    // an identity, and that timing is kept. `.ok()` on purpose:
+                    // an old mod without the function, or any RCON trouble,
+                    // leaves the field "not captured" rather than failing a run
+                    // over a metadata read.
+                    let live_map_exchange_string = match rcon.as_ref().map_exchange_string().await {
+                        Ok(string) => Some(string),
+                        Err(error) => {
+                            factorio_bot_core::tracing::warn!(
+                                %error,
+                                "could not read the map-exchange string; this run will record \
+                                 no map identity beyond its seed and resource fingerprint"
+                            );
+                            None
+                        }
+                    };
                     let factorio = installed_factorio_version(&workspace.join("data"));
                     // The working tree of the process's own directory. See
                     // `GitProvenance`: this is where the code is *now*, which
@@ -1095,12 +1113,20 @@ end
                         started_unix: recorder.started_unix(),
                         started_tick: opened_at,
                         seed: seed.clone(),
-                        map_exchange_string: std::fs::read_to_string(
-                            instance.join("map-exchange-string.txt"),
-                        )
-                        .ok()
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty()),
+                        // A seed is not a map: a map is the seed PLUS the
+                        // map-gen settings, and the exchange string encodes
+                        // both. Asked of the running game first -- the file is
+                        // only written when a string was *supplied* to setup,
+                        // which no archived run did, which is why all 20 carry
+                        // `null` here.
+                        //
+                        // A failed ask is `None`, meaning "not captured". Never
+                        // an empty string, and never a value the game did not
+                        // give: an unidentified map has to stay unidentified.
+                        map_exchange_string: choose_map_exchange_string(
+                            live_map_exchange_string,
+                            std::fs::read_to_string(instance.join("map-exchange-string.txt")).ok(),
+                        ),
                         map: world.entity_graph.resource_fingerprint(),
                         factorio: factorio.clone(),
                         git: git.clone(),

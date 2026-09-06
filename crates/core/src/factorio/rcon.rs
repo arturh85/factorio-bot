@@ -5294,6 +5294,30 @@ impl FactorioRcon {
         parse_reply("find_entities_filtered", &json)
     }
 
+    /// Asks the running game for the map-exchange string of the map it is
+    /// running -- the *producer*, and the counterpart of
+    /// [`FactorioRcon::parse_map_exchange_string`] below, which only ever
+    /// consumed one.
+    ///
+    /// **A seed is not a map.** A map is noise-generated from the seed *plus*
+    /// the map-gen settings, and the exchange string encodes both, which is
+    /// why it is the identity and the seed is not. Nothing in this project
+    /// could produce one before 2026-09-06, which is why every archived run
+    /// carries `map_exchange_string: null` and the maps behind their timings
+    /// are unidentifiable.
+    ///
+    /// Errors are for the caller to turn into `None` meaning **"not
+    /// captured"**. Never substitute an empty string: see
+    /// [`crate::record::provenance::Provenance::map_exchange_string`] for why
+    /// absence and a value must stay distinguishable.
+    pub async fn map_exchange_string(&self) -> Result<String> {
+        let lines = self
+            .remote_call("map_exchange_string", vec![])
+            .await?
+            .ok_or_else(|| miette!("map_exchange_string: the mod answered nothing"))?;
+        parse_map_exchange_reply(&lines)
+    }
+
     pub async fn parse_map_exchange_string(
         &self,
         name: &str,
@@ -10404,5 +10428,83 @@ mod scale_deadline_tests {
     #[test]
     fn a_fresh_client_assumes_normal_speed() {
         assert_eq!(FactorioRcon::new_empty().speed_factor(), 1.0);
+    }
+}
+
+/// Judges what the game answered [`FactorioRcon::map_exchange_string`] with.
+///
+/// Split out of the round trip so the shape can be tested without a running
+/// Factorio -- which is the only thing that *can* be tested here, since no
+/// test in this workspace has a game to ask.
+///
+/// A Factorio exchange string is delimited `>>>`...`<<<` and its base64 body
+/// carries embedded whitespace (the shipped one in `settings.rs` had spaces
+/// every 60-odd characters). RCON may hand the body back across several
+/// lines, so the lines are joined; whitespace *inside* is left exactly as the
+/// game wrote it, because this string is an identity and normalising it would
+/// make two recordings of one map compare unequal.
+///
+/// Anything that is not delimited is refused rather than stored. A reply that
+/// is a mod error, an empty string, or a truncated read must reach the caller
+/// as an error so it can record "not captured", never as a value.
+fn parse_map_exchange_reply(lines: &[String]) -> Result<String> {
+    let joined = lines.join("");
+    let trimmed = joined.trim();
+    if trimmed.starts_with(">>>") && trimmed.ends_with("<<<") && trimmed.len() > 6 {
+        Ok(trimmed.to_string())
+    } else {
+        Err(miette!("map_exchange_string: unreadable reply: {lines:?}"))
+    }
+}
+
+#[cfg(test)]
+mod map_exchange_string_tests {
+    use super::parse_map_exchange_reply;
+
+    fn lines(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn a_delimited_reply_is_taken_verbatim() {
+        let got = parse_map_exchange_reply(&lines(&[">>>eNpjZI CDBnsQ<<<"])).expect("accepted");
+        // The inner space survives: the string is an identity, not a value to
+        // tidy. The shipped default in `settings.rs` is full of them.
+        assert_eq!(got, ">>>eNpjZI CDBnsQ<<<");
+    }
+
+    #[test]
+    fn a_reply_split_across_lines_is_joined_not_separated() {
+        let got = parse_map_exchange_reply(&lines(&[">>>eNpjZI", "CDBnsQ<<<"])).expect("accepted");
+        assert_eq!(got, ">>>eNpjZICDBnsQ<<<");
+    }
+
+    #[test]
+    fn surrounding_whitespace_is_stripped() {
+        let got = parse_map_exchange_reply(&lines(&["  >>>eNpjZICDBnsQ<<<\n"])).expect("accepted");
+        assert_eq!(got, ">>>eNpjZICDBnsQ<<<");
+    }
+
+    #[test]
+    fn an_undelimited_reply_is_an_error_and_never_a_value() {
+        // A mod error, an empty reply and a truncated read all have to reach
+        // the caller as an error: `None` in provenance means "not captured",
+        // and a fabricated or partial string would claim a map identity that
+        // nobody established.
+        for reply in [
+            vec![],
+            lines(&[""]),
+            lines(&["   "]),
+            lines(&[">>><<<"]),
+            lines(&["eNpjZICDBnsQ"]),
+            lines(&[">>>eNpjZICDBnsQ"]),
+            lines(&["eNpjZICDBnsQ<<<"]),
+            lines(&["Error: attempt to call a nil value"]),
+        ] {
+            assert!(
+                parse_map_exchange_reply(&reply).is_err(),
+                "should have refused {reply:?}"
+            );
+        }
     }
 }

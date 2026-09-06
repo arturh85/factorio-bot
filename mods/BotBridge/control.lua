@@ -5671,34 +5671,38 @@ function rcon_place_blueprint(player_id, blueprint, pos_x, pos_y, direction, for
 		end
 		::continue::
 	end
-	-- STREAM THE GHOSTS TO THE MODEL, not just to the caller.
+	-- GHOSTS CANNOT BE STREAMED FROM HERE, and this is where the attempt was.
 	--
-	-- `result` goes back in the RCON reply body, which the executor reads as
-	-- this action's result and nothing else ever sees. The planner's world
-	-- model is fed by `writeout`, and a blueprint build raises no
-	-- `on_built_entity` for a ghost, so until now **no ghost this function
-	-- created ever reached the model**. Measured 2026-09-06 on a 9-entity
-	-- block: 9 ghosts standing in the game, 0 visible to the planner.
+	-- The gap is real: `result` goes back in the RCON reply body, which the
+	-- executor reads as this action's result and nothing else ever sees, while
+	-- the world model is fed by `writeout` on stdout. A script-driven
+	-- `build_blueprint` raises no `on_built_entity`, so no ghost this function
+	-- creates reaches the model. Measured live on a 9-entity block: 9 ghosts
+	-- standing in the game, 0 visible to the planner. That leaves
+	-- `method::blueprint`'s ghost recovery -- correct code with passing unit
+	-- tests -- unable to fire.
 	--
-	-- That made `method::blueprint`'s ghost recovery -- correct code, with
-	-- passing tests -- unable to fire even once, because its unit tests build
-	-- ghosts directly into `PlanState`, which is precisely the step the live
-	-- path never performs. A reader with nothing to read.
+	-- **A `writeout` here does not close it, and fails silently.** Measured
+	-- 2026-09-06 with a control: a plain non-ghost record, written on the same
+	-- channel from the same loop in the same call, also never arrived. So it is
+	-- not the ghost record, not the filter and not deserialization --
+	-- `writeout` cannot escape a function invoked through `remote.call` from an
+	-- RCON command. That is the same mechanism this file already warns about
+	-- for `rcon.print`: Factorio redirects console output to the RCON client
+	-- for the duration of the command, so it lands in the reply body rather
+	-- than on stdout.
 	--
-	-- Emitted under the same event name an ordinary creation uses, because the
-	-- Rust side already handles it: `on_some_entity_created` ->
-	-- `FactorioWorld::on_some_entity_created` -> `EntityGraph::add`, which
-	-- keeps anything with a non-zero bounding box, and `serialize_entity`
-	-- already carries `ghost_name`/`ghost_type` for exactly this shape.
-	-- `PlanState::ghosts_named_any` matches on `ghost_name`, never `name`.
+	-- Deferring it to `todo_next_tick_other`, so the write happens inside
+	-- `on_tick` where stdout is ordinary, was tried and **also did not
+	-- arrive** -- with the same non-ghost control, so the negative is about the
+	-- channel and not about the record. Why is not yet established; note that
+	-- that queue is drained only in an `elseif`, so a non-empty
+	-- `todo_next_tick` starves it.
 	--
-	-- Only entries still ghostly are sent: a ghost this call revived is a real
-	-- entity and was written out by the game's own event.
-	for _, entry in pairs(result) do
-		if entry.name == "entity-ghost" then
-			writeout(game.tick, "on_some_entity_created", helpers.table_to_json(entry))
-		end
-	end
+	-- Deliberately left UNIMPLEMENTED rather than leaving a call that looks
+	-- like a fix and is inert. The next thing to try is a channel that is known
+	-- to escape: a real event handler, or the sampling session's own writer.
+	-- See docs/superpowers/notes/2026-09-06-ghosts-cannot-be-written-from-rcon.md
 	if nothing == true then
 		rcon.print("Error: failed to build anything")
 	else

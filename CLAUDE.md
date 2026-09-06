@@ -1240,6 +1240,20 @@ entry over a log line:
   T-junction version consumed 100 of 100 ore and 50 of 50 coal and ran both
   furnaces at 192 ticks/plate, i.e. 100% of a stone furnace's rate. See
   `docs/superpowers/notes/2026-09-06-t-junction-smelter.md`.
+- **A burner block can EARN the research that unlocks its electric successor,
+  in about 37 seconds of game time.** Both prerequisites of
+  `automation-science-pack` are trigger technologies fired by ordinary smelting:
+  `steam-power` by 50 iron plates (unlocking boiler/steam-engine/offshore-pump)
+  and `electronics` by 10 copper plates (unlocking `inserter`,
+  `small-electric-pole`, `electronic-circuit`, `lab`, `copper-cable`). Measured
+  2026-09-06: a copper run of `TJunctionSmelter` fired `electronics` at tick
+  2,220 and the chain `copper-cable -> iron-gear-wheel -> electronic-circuit ->
+  inserter` then crafted from the block's own 16 copper plates — no lab, no
+  science pack, no research action in the plan. **Proved with a control that
+  fails for the right reason**: five copper plates (below the threshold of ten)
+  were cheated in first, so the pre-run craft could only fail on
+  `recipe copper-cable is not enabled for this force`, never on materials. See
+  `docs/superpowers/notes/2026-09-06-the-block-earns-its-own-upgrade.md`.
 - **A burner block works exactly where coal flows THROUGH it.** A burner
   inserter fuels itself from the coal it carries, so an arm on a mixed lane
   never needs fuelling — but an arm that touches only ore, or only plates, has
@@ -1261,6 +1275,14 @@ entry over a log line:
   the run starts. Check generation against demand (assembling-machine-2 is
   150kW, inserters ~13kW each), and prefer a deterministic source when what
   you are testing is geometry rather than power.
+- **`inventory_type` is passed straight to `entity.get_inventory(N)`, and a
+  furnace's result slot is 3.** A chest's main inventory and a burner's fuel
+  slot are both 1. `remove_from_inventory` had **no call site anywhere in the
+  tree** — no script and no planner code — until 2026-09-06, so none of these
+  indices had ever been exercised outside `insert_to_inventory`. A wrong index
+  answers `cannot remove from nonexisting inventory`, but a removal that moves
+  nothing is silent: re-read the source's count afterwards rather than assuming
+  it worked.
 - **`Option::None` reaches Lua as mlua's null sentinel, which is light
   userdata and therefore TRUTHY.** So `local inv = r.output_inventory or {}`
   does *not* substitute the default, and the next `pairs(inv)` raises

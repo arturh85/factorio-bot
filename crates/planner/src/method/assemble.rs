@@ -114,8 +114,8 @@ use crate::method::have::{
 use crate::method::power::{POLE, supply_anchor};
 use crate::method::produce::cells_for;
 use crate::method::util::{
-    CRAFTING_CATEGORY, RecipeGate, ingredients_of, output_per_craft, recipe_for, recipe_gate,
-    smelting_ticks, tile_alignment_facing,
+    BEACON, CRAFTING_CATEGORY, RecipeGate, beacon_geometry, ingredients_of, output_per_craft,
+    recipe_for, recipe_gate, smelting_ticks, tile_alignment_facing,
 };
 use crate::method::{ExpansionCtx, Method, Step};
 use crate::state::PlanState;
@@ -724,6 +724,81 @@ const POLE_OFFSET: (f64, f64) = (-1., 2.);
 /// hoped for.
 const LANE: [(f64, f64); 5] = [(-4., 0.), (-4., 1.), (-4., 2.), (-4., 3.), (-4., 4.)];
 
+/// The ground east of the machine column, left clear so a beacon can be
+/// added later without tearing the cell down.
+///
+/// # Why the cell reserves ground for a machine it cannot yet use
+///
+/// The owner's ask is *"leave space for beacons from the beginning so we can
+/// cheaply improve the production rates/productivity later"*. Empty ground is
+/// cheap today; a beacon lane retrofitted into a built and belted base is a
+/// teardown. So this is a **deliberate gap, not an oversight** -- if you are
+/// reading this because a layout has a hole in it, the hole is the feature,
+/// and deleting it costs the teardown it exists to avoid.
+///
+/// # Why east, and why one column rather than a lane between the machines
+///
+/// The two machines sit at `(0, 0)` and `(0, 4)`, four tiles apart, and that
+/// distance is **forced**: [`Role::LinkInserter`] at `(0, 2)` carries the
+/// intermediate's output into the product machine, and an inserter reaches
+/// exactly one tile. Widening the gap to fit a beacon between them would
+/// break the one link the cell is built around. The machines are therefore a
+/// single column, both faces on the same side, and **one beacon column to
+/// their east reaches both** -- the "does it reach both rows" question
+/// [`crate::method::util::BeaconGeometry`] exists to answer does not even
+/// arise here, because there is only one row.
+///
+/// East rather than west because west is taken: the feed and supply chests
+/// are at `x = -3` and [`LANE`], the ground a bot stands on to fill them, is
+/// at `x = -4`.
+///
+/// # Width is derived, not chosen
+///
+/// The column is [`crate::method::util::BeaconGeometry::lane_tiles`] wide --
+/// the beacon's own footprint, read off its `collision_box`. That is the
+/// narrowest lane that can ever work and it needs no `supply_area_distance`,
+/// which is just as well because the mod does not send one; see that type's
+/// doc for the derivation and for what is still missing. A world with no
+/// beacon prototype reserves **nothing**, so a mod that removes beacons pays
+/// no footprint for them.
+///
+/// # It spans the machines' own rows and no more
+///
+/// `y = -1 ..= 5` -- the seven rows the two 3x3 machines occupy. Reserving
+/// less would leave a beacon standing beside only part of the column;
+/// reserving more would buy nothing, and every tile is a tile that can refuse
+/// a site.
+const BEACON_FLANK_ROWS: [f64; 7] = [-1., 0., 1., 2., 3., 4., 5.];
+
+/// The first column east of the machines, whose east faces are at `x = 1.5`.
+///
+/// Flush against them, so the gap between beacon footprint and machine is
+/// zero and the beacon reaches the column for any `supply_area_distance`
+/// above zero -- see [`crate::method::util::BeaconGeometry`].
+const BEACON_FLANK_FIRST_COLUMN: f64 = 2.;
+
+/// The tiles a cell at `origin` facing `facing` keeps clear for a beacon.
+///
+/// Empty when the world carries no beacon prototype, which is the only way
+/// this costs nothing.
+fn beacon_flank(state: &PlanState, origin: &Position, facing: Direction) -> Option<Vec<Position>> {
+    let Some(geometry) = beacon_geometry(state, BEACON) else {
+        return Some(Vec::new());
+    };
+    let columns = geometry.lane_tiles().max(0.).round();
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let columns = columns as usize;
+    let mut tiles = Vec::with_capacity(columns * BEACON_FLANK_ROWS.len());
+    for column in 0..columns {
+        #[allow(clippy::cast_precision_loss)]
+        let x = BEACON_FLANK_FIRST_COLUMN + column as f64;
+        for y in BEACON_FLANK_ROWS {
+            tiles.push(origin.add(&Position::new(x, y).turn(facing)?));
+        }
+    }
+    Some(tiles)
+}
+
 /// A cell, sited and checked, ready to be turned into steps.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Cell {
@@ -970,6 +1045,17 @@ fn fit(
         }
     }
     for tile in &lane {
+        if !state.is_position_free(tile) {
+            return None;
+        }
+    }
+    // Ground kept clear for a beacon that no plan places yet -- see
+    // `BEACON_FLANK_ROWS` for why a cell refuses a site over a machine it
+    // cannot use, and `tests::a_cell_leaves_room_for_a_beacon_to_its_east`
+    // for the shape. Checked here and NOT in `fit_partial`: a cell already
+    // standing was sited before this rule existed, and refusing to finish it
+    // would strand a half-built cell to protect ground that is already gone.
+    for tile in &beacon_flank(state, origin, facing)? {
         if !state.is_position_free(tile) {
             return None;
         }
@@ -2724,6 +2810,94 @@ mod tests {
             &registry_for(&bots),
             BotId(1),
         )
+    }
+
+    // ---- room for a beacon ------------------------------------------------
+
+    /// The reserved ground is real ground, and it is exactly as wide as the
+    /// beacon's own footprint.
+    ///
+    /// A furnace in **any** of the three flank columns refuses the site, and
+    /// a furnace well east of them does not -- the control, without which
+    /// this would also pass if merely adding an entity anywhere refused.
+    ///
+    /// **The width is pinned elsewhere, deliberately.** The column
+    /// immediately past the flank cannot be the control: at the origin this
+    /// test finds it refuses too, for reasons of the fixture's own that
+    /// predate this reservation (the flank is columns 2, 3 and 4, so column 5
+    /// is not ground this code looks at). The claim "three columns, and three
+    /// because the beacon is 3x3" is checked directly on the tile list in
+    /// `a_world_without_beacons_reserves_no_ground_for_them`, and the
+    /// derivation itself in
+    /// `crate::method::util::tests::the_lane_follows_the_prototype_and_not_the_number_three`.
+    #[test]
+    fn a_cell_leaves_room_for_a_beacon_to_its_east() {
+        let spec = spec();
+        let origin = (6..=20)
+            .flat_map(|x| {
+                (6..=20).map(move |y| Position::new(f64::from(x) + 0.5, f64::from(y) + 0.5))
+            })
+            .find(|origin| {
+                fit(&powered(&[BotId(1)]), origin, Direction::North, true, &spec).is_some()
+            })
+            .expect("the fixture has room for a cell somewhere beside its plant");
+
+        let blocked = |dx: f64| {
+            let mut state = powered(&[BotId(1)]);
+            state.create_entity(FactorioEntity {
+                name: "stone-furnace".into(),
+                entity_type: "furnace".into(),
+                position: origin.add(&Position::new(dx, 0.)),
+                ..Default::default()
+            });
+            fit(&state, &origin, Direction::North, true, &spec).is_none()
+        };
+
+        let width = beacon_geometry(&powered(&[BotId(1)]), BEACON)
+            .expect("the fixture ships a beacon")
+            .lane_tiles();
+        assert!(
+            (width - 3.0).abs() < f64::EPSILON,
+            "vanilla's beacon is 3x3; this test's columns are derived from that"
+        );
+
+        for column in 0..3 {
+            let dx = BEACON_FLANK_FIRST_COLUMN + f64::from(column);
+            assert!(
+                blocked(dx),
+                "a furnace at dx={dx} stands in the beacon flank and must refuse the site"
+            );
+        }
+        // The control that stops this passing on "any extra entity refuses":
+        // a furnace well clear of the flank leaves the site standing.
+        assert!(
+            !blocked(BEACON_FLANK_FIRST_COLUMN + 10.0),
+            "a furnace ten tiles past the flank is nothing to do with the cell"
+        );
+    }
+
+    /// A world with no beacon in it reserves nothing, so a mod that removes
+    /// beacons pays no footprint for them.
+    #[test]
+    fn a_world_without_beacons_reserves_no_ground_for_them() {
+        let origin = Position::new(10.5, 10.5);
+        let with_beacons = powered(&[BotId(1)]);
+        assert_eq!(
+            beacon_flank(&with_beacons, &origin, Direction::North)
+                .expect("north is a cardinal facing")
+                .len(),
+            3 * BEACON_FLANK_ROWS.len(),
+            "a 3x3 beacon reserves three columns of the machines' seven rows"
+        );
+
+        let world = world();
+        world.entity_prototypes.remove(BEACON);
+        let without = PlanState::from_world(Arc::new(world), &[BotId(1)]);
+        assert_eq!(
+            beacon_flank(&without, &origin, Direction::North),
+            Some(vec![]),
+            "no beacon prototype means no reservation at all"
+        );
     }
 
     // ---- what a cell is ---------------------------------------------------

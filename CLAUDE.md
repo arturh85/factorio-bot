@@ -1226,6 +1226,28 @@ entry over a log line:
   the failure is silent because placement and function are separate concerns.
   For a row fed from a belt to its north: input and output inserters are both
   `direction = 0`, feeder and takeoff inserters are `direction = 12`.
+- **Two belt-loading rules decide whether a smelter works, and both fail
+  silently.** An **inserter drops on the belt's FAR lane** (the one away from
+  itself), and **a belt running into the SIDE of another sideloads onto its
+  NEAR lane**. Together they are how ore and coal share one belt: load ore from
+  the north so it lands on the south lane, and T-junction the coal branch in
+  from the north so it lands on the north lane. Get either backwards and both
+  commodities land on ONE lane, where the block still places 100% correctly and
+  every arm still self-fuels — **and one commodity crowds the other out
+  entirely**. Measured 2026-09-06 with ore and coal in a single chest behind a
+  single loader: the chest's coal drained 50 → 17 over 2,500 ticks while its
+  ore never moved off 99, and the whole block produced one plate. The corrected
+  T-junction version consumed 100 of 100 ore and 50 of 50 coal and ran both
+  furnaces at 192 ticks/plate, i.e. 100% of a stone furnace's rate. See
+  `docs/superpowers/notes/2026-09-06-t-junction-smelter.md`.
+- **A burner block works exactly where coal flows THROUGH it.** A burner
+  inserter fuels itself from the coal it carries, so an arm on a mixed lane
+  never needs fuelling — but an arm that touches only ore, or only plates, has
+  no fuel source at all and stops when its hand charge burns out. That is not a
+  bug to route around: it is why the electric `inserter` matters, and it puts a
+  hard shape on t=0 blocks. `electronics` (which unlocks `inserter` and
+  `small-electric-pole`) is a **trigger technology fired by 10 copper plates**,
+  no lab and no science packs — about 32 seconds of one stone furnace.
 - **`only_ghosts = true` validates nothing.** Ghosts do not collide, so a
   blueprint whose entities overlap places exactly as many ghosts as a correct
   one. A ghost-placement count is not evidence that geometry is legal; only a

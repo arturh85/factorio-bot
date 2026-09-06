@@ -11,13 +11,37 @@ blueprints = {
     -- crates/core/tests/blueprints/moving_block.txt and the pinning test
     -- `the_moving_block_decodes_to_its_nine_entities_with_every_direction_pinned`
     -- in crates/core/tests/blueprint_decode.rs.
-    MovingBlock = "0eJyd0tGKwjAQBdD3/YplntPFpEm1+RURsTqwA3ZaJqkopf8uWxdZcCsh8xKYwLkM3BGa84C9EEfwI1DEFvyfnYILSqCOwbvK1LauXWmNLrVRgBwpEgbw24/P3xkf29ueh7ZBAa8V8KFF8EDScXH8xvCj9l2gOLMjXMGvvpyC2/xOCk4keHz8ria1bJun3QzCKAVxQIkorwF6KUCbdwnlMyHKgUPfSSwaPP9zgVkKsO98m+yXWb5L9m2WXyX7LstfJ/tVlr9Jb9A6r0F1Uv83y/2f6d003QHQziE+"
+    MovingBlock = "0eJyd0tGKwjAQBdD3/YplntPFpEm1+RURsTqwA3ZaJqkopf8uWxdZcCsh8xKYwLkM3BGa84C9EEfwI1DEFvyfnYILSqCOwbvK1LauXWmNLrVRgBwpEgbw24/P3xkf29ueh7ZBAa8V8KFF8EDScXH8xvCj9l2gOLMjXMGvvpyC2/xOCk4keHz8ria1bJun3QzCKAVxQIkorwF6KUCbdwnlMyHKgUPfSSwaPP9zgVkKsO98m+yXWb5L9m2WXyX7LstfJ/tVlr9Jb9A6r0F1Uv83y/2f6d003QHQziE+",
     -- Geometry lifted from FurnaceLine, which stood 176/179 live. Only the
     -- inserter prototype differs: the electric `inserter` is not enabled at
     -- t=0 on seed 31337, which is why FurnaceLine cannot be built early.
     -- Burner inserters self-fuel from the coal they carry, so this block
     -- needs no electricity and no generator.
     SmeltingBlock = "0eNqV0N8KgjAUBvB3OddT/LfAXfYKXUaE2qlG80y2GYn47k0FCTLIy32H89vH6aFULTZGkgPRg3RYg/jIGKiiROWzQ43KSbrtla4ePkdy0km0II79/OjO1NYlGhAxAypq9FvSaAqqO9qRarT1K5rGn14geMgZdCCikA8D+0KSBSlbQ2gCSRaN86OfUuwlBhdpsJqn0YqbLq51mjC4er2ocEWdzHStW7a9W/ZPN77pcHw83InBE42dpnyX5Fme8zRL4jROhuEN0/adUw==",
+    -- One belt, two lanes, fed the way Factorio actually does it.
+    --
+    -- ORE is loaded from the NORTH of the main belt, so far-lane insertion puts
+    -- it on the SOUTH lane. COAL arrives on its own belt running south into the
+    -- SIDE of the main belt -- a T junction -- and sideloading lands on the
+    -- NEAR lane, which from the north is the NORTH lane. No inserter merges the
+    -- two commodities; the belts do it. The coal branch is a belt rather than a
+    -- chest arm because the real source is a miner column, which outputs onto a
+    -- belt.
+    --
+    -- The takeoffs sit SOUTH of the main belt, so they draw the far (coal) lane
+    -- first and fall back to the near (ore) lane once a furnace's fuel slot is
+    -- full -- which is what lets one arm per furnace deliver both.
+    --
+    -- **The predecessor to this block put ore and coal in ONE chest behind ONE
+    -- loader, and coal crowded ore out completely**: measured over 2,500 ticks,
+    -- the chest's coal drained 50 -> 17 while its ore never moved off 99, and
+    -- the whole block made one plate from the single ore that escaped first.
+    -- Lane separation is not tidiness, it is the mechanism.
+    --
+    -- Every prototype here is enabled on a fresh force. `inserter`,
+    -- `splitter`, `underground-belt` and `electric-mining-drill` are not, which
+    -- is why FurnaceLine and MinerLine cannot be built early and this can.
+    TJunctionSmelter = "0eNqV08FuhCAQBuB34awbAXGFR+i1vTVNo3aakigawKYb47sXNWvbrNsMR5jwMfkzM5G6HWGw2niiJqI9dET9uktIW9XQhrunh9E0XvfmsYPWgw0lMF57DY6o52k7XF7N2NWhqGhCTNVBeOhtZdzQW58GaBGH3ukFWj78IoqfREIuRGUnMSfkTVtotmo+JzcsQ7N5DMvRrIhhczRbxLACzZ5j2ALNljHsGc3KGLZEszSLceXuatubtPkA98/QpjSYBwrNdqYerQGbauPAbntzz7rpLzuSafSsrk3+gcsjmMXDGQrmqEh3lN+JNMdHulsMFanAy9eNoii4wMNlFPyzVM73BtL3wFcNHPS7ovww0BKLyCvykpBPsG6tiILJXErBc0Y5ZfP8DXmZEQ8=",
 }
 
 rcon.cheat_technology("automation")

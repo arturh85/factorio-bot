@@ -77,8 +77,8 @@ fn every_blueprint_in_rcontest_lua_decodes() {
     // assignment style changes -- this test would otherwise pass while checking
     // nothing at all, which is the failure it was written to prevent.
     assert!(
-        blueprints.len() >= 6,
-        "expected at least the six known fixtures in {}, found {} -- if the \
+        blueprints.len() >= 7,
+        "expected at least the seven known fixtures in {}, found {} -- if the \
          file's shape changed, fix this extractor rather than letting the test \
          quietly check nothing",
         path.display(),
@@ -168,6 +168,113 @@ fn the_smelting_block_keeps_the_geometry_it_inherited_from_furnaceline() {
                 && (sy - y).abs() < 1e-9
                 && sd == dir),
             "missing {name} at ({x}, {y}) facing {dir}; got {seen:?}"
+        );
+    }
+}
+
+
+/// `TJunctionSmelter` merges ore and coal onto one belt the way Factorio does.
+///
+/// Two mechanics decide whether this block works, and neither is visible in a
+/// picture of it — a layout with either one backwards places 100% correctly and
+/// moves nothing useful:
+///
+/// 1. **An inserter drops on the belt's FAR lane.** The ore loader therefore
+///    sits north of the main belt, so ore lands on the south lane.
+/// 2. **A belt running into the SIDE of another sideloads onto its NEAR lane.**
+///    The coal branch therefore comes from the north, putting coal on the north
+///    lane.
+///
+/// Get either wrong and both commodities land on one lane, where coal crowds
+/// ore out. That is measured, not supposed: the single-chest predecessor to
+/// this block drained 50 coal down to 17 over 2,500 ticks while its ore never
+/// moved off 99, and produced one plate — from the single ore that escaped
+/// before the coal took over. Lane separation is the mechanism, not tidiness.
+///
+/// The prototype list is pinned for the same reason as the geometry: every name
+/// must be enabled on a fresh force, because the only moment this block is
+/// interesting is before any research exists.
+#[test]
+fn the_t_junction_smelter_separates_its_lanes_and_needs_no_research() {
+    let src = std::fs::read_to_string(rcontest_path()).expect("rcontest.lua readable");
+    let (_, text) = blueprint_assignments(&src)
+        .into_iter()
+        .find(|(name, _)| name == "TJunctionSmelter")
+        .expect("TJunctionSmelter is in rcontest.lua");
+    let bp = decode(&text).expect("TJunctionSmelter decodes");
+
+    // Verified against `crates/core/tests/live-2.1.17-world-snapshot.json`:
+    // each of these recipes carries `enabled: true` on an unresearched force.
+    const BUILDABLE_AT_T0: &[&str] = &[
+        "iron-chest",
+        "burner-inserter",
+        "transport-belt",
+        "stone-furnace",
+    ];
+    for e in &bp.entities {
+        assert!(
+            BUILDABLE_AT_T0.contains(&e.name.as_str()),
+            "{} needs research; this block must stand on a fresh force",
+            e.name
+        );
+    }
+
+    let at = |n: &str, x: f64, y: f64| {
+        bp.entities.iter().find(|e| {
+            e.name == n && (e.offset.x() - x).abs() < 1e-9 && (e.offset.y() - y).abs() < 1e-9
+        })
+    };
+
+    // The main belt runs east along y = 0.5 and must be unbroken from the ore
+    // loader's drop tile through the last takeoff, or the lanes never arrive.
+    for i in 0..8 {
+        let x = 3.5 + f64::from(i);
+        assert_eq!(
+            at("transport-belt", x, 0.5).map(|e| e.direction),
+            Some(4),
+            "main belt must run east at x={x}"
+        );
+    }
+
+    // Ore enters from the NORTH, so far-lane insertion puts it on the SOUTH lane.
+    assert_eq!(
+        at("burner-inserter", 3.5, -0.5).map(|e| e.direction),
+        Some(0),
+        "the ore loader must pick from the chest to its north"
+    );
+    assert!(
+        at("iron-chest", 3.5, -1.5).is_some(),
+        "ore chest north of its loader"
+    );
+
+    // The coal branch runs SOUTH into the side of the main belt. Its last tile
+    // must sit directly above a main-belt tile: that adjacency IS the T
+    // junction, and a one-tile gap turns the merge into a belt that just ends.
+    for y in [-1.5f64, -0.5] {
+        assert_eq!(
+            at("transport-belt", 5.5, y).map(|e| e.direction),
+            Some(8),
+            "coal branch must run south at y={y}"
+        );
+    }
+    assert!(
+        at("transport-belt", 5.5, 0.5).is_some(),
+        "the coal branch must terminate against a main-belt tile, or it is not a T junction"
+    );
+
+    // Takeoffs sit SOUTH of the belt — so they draw the far (coal) lane first
+    // and fall back to the near (ore) lane once a furnace's fuel slot is full —
+    // and drop into the furnace directly below.
+    for (x, fx) in [(7.5f64, 7.0f64), (8.5, 9.0)] {
+        assert_eq!(
+            at("burner-inserter", x, 1.5).map(|e| e.direction),
+            Some(0),
+            "takeoff at x={x} must pick from the belt to its north"
+        );
+        // A 2x2 furnace centred at fx spans fx-1 .. fx+1; the arm drops at (x, 2.5).
+        assert!(
+            at("stone-furnace", fx, 3.0).is_some() && (x - fx).abs() < 1.0,
+            "takeoff at x={x} must drop inside the furnace at x={fx}"
         );
     }
 }

@@ -192,3 +192,29 @@ disagreement is new evidence rather than an old annoyance.
 hope.** The ore fix did not clear this refusal, it changed it from "no route
 for the belts" to "no anchor puts every drill on ore" — which is more
 informative than a pass would have been.
+
+## The worst shape a record can have
+
+From the `second` session, 2026-09-06, on discovering that a run's
+`git.commit` described the checkout while the mod came from a worktree:
+
+> Provenance was accurate about the thing it measures and silent about the
+> thing that mattered. That is the worst shape a record can have: **not
+> blank, but confidently about the wrong object.**
+
+Two of the night's instances have exactly this shape, and neither is a
+missing field:
+
+- **`git.commit` names the checkout, not the bytes the game loaded.** A run
+  recorded a clean commit whose mod contains the mechanism under test; the
+  mod that loaded was three weeks older and contained none of it. Two
+  sessions reasoned from the result and one sized a constant on it.
+- **`obs.done` reports "no further progress possible" in the voice of "the
+  plan is complete."** A milestone was recorded satisfied at 89 of 179
+  entities standing.
+
+A blank field prompts a question. A confident field about the wrong object
+answers one that was never asked, and the reader cannot tell. When adding
+any field to a record, state precisely which object it describes — and if
+that object is not the one a reader will assume, either rename it or record
+the one they meant.

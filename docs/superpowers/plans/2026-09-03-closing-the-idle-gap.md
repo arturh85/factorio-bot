@@ -11,6 +11,110 @@ four bots.
 
 ---
 
+## OWNER DECISION: exploration is a short committed break for the whole roster
+
+Settled with the owner on 2026-09-06, after I proposed two wrong shapes and was
+corrected on both. Recorded here because the reasoning is worth more than the
+conclusion, and because I argued for the losing side twice.
+
+**The shape.** All four bots stop, walk one ring, and come back. One ring is
+the unit of commitment: `goal.charted(0, 0, 384)` is 8 surveys, makespan
+**3,609 ticks** across four bots -- under a minute of game time. The roster
+does not split into explorers and workers, and nothing is aborted partway.
+
+**My first proposal was "explore first", and it was wrong.** There is no free
+minute at t=0: every bot is committed to rocks, drills and furnaces, and a
+minute walking outward is a minute the first furnace is not standing. The
+owner's correction: exploration rides in *idle* time, not ahead of the work.
+
+**My second was "make it preemptible background work", and that was wrong
+too.** The owner: *"starting the exploration and aborting it also sounds very
+wasteful, if we commit to exploration the bot should do it until it finds
+oil."* Correct, and the arithmetic backs it: at the measured walk speed of
+**0.1413 tiles/tick**, reaching the 384-tile ring is ~2,700 ticks one way, so
+**the cost is dominated by getting to the frontier, not by the looking**. Abort
+halfway and the whole walk is paid for a fraction of the value. Preemption is
+the wrong capability.
+
+**Why idle-filling cannot work as stated, which is what killed proposal two.**
+Idle time here is real and abundant -- the reference run was 34% acting, 21%
+walking, 45% waiting, with one bot spending 39% of a milestone waiting on a
+furnace -- but it is **fragmented and local**. A bot waiting on a smelt is idle
+for hundreds of ticks while standing next to the furnace it will service next.
+A 384-tile round trip is ~5,435 ticks. You cannot fill a smelt wait with a
+survey; a bot that leaves to explore is not idle, it is *gone*. "Is there idle
+time" and "is there a bot whose absence costs nothing for long enough" are
+different questions and only the second buys exploration.
+
+**Why finishing the ring beats early exit.** The owner's picture was that one
+bot finds oil and everyone returns immediately. That needs a stopping condition
+the planner cannot express: it plans against a snapshot and cannot know when a
+thing will be found. But it does not need to -- **the ring is already short
+enough that early termination is a rounding error**. Stopping the instant oil
+appears saves a fraction of one minute and costs machinery that does not exist.
+Commit the ring, finish it, replan. The replan boundary is where "did we find
+oil" gets answered, and replanning already happens constantly.
+
+**So the missing piece is a goal SHAPE, not a scheduler capability.**
+`Goal::Charted { around, radius }` is a *coverage* goal: cover this area. What
+this wants is a *search* goal: explore outward until crude-oil is charted, then
+stop. The ring-then-replan loop gets the same behaviour with machinery that
+already shipped, so no new goal kind is needed yet.
+
+**What the ring is priced against.** Not oil alone. One ring on seed 31337:
+
+| | t=0 | after one ring |
+|---|---:|---:|
+| crude-oil | **0** | **7** |
+| uranium-ore | **0** | **559** |
+| copper-ore | 462 | **1,400** |
+| enemy structures | **0** | **32** |
+
+The copper the standing-goal lane is gated on triples, and the threat index --
+which had no non-test caller at all before the exploration work -- gets its
+first 32 real structures, so the *next* ring's stand-off has something to avoid.
+
+### Two things to decide before this becomes the standard opening
+
+**1. The first ring is walked blind.** Cells within the stand-off of a charted
+nest are skipped, but at t=0 `threats` is `{}` while the same map at full model
+extent holds 64 enemy structures. So the first ring is walked with no nest
+data, toward nests nobody has seen, by bots with no weapons and no recovery
+tier for being attacked (`recover.rs` has four tiers and none for "a bot is
+under attack"). There is no way to get the data without going. Accept
+knowingly; do not engineer it away.
+
+**2. It puts an asterisk on every measured run, and that is the owner's
+call.** Bots cannot walk into ungenerated ground because `request_path` will
+not route there, so exploration relies on `generate_chunks`, clamped mod-side
+to 4 chunks and disclosed through three `BatchProgress` counters. Defensible
+for research; **a speedrun time from a run using it must say so beside the
+number**. The no-asterisk alternative is **radar** -- 20 red science, 10 iron
+plate, 5 gears, 5 circuits, 300 kW, all paid in game, revealing ground with
+nobody standing in it, needing no new mod surface. **Radar is unbuilt.** So the
+choice is: standard opening explores with bots and carries the disclosure, or
+waits for radar and pays science instead.
+
+### Where oil actually stands
+
+`researched:oil-processing` on the t=0 dump refuses at tier 1: *"no crude-oil
+is charted anywhere this plan can see ... charted ground covers 17 of 17 probes
+within 256 tiles"*. **After one ring that refusal is gone**, and the next wall
+is `a power plant needs water, and the plan can see none within 128 tiles` --
+power at distance, not oil. Behind that: nothing sites a pumpjack
+(`method::extract` claims nothing by design and refuses in four ordered tiers),
+and fluids are unrepresentable (`pub type ItemId = String`, counted `u32`, held
+in a character inventory that can hold no fluid at all).
+
+The science gate to `oil-gathering` is **425 red and 290 green**, all seven
+technologies already planned by the planner. For scale, the green milestone is
+six packs.
+
+**A gap worth closing.** The exploration proof run charted the oil but nobody
+dumped the resulting world, so only the three t=0 dumps exist and every
+downstream agent must work against a fixture. An explored dump would let the
+pumpjack and power lanes plan offline against a real map in ~4 seconds.
+
 ## ✅✅✅ CREDIT BELONGS TO A MACHINE, NOT A PROTOTYPE (`828466d3`) — the balance stops being rigged
 
 The self-fed cell's second blocker, and the larger of the two. Merged after

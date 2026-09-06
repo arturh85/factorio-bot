@@ -366,6 +366,12 @@ impl std::error::Error for PlanRefusal {}
 ///   message says: the whole arrangement stands and there is nothing left to
 ///   build, which is still not satisfaction -- only the record can say
 ///   whether the rate held.
+/// - [`SustainNoOfftake`](PlannerError::SustainNoOfftake) -- the cell can be
+///   built and fed and its product cannot be taken away, so its furnace fills
+///   its output slot and throttles. A verdict about **the ground** like the
+///   two below it, and measured rather than anticipated: the first belted cell
+///   ran 27,249 ticks unattended at 100% of nominal tick rate and still came
+///   back `SHORT`, with `full_output` tied for the dominant non-working status.
 /// - [`SustainNoFuelSource`](PlannerError::SustainNoFuelSource) and
 ///   [`SustainNoRouteForFuel`](PlannerError::SustainNoRouteForFuel) -- the two
 ///   ways a self-feeding cell fails to be placeable on a given map: no site on
@@ -401,7 +407,8 @@ fn refusal_for(err: &PlannerError) -> Option<PlanRefusal> {
         | PlannerError::NoSiteFound { .. }
         | PlannerError::SustainSupplyNotStanding { .. }
         | PlannerError::SustainNoFuelSource { .. }
-        | PlannerError::SustainNoRouteForFuel { .. } => true,
+        | PlannerError::SustainNoRouteForFuel { .. }
+        | PlannerError::SustainNoOfftake { .. } => true,
 
         PlannerError::InsufficientItems { .. }
         | PlannerError::UnknownBot(_)

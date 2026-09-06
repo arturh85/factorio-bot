@@ -155,17 +155,25 @@ print("recording run " .. run_id)
 -- optimistic. A window five times the prediction is one nothing but a genuinely
 -- dead cell reaches.
 --
--- And the cost is asymmetric on purpose: `at_least = 1` with a 2400-tick window
--- means a working cell stops the wait at ~500 ticks (about 8 seconds), while
--- only a dead one pays the whole 40. One plate is enough because no bot acts
--- during the window -- an item that appears in a furnace's output can only have
--- been smelted there.
+-- **Since the offtake, the watched machine is the CHEST and the number is
+-- 7,200**, and both halves of that changed for the same reason -- see the
+-- witness's own comment in the ladder below. The 432-tick fill above is still
+-- the furnace's, and it is now only the FIRST of three stages: the coal has to
+-- reach the cell's buffer and then the offtake arm's fuel slot before a plate
+-- can move, and none of those belts is running when the milestone opens. 7,200
+-- ticks is two minutes, which at 5x is 24 seconds of wall clock for a failure
+-- and is stopped by the first plate for a success.
+--
+-- The cost stays asymmetric on purpose: `at_least = 1` means a working chain
+-- stops the wait as soon as one plate lands, while only a dead one pays the
+-- whole window. One plate is enough because no bot acts during it -- an item
+-- that appears in a chest can only have been smelted by a machine and carried
+-- there by an inserter.
 --
 -- `near`/`radius` are how the cell is found at all: the planner chose its site,
--- this script never learns it, so the witness sweeps for a stone furnace that a
--- burner drill's own reported `drop_position` lands in. The hand-smelt furnaces
--- the bill also builds have nothing dropping into them and are not watched.
-local WITNESS_WITHIN_TICKS = 2400
+-- this script never learns it, so the witness sweeps for a container that a
+-- burner inserter's own reported `drop_position` lands in.
+local WITNESS_WITHIN_TICKS = 7200
 
 -- The window, and the lead-in, both stated rather than derived.
 --
@@ -203,10 +211,37 @@ local SUSTAIN_LEAD_IN_TICKS = 20000
 
 local goals = {
     goal.sustain("iron-plate", 15, SUSTAIN_WINDOW_TICKS),
+    -- **The witness watches the OFFTAKE CHEST, not the furnace, and the
+    -- offtake is exactly why.**
+    --
+    -- `supervisor.count_item` reads `output_inventory`, which for a furnace is
+    -- what the furnace has made and not yet given away. That was the right
+    -- thing to watch while nothing took the plates -- and it is the wrong
+    -- thing now, because the whole point of this rung is that the plates do
+    -- not stay there. A working offtake keeps the furnace's output near zero,
+    -- so a furnace witness would read `+0` and report a DEAD CELL precisely
+    -- when the cell is working best: a confident answer about the wrong
+    -- object, which is the failure shape this project has paid for most.
+    --
+    -- The chest is both safe and stronger. `get_output_inventory()` on a
+    -- container is its contents (`mods/BotBridge/types.lua`), so the same
+    -- counter works unchanged; and a plate sitting in a chest, with no bot
+    -- acting for the whole window, was smelted by a machine AND carried there
+    -- by an inserter. That is the entire chain, not one link of it.
+    --
+    -- The coal chests are in the watch set too -- they are also fed by an arm
+    -- -- and contribute nothing, because the count is of `iron-plate`.
+    --
+    -- `within_ticks` is 7,200 rather than 2,400 because the chain being
+    -- witnessed is three belt runs long and starts cold: the coal has to reach
+    -- the cell's buffer, then the offtake arm's own fuel slot, before the
+    -- first plate can move. The offtake arm gets **no ignition charge** -- it
+    -- does not need to swing to be filled, and `run-1788679826-02267` placed
+    -- eight arms with no charge at all and they all started.
     supervisor.witness {
         item = "iron-plate",
-        from = "burner-mining-drill",
-        into = "stone-furnace",
+        from = "burner-inserter",
+        into = "iron-chest",
         near = { x = 0, y = 0 },
         radius = 300,
         at_least = 1,
@@ -230,8 +265,12 @@ local goals = {
 -- does.
 local names = {
     "an iron-plate cell that feeds itself at 15/min",
-    "witness: the cell's furnace fills while every bot stands still",
-    "sustain iron-plate 15/min over 7200 ticks (lead-in 9600)",
+    "witness: the offtake chest fills while every bot stands still",
+    -- The lead-in matches `SUSTAIN_LEAD_IN_TICKS` above. It read 9600 here
+    -- while the constant said 20,000, so every record this run wrote named a
+    -- milestone by a parameter it was not measured with -- a confident field
+    -- about the wrong object, in the record's own index.
+    "sustain iron-plate 15/min over 7200 ticks (lead-in 20000)",
 }
 
 local sup = supervisor.new(supervisor.list(goals),

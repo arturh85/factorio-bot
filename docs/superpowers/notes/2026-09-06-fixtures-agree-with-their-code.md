@@ -151,6 +151,23 @@ and 137.7 s in one night, 38% apart, from load alone — so two *timing*
 measurements are noise to each other and must be sequenced, whoever asked
 first.
 
+**A timing is a claim about a *binary*, not about a program — name the
+profile as well as the commit.** Two sessions compared the same blueprint,
+same roster, same dump and got 96 s against 8.57 s, and spent a round of
+messages on plausible explanations (CLI path versus in-process) before
+anyone measured it. The answer was **debug versus release**, measured on one
+machine minutes later:
+
+| | trivial goal | green, 4 bots |
+|---|---|---|
+| debug | 2.70 s | **31.04 s** |
+| release | 0.77 s | **4.55 s** |
+
+~7× on this workload, and the 865 MB dump load is 2.7 s debug against 0.75 s
+release either way. Both numbers were right about their own binary; neither
+message said which. Quote release for anything anyone will act on, because
+whether a per-plan cost is a problem at all can change with the profile.
+
 **A baseline is only a baseline against a stated commit.** Both sessions
 nearly made the mirror-image mistake within an hour: one about to compare a
 pre-change planner against a post-change one and attribute the difference to

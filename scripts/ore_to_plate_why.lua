@@ -39,6 +39,26 @@ local bot1 = (type(first) == "table") and first.player_id or first
 -- spawn and walk about twenty tiles. Replanning is the designed recovery:
 -- `goal.built` re-derives the entities not yet standing, so a second pass
 -- finishes the block rather than doubling it.
+-- Walk a bot to the site BEFORE building. Planning is pure, so the plan can be
+-- made first and read for where the block will go; the bots then start beside
+-- it rather than twenty tiles away. This is the fix that cured placement losses
+-- on the saturated smelter, and it works by putting the bots near the site --
+-- walk routing -- not by changing the ground.
+do
+  local probe = goal.plan(goal.built(BP))
+  local tx, ty
+  for _, st in ipairs(probe.steps) do
+    if st.kind == "place" and st.pos then tx, ty = st.pos.x, st.pos.y break end
+  end
+  if tx then
+    print(string.format("walking to the site at (%.1f,%.1f) before building", tx, ty))
+    for _, b in ipairs(rcon.players()) do
+      local id = (type(b) == "table") and b.player_id or b
+      pcall(function() rcon.move(id, { x = tx, y = ty + 6 }, 6) end)
+    end
+  end
+end
+
 local obs
 for pass = 1, 3 do
   local plan = goal.plan(goal.built(BP))

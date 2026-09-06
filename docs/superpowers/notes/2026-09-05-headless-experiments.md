@@ -1334,3 +1334,143 @@ time and can change tick-rate-dependent waiting, though both are quoted in game
 ticks; and the two ran on different instances, though on the same seed and the
 same verified map digest. The 3.8% improvement in the green tick is the softer
 number here — the split and the refuel visits are the hard ones.
+
+### furnace — RCA: furnace count was an accident of ground, and `shared_grow` was the accident
+
+Branch `furnaces-are-reused`, from master `87ee602e`. Every number below is
+`factorio-bot plan` against `workspace/scripts/map.json` (seed 31337,
+fingerprint `c161fa3f437221d0`), offline, no run spent.
+
+**A three-bot `have:pumpjack:1` placed 43 stone furnaces and a four-bot one
+placed 66.** Nothing needs 66. The count came from one unbounded branch in
+`smelt_steps` (`crates/planner/src/method/have.rs`):
+
+```rust
+let own_grow    = patch.idle_count == 0 && patch.own_count == 0 && taker_bot.is_some();
+let shared_grow = patch.idle_count == 0 && taker_bot.is_some() && roster_supplied;
+let grow = own_grow || shared_grow
+        || (patch.idle_count == 0 && patch.hand < patch_furnace_budget(&ctx.state));
+```
+
+`own_grow` is self-limiting — once a taker queues a furnace at a patch its
+`own_count` is non-zero — and the third arm is bounded by
+`patch_furnace_budget`, one per bot. **`shared_grow` had no bound of any
+kind**: a smelt whose ore the roster supplies built a furnace whatever already
+stood there, once per shared smelt, for as many shared smelts as the goal had.
+
+Instrumenting the three arms is what settled it, because the furnace counts
+alone were only suspicious. On `have:pumpjack:1` at four bots, of 231 growth
+decisions across the plan search:
+
+| arm that fired | count |
+|---|---:|
+| `shared_grow` **alone**, ground budget already exhausted | **184** |
+| `own_grow` with budget room | 14 |
+| budget only | 14 |
+| `own_grow` past the budget | 13 |
+| `own_grow` + `shared_grow` | 6 |
+
+#### The measurement that put `shared_grow` there has been overtaken
+
+This is the part that matters more than the fix. `shared_grow` was added on
+2026-09-05 on a real measurement: a shared smelt's inserts sit on the
+*suppliers'* timelines, so queueing it behind the taker's own batch puts every
+supplier's wait on the taker's release. On `producing:logistic-science-pack:6`,
+four bots, this map: **108,170 ticks without the arm against 95,237 with it.**
+
+The same goal on the same map on 2026-09-06 reads **48,829 with the arm and
+47,542 without**. The arm has stopped paying and started costing.
+
+**I believe the world changed rather than the original measurement being
+wrong**, and the reason is that three changes landed in between, each of which
+shortens exactly the queue `shared_grow` existed to avoid joining: a furnace's
+share became a sequence of *visits* rather than one load (`runs_per_load` /
+`FurnaceLoad`, `edf6d6fa`); the drain cap stopped tripping on hand-smelt
+furnaces; and `ActionNetwork::infer_edges` stopped ordering every plate
+consumer after every earlier plate producer. Together they moved the crossover
+past the arm. The 95,237 was true when it was taken — the absolute makespan has
+roughly halved since, which is itself the evidence that the ground under it
+moved — and it is not disowned here, it is superseded. Anyone finding only the
+new number should read both.
+
+#### Before and after
+
+Four bots unless stated. Actions / makespan / **stone furnaces placed**.
+
+| goal | bots | before | after |
+|---|---|---|---|
+| `researched:automation` | 4 | 176 / 21,784 / 11 | 176 / 21,784 / 11 |
+| `producing:automation-science-pack:6` | 4 | 324 / 22,547 / 17 | **316 / 22,463 / 13** |
+| `producing:logistic-science-pack:6` | 4 | 451 / 48,829 / 22 | **442 / 47,542 / 18** |
+| `have:pumpjack:1` | 1 | 632 / 690,450 / 21 | 632 / 690,450 / 21 |
+| `have:pumpjack:1` | 3 | 1,144 / 308,069 / 43 | 1,110 / **316,424** / **28** |
+| `have:pumpjack:1` | 4 | 1,767 / 267,910 / 66 | **1,674 / 263,432 / 28** |
+| `researched:oil-gathering` | 4 | 1,742 / 253,657 / 65 | 1,671 / **260,115** / **28** |
+| `researched:automation` | 8 | 382 / 18,291 / 22 | 382 / 18,291 / 22 (2.3 s) |
+| `producing:logistic-science-pack:6` | 8 | 915 / 46,766 / 33 | 913 / **47,603** / 32 (11.0 s) |
+
+Red science and the one-bot pumpjack are **byte-identical**: `shared_grow`
+never fired on either. Both science goals improve on all three columns. The
+three regressions are stated rather than buried: pumpjack at three bots
++8,355 ticks (+2.7%), `oil-gathering` +6,458 (+2.5%), green at eight bots +837
+(+1.8%) — paid for 15, 37 and 1 fewer furnaces respectively, on goals whose
+makespans are 250k–320k ticks and which nobody runs.
+
+#### Three alternatives were built and measured, and two of them lost
+
+Not a single-candidate change. Each was implemented behind a switch, swept over
+the same seven goals, and the switch removed before commit.
+
+- **Bound `shared_grow` per taker** (`own_count < roster`, or `< suppliers`):
+  green 320 / 22,557 / 15, pumpjack@4 **2,148 / 284,700 / 55** — worse than
+  either extreme on actions and makespan at once. Rejected.
+- **Keep the furnace but flip the choice** — for a shared smelt, join the
+  *least-loaded* queue instead of the taker's own, which addresses the
+  documented harm without spending stone. **This is not implementable as
+  written, and finding out why is a result about the code**: `own_count` is
+  derived from that very sort key, so switching the preference off reports zero
+  furnaces of the taker's own and `smelt_steps`' unrelated `own_grow` arm then
+  fires on *every* smelt. Its sweep numbers (pumpjack@4 at 66 furnaces) are the
+  signature of that bug, not of the policy. The ordering preference and the
+  growth bound are one mechanism; separating them is a change to both.
+- **Replace all three arms with a cost comparison** — build only when the queue
+  we would join is longer than crafting, placing and handling a new furnace,
+  which is the shape "reuse when its queue is shorter than a new site" asks
+  for. Furnace counts collapse (green 3, logistic 8, pumpjack@4 19) and
+  **`researched:automation` gets strictly better: 161 / 21,784 / 3, fifteen
+  fewer actions and eight fewer furnaces at an identical makespan.** But green
+  goes 22,547 → **38,742** (+72%) and logistic 48,829 → **66,850** (+37%). It
+  is the lone-bot pathology generalised, and it independently reproduces
+  `bank_size`'s own documented finding: this crate cannot price machine-time
+  queueing against a build, because nothing in it can say when a bot is idle.
+  Rejected — but the red-science row says a *bounded* version of this is worth
+  someone's time.
+
+#### The refusal is now a fallback
+
+Separately, `smelt_steps`' siting call ended in
+`.ok_or_else(|| NoApplicableMethod)?`, so "nowhere within
+`FREE_TILE_SEARCH_RADIUS` to put another furnace" was a hard stop on the whole
+goal — and the patch it stopped on was, every time, one this same plan had
+paved. It now falls back to a furnace `adoptable_furnaces` already ranked,
+skipping any this bank holds already (two slots on one furnace would queue two
+batches with contradictory releases). Raising the radius is not an option:
+`power::PLANT_ADOPT_RADIUS` derives from it.
+
+**This refusal is latent on `87ee602e`, not reproducible** — it appears one
+commit later, once the over-restrictive ore-claim rule is removed. The fix
+lands anyway, with `tests/furnace_ground.rs` reproducing it directly on a
+fixture: an ore patch ringed with water out to 14 tiles and one furnace
+standing *on the ore*, which is ground `free_area_near` can never site on and
+adoption can always find.
+
+#### Found and not fixed
+
+**The one-bot pumpjack plan is unchanged at 690,450 ticks and 21 furnaces**,
+and nothing here touches it. With a roster of one, `patch_furnace_budget` is 1,
+so after the first furnace no arm can grow and every later smelt serialises —
+which is the *other* half of the reported defect and the regime `bank_size`
+documents this crate as unable to price. "Build a furnace inside a wait the bot
+is having anyway" needs a scheduler that can express slack, an optional action
+or a goal with no consumer, and has none of the three. It is a scheduler
+change, not a variation on this one.

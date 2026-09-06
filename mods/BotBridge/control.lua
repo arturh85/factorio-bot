@@ -5816,6 +5816,30 @@ function rcon_cheat_blueprint(player_id, blueprint, pos_x, pos_y, direction, for
 	rcon.print(helpers.table_to_json(result))
 end
 
+-- Produces the map-exchange string for the map this server is running -- the
+-- counterpart of `rcon_parse_map_exchange_string` below, which only ever
+-- consumed one.
+--
+-- **A seed is not a map.** A map is noise-generated from the seed *plus* the
+-- map-gen settings (resource frequency/size/richness, water, trees, cliffs),
+-- so the same seed under different settings, or on a Factorio version whose
+-- defaults moved, is a different map. The exchange string encodes seed and
+-- settings together, which is why it -- and not the seed -- is a map's
+-- identity. Nothing in this project could produce one until 2026-09-06, which
+-- is why every archived run carries `map_exchange_string: null`.
+--
+-- `game.get_map_exchange_string()` is documented as "the map exchange string
+-- for the map generation settings that were used to create this map", which is
+-- the identity wanted, rather than `surface.get_map_exchange_string()`'s
+-- *current* settings for one surface.
+--
+-- `rcon.print`, not `writeout`: this is a question asked over RCON and answered
+-- in the reply body. It is never called from inside an action's mod function,
+-- so it cannot contaminate one's result.
+function rcon_map_exchange_string()
+	rcon.print(game.get_map_exchange_string())
+end
+
 function rcon_parse_map_exchange_string(name, map_exchange_str)
 	helpers.write_file(name, helpers.table_to_json(helpers.parse_map_exchange_string(map_exchange_str)))
 end
@@ -6749,6 +6773,7 @@ remote.add_interface("botbridge", {
 	insert_to_inventory=rcon_insert_to_inventory,
 	remove_from_inventory=rcon_remove_from_inventory,
 	set_recipe=rcon_set_recipe,
+	map_exchange_string=rcon_map_exchange_string,
 	parse_map_exchange_string=rcon_parse_map_exchange_string,
 	revive_ghost=rcon_revive_ghost,
 	async_request_player_path=rcon_async_request_player_path,

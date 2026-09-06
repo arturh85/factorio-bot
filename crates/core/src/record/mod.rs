@@ -28,7 +28,10 @@ pub mod savepoint;
 pub mod splits;
 pub mod video;
 pub use lanes::{Lane, derive_lanes};
-pub use provenance::{GitProvenance, PROVENANCE_FILE, Provenance, git_provenance, read_provenance};
+pub use provenance::{
+    GitProvenance, PROVENANCE_FILE, Provenance, choose_map_exchange_string, git_provenance,
+    read_provenance,
+};
 pub use retention::{DEFAULT_KEEP, KEEP_MARKER, Reaped, reap};
 pub use run_mode::{
     BotMode, RUN_MODE_MARKER, RunMode, clear_run_mode, read_run_mode, write_run_mode,

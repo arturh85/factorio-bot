@@ -1017,37 +1017,58 @@ gated on `silent` -- every CLI path sets `silent`, which is exactly how the
 Two further paths accept `--seed` and can never use it: `lua --connect` (never
 starts a server) and `--server <host>` (never sets one up).
 
-**A SEED IS NOT A MAP. The map-exchange string is what reproduces one**, and
-this project has never recorded one. A map is noise-generated from the seed
-*plus* the map-gen settings — resource frequency, size and richness, water,
-trees, cliffs — so the same seed under different settings is a different map,
-and so is the same seed on a Factorio version whose defaults moved. The
-exchange string encodes seed and settings together, which is why it is the
-identity and the seed is not.
+**A seed reproduces a map ONLY UNDER FIXED SETTINGS.** A map is noise-generated
+from the seed *plus* the map-gen settings — resource frequency, size and
+richness, water (a per-resource knob like any other), trees, cliffs — so the
+same seed under different settings, or on a Factorio version whose defaults
+moved, is a different map. A map-exchange string encodes seed and settings
+together, which is why it is the complete identity.
 
-What is actually on disk here (checked 2026-09-06):
+Owner, 2026-09-06: *"its not that bad, a seed also uniquely regenerates a map as
+long as we keep the default settings."* **Every run this project has made is on
+empty settings — Factorio's defaults for the installed version — so the archived
+record is reproducible as it stands**, on the seed plus the game version. What
+is on disk (checked 2026-09-06):
 
 ```
 ~/.local/share/factorio-bot{,-dev}/AppSettings.toml   map_exchange_string = ""
 workspace/server/map-exchange-string.txt              ABSENT
 workspace/blocks/server/map-exchange-string.txt       ABSENT
 workspace/*/server/map-gen-seed.txt                   31337
+workspace/runs/*/provenance.json                      map_exchange_string: null (20/20)
 ```
 
-So every run so far is seed 31337 under **Factorio's defaults for its version**,
-`provenance.map_exchange_string` is `None` for all of them, and the resource
-fingerprint is the only map identity any of them carries.
+**The thing that could break that condition was in the repo, and it was live.**
+Until 2026-09-06 both `crates/core/src/data/AppSettings.toml` **and**
+`FactorioSettings::default()` shipped a 719-character exchange string dating to
+the project's first commit (`0bb136c6`, Feb 2021, Factorio 1.x). It is not
+inert: `factorio-bot lua` and `start` take the string only from `--map` and
+never from settings — which is why no run ever applied it — but the **REPL**
+`start` and the **REST API** `POST /api/v1/instance/start` both fall back to the
+setting, and `setup_factorio_instance` then parses it into
+`map-gen-settings.json` / `map-settings.json` and hands both to
+`factorio --create`. A fresh setup through either path would have been silently
+switched off defaults and generated a *different map on seed 31337*, and every
+timing taken on it would read as a regression with the seed matching. **Both now
+ship empty**, with the reason beside each; the string is in
+`crates/core/src/settings.rs`'s git history.
 
-**Two live traps.** The repo's shipped `crates/core/src/data/AppSettings.toml`
-carries a **non-empty** exchange string that no workspace has applied — so a
-fresh setup from the repo default generates a *different* map on "seed 31337"
-than every number in this record was measured on. And the plumbing is one-way:
-`rcon.parse_map_exchange_string` and the mod's `rcon_parse_map_exchange_string`
-consume a string, and **nothing anywhere produces one from a live map**, though
-the counterpart of the `helpers.parse_map_exchange_string` the mod already calls
-would do it. Until that exists, "quote the seed with every number" is necessary
-and **not sufficient** — say the seed, the game version, and that settings were
-default.
+The general shape is worth keeping: `power.rs`'s water constants and the
+distance columns in the seed-scan table below are all tuned against **one
+settings profile**. Under defaults that is consistent. It only matters the day
+someone turns a knob — and the shipped string was exactly a knob turned without
+telling anyone. **Quote the seed, the game version, and "default settings"**;
+under defaults that triple is sufficient.
+
+The plumbing used to be one-way — `rcon.parse_map_exchange_string` and the mod's
+`rcon_parse_map_exchange_string` consumed a string and nothing produced one.
+`rcon_map_exchange_string` (mod) / `FactorioRcon::map_exchange_string` (Rust)
+now do, and `provenance.map_exchange_string` is asked of the running game at run
+start. That **records** the default-settings condition rather than establishing
+it. **Not yet live-confirmed**: no run has written a non-null value, so the
+first one that does is the confirmation. `None` there still means *not
+captured*, never "defaults" and never an empty string. See
+`docs/superpowers/notes/2026-09-06-a-map-is-a-seed-plus-settings.md`.
 
 **The benchmark seed is `31337`**, chosen by an owner decision on 2026-09-04:
 *"lets do the seed search, like i said we don't need a perfect/optimal one,

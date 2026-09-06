@@ -74,8 +74,23 @@ pub struct Provenance {
     /// every map Factorio seeded itself. Both mean "unknown", and neither may
     /// be reported as a match against anything.
     pub seed: Option<String>,
-    /// The map-exchange string this workspace's instance was set up with, read
-    /// from `map-exchange-string.txt`.
+    /// The map-exchange string for the map this run played -- a **seed plus the
+    /// map-gen settings**, which is what actually identifies a map. The same
+    /// seed under different settings, or on a Factorio version whose defaults
+    /// moved, is a different map, so the seed two fields up is necessary and
+    /// not sufficient.
+    ///
+    /// Asked of the running game ([`crate::factorio::rcon::FactorioRcon::
+    /// map_exchange_string`]) and falling back to `map-exchange-string.txt`,
+    /// which setup writes only when a string was *supplied* to it. Until
+    /// 2026-09-06 the file was the only source and nothing produced a string
+    /// from a live map, so all 20 archived runs carry `null` here and their
+    /// maps are permanently unidentifiable.
+    ///
+    /// **`None` means "not captured", never "default settings".** An RCON
+    /// failure, an old mod without the function, and a server this process did
+    /// not start all land here, and none of them is evidence about the map --
+    /// the same asymmetry [`ResourceFingerprint`] documents.
     pub map_exchange_string: Option<String>,
     /// An identity for the map computed from the world itself, which is the
     /// only identity available for a map whose seed was never recorded.
@@ -157,6 +172,30 @@ pub struct GitProvenance {
 impl Provenance {
     /// The schema version this build writes.
     pub const SCHEMA: u32 = 1;
+}
+
+/// Picks the map-exchange string to record, from what the live game answered
+/// and what setup left on disk.
+///
+/// The live answer wins: it describes the map that was actually loaded, while
+/// the file records only what setup was *handed* -- and setup writes no file at
+/// all when no string was supplied, which is every run in the archive.
+///
+/// Every empty or whitespace-only candidate is dropped rather than stored.
+/// `None` here has one meaning, **"not captured"**, and an empty string would
+/// be a second one that reads as a value. That distinction is the same one
+/// [`ResourceFingerprint`] keeps: an answer and the absence of an answer are
+/// not interchangeable.
+pub fn choose_map_exchange_string(
+    from_game: Option<String>,
+    from_setup_file: Option<String>,
+) -> Option<String> {
+    fn usable(value: Option<String>) -> Option<String> {
+        value
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    }
+    usable(from_game).or_else(|| usable(from_setup_file))
 }
 
 /// Reads `HEAD` and the dirty flag from the working tree the process is running
@@ -262,6 +301,42 @@ mod tests {
         // unless the temp dir happens to be, which no CI layout does.
         assert!(git_provenance(&dir).is_none() || cfg!(windows));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_live_map_exchange_string_beats_the_file_setup_was_handed() {
+        // The file says what setup was *asked* for; the game says what it
+        // actually loaded. When they disagree the game is right.
+        assert_eq!(
+            choose_map_exchange_string(Some(">>>live<<<".into()), Some(">>>file<<<".into())),
+            Some(">>>live<<<".to_string())
+        );
+        assert_eq!(
+            choose_map_exchange_string(None, Some(">>>file<<<".into())),
+            Some(">>>file<<<".to_string())
+        );
+        assert_eq!(
+            choose_map_exchange_string(Some(">>>live<<<".into()), None),
+            Some(">>>live<<<".to_string())
+        );
+    }
+
+    #[test]
+    fn a_failure_to_capture_is_none_and_never_an_empty_string() {
+        // Both sources absent -- an RCON failure and no setup file, which is
+        // every archived run.
+        assert_eq!(choose_map_exchange_string(None, None), None);
+        // An empty or blank answer is not a value. If it were stored, a reader
+        // could not tell "this map has no settings" (meaningless) from "nobody
+        // asked", and the whole point of the field is that it can.
+        assert_eq!(choose_map_exchange_string(Some(String::new()), None), None);
+        assert_eq!(choose_map_exchange_string(Some("   \n".into()), None), None);
+        assert_eq!(choose_map_exchange_string(None, Some(String::new())), None);
+        // A blank live answer must not shadow a real file answer either.
+        assert_eq!(
+            choose_map_exchange_string(Some("  ".into()), Some(">>>file<<<".into())),
+            Some(">>>file<<<".to_string())
+        );
     }
 
     #[test]

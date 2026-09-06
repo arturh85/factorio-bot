@@ -391,6 +391,78 @@ The plateau is unchanged: `roster-fed; no generator until 6:21`, production
 stopping at the plan's bill. Everything tonight made the plan smaller and
 more honest; none of it made the factory feed itself.
 
+## ✅✅✅ A CELL RAN WITH NO BOT IN THE LOOP (`84c3259a`) — the first `factory` reading
+
+`run-1788679826-02267`, seed 31337 `--new`, four headless bots at 5x,
+release, **100% of nominal tick rate**, `state=done`. 288 actions
+dispatched, **288 settled success, 0 failed, 0 lost, 0 failed walks, 0
+refusals** — 63 belts, 8 burner inserters, 2 chests, 2 drills, a furnace, all
+standing in 15,001 ticks. Then **the roster fed nothing after tick 15,416 and
+the machines kept producing for 27,249 ticks.**
+
+| interval | machine-made | roster | verdict |
+|---|---|---|---|
+| 5:00 | iron 166 | 174 feeding actions | `roster-fed` |
+| 10:00 | iron 72, coal 75, ore 71 | **nothing** | **`factory`** |
+| end 11:48 | iron 8, coal 28, ore 56 | **nothing** | **`factory`** |
+
+**That is the first `factory` attribution this project has ever produced.**
+Every run before it, at every interval, read `roster-fed`.
+
+All three unmeasured claims came back yes. **Burner inserters self-fuel** —
+eight arms placed with no charge, still moving coal 27,000 ticks later. **An
+arm fills another burner's fuel slot** — the coal drill was hand-charged
+*one* coal, 1,600 ticks' worth, and mined **127 coal over ~35,000**. And
+**`connect`'s belts move items**, the first time in this project's history:
+the source chest is empty in 88% of samples and the cell chest in **100%**,
+coal arriving and being taken straight off.
+
+The mechanism was chosen from the seed's own t=0 recipe table rather than by
+preference: burner inserters, belts and iron chests are enabled; electric
+inserters, drills, poles and the electric furnace are not, and the electric
+furnace needs advanced circuits, so oil. Belting needs no research at all,
+and **the smelting half stays a burner however much research is done**. Three
+shapes were forced by refusals rather than designed — a chest because a drill
+is not a valid inserter pickup, *two* chests because a 1×1 chest cannot host
+three runs, and iron rather than wood because no method in this crate can
+obtain wood.
+
+### And the verdicts are still not a pass — for two reasons, both worth more than a pass
+
+**`SHORT`**, at full tick rate, and the machine's own status line says why:
+`working 80, no_ingredients 19, no_fuel 15, **full_output 15**`. Nothing
+takes the plates away, so iron decays 166 → 72 → 8 while coal and ore hold
+flat at ~16/min. **This sustains a window, not a rate.** A belt off the
+furnace is the next rung.
+
+**`ROSTER-FED` from the balance — and the balance is what has to change.**
+Credit came to 333 against a projected 69, because **credit is pooled by
+entity *prototype*, not by machine instance**: the plan hand-smelts ~95
+plates of its own belt iron in four *other* stone furnaces, and all of their
+coal is credited against the one belted furnace. With 98 outstanding at the
+window's open, a cell rated at 15/min would have to make **64/min** to pass.
+**No self-feeding stage-1 cell can pass as the balance groups today**, however
+perfectly its belts work — because the plan that builds it must hand-smelt
+its own belts in a machine of the same prototype. The fix is credit keyed by
+`(entity, position, item)`. Note the balance failed in its designed
+direction: it refused.
+
+**`ActionDispatched.delivery` survived first contact** — 90 populated
+records, `credit read from: fields`, the prose fallback never touched.
+
+### A first run that bought a real bug
+
+`run-1788679468-60128` built the whole arrangement, 288/288 success, then
+halted on the **replan**: it searched for the buffer chest from the cell's
+*drill* within 6 tiles, while `free_area_near_where` sites it from the
+*furnace* and the clearance test pushes it 7.38 tiles out — so the replan
+sited a second chest and refused to lay its belt over the first. Now a test.
+**Its falsification is the part to read**: reverting the radius alone leaves
+it green, because on the compact fixture the chest lands inside 6 tiles
+anyway; only reverting the *anchor* too reproduces the halt. A falsification
+that changed only the plausible-looking number would have read as "this fix
+does nothing" — the tautological-fixture trap in a different coat.
+
 ## ✅ `Sustain` EXISTS (`f8164862`) — and its first run passed for the wrong reason
 
 The fifth goal kind: `Sustain { item, per_minute, window_ticks }`, with

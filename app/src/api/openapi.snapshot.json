@@ -176,6 +176,36 @@
         ],
         "type": "object"
       },
+      "Delivery": {
+        "description": "What a bot's hands put into a machine or a chest, on\n[`EventKind::ActionDispatched::delivery`].\n\n**The planner's intent, not the game's answer**, on the same terms as\n[`EventKind::ActionDispatched::target`]: it travels from\n`ActionKind::Insert`'s own fields, which is what the run asked for. The\naction's settle says whether the game did it; nothing here does.\n\nOne variant of one enum reaches this struct -- `ActionKind::Insert` --\nand it covers every hand delivery the planner can express, fuel included:\na `fuel` action IS an `Insert` into `InventorySlot::Fuel`, and the label\nis the only place the two are spelled differently. `ActionKind::Remove`\n(a `take`) deliberately writes nothing here: it moves material *out* of a\nmachine and into a bot, which credits no production.",
+        "properties": {
+          "count": {
+            "description": "How many. A count of items, never of stacks.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "entity": {
+            "description": "The prototype name of what received it -- `stone-furnace`,\n`burner-mining-drill`, `wooden-chest`. Needed because the same coal\nbuys 26.7 s in a drill and 44.4 s in a furnace, so a fuel delivery\ncannot be converted into output without knowing which.",
+            "type": "string"
+          },
+          "item": {
+            "description": "What was put in.",
+            "type": "string"
+          },
+          "slot": {
+            "description": "Which inventory: the planner's own `InventorySlot` name, as\n`goal.plan`'s steps publish it (`fuel`, `furnace_source`,\n`assembler_input`, `chest`, ...) rather than Factorio's unified\n`defines.inventory` key, so a reader can still tell a furnace's input\nfrom an assembler's.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "item",
+          "count",
+          "entity",
+          "slot"
+        ],
+        "type": "object"
+      },
       "Divergence": {
         "properties": {
           "entity": {
@@ -658,6 +688,17 @@
                 "format": "int32",
                 "minimum": 0,
                 "type": "integer"
+              },
+              "delivery": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/Delivery",
+                    "description": "What this action put INTO a machine or a chest, when it put\nanything in. `None` for every action that delivers nothing -- a\nwalk, a craft, a place, a `mine`, a `take`.\n\n# Why the label was not enough\n\nThe quantity was always in `action`, as prose: *\"fuel the\nstone-furnace with 23 coal (36800 ticks, 153 iron-plate, then it\nstops)\"*. Reading it back means parsing five different sentence\nshapes written at five call sites in the planner, and a shape\nnobody anticipated reads as \"no delivery\" rather than as an error.\n\nThe **hand-credit mass balance** (`tools/run_analysis.py`) needs\nthese numbers to be right, because it accounts for what the roster\nput in against what the machines made and reports `unknown` when a\nsingle delivery cannot be priced. It is the check that replaces a\nhand-sized lead-in parameter, which failed *towards a false pass*\non `run-1788674059-90744`\n(`docs/superpowers/notes/2026-09-06-standing-goals-first-rung.md`).\n\n`#[serde(default)]` so every run archived before this field opens\nunchanged, and reads `None` -- for those runs the analyser parses\nthe label and says which source it used."
+                  }
+                ]
               },
               "id": {
                 "format": "int32",

@@ -411,6 +411,7 @@ fn refusal_for(err: &PlannerError) -> Option<PlanRefusal> {
         | PlannerError::PowerPlantNeedsWater { .. }
         | PlannerError::PowerPlantNeedsShore { .. }
         | PlannerError::PowerPlantTooSmall { .. }
+        | PlannerError::PowerHeadroomShort { .. }
         | PlannerError::UnsupportedResearchTrigger { .. }
         | PlannerError::SelfUnlockingResearchTrigger { .. }
         | PlannerError::PreconditionUnsatisfied { .. }
@@ -1308,7 +1309,11 @@ fn install_goal_holds(
 use factorio_bot_planner::{ActionNetwork, Goal, expand, pick_chain_actor, registry_for};
 
 #[cfg(test)]
-fn expand_goal(goal: Goal, world: &Arc<FactorioSurface>, bots: &[BotId]) -> LuaResult<ActionNetwork> {
+fn expand_goal(
+    goal: Goal,
+    world: &Arc<FactorioSurface>,
+    bots: &[BotId],
+) -> LuaResult<ActionNetwork> {
     let state = PlanState::from_world(world.clone(), bots);
     refuse_unknown_bots(&state)?;
     let chain_actor = pick_chain_actor(&state, bots)

@@ -214,14 +214,58 @@ loading the world costs 3 s and planning this block costs ~45 s. That is worth
 stating because the obvious suspicion — "it is just reading an 865 MB file" — is
 wrong, and would have sent the next person optimising the wrong thing.
 
-Two caveats on the number. The speedrun session measures the same fix at
-**8.57 s → 4.62 s** for `FurnaceLine` at four bots, an order of magnitude below
-this; the two are measuring different things (their figure is the planner
-in-process, this one is the whole CLI path) and **neither has been reconciled
-against the other.** And the investigation found the split is not what either of
-us guessed: on this block, expansion is 63 % and scheduling 37 %, and `expand()`
-rehearses before it plans, so `plan_best` was running **four** expansions rather
-than two.
+### Every number above is a DEBUG build — release is ~7× faster
+
+An order-of-magnitude disagreement between two careful measurements turned out
+to be the build profile, which was in neither party's model. The speedrun
+session measured the same CLI path on both binaries:
+
+| | trivial goal | green, 4 bots |
+|---|---|---|
+| **debug** | 2.70 / 2.72 s | 31.04 / 29.51 s |
+| **release** | 0.77 / 0.73 s | 4.55 / 4.24 s |
+
+**~7× on this workload**, and it reconciles the 96 → 48 s here against their
+8.57 → 4.62 s exactly: an ~11× gap that is debug-versus-release, not
+CLI-versus-in-process as we had both assumed. Both measurements were correct
+about their own binary, and **neither of us said which binary it was.**
+
+> **A timing is a claim about a binary, not about a program.** A baseline has to
+> name its profile as well as its commit. Two people comparing numbers an order
+> of magnitude apart, for a reason absent from both their models, is what the
+> omission costs.
+
+So: **quote release for anything anyone will act on.** The figures above are
+debug and remain honest as such.
+
+### Measured on release, because the extrapolation was wrong
+
+The ~7× above predicts ~4–5 s for this block. **Measured, it is ~11 s** — three
+runs on release, same command, same dump, quiet floor:
+
+| build | `FurnaceLine` sited, 4 bots | trivial goal (load only) |
+|---|---|---|
+| debug | 48 / 48 / 48 s | 3 s |
+| **release** | **13 / 10 / 11 s** | **1 s** |
+
+So the debug-to-release ratio on *this* workload is **~4.4×, not ~7×** — the 7×
+was measured on green, and a ratio measured on one goal does not transfer to
+another. Extrapolating it would have understated this block by half.
+
+**The honest figure is therefore ~10 s of planning per expansion on release**
+(≈11 s wall minus ≈1 s to load the 865 MB world). That is a great deal better
+than 45 s, and it is **not** the non-issue that ~4–5 s would have been: a run
+that replans four to seven times pays 40–70 s of planning for one block, and
+pays it exactly when things are going wrong, which is when replans happen.
+
+The I/O discriminator survives and sharpens: loading the world is 3 s debug and
+1 s release, so it is a small fixed cost in either build and the remainder
+genuinely is planning.
+
+One more correction from the investigation, against both our guesses: the split
+is not even — on this block expansion is 63 % and scheduling 37 % — and
+`expand()` rehearses before it plans, so `plan_best` was running **four**
+expansions rather than two.
 
 **The method failure is the transferable part.** The first experiment showed a
 fixed anchor still cost ~95 s and was read as exonerating the search and

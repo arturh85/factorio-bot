@@ -379,6 +379,14 @@ impl std::error::Error for PlanRefusal {}
 ///   joins that buffer to a machine that has to burn it. Both are verdicts
 ///   about **the ground**, and both name it: the second carries
 ///   `method::connect`'s own sentence, including the blocked tiles.
+/// - [`ProductNotMakeable`](PlannerError::ProductNotMakeable) -- a verdict
+///   about the **prototypes**, the sibling of `NotHandMinable`: every recipe
+///   that produces the item is in a category this planner has no machine for
+///   (`oil-processing`, `chemistry`, `metallurgy`), or no recipe produces it
+///   at all. A script acts on it by not asking for the item, exactly as with
+///   `NotHandMinable`; no amount of exploring or researching changes it,
+///   because it is the shape of the request that is wrong. The message names
+///   every producing recipe and its category, which is the diagnosis.
 fn refusal_for(err: &PlannerError) -> Option<PlanRefusal> {
     use miette::Diagnostic;
 
@@ -409,7 +417,8 @@ fn refusal_for(err: &PlannerError) -> Option<PlanRefusal> {
         | PlannerError::SustainSupplyNotStanding { .. }
         | PlannerError::SustainNoFuelSource { .. }
         | PlannerError::SustainNoRouteForFuel { .. }
-        | PlannerError::SustainNoOfftake { .. } => true,
+        | PlannerError::SustainNoOfftake { .. }
+        | PlannerError::ProductNotMakeable(_) => true,
 
         PlannerError::InsufficientItems { .. }
         | PlannerError::UnknownBot(_)

@@ -58,6 +58,23 @@ position.
 A green test proves nothing until it has been seen to go red for the right
 reason. Treat "it passes" as an unverified claim about the test.
 
+**And the rule has its own failure mode, found the same night by an agent
+following it.** A scripted forbidden-value substitution **silently matched
+nothing** against reflowed source, so the test passed — and a pass under
+substitution reads exactly like *"the forbidden value changes nothing, so
+the test is hollow"*, which was the opposite of the truth. The agent refused
+that green and redid the experiment by hand. Two guards follow:
+
+- **Assert the substitution actually matched** before drawing any conclusion
+  from what happened next.
+- **An unexpected green under substitution is a broken experiment, not a
+  finding.** Investigate the experiment first; only after it is shown to
+  have bitten may the green be read as evidence about the test.
+
+A fixture that agrees with its code is the first trap; a falsification
+performed as a ritual without its effect is the second, and it wears the
+costume of the cure.
+
 ## The sibling: a crate-scoped check cannot see a crate it does not compile
 
 Same night, same shape, different surface. A `PlannerError::NoSiteFound`
@@ -106,3 +123,49 @@ what makes that affordable, and the middle rung is where all four surfaced.
 - **When a task writes both the code and its fixture, say so in the report**
   and name what the fixture assumes. That sentence is cheap and is the only
   warning a later reader gets.
+
+## The same asymmetry, one level up: what a loaded run proves
+
+A related rule settled between the two sessions the same night, because both
+had been applying a broader one than the evidence supports.
+
+**A validity check does not need a quiet machine; a measurement does.**
+Starvation corrupts a *number*. It cannot make a block stand in the wrong
+place: whether entities are where the plan said is equally true at 2 tps and
+at 300. So a run whose question is "did this work" may share the box, and
+only a run whose number someone will quote needs a clear floor.
+
+**But the licence is one-directional.** A starved server times actions out,
+trips executor deadlines and leaves entities unplaced, so a validity run
+that comes back *short* is ambiguous between "the code chose wrong" and "the
+box was loaded".
+
+- **A clean pass at any tick rate is trustworthy.**
+- **A failure at a bad tick rate is not** — the delivered rate is then part
+  of the diagnosis, not a footnote.
+
+**Two fragile runs cannot share a floor; they have to queue.** A validity
+check can share with anything, including another validity check. But
+starvation makes a 96-second plan read as 137 — the same case measured 99.5 s
+and 137.7 s in one night, 38% apart, from load alone — so two *timing*
+measurements are noise to each other and must be sequenced, whoever asked
+first.
+
+**A baseline is only a baseline against a stated commit.** Both sessions
+nearly made the mirror-image mistake within an hour: one about to compare a
+pre-change planner against a post-change one and attribute the difference to
+its own work, the other about to do the same in reverse. Every figure in a
+record that does not name the commit it was taken on is weaker than it
+looks.
+
+**And publish what got worse in the same table as what got better.** From
+the `second` session, whose sentence this is: *"a result that only lists
+what got better is the same shape as a test that only checks the happy
+path."* Tonight's furnace change improved red and green and cost two to
+three percent on three deeper goals; a table showing only the first half
+would have been accurate and misleading.
+
+So: record the delivered tick rate in every run's note (`just analyse`
+prints it and flags below 80% of nominal), share the box freely for checks
+you expect to pass, and re-run on a quiet floor before believing any
+failure that arrived on a loaded one.

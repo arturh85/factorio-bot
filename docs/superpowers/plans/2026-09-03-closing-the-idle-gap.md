@@ -303,6 +303,211 @@ unvisited and planned nothing, silently. Threat avoidance — a 50-tile
 stand-off, refusing rather than returning an empty plan — is the **first
 non-test caller of the threat index**, which had none.
 
+## RUN 20: RED SCIENCE MEASURED AT 1x — 9:57 (`run-1788655528-63394`)
+
+2026-09-06 02:38, master `9ca5c7f4`, `factory_stage2.lua`, four clients at
+1x, seed 31337 `--new`, debug build, launched at load 0.50/1.65 on a floor
+the other session yielded. **Roster confirmed `[1,2,3,4]` in every plan**
+before quoting anything.
+
+| rung | ticks | |
+|---|---|---|
+| `researched:automation` | 24,650 | **6:50** |
+| `producing:automation-science-pack:6` | 35,835 | **9:57** |
+| witness | 39,099 | 10:51 |
+
+Three plans, 176 / 21,783 then 127 / 13,077 then 155 / 11,106. Against the
+sum of the first two, execution ran **2.8% over plan** — consistent with the
+0.9–1.6% the other measured runs now show.
+
+**A caveat that matters for comparing to the offline figure.** The offline
+`producing:automation-science-pack:6` number (22,547) plans the goal in one
+piece from t=0; the run plans it **rung by rung**, so its total is the sum
+of staged plans and is not the same quantity. The honest comparison is
+execution against the sum of the run's own plans, which is the 2.8% above.
+Automation's 6:50 here is likewise not the 6:05 record: that was release,
+this is debug, and this one replanned.
+
+**And a defect, now diagnosed and fixed (`c14c1fd9`): the placement gave up
+on a blocker that was about to leave.** Milestone 1 lost an action to
+*cannot place item 'stone-furnace' because a character is standing in the
+footprint*, refused four times over 114 ticks, forcing a replan.
+
+**Not an identity failure** — my first guess, and wrong. From the run's own
+record: bot 1 was motionless at (26.29, −47.33) **mining copper ore**, a
+third of a tile inside the furnace's 2×2 box at [26, −48], and its mine
+**settled successfully at tick 6079 — 78 ticks after the placement gave up
+at 6001.** The blocker was leaving and nobody waited.
+
+Two causes, both correct in isolation. `step_aside_from_footprint`
+deliberately steers only a blocker that is neither walking nor mining, since
+overwriting either strands the executor action waiting on it. And the
+refusal said only "a character is standing in the footprint", so the caller
+could not tell a *busy* blocker from one it had already dispatched a
+step-aside walk at — while `FOOTPRINT_CLEAR_ATTEMPTS = 4 × 600 ms` was sized
+from a single 53-tick observation of that walk.
+
+The fix names what it found — `… in the footprint (blockers: #1 mining,
+#3 stepping aside)`, a closed vocabulary appended after a byte-identical
+sentence so the existing failure classification is untouched — and a busy
+blocker is re-asked on its own **45-second** budget that does not spend a
+step-aside attempt. 45 s is measured, not chosen: across 24 archived runs the
+longest successful mine is 1,211 ticks and the longest walk leg 1,977
+(32.9 s at 1x), p95s 725 and 716.
+
+**It was never client-specific.** `storage.p[].mining` is set identically for
+character bots; what differed was only the timing that made it bite. Still
+unproven on the clock: that a real 45-second wait beats a real replan. That
+needs a 1x client run of `factory_stage2.lua` on a quiet box.
+
+## ✅✅✅ RUN 21: GREEN IN 12:49 (`run-1788661309-04254`)
+
+2026-09-06 04:35, master `1e13806e`, four clients at 1x, seed 31337 `--new`,
+launched at load 0.71/2.07 on a floor the other session cleared. 100% tick
+delivery, roster `[1,2,3,4]` confirmed.
+
+| | run 19 | **run 21** |
+|---|---|---|
+| green cell | 13:29 (48,587) | **12:49 (46,146)** |
+| green witness | 14:07 | **13:26** |
+| plan | 452 / 49,050 | **442 / 47,542**, one plan |
+| executed / planned | 0.991 | **0.971** |
+| fleet utilisation | 67.4% | **69.5%** |
+| failed / lost / failed walks | 0 | **0 / 0 / 0 of 282** |
+| furnaces standing | 22 planned | **18 planned, 18 standing** |
+| ore drilled | 551 | **551** |
+| iron plate /min at 5 / 10 | 51 / 65 | **51 / 67** |
+
+Fresh-world green: 64:22 → … → 17:20 → 18:46 → 15:19 → 14:26 → 13:29 →
+**12:49**. Automation's record is 6:05, red science 9:57.
+
+Executed came in **below** plan (0.971) for the first time, which is the
+walk model being deliberately pessimistic by ~1% plus the drain policy
+choosing well. The furnace count is exact again — 18 planned, 18 standing —
+which is now the third independent confirmation that the offline loop
+predicts placement rather than approximating it.
+
+The plateau is unchanged: `roster-fed; no generator until 6:21`, production
+stopping at the plan's bill. Everything tonight made the plan smaller and
+more honest; none of it made the factory feed itself.
+
+## ⚠️ `plan_best` DOUBLES PLANNING COST, AND THAT BILL COMES DUE ON BIG PLANS
+
+Measured by the `second` session on a 179-entity block, interleaved, three
+runs a side with load recorded per run: **~96 s with the drain-policy
+planner against ~52 s without**, spreads 2.5% and 0.3%, so the ~45 s gap is
+real. Cause found by reading, not inferred: `plan_best` runs the full
+`expand()` + `schedule()` pipeline **twice, once per `DrainPolicy`**, and
+keeps the shorter schedule. Its own doc says so — "one extra expansion and
+schedule per plan" — and 96/52 = 1.85 is consistent with two passes.
+
+**This is the drill-refuelling work (`c49df17a`), and the cost was priced
+too cheaply.** The trade is deliberate and it earns its keep on green, where
+it took the plan from 569/52,819 to 452/49,051. But it is paid **per plan**,
+and a run that replans four to seven times pays it every time; on a
+179-entity block that is 45 seconds each. Nobody saw it because green's
+plans are an order of magnitude smaller.
+
+Not a defect, a number that was missing. Options when someone takes it:
+run the second policy only when the first's schedule leaves meaningful
+slack; pick the policy from cheap plan statistics instead of building both;
+or cache the expansion, which is identical between the two and is the
+expensive half. Wants its own task with the 179-entity block as its measure.
+
+**The other session's own correction, worth recording as method:** it
+attributed this to `recover_anchor`, then implicitly to siting, before
+reading the code. Its first experiment ruled out only the ring search — a
+fixed anchor still calls recovery, so it never discriminated between the two
+remaining candidates. `recover_anchor` was genuinely broken (7.86 s worst
+call, now under 10 ms) and that fix stands, but it was never the 96 seconds.
+**Ruling out one of three candidates convicts neither of the others**, and
+that mistake was made twice in one night.
+
+## ✅ FURNACE COUNT IS A DECISION NOW (`64377193`)
+
+`smelt_steps` (`method/have.rs`) decided growth from three arms. Two were
+bounded — `own_grow` self-limits once a taker queues a furnace at a patch,
+and the third is capped at one per bot. **`shared_grow` had no bound at
+all**: every roster-supplied smelt built a furnace whatever already stood
+there. Instrumenting the arms is what turned suspicion into evidence — on
+`have:pumpjack:1` at four bots, **184 of 231 growth decisions were
+`shared_grow` firing alone with the ground budget already exhausted**. It is
+deleted, and the siting refusal that used to be a hard stop is now a
+fallback onto a furnace `adoptable_furnaces` had already ranked.
+
+| goal, four bots | before | after |
+|---|---|---|
+| `researched:automation` | 176 / 21,784 / 11 furnaces | identical |
+| `producing:automation-science-pack:6` | 324 / 22,547 / 17 | **316 / 22,463 / 13** |
+| `producing:logistic-science-pack:6` | 451 / 48,829 / 22 | **442 / 47,542 / 18** |
+| `have:pumpjack:1` | 1,767 / 267,910 / **66** | **1,674 / 263,432 / 28** |
+
+Three regressions, in the same table rather than a footnote: pumpjack at
+three bots +2.7%, `oil-gathering` +2.5%, green at eight bots +1.8%.
+
+**Live (`run-1788659072-26571`, four character bots, 5x): all milestones
+first-iteration, zero failed or lost actions or walks, and 14 furnaces
+planned against 14 standing — exact.** Automation ran 1.003× its plan, the
+red cell 1.020×, and the witness saw red packs go 0 → 5 in 3,215 of 5,400
+ticks with every bot idle. Delivered 223 tps of 300, so the counts stand and
+the ticks are indicative.
+
+Two results from the rejected candidates are worth as much as the fix. The
+cost comparison — build only when the queue exceeds the price of a new
+furnace — makes automation **strictly better** at 161 actions and **3
+furnaces** for an identical makespan, but sends green +72%: it independently
+reproduces `bank_size`'s documented finding that this crate cannot price
+queueing against a build, so it is a known wall rather than a near miss. And
+"join the least-loaded queue instead of the taker's own" is **not a policy
+but a bug**: `own_count` derives from that very sort key, so switching the
+preference off makes the unrelated `own_grow` fire on every smelt.
+
+Still open, and the other half of the same defect: **the one-bot pumpjack is
+unchanged at 690,450 ticks and 21 furnaces**, because at a roster of one the
+budget is 1, so after the first furnace nothing grows and every smelt
+serialises. Fixing it means expressing "build inside a wait the bot is
+having anyway", which needs slack, an optional action, or a goal with no
+consumer — the crate has none of the three. Scheduler work.
+
+## ⚠️ ORE BLOCKS EVERYTHING IN THE PLANNER, AND NOTHING IN THE GAME
+
+Found by the `second` session, 2026-09-06, with one `can_place_entity` query
+against a live game at an ore tile (-42.5, -37.5):
+
+```
+belt = true    pole = true    drill = true
+```
+
+**A transport belt and an electric pole can both be built on ore.** Factorio's
+resources sit on the `resource` collision layer alone — the mod's own
+walk-stall comment says so: *"resources collide on the resource layer only,
+which is why a character walks straight through them"*.
+
+The planner disagrees. Every placement check computes
+`resource_blocks = !stands_on_resources(name)` (`crates/planner/src/state.rs`
+at 2828, 3104, 3143), so **ore blocks everything that is not a mining
+drill**. `stands_on_resources` was added because `is_area_free` "refused a
+drill everywhere on every map" — the right diagnosis, but it carved an
+exception for drills instead of correcting the general rule.
+
+**Why it has never been caught: it fails in the safe direction.** It refuses
+legal ground and never builds on illegal ground, so it produces `NoRoute`
+and `NoSiteFound`, never a broken factory. `is_area_free` and
+`placement_occupant` are what `method::connect` routes belts through and
+what `method::assemble` sites cells with, so a belt route that would legally
+cross a patch is refused, and a cell near any patch on any map is refused a
+site. It also explains a result the other session was about to record as
+structural: `MinerLine` cannot site at any radius because its belt-and-pole
+corridor runs over the ore its own drills need. **That is not a siting
+limitation, it is this defect.**
+
+Not fixed tonight, deliberately: it is a planner-wide behaviour change whose
+blast radius covers `connect`, `assemble` and `produce`, and it invalidates
+every offline number measured before it. It gets its own change with
+before/after figures rather than a rider on another branch. **This is the
+first candidate to check whenever a self-fed cell refuses for reasons that
+look like crowded terrain.**
+
 ## ✅ EXPLORATION WORKS, AND THE ORE REFUSAL IS GONE (`3bd49296`)
 
 `Goal::Charted { around, radius }` → `Scout` → `Survey`, plus a mod verb
@@ -3106,7 +3311,7 @@ infrastructure for a 3h17m game, not a harder milestone.
 | red science producing **once** | never observed | witnessed six times, all inside 780 ticks |
 | red science producing **at a rate** | impossible to claim | **5 packs in 3,240 ticks (~5.5/min)**, twice |
 | green science, planning | did not expand at all | plans end to end |
-| green science, live | never run | **WITNESSED fourteen times** — fresh world **13:29 / 14:07** (`run-1788647791-64290`), one 452-step plan, zero failures, executed/planned 0.991, 67% of ore drilled; 64:22 → … → 14:26 → 13:29 |
+| green science, live | never run | **WITNESSED fifteen times** — fresh world **12:49 / 13:26** (`run-1788661309-04254`), one 442-step plan, zero failures, executed/planned 0.971, 18 furnaces planned and 18 standing; 64:22 → … → 13:29 → 12:49 |
 | furnaces per run | 42 | **8** |
 | recovery (`obs:recover`) | never executed in any run | **fires live** |
 

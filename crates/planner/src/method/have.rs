@@ -726,16 +726,27 @@ fn patch_scan(state: &PlanState, item: &str, anchor: &Position) -> Option<(Posit
 /// tick, and the bot that performs it may be crafting science packs for
 /// 7,500 ticks first.
 ///
-/// That reasoning is about the taker's *own* loads, and it does not carry
-/// to a smelt whose ore the roster supplies: there the inserts sit on the
-/// suppliers' timelines, and queueing behind the taker's batch puts *their*
-/// wait on the taker's release -- the very cost the rule avoids, landed on
-/// several bots at once. `smelt_steps` builds for such a smelt instead
-/// (`shared_grow`) whatever this order says; the measurement is there. Measured on `producing:logistic-science-pack:6` against
+/// Measured on `producing:logistic-science-pack:6` against
 /// `workspace/scripts/map.json`, with the load totals corrected but this rule
 /// absent, the queues spread evenly across three furnaces and the makespan
 /// went 102,405 → 108,170, because every bot then waited on a batch some
 /// *other* bot would insert late; with it, 95,237.
+///
+/// That reasoning is about the taker's *own* loads, and it does not carry to a
+/// smelt whose ore the roster supplies: there the inserts sit on the
+/// suppliers' timelines, and queueing behind the taker's batch puts *their*
+/// wait on the taker's release. **`smelt_steps` used to build a whole extra
+/// furnace rather than accept that, and no longer does** -- see the
+/// `shared_grow` obituary there for why the trade reversed on 2026-09-06. So
+/// such a smelt now takes this order as written, taker's own first.
+///
+/// The obvious alternative -- keep the extra furnace but drop the `own` key
+/// for a shared smelt, so it joins the *least-loaded* queue instead of the
+/// taker's -- was built and measured and is **not** available as written:
+/// `own_count` is derived from this very sort, so a preference switched off
+/// here reports zero furnaces of the taker's own, and `smelt_steps`' unrelated
+/// `own_grow` arm then fires on every smelt. The two are one mechanism, and
+/// separating them is a change to both.
 ///
 /// # The load total, and the bug that hid behind it
 ///
@@ -948,10 +959,10 @@ struct PatchFurnaces {
 /// runs short), which is the better instrument for it.
 ///
 /// **A bot with no furnace of its own on the patch builds one whatever the
-/// count**, and that furnace is its own errand (`smelt_steps`, `own_grow`);
-/// **so does a smelt whose ore the roster supplies** (`shared_grow`, same
-/// place), because the queue it would otherwise join puts its suppliers'
-/// inserts behind the taker's release.
+/// count**, and that furnace is its own errand (`smelt_steps`, `own_grow`).
+/// That is the only exception left: a second one for roster-supplied smelts
+/// (`shared_grow`) was removed on 2026-09-06 for being unbounded, and
+/// `smelt_steps` carries the measurement.
 /// This is the bound's own reasoning applied per bot rather than first-come:
 /// a bot loads and unloads one furnace at a time, so the width at which
 /// independent smelts stop queueing behind each other is one per *bot*, and
@@ -1337,27 +1348,40 @@ fn smelt_steps(
     // prefer and no claim to a furnace of its own: it grows with the budget
     // and queues least-loaded, as every smelt did before takers were known.
     let own_grow = patch.idle_count == 0 && patch.own_count == 0 && taker_bot.is_some();
-    // A smelt whose ore the roster supplies (`SharedOre`) has its inserts on
-    // the suppliers' timelines, so queueing it behind the taker's own batch
-    // puts every supplier's wait on the taker's release -- the wait on
-    // another bot's timeline that the own-queue rule above exists to avoid,
-    // landed on three bots at once. Measured on
-    // `producing:automation-science-pack:6` against
-    // `workspace/scripts/map.json`, four bots: bots 3 and 4 stood 2,914 and
-    // 4,248 ticks at bot 1's copper furnace at `[-51, 29]` waiting to insert,
-    // and bots 2-4 stood 3,002 each at `[-34, -32]` and 5,170 / 1,936 /
-    // 1,936 at `[-38, -16]` on iron, every one of them behind a take of bot
-    // 1's. Five stone and thirty ticks buy a furnace those inserts do not
-    // wait on. Same shape as `own_grow`, and for the same reason; the
-    // difference is only whose timeline the queue would have landed on.
-    let shared_grow = patch.idle_count == 0
-        && taker_bot.is_some()
-        && shared
-            .as_ref()
-            .is_some_and(|s| ingredients.iter().any(|(name, _)| *name == s.ore));
-    let grow = own_grow
-        || shared_grow
-        || (patch.idle_count == 0 && patch.hand < patch_furnace_budget(&ctx.state));
+    // **There was a third arm here, `shared_grow`, and it was the one thing in
+    // this function with no bound at all.** A smelt whose ore the roster
+    // supplies built a furnace whatever else stood on the patch -- not while
+    // under the budget, not one per taker, but once per shared smelt, for as
+    // many shared smelts as the goal had. It is deleted, and the deletion is
+    // the whole of `docs/superpowers/notes/2026-09-05-headless-experiments.md`'s
+    // `### furnace`.
+    //
+    // Why it was here (2026-09-05): a shared smelt's inserts sit on the
+    // *suppliers'* timelines, so queueing it behind the taker's own batch puts
+    // every supplier's wait on the taker's release. That was measured, and the
+    // measurement was real -- on `producing:logistic-science-pack:6`, four
+    // bots, `workspace/scripts/map.json`: 108,170 ticks without the arm
+    // against 95,237 with it.
+    //
+    // Why it is gone (2026-09-06): **the same goal on the same map now reads
+    // 48,829 with the arm and 47,542 without.** The arm has stopped paying and
+    // started costing. The world changed rather than the original measurement
+    // being wrong -- between the two dates a furnace's share became a sequence
+    // of *visits* (`runs_per_load`/`FurnaceLoad`), the drain cap stopped
+    // tripping on hand-smelt furnaces, and `ActionNetwork::infer_edges`
+    // stopped ordering every plate consumer after every earlier plate
+    // producer. Each of those shortens exactly the queue `shared_grow` existed
+    // to avoid joining, and together they moved the crossover past it.
+    //
+    // What it cost meanwhile: on `have:pumpjack:1` at four bots, 184 of the
+    // plan's 231 growth decisions were this arm firing *alone*, with the
+    // ground budget already exhausted -- 66 stone furnaces for one pumpjack,
+    // and 65 for `researched:oil-gathering`. Both read 28 without it.
+    //
+    // So the two remaining arms are the two that were always bounded:
+    // `own_grow`, at most `roster - 1` furnaces past the budget, and the
+    // budget itself.
+    let grow = own_grow || (patch.idle_count == 0 && patch.hand < patch_furnace_budget(&ctx.state));
     let mut slots: Vec<Option<Reuse>> = Vec::new();
     if grow {
         slots.push(None);
@@ -1414,18 +1438,58 @@ fn smelt_steps(
                             !crate::method::produce::is_cell_furnace_ground(&trial, ore, candidate)
                         })
                     });
-                let pos = clear
-                    .or_else(|| free_area_near(&trial, &anchor, &furnace_entity))
-                    .ok_or_else(|| PlannerError::NoApplicableMethod {
-                        goal: goal.to_string(),
-                    })?;
-                trial.create_entity(FactorioEntity {
-                    name: furnace_entity.clone(),
-                    entity_type: "furnace".into(),
-                    position: pos.clone(),
-                    ..Default::default()
-                });
-                (pos, false, None)
+                match clear.or_else(|| free_area_near(&trial, &anchor, &furnace_entity)) {
+                    Some(pos) => {
+                        trial.create_entity(FactorioEntity {
+                            name: furnace_entity.clone(),
+                            entity_type: "furnace".into(),
+                            position: pos.clone(),
+                            ..Default::default()
+                        });
+                        (pos, false, None)
+                    }
+                    // **No ground is a reason to queue, not a reason to
+                    // refuse.** This arm used to be
+                    // `.ok_or_else(|| NoApplicableMethod)?`, which made
+                    // "nowhere within `FREE_TILE_SEARCH_RADIUS` to put another
+                    // furnace" a hard stop on the whole goal -- and the patch
+                    // it stopped on was, every time, one this same plan had
+                    // paved with its own furnaces.
+                    //
+                    // Raising `FREE_TILE_SEARCH_RADIUS` is not the fix:
+                    // `power::PLANT_ADOPT_RADIUS` is derived from it. It would
+                    // not be one anyway. A patch ringed with this plan's
+                    // furnaces wants *one of those*, which `adoptable_furnaces`
+                    // has already found and ranked; the growth decision
+                    // degrades into the reuse decision rather than into an
+                    // error. `tests/furnace_ground.rs` pins it.
+                    //
+                    // A furnace another slot of this same bank already holds is
+                    // skipped: two slots on one furnace would queue two batches
+                    // with contradictory releases and double its load. When
+                    // every usable furnace is already in this bank the patch
+                    // really has nothing left, and the refusal stands.
+                    None => {
+                        let taken: BTreeSet<Pos> = bank
+                            .iter()
+                            .map(|f| Pos::from(&f.pos))
+                            .chain(
+                                slots
+                                    .iter()
+                                    .flatten()
+                                    .map(|reuse| Pos::from(reuse.position())),
+                            )
+                            .collect();
+                        let fallback = patch
+                            .furnaces
+                            .iter()
+                            .find(|reuse| !taken.contains(&Pos::from(reuse.position())))
+                            .ok_or_else(|| PlannerError::NoApplicableMethod {
+                                goal: goal.to_string(),
+                            })?;
+                        (fallback.position().clone(), true, fallback.release())
+                    }
+                }
             }
         };
         // What this furnace makes bounds what its take can ask for, and the
@@ -12260,17 +12324,48 @@ mod tests {
     }
 
     /// The handover itself: several bots load one furnace, one bot unloads it.
-    /// **A shared smelt does not queue its suppliers behind the taker's own
-    /// release.** Four bots each smelt once, so the iron patch stands at the
-    /// roster's furnace budget with every furnace queued; bot 1 then asks for
-    /// gears a second time, which `SharedSmelt` splits across the roster. The
-    /// own-queue rule would put that smelt behind bot 1's first batch, and
-    /// every supplier's insert behind bot 1's take of it -- the shape that
-    /// held bots 2-4 for 3,002 ticks each at `[-34, -32]` on the red-science
-    /// plan (see `smelt_steps`, `shared_grow`). It builds a fifth furnace
-    /// instead, and no supplier's insert waits on any take.
+    /// **A shared smelt stops at the roster's furnace budget and queues**,
+    /// where until 2026-09-06 it built one more.
+    ///
+    /// Four bots each smelt once, so the iron patch stands at the budget with
+    /// every furnace queued; bot 1 then asks for gears a second time, which
+    /// `SharedSmelt` splits across the roster. The old `shared_grow` arm gave
+    /// that smelt a fifth furnace so that no supplier's insert waited on a
+    /// take. It now joins a queue instead, and this test asserts **4**.
+    ///
+    /// # Why this constant moved, stated because moving it is the trap
+    ///
+    /// This test was written beside `shared_grow` and asserted the number
+    /// `shared_grow` produced. Editing `5` to `4` to make a suite green is
+    /// exactly the failure
+    /// `docs/superpowers/notes/2026-09-06-fixtures-agree-with-their-code.md`
+    /// is about, so the justification is deliberately **not** this fixture.
+    /// It is the offline sweep over `workspace/scripts/map.json`, which this
+    /// test has no part in and which measures whole plans on the real map:
+    ///
+    /// | goal, 4 bots | with `shared_grow` | without |
+    /// | --- | ---: | ---: |
+    /// | `producing:automation-science-pack:6` | 324 / 22,547 / 17 furnaces | **316 / 22,463 / 13** |
+    /// | `producing:logistic-science-pack:6` | 451 / 48,829 / 22 | **442 / 47,542 / 18** |
+    /// | `have:pumpjack:1` | 1,767 / 267,910 / 66 | **1,674 / 263,432 / 28** |
+    /// | `researched:oil-gathering` | 1,742 / 253,657 / 65 | **1,671 / 260,115 / 28** |
+    ///
+    /// Fewer actions, fewer furnaces and (on three of the four) a shorter
+    /// makespan. The arm's own founding measurement — 108,170 without against
+    /// 95,237 with, on green, 2026-09-05 — is not disowned; it has been
+    /// overtaken. See the obituary in `smelt_steps` for which changes since
+    /// then moved the crossover.
+    ///
+    /// # What is given up, asserted rather than omitted
+    ///
+    /// A supplier's insert now really can be ordered behind a take, which is
+    /// the cost `shared_grow` was buying off. The second half of this test
+    /// used to forbid that; it now **requires** it, so the test states the
+    /// trade instead of quietly dropping the half that stopped holding. If a
+    /// future change makes the wait disappear again, this assertion fails and
+    /// somebody re-reads the trade rather than inheriting it.
     #[test]
-    fn a_shared_smelt_builds_its_own_furnace_rather_than_queueing_its_suppliers() {
+    fn a_shared_smelt_queues_at_the_budget_rather_than_building_another_furnace() {
         let bots = vec![BotId(1), BotId(2), BotId(3), BotId(4)];
         let s = smelting_state(&bots);
         let net = expand(
@@ -12291,8 +12386,10 @@ mod tests {
             .filter(|a| matches!(&a.kind, ActionKind::Place { entity } if entity.name == "stone-furnace"))
             .count();
         assert_eq!(
-            placed, 5,
-            "one furnace per bot at the budget, and one more for the shared smelt"
+            placed,
+            patch_furnace_budget(&s) as usize,
+            "one furnace per bot at the budget and not one more: the shared \
+             smelt queues"
         );
         let supplier_inserts: Vec<&Action> = furnace_ore_inserts(&net)
             .into_iter()
@@ -12307,22 +12404,27 @@ mod tests {
             "the second smelt is shared across the roster: {} supplier insert(s)",
             supplier_inserts.len()
         );
-        for insert in supplier_inserts {
-            let behind_a_take = net.preds(insert.id).iter().any(|(pred, _)| {
-                matches!(
-                    net.action(*pred).map(|a| &a.kind),
-                    Some(ActionKind::Remove {
-                        slot: InventorySlot::FurnaceResult,
-                        ..
-                    })
-                )
-            });
-            assert!(
-                !behind_a_take,
-                "{} is ordered behind a take of the taker's",
-                insert.label
-            );
-        }
+        let waits = supplier_inserts
+            .iter()
+            .filter(|insert| {
+                net.preds(insert.id).iter().any(|(pred, _)| {
+                    matches!(
+                        net.action(*pred).map(|a| &a.kind),
+                        Some(ActionKind::Remove {
+                            slot: InventorySlot::FurnaceResult,
+                            ..
+                        })
+                    )
+                })
+            })
+            .count();
+        assert!(
+            waits > 0,
+            "queueing is what was chosen, so at least one supplier insert is \
+             ordered behind the take that drains the furnace; none was, which \
+             means the smelt found room somewhere and the budget is not \
+             binding in this fixture any more"
+        );
     }
 
     #[test]

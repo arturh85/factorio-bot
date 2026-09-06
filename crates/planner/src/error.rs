@@ -677,7 +677,9 @@ pub enum PlannerError {
     /// unresolved.
     ///
     /// `occupant` names what is there -- an entity by prototype name, water,
-    /// terrain, ore, a footprint the game already refused, or a **character**,
+    /// terrain, a footprint the game already refused, or a **character**,
+    /// (ore is not among them: nothing buildable collides with it, so the game
+    /// builds over a patch and since `ore-does-not-block` so does this),
     /// which is called out separately when it is one of this plan's own bots:
     /// a roster bot's body blocks a fixed-offset placement exactly like a
     /// rock does, and it is the case a researcher building a block near their

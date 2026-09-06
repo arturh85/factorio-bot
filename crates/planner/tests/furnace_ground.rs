@@ -28,11 +28,20 @@
 //!   to 14 tiles, comfortably past the 12-ring `free_area_near` walks. Water
 //!   is *tiles*; the ore *entities* on top of it are untouched, so the patch
 //!   is still minable and only the siting is blocked;
-//! * **ore**, which `is_area_free` refuses through `!stands_on_resources`.
-//!   That is where the one standing furnace goes — a tile no search can ever
-//!   settle on, so the furnace is reachable to adoption and invisible to
-//!   siting. Putting it on open ground instead would leave the tile beside it
-//!   free and the plan would simply build there, testing nothing.
+//! * **ore**, which `free_area_near_where` — the siting search itself, not
+//!   `is_area_free` — refuses. That distinction is new as of
+//!   `ore-does-not-block` and does not change this fixture: the game builds
+//!   over a patch and `is_area_free` now says so, while the search still
+//!   keeps a plan off the ore it is about to mine
+//!   (`docs/superpowers/notes/2026-09-06-ore-does-not-block.md`). The patch is
+//!   where the one standing furnace goes — a tile no search can settle on, so
+//!   the furnace is reachable to adoption and invisible to siting. Putting it
+//!   on open ground instead would leave the tile beside it free and the plan
+//!   would simply build there, testing nothing.
+//!
+//! `the_fixture_leaves_nowhere_to_site_a_furnace` asserts that, because three
+//! of the four tests below would pass by accident on a fixture that left
+//! ground free.
 //!
 //! Two takers then ask for plates. The first adopts the standing furnace and
 //! queues a batch into it. The second is a bot with no furnace of its own on
@@ -64,9 +73,11 @@ fn boxed_in_world() -> FactorioWorld {
     // `NoApplicableMethod { goal: "have 5 iron-ore (bot 1)" }`: a water tile
     // is `player_collidable`, so the bot had nowhere to stand and the ore
     // became unmineable. The test would have been red for a reason that has
-    // nothing to do with furnace ground. Ore tiles refuse a furnace by
-    // themselves (`!stands_on_resources`) and take a character happily, which
-    // is exactly the asymmetry this fixture needs.
+    // nothing to do with furnace ground. Ore tiles refuse a furnace to the
+    // *siting search* (`free_area_near_where`) and take a character happily,
+    // which is exactly the asymmetry this fixture needs -- they do not refuse
+    // the placement itself, which the game would allow and
+    // `PlanState::is_area_free` allows too.
     let mut tiles: Vec<FactorioTile> = Vec::new();
     for band in [
         Rect::new(&Position::new(-59., 21.), &Position::new(-21., 34.)),
@@ -144,6 +155,39 @@ fn furnaces_loaded(net: &ActionNetwork) -> Vec<Position> {
         }
     }
     seen
+}
+
+/// The fixture leaves nowhere to site a furnace.
+///
+/// Asserted rather than assumed, because every other test in this file is
+/// about a plan that had nowhere to put one, and three of them would pass on a
+/// fixture that left ground free -- verified by removing the water and
+/// watching them stay green while 91 sites opened up.
+///
+/// It asks `free_area_near`, which is the question `smelt_steps` asks, and NOT
+/// `PlanState::is_area_free`: since `ore-does-not-block` the ore tiles of this
+/// patch take a furnace as far as the ground is concerned, and what keeps the
+/// plan off them is the siting search's own policy.
+#[test]
+fn the_fixture_leaves_nowhere_to_site_a_furnace() {
+    let bots = [BotId(1)];
+    let state = PlanState::from_world(Arc::new(boxed_in_world()), &bots);
+    assert!(
+        state.is_area_free("stone-furnace", &STANDING.add(&Position::new(3., 0.))),
+        "the ground three tiles along the patch is clear -- ore is not an \
+         obstacle, so this fixture's refusal cannot come from the ground"
+    );
+    for anchor in [
+        STANDING.clone(),
+        Position::new(-45., 35.),
+        Position::new(-35., 45.),
+    ] {
+        assert_eq!(
+            factorio_bot_planner::method::util::free_area_near(&state, &anchor, "stone-furnace"),
+            None,
+            "a furnace was sited from {anchor:?}"
+        );
+    }
 }
 
 /// The gate itself: the goal plans at all.

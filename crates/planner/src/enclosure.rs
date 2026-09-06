@@ -44,8 +44,10 @@
 //!   *building* may go, not a fact about whether the ground is walkable --
 //!   the game will happily route a character across a tile it refused a
 //!   furnace on.
-//! * **resource tiles.** Ore does not block a footstep; `is_area_clear_of`
-//!   only treats it as occupancy for placement, by policy, not by collision.
+//! * **resource tiles.** Ore blocks neither a footstep nor a placement --
+//!   nothing buildable collides with the `resource` layer, and since
+//!   `ore-does-not-block` `is_area_clear_of` does not count it either, so this
+//!   exclusion is no longer a difference between the two grids.
 //!
 //! # Two questions, one grid
 //!

@@ -290,13 +290,18 @@ fn furnace_site(drill: &Position, facing: Direction) -> Option<Position> {
 ///
 /// # Why a hand-smelt has to ask
 ///
-/// A cell is a drill standing **on** the ore with its furnace two tiles ahead
-/// standing **off** it, so the only ground a cell's furnace can occupy is the
-/// ring of non-ore tiles immediately outside the patch — the same ring
-/// [`crate::method::util::free_area_near`] settles on when a hand-smelt sites
-/// its furnace from `nearest_resource_tile`. The two want the identical tiles,
-/// and the smelt gets there first: it is expanded inline, the cell arrives as a
-/// subgoal, and the furnace it built is still standing on the next plan.
+/// A cell is a drill standing **on** the ore with its furnace two tiles ahead,
+/// and a hand-smelt's furnace is sited by
+/// [`crate::method::util::free_area_near`] from `nearest_resource_tile` -- so
+/// the two want tiles from the same neighbourhood, and the smelt gets there
+/// first: it is expanded inline, the cell arrives as a subgoal, and the furnace
+/// it built is still standing on the next plan.
+///
+/// Both are still confined to the ring of non-ore tiles outside the patch --
+/// `ore-does-not-block` moved that confinement out of the collision rule and
+/// into the two siting decisions themselves (`fit` here,
+/// `free_area_near_where` there), but did not lift it: doing so starved the
+/// miners.
 ///
 /// Measured on `workspace/runs/run-1788497495-79997`'s world: the iron patch
 /// packs 15 cells clean, 7 with the run's 44 standing furnaces, and 7 again
@@ -429,11 +434,18 @@ fn machine(
 ///    a cell will happily be sited on the very tiles the plan is about to send
 ///    a bot to hand-mine, and the bot arrives to `expected iron-ore ..., found
 ///    burner-mining-drill`;
-/// 2. the ground under the drill is otherwise clear (ore does not block a
-///    drill; everything else still does, and `stands_on_resources` is narrow on
-///    purpose);
-/// 3. the ground under the furnace is clear, **including of ore** — which is
-///    what pushes a cell to a patch edge rather than into the middle of one;
+/// 2. the ground under the drill is otherwise clear (ore blocks nothing --
+///    nothing buildable collides with the `resource` layer -- and everything
+///    else still does);
+/// 3. the ground under the furnace is clear **and carries no ore**. The second
+///    half is this method's own policy since `ore-does-not-block`, stated in
+///    the code rather than inherited from a placement rule that pretended ore
+///    was a collision: it is what pushes a cell to a patch edge rather than
+///    into the middle of one. Letting the furnace stand on ore was tried and
+///    starved hand-mining -- see the comment at the check. The cost is real
+///    and unpaid: the rim is a patch's thin edge, 3-10 ore a tile on seed
+///    `31337` against 200+ three tiles in, which is the shortfall item 5 was
+///    written for;
 /// 4. with both machines standing, the drill's drop point really does land in
 ///    the furnace. Asked of a fork with the pair placed, so it is the same
 ///    predicate [`Condition::Feeds`] will be checked with rather than a
@@ -469,6 +481,21 @@ fn fit(
     }
     let furnace = furnace_site(drill, facing)?;
     if !state.is_area_free_facing(FURNACE, &furnace, Direction::North) {
+        return None;
+    }
+    // The furnace keeps off the ore. **A policy, not a collision** -- the game
+    // builds over a patch and `is_area_free_facing` above no longer pretends
+    // otherwise -- and it is here rather than in the placement rule because it
+    // is a claim about what this plan will need, not about what fits. Dropping
+    // it was tried: `have::seventy_five_packs_are_crafted_on_several_bots_and_
+    // each_delivers_to_a_lab` then failed with `NoApplicableMethod { goal:
+    // "have 40 iron-ore" }`, because a cell's furnace on a patch tile makes
+    // that tile unminable (`PlanState::resource_tile_blocked`) and the plan
+    // ate the ore it was about to mine.
+    if state
+        .collision_area(FURNACE, &furnace)
+        .is_some_and(|area| state.covers_any_resource(&area))
+    {
         return None;
     }
     let cell = Cell {

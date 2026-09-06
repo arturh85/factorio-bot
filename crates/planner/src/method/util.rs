@@ -485,6 +485,34 @@ pub fn free_area_near(state: &PlanState, from: &Position, entity: &str) -> Optio
 /// Split out rather than duplicated so the ring order — and therefore which
 /// site any given search settles on — is written once. `accept` is called only
 /// for sites that already fit, so it never has to re-ask that question.
+///
+/// # Ore is refused HERE, and only here
+///
+/// A candidate whose footprint covers ore ([`PlanState::covers_any_resource`])
+/// is skipped. This is the whole of "do not bury the patch you are about to
+/// mine", and this is where it belongs: a **siting policy**, applied by the
+/// search that chooses ground, not by
+/// [`PlanState::is_area_free`], which answers what the game allows. The game
+/// allows all of it — nothing buildable carries the `resource` collision layer
+/// — and stating the policy as a collision rule is what refused belt routes
+/// across patches, cell sites beside them and `MinerLine` a site at any
+/// radius, all as `NoRoute` / `NoSiteFound`. See
+/// `docs/superpowers/notes/2026-09-06-ore-does-not-block.md`.
+///
+/// **It is a refusal rather than a ranked preference, and that was measured.**
+/// A first attempt walked the rings twice — once off the ore, then anywhere —
+/// so a search could fall back onto the patch when the ground beside it ran
+/// out. `seventy_five_packs_are_crafted_on_several_bots_and_each_delivers_to_a_lab`
+/// then failed with `NoApplicableMethod { goal: "have 40 iron-ore" }`: the
+/// smelt's own furnaces had taken the patch, and `PlanState::resource_tile_blocked`
+/// correctly stopped the miners from selecting tiles with a furnace on them.
+/// Running out of *ground* is recoverable — `smelt_steps` queues into a
+/// furnace that already stands (`crates/planner/tests/furnace_ground.rs`) —
+/// and running out of *ore* is not.
+///
+/// Nothing else in the planner asks this. `produce::fit` sites a cell's
+/// furnace at a fixed offset from its drill and may put it on ore, which is
+/// deliberate: the rim of a patch is its thin edge.
 pub fn free_area_near_where(
     state: &PlanState,
     from: &Position,
@@ -505,9 +533,16 @@ pub fn free_area_near_where(
                     (base_x + dx) as f64 + offset_x,
                     (base_y + dy) as f64 + offset_y,
                 );
-                if state.is_area_free(entity, &candidate) && accept(&candidate) {
-                    return Some(candidate);
+                if !state.is_area_free(entity, &candidate) || !accept(&candidate) {
+                    continue;
                 }
+                if state
+                    .collision_area(entity, &candidate)
+                    .is_some_and(|area| state.covers_any_resource(&area))
+                {
+                    continue;
+                }
+                return Some(candidate);
             }
         }
     }
@@ -1617,22 +1652,37 @@ mod tests {
         assert!(s.is_area_free("stone-furnace", &second));
     }
 
+    /// Siting keeps off the ore -- and that is the siting search's own rule,
+    /// not a fact about the ground.
+    ///
+    /// The ring search starts *on* the anchor, which is an ore tile, and
+    /// `PlanState::is_area_free` would take it: the game builds over a patch,
+    /// and since `ore-does-not-block` so does this planner. What steps off it
+    /// is `free_area_near_where`'s own filter, which exists so a plan does not
+    /// bury the patch it is about to mine -- measured, not assumed: without it
+    /// `seventy_five_packs_are_crafted_on_several_bots_and_each_delivers_to_a_lab`
+    /// fails with `NoApplicableMethod` on `have 40 iron-ore`.
     #[test]
-    fn a_free_tile_near_ore_is_not_on_the_ore() {
-        // Siting a furnace by an ore patch starts the ring search on the ore
-        // tile itself. A tile carrying ore is not placeable in the game, so the
-        // search has to step off the patch rather than return where it started.
+    fn siting_steps_off_the_ore_that_no_longer_blocks_it() {
         let s = state();
         let ore = nearest_resource_tile(&s, "iron-ore", &Position::new(0., 0.), 1)
             .expect("fixture has iron ore");
+        assert!(
+            s.resource_available(&ore, "iron-ore") > 0,
+            "the anchor {ore:?} is an ore tile"
+        );
+        assert!(
+            s.is_area_free("stone-furnace", &ore),
+            "the ground itself takes a furnace -- ore is not an obstacle"
+        );
         let tile =
             free_area_near(&s, &ore, "stone-furnace").expect("open ground next to the patch");
-        assert_ne!(tile, ore, "the furnace was sited on the ore tile itself");
-        assert_eq!(
-            s.resource_available(&tile, "iron-ore"),
-            0,
-            "the chosen tile {:?} still holds ore",
-            tile
+        let area = s
+            .collision_area("stone-furnace", &tile)
+            .expect("the fixture knows a stone furnace");
+        assert!(
+            !s.covers_any_resource(&area),
+            "the chosen site {tile:?} covers ore"
         );
     }
 

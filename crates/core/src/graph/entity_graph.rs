@@ -307,6 +307,43 @@ pub struct EntityGraph {
 /// where the nests are".
 pub const ENEMY_STRUCTURE_TYPES: [&str; 2] = ["unit-spawner", "turret"];
 
+/// The entity types [`EntityGraph::add`] keeps **out** of `blocked_tree`,
+/// alongside resources and rails: ghosts.
+///
+/// **A ghost does not collide.** Measured live against Factorio 2.1.17 before
+/// `ActionKind::StampGhosts` existed: a real placement consumes the ghost
+/// beneath it cleanly rather than being refused by it, which is exactly why
+/// `PlanState::occupant_of` (`crates/planner`) skips `entity-ghost` by name in
+/// both of its entity loops, unconditionally, with the note that no caller
+/// should ever want a ghost to collide.
+///
+/// **`blocked_tree` defeated that skip.** `add` filed every entity with a
+/// non-zero box into the blocked tree regardless of name, and the tree stores
+/// a bare `is_minable` flag and no name -- so a ghost that reached this
+/// function came back out of `blocking_boxes_within` as an anonymous
+/// rectangle, and `occupant_of` reported it as
+/// *"occupied by a tree, cliff, rock or unit"*. The same box reached
+/// `enclosure::grid_for` and the belt router's obstacle grid, where a ghost
+/// is equally not an obstacle.
+///
+/// # What this is NOT a claim about
+///
+/// This is a **latent** defect of the same shape as
+/// `docs/superpowers/notes/2026-09-06-a-failed-placement-blames-a-tree.md`,
+/// and it is **not** established to be that note's cause. Whether a stamped
+/// ghost reaches this crate at all on the live path is contested by a
+/// measurement taken the same day: nothing printed inside an RCON-invoked mod
+/// function reaches stdout, so `rcon_place_blueprint`'s ghost writeouts were
+/// measured arriving zero times, with a non-ghost control that also never
+/// arrived (see CLAUDE.md, "Nothing printed inside an RCON-invoked mod
+/// function reaches stdout"). The executor discards the ghosts
+/// `place_blueprint` returns, so that reply is not a second path either.
+///
+/// The rule is unconditional regardless of which paths exist today: a ghost
+/// does not collide, so it must not be filed as ground that blocks. What
+/// stood at that tile in that run is open.
+pub const GHOST_ENTITY_TYPES: [&str; 2] = ["entity-ghost", "tile-ghost"];
+
 impl EntityGraph {
     #[allow(clippy::new_without_default)]
     pub fn new(
@@ -787,8 +824,9 @@ impl EntityGraph {
     /// 'no'`, and the run stuck on its first dispatched action.
     ///
     /// `blocked_tree` is the tree that does see them. `add` puts every entity
-    /// with a non-zero collision box into it except resources and rails (ore
-    /// and rails are asked about separately, by tile), and `add_tiles` adds
+    /// with a non-zero collision box into it except resources, rails (ore
+    /// and rails are asked about separately, by tile) and ghosts (which do not
+    /// collide at all -- see [`GHOST_ENTITY_TYPES`]), and `add_tiles` adds
     /// every `player_collidable` tile -- water. So this is the ground truth for
     /// buildability that the graph already had and nothing but `draw.rs` was
     /// reading.
@@ -812,6 +850,32 @@ impl EntityGraph {
     /// has far more precision than that at map coordinates, so rounding to
     /// that grid recovers the exact edge rather than approximating it.
     pub fn blocking_boxes_within(&self, bounds: &Rect) -> Vec<Rect> {
+        self.blocking_boxes_within_minable(bounds)
+            .into_iter()
+            .map(|(rect, _minable)| rect)
+            .collect()
+    }
+
+    /// [`Self::blocking_boxes_within`], keeping the one bit the tree stores.
+    ///
+    /// `blocked_tree`'s payload is a bare `is_minable` flag
+    /// ([`FactorioEntity::is_minable`]: the entity's type is `tree` or
+    /// `simple-entity`), and `blocking_boxes_within` throws it away. That is
+    /// the whole reason a refusal built on these boxes could only say
+    /// *"a tree, cliff, rock or unit"* -- four different things, one of which
+    /// it names first and none of which it read.
+    ///
+    /// The flag does not name the obstacle and this does not pretend it
+    /// does. It splits the boxes in two, honestly: `true` is a tree or a
+    /// rock, which a bot could in principle mine out of the way; `false` is
+    /// **anything else with a collision box that the entity tree does not
+    /// hold** -- a cliff, a unit, a water tile, a corpse, an item on the
+    /// ground. A caller that wants to say what it found says the first and
+    /// admits the second, rather than reciting a list it did not read.
+    ///
+    /// Same ordering, same snapping and the same narrowing-pass caveat as
+    /// [`Self::blocking_boxes_within`], which is now written in terms of this.
+    pub fn blocking_boxes_within_minable(&self, bounds: &Rect) -> Vec<(Rect, bool)> {
         /// Factorio stores map positions as fixed point with this denominator.
         const POSITION_GRID: f64 = 256.;
         fn snap(v: f32) -> f64 {
@@ -822,13 +886,16 @@ impl EntityGraph {
             .read()
             .query(query)
             .into_iter()
-            .map(|(_minable, rect, _id)| {
-                Rect::new(
-                    &Position::new(snap(rect.origin.x), snap(rect.origin.y)),
-                    &Position::new(
-                        snap(rect.origin.x + rect.size.width),
-                        snap(rect.origin.y + rect.size.height),
+            .map(|(minable, rect, _id)| {
+                (
+                    Rect::new(
+                        &Position::new(snap(rect.origin.x), snap(rect.origin.y)),
+                        &Position::new(
+                            snap(rect.origin.x + rect.size.width),
+                            snap(rect.origin.y + rect.size.height),
+                        ),
                     ),
+                    *minable,
                 )
             })
             .collect()
@@ -1333,6 +1400,7 @@ impl EntityGraph {
             if entity.entity_type != EntityType::Resource.to_string()
                 && entity.entity_type != EntityType::StraightRail.to_string()
                 && entity.entity_type != EntityType::CurvedRail.to_string()
+                && !GHOST_ENTITY_TYPES.contains(&entity.entity_type.as_str())
             {
                 blocked.insert_with_box(entity.is_minable(), entity.bounding_box.clone().into());
                 // The same `is_minable` the line above hands to the blocked
@@ -2763,6 +2831,87 @@ mod tests {
                 "edge {got} is more than one position step from {want}"
             );
         }
+    }
+
+    /// A ghost is not an obstacle, and `blocked_tree` used to say it was.
+    ///
+    /// The defect from
+    /// `docs/superpowers/notes/2026-09-06-a-failed-placement-blames-a-tree.md`:
+    /// `BuildBlock` stamps ghosts, the mod writes each one out as
+    /// `on_some_entity_created`, and `add` filed every entity with a non-zero
+    /// box into the blocked tree. The tree keeps no name, so the stamped
+    /// ghost came back an anonymous rectangle and the planner reported it as
+    /// terrain -- at a tile the game said held nothing but ore.
+    ///
+    /// The tree is the hostile half of this fixture, not decoration: it sits
+    /// one tile away, is added in the same call, and proves the query
+    /// actually reaches this ground. Without it the ghost's absence would
+    /// also be satisfied by a query that finds nothing anywhere.
+    #[test]
+    fn a_stamped_ghost_is_not_a_blocking_box() {
+        let mut ghost =
+            FactorioEntity::new_stone_furnace(&Position::new(3.5, 3.5), Direction::North);
+        ghost.name = "entity-ghost".into();
+        ghost.entity_type = "entity-ghost".into();
+        let tree = FactorioEntity::new_tree(&Position::new(6.5, 6.5));
+        let graph = entity_graph_from(vec![ghost.clone(), tree]).expect("adding must not fail");
+
+        assert_eq!(
+            graph
+                .blocking_boxes_within(&Rect::new(&Position::new(3., 3.), &Position::new(4., 4.)))
+                .len(),
+            0,
+            "a ghost does not collide: a real placement consumes it rather \
+             than being refused by it"
+        );
+        assert_eq!(
+            graph
+                .blocking_boxes_within(&Rect::new(&Position::new(6., 6.), &Position::new(7., 7.)))
+                .len(),
+            1,
+            "the control tree must be found, or the assertion above is about \
+             a query that sees nothing at all"
+        );
+    }
+
+    /// The one bit `blocked_tree` stores, kept rather than thrown away.
+    ///
+    /// `blocking_boxes_within` reduced every box to a bare rectangle, which
+    /// is why a refusal built on it could only recite "a tree, cliff, rock or
+    /// unit" -- four things, of which a reader takes the first, and none of
+    /// which it had read. `is_minable` is exactly "type is `tree` or
+    /// `simple-entity`", so it splits the boxes into "a tree or rock" and
+    /// "something this model cannot name", which is all that is honestly
+    /// available.
+    ///
+    /// Absolute counts and absolute flags, not a relation between them: a
+    /// pair of wrong numbers can satisfy a relation.
+    #[test]
+    fn blocking_boxes_keep_whether_the_obstacle_is_minable() {
+        let tree = FactorioEntity::new_tree(&Position::new(3.5, 3.5));
+        let mut cliff =
+            FactorioEntity::new_stone_furnace(&Position::new(9.5, 9.5), Direction::North);
+        cliff.name = "cliff".into();
+        cliff.entity_type = "cliff".into();
+        let graph = entity_graph_from(vec![tree, cliff]).expect("adding must not fail");
+
+        let minable = graph.blocking_boxes_within_minable(&Rect::new(
+            &Position::new(3., 3.),
+            &Position::new(4., 4.),
+        ));
+        assert_eq!(minable.len(), 1, "one tree: {minable:?}");
+        assert!(minable[0].1, "a tree is minable");
+
+        let anonymous = graph.blocking_boxes_within_minable(&Rect::new(
+            &Position::new(9., 9.),
+            &Position::new(10., 10.),
+        ));
+        assert_eq!(anonymous.len(), 1, "one cliff: {anonymous:?}");
+        assert!(
+            !anonymous[0].1,
+            "a cliff is not minable, and nothing here knows anything else \
+             about it"
+        );
     }
 
     /// A hand-built power plant has to be readable **by name**, not merely

@@ -954,24 +954,64 @@ impl std::fmt::Display for ChartingSummary {
 /// these reports the first, which is deliberate -- the alternative is
 /// reporting all of them and making the message longer without making it
 /// more useful.
+///
+/// **The order puts what is named ahead of what is anonymous**, and that is
+/// the whole lesson of
+/// `docs/superpowers/notes/2026-09-06-a-failed-placement-blames-a-tree.md`.
+/// The blocking-box source is the only one that cannot say what it found, so
+/// it is asked **last**: an entity has a name, a character has a player id,
+/// and a refusal carries the game's own list of what stood in the box it
+/// judged. Until 2026-09-06 the anonymous source was asked third of five, so
+/// a tile that was *also* a refused footprint reported
+/// "occupied by a tree, cliff, rock or unit" -- a confident wrong label, over
+/// a source that knew the answer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Occupant {
     /// An entity, planned or already standing, by its prototype name.
     Entity(String),
     /// A `player_collidable` tile.
     Water,
-    /// A tree, cliff, rock or unit. Deliberately unnamed: `blocked_tree`
-    /// keeps an `is_minable` flag and no name at all, so a name here would
-    /// be invented rather than read.
-    Terrain,
+    /// Something with a collision box that no source in this model names.
+    ///
+    /// `blocked_tree` keeps an `is_minable` flag and no name at all, so a
+    /// name here would be invented rather than read. `minable` is that one
+    /// bit and the only thing this variant honestly knows: `true` is a tree
+    /// or a rock (`FactorioEntity::is_minable` is exactly "type is `tree` or
+    /// `simple-entity`"), `false` is **anything else** with a box the entity
+    /// tree does not hold -- a cliff, a unit, a corpse, an item on the ground.
+    ///
+    /// It used to be a bare `Terrain` whose message recited
+    /// "a tree, cliff, rock or unit", four things it had not read, of which
+    /// a reader takes the first. That message named a tree at a tile the game
+    /// said held nothing but ore.
+    Terrain { minable: bool },
     /// A character. `on_roster` is the difference between "somebody else is
     /// standing there" and "one of the bots you are planning for is standing
     /// on the ground you asked it to build on" -- the second is the case a
     /// researcher building a block near their own bots hits, and it is
     /// cleared by walking, not by moving the block.
     Character { player: PlayerId, on_roster: bool },
-    /// A footprint the game itself already refused a build at, this run.
-    Refused,
+    /// A footprint the game itself already refused a build at, this run,
+    /// **with the evidence the game attached to that refusal**.
+    ///
+    /// `entity` is what was being built; `blockers` is what the mod found
+    /// standing in the box it had just had judged, and `tile` the ground
+    /// under the refused centre (`PlacementRefusal::blockers` / `tile`,
+    /// filled by `describe_footprint` in the mod and read back by
+    /// `note_placement_refusal`). None of it is reconstructed from this
+    /// side's model -- a refusal is the game disagreeing with the model, so
+    /// the model's opinion of the site is the one thing that cannot explain
+    /// it.
+    ///
+    /// An empty `blockers` with a `tile` means the game scanned the box and
+    /// found no entity in it; empty *and* no tile is the signature of a
+    /// refusal from a mod that appended nothing, i.e. "not asked". The
+    /// `Display` says which, rather than reading either as "clear".
+    Refused {
+        entity: String,
+        blockers: Vec<String>,
+        tile: Option<String>,
+    },
     /// The world has no prototype for the entity, so its footprint cannot be
     /// sized at all. Not "clear": the same case
     /// [`PlanState::is_area_free_facing`] answers `false` for.
@@ -983,7 +1023,14 @@ impl std::fmt::Display for Occupant {
         match self {
             Occupant::Entity(name) => write!(f, "occupied by {name}"),
             Occupant::Water => write!(f, "water"),
-            Occupant::Terrain => write!(f, "occupied by a tree, cliff, rock or unit"),
+            Occupant::Terrain { minable: true } => {
+                write!(f, "occupied by a tree or rock")
+            }
+            Occupant::Terrain { minable: false } => write!(
+                f,
+                "occupied by something with a collision box that this model cannot name -- \
+                 a cliff, a unit, or anything else the entity tree does not hold"
+            ),
             Occupant::Character {
                 player,
                 on_roster: true,
@@ -995,10 +1042,60 @@ impl std::fmt::Display for Occupant {
                 player,
                 on_roster: false,
             } => write!(f, "character {player} is standing on it"),
-            Occupant::Refused => write!(f, "a footprint the game already refused a build at"),
+            Occupant::Refused {
+                entity,
+                blockers,
+                tile,
+            } => {
+                write!(f, "a footprint the game already refused a {entity} at")?;
+                match (blockers.is_empty(), tile.as_deref()) {
+                    (false, Some(tile)) => {
+                        write!(f, ", where it found {} on tile {tile}", blockers.join(", "))
+                    }
+                    (false, None) => write!(f, ", where it found {}", blockers.join(", ")),
+                    (true, Some(tile)) => write!(
+                        f,
+                        ", where it found no entity at all on tile {tile}, so the ground itself \
+                         is the answer"
+                    ),
+                    (true, None) => {
+                        write!(f, ", and it named nothing it found there")
+                    }
+                }
+            }
             Occupant::Unknown => write!(f, "an entity this world has no prototype for"),
         }
     }
+}
+
+/// One footprint the game refused a build at, kept with what the game said
+/// about it.
+///
+/// The planner's own copy of `FactorioSurface::placement_refusals`, reduced
+/// to the geometry it has to test against ([`Self::area`], the prototype's
+/// box turned the way the build was aimed) plus the three things the refusal
+/// itself carried and this crate used to discard: the entity that was
+/// refused, and the mod's observation of what stood in the box.
+///
+/// Kept because a refusal that cannot say what it is about is unreadable
+/// exactly when it matters. A `BuildBlock` replan that refuses one tile of a
+/// partial build has to tell a reader whether to clear something, move the
+/// block, or wait for a bot to walk off, and the game already answered that
+/// question at the moment it said no.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RefusedFootprint {
+    /// The box the game actually tested: the prototype's collision box,
+    /// turned the way the build was aimed, centred where it was aimed.
+    pub area: Rect,
+    /// The entity the game refused, by prototype name.
+    pub entity: String,
+    /// What the mod found standing in that box, deduplicated and sorted by
+    /// name. Empty means it looked and found no entity.
+    pub blockers: Vec<String>,
+    /// The tile under the refused centre, when the reply named one. `None`
+    /// together with an empty `blockers` is "the mod appended nothing", not
+    /// "the ground is clear".
+    pub tile: Option<String>,
 }
 
 /// The world at a point in a hypothetical plan.
@@ -1451,9 +1548,18 @@ pub struct PlanState {
     /// other field, and two `PlanState`s built from the same world and roster
     /// still expand to the same plan.
     ///
+    /// # It carries the game's own evidence, not just the box
+    ///
+    /// `PlacementRefusal` has always held what the mod found in the box it
+    /// judged (`blockers`, `tile`) and the name of the entity that was
+    /// refused; this field kept only the rectangle and threw the rest away,
+    /// so the best a refusal could say was *"a footprint the game already
+    /// refused a build at"*. That is a true sentence about the wrong half of
+    /// what is known. See [`RefusedFootprint`].
+    ///
     /// Sorted by geometry rather than kept in arrival order, so the field
     /// does not depend on the sequence the game happened to refuse things in.
-    refused: Vec<Rect>,
+    refused: Vec<RefusedFootprint>,
     /// What the world last saw in each container and machine, **less whatever
     /// this plan has already taken out of it**, keyed by tile.
     ///
@@ -1743,7 +1849,7 @@ impl PlanState {
         // read north-facing, which is what every entry was read as until
         // then; a direction no building stands on falls back the same way
         // rather than to a guess.
-        let mut refused: Vec<Rect> = base
+        let mut refused: Vec<RefusedFootprint> = base
             .placement_refusals()
             .iter()
             .map(|refusal| {
@@ -1751,7 +1857,8 @@ impl PlanState {
                     .direction
                     .and_then(Direction::from_u8)
                     .unwrap_or(Direction::North);
-                base.entity_prototypes
+                let area = base
+                    .entity_prototypes
                     .get(&refusal.entity)
                     .map(|proto| {
                         let box_ = rotated_collision_box(&proto.collision_box, facing)
@@ -1770,16 +1877,34 @@ impl PlanState {
                             &Position::new(refusal.position.x - 0.5, refusal.position.y - 0.5),
                             &Position::new(refusal.position.x + 0.5, refusal.position.y + 0.5),
                         )
-                    })
+                    });
+                // Copied whole, not summarised: what the game found is the
+                // one description of this ground that was not written by the
+                // model the refusal contradicts.
+                RefusedFootprint {
+                    area,
+                    entity: refusal.entity.clone(),
+                    blockers: refusal.blockers.clone(),
+                    tile: refusal.tile.clone(),
+                }
             })
             .collect();
         refused.sort_by(|a, b| {
-            a.left_top
+            a.area
+                .left_top
                 .x
-                .total_cmp(&b.left_top.x)
-                .then(a.left_top.y.total_cmp(&b.left_top.y))
-                .then(a.right_bottom.x.total_cmp(&b.right_bottom.x))
-                .then(a.right_bottom.y.total_cmp(&b.right_bottom.y))
+                .total_cmp(&b.area.left_top.x)
+                .then(a.area.left_top.y.total_cmp(&b.area.left_top.y))
+                .then(a.area.right_bottom.x.total_cmp(&b.area.right_bottom.x))
+                .then(a.area.right_bottom.y.total_cmp(&b.area.right_bottom.y))
+                // Two refusals at the same box are still two refusals -- of
+                // different entities, or of the same one with different
+                // evidence -- so the tie is broken by what they say rather
+                // than left to arrival order, which is the one thing this
+                // sort exists to remove.
+                .then_with(|| a.entity.cmp(&b.entity))
+                .then_with(|| a.blockers.cmp(&b.blockers))
+                .then_with(|| a.tile.cmp(&b.tile))
         });
         // Walks the game searched for and did not find. Taken whole rather
         // than reduced to geometry the way `refused` is: a refused walk names
@@ -3209,33 +3334,6 @@ impl PlanState {
                 return Some(Occupant::Entity(entity.name.clone()));
             }
         }
-        // Everything the entity tree structurally cannot hold: trees, cliffs,
-        // small rocks, units, and `player_collidable` tiles (water). These
-        // arrive as bare rectangles — `blocked_tree` keeps only an
-        // `is_minable` flag, no name and no position — so a plan that removed
-        // a base entity is matched by the tile its box is centred on, which is
-        // the same key `remove_entity` stores and the same one the entity loop
-        // above compares. A minable obstacle is *not* treated as clear: no
-        // method emits an action to mine one out of the way, so believing a
-        // tree will move is the same wrong answer as not seeing it at all.
-        for blocked in self.base.entity_graph.blocking_boxes_within(area) {
-            if self.removed.contains(&Pos::from(&blocked.center())) {
-                continue;
-            }
-            if !water_blocks && self.base.entity_graph.is_water_at(&blocked.center()) {
-                continue;
-            }
-            if boxes_overlap(&blocked, area) {
-                return Some(if self.base.entity_graph.is_water_at(&blocked.center()) {
-                    Occupant::Water
-                } else {
-                    // A tree, cliff, rock or unit. `blocked_tree` keeps an
-                    // `is_minable` flag and no name at all, so naming one
-                    // here would be inventing the name.
-                    Occupant::Terrain
-                });
-            }
-        }
         // Characters. Nothing above can see one: they are in no tree, and
         // `removed` cannot free them either — the plan has no action that
         // makes a character move out of the way, and believing one will is the
@@ -3263,11 +3361,56 @@ impl PlanState {
         }
         // Footprints the game has already refused a build at. Not a model of
         // an obstacle -- a verdict about one. `removed` cannot clear these
-        // either: nothing the plan does is known to change the answer, since
-        // the refusal never said what the answer was about.
+        // either: nothing the plan does is known to change the answer.
+        //
+        // ASKED BEFORE THE BLOCKING BOXES, since 2026-09-06. Both can cover
+        // the same ground, and when they do this one knows what it is talking
+        // about and the other does not: a refusal carries the game's own list
+        // of what stood in the box, while a blocking box is an anonymous
+        // rectangle. Asking the anonymous source first is what produced
+        // "occupied by a tree, cliff, rock or unit" for a tile the game had
+        // just reported as holding nothing but ore. See
+        // `docs/superpowers/notes/2026-09-06-a-failed-placement-blames-a-tree.md`.
         for refused in &self.refused {
-            if boxes_overlap(refused, area) {
-                return Some(Occupant::Refused);
+            if boxes_overlap(&refused.area, area) {
+                return Some(Occupant::Refused {
+                    entity: refused.entity.clone(),
+                    blockers: refused.blockers.clone(),
+                    tile: refused.tile.clone(),
+                });
+            }
+        }
+        // Everything the entity tree structurally cannot hold: trees, cliffs,
+        // small rocks, units, and `player_collidable` tiles (water). These
+        // arrive as bare rectangles — `blocked_tree` keeps only an
+        // `is_minable` flag, no name and no position — so a plan that removed
+        // a base entity is matched by the tile its box is centred on, which is
+        // the same key `remove_entity` stores and the same one the entity loop
+        // above compares. A minable obstacle is *not* treated as clear: no
+        // method emits an action to mine one out of the way, so believing a
+        // tree will move is the same wrong answer as not seeing it at all.
+        //
+        // LAST of the six, because it is the only one that cannot say what it
+        // found. `is_minable` is the single bit the tree stores and the whole
+        // of what `Occupant::Terrain` may claim.
+        for (blocked, minable) in self
+            .base
+            .entity_graph
+            .blocking_boxes_within_minable(area)
+            .into_iter()
+        {
+            if self.removed.contains(&Pos::from(&blocked.center())) {
+                continue;
+            }
+            if !water_blocks && self.base.entity_graph.is_water_at(&blocked.center()) {
+                continue;
+            }
+            if boxes_overlap(&blocked, area) {
+                return Some(if self.base.entity_graph.is_water_at(&blocked.center()) {
+                    Occupant::Water
+                } else {
+                    Occupant::Terrain { minable }
+                });
             }
         }
         // Ore is deliberately NOT a sixth source: a resource collides on the
@@ -3497,7 +3640,7 @@ impl PlanState {
     /// Exposed so a caller can say *which* sites the planner is avoiding --
     /// a plan that quietly prefers distant tiles and cannot say why is the
     /// failure mode this memory would otherwise introduce.
-    pub fn refused_footprints(&self) -> &[Rect] {
+    pub fn refused_footprints(&self) -> &[RefusedFootprint] {
         &self.refused
     }
 
@@ -3521,7 +3664,7 @@ impl PlanState {
         };
         self.refused
             .iter()
-            .any(|refused| boxes_overlap(refused, &area))
+            .any(|refused| boxes_overlap(&refused.area, &area))
     }
 
     /// Whether the game has already told this bot there is no route from where
@@ -7484,5 +7627,160 @@ mod inserter_geometry_tests {
             !s.delivers_into(&furnace, &drill),
             "and a furnace takes from nothing"
         );
+    }
+}
+
+#[cfg(test)]
+mod occupant_naming_tests {
+    use super::*;
+    use factorio_bot_core::factorio::world::PlacementRefusal;
+    use factorio_bot_core::test_utils::fixture_world;
+    use factorio_bot_core::types::{Direction, FactorioEntity, Position};
+
+    /// Open ground in the fixture, so anything found here was put here by the
+    /// test.
+    ///
+    /// **Not the run's own (-16, -14).** That tile has a tree on it *in this
+    /// fixture* -- a different map from the run's, and a coincidence, but one
+    /// that made `the_site_starts_clear` fail on the first attempt and would
+    /// have made every assertion below about a world with two obstacles in
+    /// it. The control is what caught it.
+    const SITE: (f64, f64) = (500., 500.);
+
+    fn site() -> Position {
+        Position::new(SITE.0, SITE.1)
+    }
+
+    /// The game's own refusal, carrying what the mod found in the box it
+    /// judged -- exactly the shape `note_placement_refusal` builds.
+    fn refusal() -> PlacementRefusal {
+        PlacementRefusal::at_dispatch(
+            Some(6198),
+            "burner-mining-drill",
+            site(),
+            0,
+            vec!["iron-ore".to_string()],
+            Some("dirt-4".to_string()),
+        )
+    }
+
+    /// The control. Every assertion below is about ground that starts empty,
+    /// so a fixture that happened to have something here would make them all
+    /// vacuous.
+    #[test]
+    fn the_site_starts_clear() {
+        let state = PlanState::from_world(Arc::new(fixture_world()), &[BotId(1)]);
+        assert_eq!(
+            state.placement_occupant("burner-mining-drill", &site(), Direction::North),
+            None,
+            "nothing stands at {SITE:?} in the fixture"
+        );
+    }
+
+    /// **The defect.** A refusal and an anonymous blocking box over the same
+    /// ground, and the refusal is what gets said.
+    ///
+    /// The fixture is deliberately hostile: a tree is put at the refused site
+    /// as well, so `blocking_boxes_within` genuinely answers here and the
+    /// old order genuinely reached it first. Without the tree this test would
+    /// pass under either order and prove nothing about which source is asked
+    /// first.
+    ///
+    /// The old answer was `Occupant::Terrain`, whose message recited
+    /// "a tree, cliff, rock or unit" -- four things it had not read -- over a
+    /// source that carried the game's own list of what it found. See
+    /// `docs/superpowers/notes/2026-09-06-a-failed-placement-blames-a-tree.md`.
+    #[test]
+    fn a_refusal_is_named_over_an_anonymous_box_on_the_same_ground() {
+        let world = fixture_world();
+        world
+            .entity_graph
+            .add(vec![FactorioEntity::new_tree(&site())], None)
+            .expect("the tree loads");
+        world.record_placement_refusal(refusal());
+        let state = PlanState::from_world(Arc::new(world), &[BotId(1)]);
+
+        // The hostile half, asserted rather than assumed: the anonymous
+        // source really does cover this ground.
+        assert_eq!(
+            state
+                .base()
+                .entity_graph
+                .blocking_boxes_within(&Rect::new(
+                    &Position::new(SITE.0 - 0.5, SITE.1 - 0.5),
+                    &Position::new(SITE.0 + 0.5, SITE.1 + 0.5),
+                ))
+                .len(),
+            1,
+            "the tree must be a blocking box here, or this test cannot tell \
+             the two sources apart"
+        );
+
+        let occupant = state
+            .placement_occupant("burner-mining-drill", &site(), Direction::North)
+            .expect("the ground is not clear");
+        assert_eq!(
+            occupant,
+            Occupant::Refused {
+                entity: "burner-mining-drill".to_string(),
+                blockers: vec!["iron-ore".to_string()],
+                tile: Some("dirt-4".to_string()),
+            },
+            "the source that knows what it found is the one that answers"
+        );
+        let said = occupant.to_string();
+        assert_eq!(
+            said,
+            "a footprint the game already refused a burner-mining-drill at, \
+             where it found iron-ore on tile dirt-4",
+            "the message repeats the game's own evidence, verbatim"
+        );
+    }
+
+    /// And an anonymous box, when it is the only thing there, says exactly
+    /// what it knows and no more.
+    ///
+    /// Absolute strings, not "contains": the whole defect was a message that
+    /// said more than it had read.
+    #[test]
+    fn an_unnamed_obstacle_does_not_call_itself_a_tree() {
+        let world = fixture_world();
+        let mut cliff = FactorioEntity::new_stone_furnace(&site(), Direction::North);
+        cliff.name = "cliff".into();
+        cliff.entity_type = "cliff".into();
+        world
+            .entity_graph
+            .add(vec![cliff], None)
+            .expect("the cliff loads");
+        let state = PlanState::from_world(Arc::new(world), &[BotId(1)]);
+
+        let occupant = state
+            .placement_occupant("burner-mining-drill", &site(), Direction::North)
+            .expect("the ground is not clear");
+        assert_eq!(occupant, Occupant::Terrain { minable: false });
+        assert_eq!(
+            occupant.to_string(),
+            "occupied by something with a collision box that this model \
+             cannot name -- a cliff, a unit, or anything else the entity tree \
+             does not hold"
+        );
+    }
+
+    /// The other half of the same bit: a tree may still be called a tree,
+    /// because `is_minable` is read rather than guessed.
+    #[test]
+    fn a_minable_obstacle_is_still_named_a_tree_or_rock() {
+        let world = fixture_world();
+        world
+            .entity_graph
+            .add(vec![FactorioEntity::new_tree(&site())], None)
+            .expect("the tree loads");
+        let state = PlanState::from_world(Arc::new(world), &[BotId(1)]);
+
+        let occupant = state
+            .placement_occupant("burner-mining-drill", &site(), Direction::North)
+            .expect("the ground is not clear");
+        assert_eq!(occupant, Occupant::Terrain { minable: true });
+        assert_eq!(occupant.to_string(), "occupied by a tree or rock");
     }
 }

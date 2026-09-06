@@ -76,21 +76,107 @@
 //! copper-plate — about 0.14 items a tile, a factor of seven. Any claim that
 //! piping is ruled out on price is false in the other direction too.
 //!
-//! **What binds is supply, not price.** Wood is the item this planner cannot
-//! make: a four-bot run starts with four (see [`PLANT_ADOPT_RADIUS`], which
-//! spends one on a pole and says so), and no method in this crate mines a
-//! tree. Four wood is eight poles is about **56 tiles of wire, ever** — and
-//! poles are wanted elsewhere. Iron plate is the item a run mines and smelts
-//! by the hundred, so the pipe route has no ceiling at all: the 355-tile
-//! separation that [`supply_for`]'s world-anchored fallback exists for is 355
-//! plates of pipe, expensive but *buildable*, against 51 poles that a
-//! four-wood run cannot craft.
+//! ## The supply crossover this section used to claim does not exist
 //!
-//! So the crossover is a **supply** crossover at roughly 56 tiles, and it is
-//! an artefact of this planner rather than of the game: teach it to mine a
-//! tree and the pole route wins everywhere on materials. Until then, wire
-//! short runs and pipe long ones. Neither is a law about where a plant may
-//! stand.
+//! Until 2026-09-06 the paragraph above was followed by one that read:
+//!
+//! > *"**What binds is supply, not price.** Wood is the item this planner
+//! > cannot make: a four-bot run starts with four, and no method in this crate
+//! > mines a tree. Four wood is eight poles is about **56 tiles of wire,
+//! > ever** [...] So the crossover is a **supply** crossover at roughly 56
+//! > tiles [...] wire short runs and pipe long ones."*
+//!
+//! It is quoted rather than quietly deleted for the same reason the water
+//! premise above is: a design rule — *"wire short runs and pipe long ones"* —
+//! and half the case for the unbuilt pipe router were justified by it. **It is
+//! false, and it was already false when it was written.** Three independent
+//! things falsify it, and any one of them would be enough.
+//!
+//! **1. This crate chops.** [`crate::method::have::Chop`] swings at any
+//! standing minable entity, trees and rocks alike, and is registered in the
+//! production registry ahead of `Mine`. Its own doc records this exact cap
+//! being removed after live run `run-1788396958-07935` halted on it: *"before
+//! this method every wood in a run was wood a bot had been holding since it
+//! spawned: four bots, four wood [...] That cap was a property of this model
+//! and of nothing else."* [`crate::method::have::BUFFER_CHEST`] then picks a
+//! `wooden-chest` over an iron one **because** wood is renewable, off the
+//! reference map's 6,656 standing trees. So the constraint was real, was read
+//! from a real place, and had been lifted in a file this pricing never
+//! consulted. `the_planner_can_obtain_the_wood_a_long_pole_run_wants` asserts
+//! it against the registry rather than against a constant in this file.
+//!
+//! **2. Wood is a tier-one artefact anyway.** The owner, who plays the game:
+//! *"wood is only needed for the very first tier of power poles, we will
+//! quickly research the better tiers which don't need wood at all."* Read off
+//! `workspace/server/data/base/prototypes/recipe.lua` and
+//! `entity/entities.lua` on 2026-09-06, with `iron-stick` (1 iron plate → 2),
+//! `steel-plate` (5 iron plates → 1) and `copper-cable` (1 copper plate → 2)
+//! folded in:
+//!
+//! | pole | ingredients | iron plates | wire reach | iron plates a tile |
+//! |---|---|---|---|---|
+//! | `small-electric-pole` | 1 wood + 2 copper-cable → **2** | **0** | 7.5 | **0** |
+//! | `medium-electric-pole` | 4 iron-stick + 2 steel-plate + 2 copper-cable → 1 | 12 | 9 | 1.33 |
+//! | `big-electric-pole` | 8 iron-stick + 5 steel-plate + 4 copper-cable → 1 | 29 | 32 | **0.91** |
+//!
+//! No wood past tier one. `electric-energy-distribution-1` (120 red + green)
+//! unlocks the medium pole, the big pole and `iron-stick`, and it is already
+//! on the oil ladder — so by the time power is being run to a well 350 tiles
+//! out, the pole that needs no wood is a technology away rather than a forest
+//! away. And note the last column: even paid for entirely in iron, a big pole
+//! is **cheaper per tile than pipe**, and a medium pole is within a third of
+//! it. There is no tier at which pipe becomes the material answer.
+//!
+//! **These three rows are prose, not a checked constant.** This crate builds
+//! [`POLE`] and only [`POLE`], which is `small-electric-pole`; the fixture
+//! recipes carry no `medium-electric-pole`, `big-electric-pole` or
+//! `steel-plate`, so nothing in this crate can assert the two lower rows.
+//! They are the game's numbers, dated, with their source named — see the rule
+//! at the end of `docs/superpowers/notes/2026-09-06-stale-constraints.md`.
+//!
+//! **3. No crossover of any kind can exist between these routes, because
+//! every one of them is linear in distance.** [`pipe_run_plates`] is
+//! `ceil(N)` plates and [`pole_run_items`] is `ceil(ceil(N/7)/2)` crafts;
+//! neither has a fixed cost, so their ratio is the same at 7 tiles and at 700
+//! and no distance can reverse it. A crossover needs one route to carry a
+//! setup charge the other amortises, and neither does. That is a property of
+//! this module's own arithmetic and
+//! `no_distance_turns_the_pole_route_into_the_dearer_one` asserts it directly
+//! at the 56/57-tile boundary the retracted claim named.
+//!
+//! So the honest reading of *"poles run out at 56 tiles"* is **"you are still
+//! holding the starting pole"** — a research problem, not a logistics one.
+//! `docs/superpowers/notes/2026-09-06-piping-water-is-cheap.md` carries the
+//! same correction; this module agrees with it.
+//!
+//! ## What survives, priced — and it is not a distance rule
+//!
+//! Nothing rules the pole route out. Three real residuals, none of which is a
+//! crossover, and all three stated so the next reader can check them:
+//!
+//! * **A chop needs a charted standing minable.** `Chop::applicable` refuses
+//!   without one (`PlanState::has_minable_source`), so on an unexplored or a
+//!   genuinely bare map wood is unobtainable — and the failure is a
+//!   `NoApplicableMethod { goal: "have N wood" }` at expansion, not a longer
+//!   plan. The fix for it is charting, or research, not pipe. The treeless
+//!   half of `the_planner_can_obtain_the_wood_a_long_pole_run_wants` pins
+//!   both directions.
+//! * **Time, where the wood is the cheap half.** Derived from the two figures
+//!   [`crate::method::have::BUFFER_CHEST`] measured on the reference map: two
+//!   wood off one dead tree is **372 ticks with the walk in it** (~186 a
+//!   wood), and eight iron plates plan at **2,965 ticks** (~371 a plate, its
+//!   furnace and fuel amortised). One pole craft is 1 wood + 1 copper plate
+//!   and buys 14 tiles, so about 557 ticks — **~40 ticks a tile against
+//!   pipe's ~371**. The pole route wins on time by about the same order it
+//!   wins on materials, and **the expensive half of a pole craft is the
+//!   copper plate, not the wood**: the item five paragraphs were once spent
+//!   on is the cheaper one. (Arithmetic over two measurements taken
+//!   elsewhere, not a measurement of this route.)
+//! * **This crate can only build tier one.** [`POLE`] is hard-coded, so the
+//!   wood-free poles of row 2 above are a fact about Factorio and not yet a
+//!   capability here. A run that can find no tree cannot fall back on them
+//!   today. That is a note for whoever wires the tier up, not a reason to
+//!   pipe.
 //!
 //! # Three transports, and the rule that falls out of their prices
 //!
@@ -275,9 +361,13 @@ pub const POLES_PER_CRAFT: u32 = 2;
 
 /// Wood one craft of `small-electric-pole` costs.
 ///
-/// **The binding constraint on the pole route**, and the reason the module doc
-/// calls the crossover a supply crossover rather than a price one: no method
-/// in this crate makes wood.
+/// **Not a constraint, and this doc used to say it was.** It read *"the
+/// binding constraint on the pole route [...] no method in this crate makes
+/// wood"*, which `crate::method::have::Chop` had already falsified: wood is
+/// renewable off any charted standing tree, and no pole above tier one wants
+/// any. It is also the *cheap* half of the craft — the copper plate beside it
+/// costs roughly twice as many ticks. The module doc's "the supply crossover
+/// does not exist" section has the whole retraction.
 pub const POLE_CRAFT_WOOD: u32 = 1;
 
 /// Copper plates one craft of `small-electric-pole` costs.
@@ -339,9 +429,14 @@ pub fn pipe_run_plates(tiles: f64) -> u32 {
 ///
 /// Returned as three numbers rather than one so the caller sees **which**
 /// material it is spending. That is the whole point of the comparison: a
-/// 355-tile pipe run is 355 iron plates, which a run mines; the same distance
-/// in poles is 51 poles and 26 wood, which a four-bot run cannot obtain at
-/// all.
+/// 355-tile pipe run is 355 iron plates, where the same distance in poles is
+/// 51 poles off 26 crafts — **26 wood and 26 copper plates**, an order of
+/// magnitude fewer items.
+///
+/// This doc used to end *"which a four-bot run cannot obtain at all"*. It can:
+/// `crate::method::have::Chop` takes 26 wood off seven trees, and
+/// `the_planner_can_obtain_the_wood_a_long_pole_run_wants` asks the registry
+/// for exactly this bill rather than asserting it here.
 #[must_use]
 pub fn pole_run_items(tiles: f64) -> (u32, u32, u32) {
     if tiles <= 0. {
@@ -541,8 +636,11 @@ const SHORE_SEARCH_RADIUS: i32 = 10;
 /// * building costs an offshore pump, three pipes, a boiler and a steam engine
 ///   — about 45 iron plates, which have to be mined and smelted first, and in
 ///   every archived run that is *tens of thousands* of ticks — plus five coal
-///   and **one wood**, of which a four-bot run has exactly four and can make no
-///   more (`crate::method::assemble`'s `POLE_OFFSET`).
+///   and the pole's one wood and one copper plate, together about 557 ticks
+///   (`crate::method::have::BUFFER_CHEST`'s two measurements). This clause
+///   used to read *"one wood, of which a four-bot run has exactly four and can
+///   make no more"*; `crate::method::have::Chop` had already made wood
+///   renewable, and the wood was never the expensive part of a plant.
 ///
 /// So adoption wins by two orders of magnitude at any distance this planner
 /// can see, and the only question left is how much of the entity graph to
@@ -907,9 +1005,11 @@ pub enum Supply {
 ///    cheap one — this is the search both callers already did on their own.
 /// 2. **A network within [`PLANT_ADOPT_RADIUS`].** The tier this function was
 ///    added for: a plant that already stands is worth walking almost any
-///    distance to, because building a second one costs about 45 iron plates
-///    and one of a run's four irreplaceable wood. See [`PLANT_ADOPT_RADIUS`]
-///    for the run that was killed by not doing this.
+///    distance to, because building a second one costs about 45 iron plates,
+///    which have to be mined and smelted. (This used to say "and one of a
+///    run's four irreplaceable wood"; the wood is renewable and was never what
+///    made a second plant expensive.) See [`PLANT_ADOPT_RADIUS`] for the run
+///    that was killed by not doing this.
 /// 3. **The rest of a plant somebody started.** A pump on a shoreline with
 ///    its boiler beside it and no engine is most of a plant already paid for,
 ///    and a replan that walks past it to a fresh shoreline pays for a whole
@@ -3574,40 +3674,151 @@ mod capacity_tests {
         assert_eq!(pole_run_items(355.), (51, 26, 26));
     }
 
-    /// **There is no material crossover, and the one that binds is supply.**
+    /// **There is no crossover of any kind, and 56 tiles is not special.**
     ///
-    /// Poles are about seven times cheaper per tile than pipe at every
-    /// distance -- so any claim that piping is ruled out *on price* is false.
-    /// What rules the pole route out is wood: a four-bot run starts with four
-    /// and this crate makes none, so eight poles is the whole budget and about
-    /// 56 tiles is the whole reach.
+    /// This replaces `the_crossover_is_wood_rather_than_price`, which typed
+    /// `const STARTING_WOOD: u32 = 4` into itself and asserted arithmetic
+    /// about `pole_run_items` against that literal. Registering ten `Chop`s
+    /// would not have moved it: it was a fixture satisfying its own assertion
+    /// by construction, the fourth shape in
+    /// `docs/superpowers/notes/2026-09-06-fixtures-agree-with-their-code.md`.
+    ///
+    /// What is asserted instead is the property that kills the claim rather
+    /// than a number that restates it: **both routes are linear in distance,
+    /// so no distance can reverse their ordering.** Doubling the span doubles
+    /// each bill, at absolute values written out here rather than computed
+    /// from the constants under test, and the 56/57-tile boundary the
+    /// retracted claim named is shown to be an ordinary pair of points.
     #[test]
-    fn the_crossover_is_wood_rather_than_price() {
-        for tiles in [7., 20., 56., 100., 355.] {
+    fn no_distance_turns_the_pole_route_into_the_dearer_one() {
+        // Absolute bills, typed. A pole run of N tiles is ceil(N/7) poles off
+        // ceil(poles/2) crafts, one wood and one copper plate each; a pipe run
+        // is ceil(N) plates.
+        assert_eq!(
+            pole_run_items(56.),
+            (8, 4, 4),
+            "56 tiles: 8 poles, 4 crafts"
+        );
+        assert_eq!(pipe_run_plates(56.), 56);
+        assert_eq!(
+            pole_run_items(57.),
+            (9, 5, 5),
+            "57 tiles: 9 poles, 5 crafts"
+        );
+        assert_eq!(pipe_run_plates(57.), 57);
+        assert_eq!(pole_run_items(700.), (100, 50, 50));
+        assert_eq!(pipe_run_plates(700.), 700);
+
+        // Linearity, which is what forbids a crossover: a route with no fixed
+        // cost cannot overtake another that also has none. Doubling the span
+        // doubles both bills, so their ratio is the same everywhere.
+        for tiles in [14., 56., 112., 350.] {
+            let (_, wood, copper) = pole_run_items(tiles);
+            let (_, wood2, copper2) = pole_run_items(tiles * 2.);
+            assert_eq!(
+                (wood2, copper2),
+                (wood * 2, copper * 2),
+                "{tiles} tiles doubled must double the pole bill"
+            );
+            assert_eq!(
+                pipe_run_plates(tiles * 2.),
+                pipe_run_plates(tiles) * 2,
+                "{tiles} tiles doubled must double the pipe bill"
+            );
+        }
+
+        // And the ordering the linearity preserves, across two orders of
+        // magnitude including the retracted boundary. A factor of three is the
+        // margin the *shortest* run holds (one pole, two items, against seven
+        // plates); rounding is what costs it, and it only improves from there.
+        for tiles in [7., 20., 56., 57., 100., 355., 700.] {
             let plates = f64::from(pipe_run_plates(tiles));
             let (poles, wood, copper) = pole_run_items(tiles);
             let pole_items = f64::from(wood + copper);
             assert!(
-                pole_items < plates,
+                pole_items * 3. < plates,
                 "{tiles} tiles: {poles} poles cost {pole_items} items against \
-                 {plates} plates of pipe -- poles are supposed to be cheaper"
+                 {plates} plates of pipe -- poles are cheaper by a wide margin \
+                 at every distance, not just short ones"
             );
         }
 
-        // Four wood is the roster's whole supply.
-        const STARTING_WOOD: u32 = 4;
-        let (_, wood_at_56, _) = pole_run_items(56.);
+        // Where rounding is noise, the asymptotic factor the module doc claims:
+        // 1/14 wood + 1/14 copper a tile against a plate a tile, so seven.
+        let (_, wood, copper) = pole_run_items(700.);
+        let ratio = f64::from(pipe_run_plates(700.)) / f64::from(wood + copper);
         assert!(
-            wood_at_56 <= STARTING_WOOD,
-            "56 tiles wants {wood_at_56} wood and a four-bot run has {STARTING_WOOD}"
+            ratio > 6.9 && ratio < 7.1,
+            "the module doc's factor of seven, measured over 700 tiles: {ratio}"
         );
-        let (_, wood_at_57, _) = pole_run_items(57.);
+    }
+
+    /// **The planner can obtain the wood a 355-tile pole run wants**, and the
+    /// only thing it needs is a standing tree.
+    ///
+    /// This is the assertion the retracted supply claim never had: it asks the
+    /// **registry** whether `have 26 wood` expands, so any future change that
+    /// really did make wood unobtainable turns it red and points at the
+    /// sentence. Nothing here is computed from a constant in `power.rs`; 26 is
+    /// the wood half of `pole_run_items(355.)`, typed.
+    ///
+    /// Both directions are asserted, because the residual is real and worth
+    /// pinning: **a chop needs a charted standing minable**. The shared
+    /// fixture's hundred trees are `tree-42`, a name the prototype fixture has
+    /// no entry for, so they yield nothing and the treeless half refuses --
+    /// which is also what makes the wooded half evidence about `Chop` rather
+    /// than about the fixture's forest.
+    #[test]
+    fn the_planner_can_obtain_the_wood_a_long_pole_run_wants() {
+        use crate::goal::{Goal, Holder};
+        use crate::method::expand;
+        use crate::method::have::registry_for;
+
+        // 26 wood: what pole_run_items(355.) asks for, written out.
+        let goal = Goal::Have {
+            item: "wood".into(),
+            count: 26,
+            whose: Holder::Anyone,
+        };
+        let bots = [BotId(1)];
+
+        // tree-01 is the prototype the fixture really carries a
+        // `mine_result {wood: 4}` for; seven of them cover 26.
+        let trees: Vec<factorio_bot_core::types::Position> = (0..8)
+            .map(|k| factorio_bot_core::types::Position::new(6. + 2. * f64::from(k), 6.))
+            .collect();
+        let wooded = PlanState::from_world(
+            Arc::new(crate::test_world::with_trees(fixture_world(), &trees)),
+            &bots,
+        );
+        let net = expand(
+            std::slice::from_ref(&goal),
+            &wooded,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .expect(
+            "a standing tree is all the pole route's wood needs -- if this \
+             refuses, the module doc's retraction of the four-wood cap is \
+             wrong and must be re-argued",
+        );
+        // Seven chops, not "some": `tree-01` yields 4 wood, so 26 wants seven
+        // of the eight standing and the eighth is left alone. An absolute
+        // count, so a bill that silently under-delivers cannot pass.
+        assert_eq!(
+            net.actions().count(),
+            7,
+            "26 wood off trees yielding 4 is seven swings"
+        );
+
+        // The control, and the residual: no readable tree, no wood.
+        let treeless = PlanState::from_world(Arc::new(fixture_world()), &bots);
+        let err = expand(&[goal], &treeless, &registry_for(&bots), BotId(1))
+            .expect_err("the shared fixture's tree-42s yield nothing");
         assert!(
-            wood_at_57 > STARTING_WOOD,
-            "past 56 tiles the pole route must run out of wood, wanted {wood_at_57}"
+            matches!(err, PlannerError::NoApplicableMethod { .. }),
+            "an uncharted or bare map refuses wood by name rather than \
+             planning a shorter run: got {err:?}"
         );
-        // And the pipe route has no such ceiling: iron plate is what a run
-        // mines by the hundred.
-        assert_eq!(pipe_run_plates(357.), 357);
     }
 }

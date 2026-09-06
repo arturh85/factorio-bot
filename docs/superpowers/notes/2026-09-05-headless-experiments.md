@@ -1464,6 +1464,49 @@ fixture: an ore patch ringed with water out to 14 tiles and one furnace
 standing *on the ore*, which is ground `free_area_near` can never site on and
 adoption can always find.
 
+#### furnace — live validation (`run-1788659072-26571`)
+
+Seed 31337, map digest `c161fa3f437221d0` (the benchmark map, confirmed in
+provenance), four headless character bots, 5x, **release**, commit `fcaf4ea6`,
+on its own instance (`headless-o`, ports 4344 / 34224 / 7507).
+`factory_stage2.lua`. **All three milestones satisfied on the first iteration
+each, with zero failures of any kind**: 176 and 154 actions dispatched, 176 and
+154 settled, no failed or lost actions, no failed or lost walks, no refusals,
+no teleports.
+
+| | planned | observed |
+|---|---:|---:|
+| milestone 1 `researched:automation` | 176 steps / 21,779 ticks | satisfied at tick 22,267 (21,852 elapsed, **1.003x**) |
+| milestone 2 red cell at 6/min | 154 steps / 11,095 ticks | satisfied at tick 33,597 (11,322 elapsed, **1.020x**) |
+| milestone 3 witness | — | satisfied at tick 36,837, 0 iterations |
+| **stone furnaces** | **11 + 3 = 14** | **14 standing** |
+
+**The furnace count is the number this branch is about, and it matched
+exactly.** 11 planned for automation and 3 more for the red cell; a live
+`find_entities_filtered{name="stone-furnace"}` over RCON read **14** on the
+surface, beside 1 burner mining drill. The offline `plan` figure for milestone
+1 is the same 11 quoted in the before/after table above, so the offline loop
+predicted the placement exactly rather than approximately.
+
+Milestone 3 is the honest automation proof rather than a production curve:
+`automation-science-pack` in the one watched machine went **0 -> 5 in 3,215 of
+5,400 allowed ticks with every bot idle**.
+
+**Delivered tick rate: ~223 tps against the 300 requested** (5x), 74%, over 163
+s of wall clock; the one-minute load sat at 14-16 for most of the run. Per the
+rule the two sessions settled tonight, that splits the result in two: **the
+furnace count (14 = 14) and the failure count (zero) are validity checks and
+stand at any tick rate**, while the milestone ticks above are **indicative
+only** and should not be quoted against a run measured on a quiet floor. The
+asymmetry matters — a clean pass on a loaded box is trustworthy, a *failure*
+would have been ambiguous and would have needed a re-run before being believed.
+This one passed clean.
+
+One deliberate impurity, disclosed: the furnace count was taken with a
+read-only `/c ... find_entities_filtered` on the live game **after** the last
+milestone was satisfied. It mutates nothing, but it is a command on a measured
+run and provenance has no field that would record it.
+
 #### The falsification rule has its own failure mode: the ritual without the effect
 
 Worth its own heading because anyone following

@@ -10,6 +10,7 @@ pub mod report;
 pub mod schedule;
 pub mod score;
 pub mod state;
+pub mod substance;
 
 /// Test-only worlds. Not part of the crate's API: research needs a world with
 /// a force, and the shared `fixture_world` has none.

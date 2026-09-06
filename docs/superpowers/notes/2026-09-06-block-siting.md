@@ -525,3 +525,55 @@ finished. I asserted the happy path and the run corrected me.
 the ghost path in `recover_anchor` was exercised only by unit tests — verified
 load-bearing by disabling it and watching exactly the ghost test fail, but not
 by a game. Proving it needs a run interrupted mid-block and re-planned.
+
+---
+
+## Ghost recovery does NOT work live — measured, and it is inert end to end
+
+The ghosts note above says plainly that recovery reading a ghost was **not
+proven**, only unit-tested. It has now been measured, and the answer is
+negative.
+
+A script stamped the 9-entity `MovingBlock` as ghosts through
+`rcon.place_blueprint(only_ghosts = true)`, at an anchor 24 tiles from spawn —
+deliberately far enough that "recovered from the ghost" and "searched from the
+origin" could not be confused. Then it asked the planner where it thought the
+block was:
+
+```
+ghosts standing after the stamp:  9   (want 9)
+ghosts the PLANNER can see:       0   (the game sees 9)
+REAL block entities standing:     0
+plan: 38 steps, 10 placements, min placement (-10.0, -17.0)
+distance from the ghost anchor: dx=34.5 dy=23.5
+FAIL: the planner sited elsewhere -- it searched afresh and ignored the ghosts
+```
+
+**The discriminator is the middle line.** `rcon.find_entities_in_radius` asks
+the *game* and sees nine. `world.find_entities_in_radius` asks the *planner's
+own model* and sees none. So `recover_anchor`'s ghost pass is not wrong — **it
+is correct code that can never fire, because the model never carries a ghost to
+read.**
+
+Where they are lost: `on_some_entity_created` has no ghost filter and would
+stream one happily, but a script blueprint build does not raise that event, so
+nothing is ever written out. Neither the executor's `ActionKind::StampGhosts`
+nor a hand `rcon.place_blueprint` reaches the world model, because both go
+through the same call.
+
+**So the feature is inert end to end**, and the unit tests could not have shown
+it: they construct ghosts directly in `PlanState`, which is exactly the step
+the live path never performs. A reader with nothing to read — the same shape as
+a module with no caller, one level down.
+
+**What the earlier live run did and did not prove.** `run-1788681431-44834`
+showed a stamp is *dispatched* and that ghosts *appear in the game*, and its
+three surviving ghosts corresponded exactly to three unbuilt entities. All of
+that stands. **It never showed a ghost being read**, and this note said so at
+the time rather than being corrected into it.
+
+**The fix is mod-side and is not mine**: created ghosts need to reach the entity
+stream, either by writing them out explicitly after a blueprint build or by
+including them in the world snapshot. Until then, `recover_anchor` falls through
+to the vote path on every real expansion, which is the behaviour that existed
+before Task 8 — so nothing regressed, and nothing was gained either.

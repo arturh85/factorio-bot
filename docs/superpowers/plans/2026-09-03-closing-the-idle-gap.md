@@ -360,6 +360,37 @@ character bots; what differed was only the timing that made it bite. Still
 unproven on the clock: that a real 45-second wait beats a real replan. That
 needs a 1x client run of `factory_stage2.lua` on a quiet box.
 
+## ✅✅✅ RUN 21: GREEN IN 12:49 (`run-1788661309-04254`)
+
+2026-09-06 04:35, master `1e13806e`, four clients at 1x, seed 31337 `--new`,
+launched at load 0.71/2.07 on a floor the other session cleared. 100% tick
+delivery, roster `[1,2,3,4]` confirmed.
+
+| | run 19 | **run 21** |
+|---|---|---|
+| green cell | 13:29 (48,587) | **12:49 (46,146)** |
+| green witness | 14:07 | **13:26** |
+| plan | 452 / 49,050 | **442 / 47,542**, one plan |
+| executed / planned | 0.991 | **0.971** |
+| fleet utilisation | 67.4% | **69.5%** |
+| failed / lost / failed walks | 0 | **0 / 0 / 0 of 282** |
+| furnaces standing | 22 planned | **18 planned, 18 standing** |
+| ore drilled | 551 | **551** |
+| iron plate /min at 5 / 10 | 51 / 65 | **51 / 67** |
+
+Fresh-world green: 64:22 → … → 17:20 → 18:46 → 15:19 → 14:26 → 13:29 →
+**12:49**. Automation's record is 6:05, red science 9:57.
+
+Executed came in **below** plan (0.971) for the first time, which is the
+walk model being deliberately pessimistic by ~1% plus the drain policy
+choosing well. The furnace count is exact again — 18 planned, 18 standing —
+which is now the third independent confirmation that the offline loop
+predicts placement rather than approximating it.
+
+The plateau is unchanged: `roster-fed; no generator until 6:21`, production
+stopping at the plan's bill. Everything tonight made the plan smaller and
+more honest; none of it made the factory feed itself.
+
 ## ⚠️ `plan_best` DOUBLES PLANNING COST, AND THAT BILL COMES DUE ON BIG PLANS
 
 Measured by the `second` session on a 179-entity block, interleaved, three
@@ -3280,7 +3311,7 @@ infrastructure for a 3h17m game, not a harder milestone.
 | red science producing **once** | never observed | witnessed six times, all inside 780 ticks |
 | red science producing **at a rate** | impossible to claim | **5 packs in 3,240 ticks (~5.5/min)**, twice |
 | green science, planning | did not expand at all | plans end to end |
-| green science, live | never run | **WITNESSED fourteen times** — fresh world **13:29 / 14:07** (`run-1788647791-64290`), one 452-step plan, zero failures, executed/planned 0.991, 67% of ore drilled; 64:22 → … → 14:26 → 13:29 |
+| green science, live | never run | **WITNESSED fifteen times** — fresh world **12:49 / 13:26** (`run-1788661309-04254`), one 442-step plan, zero failures, executed/planned 0.971, 18 furnaces planned and 18 standing; 64:22 → … → 13:29 → 12:49 |
 | furnaces per run | 42 | **8** |
 | recovery (`obs:recover`) | never executed in any run | **fires live** |
 

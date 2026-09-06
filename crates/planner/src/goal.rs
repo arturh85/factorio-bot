@@ -229,6 +229,40 @@ pub enum Goal {
         entity: String,
         unlocks: Option<String>,
     },
+    /// The next rung above [`Goal::Extracted`]: an extractor stands on a well
+    /// of `entity` **and what it pumps has somewhere to go** -- a storage tank
+    /// sited for the whole field, with pipe between the two.
+    ///
+    /// # Why this is a goal of its own and not a better `Extracted`
+    ///
+    /// `Extracted` names an *act* the game rewards: Factorio 2.0's
+    /// `mine-entity` trigger fires the moment a pumpjack works a well, and a
+    /// pumpjack with nothing connected does fire it -- it fills its own output
+    /// fluidbox and stops, which is several extractions after the first. So
+    /// `Extracted` is honestly satisfied by a machine alone, and widening it
+    /// to demand a tank would make `researched:oil-processing` refuse on maps
+    /// where it currently plans end to end.
+    ///
+    /// This one names a *standing arrangement*: after it, crude exists
+    /// somewhere the model can point at. That is the precondition for
+    /// everything above -- **no character inventory can hold a fluid**
+    /// (`crate::substance`, and
+    /// `docs/superpowers/notes/2026-09-06-a-fluid-is-not-an-item.md`), so
+    /// until a tank stands there is nowhere for crude to *be*, and the trunk
+    /// to a second tank at the base has no near end to start from.
+    ///
+    /// `unlocks` rides on it for the same reason it rides on `Extracted` and
+    /// `Produced`: only the method that stands the machine up knows which
+    /// action to hang the `Effect::Researched` on.
+    ///
+    /// The topology is the owner's, recorded in
+    /// `docs/superpowers/notes/2026-09-06-how-oil-is-actually-played.md`:
+    /// pumpjacks pipe to one tank at the patch, and one long trunk crosses to
+    /// a second tank at the base. **This goal is the left-hand half.**
+    Gathered {
+        entity: String,
+        unlocks: Option<String>,
+    },
     /// This blueprint stands at this anchor.
     ///
     /// **Shaped to survive replanning.** Expanding it means *the entities not
@@ -309,6 +343,10 @@ impl std::fmt::Display for Goal {
             Goal::Extracted { entity, unlocks } => match unlocks {
                 Some(tech) => write!(f, "extract from {} to unlock {}", entity, tech),
                 None => write!(f, "extract from {}", entity),
+            },
+            Goal::Gathered { entity, unlocks } => match unlocks {
+                Some(tech) => write!(f, "gather {} into a tank to unlock {}", entity, tech),
+                None => write!(f, "gather {} into a tank", entity),
             },
             Goal::Built { blueprint, site } => {
                 let where_ = match site {

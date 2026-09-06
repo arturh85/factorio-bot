@@ -387,6 +387,19 @@ impl std::error::Error for PlanRefusal {}
 ///   `NotHandMinable`; no amount of exploring or researching changes it,
 ///   because it is the shape of the request that is wrong. The message names
 ///   every producing recipe and its category, which is the diagnosis.
+/// - [`NoFluidBuffer`](PlannerError::NoFluidBuffer),
+///   [`NoTankSite`](PlannerError::NoTankSite),
+///   [`NoPipeRoute`](PlannerError::NoPipeRoute) and
+///   [`FluidPortUnknown`](PlannerError::FluidPortUnknown) -- `method::gather`'s
+///   ladder, and three different kinds of verdict in a row. The first is about
+///   the **prototypes** (nothing in this world buffers or carries a fluid), the
+///   middle two about the **ground** (no clear footprint at the field centroid;
+///   no pipe route to it, with the blocking tiles named), and the last about
+///   the **capture** -- the mod sent no `fluidbox_prototypes`, so where a
+///   machine takes fluid in or out cannot be read. A script acts on the middle
+///   two by clearing ground or choosing another field, and on the outer two by
+///   not asking, or by dumping the world again from a mod that describes
+///   fluidboxes.
 fn refusal_for(err: &PlannerError) -> Option<PlanRefusal> {
     use miette::Diagnostic;
 
@@ -412,6 +425,10 @@ fn refusal_for(err: &PlannerError) -> Option<PlanRefusal> {
         | PlannerError::NoExtractor { .. }
         | PlannerError::ExtractorLocked { .. }
         | PlannerError::ExtractionNotModelled { .. }
+        | PlannerError::NoFluidBuffer { .. }
+        | PlannerError::NoTankSite { .. }
+        | PlannerError::NoPipeRoute { .. }
+        | PlannerError::FluidPortUnknown { .. }
         | PlannerError::BlockGroundOccupied { .. }
         | PlannerError::NoSiteFound { .. }
         | PlannerError::SustainSupplyNotStanding { .. }

@@ -221,53 +221,136 @@ impl Method for Extract {
         if let Some(refusal) = world_refusal(&ctx.state, entity, &origin) {
             return Err(refusal);
         }
-        let extractor = extractor_for(&ctx.state, entity)?;
-        match recipe_for(&ctx.state, &extractor).map(|r| recipe_gate(&ctx.state, &r)) {
-            Some(RecipeGate::Open) | Some(RecipeGate::PlannedResearch(_)) => {}
-            Some(RecipeGate::NeedsResearch(technology)) => {
-                return Err(PlannerError::ExtractorLocked {
-                    entity: entity.clone(),
-                    extractor,
-                    technology,
-                });
-            }
-            Some(RecipeGate::Unobtainable) => {
-                return Err(PlannerError::NoExtractor {
-                    entity: entity.clone(),
-                    why: format!(
-                        "a {extractor} mines it, and its recipe is disabled with no technology \
-                         to unlock it"
-                    ),
-                });
-            }
-            None => {
-                return Err(PlannerError::NoExtractor {
-                    entity: entity.clone(),
-                    why: format!("a {extractor} mines it, and no recipe in this world makes one"),
-                });
-            }
+        let sited = site_extractor(&ctx.state, entity, &origin)?;
+        let (steps, _place_id) = extractor_steps(ctx, entity, &sited, unlocks.as_deref(), &[])?;
+        Ok(steps)
+    }
+
+    fn refusal(&self, goal: &Goal, ctx: &ExpansionCtx) -> Option<PlannerError> {
+        let Goal::Extracted { entity, .. } = goal else {
+            return None;
+        };
+        Some(refusal_for(&ctx.state, entity, &origin_of(ctx)))
+    }
+}
+
+/// An extractor, decided but not yet emitted: which machine, what it draws,
+/// which well tile it stands on, and the ground that tile costs.
+///
+/// The return of [`site_extractor`], which is **pure** -- it touches no
+/// `ExpansionCtx` and reserves nothing -- so a caller that needs the site
+/// before it commits to anything (`method::gather`, which routes pipe to it)
+/// can ask without leaving a half-built plan behind if a later step refuses.
+#[derive(Debug, Clone)]
+pub(crate) struct SitedExtractor {
+    /// The machine's prototype name.
+    pub name: String,
+    /// Its electric draw, in kW, from [`PlanState::consumer_draw_kw`].
+    pub kw: f64,
+    /// The well tile it is centred on.
+    pub site: Position,
+    /// Its collision footprint at that tile, facing [`NORTH`].
+    pub area: factorio_bot_core::types::Rect,
+}
+
+/// Tiers 2 to 4 of the ladder, and then the siting search: which machine
+/// mines `entity`, whether its recipe is reachable, whether this planner
+/// knows its draw, and which charted well tile it can stand on.
+///
+/// **The order of the questions is the order of the ladder** and is not
+/// arbitrary: an extractor whose recipe is locked must be reported as locked
+/// even on a map where no well tile is free, because research is the thing
+/// the caller can act on first.
+pub(crate) fn site_extractor(
+    state: &PlanState,
+    entity: &str,
+    origin: &Position,
+) -> Result<SitedExtractor, PlannerError> {
+    let extractor = extractor_for(state, entity)?;
+    match recipe_for(state, &extractor).map(|r| recipe_gate(state, &r)) {
+        Some(RecipeGate::Open) | Some(RecipeGate::PlannedResearch(_)) => {}
+        Some(RecipeGate::NeedsResearch(technology)) => {
+            return Err(PlannerError::ExtractorLocked {
+                entity: entity.to_string(),
+                extractor,
+                technology,
+            });
         }
-        // An extractor whose draw this planner does not know is one it cannot
-        // decide is powered, and `Condition::Powered` would read the silence
-        // as zero draw and pass. That is the one table in `crate::state` whose
-        // unknown name errs towards permitting, so this refuses on its behalf.
-        let Some(kw) = ctx.state.consumer_draw_kw(&extractor) else {
-            return Err(PlannerError::ExtractionNotModelled {
-                entity: entity.clone(),
-                extractor,
+        Some(RecipeGate::Unobtainable) => {
+            return Err(PlannerError::NoExtractor {
+                entity: entity.to_string(),
+                why: format!(
+                    "a {extractor} mines it, and its recipe is disabled with no technology \
+                         to unlock it"
+                ),
             });
-        };
-
-        let site = choose_site(&ctx.state, entity, &extractor, &origin)?;
-        let Some(area) = ctx.state.collision_area(&extractor, &site) else {
-            // Unreachable in practice: `choose_site` only returns a tile
-            // `is_area_free_facing` accepted, which needs the same prototype.
-            return Err(PlannerError::ExtractionNotModelled {
-                entity: entity.clone(),
-                extractor,
+        }
+        None => {
+            return Err(PlannerError::NoExtractor {
+                entity: entity.to_string(),
+                why: format!("a {extractor} mines it, and no recipe in this world makes one"),
             });
-        };
+        }
+    }
+    // An extractor whose draw this planner does not know is one it cannot
+    // decide is powered, and `Condition::Powered` would read the silence
+    // as zero draw and pass. That is the one table in `crate::state` whose
+    // unknown name errs towards permitting, so this refuses on its behalf.
+    let Some(kw) = state.consumer_draw_kw(&extractor) else {
+        return Err(PlannerError::ExtractionNotModelled {
+            entity: entity.to_string(),
+            extractor,
+        });
+    };
 
+    let site = choose_site(state, entity, &extractor, origin)?;
+    let Some(area) = state.collision_area(&extractor, &site) else {
+        // Unreachable in practice: `choose_site` only returns a tile
+        // `is_area_free_facing` accepted, which needs the same prototype.
+        return Err(PlannerError::ExtractionNotModelled {
+            entity: entity.to_string(),
+            extractor,
+        });
+    };
+    Ok(SitedExtractor {
+        name: extractor,
+        kw,
+        site,
+        area,
+    })
+}
+
+/// The steps that stand `sited` up: its bill, whatever power it needs, and
+/// the `Place` that creates it -- with `unlocks`' `Effect::Researched` riding
+/// on that placement.
+///
+/// Returns the placement's id alongside the steps, because a caller that
+/// attaches anything downstream of the machine (`method::gather`'s pipe run)
+/// needs an edge to it and `infer_edges` cannot draw one: nothing an emitted
+/// pipe requires is *satisfied* by the pumpjack existing.
+///
+/// `reserved` is ground a caller has already committed to but has not yet
+/// emitted -- `method::gather`'s pipe run, computed before this is called so
+/// that it can refuse without leaving anything behind. It is handed to
+/// `ensure_powered` as occupants, because the pole run is sited here and
+/// would otherwise take a tile the caller is about to place a pipe on: the
+/// pipe's own `AreaFree` would then fail at execution, after the plan had
+/// been called good. `Extract` passes an empty slice.
+pub(crate) fn extractor_steps(
+    ctx: &mut ExpansionCtx,
+    entity: &str,
+    sited: &SitedExtractor,
+    unlocks: Option<&str>,
+    reserved: &[factorio_bot_core::types::FactorioEntity],
+) -> Result<(Vec<Step>, crate::ids::ActionId), PlannerError> {
+    let SitedExtractor {
+        name: extractor,
+        kw,
+        site,
+        area,
+    } = sited;
+    let (extractor, kw, site, area) = (extractor.clone(), *kw, site.clone(), area.clone());
+    {
         let mut steps: Vec<Step> = Vec::new();
         // The machine itself, first, for the same reason `power::plant_steps`
         // bills before it places: a shortfall refuses before any ground is
@@ -289,7 +372,8 @@ impl Method for Extract {
         // here, or the model cannot see the finished run carrying it".
         // Carrying power that far is a thing this planner does not model,
         // which is what the refusal says.
-        let occupant = extractor_entity(&ctx.state, &extractor, &site);
+        let mut occupants = vec![extractor_entity(&ctx.state, &extractor, &site)];
+        occupants.extend_from_slice(reserved);
         let powering = ensure_powered(
             ctx,
             &extractor,
@@ -297,10 +381,10 @@ impl Method for Extract {
             &area,
             kw,
             SUPPLY_SEARCH_RADIUS,
-            std::slice::from_ref(&occupant),
+            &occupants,
         )?
         .ok_or_else(|| PlannerError::ExtractionNotModelled {
-            entity: entity.clone(),
+            entity: entity.to_string(),
             extractor: extractor.clone(),
         })?;
         steps.extend(powering.steps);
@@ -330,7 +414,7 @@ impl Method for Extract {
         // fluid no inventory can hold, which is why `Goal::Extracted` is not a
         // `Goal::Produced` in the first place.
         if let Some(tech) = unlocks {
-            eff.push(Effect::Researched(tech.clone()));
+            eff.push(Effect::Researched(tech.to_string()));
         }
         steps.push(Step::Act(Box::new(Action {
             id: place_id,
@@ -377,14 +461,7 @@ impl Method for Extract {
                 lag: 0,
             });
         }
-        Ok(steps)
-    }
-
-    fn refusal(&self, goal: &Goal, ctx: &ExpansionCtx) -> Option<PlannerError> {
-        let Goal::Extracted { entity, .. } = goal else {
-            return None;
-        };
-        Some(refusal_for(&ctx.state, entity, &origin_of(ctx)))
+        Ok((steps, place_id))
     }
 }
 

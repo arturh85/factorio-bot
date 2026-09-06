@@ -380,6 +380,94 @@ pub enum PlannerError {
     )]
     ExtractionNotModelled { entity: String, extractor: String },
 
+    /// [`Goal::Gathered`](crate::goal::Goal::Gathered) asked for a fluid
+    /// buffer and this world has no prototype that is one, or the one it has
+    /// cannot be obtained.
+    ///
+    /// Tier 2 of `method::gather`'s ladder, and asked of the **world** rather
+    /// than of a hard-coded `storage-tank`: the prototype is found by
+    /// `entity_type`, so a modded tank answers and a capture that predates the
+    /// field refuses by name instead of quietly picking nothing.
+    #[error("nothing in this world can gather the {fluid} a {machine} pumps: {why}")]
+    #[diagnostic(
+        code(planner::no_fluid_buffer),
+        help(
+            "a fluid cannot be carried in an inventory, so gathering needs a tank standing at \
+             the patch; without one there is nowhere for the output to go"
+        )
+    )]
+    NoFluidBuffer {
+        fluid: String,
+        /// The extractor whose output has nowhere to go. **Named `machine`
+        /// and not `source`**: `thiserror` treats a field called `source` as
+        /// the error's `std::error::Error` cause and tries to call
+        /// `as_dyn_error` on it, which a `String` does not implement.
+        machine: String,
+        why: String,
+    },
+
+    /// A tank was wanted within reach of a resource field and every candidate
+    /// footprint out to the search bound was occupied.
+    ///
+    /// Distinct from [`PlannerError::NoSiteFound`], which is the generic
+    /// block-siting refusal: this one names the **field** it was anchored on
+    /// and how many of its tiles it was averaging, because the two questions a
+    /// reader has are "where did it look" and "was it looking at the right
+    /// field at all".
+    #[error(
+        "no clear {tank} site within {searched} tiles of the {wells}-well {entity} field centred \
+         on {centroid}; nearest obstruction: {nearest_obstruction}"
+    )]
+    #[diagnostic(code(planner::no_tank_site))]
+    NoTankSite {
+        tank: String,
+        entity: String,
+        wells: usize,
+        centroid: String,
+        searched: i32,
+        nearest_obstruction: String,
+    },
+
+    /// Two fluid machines could not be joined by pipe.
+    ///
+    /// **Returned before anything is placed**, the same promise
+    /// `method::connect`'s `ConnectRefusal` makes and for the same reason: a
+    /// pipe run that stops halfway is worse than no pipe run, because the
+    /// machine at the near end fills up and stops with nothing to show for the
+    /// iron.
+    ///
+    /// `from` and `to` each name a machine *and* where it stands, in one
+    /// string rather than in two fields, because `PlannerError` is returned by
+    /// value everywhere and clippy's `result_large_err` is measured against
+    /// the **largest** variant: five `String`s here would have pushed the
+    /// whole enum over the threshold and cost every `Result` in the crate a
+    /// box.
+    #[error("no pipe route from {from} to {to}: {why}")]
+    #[diagnostic(code(planner::no_pipe_route))]
+    NoPipeRoute {
+        from: String,
+        to: String,
+        why: String,
+    },
+
+    /// A machine this planner wants to pipe into has no pipe connection it can
+    /// read off the prototype table.
+    ///
+    /// **Never guessed.** A fluid connection placed at the wrong tile yields a
+    /// layout that builds 100% correctly and moves nothing -- the same silent
+    /// class as an inserter facing the wrong way -- so a prototype whose
+    /// `fluidbox_prototypes` are missing, empty, or shaped in a way this
+    /// module does not understand is refused by name.
+    #[error("cannot tell where a {prototype} takes fluid in or out: {why}")]
+    #[diagnostic(
+        code(planner::fluid_port_unknown),
+        help(
+            "fluidbox_prototypes with pipe_connections.positions is what answers this; a world \
+             captured before the mod sent them cannot be piped on"
+        )
+    )]
+    FluidPortUnknown { prototype: String, why: String },
+
     /// A `Step::Owned` whose holder names no bot.
     ///
     /// Deliberately an error rather than "keep the current chain". A handover

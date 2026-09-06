@@ -173,6 +173,14 @@ pub(crate) fn parse_goal(spec: &str) -> Result<Goal> {
       whose: Holder::Anyone,
       unlocks: None,
     }),
+    // `gathered:<resource-entity>` -- note the argument is an ENTITY, not an
+    // item: `crude-oil` here names the well in the ground, the same way
+    // `Goal::Extracted` does, and what comes out of it is a fluid no
+    // inventory can hold.
+    ["gathered", entity] if !entity.is_empty() => Ok(Goal::Gathered {
+      entity: (*entity).to_owned(),
+      unlocks: None,
+    }),
     ["producing", item, n] if !item.is_empty() => Ok(Goal::Producing {
       item: (*item).to_owned(),
       per_minute: count(n)?,
@@ -201,6 +209,7 @@ pub(crate) fn parse_goal(spec: &str) -> Result<Goal> {
       "`{spec}` is not a goal. Expected have:<item>:<count>, \
        produced:<item>:<count>, producing:<item>:<per-minute>, \
        sustain:<item>:<per-minute>:<window-ticks>, \
+       gathered:<resource-entity>, \
        charted:<x>:<y>:<radius> or researched:<technology> -- or --goal-json \
        for anything else."
     )),

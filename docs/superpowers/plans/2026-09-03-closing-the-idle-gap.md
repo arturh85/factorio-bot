@@ -403,6 +403,17 @@ that clause is empty only when every character in the box is the acting bot
 blocker bot 4 at (20.02, 5.07). Bot 4 never moved between ticks 1380 and
 1920: what a mod that never asks looks like.
 
+**Sharpened by its author on checking rather than accepting my account:** at
+that run's branch HEAD, `control.lua` contained **zero** occurrences of
+`describe_footprint_blockers` — the function arrived half an hour *later*.
+So the missing clause was not the function returning empty; the function did
+not exist. And the mechanism is nastier than "provenance was wrong": **the
+worktree's binary was launched from the main checkout's directory**, so
+`git.commit` recorded the checkout's HEAD — a commit whose mod genuinely does
+have the diagnostics — while the mod came from the worktree. In their words,
+*provenance was accurate about the thing it measures and silent about the
+thing that mattered: not blank, but confidently about the wrong object.*
+
 **So that run's footprint evidence is void**, and both sessions had reasoned
 from it — I sized a 45-second busy budget partly on it, and the other
 session drew conclusions about its own block. What survives is the siting
@@ -450,15 +461,22 @@ run out. It also corrects my earlier reasoning in the useful direction — this
 is not client-specific and never was, so **one shared cause is likelier than
 two**.
 
-**3. One unresolvable placement costs the rest of the block.** That single
-refusal ended the batch with **~50 of 179 placements never dispatched**.
+**3. VOID — one unresolvable placement costs the rest of the block.** That
+single refusal ended the batch with ~50 of 179 placements never dispatched
+— **but the run loaded a mod without the footprint work at all, so this
+number cannot be stood behind.** It may well be true; it is not measured.
+Do not size anything on it. Kept here because it was acted on, and the
+correction matters more than the claim. The original text follows.
+
+That single refusal ended the batch with ~50 of 179 placements never
+dispatched.
 Failing fast is defensible; losing fifty entities because one bot stands on
 one tile is a blast radius nobody chose. Two bots also stalled walking,
 `blocked by our own stone-furnace` and `blocked by our own inserter` — **the
 block trapping its own builders**, which is the same shortage of free ground
 as (2).
 
-Also retracted by its author: **bands do not prevent bots colliding.** They
+**Also void, same run:** *bands do not prevent bots colliding.* They
 stop bots interleaving, not two bots meeting at a slab seam, which is where
 these collisions happened. The 50-entity shortfall was measured on a loaded
 floor and needs a quiet re-run before anyone quotes a rate for it; the

@@ -1240,6 +1240,31 @@ entry over a log line:
   T-junction version consumed 100 of 100 ore and 50 of 50 coal and ran both
   furnaces at 192 ticks/plate, i.e. 100% of a stone furnace's rate. See
   `docs/superpowers/notes/2026-09-06-t-junction-smelter.md`.
+- **A smelter line fed from one end must have a SATURATED input belt; a partial
+  one starves its far end completely.** Measured 2026-09-06 on six furnaces
+  (three a side of one mixed belt) deliberately under-supplied: the two westmost
+  took **117 of 150 plates, 78%**, and the two eastmost took 3 between them.
+  The starved furnaces were **not** short of fuel — they ended with *full* fuel
+  slots and no ore. **Coal balances itself and ore does not, because of buffer
+  size**: a fuel slot caps at 5 and then refuses more, so coal rides past the
+  near arm to the next takeoff, while a furnace's ore input has no such small
+  ceiling and the near arm absorbs everything. So "add more furnaces" is not the
+  scaling move — saturating the belt is. 48 stone furnaces saturate a yellow
+  belt (0.3125 plate/s each against 15 items/s), which is why real designs run a
+  full belt into 48 rather than a partial belt into a few. A double-sided line
+  does work: an inserter picks from **both** lanes, preferring the far one, so
+  two rows meeting opposite lanes first self-correct once a furnace's ore slot
+  fills. See `docs/superpowers/notes/2026-09-06-two-rows-off-one-belt.md`.
+- **Both SEARCHING forms of `goal.built` ignore characters, so a big block can
+  wall the roster in.** Siting treats a character as non-blocking on purpose — a
+  bot can walk away, so it should not veto a site — and only the explicit-anchor
+  form refuses for a bot on the footprint. That holds until the block is large
+  enough to enclose the bots it was sited around: a 27-entity block spanning
+  ~16x8 with rows above and below a corridor, sited from the roster centroid,
+  produced `the character is already walled in here ... pocket_tiles=1.0`, a
+  walk ending inside a furnace's collision box, and **`done=true` beside
+  `pending=13`** with 2 of 6 furnaces standing. Pass a `near` hint away from
+  spawn as a workaround; the gap itself is open.
 - **A burner block can EARN the research that unlocks its electric successor,
   in about 37 seconds of game time.** Both prerequisites of
   `automation-science-pack` are trigger technologies fired by ordinary smelting:

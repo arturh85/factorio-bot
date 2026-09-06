@@ -42,6 +42,17 @@ blueprints = {
     -- `splitter`, `underground-belt` and `electric-mining-drill` are not, which
     -- is why FurnaceLine and MinerLine cannot be built early and this can.
     TJunctionSmelter = "0eNqV08FuhCAQBuB34awbAXGFR+i1vTVNo3aakigawKYb47sXNWvbrNsMR5jwMfkzM5G6HWGw2niiJqI9dET9uktIW9XQhrunh9E0XvfmsYPWgw0lMF57DY6o52k7XF7N2NWhqGhCTNVBeOhtZdzQW58GaBGH3ukFWj78IoqfREIuRGUnMSfkTVtotmo+JzcsQ7N5DMvRrIhhczRbxLACzZ5j2ALNljHsGc3KGLZEszSLceXuatubtPkA98/QpjSYBwrNdqYerQGbauPAbntzz7rpLzuSafSsrk3+gcsjmMXDGQrmqEh3lN+JNMdHulsMFanAy9eNoii4wMNlFPyzVM73BtL3wFcNHPS7ovww0BKLyCvykpBPsG6tiILJXErBc0Y5ZfP8DXmZEQ8=",
+    -- The FurnaceLine shape at six furnaces: three per side, above and below one
+    -- central mixed belt. Proves a double-sided burner line WORKS -- both rows
+    -- produce, so the far-lane preference self-corrects when a furnace's ore
+    -- slot fills -- and that it DOES NOT SHARE: under-supplied, the two westmost
+    -- of six took 78 percent of the output while the far end ended with full
+    -- fuel slots and no ore. Coal balances itself because a fuel slot caps at 5
+    -- and then refuses more, letting coal ride past; ore has no such small
+    -- ceiling, so the near arm absorbs all of it. A long line fed from one end
+    -- therefore needs a SATURATED ore belt, not merely a longer one. See
+    -- docs/superpowers/notes/2026-09-06-two-rows-off-one-belt.md.
+    TwoRowSmelter = "0eNqd09FugyAUBuB34VobQbDiY3S7W5ZFu7OMRLEBuq5p+u7DNrNbiss5uxTC5y/H/8S6fg87Z2xgzYmZAANrfqxlrG876OPa42HcjIeHAfoALq6DDSYY8Kx5Ol0fji92P3Rxs+EZs+0A8VRwrfW70YU8KhO3G308NtrpbZ+sKVcqY0fWFCt1ztircbC97spzdscKNCspbIlmFYWVaLaisArNrilshWZrCrtGs5rC1miWFxRX411OcXkxw8aNNt++g/+jDXnEzynmVqxu7yy43FgP7lrIJesuYJGSBbkEl5C/4DoF09t1nzgJS9SVzmi5cKUKf6WzJVBXWuHl76pyFHwrlQ+jhfwt8u0WEuwFLZPfXePTaVI6jU2nl9OJAp9ubiIqnuDYeFPZFvMJ+mxxv7UoacPNRTKfpE8XmU/RxruQr/rHfJEB18QBTwmfM/YBzl/2VCW01FqVUvCSx80vMsr/aA==",
 }
 
 rcon.cheat_technology("automation")

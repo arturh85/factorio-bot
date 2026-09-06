@@ -567,6 +567,16 @@ pub(crate) struct BlockPower {
     pub disconnected_poles: usize,
     /// Consumers no pole of this block supplies, by name and offset.
     pub uncovered: Vec<(String, Position)>,
+    /// What the block's own generators contribute, in kW.
+    ///
+    /// `FurnaceLine` is why this is worth carrying beside the draw. The record
+    /// has always described it as having "no generator at all", which is a
+    /// statement about generation with no number attached — and a block that
+    /// brings its own power needs no plant planned for it, so the two figures
+    /// answer different questions and both are needed.
+    pub generation_kw: f64,
+    /// How many entities that generation came from.
+    pub generators: usize,
 }
 
 impl BlockPower {
@@ -629,6 +639,15 @@ pub(crate) fn blueprint_power(state: &PlanState, bp: &Blueprint, anchor: &Positi
     }
     let disconnected_poles = reached.iter().filter(|r| !**r).count();
 
+    let mut generation_kw = 0.0;
+    let mut generators = 0usize;
+    for e in &bp.entities {
+        if let Some(kw) = state.generator_output_kw(&e.name) {
+            generation_kw += kw;
+            generators += 1;
+        }
+    }
+
     let mut uncovered = Vec::new();
     for e in &bp.entities {
         if state.consumer_draw_kw(&e.name).is_none() {
@@ -655,6 +674,8 @@ pub(crate) fn blueprint_power(state: &PlanState, bp: &Blueprint, anchor: &Positi
         poles: poles.len(),
         disconnected_poles,
         uncovered,
+        generation_kw,
+        generators,
     }
 }
 
@@ -1122,8 +1143,11 @@ impl Method for BuildBlock {
             }
             return Err(PlannerError::BlueprintRefused {
                 reason: format!(
-                    "the block draws {:.0} kW but cannot distribute it: {}",
+                    "the block draws {:.0} kW and generates {:.0} kW from {} \
+                     generator(s), but cannot distribute it: {}",
                     power.demand.kw,
+                    power.generation_kw,
+                    power.generators,
                     why.join("; ")
                 ),
             });
@@ -3196,6 +3220,18 @@ mod block_demand_tests {
         PlanState::from_world(Arc::new(fixture_world()), &[BotId(1)])
     }
 
+    /// One blueprint entity at an offset. The sibling `tests` module has its
+    /// own; this module cannot reach it, and duplicating four lines beats
+    /// widening the other one's visibility for a test helper.
+    fn ent(x: f64, y: f64, name: &str) -> BlueprintEntity {
+        BlueprintEntity {
+            name: name.to_string(),
+            offset: Position::new(x, y),
+            direction: 0,
+            underground_half: None,
+        }
+    }
+
     fn fixture(name: &str) -> Blueprint {
         let src = std::fs::read_to_string(
             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -3335,6 +3371,113 @@ mod block_demand_tests {
                 .iter()
                 .any(|e| e.name == "inserter" || e.name == "small-electric-pole"),
             "this block is defined by needing electronics"
+        );
+    }
+
+    /// The FurnaceLine finding, now quantified on BOTH sides.
+    ///
+    /// CLAUDE.md has always said the block has "no generator at all" — a
+    /// statement about generation with no number attached, sitting beside a
+    /// draw that was equally unquantified until today. Both halves are numbers
+    /// now, and the pair is what says a plant is needed rather than either one
+    /// alone.
+    #[test]
+    fn furnace_line_generates_nothing_against_its_624_kw() {
+        let power = blueprint_power(&state(), &fixture("FurnaceLine"), &Position::new(0.0, 0.0));
+        assert_eq!(power.generators, 0, "13 poles and not one generator");
+        assert_eq!(power.generation_kw, 0.0);
+        assert!(
+            (power.demand.kw - 624.0).abs() < 1e-9,
+            "against 624 kW of draw"
+        );
+        assert!(
+            power.generation_kw < power.demand.kw,
+            "624 kW of draw against nothing that makes any"
+        );
+    }
+
+    /// A block carrying its own generation is visible as such.
+    ///
+    /// There is deliberately **no `powers_itself()` predicate yet**: its only
+    /// real caller is the power wiring in `expand`, which is blocked on
+    /// `ensure_powered` charging a block's own consumers against its own
+    /// budget. Shipping the predicate ahead of that caller is the shape clippy
+    /// caught twice in this file today, and the shape that let
+    /// `method::connect`'s geometry defect survive four reviews.
+    ///
+    /// Built inline rather than as a fixture: the claim is about the
+    /// arithmetic, not about a layout anyone builds.
+    #[test]
+    fn a_block_carrying_its_own_generation_powers_itself() {
+        let s = state();
+        let self_powered = Blueprint {
+            entities: vec![
+                ent(0.0, 0.0, "inserter"),
+                ent(1.0, 0.0, "small-electric-pole"),
+                ent(4.0, 0.0, "steam-engine"),
+            ],
+            version: 0,
+        };
+        let power = blueprint_power(&s, &self_powered, &Position::new(0.0, 0.0));
+        assert_eq!(power.demand.consumers, 1, "one inserter");
+        assert!((power.demand.kw - 13.0).abs() < 1e-9, "13 kW of draw");
+        assert_eq!(power.generators, 1, "one steam engine");
+        assert!(
+            (power.generation_kw - 900.0).abs() < 1e-9,
+            "900 kW nameplate"
+        );
+        assert!(power.generation_kw >= power.demand.kw);
+
+        // Remove the engine and the same block cannot: the assertion is about
+        // the generation term, not about the block being small.
+        let unpowered = Blueprint {
+            entities: self_powered.entities[..2].to_vec(),
+            version: 0,
+        };
+        let power = blueprint_power(&s, &unpowered, &Position::new(0.0, 0.0));
+        assert_eq!(power.generators, 0);
+        assert_eq!(power.generation_kw, 0.0, "no engine, no generation");
+    }
+
+    /// **A solar block reads as unpowered, deliberately — including the one
+    /// that demonstrably ran.**
+    ///
+    /// `generation_kw` credits deterministic sources only, and says why: a
+    /// steam engine's 900 kW is the same at every hour, while a solar panel's
+    /// 60 kW is a day/night average whose instantaneous value is whatever the
+    /// map clock says. A planner whose output must be identical for identical
+    /// inputs cannot credit a number that is not.
+    ///
+    /// This is pinned because it is a surprise waiting for the next reader, and
+    /// it already caught me. `electric_smelter_live.lua` powers its block with
+    /// **four hand-placed solar panels and makes 78 plates**, so the block runs
+    /// — and this planner would still refuse to plan it as self-powered. The
+    /// run's own header calls the panels apparatus rather than design, and this
+    /// is the reason that wording matters: solar is a fine way to prove a block
+    /// works and can never be a way to plan one.
+    #[test]
+    fn a_solar_block_reads_as_unpowered_on_purpose() {
+        let s = state();
+        let solar = Blueprint {
+            entities: vec![
+                ent(0.0, 0.0, "inserter"),
+                ent(1.0, 0.0, "small-electric-pole"),
+                ent(4.0, 0.0, "solar-panel"),
+                ent(8.0, 0.0, "accumulator"),
+            ],
+            version: 0,
+        };
+        let power = blueprint_power(&s, &solar, &Position::new(0.0, 0.0));
+        assert_eq!(
+            power.generators, 0,
+            "solar panels and accumulators are absent from the generation table \
+             on purpose -- their output is not deterministic"
+        );
+        assert_eq!(power.generation_kw, 0.0);
+        assert_eq!(
+            power.generation_kw, 0.0,
+            "a solar block reads as unpowered here even though a live run \
+             proved one delivers 78 plates"
         );
     }
 

@@ -143,6 +143,65 @@ struct RawPos {
     y: f64,
 }
 
+/// The inverse of [`decode`]: a blueprint string Factorio -- and `decode` --
+/// will read back as exactly these entities.
+///
+/// Exists so a layout **generated in Rust** can be handed to the same paths a
+/// hand-exported blueprint takes: `Goal::Built` takes blueprint *text*, and
+/// `scripts/rate_three_drills.lua` measures a block from its string. Without
+/// this, a searched layout could be scored offline but never stood up in a
+/// game, and the score would have nothing to be checked against.
+///
+/// Writes a **2.0** blueprint (`BLUEPRINT_VERSION_2_0`), so `direction` is
+/// carried on the 16-point scale `BlueprintEntity::direction` already uses
+/// and `decode` folds it with `% 16` rather than doubling it. The `type` key
+/// is written only for an underground belt, and the entity keys emitted are
+/// exactly the ones `ALLOWED_ENTITY_KEYS` admits, so the round trip cannot
+/// trip the decoder's own allowlist.
+pub fn encode(entities: &[BlueprintEntity]) -> String {
+    use std::io::Write;
+    let entity_json: Vec<Value> = entities
+        .iter()
+        .enumerate()
+        .map(|(i, e)| {
+            let mut obj = serde_json::json!({
+                "entity_number": i + 1,
+                "name": e.name,
+                "position": {"x": e.offset.x(), "y": e.offset.y()},
+                "direction": e.direction,
+            });
+            if let Some(half) = e.underground_half {
+                obj["type"] = Value::String(
+                    match half {
+                        UndergroundHalf::Input => "input",
+                        UndergroundHalf::Output => "output",
+                    }
+                    .to_owned(),
+                );
+            }
+            obj
+        })
+        .collect();
+    let envelope = serde_json::json!({
+        "blueprint": {
+            "item": "blueprint",
+            "version": crate::types::BLUEPRINT_VERSION_2_0,
+            "entities": entity_json,
+        }
+    });
+    let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder
+        .write_all(envelope.to_string().as_bytes())
+        .expect("an in-memory zlib write cannot fail");
+    let compressed = encoder
+        .finish()
+        .expect("an in-memory zlib finish cannot fail");
+    format!(
+        "0{}",
+        base64::engine::general_purpose::STANDARD.encode(compressed)
+    )
+}
+
 pub fn decode(text: &str) -> Result<Blueprint, BlueprintError> {
     // The leading byte is the format version, not part of the payload.
     let payload = text.strip_prefix('0').unwrap_or(text);

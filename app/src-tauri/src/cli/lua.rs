@@ -8,6 +8,7 @@ use crate::settings::load_app_settings_with;
 use clap::{Arg, ArgAction, ArgMatches, Command, value_parser};
 use factorio_bot_core::factorio::rcon::{FactorioRcon, RconSettings};
 use factorio_bot_core::factorio::snapshot::attach_world;
+use factorio_bot_core::factorio::world::{FactorioSurface, FactorioWorld};
 use factorio_bot_core::miette::{Context as _, Result};
 use factorio_bot_core::paris::{info, warn};
 use factorio_bot_core::parking_lot::RwLock;
@@ -15,6 +16,7 @@ use factorio_bot_core::plan::planner::Planner;
 use factorio_bot_core::process::process_control::{
   FactorioInstance, FactorioParams, FactorioStartCondition,
 };
+use factorio_bot_core::types::SurfaceId;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -91,106 +93,125 @@ Two things a resumed run is not:
     refuses outright if the mod's code has changed since the savepoint was
     written -- pass --resume-force to override that, which is recorded.";
 
+/// The four flags about *this session* rather than about the map or the
+/// roster: where output goes, whether to attach instead of start, and **which
+/// surface the script means**.
+///
+/// A separate function only because `build_command` is at clippy's 100-line
+/// ceiling; the grouping is the honest one rather than an arbitrary cut.
+fn session_args(command: Command) -> Command {
+  command
+    .arg(
+      Arg::new("logs")
+        .short('l')
+        .long("logs")
+        .action(ArgAction::SetTrue)
+        .help("enabled writing server & client logs to workspace"),
+    )
+    .arg(
+      Arg::new("verbose")
+        .short('v')
+        .long("verbose")
+        .action(ArgAction::SetTrue)
+        .help("Log server output to console"),
+    )
+    .arg(
+      Arg::new("connect")
+        .long("connect")
+        .action(ArgAction::SetTrue)
+        .help("Attach to an already-running Factorio server instead of starting one"),
+    )
+    .arg(
+      Arg::new("surface")
+        .long("surface")
+        .num_args(1)
+        .default_value("nauvis")
+        .help("Which surface the script plans and acts on (default: nauvis)"),
+    )
+}
+
 impl Subcommand for ThisCommand {
   fn name(&self) -> &'static str {
     "lua"
   }
   fn build_command(&self) -> Command {
-    resume_args(Command::new("lua").about("Start Factorio and run a Lua script"))
-      .after_help(format!("{LUA_AFTER_HELP}\n\n{SETTINGS_PRECEDENCE_HELP}"))
-      .arg(
-        Arg::new("script")
-          .help("Path to the Lua script to run (relative to scripts/ folder)")
-          .required(true)
-          .value_parser(value_parser!(String)),
-      )
-      .arg(
-        Arg::new("clients")
-          .short('c')
-          .long("clients")
-          .default_value("1")
-          .value_parser(value_parser!(u8))
-          .help("number of graphical Factorio clients to start (0 = server only)"),
-      )
-      .arg(
-        Arg::new("bots")
-          .short('b')
-          .long("bots")
-          .value_name("bots")
-          .required(false)
-          .value_parser(value_parser!(u8))
-          .help("number of bots the script plans for [default: same as --clients]"),
-      )
-      .arg(
-        Arg::new("headless")
-          .long("headless")
-          .action(ArgAction::SetTrue)
-          .conflicts_with("connect")
-          .help(
-            "bots are server-side character entities created by the mod; no graphical \
+    session_args(resume_args(
+      Command::new("lua").about("Start Factorio and run a Lua script"),
+    ))
+    .after_help(format!("{LUA_AFTER_HELP}\n\n{SETTINGS_PRECEDENCE_HELP}"))
+    .arg(
+      Arg::new("script")
+        .help("Path to the Lua script to run (relative to scripts/ folder)")
+        .required(true)
+        .value_parser(value_parser!(String)),
+    )
+    .arg(
+      Arg::new("clients")
+        .short('c')
+        .long("clients")
+        .default_value("1")
+        .value_parser(value_parser!(u8))
+        .help("number of graphical Factorio clients to start (0 = server only)"),
+    )
+    .arg(
+      Arg::new("bots")
+        .short('b')
+        .long("bots")
+        .value_name("bots")
+        .required(false)
+        .value_parser(value_parser!(u8))
+        .help("number of bots the script plans for [default: same as --clients]"),
+    )
+    .arg(
+      Arg::new("headless")
+        .long("headless")
+        .action(ArgAction::SetTrue)
+        .conflicts_with("connect")
+        .help(
+          "bots are server-side character entities created by the mod; no graphical \
              client is started (implies --clients 0; --bots defaults to 1)",
-          ),
-      )
-      .arg(
-        Arg::new("game-speed")
-          .long("game-speed")
-          .value_name("speed")
-          .default_value("1")
-          .value_parser(value_parser!(f64))
-          .help("run the world at this game.speed; every wall-clock deadline scales with it"),
-      )
-      .arg(
-        Arg::new("server")
-          .short('s')
-          .long("server")
-          .value_name("server")
-          .required(false)
-          .value_parser(value_parser!(String))
-          .help("connect to server instead of starting a server"),
-      )
-      .arg(
-        Arg::new("seed")
-          .long("seed")
-          .value_name("seed")
-          .required(false)
-          .value_parser(value_parser!(String))
-          .help("use given seed to recreate level"),
-      )
-      .arg(
-        Arg::new("map")
-          .long("map")
-          .value_name("map")
-          .required(false)
-          .value_parser(value_parser!(String))
-          .help("use given map exchange string"),
-      )
-      .arg(
-        Arg::new("new")
-          .long("new")
-          .short('n')
-          .action(ArgAction::SetTrue)
-          .help("recreate level by deleting server map if exists"),
-      )
-      .arg(
-        Arg::new("logs")
-          .short('l')
-          .long("logs")
-          .action(ArgAction::SetTrue)
-          .help("enabled writing server & client logs to workspace"),
-      )
-      .arg(
-        Arg::new("verbose")
-          .short('v')
-          .long("verbose")
-          .action(ArgAction::SetTrue)
-          .help("Log server output to console"),
-      )
-      .arg(
-        Arg::new("connect")
-          .long("connect")
-          .action(ArgAction::SetTrue)
-          .help("Attach to an already-running Factorio server instead of starting one"),
-      )
+        ),
+    )
+    .arg(
+      Arg::new("game-speed")
+        .long("game-speed")
+        .value_name("speed")
+        .default_value("1")
+        .value_parser(value_parser!(f64))
+        .help("run the world at this game.speed; every wall-clock deadline scales with it"),
+    )
+    .arg(
+      Arg::new("server")
+        .short('s')
+        .long("server")
+        .value_name("server")
+        .required(false)
+        .value_parser(value_parser!(String))
+        .help("connect to server instead of starting a server"),
+    )
+    .arg(
+      Arg::new("seed")
+        .long("seed")
+        .value_name("seed")
+        .required(false)
+        .value_parser(value_parser!(String))
+        .help("use given seed to recreate level"),
+    )
+    .arg(
+      Arg::new("map")
+        .long("map")
+        .value_name("map")
+        .required(false)
+        .value_parser(value_parser!(String))
+        .help("use given map exchange string"),
+    )
+    .arg(
+      Arg::new("new")
+        .long("new")
+        .short('n')
+        .action(ArgAction::SetTrue)
+        .help("recreate level by deleting server map if exists"),
+    )
   }
 
   fn build_callback(&self) -> SubcommandCallback {
@@ -253,6 +274,66 @@ pub fn resolve_run_counts(matches: &ArgMatches) -> Result<RunCounts> {
   })
 }
 
+/// The surface this run plans and acts on, **named by the caller** rather than
+/// inferred from how many the world happens to hold.
+///
+/// # Why this exists
+///
+/// `FactorioInstance::surface()` is `FactorioWorld::only_surface()`, the
+/// porting seam: it answers while a world holds exactly one surface and stops
+/// answering when it holds two, so a caller that never said which surface it
+/// meant fails loudly instead of silently getting Nauvis. Routing gave the
+/// parser a second surface on 2026-09-07, and from that day
+/// `factorio-bot lua` could not run **any** script against the world-record
+/// save -- the run died in startup with `Failed to start Factorio (no world
+/// available)` while holding four perfectly good surfaces. The seam was
+/// working; this path had not been ported.
+///
+/// # What it deliberately is not
+///
+/// It is **not** a fallback for `only_surface()`, and `--surface` defaulting to
+/// `nauvis` is not the same thing as `only_surface()` returning the default
+/// when it cannot decide. The difference is where the decision is made and
+/// whether it is visible: here a caller states a surface, it appears in
+/// `--help` and in the invocation, and a name the world does not hold is
+/// **refused by name with the surfaces that do exist listed** -- not quietly
+/// resolved to Nauvis. A lookup that cannot answer returning the same value as
+/// one that answers is this project's most-repeated defect, and it is exactly
+/// what the surface split exists to make impossible.
+///
+/// The old "no world available" message is kept for the case that genuinely is
+/// that: an instance with no world at all.
+fn resolve_surface(instance: &FactorioInstance, name: &str) -> Result<Arc<FactorioSurface>> {
+  pick_surface(instance.world.as_deref(), name)
+}
+
+/// [`resolve_surface`] without the instance, so it can be tested without
+/// starting Factorio. `None` is an instance with no world at all.
+fn pick_surface(world: Option<&FactorioWorld>, name: &str) -> Result<Arc<FactorioSurface>> {
+  let Some(world) = world else {
+    return Err(factorio_bot_core::miette::miette!(
+      "Failed to start Factorio (no world available)"
+    ));
+  };
+  if let Some(surface) = world.surface(&SurfaceId::from(name)) {
+    return Ok(surface);
+  }
+  let held: Vec<String> = world
+    .surface_ids()
+    .iter()
+    .map(|id| id.as_str().to_owned())
+    .collect();
+  Err(factorio_bot_core::miette::miette!(
+    "this world has no surface called '{name}'; it holds: {}. Pass --surface \
+     <name> to choose one.",
+    if held.is_empty() {
+      "nothing yet".to_owned()
+    } else {
+      held.join(", ")
+    }
+  ))
+}
+
 async fn run(matches: &ArgMatches, _context: &mut Context) -> Result<()> {
   let app_settings = load_app_settings_with(&settings_overrides(matches))?;
   let script_path = matches
@@ -267,6 +348,10 @@ async fn run(matches: &ArgMatches, _context: &mut Context) -> Result<()> {
     .get_one::<f64>("game-speed")
     .expect("defaulted by clap");
   let connect_mode = matches.get_flag("connect");
+  let surface_name = matches
+    .get_one::<String>("surface")
+    .cloned()
+    .unwrap_or_else(|| SurfaceId::nauvis().as_str().to_owned());
   let server_host = matches.get_one::<String>("server").cloned();
   warn_if_server_flags_are_ignored(connect_mode || server_host.is_some(), headless, game_speed);
 
@@ -346,8 +431,8 @@ async fn run(matches: &ArgMatches, _context: &mut Context) -> Result<()> {
     // `FactorioInstance` has no `Drop`, so a failing script leaked a Factorio
     // server holding the factorio and rcon ports. The next run then failed with
     // "Host address is already in use" instead of the real error.
-    let script_result = match instance_state.surface() {
-      Some(world) => {
+    let script_result = match resolve_surface(&instance_state, &surface_name) {
+      Ok(world) => {
         info!("Factorio started, running script...");
         let mut planner = if attached_server {
           Planner::attached(world.clone(), Some(instance_state.rcon.clone()))
@@ -366,9 +451,7 @@ async fn run(matches: &ArgMatches, _context: &mut Context) -> Result<()> {
         }
         run_script_file(&mut planner, &app_settings, script_path, bots, None).await
       }
-      None => Err(factorio_bot_core::miette::miette!(
-        "Failed to start Factorio (no world available)"
-      )),
+      Err(err) => Err(err),
     };
 
     // Clean up Factorio processes (clients first, then server) on every path.
@@ -689,6 +772,99 @@ mod tests {
     assert!(
       help.contains("Settings precedence"),
       "missing the precedence note:\n{help}"
+    );
+  }
+
+  fn surface_arg_for(argv: &[&str]) -> String {
+    let matches = build_app()
+      .try_get_matches_from(argv)
+      .unwrap_or_else(|e| panic!("parses {argv:?}: {e}"));
+    let sub = matches.subcommand_matches("lua").expect("lua matched");
+    sub
+      .get_one::<String>("surface")
+      .cloned()
+      .expect("defaulted by clap")
+  }
+
+  /// The caller states a surface, and stating nothing states `nauvis` -- which
+  /// is a *default*, visible in `--help` and in the parse, and not the same
+  /// thing as a lookup that could not decide.
+  #[test]
+  fn surface_defaults_to_nauvis_and_is_overridable() {
+    assert_eq!(surface_arg_for(&["factorio-bot", "lua", "x.lua"]), "nauvis");
+    assert_eq!(
+      surface_arg_for(&["factorio-bot", "lua", "x.lua", "--surface", "vulcanus"]),
+      "vulcanus"
+    );
+  }
+
+  /// **The world-record save's failure, reduced.** Four surfaces made
+  /// `only_surface()` refuse, and `factorio-bot lua` died in startup with "no
+  /// world available" while holding four perfectly usable surfaces. A named
+  /// lookup answers on the very same world.
+  ///
+  /// Both halves are asserted from the same world: `only_surface()` still
+  /// refuses -- the seam is not weakened -- and the named lookup returns the
+  /// surface that holds the *right* entity, not merely some surface.
+  #[test]
+  fn a_named_surface_answers_where_only_surface_refuses() {
+    use factorio_bot_core::process::output_parser::OutputParser;
+    use factorio_bot_core::types::Position;
+
+    let world = Arc::new(FactorioWorld::nauvis_only(Arc::new(FactorioSurface::new())));
+    let mut parser = OutputParser::with_game_world(world.clone());
+    // One chest per surface, at the same tile -- so "the right surface" is a
+    // claim about routing and not about which one happens to be occupied.
+    let chest = |name: &str, surface: &str| {
+      format!(
+        r#"{{"name":"{name}","entity_type":"container","direction":0,"position":{{"x":5.5,"y":5.5}},"bounding_box":{{"left_top":{{"x":5.1,"y":5.1}},"right_bottom":{{"x":5.9,"y":5.9}}}},"surface":"{surface}"}}"#
+      )
+    };
+    parser
+      .parse(
+        1,
+        "entities",
+        &format!(
+          "0,0;32,32:[{},{}]",
+          chest("iron-chest", "nauvis"),
+          chest("wooden-chest", "vulcanus")
+        ),
+      )
+      .expect("the entities line must parse");
+
+    assert!(
+      world.only_surface().is_none(),
+      "the porting seam must still refuse on a two-surface world"
+    );
+    assert!(
+      pick_surface(Some(&world), "gleba").is_err(),
+      "a surface this world does not hold is refused, never resolved to the \
+       default one"
+    );
+
+    let named = |name: &str| {
+      pick_surface(Some(&world), name)
+        .unwrap_or_else(|e| panic!("{name} must resolve: {e}"))
+        .entity_graph
+        .find_entities_in_radius(Position::new(5.5, 5.5), 0.1, None, None)
+        .first()
+        .map(|e| e.name.clone())
+    };
+    assert_eq!(named("nauvis"), Some("iron-chest".to_string()));
+    assert_eq!(named("vulcanus"), Some("wooden-chest".to_string()));
+  }
+
+  /// An instance with no world at all keeps the message it always had. That
+  /// case is genuinely "no world available"; the multi-surface case never was.
+  #[test]
+  fn no_world_at_all_still_says_no_world_available() {
+    let message = match pick_surface(None, "nauvis") {
+      Ok(_) => panic!("no world must be an error"),
+      Err(err) => format!("{err}"),
+    };
+    assert!(
+      message.contains("no world available"),
+      "unexpected message: {message}"
     );
   }
 }

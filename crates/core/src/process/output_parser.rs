@@ -33,18 +33,22 @@ pub struct OutputParser {
     /// **The route from a writeout to the surface it is about**, added
     /// 2026-09-07.
     ///
-    /// Five writeouts route. Four carry a [`FactorioEntity`] and have named
+    /// Six writeouts route. Four carry a [`FactorioEntity`] and have named
     /// their surface on the wire since 2026-09-06 (`serialize_entity` in
     /// `mods/BotBridge/types.lua`): the bulk `entities` line and the three
     /// `on_some_entity_*` events. The fifth is `tiles`, whose compact header
     /// grew a third field on 2026-09-07 -- `x,y;x,y;<surface>: name:0,...`,
     /// see [`parse_ground_header`]. **Ground was the last thing on this wire
-    /// that could not say where it was.**
+    /// that could not say where it was.** The sixth is `daylight`, which
+    /// carries its surface as an ordinary JSON field and joined the route the
+    /// same day.
     ///
-    /// Still unrouted: `daylight`, which is per-surface and lands here anyway.
-    /// (`resources` shares `tiles`' header in the mod but has no caller there
-    /// and no arm here -- resource entities arrive on the bulk `entities`
-    /// line.)
+    /// **Nothing on this wire is unrouted any more.** The remaining
+    /// single-surface writeouts are about a game or a force rather than a
+    /// place -- recipes, prototypes, research, players, action outcomes -- and
+    /// `surfaces` is the census of them all. (`resources` shares `tiles`'
+    /// header in the mod but has no caller there and no arm here -- resource
+    /// entities arrive on the bulk `entities` line.)
     ///
     /// This was not a hypothetical gap. Loading the world-record save on
     /// 2026-09-07 produced 2,609 `on_some_entity_deleted` writeouts, 2,601 of
@@ -459,8 +463,27 @@ impl OutputParser {
             // curve unset, which reads downstream as *nobody said* -- the
             // same answer an older mod gives -- rather than as a dark
             // surface.
+            //
+            // **Routed, since 2026-09-07, and this is the writeout with the
+            // strongest claim to it.** `solar_power_multiplier` and
+            // `ticks_per_day` are exactly what differs between planets -- they
+            // are the two terms `PlanState::solar_average_kw` and
+            // `accumulators_per_panel` multiply through -- so a curve filed on
+            // the wrong surface sizes a solar array for the wrong world while
+            // reading as a measurement. The route needs no wire change:
+            // `serialize_surface_daylight` (`mods/BotBridge/types.lua`) has
+            // set `record.surface = surface.name` since the field was added,
+            // and `SurfaceDaylight::surface` has existed to receive it. It was
+            // read by nothing, the same way `FactorioEntity::surface` was
+            // before `b0bb7f53`.
+            //
+            // A record that names no surface goes to the default one, which is
+            // `route`'s rule everywhere: absent is *the sender did not say*,
+            // never "this planet has no daylight". The non-erasure rule in
+            // `apply_snapshot` is the same statement from the other side and
+            // is untouched.
             "daylight" => match serde_json::from_str::<SurfaceDaylight>(rest) {
-                Ok(daylight) => self.world.update_daylight(daylight),
+                Ok(daylight) => self.route(&daylight.surface).update_daylight(daylight),
                 Err(err) => {
                     error!(
                         "<red>failed to deserialize daylight</>: {:?} '{}'",

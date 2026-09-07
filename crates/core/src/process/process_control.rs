@@ -10,7 +10,7 @@ use crate::process::{InteractiveProcess, io_utils};
 use crate::record::run_mode::{BotMode, RunMode, write_run_mode};
 use crate::record::savepoint::{ResumeMarker, clear_resume_marker, write_resume_marker};
 use crate::settings::FactorioSettings;
-use crate::types::PlayerId;
+use crate::types::{PlayerId, SurfaceId};
 use miette::{IntoDiagnostic, Result};
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -51,6 +51,35 @@ impl FactorioInstance {
     /// caller already handled.
     pub fn surface(&self) -> Option<Arc<FactorioSurface>> {
         self.world.as_ref()?.only_surface()
+    }
+
+    /// The surface a caller **named**, which is how a caller leaves
+    /// [`Self::surface`] behind.
+    ///
+    /// This is the other side of the porting seam and it is deliberately not a
+    /// fallback for it: it answers only for a surface the world actually
+    /// holds, and `None` here means *this world has no such surface*, never
+    /// "so have the default one". A lookup that cannot answer returning the
+    /// same value as one that answers is this project's most-repeated defect,
+    /// and reintroducing it here would undo the whole point of
+    /// [`FactorioWorld`](crate::factorio::world::FactorioWorld).
+    ///
+    /// [`Self::surface_ids`] is what a caller reports alongside a `None`, so
+    /// the refusal names what *is* there.
+    pub fn surface_named(&self, id: &SurfaceId) -> Option<Arc<FactorioSurface>> {
+        self.world.as_ref()?.surface(id)
+    }
+
+    /// Every surface this instance's world holds, in name order -- empty when
+    /// it has no world at all.
+    ///
+    /// For error messages: a refusal that says "no surface called `vulcanus`"
+    /// and stops is only half an answer on a save with ten of them.
+    pub fn surface_ids(&self) -> Vec<SurfaceId> {
+        match self.world.as_ref() {
+            Some(world) => world.surface_ids(),
+            None => vec![],
+        }
     }
 }
 

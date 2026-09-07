@@ -387,6 +387,14 @@ impl std::error::Error for PlanRefusal {}
 ///   `NotHandMinable`; no amount of exploring or researching changes it,
 ///   because it is the shape of the request that is wrong. The message names
 ///   every producing recipe and its category, which is the diagnosis.
+/// - [`FluidNotItem`](PlannerError::FluidNotItem) -- a verdict about the
+///   **shape of the request**, and the only one of these that is not about the
+///   world at all. `have:<fluid>:N` asks a character to hold something no
+///   character inventory accepts in any amount, so nothing a script can do
+///   changes the answer. A script acts on it by asking for the fluid where a
+///   fluid can be: `gathered:<fluid>` stands a pumpjack and a storage tank on
+///   the field. The message names every recipe in this world that produces the
+///   fluid and its category, so a reader can see what machine is missing.
 /// - [`NoFluidBuffer`](PlannerError::NoFluidBuffer),
 ///   [`NoTankSite`](PlannerError::NoTankSite),
 ///   [`NoPipeRoute`](PlannerError::NoPipeRoute) and
@@ -436,7 +444,8 @@ fn refusal_for(err: &PlannerError) -> Option<PlanRefusal> {
         | PlannerError::SustainNoFuelSource { .. }
         | PlannerError::SustainNoRouteForFuel { .. }
         | PlannerError::SustainNoOfftake { .. }
-        | PlannerError::ProductNotMakeable(_) => true,
+        | PlannerError::ProductNotMakeable(_)
+        | PlannerError::FluidNotItem(_) => true,
 
         PlannerError::InsufficientItems { .. }
         | PlannerError::UnknownBot(_)

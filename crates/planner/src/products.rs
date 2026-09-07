@@ -959,6 +959,25 @@ mod no_producer_driver_tests {
         }
     }
 
+    /// A **`Produced`** goal, not a `Have`.
+    ///
+    /// These tests asked for `Have { petroleum-gas }` until 2026-09-07, when
+    /// the driver learned to refuse a fluid `Have` by shape before any method
+    /// is asked -- see `method::expand_goal_body`'s `fluid_have_refusal`. That
+    /// guard is right and this method is not the thing it tests, so the goal
+    /// moved to the shape `NoProducer` is the authority for. `Produced` says
+    /// "cause this to come into existence", which is a meaningful request an
+    /// oil refinery answers and which makes no claim about an inventory, so it
+    /// reaches the registry exactly as it always did.
+    fn produced(item: &str) -> Goal {
+        Goal::Produced {
+            item: item.to_string(),
+            count: 100,
+            whose: Holder::Anyone,
+            unlocks: None,
+        }
+    }
+
     /// The premise: with no method registered at all, the driver's own answer
     /// is the unactionable one. Asserted so the test below cannot pass because
     /// the goal happened to succeed.
@@ -966,7 +985,7 @@ mod no_producer_driver_tests {
     fn without_the_method_the_driver_says_only_no_method_can_satisfy() {
         let state = oil_state();
         let registry = MethodRegistry::new();
-        let err = expand(&[have("petroleum-gas")], &state, &registry, BotId(1))
+        let err = expand(&[produced("petroleum-gas")], &state, &registry, BotId(1))
             .expect_err("nothing can satisfy this");
         assert!(
             matches!(err, PlannerError::NoApplicableMethod { .. }),
@@ -974,7 +993,7 @@ mod no_producer_driver_tests {
         );
         assert_eq!(
             err.to_string(),
-            "no method can satisfy goal: have 100 petroleum-gas (anyone)"
+            "no method can satisfy goal: produce 100 petroleum-gas"
         );
     }
 
@@ -982,7 +1001,7 @@ mod no_producer_driver_tests {
     fn with_the_method_the_driver_names_the_recipe_and_its_category() {
         let state = oil_state();
         let registry = MethodRegistry::new().with(Box::new(NoProducer));
-        let err = expand(&[have("petroleum-gas")], &state, &registry, BotId(1))
+        let err = expand(&[produced("petroleum-gas")], &state, &registry, BotId(1))
             .expect_err("still nothing can satisfy it -- but now it says why");
         assert!(
             matches!(err, PlannerError::ProductNotMakeable(_)),
@@ -1007,7 +1026,7 @@ mod no_producer_driver_tests {
     fn an_item_with_no_recipe_is_told_to_come_out_of_the_ground() {
         let state = oil_state();
         let registry = MethodRegistry::new().with(Box::new(NoProducer));
-        let err = expand(&[have("iron-plate")], &state, &registry, BotId(1))
+        let err = expand(&[produced("iron-plate")], &state, &registry, BotId(1))
             .expect_err("no recipe makes iron-plate in this world");
         let text = err.to_string();
         assert!(text.contains("mine or extract it"), "{text}");

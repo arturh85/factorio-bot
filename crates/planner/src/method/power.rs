@@ -5340,11 +5340,22 @@ mod capacity_tests {
         let treeless = PlanState::from_world(Arc::new(fixture_world()), &bots);
         let err = expand(&[goal], &treeless, &registry_for(&bots), BotId(1))
             .expect_err("the shared fixture's tree-42s yield nothing");
+        // The property this control is for is that a bare map **refuses**
+        // rather than quietly planning a shorter pole run. The variant that
+        // carries it changed on 2026-09-07, when `products::NoProducer` was
+        // registered last in `registry_for`: `NoApplicableMethod` ("no method
+        // can satisfy goal: have 26 wood") became `ProductNotMakeable`, which
+        // adds that no recipe produces wood and that it therefore comes out of
+        // the ground. Nothing was lost -- both name the item -- so the
+        // assertion moved to the property and the name rather than staying
+        // pinned to a variant this test was never about.
+        let text = err.to_string();
         assert!(
-            matches!(err, PlannerError::NoApplicableMethod { .. }),
+            matches!(err, PlannerError::ProductNotMakeable(_)),
             "an uncharted or bare map refuses wood by name rather than \
              planning a shorter run: got {err:?}"
         );
+        assert!(text.contains("wood"), "and the refusal names it: {text}");
     }
 }
 

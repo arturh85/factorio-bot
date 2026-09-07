@@ -1104,4 +1104,31 @@ pub enum PlannerError {
         )
     )]
     ProductNotMakeable(#[from] crate::products::ProductRefusal),
+
+    /// A [`crate::goal::Goal::Have`] was stated about a fluid.
+    ///
+    /// **Not a shortfall and not a missing method.** `Have` means "this is in
+    /// an inventory", and the game will not put a fluid in one -- so the goal
+    /// is not unsatisfiable, it is *inexpressible*, and no amount of mining,
+    /// research or exploration moves it. The driver refuses it before any
+    /// method is asked, which is what stops the roster splitter dividing 100
+    /// petroleum-gas into four shares of 25 and asking a character to carry
+    /// one; that message ("a share sized for bot 1") named the wrong thing
+    /// entirely and is the reason this variant exists.
+    ///
+    /// The wrapped [`crate::substance::FluidRefusal`] carries the fluid, the
+    /// count that was asked for, and -- via
+    /// [`crate::substance::FluidSource`] -- which recipes in *this* world
+    /// produce it and in what categories, so a reader learns where the fluid
+    /// would have to come from instead.
+    #[error("{0}")]
+    #[diagnostic(
+        code(planner::fluid_not_item),
+        help(
+            "a fluid lives in a fluidbox -- a pipe, a storage tank, a machine's own -- and this \
+             planner has no goal that names one; `gathered:<fluid>` stands a pumpjack and a tank \
+             up on a field, which is as close as the planner gets today"
+        )
+    )]
+    FluidNotItem(#[from] crate::substance::FluidRefusal),
 }

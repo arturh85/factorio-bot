@@ -1115,3 +1115,103 @@ fn every_direction_in_the_live_captures_is_readable() {
         }
     }
 }
+
+/// **The daylight curve and the solar prototypes as a live 2.1.17 game
+/// reports them**, lifted verbatim out of a `world.dump` taken on an isolated
+/// headless seed-31337 instance on 2026-09-07.
+///
+/// # Why a fixture, when the arithmetic is unit-tested already
+///
+/// Because the unit tests were written against a number that turned out to be
+/// wrong. Every reference this project could find says a Factorio day is
+/// **25,000 ticks**, and the running game says **25,200** — seven minutes
+/// exactly at 60 ticks per second. The panel average does not depend on day
+/// length at all, so 0.7 and 42 kW survive; the *accumulator* ratio is
+/// proportional to it, so the vanilla 25:21 rule of thumb (0.84) is really
+/// **0.8467** on this install. That is a 0.8% disagreement between the owner's
+/// number and the derivation, and it is entirely explained by day length.
+///
+/// That is exactly the failure mode this file exists for: a type modelled on
+/// what the author already believed, invisible because no fixture could
+/// contradict it.
+#[test]
+fn the_live_2_1_daylight_and_solar_prototypes_parse_and_derive() {
+    let raw = include_str!("live-2.1.17-daylight.json");
+    let payload: serde_json::Value = serde_json::from_str(raw).expect("the capture is json");
+
+    let daylight: factorio_bot_core::types::SurfaceDaylight =
+        serde_json::from_value(payload["daylight"].clone()).expect("the daylight record parses");
+    assert_eq!(
+        daylight.ticks_per_day,
+        Some(25_200),
+        "the running game, not the 25,000 every reference repeats",
+    );
+    assert_eq!(daylight.dusk, Some(0.25));
+    assert_eq!(daylight.evening, Some(0.45));
+    assert_eq!(daylight.morning, Some(0.55));
+    assert_eq!(daylight.dawn, Some(0.75));
+    assert_eq!(daylight.solar_power_multiplier, Some(1.0));
+
+    let panel: factorio_bot_core::types::FactorioEntityPrototype =
+        serde_json::from_value(payload["solar-panel"].clone()).expect("the panel parses");
+    assert_eq!(
+        panel.max_energy_production_kw(),
+        Some(60.0),
+        "the 60 kW on the tooltip is its NOON output",
+    );
+    assert_eq!(panel.solar_panel_performance_at_day, Some(1.0));
+    assert_eq!(panel.solar_panel_performance_at_night, Some(0.0));
+    assert_eq!(
+        panel.electric_buffer_capacity,
+        Some(0.0),
+        "a real zero from a real game: a panel stores nothing, and the sizing \
+         code must filter it rather than divide by it",
+    );
+
+    let accumulator: factorio_bot_core::types::FactorioEntityPrototype =
+        serde_json::from_value(payload["accumulator"].clone()).expect("the accumulator parses");
+    assert_eq!(
+        accumulator.max_energy_production_kw(),
+        Some(300.0),
+        "300 kW is a discharge RATE and is not what sizing needs",
+    );
+    assert_eq!(
+        accumulator.electric_buffer_capacity,
+        Some(5_000_000.0),
+        "5 MJ, read through the sub-prototype, which is what sizing needs",
+    );
+
+    // The average, which does not depend on day length: 60 kW x 0.7.
+    let average = daylight
+        .average_solar_fraction(
+            panel.solar_panel_performance_at_day.expect("a panel"),
+            panel.solar_panel_performance_at_night.expect("a panel"),
+        )
+        .expect("the live curve describes a day")
+        * panel.max_energy_production_kw().expect("a panel");
+    assert!(
+        (average - 42.0).abs() < 1e-9,
+        "42 kW, the figure every reference gives, derived from nothing typed \
+         here, got {average}",
+    );
+
+    // The accumulator ratio, which does: 25,200 ticks instead of 25,000 moves
+    // it off the 0.84 rule of thumb by exactly that factor.
+    let deficit = daylight
+        .night_deficit_fraction(1.0, 0.0)
+        .expect("the live curve describes a day");
+    let ratio = deficit
+        * f64::from(daylight.ticks_per_day.expect("a day"))
+        * panel.max_energy_production.expect("a panel")
+        / accumulator
+            .electric_buffer_capacity
+            .expect("an accumulator");
+    assert!(
+        (ratio - 0.84 * 25_200. / 25_000.).abs() < 1e-9,
+        "the 25:21 ratio scaled by the live day length, got {ratio}",
+    );
+    assert!(
+        (ratio - 0.8467200).abs() < 1e-7,
+        "0.8467 accumulators per panel on this install, got {ratio}",
+    );
+}

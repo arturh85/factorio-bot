@@ -6,7 +6,7 @@ use crate::types::{
     ActionId, FactorioEntity, FactorioEntityPrototype, FactorioForce, FactorioGraphic,
     FactorioItemPrototype, FactorioPlayer, FactorioRecipe, FactorioTile, InventoryResponse,
     PlayerChangedDistanceEvent, PlayerChangedMainInventoryEvent, PlayerChangedPositionEvent,
-    PlayerId, Pos, Position, SurfaceId,
+    PlayerId, Pos, Position, SurfaceDaylight, SurfaceId,
 };
 use dashmap::DashMap;
 use image::RgbaImage;
@@ -1125,6 +1125,7 @@ impl ObservedInventory {
 /// |---|---|
 /// | `entity_graph` | Four quadtrees over one ±5120 coordinate space, plus `resources`/`minables`/`threats` as `BTreeMap<Pos, _>`. This is the aliasing case itself. |
 /// | `flow_graph` | Derived from exactly one entity graph. |
+/// | `daylight` | `ticks_per_day` and `solar_power_multiplier` are `LuaSurface` attributes, and are exactly what differs between planets. The clearest per-surface field on the type. |
 /// | `inventories` | `DashMap<Pos, ObservedInventory>`. |
 /// | `placement_refusals`, `walk_refusals`, `enclosures`, `step_asides` | Every one is a fact about a *place*: a site the game refused, a spot a walk could not leave. None of it says anything about the same coordinates elsewhere. |
 ///
@@ -1415,9 +1416,36 @@ pub struct FactorioSurface {
     /// could have said so. Read by `crates/planner`'s `PlanState::from_world`,
     /// written and released by `crates/executor`.
     pub benches: SyncMutex<Benches>,
+    /// This surface's day/night curve, or `None` because nobody has said.
+    ///
+    /// **Per-surface, unambiguously** — `ticks_per_day` and
+    /// `solar_power_multiplier` are `LuaSurface` attributes and are exactly
+    /// what differs between planets, so this is one of the few fields on this
+    /// type that will need no argument when the global state is finally split
+    /// out. See [`FactorioWorld`]'s table.
+    ///
+    /// `None` is *not observed*, never "dark": every archived dump and every
+    /// BotBridge older than this field reports nothing, and a planner that
+    /// read that as a surface with no sun would refuse a solar base for the
+    /// wrong reason. [`SurfaceDaylight`]'s own doc carries the curve.
+    pub daylight: SyncMutex<Option<SurfaceDaylight>>,
 }
 
 impl FactorioSurface {
+    /// This surface's daylight curve, when one has been reported.
+    pub fn daylight(&self) -> Option<SurfaceDaylight> {
+        self.daylight.lock().clone()
+    }
+
+    /// Records the curve the mod read off the live surface.
+    ///
+    /// Replaces rather than merges: the mod sends the whole record in one
+    /// piece, so a later one is a fresher reading of the same thing and a
+    /// half-updated curve would be a day that never existed.
+    pub fn update_daylight(&self, daylight: SurfaceDaylight) {
+        *self.daylight.lock() = Some(daylight);
+    }
+
     pub fn update_entity_prototypes(
         &self,
         entity_prototypes: Vec<FactorioEntityPrototype>,
@@ -1679,6 +1707,12 @@ impl FactorioSurface {
         for force in snapshot.forces {
             self.update_force(force)?;
         }
+        // Only when the sender said. An older mod reports nothing here, and
+        // overwriting a known curve with `None` would turn "this build is old"
+        // into "this surface has no daylight".
+        if let Some(daylight) = snapshot.daylight {
+            self.update_daylight(daylight);
+        }
         Ok(())
     }
 
@@ -1764,6 +1798,7 @@ impl FactorioSurface {
             enclosures: SyncMutex::new(Enclosures::default()),
             step_asides: SyncMutex::new(Vec::new()),
             benches: SyncMutex::new(Benches::default()),
+            daylight: SyncMutex::new(None),
         }
     }
 
@@ -2032,7 +2067,7 @@ impl Serialize for FactorioSurface {
     where
         S: Serializer,
     {
-        let mut state = serializer.serialize_struct("FactorioSurface", 14)?;
+        let mut state = serializer.serialize_struct("FactorioSurface", 15)?;
         state.serialize_field("players", &self.players)?;
         state.serialize_field("forces", &self.forces)?;
         state.serialize_field("graphics", &self.graphics)?;
@@ -2063,6 +2098,11 @@ impl Serialize for FactorioSurface {
         // benched must plan with it benched, or the offline plan re-sends
         // exactly the walk the live run halted on.
         state.serialize_field("benches", &*self.benches.lock())?;
+        // Surface state, and the one field here a *prototype* can never
+        // reconstruct: an offline plan against a dump has no game to ask, so a
+        // dump that dropped the curve would make every solar question
+        // unanswerable rather than merely stale.
+        state.serialize_field("daylight", &*self.daylight.lock())?;
         state.end()
     }
 }
@@ -2087,6 +2127,7 @@ impl<'de> Deserialize<'de> for FactorioSurface {
             WalkRefusals,
             Enclosures,
             Benches,
+            Daylight,
         }
 
         impl<'de> Deserialize<'de> for Field {
@@ -2122,6 +2163,7 @@ impl<'de> Deserialize<'de> for FactorioSurface {
                             "walk_refusals" => Ok(Field::WalkRefusals),
                             "enclosures" => Ok(Field::Enclosures),
                             "benches" => Ok(Field::Benches),
+                            "daylight" => Ok(Field::Daylight),
                             _ => Err(de::Error::unknown_field(value, FIELDS)),
                         }
                     }
@@ -2158,6 +2200,7 @@ impl<'de> Deserialize<'de> for FactorioSurface {
                 let mut walk_refusals: Option<WalkRefusals> = None;
                 let mut enclosures: Option<Enclosures> = None;
                 let mut benches: Option<Benches> = None;
+                let mut daylight: Option<Option<SurfaceDaylight>> = None;
 
                 while let Some(key) = map.next_key()? {
                     match key {
@@ -2245,6 +2288,12 @@ impl<'de> Deserialize<'de> for FactorioSurface {
                             }
                             benches = Some(map.next_value()?);
                         }
+                        Field::Daylight => {
+                            if daylight.is_some() {
+                                return Err(de::Error::duplicate_field("daylight"));
+                            }
+                            daylight = Some(map.next_value()?);
+                        }
                     }
                 }
                 let players = players.ok_or_else(|| de::Error::missing_field("players"))?;
@@ -2273,6 +2322,11 @@ impl<'de> Deserialize<'de> for FactorioSurface {
                 let walk_refusals = walk_refusals.unwrap_or_default();
                 let enclosures = enclosures.unwrap_or_default();
                 let benches = benches.unwrap_or_default();
+                // Two levels of absence collapse to the same answer on
+                // purpose: a dump written before this field, and one whose
+                // sender had no curve to report, both mean *nobody said*.
+                // Neither means the surface is dark.
+                let daylight = daylight.flatten();
 
                 let entity_graph: Arc<EntityGraph> = Arc::new(entity_graph);
                 let flow_graph = Arc::new(FlowGraph::new(entity_graph.clone()));
@@ -2299,6 +2353,7 @@ impl<'de> Deserialize<'de> for FactorioSurface {
                     enclosures: SyncMutex::new(enclosures),
                     step_asides: Default::default(),
                     benches: SyncMutex::new(benches),
+                    daylight: SyncMutex::new(daylight),
                 })
             }
         }
@@ -2318,6 +2373,7 @@ impl<'de> Deserialize<'de> for FactorioSurface {
             "walk_refusals",
             "enclosures",
             "benches",
+            "daylight",
         ];
         deserializer.deserialize_struct("FactorioSurface", FIELDS, FactorioSurfaceVisitor)
     }
@@ -2386,6 +2442,9 @@ impl Clone for FactorioSurface {
                 active: self.benches.lock().active.clone(),
                 changes: Vec::new(),
             }),
+            // Knowledge about the surface itself, and cheap: a clone that
+            // dropped it would plan solar as unknown on a world that knows.
+            daylight: SyncMutex::new(self.daylight.lock().clone()),
             flow_graph: Arc::new(FlowGraph::new(_entity_graph)),
         }
     }
@@ -2423,6 +2482,7 @@ mod tests {
             enclosures: Default::default(),
             step_asides: Default::default(),
             benches: Default::default(),
+            daylight: Default::default(),
             entity_graph: Arc::new(EntityGraph::new(
                 Arc::new(DashMap::new()),
                 Arc::new(DashMap::new()),

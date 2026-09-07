@@ -614,6 +614,43 @@ function serialize_entity_prototype(entity)
     -- source to test.
     ok, val = pcall(function() return entity.get_max_energy_production() end)
     if ok then record.max_energy_production = val end
+    -- SOLAR, whose nameplate is a lie by itself. `max_energy_production`
+    -- above answers 60 kW for a `solar-panel` and 300 kW for an
+    -- `accumulator`, and both are instantaneous maxima: the panel's is its
+    -- NOON output and the accumulator's is a discharge limit. The day/night
+    -- curve that turns noon into an average is surface state, not prototype
+    -- data -- see `serialize_surface_daylight` at the foot of this file --
+    -- but its two ENDPOINTS are here, and without them the integral has a
+    -- shape and no scale.
+    --
+    -- Both are attributes with `subclasses: ["SolarPanel"]`, so reading
+    -- either on anything else raises and `pcall` drops it. That is the
+    -- intended gate: the field's presence is what says "this is a solar
+    -- panel", the same way `electric_energy_usage`'s presence says "this is
+    -- electric".
+    ok, val = pcall(function() return entity.solar_panel_performance_at_day end)
+    if ok then record.solar_panel_performance_at_day = val end
+    ok, val = pcall(function() return entity.solar_panel_performance_at_night end)
+    if ok then record.solar_panel_performance_at_night = val end
+    -- How many joules the entity's own electric buffer holds.
+    --
+    -- **This is the accumulator's real number**, and it is not on
+    -- `LuaEntityPrototype` at all: `electric_energy_source_prototype` is an
+    -- optional attribute returning a `LuaElectricEnergySourcePrototype`, and
+    -- `buffer_capacity` is an attribute on THAT. A sub-prototype nothing here
+    -- had ever reached through, which is why solar sizing stopped at the
+    -- panel average and could not answer "how many accumulators".
+    --
+    -- Sent for every electric entity, not only accumulators. A machine's
+    -- buffer is small and is not storage anybody plans with, but filtering it
+    -- out here would mean this collector deciding what an accumulator is, and
+    -- prototype-shape decisions made in Lua are the ones no Rust test can see.
+    ok, val = pcall(function()
+        local source = entity.electric_energy_source_prototype
+        if source == nil then return nil end
+        return source.buffer_capacity
+    end)
+    if ok then record.electric_buffer_capacity = val end
     -- Beacon only: the fraction of a module's effect the receiver gets.
     ok, val = pcall(function() return entity.distribution_effectivity end)
     if ok then record.distribution_effectivity = val end
@@ -1016,4 +1053,61 @@ function table_properties(tbl, props, replacements)
         end
     end
     return filtered
+end
+
+--- The daylight curve of one surface, which is **surface state and not
+--- prototype data**.
+---
+--- A `solar-panel` prototype carries its **noon** figure only
+--- (`get_max_energy_production()` = 60 kW in vanilla 2.1.17). What a day
+--- averages is that figure times the fraction of the day the sun is up, and
+--- every term of that fraction is on `LuaSurface`, not on any prototype. So a
+--- planner that credits solar at nameplate sizes a base that is dead at night,
+--- and one that refuses solar entirely -- which is what this project did until
+--- this record existed -- cannot plan a solar base at all.
+---
+--- **Every field here is an ATTRIBUTE on `LuaSurface` in 2.1.17**, checked
+--- against this install's `runtime-api.json` rather than recalled. That matters
+--- because the pair `energy_usage` (attribute) / `get_max_energy_production()`
+--- (method) in `serialize_entity_prototype` above landed one each way, and
+--- reading a method as an attribute raises, `pcall` swallows it, and the field
+--- arrives nil with nothing saying it should not have. All ten of the names
+--- below are `read_type`/`write_type` attributes with `optional: false`; there
+--- is no `get_dawn()` and no `get_ticks_per_day()` -- doclint-allow: names that
+--- deliberately do NOT exist, and their absence is exactly the claim.
+---
+--- # What the four boundaries mean
+---
+--- `daytime` runs `[0, 1)` and **0 is noon**, so the sunlit half straddles the
+--- wrap. In vanilla order the day runs `dusk` (0.25) -> `evening` (0.45) ->
+--- `morning` (0.55) -> `dawn` (0.75): full sun from `dawn` through 0 to `dusk`,
+--- a linear fade `dusk` -> `evening`, night from `evening` to `morning`, a
+--- linear rise `morning` -> `dawn`. `crates/planner/src/state.rs` integrates
+--- that trapezoid; nothing here interprets it, because a collector that
+--- editorialises is a second copy of the model.
+---
+--- `always_day` and `freeze_daytime` are sent because either one makes the
+--- integral wrong in a way no boundary would reveal: an `always_day` surface
+--- produces the day figure around the clock, and a frozen one produces
+--- whatever `daytime` was stopped at, forever.
+---
+--- `solar_power_multiplier` is the surface's own scaling (1 on Nauvis, and not
+--- 1 everywhere -- it is exactly the knob that makes a solar array a different
+--- size on a different planet).
+function serialize_surface_daylight(surface)
+    local record = table_properties(surface, {
+        "ticks_per_day",
+        "dawn",
+        "dusk",
+        "evening",
+        "morning",
+        "daytime",
+        "solar_power_multiplier",
+        "always_day",
+        "freeze_daytime",
+    })
+    -- Named, because a curve is only about the surface it was read from and a
+    -- record that cannot say which one is not a fact about anything.
+    record.surface = surface.name
+    return record
 end

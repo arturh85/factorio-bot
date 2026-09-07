@@ -96,3 +96,72 @@ fn a_second_surface_is_refused_by_name_rather_than_forking_the_research_state() 
     assert_eq!(world.len(), 1);
     assert!(world.surface(&SurfaceId::from("vulcanus")).is_none());
 }
+
+/// **A dump has to carry the daylight curve, because an offline plan has no
+/// game to ask.**
+///
+/// `crates/planner`'s solar accessors read the surface, not a prototype, so a
+/// `world.dump` that dropped this would make every solar question unanswerable
+/// on exactly the basis this project iterates in. Round-tripped through the
+/// hand-written `Serialize`/`Deserialize` pair rather than checked in memory:
+/// that pair names its fields as strings in four separate places, and a field
+/// added to three of them is a silent loss.
+#[test]
+fn a_surfaces_daylight_survives_a_dump_and_reload() {
+    let surface = FactorioSurface::new();
+    surface.update_daylight(factorio_bot_core::types::SurfaceDaylight {
+        surface: Some(SurfaceId::nauvis()),
+        ticks_per_day: Some(25_200),
+        dawn: Some(0.75),
+        dusk: Some(0.25),
+        evening: Some(0.45),
+        morning: Some(0.55),
+        daytime: Some(0.125),
+        solar_power_multiplier: Some(1.0),
+        always_day: Some(false),
+        freeze_daytime: Some(false),
+    });
+
+    let json = serde_json::to_string(&surface).expect("a surface serialises");
+    let back: FactorioSurface = serde_json::from_str(&json).expect("and reloads");
+    let daylight = back.daylight().expect("the curve came back");
+    assert_eq!(daylight.ticks_per_day, Some(25_200));
+    assert_eq!(daylight.dusk, Some(0.25));
+    assert_eq!(daylight.dawn, Some(0.75));
+    assert_eq!(daylight.solar_power_multiplier, Some(1.0));
+    assert_eq!(
+        daylight.average_solar_fraction(1.0, 0.0),
+        Some(0.7),
+        "and it still describes a day after the round trip",
+    );
+}
+
+/// **Every dump this project has archived predates this field, and all of them
+/// must stay readable.**
+///
+/// Two distinct absences collapse to the same answer on purpose: a file with no
+/// `daylight` key at all, and one whose sender had no curve to report. Neither
+/// is a surface in permanent darkness, and a planner that read either as zero
+/// would credit solar at nothing for a reason nobody established — the failure
+/// this repo's rule about `None` exists to prevent.
+#[test]
+fn a_dump_written_before_the_daylight_channel_still_loads() {
+    let surface = FactorioSurface::new();
+    let json = serde_json::to_string(&surface).expect("a surface serialises");
+    let stripped: serde_json::Value = {
+        let mut value: serde_json::Value = serde_json::from_str(&json).expect("json");
+        value
+            .as_object_mut()
+            .expect("an object")
+            .remove("daylight")
+            .expect("the key is there to remove, or this test proves nothing");
+        value
+    };
+
+    let back: FactorioSurface =
+        serde_json::from_value(stripped).expect("an older dump must still load");
+    assert!(
+        back.daylight().is_none(),
+        "absent is unknown, and unknown is not dark",
+    );
+}

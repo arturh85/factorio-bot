@@ -925,6 +925,7 @@ function writeout_initial_stuff()
 	writeout_item_prototypes()
 	writeout_recipes()
 	writeout_forces()
+	writeout_daylight()
 	writeout(0, "STATIC_DATA_END", "done")
 end
 
@@ -1254,6 +1255,29 @@ end
 -- carry ~120 kB technology tables each and describe nobody.
 function writeout_forces()
 	writeout(0, "force", helpers.table_to_json(collect_player_force()))
+end
+
+-- The one surface this project models, for `collect_surface_daylight`.
+--
+-- `game.surfaces['nauvis']` and not `game.surfaces[1]`: the Nauvis guard in
+-- `on_chunk_generated` already names it that way, and a numeric index says
+-- "whichever surface was made first", which is a different claim.
+function bridge_surface()
+	return game.surfaces['nauvis']
+end
+
+-- The daylight curve, for both transports. See `serialize_surface_daylight`
+-- in `types.lua` for what each field is and why prototypes cannot answer this.
+function collect_surface_daylight()
+	local surface = bridge_surface()
+	if surface == nil then return nil end
+	return serialize_surface_daylight(surface)
+end
+
+function writeout_daylight()
+	local daylight = collect_surface_daylight()
+	if daylight == nil then return end
+	writeout(0, "daylight", helpers.table_to_json(daylight))
 end
 
 function on_whoami()
@@ -5114,6 +5138,7 @@ function rcon_world_snapshot()
 		item_prototypes = collect_item_prototypes(),
 		recipes = collect_recipes(),
 		forces = {collect_player_force()},
+		daylight = collect_surface_daylight(),
 	}))
 end
 

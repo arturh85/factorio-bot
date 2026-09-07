@@ -1,0 +1,98 @@
+{
+  "daylight": {
+    "surface": "nauvis",
+    "ticks_per_day": 25200,
+    "dawn": 0.75,
+    "dusk": 0.25,
+    "evening": 0.45,
+    "morning": 0.55,
+    "daytime": 3.968253968253969e-05,
+    "solar_power_multiplier": 1.0,
+    "always_day": false,
+    "freeze_daytime": false
+  },
+  "solar-panel": {
+    "name": "solar-panel",
+    "entity_type": "solar-panel",
+    "collision_mask": [
+      "is_lower_object",
+      "is_object",
+      "water_tile",
+      "item",
+      "object",
+      "player"
+    ],
+    "collision_box": {
+      "left_top": {
+        "x": -1.34765625,
+        "y": -1.34765625
+      },
+      "right_bottom": {
+        "x": 1.34765625,
+        "y": 1.34765625
+      }
+    },
+    "mine_result": {
+      "solar-panel": 1
+    },
+    "mining_time": 0.1,
+    "mining_speed": null,
+    "crafting_speed": null,
+    "max_underground_distance": null,
+    "fluidbox_prototypes": null,
+    "mining_drill_radius": null,
+    "resource_category": null,
+    "resource_categories": null,
+    "mining_fluid": null,
+    "supply_area_distance": null,
+    "distribution_effectivity": null,
+    "beacon_profile": null,
+    "electric_energy_usage": null,
+    "max_energy_production": 1000.0,
+    "solar_panel_performance_at_day": 1.0,
+    "solar_panel_performance_at_night": 0.0,
+    "electric_buffer_capacity": 0.0
+  },
+  "accumulator": {
+    "name": "accumulator",
+    "entity_type": "accumulator",
+    "collision_mask": [
+      "is_lower_object",
+      "is_object",
+      "water_tile",
+      "item",
+      "object",
+      "player"
+    ],
+    "collision_box": {
+      "left_top": {
+        "x": -0.8984375,
+        "y": -0.8984375
+      },
+      "right_bottom": {
+        "x": 0.8984375,
+        "y": 0.8984375
+      }
+    },
+    "mine_result": {
+      "accumulator": 1
+    },
+    "mining_time": 0.1,
+    "mining_speed": null,
+    "crafting_speed": null,
+    "max_underground_distance": null,
+    "fluidbox_prototypes": null,
+    "mining_drill_radius": null,
+    "resource_category": null,
+    "resource_categories": null,
+    "mining_fluid": null,
+    "supply_area_distance": null,
+    "distribution_effectivity": null,
+    "beacon_profile": null,
+    "electric_energy_usage": null,
+    "max_energy_production": 5000.0,
+    "solar_panel_performance_at_day": null,
+    "solar_panel_performance_at_night": null,
+    "electric_buffer_capacity": 5000000.0
+  }
+}

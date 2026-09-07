@@ -238,6 +238,19 @@ fn pole_wire_reach(name: &str) -> Option<f64> {
 /// does not run depending on when the run starts". A planner whose output must
 /// be identical for identical inputs cannot credit a number that is not.
 ///
+/// **The daylight channel does not lift this gate, and that is deliberate.**
+/// [`PlanState::solar_average_kw`] now derives a panel's *average* output,
+/// which is a function of surface constants and so is perfectly deterministic
+/// — the determinism objection is answered. What is not answered is storage: an
+/// array credited its average keeps a base alive only if the accumulators to
+/// carry the night are actually standing, and
+/// [`PlanState::accumulators_per_panel`] says how many that is without anything
+/// yet checking that they exist. Crediting the average here before that check
+/// exists would turn a *false refusal* into a base that dies at midnight, which
+/// is the wrong direction to be wrong in. The two accessors are the arithmetic
+/// a solar arm of `method::power` needs; wiring them into supply is that arm's
+/// work, not this table's.
+///
 /// These three are steady while fuelled: a steam engine's 900 kW is the same
 /// at every hour of every day. `generator` covers `steam-engine` and
 /// `steam-turbine`, `burner-generator` and `fusion-generator` the Space Age
@@ -4334,14 +4347,16 @@ impl PlanState {
     ///
     /// # What this deliberately does not count
     ///
-    /// * **Solar panels.** Their output depends on the in-game time of day, so
-    ///   the same plan would be feasible or not according to when the run
-    ///   started. CLAUDE.md names this as the trap that makes a layout "run or
-    ///   not run depending on when the run starts"; a planner that has to be
-    ///   deterministic cannot credit it. A solar-powered base is therefore
-    ///   reported as unpowered — a false refusal, and the safe direction.
+    /// * **Solar panels**, still — but no longer because the number is
+    ///   unknowable. [`Self::solar_average_kw`] derives a panel's daily
+    ///   average from the surface's own curve, which is deterministic; what is
+    ///   missing is any check that the accumulators to carry the night are
+    ///   standing. Crediting an average without that check trades a false
+    ///   refusal for a base that dies at midnight. See
+    ///   [`DETERMINISTIC_GENERATOR_TYPES`].
     /// * **Accumulators**, for the same reason once removed: they store what
-    ///   solar generated.
+    ///   solar generated, and [`Self::accumulators_per_panel`] says how many
+    ///   are needed rather than what a standing one is worth.
     /// * **Whether the generator is actually running.** A steam engine with no
     ///   steam produces nothing, and nothing in `FactorioSurface` says whether
     ///   it has any. This counts nameplate capacity, so a boiler that is out
@@ -4420,6 +4435,119 @@ impl PlanState {
     /// caller sizing against it refuses rather than promising.
     pub fn generator_output_kw(&self, name: &str) -> Option<f64> {
         generation_kw(&self.base.entity_prototypes, name)
+    }
+
+    /// What one solar panel of `name` contributes **averaged over a day**, in
+    /// kW, on this world's surface.
+    ///
+    /// # Why this is not [`generator_output_kw`](Self::generator_output_kw)
+    ///
+    /// The supply ledger credits nameplate capacity, which for every
+    /// deterministic generator is also what it makes at every hour. A solar
+    /// panel's nameplate is its **noon** figure and it makes that for a
+    /// fraction of the day, so nameplate and average are different numbers and
+    /// the difference is the whole trap: a base sized on 60 kW per panel is
+    /// dead every night, and this repo already records twice that an
+    /// under-supplied network reads as completely dead rather than as slow.
+    /// The owner's ruling is that solar is planned at average output.
+    ///
+    /// # Every term is derived, and none of them is here
+    ///
+    /// The two endpoints come from the panel's own prototype
+    /// ([`FactorioEntityPrototype::solar_panel_performance_at_day`] and
+    /// `..._at_night`) and everything else from
+    /// [`factorio_bot_core::factorio::world::FactorioSurface::daylight`] — the four day-phase boundaries,
+    /// `ticks_per_day` and `solar_power_multiplier`. There is no table here
+    /// and no fallback, deliberately: `0.7` is a *result* of vanilla Nauvis
+    /// arithmetic, and writing it down would be the mod-compatibility defect
+    /// the standing rule names, in the one place where a mod is most likely to
+    /// differ. See [`factorio_bot_core::types::SurfaceDaylight::average_solar_fraction`].
+    ///
+    /// # `None` means unknown, and it is why no baseline moved
+    ///
+    /// A world whose sender predates the daylight channel — which is every
+    /// dump this project has archived — answers `None`, exactly as it did
+    /// before this existed, and a caller must read that as "this planner may
+    /// not put solar on a network" rather than as zero. That is the same
+    /// refusal `electric_supply_kw` already makes; see its doc for why solar
+    /// is still not *credited* there.
+    pub fn solar_average_kw(&self, name: &str) -> Option<f64> {
+        let daylight = self.base.daylight()?;
+        let prototype = self.base.entity_prototypes.get(name)?;
+        let noon_kw = prototype.max_energy_production_kw().filter(|kw| *kw > 0.)?;
+        // The two endpoints gate this as much as they scale it: they carry
+        // `subclasses: ["SolarPanel"]`, so their presence is what says the
+        // prototype is a panel at all. A name that is not one answers `None`
+        // here rather than being credited a curve it does not follow.
+        let fraction = daylight.average_solar_fraction(
+            prototype.solar_panel_performance_at_day?,
+            prototype.solar_panel_performance_at_night?,
+        )?;
+        Some(noon_kw * fraction)
+    }
+
+    /// How many accumulators of `accumulator` one panel of `panel` needs for
+    /// the array to carry its own average load through the night.
+    ///
+    /// # The derivation, and the number it lands on
+    ///
+    /// An array sized at [`solar_average_kw`](Self::solar_average_kw) carries
+    /// a flat load equal to its average. It makes more than that around noon
+    /// and less around midnight, and the *less* is what accumulators cover.
+    /// [`factorio_bot_core::types::SurfaceDaylight::night_deficit_fraction`] integrates that shortfall
+    /// exactly — the area between the flat load line and the curve wherever
+    /// the curve is beneath it — and multiplying by the panel's own
+    /// joules-per-tick and the surface's `ticks_per_day` turns it into joules.
+    /// Dividing by the accumulator's
+    /// [`FactorioEntityPrototype::electric_buffer_capacity`] gives this.
+    ///
+    /// On Nauvis it is **0.8467** — the owner's 25 panels to 21 accumulators
+    /// (0.84) scaled by the day length the running game reports, 25,200 ticks
+    /// against the 25,000 every reference repeats. Reached without either
+    /// number being written down, and the 0.8% gap is fully explained rather
+    /// than tuned away.
+    ///
+    /// # 0.84 is the accumulator ratio and 0.7 is the average — they are not
+    /// the same statement
+    ///
+    /// Worth saying because the two are easy to conflate, and conflating them
+    /// would size an array 20% short. `25:21` says nothing about average
+    /// output; it says how much *storage* a day's shortfall needs. The average
+    /// is 0.7 of nameplate, from the same curve, by a different integral. Both
+    /// fall out of this one channel, which is the corroboration: two
+    /// independently-known vanilla ratios from one derivation.
+    ///
+    /// # What it is not
+    ///
+    /// Not a discharge-rate check. An accumulator's
+    /// `max_energy_production` is its 300 kW discharge *limit*, and a bank
+    /// with enough joules can still be unable to deliver them fast enough.
+    /// This sizes energy only; the rate question is a separate one and is not
+    /// answered anywhere yet.
+    ///
+    /// `None` on a world that has not reported daylight, or for a `panel`
+    /// that is not a solar panel or an `accumulator` with no buffer — unknown,
+    /// never zero.
+    pub fn accumulators_per_panel(&self, panel: &str, accumulator: &str) -> Option<f64> {
+        let daylight = self.base.daylight()?;
+        let ticks_per_day = f64::from(daylight.ticks_per_day?);
+        let panel = self.base.entity_prototypes.get(panel)?;
+        let deficit_fraction = daylight.night_deficit_fraction(
+            panel.solar_panel_performance_at_day?,
+            panel.solar_panel_performance_at_night?,
+        )?;
+        // `max_energy_production` is joules per tick, so a day of it at full
+        // output is that times the day's ticks, and the deficit is a fraction
+        // of exactly that.
+        let deficit_joules =
+            panel.max_energy_production.filter(|j| *j > 0.)? * ticks_per_day * deficit_fraction;
+        let buffer_joules = self
+            .base
+            .entity_prototypes
+            .get(accumulator)?
+            .electric_buffer_capacity
+            .filter(|j| *j > 0.)?;
+        Some(deficit_joules / buffer_joules)
     }
 
     /// How much draw, in kW, is already committed on the network that reaches
@@ -6204,6 +6332,202 @@ mod tests {
             None,
             "an accumulator's discharge limit is not generation either"
         );
+    }
+
+    // ---- solar, which needs the surface and not just the prototype ---------
+
+    /// Vanilla Nauvis' daylight curve, as `LuaSurface` reports it.
+    fn nauvis_daylight() -> factorio_bot_core::types::SurfaceDaylight {
+        factorio_bot_core::types::SurfaceDaylight {
+            surface: Some(factorio_bot_core::types::SurfaceId::nauvis()),
+            // The live 2.1.17 figure. See
+            // `crates/core/tests/live-2.1.17-daylight.json`.
+            ticks_per_day: Some(25_200),
+            dawn: Some(0.75),
+            dusk: Some(0.25),
+            evening: Some(0.45),
+            morning: Some(0.55),
+            daytime: Some(0.0),
+            solar_power_multiplier: Some(1.0),
+            always_day: Some(false),
+            freeze_daytime: Some(false),
+        }
+    }
+
+    /// A `PlanState` carrying a vanilla `solar-panel` and `accumulator`, and
+    /// optionally a daylight curve.
+    ///
+    /// The fixture ships all 528 prototypes with none of the solar fields, so
+    /// they are set in place here for the same reason `state_with_energy`
+    /// does: a number that came from the world is distinguishable from a
+    /// number that happens to match a table.
+    fn state_with_solar(daylight: Option<factorio_bot_core::types::SurfaceDaylight>) -> PlanState {
+        let world = fixture_world();
+        let mut panel = world
+            .entity_prototypes
+            .get("solar-panel")
+            .expect("the fixture ships a solar panel")
+            .clone();
+        // 1,000 J/tick is the 60 kW on a vanilla panel's tooltip: its NOON
+        // output, which is the whole reason this pair of accessors exists.
+        panel.max_energy_production = Some(1000.);
+        panel.solar_panel_performance_at_day = Some(1.0);
+        panel.solar_panel_performance_at_night = Some(0.0);
+        world.entity_prototypes.insert("solar-panel".into(), panel);
+
+        let mut accumulator = world
+            .entity_prototypes
+            .get("accumulator")
+            .expect("the fixture ships an accumulator")
+            .clone();
+        accumulator.max_energy_production = Some(5000.);
+        accumulator.electric_buffer_capacity = Some(5_000_000.);
+        world
+            .entity_prototypes
+            .insert("accumulator".into(), accumulator);
+
+        if let Some(daylight) = daylight {
+            world.update_daylight(daylight);
+        }
+        PlanState::from_world(Arc::new(world), &[BotId(1)])
+    }
+
+    /// **The owner's ruling, derived rather than typed: solar is planned at
+    /// average output, and a vanilla panel averages 42 kW of its 60.**
+    ///
+    /// Every term comes from somewhere: the 60 kW from the panel's own
+    /// `max_energy_production`, the two endpoints from its
+    /// `solar_panel_performance_at_*`, and the 0.7 from the surface's four
+    /// day-phase boundaries. Nothing in the tree contains 42, or 0.7, and
+    /// that is the point — a rate copied from a table is a mod-compatibility
+    /// defect by the standing rule, and solar is where a mod is likeliest to
+    /// differ.
+    #[test]
+    fn a_solar_panel_is_worth_its_daily_average_and_not_its_noon_figure() {
+        let s = state_with_solar(Some(nauvis_daylight()));
+        assert_eq!(
+            s.generator_output_kw("solar-panel"),
+            None,
+            "the nameplate ledger still refuses it, and must",
+        );
+        let average = s
+            .solar_average_kw("solar-panel")
+            .expect("a vanilla panel on a vanilla surface");
+        assert!(
+            (average - 42.).abs() < 1e-9,
+            "60 kW at noon x 0.7 of a day, got {average}",
+        );
+    }
+
+    /// **`None` means unknown, and that is why no offline baseline moved.**
+    ///
+    /// Every world this project has archived predates the daylight channel, so
+    /// every one of them answers exactly as it did before these accessors
+    /// existed. A zero here would be a claim that the surface is dark, which
+    /// nobody established.
+    #[test]
+    fn a_world_that_never_reported_daylight_answers_unknown_not_zero() {
+        let s = state_with_solar(None);
+        assert_eq!(s.solar_average_kw("solar-panel"), None);
+        assert_eq!(
+            s.accumulators_per_panel("solar-panel", "accumulator"),
+            None,
+            "and the accumulator half refuses on the same terms",
+        );
+    }
+
+    /// A prototype that is not a solar panel has no curve to follow, and the
+    /// endpoints' absence is what says so — they carry
+    /// `subclasses: ["SolarPanel"]`, so the live game omits them on everything
+    /// else. A steam engine credited a daylight average would be a silent
+    /// 30% under-count of a generator that runs all night.
+    #[test]
+    fn a_machine_that_is_not_a_panel_has_no_daily_average() {
+        let s = state_with_solar(Some(nauvis_daylight()));
+        assert_eq!(s.solar_average_kw("steam-engine"), None);
+        assert_eq!(
+            s.solar_average_kw("accumulator"),
+            None,
+            "an accumulator declares production and is not a panel",
+        );
+    }
+
+    /// **The second vanilla ratio out of the same channel: 25 panels to 21
+    /// accumulators, scaled by the day the running game actually reports.**
+    ///
+    /// Independent of the 0.7 average — a different integral of the same curve
+    /// — which is why landing both is corroboration rather than one number
+    /// checked twice. The energy path is explicit: 0.168 of a day's full
+    /// output is 4.234 MJ per panel on a 25,200-tick day, against an
+    /// accumulator's 5 MJ — 0.8467, which is the familiar 0.84 times
+    /// 25,200/25,000 and nothing else.
+    #[test]
+    fn the_accumulator_ratio_is_derived_and_lands_on_the_vanilla_twenty_five_to_twenty_one() {
+        let s = state_with_solar(Some(nauvis_daylight()));
+        let ratio = s
+            .accumulators_per_panel("solar-panel", "accumulator")
+            .expect("a vanilla pair on a vanilla surface");
+        assert!(
+            (ratio - 0.84 * 25_200. / 25_000.).abs() < 1e-9,
+            "4.234 MJ of shortfall against a 5 MJ buffer, got {ratio}",
+        );
+        assert!(
+            (ratio * 25. - 21.).abs() < 0.2,
+            "which is 25 panels to 21 accumulators to within the day-length \
+             correction, got {} per 25 panels",
+            ratio * 25.,
+        );
+    }
+
+    /// The buffer is the accumulator's real number and it is **not** its
+    /// `max_energy_production`: that field carries the 300 kW discharge
+    /// *limit*, a rate rather than a store. Sizing against it would ask for
+    /// 14,000 accumulators per panel.
+    #[test]
+    fn an_accumulator_with_no_buffer_declared_cannot_be_sized_against() {
+        let world = fixture_world();
+        let mut panel = world
+            .entity_prototypes
+            .get("solar-panel")
+            .expect("the fixture ships a solar panel")
+            .clone();
+        panel.max_energy_production = Some(1000.);
+        panel.solar_panel_performance_at_day = Some(1.0);
+        panel.solar_panel_performance_at_night = Some(0.0);
+        world.entity_prototypes.insert("solar-panel".into(), panel);
+
+        let mut accumulator = world
+            .entity_prototypes
+            .get("accumulator")
+            .expect("the fixture ships an accumulator")
+            .clone();
+        // The discharge limit is declared; the store is not.
+        accumulator.max_energy_production = Some(5000.);
+        accumulator.electric_buffer_capacity = None;
+        world
+            .entity_prototypes
+            .insert("accumulator".into(), accumulator);
+        world.update_daylight(nauvis_daylight());
+        let s = PlanState::from_world(Arc::new(world), &[BotId(1)]);
+
+        assert_eq!(
+            s.accumulators_per_panel("solar-panel", "accumulator"),
+            None,
+            "a discharge rate is not a store and must not be read as one",
+        );
+    }
+
+    /// The surface's own multiplier reaches the kW answer, not just the
+    /// fraction. It is exactly the knob that makes an array a different size
+    /// on a different planet, and it is 1 on Nauvis, so a version that dropped
+    /// it would pass every other test in this file.
+    #[test]
+    fn the_surfaces_solar_multiplier_reaches_the_kilowatt_answer() {
+        let mut daylight = nauvis_daylight();
+        daylight.solar_power_multiplier = Some(0.5);
+        let s = state_with_solar(Some(daylight));
+        let average = s.solar_average_kw("solar-panel").expect("a dimmer surface");
+        assert!((average - 21.).abs() < 1e-9, "half of 42 kW, got {average}",);
     }
 
     /// **A beacon is not a pole, and the same field means something else on

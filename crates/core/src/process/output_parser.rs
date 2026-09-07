@@ -13,6 +13,7 @@ use crate::types::{
     ChunkPosition, FactorioEntity, FactorioEntityPrototype, FactorioForce, FactorioGraphic,
     FactorioItemPrototype, FactorioRecipe, FactorioTile, PlayerChangedDistanceEvent,
     PlayerChangedMainInventoryEvent, PlayerChangedPositionEvent, PlayerId, Pos, Position, Rect,
+    SurfaceDaylight,
 };
 use miette::{IntoDiagnostic, Result, miette};
 
@@ -343,6 +344,20 @@ impl OutputParser {
             // update is recoverable, aborting a running multi-bot session is
             // not. Do not silently swallow the error either -- an ignored
             // failure with no log would be worse than the panic it replaces.
+            // The surface's day/night curve, emitted once beside the forces
+            // in `writeout_initial_stuff`. A failure to parse leaves the
+            // curve unset, which reads downstream as *nobody said* -- the
+            // same answer an older mod gives -- rather than as a dark
+            // surface.
+            "daylight" => match serde_json::from_str::<SurfaceDaylight>(rest) {
+                Ok(daylight) => self.world.update_daylight(daylight),
+                Err(err) => {
+                    error!(
+                        "<red>failed to deserialize daylight</>: {:?} '{}'",
+                        err, rest
+                    );
+                }
+            },
             "force" => match serde_json::from_str::<FactorioForce>(rest) {
                 Ok(force) => self.world.update_force(force)?,
                 Err(err) => {

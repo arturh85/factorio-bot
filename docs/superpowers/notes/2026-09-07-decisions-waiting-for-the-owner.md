@@ -1,5 +1,21 @@
 # Decisions waiting for the owner — 2026-09-07 morning
 
+> **DECIDED 2026-09-07 by the owner. All five are ruled; the rulings are here
+> and the sections below are kept as the evidence behind them.**
+>
+> 1. **Persist the anchor with the goal.** Accepted, including the cost to
+>    `Goal::Built`'s semantics and serialised shape.
+> 2. **Ship `maximum_wire_distance` through the mod**, keeping the vanilla
+>    fallback for dumps that predate it.
+> 3. Fluids — `Goal::Stored` — not yet ruled; still open below.
+> 4. **Credit solar only once accumulators are standing and sized.** A refusal
+>    at plan time beats a base that dies at 03:00.
+> 5. **Adopt a busy furnace anyway — do NOT change it.** *A deliberate ruling,
+>    not an oversight*: the first insert competing with a running smelt is
+>    cheap and mostly self-correcting, and the alternative costs stone and can
+>    turn a working adoption into a shortfall on replan. **`holds_input` stays
+>    available and unused. Do not "fix" this.**
+
 **Five** things overnight work reached and deliberately did **not** decide. Each
 is recorded with the measurement behind it, so none has to be re-derived.
 

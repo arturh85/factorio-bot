@@ -2131,6 +2131,58 @@ mod tests {
         );
     }
 
+    /// **What `Site::Anchored` does NOT fix, pinned so nobody assumes it
+    /// does: a BRAND-NEW block's first siting on a map that already carries
+    /// a similar one is still hijacked.**
+    ///
+    /// The owner's ruling was "persist the anchor with the goal", and that is
+    /// what shipped: a block whose anchor has been *recorded* is immune. But
+    /// a block being sited for the first time has no anchor to record yet, so
+    /// it arrives as `Anywhere`/`Near`/`At` — and `resolve_site` consults
+    /// `recover_anchor` before any of those, which is deliberate and is what
+    /// stops a half-built block restarting elsewhere.
+    ///
+    /// So the second block on a map must have its anchor **chosen by the
+    /// caller** (`Site::Anchored`), because siting it automatically is exactly
+    /// the operation that gets hijacked. That is a real remaining limitation,
+    /// not an oversight, and it is worth a test rather than a sentence in a
+    /// note because the obvious reading of "anchor persistence shipped" is
+    /// that two blocks now site themselves side by side. They do not.
+    #[test]
+    fn a_new_block_sited_fresh_beside_a_standing_one_is_still_hijacked() {
+        let mut state = test_state();
+        // Block A stands.
+        for i in 0..4 {
+            state.create_entity(stone_furnace_at(40.0 + 3.0 * f64::from(i), 40.0));
+        }
+        // Block B is new, shares a sub-layout, and has never been sited.
+        let b = Blueprint {
+            entities: vec![
+                at_named(0.0, 0.0, "stone-furnace"),
+                at_named(3.0, 0.0, "stone-furnace"),
+                at_named(0.0, 6.0, "iron-chest"),
+            ],
+            version: 0,
+        };
+
+        for site in [Site::Anywhere, Site::Near(Position::new(0.5, 0.5))] {
+            let (resolved, source) =
+                resolve_and_guard(&state, &b, &site).expect("resolves one way or another");
+            assert_eq!(
+                source,
+                AnchorSource::Recovered,
+                "a fresh siting request is still answered by recovery, because \
+                 recovery runs before the Site match: {site:?}"
+            );
+            assert!(
+                resolved.x() >= 40.0 && resolved.x() <= 49.0,
+                "and the anchor lands inside block A, at {:?} -- so \
+                 Site::Anchored is the ONLY way to place a second block today",
+                Pos::from(&resolved)
+            );
+        }
+    }
+
     /// **A recorded anchor survives another block standing on top of the
     /// answer — the crosstalk defect, closed.**
     ///

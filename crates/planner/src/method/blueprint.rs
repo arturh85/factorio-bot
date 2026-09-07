@@ -599,6 +599,52 @@ impl BlockPower {
 /// consumer's own collision box as the area. That is the call's intended use:
 /// overlap and coverage coincide for a single entity, and diverge only when a
 /// whole region is passed as the area.
+/// Entities this blueprint calls poles that the model cannot size.
+///
+/// **`pole_would_supply` answers `false` both for "not a pole" and for "a pole
+/// whose reach I cannot describe", and [`blueprint_power`] deliberately uses
+/// that to identify poles by capability rather than by name.** That is right
+/// for identification and wrong for the refusal built on top of it: a pole the
+/// model cannot size is silently not-a-pole, every consumer then reads as
+/// uncovered, and the block is refused for *failing to distribute* when the
+/// truth is that nothing here could say whether it distributes.
+///
+/// The discriminator is the prototype's own `entity_type`. A prototype typed
+/// `electric-pole` IS a pole -- the model knows that much -- and if
+/// `pole_supply_half_extent` still cannot give it a reach, then the reach is
+/// **unknown**, not zero. That happens for a modded pole named in neither the
+/// dump's `supply_area_distance` nor the vanilla fallback table.
+///
+/// Same shape as [`drill_capability_is_known`], and the same rule behind both:
+/// a confident refusal fires only when the model is in a position to be right.
+/// Absent is not a value.
+fn poles_the_model_cannot_size(
+    state: &PlanState,
+    bp: &Blueprint,
+    anchor: &Position,
+) -> Vec<String> {
+    let mut names: BTreeSet<String> = BTreeSet::new();
+    for e in &bp.entities {
+        let is_pole = state
+            .base()
+            .entity_prototypes
+            .get(&e.name)
+            .is_some_and(|proto| proto.entity_type == "electric-pole");
+        if !is_pole {
+            continue;
+        }
+        let at = anchor.add(&e.offset);
+        let own_tile = Rect::new(
+            &Position::new(at.x() - 0.05, at.y() - 0.05),
+            &Position::new(at.x() + 0.05, at.y() + 0.05),
+        );
+        if !state.pole_would_supply(&e.name, &at, &own_tile) {
+            names.insert(e.name.clone());
+        }
+    }
+    names.into_iter().collect()
+}
+
 pub(crate) fn blueprint_power(state: &PlanState, bp: &Blueprint, anchor: &Position) -> BlockPower {
     use crate::method::power::{POLE, POLE_WIRE_REACH_TILES};
 
@@ -1269,6 +1315,20 @@ impl Method for BuildBlock {
         // refuses nothing that works today.
         let power = blueprint_power(&ctx.state, &bp, &anchor);
         if !power.distributes_itself() {
+            // Before blaming distribution, check whether this model was in a
+            // position to judge it at all. A pole it cannot size reads as
+            // not-a-pole, which makes every consumer uncovered and produces a
+            // confident refusal about a layout nobody assessed.
+            let unsizable = poles_the_model_cannot_size(&ctx.state, &bp, &anchor);
+            if !unsizable.is_empty() {
+                return Err(PlannerError::BlueprintRefused {
+                    reason: format!(
+                        "this block carries {} whose supply area this world does                          not describe, so whether it distributes its own {:.0} kW                          cannot be judged here -- not a layout fault. Dump a world                          from a mod that sends supply_area_distance, or use a pole                          this planner knows",
+                        unsizable.join(", "),
+                        power.demand.kw,
+                    ),
+                });
+            }
             let mut why = Vec::new();
             if power.disconnected_poles > 0 {
                 why.push(format!(
@@ -2035,6 +2095,80 @@ mod tests {
             resolved.x() >= 40.0 && resolved.x() <= 49.0 && resolved.y() == 40.0,
             "block B was sited inside block A, at {:?}",
             Pos::from(&resolved)
+        );
+    }
+
+    /// **A pole the model cannot size is unknown, not absent — and the
+    /// distribution refusal must not blame the layout for it.**
+    ///
+    /// `pole_would_supply` answers `false` both for "not a pole" and for "a
+    /// pole whose reach I cannot describe", and `blueprint_power` uses that
+    /// deliberately to identify poles by capability rather than by name. The
+    /// consequence nobody followed through: a pole with no known reach is
+    /// silently not-a-pole, so every consumer reads as uncovered and the block
+    /// is refused for **failing to distribute** — a confident verdict about a
+    /// layout the model never assessed.
+    ///
+    /// **This must fail without `poles_the_model_cannot_size`**: drop the
+    /// early return in `expand` and the refusal reverts to naming uncovered
+    /// consumers, which is the wrong diagnosis with the right shape.
+    #[test]
+    fn a_pole_the_model_cannot_size_is_not_a_layout_fault() {
+        use factorio_bot_core::test_utils::fixture_world;
+
+        let world = fixture_world();
+        // A modded pole: typed `electric-pole`, so the model knows it IS a
+        // pole, but named in neither the dump's `supply_area_distance` nor
+        // the vanilla fallback table, so its reach is UNKNOWN.
+        let proto = {
+            let any = world
+                .entity_prototypes
+                .get("stone-furnace")
+                .expect("fixture has a stone furnace");
+            let mut p = any.clone();
+            p.name = "modded-pole".to_string();
+            p.entity_type = "electric-pole".to_string();
+            p.supply_area_distance = None;
+            p
+        };
+        world
+            .entity_prototypes
+            .insert("modded-pole".to_string(), proto);
+        let state = PlanState::from_world(std::sync::Arc::new(world), &[crate::ids::BotId(1)]);
+
+        let bp = Blueprint {
+            entities: vec![at_named(0.0, 0.0, "modded-pole")],
+            version: 0,
+        };
+        let anchor = Position::new(0.5, 0.5);
+
+        // The premise: this pole is invisible to `blueprint_power`, which is
+        // exactly what makes the naive refusal wrong rather than merely terse.
+        let power = blueprint_power(&state, &bp, &anchor);
+        assert_eq!(
+            power.poles, 0,
+            "premise: an unsizable pole is not counted as a pole at all -- if \
+             this stops holding the test below passes for the wrong reason"
+        );
+
+        let named = poles_the_model_cannot_size(&state, &bp, &anchor);
+        assert_eq!(
+            named,
+            vec!["modded-pole".to_string()],
+            "the block must be able to say WHICH pole it cannot size, so the \
+             refusal blames the world's description rather than the layout"
+        );
+
+        // And a pole the model DOES know must not be swept up in it: the gate
+        // has to be narrow, or it would silence every genuine layout fault.
+        let known = Blueprint {
+            entities: vec![at_named(0.0, 0.0, crate::method::power::POLE)],
+            version: 0,
+        };
+        assert!(
+            poles_the_model_cannot_size(&state, &known, &anchor).is_empty(),
+            "a vanilla pole is sizable through the fallback table, so it is \
+             not an unknown and a real distribution fault still refuses"
         );
     }
 

@@ -221,6 +221,30 @@ it wants your judgement rather than an overnight guess.
 
 ---
 
+---
+
+## 6. Wrong-grid anchors: DECIDED BY A SESSION, not by the owner — revert is one commit
+
+**Flagged here for visibility because a session made the call rather than waiting.** If you disagree, `6400fbaa` reverts cleanly.
+
+**The finding it answers**: an even-footprint entity belongs on a tile *boundary* and an odd one on a tile *centre*, and **the game silently MOVES a wrong-parity entity** — no refusal, no warning, the block standing half a tile from where the planner believes it is. `search_site` steps in whole tiles, so every candidate inherited the seed's fractional part, and `Site::Anywhere` seeds at an ore position, which is a centre. **So no block containing a 2×2 entity could ever be sited legally, on any map.** Live: drills the game refused went 4 → 0.
+
+`Site::Anywhere` now aligns its seed. The open question was what a **caller-supplied** anchor (`Site::At`, `Site::Anchored`) should do when its parity is wrong.
+
+**Decided: refuse by name** (`BlockAnchorMisaligned`), naming both the anchor asked for and one that would work — and the test asserts the recommended anchor is actually accepted, because a message that is correct but not actionable is worth less.
+
+**The argument, which is why it did not wait:**
+
+* **It is not a new decision.** `Site::At`'s own doc already promises *"this exact anchor, or refuse"*. Refusing is that contract; **snapping would be the change.**
+* **Refusing is loud; snapping is silent.** The bug being fixed *was* silent wrongness, so adding more of it as the cure is the wrong direction.
+* Silently aligning a **recorded** anchor would defeat the point of recording it — the whole reason `Site::Anchored` exists is that the caller's choice outranks the ground.
+
+**If you would rather it snapped**, say so; it is one commit.
+
+**One thing the refusal found on its first run, worth seeing**: it broke exactly one existing test — a block of tile-centre entities anchored at (30, 30). **Every entity in it would have stood half a tile out in a real game**, and the test had passed for as long as it existed, because *the fixture world does not snap*. A fixture fitted to the code rather than to the game.
+
+---
+
 ## What is NOT waiting on anything
 
 Everything else overnight is merged and green: gathering bills its own unlock,

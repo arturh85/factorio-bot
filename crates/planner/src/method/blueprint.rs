@@ -1968,6 +1968,76 @@ mod tests {
         );
     }
 
+    /// **`Site::At` is NOT an escape hatch from cross-block recovery, so
+    /// there is currently no way to put two of these blocks on one map.**
+    ///
+    /// This is the decision-relevant fact for anchor persistence, and it is
+    /// easy to get wrong by reading `resolve_site`'s `match` and stopping
+    /// there. `recover_anchor` runs BEFORE the match and unconditionally, so
+    /// a caller naming an explicit anchor is outranked by any two of the
+    /// block's entities standing at the right relative offsets -- including
+    /// when they belong to a DIFFERENT block that happens to share a
+    /// sub-layout (`crates/core/tests/recovery_crosstalk_probe.rs`: 21 of
+    /// `ElectricSmelter`'s 28 entities match inside `FurnaceLine`).
+    ///
+    /// Recovery outranking `Site::At` is deliberate and right on its own
+    /// terms -- see
+    /// `resolve_site_prefers_the_recovered_anchor_over_an_explicit_site_at`;
+    /// a stale caller anchor must not start a second half-block. The two
+    /// rulings are individually correct and jointly leave no way to say
+    /// "this is a new block, put it here".
+    ///
+    /// The mitigation in place is the guard: the hijacked anchor is refused
+    /// by name rather than silently built on another block's ground. The fix
+    /// is to persist the anchor with the goal, which changes `Goal::Built`
+    /// semantics and is the owner's call.
+    #[test]
+    fn an_explicit_anchor_does_not_escape_recovery_into_another_block() {
+        // Block A stands: four furnaces in a row, 3 tiles apart.
+        let mut state = test_state();
+        for i in 0..4 {
+            state.create_entity(stone_furnace_at(40.0 + 3.0 * f64::from(i), 40.0));
+        }
+        // Block B is a DIFFERENT blueprint that happens to share a
+        // two-furnace sub-layout with A: same name, same spacing.
+        let b = Blueprint {
+            entities: vec![
+                at_named(0.0, 0.0, "stone-furnace"),
+                at_named(3.0, 0.0, "stone-furnace"),
+                at_named(0.0, 6.0, "iron-chest"),
+            ],
+            version: 0,
+        };
+
+        // The caller names a clear anchor far from block A.
+        let asked = Position::new(0.5, 0.5);
+        let (resolved, source) = resolve_and_guard(&state, &b, &Site::At(asked.clone()))
+            .expect("no drill in this block, so the ore guard has nothing to say");
+
+        assert_eq!(
+            source,
+            AnchorSource::Recovered,
+            "recovery runs before the Site match, so an explicit anchor loses"
+        );
+        assert_ne!(
+            Pos::from(&resolved),
+            Pos::from(&asked),
+            "the caller asked for (0.5, 0.5) and did not get it -- this is why \
+             Site::At cannot be recommended as a way to place a second block \
+             on a map that already carries one"
+        );
+        // Inside block A's own span (x 40..=49, y 40), not at the caller's
+        // anchor. The exact tile is a tie-break detail -- every furnace pair
+        // 3 apart satisfies 2 entities, and `recover_anchor` takes the larger
+        // key on a tie -- so this asserts the property that matters rather
+        // than the tile I first guessed, which was 40 and is 46.
+        assert!(
+            resolved.x() >= 40.0 && resolved.x() <= 49.0 && resolved.y() == 40.0,
+            "block B was sited inside block A, at {:?}",
+            Pos::from(&resolved)
+        );
+    }
+
     /// **Unknown is not zero, and a hard refusal must not confuse them.**
     ///
     /// `fixture_world()` declares no `resource_category` on its ore and no

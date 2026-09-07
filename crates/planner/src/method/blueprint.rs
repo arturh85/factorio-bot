@@ -4826,10 +4826,15 @@ mod block_demand_tests {
     fn the_saturating_module_distributes_its_own_power_and_generates_none() {
         let s = state();
         let bp = fixture("SmeltRow24");
-        assert_eq!(bp.entities.len(), 162, "the module as authored");
+        assert_eq!(bp.entities.len(), 152, "the module as authored");
 
         let power = blueprint_power(&s, &bp, &Position::new(0.0, 0.0));
-        assert_eq!(power.poles, 18, "three rows of six");
+        assert_eq!(
+            power.poles, 8,
+            "two rows of four MEDIUM poles. Medium not for coverage but because \
+             a small pole is the only tier costing WOOD, and this block makes \
+             the steel a medium one needs"
+        );
         assert_eq!(
             power.disconnected_poles, 0,
             "all 18 must be one component, or powering one leaves the rest dark"

@@ -327,24 +327,27 @@ fn naming_the_recipe_moves_the_refusal_to_the_fluid_ingredient() {
         "{said}"
     );
     assert!(said.contains("100 crude-oil"), "{said}");
-    assert!(said.contains("which is a fluid"), "{said}");
+    assert!(said.contains("a fluid, so it arrives by pipe"), "{said}");
+    // **What is missing is a SOURCE, not a way to carry it.** Since
+    // 2026-09-07 a fluid ingredient is satisfied by connectivity, so the
+    // refusal names the absent standing fluidbox rather than the absent
+    // action -- see `2026-09-07-a-fluid-arrives-by-pipe.md`.
+    assert!(said.contains("can be shown to supply"), "{said}");
 }
 
-/// The other rung of the same ladder, for the recipe whose *product* is the
-/// wall rather than its ingredient. `light-oil-cracking` is chemistry, so the
-/// machine is a chemical-plant, and with its fluid ingredients dropped what is
-/// left is a fluid product with nowhere to land.
+/// The other rung of the same ladder, for the recipe whose wall is a
+/// *different one*. `light-oil-cracking` is chemistry, so the machine is a
+/// chemical-plant, and it takes **two** fluids in -- light oil and water --
+/// which nothing on our wire can assign to the plant's two input fluidboxes.
 ///
 /// Its value here is that naming a recipe reaches a **different** wall than
 /// the test above: the qualifier chooses which recipe, and the recipe chooses
-/// which wall.
+/// which wall. One is "nothing standing supplies crude"; the other is "two
+/// fluids and no way to tell which box takes which".
 #[test]
 fn naming_a_different_recipe_for_the_same_product_reaches_a_different_wall() {
     let said = plan_error(
-        live_state_with(&BOTS, true, |r| {
-            enable(r, "light-oil-cracking");
-            drop_fluid_ingredients(r, "light-oil-cracking");
-        }),
+        live_state_with(&BOTS, true, |r| enable(r, "light-oil-cracking")),
         Goal::Produced {
             item: "petroleum-gas".into(),
             count: 100,
@@ -357,7 +360,11 @@ fn naming_a_different_recipe_for_the_same_product_reaches_a_different_wall() {
         said.contains("light-oil-cracking runs in chemical-plant"),
         "{said}"
     );
-    assert!(said.contains("nowhere for it to land"), "{said}");
+    assert!(said.contains("2 fluids in"), "{said}");
+    assert!(
+        !said.contains("can be shown to supply"),
+        "a different wall, not the same one: {said}"
+    );
 }
 
 // ---------------------------------------------------------------------------

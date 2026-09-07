@@ -318,7 +318,10 @@ fn a_fluid_ingredient_is_refused_with_the_machine_named() {
     assert!(after.contains("chemical-plant"), "{after}");
     assert!(after.contains("category chemistry"), "{after}");
     assert!(after.contains("20 petroleum-gas"), "{after}");
-    assert!(after.contains("is a fluid"), "{after}");
+    assert!(after.contains("a fluid, so it arrives by pipe"), "{after}");
+    // Since 2026-09-07 the missing thing is a standing SOURCE, not an action
+    // that carries a fluid: a fluid ingredient is satisfied by connectivity.
+    assert!(after.contains("can be shown to supply"), "{after}");
     // And it says where the fluid would have to come from, which is what
     // `substance::FluidSource` is for.
     assert!(after.contains("basic-oil-processing"), "{after}");
@@ -363,30 +366,37 @@ fn the_same_recipe_without_its_fluid_plans_in_the_named_machine() {
     );
 }
 
-/// A fluid *product* has nowhere to land, and that is said separately from a
-/// fluid ingredient -- the two are different problems with different remedies.
+/// **Several** fluid products are refused with the machine named, and that is
+/// said separately from a fluid ingredient -- the two are different problems
+/// with different remedies.
 ///
-/// **Unreachable in vanilla today**, which is why it needs an experiment: no
-/// recipe in a nameable category has an all-item bill and a fluid product.
-/// `sulfuric-acid` with its water dropped is one.
+/// One fluid product is no longer a refusal at all: since 2026-09-07 it is
+/// given a buffer and a pipe run, because the owner's rule is that a machine
+/// whose output has nowhere to go stalls, and a buffer *is* somewhere to go.
+/// What survives is the multi-output rule, which is
+/// `advanced-oil-processing`'s three fluids and a separate owner decision.
+///
+/// Its fluid *ingredients* are dropped so the refusal that fires is the one
+/// about products; with them the plan refuses one rung earlier, on two fluids
+/// in.
 #[test]
-fn a_fluid_product_is_refused_with_the_machine_named() {
+fn several_fluid_products_are_refused_with_the_machine_named() {
     let said = plan_error(
         live_state_with(&BOTS, true, |r| {
-            enable(r, "sulfuric-acid");
-            drop_fluid_ingredients(r, "sulfuric-acid");
+            enable(r, "advanced-oil-processing");
+            drop_fluid_ingredients(r, "advanced-oil-processing");
         }),
         Goal::Produced {
-            item: "sulfuric-acid".into(),
-            count: 50,
+            item: "petroleum-gas".into(),
+            count: 55,
             whose: Holder::Anyone,
             unlocks: None,
-            via: None,
+            via: Some("advanced-oil-processing".into()),
         },
     );
-    assert!(said.contains("chemical-plant"), "{said}");
-    assert!(said.contains("sulfuric-acid"), "{said}");
-    assert!(said.contains("nowhere for it to land"), "{said}");
+    assert!(said.contains("oil-refinery"), "{said}");
+    assert!(said.contains("3 fluids"), "{said}");
+    assert!(said.contains("stalls"), "{said}");
 }
 
 /// The rung the whole ladder is aimed at. `produced:petroleum-gas` does not

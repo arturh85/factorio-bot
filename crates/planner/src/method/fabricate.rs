@@ -16,35 +16,47 @@
 //! one encoding, shared with [`crate::products::Categories::planner_runs`],
 //! rather than a second table agreeing with the first until it does not.
 //!
-//! # It refuses before it emits, and that is most of what it does today
+//! # It refuses before it emits
 //!
 //! The same promise `method::connect` makes: every refusal is returned before
 //! a step is emitted or an entity lands in the plan overlay. A half-built
 //! machine with its bill half-spent is worse than none.
 //!
-//! And the refusals are where the frontier actually is. Opening the category
-//! gate does **not** make `produced:petroleum-gas` plan, and was never going
-//! to: `basic-oil-processing` is 100 crude-oil in and 45 petroleum-gas out,
-//! both fluids. What this method does is move the refusal from *"none is in a
-//! category this planner runs"* — which sends a reader looking for a missing
-//! machine — to the thing that is actually missing, named:
+//! # Fluids arrive by pipe, and that is the whole of what a fluid ingredient
+//! means
 //!
-//! * [`FabricateRefusal::FluidIngredient`] — the machine is named, the bill
-//!   was walked, and one of its ingredients is a fluid. This is
-//!   [`crate::substance::split_bill`]'s first production caller; it existed
-//!   with unit tests and no caller until a category-aware method could give
-//!   it one.
-//! * [`FabricateRefusal::FluidProduct`] — the machine is named and would run,
-//!   and the thing it makes has nowhere to land. A fluid product needs a
-//!   fluidbox concept or a `Goal::Stored`, which is an **open owner
-//!   decision** (`docs/superpowers/notes/2026-09-07-decisions-waiting-for-the-owner.md`
-//!   §3) and deliberately not invented here.
+//! Owner ruling, 2026-09-07: **a fluid ingredient is satisfied by
+//! CONNECTIVITY, not by a quantity** -- *"you pipe crude to a refinery, you
+//! never carry it"*. There is no `Goal::Stored` and no tenth goal kind; items
+//! are counted in an inventory and fluids are piped. So this method:
 //!
-//! Without these, opening the gate makes the *message worse*, which the
-//! predecessor measured: `products::NoProducer` declines the moment one
-//! runnable recipe exists, and the driver falls through to `no method can
-//! satisfy goal`. That degradation is the reason this method claims the goal
-//! rather than being a refusal-only observer.
+//! * **sites the machine beside its fluid source** rather than beside the bot
+//!   that owns the chain. The run has to be short and local, and a refinery
+//!   sited at the roster's feet and a tank thirty tiles away is not a pipe
+//!   run, it is the long-distance trunk -- which is a separate rung and is
+//!   deliberately not built here;
+//! * **adopts a source and never builds one**, because a tank this plan
+//!   places is *empty*. The asymmetry with the sink below is the point:
+//!   an empty buffer is exactly right for catching an output and exactly
+//!   wrong for feeding an input;
+//! * **gives a fluid product a sink or refuses by name**, because a machine
+//!   whose output has nowhere to go stalls. One fluid out is sited and piped
+//!   into a buffer; several -- `advanced-oil-processing` -- is the
+//!   multi-output rule the owner has ruled on separately.
+//!
+//! Every refusal is a wall rather than a shortfall, and each names the next
+//! missing thing: [`FabricateRefusal::NoFluidSource`],
+//! [`FabricateRefusal::ManyFluidIngredients`],
+//! [`FabricateRefusal::ManyFluidProducts`], [`FabricateRefusal::SinkTooSmall`]
+//! and [`FabricateRefusal::NoSinkSite`].
+//!
+//! # What connectivity cannot check, stated because it is load-bearing
+//!
+//! Nothing in [`PlanState`] models what a standing tank *holds*. The source is
+//! chosen because its prototype declares a fluidbox that can supply and
+//! because it is the nearest such thing -- **not** because anyone established
+//! it holds crude. `docs/superpowers/notes/2026-09-07-a-fluid-arrives-by-pipe.md`
+//! says what would close that.
 //!
 //! # Registration
 //!
@@ -59,15 +71,18 @@ use crate::goal::{Goal, Holder};
 use crate::ids::{ItemId, Ticks};
 use crate::method::have::{Demand, demand};
 use crate::method::machine::{Machine, MachineTable};
+use crate::method::pipe::{
+    self, PipeEnd, buffer_prototype, pipe_prototype, place_step, plain_entity, route_between,
+};
 use crate::method::util::{
-    CRAFTING_CATEGORY, RecipeGate, SMELTING_CATEGORY, free_area_near, output_per_craft, recipe_for,
-    recipe_gate, smelting_ticks,
+    CRAFTING_CATEGORY, RecipeGate, SMELTING_CATEGORY, free_area_near, free_area_near_where,
+    output_per_craft, recipe_for, recipe_gate, smelting_ticks,
 };
 use crate::method::{ExpansionCtx, Method, Step};
 use crate::products::{Categories, ProductIndex};
 use crate::state::PlanState;
 use crate::substance::{FluidSource, split_bill};
-use factorio_bot_core::types::{FactorioEntity, FactorioRecipe};
+use factorio_bot_core::types::{FactorioEntity, FactorioRecipe, Position, Rect};
 use miette::Diagnostic;
 use thiserror::Error;
 
@@ -85,60 +100,167 @@ const SET_RECIPE_TICKS: Ticks = 10;
 
 /// Why a named machine still cannot run a recipe.
 ///
-/// **Both variants are returned before anything is emitted.** They are walls,
-/// not shortfalls: no amount of mining, research or walking moves either.
-#[derive(Clone, Debug, PartialEq, Eq, Error, Diagnostic)]
+/// **Every variant is returned before anything is emitted.** They are walls,
+/// not shortfalls: no amount of mining, research or walking moves any of them.
+#[derive(Clone, Debug, PartialEq, Error, Diagnostic)]
 pub enum FabricateRefusal {
-    /// The bill contains something no character can carry to the machine.
+    /// The recipe wants a fluid and **nothing standing could put one into a
+    /// pipe**.
     ///
-    /// The machine is named because that is the new information: before
-    /// `crafting_categories` crossed the bridge, a reader was told only that
-    /// the category was unrunnable and could not tell a missing *machine*
-    /// from a missing *fluid*.
+    /// # A fluid ingredient is a connectivity requirement, and this is the
+    /// only thing that can go wrong with one
+    ///
+    /// Owner ruling, 2026-09-07: *"you pipe crude to a refinery, you never
+    /// carry it"*. So there is no quantity to satisfy and no shortfall to
+    /// bill -- either something is connected or nothing is. The amount is
+    /// still quoted because it is the recipe's own number and it tells a
+    /// reader which recipe was walked, not because anything counts it.
+    ///
+    /// **Asked of `production_type`, never of the name `storage-tank`**: see
+    /// [`crate::method::pipe::fluidbox_entities`]. A pumpjack and an offshore
+    /// pump answer as readily as a tank, which is what sulfur's water needs.
     #[error(
-        "{recipe} runs in {machine} (category {category}), and this planner can name that \
-         machine now -- but the recipe wants {amount} {fluid}, which is a fluid. No character \
-         inventory holds a fluid, no `InventorySlot` addresses a fluidbox, and no action in this \
-         planner moves one, so the {amount} {fluid} cannot be delivered to the {machine}. \
-         {produced_by}"
+        "{recipe} runs in {machine} (category {category}), and the recipe wants {amount} \
+         {fluid} -- a fluid, so it arrives by pipe rather than in a hand. Nothing standing on \
+         this map can be shown to supply {fluid}, so there is nothing to connect the {machine} \
+         to{}. {produced_by}",
+        if considered.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " (considered and rejected: {} -- a fluidbox that supplies SOMETHING is not a \
+                 source of {fluid})",
+                considered.join(", ")
+            )
+        }
     )]
     #[diagnostic(
-        code(planner::fluid_ingredient),
+        code(planner::no_fluid_source),
         help(
-            "the machine is no longer the blocker; a fluid ingredient needs pipes from a source \
-             to the machine's fluidbox, which this planner does not model. `gathered:<fluid>` \
-             stands a pumpjack and a tank up on a field, which is as close as it gets today"
+            "a fluid ingredient is satisfied by CONNECTIVITY, so what is missing is a standing \
+             source -- `gathered:<fluid>` stands a pumpjack and a tank up on a field, and the \
+             trunk from that tank to a tank at the base is the rung above this one"
         )
     )]
-    FluidIngredient {
+    NoFluidSource {
         recipe: String,
         category: String,
         machine: String,
         fluid: String,
         amount: u32,
         produced_by: FluidSource,
+        /// Standing fluidboxes that could supply *a* fluid and could not be
+        /// attributed to *this* one, capped at five. Named because the first
+        /// version of this rung silently piped a refinery to a boiler.
+        considered: Vec<String>,
     },
 
-    /// The machine would run and the thing it makes has nowhere to go.
+    /// More than one fluid goes **in**, and nothing here can say which
+    /// fluidbox takes which.
+    ///
+    /// A machine's `fluidbox_prototypes` say where fluid may be joined and
+    /// which way it flows; **no field on our wire says which fluid a
+    /// particular input box accepts**. With one input that does not matter --
+    /// there is one box and one fluid. With two it decides everything, and a
+    /// pipe on the wrong box builds perfectly and moves nothing, the silent
+    /// class this repo has paid for with inserters and with pumps.
+    ///
+    /// So this refuses rather than guessing. It is what `sulfur` (water +
+    /// petroleum gas) and `advanced-oil-processing` (water + crude) land on,
+    /// and closing it needs a fluid filter across the bridge, not more
+    /// geometry.
     #[error(
-        "{recipe} runs in {machine} (category {category}) and produces {}, which {} -- and this \
-         planner has no goal that names a fluidbox, so there is nowhere for it to land",
-        fluids.join(", "),
-        if fluids.len() == 1 { "is a fluid" } else { "are fluids" }
+        "{recipe} runs in {machine} and takes {} fluids in -- {} -- and no field this planner \
+         receives says which of the {machine}'s input fluidboxes accepts which, so a pipe would \
+         be a guess",
+        fluids.len(),
+        fluids.join(" and ")
     )]
     #[diagnostic(
-        code(planner::fluid_product),
+        code(planner::many_fluid_ingredients),
         help(
-            "landing a fluid product needs a `Goal::Stored`-shaped goal, which is an open owner \
-             decision -- see docs/superpowers/notes/2026-09-07-decisions-waiting-for-the-owner.md"
+            "one fluid in is routable today; two needs the fluidbox's accepted fluid on the \
+             wire. A pipe joined to the wrong box builds 100% correctly and moves nothing"
         )
     )]
-    FluidProduct {
+    ManyFluidIngredients {
+        recipe: String,
+        machine: String,
+        /// In bill order, which is the recipe's own order.
+        fluids: Vec<String>,
+    },
+
+    /// More than one fluid comes **out**, and each needs its own sink.
+    ///
+    /// The owner's ruling is that a machine whose output has nowhere to go
+    /// **stalls**, so a plan must give every fluid product a sink or refuse
+    /// loudly. One output is handled -- a buffer is sited and piped. Three,
+    /// which is `advanced-oil-processing`, is a separate piece of work the
+    /// owner has already ruled on and is deliberately not invented here.
+    #[error(
+        "{recipe} runs in {machine} (category {category}) and produces {} fluids -- {} -- each \
+         of which needs somewhere to go or the {machine} stalls with a full output. One fluid \
+         out is sited and piped into a buffer; several is the multi-output rule, which is a \
+         separate decision",
+        fluids.len(),
+        fluids.join(", ")
+    )]
+    #[diagnostic(
+        code(planner::many_fluid_products),
+        help(
+            "see docs/superpowers/notes/2026-09-07-decisions-waiting-for-the-owner.md -- \
+             advanced-oil-processing's three outputs are the case this names"
+        )
+    )]
+    ManyFluidProducts {
         recipe: String,
         category: String,
         machine: String,
         /// In recipe order, which is the game's own order.
         fluids: Vec<String>,
+    },
+
+    /// The buffer this world offers cannot hold what the goal asked for.
+    ///
+    /// **Derived from the prototype's own `volume`, never from a table of
+    /// vanilla capacities.** `volume` is `None` on a capture taken before the
+    /// mod sent it, and `None` is *"the sender did not say"* rather than
+    /// zero -- so this refuses only when the world positively states a
+    /// capacity that is too small. Erring towards permitting is deliberate:
+    /// refusing on silence would break every archived dump.
+    #[error(
+        "{recipe} makes {amount} {fluid} and the only buffer this world has is a {buffer}, \
+         which holds {volume}: the {machine} would fill it and stall"
+    )]
+    #[diagnostic(
+        code(planner::sink_too_small),
+        help("ask for less, or give the plan a consumer to pipe into instead of a buffer")
+    )]
+    SinkTooSmall {
+        recipe: String,
+        machine: String,
+        fluid: String,
+        amount: u32,
+        buffer: String,
+        volume: f64,
+    },
+
+    /// A fluid product needs a buffer beside the machine and there is no
+    /// clear footprint for one.
+    #[error(
+        "{recipe} makes {fluid}, which needs a {buffer} beside the {machine} at {site} to land \
+         in, and no clear footprint for one was found near it"
+    )]
+    #[diagnostic(
+        code(planner::no_sink_site),
+        help("clear the ground around the machine's site, or plan the block somewhere emptier")
+    )]
+    NoSinkSite {
+        recipe: String,
+        machine: String,
+        fluid: String,
+        buffer: String,
+        site: String,
     },
 }
 
@@ -206,6 +328,342 @@ fn job_for(goal: &Goal, state: &PlanState) -> Option<Job> {
     })
 }
 
+// ---------------------------------------------------------------------------
+// The fluid halves
+// ---------------------------------------------------------------------------
+
+/// A run of pipe this expansion is going to lay, resolved but not emitted.
+struct Run {
+    /// The fluid it carries, for the label a reader sees in the plan.
+    fluid: String,
+    /// The thing at the other end from the machine.
+    other: String,
+    /// Every tile that needs a pipe, in placement order.
+    tiles: Vec<Position>,
+}
+
+/// Where the machine goes and what has to be piped to and from it.
+///
+/// **Resolved in one place, before a single step is emitted.** Siting the
+/// machine is part of it because a fluid ingredient *moves the machine*: the
+/// run has to be short and local, so the refinery is sited beside the tank
+/// the crude arrives in rather than beside whichever bot happens to own the
+/// chain.
+struct FluidRig {
+    site: Position,
+    pipe: String,
+    inbound: Option<Run>,
+    outbound: Option<Run>,
+    /// The buffer to obtain and place, when a fluid product needed one.
+    buffer: Option<(String, Position)>,
+}
+
+/// Every fluid product of `recipe`, in the game's own order, with its amount.
+fn fluid_products(ctx: &ExpansionCtx, recipe: &FactorioRecipe) -> Vec<(String, u32)> {
+    recipe
+        .products
+        .iter()
+        .filter(|p| ctx.substances().is_fluid(&p.name))
+        .map(|p| (p.name.clone(), p.amount))
+        .collect()
+}
+
+/// The declared capacity of `name`'s fluidboxes, or `None` when the world did
+/// not say.
+///
+/// The maximum over the prototype's boxes rather than the sum: a buffer's
+/// capacity is one box's, and summing would invent headroom out of a machine
+/// that happens to declare several.
+fn buffer_volume(state: &PlanState, name: &str) -> Option<f64> {
+    state
+        .base()
+        .globals
+        .entity_prototypes
+        .get(name)?
+        .fluidbox_prototypes
+        .as_ref()?
+        .iter()
+        .filter_map(|b| b.volume)
+        .max_by(|a, b| a.total_cmp(b))
+}
+
+/// Site the machine, resolve both pipe runs, and refuse before any of it is
+/// emitted.
+///
+/// # The asymmetry between a source and a sink is deliberate
+///
+/// **A source is adopted and never built; a sink is built when none stands.**
+/// A buffer this plan places is *empty*, which is exactly right for catching
+/// an output and exactly wrong for feeding an input -- building a tank and
+/// calling it a crude supply would be the "factory that quietly stops" the
+/// owner ruled against, in its purest form. So the input end demands a
+/// standing fluidbox and says so by name when there is none.
+///
+/// # What connectivity cannot check
+///
+/// Nothing in [`PlanState`] models what a standing tank *holds*, and no dump
+/// this project has carries fluid contents. So the source is chosen by *"its
+/// prototype has a box that can supply"* and by distance, and the plan's own
+/// labels name it so a reader can see which one was picked. That is the
+/// honest edge of the connectivity rule.
+fn plan_fluid_rig(
+    ctx: &ExpansionCtx,
+    goal: &Goal,
+    recipe: &FactorioRecipe,
+    machine: &str,
+    bill_fluids: &[(String, u32)],
+    origin: &Position,
+) -> Result<FluidRig, PlannerError> {
+    let state = &ctx.state;
+    if bill_fluids.len() > 1 {
+        return Err(PlannerError::CannotFabricate(Box::new(
+            FabricateRefusal::ManyFluidIngredients {
+                recipe: recipe.name.clone(),
+                machine: machine.to_string(),
+                fluids: bill_fluids.iter().map(|(f, _)| f.clone()).collect(),
+            },
+        )));
+    }
+    let products = fluid_products(ctx, recipe);
+    if products.len() > 1 {
+        return Err(PlannerError::CannotFabricate(Box::new(
+            FabricateRefusal::ManyFluidProducts {
+                recipe: recipe.name.clone(),
+                category: recipe.category.clone(),
+                machine: machine.to_string(),
+                fluids: products.into_iter().map(|(f, _)| f).collect(),
+            },
+        )));
+    }
+
+    // Nothing fluid at all: the machine is sited where every other method
+    // sites one, beside the bot that owns the chain, and this is the whole of
+    // the answer.
+    if bill_fluids.is_empty() && products.is_empty() {
+        let Some(site) = free_area_near(state, origin, machine) else {
+            return Err(PlannerError::NoApplicableMethod {
+                goal: goal.to_string(),
+            });
+        };
+        return Ok(FluidRig {
+            site,
+            pipe: String::new(),
+            inbound: None,
+            outbound: None,
+            buffer: None,
+        });
+    }
+
+    let fluid_for_naming = bill_fluids
+        .first()
+        .map(|(f, _)| f.clone())
+        .or_else(|| products.first().map(|(f, _)| f.clone()))
+        .unwrap_or_default();
+    let pipe = pipe_prototype(state, &fluid_for_naming, machine)?;
+
+    // ---- the machine's site, which the source decides when there is one ----
+    let source = match bill_fluids.first() {
+        Some((fluid, amount)) => {
+            let (attributable, rejected) = pipe::sources_of(state, fluid, origin);
+            let Some(source) = attributable.into_iter().next() else {
+                let recipes: Vec<FactorioRecipe> = state
+                    .base()
+                    .globals
+                    .recipes
+                    .iter()
+                    .map(|entry| entry.value().clone())
+                    .collect();
+                return Err(PlannerError::CannotFabricate(Box::new(
+                    FabricateRefusal::NoFluidSource {
+                        recipe: recipe.name.clone(),
+                        category: recipe.category.clone(),
+                        machine: machine.to_string(),
+                        fluid: fluid.clone(),
+                        amount: *amount,
+                        produced_by: FluidSource::of(recipes.iter(), fluid),
+                        considered: rejected
+                            .iter()
+                            .take(5)
+                            .map(|e| format!("the {} at {}", e.name, e.position))
+                            .collect(),
+                    },
+                )));
+            };
+            Some((fluid.clone(), source))
+        }
+        None => None,
+    };
+    let anchor = source
+        .as_ref()
+        .map(|(_, entity)| entity.position.clone())
+        .unwrap_or_else(|| origin.clone());
+    // **The machine goes where its own ports fit.** A site flush against the
+    // source puts the machine's input port inside the source; see
+    // `pipe::port_is_placeable`, which is that refusal turned into a siting
+    // predicate.
+    let wants_in = !bill_fluids.is_empty();
+    let wants_out = !products.is_empty();
+    let ports_fit = |candidate: &Position| {
+        (!wants_in
+            || pipe::port_is_placeable(state, machine, candidate, Some("input"), Some(0), &pipe))
+            && (!wants_out
+                || pipe::port_is_placeable(
+                    state,
+                    machine,
+                    candidate,
+                    Some("output"),
+                    Some(0),
+                    &pipe,
+                ))
+    };
+    let Some(site) = free_area_near_where(state, &anchor, machine, ports_fit) else {
+        return Err(PlannerError::NoApplicableMethod {
+            goal: goal.to_string(),
+        });
+    };
+    let Some(machine_area) = state.collision_area(machine, &site) else {
+        return Err(PlannerError::FluidPortUnknown {
+            prototype: machine.to_string(),
+            why: "the world has no collision box for it, so its footprint cannot be reserved"
+                .to_string(),
+        });
+    };
+
+    // ---- in ----
+    let inbound = match &source {
+        Some((fluid, entity)) => {
+            let area = state
+                .collision_area(&entity.name, &entity.position)
+                .unwrap_or_else(|| entity.bounding_box.clone());
+            let tiles = route_between(
+                state,
+                &PipeEnd {
+                    name: &entity.name,
+                    position: &entity.position,
+                    area,
+                    production_type: None,
+                    port_index: None,
+                },
+                &PipeEnd {
+                    name: machine,
+                    position: &site,
+                    area: machine_area.clone(),
+                    production_type: Some("input"),
+                    // The recipe has exactly one fluid ingredient -- two are
+                    // refused above -- so it is the machine's first input box.
+                    port_index: Some(0),
+                },
+                &pipe,
+                &[],
+            )?;
+            Some(Run {
+                fluid: fluid.clone(),
+                other: entity.name.clone(),
+                tiles,
+            })
+        }
+        None => None,
+    };
+
+    // ---- out ----
+    let mut buffer = None;
+    let outbound = match products.first() {
+        Some((fluid, amount)) => {
+            let tank = buffer_prototype(state, fluid, machine)?;
+            if let Some(volume) = buffer_volume(state, &tank)
+                && volume < f64::from(*amount)
+            {
+                return Err(PlannerError::CannotFabricate(Box::new(
+                    FabricateRefusal::SinkTooSmall {
+                        recipe: recipe.name.clone(),
+                        machine: machine.to_string(),
+                        fluid: fluid.clone(),
+                        amount: *amount,
+                        buffer: tank.clone(),
+                        volume,
+                    },
+                )));
+            }
+            // The inbound run's tiles are ground already spoken for: it is
+            // resolved and not emitted, so nothing on any grid knows about
+            // it and a tank sited blindly would stand on it.
+            let taken: Vec<Rect> = inbound
+                .iter()
+                .flat_map(|run| run.tiles.iter())
+                .filter_map(|tile| state.collision_area(&pipe, tile))
+                .collect();
+            let clear = |candidate: &Position| {
+                state
+                    .collision_area(&tank, candidate)
+                    .is_some_and(|area| !taken.iter().any(|t| overlaps(&area, t)))
+            };
+            let Some(tank_site) = free_area_near_where(state, &site, &tank, clear) else {
+                return Err(PlannerError::CannotFabricate(Box::new(
+                    FabricateRefusal::NoSinkSite {
+                        recipe: recipe.name.clone(),
+                        machine: machine.to_string(),
+                        fluid: fluid.clone(),
+                        buffer: tank.clone(),
+                        site: site.to_string(),
+                    },
+                )));
+            };
+            let Some(tank_area) = state.collision_area(&tank, &tank_site) else {
+                return Err(PlannerError::FluidPortUnknown {
+                    prototype: tank.clone(),
+                    why: "the world has no collision box for it, so its footprint cannot be \
+                          reserved"
+                        .to_string(),
+                });
+            };
+            let tiles = route_between(
+                state,
+                &PipeEnd {
+                    name: machine,
+                    position: &site,
+                    area: machine_area,
+                    production_type: Some("output"),
+                    // Likewise the first output box: one fluid product, two
+                    // are refused above.
+                    port_index: Some(0),
+                },
+                &PipeEnd {
+                    name: &tank,
+                    position: &tank_site,
+                    area: tank_area,
+                    production_type: None,
+                    port_index: None,
+                },
+                &pipe,
+                &taken,
+            )?;
+            buffer = Some((tank.clone(), tank_site));
+            Some(Run {
+                fluid: fluid.clone(),
+                other: tank,
+                tiles,
+            })
+        }
+        None => None,
+    };
+
+    Ok(FluidRig {
+        site,
+        pipe,
+        inbound,
+        outbound,
+        buffer,
+    })
+}
+
+/// Do two footprints share any ground? Touching edges do not count.
+fn overlaps(a: &Rect, b: &Rect) -> bool {
+    a.left_top.x() < b.right_bottom.x()
+        && b.left_top.x() < a.right_bottom.x()
+        && a.left_top.y() < b.right_bottom.y()
+        && b.left_top.y() < a.right_bottom.y()
+}
+
 /// Run one recipe in the machine that runs its category.
 pub struct Fabricate;
 
@@ -242,58 +700,16 @@ impl Method for Fabricate {
         // The expansion's own cached table -- built once per expansion, the
         // rule `SubstanceTable`'s doc states.
         let bill = split_bill(ctx.substances(), &recipe);
-        if let Some((fluid, amount)) = bill.fluids.first() {
-            let recipes: Vec<FactorioRecipe> = ctx
-                .state
-                .base()
-                .globals
-                .recipes
-                .iter()
-                .map(|entry| entry.value().clone())
-                .collect();
-            return Err(PlannerError::CannotFabricate(Box::new(
-                FabricateRefusal::FluidIngredient {
-                    recipe: recipe.name.clone(),
-                    category: recipe.category.clone(),
-                    machine,
-                    fluid: fluid.clone(),
-                    amount: *amount,
-                    produced_by: FluidSource::of(recipes.iter(), fluid),
-                },
-            )));
-        }
-        // Asked of every product, not only the one the goal named: a recipe
-        // yielding an item *and* a fluid still strands the fluid in the
-        // machine, and the next run then jams on a full output. Nothing in
-        // vanilla's runnable categories does this today; saying so costs one
-        // branch and the alternative is a silent half-answer.
-        let fluid_products: Vec<String> = recipe
-            .products
-            .iter()
-            .filter(|p| ctx.substances().is_fluid(&p.name))
-            .map(|p| p.name.clone())
-            .collect();
-        if !fluid_products.is_empty() {
-            return Err(PlannerError::CannotFabricate(Box::new(
-                FabricateRefusal::FluidProduct {
-                    recipe: recipe.name.clone(),
-                    category: recipe.category.clone(),
-                    machine,
-                    fluids: fluid_products,
-                },
-            )));
-        }
-
         let from = ctx
             .state
             .bot(ctx.chain_actor)
             .map(|b| b.position.clone())
             .unwrap_or_default();
-        let Some(site) = free_area_near(&ctx.state, &from, &machine) else {
-            return Err(PlannerError::NoApplicableMethod {
-                goal: goal.to_string(),
-            });
-        };
+        // Both fluid ends, and the machine's site with them: a fluid
+        // ingredient moves the machine next to the thing that supplies it.
+        // Every refusal in here is returned before a step is emitted.
+        let rig = plan_fluid_rig(ctx, goal, &recipe, &machine, &bill.fluids, &from)?;
+        let site = rig.site.clone();
 
         // ---- nothing below refuses; from here it is all emission ----
 
@@ -479,6 +895,77 @@ impl Method for Fabricate {
             })));
         }
 
+        // ---- the pipes, and the buffer the output lands in -----------------
+        //
+        // Emitted after the machine so a reader follows the arrangement in
+        // the order it comes into being, and after `SetRecipe` for no
+        // stronger reason than that: no ordering edge is needed, because the
+        // route was searched around the machine's own footprint and the
+        // `AreaFree` on every placement is the executor's check.
+        let mut last_pipe: Option<usize> = None;
+        for run in [rig.inbound.as_ref(), rig.outbound.as_ref()]
+            .into_iter()
+            .flatten()
+        {
+            let count = u32::try_from(run.tiles.len()).unwrap_or(u32::MAX);
+            steps.push(Step::Subgoal(Goal::Have {
+                item: rig.pipe.clone(),
+                count,
+                whose: whose.clone(),
+                via: None,
+            }));
+            for position in &run.tiles {
+                let entity = plain_entity(&ctx.state, &rig.pipe, position);
+                steps.push(place_step(
+                    ctx,
+                    entity,
+                    &format!(
+                        "carry {} between the {machine} and the {}",
+                        run.fluid, run.other
+                    ),
+                ));
+                last_pipe = Some(steps.len() - 1);
+            }
+        }
+        if let Some((tank, tank_site)) = &rig.buffer {
+            steps.push(Step::Subgoal(Goal::Have {
+                item: tank.clone(),
+                count: 1,
+                whose: whose.clone(),
+                via: None,
+            }));
+            let entity = plain_entity(&ctx.state, tank, tank_site);
+            steps.push(place_step(
+                ctx,
+                entity,
+                &format!("catch what the {machine} at {site} makes"),
+            ));
+        }
+
+        // A fluid product is not taken: no inventory holds one, and the
+        // arrangement above is what "produced" means for it. So the take step
+        // -- and the `Effect::GainItem` in it -- is emitted only for an item,
+        // and the technology this production triggers moves to the last pipe
+        // laid, which is the action after which the machine can actually run.
+        if ctx.substances().is_fluid(item) {
+            if let Some(tech) = unlocks
+                && let Some(index) = last_pipe
+                && let Step::Act(action) = &mut steps[index]
+            {
+                action.eff.push(Effect::Researched(tech.to_string()));
+            }
+            steps.push(Step::Link {
+                from: place_id,
+                to: recipe_id,
+                lag: 0,
+            });
+            debug_assert!(matches!(
+                whose,
+                Holder::Anyone | Holder::Bot(_) | Holder::Share(_)
+            ));
+            return Ok(steps);
+        }
+
         let take = runs.saturating_mul(per_craft).min(need);
         let take_id = ctx.ids.next();
         let mut take_eff = vec![Effect::GainItem {
@@ -543,5 +1030,495 @@ impl Method for Fabricate {
             Holder::Anyone | Holder::Bot(_) | Holder::Share(_)
         ));
         Ok(steps)
+    }
+}
+
+#[cfg(test)]
+mod fabricate_fluid_tests {
+    use super::*;
+    use crate::ids::BotId;
+    use crate::test_world::{OilFixture, PumpjackRecipe, world_with_oil};
+    use factorio_bot_core::factorio::world::FactorioSurface;
+    use factorio_bot_core::types::FactorioEntity;
+    use std::sync::Arc;
+
+    /// The oil ladder's fixture with the wells charted, as `method::gather`'s
+    /// tests use it. **Not written for this code**, which is the point.
+    const OIL: OilFixture = OilFixture {
+        wells: true,
+        categories: true,
+        pumpjack: PumpjackRecipe::LockedBy { researched: true },
+        prerequisite: false,
+    };
+
+    /// The wells run east from (20.5, 20.5); this is clear ground beside them.
+    fn tank_site() -> Position {
+        Position::new(24.5, 26.5)
+    }
+
+    /// The fixture, plus what the *game* has and the capture predates: an
+    /// `oil-refinery` that says it crafts `oil-processing`, and the recipe.
+    ///
+    /// Both are transcribed rather than invented -- the category from
+    /// 2.1.17's `entities.lua`, the recipe's amounts (100 crude in, 45
+    /// petroleum out) from the live capture the CLI measurements use.
+    fn oil_world(refinery_category: bool) -> FactorioSurface {
+        let world = world_with_oil(OIL);
+        if refinery_category {
+            world
+                .globals
+                .entity_prototypes
+                .get_mut("oil-refinery")
+                .expect("the fixture has an oil-refinery prototype")
+                .crafting_categories = Some(vec!["oil-processing".into()]);
+        }
+        let recipe: FactorioRecipe = serde_json::from_str(
+            r#"{
+              "name": "basic-oil-processing", "valid": true, "enabled": true,
+              "category": "oil-processing",
+              "ingredients": [
+                { "name": "crude-oil", "ingredient_type": "fluid", "amount": 100 }
+              ],
+              "products": [
+                { "name": "petroleum-gas", "product_type": "fluid", "amount": 45,
+                  "probability": 1.0 }
+              ],
+              "hidden": false, "energy": 5.0, "order": "a-a",
+              "group": "intermediate-products", "subgroup": "fluid-recipes"
+            }"#,
+        )
+        .expect("the basic-oil-processing recipe parses");
+        world
+            .update_recipes(vec![recipe])
+            .expect("update_recipes cannot fail for a well-formed recipe");
+        world
+    }
+
+    fn state_of(world: FactorioSurface) -> PlanState {
+        PlanState::from_world(Arc::new(world), &[BotId(1)])
+    }
+
+    /// A world with the crude arriving in a tank at the field, which is the
+    /// topology the owner stated: tank -> refinery, the trunk given.
+    fn state_with_tank() -> PlanState {
+        let mut state = state_of(oil_world(true));
+        state.create_entity(FactorioEntity {
+            name: "storage-tank".into(),
+            entity_type: "storage-tank".into(),
+            position: tank_site(),
+            direction: 0,
+            ..Default::default()
+        });
+        stock(&mut state);
+        state
+    }
+
+    /// Everything the plan would otherwise have to make. The subject here is
+    /// the pipe run, not the bill.
+    fn stock(state: &mut PlanState) {
+        for (item, count) in [
+            ("oil-refinery", 4u32),
+            ("storage-tank", 4),
+            ("pipe", 400),
+            ("iron-plate", 400),
+            ("copper-plate", 400),
+            ("steel-plate", 400),
+        ] {
+            state.gain(BotId(1), item, count);
+        }
+    }
+
+    fn goal() -> Goal {
+        Goal::Produced {
+            item: "petroleum-gas".into(),
+            count: 45,
+            whose: Holder::Bot(BotId(1)),
+            unlocks: None,
+            via: Some("basic-oil-processing".into()),
+        }
+    }
+
+    fn expand(state: PlanState, goal: &Goal) -> Result<Vec<Step>, PlannerError> {
+        let mut ctx = ExpansionCtx::new(state, BotId(1));
+        Fabricate.expand(goal, &mut ctx)
+    }
+
+    /// Every `Place` of `name`, in emission order.
+    fn placed(steps: &[Step], name: &str) -> Vec<Position> {
+        steps
+            .iter()
+            .filter_map(|step| match step {
+                Step::Act(action) => match &action.kind {
+                    ActionKind::Place { entity } if entity.name == name => {
+                        Some(entity.position.clone())
+                    }
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn message(error: &PlannerError) -> String {
+        error.to_string()
+    }
+
+    // -----------------------------------------------------------------------
+    // The rung itself
+    // -----------------------------------------------------------------------
+
+    /// **The claim of this whole branch**: a fluid ingredient is met by a pipe
+    /// run from something standing that can supply it, and the plan builds
+    /// that run.
+    ///
+    /// Paired assertions on purpose. "Pipes were placed" is an accidental pass
+    /// for any expansion that ran at all, so the machine's own placement and
+    /// its recipe are asserted beside it -- if expansion never reached the
+    /// emission half, both are absent and the test fails for the right
+    /// reason.
+    #[test]
+    fn a_fluid_ingredient_is_met_by_a_pipe_run_from_a_standing_tank() {
+        let steps = expand(state_with_tank(), &goal()).expect("the goal expands");
+        let refineries = placed(&steps, "oil-refinery");
+        let pipes = placed(&steps, "pipe");
+        assert_eq!(refineries.len(), 1, "one refinery, in {steps:?}");
+        assert!(
+            steps.iter().any(|step| matches!(
+                step,
+                Step::Act(action)
+                    if matches!(&action.kind, ActionKind::SetRecipe { recipe, .. }
+                        if recipe == "basic-oil-processing")
+            )),
+            "the refinery is told what to run"
+        );
+        assert!(!pipes.is_empty(), "a pipe run was laid");
+        // Every pipe stands on a tile of its own, and none on the refinery.
+        let mut sorted = pipes.clone();
+        sorted.sort_by(|a, b| a.x.total_cmp(&b.x).then(a.y.total_cmp(&b.y)));
+        sorted.dedup();
+        assert_eq!(sorted.len(), pipes.len(), "no tile is piped twice");
+    }
+
+    /// The other half of the ruling: **a fluid product needs a sink or the
+    /// machine stalls**, and one output is given a buffer rather than
+    /// refused.
+    #[test]
+    fn a_fluid_product_lands_in_a_buffer_this_plan_builds() {
+        let steps = expand(state_with_tank(), &goal()).expect("the goal expands");
+        // Two tanks stand afterwards: the one that was already there and the
+        // one built to catch the petroleum. Only the second is *placed*.
+        let tanks = placed(&steps, "storage-tank");
+        assert_eq!(tanks.len(), 1, "exactly one buffer is built, in {steps:?}");
+        assert_ne!(tanks[0], tank_site(), "the source is adopted, not rebuilt");
+    }
+
+    /// A fluid cannot be taken into a hand, so no `Remove` is emitted for one
+    /// -- **and the same method does emit one for an item**, which is the
+    /// control that makes the absence mean something.
+    #[test]
+    fn a_fluid_goal_takes_nothing_and_an_item_goal_takes() {
+        let steps = expand(state_with_tank(), &goal()).expect("the goal expands");
+        assert!(
+            !steps.iter().any(|step| matches!(
+                step,
+                Step::Act(action) if matches!(action.kind, ActionKind::Remove { .. })
+            )),
+            "nothing is taken out of the refinery by hand"
+        );
+
+        // The control: an item-producing recipe in a nameable category, same
+        // method, same world.
+        let world = oil_world(true);
+        world
+            .globals
+            .entity_prototypes
+            .get_mut("chemical-plant")
+            .expect("the fixture has a chemical-plant")
+            .crafting_categories = Some(vec!["chemistry".into()]);
+        let recipe: FactorioRecipe = serde_json::from_str(
+            r#"{
+              "name": "solid-fuel-from-nothing", "valid": true, "enabled": true,
+              "category": "chemistry",
+              "ingredients": [
+                { "name": "iron-plate", "ingredient_type": "item", "amount": 1 }
+              ],
+              "products": [
+                { "name": "solid-fuel", "product_type": "item", "amount": 1, "probability": 1.0 }
+              ],
+              "hidden": false, "energy": 1.0, "order": "a-a", "group": "g", "subgroup": "s"
+            }"#,
+        )
+        .expect("the control recipe parses");
+        world.update_recipes(vec![recipe]).expect("recipes update");
+        let mut state = state_of(world);
+        stock(&mut state);
+        state.gain(BotId(1), "chemical-plant", 2);
+        let control = Goal::Produced {
+            item: "solid-fuel".into(),
+            count: 1,
+            whose: Holder::Bot(BotId(1)),
+            unlocks: None,
+            via: Some("solid-fuel-from-nothing".into()),
+        };
+        let steps = expand(state, &control).expect("the control expands");
+        assert!(
+            steps.iter().any(|step| matches!(
+                step,
+                Step::Act(action) if matches!(action.kind, ActionKind::Remove { .. })
+            )),
+            "an item IS taken, so the absence above is about fluids"
+        );
+    }
+
+    /// The machine follows its source. A refinery sited beside the bot and a
+    /// tank thirty tiles away is not a pipe run -- it is the long-distance
+    /// trunk, which is a separate rung.
+    #[test]
+    fn the_machine_is_sited_beside_its_source_not_beside_the_bot() {
+        let mut state = state_with_tank();
+        state.set_position(BotId(1), Position::new(-200.5, -200.5));
+        let steps = expand(state, &goal()).expect("the goal expands");
+        let refinery = placed(&steps, "oil-refinery")
+            .first()
+            .expect("a refinery is placed")
+            .clone();
+        let distance =
+            factorio_bot_core::factorio::util::calculate_distance(&refinery, &tank_site());
+        assert!(
+            distance < 12.0,
+            "the refinery stands beside its tank, not beside the bot: {distance} tiles"
+        );
+    }
+
+    /// **A buffer outranks an extractor, and that is the owner's topology**:
+    /// *"the fluid tank the oil arrives in from far away should be connected
+    /// to the refineries"*. A pumpjack can supply crude and is often nearer,
+    /// so choosing by distance alone ties one refinery to one well.
+    ///
+    /// The pumpjack stands on a well, so it is attributable by rule 2 and the
+    /// only thing separating them is the ranking.
+    #[test]
+    fn a_buffer_outranks_an_extractor_even_when_the_extractor_is_nearer() {
+        let mut state = state_with_tank();
+        // A pumpjack on the first well, closer to the bot than the tank is.
+        state.create_entity(FactorioEntity {
+            name: "pumpjack".into(),
+            entity_type: "mining-drill".into(),
+            position: Position::new(20.5, 20.5),
+            direction: 0,
+            ..Default::default()
+        });
+        let steps = expand(state, &goal()).expect("the goal expands");
+        let refinery = placed(&steps, "oil-refinery")
+            .first()
+            .expect("a refinery is placed")
+            .clone();
+        let to_tank =
+            factorio_bot_core::factorio::util::calculate_distance(&refinery, &tank_site());
+        let to_well = factorio_bot_core::factorio::util::calculate_distance(
+            &refinery,
+            &Position::new(20.5, 20.5),
+        );
+        assert!(
+            to_tank < to_well,
+            "the refinery follows the tank ({to_tank}) not the pumpjack ({to_well})"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // The refusals
+    // -----------------------------------------------------------------------
+
+    /// With nothing standing that can supply crude, the plan says so by name
+    /// rather than building a tank and calling it a supply.
+    #[test]
+    fn no_standing_source_refuses_by_name() {
+        let mut state = state_of(oil_world(true));
+        stock(&mut state);
+        let error = expand(state, &goal()).expect_err("nothing can supply crude");
+        let said = message(&error);
+        assert!(said.contains("crude-oil"), "{said}");
+        assert!(said.contains("can be shown to supply"), "{said}");
+    }
+
+    /// **The measured regression**: the first version of this code took the
+    /// nearest supplying fluidbox and chose a `boiler`, because
+    /// `method::power` sites a plant at the wellhead and a boiler's steam box
+    /// supplies. A refinery piped to a boiler builds perfectly and makes
+    /// nothing.
+    #[test]
+    fn a_boiler_is_not_a_crude_source_and_the_refusal_names_it() {
+        let mut state = state_of(oil_world(true));
+        stock(&mut state);
+        state.create_entity(FactorioEntity {
+            name: "boiler".into(),
+            entity_type: "boiler".into(),
+            position: Position::new(22.0, 24.0),
+            direction: 0,
+            ..Default::default()
+        });
+        let error = expand(state, &goal()).expect_err("a boiler supplies steam, not crude");
+        let said = message(&error);
+        assert!(said.contains("boiler"), "the rejection is named: {said}");
+        assert!(said.contains("rejected"), "{said}");
+    }
+
+    /// Two fluids in and nothing on the wire says which box takes which, so
+    /// the plan refuses instead of guessing. This is `sulfur` and
+    /// `advanced-oil-processing`.
+    #[test]
+    fn two_fluid_ingredients_refuse_rather_than_guess_a_fluidbox() {
+        let world = oil_world(true);
+        let recipe: FactorioRecipe = serde_json::from_str(
+            r#"{
+              "name": "sulfur", "valid": true, "enabled": true, "category": "oil-processing",
+              "ingredients": [
+                { "name": "water", "ingredient_type": "fluid", "amount": 30 },
+                { "name": "petroleum-gas", "ingredient_type": "fluid", "amount": 30 }
+              ],
+              "products": [
+                { "name": "sulfur", "product_type": "item", "amount": 2, "probability": 1.0 }
+              ],
+              "hidden": false, "energy": 1.0, "order": "a-a", "group": "g", "subgroup": "s"
+            }"#,
+        )
+        .expect("the two-fluid recipe parses");
+        world.update_recipes(vec![recipe]).expect("recipes update");
+        let mut state = state_of(world);
+        stock(&mut state);
+        let error = expand(
+            state,
+            &Goal::Produced {
+                item: "sulfur".into(),
+                count: 2,
+                whose: Holder::Bot(BotId(1)),
+                unlocks: None,
+                via: Some("sulfur".into()),
+            },
+        )
+        .expect_err("two fluids in cannot be routed");
+        let said = message(&error);
+        assert!(said.contains("2 fluids in"), "{said}");
+        assert!(said.contains("water"), "{said}");
+    }
+
+    /// Three fluids out is `advanced-oil-processing`, whose sink rule the
+    /// owner ruled on separately. It is refused by name, not half-built.
+    #[test]
+    fn three_fluid_products_refuse_as_the_multi_output_rule() {
+        let world = oil_world(true);
+        let recipe: FactorioRecipe = serde_json::from_str(
+            r#"{
+              "name": "advanced-oil-processing", "valid": true, "enabled": true,
+              "category": "oil-processing",
+              "ingredients": [
+                { "name": "crude-oil", "ingredient_type": "fluid", "amount": 100 }
+              ],
+              "products": [
+                { "name": "heavy-oil", "product_type": "fluid", "amount": 25, "probability": 1.0 },
+                { "name": "light-oil", "product_type": "fluid", "amount": 45, "probability": 1.0 },
+                { "name": "petroleum-gas", "product_type": "fluid", "amount": 55,
+                  "probability": 1.0 }
+              ],
+              "hidden": false, "energy": 5.0, "order": "a-b", "group": "g", "subgroup": "s"
+            }"#,
+        )
+        .expect("the three-output recipe parses");
+        world.update_recipes(vec![recipe]).expect("recipes update");
+        let mut state = state_of(world);
+        state.create_entity(FactorioEntity {
+            name: "storage-tank".into(),
+            entity_type: "storage-tank".into(),
+            position: tank_site(),
+            direction: 0,
+            ..Default::default()
+        });
+        stock(&mut state);
+        let error = expand(
+            state,
+            &Goal::Produced {
+                item: "light-oil".into(),
+                count: 45,
+                whose: Holder::Bot(BotId(1)),
+                unlocks: None,
+                via: Some("advanced-oil-processing".into()),
+            },
+        )
+        .expect_err("three fluids out need three sinks");
+        let said = message(&error);
+        assert!(said.contains("3 fluids"), "{said}");
+        assert!(said.contains("stalls"), "{said}");
+    }
+
+    /// A world that states a capacity too small for what was asked refuses.
+    /// **Derived from the prototype's own `volume`** -- and the silent case is
+    /// the control below.
+    #[test]
+    fn a_buffer_the_world_says_is_too_small_refuses() {
+        let world = oil_world(true);
+        {
+            let mut tank = world
+                .globals
+                .entity_prototypes
+                .get_mut("storage-tank")
+                .expect("the fixture has a storage-tank");
+            if let Some(boxes) = tank.fluidbox_prototypes.as_mut() {
+                for b in boxes.iter_mut() {
+                    b.volume = Some(10.0);
+                }
+            }
+        }
+        let mut state = state_of(world);
+        state.create_entity(FactorioEntity {
+            name: "storage-tank".into(),
+            entity_type: "storage-tank".into(),
+            position: tank_site(),
+            direction: 0,
+            ..Default::default()
+        });
+        stock(&mut state);
+        let error = expand(state, &goal()).expect_err("10 units cannot hold 45");
+        assert!(
+            message(&error).contains("would fill it and stall"),
+            "{error}"
+        );
+    }
+
+    /// The control for the one above: **`volume: None` is "the sender did not
+    /// say", never zero.** Every dump this project holds is silent about
+    /// volume, so refusing on silence would break the whole archive.
+    #[test]
+    fn a_world_silent_about_volume_is_not_refused() {
+        let world = oil_world(true);
+        assert!(
+            world
+                .globals
+                .entity_prototypes
+                .get("storage-tank")
+                .expect("the fixture has a storage-tank")
+                .fluidbox_prototypes
+                .as_ref()
+                .expect("it has fluidboxes")
+                .iter()
+                .all(|b| b.volume.is_none()),
+            "the fixture is silent about volume, which is what makes this a control"
+        );
+        expand(state_with_tank(), &goal()).expect("silence permits");
+    }
+
+    /// The machine whose category nothing crafts is not this method's, and it
+    /// must not be claimed -- the registration promise that no existing plan
+    /// can move.
+    #[test]
+    fn a_category_no_machine_runs_is_not_claimed() {
+        let state = {
+            let mut state = state_of(oil_world(false));
+            stock(&mut state);
+            state
+        };
+        assert!(
+            !Fabricate.applicable(&goal(), &state),
+            "with no refinery category on the prototype, nothing here can name the machine"
+        );
     }
 }

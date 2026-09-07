@@ -108,25 +108,13 @@
 use crate::error::PlannerError;
 use crate::goal::{Goal, Holder};
 use crate::method::extract;
-use crate::method::have::PLACE_TICKS;
+use crate::method::pipe::{
+    PipeEnd, buffer_prototype, pipe_prototype, place_step, plain_entity, route_between,
+};
 use crate::method::{ExpansionCtx, Method, Step};
 use crate::state::PlanState;
 use factorio_bot_core::factorio::util::calculate_distance;
-use factorio_bot_core::graph::enclosure;
-use factorio_bot_core::graph::route::{RouteError, TileKind, route_belt};
 use factorio_bot_core::types::{Direction, FactorioEntity, Position, Rect};
-
-use crate::action::{Action, ActionKind, Actor, Condition, Effect};
-
-/// `Direction::North` as the wire byte an emitted entity carries.
-///
-/// A storage tank is symmetric -- its four pipe connections sit in two
-/// diagonally opposite pairs, so rotating one maps the set onto itself -- and
-/// a pipe has a connection on all four sides. Neither has a facing that
-/// changes what it does, so both are placed north and nothing here computes a
-/// direction. That is a deliberate contrast with the pump this module refuses
-/// to need.
-const NORTH: u8 = 0;
 
 /// How far from the wellhead a tile counts as the same **field**.
 ///
@@ -152,19 +140,6 @@ pub const FIELD_RADIUS: f64 = 20.0;
 /// question. Refusing by name and letting a caller move the goal is the better
 /// failure.
 pub const TANK_SEARCH_RADIUS: f64 = 12.0;
-
-/// Half the collision box of the largest thing this module *routes*: a pipe
-/// is `0.578` tiles across, and this is the placement clearance
-/// `enclosure::rasterize` grows every obstacle by.
-///
-/// The same reasoning as `method::connect`'s `PLACEMENT_HALF_BOX`, including
-/// the defect it records: passing zero makes a cell count as blocked only when
-/// an obstacle covers its exact centre, which is accidentally safe for
-/// grid-aligned buildings and **misses trees and rocks entirely**, because
-/// those sit at arbitrary sub-tile positions. Oil fields are exactly where
-/// that matters -- they are unbuilt ground, so trees and rocks are all there
-/// is to hit.
-const PIPE_HALF_BOX: f64 = 0.3;
 
 /// The method that claims [`Goal::Gathered`]. See the module doc.
 pub struct Gather;
@@ -226,7 +201,25 @@ impl Method for Gather {
 
         // Tier 4. Every refusal above and below this line happens before
         // anything is emitted or reserved.
-        let run = pipe_run(&ctx.state, &sited, &tank, &tank_site, &tank_area, &pipe)?;
+        let run = route_between(
+            &ctx.state,
+            &PipeEnd {
+                name: &sited.name,
+                position: &sited.site,
+                area: sited.area.clone(),
+                production_type: Some("output"),
+                port_index: None,
+            },
+            &PipeEnd {
+                name: &tank,
+                position: &tank_site,
+                area: tank_area,
+                production_type: None,
+                port_index: None,
+            },
+            &pipe,
+            &[],
+        )?;
 
         // -- nothing refuses past here ---------------------------------------
 
@@ -404,52 +397,6 @@ pub(crate) fn centroid_of(field: &[Position]) -> Position {
     Position::new(x.floor() + 0.5, y.floor() + 0.5)
 }
 
-// ---------------------------------------------------------------------------
-// Prototypes
-// ---------------------------------------------------------------------------
-
-/// The prototype that buffers a fluid: the `storage-tank`-typed entity this
-/// world knows, first by name when there are several.
-///
-/// **Found by `entity_type`, never by the name `storage-tank`.** The name is
-/// vanilla's; the type is the game's, and asking the world is what lets a
-/// modded tank answer and a capture with no tank at all refuse by name.
-fn buffer_prototype(state: &PlanState, fluid: &str, source: &str) -> Result<String, PlannerError> {
-    prototype_of_type(state, "storage-tank").ok_or_else(|| PlannerError::NoFluidBuffer {
-        fluid: fluid.to_string(),
-        machine: source.to_string(),
-        why: "no entity in this world has entity_type `storage-tank`".to_string(),
-    })
-}
-
-/// The prototype that carries a fluid between two machines, chosen the same
-/// way and refusing the same way.
-fn pipe_prototype(state: &PlanState, fluid: &str, source: &str) -> Result<String, PlannerError> {
-    prototype_of_type(state, "pipe").ok_or_else(|| PlannerError::NoFluidBuffer {
-        fluid: fluid.to_string(),
-        machine: source.to_string(),
-        why: "no entity in this world has entity_type `pipe`".to_string(),
-    })
-}
-
-/// The first prototype of `entity_type` by name. `entity_prototypes` is a
-/// `BTreeMap`, so "first by name" is a stated order and not a hash accident.
-fn prototype_of_type(state: &PlanState, entity_type: &str) -> Option<String> {
-    // `entity_prototypes` is a `DashMap`, whose iteration order is a hash
-    // accident -- so the *order* is thrown away and only `min` is kept. A
-    // "first one found" here would pick a different tank between two runs of
-    // the same binary, which is precisely the determinism this crate is
-    // defined by.
-    state
-        .base()
-        .globals
-        .entity_prototypes
-        .iter()
-        .filter(|proto| proto.entity_type == entity_type)
-        .map(|proto| proto.name.clone())
-        .min()
-}
-
 /// A tank of `name` already standing within [`FIELD_RADIUS`] of the field
 /// centroid, nearest first, or `None`.
 ///
@@ -571,474 +518,12 @@ fn boxes_overlap(a: &Rect, b: &Rect) -> bool {
         && b.left_top.y() < a.right_bottom.y()
 }
 
-// ---------------------------------------------------------------------------
-// Fluid ports
-// ---------------------------------------------------------------------------
-
-/// One place a machine takes fluid in or out: the tiles a pipe may stand on to
-/// meet it, and one tile that joins all of them.
-///
-/// # Two captures in this repo disagree about what `positions` MEANS
-///
-/// `fluidbox_prototypes[].pipe_connections[].positions` is a
-/// `PipeConnectionDefinition`'s four positions, one per direction the entity
-/// can face, north first. What each position *is* differs between the two
-/// captures this repo holds, and the difference is not cosmetic -- read one as
-/// the other and every pipe lands on the wrong tile:
-///
-/// | capture | pumpjack output, north | storage tank, north |
-/// |---|---|---|
-/// | `crates/core/tests/entity-prototype-fixtures.json` (1.x) | `(1,-2)` | `(-1,-2) (2,-1) (1,2) (-2,1)` |
-/// | `crates/core/tests/live-2.1.17-world-snapshot.json`, and every live dump | `(1,-1)` | `(-1,-1) (1,1) (1,1) (-1,-1)` |
-///
-/// A pumpjack's footprint is 3x3, so `(1,-1)` is a tile **inside** it and
-/// `(1,-2)` is the neighbour **outside** it. The old capture names the pipe
-/// tile directly; the new one names the interior tile the connection sits on
-/// and pairs it, in the game's own prototype, with a `direction` saying which
-/// neighbour the pipe goes on -- **and the mod does not send that direction**.
-///
-/// So this is decided per connection, by whether the offset leaves the
-/// footprint, and never by assuming a version. Where the offset is interior
-/// and sits on a *corner*, two neighbours are outside and the pipe tile is
-/// genuinely ambiguous from the data available. Guessing is the one thing this
-/// must not do -- a pipe on the wrong side of a corner builds perfectly and
-/// moves nothing -- so the port names **both** candidates plus the diagonal
-/// tile that touches both, and the caller places all three. Whichever
-/// candidate is the real connection is joined to the run either way, and the
-/// other is an inert stub costing one iron plate.
-///
-/// **For the 2.x storage tank both candidates are real anyway.** Its four
-/// connections carry only two distinct interior positions, `(-1,-1)` and
-/// `(1,1)`, each appearing twice -- two corners with two directions each -- so
-/// the pair of tiles at a corner is the shape of the machine rather than a
-/// hedge. The 1.x capture describes a different tank, with one connection at
-/// each of the four corners. **Which of those the shipped game has is not
-/// settled here**, and this module does not need it settled: both are handled
-/// on their own terms, and the answer would only ever save an iron plate.
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct FluidPort {
-    /// The tiles that might be the connection. One or two.
-    pub candidates: Vec<Position>,
-    /// A tile adjacent to every candidate: the corner between them when there
-    /// are two, and the candidate itself when there is one. This is what a
-    /// route starts from or ends at.
-    pub junction: Position,
-}
-
-impl FluidPort {
-    /// Every tile this port needs a pipe on, junction last.
-    fn tiles(&self) -> Vec<Position> {
-        let mut tiles = self.candidates.clone();
-        if !tiles.iter().any(|tile| tile == &self.junction) {
-            tiles.push(self.junction.clone());
-        }
-        tiles
-    }
-}
-
-/// The ports of the machine `name` standing at `position`, facing north.
-///
-/// `production_type` filters: `Some("output")` for a pumpjack's single output,
-/// `None` for a tank, whose fluidbox is `"none"` because a buffer neither
-/// produces nor consumes.
-///
-/// Refuses with [`PlannerError::FluidPortUnknown`] rather than guessing, on
-/// every shape it does not understand: no prototype, no fluidboxes, no
-/// connections, a connection with no north position, a non-integer offset, or
-/// an offset that is not on the footprint's edge.
-pub(crate) fn fluid_ports(
-    state: &PlanState,
-    name: &str,
-    position: &Position,
-    production_type: Option<&str>,
-) -> Result<Vec<FluidPort>, PlannerError> {
-    let refuse = |why: &str| PlannerError::FluidPortUnknown {
-        prototype: name.to_string(),
-        why: why.to_string(),
-    };
-    let proto = state
-        .base()
-        .globals
-        .entity_prototypes
-        .get(name)
-        .ok_or_else(|| refuse("this world has no prototype of that name"))?;
-    let boxes = proto
-        .fluidbox_prototypes
-        .as_ref()
-        .ok_or_else(|| refuse("its prototype carries no fluidbox_prototypes"))?;
-
-    // The largest whole-tile offset still inside the footprint, per axis. A
-    // 3x3 collision box (half-width 1.199) gives 1: the tiles at offset -1, 0
-    // and 1 are the machine, and anything beyond is outside it.
-    let span_x = (proto.collision_box.right_bottom.x() + 0.5).floor();
-    let span_y = (proto.collision_box.right_bottom.y() + 0.5).floor();
-
-    let mut ports: Vec<FluidPort> = Vec::new();
-    for fluidbox in boxes {
-        if let Some(wanted) = production_type
-            && fluidbox.production_type != wanted
-        {
-            continue;
-        }
-        let connections =
-            fluidbox.pipe_connections.as_ref().as_ref().ok_or_else(|| {
-                refuse("a fluidbox of its prototype declares no pipe_connections")
-            })?;
-        for connection in connections {
-            // `positions` is one entry per entity direction, north first.
-            let offset = connection
-                .positions
-                .first()
-                .ok_or_else(|| refuse("a pipe connection carries no positions at all"))?;
-            let (dx, dy) = (offset.x(), offset.y());
-            if dx.fract() != 0. || dy.fract() != 0. {
-                return Err(refuse(
-                    "a pipe connection sits at a fractional offset, which this module cannot \
-                     place a whole pipe tile against",
-                ));
-            }
-            // **Which of the two conventions is this capture using?** See the
-            // note above this function: a 2.x capture names the tile INSIDE
-            // the machine and a 1.x one names the tile OUTSIDE it, and the
-            // difference is decided per connection by whether the offset
-            // leaves the footprint.
-            let outside_x = dx.abs() > span_x;
-            let outside_y = dy.abs() > span_y;
-            let (candidates, junction): (Vec<(f64, f64)>, (f64, f64)) = match (outside_x, outside_y)
-            {
-                // Outside on both axes: a diagonal, which no pipe connection
-                // is, under either convention.
-                (true, true) => {
-                    return Err(refuse(
-                        "a pipe connection sits diagonally off the footprint's corner, which is \
-                         neither an interior tile nor an orthogonal neighbour",
-                    ));
-                }
-                // The 1.x convention: this IS the pipe tile, and there is
-                // nothing to disambiguate.
-                (true, false) | (false, true) => {
-                    let adjacent = if outside_x {
-                        dx.abs() == span_x + 1.
-                    } else {
-                        dy.abs() == span_y + 1.
-                    };
-                    if !adjacent {
-                        return Err(refuse(
-                            "a pipe connection sits more than one tile off the footprint, so it \
-                             names neither an interior tile nor a neighbouring one",
-                        ));
-                    }
-                    (vec![(dx, dy)], (dx, dy))
-                }
-                // The 2.x convention: an interior tile, whose connection
-                // direction the mod does not send. Every neighbour outside
-                // the footprint is a candidate, and for a corner there are
-                // two -- joined by the diagonal between them.
-                (false, false) => {
-                    let mut candidates: Vec<(f64, f64)> = Vec::new();
-                    if dx.abs() == span_x {
-                        candidates.push((dx + dx.signum(), dy));
-                    }
-                    if dy.abs() == span_y {
-                        candidates.push((dx, dy + dy.signum()));
-                    }
-                    if candidates.is_empty() {
-                        return Err(refuse(
-                            "a pipe connection sits away from the footprint's edge, so no \
-                             neighbouring tile is outside the machine",
-                        ));
-                    }
-                    let junction = if candidates.len() == 2 {
-                        (dx + dx.signum(), dy + dy.signum())
-                    } else {
-                        candidates[0]
-                    };
-                    (candidates, junction)
-                }
-            };
-            let at = |(ox, oy): (f64, f64)| Position::new(position.x() + ox, position.y() + oy);
-            let port = FluidPort {
-                candidates: candidates.iter().copied().map(at).collect(),
-                junction: at(junction),
-            };
-            if !ports.contains(&port) {
-                ports.push(port);
-            }
-        }
-    }
-    if ports.is_empty() {
-        return Err(refuse(
-            "no fluidbox of the requested production type has a pipe connection",
-        ));
-    }
-    Ok(ports)
-}
-
-// ---------------------------------------------------------------------------
-// The pipe run
-// ---------------------------------------------------------------------------
-
-/// Every tile the run needs a pipe on: both ports' tiles and the route
-/// between their junctions, in placement order and without duplicates.
-///
-/// Touches no `ExpansionCtx` and reserves nothing, so every refusal it makes
-/// leaves the plan exactly as it found it.
-fn pipe_run(
-    state: &PlanState,
-    sited: &extract::SitedExtractor,
-    tank: &str,
-    tank_site: &Position,
-    tank_area: &Rect,
-    pipe: &str,
-) -> Result<Vec<Position>, PlannerError> {
-    let refuse = |why: String| PlannerError::NoPipeRoute {
-        from: format!("the {} at {}", sited.name, sited.site),
-        to: format!("the {tank} at {tank_site}"),
-        why,
-    };
-
-    let source = fluid_ports(state, &sited.name, &sited.site, Some("output"))?;
-    let source = source.first().expect("fluid_ports refuses an empty answer");
-    let sinks = fluid_ports(state, tank, tank_site, None)?;
-
-    let (area, origin) = enclosure::window(&sited.site);
-    let mut blocked = enclosure::rasterize(
-        state
-            .base()
-            .entity_graph
-            .blocking_boxes_within(&area)
-            .into_iter()
-            .chain(overlay_boxes(state, &area))
-            // Neither machine is in the overlay yet -- this function is asked
-            // before anything is emitted -- so both footprints are claimed by
-            // hand, or the route would happily run through the tank it is
-            // aiming at.
-            .chain([sited.area.clone(), tank_area.clone()]),
-        origin,
-        (PIPE_HALF_BOX, PIPE_HALF_BOX),
-    );
-    // A port's own tiles are where pipes go, so they must not read as
-    // obstacles to the search that has to end on one.
-    let port_tiles: Vec<Position> = source
-        .tiles()
-        .into_iter()
-        .chain(sinks.iter().flat_map(|port| port.tiles()))
-        .collect();
-    for tile in &port_tiles {
-        if let Some(cell) = cell_of(origin, tile) {
-            blocked[enclosure::cell_index(cell.0, cell.1)] = false;
-        }
-    }
-
-    let from = cell_of(origin, &source.junction).ok_or_else(|| {
-        refuse(format!(
-            "the {}'s own output tile {} is outside the searched window",
-            sited.name, source.junction
-        ))
-    })?;
-
-    // The tank's nearest port by straight-line distance, then the next, so a
-    // corner the route cannot reach does not refuse the whole run.
-    let mut ranked: Vec<&FluidPort> = sinks.iter().collect();
-    ranked.sort_by(|a, b| {
-        calculate_distance(&a.junction, &source.junction)
-            .total_cmp(&calculate_distance(&b.junction, &source.junction))
-            .then(a.junction.x.total_cmp(&b.junction.x))
-            .then(a.junction.y.total_cmp(&b.junction.y))
-    });
-
-    let mut last: Option<String> = None;
-    for sink in ranked {
-        let Some(to) = cell_of(origin, &sink.junction) else {
-            last = Some(format!(
-                "the {tank}'s connection at {} is outside the searched window",
-                sink.junction
-            ));
-            continue;
-        };
-        // `max_underground: None`: an underground pipe pair has an input half
-        // and an output half, and neither `FactorioEntity` nor the mod's
-        // `rcon_place_entity` can say which -- the identical constraint
-        // `method::connect` states for underground belts. A route that would
-        // need to tunnel refuses.
-        match route_belt(&blocked, origin, from, to, None) {
-            Ok(route) => {
-                let mut tiles: Vec<Position> = Vec::new();
-                let mut push = |position: &Position| {
-                    if !tiles.contains(position) {
-                        tiles.push(position.clone());
-                    }
-                };
-                for tile in source.tiles() {
-                    push(&tile);
-                }
-                for tile in &route.tiles {
-                    debug_assert!(
-                        matches!(tile.kind, TileKind::Belt),
-                        "route_belt with max_underground: None can only produce surface tiles"
-                    );
-                    push(&tile.position);
-                }
-                for tile in sink.tiles() {
-                    push(&tile);
-                }
-                // The grid says a pipe fits; `is_area_free` is what the game
-                // will be asked. It knows about water, which the entity
-                // rasterisation does not, and an oil field beside a lake is
-                // exactly where that differs.
-                if let Some(bad) = tiles.iter().find(|tile| !state.is_area_free(pipe, tile)) {
-                    return Err(refuse(format!("the tile at {bad} cannot hold a {pipe}",)));
-                }
-                return Ok(tiles);
-            }
-            Err(RouteError::NoPath { blocked }) => {
-                last = Some(match blocked.first() {
-                    Some(first) => format!(
-                        "no route to the {tank}'s connection at {}, blocked by {} tile(s) from \
-                         {first}",
-                        sink.junction,
-                        blocked.len()
-                    ),
-                    None => format!(
-                        "no route to the {tank}'s connection at {}, and nothing on the searched \
-                         grid blocked it: the two are further apart than one window reaches",
-                        sink.junction
-                    ),
-                });
-            }
-            Err(RouteError::SpanTooLong { needed, max }) => {
-                last = Some(format!(
-                    "the obstacle needs an underground span of {needed} tiles and the pipe \
-                     allows {max}"
-                ));
-            }
-        }
-    }
-    Err(refuse(last.unwrap_or_else(|| {
-        format!("the {tank} declares no pipe connection to aim at")
-    })))
-}
-
-/// The cell `at` falls in, or `None` when it lies outside the window.
-///
-/// The same body as `method::connect`'s, which is private to that module.
-fn cell_of(origin: (f64, f64), at: &Position) -> Option<(usize, usize)> {
-    let x = (at.x() - origin.0) / enclosure::CELL;
-    let y = (at.y() - origin.1) / enclosure::CELL;
-    if x < 0.0 || y < 0.0 {
-        return None;
-    }
-    let (x, y) = (x as usize, y as usize);
-    (x < enclosure::GRID && y < enclosure::GRID).then_some((x, y))
-}
-
-/// The footprints of everything this plan has already put on the ground
-/// inside `area` -- the overlay half of the obstacle grid, which
-/// `EntityGraph::blocking_boxes_within` cannot see.
-fn overlay_boxes(state: &PlanState, area: &Rect) -> Vec<Rect> {
-    let centre = Position::new(
-        (area.left_top.x() + area.right_bottom.x()) / 2.,
-        (area.left_top.y() + area.right_bottom.y()) / 2.,
-    );
-    let radius = (area.width() / 2.).hypot(area.height() / 2.);
-    state
-        .entities_within(&centre, radius)
-        .into_iter()
-        .filter_map(|entity| {
-            <Direction as factorio_bot_core::num_traits::FromPrimitive>::from_u8(entity.direction)
-                .and_then(|facing| {
-                    state.collision_area_facing(&entity.name, &entity.position, facing)
-                })
-                .or_else(|| {
-                    let box_ = &entity.bounding_box;
-                    (box_.width() > 0. && box_.height() > 0.).then(|| box_.clone())
-                })
-        })
-        .collect()
-}
-
-// ---------------------------------------------------------------------------
-// Emission
-// ---------------------------------------------------------------------------
-
-/// The `FactorioEntity` a placement of `name` at `position` creates, facing
-/// north.
-///
-/// `entity_type` is read from the prototype rather than guessed, for the
-/// reason `extract::extractor_entity` gives: `EntityGraph::add` keys its
-/// whitelist on the `(name, type)` pair, and a tank's type is `storage-tank`
-/// while a pumpjack's is `mining-drill`.
-fn plain_entity(state: &PlanState, name: &str, position: &Position) -> FactorioEntity {
-    let entity_type = state
-        .base()
-        .globals
-        .entity_prototypes
-        .get(name)
-        .map(|proto| proto.entity_type.clone())
-        .unwrap_or_else(|| name.to_string());
-    FactorioEntity {
-        name: name.to_string(),
-        entity_type,
-        position: position.clone(),
-        direction: NORTH,
-        ..Default::default()
-    }
-}
-
-/// One `Place`, with the preconditions and effects every other method's
-/// placements carry, and the overlay update that makes the next one see it.
-///
-/// The same body as `method::connect`'s `place_step`, which is private there.
-fn place_step(ctx: &mut ExpansionCtx, entity: FactorioEntity, note: &str) -> Step {
-    let build = ctx
-        .state
-        .bot(ctx.chain_actor)
-        .map(|b| b.build_distance)
-        .unwrap_or(10.0);
-    let min_radius = ctx.state.placement_clearance(&entity.name).unwrap_or(0.0);
-    let step = Step::Act(Box::new(Action {
-        id: ctx.ids.next(),
-        kind: ActionKind::Place {
-            entity: Box::new(entity.clone()),
-        },
-        pre: vec![
-            Condition::AtPosition {
-                who: Actor::Role,
-                pos: entity.position.clone(),
-                radius: build,
-                min_radius,
-            },
-            Condition::AreaFree {
-                pos: entity.position.clone(),
-                entity: entity.name.as_str().into(),
-                direction: entity.direction,
-            },
-            Condition::HasItem {
-                who: Actor::Role,
-                item: entity.name.as_str().into(),
-                count: 1,
-            },
-        ],
-        eff: vec![
-            Effect::LoseItem {
-                who: Actor::Role,
-                item: entity.name.as_str().into(),
-                count: 1,
-            },
-            Effect::CreateEntity(Box::new(entity.clone())),
-        ],
-        duration: PLACE_TICKS,
-        pinned: None,
-        label: format!("place {} at {} -- {note}", entity.name, entity.position),
-    }));
-    ctx.state.create_entity(entity);
-    step
-}
-
 #[cfg(test)]
 mod gather_tests {
     use super::*;
+    use crate::action::ActionKind;
     use crate::ids::BotId;
+    use crate::method::pipe::fluid_ports;
     use crate::method::util::{RecipeGate, recipe_for, recipe_gate};
     use crate::test_world::{OilFixture, PumpjackRecipe, world_with_oil};
     use factorio_bot_core::factorio::world::FactorioSurface;

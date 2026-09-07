@@ -1308,8 +1308,8 @@ pub enum PlannerError {
     #[error("{0}")]
     #[diagnostic(transparent)]
     ///
-    /// **Boxed**, and that is not cosmetic: `FabricateRefusal::FluidIngredient`
-    /// carries four owned strings and a [`crate::substance::FluidSource`], and
+    /// **Boxed**, and that is not cosmetic: `FabricateRefusal::NoFluidSource`
+    /// carries five owned strings and a [`crate::substance::FluidSource`], and
     /// inlining it took `PlannerError` past `clippy::result_large_err` -- every
     /// `Result<_, PlannerError>` in the crate would have paid for a refusal
     /// almost nothing returns.

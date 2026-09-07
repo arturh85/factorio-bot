@@ -241,7 +241,11 @@ fn two_records_on_one_surface_land_in_one_graph() {
 
     for (n, (x, y)) in [("iron-chest", (1.5, 1.5)), ("wooden-chest", (9.5, 9.5))] {
         parser
-            .parse(1, "on_some_entity_created", &entity_json(n, x, y, Some("vulcanus")))
+            .parse(
+                1,
+                "on_some_entity_created",
+                &entity_json(n, x, y, Some("vulcanus")),
+            )
             .expect("created line");
     }
 
@@ -250,7 +254,9 @@ fn two_records_on_one_surface_land_in_one_graph() {
         2,
         "nauvis and vulcanus -- a second vulcanus record must not make a third surface"
     );
-    let vulcanus = world.surface(&SurfaceId::from("vulcanus")).expect("vulcanus");
+    let vulcanus = world
+        .surface(&SurfaceId::from("vulcanus"))
+        .expect("vulcanus");
     assert_eq!(
         name_at(&vulcanus, &Position::new(1.5, 1.5)),
         Some("iron-chest".to_string()),
@@ -290,5 +296,61 @@ fn only_surface_stops_answering_once_a_second_surface_is_routed() {
     assert!(
         world.only_surface().is_none(),
         "two surfaces: the seam must refuse rather than pick one"
+    );
+}
+
+/// **A routed deletion does its work, on the surface it was routed to.**
+///
+/// The gap this closes: `a_deletion_on_another_surface_leaves_this_one_standing`
+/// asserts platform-4 is empty at that tile afterwards, and platform-4 was
+/// *never* occupied there — so a deletion that routed correctly and then did
+/// nothing at all passes it, as does one dropped on the floor into a surface
+/// nobody holds. Both halves are asserted here instead: the chest is standing
+/// on platform-4 after the create, and gone after the delete, in the same
+/// graph the world holds.
+///
+/// This is the same shape as `two_records_on_one_surface_land_in_one_graph`
+/// and exists for the same reason — a routing that returns a fresh surface per
+/// call removes from a graph nobody reads, which looks exactly like a working
+/// deletion.
+#[test]
+fn a_deletion_removes_from_the_surface_it_was_routed_to() {
+    let world = world();
+    let mut parser = OutputParser::with_game_world(world.clone());
+
+    let at = Position::new(-14.5, -38.5);
+    parser
+        .parse(
+            1,
+            "on_some_entity_created",
+            &entity_json("iron-chest", -14.5, -38.5, Some("platform-4")),
+        )
+        .expect("the created line must parse");
+
+    let platform = world
+        .surface(&SurfaceId::from("platform-4"))
+        .expect("the creation must have routed to a platform-4 surface");
+    assert_eq!(
+        name_at(&platform, &at),
+        Some("iron-chest".to_string()),
+        "the chest must be standing on platform-4 before anything is deleted"
+    );
+
+    parser
+        .parse(
+            2,
+            "on_some_entity_deleted",
+            &entity_json("iron-chest", -14.5, -38.5, Some("platform-4")),
+        )
+        .expect("the deleted line must parse");
+
+    assert_eq!(
+        world.len(),
+        2,
+        "nauvis and platform-4 -- the deletion must reuse the surface the creation made"
+    );
+    assert!(
+        name_at(&platform, &at).is_none(),
+        "and the deletion must have removed it from THAT graph, not from one nobody holds"
     );
 }

@@ -1345,10 +1345,34 @@ impl FactorioWorld {
         // Re-checked under the write lock: two parser threads asking for the
         // same new surface must get the same object, not two graphs one of
         // which is silently discarded along with everything written to it.
-        surfaces
+        let mut born = false;
+        let surface = surfaces
             .entry(id.clone())
-            .or_insert_with(|| Arc::new(FactorioSurface::with_globals(self.globals.clone())))
-            .clone()
+            .or_insert_with(|| {
+                born = true;
+                Arc::new(FactorioSurface::with_globals(self.globals.clone()))
+            })
+            .clone();
+        if born {
+            // **The only live signal that routing happened.** A surface is
+            // born here and nowhere else outside a constructor, so this line
+            // is the run's own evidence that a writeout named somewhere other
+            // than the default surface and was filed there -- the thing the
+            // 2,601 misfiled asteroid deletions of 2026-09-07 had no way to
+            // announce. Bounded by the number of surfaces a save has (ten on
+            // the world-record save), not by the number of records, so it can
+            // never bury a run's output the way a per-record line would.
+            //
+            // `info!` is `paris` on stdout via `#[macro_use] extern crate
+            // paris` in this crate's lib.rs -- narration a person reads while
+            // the run happens, which is what this is.
+            info!(
+                "model now tracks surface <bright-blue>{}</> ({} in total)",
+                id.as_str(),
+                surfaces.len()
+            );
+        }
+        surface
     }
 
     /// The one surface this world holds, for callers written before there

@@ -5072,6 +5072,21 @@ pub fn default_registry() -> MethodRegistry {
         // anywhere is correct and beside them is where it reads.
         .with(Box::new(crate::method::sustain::Sustain))
         .with(Box::new(crate::method::blueprint::BuildBlock))
+        // **Dead last, and that is the whole contract.** `NoProducer` claims
+        // nothing and satisfies nothing -- `applicable` and `claims` are both
+        // hard `false` -- so it can never take a goal from a method above it.
+        // It answers only `Method::refusal`, and `MethodRegistry::refusal`
+        // takes the *first* method that offers one, so every method that knows
+        // more about why a goal failed (`Mine` knows the ore is uncharted,
+        // `Extract` walks a four-tier ladder) still speaks first. All it can
+        // do is replace the driver's `no method can satisfy goal: have 100
+        // solid-fuel` -- true and unactionable -- with the recipes that
+        // produce the item and the category no machine here runs.
+        //
+        // This is `products::ProductIndex`'s first production caller. Until
+        // now the honest product-to-recipe lookup existed and nothing asked
+        // it, which by this repo's own record makes it a hypothesis.
+        .with(Box::new(crate::products::NoProducer))
 }
 
 /// Split a shared goal into one independent chain per bot.
@@ -6542,6 +6557,21 @@ pub fn registry_for(bots: &[BotId]) -> MethodRegistry {
         // `plan`/`score-map` CLIs all build their registry from this
         // function, not from `default_registry`.
         .with(Box::new(crate::method::blueprint::BuildBlock))
+        // **Dead last, and that is the whole contract.** `NoProducer` claims
+        // nothing and satisfies nothing -- `applicable` and `claims` are both
+        // hard `false` -- so it can never take a goal from a method above it.
+        // It answers only `Method::refusal`, and `MethodRegistry::refusal`
+        // takes the *first* method that offers one, so every method that knows
+        // more about why a goal failed (`Mine` knows the ore is uncharted,
+        // `Extract` walks a four-tier ladder) still speaks first. All it can
+        // do is replace the driver's `no method can satisfy goal: have 100
+        // solid-fuel` -- true and unactionable -- with the recipes that
+        // produce the item and the category no machine here runs.
+        //
+        // This is `products::ProductIndex`'s first production caller. Until
+        // now the honest product-to-recipe lookup existed and nothing asked
+        // it, which by this repo's own record makes it a hypothesis.
+        .with(Box::new(crate::products::NoProducer))
 }
 
 #[cfg(test)]
@@ -8437,8 +8467,21 @@ mod tests {
         );
     }
 
-    /// An item no resource yields is still `NoApplicableMethod`: the refusal
-    /// hook adds names to answers, never answers to names.
+    /// An item no resource yields still **refuses**: the refusal hook adds
+    /// names to answers, never answers to names.
+    ///
+    /// The variant changed on 2026-09-07, when `products::NoProducer` was
+    /// registered last in [`registry_for`]. It used to be
+    /// `NoApplicableMethod`, whose whole text was `no method can satisfy goal:
+    /// have 1 unobtainium`; it is now `ProductNotMakeable`, which says no
+    /// recipe produces the name **and** that no prototype table in this world
+    /// mentions it at all -- i.e. check the spelling. That is strictly more
+    /// than the old message said and it is still a refusal, so the property
+    /// this test is named for is unchanged: the hook did not turn a
+    /// non-answer into a plan. What is asserted below is therefore the
+    /// property, plus the name, plus the new diagnosis -- not the variant
+    /// alone, which is what let the meaning of this test drift in the first
+    /// place.
     #[test]
     fn an_item_nothing_yields_is_still_no_applicable_method() {
         let s = state(&[BotId(1)]);
@@ -8454,8 +8497,18 @@ mod tests {
         )
         .expect_err("nothing makes unobtainium");
         assert!(
-            matches!(err, PlannerError::NoApplicableMethod { .. }),
+            matches!(err, PlannerError::ProductNotMakeable(_)),
             "got {err}"
+        );
+        let text = err.to_string();
+        assert!(
+            text.contains("unobtainium"),
+            "the refusal names the item: {text}"
+        );
+        assert!(
+            text.contains("check the spelling"),
+            "and says the world has never heard of the name, which is the whole \
+             diagnosis for a typo: {text}"
         );
     }
 

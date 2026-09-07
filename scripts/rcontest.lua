@@ -116,6 +116,13 @@ blueprints = {
     -- shape gives 78, and the coal chest drains 100 -> 11 where the broken one
     -- left 55 unused.
     OreToPlateTee = "0eNqd1dFuwiAUgOF34bo1Hgpt6UtsF94ty9K6s42kpQZwmTF996FeaCYm5+xSSL8S4adHMYx73HnrouiOwkacRHczVoixH3BMY08eN/Pz2EfcIKZxdNFGi0F0L8fLj8Ob208DetFBIVw/YXoq+t6F3exjmZQTt5tDemx2p7f9iK5e6UIcRLde6aUQ79bj9jLbLsUdK9ksUNiKzUoKq9hsRWE1m1UUtmazmsI2bLamsC2bbSisYbMthYU12zUkl98ZkEKDf5RGSg34rQEpNqDXBo+uHJVz6blJlkvvrWK59OAUy6UXp1kuPTnzyAWZ+1bQm2t5MD26hgdfo7N+duX2C0Pu+N6e3xxzTWzYe4e+tC6gj2nu3lpz9kqqv/JknXWf5bu345gJ4kyXQPiwa56s6HJN/zeaR3d6fruupYU4Oyw/kt9vMXNwL2p2s1r+8u5v2vz6DG99AMvyWohv9OE8pWtplDG6UhKq9IblFxoeVrE=",
+    -- Three drills to two furnaces, against OreToPlateTee's two and two.
+    -- The two-drill block is DRILL limited: 28.7 plates/min against the 30.0
+    -- ore/min two burner drills supply. A third drill takes supply to 45.0,
+    -- past the furnaces' 37.5, and the block measures 36.2 -- 96.5% of the
+    -- furnace ceiling, +26% for one drill and one belt tile. The drill
+    -- extends the pattern west (x = 0, 2, 4) so the T junction is untouched.
+    OreToPlateThree = "0eNqd1t1ugjAUwPF36TUQDrR8vcR24d2yLKBnWxMoptRlxvDuq7pEIyU7Z5dS+dnQ/osn0fUH3FttnGhOQjscRHN3LRJ922Hvrz1Z3IzPfetw82kR/Qgap53GSTQvp+uH45s5DB1a0UAkTDugv8/Z1kz70brYO2dwP07+ttGcf+9bNEWiInEUTZqoORI7bXF7Ha3maMFmbBYobM5mMwor2WxOYRWblRS2YLOKwpZstqCwFZstKWzNZisKCynbrUkuvzMghQb/KI2UGvBbA1JsQK8N1o4cGXLpuWUsl95bznLpwUmWSy9OsVx6cvWaC1noXUFvruLB9OhKHnyLTtvRxNtPnELb937/hphbYt3BGrSxNhNa58eWVspZq0w+yoM22nzEO6v7PhDEhY6B8GJXPFnS5YL+NMq1Mz28XLfSJjcajN+9324xsHGvanCxKv70lidteH41b34AlwlyliFN0t+FSNKHpYgWf7LSO/2vcNa35dKF+TUSX2inyxdUkdWyrlUuM8j9c5l/AEupkxI=",
 }
 
 rcon.cheat_technology("automation")

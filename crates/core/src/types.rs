@@ -3021,15 +3021,6 @@ pub enum EntityType {
     Fish,
 }
 
-impl EntityType {
-    pub fn is_fluid_input(&self) -> bool {
-        *self == EntityType::Pipe
-            || *self == EntityType::StorageTank
-            || *self == EntityType::PipeToGround
-            || *self == EntityType::Boiler
-    }
-}
-
 #[derive(Debug)]
 pub struct ResourcePatch {
     pub name: String,

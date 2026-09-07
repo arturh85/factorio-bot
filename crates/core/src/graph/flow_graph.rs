@@ -20,7 +20,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
-use tracing::{error, warn};
+use tracing::{debug, error, warn};
 
 /// The `built_generation` of a graph that has never been walked.
 ///
@@ -285,7 +285,20 @@ impl FlowGraph {
         *self.inner.write() = FlowGraphInner::new();
         *self.flow_tree.write() = fresh_flow_tree();
         let inner = self.entity_graph.inner_graph();
-        for entity_root_index in inner.externals(petgraph::Direction::Incoming) {
+        // **A root is what a source IS, not what points at it.** This used to
+        // walk `externals(Direction::Incoming)` and filter that, which held
+        // only while nothing in the entity graph ever pointed at a producer --
+        // a proxy, and one that had already quietly cost a burner drill its
+        // ore the moment an inserter fuelled it.
+        //
+        // The fluid rule falsified the proxy outright: an
+        // `electric-mining-drill` declares an `input-output` fluid box (that is
+        // how sulfuric acid reaches a uranium drill), so a pipe beside one now
+        // draws an edge into it, correctly. Under the old predicate that
+        // deleted the drill from the roster of roots and with it every rate
+        // downstream -- measured on the world-record base as `iron-ore`
+        // 16,500/min -> 120 and `copper-ore` 15,870 -> 0.
+        for entity_root_index in inner.node_indices() {
             let entity_root = inner.node_weight(entity_root_index).unwrap();
             if entity_root.entity_type == EntityType::OffshorePump
                 || (entity_root.entity_type == EntityType::MiningDrill
@@ -1549,9 +1562,27 @@ impl FlowGraph {
         entity_edge_count: usize,
         position: &Position,
     ) -> (FlowRates, FlowRates) {
-        let flow_node_index = self.node_at(position).unwrap();
         let mut left: FlowRates = vec![];
         let mut right: FlowRates = vec![];
+        // **Nothing arriving, not an invariant.** This used to `unwrap`, on the
+        // assumption that a node the walk is descending FROM already has a flow
+        // node -- which every arm but one upholds. `EntityType::MiningDrill`
+        // with no ore under it warns and returns `Control::Continue` without
+        // emitting an edge, so the walk descends past a drill that minted no
+        // node, and the first entity beyond it that reads its own incoming
+        // rates finds none. It took a fluid edge into a refinery to reach that
+        // path on a real base and take the process down -- `[profile.release]`
+        // sets `panic = "abort"`, so it would have been the whole run.
+        //
+        // Empty is the honest answer and it is the answer this file already
+        // gives everywhere else: see `get_or_create_flow_node`, which returns
+        // `None` rather than inventing a node, and `flow_rates_at`, whose doc
+        // says an empty answer means "this graph knows of nothing arriving
+        // here".
+        let Some(flow_node_index) = self.node_at(position) else {
+            debug!("no flow node at {position}: nothing arriving there is modelled");
+            return (left, right);
+        };
 
         let graph = self.inner.read();
         let flow_node = graph.node_weight(flow_node_index).unwrap();
@@ -1668,7 +1699,12 @@ impl FlowGraph {
     }
 
     fn sum_incoming_edge_weights(&self, position: &Position) -> FlowRates {
-        let flow_node_index = self.node_at(position).unwrap();
+        // Empty rather than a panic, for the reason spelled out on
+        // [`Self::sum_incoming_edge_weights_by_side`].
+        let Some(flow_node_index) = self.node_at(position) else {
+            debug!("no flow node at {position}: nothing arriving there is modelled");
+            return vec![];
+        };
         let graph = self.inner.read();
         let incoming: Vec<FlowEdge> = graph
             .edges_directed(flow_node_index, petgraph::Direction::Incoming)
@@ -3412,6 +3448,18 @@ mod tests {
         let json = std::fs::read_to_string(&path).expect("the dump reads");
         let surface: crate::factorio::world::FactorioSurface =
             serde_json::from_str(&json).expect("the dump parses");
+        // **A dump carries the edges the binary that WROTE it computed.**
+        // `EntityGraph`'s `Deserialize` restores `entity_graph` verbatim, so
+        // every number below was, until 2026-09-07, an answer about the
+        // connection rules of whatever build dumped the world. `connect` is
+        // append-only and dedupes, so this is a no-op on a graph already
+        // wired by this binary's rules and re-derives the difference on one
+        // that is not. Nothing else here re-runs it: an offline probe is not
+        // a live parser and no `on_init` fires.
+        surface
+            .entity_graph
+            .connect()
+            .expect("the graph reconnects");
         let rates = surface.flow_graph.production_rates();
         let sustained = surface.flow_graph.sustained_production_rates();
         // The predecessor of `balance`, reproduced rather than remembered:
@@ -3681,6 +3729,18 @@ mod tests {
         let json = std::fs::read_to_string(&path).expect("the dump reads");
         let surface: crate::factorio::world::FactorioSurface =
             serde_json::from_str(&json).expect("the dump parses");
+        // **A dump carries the edges the binary that WROTE it computed.**
+        // `EntityGraph`'s `Deserialize` restores `entity_graph` verbatim, so
+        // every number below was, until 2026-09-07, an answer about the
+        // connection rules of whatever build dumped the world. `connect` is
+        // append-only and dedupes, so this is a no-op on a graph already
+        // wired by this binary's rules and re-derives the difference on one
+        // that is not. Nothing else here re-runs it: an offline probe is not
+        // a live parser and no `on_init` fires.
+        surface
+            .entity_graph
+            .connect()
+            .expect("the graph reconnects");
         let lines = surface.flow_graph.nameplate_lines();
         let scale = FlowGraph::balance(&lines);
         let mut drained: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
@@ -3788,6 +3848,18 @@ mod tests {
         let json = std::fs::read_to_string(&path).expect("the dump reads");
         let surface: crate::factorio::world::FactorioSurface =
             serde_json::from_str(&json).expect("the dump parses");
+        // **A dump carries the edges the binary that WROTE it computed.**
+        // `EntityGraph`'s `Deserialize` restores `entity_graph` verbatim, so
+        // every number below was, until 2026-09-07, an answer about the
+        // connection rules of whatever build dumped the world. `connect` is
+        // append-only and dedupes, so this is a no-op on a graph already
+        // wired by this binary's rules and re-derives the difference on one
+        // that is not. Nothing else here re-runs it: an offline probe is not
+        // a live parser and no `on_init` fires.
+        surface
+            .entity_graph
+            .connect()
+            .expect("the graph reconnects");
         let lines = surface.flow_graph.nameplate_lines();
         let mut drained: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
         for line in &lines {
@@ -3862,6 +3934,18 @@ mod tests {
         let json = std::fs::read_to_string(&path).expect("the dump reads");
         let surface: crate::factorio::world::FactorioSurface =
             serde_json::from_str(&json).expect("the dump parses");
+        // **A dump carries the edges the binary that WROTE it computed.**
+        // `EntityGraph`'s `Deserialize` restores `entity_graph` verbatim, so
+        // every number below was, until 2026-09-07, an answer about the
+        // connection rules of whatever build dumped the world. `connect` is
+        // append-only and dedupes, so this is a no-op on a graph already
+        // wired by this binary's rules and re-derives the difference on one
+        // that is not. Nothing else here re-runs it: an offline probe is not
+        // a live parser and no `on_init` fires.
+        surface
+            .entity_graph
+            .connect()
+            .expect("the graph reconnects");
         let produced = surface.flow_graph.production_rates();
         // What every consuming machine believes is arriving at its own tile.
         let mut arriving: BTreeMap<String, f64> = BTreeMap::new();
@@ -3917,6 +4001,18 @@ mod tests {
         let json = std::fs::read_to_string(&path).expect("the dump reads");
         let surface: crate::factorio::world::FactorioSurface =
             serde_json::from_str(&json).expect("the dump parses");
+        // **A dump carries the edges the binary that WROTE it computed.**
+        // `EntityGraph`'s `Deserialize` restores `entity_graph` verbatim, so
+        // every number below was, until 2026-09-07, an answer about the
+        // connection rules of whatever build dumped the world. `connect` is
+        // append-only and dedupes, so this is a no-op on a graph already
+        // wired by this binary's rules and re-derives the difference on one
+        // that is not. Nothing else here re-runs it: an offline probe is not
+        // a live parser and no `on_init` fires.
+        surface
+            .entity_graph
+            .connect()
+            .expect("the graph reconnects");
         let flow = &surface.flow_graph;
         let standing = flow.production_rates();
         // Per (entity_type, recipe): how many machines, and their statuses.
@@ -4039,6 +4135,18 @@ mod tests {
         let json = std::fs::read_to_string(&path).expect("the dump reads");
         let surface: crate::factorio::world::FactorioSurface =
             serde_json::from_str(&json).expect("the dump parses");
+        // **A dump carries the edges the binary that WROTE it computed.**
+        // `EntityGraph`'s `Deserialize` restores `entity_graph` verbatim, so
+        // every number below was, until 2026-09-07, an answer about the
+        // connection rules of whatever build dumped the world. `connect` is
+        // append-only and dedupes, so this is a no-op on a graph already
+        // wired by this binary's rules and re-derives the difference on one
+        // that is not. Nothing else here re-runs it: an offline probe is not
+        // a live parser and no `on_init` fires.
+        surface
+            .entity_graph
+            .connect()
+            .expect("the graph reconnects");
         let provenance = surface.flow_graph.input_provenance();
         // The same ledger as it read when the ingredient bill was guessed back
         // from the product name, on this binary and this dump -- the only way
@@ -4078,5 +4186,241 @@ mod tests {
             "{unmodelled} of {} eaten items have no modelled producer",
             provenance.len()
         );
+    }
+
+    /// **A producer with something pointing at it is still a producer.**
+    ///
+    /// The roots of this walk used to be `externals(Direction::Incoming)`
+    /// filtered to pumps and ore drills -- "has no incoming edge" standing in
+    /// for "is a source". An `electric-mining-drill` declares an
+    /// `input-output` fluid box, because that is how sulfuric acid reaches a
+    /// uranium drill, so once a pipe beside one draws its edge the drill has an
+    /// incoming edge and the proxy deletes it from the roster. Measured on the
+    /// world-record base before the predicate was fixed: `iron-ore`
+    /// 16,500/min -> 120 and `copper-ore` 15,870 -> 0.
+    ///
+    /// The pipe is asserted to have wired at all, beside the rate, so this
+    /// cannot pass on a graph where the edge was never drawn.
+    #[test]
+    fn a_drill_with_a_pipe_on_it_is_still_a_root() {
+        let drill = Position::new(0.5, -1.5);
+        let belt = Position::new(0.5, 0.5);
+        let feed = Position::new(2.5, -1.5);
+        let entity_graph = Arc::new(
+            entity_graph_from(vec![
+                FactorioEntity::new_resource(
+                    &drill,
+                    Direction::South,
+                    &EntityName::IronOre.to_string(),
+                ),
+                FactorioEntity::new_electric_mining_drill(&drill, Direction::South),
+                FactorioEntity::new_transport_belt(&belt, Direction::South),
+                FactorioEntity {
+                    name: "pipe".into(),
+                    entity_type: "pipe".into(),
+                    bounding_box: add_to_rect(&Rect::from_wh(0.578_125, 0.578_125), &feed),
+                    position: feed.clone(),
+                    ..Default::default()
+                },
+            ])
+            .unwrap(),
+        );
+        let (drill_index, feed_index) = (
+            entity_graph.node_at(&drill).expect("the drill is there"),
+            entity_graph.node_at(&feed).expect("the pipe is there"),
+        );
+        assert!(
+            entity_graph
+                .inner_graph()
+                .contains_edge(feed_index, drill_index),
+            "the pipe must reach the drill's fluid box, or this proves nothing"
+        );
+        let flow_graph = FlowGraph::new(entity_graph);
+        assert_eq!(
+            rate_of(&flow_graph.throughput_at(&belt), "iron-ore"),
+            Some(0.5),
+            "a drill with a pipe on it still puts its 0.5 ore/s on the belt"
+        );
+    }
+
+    /// **A drill with no ore under it must not take the process down.**
+    ///
+    /// `update`'s `EntityType::MiningDrill` arm warns and returns
+    /// `Control::Continue` without emitting an edge when the drill stands on
+    /// nothing, so the walk descends past a source that minted no flow node --
+    /// and the first entity beyond it that reads its own incoming rates used to
+    /// `unwrap` a `None`. `[profile.release]` sets `panic = "abort"`, so that
+    /// was the whole run, and it took a fluid edge into an oil refinery on the
+    /// world-record base to reach the path at all.
+    ///
+    /// The chain is: a drill on ore -> two belts -> an inserter -> **a drill on
+    /// nothing** -> two more belts. The empty answer at the far end is paired
+    /// with the real rate at the near end, so this cannot pass on a walk that
+    /// never ran.
+    #[test]
+    fn a_drill_standing_on_nothing_stops_the_flow_rather_than_the_process() {
+        let entity_graph = Arc::new(
+            entity_graph_from(vec![
+                FactorioEntity::new_resource(
+                    &Position::new(0.5, -1.5),
+                    Direction::South,
+                    &EntityName::IronOre.to_string(),
+                ),
+                FactorioEntity::new_electric_mining_drill(
+                    &Position::new(0.5, -1.5),
+                    Direction::South,
+                ),
+                FactorioEntity::new_transport_belt(&Position::new(0.5, 0.5), Direction::South),
+                FactorioEntity::new_transport_belt(&Position::new(0.5, 1.5), Direction::South),
+                FactorioEntity::new_named_inserter(
+                    EntityName::Inserter.to_string(),
+                    &Position::new(0.5, 2.5),
+                    Direction::North,
+                ),
+                // No `new_resource` under this one: it mines nothing.
+                FactorioEntity::new_electric_mining_drill(
+                    &Position::new(0.5, 4.5),
+                    Direction::South,
+                ),
+                FactorioEntity::new_transport_belt(&Position::new(0.5, 6.5), Direction::South),
+                FactorioEntity::new_transport_belt(&Position::new(0.5, 7.5), Direction::South),
+            ])
+            .unwrap(),
+        );
+        let flow_graph = FlowGraph::new(entity_graph);
+        assert_eq!(
+            rate_of(
+                &flow_graph.throughput_at(&Position::new(0.5, 1.5)),
+                "iron-ore"
+            ),
+            Some(0.5),
+            "the belt below the drill that IS on ore still carries its 0.5 ore/s"
+        );
+        assert!(
+            flow_graph
+                .throughput_at(&Position::new(0.5, 7.5))
+                .is_empty(),
+            "and nothing flows out of the drill standing on nothing"
+        );
+    }
+
+    /// **Probe.** Why a given entity is absent from the flow graph: because
+    /// nothing in the ENTITY graph points at it, or because the walk reached it
+    /// and pruned.
+    ///
+    /// The two are different defects in different files and the census table
+    /// that started this work could not tell them apart -- it printed
+    /// `oil-refinery 55 -> 0`, `steam-engine 896 -> 0` and `biolab 80 -> 0`
+    /// side by side as if one rule explained all three.
+    #[test]
+    #[ignore = "needs a world dump named by FACTORIO_BOT_WORLD_DUMP"]
+    fn why_a_machine_never_reaches_the_flow_graph() {
+        let Ok(path) = std::env::var("FACTORIO_BOT_WORLD_DUMP") else {
+            panic!("set FACTORIO_BOT_WORLD_DUMP to a world.dump JSON");
+        };
+        let json = std::fs::read_to_string(&path).expect("the dump reads");
+        let surface: crate::factorio::world::FactorioSurface =
+            serde_json::from_str(&json).expect("the dump parses");
+        // **A dump carries the edges the binary that WROTE it computed.**
+        // `EntityGraph`'s `Deserialize` restores `entity_graph` verbatim, so
+        // every number below was, until 2026-09-07, an answer about the
+        // connection rules of whatever build dumped the world. `connect` is
+        // append-only and dedupes, so this is a no-op on a graph already
+        // wired by this binary's rules and re-derives the difference on one
+        // that is not. Nothing else here re-runs it: an offline probe is not
+        // a live parser and no `on_init` fires.
+        surface
+            .entity_graph
+            .connect()
+            .expect("the graph reconnects");
+        let flow = &surface.flow_graph;
+        let in_flow: std::collections::BTreeSet<String> = {
+            let inner = flow.inner_graph();
+            inner
+                .node_indices()
+                .filter_map(|i| inner.node_weight(i).map(|n| n.entity_name.clone()))
+                .collect()
+        };
+        let _ = in_flow;
+        let mut flow_positions: std::collections::BTreeSet<String> =
+            std::collections::BTreeSet::new();
+        {
+            let inner = flow.inner_graph();
+            for i in inner.node_indices() {
+                if let Some(n) = inner.node_weight(i) {
+                    flow_positions.insert(format!("{}", n.position));
+                }
+            }
+        }
+        let names = [
+            "oil-refinery",
+            "chemical-plant",
+            "steam-engine",
+            "biolab",
+            "lab",
+            "boiler",
+            "offshore-pump",
+            "pipe",
+            "pipe-to-ground",
+            "storage-tank",
+            "pump",
+        ];
+        let graph = surface.entity_graph.inner_graph();
+        println!("-- why each entity is or is not in the flow graph --");
+        println!(
+            "{:>18} {:>7} {:>9} {:>9} {:>7}  incoming neighbour types",
+            "entity", "count", "in_flow", "has_in", "has_out"
+        );
+        for name in names {
+            let mut count = 0_usize;
+            let mut in_flow_n = 0_usize;
+            let mut has_in = 0_usize;
+            let mut has_out = 0_usize;
+            let mut sources: BTreeMap<String, usize> = BTreeMap::new();
+            for index in graph.node_indices() {
+                let Some(node) = graph.node_weight(index) else {
+                    continue;
+                };
+                if node.entity_name != name {
+                    continue;
+                }
+                count += 1;
+                if flow_positions.contains(&format!("{}", node.position)) {
+                    in_flow_n += 1;
+                }
+                let mut any_in = false;
+                for edge in graph.edges_directed(index, petgraph::Direction::Incoming) {
+                    any_in = true;
+                    if let Some(source) = graph.node_weight(petgraph::visit::EdgeRef::source(&edge))
+                    {
+                        *sources.entry(source.entity_name.clone()).or_insert(0) += 1;
+                    }
+                }
+                if any_in {
+                    has_in += 1;
+                }
+                if graph
+                    .edges_directed(index, petgraph::Direction::Outgoing)
+                    .next()
+                    .is_some()
+                {
+                    has_out += 1;
+                }
+            }
+            if count == 0 {
+                continue;
+            }
+            let mut top: Vec<(&String, &usize)> = sources.iter().collect();
+            top.sort_by(|a, b| b.1.cmp(a.1));
+            let listed: Vec<String> = top
+                .iter()
+                .take(5)
+                .map(|(n, c)| format!("{n}:{c}"))
+                .collect();
+            println!(
+                "{name:>18} {count:>7} {in_flow_n:>9} {has_in:>9} {has_out:>7}  {}",
+                listed.join(" ")
+            );
+        }
     }
 }

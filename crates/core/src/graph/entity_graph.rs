@@ -6,8 +6,9 @@ use crate::factorio::util::{
 use crate::num_traits::FromPrimitive;
 use crate::record::map::{EntitySnapshot, resource_position_from_pos};
 use crate::types::{
-    Direction, EntityName, EntityType, FactorioEntity, FactorioEntityPrototype, FactorioRecipe,
-    FactorioTile, Pos, Position, Rect, ResourcePatch,
+    Direction, EntityName, EntityType, FactorioEntity, FactorioEntityPrototype,
+    FactorioFluidBoxConnection, FactorioFluidBoxPrototype, FactorioRecipe, FactorioTile, Pos,
+    Position, Rect, ResourcePatch,
 };
 use dashmap::DashMap;
 use euclid::{Point2D, Rect as EuclidRect, Size2D};
@@ -2170,6 +2171,65 @@ impl EntityGraph {
                     ),
                 }
             }
+            // Fluid joints, from the prototypes rather than from a list
+            // of type names. Two entities are joined where one's fluid box
+            // faces a tile the other's fluid box sits on, and their two
+            // `production_type`s agree on which way fluid may cross.
+            //
+            // That last clause is what keeps the flow walk's roots roots: an
+            // offshore pump and a pumpjack each declare a single `output`
+            // box, so a pipe beside one draws an edge out of it and never one
+            // back in, and `FlowGraph::update`'s
+            // `externals(Direction::Incoming)` still finds them.
+            let my_boxes = self.fluid_boxes(node);
+            for mine in &my_boxes {
+                for port in &mine.ports {
+                    let Some(other_index) = self.node_at(port) else {
+                        continue;
+                    };
+                    if other_index == node_index {
+                        continue;
+                    }
+                    let Some(other) = inner.node_weight(other_index) else {
+                        continue;
+                    };
+                    for theirs in self.fluid_boxes(other) {
+                        // Symmetric on purpose: `node_at` answers for any tile
+                        // of a footprint, so without asking the neighbour where
+                        // ITS box sits, a pipe beside any of a refinery's
+                        // twenty-five tiles would read as joined to it.
+                        // **Each box must reach into the other's footprint,
+                        // both ways.** Stated on footprints rather than on
+                        // anchors so that it holds under either `positions`
+                        // convention (see [`FluidBoxPorts::certain`]), and
+                        // asked of the neighbour as well as of us because
+                        // `node_at` answers for any tile of a footprint: a pipe
+                        // beside any of a refinery's twenty-five tiles would
+                        // otherwise read as joined to it, when only the four it
+                        // declares connections on are.
+                        if !other.bounding_box.contains(port)
+                            || !theirs
+                                .ports
+                                .iter()
+                                .any(|tile| node.bounding_box.contains(tile))
+                        {
+                            continue;
+                        }
+                        if mine.gives_out
+                            && theirs.takes_in
+                            && !inner.contains_edge(node_index, other_index)
+                        {
+                            edges_to_add.push((node_index, other_index, 1.));
+                        }
+                        if theirs.gives_out
+                            && mine.takes_in
+                            && !inner.contains_edge(other_index, node_index)
+                        {
+                            edges_to_add.push((other_index, node_index, 1.));
+                        }
+                    }
+                }
+            }
             match node.entity_type {
                 EntityType::Splitter => {
                     // `turn` is `None` for anything but a cardinal; a
@@ -2230,68 +2290,6 @@ impl EntityGraph {
                         //     )
                     }
                 }
-                EntityType::OffshorePump => {
-                    if let Some(next_index) =
-                        self.node_at_moved(&node.position, node.direction, -1.)
-                    {
-                        let next = inner.node_weight(next_index).unwrap();
-                        if next.entity_type.is_fluid_input()
-                            && !inner.contains_edge(node_index, next_index)
-                        {
-                            edges_to_add.push((node_index, next_index, 1.));
-                        }
-                    }
-                }
-                EntityType::Pipe => {
-                    for direction in Direction::orthogonal() {
-                        if let Some(next_index) = self.node_at_moved(&node.position, direction, 1.)
-                        {
-                            let next = inner.node_weight(next_index).unwrap();
-                            if next.entity_type.is_fluid_input() {
-                                if !inner.contains_edge(node_index, next_index) {
-                                    edges_to_add.push((node_index, next_index, 1.));
-                                }
-                                if !inner.contains_edge(next_index, node_index) {
-                                    edges_to_add.push((next_index, node_index, 1.));
-                                }
-                            }
-                        }
-                    }
-                }
-                EntityType::StorageTank => {
-                    // A storage tank is two-way only: the game stores
-                    // `north` or `east` and never the other fourteen
-                    // values. North and south share one connection set, the
-                    // other orientation the mirrored one. Spelling `South`
-                    // out matters after the 2.x widening -- `8` used to be
-                    // unreadable and now means south.
-                    for position in &match node.direction {
-                        Direction::North | Direction::South => [
-                            node.position.add(&Position::new(-1., -2.)),
-                            node.position.add(&Position::new(-2., -1.)),
-                            node.position.add(&Position::new(2., 1.)),
-                            node.position.add(&Position::new(1., 2.)),
-                        ],
-                        _ => [
-                            node.position.add(&Position::new(2., -1.)),
-                            node.position.add(&Position::new(1., -2.)),
-                            node.position.add(&Position::new(-2., 1.)),
-                            node.position.add(&Position::new(-1., 2.)),
-                        ],
-                    } {
-                        if let Some(next_index) = self.node_at(position) {
-                            let next = inner.node_weight(next_index).unwrap();
-                            if next.entity_type.is_fluid_input() {
-                                if !inner.contains_edge(node_index, next_index) {
-                                    edges_to_add.push((node_index, next_index, 1.));
-                                }
-                                if !inner.contains_edge(next_index, node_index) {
-                                    edges_to_add.push((next_index, node_index, 1.));
-                                }
-                            }
-                        }
-                    }
-                }
                 EntityType::UndergroundBelt => {
                     let mut found = false;
                     if let Some(prototype) = self.entity_prototypes.get(&node.entity_name) {
@@ -2337,7 +2335,6 @@ impl EntityGraph {
                     }
                 }
                 EntityType::PipeToGround => {
-                    let mut found = false;
                     if let Some(prototype) = self.entity_prototypes.get(&node.entity_name) {
                         if let Some(max_distance) = prototype.max_underground_distance.as_ref() {
                             for length in 1..=*max_distance {
@@ -2364,7 +2361,6 @@ impl EntityGraph {
                                                 length as f64,
                                             ));
                                         }
-                                        found = true;
                                         break;
                                     }
                                 }
@@ -2375,17 +2371,10 @@ impl EntityGraph {
                     } else {
                         warn!("underground pipe prototype not found");
                     }
-                    if found
-                        && let Some(next_index) =
-                            self.node_at_moved(&node.position, node.direction, 1.)
-                    {
-                        let next = inner.node_weight(next_index).unwrap();
-                        if next.entity_type.is_fluid_input()
-                            && !inner.contains_edge(node_index, next_index)
-                        {
-                            edges_to_add.push((node_index, next_index, 1.));
-                        }
-                    }
+                    // The surface hop this used to draw by hand is the
+                    // fluid-joint rule above now: a pipe-to-ground's own box is
+                    // exact, because it carries an `underground` connection at
+                    // the same anchor and so faces `direction` on the surface.
                 }
                 _ => {}
             }
@@ -2962,7 +2951,7 @@ mod tests {
     use crate::factorio::util::rect_fields;
     use crate::num_traits::ToPrimitive;
     use crate::test_utils::{
-        entity_graph_from, fixture_entity_prototypes, fixture_world, spawn_ore,
+        entity_graph_from, fixture_entity_prototypes, fixture_recipes, fixture_world, spawn_ore,
     };
 
     use super::*;
@@ -5867,4 +5856,650 @@ mod tests {
         assert!(graph.entity_at(&furnace_at).is_some());
         assert!(graph.entity_at(&chest_at).is_some());
     }
+
+    /// The live 2.1.17 fluid boxes for the entities the tests below stand up,
+    /// overlaid on the captured fixture map.
+    ///
+    /// **`tests/entity-prototype-fixtures.json` is a Factorio 1.x capture and
+    /// its fluid boxes use the OLD convention**, where a `positions` entry
+    /// names the tile outside the entity the connection reaches: its
+    /// `oil-refinery` says `(-1, 3)`, which is a tile beyond a 5x5 footprint,
+    /// and its `connection_type` values are `input` / `output` /
+    /// `input-output`, which 2.0 replaced with `normal` / `underground`. Live
+    /// 2.x data says `(-1, 2)` for the same connection -- a tile ON the
+    /// refinery -- and `normal`. Both are read (see [`FluidBoxPorts::certain`]),
+    /// and each needs its own fixture to be exercised, so these are quoted
+    /// verbatim from `workspace/scripts/map-31337-t0.json`, a seed-31337
+    /// `world.dump` written by this project against Factorio 2.1.17.
+    fn live_2_1_prototypes() -> DashMap<String, FactorioEntityPrototype> {
+        let prototypes = fixture_entity_prototypes();
+        let live: HashMap<String, FactorioEntityPrototype> = serde_json::from_str(
+            r#"{
+  "oil-refinery": {
+    "name": "oil-refinery", "entity_type": "assembling-machine",
+    "collision_box": {"left_top": {"x": -2.19921875, "y": -2.19921875},
+                      "right_bottom": {"x": 2.19921875, "y": 2.19921875}},
+    "fluidbox_prototypes": [
+      {"production_type": "input", "pipe_connections": [{"connection_type": "normal",
+        "positions": [{"x":-1.0,"y":2.0},{"x":-2.0,"y":-1.0},{"x":1.0,"y":-2.0},{"x":2.0,"y":1.0}]}]},
+      {"production_type": "input", "pipe_connections": [{"connection_type": "normal",
+        "positions": [{"x":1.0,"y":2.0},{"x":-2.0,"y":1.0},{"x":-1.0,"y":-2.0},{"x":2.0,"y":-1.0}]}]},
+      {"production_type": "output", "pipe_connections": [{"connection_type": "normal",
+        "positions": [{"x":0.0,"y":-2.0},{"x":2.0,"y":0.0},{"x":0.0,"y":2.0},{"x":-2.0,"y":0.0}]}]}
+    ]
+  },
+  "pipe": {
+    "name": "pipe", "entity_type": "pipe",
+    "collision_box": {"left_top": {"x": -0.2890625, "y": -0.2890625},
+                      "right_bottom": {"x": 0.2890625, "y": 0.2890625}},
+    "fluidbox_prototypes": [
+      {"production_type": "none", "pipe_connections": [
+        {"connection_type": "normal", "positions": [{"x":0.0,"y":0.0},{"x":0.0,"y":0.0},{"x":0.0,"y":0.0},{"x":0.0,"y":0.0}]},
+        {"connection_type": "normal", "positions": [{"x":0.0,"y":0.0},{"x":0.0,"y":0.0},{"x":0.0,"y":0.0},{"x":0.0,"y":0.0}]},
+        {"connection_type": "normal", "positions": [{"x":0.0,"y":0.0},{"x":0.0,"y":0.0},{"x":0.0,"y":0.0},{"x":0.0,"y":0.0}]},
+        {"connection_type": "normal", "positions": [{"x":0.0,"y":0.0},{"x":0.0,"y":0.0},{"x":0.0,"y":0.0},{"x":0.0,"y":0.0}]}]}
+    ]
+  },
+  "storage-tank": {
+    "name": "storage-tank", "entity_type": "storage-tank",
+    "collision_box": {"left_top": {"x": -1.296875, "y": -1.296875},
+                      "right_bottom": {"x": 1.296875, "y": 1.296875}},
+    "fluidbox_prototypes": [
+      {"production_type": "none", "pipe_connections": [
+        {"connection_type": "normal", "positions": [{"x":-1.0,"y":-1.0},{"x":1.0,"y":-1.0},{"x":1.0,"y":1.0},{"x":-1.0,"y":1.0}]},
+        {"connection_type": "normal", "positions": [{"x":1.0,"y":1.0},{"x":-1.0,"y":1.0},{"x":-1.0,"y":-1.0},{"x":1.0,"y":-1.0}]},
+        {"connection_type": "normal", "positions": [{"x":1.0,"y":1.0},{"x":-1.0,"y":1.0},{"x":-1.0,"y":-1.0},{"x":1.0,"y":-1.0}]},
+        {"connection_type": "normal", "positions": [{"x":-1.0,"y":-1.0},{"x":1.0,"y":-1.0},{"x":1.0,"y":1.0},{"x":-1.0,"y":1.0}]}]}
+    ]
+  },
+  "chemical-plant": {
+    "name": "chemical-plant", "entity_type": "assembling-machine",
+    "collision_box": {"left_top": {"x": -1.19921875, "y": -1.19921875},
+                      "right_bottom": {"x": 1.19921875, "y": 1.19921875}},
+    "fluidbox_prototypes": [
+      {"production_type": "input", "pipe_connections": [{"connection_type": "normal",
+        "positions": [{"x":-1.0,"y":-1.0},{"x":1.0,"y":-1.0},{"x":1.0,"y":1.0},{"x":-1.0,"y":1.0}]}]},
+      {"production_type": "input", "pipe_connections": [{"connection_type": "normal",
+        "positions": [{"x":1.0,"y":-1.0},{"x":1.0,"y":1.0},{"x":-1.0,"y":1.0},{"x":-1.0,"y":-1.0}]}]},
+      {"production_type": "output", "pipe_connections": [{"connection_type": "normal",
+        "positions": [{"x":-1.0,"y":1.0},{"x":-1.0,"y":-1.0},{"x":1.0,"y":-1.0},{"x":1.0,"y":1.0}]}]},
+      {"production_type": "output", "pipe_connections": [{"connection_type": "normal",
+        "positions": [{"x":1.0,"y":1.0},{"x":-1.0,"y":1.0},{"x":-1.0,"y":-1.0},{"x":1.0,"y":-1.0}]}]}
+    ]
+  },
+  "pumpjack": {
+    "name": "pumpjack", "entity_type": "mining-drill",
+    "collision_box": {"left_top": {"x": -1.19921875, "y": -1.19921875},
+                      "right_bottom": {"x": 1.19921875, "y": 1.19921875}},
+    "fluidbox_prototypes": [
+      {"production_type": "output", "pipe_connections": [{"connection_type": "normal",
+        "positions": [{"x":1.0,"y":-1.0},{"x":1.0,"y":1.0},{"x":-1.0,"y":1.0},{"x":-1.0,"y":-1.0}]}]}
+    ]
+  },
+  "pipe-to-ground": {
+    "name": "pipe-to-ground", "entity_type": "pipe-to-ground",
+    "collision_box": {"left_top": {"x": -0.2890625, "y": -0.2890625},
+                      "right_bottom": {"x": 0.2890625, "y": 0.19921875}},
+    "fluidbox_prototypes": [
+      {"production_type": "none", "pipe_connections": [
+        {"connection_type": "normal", "positions": [{"x":0.0,"y":0.0},{"x":0.0,"y":0.0},{"x":0.0,"y":0.0},{"x":0.0,"y":0.0}]},
+        {"connection_type": "underground", "max_underground_distance": 10,
+         "positions": [{"x":0.0,"y":0.0},{"x":0.0,"y":0.0},{"x":0.0,"y":0.0},{"x":0.0,"y":0.0}]}]}
+    ]
+  }
+}"#,
+        )
+        .expect("the live prototypes parse");
+        for (name, prototype) in live {
+            prototypes.insert(name, prototype);
+        }
+        prototypes
+    }
+
+    fn fluid_entity(
+        name: &str,
+        entity_type: &str,
+        half: f64,
+        position: Position,
+    ) -> FactorioEntity {
+        FactorioEntity {
+            name: name.into(),
+            entity_type: entity_type.into(),
+            bounding_box: add_to_rect(&Rect::from_wh(half * 2., half * 2.), &position),
+            position,
+            ..Default::default()
+        }
+    }
+
+    fn graph_of(
+        entities: Vec<FactorioEntity>,
+        prototypes: DashMap<String, FactorioEntityPrototype>,
+    ) -> EntityGraph {
+        let graph = EntityGraph::new(Arc::new(prototypes), Arc::new(fixture_recipes()));
+        graph.add(entities, None).expect("adding must not fail");
+        graph.connect().expect("connecting must not fail");
+        graph
+    }
+
+    /// **The defect this rule was written for.** A pipe against an oil
+    /// refinery's declared input drew no edge, because
+    /// `EntityType::is_fluid_input` named four types and an assembling machine
+    /// was not one of them. On the 6:39:53 world-record base that left all 55
+    /// refineries with no entity-graph edge at all, incoming or outgoing, and
+    /// `petroleum-gas` -- 28,800/min of demand -- with no modelled producer.
+    #[test]
+    fn a_pipe_reaches_the_assembling_machine_the_type_list_refused() {
+        let refinery = Position::new(10.5, 10.5);
+        let feeding = Position::new(9.5, 13.5);
+        let draining = Position::new(10.5, 7.5);
+        let graph = graph_of(
+            vec![
+                fluid_entity(
+                    "oil-refinery",
+                    "assembling-machine",
+                    2.199_218_75,
+                    refinery.clone(),
+                ),
+                fluid_entity("pipe", "pipe", 0.289_062_5, feeding.clone()),
+                fluid_entity("pipe", "pipe", 0.289_062_5, draining.clone()),
+            ],
+            live_2_1_prototypes(),
+        );
+        assert!(
+            has_edge(&graph, &feeding, &refinery),
+            "the pipe on the refinery's input connection must feed it"
+        );
+        assert!(
+            has_edge(&graph, &refinery, &draining),
+            "the pipe on the refinery's output connection must drain it"
+        );
+        // **`production_type` decides the direction, and it is what keeps a
+        // pumpjack and an offshore pump roots of the flow walk.** An `input`
+        // box never gives fluid back and an `output` box never takes any.
+        assert!(
+            !has_edge(&graph, &refinery, &feeding),
+            "an input box must not hand fluid back to the pipe feeding it"
+        );
+        assert!(
+            !has_edge(&graph, &draining, &refinery),
+            "an output box must not accept fluid from the pipe it drains into"
+        );
+    }
+
+    /// A pipe touching a machine somewhere it declares no connection joins
+    /// nothing, which is the half a footprint-wide `node_at` cannot do alone:
+    /// it answers for any of a refinery's twenty-five tiles.
+    ///
+    /// The negative is paired with a positive from the same graph, so it cannot
+    /// pass because the wiring never ran.
+    #[test]
+    fn a_pipe_against_a_machines_blank_side_joins_nothing() {
+        let refinery = Position::new(10.5, 10.5);
+        let blank = Position::new(13.5, 10.5);
+        let connected = Position::new(11.5, 13.5);
+        let graph = graph_of(
+            vec![
+                fluid_entity(
+                    "oil-refinery",
+                    "assembling-machine",
+                    2.199_218_75,
+                    refinery.clone(),
+                ),
+                fluid_entity("pipe", "pipe", 0.289_062_5, blank.clone()),
+                fluid_entity("pipe", "pipe", 0.289_062_5, connected.clone()),
+            ],
+            live_2_1_prototypes(),
+        );
+        assert!(
+            has_edge(&graph, &connected, &refinery),
+            "the declared input connection must still join"
+        );
+        assert!(
+            !has_edge(&graph, &blank, &refinery),
+            "a pipe against a tile the refinery declares no connection on must not join it"
+        );
+        assert!(
+            !has_edge(&graph, &refinery, &blank),
+            "and not in the other direction either"
+        );
+    }
+
+    /// The four joints the deleted `EntityType::StorageTank` arm listed by hand
+    /// -- `(-1,-2)`, `(-2,-1)`, `(2,1)`, `(1,2)` -- come back out of the
+    /// prototype, and the four tiles between them do not.
+    ///
+    /// This is the case the geometry resolves EXACTLY rather than as a
+    /// superset: the tank's two corner anchors carry two connections each, so
+    /// both of each corner's two outward sides are used.
+    #[test]
+    fn a_storage_tanks_joints_are_the_ones_the_hand_written_list_had() {
+        let tank = Position::new(20.5, 20.5);
+        let joints = [
+            Position::new(19.5, 18.5),
+            Position::new(18.5, 19.5),
+            Position::new(22.5, 21.5),
+            Position::new(21.5, 22.5),
+        ];
+        let blanks = [
+            Position::new(20.5, 18.5),
+            Position::new(18.5, 20.5),
+            Position::new(22.5, 20.5),
+            Position::new(20.5, 22.5),
+        ];
+        let mut entities = vec![fluid_entity(
+            "storage-tank",
+            "storage-tank",
+            1.296_875,
+            tank.clone(),
+        )];
+        for position in joints.iter().chain(blanks.iter()) {
+            entities.push(fluid_entity("pipe", "pipe", 0.289_062_5, position.clone()));
+        }
+        let graph = graph_of(entities, live_2_1_prototypes());
+        for joint in &joints {
+            assert!(
+                has_edge(&graph, joint, &tank) && has_edge(&graph, &tank, joint),
+                "the tank must join both ways at {joint}"
+            );
+        }
+        for blank in &blanks {
+            assert!(
+                !has_edge(&graph, blank, &tank),
+                "the tank declares no connection at {blank}"
+            );
+        }
+    }
+
+    /// **A fluid producer keeps no incoming edge, so the flow walk keeps its
+    /// roots.** `FlowGraph::update` starts from
+    /// `externals(Direction::Incoming)` filtered to offshore pumps and drills
+    /// on ore; one edge drawn back into a pumpjack would take it off that list
+    /// and silently delete every rate downstream of it.
+    #[test]
+    fn nothing_draws_an_edge_back_into_a_fluid_producer() {
+        let pumpjack = Position::new(40.5, 40.5);
+        let outlet = Position::new(41.5, 38.5);
+        let graph = graph_of(
+            vec![
+                fluid_entity("pumpjack", "mining-drill", 1.199_218_75, pumpjack.clone()),
+                fluid_entity("pipe", "pipe", 0.289_062_5, outlet.clone()),
+            ],
+            live_2_1_prototypes(),
+        );
+        assert!(
+            has_edge(&graph, &pumpjack, &outlet),
+            "the pumpjack's output box must reach the pipe on it"
+        );
+        assert!(
+            !has_edge(&graph, &outlet, &pumpjack),
+            "an output box must take nothing back, or the pumpjack stops being a flow root"
+        );
+        assert!(
+            graph
+                .inner_graph()
+                .externals(petgraph::Direction::Incoming)
+                .any(|index| graph
+                    .inner_graph()
+                    .node_weight(index)
+                    .is_some_and(|node| node.entity_name == "pumpjack")),
+            "the pumpjack must still be a root of the walk"
+        );
+    }
+
+    /// **Both `positions` conventions are read, and neither is guessed from a
+    /// version number.** The 1.x fixture names the tile outside the entity; the
+    /// 2.x capture names the tile on it. The same two pipes join the same
+    /// storage tank under both.
+    #[test]
+    fn a_fluid_box_is_read_under_either_positions_convention() {
+        let tank = Position::new(20.5, 20.5);
+        let joint = Position::new(19.5, 18.5);
+        let build = |prototypes: DashMap<String, FactorioEntityPrototype>| {
+            graph_of(
+                vec![
+                    fluid_entity("storage-tank", "storage-tank", 1.296_875, tank.clone()),
+                    fluid_entity("pipe", "pipe", 0.289_062_5, joint.clone()),
+                ],
+                prototypes,
+            )
+        };
+        // The 1.x fixture states the outside tile directly, so it is exact and
+        // needs none of the corner reasoning the 2.x form does.
+        let old = build(fixture_entity_prototypes());
+        let new = build(live_2_1_prototypes());
+        assert!(
+            has_edge(&old, &joint, &tank),
+            "the 1.x fixture's outward positions must still join"
+        );
+        assert!(
+            has_edge(&new, &joint, &tank),
+            "the 2.x capture's anchor positions must join the same tiles"
+        );
+        assert_eq!(
+            edge_set(&old),
+            edge_set(&new),
+            "the same arrangement must wire the same way under both conventions"
+        );
+    }
+
+    /// The one box of the node at `position`, for the assertions below.
+    fn boxes_at(graph: &EntityGraph, position: &Position) -> Vec<FluidBoxPorts> {
+        let index = graph.node_at(position).expect("the entity must be there");
+        let inner = graph.inner_graph();
+        let node = inner.node_weight(index).expect("the node must be there");
+        graph.fluid_boxes(node)
+    }
+
+    /// **A corner with as many connections as it has sides is exact.** A
+    /// storage tank's two corner anchors carry two connections each, so both of
+    /// each corner's two outward sides are used and nothing is guessed -- which
+    /// is why the four tiles come back identical to the hand-written list the
+    /// prototype rule replaced.
+    #[test]
+    fn a_corner_with_a_connection_per_side_is_resolved_exactly() {
+        let tank = Position::new(20.5, 20.5);
+        let graph = graph_of(
+            vec![fluid_entity(
+                "storage-tank",
+                "storage-tank",
+                1.296_875,
+                tank.clone(),
+            )],
+            live_2_1_prototypes(),
+        );
+        let boxes = boxes_at(&graph, &tank);
+        assert_eq!(boxes.len(), 4, "the tank declares four connections");
+        for resolved in &boxes {
+            assert!(
+                resolved.certain,
+                "a corner with two connections on it leaves nothing to guess: {resolved:?}"
+            );
+            assert_eq!(
+                resolved.ports.len(),
+                2,
+                "each corner reaches its two outward tiles: {resolved:?}"
+            );
+        }
+    }
+
+    /// **A corner with fewer connections than sides is NOT exact, and says so.**
+    /// A chemical plant's four connections each sit on a corner tile of its 3x3
+    /// footprint, so each could face either of two ways, and the datum that
+    /// would settle it -- `PipeConnectionDefinition::direction` -- is not one
+    /// the mod sends. The candidate set is emitted whole and flagged, rather
+    /// than one of the two being picked.
+    ///
+    /// The flag is asserted beside the anchor and the candidate tiles from the
+    /// same call, so this cannot pass on a computation that did not run.
+    #[test]
+    fn a_corner_the_data_cannot_settle_is_reported_as_a_superset() {
+        let plant = Position::new(30.5, 30.5);
+        let graph = graph_of(
+            vec![fluid_entity(
+                "chemical-plant",
+                "assembling-machine",
+                1.199_218_75,
+                plant.clone(),
+            )],
+            live_2_1_prototypes(),
+        );
+        let boxes = boxes_at(&graph, &plant);
+        assert_eq!(boxes.len(), 4, "the plant declares four connections");
+        let north_west = boxes
+            .iter()
+            .find(|resolved| resolved.anchor == Position::new(29.5, 29.5))
+            .expect("one connection sits on the north-west corner tile");
+        assert!(
+            !north_west.certain,
+            "one connection on a corner could face either of two ways"
+        );
+        assert_eq!(
+            north_west.ports,
+            vec![Position::new(29.5, 28.5), Position::new(28.5, 29.5)],
+            "and both of them are offered"
+        );
+        assert!(
+            north_west.takes_in && !north_west.gives_out,
+            "the plant's north-west box is an input"
+        );
+    }
+
+    /// **An underground connector faces the way it points, and that is exact.**
+    /// A pipe-to-ground's normal connection sits on its own single tile, which
+    /// has four outward sides and only one real one -- the ambiguity above,
+    /// with 751 of them on the record base. It is settled by the box also
+    /// carrying an `underground` connection, which is what an underground
+    /// connector is: keyed on `max_underground_distance` being present rather
+    /// than on the type being `PipeToGround`, so a mod's own underground pipe
+    /// is read the same way.
+    #[test]
+    fn an_underground_connector_faces_the_way_it_points() {
+        let underground = Position::new(50.5, 50.5);
+        let entity = FactorioEntity {
+            direction: Direction::East as u8,
+            ..fluid_entity(
+                "pipe-to-ground",
+                "pipe-to-ground",
+                0.289_062_5,
+                underground.clone(),
+            )
+        };
+        let graph = graph_of(vec![entity], live_2_1_prototypes());
+        let boxes = boxes_at(&graph, &underground);
+        assert_eq!(
+            boxes.len(),
+            1,
+            "the underground connection contributes no surface tile of its own"
+        );
+        assert!(boxes[0].certain, "the facing settles it");
+        assert_eq!(
+            boxes[0].ports,
+            vec![Position::new(51.5, 50.5)],
+            "an east-facing underground pipe opens to the east"
+        );
+    }
+}
+
+/// One fluid box of one standing entity, resolved into world tiles: where it
+/// sits on the entity, which tiles a neighbour must occupy to join it, and
+/// which way fluid may cross.
+///
+/// This is what replaced `EntityType::is_fluid_input` (deleted with it) as the rule
+/// [`EntityGraph::connect_node`] joins fluid handlers by. The type test named
+/// four types -- `Pipe`, `PipeToGround`, `StorageTank`, `Boiler` -- so a pipe
+/// never drew an edge into an assembling machine, and on the world-record base
+/// **all 55 oil refineries and all 896 steam engines had no entity-graph edge
+/// at all, incoming or outgoing**, along with 109 of 146 chemical plants. That
+/// is a mod-compatibility defect of exactly the shape this project has recorded
+/// before (`pole_supply_half_extent`, the copied smelting rate): a hard-coded
+/// name or type list standing in for data the game already sends.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FluidBoxPorts {
+    /// The tile of the entity's own footprint this fluid box connects through.
+    pub anchor: Position,
+    /// The tiles OUTSIDE the entity a neighbour must occupy to join this box.
+    ///
+    /// More than one means the prototype could not say which side the
+    /// connection faces -- see [`Self::certain`].
+    pub ports: Vec<Position>,
+    /// Fluid may enter the entity here (`production_type` `input`,
+    /// `input-output` or `none`).
+    pub takes_in: bool,
+    /// Fluid may leave the entity here (`production_type` `output`,
+    /// `input-output` or `none`).
+    pub gives_out: bool,
+    /// Whether [`Self::ports`] is the connection set or a superset of it.
+    ///
+    /// **The datum that would make this always true is one field the mod does
+    /// not send.** `positions[direction]` names the tile of the entity the
+    /// connection sits ON, not the tile it faces, and 2.0 moved the facing into
+    /// `PipeConnectionDefinition::direction`, which
+    /// `mods/BotBridge/types.lua::serialize_fluidbox_connection` does not
+    /// serialise. So the facing is recovered here from geometry, which is exact
+    /// whenever the anchor tile touches the footprint's edge on one side only,
+    /// and ambiguous at a corner: a chemical plant's four connections all sit on
+    /// corner tiles, and each could face either of two ways.
+    ///
+    /// Two cases are still exact and neither is a name list:
+    ///
+    /// - **As many connections share the anchor as it has candidate sides**, so
+    ///   every candidate is used. That is a storage tank, whose two corner
+    ///   anchors carry two connections each -- and the four tiles this yields
+    ///   are exactly the four the deleted `EntityType::StorageTank` arm listed
+    ///   by hand. It is also an ordinary pipe: four connections on its own
+    ///   single tile, four sides.
+    /// - **The box also carries an `underground` connection at the same
+    ///   anchor**, which is what a pipe-to-ground is. Such a connector faces
+    ///   `direction` on the surface and burrows the opposite way, so the normal
+    ///   connection is exactly one tile. Keyed on the connection carrying
+    ///   `max_underground_distance` rather than on the type being
+    ///   `PipeToGround`, so a mod's own underground pipe gets it too.
+    ///
+    /// What is left uncertain is emitted as the whole candidate set, because an
+    /// edge too many is a reachability question and an edge too few is 55
+    /// refineries the flow graph swore had no producer.
+    pub certain: bool,
+}
+
+impl EntityGraph {
+    /// Every fluid box of the entity behind `node`, resolved into world tiles.
+    ///
+    /// Empty when the prototype declares no fluid box, when it is unknown, or
+    /// when the entity faces one of the twelve non-cardinal directions 2.0
+    /// added: `pipe_connections[].positions` holds exactly four offsets, one
+    /// per cardinal facing, so there is no offset to read for the other twelve
+    /// and this returns nothing rather than an invented tile.
+    pub fn fluid_boxes(&self, node: &EntityNode) -> Vec<FluidBoxPorts> {
+        let facing = node.direction as usize;
+        if !facing.is_multiple_of(4) {
+            return vec![];
+        }
+        let facing = facing / 4;
+        let Some(prototype) = self.entity_prototypes.get(&node.entity_name) else {
+            return vec![];
+        };
+        let Some(fluid_boxes) = prototype.fluidbox_prototypes.as_ref() else {
+            return vec![];
+        };
+        // How many normal connections sit on each anchor tile of the whole
+        // prototype, which is what makes the storage tank's two-per-corner
+        // exact. Counted across every box, because two boxes may share a tile.
+        let mut normals_at: Vec<(Position, usize)> = vec![];
+        for fluid_box in fluid_boxes {
+            for connection in Self::normal_connections(fluid_box) {
+                let Some(offset) = connection.positions.get(facing) else {
+                    continue;
+                };
+                let anchor = node.position.add(offset);
+                if !node.bounding_box.contains(&anchor) {
+                    // A 1.x external tile, which shares nothing and needs no
+                    // count -- see the convention note below.
+                    continue;
+                }
+                match normals_at.iter_mut().find(|(at, _)| same_tile(at, &anchor)) {
+                    Some(slot) => slot.1 += 1,
+                    None => normals_at.push((anchor, 1)),
+                }
+            }
+        }
+        let mut resolved: Vec<FluidBoxPorts> = vec![];
+        for fluid_box in fluid_boxes {
+            let takes_in = matches!(
+                fluid_box.production_type.as_str(),
+                "input" | "input-output" | "none"
+            );
+            let gives_out = matches!(
+                fluid_box.production_type.as_str(),
+                "output" | "input-output" | "none"
+            );
+            let burrows = Self::connections_of(fluid_box)
+                .any(|connection| connection.max_underground_distance.is_some());
+            for connection in Self::normal_connections(fluid_box) {
+                let Some(offset) = connection.positions.get(facing) else {
+                    continue;
+                };
+                let stated = node.position.add(offset);
+                // **The two conventions, told apart by the datum itself.**
+                // A 1.x `positions` entry names the tile OUTSIDE the entity the
+                // connection reaches; a 2.0 one names the tile of the entity's
+                // own footprint the connection sits on, with the facing moved
+                // into `PipeConnectionDefinition::direction`. Whether the tile
+                // is inside the footprint says which, per connection, with no
+                // version number to read and none available offline anyway.
+                //
+                // The 1.x form is exact and needs none of the machinery below:
+                // it already IS the tile a neighbour must occupy.
+                if !node.bounding_box.contains(&stated) {
+                    resolved.push(FluidBoxPorts {
+                        anchor: stated.clone(),
+                        ports: vec![stated],
+                        takes_in,
+                        gives_out,
+                        certain: true,
+                    });
+                    continue;
+                }
+                let anchor = stated;
+                let candidates: Vec<Position> = Direction::orthogonal()
+                    .into_iter()
+                    .filter_map(|direction| move_position(&anchor, direction, 1.))
+                    .filter(|tile| !node.bounding_box.contains(tile))
+                    .collect();
+                if candidates.is_empty() {
+                    continue;
+                }
+                let shared = normals_at
+                    .iter()
+                    .find(|(at, _)| same_tile(at, &anchor))
+                    .map(|(_, count)| *count)
+                    .unwrap_or(1);
+                let (ports, certain) = if burrows {
+                    match move_position(&anchor, node.direction, 1.) {
+                        Some(tile) if candidates.iter().any(|c| same_tile(c, &tile)) => {
+                            (vec![tile], true)
+                        }
+                        _ => (candidates, false),
+                    }
+                } else if shared >= candidates.len() {
+                    (candidates, true)
+                } else {
+                    (candidates, false)
+                };
+                resolved.push(FluidBoxPorts {
+                    anchor,
+                    ports,
+                    takes_in,
+                    gives_out,
+                    certain,
+                });
+            }
+        }
+        resolved
+    }
+
+    fn connections_of(
+        fluid_box: &FactorioFluidBoxPrototype,
+    ) -> impl Iterator<Item = &FactorioFluidBoxConnection> {
+        (*fluid_box.pipe_connections).iter().flatten()
+    }
+
+    /// Connections a neighbour on the surface could join. An `underground` one
+    /// is reached by the pairing walk in [`Self::connect_node`], not by
+    /// adjacency, so it must not contribute a surface tile.
+    fn normal_connections(
+        fluid_box: &FactorioFluidBoxPrototype,
+    ) -> impl Iterator<Item = &FactorioFluidBoxConnection> {
+        Self::connections_of(fluid_box)
+            .filter(|connection| connection.max_underground_distance.is_none())
+    }
+}
+
+/// Whether two positions name the same tile.
+///
+/// Exact `f64` equality would very nearly do -- every offset here is a whole or
+/// half tile and both sides compute the same sum -- but "very nearly" is how
+/// the resource-position rounding bug survived a full test suite, so the
+/// comparison is explicit.
+fn same_tile(a: &Position, b: &Position) -> bool {
+    (a.x() - b.x()).abs() < 0.01 && (a.y() - b.y()).abs() < 0.01
 }

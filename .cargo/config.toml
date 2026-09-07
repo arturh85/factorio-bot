@@ -1,5 +1,27 @@
+# `--cfg tokio_unstable` is for tokio-console; `-fuse-ld=mold` picks the fast
+# linker (mold comes from flake.nix; gcc 15 here understands the flag).
+#
+# BOTH LIVE IN THIS ONE ARRAY ON PURPOSE. Cargo does NOT merge
+# `build.rustflags` with `target.<triple>.rustflags` -- the target one wins
+# outright and this one is ignored entirely. So putting the linker in a
+# `[target.x86_64-unknown-linux-gnu]` block would silently drop
+# `--cfg tokio_unstable`, and tokio-console would stop working with no error
+# at build time. Extend this array; do not add a target block.
+#
+# Verify both halves at once, in one command (2026-09-07):
+#   rustc --cfg tokio_unstable -C link-arg=-fuse-ld=mold x.rs -o t && \
+#     readelf -p .comment t | grep mold
+# the binary must both see the cfg and report `mold` in .comment.
+#
+# MOLD DOES NOT SPEED THIS WORKSPACE UP TODAY, and that is measured, not
+# assumed: warm-rebuild cpu 66/65/71 s with it against 61/63/70 s without.
+# Under `lto = true` + `codegen-units = 1` the time is LLVM fat-LTO codegen
+# inside rustc, not ELF linking, so there is nearly nothing for a linker to
+# win. It is kept because it costs nothing and becomes the win the moment
+# codegen-units is loosened. See
+# docs/superpowers/notes/2026-09-07-what-the-build-profile-costs.md
 [build]
-rustflags = ["--cfg", "tokio_unstable"] # for tokio-console
+rustflags = ["--cfg", "tokio_unstable", "-C", "link-arg=-fuse-ld=mold"]
 
 # Cap parallel codegen jobs per cargo invocation.
 #

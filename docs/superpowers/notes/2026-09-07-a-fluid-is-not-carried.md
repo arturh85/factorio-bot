@@ -327,3 +327,42 @@ is not enough to say **how much** it holds.
 So the four questions reduce cleanly: siting is answerable from data we already
 receive; capacity needs one more mod field before it can be honest. Do not
 close that gap with a table.
+
+---
+
+## SUPERSEDED IN PART, 2026-09-07: capacity is a property of the SEGMENT, not the prototype
+
+The section above is correct about the **prototype** and incomplete about the
+**game**. Factorio 2.0 reworked fluids, and the owner flagged it; verified
+against `workspace/client1/doc-html/runtime-api.json` (2.1.17) rather than
+recalled:
+
+```
+get_fluid_segment_id                     has_fluid_segment
+get_fluid_segment_capacity               get_fluid_segment_fluid
+get_fluid_segment_extent_bounding_box    get_fluid_segment_filter
+set_ / add_ / remove_ / clear_fluid_segment_fluid
+```
+
+**A connected run of pipes is ONE object** — one fluid level, one capacity, one
+queryable id. There is no per-pipe throughput, no length penalty and no pressure
+gradient along a run. **Any design reasoning about pipes as a chain is reasoning
+about the pre-2.0 game.**
+
+Three consequences:
+
+* **A fluid network model is not needed and would be wrong.** Flow *within* a
+  segment is not a thing to model.
+* **Connectivity is an id comparison, not a graph walk** — two fluidboxes are
+  connected iff they report the same segment id. That is the shape
+  `electric_supply_kw` / `powering_entities` already use for the electric
+  network, so there is a precedent rather than an invention.
+* **`get_fluid_segment_capacity` is what `Goal::Stored` was missing.** The claim
+  above that capacity "needs one more mod field" was about
+  `LuaFluidBoxPrototype`; the segment answers it directly.
+
+**The limit, which must not become an assumption**: *none of this crosses our
+bridge today.* The mod sends `fluidbox_prototypes` — connection offsets and
+`production_type` — and nothing about segments. This is a **route we now know
+exists**, not a capability we have. It is also a **runtime** API, so it answers
+about a live game and not about a dump.

@@ -55,6 +55,7 @@ fn stock_a_furnace(world: &FactorioSurface, at: Position, item: &str, stock: u32
         position: at,
         output_inventory: Box::new(Some(items(item, stock))),
         fuel_inventory: Box::new(None),
+        input_inventory: Box::new(None),
     }]);
 }
 
@@ -381,6 +382,7 @@ fn a_reading_with_no_entity_behind_it_is_not_believed() {
         position: FURNACE,
         output_inventory: Box::new(Some(items("iron-plate", 10))),
         fuel_inventory: Box::new(None),
+        input_inventory: Box::new(None),
     }]);
     let state = PlanState::from_world(Arc::new(world), &[BotId(1)]);
     assert!(
@@ -408,6 +410,7 @@ fn a_reading_for_a_different_entity_is_not_believed() {
         position: FURNACE,
         output_inventory: Box::new(Some(items("iron-plate", 10))),
         fuel_inventory: Box::new(None),
+        input_inventory: Box::new(None),
     }]);
     let state = PlanState::from_world(Arc::new(world), &[BotId(1)]);
     assert!(
@@ -435,6 +438,7 @@ fn coal_in_a_furnaces_fuel_slot_is_not_withdrawn() {
         position: FURNACE,
         output_inventory: Box::new(None),
         fuel_inventory: Box::new(Some(items("coal", 20))),
+        input_inventory: Box::new(None),
     }]);
     let state = PlanState::from_world(Arc::new(world), &[BotId(1)]);
     assert!(
@@ -462,4 +466,112 @@ fn a_world_nobody_has_read_contents_from_has_no_buffers_at_all() {
             "{item}: nothing to withdraw on a world with no readings"
         );
     }
+}
+
+/// **A furnace mid-smelt is not empty, and the plan must be able to tell.**
+///
+/// Ore in, nothing out. Before `input_inventory` reached this reply the
+/// reading was dropped entirely by `from_world`'s "holds nothing" guard, so a
+/// furnace holding 34 ore and a furnace no ore ever reached were the same
+/// state. `holds_buffer` still says `false` -- nothing is withdrawable and
+/// this test pins that, because counting an input slot as material a plan may
+/// spend is the double-spend shape this path has already paid for once.
+#[test]
+fn a_furnace_holding_only_ore_is_kept_and_is_not_a_buffer() {
+    let world = fixture_world();
+    world
+        .on_some_entity_created(FactorioEntity::new_stone_furnace(
+            &FURNACE,
+            Direction::North,
+        ))
+        .expect("a furnace stands there");
+    world.observe_inventories(vec![InventoryResponse {
+        name: "stone-furnace".into(),
+        position: FURNACE,
+        output_inventory: Box::new(None),
+        fuel_inventory: Box::new(None),
+        input_inventory: Box::new(Some(items("iron-ore", 34))),
+    }]);
+    let state = PlanState::from_world(Arc::new(world), &[BotId(1)]);
+
+    assert!(
+        state.holds_input(&FURNACE),
+        "the ore in its input slot is the evidence that it is busy"
+    );
+    assert_eq!(state.input_held(&FURNACE, "iron-ore"), 34);
+    assert_eq!(
+        state.input_held(&FURNACE, "copper-ore"),
+        0,
+        "and it is holding none of anything else"
+    );
+    assert!(
+        !state.has_buffers(),
+        "an input slot is not withdrawable: `withdraw_slot` maps a furnace to \
+         its RESULT slot, and no `Remove` this planner emits can address the \
+         other one"
+    );
+    assert!(
+        !state.holds_buffer(&FURNACE),
+        "so the buffer predicate is unmoved -- changing what \
+         `adoptable_furnaces` does with the input reading is a separate, \
+         live-measurable policy decision"
+    );
+}
+
+/// **`absent`, `empty` and `never asked` stay three answers.**
+///
+/// `Planner::refresh_buffers` queries `wooden-chest` alongside
+/// `stone-furnace`, and a chest has no input inventory at all. Reading that as
+/// "an empty input slot" would say a chest is a machine waiting for ore.
+#[test]
+fn an_input_reading_separates_a_chest_from_a_starved_furnace() {
+    let world = fixture_world();
+    world
+        .on_some_entity_created(FactorioEntity::new_stone_furnace(
+            &FURNACE,
+            Direction::North,
+        ))
+        .expect("a furnace stands there");
+    world
+        .on_some_entity_created(FactorioEntity::new_stone_furnace(
+            &SECOND_FURNACE,
+            Direction::North,
+        ))
+        .expect("a second furnace stands there");
+    world.observe_inventories(vec![
+        InventoryResponse {
+            name: "stone-furnace".into(),
+            position: FURNACE,
+            output_inventory: Box::new(Some(items("iron-plate", 1))),
+            fuel_inventory: Box::new(None),
+            // It answered, and the slot is empty.
+            input_inventory: Box::new(Some(vec![])),
+        },
+        InventoryResponse {
+            name: "stone-furnace".into(),
+            position: SECOND_FURNACE,
+            output_inventory: Box::new(Some(items("iron-plate", 1))),
+            fuel_inventory: Box::new(None),
+            // It answered, and there is no such slot -- what a chest sends.
+            input_inventory: Box::new(None),
+        },
+    ]);
+    let state = PlanState::from_world(Arc::new(world), &[BotId(1)]);
+
+    assert_eq!(
+        state.input_reading(&FURNACE),
+        Some(&Some(std::collections::BTreeMap::new())),
+        "the game answered and the slot is empty"
+    );
+    assert_eq!(
+        state.input_reading(&SECOND_FURNACE),
+        Some(&None),
+        "the game answered and there is no input slot"
+    );
+    assert_eq!(
+        state.input_reading(&Position { x: 100.0, y: 100.0 }),
+        None,
+        "and nobody asked about this tile at all -- three answers, not two"
+    );
+    assert!(!state.holds_input(&FURNACE) && !state.holds_input(&SECOND_FURNACE));
 }

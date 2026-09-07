@@ -1853,6 +1853,47 @@ pub struct PlanState {
     /// dump, since `world.dump` never refreshes inventories -- so offline a
     /// standing cell is topped up in full, which is the safe direction.
     fuel: BTreeMap<Pos, BTreeMap<ItemId, u32>>,
+    /// What each machine was last seen holding in its **input** slot, by tile
+    /// — a furnace's ore, an assembler's ingredients — and `None` for a tile
+    /// whose entity has no input slot at all.
+    ///
+    /// # Not a buffer, and deliberately not counted as material
+    ///
+    /// The third of the three readings one `inventory_contents_at` reply
+    /// carries, beside `buffers` (`output`) and `fuel`. Like fuel and unlike
+    /// output, **nothing withdraws from here**: [`withdraw_slot`] maps a
+    /// furnace to its *result* slot, which is the only inventory an
+    /// `ActionKind::Remove` this planner emits can address, so ore in an input
+    /// slot never becomes material a plan may spend. Adding it to `buffers`
+    /// would be a double-spend of exactly the shape this crate has already
+    /// paid for once.
+    ///
+    /// # What it is for: a machine that is BUSY looks idle without it
+    ///
+    /// A `stone-furnace` mid-smelt — ore in, nothing out yet — is
+    /// indistinguishable from a furnace no ore ever reached, once the input
+    /// slot is dropped. `crate::method::have`'s `adoptable_furnaces` asks
+    /// [`PlanState::holds_buffer`] whether a standing furnace is free and
+    /// therefore reads the second answer for the first. **This field is the
+    /// evidence that separates them; changing what `adoptable_furnaces` does
+    /// with it is a planner policy decision and is deliberately not taken
+    /// here.** See [`PlanState::holds_input`].
+    ///
+    /// # `None` is not an empty map
+    ///
+    /// A `wooden-chest` is queried by `refresh_buffers` alongside furnaces and
+    /// has no input inventory whatsoever; the value is `None` for it and
+    /// `Some(empty)` for a furnace standing empty. Both answer "no ore here",
+    /// and they answer differently about the machine.
+    ///
+    /// # Read once, like every other reading
+    ///
+    /// Seeded in [`PlanState::from_world`] under the same guard as `buffers`
+    /// and `fuel`: the entity the reading names must still be the entity
+    /// standing on that tile. Never decremented — nothing in a plan spends it,
+    /// the machine does. Empty in every fixture and in every offline dump,
+    /// since `world.dump` never refreshes inventories.
+    input: BTreeMap<Pos, Option<BTreeMap<ItemId, u32>>>,
     /// Walks the game's pathfinder searched for and did not find, this run.
     ///
     /// The `refused` field's twin for *getting somewhere* rather than for
@@ -2169,8 +2210,12 @@ impl PlanState {
         // decision about which ones to observe actually lives.
         let mut buffers: BTreeMap<Pos, Buffer> = BTreeMap::new();
         let mut fuel: BTreeMap<Pos, BTreeMap<ItemId, u32>> = BTreeMap::new();
+        let mut input: BTreeMap<Pos, Option<BTreeMap<ItemId, u32>>> = BTreeMap::new();
         for (tile, observed) in base.observed_inventories() {
-            if observed.output.is_empty() && observed.fuel.is_empty() {
+            // `is_empty` covers all three inventories, so a furnace holding
+            // nothing but ore is kept rather than skipped as "nothing here" --
+            // which is the whole point of reading the input slot.
+            if observed.is_empty() {
                 continue;
             }
             // A reading is keyed by tile, and a tile can be cleared and
@@ -2191,6 +2236,12 @@ impl PlanState {
             if !observed.fuel.is_empty() {
                 fuel.insert(tile.clone(), observed.fuel);
             }
+            // Stored whenever the game answered about this entity at all, empty
+            // slot and absent slot alike: `None` here means "this entity has no
+            // input inventory", and a tile with no entry at all means "nobody
+            // asked". Folding the first into the second would lose the
+            // distinction one map lower down.
+            input.insert(tile.clone(), observed.input);
             if observed.output.is_empty() {
                 continue;
             }
@@ -2231,6 +2282,7 @@ impl PlanState {
             refused,
             buffers,
             fuel,
+            input,
             refused_walks,
             walled_in: BTreeMap::new(),
             benched: BTreeMap::new(),
@@ -2729,6 +2781,63 @@ impl PlanState {
     pub fn fuelled(&self, position: &Position, item: &str) -> u32 {
         self.fuel
             .get(&Pos::from(position))
+            .and_then(|slot| slot.get(item))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Is the machine on `position`'s tile holding something it has been given
+    /// and not yet turned into anything -- ore in a furnace, ingredients in an
+    /// assembler?
+    ///
+    /// `false` for three different situations, and a caller that needs to tell
+    /// them apart wants [`PlanState::input_reading`] rather than this: nobody
+    /// asked the game about this tile, the entity has no input slot at all
+    /// (every chest), or it has one and it is standing empty.
+    ///
+    /// # What this answers that [`PlanState::holds_buffer`] cannot
+    ///
+    /// A furnace mid-smelt has ore in and nothing out, so `holds_buffer` says
+    /// `false` for it -- the same answer it gives for a furnace no ore ever
+    /// reached. `crate::method::have`'s `adoptable_furnaces` uses that answer
+    /// to decide a standing furnace is free to load, and so treats a busy
+    /// furnace as idle. **This function is the evidence; acting on it is a
+    /// planner policy change that has to be measured live** (an offline dump's
+    /// `inventories` is always empty, so no baseline here can move), and it is
+    /// deliberately left to whoever owns that decision -- excluding a busy
+    /// furnace makes a plan place another one instead, which costs stone.
+    pub fn holds_input(&self, position: &Position) -> bool {
+        self.input
+            .get(&Pos::from(position))
+            .and_then(Option::as_ref)
+            .is_some_and(|slot| slot.values().any(|count| *count > 0))
+    }
+
+    /// The raw input reading for `position`'s tile, with `absent`, `empty` and
+    /// `never asked` all still distinct.
+    ///
+    /// `None` -- nobody asked the game about this tile.
+    /// `Some(None)` -- it answered, and the entity has no input inventory.
+    /// `Some(Some(map))` -- it answered with the contents, possibly empty.
+    ///
+    /// Kept beside the verdict [`PlanState::holds_input`] rather than replaced
+    /// by it, so a caller that needs to distinguish "this machine cannot hold
+    /// ore" from "it can and does not" still has the evidence.
+    pub fn input_reading(&self, position: &Position) -> Option<&Option<BTreeMap<ItemId, u32>>> {
+        self.input.get(&Pos::from(position))
+    }
+
+    /// How much of `item` the machine on `position`'s tile was last seen
+    /// holding in its input slot.
+    ///
+    /// Zero for a tile nobody asked about, for an entity with no input slot
+    /// and for an empty one alike -- all three mean "no `item` is waiting in
+    /// there", which is what a caller counting ore wants. Use
+    /// [`PlanState::input_reading`] when the difference matters.
+    pub fn input_held(&self, position: &Position, item: &str) -> u32 {
+        self.input
+            .get(&Pos::from(position))
+            .and_then(Option::as_ref)
             .and_then(|slot| slot.get(item))
             .copied()
             .unwrap_or(0)

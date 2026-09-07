@@ -5515,6 +5515,36 @@ function rcon_inventory_contents_at(positions)
 			else
 				rec.fuel_inventory = nil
 			end
+			-- WHAT THE MACHINE WAS GIVEN AND HAS NOT TURNED INTO ANYTHING YET.
+			--
+			-- `serialize_entity` (types.lua) has sent this since 2026-09-07 and
+			-- this path did not, which split the world in half by how you
+			-- asked: a furnace's ore was visible when you dumped every entity
+			-- and invisible when you asked about that one furnace. This is the
+			-- reply `Planner::refresh_buffers` pulls, so it is the one the
+			-- planner's own model is built from -- the half that was missing
+			-- was the half that mattered.
+			--
+			-- **`nil` and empty are different answers and must stay
+			-- different.** A `wooden-chest` has no input inventory at all and
+			-- gets no key, which reaches Rust as `None`; a `stone-furnace`
+			-- standing empty gets `{}`, which `option_vec_or_empty_map` reads
+			-- as `Some(empty)`. `ObservedInventory::input` is an `Option` for
+			-- exactly this reason -- collapsing the two would rebuild the
+			-- ambiguity one layer up, where "this machine has nowhere to put
+			-- ore" and "this machine is waiting for ore" would read alike.
+			--
+			-- The index comes from `input_inventory_index` in types.lua rather
+			-- than being written out again here: two tables of
+			-- `defines.inventory` names is two things a Factorio version can
+			-- outgrow separately.
+			local input_index = input_inventory_index(entity.type)
+			if input_index ~= nil then
+				local input_inventory = entity.get_inventory(input_index)
+				if input_inventory ~= nil then
+					rec.input_inventory = input_inventory.get_contents()
+				end
+			end
 			rec.name = v.name
 			rec.position = v.position
 			table.insert(result, rec)

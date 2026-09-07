@@ -596,6 +596,7 @@ mod tests {
                 count,
             }])),
             fuel_inventory: Box::new(None),
+            input_inventory: Box::new(None),
         }
     }
 

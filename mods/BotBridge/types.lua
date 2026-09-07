@@ -721,6 +721,13 @@ end
 -- the index has to be named per type, exactly as `machine_row` in control.lua
 -- does it.
 --
+-- **Global, not local, because two paths need it.** `serialize_entity` below
+-- is the bulk/query description of the world; `rcon_inventory_contents_at` in
+-- control.lua is the on-demand reading the planner's buffer model pulls, and
+-- it has to resolve the same index the same way or the two would disagree
+-- about what a furnace is holding. `require "types"` at the top of control.lua
+-- is what makes this visible there.
+--
 -- Factorio 2.1.17 renamed the crafting-machine inventories: this install's
 -- `defines.inventory` has `crafter_input` and has **no** `furnace_source` or
 -- `assembling_machine_input` at all (checked against
@@ -733,7 +740,7 @@ end
 -- runs these serialisers in a plain Lua 5.4 state, where a bare global read
 -- of a table that does not exist is nil and indexing it raises. The tests
 -- install a `defines` stub shaped like the real one.
-local function input_inventory_index(entity_type)
+function input_inventory_index(entity_type)
     local defines_table = rawget(_G, "defines")
     if defines_table == nil or defines_table.inventory == nil then
         return nil

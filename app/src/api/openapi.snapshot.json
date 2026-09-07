@@ -2376,6 +2376,16 @@
               "null"
             ]
           },
+          "input_inventory": {
+            "description": "What the machine has been given and has not turned into anything yet --\na furnace's ore, an assembler's ingredients, a lab's science.\n\n# `None` is not empty, and neither is a count of zero\n\n`None` means the entity has no input inventory at all (a\n`wooden-chest`, a belt) **or** the reply came from a mod build that\npredates the field -- `serde(default)` is what makes the second of\nthose possible, and the archived `inventory_contents_at` payload in\n`crates/core/tests/live_2_1_payloads.rs` is exactly such a reply.\n`Some(empty)` means the entity has one and it is standing empty, which\nis a real observation. The mod omits the key rather than sending an\nempty table for the first case; see `rcon_inventory_contents_at` in\n`mods/BotBridge/control.lua`.\n\n# Never a buffer\n\nNothing withdraws from here. `crates/planner`'s `withdraw_slot` maps a\nfurnace to its *result* slot, which is what an `ActionKind::Remove` can\naddress, so ore sitting in an input slot is never counted as material\nthe plan may spend. It is a reading about whether a machine is busy,\non the same terms as the fuel slot beside it.",
+            "items": {
+              "$ref": "#/components/schemas/InventoryItemWithQuality"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "name": {
             "type": "string"
           },

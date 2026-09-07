@@ -1079,21 +1079,64 @@ pub struct ObservedInventory {
     pub output: BTreeMap<String, u32>,
     /// `LuaEntity::get_fuel_inventory()`.
     pub fuel: BTreeMap<String, u32>,
+    /// What the machine was given and has not turned into anything yet: a
+    /// furnace's ore, an assembler's ingredients, a lab's science.
+    ///
+    /// # The one field here that keeps `absent` apart from `empty`
+    ///
+    /// `output` and `fuel` above are bare maps, so a chest that answered
+    /// `{}` and an entity with no such inventory at all fold together. That is
+    /// survivable for them because every reader asks "how much of X is in
+    /// there" and both answers are zero. It is *not* survivable here: the
+    /// question this field exists to answer is "is this machine holding ore it
+    /// has not smelted yet", and a `wooden-chest` -- which
+    /// `Planner::refresh_buffers` queries alongside furnaces -- has no input
+    /// inventory whatsoever. `None` says the entity has none (or the mod
+    /// predates the field); `Some(empty)` says it has one and is standing
+    /// empty, which is what a starved furnace looks like.
+    ///
+    /// # Not withdrawable, on purpose
+    ///
+    /// `crates/planner`'s `withdraw_slot` maps a furnace to its *result* slot.
+    /// Nothing this planner emits can take items out of an input slot, so this
+    /// reading never becomes a `Buffer` and never counts as material a plan
+    /// may spend -- the same standing `fuel` has, and for a related reason.
+    #[serde(default)]
+    pub input: Option<BTreeMap<String, u32>>,
 }
 
 impl ObservedInventory {
     /// Sums an inventory reply's item list by name, discarding quality.
+    ///
+    /// An absent inventory folds to the same empty map an empty one does. That
+    /// is why [`ObservedInventory::input`] does not go through here without an
+    /// `Option` around the result.
     fn fold(items: &Option<Vec<crate::types::InventoryItemWithQuality>>) -> BTreeMap<String, u32> {
+        items
+            .as_ref()
+            .map(|items| Self::fold_items(items))
+            .unwrap_or_default()
+    }
+
+    /// [`ObservedInventory::fold`] for a list that is known to exist.
+    fn fold_items(items: &[crate::types::InventoryItemWithQuality]) -> BTreeMap<String, u32> {
         let mut out: BTreeMap<String, u32> = BTreeMap::new();
-        for item in items.iter().flatten() {
+        for item in items {
             *out.entry(item.name.clone()).or_insert(0) += item.count;
         }
         out
     }
 
-    /// True when the entity holds nothing at all in either inventory.
+    /// True when the entity holds nothing at all in any of its inventories.
+    ///
+    /// An input slot the entity does not have (`None`) holds nothing, and an
+    /// input slot it does have and which is empty also holds nothing -- the
+    /// two differ in what they say about the *entity*, not in what it is
+    /// carrying, so both count as empty here.
     pub fn is_empty(&self) -> bool {
-        self.output.is_empty() && self.fuel.is_empty()
+        self.output.is_empty()
+            && self.fuel.is_empty()
+            && self.input.as_ref().is_none_or(BTreeMap::is_empty)
     }
 }
 
@@ -1599,6 +1642,12 @@ impl FactorioSurface {
                 position: reply.position,
                 output: ObservedInventory::fold(&reply.output_inventory),
                 fuel: ObservedInventory::fold(&reply.fuel_inventory),
+                // `fold` would answer an empty map for both "no such
+                // inventory" and "an empty one", which is the distinction this
+                // field exists to keep. See `ObservedInventory::input`.
+                input: (*reply.input_inventory)
+                    .as_ref()
+                    .map(|items| ObservedInventory::fold_items(items)),
             };
             self.inventories
                 .insert(Pos::from(&observed.position), observed);
@@ -2511,7 +2560,83 @@ mod tests {
                     .collect(),
             )),
             fuel_inventory: Box::new(None),
+            input_inventory: Box::new(None),
         }
+    }
+
+    /// **A furnace holding ore, a furnace standing empty and a chest that
+    /// cannot hold ore are three different readings.**
+    ///
+    /// The first two are what the whole field is for. The third is why it is
+    /// an `Option` rather than a bare map: `Planner::refresh_buffers` asks
+    /// about `wooden-chest` alongside `stone-furnace`, and folding "has no
+    /// input inventory" into "has one and it is empty" would put "this machine
+    /// cannot hold ore" and "this machine is waiting for ore" behind one
+    /// answer.
+    #[test]
+    fn an_input_reading_keeps_absent_apart_from_empty() {
+        let ore = |count: u32| {
+            Box::new(Some(vec![crate::types::InventoryItemWithQuality {
+                name: "iron-ore".into(),
+                quality: "normal".into(),
+                count,
+            }]))
+        };
+        let world = FactorioSurface::new();
+        world.observe_inventories(vec![
+            InventoryResponse {
+                name: "stone-furnace".into(),
+                position: Position::new(0.5, 0.5),
+                output_inventory: Box::new(None),
+                fuel_inventory: Box::new(None),
+                input_inventory: ore(34),
+            },
+            InventoryResponse {
+                name: "stone-furnace".into(),
+                position: Position::new(2.5, 0.5),
+                output_inventory: Box::new(None),
+                fuel_inventory: Box::new(None),
+                // The mod sends `{}` for a furnace with an empty input slot,
+                // which `option_vec_or_empty_map` reads as an empty list.
+                input_inventory: Box::new(Some(vec![])),
+            },
+            InventoryResponse {
+                name: "wooden-chest".into(),
+                position: Position::new(4.5, 0.5),
+                output_inventory: Box::new(None),
+                fuel_inventory: Box::new(None),
+                // No key on the wire at all.
+                input_inventory: Box::new(None),
+            },
+        ]);
+
+        let observed = world.observed_inventories();
+        assert_eq!(observed.len(), 3);
+        assert_eq!(
+            observed[0].1.input.as_ref().and_then(|i| i.get("iron-ore")),
+            Some(&34),
+            "the furnace mid-smelt says so"
+        );
+        assert_eq!(
+            observed[1].1.input,
+            Some(BTreeMap::new()),
+            "an empty input slot is a real observation, not an absent one"
+        );
+        assert_eq!(
+            observed[2].1.input, None,
+            "a chest has no input inventory, and that is a different answer \
+             from an empty one"
+        );
+        assert!(
+            !observed[0].1.is_empty(),
+            "a furnace holding 34 ore is holding something, even with nothing \
+             in its output or fuel slots -- before the input slot travelled, \
+             this read as an entirely empty machine"
+        );
+        assert!(
+            observed[1].1.is_empty() && observed[2].1.is_empty(),
+            "and both of the others really are empty"
+        );
     }
 
     #[test]
@@ -2535,6 +2660,7 @@ mod tests {
                 },
             ])),
             fuel_inventory: Box::new(None),
+            input_inventory: Box::new(None),
         }]);
 
         let observed = world.observed_inventories();
@@ -2608,6 +2734,7 @@ mod tests {
             position: Position::new(0., 0.),
             output_inventory: Box::new(Some(vec![])),
             fuel_inventory: Box::new(None),
+            input_inventory: Box::new(None),
         }]);
         let observed = world.observed_inventories();
         assert_eq!(observed.len(), 1, "an empty answer is still an answer");

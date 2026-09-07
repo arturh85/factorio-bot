@@ -926,6 +926,7 @@ function writeout_initial_stuff()
 	writeout_recipes()
 	writeout_forces()
 	writeout_daylight()
+	writeout_surfaces()
 	writeout(0, "STATIC_DATA_END", "done")
 end
 
@@ -1300,12 +1301,24 @@ function collect_surfaces()
     return result
 end
 
--- **There is deliberately no `writeout_surfaces` yet.** `output_parser.rs`
--- logs `unexpected action: <key>` as an ERROR for any writeout key it has no
--- arm for, so emitting the census on the stdout transport before the Rust side
--- can receive it would put a red line in every run that looks like a defect and
--- is not. The stdout half and its parser arm land together; see
--- `docs/superpowers/notes/2026-09-07-two-things-the-mod-could-not-say.md`.
+-- The census on the stdout transport, for a server this process started.
+--
+-- **This landed in the same commit as its `"surfaces"` arm in
+-- `output_parser.rs`, and it had to.** The parser logs
+-- `unexpected action: <key>` as an ERROR for any writeout key it has no arm
+-- for, so emitting the census first would have put a red line in every run
+-- that looks like a defect and is not.
+--
+-- One line carrying the whole JSON array, not a row per surface: the parser
+-- takes the census all-rows-or-none, because a census missing a row
+-- under-reports the surfaces a save has while reading as a complete answer.
+--
+-- Emitted unconditionally -- there is no `nil` case to guard, unlike
+-- `writeout_daylight`, because a running game always has at least one surface.
+-- So a run where this line is missing means an OLD MOD, never "no surfaces".
+function writeout_surfaces()
+	writeout(0, "surfaces", helpers.table_to_json(collect_surfaces()))
+end
 
 -- The census on demand, for `factorio-bot rcon -s <host> -- ...` and for an
 -- attached (`--connect`) session. `rcon_world_snapshot` carries the same list

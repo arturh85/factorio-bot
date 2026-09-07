@@ -15,7 +15,7 @@ use crate::factorio::world::{
 };
 use crate::types::{
     FactorioEntityPrototype, FactorioForce, FactorioGraphic, FactorioItemPrototype, FactorioPlayer,
-    FactorioRecipe, PlayerId, SurfaceId,
+    FactorioRecipe, FactorioSurfaceInfo, PlayerId, SurfaceId,
 };
 use dashmap::DashMap;
 use image::RgbaImage;
@@ -124,6 +124,26 @@ pub struct GameGlobals {
     /// *here*") is positional, but it is keyed by [`PlayerId`] and follows
     /// `players`. See the type's doc.
     pub benches: SyncMutex<Benches>,
+    /// What surfaces the running game **has**, as opposed to the one this
+    /// bridge observes. See [`FactorioSurfaceInfo`].
+    ///
+    /// **Here and not on a surface, and that is not a preference.** A census
+    /// of `game.surfaces` is a fact about the save, and a surface cannot hold
+    /// the list of surfaces without every surface holding its own copy of the
+    /// same list -- the exact shape the globals move exists to end. It is also
+    /// the aggregate `output_parser` and `snapshot` can *reach*: both hold a
+    /// [`FactorioSurface`](crate::factorio::world::FactorioSurface) and
+    /// nothing above it, while
+    /// [`FactorioWorld`](crate::factorio::world::FactorioWorld) is
+    /// constructed in one place and reached only through `FactorioInstance`.
+    /// `FactorioWorld::surface_census` reads it back from the top.
+    ///
+    /// **`None` is *nobody enumerated*, and an empty list would be a
+    /// different claim** -- that a running game has no surfaces, which cannot
+    /// happen. Folding the two together puts the field back into the silence
+    /// it exists to end, so the `Option` is load-bearing and not a
+    /// convenience.
+    pub surfaces: SyncMutex<Option<Vec<FactorioSurfaceInfo>>>,
 }
 
 impl GameGlobals {
@@ -144,6 +164,7 @@ impl GameGlobals {
             research_triggers: SyncMutex::new(Vec::new()),
             surface_chunk_drops: SyncMutex::new(BTreeMap::new()),
             benches: SyncMutex::new(Benches::default()),
+            surfaces: SyncMutex::new(None),
         }
     }
 }
@@ -181,6 +202,11 @@ impl Clone for GameGlobals {
             // change queue reset like the record cursors on the surface: a
             // second recorder has been told about none of it.
             benches: SyncMutex::new(self.benches.lock().fork()),
+            // Knowledge, like `benches`: what surfaces the game has does not
+            // change because a plan is being imagined against it, and a fork
+            // that forgot the census would answer "nobody enumerated" for a
+            // world where somebody did.
+            surfaces: SyncMutex::new(self.surfaces.lock().clone()),
         }
     }
 }

@@ -377,28 +377,110 @@ fn the_census_is_askable_over_rcon() {
 /// **The census rides on `world_snapshot` too, and today Rust drops it.**
 ///
 /// `WorldSnapshot` has no field for it yet: the landing site is
-/// `crates/core/src/factorio/`, which is being refactored to move the
-/// game-global fields off `FactorioSurface`, so placing it there now would be
-/// two writers in one file. The mod sends it regardless, so the day the field
-/// is added nothing in the mod changes.
-///
-/// This pins the only thing that could go wrong meanwhile: `WorldSnapshot` has
-/// no `deny_unknown_fields`, so the extra key is **ignored**, not an error. A
-/// snapshot reply carrying it must still deserialise, or every `--connect`
-/// session would break on a key nobody reads.
+/// `WorldSnapshot.surfaces`, which did not exist when this test was written:
+/// the key was tolerated and thrown away, and the test's name said so. It now
+/// **lands**, and this is the seam between the two transports -- one JSON
+/// shape, read by the RCON half here and by the stdout half in
+/// `surface_census_lands.rs`.
 #[test]
-fn a_snapshot_carrying_the_census_still_loads_before_rust_has_a_field_for_it() {
+fn a_snapshot_carrying_the_census_lands_it_rather_than_dropping_it() {
     use factorio_bot_core::factorio::snapshot::WorldSnapshot;
 
     let with_census = r#"{
         "entity_prototypes": [], "item_prototypes": [], "recipes": [],
         "forces": [], "daylight": null,
-        "surfaces": [{"index": 1, "name": "nauvis", "planet": "nauvis"}]
+        "surfaces": [
+            {"index": 1, "name": "nauvis", "planet": "nauvis"},
+            {"index": 2, "name": "platform-1"}
+        ]
     }"#;
-    let snapshot: WorldSnapshot =
-        serde_json::from_str(with_census).expect("the extra key is ignored, not rejected");
+    let snapshot: WorldSnapshot = serde_json::from_str(with_census).expect("the census parses");
     // Non-accidental control: the parse really produced a snapshot, so the
-    // assertion above is about tolerance and not about an empty success.
+    // assertion below is about the census and not about an empty success.
     assert!(snapshot.recipes.is_empty());
     assert!(snapshot.entity_prototypes.is_empty());
+
+    let census = snapshot
+        .surfaces
+        .expect("the census is carried, not dropped");
+    assert_eq!(census.len(), 2);
+    assert_eq!(census[0].name, "nauvis");
+    assert_eq!(census[0].planet.as_deref(), Some("nauvis"));
+    assert_eq!(census[1].name, "platform-1");
+    assert_eq!(
+        census[1].planet, None,
+        "a platform is a surface that is not a planet -- a real answer, not a gap",
+    );
+}
+
+/// **The stdout half, which had to land in the same commit as its parser
+/// arm.** `output_parser.rs` logs `unexpected action: <key>` as an *error* for
+/// a writeout key it has no arm for, so a mod emitting the census before Rust
+/// could receive it would have put a red line in every run that looks like a
+/// defect and is not. `control.lua` carried a comment saying exactly that at
+/// the point this function now occupies.
+///
+/// Asserted through `writeout_initial_stuff`, not by calling
+/// `writeout_surfaces` directly: a function nobody calls emits nothing, and
+/// that is the failure this pins.
+#[test]
+fn the_census_is_written_out_at_init_under_its_own_key() {
+    let lua = mod_lua();
+    lua.load(
+        r#"
+        game.surfaces = {
+            { name = "nauvis", index = 1, planet = { name = "nauvis" } },
+            { name = "platform-1", index = 2 },
+        }
+        writeout_surfaces()
+        "#,
+    )
+    .set_name("writeout_surfaces")
+    .exec()
+    .expect("writeout_surfaces");
+
+    let lines = writeouts(&lua, "surfaces");
+    assert_eq!(lines.len(), 1, "one line carrying the whole census");
+    assert_eq!(
+        lines[0],
+        r#"{"1":{"index":1,"name":"nauvis","planet":"nauvis"},"2":{"index":2,"name":"platform-1"}}"#,
+        "the same record `collect_surfaces` gives the RCON half -- one shape, two transports",
+    );
+}
+
+/// `writeout_initial_stuff` is what a run actually calls, and a
+/// `writeout_surfaces` that exists but is never called emits nothing.
+#[test]
+fn writeout_initial_stuff_emits_the_census() {
+    let lua = mod_lua();
+    lua.load(
+        r#"
+        game.surfaces = { { name = "nauvis", index = 1, planet = { name = "nauvis" } } }
+        -- Everything else `writeout_initial_stuff` reaches for is stubbed out;
+        -- what is under test is that the census is among the lines it emits.
+        writeout_pictures = noop
+        writeout_entity_prototypes = noop
+        writeout_item_prototypes = noop
+        writeout_recipes = noop
+        writeout_forces = noop
+        writeout_daylight = noop
+        writeout_initial_stuff()
+        "#,
+    )
+    .set_name("writeout_initial_stuff")
+    .exec()
+    .expect("writeout_initial_stuff");
+
+    assert_eq!(
+        writeouts(&lua, "surfaces").len(),
+        1,
+        "the census is emitted at init, not merely definable",
+    );
+    // Non-accidental control from the same call: the envelope really ran, so
+    // the assertion above is about the census and not about a silent no-op.
+    assert_eq!(
+        writeouts(&lua, "STATIC_DATA_END").len(),
+        1,
+        "the init envelope itself ran",
+    );
 }

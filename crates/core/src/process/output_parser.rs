@@ -12,9 +12,9 @@ use std::collections::BTreeMap;
 // };
 use crate::types::{
     ChunkPosition, FactorioEntity, FactorioEntityPrototype, FactorioForce, FactorioGraphic,
-    FactorioItemPrototype, FactorioRecipe, FactorioTile, PlayerChangedDistanceEvent,
-    PlayerChangedMainInventoryEvent, PlayerChangedPositionEvent, PlayerId, Pos, Position, Rect,
-    SurfaceDaylight, SurfaceId,
+    FactorioItemPrototype, FactorioRecipe, FactorioSurfaceInfo, FactorioTile,
+    PlayerChangedDistanceEvent, PlayerChangedMainInventoryEvent, PlayerChangedPositionEvent,
+    PlayerId, Pos, Position, Rect, SurfaceDaylight, SurfaceId,
 };
 use miette::{IntoDiagnostic, Result, miette};
 
@@ -415,6 +415,31 @@ impl OutputParser {
                 Err(err) => {
                     error!(
                         "<red>failed to deserialize daylight</>: {:?} '{}'",
+                        err, rest
+                    );
+                }
+            },
+            // What surfaces the game HAS, emitted once beside the daylight in
+            // `writeout_initial_stuff`.
+            //
+            // **All rows or none, deliberately unlike `entity_prototypes`
+            // above**, which `filter_map`s a bad row away. Missing one
+            // prototype is *degraded*; a census missing one row is wrong in
+            // the exact direction the field exists to prevent -- it
+            // under-reports the surfaces a save has while reading as a
+            // complete answer. A census that cannot be parsed stays `None`,
+            // which is *nobody enumerated*, the honest reading.
+            //
+            // No `"{}"` -> `"[]"` fixup like the `entities` arm above needs.
+            // `helpers.table_to_json` degenerates only an *empty* sequence to
+            // an object, and a running game always has at least one surface;
+            // if one ever arrived it would fail to parse and stay `None`,
+            // which is still the honest answer rather than an empty census.
+            "surfaces" => match serde_json::from_str::<Vec<FactorioSurfaceInfo>>(rest) {
+                Ok(surfaces) => self.world.update_surface_census(surfaces),
+                Err(err) => {
+                    error!(
+                        "<red>failed to deserialize surface census</>: {:?} '{}'",
                         err, rest
                     );
                 }

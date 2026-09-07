@@ -35,7 +35,7 @@ use crate::factorio::rcon::FactorioRcon;
 use crate::factorio::world::FactorioSurface;
 use crate::types::{
     AreaFilter, FactorioEntityPrototype, FactorioForce, FactorioItemPrototype, FactorioRecipe,
-    Position, Rect, SurfaceDaylight,
+    FactorioSurfaceInfo, Position, Rect, SurfaceDaylight,
 };
 use miette::Result;
 use serde::{Deserialize, Serialize};
@@ -82,6 +82,21 @@ pub struct WorldSnapshot {
     /// such a world instead of crediting zero.
     #[serde(default)]
     pub daylight: Option<SurfaceDaylight>,
+    /// What surfaces the game has, when the mod enumerated them.
+    ///
+    /// **Not what this world model holds.** The mod's Nauvis guard drops every
+    /// other surface's chunks, so an attached session's world is one surface
+    /// whatever this says -- and until this field existed, "this save has one
+    /// surface" and "nobody looked" were the same silence. The world-record
+    /// base answers ten here.
+    ///
+    /// `None` from a BotBridge that predates the field -- *not said*, never
+    /// "this game has no surfaces", which no running game can be.
+    /// [`crate::factorio::world::FactorioSurface::apply_snapshot`] therefore
+    /// leaves an existing census alone rather than erasing it, exactly as it
+    /// does for `daylight`.
+    #[serde(default)]
+    pub surfaces: Option<Vec<FactorioSurfaceInfo>>,
 }
 
 /// What one [`FactorioRcon::generate_chunks`] call actually bought.
@@ -285,6 +300,7 @@ mod tests {
                 technologies: Box::default(),
             }],
             daylight: None,
+            surfaces: None,
         }
     }
 

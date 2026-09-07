@@ -4,9 +4,9 @@ use crate::graph::entity_graph::EntityGraph;
 use crate::graph::flow_graph::FlowGraph;
 use crate::types::{
     ActionId, FactorioEntity, FactorioEntityPrototype, FactorioForce, FactorioGraphic,
-    FactorioItemPrototype, FactorioPlayer, FactorioRecipe, FactorioTile, InventoryResponse,
-    PlayerChangedDistanceEvent, PlayerChangedMainInventoryEvent, PlayerChangedPositionEvent,
-    PlayerId, Pos, Position, SurfaceDaylight, SurfaceId,
+    FactorioItemPrototype, FactorioPlayer, FactorioRecipe, FactorioSurfaceInfo, FactorioTile,
+    InventoryResponse, PlayerChangedDistanceEvent, PlayerChangedMainInventoryEvent,
+    PlayerChangedPositionEvent, PlayerId, Pos, Position, SurfaceDaylight, SurfaceId,
 };
 use dashmap::DashMap;
 use miette::{IntoDiagnostic, Result};
@@ -1284,6 +1284,26 @@ impl FactorioWorld {
         &self.globals
     }
 
+    /// What surfaces the running game **has**, when somebody enumerated them.
+    ///
+    /// **Not the same question as [`Self::surface_ids`], and the difference is
+    /// the whole point.** `surface_ids` answers *what this world model holds*,
+    /// which is one surface on every run so far -- the mod's Nauvis guard
+    /// drops every other chunk, and since 2026-09-07 the only thing that can
+    /// add a surface is an entity writeout naming one, which no single-surface
+    /// save produces. This answers *what the save contains*, and the two are
+    /// allowed
+    /// to disagree loudly: the world-record base reports ten surfaces here and
+    /// one there, which is a fact about this bridge rather than about the
+    /// save. Before the census those were the same silence.
+    ///
+    /// `None` is *nobody enumerated* -- every archived dump, and every
+    /// BotBridge older than the field. An empty list would be the claim that a
+    /// running game has no surfaces, which cannot happen.
+    pub fn surface_census(&self) -> Option<Vec<FactorioSurfaceInfo>> {
+        self.globals.surfaces.lock().clone()
+    }
+
     /// A world holding one Nauvis surface. The shape every run has had so
     /// far, said out loud instead of assumed.
     pub fn nauvis_only(surface: Arc<FactorioSurface>) -> Self {
@@ -1521,6 +1541,30 @@ impl FactorioSurface {
     /// This surface's daylight curve, when one has been reported.
     pub fn daylight(&self) -> Option<SurfaceDaylight> {
         self.daylight.lock().clone()
+    }
+
+    /// What surfaces the game has, when somebody enumerated them.
+    ///
+    /// **A method on the surface only because the surface is what the parser
+    /// and the snapshot path hold** -- the census itself lives on
+    /// [`GameGlobals`] and is shared by every surface of one world. Read it
+    /// from the top through [`FactorioWorld::surface_census`].
+    ///
+    /// `None` is *nobody enumerated* -- every archived dump, and every
+    /// BotBridge older than the field. It is never "this game has no
+    /// surfaces", which no running game can be.
+    pub fn surface_census(&self) -> Option<Vec<FactorioSurfaceInfo>> {
+        self.globals.surfaces.lock().clone()
+    }
+
+    /// Records the census the mod read off `game.surfaces`.
+    ///
+    /// Replaces rather than merges, like [`Self::update_daylight`]: the mod
+    /// sends the whole list in one piece, and a half-updated census would
+    /// under-report the surfaces a save has while reading as a complete
+    /// answer -- the exact failure the field exists to end.
+    pub fn update_surface_census(&self, surfaces: Vec<FactorioSurfaceInfo>) {
+        *self.globals.surfaces.lock() = Some(surfaces);
     }
 
     /// Records the curve the mod read off the live surface.
@@ -1806,6 +1850,12 @@ impl FactorioSurface {
         // into "this surface has no daylight".
         if let Some(daylight) = snapshot.daylight {
             self.update_daylight(daylight);
+        }
+        // The same rule, for the same reason. A BotBridge older than the
+        // census says nothing here, and installing an empty list would claim
+        // the game has no surfaces -- the one answer that cannot be true.
+        if let Some(surfaces) = snapshot.surfaces {
+            self.update_surface_census(surfaces);
         }
         Ok(())
     }
@@ -2174,7 +2224,7 @@ impl Serialize for FactorioSurface {
     where
         S: Serializer,
     {
-        let mut state = serializer.serialize_struct("FactorioSurface", 15)?;
+        let mut state = serializer.serialize_struct("FactorioSurface", 16)?;
         state.serialize_field("players", &self.globals.players)?;
         state.serialize_field("forces", &self.globals.forces)?;
         state.serialize_field("graphics", &self.globals.graphics)?;
@@ -2210,6 +2260,11 @@ impl Serialize for FactorioSurface {
         // dump that dropped the curve would make every solar question
         // unanswerable rather than merely stale.
         state.serialize_field("daylight", &*self.daylight.lock())?;
+        // What surfaces the game HAS, which no prototype and no entity graph
+        // can reconstruct either: an offline plan against a dump has no game
+        // to enumerate. Absent in every dump written before 2026-09-07, and
+        // that absence must keep reading as *nobody enumerated*.
+        state.serialize_field("surfaces", &*self.globals.surfaces.lock())?;
         state.end()
     }
 }
@@ -2235,6 +2290,7 @@ impl<'de> Deserialize<'de> for FactorioSurface {
             Enclosures,
             Benches,
             Daylight,
+            Surfaces,
         }
 
         impl<'de> Deserialize<'de> for Field {
@@ -2271,6 +2327,7 @@ impl<'de> Deserialize<'de> for FactorioSurface {
                             "enclosures" => Ok(Field::Enclosures),
                             "benches" => Ok(Field::Benches),
                             "daylight" => Ok(Field::Daylight),
+                            "surfaces" => Ok(Field::Surfaces),
                             _ => Err(de::Error::unknown_field(value, FIELDS)),
                         }
                     }
@@ -2308,6 +2365,7 @@ impl<'de> Deserialize<'de> for FactorioSurface {
                 let mut enclosures: Option<Enclosures> = None;
                 let mut benches: Option<Benches> = None;
                 let mut daylight: Option<Option<SurfaceDaylight>> = None;
+                let mut surfaces: Option<Option<Vec<FactorioSurfaceInfo>>> = None;
 
                 while let Some(key) = map.next_key()? {
                     match key {
@@ -2401,6 +2459,12 @@ impl<'de> Deserialize<'de> for FactorioSurface {
                             }
                             daylight = Some(map.next_value()?);
                         }
+                        Field::Surfaces => {
+                            if surfaces.is_some() {
+                                return Err(de::Error::duplicate_field("surfaces"));
+                            }
+                            surfaces = Some(map.next_value()?);
+                        }
                     }
                 }
                 let players = players.ok_or_else(|| de::Error::missing_field("players"))?;
@@ -2434,6 +2498,11 @@ impl<'de> Deserialize<'de> for FactorioSurface {
                 // sender had no curve to report, both mean *nobody said*.
                 // Neither means the surface is dark.
                 let daylight = daylight.flatten();
+                // Same two-levels-of-absence collapse, and the same reason: a
+                // dump written before this field and one whose sender never
+                // enumerated both mean *nobody looked*. Neither means the game
+                // has no surfaces, which no running game can be.
+                let surfaces = surfaces.flatten();
 
                 let entity_graph: Arc<EntityGraph> = Arc::new(entity_graph);
                 let flow_graph = Arc::new(FlowGraph::new(entity_graph.clone()));
@@ -2457,6 +2526,7 @@ impl<'de> Deserialize<'de> for FactorioSurface {
                     research_triggers: Default::default(),
                     surface_chunk_drops: Default::default(),
                     benches: SyncMutex::new(benches),
+                    surfaces: SyncMutex::new(surfaces),
                 });
                 Ok(FactorioSurface {
                     globals,
@@ -2488,6 +2558,7 @@ impl<'de> Deserialize<'de> for FactorioSurface {
             "enclosures",
             "benches",
             "daylight",
+            "surfaces",
         ];
         deserializer.deserialize_struct("FactorioSurface", FIELDS, FactorioSurfaceVisitor)
     }

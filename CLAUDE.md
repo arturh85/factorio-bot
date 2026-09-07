@@ -45,7 +45,7 @@ is not handling* below.
   comparable — **that was luck, not design**, and only provenance makes it a
   fact rather than an assumption.
 
-**Do not add or remove a mod without checking `provenance.mod_set` afterwards.**
+**Do not add or remove a mod without checking `provenance.mods` afterwards (the field is `mods`, an `Option<BTreeMap>`; this file said `mod_set` until 2026-09-08 and an agent went looking for a field that does not exist).**
 `None` there means *not captured*; `Some(empty)` means *the game is vanilla* —
 collapsing them would make an unrecorded run indistinguishable from a base-game
 one, which is the confusion provenance exists to prevent.

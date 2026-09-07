@@ -439,6 +439,13 @@ impl std::error::Error for PlanRefusal {}
 ///   `Site::At` promises "this exact anchor, or refuse", and because a
 ///   `Site::Anchored` value that needs moving means something upstream is
 ///   already wrong.
+/// - [`CannotFabricate`](PlannerError::CannotFabricate) -- a verdict about
+///   **the recipe**, and the successor to the category refusal
+///   `ProductNotMakeable` used to give for everything an oil refinery or a
+///   chemical plant runs. Since `crafting_categories` crosses the bridge the
+///   machine is named, so the remaining blocker is stated instead: a fluid in
+///   the bill, or a fluid product with nowhere to land. A script acts on it by
+///   asking for something else -- no amount of mining or research moves it.
 fn refusal_for(err: &PlannerError) -> Option<PlanRefusal> {
     use miette::Diagnostic;
 
@@ -480,7 +487,8 @@ fn refusal_for(err: &PlannerError) -> Option<PlanRefusal> {
         | PlannerError::SolarBankShort { .. }
         | PlannerError::SolarBankNotSizable { .. }
         | PlannerError::ProductNotMakeable(_)
-        | PlannerError::FluidNotItem(_) => true,
+        | PlannerError::FluidNotItem(_)
+        | PlannerError::CannotFabricate(_) => true,
 
         PlannerError::InsufficientItems { .. }
         | PlannerError::UnknownBot(_)

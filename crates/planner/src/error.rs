@@ -1287,4 +1287,25 @@ pub enum PlannerError {
         )
     )]
     FluidNotItem(#[from] crate::substance::FluidRefusal),
+
+    /// A machine was named for the recipe's category and still cannot run it.
+    ///
+    /// **Deliberately not a `NoApplicableMethod`, and deliberately distinct
+    /// from [`PlannerError::ProductNotMakeable`].** That one says "no recipe
+    /// this planner can run makes it", which was the honest answer while the
+    /// world model could not say what a machine crafts. Since
+    /// `crafting_categories` crosses the bridge the machine *is* named, so a
+    /// reader who still gets "no machine" would go looking for the wrong
+    /// thing entirely. The wrapped
+    /// [`crate::method::fabricate::FabricateRefusal`] names the machine, the
+    /// recipe, its category and the fluid.
+    #[error("{0}")]
+    #[diagnostic(transparent)]
+    ///
+    /// **Boxed**, and that is not cosmetic: `FabricateRefusal::FluidIngredient`
+    /// carries four owned strings and a [`crate::substance::FluidSource`], and
+    /// inlining it took `PlannerError` past `clippy::result_large_err` -- every
+    /// `Result<_, PlannerError>` in the crate would have paid for a refusal
+    /// almost nothing returns.
+    CannotFabricate(#[from] Box<crate::method::fabricate::FabricateRefusal>),
 }

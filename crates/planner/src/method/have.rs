@@ -5087,6 +5087,12 @@ pub fn default_registry() -> MethodRegistry {
         // This is `products::ProductIndex`'s first production caller. Until
         // now the honest product-to-recipe lookup existed and nothing asked
         // it, which by this repo's own record makes it a hypothesis.
+        // Second to last, immediately ahead of `NoProducer`. Every method
+        // above is asked first, so a goal that plans today reaches an
+        // applicable method before this one is consulted and no existing plan
+        // can move -- it can only claim goals that previously refused. See
+        // `method::fabricate`.
+        .with(Box::new(crate::method::fabricate::Fabricate))
         .with(Box::new(crate::products::NoProducer))
 }
 
@@ -6572,6 +6578,12 @@ pub fn registry_for(bots: &[BotId]) -> MethodRegistry {
         // This is `products::ProductIndex`'s first production caller. Until
         // now the honest product-to-recipe lookup existed and nothing asked
         // it, which by this repo's own record makes it a hypothesis.
+        // Second to last, immediately ahead of `NoProducer`. Every method
+        // above is asked first, so a goal that plans today reaches an
+        // applicable method before this one is consulted and no existing plan
+        // can move -- it can only claim goals that previously refused. See
+        // `method::fabricate`.
+        .with(Box::new(crate::method::fabricate::Fabricate))
         .with(Box::new(crate::products::NoProducer))
 }
 

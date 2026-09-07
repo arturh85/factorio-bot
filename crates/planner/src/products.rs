@@ -98,7 +98,7 @@
 
 use crate::error::PlannerError;
 use crate::goal::Goal;
-use crate::method::util::{CRAFTING_CATEGORY, SMELTING_CATEGORY};
+use crate::method::machine::MachineTable;
 use crate::method::{ExpansionCtx, Method, Step};
 use crate::state::PlanState;
 use crate::substance::{Substance, SubstanceTable};
@@ -137,15 +137,34 @@ impl Categories {
         }
     }
 
-    /// The two categories this planner has a machine for: `crafting`, which a
-    /// character's hands run, and `smelting`, which a furnace runs.
+    /// Every category this planner has a machine for **in this world**.
     ///
-    /// Built from [`CRAFTING_CATEGORY`] and [`SMELTING_CATEGORY`] rather than
-    /// from string literals, so that widening either gate widens this too
-    /// instead of leaving a second copy behind — the same reason those
-    /// constants are named at all.
-    pub fn planner_runs() -> Self {
-        Categories::only([CRAFTING_CATEGORY, SMELTING_CATEGORY])
+    /// Was a two-element constant (`crafting`, `smelting`) until 2026-09-07,
+    /// and the note that ended that era said why: those were not a scope
+    /// decision, they were the two categories reachable without knowing what
+    /// a machine crafts. `LuaEntityPrototype.crafting_categories` now crosses
+    /// the bridge, so the set is **derived** — from
+    /// [`MachineTable::runnable_categories`], which is the same computation
+    /// [`crate::method::fabricate::Fabricate`] uses to name the machine it
+    /// stands up. One encoding, so the set a refusal names and the set a
+    /// method acts on cannot drift.
+    ///
+    /// On a world model that predates the field — every archived dump — the
+    /// table declares nothing and this answers exactly the old two, so no
+    /// archived plan moves.
+    pub fn planner_runs(machines: &MachineTable) -> Self {
+        Categories::only(machines.runnable_categories())
+    }
+
+    /// The two categories the planner brings with it, for a caller with no
+    /// world: `crafting` (hands) and `smelting` (a furnace).
+    ///
+    /// **Not a second copy of the rule.** It is
+    /// `planner_runs(&MachineTable::default())` — an empty table is a world
+    /// that declared nothing — spelled out so that a test which has no
+    /// prototypes says what it means.
+    pub fn planner_brings() -> Self {
+        Categories::planner_runs(&MachineTable::default())
     }
 
     pub fn admits(&self, category: &str) -> bool {
@@ -560,7 +579,8 @@ impl Method for NoProducer {
             _ => return None,
         };
         let index = ProductIndex::from_state(&ctx.state);
-        match index.sole_recipe_producing(item, &Categories::planner_runs()) {
+        let machines = MachineTable::from_state(&ctx.state);
+        match index.sole_recipe_producing(item, &Categories::planner_runs(&machines)) {
             // Something can make it. Whatever stopped this goal, it is not
             // the recipe table, and saying anything here would be guessing.
             Ok(_) => None,
@@ -768,10 +788,10 @@ mod product_index_tests {
     fn a_runnable_product_resolves_to_its_one_recipe() {
         let i = index();
         let r = i
-            .sole_recipe_producing("iron-gear-wheel", &Categories::planner_runs())
+            .sole_recipe_producing("iron-gear-wheel", &Categories::planner_brings())
             .expect("crafting admits exactly one of the two");
         assert_eq!(r.name, "iron-gear-wheel");
-        assert_eq!(r.category, CRAFTING_CATEGORY);
+        assert_eq!(r.category, crate::method::util::CRAFTING_CATEGORY);
     }
 
     #[test]
@@ -815,7 +835,7 @@ mod product_index_tests {
     fn tier_two_names_every_producer_and_its_category() {
         let i = index();
         let err = i
-            .sole_recipe_producing("petroleum-gas", &Categories::planner_runs())
+            .sole_recipe_producing("petroleum-gas", &Categories::planner_brings())
             .expect_err("oil-processing is not a category this planner runs");
         let ProductRefusal::NoRunnableCategory {
             candidates,
@@ -1046,7 +1066,7 @@ mod no_producer_driver_tests {
         // than the index failing.
         assert!(
             index
-                .sole_recipe_producing("petroleum-gas", &Categories::planner_runs())
+                .sole_recipe_producing("petroleum-gas", &Categories::planner_brings())
                 .is_err()
         );
         assert!(matches!(ctx_goal, Goal::Have { .. }));

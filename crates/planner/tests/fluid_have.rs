@@ -353,7 +353,7 @@ fn the_product_index_answers_for_a_fluid_where_a_recipe_name_lookup_cannot() {
 
     // And it refuses by name rather than silently, naming the wall.
     let refusal = index
-        .sole_recipe_producing(FLUID, &Categories::planner_runs())
+        .sole_recipe_producing(FLUID, &Categories::planner_brings())
         .expect_err("no crafting or smelting recipe produces a fluid");
     let ProductRefusal::NoRunnableCategory { candidates, .. } = &refusal else {
         panic!("expected NoRunnableCategory, got {refusal:?}");

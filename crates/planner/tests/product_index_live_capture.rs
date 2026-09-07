@@ -153,7 +153,7 @@ fn the_index_reproduces_the_oracle_exactly() {
 fn recipe_for_is_accidentally_exact_over_crafting_and_smelting_only() {
     let snapshot = snapshot();
     let index = index(&snapshot);
-    let runs = Categories::planner_runs();
+    let runs = Categories::planner_brings();
 
     let runnable: Vec<&FactorioRecipe> = snapshot
         .recipes
@@ -216,7 +216,7 @@ fn petroleum_gas_refuses_by_naming_all_five_of_its_recipes() {
     let index = index(&snapshot);
 
     let err = index
-        .sole_recipe_producing("petroleum-gas", &Categories::planner_runs())
+        .sole_recipe_producing("petroleum-gas", &Categories::planner_brings())
         .expect_err("no crafting or smelting recipe makes petroleum-gas");
     let ProductRefusal::NoRunnableCategory {
         candidates,
@@ -305,7 +305,7 @@ fn iron_ore_is_told_to_come_out_of_the_ground() {
     );
 
     let err = index
-        .sole_recipe_producing("iron-ore", &Categories::planner_runs())
+        .sole_recipe_producing("iron-ore", &Categories::planner_brings())
         .expect_err("no crafting or smelting recipe makes iron ore");
     assert!(
         matches!(err, ProductRefusal::NoRunnableCategory { .. }),

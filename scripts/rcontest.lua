@@ -123,6 +123,18 @@ blueprints = {
     -- furnace ceiling, +26% for one drill and one belt tile. The drill
     -- extends the pattern west (x = 0, 2, 4) so the T junction is untouched.
     OreToPlateThree = "0eNqd1t1ugjAUwPF36TUQDrR8vcR24d2yLKBnWxMoptRlxvDuq7pEIyU7Z5dS+dnQ/osn0fUH3FttnGhOQjscRHN3LRJ922Hvrz1Z3IzPfetw82kR/Qgap53GSTQvp+uH45s5DB1a0UAkTDugv8/Z1kz70brYO2dwP07+ttGcf+9bNEWiInEUTZqoORI7bXF7Ha3maMFmbBYobM5mMwor2WxOYRWblRS2YLOKwpZstqCwFZstKWzNZisKCynbrUkuvzMghQb/KI2UGvBbA1JsQK8N1o4cGXLpuWUsl95bznLpwUmWSy9OsVx6cvWaC1noXUFvruLB9OhKHnyLTtvRxNtPnELb937/hphbYt3BGrSxNhNa58eWVspZq0w+yoM22nzEO6v7PhDEhY6B8GJXPFnS5YL+NMq1Mz28XLfSJjcajN+9324xsHGvanCxKv70lidteH41b34AlwlyliFN0t+FSNKHpYgWf7LSO/2vcNa35dKF+TUSX2inyxdUkdWyrlUuM8j9c5l/AEupkxI=",
+    -- A SATURATING smelting module: one mixed belt in, plates out, no drills.
+    -- Mining and smelting are separate units joined by a belt, which is also
+    -- what this seed forces -- ore is 18.4 from spawn and water 48.1, so a
+    -- self-powered mining block cannot be sited at all.
+    --
+    -- 24 and not 48: a 2x2 stone furnace in a tight row has exactly two
+    -- inserter slots, above and below, one in and one out. There is no third
+    -- slot for coal, so coal rides the input belt on the lane the ore does not
+    -- use -- capping the unit at one lane, 7.5 ore/s, and 7.5/0.3125 = 24
+    -- furnaces. A saturated yellow belt feeds TWO of these, not one of 48.
+    -- 24 x 0.3125 x 60 = 450 plates/min.
+    SmeltRow24 = "0eNqdmttuG0cQRP9ln0lje+7Dz7AfjSCglA1AgFwKy5UdQ+C/h74gECMnrtNPAijyoKZLpWks62V4OD5PT8thXofdy3BYp9Owe/XaZjjuH6bj7bUPp+m4vj9/Dun24qdpuRzO87ALzVLtobbWSrewGaZ5PayH6TLsPr4M8/403T66Lvv58nRe1u0N9ZX5dL7c3vT18y/DX8NufJc3w5dvP6+b4Y/DMj1+/236wfvy+/x8epiWYWfXjYw1HRsANujYCLBRxyaATTo2A2zWsQVgi46tAFt1bAPYpmM7wHYQh5HkgeQMBQ0kzUjUDGTNSNgMpM1I3AzkzUjgDCTOSOQMZM5I6AykzkjsDOTOSPAMJC+Q5AWQvECSF8gdhy45kLxAkhdA8sLr5F3W8zxt/3xe5v3j9LPLfvyG3YZ34z13fMt9HbzDfJmW9fbyf64l2zdS21tkYcgoICs/fRQO35BS+7fQnxA7IqZfE+OoHz0C46NJSgMwPgaGFIyPkZ9eMD4mpFQwPmZEVIwv+tEzMb5KShMxvjGkYnznpxeMTyNSKhifDBEF41PQj16B8SlKSgswPiWGFIxPmZ9eMb4gpYrxFREV45t+9E6M1y6lBozPI0MKxmfjpxeMzwEpFYzPEREF4zNZ7sh2l7Vbych6lwtkKt5XxwAU8xvTqrjfGVKwv4AVz8iOV7S7yciSVwJkCvaX6BiAYH9JTKtgf8kMqdgPFj0jm17Rbigjq15pkKnY3x0DEOyvI9Mq2F+NIQX7K1j3jOx7VbunjCx8NUGmYH/NjgEo9hemVbG/MqRiP1j6jGx9VbyoyNrXRsgU7G/mGIBgfwtMq2B/iwwp2N/A6hfI6tfEBxJk9WsFMhX7q2MAiv2NaVXs7wwp2N/B6hfI6tfFx3tk9esBMgX7e3QMQLC/J6ZVsL9nhlTsJ99O/ZOqJHzHWh3gLHCbo3QgCe4OcFa+FR4dfQZFsY3mIEuSg6MroUn2tDAkyZ4ehiY5O8iS5OLoeGiSq4MsSW6O/ogmuTvIimTUyqhEMqplVCI5OHovmuToIEuSk6NTo0nODrIkuXjqOprm6kFLopunCqSJ7h60IhrVMwxdgaigYeQORA0NQ5dgcLWjJNGuepQmOnvQkujiqV5poqsHLYlunlqXJrp70IroOHoqY5LoaB60JDp46mia6OhBS6KTp+qmic4etCS6eGp0mujqQUuim6eip4nuHrQiOo2e+p8kOpkHLYkOnmqhJtrVWpRE3z3ePO2Px+10vL1/OTxun87H6X8eGoy/fnxi92URhI8KvnjxSaFXSs9oNs2Nl2bTvXhlNnf9EoneyWzuuyYIr8zmrnOC8NJsIv6rjGg4yc+XppPdfGk8PLQVjaf6+dJ4mpsvjQfnNqB/yWX085XxFHPzlfGUcP3tev0bS+oq9A==",
 }
 
 rcon.cheat_technology("automation")

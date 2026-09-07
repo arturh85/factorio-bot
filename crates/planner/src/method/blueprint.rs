@@ -4806,6 +4806,50 @@ mod block_demand_tests {
     ///
     /// **This must fail without the per-pole reach**: restore the constant in
     /// the flood and the two poles read as disconnected.
+    /// **The saturating smelting module reads as a coherent block: it
+    /// distributes its own power, and it draws what 48 inserters draw.**
+    ///
+    /// `SmeltRow24` is one mixed belt with twelve stone furnaces either side —
+    /// the unit a saturated ore lane feeds. It is the first fixture here built
+    /// to a throughput target rather than to exercise a code path, so what
+    /// matters is that the planner reads it as buildable at all: 18 poles in
+    /// one wired component, every one of its 48 inserters inside some pole's
+    /// supply area, and nothing generating.
+    ///
+    /// **24 and not 48**, which is a fact about furnace geometry rather than a
+    /// choice: a 2x2 furnace in a tight row has exactly two inserter slots,
+    /// above and below, and they are the input and the output. There is no
+    /// third slot for coal, so coal must ride the input belt on the lane the
+    /// ore does not use — capping the unit at one lane (7.5 ore/s) and
+    /// 7.5 / 0.3125 = 24 furnaces. A full belt feeds two of these.
+    #[test]
+    fn the_saturating_module_distributes_its_own_power_and_generates_none() {
+        let s = state();
+        let bp = fixture("SmeltRow24");
+        assert_eq!(bp.entities.len(), 162, "the module as authored");
+
+        let power = blueprint_power(&s, &bp, &Position::new(0.0, 0.0));
+        assert_eq!(power.poles, 18, "three rows of six");
+        assert_eq!(
+            power.disconnected_poles, 0,
+            "all 18 must be one component, or powering one leaves the rest dark"
+        );
+        assert!(
+            power.uncovered.is_empty(),
+            "every inserter must sit in some pole's supply area; uncovered: {:?}",
+            power.uncovered
+        );
+        assert!(power.distributes_itself());
+
+        assert_eq!(power.demand.consumers, 48, "two inserters per furnace");
+        assert_eq!(
+            power.generators, 0,
+            "it generates nothing, exactly like FurnaceLine -- which is why it \
+             needs `ensure_powered` to reach it, and why a plant that lands out \
+             of pole range leaves it standing and dead"
+        );
+    }
+
     #[test]
     fn two_big_poles_twenty_tiles_apart_are_wired_because_a_big_pole_reaches_32() {
         let s = state();

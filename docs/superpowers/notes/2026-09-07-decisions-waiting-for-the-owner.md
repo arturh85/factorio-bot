@@ -1,0 +1,103 @@
+# Decisions waiting for the owner — 2026-09-07 morning
+
+Three things overnight work reached and deliberately did **not** decide. Each is
+recorded with the measurement behind it, so none has to be re-derived.
+
+---
+
+## 1. `Goal::Built` should persist its anchor instead of re-deriving it
+
+**This is the one that matters, and it changes what a goal means.**
+
+`resolve_site` opens with `recover_anchor`, first and unconditionally. Recovery
+trusts an anchor once **two** of a blueprint's entities stand at the right
+relative offsets. Our fixtures are variations of one another by construction, so
+that test is ambiguous by default rather than at the edges
+(`crates/core/tests/recovery_crosstalk_probe.rs`):
+
+```
+ElectricSmelter   21 of its 28 entities  match inside FurnaceLine
+SaturatedSmelter  17 of 33               match inside FurnaceLine
+TwoRowSmelter     15 of 27               match inside FurnaceLine
+OreToPlate        14 of 24               match inside MinerLine
+```
+
+The chain scripts run several of these **on one map in sequence**, and
+FurnaceLine's 179 entities stood there. So a later block read its anchor off an
+earlier block, put a drill where FurnaceLine's geometry wanted it — not on ore —
+and the game refused. That is the whole of the stranded-tile bug two sessions
+spent a day on.
+
+**Raising the vote threshold cannot fix it.** 21 of 28 is 75% of the blueprint,
+and any threshold loose enough to recover a genuinely half-built block accepts a
+hijack. Recovery by geometry is ambiguous whenever two blocks share a
+sub-layout.
+
+**The options, as we see them:**
+
+| option | cost |
+|---|---|
+| persist the anchor with the goal | changes `Goal::Built` semantics and the goal's serialised shape |
+| identify blocks by a marker entity | needs something on the ground that is not part of the design |
+| keep re-deriving, accept the ambiguity | leaves the failure in place; it is silent and strands whole blocks |
+
+Nobody implemented any of these overnight, deliberately. **Landed instead**
+(`06296b0a`): every anchor is now screened for ore rather than only the ones
+siting chose, refusing as `BlockDrillUnfed`, which names the drill, the tile, and
+whether the remedy is to move the anchor or clear the half-built block. That is
+strictly worth having **even after** the anchor is persisted — it turns a silent
+stranding into a named refusal — but it treats the symptom.
+
+---
+
+## 2. `maximum_wire_distance` is not on the wire, and one hand-kept value had
+already drifted
+
+`pole_supply_half_extent`'s four entries were **all correct** when checked
+against the installed game's own prototypes. Its neighbour `pole_wire_reach` was
+not: `big-electric-pole` read **30.0** against the game's **32**. Factorio 2.0
+moved the value and nothing noticed, *because a hand-kept table of game data is
+only ever read by code that agrees with it*. A legal big-pole span read as a
+broken network, silently. Corrected in `59ab9ca3` with a test at 31 tiles — the
+one-tile window that distinguishes 30 from 32.
+
+**It cannot be derived**: the mod does not send `maximum_wire_distance` and
+`FactorioEntityPrototype` has no field for it. So the choice is to ship the
+field or to keep a table that has already drifted once.
+
+A related measurement worth seeing, because it explains why the pole table
+cannot simply be deleted: with the vanilla fallback removed and nothing else
+changed, **all three offline goals refuse to expand at all** — every archived
+world predates the prototype field, so every pole supplies nothing. And the
+refusal blames *the water*, one layer downstream, with no mention of poles.
+
+---
+
+## 3. Fluids: `Goal::Stored` needs a design, and one of its four unknowns is now
+answered
+
+`have:petroleum-gas` now refuses honestly rather than dividing a fluid among four
+bots. Storing one still has no goal kind. Of the four things that needed settling
+first, the measurable one is settled: **`fluidbox_prototypes` carries
+`pipe_connections` and `production_type` and nothing else — there is no `volume`
+on the entity prototype**, though `LuaFluidBoxPrototype::get_volume()` exists and
+now ships.
+
+So **siting a tank is answerable from data we already receive** (connection
+offsets plus input/output direction, per prototype); **capacity is not**, and
+closing that gap with a table would repeat the defect §2 just found.
+
+---
+
+## What is NOT waiting on anything
+
+Everything else overnight is merged and green: gathering bills its own unlock,
+the refusal names what it found, per-interval delivered tick rate, the furnace
+input slot, transport-line contents, beacon prototype fields, the beacon lane
+reservation, the world-record flow-graph validation, the supply balance, the
+demand side, `entity.status`, refusal expiry, the `blocked_tree` binding, and
+entity-graph edges that outlive tick 0.
+
+The flow graph's mean absolute log error against a world-record base went
+**0.298 → 0.216 → 0.184** over the night, with every regression published in the
+same table as the wins.

@@ -4537,6 +4537,27 @@ mod block_demand_tests {
     /// So the follow-up is a solar arm of `method::power` that sizes the
     /// accumulator bank, not a row in `generation_kw`.
     ///
+    /// **That arm LANDED on 2026-09-07 (`f38c28a7`), and this test still
+    /// passes — for a third reason, which is why the condition is stated as
+    /// something checkable rather than as another promise.** This doc has now
+    /// twice described a follow-up as pending that had already happened, and
+    /// each time the verdict held for a reason the previous text did not name.
+    ///
+    /// The remaining gap is one wire, verified here rather than taken on
+    /// report: `PlanState::electric_supply_kw` sums `generation_kw` over the
+    /// entities in reach, and `generation_kw` does not answer for a
+    /// `solar-panel`. So the arm can size a bank and refuse correctly while
+    /// `Condition::Powered` still sees a solar block as generating nothing,
+    /// and `blueprint_power` — which asks the same question — reads it as
+    /// unpowered.
+    ///
+    /// **The condition for revisiting is therefore: does `electric_supply_kw`
+    /// credit a standing solar panel?** That is a question about one function,
+    /// answerable by reading it, and it does not depend on anyone's plan. When
+    /// the answer becomes yes, this test inverts and
+    /// `a_block_carrying_its_own_generation_powers_itself` gains a solar case.
+    /// Until then the verdict below is correct and should not be "fixed".
+    ///
     /// **And a correction to my own arithmetic, which I passed to the peer and
     /// which was wrong.** I wrote that the owner's 25 panels : 21 accumulators
     /// *is* the statement that average output is 0.84 of nameplate. It is not.

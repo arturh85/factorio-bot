@@ -6,6 +6,50 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Factorio Bot is a Rust application that orchestrates Factorio game servers and multiple bots via Lua scripting, with a browser frontend served by its own HTTP server. It was a Tauri desktop app until plan 5 (`docs/superpowers/plans/2026-08-30-frontend-transport-swap.md`) removed Tauri entirely; the crate directory is still named `app/src-tauri` because renaming it is a deferred mechanical change, not because Tauri is still there. Use cases include tool-assisted speedruns (TAS), ML training environments, and Factorio experiments.
 
+## THIS PROJECT RUNS SPACE AGE, NOT BASE FACTORIO
+
+Every instance extracts from `workspace/factorio-space-age_linux_2.1.17.tar.xz`,
+and a run loads **six** mods:
+
+```
+base 2.1.17 · space-age · elevated-rails · quality · recycler · BotBridge 0.0.1
+```
+
+**Nothing recorded this until 2026-09-07** (`295056a5` puts the mod set in
+provenance, BotBridge's version included). Two sessions worked for a day on
+Space Age world-record saves — ten surfaces, biolabs, cargo landing pads — while
+calling this install's prototype values "vanilla", with the archive filename in
+their own terminal output. **Seeing is not registering**; the sibling of *filing
+is not handling* below.
+
+**Why it matters, beyond the label:**
+
+- **Every prototype-derived value in this repo was read off a Space Age
+  install** — `energy_usage`, `supply_area_distance`, `maximum_wire_distance`,
+  `crafting_categories`, `resource_category`. They are right for what we run.
+  They are **not** "vanilla Factorio" values, and ~111 uses of the word
+  *vanilla* in `state.rs` and `types.rs` mean *"the shipped fallback"* rather
+  than *"base game"*. The fallback tables themselves are sound — checked:
+  `VANILLA_CHARACTER_RESOURCE_CATEGORIES` is `["basic-solid"]`, the character's
+  own category, which Space Age does not change.
+- **It is why product ambiguity is everywhere.** Three of sulfur's four recipes
+  (`advanced-carbonic-asteroid-crushing`, `biosulfur`, `sulfur-recycling`) are
+  Space Age; in base Factorio *"produce sulfur"* has exactly one answer.
+  Petroleum gas is the counter-example worth keeping straight — its four
+  producers are all base game, so **that** ambiguity is real regardless of mods.
+- **It explains `no resource patch found for 'calcite'` / `'scrap'`**, which has
+  scrolled past in every log anyone has read. Those are Space Age resources the
+  entity graph looks for and a Nauvis map does not have. Nobody asked why the
+  graph wanted calcite.
+- The owner's world-record saves are Space Age too, so runs and saves are
+  comparable — **that was luck, not design**, and only provenance makes it a
+  fact rather than an assumption.
+
+**Do not add or remove a mod without checking `provenance.mod_set` afterwards.**
+`None` there means *not captured*; `Some(empty)` means *the game is vanilla* —
+collapsing them would make an unrecorded run indistinguishable from a base-game
+one, which is the confusion provenance exists to prevent.
+
 ## Build & Development Commands
 
 **Never `git commit --amend` in this checkout, and never `cargo fmt --all`.**

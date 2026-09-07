@@ -720,9 +720,20 @@ pub enum PlannerError {
     /// Refusing by name is the point. An undersized plant returned as success
     /// is the *coverage is not capacity* failure one level up: everything
     /// places, everything is wired, and the network browns out.
+    /// # Two numbers, because the margin must not masquerade as the demand
+    ///
+    /// Since 2026-09-07 a plant is sized to
+    /// [`PLANT_HEADROOM`](crate::method::power::PLANT_HEADROOM) times the draw
+    /// it is asked for, so a demand can be refused here that would have fitted
+    /// unmargined. `needed_kw` is **what the caller asked for** and `sized_kw`
+    /// is what this planner tried to build; quoting only the second would
+    /// report a number nobody supplied, which is the confusion this project
+    /// keeps fixing elsewhere. When they differ and `needed_kw` alone would
+    /// have fitted, the margin is the reason and the message shows both so a
+    /// reader can see it rather than infer it.
     #[error(
-        "that needs {needed_kw} kW and the largest plant this planner lays out generates \
-         {plant_kw} kW"
+        "that needs {needed_kw} kW -- sized with headroom to {sized_kw} kW -- and the largest \
+         plant this planner lays out generates {plant_kw} kW"
     )]
     #[diagnostic(
         code(planner::power_plant_too_small),
@@ -738,7 +749,11 @@ pub enum PlannerError {
              different water"
         )
     )]
-    PowerPlantTooSmall { needed_kw: f64, plant_kw: f64 },
+    PowerPlantTooSmall {
+        needed_kw: f64,
+        sized_kw: f64,
+        plant_kw: f64,
+    },
 
     /// The poles reach, and what they reach is not big enough.
     ///

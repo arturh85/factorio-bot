@@ -31,15 +31,43 @@ opt-level = "s"
 
 
 # defaults: https://doc.rust-lang.org/cargo/reference/profiles.html#dev
+# THIS is the profile everything should be built with. `cargo build` and
+# `cargo test` are the working commands; `--release` is for CI and
+# `cargo release` only. Measured 2026-09-07, see
+# docs/superpowers/notes/2026-09-07-what-a-build-profile-costs-the-loop.md
+#
+# `opt-level = 1` on OUR crates is the whole reason this is viable, and it is
+# the one setting that must not go back to 0. The offline `plan` loop -- which
+# is what this project iterates in -- costs 1.2 s of cpu here against 6.2 s at
+# `opt-level = 0`, and 1.3 s on the shipped fat-LTO release binary. So a plain
+# `cargo build` now plans as fast as `--release` did, which is what made the
+# "always use --release" habit necessary in the first place. That 4.8x is
+# exactly the "debug is 4-7x slower" figure CLAUDE.md records; it belongs to
+# `opt-level = 0` alone and one notch removes all of it.
+#
+# It is nearly free to build: a warm rebuild after touching one leaf file is
+# ~5 cpu-seconds at EVERY opt-level (0, 1, 2 and 3 all measured at 4.3-5.4),
+# because what makes a rebuild expensive is fat LTO, not optimisation. The
+# release profile pays ~60 cpu for the same edit.
 [profile.dev]
 incremental = true
-opt-level = 0
+opt-level = 2
 
 
-# override the optimization level of dependencies.
-# You can use that feature to optimize all dependencies for size while keeping the top crate unoptimized and debugger friendly.
+# Dependencies are built ONCE and then served by sccache, so optimising them is
+# close to free and buys runtime in exactly the places tests and the planner
+# spend it (serde, parsing an 865 MB world dump). Our own crates recompile on
+# every edit; these do not. That asymmetry is the point.
+#
+# `opt-level = "z"` was the old value and it was the wrong setting twice over:
+# it optimises dependency code for SIZE, which costs runtime, while not being
+# meaningfully cheaper to compile than 2 -- and it does not shrink the dev
+# binary, which carries 228 MB of debug info regardless.
+#
+# `debug = false` stays: debug info on dependencies is what nobody steps into.
+debug = true
 [profile.dev.package."*"]
-opt-level = "z"
+opt-level = 3
 debug = false
 
 # git-cliff config: https://github.com/orhun/git-cliff#configuration-file

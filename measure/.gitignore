@@ -1,0 +1,11 @@
+# Measurement artefacts, not results. The results live in the .tsv files and in
+# the note; these are the raw material and are large (each td-* is 3-4 GB, and
+# the opt-level-0 one is bigger still).
+td-*/
+tdd-*/
+last-*.log
+t-*.txt
+plan-*.log
+round*.out
+round*.done
+results.tsv

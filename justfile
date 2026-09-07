@@ -10,16 +10,16 @@ start:
 # alongside this). `--all-features` also builds this but drags tokio-console
 # in with it -- use this recipe or `--features viewer` instead.
 serve *ARGS:
-    cargo run --release --no-default-features --features viewer -- serve --web-root app/dist {{ARGS}}
+    cargo run --no-default-features --features viewer -- serve --web-root app/dist {{ARGS}}
 
 repl *ARGS:
     cargo repl {{ARGS}}
 
 factorio *ARGS:
-    cargo run --release --no-default-features --features cli,repl -- start -v {{ARGS}}
+    cargo run --no-default-features --features cli,repl -- start -v {{ARGS}}
 
 lua SCRIPT *ARGS:
-    cargo run --release --no-default-features --features cli,lua -- lua {{SCRIPT}} {{ARGS}}
+    cargo run --no-default-features --features cli,lua -- lua {{SCRIPT}} {{ARGS}}
 
 # The benchmark seed. Fixed, written down, and deliberately NOT chosen for
 # being a good map.
@@ -59,6 +59,17 @@ BENCHMARK_SEED := "31337"
 # roster, because the roster is half of what the number means.
 BENCH_CLIENTS := "4"
 
+# THE ONE RECIPE THAT KEEPS `--release`, and it keeps it on purpose.
+#
+# Every other recipe here dropped `--release` on 2026-09-07 because a plain
+# `cargo build` now plans as fast as a release binary and rebuilds 13x cheaper
+# (docs/superpowers/notes/2026-09-07-what-a-build-profile-costs-the-loop.md).
+# A MEASURED run is the exception: it has to be built the way the deliverable
+# is built, or the number describes a binary nobody ships. That constraint did
+# not go away when the default changed -- it just became the thing that has to
+# be said out loud, which is what this comment is for.
+#
+# Same reasoning as BENCH_CLIENTS above: state it, do not inherit it.
 bench SCRIPT *ARGS:
     cargo run --release --no-default-features --features cli,lua -- lua {{SCRIPT}} --seed {{BENCHMARK_SEED}} --new --clients {{BENCH_CLIENTS}} {{ARGS}}
 
@@ -91,7 +102,7 @@ headless SCRIPT *ARGS:
 
 # Fast iteration: connect to already-running Factorio (start with 'just factorio' first)
 lua-connect SCRIPT *ARGS:
-    cargo run --release --no-default-features --features cli,lua -- lua --connect {{SCRIPT}} {{ARGS}}
+    cargo run --no-default-features --features cli,lua -- lua --connect {{SCRIPT}} {{ARGS}}
 
 # Verify only -- never rewrites a file. Safe to run on a dirty tree, and safe
 # when more than one person or agent is working in the same checkout.

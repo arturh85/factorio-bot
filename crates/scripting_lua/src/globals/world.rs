@@ -14,7 +14,7 @@ use factorio_bot_core::mlua::prelude::*;
 use factorio_bot_core::plan::planner::Planner;
 use factorio_bot_core::scripts::resolve_write_path;
 use factorio_bot_core::serde_json;
-use factorio_bot_core::types::{FactorioBlueprintInfo, PlayerId};
+use factorio_bot_core::types::{FactorioBlueprintInfo, PlayerId, Rect};
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -22,6 +22,7 @@ use std::sync::Arc;
 
 use super::goal::BufferRefresher;
 use super::{path_error, position_from_lua, relative_to};
+use crate::blocked::blocked_boxes_report;
 
 /// Says what the buffer read before a dump found, or why there was none.
 ///
@@ -294,6 +295,65 @@ end
             },
         )?,
     )?;
+    let world = _world.clone();
+    map_table.set(
+        "__doc_entry_blocked_boxes",
+        String::from(
+            r#"
+--- what the world model believes blocks building over a rectangle
+-- Reads the entity graph's *blocked* tree, which is a different structure from
+-- the one `world.find_entities_in_radius` reads. That one holds a whitelist of
+-- entity types -- furnaces, inserters, belts, containers, the two big rocks --
+-- because it models a factory; trees, small rocks, cliffs, units and water
+-- never enter it. The blocked tree holds every collision box the model has
+-- been told about, which is what a build refusal is decided against.
+--
+-- **The boxes are anonymous, and this does not invent a name for them.** The
+-- tree stores one bit per box, `minable` (the entity's type was `tree` or
+-- `simple-entity`), and no name at all, so each box comes back reading
+-- "a box, minable, source unknown". A refusal that recited "a tree, cliff,
+-- rock or unit" named four things it had not read, and named a tree at a tile
+-- the game said held nothing but ore.
+--
+-- **Read `coverage` before `boxes`.** An empty `boxes` means the ground is
+-- clear only when `coverage` is `"charted"`. `"unknown"` means no tile of the
+-- rectangle has ever been written out to the model, so the empty list says
+-- nothing whatever about the ground; `"partial"` means some of it was;
+-- `"outside_model"` means the rectangle leaves the region the index covers at
+-- all.
+--
+-- Every field is always present and `boxes` is always a table, so
+-- `for _, b in ipairs(result.boxes)` is safe with no guard. Nothing here is
+-- ever nil.
+--
+-- Answered from the model this process already holds -- no RCON round trip.
+-- Diff it against `rcon.find_entities_filtered` over the same rectangle to see
+-- where the model and the game disagree; `scripts/blocked_diff.lua` does
+-- exactly that.
+--
+-- The rectangle is widened to whole tiles and the widened one is returned as
+-- `area`. Asking about more than 16384 tiles (128x128) is an error, as is a
+-- rectangle with a swapped corner.
+-- @param left_top `types.Position` top-left corner of the rectangle
+-- @param right_bottom `types.Position` bottom-right corner of the rectangle
+-- @return `types.BlockedBoxReport`
+function world.blocked_boxes(left_top, right_bottom)
+end
+"#,
+        ),
+    )?;
+    map_table.set(
+        "blocked_boxes",
+        lua.create_function(move |lua, (left_top, right_bottom): (LuaTable, LuaTable)| {
+            let left_top = position_from_lua(&left_top, "left_top")?;
+            let right_bottom = position_from_lua(&right_bottom, "right_bottom")?;
+            let area = Rect::new(&left_top, &right_bottom);
+            let report = blocked_boxes_report(&world.entity_graph, &area)
+                .map_err(|err| LuaError::RuntimeError(err.to_string()))?;
+            lua.to_value(&report)
+        })?,
+    )?;
+
     let world = _world.clone();
     map_table.set(
         "__doc_entry_draw",

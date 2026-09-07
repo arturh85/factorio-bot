@@ -105,3 +105,37 @@ call site, two frames above.
 
 The tell was available cheaply: `grep -n drills_are_fed` shows one non-test
 call site. I ran it only after deciding to change the function.
+
+## An anomaly from the night before, now explained
+
+The first attempt to re-measure the T-junction ratio built all three variants
+on one map in sequence, and the numbers were wrong. I diagnosed it at the time
+as *"the second sited on ground the first changed"* and fixed the methodology
+by giving each variant its own map. The workaround was right and the diagnosis
+was not.
+
+The second block's anchor was not *influenced* by the first block's ground. It
+was **read off the first block** — `recover_anchor` found two of the second
+blueprint's entities standing inside the first and returned an anchor there,
+which is why the third variant landed somewhere that made no sense as a search
+result. It could not have been a search result; no search ran.
+
+Two consequences worth stating plainly:
+
+- **Every measurement taken with one block per fresh map is unaffected.**
+  Crosstalk needs two different blocks on one map, and the per-map discipline
+  adopted for the wrong reason happens to be exactly the right control.
+- **A block replanned within its own run is also unaffected.** That is
+  recovery working as designed — `ore_to_plate_tee.lua` plans twice on
+  purpose, and the second pass recovering its *own* anchor is the behaviour
+  that stops a half-built block restarting elsewhere.
+
+So the published numbers stand. What does not stand is any future run that
+puts two of these fixtures on one map, and there is now a test naming which
+pairs collide.
+
+**The lesson is about the workaround, not the bug.** A fix that makes the
+symptom go away also removes the evidence, and a plausible cause attached to a
+working fix is very hard to revisit — it took a separate investigation, chasing
+something else, to find out what the workaround had actually been working
+around.

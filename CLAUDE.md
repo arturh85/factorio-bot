@@ -686,6 +686,20 @@ declaration in `app/src/api/types.ts` via `objectContract<T>`. Adding a field
 in Rust fails the Rust snapshot test until regenerated, then fails the
 TypeScript contract test until mirrored. Neither half can drift quietly.
 
+**But a THIRD place can, and did (2026-09-07).** `vitest` does **not**
+type-check — it strips types and runs. So a test *helper* that constructs a
+`FactorioEntity` literal can go stale when a field is added, and every test
+still passes while `tsc --noEmit` fails. `MapEntities.spec.ts` sat broken on
+master exactly that way after `input_inventory` and `transport_lines` landed:
+`cargo test --workspace` green, `pnpm test` green, **`pnpm lint` red**.
+
+Two consequences worth internalising. **`pnpm lint` is part of the seam, not a
+style pass** — run it before calling a frontend-touching change done. And a
+type error in a file `git status` reports as *clean* is not evidence of
+anything: a committed file can be committed-broken. Asking "is this file
+dirty?" answers a different question from "does this compile", and that
+substitution has already produced one confident wrong dismissal here.
+
 ### Logging: two systems, on purpose
 
 **Narration is `paris`, on stdout. Diagnostics are `tracing`, on stderr.**

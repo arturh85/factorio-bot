@@ -83,7 +83,73 @@ local todo_next_tick_other = {}
 -- `storage.craft_actions` now -- see `craft_actions()`.
 local recent_item_additions   = {} -- recent_item_additions[character_index].{tick,itemlist,recipe?,action_id?}, itemlist = { {"foo",2}, {"bar",17} }
 
+-- Which chunks have already had their ground written out, so `writeout_tiles`
+-- runs once per chunk instead of on every regeneration.
+--
+-- **The key carries the SURFACE, and that is not cosmetic.** It was
+-- `chunk_x.."/"..chunk_y` until 2026-09-07, so Nauvis chunk (0,0) would have
+-- suppressed the tiles writeout for chunk (0,0) on **every other surface** --
+-- silently, because a suppressed writeout looks exactly like a chunk that was
+-- never generated. That is the shape this repo keeps paying for: a key that
+-- does not carry its own scope. `POLE_WIRE_REACH_TILES` was documented as "a
+-- small pole's" and used as every pole's; `0.84` was "the accumulator ratio"
+-- and used as the average.
+--
+-- The Nauvis guard in `on_chunk_generated` meant this could not fire yet. It is
+-- fixed anyway and ahead of the guard coming off, because the guard's own
+-- comment names this as one of the two reasons it still stands that **fail
+-- silently** -- and a latent silent failure is not a smaller bug than a live
+-- one, it is a live one waiting for the commit that removes the `if`.
+--
+-- A module local rather than `storage`, so it resets on save/load and a
+-- reloaded save re-writes ground it had already sent. That is pre-existing and
+-- harmless -- the tile tree is keyed by position and a rewrite is idempotent --
+-- and it is not what this key was about.
 local tile_chunks = {}
+
+-- The bounding box of the charted chunks **of one surface**, created on first
+-- use.
+--
+-- `storage.map_area` was a single `{x1,y1,x2,y2}` across every surface until
+-- 2026-09-07. A space platform's coordinates are its own frame -- that is the
+-- whole reason `SurfaceId` went on the container and not on `Position` -- so a
+-- union of a Nauvis rectangle and a platform rectangle describes no region of
+-- anything, and with ten surfaces it is meaningless rather than merely wrong.
+--
+-- **Nothing reads this field.** Not the mod, not `crates/`, not `scripts/`, not
+-- the frontend -- checked by grep on 2026-09-07, which finds only this write,
+-- the `on_init` initialiser, and four test stubs. So this is not a fix for an
+-- observed wrong answer; it is a keyed-by-scope container put in ahead of the
+-- Nauvis guard coming off, and it can only be tested for its own shape. It is
+-- named in that guard's comment as one of the reasons the guard stands.
+--
+-- **The shape change migrates itself rather than needing a version bump.**
+-- `storage` survives save/load, so a save taken before today holds the flat
+-- box; an `x1` at the top level is the tell, and the old union is discarded
+-- rather than split, because there is no honest way to attribute it to a
+-- surface and no reader that would miss it.
+function map_area_of(surface)
+	if storage.map_area == nil or storage.map_area.x1 ~= nil then
+		storage.map_area = {}
+	end
+	local area = storage.map_area[surface.name]
+	if area == nil then
+		area = { x1 = 0, y1 = 0, x2 = 0, y2 = 0 }
+		storage.map_area[surface.name] = area
+	end
+	return area
+end
+
+-- True the first time this surface's chunk at (`chunk_x`, `chunk_y`) is seen,
+-- false every time after. Named and separate from `on_chunk_generated` so the
+-- scoping can be tested across two surfaces without lifting the Nauvis guard,
+-- which no test may do.
+function ground_chunk_first_seen(surface, chunk_x, chunk_y)
+	local key = surface.name .. "/" .. chunk_x .. "/" .. chunk_y
+	if tile_chunks[key] ~= nil then return false end
+	tile_chunks[key] = true
+	return true
+end
 
 function inventory_type_name(invtype, enttype)
 	local burner = {
@@ -294,7 +360,7 @@ function on_init()
 	storage.resources.last_index = 0
 	storage.resources.list = {} -- might be sparse, so the #-operator won't work
 	storage.resources.map = {}
-	storage.map_area = {x1=0, y1=0, x2=0, y2=0} -- a bounding box of all charted map chunks
+	storage.map_area = {} -- surface name -> bounding box of its charted chunks, see `map_area_of`
 	storage.p = {} -- player-private data
 	storage.bots = {} -- character bots, see `bot_handle`
 	storage.pathfinding = {}
@@ -1999,12 +2065,21 @@ function on_chunk_generated(event)
 	-- `ground_header` since today. What blocks lifting it is no longer
 	-- serialisation, and each of these is a separate piece of work:
 	--
-	--   1. `tile_chunks` (line 86) is keyed `chunk_x.."/"..chunk_y` with **no
-	--      surface in the key**, so Nauvis chunk (0,0) would suppress the tiles
-	--      writeout for chunk (0,0) on every other surface -- and silently.
-	--   2. `storage.map_area` is ONE bounding box over all charted chunks. A
-	--      space platform at its own coordinates would stretch it and the
-	--      512-tile clamps above would then be applied to the union.
+	--   1. DONE 2026-09-07. `tile_chunks` was keyed `chunk_x.."/"..chunk_y`
+	--      with no surface, so Nauvis chunk (0,0) would have suppressed the
+	--      tiles writeout for chunk (0,0) on every other surface -- silently.
+	--      `ground_chunk_first_seen` carries the surface name in the key now
+	--      and is tested across two surfaces in
+	--      `crates/core/tests/botbridge_surface_guard.rs`.
+	--   2. DONE 2026-09-07. `storage.map_area` was ONE bounding box over all
+	--      charted chunks, so a space platform at its own coordinates would
+	--      have stretched Nauvis's rectangle over a frame it shares nothing
+	--      with. It is keyed by surface name now (`map_area_of`). The 512-tile
+	--      clamps just above are per CHUNK and always were -- they reject the
+	--      chunk before the box is touched -- so they were never applied to a
+	--      union; that part of the report was imprecise.
+	--      **Nothing reads this field**, in the mod or anywhere downstream, so
+	--      the fix is shape-only and no measurement can confirm it.
 	--   3. The initial-discovery replay is hard-coded to `game.surfaces[1]` at
 	--      both ends (collection ~line 1332, replay ~line 1364), so on a LOADED
 	--      save -- which generates no chunks at all, and where this guard has
@@ -2014,9 +2089,10 @@ function on_chunk_generated(event)
 	--      surface's graph, and `FactorioWorld::only_surface()` refuses on a
 	--      multi-surface world, so `factorio-bot lua` cannot start against one.
 	--
-	-- So the guard is now a stand-in for four unported call sites rather than
-	-- for a missing field. Do not lift it without 1 and 2 at minimum: those two
-	-- fail silently, which is the failure mode this file keeps paying for.
+	-- So the guard is now a stand-in for unported call sites rather than for a
+	-- missing field. Of the two that fail SILENTLY, 1 is closed and 2 is not,
+	-- so do not lift it without 2 at minimum -- silent failure is the mode this
+	-- file keeps paying for.
 	--
 	-- It used to `print("unknown surface")`, which is NOT a writeout: it
 	-- carries no `§tick§key§` envelope, so it reached the server log and no
@@ -2045,15 +2121,14 @@ function on_chunk_generated(event)
 	if chunk_xend > 512 then return end
 	if chunk_yend > 512 then return end
 
-	if chunk_x < storage.map_area.x1 then storage.map_area.x1 = chunk_x end
-	if chunk_y < storage.map_area.y1 then storage.map_area.y1 = chunk_y end
-	if chunk_xend > storage.map_area.x2 then storage.map_area.x2 = chunk_xend end
-	if chunk_yend > storage.map_area.y2 then storage.map_area.y2 = chunk_yend end
+	local map_area = map_area_of(surface)
+	if chunk_x < map_area.x1 then map_area.x1 = chunk_x end
+	if chunk_y < map_area.y1 then map_area.y1 = chunk_y end
+	if chunk_xend > map_area.x2 then map_area.x2 = chunk_xend end
+	if chunk_yend > map_area.y2 then map_area.y2 = chunk_yend end
 
 	writeout_entities(event.tick, surface, area)
-	local chunk_id = chunk_x .. "/" .. chunk_y
-	if tile_chunks[chunk_id] == nil then
-		tile_chunks[chunk_id] = true
+	if ground_chunk_first_seen(surface, chunk_x, chunk_y) then
 		writeout_tiles(event.tick, surface, area)
 	end
 

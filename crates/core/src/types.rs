@@ -1801,6 +1801,49 @@ pub struct FactorioEntityPrototype {
     /// exactly that for all 1028 prototypes of a live game.
     #[serde(default)]
     pub maximum_wire_distance: Option<f64>,
+    /// How much fluid an **offshore pump produces, or a normal pump moves, per
+    /// TICK** — `20` for both of vanilla's, i.e. 1,200 per second. Use
+    /// [`Self::pumping_speed_per_second`] rather than scaling it at a call
+    /// site.
+    ///
+    /// # The unit is per tick, and that is measured
+    ///
+    /// The prototype stage documents `pumping_speed` as "How many units of
+    /// fluid are produced per tick" and `base/prototypes/entity/entities.lua`
+    /// writes `20` for `offshore-pump` and for `pump`. The *runtime* method
+    /// answers the same `20` on a live 2.1.17 game (2026-09-07), so it did not
+    /// convert on the way out.
+    ///
+    /// **Checked against the running game and not only against the docs**: an
+    /// offshore pump piped into a storage tank filled it 3,964.84 units in
+    /// each of two consecutive 203-tick windows, i.e. **19.53 units/tick** —
+    /// 97.7% of 20, the pipe run taking the rest. Read as per *second* that
+    /// same figure is 60x wrong, and every doc string would still have agreed.
+    /// A units error of exactly this shape (`mining_speed / mining_time`
+    /// counting *operations*, not items) hid in [`FlowGraph`]'s drill arm for
+    /// months, because every solid ore yields one item per operation.
+    ///
+    /// # It is a method on the runtime API, and there is no attribute
+    ///
+    /// `LuaEntityPrototype::get_pumping_speed(quality)`, subclasses
+    /// `OffshorePump` and `Pump`. Reading `entity.pumping_speed` on a live
+    /// server raises `LuaEntityPrototype doesn't contain key pumping_speed.`
+    /// — measured, not recalled — the mod's `pcall` swallows it, and the field
+    /// arrives `None` for every prototype in the game with nothing saying it
+    /// should not have. See [`Self::crafting_speed`], which did exactly that
+    /// for 1028 prototypes of a live game.
+    ///
+    /// # `None` is *the sender did not say*
+    ///
+    /// `default`, so every world dumped before 2026-09-07 reads `None` —
+    /// including the 2.94 GB world-record census this rate was measured
+    /// against. `crates/core/src/graph/flow_graph.rs` falls back to a
+    /// **vanilla table keyed by prototype name** on exactly that answer, the
+    /// same shape `crates/planner/src/state.rs` uses for
+    /// [`Self::maximum_wire_distance`], and warns and emits no flow for a pump
+    /// it has never heard of rather than inventing a rate for it.
+    #[serde(default)]
+    pub pumping_speed: Option<f64>,
     /// A **beacon's** `distribution_effectivity`: the fraction of a module's
     /// effect a receiver in range actually gets. `None` for anything that is
     /// not a beacon.
@@ -2403,6 +2446,18 @@ impl FactorioEntityPrototype {
     pub fn energy_usage_kw(&self) -> Option<f64> {
         self.electric_energy_usage
             .map(|joules_per_tick| joules_per_tick * TICKS_PER_SECOND / 1000.)
+    }
+
+    /// [`Self::pumping_speed`] in fluid units **per second**, or `None` when
+    /// the sender did not say.
+    ///
+    /// The one place the x60 happens, so no call site can pick a different
+    /// conversion. `20` per tick is `1200.0` here, which is what the game
+    /// shows on an offshore pump.
+    #[must_use]
+    pub fn pumping_speed_per_second(&self) -> Option<f64> {
+        self.pumping_speed
+            .map(|per_tick| per_tick * TICKS_PER_SECOND)
     }
 
     /// [`Self::max_energy_production`] in kW, or `None` when the sender did
@@ -3333,11 +3388,52 @@ mod tests {
             solar_panel_performance_at_day: None,
             solar_panel_performance_at_night: None,
             electric_buffer_capacity: None,
+            pumping_speed: None,
         }
     }
 
     fn character_mines(categories: &[&str]) -> Vec<String> {
         categories.iter().map(|c| (*c).to_string()).collect()
+    }
+
+    /// **The wire carries fluid per TICK; this helper is the only place it
+    /// becomes per second.**
+    ///
+    /// Vanilla's `20` is the value the live 2.1.17 game returns from
+    /// `get_pumping_speed()` and the value `base/prototypes/entity/
+    /// entities.lua` writes, and `1200.0` is what the game shows on an
+    /// offshore pump. Checked live rather than only against the docs: a pump
+    /// piped into a storage tank delivered **19.53 units/tick** over two
+    /// consecutive 203-tick windows, so a per-second reading of the same `20`
+    /// would have been 60x wrong with every doc string still agreeing.
+    ///
+    /// The second row is the non-accidental pairing. `20 -> 1200` alone is
+    /// satisfied by a table keyed on 20; `0.5 -> 30` can only come from a
+    /// multiplication, and a `/60` gives 0.008333 for it. And `None` must stay
+    /// `None`: *the sender did not say* is not zero throughput, and the
+    /// fallback that handles it lives in the flow graph, keyed by prototype
+    /// name.
+    #[test]
+    fn a_pumping_speed_crosses_from_per_tick_to_per_second() {
+        let mut pump = resource_prototype("offshore-pump", "offshore-pump");
+        assert_eq!(
+            pump.pumping_speed_per_second(),
+            None,
+            "the sender did not say -- not zero, and not a vanilla default \
+             invented down here where the prototype's name is not consulted"
+        );
+        pump.pumping_speed = Some(20.);
+        assert_eq!(
+            pump.pumping_speed_per_second(),
+            Some(1_200.),
+            "vanilla's 20 per tick is the 1,200 per second the game shows"
+        );
+        pump.pumping_speed = Some(0.5);
+        assert_eq!(
+            pump.pumping_speed_per_second(),
+            Some(30.),
+            "x60, not a lookup: half a unit a tick is thirty a second"
+        );
     }
 
     /// The game's rule: a resource whose category the character does not

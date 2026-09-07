@@ -1716,6 +1716,75 @@ fn an_unconnectable_prototype_reports_zero_rather_than_nothing() {
     );
 }
 
+/// **A pump's speed crosses the bridge, and it comes from the METHOD.**
+///
+/// `crates/core/src/graph/flow_graph.rs`'s `OffshorePump` arm emitted a flat
+/// `1.` fluid per second from the day the file was written, against the game's
+/// 20 per tick. That is a factor of 1,200, and it made water the largest wrong
+/// number in the model: 600/min supplied on the world-record base against
+/// 68,250/min the machines the game has configured were eating.
+///
+/// **The trap this fixture holds shut is the same one the pole's wire reach
+/// has**, and it is not hypothetical here — measured on a live 2.1.17 server
+/// on 2026-09-07, `entity.pumping_speed` raises
+/// `LuaEntityPrototype doesn't contain key pumping_speed.` and
+/// `entity.get_pumping_speed()` answers `20`. So the fixture carries a *decoy*
+/// attribute holding a different number: a serialiser reading the attribute
+/// would pass a test asserting only "some number arrived", would fail here,
+/// and on the live game would raise, be swallowed by the mod's `pcall`, and
+/// report `None` for every prototype in the game in silence.
+///
+/// **The unit is per tick and stays per tick across the wire.** 20, not 1,200.
+/// `FactorioEntityPrototype::pumping_speed_per_second` is where the x60 lives.
+#[test]
+fn a_serialised_pump_carries_its_speed_per_tick_from_the_method() {
+    let lua = botbridge_types();
+    let pump = machine_prototype(&lua, "offshore-pump", "offshore-pump");
+    pump.set(
+        "get_pumping_speed",
+        lua.create_function(|_, ()| Ok(20.0)).expect("function"),
+    )
+    .expect("set");
+    // The spelling that exists at the DATA stage and nowhere on
+    // `LuaEntityPrototype`, carrying a number no correct read can produce.
+    pump.set("pumping_speed", 7.0).expect("set");
+
+    let prototype = prototype_through_serde(&lua, pump);
+    assert_eq!(
+        prototype.pumping_speed,
+        Some(20.0),
+        "read through get_pumping_speed(); 7 sits on the data-stage attribute \
+         name the live API lacks",
+    );
+    assert_eq!(
+        prototype.pumping_speed_per_second(),
+        Some(1_200.0),
+        "and the conversion happens once, downstream -- the wire is per tick",
+    );
+}
+
+/// The other half: **an entity that is not a pump says nothing about pumping.**
+///
+/// `get_pumping_speed()` carries `subclasses` `OffshorePump` and `Pump`, so it
+/// raises on anything else and the mod's `pcall` is the whole gate — the same
+/// shape `get_supply_area_distance()` relies on, and the opposite of
+/// `get_max_wire_distance()`, which answers 0 for everything.
+///
+/// `Some(0.0)` would claim a pump that moves nothing; `None` is *the sender did
+/// not say*, which is every world dumped before 2026-09-07 and is the only
+/// answer `flow_graph`'s vanilla fallback fires on.
+#[test]
+fn a_prototype_that_is_not_a_pump_reports_no_pumping_speed() {
+    let lua = botbridge_types();
+    let furnace = machine_prototype(&lua, "stone-furnace", "furnace");
+    assert_eq!(
+        prototype_through_serde(&lua, furnace).pumping_speed,
+        None,
+        "the method is absent on a furnace exactly as it raises on the live \
+         game, and absence must not become a zero",
+    );
+}
+
 /// A prototype table shaped like the live API presents a machine: a square
 /// collision box, plus whatever `extra` the caller wants set on it.
 fn machine_prototype(lua: &Lua, name: &str, entity_type: &str) -> Table {
@@ -2321,10 +2390,7 @@ fn surface_through_serde(
 #[test]
 fn a_surface_on_a_planet_names_the_planet() {
     let lua = botbridge_types();
-    let info = surface_through_serde(
-        &lua,
-        surface_table(&lua, "vulcanus-2", 3, Some("vulcanus")),
-    );
+    let info = surface_through_serde(&lua, surface_table(&lua, "vulcanus-2", 3, Some("vulcanus")));
     assert_eq!(info.name, "vulcanus-2");
     assert_eq!(info.index, 3);
     assert_eq!(

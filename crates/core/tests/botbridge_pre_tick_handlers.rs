@@ -68,6 +68,13 @@ const PRELUDE: &str = r#"
     }
 
     _surface = {
+        -- `name` is not optional on a `LuaSurface`, and since 2026-09-07 the
+        -- mod keys `tile_chunks` and `storage.map_area` by it so a second
+        -- surface cannot silently suppress the first's ground or stretch its
+        -- bounding box. A stub without it is a surface the game cannot
+        -- produce, and it raised `table index is nil` here rather than
+        -- reporting anything about pre-tick handlers.
+        name = "nauvis",
         index = 1,
         find_entity = function() return nil end,
         find_entities_filtered = function() return {} end,

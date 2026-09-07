@@ -256,6 +256,7 @@ mod tests {
             solar_panel_performance_at_day: None,
             solar_panel_performance_at_night: None,
             electric_buffer_capacity: None,
+            pumping_speed: None,
         }
     }
 
@@ -479,6 +480,7 @@ mod tests {
             solar_panel_performance_at_day: None,
             solar_panel_performance_at_night: None,
             electric_buffer_capacity: None,
+            pumping_speed: None,
         });
         assert!(
             !snapshot.is_plannable(),
@@ -533,6 +535,7 @@ mod tests {
             solar_panel_performance_at_day: None,
             solar_panel_performance_at_night: None,
             electric_buffer_capacity: None,
+            pumping_speed: None,
         });
         snapshot.item_prototypes.push(FactorioItemPrototype {
             name: "iron-plate".into(),

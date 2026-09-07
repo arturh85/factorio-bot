@@ -8,9 +8,9 @@ use crate::errors::{
 use crate::factorio::snapshot::{GeneratedChunks, WorldSnapshot};
 use crate::factorio::ticks::{ActionTicks, take_tick_stamp};
 use crate::factorio::util::{
-    add_to_rect, blueprint_build_area, build_entity_path, calculate_distance, hashmap_to_lua,
-    map_blocked_tiles, move_pos, move_position, position_to_lua, rect_to_lua, span_rect,
-    str_to_lua, value_to_lua, vec_to_lua, vector_add, vector_multiply, vector_normalize,
+    add_to_rect, blueprint_build_area_at, build_entity_path, calculate_distance, entities_to_clear,
+    hashmap_to_lua, map_blocked_tiles, move_pos, move_position, position_to_lua, rect_to_lua,
+    span_rect, str_to_lua, value_to_lua, vec_to_lua, vector_add, vector_multiply, vector_normalize,
     vector_substract,
 };
 use crate::factorio::world::{
@@ -3791,22 +3791,33 @@ impl FactorioRcon {
         }
         // TODO: move inventory players close too
 
-        let build_area = blueprint_build_area(world.globals.entity_prototypes.clone(), &blueprint);
-        let width_2 = build_area.width() / 2.0;
-        let height_2 = build_area.height() / 2.0;
-        let build_area = Rect {
-            left_top: Position::new(position.x() - width_2, position.y() - height_2),
-            right_bottom: Position::new(position.x() + width_2, position.y() + height_2),
-        };
-        let build_area_entities = self
-            .find_entities_filtered(&AreaFilter::Rect(build_area.clone()), None, None)
-            .await?;
+        // **A ghost stamp clears nothing.** Ghosts do not collide, so there is
+        // no footprint to make room for and nothing this call is about to
+        // build. The sweep below exists for a real bulk build, and under
+        // `only_ghosts` it was pure destruction: `ActionKind::StampGhosts`
+        // mined the power poles the same plan had just placed, silently, and
+        // the run still ended `done=true failed=0 lost=0 pending=0` -- mining
+        // is not a failure of anything, so every counter stayed green over a
+        // block with no power. Reproduced twice live on seed 31337; see
+        // `docs/superpowers/notes/2026-09-07-the-stamp-mines-the-pole-run.md`.
+        //
+        // The executor's `stamp_ghosts` is the only caller that passes
+        // `only_ghosts = true`, and the guard its doc used to rely on
+        // (`method::blueprint`'s `is_fresh_site`) covers the *block's own*
+        // entities and nothing else -- a pole belonging to the plan but not to
+        // the blueprint is invisible to it. This is the version that does not
+        // depend on a planner-side promise.
+        if !only_ghosts {
+            let build_area = blueprint_build_area_at(
+                world.globals.entity_prototypes.clone(),
+                &blueprint,
+                position,
+            );
+            let build_area_entities = self
+                .find_entities_filtered(&AreaFilter::Rect(build_area.clone()), None, None)
+                .await?;
 
-        for entity in build_area_entities {
-            if entity.name != "character"
-                && entity.entity_type != "resource"
-                && build_area.contains(&entity.position)
-            {
+            for entity in entities_to_clear(build_area_entities, &build_area) {
                 warn!(
                     "mining entity in build area: {} @ {}/{}",
                     entity.name,

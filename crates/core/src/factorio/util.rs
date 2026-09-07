@@ -207,6 +207,56 @@ pub fn expand_rect(total_rect: &mut Rect, rect: &Rect) {
     }
 }
 
+/// [`blueprint_build_area`] **translated onto the ground the block will
+/// actually occupy** when stamped at `position`.
+///
+/// The distinction is the whole of a live defect
+/// (`docs/superpowers/notes/2026-09-07-the-stamp-mines-the-pole-run.md`).
+/// `blueprint_build_area` answers in the blueprint's **own offset space**,
+/// where the entities need not straddle the origin at all -- `MinerLine`'s
+/// span begins three tiles east of it. The build sweep used to throw that
+/// position away and re-centre a *same-sized* rectangle on the anchor, which
+/// is only the same rectangle for a blueprint that happens to be centred on
+/// its own origin. Measured live with two markers that are each other's
+/// control: a chest 6.5 tiles clear of the block was mined, and a chest inside
+/// the block's own footprint survived. **It cleared the wrong ground in both
+/// directions**, which is also why "keep things outside the footprint" was
+/// never a workaround -- the ground at risk was not the footprint.
+pub fn blueprint_build_area_at(
+    entity_prototypes: Arc<DashMap<String, FactorioEntityPrototype>>,
+    blueprint: &str,
+    position: &Position,
+) -> Rect {
+    add_to_rect(
+        &blueprint_build_area(entity_prototypes, blueprint),
+        position,
+    )
+}
+
+/// The entities a **real** build's clearing sweep would mine, out of what the
+/// area query returned.
+///
+/// Two exclusions, and they are the only ones: a `character` is a bot and is
+/// not the sweep's to remove, and a `resource` is ore, which a blueprint is
+/// usually placed *on top of* rather than instead of. Everything else standing
+/// on ground the block is about to occupy has to go, because the game will
+/// otherwise refuse the placement.
+///
+/// The position test is not redundant with the query.
+/// `find_entities_filtered` answers by **bounding-box overlap**, so it hands
+/// back entities whose own position lies outside the rectangle; mining those
+/// would reach beyond the footprint.
+pub fn entities_to_clear(entities: Vec<FactorioEntity>, build_area: &Rect) -> Vec<FactorioEntity> {
+    entities
+        .into_iter()
+        .filter(|entity| {
+            entity.name != "character"
+                && entity.entity_type != "resource"
+                && build_area.contains(&entity.position)
+        })
+        .collect()
+}
+
 pub fn blueprint_build_area(
     entity_prototypes: Arc<DashMap<String, FactorioEntityPrototype>>,
     blueprint: &str,

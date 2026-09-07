@@ -2948,6 +2948,24 @@ impl std::error::Error for ActionFailure {}
 /// ([`take_tick_stamp`]) reads a tick off a reply, whoever wrote it.
 pub const GAME_TICK_QUERY: &str = "/silent-command rcon.print(\"§tick§\"..game.tick)";
 
+/// Is this a plain Factorio name, safe to place inside a Lua string literal?
+///
+/// Conservative by design: letters, digits, space, `_`, `-` and `.` and
+/// nothing else. Every prototype name in the game is a subset of this, and a
+/// caller-chosen platform name has no reason to leave it.
+///
+/// **Rejecting is the safe direction here.** A name this refuses costs a
+/// caller a rename; a name it wrongly admits closes a Lua string literal
+/// inside a `/silent-command` and hands the game arbitrary code. Empty is
+/// refused too -- an empty name is never intended, and letting one through
+/// would produce a Lua literal that parses and means nothing.
+fn is_safe_lua_name(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '_' | '-' | '.'))
+}
+
 /// The prefix a [`FactorioRcon::create_space_platform`] reply carries.
 pub const PLATFORM_STAMP_PREFIX: &str = "§platform§";
 
@@ -5447,6 +5465,34 @@ impl FactorioRcon {
         planet: &str,
         starter_pack: &str,
     ) -> Result<String> {
+        // **Validated, not escaped, and not interpolated raw.**
+        //
+        // These three land inside a Lua string literal in a `/silent-command`,
+        // so a value containing a quote closes it and everything after is
+        // executed by the game. That is a sandbox escape: `crates/scripting_lua`
+        // deliberately withholds `io`, `os` and `package` from user scripts,
+        // and the script-execute HTTP endpoint is unauthenticated, so a script
+        // that can inject arbitrary Lua into the GAME has stepped around the
+        // allowlist that is the whole boundary.
+        //
+        // Escaping is not on offer here: `str_to_lua` only wraps in quotes and
+        // this file's own doc says so. Validation is the stronger answer
+        // anyway -- all three are Factorio names, a domain with no legitimate
+        // quotes, backslashes, brackets or newlines in it, so a conservative
+        // allowlist rejects an attack and every honest input alike.
+        for (what, value) in [
+            ("name", name),
+            ("planet", planet),
+            ("starter_pack", starter_pack),
+        ] {
+            if !is_safe_lua_name(value) {
+                return Err(miette!(
+                    "create_space_platform: {what} {value:?} is not a plain Factorio name. \
+                     Only letters, digits, space, '_', '-' and '.' are accepted, because this \
+                     value is placed inside a Lua string the game executes"
+                ));
+            }
+        }
         let command = format!(
             "/silent-command local ok,r = pcall(function() return \
              game.forces.player.create_space_platform{{name=\"{name}\", planet=\"{planet}\", \
@@ -10762,7 +10808,49 @@ mod active_mods_tests {
 
 #[cfg(test)]
 mod platform_reply_tests {
-    use super::{PLATFORM_STAMP_PREFIX, parse_platform_reply};
+    use super::{PLATFORM_STAMP_PREFIX, is_safe_lua_name, parse_platform_reply};
+
+    /// **A name that could close the Lua string is refused**, because these
+    /// values are interpolated into a `/silent-command` the game executes.
+    ///
+    /// The escape this blocks is real rather than theoretical: user scripts run
+    /// in a sandbox that withholds `io`, `os` and `package` on purpose, and the
+    /// script-execute HTTP endpoint is unauthenticated. A script that can put
+    /// arbitrary Lua into the GAME has gone around that boundary entirely, so
+    /// the interesting inputs are the ones a caller would never type.
+    #[test]
+    fn a_name_that_could_escape_the_lua_string_is_refused() {
+        for hostile in [
+            r#"p1", planet="nauvis"} game.print("owned") --"#,
+            "p1' .. x .. '",
+            "p1\nrcon.print(1)",
+            "p1\\",
+            "p1{}",
+            "p1[[",
+            "",
+        ] {
+            assert!(
+                !is_safe_lua_name(hostile),
+                "must refuse {hostile:?} -- it can leave the string literal"
+            );
+        }
+    }
+
+    /// And every honest name is still accepted, or the guard would be a
+    /// different bug: a validator that refuses real inputs is an outage.
+    #[test]
+    fn ordinary_factorio_names_are_accepted() {
+        for ok in [
+            "nauvis",
+            "space-platform-starter-pack",
+            "p1",
+            "My Platform 2",
+            "base.1",
+            "iron_plate",
+        ] {
+            assert!(is_safe_lua_name(ok), "must accept {ok:?}");
+        }
+    }
 
     fn lines(parts: &[&str]) -> Vec<String> {
         parts.iter().map(|s| (*s).to_string()).collect()

@@ -4437,6 +4437,43 @@ impl PlanState {
         generation_kw(&self.base.entity_prototypes, name)
     }
 
+    /// How far a pole of `name` can throw a wire, in tiles.
+    ///
+    /// The third of the pair [`consumer_draw_kw`](Self::consumer_draw_kw) and
+    /// [`generator_output_kw`](Self::generator_output_kw) exposes, for exactly
+    /// their reason: a method deciding whether a blueprint's poles are
+    /// *connected* has to ask in the units [`pole_wire_reach`] answers in, and
+    /// a second copy of that table elsewhere is a copy that can disagree.
+    ///
+    /// # It is a per-pole fact, and the pairwise rule is the trap
+    ///
+    /// `method::power`'s `POLE_WIRE_REACH_TILES` is **7.5 — a small pole's**
+    /// reach, as its own doc says — and it was being applied to every pole in
+    /// a blueprint. Medium is 9, substation 18, and `big-electric-pole` is the
+    /// **32** that this table read as 30 until 2026-09-07. So the universal is
+    /// wrong for three of the four types, always in the direction that
+    /// *under*-reaches: a block whose poles really are wired reports
+    /// `disconnected_poles` and is refused for a distribution fault it does
+    /// not have.
+    ///
+    /// **And the game's rule is the SMALLER of the two poles' distances**, so
+    /// even a correct per-pole table has to be applied *pairwise* rather than
+    /// per pole. An accessor that hands back one pole's reach is the input to
+    /// that minimum, never the answer on its own.
+    ///
+    /// Latent rather than live only because every pole in every fixture today
+    /// is a small pole (FurnaceLine 13, MinerLine 3, ElectricSmelter 3,
+    /// StarterSteamEngineBoiler 2). It stops being latent the moment a real
+    /// Factorio blueprint is imported, which routinely mixes pole types.
+    ///
+    /// `None` for a name the table does not carry — **unknown, never zero**. A
+    /// caller must not read that as "cannot reach anything"; see
+    /// [`pole_would_supply`](Self::pole_would_supply), whose gate on
+    /// `entity_type` exists so an unsizable pole is not silently not-a-pole.
+    pub fn pole_wire_reach_tiles(&self, name: &str) -> Option<f64> {
+        pole_wire_reach(name)
+    }
+
     /// What one solar panel of `name` contributes **averaged over a day**, in
     /// kW, on this world's surface.
     ///

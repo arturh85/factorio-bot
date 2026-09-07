@@ -2417,6 +2417,7 @@ mod tests {
             map_exchange_string: None,
             map: None,
             factorio: Some("2.1.17".into()),
+            mods: None,
             git: None,
             profile: "debug".into(),
             roster_requested: vec![1, 2, 3, 4],

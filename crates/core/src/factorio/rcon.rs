@@ -2948,6 +2948,70 @@ impl std::error::Error for ActionFailure {}
 /// ([`take_tick_stamp`]) reads a tick off a reply, whoever wrote it.
 pub const GAME_TICK_QUERY: &str = "/silent-command rcon.print(\"§tick§\"..game.tick)";
 
+/// The prefix [`ACTIVE_MODS_QUERY`]'s reply carries, so one parser reads it.
+pub const MODS_STAMP_PREFIX: &str = "§mods§";
+
+/// Every mod the RUNNING GAME loaded, as `name=version` pairs, comma separated
+/// and sorted.
+///
+/// **Vanilla, deliberately, for the same reason [`GAME_TICK_QUERY`] is**, and
+/// with a sharper edge: asking BotBridge which mods are loaded is circular. It
+/// would answer only when BotBridge itself loaded, which is exactly the case
+/// where the answer is not in doubt — and stay silent in the case worth
+/// recording, where the mod set is not what anybody expected.
+///
+/// `game.active_mods` is what the game **loaded**, not what sits in
+/// `workspace/mods`. That distinction is the whole point: a mod present on disk
+/// but absent from `mod-list.json` is a DISABLED mod, and this repo already
+/// records that failure as completely silent. A disk listing would report it as
+/// present; this reports it as absent, which is the truth.
+///
+/// Sorted inside the game so the string is stable run to run: an unsorted
+/// `pairs()` traversal would make two identical mod sets compare unequal as
+/// text, and provenance is compared as text.
+///
+/// **`script.active_mods`, NOT `game.active_mods`.** The latter is the
+/// Factorio 1.x spelling and is the obvious guess; on 2.1.17 the game answers
+/// `LuaGameScript doesn't contain key active_mods`, and this query returned no
+/// stamp at all — which provenance recorded as *not captured*, correctly and
+/// uselessly. `active_mods` lives on `LuaBootstrap`, per `runtime-api.json`,
+/// and `script` **is** bound in `/silent-command` context (`script ~= nil`
+/// answers `true`), which was the reason to doubt the fix and was worth
+/// checking rather than assuming.
+pub const ACTIVE_MODS_QUERY: &str = "/silent-command local t={} for n,v in pairs(script.active_mods) do t[#t+1]=n..\"=\"..v end table.sort(t) rcon.print(\"§mods§\"..table.concat(t,\",\"))";
+
+/// Read [`ACTIVE_MODS_QUERY`]'s reply.
+///
+/// `None` when no line carried the stamp — the game did not answer, or answered
+/// something else — and **`Some(empty)` when it answered with no mods at all**,
+/// which is a real answer about a vanilla game. Collapsing those two into an
+/// empty map would make "we could not ask" indistinguishable from "there are
+/// none", and this project has paid for that conflation in four other places.
+pub fn parse_active_mods(lines: &[String]) -> Option<std::collections::BTreeMap<String, String>> {
+    let body = lines
+        .iter()
+        .find_map(|line| line.split_once(MODS_STAMP_PREFIX).map(|(_, rest)| rest))?;
+    let body = body.trim();
+    let mut out = std::collections::BTreeMap::new();
+    if body.is_empty() {
+        return Some(out);
+    }
+    for pair in body.split(',') {
+        let pair = pair.trim();
+        if pair.is_empty() {
+            continue;
+        }
+        // A mod name cannot contain '=' but a version never does either, so
+        // splitting on the FIRST '=' is unambiguous. `split_once` rather than
+        // `split('=').nth(..)` so a malformed entry is dropped rather than
+        // silently half-read.
+        if let Some((name, version)) = pair.split_once('=') {
+            out.insert(name.trim().to_string(), version.trim().to_string());
+        }
+    }
+    Some(out)
+}
+
 pub struct FactorioRcon {
     pool: Option<bb8::Pool<ConnectionManager>>,
     silent: Arc<RwLock<bool>>,
@@ -5317,6 +5381,17 @@ impl FactorioRcon {
     /// captured"**. Never substitute an empty string: see
     /// [`crate::record::provenance::Provenance::map_exchange_string`] for why
     /// absence and a value must stay distinguishable.
+    /// Every mod the running game loaded, as `name -> version`.
+    ///
+    /// `None` means **not captured** — the game did not answer, or answered
+    /// without the stamp — and is never to be read as "no mods". An empty map
+    /// is the positive answer that the game is vanilla. See
+    /// [`ACTIVE_MODS_QUERY`] for why this asks the game rather than BotBridge.
+    pub async fn active_mods(&self) -> Result<Option<std::collections::BTreeMap<String, String>>> {
+        let lines = self.send(ACTIVE_MODS_QUERY).await?;
+        Ok(lines.as_deref().and_then(parse_active_mods))
+    }
+
     pub async fn map_exchange_string(&self) -> Result<String> {
         let lines = self
             .remote_call("map_exchange_string", vec![])
@@ -10516,5 +10591,91 @@ mod map_exchange_string_tests {
                 "should have refused {reply:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod active_mods_tests {
+    use super::{MODS_STAMP_PREFIX, parse_active_mods};
+
+    fn lines(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    /// **The distinction the whole field exists for: NOT CAPTURED is not the
+    /// same as NO MODS.**
+    ///
+    /// A reply with no stamp means the game did not answer the question — an
+    /// RCON failure, a server that is not up, a reply that went somewhere else.
+    /// A reply whose stamp is followed by nothing means the game answered, and
+    /// the answer is that it loaded no mods.
+    ///
+    /// Collapsing them would make an unrecorded run indistinguishable from a
+    /// vanilla one, which is precisely the confusion that makes provenance
+    /// worth writing at all. This project has now paid for the same conflation
+    /// in `consumer_kw`, `occupant_of`, a stale binary's dropped field, and its
+    /// own test prose.
+    #[test]
+    fn an_unanswered_query_is_unknown_and_an_empty_answer_is_vanilla() {
+        assert_eq!(
+            parse_active_mods(&lines(&["something else entirely"])),
+            None,
+            "no stamp means the game did not answer -- never 'no mods'"
+        );
+        assert_eq!(
+            parse_active_mods(&lines(&[])),
+            None,
+            "and neither does an empty reply"
+        );
+
+        let vanilla = parse_active_mods(&lines(&[MODS_STAMP_PREFIX]))
+            .expect("a stamped reply IS an answer, even when it lists nothing");
+        assert!(
+            vanilla.is_empty(),
+            "an answer of no mods is an empty map, not a missing one"
+        );
+    }
+
+    /// Names and versions round-trip, and the map is ordered.
+    ///
+    /// Ordered because provenance is compared as text: two identical mod sets
+    /// that serialise in different orders would read as different runs. The
+    /// game sorts before answering and `BTreeMap` keeps it sorted here, so the
+    /// property holds on both sides of the wire.
+    #[test]
+    fn names_and_versions_survive_and_stay_ordered() {
+        let got = parse_active_mods(&lines(&[&format!(
+            "{MODS_STAMP_PREFIX}base=2.1.17,BotBridge=0.0.1,creative-mod=1.2.3"
+        )]))
+        .expect("a stamped reply parses");
+
+        assert_eq!(got.get("base").map(String::as_str), Some("2.1.17"));
+        assert_eq!(got.get("BotBridge").map(String::as_str), Some("0.0.1"));
+        assert_eq!(got.get("creative-mod").map(String::as_str), Some("1.2.3"));
+        assert_eq!(got.len(), 3);
+
+        let order: Vec<&str> = got.keys().map(String::as_str).collect();
+        let mut sorted = order.clone();
+        sorted.sort_unstable();
+        assert_eq!(order, sorted, "a BTreeMap keeps provenance text stable");
+    }
+
+    /// The stamp is found mid-reply, and a malformed entry is dropped rather
+    /// than half-read.
+    ///
+    /// A version containing no `=` cannot happen, but a truncated reply can,
+    /// and a pair split on the FIRST `=` would otherwise turn `"broken"` into
+    /// a mod named `broken` with an empty version — a fact nobody stated.
+    #[test]
+    fn the_stamp_is_found_anywhere_and_a_malformed_pair_is_dropped() {
+        let got = parse_active_mods(&lines(&[
+            "unrelated chatter",
+            &format!("{MODS_STAMP_PREFIX}base=2.1.17,broken,BotBridge=0.0.1"),
+        ]))
+        .expect("the stamp is found on a later line");
+
+        assert_eq!(got.len(), 2, "the malformed entry is dropped: {got:?}");
+        assert!(!got.contains_key("broken"));
+        assert_eq!(got.get("base").map(String::as_str), Some("2.1.17"));
     }
 }

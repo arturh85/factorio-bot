@@ -100,6 +100,27 @@ pub struct Provenance {
     pub map: Option<ResourceFingerprint>,
     /// The installed game's version, e.g. `"2.1.17"`.
     pub factorio: Option<String>,
+    /// Every mod the running game **loaded**, as `name -> version`.
+    ///
+    /// Recorded because a run's mod set is part of what a run *is*, and nothing
+    /// else here captures it. Two runs on the same seed, the same commit and
+    /// the same game version are still not comparable if one loaded a mod that
+    /// adds prototypes, changes recipes, or supplies infinite resources — and
+    /// until 2026-09-07 there was no way to tell them apart afterwards. That is
+    /// the shape that already made every pre-2026-09-04 timing unidentifiable,
+    /// when `--seed` was silently ignored and nothing recorded the map.
+    ///
+    /// **This includes BotBridge**, whose version has never been pinned to a
+    /// run. The mod resolves from different places in debug and release builds
+    /// (see `CLAUDE.md`), so the same commit can genuinely run different Lua —
+    /// `profile` hints at that and this settles it.
+    ///
+    /// `None` is **not captured**; `Some` of an empty map is the positive
+    /// answer that the game loaded no mods at all. A reader must not collapse
+    /// them: "we could not ask" and "there are none" are different facts, and
+    /// this file already keeps that distinction for `seed`, `map` and
+    /// `map_exchange_string`.
+    pub mods: Option<std::collections::BTreeMap<String, String>>,
     /// Where the code came from. See [`GitProvenance`].
     pub git: Option<GitProvenance>,
     /// `"debug"` or `"release"`. Worth recording because the two builds resolve
@@ -353,6 +374,7 @@ mod tests {
             map_exchange_string: None,
             map: None,
             factorio: Some("2.1.17".into()),
+            mods: None,
             git: Some(GitProvenance {
                 commit: "0".repeat(40),
                 dirty: true,

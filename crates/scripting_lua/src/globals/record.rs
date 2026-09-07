@@ -1099,6 +1099,23 @@ end
                             None
                         }
                     };
+                    // Asked the same way and at the same moment, and for the
+                    // same reason: a run's mod set is part of its identity, and
+                    // a run that is killed before `finish` still needs one.
+                    // Vanilla `game.active_mods`, not a BotBridge function --
+                    // asking the mod which mods loaded answers only when the
+                    // mod loaded, which is the case where nobody is in doubt.
+                    let mods = match rcon.as_ref().active_mods().await {
+                        Ok(mods) => mods,
+                        Err(error) => {
+                            factorio_bot_core::tracing::warn!(
+                                %error,
+                                "could not read the loaded mod list; this run will not record \
+                                 which mods it ran with, so it is not comparable to one that does"
+                            );
+                            None
+                        }
+                    };
                     let factorio = installed_factorio_version(&workspace.join("data"));
                     // The working tree of the process's own directory. See
                     // `GitProvenance`: this is where the code is *now*, which
@@ -1129,6 +1146,7 @@ end
                         ),
                         map: world.entity_graph.resource_fingerprint(),
                         factorio: factorio.clone(),
+                        mods: mods.clone(),
                         git: git.clone(),
                         profile: if cfg!(debug_assertions) {
                             "debug".to_string()

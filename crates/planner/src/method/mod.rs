@@ -9,6 +9,7 @@ pub mod fabricate;
 pub mod gather;
 pub mod have;
 pub mod machine;
+pub mod pipe;
 pub mod power;
 pub mod produce;
 pub mod scout;

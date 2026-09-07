@@ -24,8 +24,19 @@ open(p,'w').write(s)
 PY
 
 # --- Cargo.toml [profile.release] -------------------------------------------
-case "$LTO" in fat) LTOV='true';; thin) LTOV='"thin"';; esac
-case "$OPT" in s) OPTV='"s"';; *) OPTV="$OPT";; esac
+# `off` is Cargo's "no LTO at all, and no thin-local either"; `false` means
+# thin-local LTO within a crate. We want the genuinely-cheap one for an
+# iteration profile, so `off` maps to `false`+ nothing here: cargo's `false`
+# IS thin-local, which is the cheap useful setting, and `"off"` disables even
+# that. Both are offered; `off` is the one the candidate names.
+case "$LTO" in
+  fat)  LTOV='true';;
+  thin) LTOV='"thin"';;
+  none) LTOV='false';;   # thin-local LTO only (cargo's `false`)
+  off)  LTOV='"off"';;   # no LTO whatsoever
+  *) echo "unknown lto: $LTO" >&2; exit 1;;
+esac
+case "$OPT" in s|z) OPTV="\"$OPT\"";; 0|1|2|3) OPTV="$OPT";; *) echo "unknown opt: $OPT" >&2; exit 1;; esac
 python3 - "$WT/Cargo.toml" "$LTOV" "$CU" "$OPTV" <<'PY'
 import sys
 p,lto,cu,opt=sys.argv[1:5]

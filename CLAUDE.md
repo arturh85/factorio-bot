@@ -1426,9 +1426,20 @@ never read `map_gen_settings`, so the maps behind every timing quoted in the
 
 ### Silence is not success
 
-Four separate mechanisms have been found reporting nothing while broken. When
+Five separate mechanisms have been found reporting nothing while broken. When
 adding any check, ask what a reader sees when it *fails*, and prefer a record
 entry over a log line:
+
+- **A STALE BINARY drops a newly-added field in silence, and it reads exactly
+  like "the game does not report it"** (2026-09-07). A session added
+  `entity.status` to the mod, then read it back as `nil` for every furnace. The
+  mod was correct; the **release binary predated the field by 89 minutes**, so
+  `FactorioEntity` had nowhere to put it and serde discarded it without a
+  word. **The tell is that the field is UNIFORMLY absent rather than sometimes
+  absent** — a real "the game does not know" is almost never perfectly
+  uniform. Cousin of the stale-mod trap below, and it bites from the opposite
+  side: there, the binary is new and the mod is old. Rebuild before concluding
+  anything about a field added in the same session.
 
 - the `Using mods directory` line was gated behind `if !silent`, which every CLI
   path sets, so the authoritative "did my edit ship" answer printed on no run;
@@ -1587,6 +1598,30 @@ entry over a log line:
   does work: an inserter picks from **both** lanes, preferring the far one, so
   two rows meeting opposite lanes first self-correct once a furnace's ore slot
   fills. See `docs/superpowers/notes/2026-09-06-two-rows-off-one-belt.md`.
+
+  **NARROWED 2026-09-07 by `entity.status`: the gradient is real, "not short of
+  fuel" is NOT general.** The claim above was inferred from plate counts on one
+  block. Read directly instead — 3,058 status samples across the window, on a
+  four-furnace chain:
+
+  ```
+  furnace 1 (near)  working 91%  no_ingredients  2%  no_fuel  7%
+  furnace 2         working 43%  no_ingredients 42%  no_fuel 15%
+  furnace 3         working  7%  no_ingredients 62%  no_fuel 31%
+  furnace 4 (far)   working  0%  no_ingredients 58%  no_fuel 42%
+  ```
+
+  **`no_fuel` climbs 7% → 42% alongside `no_ingredients`**, so the far end
+  starves of *everything the belt carries*, not of ore specifically. The
+  original reading took its mechanism from the commodity that happened to be
+  counted. The buffer-size story survives but is narrower than stated: a fuel
+  slot capping at 5 lets coal ride past a **satisfied** furnace, and does
+  nothing for a furnace whose arm never gets a turn at all.
+
+  The general lesson is the one this file keeps relearning: **a mechanism
+  inferred from the one quantity you were measuring will be about that
+  quantity.** The status field cost nothing to read and corrected an inference
+  within an hour of landing.
 - **RETRACTED 2026-09-06: "ungenerated ground reads as clear".** This entry
   claimed that a siting search picked a tile with a tree on it because the chunk
   was not generated yet, and that "zero entities in a 10-tile disc of a fresh

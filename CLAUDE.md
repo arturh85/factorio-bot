@@ -558,7 +558,19 @@ BotBridge Mod (Factorio mod for RPC)
       **What was missing was one machine, and that is now measured** (peer
       session, 2026-09-06, computed offline from the fixture with no world):
       **13 of 13 poles wired into one component, 48 of 48 inserters inside a
-      pole's supply area, 624.0 kW of demand.** The block is *internally
+      pole's supply area, 624.0 kW of demand -- **and that 624 was itself
+      incomplete, corrected 2026-09-07 when `electric_energy_usage` began
+      crossing the bridge.** It counted the 48 inserters and priced the
+      block's **three `small-lamp`s at nothing**, because `consumer_kw` had
+      no row for a lamp and the unknown-name branch errs towards permitting.
+      A lamp draws 5 kW, so the live figure is **639 kW**. The error is 2.4%
+      and harmless here; the shape of it is not, and it is the reason
+      `BlockDemand` carries an `unpriced` set: **a table's silence means "I
+      have never heard of this", not "it draws nothing", and those were the
+      same answer.** 17 electric consumers were missing from that table
+      (`foundry` 2,500 kW, `electromagnetic-plant` 2,000, `crusher` 540,
+      `rocket-silo` 250, `recycler` 180 ...), every one of them headroom
+      that was not there.** The block is *internally
       complete* — its own poles connect and cover its own consumers. It was
       never a coverage or a distribution problem, and nothing in the planner
       was at fault: **nobody ever gave it a generator.** "13 poles and no
@@ -567,9 +579,9 @@ BotBridge Mod (Factorio mod for RPC)
       So closing it needs **generation**, not power *in* the blueprint: one
       hop from a supply anchor to any one of the block's own poles, which is
       point-to-point and is what `method::power::ensure_powered` does. A
-      900 kW plant covers 624 kW with headroom.
+      900 kW plant covers 639 kW with headroom.
 
-      **And 624 kW is the PRE-ELECTRIC number.** Those furnaces burn coal; the
+      **And 639 kW is the PRE-ELECTRIC number.** Those furnaces burn coal; the
       draw is 48 inserters at 13 kW. Convert them to electric furnaces at
       **180 kW each** and one yellow belt's worth (24 furnaces, see the
       smelting ratios) is **4,320 kW** against a plant that tops out at 1.8 MW

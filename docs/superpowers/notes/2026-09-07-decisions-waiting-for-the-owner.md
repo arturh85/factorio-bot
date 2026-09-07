@@ -245,6 +245,37 @@ it wants your judgement rather than an overnight guess.
 
 ---
 
+---
+
+## 7. Space platforms: NOT a decision — recorded because it was nearly built wrong
+
+No ruling needed. This is here because the obvious implementation is a trap, and the trap is invisible.
+
+**A space platform needs ONE new capability, not two.** `LuaForce.create_space_platform{name, planet, starter_pack}` is **force-level with no `LuaEntity` receiver**, so it cannot be expressed by any of the eight entity-scoped verbs — that is a structural fact about the vocabulary, not an inconvenience. It needs a mod function and an `ActionKind`.
+
+**No launch verb is needed.** The working sequence is:
+
+1. `create_space_platform{…}` → a pending platform, `surface = nil`
+2. **`Insert`** the starter pack into the silo **while it is building a rocket** → it loads as cargo into `rocket_silo_rocket`
+3. The silo **launches itself**. Nothing asks it to.
+
+```
+LAUNCH -> false
+t+12s: surfaces=2  platform=paused  surf=platform-1
+```
+
+**The explicit launch was refused and the platform came into being anyway.**
+
+**Why an added `Launch` action would have been worse than useless**: `launch_rocket()` on a finished, empty rocket returns **true**, runs a complete flight cycle, **consumes the starter pack**, resets `rocket_parts` — and leaves `#game.surfaces` at 1. Every signal reports success. **The variable is *when* the pack is inserted**: during the build it loads onto the rocket; into a finished rocket it sits in `rocket_silo_attached_cargo_unit` and goes nowhere.
+
+**`LuaEntity.auto_launch` does not exist on 2.1.17** — zero occurrences in `runtime-api.json`. Auto-launch is destination-driven now, via read-only prototype properties (`launch_to_space_platforms`, `launch_wait_time`, `can_launch_without_landing_pads`). **There is nothing for a mod function to configure**, which is what makes `Insert` sufficient on the silo side.
+
+**Caveat, kept as one**: this is one run, and the silo read `building_rocket` at every poll, so the *result* was observed rather than the launch transition. Cheap to reproduce now the ordering is known.
+
+**The methodological finding, which is the more transferable half**: a refused call was read as the blocker for **four consecutive experiments**. `launch_rocket` returning `false` was true every time and was never the reason anything failed — every hypothesis formed was about *why the call was refused*, when the call was irrelevant. And the tell was in the very first run: the platform changed state and consumed the pack while **no launch call had succeeded**. That was written down as "a promising signal" and then set aside to keep debugging the launch. **Noticing an anomaly and filing it is not the same as acting on it** — and here the misleading signal was one the author *chose to measure*, not one the code emitted.
+
+---
+
 ## What is NOT waiting on anything
 
 Everything else overnight is merged and green: gathering bills its own unlock,

@@ -1647,6 +1647,43 @@ entry over a log line:
   The general lesson is the one worth keeping: **an inference is not a
   measurement, and the tell was a guess about Factorio terrain that a moment's
   thought would have killed.**
+
+  **CLOSED 2026-09-07, and the answer was siting — every refusal in the chain
+  was correct.** Using the new `world.blocked_boxes` binding on its first real
+  case:
+
+  ```
+  replan REFUSES: a footprint the game already refused a burner-mining-drill
+                  at, where it found no entity
+  model coverage: charted (64 of 64 tiles)
+  model boxes covering the refused tile: 0
+  iron-ore in the rectangle:                41
+  iron-ore under the drill's own footprint:  0
+  ```
+
+  **Siting chose an anchor where one drill had no ore beneath it.** The game
+  refused, correctly — a drill cannot stand on ground with nothing to mine. The
+  refusal was recorded with **no named blocker**, so it is durable and the
+  expiry rule rightly cannot drop it. The replan refused the same footprint,
+  also correctly. Nothing in the refusal machinery was ever broken.
+
+  **What misled two sessions for a day was a message, not a mechanism**:
+  `occupant_of` consulted `blocking_boxes_within` *before* the refused-footprint
+  check, so `Occupant::Terrain` masked `Occupant::Refused`. We went looking for
+  terrain because the error said terrain, and there was none — twice.
+
+  **The real defect is upstream and had been in the repository all along**:
+  `drills_are_fed` asks whether the mining area covers *some* extractable
+  resource, not whether *every* drill in it has ore. A drill on one of four
+  tiles merely exhausts its ground four times faster; **a drill on zero tiles
+  strands the whole block.**
+
+  **And a second lesson, about retracting**: the first hypothesis here
+  overclaimed, and the retraction of a *later* hypothesis then **overshot in
+  the other direction** — an empty `placement_refusals` across 21 archived runs
+  was read as "this is a different structure", when it only ever supported
+  "unknown". A retraction can be as unsupported as the claim it replaces.
+  Retract to *uncertainty*, not to an opposite certainty.
 - **`method::blueprint` had NO enclosure guard until 2026-09-06, while
   `method::assemble` has had one — so the method that builds the LARGEST blocks
   was the unguarded one.** `BuildBlock::expand` now calls

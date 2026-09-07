@@ -1,7 +1,14 @@
 # Decisions waiting for the owner — 2026-09-07 morning
 
-Three things overnight work reached and deliberately did **not** decide. Each is
-recorded with the measurement behind it, so none has to be re-derived.
+**Five** things overnight work reached and deliberately did **not** decide. Each
+is recorded with the measurement behind it, so none has to be re-derived.
+
+**Read §1 first if you read only one.** It is the only one that blocks a
+milestone: several blocks on one map — the electric-smelter and solar work — is
+not currently expressible, and no workaround exists.
+
+The other four are ready to act on and are ordered by how much they cost to
+leave alone, not by size.
 
 ---
 

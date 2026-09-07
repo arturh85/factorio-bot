@@ -1051,6 +1051,11 @@ enum AnchorSource {
     /// block already stands. Screened for nothing, and deliberately immune
     /// to re-siting.
     Recovered,
+    /// A previously-resolved anchor the caller recorded and handed back
+    /// (`Site::Anchored`). Screened for nothing by *this* call — but it was
+    /// screened when siting first chose it, which is the difference between
+    /// this and [`AnchorSource::Caller`].
+    Recorded,
 }
 
 impl AnchorSource {
@@ -1072,6 +1077,9 @@ impl AnchorSource {
             AnchorSource::Recovered => {
                 "recovery -- part of this block already stands, so the anchor cannot move"
             }
+            AnchorSource::Recorded => {
+                "a recorded anchor the caller pinned, which siting chose on an earlier plan"
+            }
         }
     }
 }
@@ -1081,11 +1089,28 @@ fn resolve_site(
     bp: &Blueprint,
     site: &Site,
 ) -> Result<(Position, AnchorSource), PlannerError> {
+    // **`Anchored` short-circuits everything, and the ORDER here is the whole
+    // fix.** Recovery reconstructs an anchor by geometry precisely because
+    // nothing had recorded one; a recorded anchor is the answer that
+    // reconstruction was approximating, so consulting geometry first would
+    // let a *different block* that shares a sub-layout overrule it. That is
+    // the crosstalk defect exactly: 21 of `ElectricSmelter`'s 28 entities
+    // match inside a standing `FurnaceLine`.
+    //
+    // Deliberately placed above `recover_anchor` rather than inside the match
+    // below, where it would be unreachable whenever anything of any similar
+    // block stands.
+    if let Site::Anchored(p) = site {
+        return Ok((p.clone(), AnchorSource::Recorded));
+    }
     if let Some(recovered) = recover_anchor(state, bp) {
         return Ok((recovered, AnchorSource::Recovered));
     }
     match site {
         Site::At(p) => Ok((p.clone(), AnchorSource::Caller)),
+        // Unreachable: handled above, before recovery. Stated rather than
+        // wildcarded so a new `Site` variant still fails to compile here.
+        Site::Anchored(p) => Ok((p.clone(), AnchorSource::Recorded)),
         Site::Near(p) => Ok((
             search_site(state, bp, p, SEARCH_RADIUS)?,
             AnchorSource::Search,
@@ -1999,6 +2024,68 @@ mod tests {
         assert_eq!(
             second_stamps, 0,
             "a block the ghost pass can already recover must not be re-stamped"
+        );
+    }
+
+    /// **A recorded anchor survives another block standing on top of the
+    /// answer — the crosstalk defect, closed.**
+    ///
+    /// This is the exact scenario of
+    /// `an_explicit_anchor_does_not_escape_recovery_into_another_block`, which
+    /// documents that `Site::At` has no defence: block A stands, block B asks
+    /// for its own anchor, and recovery hands back an anchor *inside A*.
+    /// `Site::Anchored` is the owner's ruling of 2026-09-07 and the difference
+    /// is order — it is answered before `recover_anchor` is ever called.
+    ///
+    /// **This must fail if the `Anchored` arm is moved below recovery**, which
+    /// is the whole content of the fix: placed inside the `match` instead, it
+    /// is unreachable whenever anything of any similar block stands, and this
+    /// test recovers into block A exactly as `Site::At` does.
+    #[test]
+    fn a_recorded_anchor_is_not_overruled_by_another_block_that_looks_like_it() {
+        let mut state = test_state();
+        // Block A stands: four furnaces, 3 apart.
+        for i in 0..4 {
+            state.create_entity(stone_furnace_at(40.0 + 3.0 * f64::from(i), 40.0));
+        }
+        // Block B shares a two-furnace sub-layout with A -- enough for
+        // `recover_anchor`, which needs two.
+        let b = Blueprint {
+            entities: vec![
+                at_named(0.0, 0.0, "stone-furnace"),
+                at_named(3.0, 0.0, "stone-furnace"),
+                at_named(0.0, 6.0, "iron-chest"),
+            ],
+            version: 0,
+        };
+        let recorded = Position::new(0.5, 0.5);
+
+        // The premise, and the reason this variant had to exist: as a plain
+        // caller hint, this same anchor is thrown away.
+        let (hinted, hinted_source) = resolve_and_guard(&state, &b, &Site::At(recorded.clone()))
+            .expect("no drill here, so the ore guard has nothing to say");
+        assert_eq!(hinted_source, AnchorSource::Recovered);
+        assert_ne!(
+            Pos::from(&hinted),
+            Pos::from(&recorded),
+            "premise: Site::At loses to recovery -- if this stops holding, the \
+             test below proves nothing"
+        );
+
+        // Recorded, it is honoured.
+        let (kept, source) = resolve_and_guard(&state, &b, &Site::Anchored(recorded.clone()))
+            .expect("a recorded anchor needs no search and no recovery");
+        assert_eq!(
+            source,
+            AnchorSource::Recorded,
+            "a recorded anchor must not be reported as recovered -- the two \
+             carry different remedies"
+        );
+        assert_eq!(
+            Pos::from(&kept),
+            Pos::from(&recorded),
+            "the recorded anchor is the answer geometry was only ever \
+             approximating, so geometry must not overrule it"
         );
     }
 

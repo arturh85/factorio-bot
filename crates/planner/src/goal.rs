@@ -99,6 +99,39 @@ pub enum Site {
     Near(Position),
     /// Search outward from the roster's centroid.
     Anywhere,
+    /// **A resolved anchor, recorded. Authoritative — recovery does not
+    /// override it, and no search runs.**
+    ///
+    /// The owner's ruling of 2026-09-07, and the fix for a defect that had no
+    /// workaround: `resolve_site` calls `recover_anchor` first and
+    /// unconditionally, and recovery trusts an anchor once **two** of a
+    /// blueprint's entities stand at the right relative offsets. Blocks that
+    /// share a sub-layout therefore recover into each other —
+    /// `ElectricSmelter` finds 21 of its 28 entities inside a standing
+    /// `FurnaceLine` (`crates/core/tests/recovery_crosstalk_probe.rs`) — so a
+    /// second block planned on a map that already carries one is sited *inside
+    /// it*, and no threshold can fix that: 21 of 28 is 75%, and any threshold
+    /// loose enough to resume a genuinely half-built block accepts it.
+    ///
+    /// # Why this is not [`Site::At`]
+    ///
+    /// `At` is a **hint** and is deliberately outranked by recovery — see
+    /// `resolve_site_prefers_the_recovered_anchor_over_an_explicit_site_at`.
+    /// A caller naming an anchor may be working from a stale script, and
+    /// standing entities are the better evidence of where a block actually is;
+    /// letting a stale `At` win starts a second half-block with no error.
+    ///
+    /// `Anchored` is a **recorded fact**: this anchor was *resolved by siting*
+    /// and handed back, so it is not a guess that standing entities could
+    /// improve on — it is the answer standing entities were being consulted to
+    /// reconstruct. Recovery reconstructs an anchor by geometry precisely
+    /// because nothing had recorded one; once one is recorded, geometry is the
+    /// weaker evidence and must not override it.
+    ///
+    /// The two variants are kept apart rather than merged because they encode
+    /// different claims, and collapsing them would either make every stale
+    /// caller anchor authoritative or leave persistence impossible.
+    Anchored(Position),
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -353,6 +386,7 @@ impl std::fmt::Display for Goal {
                     Site::At(p) => format!("at {p}"),
                     Site::Near(p) => format!("near {p}"),
                     Site::Anywhere => "anywhere".to_string(),
+                    Site::Anchored(p) => format!("at its recorded anchor {p}"),
                 };
                 write!(f, "build {}-byte block {}", blueprint.len(), where_)
             }

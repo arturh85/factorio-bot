@@ -139,6 +139,12 @@ pub(crate) fn install_goal_constructors(lua: &Lua, table: &LuaTable) -> LuaResul
                         near.set("y", pos.y())?;
                         t.set("near", near)?;
                     }
+                    Site::Anchored(pos) => {
+                        let anchored = lua.create_table()?;
+                        anchored.set("x", pos.x())?;
+                        anchored.set("y", pos.y())?;
+                        t.set("anchored", anchored)?;
+                    }
                     Site::Anywhere => {}
                 }
                 t.set_metatable(Some(mt.clone()))?;
@@ -286,6 +292,7 @@ fn render_goal(t: &LuaTable) -> LuaResult<String> {
                 Site::At(pos) => format!("at {pos}"),
                 Site::Near(pos) => format!("near {pos}"),
                 Site::Anywhere => "anywhere".to_string(),
+                Site::Anchored(pos) => format!("at its recorded anchor {pos}"),
             };
             Ok(format!("build {}-byte block {}", blueprint.len(), where_))
         }
@@ -458,23 +465,46 @@ fn site_from_table(t: &LuaTable) -> LuaResult<Site> {
     // instead of an error.
     let has_anchor = !matches!(t.get("x")?, LuaValue::Nil) || !matches!(t.get("y")?, LuaValue::Nil);
     let has_near = !matches!(t.get("near")?, LuaValue::Nil);
-    match (has_anchor, has_near) {
-        (true, true) => Err(goal_error(
-            "goal.built: an anchor (x/y) and a near hint (near) are mutually exclusive",
-        )),
-        (true, false) => Ok(Site::At(Position::new(
+    // `anchored` is a RECORDED anchor -- one siting already resolved and the
+    // caller pinned -- and it is authoritative where `x`/`y` is only a hint.
+    // See `Site::Anchored`'s own doc for why the two cannot be the same field:
+    // merging them would either make every stale caller anchor override the
+    // ground, or leave persistence inexpressible.
+    let has_anchored = !matches!(t.get("anchored")?, LuaValue::Nil);
+
+    // Counted rather than matched as a tuple. The 2x2 match this replaces was
+    // exhaustive over two flags; a third makes eight cases of which six are the
+    // same error, and writing them out invites exactly the (false, false)
+    // fall-through its own comment warns about -- a malformed request answered
+    // with a different, valid goal.
+    let named = usize::from(has_anchor) + usize::from(has_near) + usize::from(has_anchored);
+    if named > 1 {
+        return Err(goal_error(
+            "goal.built: an anchor (x/y), a near hint (near) and a recorded \
+             anchor (anchored) are mutually exclusive",
+        ));
+    }
+    if has_anchored {
+        let a = require_table_field(t.get("anchored")?, "anchored")?;
+        return Ok(Site::Anchored(Position::new(
+            require_coordinate(a.get("x")?, "x")?,
+            require_coordinate(a.get("y")?, "y")?,
+        )));
+    }
+    if has_near {
+        let near = require_table_field(t.get("near")?, "near")?;
+        return Ok(Site::Near(Position::new(
+            require_coordinate(near.get("x")?, "x")?,
+            require_coordinate(near.get("y")?, "y")?,
+        )));
+    }
+    if has_anchor {
+        return Ok(Site::At(Position::new(
             require_coordinate(t.get("x")?, "x")?,
             require_coordinate(t.get("y")?, "y")?,
-        ))),
-        (false, true) => {
-            let near = require_table_field(t.get("near")?, "near")?;
-            Ok(Site::Near(Position::new(
-                require_coordinate(near.get("x")?, "x")?,
-                require_coordinate(near.get("y")?, "y")?,
-            )))
-        }
-        (false, false) => Ok(Site::Anywhere),
+        )));
     }
+    Ok(Site::Anywhere)
 }
 
 fn require_nonempty_string(value: LuaValue, what: &str) -> LuaResult<String> {
@@ -594,6 +624,21 @@ mod tests {
                 r#"goal.built("0eNq...", {x = 1, y = 1, near = {x = 2, y = 2}})"#,
                 "mutually exclusive",
             ),
+            // The third site kind is exclusive with BOTH others, and the
+            // check counts rather than enumerating pairs -- a tuple match
+            // over three flags is eight cases of which six are this error,
+            // and the one that gets forgotten falls through to `Anywhere`,
+            // answering a malformed request with a different valid goal.
+            (
+                r#"goal.built("0eNq...", {x = 1, y = 1, anchored = {x = 2, y = 2}})"#,
+                "mutually exclusive",
+            ),
+            (
+                r#"goal.built("0eNq...", {near = {x = 1, y = 1}, anchored = {x = 2, y = 2}})"#,
+                "mutually exclusive",
+            ),
+            (r#"goal.built("0eNq...", {anchored = 5})"#, "anchored"),
+            (r#"goal.built("0eNq...", {anchored = {x = 1}})"#, "y"),
             (r#"goal.all({})"#, "at least one"),
             (r#"goal.all({ 42 })"#, "goal"),
             (r#"goal.have("iron-plate", 1, { bot = 0 })"#, "bot"),
@@ -609,6 +654,54 @@ mod tests {
             let err = lua.load(src).exec().expect_err(src).to_string();
             assert!(err.contains(want), "{src}: {err} lacks {want}");
         }
+    }
+
+    /// **A recorded anchor survives the Lua round trip and is not confused
+    /// with a caller's hint.**
+    ///
+    /// `goal.built` writes the site back into the table it returns, and
+    /// `site_from_table` reads that same table — so the constructor and the
+    /// reader must agree on which field means which claim. `x`/`y` is a hint
+    /// the ground may override; `anchored` is an anchor siting already
+    /// resolved, which the ground must NOT override. Writing a recorded
+    /// anchor into `x`/`y` would silently demote it to a hint and restore the
+    /// crosstalk defect it exists to fix, with nothing failing.
+    #[test]
+    fn a_recorded_anchor_round_trips_and_stays_distinct_from_a_hint() {
+        let lua = lua_with_goal();
+        // Rendered through `tostring`, which is the metatable's own
+        // `__tostring` and therefore the same path a script or a plan log
+        // takes -- not a second formatter that could agree with the
+        // constructor while the real one does not.
+        let describe = |src: &str| -> String {
+            lua.load(format!("return tostring({src})"))
+                .eval::<String>()
+                .expect(src)
+        };
+
+        // Round trip: the constructor's own output re-read by `describe`.
+        let anchored = describe(r#"goal.built("0eNq...", {anchored = {x = 3, y = 4}})"#);
+        assert!(
+            anchored.contains("recorded anchor"),
+            "a recorded anchor must render as one: {anchored}"
+        );
+        assert!(
+            anchored.contains('3') && anchored.contains('4'),
+            "and must carry its coordinates: {anchored}"
+        );
+
+        // The same coordinates as a plain hint must render differently, or
+        // the two claims are indistinguishable to anyone reading a plan.
+        let hinted = describe(r#"goal.built("0eNq...", {x = 3, y = 4})"#);
+        assert!(
+            !hinted.contains("recorded"),
+            "a caller hint is not a recorded anchor: {hinted}"
+        );
+        assert_ne!(
+            anchored, hinted,
+            "a recorded anchor and a hint at the same tile must not describe \
+             identically -- they carry different authority over the ground"
+        );
     }
 
     #[test]

@@ -345,6 +345,110 @@ fn an_rcon_query_still_answers_with_the_contents() {
     );
 }
 
+/// **The reply the PLANNER reads carries all three inventories too.**
+///
+/// `serialize_entity` gained `input_inventory` on 2026-09-07 and
+/// `rcon_inventory_contents_at` did not, which split the world in half by how
+/// you asked: a furnace's ore was visible when you dumped every entity and
+/// invisible when you asked about that one furnace. This is the path
+/// `Planner::refresh_buffers` pulls and `FactorioSurface::observe_inventories`
+/// ingests, so it is the half the planner's own model is built from.
+#[test]
+fn the_on_demand_reply_carries_the_input_inventory() {
+    let lua = fresh_mod();
+    lua.load(
+        r#"
+        _surface.find_entity = function(name, position)
+            return entity(name, "furnace", position.x, position.y, 1, { ["iron-plate"] = 42 })
+        end
+        rcon_inventory_contents_at({
+            { name = "stone-furnace", position = { x = 4, y = 4 } },
+        })
+        "#,
+    )
+    .set_name("query")
+    .exec()
+    .expect("rcon_inventory_contents_at");
+
+    let replies = lua
+        .globals()
+        .get::<Table>("_encoded")
+        .expect("_encoded -- the reply must have gone through table_to_json");
+    let reply: Table = replies.get(1).expect("one reply");
+    assert_eq!(
+        reply
+            .get::<Table>("input_inventory")
+            .expect("input_inventory -- the on-demand path must carry it")
+            .get::<u32>("iron-ore")
+            .expect("iron-ore"),
+        7,
+        "a furnace holding ore it has not smelted yet is exactly the reading \
+         that separates `busy` from `nobody ever fed it`, and the planner's \
+         buffer model reads this reply and no other"
+    );
+    assert!(
+        reply
+            .get::<Option<Table>>("output_inventory")
+            .expect("get")
+            .is_some(),
+        "the two that were already here are untouched"
+    );
+    assert!(
+        reply
+            .get::<Option<Table>>("fuel_inventory")
+            .expect("get")
+            .is_some(),
+        "both of them"
+    );
+}
+
+/// **A chest gets no `input_inventory` key at all, and that is not the same
+/// answer as an empty one.**
+///
+/// `Planner::refresh_buffers` asks about `wooden-chest` alongside
+/// `stone-furnace`. A chest has no input inventory in the game, so the key is
+/// omitted and reaches Rust as `None`; a furnace standing empty would send
+/// `{}` and reach it as `Some(empty)`. Collapsing those would put "this
+/// machine cannot hold ore" and "this machine is waiting for ore" behind one
+/// answer.
+#[test]
+fn an_entity_with_no_input_slot_sends_no_input_key() {
+    let lua = fresh_mod();
+    lua.load(
+        r#"
+        _surface.find_entity = function(name, position)
+            return entity(name, "container", position.x, position.y, 0.4, { coal = 5 })
+        end
+        rcon_inventory_contents_at({
+            { name = "wooden-chest", position = { x = 4, y = 4 } },
+        })
+        "#,
+    )
+    .set_name("query")
+    .exec()
+    .expect("rcon_inventory_contents_at");
+
+    let replies = lua.globals().get::<Table>("_encoded").expect("_encoded");
+    let reply: Table = replies.get(1).expect("one reply");
+    assert!(
+        reply
+            .get::<Option<Table>>("input_inventory")
+            .expect("get")
+            .is_none(),
+        "`input_inventory_index` has no row for a container, so the field is \
+         omitted rather than sent as an empty table"
+    );
+    assert!(
+        reply
+            .get::<Option<Table>>("output_inventory")
+            .expect("get")
+            .is_some(),
+        "a chest's whole inventory is its output inventory, and it still \
+         travels -- this test is about the absent key, not about a silent \
+         reply"
+    );
+}
+
 /// **A belt carries no contents, and this test exists to keep it that way.**
 ///
 /// A yellow belt holds 8 items per tile and a base has thousands of belt tiles.

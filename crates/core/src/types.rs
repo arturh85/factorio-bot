@@ -665,6 +665,33 @@ pub struct InventoryResponse {
         deserialize_with = "deserialize_helpers::boxed_option_vec_or_empty_map"
     )]
     pub fuel_inventory: Box<Option<Vec<InventoryItemWithQuality>>>,
+    /// What the machine has been given and has not turned into anything yet --
+    /// a furnace's ore, an assembler's ingredients, a lab's science.
+    ///
+    /// # `None` is not empty, and neither is a count of zero
+    ///
+    /// `None` means the entity has no input inventory at all (a
+    /// `wooden-chest`, a belt) **or** the reply came from a mod build that
+    /// predates the field -- `serde(default)` is what makes the second of
+    /// those possible, and the archived `inventory_contents_at` payload in
+    /// `crates/core/tests/live_2_1_payloads.rs` is exactly such a reply.
+    /// `Some(empty)` means the entity has one and it is standing empty, which
+    /// is a real observation. The mod omits the key rather than sending an
+    /// empty table for the first case; see `rcon_inventory_contents_at` in
+    /// `mods/BotBridge/control.lua`.
+    ///
+    /// # Never a buffer
+    ///
+    /// Nothing withdraws from here. `crates/planner`'s `withdraw_slot` maps a
+    /// furnace to its *result* slot, which is what an `ActionKind::Remove` can
+    /// address, so ore sitting in an input slot is never counted as material
+    /// the plan may spend. It is a reading about whether a machine is busy,
+    /// on the same terms as the fuel slot beside it.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_helpers::boxed_option_vec_or_empty_map"
+    )]
+    pub input_inventory: Box<Option<Vec<InventoryItemWithQuality>>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Hash, Eq)]
@@ -3743,6 +3770,59 @@ mod tests {
         }"#;
         let player: FactorioPlayer = serde_json::from_str(json).expect("parses");
         assert_eq!(player.main_inventory.get("iron-plate").copied(), Some(4));
+    }
+
+    /// **Three inventories, three answers, and the missing key is the one that
+    /// has to keep working.**
+    ///
+    /// A mod build that predates `input_inventory` sends no key at all, and so
+    /// does a running mod asked about a `wooden-chest`. Both must reach
+    /// `None` rather than failing to deserialize -- `Box<Option<_>>` is not
+    /// optional to serde on its own, which is exactly how every
+    /// `inventory_contents_at` reply once failed to parse over a camelCase
+    /// spelling. `{}` is Lua's empty table and must reach `Some(empty)`,
+    /// because a furnace with an empty input slot is a real observation.
+    #[test]
+    fn an_input_inventory_distinguishes_absent_from_empty_from_held() {
+        let held: InventoryResponse = serde_json::from_str(
+            r#"{"name":"stone-furnace","position":{"x":0.5,"y":0.5},
+                "output_inventory":{},"fuel_inventory":{},
+                "input_inventory":[{"name":"iron-ore","quality":"normal","count":34}]}"#,
+        )
+        .expect("parses");
+        assert_eq!(
+            held.input_inventory.as_ref().as_ref().map(Vec::len),
+            Some(1)
+        );
+        assert_eq!(
+            held.input_inventory
+                .as_ref()
+                .as_ref()
+                .and_then(|items| items.first())
+                .map(|item| item.count),
+            Some(34)
+        );
+
+        let empty: InventoryResponse = serde_json::from_str(
+            r#"{"name":"stone-furnace","position":{"x":0.5,"y":0.5},
+                "input_inventory":{}}"#,
+        )
+        .expect("parses");
+        assert_eq!(
+            *empty.input_inventory,
+            Some(vec![]),
+            "a furnace that answered with an empty input slot is standing \
+             empty, which is not the same as having no input slot"
+        );
+
+        let absent: InventoryResponse =
+            serde_json::from_str(r#"{"name":"wooden-chest","position":{"x":0.5,"y":0.5}}"#)
+                .expect("a reply with no input key must still parse");
+        assert_eq!(
+            *absent.input_inventory, None,
+            "no key means the entity has no input inventory, or the mod \
+             predates the field -- never that it is empty"
+        );
     }
 
     /// Lua serializes an empty table as `{}`, never `[]`.

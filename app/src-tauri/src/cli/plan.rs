@@ -549,6 +549,7 @@ mod tests {
         count: 40,
       }])),
       fuel_inventory: Box::new(None),
+      input_inventory: Box::new(None),
     }]);
     let path = dir.path().join("full.json");
     world.dump_to(&path).expect("a dump is written");

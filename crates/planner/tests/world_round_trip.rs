@@ -120,6 +120,7 @@ fn world_mid_run() -> FactorioSurface {
             count: 40,
         }])),
         fuel_inventory: Box::new(None),
+        input_inventory: Box::new(None),
     }]);
 
     world.record_placement_refusal(PlacementRefusal::at_dispatch(

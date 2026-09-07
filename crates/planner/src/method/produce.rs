@@ -4348,12 +4348,14 @@ mod tests {
                     position: cell.drill.clone(),
                     output_inventory: Box::new(None),
                     fuel_inventory: coal(drill_coal),
+                    input_inventory: Box::new(None),
                 },
                 factorio_bot_core::types::InventoryResponse {
                     name: FURNACE.into(),
                     position: cell.furnace.clone(),
                     output_inventory: Box::new(None),
                     fuel_inventory: coal(furnace_coal),
+                    input_inventory: Box::new(None),
                 },
             ]);
         }

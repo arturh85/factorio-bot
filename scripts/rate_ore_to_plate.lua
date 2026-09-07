@@ -124,6 +124,36 @@ for _, f in ipairs(furnaces) do
   ask[#ask + 1] = { name = "stone-furnace", x = f.position.x, y = f.position.y }
 end
 
+-- Read the furnaces' STATUS as well as their output. A rate that falls away
+-- has several candidate causes -- ore, coal, the lane, the output -- and the
+-- status field distinguishes them where a plate count cannot. It is the field
+-- that corrected an ore-only inference about this very block once already:
+-- `no_fuel` turned out to climb alongside `no_ingredients`.
+--
+-- The hypothesis this run exists to kill or confirm: **200 plates is exactly
+-- two full output stacks.** A stone furnace's output slot holds 100 iron
+-- plates, this block has two furnaces and NO OUTPUT SIDE -- a burner arm
+-- carries coal and ore, never plates -- so the ceiling may be the furnaces
+-- filling up rather than anything about supply at all.
+-- NOTE (measured 2026-09-07): this returns "?" for every furnace, every time.
+-- `inventory_contents_at` answers with output and fuel inventories and does NOT
+-- carry `status`; that field is on the entity record from
+-- `find_entities_in_radius`. Kept, reporting "?" honestly rather than deleted,
+-- because the column being uniformly absent is the tell for a field that is not
+-- on this response at all -- exactly the shape a stale binary produces, and
+-- worth being able to recognise. The question this run asked was settled by the
+-- per-furnace plate split below instead.
+local function statuses()
+  local r = rcon.inventory_contents_at(ask)
+  local out = {}
+  if type(r) == "table" then
+    for i, e in ipairs(r) do
+      out[i] = (type(e) == "table" and e.status) and tostring(e.status) or "?"
+    end
+  end
+  return out
+end
+
 local function plates_now()
   local r = rcon.inventory_contents_at(ask)
   local total = 0
@@ -142,7 +172,7 @@ end
 local t0 = rcon.game_tick()
 print(string.format("charged at tick %s; measuring %d ticks in %d-tick marks",
   tostring(t0), WINDOW, MARK))
-print("  tick   elapsed  plates  plates/min")
+print("  tick   elapsed  plates  plates/min  furnace statuses")
 
 local next_mark = MARK
 local last_plates = 0
@@ -153,8 +183,9 @@ while true do
   if elapsed >= next_mark then
     local p = plates_now()
     last_plates = p
-    print(string.format("  %-7d %-8d %-7d %.1f",
-      t, elapsed, p, elapsed > 0 and (p * 3600.0 / elapsed) or 0))
+    print(string.format("  %-7d %-8d %-7d %-11.1f %s",
+      t, elapsed, p, elapsed > 0 and (p * 3600.0 / elapsed) or 0,
+      table.concat(statuses(), " | ")))
     next_mark = next_mark + MARK
   end
   if elapsed >= WINDOW then break end
@@ -163,6 +194,26 @@ end
 print("")
 print(string.format("PLATES IN %d GAME TICKS: %d  (%.1f/min)",
   WINDOW, last_plates, last_plates * 3600.0 / WINDOW))
+-- Per furnace, because the ceiling hypothesis is about EACH slot filling and a
+-- total of 200 across two furnaces is equally consistent with 100+100 (capped)
+-- and with 150+50 (not capped). Only the split tells them apart.
+do
+  local r = rcon.inventory_contents_at(ask)
+  if type(r) == "table" then
+    for i, e in ipairs(r) do
+      local n = 0
+      if type(e) == "table" and type(e.output_inventory) == "table" then
+        for _, sl in ipairs(e.output_inventory) do
+          if type(sl) == "table" and sl.name == "iron-plate" then n = sl.count or 0 end
+        end
+      end
+      print(string.format("  furnace %d: %d plates, status %s%s", i, n,
+        (type(e) == "table" and e.status) and tostring(e.status) or "?",
+        n >= 100 and "   <- FULL STACK, capped" or ""))
+    end
+  end
+end
+
 print("Every plate was mined by a drill, moved by a belt and smelted by a")
 print("furnace. Only COAL was cheated, into the coal chest and the drills.")
 print("end rate ore to plate")

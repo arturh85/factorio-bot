@@ -57,10 +57,45 @@ reproduced:             two runs, identical to the plate
 ```
 
 The curve rises to 28/min and then falls away — 26, 24, 21, 16, 8 plates per
-3,000-tick mark over the last five. **The block peaks and declines rather than
-plateauing**, which is a different shape from the sideload designs that simply
-stopped, and it is not explained by ore: 986 tiles-worth was in reach and about
-200 was consumed.
+3,000-tick mark over the last five.
+
+**That shape is fully explained, and the explanation makes the 200 not a rate
+at all.** Per furnace at the end of the window:
+
+```
+furnace 1: 100 plates   <- FULL STACK
+furnace 2: 100 plates   <- FULL STACK
+```
+
+**200 is exactly two output stacks.** A stone furnace's output slot holds 100
+iron plates, this block has two furnaces and **no output side** — a burner arm
+carries coal and ore, never plates, so nothing empties them. The decline is each
+furnace approaching its own cap and stalling; the supply side was never the
+constraint. 986 ore sat in reach against ~200 consumed, and the coal chest was
+nowhere near empty.
+
+So **the 30,000-tick figure measures the furnaces' output slots, not this
+block's production**. The 6,300-tick figure of 43 is below the cap and is a real
+rate; the 200 is a ceiling. Any window long enough to approach it is measuring
+storage.
+
+This also retroactively vindicates the old 78: it was below 200, so it was a
+genuine non-terminal value, exactly as that note said.
+
+## An instrument with a dead half
+
+The run that settled this asked for furnace `status` alongside the plate count,
+on the theory that ore, coal, lane and output failures are indistinguishable in
+a plate count and obvious in a status. **It returned `?` for every furnace at
+every mark**: `inventory_contents_at` answers with output and fuel inventories
+and does not carry `status`, which lives on the entity record from
+`find_entities_in_radius`.
+
+Worth recording twice over. The question was settled by the *other* half of the
+instrument — the per-furnace split — and had that been left out, the run would
+have produced ten rows of `?` and no answer. And a value that is **uniformly**
+absent is the same tell as the stale-binary case in CLAUDE.md: a real "the game
+does not know" is almost never perfectly uniform.
 
 ## What is now the visible constraint
 
@@ -70,8 +105,19 @@ stopped, and it is not explained by ore: 986 tiles-worth was in reach and about
 has *some* ore, which is right for feasibility and silent about quality, and a
 drill on two tiles exhausts its ground twice as fast as one on four.
 
-Before the parity fix that gap was invisible under a larger one. It is now the
-top of the list.
+Before the parity fix that gap was invisible under a larger one.
+
+**But it is not the top of the list, and the output cap is why.** With no output
+side the block stops at 200 plates however much ore its drills can reach, so
+better drill coverage buys a longer run at the same rate and the same ceiling.
+The ordering is: give the block an output side, then coverage becomes worth
+fixing. An output side needs electric inserters, and this project has already
+shown a burner block earning `electronics` from its own copper in about 37
+seconds of game time.
+
+That is the second time today that diagnosing before treating changed the
+answer. Fixing coverage first would have been a real fix that moved no plates —
+which is precisely what the parity fix turned out to be.
 
 ## The method note
 

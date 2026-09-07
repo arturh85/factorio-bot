@@ -92,3 +92,34 @@ this same rung.
 3. pumpjack siting on a real oil field — untested, blocked behind rung 2.
 4. fluids as a substance the planner can hold, move and count — **open, and
    the largest**. Not a bug list; a design question.
+
+---
+
+## 2026-09-07: the milestone chain, measured — electric smelting is gated on `chemistry`, not on advanced oil
+
+Four probes, `map-31337-explored.json`, four bots, all refusing on **the same wall**:
+
+```
+researched:advanced-material-processing-2   4 recipes produce sulfur … (chemistry)
+have:electric-furnace:1                     4 recipes produce sulfur … (chemistry)
+have:sulfur:10                              4 recipes produce sulfur … (chemistry)
+have:plastic-bar:10                         9 recipes produce plastic-bar …
+```
+
+**So the critical path is `basic oil processing → chemistry (sulfur + plastic) → advanced circuits + chemical science → electric furnace`.**
+
+**Advanced oil processing is NOT on it.** It is a *throughput* upgrade — more petroleum per crude, plus heavy and light for lubricant and solid fuel — and it brings the three-output stall puzzle with it. Take it when the rate is wanted, not because anything is blocked.
+
+CLAUDE.md's *"the electric furnace is gated by oil twice"* is right in substance — both gates are petroleum-derived — and imprecise about the mechanism: what stands in the way is the **`chemistry` category**, not the advanced recipe.
+
+**And `oil-processing` and `chemistry` are the same wall**, so the `crafting_categories` work opens basic oil *and* sulfur *and* plastic together: one fix, the whole road to electric smelting.
+
+### The three-output puzzle, for whoever takes advanced processing
+
+A refinery **stalls entirely if any one of its outputs backs up** — not degrades, stops. So a base consuming only petroleum gets *zero* petroleum once heavy and light fill.
+
+**The flow graph does not model this.** `nameplate_lines` pushes **one `ProductionLine` per product, rationed independently**, so a multi-output machine is three unrelated producers that happen to share a machine. A machine's real rate is the **min over its outputs, with a hard zero**.
+
+The error direction is **over**-prediction, and **it hides on a working base**: all 55 refineries in the world-record save run `advanced-oil-processing` and that base evidently works, so every output drains and independent treatment is roughly right. It bites exactly when the oil is *imbalanced* — which is when the model would be most worth consulting.
+
+`basic-oil-processing` is 100 crude → 45 petroleum, **single output, no puzzle**, which is a second reason it is the right first rung.

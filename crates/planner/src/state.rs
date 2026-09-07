@@ -5,12 +5,14 @@ use crate::ids::{ActionId, BotId, ChainId, ItemId, Ticks};
 use crate::method::produce::DrainPolicy;
 use crate::method::util::rotated_collision_box;
 use factorio_bot_core::constants::BOT_FORCE;
+use factorio_bot_core::dashmap::DashMap;
 use factorio_bot_core::factorio::util::{add_to_rect, calculate_distance};
 use factorio_bot_core::factorio::world::{FactorioSurface, WalkRefusal};
 use factorio_bot_core::num_traits::FromPrimitive;
 use factorio_bot_core::types::{
-    Direction, FactorioEntity, FactorioTechnology, FactorioTile, HandMiningObstacle, PlayerId, Pos,
-    Position, Rect, ResourcePatch, VANILLA_CHARACTER_RESOURCE_CATEGORIES,
+    Direction, FactorioEntity, FactorioEntityPrototype, FactorioTechnology, FactorioTile,
+    HandMiningObstacle, PlayerId, Pos, Position, Rect, ResourcePatch,
+    VANILLA_CHARACTER_RESOURCE_CATEGORIES,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -117,20 +119,65 @@ const VANILLA_RESOURCE_REACH: f64 = 2.7;
 /// never a candidate for it to find.
 const POWER_SEARCH_RADIUS: f64 = 64.;
 
-/// Half the side of a pole's supply area, by pole name, from vanilla 2.1.
+/// Half the side of a pole's supply area, **from the pole's own prototype**.
 ///
-/// A table rather than prototype data because the mod does not send
-/// `supply_area_distance` — `FactorioEntityPrototype`
-/// (`crates/core/src/types.rs`) carries `collision_box`, mining and crafting
-/// fields and nothing electrical. Sending it is the follow-up that makes this
-/// table unnecessary; until then it is written down where it can be checked
-/// rather than guessed at a call site. Same discipline as
-/// [`crate::method::have::COAL_BURN_TICKS`], which hardcodes a stone furnace's
-/// 90 kW for the same reason.
+/// `FactorioEntityPrototype::supply_area_distance` landed on 2026-09-06 and
+/// this is its first reader. It is the field the game itself uses, so a mod
+/// that retunes `small-electric-pole`, or ships a pole this crate has never
+/// heard of, now gets its own number instead of ours — which is the whole
+/// point, and is the owner's standing rule that a rate or a reach is *worked
+/// out from data* rather than copied.
 ///
-/// A pole this does not name contributes no coverage at all, which refuses
-/// rather than over-credits.
-fn pole_supply_half_extent(name: &str) -> Option<f64> {
+/// # Two things it is not, and both would be silent if got wrong
+///
+/// **A pole's convention is half the side, and a beacon's is not.** The same
+/// prototype field answers for both `ElectricPole` and `Beacon`, and it means
+/// different things on each: `2.5` on a small pole is a 5x5 supply *square*,
+/// while `3` on a beacon is 3 tiles *beyond its 3x3 footprint*, i.e. 9x9. So
+/// this gates on `entity_type == "electric-pole"` before believing the number
+/// — without that gate a beacon standing in a plan would read as supplying
+/// 6x6 of power, having never been wired to anything. The beacon convention
+/// lives in [`crate::method::util::BeaconGeometry`] and deliberately shares no
+/// helper with this one.
+///
+/// **An absent field is unknown, not zero.** A pre-2026-09-06 dump — which is
+/// every archived world this project has, `workspace/scripts/map.json`
+/// included — carries no `supply_area_distance` at all, and a pole that
+/// supplies nothing is a different fact from a pole nobody asked. So the
+/// answer falls back to [`vanilla_pole_supply_half_extent`], which is what
+/// the field *would have said* on those maps, and a name that table does not
+/// know answers `None` — no coverage, which under-credits rather than
+/// over-credits, the direction every table in this file errs in.
+///
+/// A prototype the world does not carry at all is `None` for the same reason.
+fn pole_supply_half_extent(
+    prototypes: &DashMap<String, FactorioEntityPrototype>,
+    name: &str,
+) -> Option<f64> {
+    let prototype = prototypes.get(name)?;
+    if prototype.entity_type != "electric-pole" {
+        return None;
+    }
+    prototype
+        .supply_area_distance
+        .or_else(|| vanilla_pole_supply_half_extent(name))
+}
+
+/// What [`pole_supply_half_extent`] answers for a **vanilla pole on a world
+/// whose sender predates `supply_area_distance`**, from base 2.1.17's
+/// `base/prototypes/entity/entities.lua` in this repo's `workspace/data`.
+///
+/// Not a table anybody should extend. It exists because deleting it would
+/// blind the planner on every dump taken before 2026-09-06 — the entire
+/// offline measurement basis, including the seed-31337 t=0 map — and a
+/// planner that silently stops seeing poles is worse than one carrying four
+/// numbers it can point at a file for. Every world recorded from here on
+/// overrides it before it is ever consulted, and
+/// `a_pole_prototype_without_the_field_falls_back_to_vanilla` is what pins
+/// that this path is reached only when the sender said nothing.
+///
+/// A name it does not know contributes no coverage at all.
+fn vanilla_pole_supply_half_extent(name: &str) -> Option<f64> {
     match name {
         // 5x5 supply area.
         "small-electric-pole" => Some(2.5),
@@ -144,16 +191,36 @@ fn pole_supply_half_extent(name: &str) -> Option<f64> {
     }
 }
 
-/// A pole's maximum copper-wire distance, by pole name, from vanilla 2.1.
+/// A pole's maximum copper-wire distance, by pole name, from base 2.1.17's
+/// `base/prototypes/entity/entities.lua` in this repo's `workspace/data`.
 ///
 /// Two poles are wired when their centres are within the **smaller** of their
 /// two reaches, which is the game's rule and is why this is a per-pole number
 /// rather than one constant.
+///
+/// # It is the last hand-kept supply-side table, and it had drifted
+///
+/// [`pole_supply_half_extent`] used to be a table just like this one and now
+/// derives from `FactorioEntityPrototype::supply_area_distance`. This one
+/// cannot: `maximum_wire_distance` is not a field the mod sends and
+/// `FactorioEntityPrototype` has nowhere to put it. Sending it is the
+/// follow-up that deletes this.
+///
+/// **It is worth deleting rather than maintaining, and the proof is in the
+/// numbers below.** When the four were checked against the game's own data on
+/// 2026-09-07 — the first time anybody had — `big-electric-pole` read **30.0**
+/// here against the game's **32**; Factorio 2.0 moved it and nothing noticed,
+/// because a supply table is only ever read by code that agrees with it. The
+/// supply table it sat beside was correct on all four, so the pair is one
+/// checked and one drifted. Corrected in the same change; the goals this
+/// project measures are all pre-`electric-energy-distribution-1` and none of
+/// the four offline baselines moved by a tick.
 fn pole_wire_reach(name: &str) -> Option<f64> {
     match name {
         "small-electric-pole" => Some(7.5),
         "medium-electric-pole" => Some(9.0),
-        "big-electric-pole" => Some(30.0),
+        // 32, not the 30 of Factorio 1.x.
+        "big-electric-pole" => Some(32.0),
         "substation" => Some(18.0),
         _ => None,
     }
@@ -334,10 +401,16 @@ const INSERTER_DUTY_KW: f64 = 13.0;
 /// `base/prototypes/entity/entities.lua` and
 /// `base/prototypes/entity/mining-drill.lua` in this repo's `workspace/data`
 /// (base 2.1.17), and written down here for the same reason as
-/// [`pole_supply_half_extent`], [`pole_wire_reach`], [`generation_kw`] and
-/// [`delivery_offset`]: **the mod does not send `energy_usage`** and
+/// [`vanilla_pole_supply_half_extent`], [`pole_wire_reach`], [`generation_kw`]
+/// and [`delivery_offset`]: **the mod does not send `energy_usage`** and
 /// `FactorioEntityPrototype` has no field for it. Sending it is the one
 /// follow-up that deletes all five tables at once.
+///
+/// **One of those five is already gone**, and it is the precedent for the
+/// rest: [`pole_supply_half_extent`] reads
+/// `FactorioEntityPrototype::supply_area_distance` off the world and keeps a
+/// vanilla table only as a fallback for dumps taken before that field
+/// existed.
 ///
 /// # The direction an unknown name errs in, which is not the usual one
 ///
@@ -408,17 +481,18 @@ fn takes_a_recipe(name: &str) -> bool {
 /// Vanilla's `vector_to_place_result`, read off
 /// `base/prototypes/entity/mining-drill.lua` in this repo's `workspace/data`
 /// (`{-0.35, -1.3}` for the burner drill, `{0, -1.85}` for the electric one)
-/// and written down here for the same reason as [`pole_supply_half_extent`],
-/// [`generation_kw`] and `power.rs`'s fluid-connection tables:
-/// **`FactorioEntityPrototype` carries no such field and the mod does not send
-/// one.** Sending `vector_to_place_result`, `supply_area_distance`,
-/// `maximum_wire_distance` and `energy_usage` is the one follow-up that
-/// deletes all four tables at once.
+/// and written down here for the same reason as
+/// [`vanilla_pole_supply_half_extent`], [`generation_kw`] and `power.rs`'s
+/// fluid-connection tables: **`FactorioEntityPrototype` carries no such field
+/// and the mod does not send one.** Sending `vector_to_place_result`,
+/// `maximum_wire_distance` and `energy_usage` is what deletes the three that
+/// are left; `supply_area_distance` was the fourth and it has landed, so
+/// [`pole_supply_half_extent`] now derives.
 ///
 /// A machine this table does not name delivers into nothing at all, which
 /// refuses rather than over-credits — the same direction
-/// [`pole_supply_half_extent`] and `collides_with_water` choose for an unknown
-/// name.
+/// [`vanilla_pole_supply_half_extent`] and `collides_with_water` choose for an
+/// unknown name.
 ///
 /// **The inserters are the pair with [`pickup_offset`], and neither is useful
 /// without the other.** An inserter's `direction` names the side it *picks up*
@@ -4050,7 +4124,7 @@ impl PlanState {
             .entities_within(from, radius)
             .into_iter()
             .filter_map(|entity| {
-                let supply = pole_supply_half_extent(&entity.name)?;
+                let supply = pole_supply_half_extent(&self.base.entity_prototypes, &entity.name)?;
                 let box_ = Rect::new(
                     &Position::new(entity.position.x() - supply, entity.position.y() - supply),
                     &Position::new(entity.position.x() + supply, entity.position.y() + supply),
@@ -4097,7 +4171,7 @@ impl PlanState {
     /// `false` for a pole this crate does not know the supply area of, which
     /// refuses rather than over-credits.
     pub fn pole_would_supply(&self, name: &str, position: &Position, area: &Rect) -> bool {
-        let Some(supply) = pole_supply_half_extent(name) else {
+        let Some(supply) = pole_supply_half_extent(&self.base.entity_prototypes, name) else {
             return false;
         };
         let box_ = Rect::new(
@@ -4352,7 +4426,8 @@ impl PlanState {
         // the same order, recovers each pole's index.
         let mut pole_index = 0;
         for entity in &net.nearby {
-            let is_pole = pole_supply_half_extent(&entity.name).is_some()
+            let is_pole = pole_supply_half_extent(&self.base.entity_prototypes, &entity.name)
+                .is_some()
                 && pole_wire_reach(&entity.name).is_some();
             if is_pole {
                 if net.supplying.contains(&net.root(pole_index)) {
@@ -4453,7 +4528,7 @@ impl PlanState {
         let poles: Vec<(Position, Rect, f64)> = nearby
             .iter()
             .filter_map(|entity| {
-                let supply = pole_supply_half_extent(&entity.name)?;
+                let supply = pole_supply_half_extent(&self.base.entity_prototypes, &entity.name)?;
                 let wire = pole_wire_reach(&entity.name)?;
                 let box_ = Rect::new(
                     &Position::new(entity.position.x() - supply, entity.position.y() - supply),
@@ -5739,6 +5814,132 @@ mod tests {
     }
 
     // ---- electric supply ---------------------------------------------------
+
+    /// Two big poles 31 tiles apart are wired, because the game's reach is 32.
+    ///
+    /// **This table read 30.0 until 2026-09-07**, a Factorio 1.x number that
+    /// nobody had ever checked against the game's own `entities.lua`, so a
+    /// legal big-pole span read as a broken network and everything past it
+    /// lost its power. 31 is the one-tile window that tells the two apart.
+    #[test]
+    fn two_big_poles_are_wired_at_thirty_one_tiles() {
+        let mut s = state();
+        for x in [0., 31.] {
+            s.create_entity(FactorioEntity {
+                name: "big-electric-pole".into(),
+                position: Position::new(x, 0.),
+                ..Default::default()
+            });
+        }
+        s.create_entity(FactorioEntity {
+            name: "steam-engine".into(),
+            position: Position::new(31., 1.),
+            ..Default::default()
+        });
+
+        let kw = s.electric_supply_kw(&lab_area(&s, Position::new(0., 0.)));
+        assert_eq!(
+            kw, 900.,
+            "a big pole reaches 32, so a 31-tile span carries the engine's power"
+        );
+    }
+
+    // ---- supply area, from the prototype -----------------------------------
+
+    /// A `PlanState` whose `name` prototype declares `supply_area_distance`,
+    /// or, with `None`, has it explicitly cleared.
+    ///
+    /// The fixture ships every vanilla pole with the field **absent**, which
+    /// is what a pre-2026-09-06 dump looks like, so overwriting it in place is
+    /// what lets a test say "the reach came from the world" rather than "the
+    /// reach happens to equal the table".
+    fn state_with_supply_area(name: &str, distance: Option<f64>) -> PlanState {
+        let world = fixture_world();
+        let mut prototype = world
+            .entity_prototypes
+            .get(name)
+            .expect("the fixture ships this prototype")
+            .clone();
+        prototype.supply_area_distance = distance;
+        world.entity_prototypes.insert(name.into(), prototype);
+        PlanState::from_world(Arc::new(world), &[BotId(1)])
+    }
+
+    /// A pole's reach is read off its own prototype, not off the vanilla
+    /// table.
+    ///
+    /// **The whole point of the change.** A modded `small-electric-pole` that
+    /// supplies 10x10 must supply 10x10 here, and the only way to see that is
+    /// to state a number the table does not contain and watch coverage follow
+    /// it. 5.0 reaches ground 4.5 tiles out and vanilla's 2.5 does not.
+    #[test]
+    fn a_poles_supply_area_comes_from_its_own_prototype() {
+        let far = Rect::new(&Position::new(4.4, -0.1), &Position::new(4.6, 0.1));
+
+        let retuned = state_with_supply_area("small-electric-pole", Some(5.0));
+        assert!(
+            retuned.pole_would_supply("small-electric-pole", &Position::new(0., 0.), &far),
+            "the prototype says 5.0, so 4.5 tiles away is inside the supply area"
+        );
+
+        let vanilla = state_with_supply_area("small-electric-pole", Some(2.5));
+        assert!(
+            !vanilla.pole_would_supply("small-electric-pole", &Position::new(0., 0.), &far),
+            "at 2.5 the same ground is outside it, so the number is doing the work"
+        );
+    }
+
+    /// A pole prototype with no `supply_area_distance` — every world dumped
+    /// before the field existed — falls back to the vanilla number rather than
+    /// reading as a pole that supplies nothing.
+    ///
+    /// This is what keeps `workspace/scripts/map.json` and every archived run
+    /// planning at all. It is a compatibility shim and is documented as one on
+    /// [`vanilla_pole_supply_half_extent`].
+    #[test]
+    fn a_pole_prototype_without_the_field_falls_back_to_vanilla() {
+        let s = state_with_supply_area("small-electric-pole", None);
+        let inside = Rect::new(&Position::new(2.3, -0.1), &Position::new(2.4, 0.1));
+        let outside = Rect::new(&Position::new(2.6, -0.1), &Position::new(2.7, 0.1));
+        assert!(
+            s.pole_would_supply("small-electric-pole", &Position::new(0., 0.), &inside),
+            "vanilla's 2.5 must still be reachable when the sender said nothing"
+        );
+        assert!(
+            !s.pole_would_supply("small-electric-pole", &Position::new(0., 0.), &outside),
+            "and it must still end at 2.5, not become unbounded"
+        );
+    }
+
+    /// **A beacon is not a pole, and the same field means something else on
+    /// it.**
+    ///
+    /// `supply_area_distance` rides on both `ElectricPole` and `Beacon`, so a
+    /// reader that trusts the number without checking `entity_type` reports a
+    /// beacon as supplying 6x6 of electricity it was never wired to carry.
+    /// Vanilla's beacon declares 3, which is the largest of the four pole
+    /// numbers but the one least entitled to be believed here.
+    #[test]
+    fn a_beacon_declaring_a_supply_area_supplies_no_power() {
+        let s = state_with_supply_area("beacon", Some(3.0));
+        let beside = Rect::new(&Position::new(1.4, -0.1), &Position::new(1.6, 0.1));
+        assert!(
+            !s.pole_would_supply("beacon", &Position::new(0., 0.), &beside),
+            "a beacon's 3 is distance beyond its footprint, and it is not a power source"
+        );
+    }
+
+    /// A name no prototype describes contributes no coverage, which
+    /// under-credits rather than over-credits.
+    #[test]
+    fn a_pole_the_world_has_never_heard_of_supplies_nothing() {
+        let s = state();
+        let anywhere = Rect::new(&Position::new(-1., -1.), &Position::new(1., 1.));
+        assert!(
+            !s.pole_would_supply("mod-mega-pole", &Position::new(0., 0.), &anywhere),
+            "an unknown name is unknown reach, never a default one"
+        );
+    }
 
     /// A `PlanState` with a pole at `pole` and, optionally, a steam engine at
     /// `engine`.

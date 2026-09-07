@@ -138,11 +138,28 @@ general was not.**
 unfuelled twin scores 37.5 in the model and makes zero plates in the game.
 The model cannot see fuel (a burner's coal is not a recipe ingredient, and
 `the_ground_is_not_a_recipe` is deliberate), so a search over layouts that
-differ in fuelling would rank a dead block equal to a live one. That is
+differ in fuelling cannot tell a dead block from a live one. That is
 differential in the worst way -- it is not off by a factor, it is off by the
 whole answer -- and it is why the CLI prints every generated block beside its
-`-nocoal` twin: the tie is the finding, and a reader should see it rather than
-be told about it.
+`-nocoal` twin: a reader should see it rather than be told about it.
+
+**CORRECTED 2026-09-08, by running it on master (`52c1329c`): the dead twin
+does not TIE the live one, it BEATS it, and sorts above it in the default
+table.** Same rate, but 5 fewer entities and 15 fewer iron, so its payback is
+shorter and it wins the tiebreak:
+
+```
+gen-6x5-nocoal  90.0 plates/min  65 ents  175 iron  payback 1.9m   <- CONTROL, ranked FIRST
+gen-6x5         90.0 plates/min  65 ents  190 iron  payback 2.1m
+```
+
+This is worth stating precisely because the original wording made the failure
+sound symmetric. It is not: **the cheapest way to score well in this model is
+to leave the coal out**, so the bias points at exactly the layout that produces
+nothing. `--no-controls` gives the sound ranking (`gen-6x5` first, `gen-1x6`
+last at 9.9m payback), and is what a real ranking should use -- but the default
+view puts a known-dead block on row one, labelled `CONTROL` and nothing more.
+Whoever gives fuel a representation should fix the ordering in the same change.
 
 ## 5. What this ranking gets wrong -- the limits, as limits
 

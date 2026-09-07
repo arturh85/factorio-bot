@@ -4183,10 +4183,37 @@ mod block_demand_tests {
     /// brownout at night, which is a capacity-over-time question that
     /// accumulators answer rather than a determinism question.
     ///
-    /// Left green rather than inverted because `generation_kw` lives in
-    /// `state.rs`, which the other session is editing right now. When the
-    /// average lands this test inverts, and `a_block_carrying_its_own_
-    /// generation_powers_itself` gains a solar case.
+    /// **UPDATED 2026-09-07: the premise above is answered and the verdict
+    /// still stands, for a different reason. Do not expect this test to
+    /// invert soon.**
+    ///
+    /// It used to say "when the average lands this test inverts". The average
+    /// has landed — the daylight channel derives it from `LuaSurface`, and it
+    /// reproduces vanilla by two independent paths — and this test did not
+    /// invert, because derivability was never the real blocker. **Nothing
+    /// checks that the accumulators are standing**, and crediting solar
+    /// generation without that trades a false refusal for a base that dies at
+    /// midnight. That is the worse trade: a refusal is loud and a brownout at
+    /// 03:00 is the *coverage is not capacity* failure with a clock attached.
+    ///
+    /// So the follow-up is a solar arm of `method::power` that sizes the
+    /// accumulator bank, not a row in `generation_kw`.
+    ///
+    /// **And a correction to my own arithmetic, which I passed to the peer and
+    /// which was wrong.** I wrote that the owner's 25 panels : 21 accumulators
+    /// *is* the statement that average output is 0.84 of nameplate. It is not.
+    /// They are two different integrals of the same curve:
+    ///
+    /// ```text
+    /// average       0.70 of nameplate   60 kW noon -> 42 kW
+    /// accumulators  0.84 per panel      integral of max(0, average - instantaneous)
+    /// ```
+    ///
+    /// Sizing an array on 0.84 instead of 0.70 would have come out **20%
+    /// short**. Measured, the live day is 25,200 ticks rather than the 25,000
+    /// every reference gives, which makes the true ratio 0.8467 — the whole
+    /// 0.8% gap from the owner's figure is day length. Same shape as the pole
+    /// table: a number everyone quotes that the game does not hold.
     ///
     /// `generation_kw` credits deterministic sources only, and says why: a
     /// steam engine's 900 kW is the same at every hour, while a solar panel's

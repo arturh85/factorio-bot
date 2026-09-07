@@ -81,7 +81,8 @@ a fact. The route is known to work:
 Solar then needs one derived judgement rather than a constant: **average
 output, not nameplate**, per the owner. A panel's nameplate is its noon figure,
 and the accumulator ratio the owner gave — 25:21 — is itself the statement that
-average is 0.84 of what the panels would otherwise promise. Deriving the ratio
+average is 0.84 of what the panels would otherwise promise. **That inference is
+WRONG — see the correction at the end of this note.** Deriving the ratio
 from the two prototypes rather than writing 0.7 or 42 kW anywhere is what makes
 it survive a mod that changes either.
 
@@ -142,6 +143,37 @@ derivation removes.
 and `output_flow_limit` both `300kW`. 60 kW is the noon nameplate, so the
 owner's "assume the average" needs the day/night factor — and their 25:21 ratio
 *is* that statement, since 21/25 = 0.84.
+
+## CORRECTION: 25:21 is the accumulator ratio, not the average
+
+I asserted twice above that the owner's 25:21 states "average is 0.84 of
+nameplate", and passed that to the peer, who put it in an agent brief. **It is
+wrong.** The agent measured it rather than inheriting it. They are two different
+integrals of the same curve:
+
+```
+average       0.70 of nameplate    60 kW noon -> 42 kW
+              0.50*1 + 0.20*0.5 + 0.10*0 + 0.20*0.5
+accumulators  0.84 per panel       integral of max(0, average - instantaneous)
+              0.168 of a day's full output -> 4.2 MJ against a 5 MJ buffer
+```
+
+**Sizing an array on 0.84 rather than 0.70 comes out 20% short.** The two
+numbers are close enough to look interchangeable and are not, which is exactly
+why the coincidence was worth checking rather than reasoning from.
+
+And the live day is **25,200 ticks, not the 25,000 every reference gives** —
+seven minutes exactly. The average is a fraction of a day and so is unaffected;
+the accumulator ratio is proportional, making it 0.8467. The entire 0.8% gap
+from the owner's 0.84 is day length. That is the third number this week that
+everyone quotes and the game does not hold, after the pole's 30-against-32 and
+the turbine's 5,800-against-5,820.
+
+The mistake has the shape this note is otherwise about: I had two numbers that
+nearly matched and concluded they were the same quantity, instead of asking what
+each was an integral *of*. **A match is more suspicious than a mismatch** — this
+repo already says so about the flow graph's copper-cable 1.01 — and I did not
+apply it to my own arithmetic.
 
 **A note on the instrument, because the first version of it lied.** Scanning a
 fixed 6,000-character window after each `name = "..."` let fields bleed across

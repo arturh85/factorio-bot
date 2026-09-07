@@ -31,6 +31,23 @@ use tracing::{error, warn};
 /// itself current while holding nothing at all.
 const NEVER_BUILT: u64 = u64::MAX;
 
+/// One machine making one item, and what that costs it.
+///
+/// The unit of the whole-base balance in
+/// [`FlowGraph::sustained_production_rates`]: a producer appears once per
+/// **product**, so a furnace credited with two outputs is throttled
+/// independently on each.
+#[derive(Debug, Clone)]
+struct ProductionLine {
+    /// What this machine makes.
+    item: String,
+    /// How much of it, per second, at nameplate -- ingredients assumed.
+    rate: f64,
+    /// What one second at `rate` eats, per ingredient. Empty for a drill and
+    /// an offshore pump, which take their output from the ground.
+    needs: BTreeMap<String, f64>,
+}
+
 pub struct FlowGraph {
     entity_graph: Arc<EntityGraph>,
     entity_prototypes: Arc<DashMap<String, FactorioEntityPrototype>>,
@@ -618,16 +635,70 @@ impl FlowGraph {
         per_machine
     }
 
-    /// What the base can actually keep making, once a machine is not allowed
-    /// to consume more of an item than the base makes of it.
+    /// One entry per **product of one machine**: what it makes at nameplate,
+    /// and what that costs it per second in ingredients.
     ///
-    /// [`FlowGraph::production_rates`] is a **nameplate** figure: every
-    /// machine at 100%, ingredients assumed. This is the same figure with one
-    /// term added -- the one the world-record base said was the whole
-    /// remaining gap, `no_ingredients` idleness. Against that base it takes
-    /// iron plate from 1.25x the game's own statistics to 1.09x and green
-    /// circuits from 1.32x to 1.13x, and leaves copper cable exactly where it
-    /// was, which is the honest outcome there (see the note).
+    /// The unit is a machine's *output*, not the machine: a furnace this graph
+    /// credits with copper plate and stone brick at once -- the mixed-belt
+    /// artefact `update`'s furnace arm shares time between -- has two
+    /// independent products, and a stone shortage must not throttle its
+    /// copper. Gating the machine on the minimum over everything it touches
+    /// took copper plate from 9% high to 12% low while the ore that feeds it
+    /// was never short.
+    ///
+    /// `needs` is empty for a drill and an offshore pump: they take their
+    /// output from the **ground**, not from a recipe, so nothing may be
+    /// charged against them.
+    fn nameplate_lines(&self) -> Vec<ProductionLine> {
+        self.ensure_current();
+        let nameplate = self.producer_nameplates();
+        // What the base makes of each item before anything is throttled. Used
+        // only to pick which recipe an item is being made BY -- see
+        // `recipe_making`.
+        let mut standing: BTreeMap<String, f64> = BTreeMap::new();
+        for (_, made) in &nameplate {
+            for (item, rate) in made {
+                *standing.entry(item.clone()).or_insert(0.) += rate;
+            }
+        }
+        let mut lines: Vec<ProductionLine> = vec![];
+        for (crafts, made) in nameplate {
+            for (item, rate) in made {
+                let mut needs: BTreeMap<String, f64> = BTreeMap::new();
+                if crafts
+                    && let Some(recipe_name) = self.recipe_making(&item, &standing)
+                    && let Some(recipe) = self.recipes.get(&recipe_name)
+                    && let Some(product) = recipe.products.iter().find(|p| p.name == item)
+                    && product.amount > 0
+                {
+                    let crafts = rate / f64::from(product.amount);
+                    for ingredient in recipe.ingredients.iter().flatten() {
+                        *needs.entry(ingredient.name.clone()).or_insert(0.) +=
+                            crafts * f64::from(ingredient.amount);
+                    }
+                }
+                lines.push(ProductionLine { item, rate, needs });
+            }
+        }
+        lines
+    }
+
+    /// What the base can actually keep making, once no machine is allowed to
+    /// consume more of an item than the base makes of it, **or to make more of
+    /// one than anything takes**.
+    ///
+    /// [`FlowGraph::production_rates`] is a **nameplate** figure: every machine
+    /// at 100%, ingredients assumed and output assumed to vanish. This adds
+    /// both halves of idleness -- supply in
+    /// [`FlowGraph::sustained_production_rates`]'s own balance, and demand in
+    /// [`FlowGraph::balance`]'s outlet cap. Against the world-record base it
+    /// takes the mean absolute log error over the fourteen items the game
+    /// reports from **0.298 at nameplate to 0.184**, the largest single move
+    /// being `iron-gear-wheel` from 3.58x the game's own statistics to 0.99x.
+    ///
+    /// It is a prediction, and four of the fourteen are worse than nameplate:
+    /// see `docs/superpowers/notes/2026-09-07-a-full-consumer-stops-pulling.md`
+    /// for the whole table and what each regression says.
     ///
     /// # Why this is a WHOLE-BASE balance and not a per-machine duty cycle
     ///
@@ -651,91 +722,241 @@ impl FlowGraph {
     /// bot, or through a chest nothing feeds is counted in the base's supply
     /// even though no edge carries it.
     ///
-    /// # It throttles on shortage and never on surplus, deliberately
+    /// # It throttles on shortage, and on surplus only where the surplus is
     ///
     /// Demand here is only what *modelled producers* consume. Everything else
     /// a base does with an item -- a wall, a rocket, a lab, a chest somebody
     /// fills -- is invisible, so demand is systematically understated and a
-    /// surplus proves nothing. A shortage is different: if the model can only
-    /// see 16,500 ore/min being mined, consumers needing 19,016 cannot all be
-    /// running. So supply below demand throttles the consumers, and supply
-    /// above demand does **not** throttle the producers -- the
-    /// `waiting_for_space_in_destination` half of idleness (194 drills on the
-    /// record base) is still not modelled here.
+    /// **surplus proves nothing**. That is why no producer is ever capped at
+    /// the consumption this model can see: on the world-record base the model
+    /// sees 844 coal/min being eaten against 4,096 the game really makes,
+    /// because a burner's fuel is not a recipe ingredient and nothing here
+    /// charges it.
+    ///
+    /// What it does instead is decide, per line, **whose demand is real** --
+    /// see [`FlowGraph::balance`].
     ///
     /// An item **nothing in the model produces** is unknown, not absent, and
     /// does not constrain anybody -- the same rule `runMatch.ts` applies to a
     /// missing run id. Otherwise every machine fed a fluid, or fed from
     /// another surface, would read as stopped.
-    ///
-    /// Deterministic: ordered collections throughout, and the iteration only
-    /// ever lowers a machine's scale, so it converges rather than oscillating
-    /// between two allocations that each look feasible.
     pub fn sustained_production_rates(&self) -> BTreeMap<String, f64> {
         self.ensure_current();
-        // The unit of throttling is a machine's OUTPUT, not the machine.
-        // A furnace this graph credits with copper plate and stone brick at
-        // once -- the mixed-belt artefact `update`'s furnace arm shares time
-        // between -- has two independent products, and a stone shortage must
-        // not throttle its copper. Gating the machine on the minimum over
-        // everything it touches took copper plate from 9% high to 12% low
-        // while the ore that feeds it was never short.
-        let nameplate = self.producer_nameplates();
-        // What the base makes of each item before anything is throttled. Used
-        // only to pick which recipe an item is being made BY -- see
-        // `recipe_making`.
-        let mut standing: BTreeMap<String, f64> = BTreeMap::new();
-        for (_, made) in &nameplate {
-            for (item, rate) in made {
-                *standing.entry(item.clone()).or_insert(0.) += rate;
+        let lines = self.nameplate_lines();
+        let scale = Self::balance(&lines);
+
+        let mut total: BTreeMap<String, f64> = BTreeMap::new();
+        for (index, line) in lines.iter().enumerate() {
+            *total.entry(line.item.clone()).or_insert(0.) += line.rate * scale[index];
+        }
+        total
+    }
+
+    /// How much of its nameplate each line can actually run at, given that the
+    /// base's own supply is all any of them has to eat.
+    ///
+    /// Pure: it reads nothing but `lines`, so it is testable without a world
+    /// and its result depends on no clock, no map and no iteration order.
+    ///
+    /// # A full consumer stops pulling, and that is the demand side
+    ///
+    /// The first version of this charged **every** consumer at nameplate --
+    /// every machine assumed to pull its ingredients at its full rate, always.
+    /// That is false in exactly the way the world-record base measures: at
+    /// tick 1,443,169, **21.7% of its assemblers read `full_output`** and
+    /// **49.3% of its inserters read `waiting_for_space_in_destination`**. A
+    /// machine whose output has nowhere to go is not eating, and charging it
+    /// as though it were invents a shortage that then propagates down the
+    /// whole chain. It is why `processing-unit` came out at 0.54x the game's
+    /// own statistics and `advanced-circuit` at 0.70x -- both *under*, while
+    /// everything shallower was over.
+    ///
+    /// # Predicting it from topology and rates, never from an observed status
+    ///
+    /// `FactorioEntity::status` exists now and says which machines are backed
+    /// up. **It is deliberately not read here.** A plan is scored on machines
+    /// that do not exist yet, so a model that needs their status is an oracle
+    /// that evaporates the moment it is needed. The census validates this
+    /// prediction; it is not an input to it.
+    ///
+    /// What the model can see instead is **whether anything it knows about
+    /// drains a line's output**:
+    ///
+    /// - A line whose product some other line eats has a **known drain**. It
+    ///   keeps pulling, because something downstream keeps taking.
+    /// - A line whose product **nothing in the model consumes** has an
+    ///   *unknown* drain. On the record base that is the mall and the science
+    ///   block -- roboports at 9/min, labs at 22.5/min, six science packs,
+    ///   splitters, poles, solar panels: 42 items whose modelled consumption
+    ///   is exactly zero. Their real drain is a bot request, a lab, or a
+    ///   player, none of which this graph models.
+    ///
+    /// The rule is the same one the supply side already uses for an item
+    /// nothing produces, applied to the other end: **unknown is not
+    /// nameplate.** A known drain is served first; an unknown drain gets what
+    /// is left. That is not an arbitrary tie-break -- it is the mechanism
+    /// itself. A mall assembler with a full output chest stops its input
+    /// inserters, which releases its share of the belt to the machines
+    /// downstream that are still pulling.
+    ///
+    /// It never invents supply, only refuses to invent demand, so it can only
+    /// move a rate **up** toward nameplate, never above it.
+    ///
+    /// # Two phases, because a scale that only falls cannot recover
+    ///
+    /// The iteration is monotone decreasing, which is what makes it converge
+    /// rather than oscillate between two allocations that each look feasible.
+    /// That forbids doing this in one pass: an unknown-drain line clamped to
+    /// zero early, while the known-drain lines were still at nameplate, could
+    /// never take back the residual they freed as they scaled down. So the
+    /// known-drain lines reach their fixed point first, and the unknown-drain
+    /// lines are then fitted to what that leaves.
+    ///
+    /// Phase one may ignore the unknown-drain lines entirely rather than
+    /// merely deprioritise them, and that is exact, not an approximation: a
+    /// line is unknown-drain precisely because **no** line's `needs` mention
+    /// its product, so it can supply nothing that phase one is rationing.
+    fn balance(lines: &[ProductionLine]) -> Vec<f64> {
+        // Every item some line eats. A line making one of these has a drain
+        // this model can point at.
+        let mut drained: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+        for line in lines {
+            for ingredient in line.needs.keys() {
+                drained.insert(ingredient.as_str());
             }
         }
-        let mut lines: Vec<(String, f64, BTreeMap<String, f64>)> = vec![];
-        for (crafts, made) in nameplate {
-            for (item, rate) in made {
-                let mut needs: BTreeMap<String, f64> = BTreeMap::new();
-                if crafts
-                    && let Some(recipe_name) = self.recipe_making(&item, &standing)
-                    && let Some(recipe) = self.recipes.get(&recipe_name)
-                    && let Some(product) = recipe.products.iter().find(|p| p.name == item)
-                    && product.amount > 0
-                {
-                    let crafts = rate / f64::from(product.amount);
-                    for ingredient in recipe.ingredients.iter().flatten() {
-                        *needs.entry(ingredient.name.clone()).or_insert(0.) +=
-                            crafts * f64::from(ingredient.amount);
-                    }
-                }
-                lines.push((item, rate, needs));
-            }
-        }
+        let known: Vec<bool> = lines
+            .iter()
+            .map(|line| drained.contains(line.item.as_str()))
+            .collect();
 
         let mut scale = vec![1_f64; lines.len()];
-        // Bounded rather than "until it converges": the map only decreases, so
-        // it does converge, but a fixed cap means a pathological recipe cycle
-        // cannot hang a caller. 64 is far more than the depth of any vanilla
-        // chain.
+        // Phase one: the lines whose output is drained, rationed against each
+        // other, and each held to the outlet its own product has among them.
+        Self::ration(
+            lines,
+            &mut scale,
+            |index| known[index],
+            &BTreeMap::new(),
+            true,
+        );
+        // What phase one leaves on the table, per item.
+        //
+        // Keyed on what phase one **makes**, never on what it merely eats: an
+        // item with no producer in the model is unknown rather than absent,
+        // and a residual of `-demand` for it would read as "every gram is
+        // spoken for" and stop a line dead on an ingredient the model has
+        // simply never heard of -- a fluid off another surface, say.
+        //
+        // Every ingredient any line needs is by definition drained, so all of
+        // its producers are phase-one lines: this map cannot miss supply that
+        // phase two is entitled to.
+        let mut made: BTreeMap<String, f64> = BTreeMap::new();
+        let mut eaten: BTreeMap<String, f64> = BTreeMap::new();
+        for (index, line) in lines.iter().enumerate() {
+            if !known[index] {
+                continue;
+            }
+            *made.entry(line.item.clone()).or_insert(0.) += line.rate * scale[index];
+            for (ingredient, rate) in &line.needs {
+                *eaten.entry(ingredient.clone()).or_insert(0.) += rate * scale[index];
+            }
+        }
+        let residual: BTreeMap<String, f64> = made
+            .into_iter()
+            .map(|(item, rate)| {
+                let left = rate - eaten.get(&item).copied().unwrap_or_default();
+                (item, left.max(0.))
+            })
+            .collect();
+        // Phase two: the rest, against that residual and against each other.
+        // No outlet cap here -- a phase-two line is one whose outlet the model
+        // cannot see at all, so there is nothing to cap it at.
+        Self::ration(lines, &mut scale, |index| !known[index], &residual, false);
+        scale
+    }
+
+    /// One monotone-decreasing fixed point over the lines `selected` picks,
+    /// against `floor` -- the supply available to them before any of them
+    /// makes anything, which is zero in phase one and the leftovers in phase
+    /// two.
+    ///
+    /// Bounded rather than "until it converges": the scale map only
+    /// decreases, so it does converge, but a fixed cap means a pathological
+    /// recipe cycle cannot hang a caller. 64 is far more than the depth of any
+    /// vanilla chain.
+    ///
+    /// With `cap_on_outlet`, a line is additionally held to what the selected
+    /// lines eat of its own product: **a full consumer stops pulling**. That
+    /// is the one place this model predicts `full_output` and
+    /// `waiting_for_space_in_destination`, and it is predicted from recipes
+    /// and rates, never from an observed status.
+    ///
+    /// Two exemptions, both the same rule the input side already applies:
+    ///
+    /// - **An item nothing here eats has an unknown outlet, not a zero one**,
+    ///   and is not capped. Otherwise the deepest item in the chain -- the one
+    ///   whose only consumers are the mall this phase excludes -- would be
+    ///   held at zero. On the record base that is `processing-unit` exactly.
+    /// - **A machine that takes its output from the ground is capped by
+    ///   nothing**, the same exemption `the_ground_is_not_a_recipe` gives it
+    ///   on the input side, and for the same reason: the model has neither its
+    ///   bill nor its buyers. A burner's fuel is not a recipe ingredient, so
+    ///   the model sees **844 coal/min being eaten on the record base against
+    ///   a real 4,096** -- 21% of the true drain. Capping a coal drill at what
+    ///   the model can see it feed would be wrong by a factor of five, and
+    ///   measured to be.
+    fn ration(
+        lines: &[ProductionLine],
+        scale: &mut [f64],
+        selected: impl Fn(usize) -> bool,
+        floor: &BTreeMap<String, f64>,
+        cap_on_outlet: bool,
+    ) {
         for _ in 0..64 {
-            let mut supply: BTreeMap<String, f64> = BTreeMap::new();
+            let mut supply: BTreeMap<String, f64> = floor.clone();
             let mut demand: BTreeMap<String, f64> = BTreeMap::new();
-            for (index, (item, rate, needs)) in lines.iter().enumerate() {
-                *supply.entry(item.clone()).or_insert(0.) += rate * scale[index];
-                for (ingredient, rate) in needs {
+            for (index, line) in lines.iter().enumerate() {
+                if !selected(index) {
+                    continue;
+                }
+                *supply.entry(line.item.clone()).or_insert(0.) += line.rate * scale[index];
+                for (ingredient, rate) in &line.needs {
                     *demand.entry(ingredient.clone()).or_insert(0.) += rate * scale[index];
                 }
             }
             let mut moved = false;
-            for (index, (_, _, needs)) in lines.iter().enumerate() {
+            for (index, line) in lines.iter().enumerate() {
+                if !selected(index) {
+                    continue;
+                }
                 let mut limit = scale[index];
-                for ingredient in needs.keys() {
+                for ingredient in line.needs.keys() {
                     let have = supply.get(ingredient).copied().unwrap_or_default();
                     let want = demand.get(ingredient).copied().unwrap_or_default();
                     // Nobody in the model makes it: unknown, not zero.
+                    // Phase two reads a *residual* here, where zero means
+                    // "spoken for" rather than "unheard of" -- so the guard
+                    // must be strict, or a line would keep its nameplate on an
+                    // ingredient every gram of which is already claimed.
                     if have <= 0. {
+                        if floor.contains_key(ingredient) {
+                            limit = 0.;
+                        }
                         continue;
                     }
                     if want > have {
                         limit = limit.min(scale[index] * have / want);
+                    }
+                }
+                // The outlet. `needs` is empty for a drill and an offshore
+                // pump, which is the ground exemption.
+                if cap_on_outlet && !line.needs.is_empty() {
+                    let outlet = demand.get(&line.item).copied().unwrap_or_default();
+                    let standing = supply.get(&line.item).copied().unwrap_or_default();
+                    // Nobody here eats it: unknown outlet, not a closed one.
+                    if outlet > 0. && standing > outlet {
+                        limit = limit.min(scale[index] * outlet / standing);
                     }
                 }
                 if limit < scale[index] {
@@ -747,12 +968,6 @@ impl FlowGraph {
                 break;
             }
         }
-
-        let mut total: BTreeMap<String, f64> = BTreeMap::new();
-        for (index, (item, rate, _)) in lines.iter().enumerate() {
-            *total.entry(item.clone()).or_insert(0.) += rate * scale[index];
-        }
-        total
     }
 
     /// The name of the recipe that makes `item`, for charging its ingredients.
@@ -2244,6 +2459,141 @@ mod tests {
         );
     }
 
+    /// One machine making one item out of `needs`, for the pure tests of
+    /// [`FlowGraph::balance`] below.
+    fn line(item: &str, rate: f64, needs: &[(&str, f64)]) -> ProductionLine {
+        ProductionLine {
+            item: item.to_string(),
+            rate,
+            needs: needs
+                .iter()
+                .map(|(name, rate)| ((*name).to_string(), *rate))
+                .collect(),
+        }
+    }
+
+    /// What each line's item comes to, once `balance` has decided its scale.
+    fn balanced(lines: &[ProductionLine]) -> BTreeMap<String, f64> {
+        let scale = FlowGraph::balance(lines);
+        let mut total: BTreeMap<String, f64> = BTreeMap::new();
+        for (index, line) in lines.iter().enumerate() {
+            *total.entry(line.item.clone()).or_insert(0.) += line.rate * scale[index];
+        }
+        total
+    }
+
+    /// The demand side: **a machine whose output has nowhere to go stops
+    /// pulling.**
+    ///
+    /// `cog` has capacity for 10/s and one consumer that can take 2/s. The
+    /// old model charged it 10 plates a second regardless, which is the
+    /// fictional demand that dragged `processing-unit` to 0.54x the game's own
+    /// number.
+    ///
+    /// The chain is three deep on purpose: `widget` has to be drained by
+    /// *something* or its own line would be exempt for the different reason
+    /// tested by `an_item_nothing_here_eats_has_an_unknown_outlet`, and the
+    /// test would pass without exercising the cap at all.
+    #[test]
+    fn a_producer_is_held_to_what_its_consumers_can_take() {
+        let lines = vec![
+            line("plate", 100., &[]),
+            line("cog", 10., &[("plate", 10.)]),
+            line("widget", 2., &[("cog", 2.)]),
+            line("gizmo", 1., &[("widget", 1.)]),
+        ];
+        let out = balanced(&lines);
+        assert_eq!(
+            out.get("cog").copied(),
+            Some(2.),
+            "one consumer takes 2 cogs a second, so ten a second is not \
+             sustained however many machines stand there: {out:?}"
+        );
+        assert_eq!(
+            out.get("plate").copied(),
+            Some(100.),
+            "and the cog line stops pulling the other 8 plates: {out:?}"
+        );
+    }
+
+    /// An **unknown** drain does not displace a **known** one.
+    ///
+    /// Both lines want 8 plate/s and only 10 exist. `cog` is eaten by
+    /// something in the model; nothing at all eats `trinket`, so its real
+    /// drain is a bot request, a lab or a player -- none of which this graph
+    /// holds. Sharing the shortage proportionally, which is what one
+    /// undifferentiated ration does, charges the unknown drain at nameplate
+    /// and starves the known one.
+    #[test]
+    fn an_unknown_drain_does_not_displace_a_known_one() {
+        let lines = vec![
+            line("plate", 10., &[]),
+            line("cog", 8., &[("plate", 8.)]),
+            line("widget", 8., &[("cog", 8.)]),
+            line("gizmo", 1., &[("widget", 1.)]),
+            line("trinket", 8., &[("plate", 8.)]),
+        ];
+        let out = balanced(&lines);
+        assert_eq!(
+            out.get("cog").copied(),
+            Some(8.),
+            "the line something is pulling from keeps its plates: {out:?}"
+        );
+        assert_eq!(
+            out.get("trinket").copied(),
+            Some(2.),
+            "and the line nothing is pulling from gets the two left over, \
+             not four and a half: {out:?}"
+        );
+    }
+
+    /// An item **nothing here eats** has an unknown outlet, not a closed one.
+    ///
+    /// Without this the deepest item in every chain -- the one whose only
+    /// consumers are the mall the first phase excludes -- would be capped at
+    /// zero. On the world-record base that is `processing-unit` exactly: its
+    /// modelled consumption comes entirely from lines nothing drains.
+    #[test]
+    fn an_item_nothing_here_eats_has_an_unknown_outlet() {
+        let lines = vec![
+            line("plate", 100., &[]),
+            line("core", 5., &[("plate", 5.)]),
+            line("trinket", 1., &[("core", 1.)]),
+        ];
+        let out = balanced(&lines);
+        assert_eq!(
+            out.get("core").copied(),
+            Some(5.),
+            "nothing in the first phase eats a core, which is not the same \
+             claim as nothing wanting one: {out:?}"
+        );
+    }
+
+    /// A machine that takes its output from the **ground** is capped by
+    /// nothing, the same exemption `the_ground_is_not_a_recipe` gives it on
+    /// the input side.
+    ///
+    /// This is the `coal` shape, and it is why the exemption is not
+    /// cosmetic: a burner's fuel is not a recipe ingredient, so on the
+    /// world-record base the model sees 844 coal/min eaten against a real
+    /// 4,096. Capping the drills at what the model can see them feed would
+    /// be a factor of five wrong.
+    #[test]
+    fn the_ground_is_not_capped_by_the_customers_the_model_can_see() {
+        let lines = vec![
+            line("coal", 100., &[]),
+            line("brick", 1., &[("coal", 1.)]),
+            line("trinket", 1., &[("brick", 1.)]),
+        ];
+        let out = balanced(&lines);
+        assert_eq!(
+            out.get("coal").copied(),
+            Some(100.),
+            "the model sees one consumer of coal and knows nothing of the \
+             boilers burning the rest: {out:?}"
+        );
+    }
+
     /// Which recipe an item is charged to is decided by **what the base can
     /// supply**, not by sorting.
     ///
@@ -2342,19 +2692,90 @@ mod tests {
             serde_json::from_str(&json).expect("the dump parses");
         let rates = surface.flow_graph.production_rates();
         let sustained = surface.flow_graph.sustained_production_rates();
+        // The predecessor of `balance`, reproduced rather than remembered:
+        // one ration over every line at once, which is what
+        // `sustained_production_rates` did before a line's demand depended on
+        // whether anything drains its output. Keeping the old column
+        // computable is what makes a before/after honest -- both are measured
+        // on the same dump by the same binary, and the note this feeds warns
+        // that a baseline compared across two builds measures the builds.
+        let lines = surface.flow_graph.nameplate_lines();
+        let mut flat = vec![1_f64; lines.len()];
+        FlowGraph::ration(&lines, &mut flat, |_| true, &BTreeMap::new(), false);
+        let mut every_consumer_pulls: BTreeMap<String, f64> = BTreeMap::new();
+        for (index, line) in lines.iter().enumerate() {
+            *every_consumer_pulls.entry(line.item.clone()).or_insert(0.) += line.rate * flat[index];
+        }
         println!("-- production_rates of {path} --");
         println!(
-            "{:>28}  {:>14}  {:>14}",
-            "item", "nameplate/min", "sustained/min"
+            "{:>28}  {:>14}  {:>14}  {:>14}",
+            "item", "nameplate/min", "pull-always/min", "sustained/min"
         );
         for (name, rate) in &rates {
             println!(
-                "{name:>28}  {:>14.1}  {:>14.1}",
+                "{name:>28}  {:>14.1}  {:>14.1}  {:>14.1}",
                 rate * 60.,
+                every_consumer_pulls.get(name).copied().unwrap_or_default() * 60.,
                 sustained.get(name).copied().unwrap_or_default() * 60.
             );
         }
         println!("{} items", rates.len());
+    }
+
+    /// A probe: what the model says is MADE of each item beside what it says
+    /// is EATEN of it, both at nameplate.
+    #[test]
+    #[ignore = "needs a world dump named by FACTORIO_BOT_WORLD_DUMP"]
+    fn what_the_model_thinks_is_consumed() {
+        let Ok(path) = std::env::var("FACTORIO_BOT_WORLD_DUMP") else {
+            panic!("set FACTORIO_BOT_WORLD_DUMP to a world.dump JSON");
+        };
+        let json = std::fs::read_to_string(&path).expect("the dump reads");
+        let surface: crate::factorio::world::FactorioSurface =
+            serde_json::from_str(&json).expect("the dump parses");
+        let lines = surface.flow_graph.nameplate_lines();
+        let mut drained: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+        for line in &lines {
+            for ingredient in line.needs.keys() {
+                drained.insert(ingredient.as_str());
+            }
+        }
+        let mut made: BTreeMap<String, f64> = BTreeMap::new();
+        let mut known: BTreeMap<String, f64> = BTreeMap::new();
+        let mut unknown: BTreeMap<String, f64> = BTreeMap::new();
+        for line in &lines {
+            *made.entry(line.item.clone()).or_insert(0.) += line.rate;
+            let bucket = if drained.contains(line.item.as_str()) {
+                &mut known
+            } else {
+                &mut unknown
+            };
+            for (ingredient, rate) in &line.needs {
+                *bucket.entry(ingredient.clone()).or_insert(0.) += rate;
+            }
+        }
+        let mut items: Vec<&String> = made
+            .keys()
+            .chain(known.keys())
+            .chain(unknown.keys())
+            .collect();
+        items.sort();
+        items.dedup();
+        println!(
+            "{:>28}  {:>12}  {:>12}  {:>12}  {:>8}",
+            "item", "made/min", "known/min", "unknown/min", "k/m"
+        );
+        for item in items {
+            let m = made.get(item).copied().unwrap_or_default() * 60.;
+            let k = known.get(item).copied().unwrap_or_default() * 60.;
+            let u = unknown.get(item).copied().unwrap_or_default() * 60.;
+            let r = if m > 0. {
+                format!("{:.2}", k / m)
+            } else {
+                "-".into()
+            };
+            println!("{item:>28}  {m:>12.1}  {k:>12.1}  {u:>12.1}  {r:>8}");
+        }
     }
 
     /// **Can this graph's edge weights carry a back-pressure term at all?**

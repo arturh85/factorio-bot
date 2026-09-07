@@ -608,6 +608,58 @@ impl PlantSize {
     }
 }
 
+/// How much bigger than the stated demand a plant this planner **builds** is
+/// sized.
+///
+/// Owner ruling, 2026-09-07: *"We probably don't just want to build what we
+/// need in terms of power, but maybe at least 50% more, so that we can build
+/// stuff and not immediately lose power."*
+///
+/// The failure it buys out of is not caution. An under-supplied Factorio
+/// network does not degrade into "slow" — it reads as **completely dead**, and
+/// this repo already records that from the other side twice (*"power coverage
+/// is not power capacity"*, and `PowerPlantTooSmall`'s own "everything places,
+/// everything is wired, and the network browns out"). A plant sized exactly to
+/// a block's draw browns the whole network out the moment one more inserter
+/// goes down beside it — 13 kW against a number that was already exact.
+///
+/// # Rounding up to whole engines is NOT already this, and the arithmetic says so
+///
+/// The obvious objection is that [`plant_size_for`] already takes a ceiling
+/// over 900 kW engines, so most demands get slack for free. Most do. The ones
+/// that do not are exactly the ones that matter:
+///
+/// | demand | engines before | capacity | ratio |
+/// |---|---|---|---|
+/// | 60 kW (a lab) | 1 | 900 | 15.0x |
+/// | 78 kW (the electric block) | 1 | 900 | 11.5x |
+/// | **900 kW** | **1** | **900** | **1.00x** |
+/// | **1,800 kW** | **2** | **1,800** | **1.00x** |
+/// | 4,320 kW (24 electric furnaces) | 5 | 4,500 | 1.04x |
+///
+/// At every exact multiple of an engine the free margin is **zero**, and just
+/// above one it is a rounding accident. So the answer to "does rounding
+/// already do it" is **no**, and the demands where it fails are the large ones
+/// — the electric-furnace case this ruling was made for.
+///
+/// # Where it applies, and where it deliberately does not
+///
+/// **Sizing a plant this planner builds, and nothing else.** Not
+/// [`supply_for`]'s adoption tiers and not [`Condition::Powered`]'s headroom
+/// test, which both go on asking for the true `kw`. Two reasons, and either
+/// alone would settle it:
+///
+/// * A plant that already stands with exactly enough headroom is still worth
+///   adopting; demanding 1.5x to adopt would build a *second* plant beside a
+///   working one, which is the cost [`PLANT_ADOPT_RADIUS`] exists to avoid.
+/// * If the *test* asked for 1.5x too, the margin would be spent as fast as it
+///   was bought and the plant would grow without bound — the check must
+///   measure the load, not the allowance.
+///
+/// A whole engine is the granularity, so the delivered margin is
+/// `ceil(1.5 x kw / 900) x 900 / kw`, which is at least 1.5 and usually more.
+pub const PLANT_HEADROOM: f64 = 1.5;
+
 /// How many engines a plant carrying `kw` needs, or why it cannot be built.
 ///
 /// Ceiling division, floor one: a plant with no engine generates nothing and
@@ -664,14 +716,21 @@ pub fn plant_size_for(state: &PlanState, kw: f64) -> Result<PlantSize, PlannerEr
         .generator_output_kw(ENGINE)
         .ok_or(PlannerError::PowerPlantTooSmall {
             needed_kw: kw,
+            sized_kw: kw * PLANT_HEADROOM,
             plant_kw: 0.,
         })?;
     let ceiling = f64::from(BOILERS_PER_PUMP * MAX_ENGINES_PER_BOILER);
-    let wanted = (kw / each).ceil().max(1.);
+    // [`PLANT_HEADROOM`]: a plant is built to more than it is asked for, so
+    // adding one inserter later does not brown the network out. Both figures
+    // travel into the refusal, because a message quoting only the sized number
+    // would report a demand the caller never asked for.
+    let sized = kw * PLANT_HEADROOM;
+    let wanted = (sized / each).ceil().max(1.);
     // `total_cmp` rather than `>`: this crate orders every float that way.
     if wanted.total_cmp(&ceiling).is_gt() {
         return Err(PlannerError::PowerPlantTooSmall {
             needed_kw: kw,
+            sized_kw: sized,
             plant_kw: each * ceiling,
         });
     }
@@ -2462,6 +2521,70 @@ pub fn supply_anchor(
 /// before that check, which is the one place this differs from
 /// `method::connect`'s all-or-nothing promise -- a plant is worth having on
 /// its own, a half-run of poles is not.
+///
+/// # What `Ok(Some(_))` does NOT promise, and one of them has bitten
+///
+/// The answer is a claim about a **plan**: *if every step returned here is
+/// executed and every pole in it is still standing, the game's own rule says
+/// the site is powered.* Three things are outside that claim, and they are
+/// listed together because the first two are named elsewhere in this module
+/// and the third was not named anywhere until it cost a live run.
+///
+/// 1. **That the generation runs.** [`supply_for`]'s "What it assumes" and
+///    [`crate::state::PlanState::electric_supply_kw`]'s own doc: this counts
+///    *nameplate* capacity, so a boiler with no water or no fuel reads as
+///    900 kW.
+/// 2. **That the caller's other consumers are covered.** Only the
+///    representative `site`/`area` is tested. `method::blueprint` checks the
+///    rest separately (`blueprint_power`'s `distributes_itself`), and a
+///    caller that does not check is not covered by anything here.
+/// 3. **That the poles it emits are still standing when the caller's own
+///    build finishes.** They are not, today, for `Goal::Built`.
+///
+/// ## The third one, measured
+///
+/// `ActionKind::StampGhosts` dispatches `FactorioRcon::place_blueprint`, which
+/// **mines every non-character, non-resource entity inside its build area**
+/// before stamping. `rcon_actuator`'s own doc calls that "a live hazard ... if
+/// this were ever dispatched over a block that already has real entities
+/// standing in it" and argues it cannot happen, because `is_fresh_site` emits
+/// the stamp only where nothing of the block stands yet. **That argument
+/// covers the block's own entities and nothing else.** The pole run is emitted
+/// in the *same* expansion, its poles are ordinary `Place` actions, and the
+/// scheduler is free to run them before the stamp — so the sweep reaches
+/// poles this function laid one moment earlier.
+///
+/// It does, and twice out of two runs on seed 31337 (2026-09-07,
+/// `scripts/false_power_probe.lua` and `scripts/false_power_sweep.lua`):
+///
+/// ```text
+/// WARN mining entity in build area: small-electric-pole @ 3.5/-2.5
+/// build: done=true failed=0 lost=0 pending=0
+/// plan kept at the planned tile: 40 of 41
+/// ```
+///
+/// The block survived only by luck — the surviving run pole at (8.5, −3.5) was
+/// 4.47 tiles from one of the block's own poles, inside the 7.5-tile reach. A
+/// geometry where the mined pole is the only link leaves the block dark with
+/// `done=true failed=0`, which is exactly the signature
+/// `docs/superpowers/notes/2026-09-07-a-powered-block-that-is-not-powered.md`
+/// reports and could not explain.
+///
+/// And the swept rectangle is not even the block's footprint:
+/// `blueprint_build_area` returns the extent in the blueprint's *own* offset
+/// space and `place_blueprint` then discards its position, re-centring a
+/// same-sized rect on the anchor. Measured with two markers that are each
+/// other's control — a chest 6.5 tiles clear of the block's westmost entity
+/// was **mined**, a chest inside the block's own footprint **survived**. So a
+/// pole is at risk on ground the block will never occupy, and moving the run
+/// out of the block's envelope would not save it.
+///
+/// **Nothing here can fix that**; it lives in `crates/core` and
+/// `crates/executor`. What this function could stop doing is *forgetting*:
+/// [`Powering::powered`] is handed back for a caller to put on its own
+/// placements, `method::extract` does, and `method::blueprint` drops it — so
+/// the one caller siting a whole block is the one with no precondition left to
+/// notice that its power went away.
 ///
 /// # Why it takes `kw` rather than computing it
 ///
@@ -4369,21 +4492,27 @@ mod tests {
             let entity = entity_for(&s, part);
             s.create_entity(entity);
         }
-        // A lab on the first plant's network: 60 of its 900 kW spoken for.
+        // A beacon on the first plant's network: 480 of its 900 kW spoken
+        // for, leaving 420. The demand below has to fall in the gap between
+        // that headroom and one engine's worth *after* `PLANT_HEADROOM` --
+        // 420 < 450 and 450 x 1.5 = 675 < 900 -- so the complete plant has
+        // nothing missing to finish and the half-built one is the answer.
+        // A lab's 60 kW left 840 free, and no demand above 840 fits in one
+        // margined engine, so the consumer had to grow with the margin.
         s.create_entity(FactorioEntity {
-            name: "lab".into(),
-            entity_type: "lab".into(),
+            name: "beacon".into(),
+            entity_type: "beacon".into(),
             position: Position::new(first.pole.x(), first.pole.y() + 2.5),
             ..Default::default()
         });
         assert!(
-            s.nearest_supply_anchor(&first.pole, PLANT_ADOPT_RADIUS, 900.)
+            s.nearest_supply_anchor(&first.pole, PLANT_ADOPT_RADIUS, 450.)
                 .is_none(),
-            "the premise: the standing network cannot carry 900 kW more"
+            "the premise: the standing network cannot carry 450 kW more"
         );
-        let Supply::Build(finished) = supply_for(&s, &first.pole, 64., 900.).expect("a lake")
+        let Supply::Build(finished) = supply_for(&s, &first.pole, 64., 450.).expect("a lake")
         else {
-            panic!("nothing standing carries 900 kW")
+            panic!("nothing standing carries 450 kW")
         };
         assert_eq!(
             finished.engine, second.engine,
@@ -4471,20 +4600,26 @@ mod capacity_tests {
     #[test]
     fn a_demand_is_sized_into_engines_and_a_bigger_one_refuses_by_name() {
         let s = state();
-        // Zero and anything up to one engine's worth is one engine -- the
-        // plant this module has always built.
+        // Zero and anything up to two thirds of an engine is one engine -- the
+        // plant this module has always built. Two thirds, not all of it, since
+        // `PLANT_HEADROOM`.
         assert_eq!(engines_for(&s, 0.).expect("zero"), 1);
         assert_eq!(engines_for(&s, 60.).expect("a lab"), 1);
         assert_eq!(engines_for(&s, 189.).expect("a red cell"), 1);
-        assert_eq!(engines_for(&s, 900.).expect("exactly one engine"), 1);
-        // Past one engine, two.
-        assert_eq!(engines_for(&s, 900.5).expect("a hair over"), 2);
-        assert_eq!(engines_for(&s, 1800.).expect("exactly two"), 2);
+        assert_eq!(
+            engines_for(&s, 600.).expect("exactly one engine of headroom"),
+            1
+        );
+        // Past two thirds of an engine, two -- because the plant is built to
+        // `PLANT_HEADROOM` times the draw, not to the draw.
+        assert_eq!(engines_for(&s, 600.5).expect("a hair over"), 2);
+        assert_eq!(engines_for(&s, 900.).expect("one engine's nameplate"), 2);
+        assert_eq!(engines_for(&s, 1200.).expect("two engines of headroom"), 2);
         // **Past one boiler's worth, a second boiler rather than a refusal.**
-        // This is the line that moved on 2026-09-06: 1,800.5 kW used to be
+        // This is the line that moved on 2026-09-06: it used to be
         // `PowerPlantTooSmall`, stating a limit that was the layout's.
-        assert_eq!(engines_for(&s, 1800.5).expect("a hair over one boiler"), 3);
-        let three = plant_size_for(&s, 1800.5).expect("a hair over one boiler");
+        assert_eq!(engines_for(&s, 1200.5).expect("a hair over one boiler"), 3);
+        let three = plant_size_for(&s, 1200.5).expect("a hair over one boiler");
         assert_eq!(
             (three.boilers, three.engines),
             (2, 3),
@@ -4497,24 +4632,37 @@ mod capacity_tests {
         let electric_furnaces = plant_size_for(&s, 4_320.).expect("24 electric furnaces");
         assert_eq!(
             (electric_furnaces.boilers, electric_furnaces.engines),
-            (3, 5)
+            (4, 8)
         );
         // The ceiling: twenty boilers of two engines, and it is the WATER's.
-        let full = plant_size_for(&s, WHOLE_PLANT_KW_LITERAL).expect("exactly the pump's water");
+        // The largest DEMAND it serves is that over `PLANT_HEADROOM`, because
+        // the plant built is bigger than the demand asked for.
+        let largest_demand = WHOLE_PLANT_KW_LITERAL / PLANT_HEADROOM;
+        let full = plant_size_for(&s, largest_demand).expect("exactly the pump's water");
         assert_eq!(
             (full.boilers, full.engines),
             (BOILERS_PER_PUMP, BOILERS_PER_PUMP * MAX_ENGINES_PER_BOILER),
             "36 MW is twenty boilers driving forty engines"
         );
         // Past it, a named refusal rather than a chain no water reaches.
-        let err = plant_size_for(&s, WHOLE_PLANT_KW_LITERAL + 0.5)
+        let err = plant_size_for(&s, largest_demand + 0.5)
             .expect_err("more water than one offshore pump moves");
         match err {
             PlannerError::PowerPlantTooSmall {
                 needed_kw,
+                sized_kw,
                 plant_kw,
             } => {
-                assert_eq!(needed_kw, WHOLE_PLANT_KW_LITERAL + 0.5);
+                assert_eq!(
+                    needed_kw,
+                    largest_demand + 0.5,
+                    "the refusal quotes what the CALLER asked for"
+                );
+                assert_eq!(
+                    sized_kw,
+                    (largest_demand + 0.5) * PLANT_HEADROOM,
+                    "and, separately, what the margin made this planner try to build"
+                );
                 assert_eq!(
                     plant_kw, WHOLE_PLANT_KW_LITERAL,
                     "the ceiling reported is the pump's water, not one boiler's {ONE_BOILER_KW_LITERAL} kW"
@@ -4522,6 +4670,66 @@ mod capacity_tests {
             }
             other => panic!("expected PowerPlantTooSmall, got {other:?}"),
         }
+    }
+
+    /// The margin is real generation, not a bigger number in a refusal: for
+    /// every demand this planner will serve, the plant it sizes generates at
+    /// least [`PLANT_HEADROOM`] times that demand.
+    ///
+    /// **Paired with a non-accidental assertion on purpose.** "The ratio is at
+    /// least 1.5" is a property a function that refused everything would also
+    /// satisfy, so the same loop asserts that each demand was *served* and
+    /// that the engine count is the one the arithmetic predicts -- otherwise
+    /// this test would pass against a `plant_size_for` that had stopped
+    /// working.
+    #[test]
+    fn every_demand_the_planner_serves_gets_at_least_the_headroom_margin() {
+        let s = state();
+        let each = s.generator_output_kw(ENGINE).expect("a priceable engine");
+        let mut served = 0;
+        for demand in [
+            1.,
+            60.,
+            78.,
+            189.,
+            599.,
+            600.,
+            600.5,
+            624.,
+            900.,
+            1_170.,
+            1_200.,
+            1_800.,
+            4_320.,
+            9_000.,
+            23_999.,
+            WHOLE_PLANT_KW_LITERAL / PLANT_HEADROOM,
+        ] {
+            let size = plant_size_for(&s, demand).expect("a demand inside the water's ceiling");
+            served += 1;
+            let capacity = f64::from(size.engines) * each;
+            assert!(
+                capacity >= demand * PLANT_HEADROOM,
+                "{demand} kW got {} engine(s) = {capacity} kW, short of the \
+                 {PLANT_HEADROOM}x margin",
+                size.engines
+            );
+            // The non-accidental half: the exact size, not merely "enough".
+            assert_eq!(
+                size.engines,
+                (demand * PLANT_HEADROOM / each).ceil().max(1.) as u32,
+                "{demand} kW was not sized by the documented arithmetic"
+            );
+            assert_eq!(
+                size.boilers,
+                size.engines.div_ceil(MAX_ENGINES_PER_BOILER),
+                "{demand} kW: boilers do not follow the engine row"
+            );
+        }
+        assert_eq!(
+            served, 16,
+            "every demand in the table must have been served"
+        );
     }
 
     #[test]
@@ -4923,7 +5131,16 @@ mod capacity_tests {
     /// records catching a test in. The overlay is not the plan.
     #[test]
     fn every_boiler_in_the_chain_is_fuelled_and_the_bill_pays_for_it() {
-        for kw in [60., 1000., 1800.5, 4_320., 36_000.] {
+        // The last entry is the largest DEMAND the water carries, which is
+        // the pump's own ceiling over `PLANT_HEADROOM` -- a plant is built to
+        // more than it is asked for.
+        for kw in [
+            60.,
+            1000.,
+            1800.5,
+            4_320.,
+            WHOLE_PLANT_KW_LITERAL / PLANT_HEADROOM,
+        ] {
             let (s, plant) = plant_for(kw);
             let size = plant_size_for(&s, kw).expect("sized");
             assert_eq!(
@@ -5018,7 +5235,10 @@ mod capacity_tests {
     /// `docs/superpowers/notes/2026-09-06-fixtures-agree-with-their-code.md`.
     #[test]
     fn every_engine_of_a_grown_plant_is_covered_and_the_poles_are_one_network() {
-        for kw in [60., 1000., 4_320., 36_000.] {
+        // The last is the largest DEMAND the water carries -- the pump's own
+        // ceiling over `PLANT_HEADROOM`, since a plant is built to more than
+        // it is asked for.
+        for kw in [60., 1000., 4_320., WHOLE_PLANT_KW_LITERAL / PLANT_HEADROOM] {
             let (s, plant) = plant_for(kw);
             let built = with_parts(&s, &plant);
             let poles: Vec<Position> = plant
@@ -5098,9 +5318,11 @@ mod capacity_tests {
         // The other side of the refusal, so the test above cannot pass by the
         // function refusing everything.
         let s = state();
+        // 1,500 kW is 2,250 kW once `PLANT_HEADROOM` is applied, which is
+        // three engines -- the margin is visible here rather than hidden.
         match supply_for(&s, &Position::new(0., 0.), 64., 1500.) {
-            Ok(Supply::Build(plant)) => assert_eq!(plant.engines.len(), 2),
-            other => panic!("expected a two-engine plant to build, got {other:?}"),
+            Ok(Supply::Build(plant)) => assert_eq!(plant.engines.len(), 3),
+            other => panic!("expected a three-engine plant to build, got {other:?}"),
         }
     }
 
@@ -6051,7 +6273,9 @@ mod block_headroom_tests {
         assert_eq!(
             built.electric_supply_kw(&area),
             900.,
-            "one steam engine, which is what `engines_for` sizes for 624 kW"
+            "one steam engine -- this fixture uses `plan_plant`, the unsized \
+             compatibility wrapper, so `PLANT_HEADROOM` does not enter here. \
+             `plant_size_for(624.)` would ask for two"
         );
         assert_eq!(
             built.electric_demand_kw_excluding(&area, Excluded::Consumer(&hub)),

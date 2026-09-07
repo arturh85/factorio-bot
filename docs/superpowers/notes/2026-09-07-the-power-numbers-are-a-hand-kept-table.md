@@ -93,14 +93,63 @@ at 1.8 MW with two engines — which is the whole reason a second boiler and the
 solar are on the path at all.
 
 **That 180 is a hand-typed number in a fifteen-row table, and the 900 beside it
-is one of two.** If either is as wrong as the pole table was, the conclusion
-that the plant ceiling binds is wrong too, in a direction nobody would notice:
-a block that passes its own power check and browns out is precisely the
-*coverage is not capacity* failure this file has documented twice, one level
-further up.
+is one of two.** So the obvious worry is that one of them has drifted the way
+the pole table did, in a direction nobody would notice: a block that passes its
+own power check and browns out.
 
-The tables are not urgent because they are ugly. They are urgent because the
-next milestone is the first thing that leans on them hard.
+## MEASURED, and the worry is falsified
+
+**The table has not drifted.** Checked against the game's own prototype files,
+which are on disk (`workspace/server/data/base/prototypes/`) and need no run:
+
+```
+assembling-machine-1/2/3   75 / 150 / 375   MATCH
+electric-mining-drill 90   pumpjack 90      MATCH
+lab 60   electric-furnace 180               MATCH
+chemical-plant 210   oil-refinery 420       MATCH
+radar 300   beacon 480                      MATCH
+```
+
+All eleven checkable `consumer_kw` rows agree exactly, `electric-furnace` 180
+included. **The milestone arithmetic is sound as written** and the second boiler
+really is needed. So this is a maintainability fix, not a bug fix, and the case
+for it rests on mod compatibility alone — which was the owner's reason in the
+first place, and did not need my embellishment.
+
+**The generator side is the part that changes the implementation.** A generator
+carries no production field at all — only `fluid_usage_per_tick`,
+`maximum_temperature` and `effectivity`:
+
+```
+kW = fluid_usage_per_tick * 60 * heat_capacity * (max_temperature - default_temperature) * effectivity
+steam: heat_capacity 0.2kJ, default_temperature 15
+
+steam-engine   0.5 * 60 * 0.2 * (165-15) = 900 kW      table 900     exact
+steam-turbine  1.0 * 60 * 0.2 * (500-15) = 5,820 kW    table 5,800   off by 20
+```
+
+So asking the mod for `max_energy_production` is the wrong shape for generators:
+the field does not exist at the data stage. Send the four inputs and derive —
+which is the honest form of "derive, do not tabulate", because the derivation is
+the physics and survives a mod changing a temperature or a fluid.
+
+**The one real discrepancy is the turbine: 5,800 against a derived 5,820**,
+0.34%, in an entity nothing builds yet. Small, and exactly the class a
+derivation removes.
+
+**Solar, with numbers**: `solar-panel` has `production = "60kW"` and no
+`energy_usage`; `accumulator` has `buffer_capacity 5MJ` with `input_flow_limit`
+and `output_flow_limit` both `300kW`. 60 kW is the noon nameplate, so the
+owner's "assume the average" needs the day/night factor — and their 25:21 ratio
+*is* that statement, since 21/25 = 0.84.
+
+**A note on the instrument, because the first version of it lied.** Scanning a
+fixed 6,000-character window after each `name = "..."` let fields bleed across
+entity boundaries: it reported `steam-engine` at 60 kW (solar's `production`)
+and gave solar the accumulator's buffer and flow limits. Bounding each block at
+the *next* `name =` fixed it. The tell was a value that made no sense for the
+entity it was attached to — and had the contamination landed on a plausible
+number instead, this note would have shipped a wrong table verdict.
 
 ## Ownership
 

@@ -276,6 +276,49 @@ fn recover_anchor_from_ghosts(state: &PlanState, bp: &Blueprint) -> Option<Posit
     if ghosts_by_name.is_empty() {
         return None;
     }
+    // How many of this block's entities are actually present at `anchor`,
+    // counting a ghost of the right name and facing as presence. This is the
+    // corroboration a single ghost cannot supply for itself.
+    let present_at = |anchor: &Position| -> usize {
+        bp.entities
+            .iter()
+            .filter(|e| {
+                let at = Position::new(anchor.x() + e.offset.x(), anchor.y() + e.offset.y());
+                if matches!(already_stands(state, e, &at), Standing::AsDesigned) {
+                    return true;
+                }
+                ghosts_by_name.get(&e.name).is_some_and(|candidates| {
+                    candidates.iter().any(|g| {
+                        g.direction == e.direction
+                            && g.underground_half == e.underground_half
+                            && (g.position.x() - at.x()).abs() < 1e-9
+                            && (g.position.y() - at.y()).abs() < 1e-9
+                    })
+                })
+            })
+            .count()
+    };
+
+    // Score every anchor a ghost implies, and require TWO of the block to be
+    // there -- the same bar the vote path uses, and for the same reason.
+    //
+    // **This used to return on the first matching ghost**, justified as "a
+    // ghost of this block IS this block". That holds only while a ghost can
+    // belong to no other block, and ours share prototypes by construction: a
+    // `transport-belt` is in nearly every fixture. One stray belt ghost was
+    // therefore enough to site an entire unrelated block on top of it -- the
+    // crosstalk defect again, one entity cheaper than the vote path's two.
+    // And ghosts persist: a completed `OreToPlateTee` build leaves 29 of them
+    // standing (measured 2026-09-07, before and after the parity fix), so the
+    // stray ghost is the normal case rather than a contrived one.
+    //
+    // **The guarantee this must not break is that a block is recoverable
+    // before any REAL entity exists**, which is what ghost recovery is for.
+    // That survives: `StampGhosts` stamps the whole block, so a freshly
+    // stamped block has a ghost for every entity and corroborates itself
+    // many times over. What no longer recovers is a *lone* ghost, which a
+    // real stamp never produces.
+    let mut best: Option<((i64, i64), usize)> = None;
     for e in &bp.entities {
         let Some(candidates) = ghosts_by_name.get(&e.name) else {
             continue;
@@ -284,13 +327,31 @@ fn recover_anchor_from_ghosts(state: &PlanState, bp: &Blueprint) -> Option<Posit
             if ghost.direction != e.direction || ghost.underground_half != e.underground_half {
                 continue;
             }
-            return Some(Position::new(
+            let anchor = Position::new(
                 ghost.position.x() - e.offset.x(),
                 ghost.position.y() - e.offset.y(),
-            ));
+            );
+            let matched = present_at(&anchor);
+            if matched < 2 {
+                continue;
+            }
+            // Half-tile fixed point, and the larger key on a tie -- the same
+            // keying and tie-break as the vote path, so the two cannot answer
+            // differently about the same ground.
+            let key = (
+                (anchor.x() * 2.0).round() as i64,
+                (anchor.y() * 2.0).round() as i64,
+            );
+            let better = match best {
+                None => true,
+                Some((bk, bm)) => matched > bm || (matched == bm && key > bk),
+            };
+            if better {
+                best = Some((key, matched));
+            }
         }
     }
-    None
+    best.map(|(key, _)| Position::new(key.0 as f64 / 2.0, key.1 as f64 / 2.0))
 }
 
 /// The anchor this block is ALREADY sited at, read back off the ground.
@@ -1959,7 +2020,14 @@ mod tests {
             version: 0,
         };
         let mut state = test_state();
+        // BOTH ghosts, because `StampGhosts` stamps the whole block and a lone
+        // ghost is not something a real stamp produces. The guarantee under
+        // test is unchanged -- no REAL entity stands here -- but one ghost is
+        // no longer accepted as evidence on its own:
+        // `one_stray_ghost_does_not_hand_a_block_the_wrong_anchor` guards the
+        // hijack that a single ghost used to permit.
         state.create_entity(ghost_of("stone-furnace", 20.5, 20.5));
+        state.create_entity(ghost_of("stone-furnace", 23.5, 20.5));
 
         let recovered = recover_anchor(&state, &bp).expect("a ghost is a site marker");
         assert_eq!(Pos::from(&recovered), Pos::from(&Position::new(20.5, 20.5)));
@@ -2344,6 +2412,64 @@ mod tests {
             ((sited.x().fract().abs() - 0.5).abs() < 1e-9)
                 && ((sited.y().fract().abs() - 0.5).abs() < 1e-9),
             "the anchor must sit on a tile centre for a 1x1 block, got {sited:?}"
+        );
+    }
+
+    /// **One stray ghost of another block must NOT hand this block an anchor.**
+    ///
+    /// `recover_anchor_from_ghosts` returns on the first ghost whose name,
+    /// direction and underground half match any entity of the blueprint, and
+    /// it runs BEFORE the vote path, which needs two. Its doc explains that one
+    /// match is enough because a ghost of this block IS this block — true when
+    /// a ghost can only belong to the block being planned, and **not true when
+    /// two blocks share a prototype**, which ours do by construction: a
+    /// `transport-belt` appears in nearly every fixture.
+    ///
+    /// This is the crosstalk defect again, one entity cheaper. The vote path
+    /// needs two matching entities at consistent offsets; this needs a single
+    /// belt.
+    ///
+    /// **And ghosts really do survive**, so it is not hypothetical: a completed
+    /// `OreToPlateTee` build leaves 29 `entity-ghost`s standing, measured on
+    /// 2026-09-07 both before and after the parity fix.
+    #[test]
+    fn one_stray_ghost_does_not_hand_a_block_the_wrong_anchor() {
+        let mut state = test_state();
+        // A single belt ghost, left behind by some other block far away.
+        state.create_entity(ghost_of("transport-belt", 50.5, 50.5));
+
+        // A block that merely CONTAINS a belt. Nothing of it stands.
+        let bp = Blueprint {
+            entities: vec![
+                at_named(0.0, 0.0, "transport-belt"),
+                at_named(0.0, 4.0, "iron-chest"),
+                at_named(0.0, 8.0, "iron-chest"),
+            ],
+            version: 0,
+        };
+
+        // **This must fail without the corroboration rule**: restore the early
+        // `return Some(..)` on the first matching ghost and this block is sited
+        // at (50.5, 50.5), on top of somebody else's belt.
+        assert!(
+            recover_anchor(&state, &bp).is_none(),
+            "one belt ghost, belonging to nobody in particular, must not site \
+             an entire unrelated block on top of it"
+        );
+
+        // The positive half, so this is a corroboration rule rather than
+        // "ghosts no longer recover". Two of the block's OWN ghosts at
+        // consistent offsets, with nothing real standing anywhere -- which is
+        // the guarantee ghost recovery exists for and has to keep.
+        let mut stamped = test_state();
+        stamped.create_entity(ghost_of("transport-belt", 50.5, 50.5));
+        stamped.create_entity(ghost_of("iron-chest", 50.5, 54.5));
+        assert_eq!(
+            recover_anchor(&stamped, &bp).as_ref().map(Pos::from),
+            Some(Pos::from(&Position::new(50.5, 50.5))),
+            "two of the block's own ghosts, at consistent offsets, ARE the \
+             block -- and a real StampGhosts stamps every entity, so this is \
+             the normal case rather than the lucky one"
         );
     }
 

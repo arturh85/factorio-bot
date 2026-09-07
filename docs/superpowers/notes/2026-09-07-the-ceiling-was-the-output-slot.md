@@ -41,8 +41,37 @@ about a quarter of the time, and the constraint moves upstream to supply:
 - 986 ore was in reach against ~240 consumed, so this is not exhaustion.
 
 That is the siting-quality gap documented on 2026-09-06 and deliberately left
-open, and it is now — finally — the top of the list rather than something
-hidden under a larger problem.
+open.
+
+## CORRECTION: coverage was not where the difference lived
+
+Siting now prefers the better-covered of equally legal sites, and the coverage
+duly improved — **6 of 8 tiles to 8 of 8, ore in reach 986 to 1694.** The rate
+did not move at all: **239 plates, 28.7/min, identical to the plate.**
+
+Which is exactly what the older note about `drills_are_fed` says and I did not
+apply here: *a drill on one ore tile mines at the full nameplate rate, because
+Factorio does not scale a drill's speed by how many tiles it covers.* Coverage
+buys **longevity, not throughput**. The block now runs the same rate for
+roughly twice as long, which is worth having and is not what I said it would be.
+
+The real constraint is arithmetic, from the game's own prototypes:
+
+```
+burner-mining-drill  mining_speed 0.25/s  ->  2 drills  = 30.0 ore/min
+stone-furnace        crafting_speed 1     ->  2 furnaces = 37.5 plates/min
+measured 28.7/min    = 96% of DRILL capacity, 77% of furnace capacity
+```
+
+**The block is drill-limited and running at 96% of what its drills can
+deliver.** The furnaces are over-provisioned; the 23% I attributed to coverage
+was the mismatch between two drills and two furnaces, nothing to do with which
+tiles the drills sat on. One stone furnace consumes 18.75 ore/min and one burner
+drill supplies 15, so the honest ratio is **five drills to four furnaces**, and
+this block has two and two.
+
+So the way to make it faster is more drills per furnace. Nothing else in the
+block is close to its ceiling.
 
 ## The apparatus, disclosed
 

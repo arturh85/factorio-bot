@@ -581,6 +581,78 @@ fn align_seed(seed: &Position, frac: (f64, f64)) -> Position {
     Position::new(axis(seed.x(), frac.0), axis(seed.y(), frac.1))
 }
 
+/// How many ore tiles this block's drills would actually work at `anchor`.
+///
+/// **A preference, never a verdict.** [`drills_are_fed`] already decides
+/// whether a site is legal -- every drill must reach *some* ore it can mine --
+/// and this decides which of several legal sites is better. Turning coverage
+/// into a threshold would refuse blocks that work, which is the one thing this
+/// must not do: a drill on one tile of four mines at exactly the same rate as
+/// one on four, so a low-coverage block is not broken, only short-lived.
+///
+/// **Why it is worth ranking on.** A burner drill works its own 2x2 and no
+/// more, so four tiles is the ceiling per drill. Measured 2026-09-07,
+/// `OreToPlateTee` sited at `DRILL COVERAGE: 6 of 8` -- one drill on all four
+/// of its tiles, the other on two -- and a drill on half the ground exhausts it
+/// in half the time. With the output cap removed the block runs at 28.7
+/// plates/min against a theoretical 37.5, and this is where the difference
+/// lives (`docs/superpowers/notes/2026-09-07-the-ceiling-was-the-output-slot.md`).
+///
+/// Counts TILES, not ore amount. Amount falls as drills mine, so ranking on it
+/// would make an anchor depend on how long a run had been going; tile count
+/// only changes when a tile is exhausted outright. That matters because siting
+/// must be replan-stable -- see `search_site`'s own doc.
+///
+/// Boundary tiles are counted with a small slack of this function's own rather
+/// than `state`'s private `TOUCH_SLACK`. Duplicating a constant that must match
+/// is the defect this file has already paid for twice; here it cannot bite,
+/// because an off-by-one at the edge of a mining area changes a *ranking* and
+/// never a legality.
+fn drill_coverage(state: &PlanState, bp: &Blueprint, anchor: &Position) -> usize {
+    const EDGE_SLACK: f64 = 1.0 / 512.0;
+    let mut tiles = 0usize;
+    for e in &bp.entities {
+        if !state.stands_on_resources(&e.name) {
+            continue;
+        }
+        let world = anchor.add(&e.offset);
+        let facing = Direction::from_u8(e.direction).unwrap_or(Direction::North);
+        let Some(area) = mining_area(state, &e.name, &world, facing) else {
+            continue;
+        };
+        let x0 = (area.left_top.x() + EDGE_SLACK).floor() as i32;
+        let x1 = (area.right_bottom.x() - EDGE_SLACK).floor() as i32;
+        let y0 = (area.left_top.y() + EDGE_SLACK).floor() as i32;
+        let y1 = (area.right_bottom.y() - EDGE_SLACK).floor() as i32;
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                // Tile CENTRES: every real resource entity sits at a
+                // half-integer, and `resource_available` floors what it is
+                // given, so a centre lands on the right tile either way.
+                let at = Position::new(f64::from(x) + 0.5, f64::from(y) + 0.5);
+                let has_ore = state.resource_names().iter().any(|resource| {
+                    state
+                        .resource_category(resource)
+                        .is_some_and(|c| state.extractors_for(&c).iter().any(|d| d == &e.name))
+                        && state.resource_available(&at, resource) > 0
+                });
+                if has_ore {
+                    tiles += 1;
+                }
+            }
+        }
+    }
+    tiles
+}
+
+/// How far past the first clear ring siting looks for a better-covered site.
+///
+/// Bounded on purpose. Scanning every ring for the best coverage would cost
+/// O(radius^2) footprint scans *and* move blocks arbitrarily far from their
+/// seed to gain a tile; two rings is enough to choose between real
+/// alternatives while keeping the block where the seed asked for it.
+const COVERAGE_LOOKAHEAD_RINGS: i32 = 2;
+
 pub fn search_site(
     state: &PlanState,
     bp: &Blueprint,
@@ -594,7 +666,27 @@ pub fn search_site(
         None => seed.clone(),
     };
     let mut nearest: Option<String> = None;
+    // The best legal site found so far, and the ring the search may look to.
+    //
+    // **Every candidate here is already legal**; this only chooses between
+    // them. `first_obstruction` -- which includes `drills_are_fed` -- has said
+    // yes to each one, so a low-coverage site is not refused, merely passed
+    // over when a better-covered one is equally close. Returning the first
+    // clear anchor, as this did until 2026-09-07, took whatever ring order
+    // happened to reach first: `OreToPlateTee` sited at 6 of 8 drill tiles,
+    // with one drill on half the ground of the other.
+    let mut best: Option<(usize, Position)> = None;
+    let mut last_ring: Option<i32> = None;
     for radius in 0..=max_radius {
+        // Stop once the lookahead past the first success is spent. Checked at
+        // the TOP of a ring so the ring that found the first site is always
+        // finished -- otherwise the choice would depend on where in a ring the
+        // first hit landed, which is not a property of the ground.
+        if let Some(found) = last_ring
+            && radius > found + COVERAGE_LOOKAHEAD_RINGS
+        {
+            break;
+        }
         for dy in -radius..=radius {
             for dx in -radius..=radius {
                 // Ring, not disc: skip what an inner radius already tried.
@@ -603,7 +695,17 @@ pub fn search_site(
                 }
                 let anchor = Position::new(seed.x() + dx as f64, seed.y() + dy as f64);
                 match first_obstruction(state, bp, &anchor) {
-                    None => return Ok(anchor),
+                    None => {
+                        let coverage = drill_coverage(state, bp, &anchor);
+                        // Strictly greater, so ties keep the EARLIER anchor in
+                        // scan order -- nearer the seed, and deterministic.
+                        if best.as_ref().is_none_or(|(c, _)| coverage > *c) {
+                            best = Some((coverage, anchor));
+                        }
+                        if last_ring.is_none() {
+                            last_ring = Some(radius);
+                        }
+                    }
                     Some(what) => {
                         if nearest.is_none() {
                             nearest = Some(what);
@@ -612,6 +714,9 @@ pub fn search_site(
                 }
             }
         }
+    }
+    if let Some((_, anchor)) = best {
+        return Ok(anchor);
     }
     Err(PlannerError::NoSiteFound {
         entities: bp.entities.len(),
@@ -2341,6 +2446,90 @@ mod tests {
             .expect("the anchor the refusal recommends must actually work");
         assert_eq!(source, AnchorSource::Caller);
         assert_eq!(Pos::from(&ok), Pos::from(&Position::new(5.5, 7.5)));
+    }
+
+    /// **Between two legal sites, siting takes the better-covered one.**
+    ///
+    /// Not a threshold: both anchors here pass `drills_are_fed`, so neither is
+    /// refused and a low-coverage block still builds. This only decides which
+    /// of several equally legal sites is chosen, which until 2026-09-07 was
+    /// whatever ring order reached first.
+    ///
+    /// **This must fail without the preference**: return on the first clear
+    /// anchor and the search takes the two-tile site, because it is nearer the
+    /// seed in scan order.
+    #[test]
+    fn siting_prefers_the_better_covered_of_two_legal_sites() {
+        use crate::ids::BotId;
+        use std::sync::Arc;
+
+        // A burner drill works exactly its own 2x2, so four tiles is its
+        // ceiling. Ore is laid so a drill at one anchor reaches two tiles and
+        // at another reaches four.
+        let world = drill_world();
+        // `drill_world` wires the ELECTRIC drill's categories, not the burner's,
+        // so without this the burner matches no ore at all and every anchor
+        // scores zero. Caught by this test's own premise assertion, which is
+        // the reason to assert premises rather than jump to the conclusion.
+        world
+            .globals
+            .entity_prototypes
+            .get_mut("burner-mining-drill")
+            .expect("the fixture has a burner drill")
+            .resource_categories = Some(vec!["basic-solid".to_string()]);
+        let ore = |x: i32, y: i32| {
+            FactorioEntity::new_resource(
+                &Position::new(f64::from(x) + 0.5, f64::from(y) + 0.5),
+                Direction::North,
+                "iron-ore",
+            )
+        };
+        // A half patch at tiles (2,2)-(3,2) -- one row, so a drill there covers
+        // two tiles -- and a full 2x2 at (4,4)-(5,5).
+        //
+        // **Within `COVERAGE_LOOKAHEAD_RINGS` of the seed, deliberately.** The
+        // search looks two rings past its first success and no further, so that
+        // a block stays where its seed asked for it rather than wandering to
+        // gain a tile. A fixture that put the better patch eight rings away
+        // would be testing that bound rather than the preference, and the first
+        // version of this test did exactly that and failed for the right
+        // reason.
+        let mut resources = vec![ore(2, 2), ore(3, 2)];
+        for y in 4..6 {
+            for x in 4..6 {
+                resources.push(ore(x, y));
+            }
+        }
+        world
+            .update_chunk_entities(resources)
+            .expect("a fixture world accepts its own ore");
+        let state = PlanState::from_world(Arc::new(world), &[BotId(1)]);
+
+        let bp = Blueprint {
+            entities: vec![at_named(0.0, 0.0, "burner-mining-drill")],
+            version: 0,
+        };
+
+        // The premise: the two anchors really do differ, and both are legal.
+        let poor = Position::new(3.0, 3.0);
+        let rich = Position::new(5.0, 5.0);
+        assert_eq!(drill_coverage(&state, &bp, &poor), 2, "the half patch");
+        assert_eq!(drill_coverage(&state, &bp, &rich), 4, "the full patch");
+        assert_eq!(drills_are_fed(&state, &bp, &poor), None, "poor is LEGAL");
+        assert_eq!(
+            drills_are_fed(&state, &bp, &rich),
+            None,
+            "rich is legal too"
+        );
+
+        // Seeded beside the poor patch, so first-clear-wins would take it.
+        let sited = search_site(&state, &bp, &poor, 20).expect("both sites exist");
+        assert_eq!(
+            drill_coverage(&state, &bp, &sited),
+            4,
+            "siting must take the four-tile site, not merely the first legal \
+             one it reaches; got {sited:?}"
+        );
     }
 
     /// **Siting must produce an anchor the GAME will honour, not merely one

@@ -31,6 +31,31 @@ use tracing::{error, warn};
 /// itself current while holding nothing at all.
 const NEVER_BUILT: u64 = u64::MAX;
 
+/// How far [`FlowGraph::ration`] steps toward a line's target each round.
+///
+/// Small enough that the iteration walks down from the ceiling rather than
+/// jumping past a fixed point into a lower basin -- see that function for why
+/// the **greatest** fixed point is the physical one.
+///
+/// Not a tuning knob, and measured rather than argued: on the world-record
+/// base the mean absolute log error over the fourteen items the game reports
+/// is **0.141 at both 0.05 and 0.1**, 0.143 at 0.25, and then degrades
+/// smoothly toward the old descent's 0.184 as the step grows -- 0.150 at 0.5
+/// and 0.210 at 0.9. A halving of the step that moves the answer by 0.2% is a
+/// converged solution; a full step is not.
+const RATION_DAMPING: f64 = 0.1;
+
+/// The largest movement [`FlowGraph::ration`] will call converged. Small
+/// enough that a caller may compare a balanced rate against an exact
+/// expectation within 1e-9, which its unit tests do.
+const RATION_TOLERANCE: f64 = 1e-12;
+
+/// A bound rather than "until it converges", so a pathological recipe cycle
+/// cannot hang a caller. The world-record base's 3,722 lines reach
+/// [`RATION_TOLERANCE`] in 2,406 rounds for phase one and 4,353 for phase
+/// two, in about a second, so the cap is loose by a factor of four.
+const RATION_ROUNDS: usize = 20_000;
+
 /// One machine making one item, and what that costs it.
 ///
 /// The unit of the whole-base balance in
@@ -693,12 +718,14 @@ impl FlowGraph {
     /// [`FlowGraph::sustained_production_rates`]'s own balance, and demand in
     /// [`FlowGraph::balance`]'s outlet cap. Against the world-record base it
     /// takes the mean absolute log error over the fourteen items the game
-    /// reports from **0.298 at nameplate to 0.184**, the largest single move
-    /// being `iron-gear-wheel` from 3.58x the game's own statistics to 0.99x.
+    /// reports from **0.298 at nameplate to 0.141**.
     ///
-    /// It is a prediction, and four of the fourteen are worse than nameplate:
-    /// see `docs/superpowers/notes/2026-09-07-a-full-consumer-stops-pulling.md`
-    /// for the whole table and what each regression says.
+    /// It is a prediction, and some of the fourteen are worse than nameplate.
+    /// `production_rates_of_a_dumped_world` prints the whole table with the
+    /// error, computed rather than quoted;
+    /// `docs/superpowers/notes/2026-09-07-a-full-consumer-stops-pulling.md`
+    /// and `2026-09-07-the-mall-was-not-the-problem.md` say what each
+    /// regression means.
     ///
     /// # Why this is a WHOLE-BASE balance and not a per-machine duty cycle
     ///
@@ -802,20 +829,37 @@ impl FlowGraph {
     /// It never invents supply, only refuses to invent demand, so it can only
     /// move a rate **up** toward nameplate, never above it.
     ///
-    /// # Two phases, because a scale that only falls cannot recover
+    /// # Two phases, because the priority is the whole point
     ///
-    /// The iteration is monotone decreasing, which is what makes it converge
-    /// rather than oscillate between two allocations that each look feasible.
-    /// That forbids doing this in one pass: an unknown-drain line clamped to
-    /// zero early, while the known-drain lines were still at nameplate, could
-    /// never take back the residual they freed as they scaled down. So the
-    /// known-drain lines reach their fixed point first, and the unknown-drain
-    /// lines are then fitted to what that leaves.
+    /// The known-drain lines are rationed to their fixed point first, and the
+    /// unknown-drain lines are then fitted to what that leaves. This used to
+    /// be justified by the solver instead -- the ration was a monotone
+    /// descent, so a line clamped early could never take back what its
+    /// neighbours freed -- and that reason expired when [`FlowGraph::ration`]
+    /// became a fixed point a line may climb back up to. **The priority is
+    /// the reason that remains**, and it is the one that was always doing the
+    /// work: a known drain is served before an unknown one.
     ///
     /// Phase one may ignore the unknown-drain lines entirely rather than
     /// merely deprioritise them, and that is exact, not an approximation: a
     /// line is unknown-drain precisely because **no** line's `needs` mention
     /// its product, so it can supply nothing that phase one is rationing.
+    ///
+    /// # What the mall pulls, and why it is still nothing
+    ///
+    /// The brief for this shape warned that giving the mall zero is as much
+    /// an extreme as giving it nameplate, and named `advanced-circuit` at
+    /// 0.61x as the cost. **Measured on the record base, it is not.** Freeing
+    /// `advanced-circuit`'s outlet cap completely -- an infinite mall pull on
+    /// that one item -- moves it from 0.61 to 0.61: it was never
+    /// outlet-limited. Nor does any mall prior help in aggregate. Charging
+    /// the unknown-drain lines at a fraction of nameplate was measured at
+    /// twenty-six settings across four families -- as a competitor for
+    /// ingredients and as a relaxation of the outlet alone, uniform and split
+    /// by whether the product is a building or a consumed good -- and **every
+    /// one of them is worse than zero**, the error growing with the size of
+    /// the prior. See
+    /// `docs/superpowers/notes/2026-09-07-the-mall-was-not-the-problem.md`.
     fn balance(lines: &[ProductionLine]) -> Vec<f64> {
         // Every item some line eats. A line making one of these has a drain
         // this model can point at.
@@ -876,15 +920,53 @@ impl FlowGraph {
         scale
     }
 
-    /// One monotone-decreasing fixed point over the lines `selected` picks,
-    /// against `floor` -- the supply available to them before any of them
-    /// makes anything, which is zero in phase one and the leftovers in phase
-    /// two.
+    /// One fixed point over the lines `selected` picks, against `floor` -- the
+    /// supply available to them before any of them makes anything, which is
+    /// zero in phase one and the leftovers in phase two.
     ///
-    /// Bounded rather than "until it converges": the scale map only
-    /// decreases, so it does converge, but a fixed cap means a pathological
-    /// recipe cycle cannot hang a caller. 64 is far more than the depth of any
-    /// vanilla chain.
+    /// # A line that stops pulling releases its share, and a line still
+    /// pulling TAKES IT UP
+    ///
+    /// Until 2026-09-07 this was a **monotone descent**: a scale could only
+    /// fall, and the loop stopped when nothing had fallen. That made it
+    /// converge, and it made the second half of the sentence above
+    /// impossible. The mechanism this file has claimed since the outlet cap
+    /// landed -- *"a mall assembler with a full output chest stops its input
+    /// inserters, which releases its share of the belt to the machines
+    /// downstream that are still pulling"* -- was **written in the doc and
+    /// absent from the code**: the release happened, and no line was ever
+    /// allowed to climb back up and take it.
+    ///
+    /// Worse, the descent and the outlet cap compound. A shortage rations
+    /// every consumer of an item proportionally, including the ones that are
+    /// really running flat out; their reduced pull then caps their own
+    /// suppliers, whose reduced output rations them again. On the
+    /// world-record base the whole chain settles with **supply exactly equal
+    /// to demand for every modelled item** -- the residual left for anything
+    /// the model cannot see is exactly zero, for iron plate, gears, copper
+    /// plate and advanced circuit alike -- which is not a property of that
+    /// base but an artefact of the ratchet.
+    ///
+    /// So the scale is now solved as a **fixed point a line may climb back up
+    /// to**: each round recomputes every selected line's target from the
+    /// current allocation and steps a fraction [`RATION_DAMPING`] of the way
+    /// there, up or down, never above the ceiling it started at. Measured on
+    /// the record base this takes the mean absolute log error over the
+    /// fourteen items the game reports from **0.184 to 0.141**.
+    ///
+    /// # Why damped, and why the damping is not a tuning knob
+    ///
+    /// The undamped iteration converges too, and to a **worse** fixed point:
+    /// a full step overshoots downward and settles in a lower basin, landing
+    /// back at 0.204. The system has many fixed points -- an outlet cap and a
+    /// supply share can hold each other consistent at any level -- and the
+    /// one that is physically right is the **greatest**, because a factory
+    /// does not choose to run slower than it can. Stepping down from the
+    /// ceiling in small steps stops at the first fixed point below it, which
+    /// is that one.
+    ///
+    /// The sweep behind [`RATION_DAMPING`] is the evidence that the step size
+    /// is not fitted to this base.
     ///
     /// With `cap_on_outlet`, a line is additionally held to what the selected
     /// lines eat of its own product: **a full consumer stops pulling**. That
@@ -913,7 +995,15 @@ impl FlowGraph {
         floor: &BTreeMap<String, f64>,
         cap_on_outlet: bool,
     ) {
-        for _ in 0..64 {
+        // What each line started at: its nameplate in phase one, and in phase
+        // two whatever phase one left it. Nothing may climb above it.
+        let ceiling: Vec<f64> = scale.to_vec();
+        let mut next: Vec<f64> = scale.to_vec();
+        // Each line's outlet ratio from the round before, so the relief below
+        // can tell a line that is output-blocked from one that is merely
+        // short. `INFINITY` is "nothing known to block it".
+        let mut blocked: Vec<f64> = vec![f64::INFINITY; lines.len()];
+        for _ in 0..RATION_ROUNDS {
             let mut supply: BTreeMap<String, f64> = floor.clone();
             let mut demand: BTreeMap<String, f64> = BTreeMap::new();
             for (index, line) in lines.iter().enumerate() {
@@ -925,49 +1015,154 @@ impl FlowGraph {
                     *demand.entry(ingredient.clone()).or_insert(0.) += rate * scale[index];
                 }
             }
-            let mut moved = false;
+            // What each item's consumers would take **if that item were
+            // abundant** -- see `FlowGraph::relieved_pull`.
+            let pull = Self::relieved_pull(
+                lines, scale, &ceiling, &supply, &demand, &blocked, &selected,
+            );
+            let mut worst = 0_f64;
             for (index, line) in lines.iter().enumerate() {
                 if !selected(index) {
                     continue;
                 }
-                let mut limit = scale[index];
+                // How much of what it is running at now it may run at, given
+                // what everybody else is doing. Above 1.0 means it may climb.
+                let mut ratio = f64::INFINITY;
                 for ingredient in line.needs.keys() {
-                    let have = supply.get(ingredient).copied().unwrap_or_default();
-                    let want = demand.get(ingredient).copied().unwrap_or_default();
-                    // Nobody in the model makes it: unknown, not zero.
-                    // Phase two reads a *residual* here, where zero means
-                    // "spoken for" rather than "unheard of" -- so the guard
-                    // must be strict, or a line would keep its nameplate on an
-                    // ingredient every gram of which is already claimed.
-                    if have <= 0. {
-                        if floor.contains_key(ingredient) {
-                            limit = 0.;
-                        }
-                        continue;
-                    }
-                    if want > have {
-                        limit = limit.min(scale[index] * have / want);
+                    match Self::supply_ratio(ingredient, &supply, &demand, floor) {
+                        Some(share) => ratio = ratio.min(share),
+                        None => continue,
                     }
                 }
                 // The outlet. `needs` is empty for a drill and an offshore
                 // pump, which is the ground exemption.
+                blocked[index] = f64::INFINITY;
                 if cap_on_outlet && !line.needs.is_empty() {
-                    let outlet = demand.get(&line.item).copied().unwrap_or_default();
+                    let outlet = pull.get(&line.item).copied().unwrap_or_default();
                     let standing = supply.get(&line.item).copied().unwrap_or_default();
                     // Nobody here eats it: unknown outlet, not a closed one.
-                    if outlet > 0. && standing > outlet {
-                        limit = limit.min(scale[index] * outlet / standing);
+                    if outlet > 0. && standing > 0. {
+                        blocked[index] = outlet / standing;
+                        ratio = ratio.min(blocked[index]);
                     }
                 }
-                if limit < scale[index] {
-                    scale[index] = limit;
-                    moved = true;
-                }
+                let target = if ratio.is_finite() {
+                    (scale[index] * ratio).min(ceiling[index])
+                } else {
+                    // Every ingredient it needs is one nobody models, so
+                    // nothing here holds it below its ceiling.
+                    ceiling[index]
+                };
+                worst = worst.max((target - scale[index]).abs());
+                next[index] = scale[index] + RATION_DAMPING * (target - scale[index]);
             }
-            if !moved {
+            scale.copy_from_slice(&next);
+            if worst < RATION_TOLERANCE {
                 break;
             }
         }
+    }
+
+    /// A line's share of one ingredient, as a multiple of what it is running
+    /// at: `Some(1.0)` means exactly its current draw is available.
+    ///
+    /// `None` is **unknown, not zero** -- nobody in the model makes the item,
+    /// so it constrains nobody, or every machine fed a fluid or fed from
+    /// another surface would read as stopped. `Some(0.0)` is the other case,
+    /// and only phase two can see it: the item has a *residual* of zero, which
+    /// means every gram is already spoken for rather than that the model has
+    /// never heard of it.
+    fn supply_ratio(
+        ingredient: &str,
+        supply: &BTreeMap<String, f64>,
+        demand: &BTreeMap<String, f64>,
+        floor: &BTreeMap<String, f64>,
+    ) -> Option<f64> {
+        let have = supply.get(ingredient).copied().unwrap_or_default();
+        if have <= 0. {
+            return if floor.contains_key(ingredient) {
+                Some(0.)
+            } else {
+                None
+            };
+        }
+        let want = demand.get(ingredient).copied().unwrap_or_default();
+        if want > 0. { Some(have / want) } else { None }
+    }
+
+    /// Per item, what its consumers would take **if it were abundant**.
+    ///
+    /// # Being short of a thing is not the same as not wanting it
+    ///
+    /// The outlet cap asks "is anybody still pulling this?", and the honest
+    /// answer must not count a consumer's own shortage *of this very item* as
+    /// evidence that it has stopped pulling. Charging the outlet at what
+    /// consumers are currently drawing does exactly that, and it makes a
+    /// producer and its consumer **neutrally stable at any level**: each is
+    /// consistent with the other at 90% of nameplate and equally consistent
+    /// at 73%, so the answer becomes whatever the transient happened to leave,
+    /// and the fixed point is no longer a property of the base.
+    /// `a_line_that_stops_pulling_releases_its_share_to_one_that_has_not`
+    /// measures that as 7.31 where the plate supply allows 9.
+    ///
+    /// So a consumer contributes what it would run at with every constraint
+    /// it has EXCEPT its share of this item -- its other ingredients, its own
+    /// outlet, and its ceiling. A machine that is genuinely output-blocked
+    /// still contributes only its reduced pull, which is the whole point of
+    /// the cap; a machine that is merely starved contributes what it would
+    /// take.
+    ///
+    /// Its own outlet ratio is one round stale, which the iteration absorbs:
+    /// at the fixed point the lag is nil, because nothing is moving.
+    fn relieved_pull(
+        lines: &[ProductionLine],
+        scale: &[f64],
+        ceiling: &[f64],
+        supply: &BTreeMap<String, f64>,
+        demand: &BTreeMap<String, f64>,
+        blocked: &[f64],
+        selected: &impl Fn(usize) -> bool,
+    ) -> BTreeMap<String, f64> {
+        let mut pull: BTreeMap<String, f64> = BTreeMap::new();
+        for (index, line) in lines.iter().enumerate() {
+            if !selected(index) {
+                continue;
+            }
+            // The smallest and second-smallest share among its ingredients,
+            // so "the smallest among the others" is one lookup rather than a
+            // rescan per ingredient.
+            let mut smallest = f64::INFINITY;
+            let mut runner_up = f64::INFINITY;
+            let mut scarcest: Option<&str> = None;
+            for ingredient in line.needs.keys() {
+                let Some(share) = Self::supply_ratio(ingredient, supply, demand, &BTreeMap::new())
+                else {
+                    continue;
+                };
+                if share < smallest {
+                    runner_up = smallest;
+                    smallest = share;
+                    scarcest = Some(ingredient.as_str());
+                } else if share < runner_up {
+                    runner_up = share;
+                }
+            }
+            for (ingredient, rate) in &line.needs {
+                let others = if scarcest == Some(ingredient.as_str()) {
+                    runner_up
+                } else {
+                    smallest
+                };
+                let relieved = others.min(blocked[index]);
+                let would_run = if relieved.is_finite() {
+                    (scale[index] * relieved).min(ceiling[index])
+                } else {
+                    ceiling[index]
+                };
+                *pull.entry(ingredient.clone()).or_insert(0.) += rate * would_run;
+            }
+        }
+        pull
     }
 
     /// The name of the recipe that makes `item`, for charging its ingredients.
@@ -2472,6 +2667,22 @@ mod tests {
         }
     }
 
+    /// One balanced rate, against what it should be.
+    ///
+    /// A tolerance rather than `assert_eq!` because [`FlowGraph::ration`] is
+    /// an **iteration to a fixed point**, not a closed form: it stops when
+    /// nothing moves by more than [`RATION_TOLERANCE`], so an exact 2.0 lands
+    /// as 2.000000000006. 1e-9 is a thousand times that residual and a
+    /// billionth of any rate these tests assert, so it distinguishes every
+    /// answer they are trying to tell apart.
+    fn assert_close(out: &BTreeMap<String, f64>, item: &str, want: f64, why: &str) {
+        let got = out.get(item).copied().unwrap_or(f64::NAN);
+        assert!(
+            (got - want).abs() < 1e-9,
+            "{item} should balance to {want}, got {got}: {why}: {out:?}"
+        );
+    }
+
     /// What each line's item comes to, once `balance` has decided its scale.
     fn balanced(lines: &[ProductionLine]) -> BTreeMap<String, f64> {
         let scale = FlowGraph::balance(lines);
@@ -2503,16 +2714,64 @@ mod tests {
             line("gizmo", 1., &[("widget", 1.)]),
         ];
         let out = balanced(&lines);
-        assert_eq!(
-            out.get("cog").copied(),
-            Some(2.),
+        assert_close(
+            &out,
+            "cog",
+            2.,
             "one consumer takes 2 cogs a second, so ten a second is not \
-             sustained however many machines stand there: {out:?}"
+             sustained however many machines stand there",
         );
-        assert_eq!(
-            out.get("plate").copied(),
-            Some(100.),
-            "and the cog line stops pulling the other 8 plates: {out:?}"
+        assert_close(
+            &out,
+            "plate",
+            100.,
+            "and the cog line stops pulling the other 8 plates",
+        );
+    }
+
+    /// **A line that stops pulling releases its share, and a line still
+    /// pulling takes it up.**
+    ///
+    /// The sentence [`FlowGraph::ration`] has claimed since the outlet cap
+    /// landed, and could not do while the scale was a monotone descent.
+    ///
+    /// `cog` and `bolt` are two consumers of one 10/s plate supply, each able
+    /// to eat all of it. `cog` has an outlet that takes 1/s; `bolt` has one
+    /// that takes 10/s. So `cog` is output-blocked at a tenth of its
+    /// nameplate and the nine plates a second it stops pulling belong to
+    /// `bolt`.
+    ///
+    /// Under the descent both were first rationed to half the plate -- 5 and
+    /// 5 -- and when `cog` then fell to 1 on its outlet, **`bolt` was frozen
+    /// at 5**: it had already been written down and nothing could write it
+    /// back up. The nine plates were released and nobody could take them.
+    #[test]
+    fn a_line_that_stops_pulling_releases_its_share_to_one_that_has_not() {
+        let lines = vec![
+            line("plate", 10., &[]),
+            line("cog", 10., &[("plate", 10.)]),
+            line("bolt", 10., &[("plate", 10.)]),
+            // The two outlets, and the two phase-two lines that make them
+            // drained rather than exempt.
+            line("widget", 1., &[("cog", 1.)]),
+            line("nut", 10., &[("bolt", 10.)]),
+            line("gizmo", 1., &[("widget", 1.)]),
+            line("doodad", 1., &[("nut", 1.)]),
+        ];
+        let out = balanced(&lines);
+        assert_close(
+            &out,
+            "cog",
+            1.,
+            "its outlet takes one a second, so it pulls one plate a second",
+        );
+        assert_close(
+            &out,
+            "bolt",
+            9.,
+            "and the nine plates the cog line stopped pulling are the bolt \
+             line's -- under the descent it was frozen at the 5 it had \
+             already been rationed to",
         );
     }
 
@@ -2534,16 +2793,18 @@ mod tests {
             line("trinket", 8., &[("plate", 8.)]),
         ];
         let out = balanced(&lines);
-        assert_eq!(
-            out.get("cog").copied(),
-            Some(8.),
-            "the line something is pulling from keeps its plates: {out:?}"
+        assert_close(
+            &out,
+            "cog",
+            8.,
+            "the line something is pulling from keeps its plates",
         );
-        assert_eq!(
-            out.get("trinket").copied(),
-            Some(2.),
+        assert_close(
+            &out,
+            "trinket",
+            2.,
             "and the line nothing is pulling from gets the two left over, \
-             not four and a half: {out:?}"
+             not four and a half",
         );
     }
 
@@ -2561,11 +2822,12 @@ mod tests {
             line("trinket", 1., &[("core", 1.)]),
         ];
         let out = balanced(&lines);
-        assert_eq!(
-            out.get("core").copied(),
-            Some(5.),
+        assert_close(
+            &out,
+            "core",
+            5.,
             "nothing in the first phase eats a core, which is not the same \
-             claim as nothing wanting one: {out:?}"
+             claim as nothing wanting one",
         );
     }
 
@@ -2586,11 +2848,12 @@ mod tests {
             line("trinket", 1., &[("brick", 1.)]),
         ];
         let out = balanced(&lines);
-        assert_eq!(
-            out.get("coal").copied(),
-            Some(100.),
+        assert_close(
+            &out,
+            "coal",
+            100.,
             "the model sees one consumer of coal and knows nothing of the \
-             boilers burning the rest: {out:?}"
+             boilers burning the rest",
         );
     }
 
@@ -2702,24 +2965,299 @@ mod tests {
         let lines = surface.flow_graph.nameplate_lines();
         let mut flat = vec![1_f64; lines.len()];
         FlowGraph::ration(&lines, &mut flat, |_| true, &BTreeMap::new(), false);
-        let mut every_consumer_pulls: BTreeMap<String, f64> = BTreeMap::new();
-        for (index, line) in lines.iter().enumerate() {
-            *every_consumer_pulls.entry(line.item.clone()).or_insert(0.) += line.rate * flat[index];
-        }
+        let every_consumer_pulls = totals(&lines, &flat);
+        // The shipped model as it stood before 2026-09-07: the same two
+        // phases, solved as a monotone descent. Computed rather than
+        // remembered, so the before column and the after column are the same
+        // dump through the same binary -- this repository's standing warning
+        // is that a baseline compared across two builds measures the builds.
+        let descent = totals(&lines, &balance_by_descent(&lines));
         println!("-- production_rates of {path} --");
         println!(
-            "{:>28}  {:>14}  {:>14}  {:>14}",
-            "item", "nameplate/min", "pull-always/min", "sustained/min"
+            "{:>28}  {:>14}  {:>14}  {:>14}  {:>14}",
+            "item", "nameplate/min", "pull-always/min", "descent/min", "sustained/min"
         );
         for (name, rate) in &rates {
             println!(
-                "{name:>28}  {:>14.1}  {:>14.1}  {:>14.1}",
+                "{name:>28}  {:>14.1}  {:>14.1}  {:>14.1}  {:>14.1}",
                 rate * 60.,
                 every_consumer_pulls.get(name).copied().unwrap_or_default() * 60.,
+                descent.get(name).copied().unwrap_or_default() * 60.,
                 sustained.get(name).copied().unwrap_or_default() * 60.
             );
         }
         println!("{} items", rates.len());
+        println!();
+        println!("-- against the game's own ten-minute statistics --");
+        println!(
+            "{:>22} {:>10} {:>10} {:>7} {:>10} {:>7} {:>10} {:>7}",
+            "item", "game/min", "nameplate", "ratio", "descent", "ratio", "sustained", "ratio"
+        );
+        let columns = [&rates, &descent, &sustained];
+        let mut error = [0_f64; 3];
+        for (item, game) in game_reported_rates() {
+            print!("{item:>22} {game:>10.0}");
+            for (slot, column) in columns.iter().enumerate() {
+                let model = column.get(item).copied().unwrap_or_default() * 60.;
+                let ratio = model / game;
+                error[slot] += ratio.ln().abs();
+                print!(" {model:>10.1} {ratio:>7.2}");
+            }
+            println!();
+        }
+        let count = game_reported_rates().len() as f64;
+        println!(
+            "{:>22} {:>10} {:>19.3} {:>19.3} {:>19.3}",
+            "mean abs log error",
+            "",
+            error[0] / count,
+            error[1] / count,
+            error[2] / count
+        );
+    }
+
+    /// What the game reported making on Nauvis over ten minutes, from
+    /// `docs/superpowers/notes/2026-09-06-what-the-record-base-knows.md`.
+    fn game_reported_rates() -> Vec<(&'static str, f64)> {
+        vec![
+            ("copper-cable", 22367.),
+            ("iron-ore", 15247.),
+            ("iron-plate", 15170.),
+            ("copper-ore", 15157.),
+            ("copper-plate", 15147.),
+            ("electronic-circuit", 6694.),
+            ("coal", 4096.),
+            ("plastic-bar", 2846.),
+            ("stone", 1775.),
+            ("steel-plate", 1213.),
+            ("advanced-circuit", 942.),
+            ("iron-gear-wheel", 578.),
+            ("stone-brick", 450.),
+            ("processing-unit", 249.),
+        ]
+    }
+
+    /// What each line's item comes to at a given scale.
+    fn totals(lines: &[ProductionLine], scale: &[f64]) -> BTreeMap<String, f64> {
+        let mut total: BTreeMap<String, f64> = BTreeMap::new();
+        for (index, line) in lines.iter().enumerate() {
+            *total.entry(line.item.clone()).or_insert(0.) += line.rate * scale[index];
+        }
+        total
+    }
+
+    /// [`FlowGraph::balance`] as it was shipped between 2026-09-07 and this
+    /// change: the same two phases and the same constraints, solved as a
+    /// **monotone descent** in which a scale could only fall.
+    ///
+    /// Kept, and kept only here, so the before column of the record base's
+    /// table is computed on the same binary as the after column instead of
+    /// being quoted from a note.
+    fn balance_by_descent(lines: &[ProductionLine]) -> Vec<f64> {
+        let mut drained: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+        for line in lines {
+            for ingredient in line.needs.keys() {
+                drained.insert(ingredient.as_str());
+            }
+        }
+        let known: Vec<bool> = lines
+            .iter()
+            .map(|line| drained.contains(line.item.as_str()))
+            .collect();
+        let mut scale = vec![1_f64; lines.len()];
+        descend(lines, &mut scale, &known, true, &BTreeMap::new());
+        let mut made: BTreeMap<String, f64> = BTreeMap::new();
+        let mut eaten: BTreeMap<String, f64> = BTreeMap::new();
+        for (index, line) in lines.iter().enumerate() {
+            if !known[index] {
+                continue;
+            }
+            *made.entry(line.item.clone()).or_insert(0.) += line.rate * scale[index];
+            for (ingredient, rate) in &line.needs {
+                *eaten.entry(ingredient.clone()).or_insert(0.) += rate * scale[index];
+            }
+        }
+        let residual: BTreeMap<String, f64> = made
+            .into_iter()
+            .map(|(item, rate)| {
+                let left = rate - eaten.get(&item).copied().unwrap_or_default();
+                (item, left.max(0.))
+            })
+            .collect();
+        let unknown: Vec<bool> = known.iter().map(|k| !*k).collect();
+        descend(lines, &mut scale, &unknown, false, &residual);
+        scale
+    }
+
+    /// The old monotone descent, for `balance_by_descent`.
+    fn descend(
+        lines: &[ProductionLine],
+        scale: &mut [f64],
+        selected: &[bool],
+        cap_on_outlet: bool,
+        floor: &BTreeMap<String, f64>,
+    ) {
+        for _ in 0..64 {
+            let mut supply: BTreeMap<String, f64> = floor.clone();
+            let mut demand: BTreeMap<String, f64> = BTreeMap::new();
+            for (index, line) in lines.iter().enumerate() {
+                if !selected[index] {
+                    continue;
+                }
+                *supply.entry(line.item.clone()).or_insert(0.) += line.rate * scale[index];
+                for (ingredient, rate) in &line.needs {
+                    *demand.entry(ingredient.clone()).or_insert(0.) += rate * scale[index];
+                }
+            }
+            let mut moved = false;
+            for (index, line) in lines.iter().enumerate() {
+                if !selected[index] {
+                    continue;
+                }
+                let mut limit = scale[index];
+                for ingredient in line.needs.keys() {
+                    let have = supply.get(ingredient).copied().unwrap_or_default();
+                    let want = demand.get(ingredient).copied().unwrap_or_default();
+                    if have <= 0. {
+                        if floor.contains_key(ingredient) {
+                            limit = 0.;
+                        }
+                        continue;
+                    }
+                    if want > have {
+                        limit = limit.min(scale[index] * have / want);
+                    }
+                }
+                if cap_on_outlet && !line.needs.is_empty() {
+                    let outlet = demand.get(&line.item).copied().unwrap_or_default();
+                    let standing = supply.get(&line.item).copied().unwrap_or_default();
+                    if outlet > 0. && standing > outlet {
+                        limit = limit.min(scale[index] * outlet / standing);
+                    }
+                }
+                if limit < scale[index] {
+                    scale[index] = limit;
+                    moved = true;
+                }
+            }
+            if !moved {
+                break;
+            }
+        }
+    }
+
+    /// A probe: **what actually holds each line below its nameplate.**
+    ///
+    /// The question the brief for the outlet cap could not answer without it,
+    /// and got wrong: it read `advanced-circuit` at 0.61x the game's own
+    /// number as the outlet cap's sharp edge -- the mall pulling nothing --
+    /// when advanced circuit is not outlet-limited at all. This prints, per
+    /// item, how many of its lines are held by their outlet and how many by
+    /// each ingredient, at the converged allocation. **Reach for it before
+    /// attributing an error to a mechanism.**
+    #[test]
+    #[ignore = "needs a world dump named by FACTORIO_BOT_WORLD_DUMP"]
+    fn what_holds_each_line_back() {
+        let Ok(path) = std::env::var("FACTORIO_BOT_WORLD_DUMP") else {
+            panic!("set FACTORIO_BOT_WORLD_DUMP to a world.dump JSON");
+        };
+        let json = std::fs::read_to_string(&path).expect("the dump reads");
+        let surface: crate::factorio::world::FactorioSurface =
+            serde_json::from_str(&json).expect("the dump parses");
+        let lines = surface.flow_graph.nameplate_lines();
+        let scale = FlowGraph::balance(&lines);
+        let mut drained: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+        for line in &lines {
+            for ingredient in line.needs.keys() {
+                drained.insert(ingredient.as_str());
+            }
+        }
+        let known: Vec<bool> = lines
+            .iter()
+            .map(|line| drained.contains(line.item.as_str()))
+            .collect();
+        let selected = |index: usize| known[index];
+        let mut supply: BTreeMap<String, f64> = BTreeMap::new();
+        let mut demand: BTreeMap<String, f64> = BTreeMap::new();
+        for (index, line) in lines.iter().enumerate() {
+            if !selected(index) {
+                continue;
+            }
+            *supply.entry(line.item.clone()).or_insert(0.) += line.rate * scale[index];
+            for (ingredient, rate) in &line.needs {
+                *demand.entry(ingredient.clone()).or_insert(0.) += rate * scale[index];
+            }
+        }
+        let blocked = vec![f64::INFINITY; lines.len()];
+        let ceiling = vec![1_f64; lines.len()];
+        let pull = FlowGraph::relieved_pull(
+            &lines, &scale, &ceiling, &supply, &demand, &blocked, &selected,
+        );
+        // The whole-surface tally, which is what the census's 21.7% of
+        // assemblers reading `full_output` can be held against.
+        let mut outlet_bound = 0_usize;
+        let mut crafting = 0_usize;
+        for (index, line) in lines.iter().enumerate() {
+            if !known[index] || line.needs.is_empty() {
+                continue;
+            }
+            crafting += 1;
+            if scale[index] > 0.999_999 {
+                continue;
+            }
+            let mut tightest = f64::INFINITY;
+            for ingredient in line.needs.keys() {
+                if let Some(share) =
+                    FlowGraph::supply_ratio(ingredient, &supply, &demand, &BTreeMap::new())
+                {
+                    tightest = tightest.min(share);
+                }
+            }
+            let outlet = pull.get(&line.item).copied().unwrap_or_default();
+            let standing = supply.get(&line.item).copied().unwrap_or_default();
+            if outlet > 0. && standing > 0. && outlet / standing < tightest {
+                outlet_bound += 1;
+            }
+        }
+        println!(
+            "{outlet_bound} of {crafting} crafting lines are outlet-bound ({:.1}%), \
+             out of {} lines in all",
+            100. * outlet_bound as f64 / crafting as f64,
+            lines.len()
+        );
+        println!("-- what holds each line below nameplate, at the fixed point --");
+        for (item, _) in game_reported_rates() {
+            let mut verdict: BTreeMap<String, usize> = BTreeMap::new();
+            for (index, line) in lines.iter().enumerate() {
+                if line.item != item || !known[index] {
+                    continue;
+                }
+                if scale[index] > 0.999_999 {
+                    *verdict.entry("at nameplate".into()).or_insert(0) += 1;
+                    continue;
+                }
+                let mut tightest = f64::INFINITY;
+                let mut who = "unconstrained".to_string();
+                for ingredient in line.needs.keys() {
+                    if let Some(share) =
+                        FlowGraph::supply_ratio(ingredient, &supply, &demand, &BTreeMap::new())
+                        && share < tightest
+                    {
+                        tightest = share;
+                        who = format!("short of {ingredient}");
+                    }
+                }
+                if !line.needs.is_empty() {
+                    let outlet = pull.get(&line.item).copied().unwrap_or_default();
+                    let standing = supply.get(&line.item).copied().unwrap_or_default();
+                    if outlet > 0. && standing > 0. && outlet / standing < tightest {
+                        who = "outlet".to_string();
+                    }
+                }
+                *verdict.entry(who).or_insert(0) += 1;
+            }
+            println!("{item:>22}  {verdict:?}");
+        }
     }
 
     /// A probe: what the model says is MADE of each item beside what it says

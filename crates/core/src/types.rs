@@ -1738,16 +1738,66 @@ pub struct FactorioEntityPrototype {
     ///
     /// This is maximum production, so a `solar-panel` reports its **noon**
     /// figure and an `accumulator` reports its discharge limit. Neither is
-    /// what a day averages, and the average is not derivable from any
-    /// prototype — the day/night curve lives on `LuaSurface`
-    /// (`ticks_per_day`, `dawn`, `dusk`, `evening`, `morning`,
-    /// `solar_power_multiplier`), which nothing sends. `state.rs` credits
-    /// deterministic sources only and says so.
+    /// what a day averages, and neither is derivable from any prototype: the
+    /// day/night curve lives on `LuaSurface` and arrives as
+    /// [`SurfaceDaylight`], whose [`SurfaceDaylight::average_solar_fraction`]
+    /// turns this figure into the average and whose
+    /// [`SurfaceDaylight::night_deficit_fraction`] sizes the accumulators.
+    /// `state.rs` still credits only deterministic sources in
+    /// `electric_supply_kw` and exposes the solar answers separately.
     ///
     /// `default`: `None` on every world written before this field, meaning
     /// *unknown*, never "produces nothing".
     #[serde(default)]
     pub max_energy_production: Option<f64>,
+    /// The **fraction of [`Self::max_energy_production`] a solar panel makes
+    /// while the sun is fully up**, from `solar_panel_performance_at_day`.
+    ///
+    /// One endpoint of the daylight curve. `1.0` in vanilla, so it looks
+    /// redundant and is not: it is the scale a mod moves, and it is also the
+    /// field whose *presence* says "this prototype is a solar panel". The
+    /// attribute carries `subclasses: ["SolarPanel"]` in 2.1.17, so reading it
+    /// on anything else raises and the mod's `pcall` drops it.
+    ///
+    /// The other terms of the average — how much of a day is spent up there —
+    /// are on `LuaSurface` and arrive as [`SurfaceDaylight`], never on a
+    /// prototype. `default`: `None` is *the sender did not say*, never "makes
+    /// nothing by day".
+    #[serde(default)]
+    pub solar_panel_performance_at_day: Option<f64>,
+    /// The other endpoint, from `solar_panel_performance_at_night`: the
+    /// fraction of [`Self::max_energy_production`] a solar panel makes at
+    /// midnight. `0.0` in vanilla.
+    ///
+    /// **A zero here is a real answer and must not be read as absence.** That
+    /// is the whole reason this is `Option<f64>` and not `f64` — a vanilla
+    /// panel genuinely produces nothing at night, and a modded one that
+    /// produces a little is a different world, not a better-populated one.
+    #[serde(default)]
+    pub solar_panel_performance_at_night: Option<f64>,
+    /// How many **joules** this entity's own electric buffer holds, from
+    /// `LuaElectricEnergySourcePrototype::buffer_capacity`.
+    ///
+    /// **Reached through a sub-prototype, which is why solar sizing was
+    /// previously blocked at the panel.** `electric_energy_source_prototype`
+    /// is an optional attribute on `LuaEntityPrototype` returning a
+    /// `LuaElectricEnergySourcePrototype`, and `buffer_capacity` is an
+    /// attribute on that; nothing in this project had ever read through a
+    /// sub-prototype before.
+    ///
+    /// An `accumulator`'s is the number that answers "how many accumulators
+    /// per panel" — 5 MJ in vanilla — and [`Self::max_energy_production`]
+    /// answers only its 300 kW discharge *rate*, which is a different
+    /// question. Sent for every electric entity, so a machine's small internal
+    /// buffer appears here too; that is not storage anybody plans with, and
+    /// filtering it upstream would put the "what counts as an accumulator"
+    /// decision in Lua where no Rust test can see it.
+    ///
+    /// `default`: `None` means the sender did not say — an entity with no
+    /// electric energy source at all reports nothing here, and so does every
+    /// world written before this field existed.
+    #[serde(default)]
+    pub electric_buffer_capacity: Option<f64>,
 }
 
 /// Ticks in a Factorio second at nominal speed, which is what turns the
@@ -1760,6 +1810,322 @@ pub struct FactorioEntityPrototype {
 /// scaled by `game.speed`: a prototype's draw per tick does not change when
 /// the game runs faster, only how many ticks pass per wall second does.
 const TICKS_PER_SECOND: f64 = 60.;
+
+/// One surface's daylight curve — **surface state, which no prototype can
+/// answer**.
+///
+/// # Why this type had to exist before solar could be planned
+///
+/// `FactorioEntityPrototype::max_energy_production` says a `solar-panel` makes
+/// 60 kW. That is its **noon** figure, and a base sized on it is dead every
+/// night. The owner's ruling is that solar must be planned at *average*
+/// output, and the average is the noon figure times the fraction of a day the
+/// sun is up — a quantity every term of which is on `LuaSurface` and none of
+/// which is on any prototype. Until this record existed
+/// `crates/planner/src/state.rs` credited solar at nothing at all, which
+/// refuses a solar base outright: the safe direction, and still wrong.
+///
+/// Every field is a `read_type`/`write_type` **attribute** on `LuaSurface` in
+/// 2.1.17, checked against `runtime-api.json` rather than recalled. There is
+/// no `get_dawn()` and no `get_ticks_per_day()` -- doclint-allow: names that
+/// deliberately do NOT exist, in either Factorio or this tree, and their
+/// absence is exactly the claim. The neighbouring pair `energy_usage`
+/// (attribute) and `get_max_energy_production()` (method) landed one each way,
+/// and reading a method as an attribute raises inside the mod's `pcall` and
+/// arrives here as a silently missing field.
+///
+/// # The clock
+///
+/// [`Self::daytime`] runs `[0, 1)` and **0 is noon**, so the sunlit half
+/// straddles the wrap. The vanilla order is
+/// `dusk` 0.25 -> `evening` 0.45 -> `morning` 0.55 -> `dawn` 0.75:
+///
+/// ```text
+///   0        0.25       0.45      0.55       0.75        1
+///   |  full   |   fall   |  night  |   rise   |   full    |
+///  noon      dusk     evening   morning     dawn        noon
+/// ```
+///
+/// [`Self::average_solar_fraction`] integrates that trapezoid.
+///
+/// # Absent is not dark
+///
+/// Every field is `Option`, and `None` means **the sender did not say** — a
+/// world recorded before this channel existed, which is every archived dump.
+/// A surface that never reported daylight is not a surface in permanent
+/// darkness, and [`Self::average_solar_fraction`] answers `None` rather than
+/// zero for one.
+#[derive(
+    Debug, Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema, utoipa::ToSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub struct SurfaceDaylight {
+    /// The surface this curve was read from, by name.
+    ///
+    /// A curve is only ever about one surface — `solar_power_multiplier` is
+    /// exactly the knob that makes an array a different size on a different
+    /// planet — so a record that cannot say which one is not a fact about
+    /// anything.
+    #[serde(default)]
+    pub surface: Option<SurfaceId>,
+    /// How many ticks a full day-night cycle takes on this surface.
+    ///
+    /// **25,200 on Nauvis in 2.1.17 — seven minutes exactly — and not the
+    /// 25,000 every reference repeats.** Measured off a running game on
+    /// 2026-09-07 and pinned by `crates/core/tests/live-2.1.17-daylight.json`,
+    /// because the difference is not cosmetic: it is proportional to the
+    /// accumulator ratio below, and it is the whole 0.8% by which the derived
+    /// figure misses the familiar 25:21 rule of thumb.
+    ///
+    /// **This is the term that turns a fraction into an energy**, and it is
+    /// why accumulator sizing needs the surface and not just the panel: the
+    /// deficit a night leaves is a fraction of a day times the length of a
+    /// day. [`Self::average_solar_fraction`] does *not* depend on it at all,
+    /// which is why the panel average survives the correction and the
+    /// accumulator ratio does not.
+    #[serde(default)]
+    pub ticks_per_day: Option<u32>,
+    /// The `daytime` at which dawn starts — the end of the dark half, where
+    /// brightness finishes rising. 0.75 in vanilla.
+    #[serde(default)]
+    pub dawn: Option<f64>,
+    /// The `daytime` at which dusk starts — the end of the sunlit half, where
+    /// brightness begins to fall. 0.25 in vanilla.
+    #[serde(default)]
+    pub dusk: Option<f64>,
+    /// The `daytime` at which evening starts, i.e. where the fall from full
+    /// sun reaches the night floor. 0.45 in vanilla.
+    #[serde(default)]
+    pub evening: Option<f64>,
+    /// The `daytime` at which morning starts, i.e. where brightness begins
+    /// rising off the night floor. 0.55 in vanilla.
+    #[serde(default)]
+    pub morning: Option<f64>,
+    /// Where the surface's clock stood when this was read, in `[0, 1)`.
+    ///
+    /// **Not part of the average and deliberately kept anyway.** A planner
+    /// must not depend on it — that is the whole reason the average exists —
+    /// but [`Self::freeze_daytime`] makes it the *only* thing that matters,
+    /// and a record that dropped it could not tell a frozen noon from a frozen
+    /// midnight.
+    #[serde(default)]
+    pub daytime: Option<f64>,
+    /// The surface's own multiplier on solar output. 1.0 on Nauvis.
+    #[serde(default)]
+    pub solar_power_multiplier: Option<f64>,
+    /// True when the sun never sets on this surface, whatever the four
+    /// boundaries say.
+    ///
+    /// Sent because it makes the integral wrong in a way no boundary would
+    /// reveal: an `always_day` surface produces the full-sun figure around the
+    /// clock and its `dusk`/`dawn` still read as vanilla.
+    #[serde(default)]
+    pub always_day: Option<bool>,
+    /// True when the clock is stopped, so the surface produces whatever
+    /// [`Self::daytime`] was frozen at, forever. The other way the boundaries
+    /// can be true and the integral still wrong.
+    #[serde(default)]
+    pub freeze_daytime: Option<bool>,
+}
+
+/// One straight run of the daylight curve: a length in days, and the
+/// brightness at each end.
+///
+/// The curve is piecewise linear with exactly four runs, so integrating it is
+/// exact rather than sampled — which matters, because
+/// [`SurfaceDaylight::night_deficit_fraction`] integrates a *clipped* version
+/// of it and a sampled clip would land the accumulator ratio somewhere near
+/// the answer with no way to tell how near.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct DaylightRun {
+    days: f64,
+    from: f64,
+    to: f64,
+}
+
+impl SurfaceDaylight {
+    /// The curve as four straight runs, starting at dawn, or `None` when this
+    /// record cannot describe one.
+    ///
+    /// Refuses rather than guesses. A boundary set that is not
+    /// `0 <= dusk <= evening <= morning <= dawn <= 1` is not a day this code
+    /// understands, and computing an average from it would produce a number
+    /// with no meaning that every downstream test would then agree with.
+    fn runs(&self) -> Option<[DaylightRun; 4]> {
+        let (dusk, evening, morning, dawn) = (self.dusk?, self.evening?, self.morning?, self.dawn?);
+        if !(0. ..=1.).contains(&dusk)
+            || !(dusk..=1.).contains(&evening)
+            || !(evening..=1.).contains(&morning)
+            || !(morning..=1.).contains(&dawn)
+        {
+            return None;
+        }
+        Some([
+            // Dawn through the wrap at noon to dusk: the sunlit half.
+            DaylightRun {
+                days: (1. - dawn) + dusk,
+                from: 1.,
+                to: 1.,
+            },
+            DaylightRun {
+                days: evening - dusk,
+                from: 1.,
+                to: 0.,
+            },
+            DaylightRun {
+                days: morning - evening,
+                from: 0.,
+                to: 0.,
+            },
+            DaylightRun {
+                days: dawn - morning,
+                from: 0.,
+                to: 1.,
+            },
+        ])
+    }
+
+    /// Brightness in `[0, 1]` at one instant, from the four boundaries.
+    fn brightness_at(&self, daytime: f64) -> Option<f64> {
+        let (dusk, evening, morning, dawn) = (self.dusk?, self.evening?, self.morning?, self.dawn?);
+        self.runs()?;
+        let t = daytime.rem_euclid(1.);
+        if t <= dusk || t >= dawn {
+            Some(1.)
+        } else if t < evening {
+            Some(1. - (t - dusk) / (evening - dusk))
+        } else if t < morning {
+            Some(0.)
+        } else {
+            Some((t - morning) / (dawn - morning))
+        }
+    }
+
+    /// What fraction of its [`FactorioEntityPrototype::max_energy_production`]
+    /// a solar panel makes **averaged over a whole day** on this surface.
+    ///
+    /// This is the number the owner's ruling is about: solar planned at
+    /// average output rather than at nameplate. On vanilla Nauvis with a
+    /// vanilla panel it is **0.7** — half the day at full sun, two fifths of
+    /// it on a linear ramp worth half each, a tenth of it dark:
+    ///
+    /// ```text
+    /// 0.50 * 1  +  0.20 * 0.5  +  0.10 * 0  +  0.20 * 0.5  =  0.7
+    /// ```
+    ///
+    /// Nothing here is written down: every term comes from the four
+    /// boundaries, the two endpoints come from the panel's own prototype, and
+    /// the whole is scaled by [`Self::solar_power_multiplier`]. That is the
+    /// standing rule — a rate copied from a table is a mod-compatibility
+    /// defect — and it is why `0.7` appears in this doc as a *result* and
+    /// nowhere in the code as an input.
+    ///
+    /// `at_day` and `at_night` are
+    /// [`FactorioEntityPrototype::solar_panel_performance_at_day`] and
+    /// `..._at_night`, the curve's two endpoints. They are 1 and 0 in vanilla,
+    /// so passing them looks redundant and is not: a modded panel with a night
+    /// floor has a genuinely different average, and a `0.0` night endpoint is
+    /// a real answer rather than a missing one.
+    ///
+    /// `None` when this record cannot describe a day — see [`Self::runs`].
+    /// Never zero for that case: a surface nobody reported daylight for is not
+    /// a surface in permanent darkness.
+    ///
+    /// [`Self::always_day`] short-circuits to the full-sun figure, and
+    /// [`Self::freeze_daytime`] to whatever instant the clock was stopped at,
+    /// because either makes the integral wrong in a way the boundaries alone
+    /// would not reveal.
+    pub fn average_solar_fraction(&self, at_day: f64, at_night: f64) -> Option<f64> {
+        let multiplier = self.solar_power_multiplier.unwrap_or(1.);
+        let output = |brightness: f64| at_night + (at_day - at_night) * brightness;
+        if self.always_day == Some(true) {
+            return Some(output(1.) * multiplier);
+        }
+        if self.freeze_daytime == Some(true) {
+            let frozen = self.brightness_at(self.daytime?)?;
+            return Some(output(frozen) * multiplier);
+        }
+        let mean = self
+            .runs()?
+            .iter()
+            .map(|run| run.days * (output(run.from) + output(run.to)) / 2.)
+            .sum::<f64>();
+        Some(mean * multiplier)
+    }
+
+    /// How much energy the dark part of a day leaves short, as a fraction of
+    /// what one panel would make in a day at **full** output —
+    /// i.e. `deficit_joules / (max_energy_production * ticks_per_day)`.
+    ///
+    /// # What question this answers
+    ///
+    /// An array sized at [`Self::average_solar_fraction`] carries a load equal
+    /// to its own average. For part of the day it makes more than that and for
+    /// part of it less, and the *less* has to come out of accumulators. This
+    /// integrates exactly that shortfall: `max(0, average - instantaneous)`
+    /// over the whole day, which is the area between the flat load line and
+    /// the curve wherever the curve is underneath.
+    ///
+    /// On vanilla Nauvis with a vanilla panel it is **0.168 of a full day**.
+    /// Multiplying by a panel's 1,000 J/tick and the live 25,200-tick day
+    /// gives **4.234 MJ per panel**, which against an accumulator's 5 MJ
+    /// ([`FactorioEntityPrototype::electric_buffer_capacity`]) is **0.8467
+    /// accumulators per panel**. On the 25,000-tick day every reference
+    /// quotes, the same arithmetic is exactly **0.84** — the familiar 25:21
+    /// ratio. So the derivation reproduces the rule of thumb and says where
+    /// the remaining 0.8% comes from: day length, measured rather than
+    /// recalled.
+    ///
+    /// `None` on the same terms as [`Self::average_solar_fraction`], and
+    /// `Some(0.0)` for an `always_day` surface, which is a real answer: no
+    /// night, no deficit, no accumulators.
+    pub fn night_deficit_fraction(&self, at_day: f64, at_night: f64) -> Option<f64> {
+        let average = self.average_solar_fraction(at_day, at_night)?;
+        let multiplier = self.solar_power_multiplier.unwrap_or(1.);
+        let output = |brightness: f64| (at_night + (at_day - at_night) * brightness) * multiplier;
+        if self.always_day == Some(true) {
+            return Some(0.);
+        }
+        if self.freeze_daytime == Some(true) {
+            // A frozen clock produces its one value forever, so it is never
+            // above or below its own average: nothing to store.
+            return Some(0.);
+        }
+        let deficit = self
+            .runs()?
+            .iter()
+            .map(|run| clipped_shortfall(run.days, output(run.from), output(run.to), average))
+            .sum::<f64>();
+        Some(deficit)
+    }
+}
+
+/// The area of `max(0, target - g)` over one straight run of length `days`
+/// where `g` goes linearly from `from` to `to`.
+///
+/// Exact, including the case where the run crosses `target` partway: the
+/// piece below the line is a triangle whose base is the crossed fraction of
+/// the run. A version of this that tested only the endpoints would silently
+/// score a crossing run as entirely above or entirely below.
+fn clipped_shortfall(days: f64, from: f64, to: f64, target: f64) -> f64 {
+    let (below_from, below_to) = (from < target, to < target);
+    match (below_from, below_to) {
+        (false, false) => 0.,
+        (true, true) => days * ((target - from) + (target - to)) / 2.,
+        // One end is under the line and the other is not, so the run crosses
+        // it exactly once. `to != from` here, because equal endpoints cannot
+        // straddle a value.
+        _ => {
+            let crossing = (target - from) / (to - from);
+            let (base, depth) = if below_from {
+                (crossing, target - from)
+            } else {
+                (1. - crossing, target - to)
+            };
+            days * base * depth / 2.
+        }
+    }
+}
 
 /// The resource categories a vanilla character mines, used when the world's
 /// prototype table has no `character` entry or one captured before
@@ -2763,6 +3129,9 @@ mod tests {
             electric_energy_usage: None,
             max_energy_production: None,
             mining_drill_radius: None,
+            solar_panel_performance_at_day: None,
+            solar_panel_performance_at_night: None,
+            electric_buffer_capacity: None,
         }
     }
 
@@ -3588,5 +3957,222 @@ mod tests {
         // same name, same type, same footprint -- only the half differs.
         assert_eq!(input.name, output.name);
         assert_eq!(input.entity_type, output.entity_type);
+    }
+
+    /// Vanilla Nauvis, as `LuaSurface` reports it.
+    fn nauvis_daylight() -> SurfaceDaylight {
+        SurfaceDaylight {
+            surface: Some(SurfaceId::nauvis()),
+            // The live 2.1.17 figure, not the 25,000 every reference
+            // repeats. See `crates/core/tests/live-2.1.17-daylight.json`.
+            ticks_per_day: Some(25_200),
+            dawn: Some(0.75),
+            dusk: Some(0.25),
+            evening: Some(0.45),
+            morning: Some(0.55),
+            daytime: Some(0.0),
+            solar_power_multiplier: Some(1.0),
+            always_day: Some(false),
+            freeze_daytime: Some(false),
+        }
+    }
+
+    /// **The number the whole channel exists for.**
+    ///
+    /// A vanilla panel averages 0.7 of its noon output over a day — 42 kW of
+    /// its 60 — and that falls out of the four boundaries with nothing written
+    /// down: half the day at full sun, two fifths on a linear ramp worth half
+    /// each, a tenth dark.
+    ///
+    /// It is asserted exactly, not approximately, because every term is a
+    /// halving or a sum of exact binary fractions and a tolerance would hide
+    /// a real drift.
+    #[test]
+    fn a_vanilla_panel_averages_seven_tenths_of_its_noon_output() {
+        let fraction = nauvis_daylight()
+            .average_solar_fraction(1.0, 0.0)
+            .expect("vanilla boundaries describe a day");
+        assert_eq!(fraction, 0.7);
+    }
+
+    /// The endpoints are the *scale* of the curve, so a modded panel with a
+    /// night floor has a genuinely different average and the shape is
+    /// unchanged: `night + (day - night) * 0.7`.
+    ///
+    /// Here `0.2 + 0.8 * 0.7 = 0.76`. This is the test that would fail if the
+    /// endpoints were assumed to be 1 and 0 anywhere, which is the shape of
+    /// the hard-coded-rate defect the standing rule is about.
+    #[test]
+    fn the_endpoints_scale_the_curve_rather_than_being_assumed() {
+        let fraction = nauvis_daylight()
+            .average_solar_fraction(1.0, 0.2)
+            .expect("vanilla boundaries describe a day");
+        assert!(
+            (fraction - 0.76).abs() < 1e-12,
+            "0.2 + 0.8 * 0.7, got {fraction}"
+        );
+    }
+
+    /// `solar_power_multiplier` is the surface's own scaling and is exactly
+    /// what differs between planets, so it must multiply the answer rather
+    /// than being ignored on Nauvis where it happens to be 1.
+    #[test]
+    fn the_surfaces_own_multiplier_scales_the_average() {
+        let mut daylight = nauvis_daylight();
+        daylight.solar_power_multiplier = Some(0.5);
+        assert_eq!(daylight.average_solar_fraction(1.0, 0.0), Some(0.35));
+    }
+
+    /// An `always_day` surface produces the full-sun figure around the clock
+    /// while its four boundaries still read as vanilla, so the flag has to
+    /// short-circuit the integral. A version that trusted the boundaries alone
+    /// would under-credit such a surface by 30% and every boundary assertion
+    /// above would still pass.
+    #[test]
+    fn always_day_is_not_visible_in_the_boundaries() {
+        let mut daylight = nauvis_daylight();
+        daylight.always_day = Some(true);
+        assert_eq!(daylight.average_solar_fraction(1.0, 0.0), Some(1.0));
+        assert_eq!(
+            daylight.night_deficit_fraction(1.0, 0.0),
+            Some(0.0),
+            "no night, no deficit, no accumulators",
+        );
+    }
+
+    /// The other way the boundaries can be true and the integral still wrong:
+    /// a stopped clock produces whatever instant it stopped at, forever. Frozen
+    /// at midnight a vanilla surface makes nothing at all.
+    #[test]
+    fn a_frozen_clock_produces_the_instant_it_stopped_at() {
+        let mut daylight = nauvis_daylight();
+        daylight.freeze_daytime = Some(true);
+        daylight.daytime = Some(0.5);
+        assert_eq!(daylight.average_solar_fraction(1.0, 0.0), Some(0.0));
+
+        daylight.daytime = Some(0.35);
+        let halfway = daylight
+            .average_solar_fraction(1.0, 0.0)
+            .expect("a frozen vanilla day");
+        assert!(
+            (halfway - 0.5).abs() < 1e-12,
+            "halfway down the dusk-to-evening ramp, got {halfway}",
+        );
+    }
+
+    /// A record that cannot describe a day refuses rather than returning a
+    /// number nobody can interpret — and, critically, refuses rather than
+    /// returning zero. A surface nobody reported daylight for is not a surface
+    /// in permanent darkness, and `state.rs` reads the `None` as "may not put
+    /// solar on a network" instead of "solar makes nothing here".
+    #[test]
+    fn an_unreported_or_impossible_day_is_unknown_and_not_dark() {
+        assert_eq!(
+            SurfaceDaylight::default().average_solar_fraction(1.0, 0.0),
+            None,
+            "every archived dump predates this channel and reports nothing",
+        );
+
+        let mut scrambled = nauvis_daylight();
+        // dusk after evening: not a day this code understands.
+        scrambled.dusk = Some(0.5);
+        assert_eq!(scrambled.average_solar_fraction(1.0, 0.0), None);
+        assert_eq!(scrambled.night_deficit_fraction(1.0, 0.0), None);
+    }
+
+    /// **The accumulator half, and the second of the two vanilla ratios this
+    /// one channel reproduces.**
+    ///
+    /// The shortfall an array of vanilla panels leaves against its own average
+    /// load is 0.168 of a full day's full output. Against a panel's 1,000
+    /// J/tick it is 4.2 MJ on a 25,000-tick day — **0.84 accumulators per
+    /// panel**, the familiar 25:21 ratio — and 4.234 MJ on the 25,200-tick day
+    /// this install actually runs, which is 0.8467. Both are asserted, because
+    /// the rule of thumb is what a reader will check against and the live
+    /// figure is what the planner will use.
+    ///
+    /// The fraction itself is exact and independent of day length: the deficit
+    /// is `0.14 * 0.35` on each ramp plus `0.1 * 0.7` of night, i.e.
+    /// `0.049 + 0.07 + 0.049`.
+    #[test]
+    fn the_night_deficit_is_the_vanilla_accumulator_ratio() {
+        let deficit = nauvis_daylight()
+            .night_deficit_fraction(1.0, 0.0)
+            .expect("vanilla boundaries describe a day");
+        assert!(
+            (deficit - 0.168).abs() < 1e-12,
+            "0.049 + 0.07 + 0.049, got {deficit}"
+        );
+
+        let by_the_book = 1000.0 * 25_000.0 * deficit / 5_000_000.0;
+        assert!(
+            (by_the_book - 0.84).abs() < 1e-12,
+            "on the 25,000-tick day every reference quotes, exactly 25 panels \
+             to 21 accumulators, got {by_the_book}"
+        );
+        let live = 1000.0 * 25_200.0 * deficit / 5_000_000.0;
+        assert!(
+            (live - 0.84 * 25_200. / 25_000.).abs() < 1e-12,
+            "and on the day the running game reports, that scaled by the day \
+             length and nothing else, got {live}"
+        );
+    }
+
+    /// 0.7 and 0.84 are answers to different questions from the same curve,
+    /// and conflating them would size an array 20% short. Pinned here because
+    /// the brief that commissioned this work read 25:21 as a statement that
+    /// the *average* is 0.84, which it is not.
+    #[test]
+    fn the_average_and_the_accumulator_ratio_are_different_integrals() {
+        let daylight = nauvis_daylight();
+        let average = daylight.average_solar_fraction(1.0, 0.0).expect("a day");
+        let deficit = daylight.night_deficit_fraction(1.0, 0.0).expect("a day");
+        assert!(
+            (average - 0.7).abs() < 1e-12 && (deficit - 0.168).abs() < 1e-12,
+            "average {average}, deficit {deficit}",
+        );
+        let ratio = deficit * 25_200.0 * 1000.0 / 5_000_000.0;
+        assert_ne!(
+            average, ratio,
+            "the average fraction and the accumulators-per-panel ratio are \
+             not the same number and must never be derived from each other",
+        );
+    }
+
+    /// A run that crosses the load line partway contributes a triangle, and a
+    /// version of the integral that tested only its endpoints would score the
+    /// whole run as above or below. Vanilla's ramps cross at 0.31 and 0.69, so
+    /// this is exercised by every assertion above — but only implicitly, and a
+    /// direct case makes the failure legible.
+    #[test]
+    fn a_run_that_crosses_the_load_line_contributes_a_triangle() {
+        // Full sun for a quarter of the day, dark for the rest, with no ramp
+        // at all: nothing crosses, and the deficit is the flat area under the
+        // 0.25 average across the dark three quarters.
+        let square = SurfaceDaylight {
+            dusk: Some(0.125),
+            evening: Some(0.125),
+            morning: Some(0.875),
+            dawn: Some(0.875),
+            ..nauvis_daylight()
+        };
+        assert_eq!(square.average_solar_fraction(1.0, 0.0), Some(0.25));
+        assert_eq!(
+            square.night_deficit_fraction(1.0, 0.0),
+            Some(0.75 * 0.25),
+            "a square wave has no crossing run at all",
+        );
+
+        // The vanilla curve, whose two ramps each cross. Their triangles are
+        // what separates 0.168 from the 0.21 an endpoint-only test would give
+        // by charging each whole ramp at its mean depth.
+        assert!(
+            (nauvis_daylight()
+                .night_deficit_fraction(1.0, 0.0)
+                .expect("a day")
+                - 0.168)
+                .abs()
+                < 1e-12
+        );
     }
 }

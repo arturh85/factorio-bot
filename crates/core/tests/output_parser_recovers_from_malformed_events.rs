@@ -354,3 +354,48 @@ fn a_malformed_graphic_is_skipped_and_a_well_formed_one_keeps_distinct_width_and
         "height must come from the height field, not be a copy of width"
     );
 }
+
+/// **The stdout half of the daylight channel, end to end.**
+///
+/// `writeout_daylight` in the mod emits this line beside the forces at
+/// startup, and `crates/planner`'s solar accessors read what it lands in. The
+/// two transports are meant to agree, so this is the one the RCON
+/// `world_snapshot` path is checked against; a key that reaches no field is
+/// dropped by serde in silence, which is a bug shape this tree has hit twice.
+#[test]
+fn a_daylight_writeout_reaches_the_surface() {
+    let mut parser = OutputParser::new();
+    parser
+        .parse(
+            0,
+            "daylight",
+            r#"{"surface":"nauvis","ticks_per_day":25200,"dawn":0.75,"dusk":0.25,
+                "evening":0.45,"morning":0.55,"daytime":0.0,
+                "solar_power_multiplier":1.0,"always_day":false,
+                "freeze_daytime":false}"#,
+        )
+        .expect("a well-formed daylight line parses");
+
+    let daylight = parser
+        .world()
+        .daylight()
+        .expect("and reaches the surface it describes");
+    assert_eq!(daylight.ticks_per_day, Some(25_200));
+    assert_eq!(
+        daylight.average_solar_fraction(1.0, 0.0),
+        Some(0.7),
+        "a vanilla panel averages 0.7 of its noon output on this curve",
+    );
+}
+
+/// A daylight line this build cannot read must leave the curve **unset**, not
+/// dark. `None` reads downstream as "nobody said", which is the same answer an
+/// older mod gives and is the one that refuses solar rather than crediting it
+/// at zero.
+#[test]
+fn a_malformed_daylight_line_leaves_the_curve_unknown() {
+    let mut parser = OutputParser::new();
+    let result = parser.parse(0, "daylight", "{\"dawn\":");
+    assert!(result.is_ok(), "logged and skipped, never propagated");
+    assert!(parser.world().daylight().is_none());
+}

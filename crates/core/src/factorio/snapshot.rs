@@ -35,7 +35,7 @@ use crate::factorio::rcon::FactorioRcon;
 use crate::factorio::world::FactorioSurface;
 use crate::types::{
     AreaFilter, FactorioEntityPrototype, FactorioForce, FactorioItemPrototype, FactorioRecipe,
-    Position, Rect,
+    Position, Rect, SurfaceDaylight,
 };
 use miette::Result;
 use serde::{Deserialize, Serialize};
@@ -72,6 +72,16 @@ pub struct WorldSnapshot {
     pub item_prototypes: Vec<FactorioItemPrototype>,
     pub recipes: Vec<FactorioRecipe>,
     pub forces: Vec<FactorioForce>,
+    /// The daylight curve of the surface the mod bridges, when it reported
+    /// one.
+    ///
+    /// `None` from a BotBridge that predates the field — *not said*, never
+    /// "no daylight". `attach_world` therefore leaves the surface's daylight
+    /// unset rather than installing a dark one, and
+    /// `crates/planner/src/state.rs` answers `None` for a solar question on
+    /// such a world instead of crediting zero.
+    #[serde(default)]
+    pub daylight: Option<SurfaceDaylight>,
 }
 
 /// What one [`FactorioRcon::generate_chunks`] call actually bought.
@@ -226,6 +236,9 @@ mod tests {
             electric_energy_usage: None,
             max_energy_production: None,
             mining_drill_radius: None,
+            solar_panel_performance_at_day: None,
+            solar_panel_performance_at_night: None,
+            electric_buffer_capacity: None,
         }
     }
 
@@ -269,6 +282,7 @@ mod tests {
                 worker_robots_speed_modifier: None,
                 technologies: Box::default(),
             }],
+            daylight: None,
         }
     }
 
@@ -442,6 +456,9 @@ mod tests {
             electric_energy_usage: None,
             max_energy_production: None,
             mining_drill_radius: None,
+            solar_panel_performance_at_day: None,
+            solar_panel_performance_at_night: None,
+            electric_buffer_capacity: None,
         });
         assert!(
             !snapshot.is_plannable(),
@@ -491,6 +508,9 @@ mod tests {
             electric_energy_usage: None,
             max_energy_production: None,
             mining_drill_radius: None,
+            solar_panel_performance_at_day: None,
+            solar_panel_performance_at_night: None,
+            electric_buffer_capacity: None,
         });
         snapshot.item_prototypes.push(FactorioItemPrototype {
             name: "iron-plate".into(),
@@ -548,6 +568,65 @@ mod tests {
         assert!(
             world.forces.contains_key("player"),
             "without a force the planner has no technology table"
+        );
+    }
+
+    /// The RCON half of the daylight channel: an attached session must learn
+    /// the surface's curve, or a solar question answers "unknown" on a world
+    /// that could have said.
+    ///
+    /// The `--connect` path never sees a stdout writeout, so `apply_snapshot`
+    /// is the *only* way the curve reaches an attached world. This is the test
+    /// that would fail if `daylight` were added to `WorldSnapshot` and never
+    /// applied — a shape that costs nothing at compile time and everything at
+    /// run time.
+    #[test]
+    fn apply_snapshot_lands_the_daylight_curve() {
+        let mut snapshot = plannable_snapshot();
+        snapshot.daylight = Some(crate::types::SurfaceDaylight {
+            surface: Some(crate::types::SurfaceId::nauvis()),
+            ticks_per_day: Some(25_200),
+            dawn: Some(0.75),
+            dusk: Some(0.25),
+            evening: Some(0.45),
+            morning: Some(0.55),
+            daytime: Some(0.0),
+            solar_power_multiplier: Some(1.0),
+            always_day: Some(false),
+            freeze_daytime: Some(false),
+        });
+        let world = FactorioSurface::new();
+        world.apply_snapshot(snapshot).expect("apply_snapshot");
+        assert_eq!(
+            world
+                .daylight()
+                .and_then(|d| d.average_solar_fraction(1., 0.)),
+            Some(0.7),
+        );
+    }
+
+    /// **An older BotBridge says nothing here, and saying nothing must not
+    /// erase what is already known.**
+    ///
+    /// `attach_world` builds a fresh surface, so today this can only be the
+    /// difference between unknown and unknown — but `apply_snapshot` is a
+    /// public method on a live surface, and a re-snapshot from a downgraded
+    /// mod overwriting a good curve with `None` would turn "this build is old"
+    /// into "this surface has no daylight" silently.
+    #[test]
+    fn a_snapshot_that_says_nothing_about_daylight_does_not_erase_it() {
+        let world = FactorioSurface::new();
+        world.update_daylight(crate::types::SurfaceDaylight {
+            ticks_per_day: Some(25_200),
+            ..Default::default()
+        });
+        let snapshot = plannable_snapshot();
+        assert!(snapshot.daylight.is_none(), "an older mod sends nothing");
+        world.apply_snapshot(snapshot).expect("apply_snapshot");
+        assert_eq!(
+            world.daylight().and_then(|d| d.ticks_per_day),
+            Some(25_200),
+            "silence is not a correction",
         );
     }
 }

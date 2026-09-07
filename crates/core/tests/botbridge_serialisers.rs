@@ -1905,3 +1905,144 @@ fn an_empty_lane_survives_the_empty_table_json_renders_as_an_object() {
     );
     assert_eq!(lanes[1].contents.len(), 1);
 }
+
+/// A solar panel's nameplate is its **noon** output, so the fields that turn
+/// it into an average have to cross this bridge or a solar base is planned
+/// dead. Two of the three are on the entity prototype
+/// (`solar_panel_performance_at_day` / `_at_night`, the curve's endpoints);
+/// the third — the accumulator's buffer — is on a *sub*-prototype nothing here
+/// had ever read through.
+///
+/// Goes the whole way into the struct, for the reason
+/// `a_serialised_beacon_prototype_carries_its_geometry` gives: a correctly
+/// spelled Lua key that matches no serde field is dropped in silence, and this
+/// file records two live bugs of exactly that shape.
+#[test]
+fn a_serialised_solar_panel_carries_both_ends_of_its_curve() {
+    let lua = botbridge_types();
+    let panel = machine_prototype(&lua, "solar-panel", "solar-panel");
+    panel
+        .set(
+            "get_max_energy_production",
+            lua.create_function(|_, ()| Ok(1000.0)).expect("function"),
+        )
+        .expect("set");
+    panel
+        .set("solar_panel_performance_at_day", 1.0)
+        .expect("set");
+    panel
+        .set("solar_panel_performance_at_night", 0.0)
+        .expect("set");
+    let prototype = prototype_through_serde(&lua, panel);
+
+    assert_eq!(
+        prototype.max_energy_production_kw(),
+        Some(60.0),
+        "1000 J/tick x 60 / 1000 is the 60 kW a vanilla panel makes at noon",
+    );
+    assert_eq!(prototype.solar_panel_performance_at_day, Some(1.0));
+    assert_eq!(
+        prototype.solar_panel_performance_at_night,
+        Some(0.0),
+        "a real zero, and it must survive as Some(0.0): a vanilla panel \
+         genuinely makes nothing at midnight, which is not the same fact as a \
+         sender that did not say",
+    );
+}
+
+/// The accumulator's real number is not on `LuaEntityPrototype` at all:
+/// `get_max_energy_production()` answers its 300 kW *discharge limit*, and
+/// what sizing needs is the 5 MJ it holds, which lives on
+/// `LuaElectricEnergySourcePrototype`. Reading through a sub-prototype is new
+/// here, so it gets its own test.
+#[test]
+fn a_serialised_accumulator_carries_its_buffer_through_the_sub_prototype() {
+    let lua = botbridge_types();
+    let accumulator = machine_prototype(&lua, "accumulator", "accumulator");
+    let source = lua.create_table().expect("table");
+    source.set("buffer_capacity", 5_000_000.0).expect("set");
+    accumulator
+        .set("electric_energy_source_prototype", source)
+        .expect("set");
+    let prototype = prototype_through_serde(&lua, accumulator);
+
+    assert_eq!(
+        prototype.electric_buffer_capacity,
+        Some(5_000_000.0),
+        "joules, unconverted, read off the sub-prototype",
+    );
+}
+
+/// An entity with no electric energy source has no buffer to report, and the
+/// absence must stay absence: a burner machine that read as a zero-joule
+/// battery would be indistinguishable from an accumulator somebody drained.
+#[test]
+fn a_burner_machine_reports_no_electric_buffer() {
+    let lua = botbridge_types();
+    let furnace = machine_prototype(&lua, "stone-furnace", "furnace");
+    let prototype = prototype_through_serde(&lua, furnace);
+
+    assert_eq!(prototype.electric_buffer_capacity, None);
+    assert_eq!(
+        prototype.solar_panel_performance_at_day, None,
+        "the endpoints carry `subclasses: [\"SolarPanel\"]`, so their presence \
+         is what says a prototype is a panel",
+    );
+}
+
+/// The daylight curve is **surface state**, and this is the first record in
+/// this project that is about a surface rather than about a prototype, an
+/// entity or a force. Every field is an attribute on `LuaSurface` in 2.1.17 —
+/// there is no `get_dawn()` — and the whole point of going the whole way into
+/// the struct is that a method read as an attribute raises, the mod's `pcall`
+/// swallows it, and the field arrives missing with nothing saying it should
+/// not have.
+#[test]
+fn a_serialised_surface_carries_its_daylight_curve() {
+    let lua = botbridge_types();
+    let daylight = daylight_through_serde(&lua, vanilla_nauvis_surface(&lua));
+
+    assert_eq!(
+        daylight.surface,
+        Some(factorio_bot_core::types::SurfaceId::nauvis()),
+        "a curve is only about the surface it was read from",
+    );
+    assert_eq!(daylight.ticks_per_day, Some(25_000));
+    assert_eq!(daylight.dusk, Some(0.25));
+    assert_eq!(daylight.evening, Some(0.45));
+    assert_eq!(daylight.morning, Some(0.55));
+    assert_eq!(daylight.dawn, Some(0.75));
+    assert_eq!(daylight.solar_power_multiplier, Some(1.0));
+    assert_eq!(daylight.always_day, Some(false));
+    assert_eq!(daylight.freeze_daytime, Some(false));
+    assert_eq!(
+        daylight.daytime,
+        Some(0.0),
+        "kept even though the average must not depend on it: a frozen clock \
+         makes it the only thing that matters",
+    );
+}
+
+/// Vanilla Nauvis as `LuaSurface` reports it, for the daylight tests.
+fn vanilla_nauvis_surface(lua: &Lua) -> Table {
+    let surface = lua.create_table().expect("table");
+    surface.set("name", "nauvis").expect("set");
+    surface.set("ticks_per_day", 25_000).expect("set");
+    surface.set("dusk", 0.25).expect("set");
+    surface.set("evening", 0.45).expect("set");
+    surface.set("morning", 0.55).expect("set");
+    surface.set("dawn", 0.75).expect("set");
+    surface.set("daytime", 0.0).expect("set");
+    surface.set("solar_power_multiplier", 1.0).expect("set");
+    surface.set("always_day", false).expect("set");
+    surface.set("freeze_daytime", false).expect("set");
+    surface
+}
+
+fn daylight_through_serde(lua: &Lua, surface: Table) -> factorio_bot_core::types::SurfaceDaylight {
+    let out = call(lua, "serialize_surface_daylight", surface);
+    let json: serde_json::Value = lua
+        .from_value(Value::Table(out))
+        .expect("the serialised daylight converts to json");
+    serde_json::from_value(json.clone()).unwrap_or_else(|err| panic!("{err} in {json}"))
+}

@@ -22,6 +22,20 @@ use mlua::{Function, Lua, LuaSerdeExt, Table, Value};
 const CRAFTER_INPUT: i64 = 2;
 /// `defines.inventory.lab_input`, on the same terms as [`CRAFTER_INPUT`].
 const LAB_INPUT: i64 = 1;
+/// `defines.entity_status.no_ingredients` -- a machine that is STOPPED and has
+/// a name for why. The number is arbitrary here for the same reason
+/// [`CRAFTER_INPUT`]'s is: what the tests assert is that the serialiser
+/// resolves whatever the game's own table says, never a number written down.
+const NO_INGREDIENTS: i64 = 22;
+/// `defines.entity_status.working`.
+const WORKING: i64 = 1;
+/// `defines.entity_status.waiting_for_space_in_destination` -- the
+/// back-pressure half of idleness, which nothing derivable from the flow graph
+/// can see and which 194 drills of the world-record base were sitting in.
+const WAITING_FOR_SPACE: i64 = 5;
+/// A status value the stubbed `defines` cannot name, standing in for an
+/// archive read against a Factorio whose enum has grown.
+const UNMAPPED_STATUS: i64 = 9_001;
 
 /// Loads the mod's serialisers. The path is the same live reference a debug
 /// build uses for `workspace/mods`.
@@ -62,9 +76,25 @@ fn botbridge_types() -> Lua {
     ] {
         transport_line.set(name, index).expect("set");
     }
+    // `defines.entity_status`, which the serialiser INVERTS to name a status.
+    // Four of the seventy-two 2.1.17 members and deliberately not in value
+    // order, on the same terms as `transport_line` above: the mapping under
+    // test is value -> name, so an implementation reading this as a list would
+    // produce wrong names here rather than accidentally right ones. Leaving
+    // most of the enum out is what makes [`UNMAPPED_STATUS`] a real case.
+    let entity_status = lua.create_table().expect("table");
+    for (name, value) in [
+        ("no_ingredients", NO_INGREDIENTS),
+        ("working", WORKING),
+        ("waiting_for_space_in_destination", WAITING_FOR_SPACE),
+        ("no_power", 12),
+    ] {
+        entity_status.set(name, value).expect("set");
+    }
     let defines = lua.create_table().expect("table");
     defines.set("inventory", inventory).expect("set");
     defines.set("transport_line", transport_line).expect("set");
+    defines.set("entity_status", entity_status).expect("set");
     lua.globals().set("defines", defines).expect("set");
     lua.load(&source)
         .set_name("types.lua")
@@ -779,6 +809,10 @@ fn every_serialize_entity_branch(lua: &Lua) -> Vec<(&'static str, Table)> {
         .expect("set");
 
     let assembler = entity_table(lua, "assembling-machine-1", "assembling-machine", true);
+    // The one branch carrying a status, so `status` is among the keys this
+    // guard sees. Every other stub leaves `entity.status` nil, which is the
+    // ordinary case for a tree, a chest or a belt.
+    assembler.set("status", WORKING).expect("set");
     let recipe = lua.create_table().expect("table");
     recipe.set("name", "iron-gear-wheel").expect("set");
     assembler
@@ -865,8 +899,209 @@ fn every_key_serialize_entity_emits_is_a_field_of_factorio_entity() {
     // emit; a shrinking count would mean a branch stopped being exercised.
     assert_eq!(
         seen.len(),
-        16,
-        "serialize_entity emits sixteen distinct keys across its branches; saw {seen:?}"
+        17,
+        "serialize_entity emits seventeen distinct keys across its branches; saw {seen:?}"
+    );
+}
+
+// --------------------------------------------------------------------------
+// `volume`: how much a fluid box holds, which its connections cannot say.
+// --------------------------------------------------------------------------
+
+/// A `LuaFluidBoxPrototype` as `serialize_fluidbox_prototype` uses it.
+/// `get_volume` is installed only when `volume` is `Some`, because the case
+/// that matters is a prototype that does not have the METHOD at all -- an
+/// older Factorio, or an attribute read against a game that only offers a
+/// method. That case must leave the key absent and must not raise.
+fn fluidbox_prototype(lua: &Lua, volume: Option<f64>) -> Table {
+    let fluidbox = lua.create_table().expect("table");
+    fluidbox
+        .set("production_type", "input-output")
+        .expect("set");
+    fluidbox
+        .set("pipe_connections", lua.create_table().expect("table"))
+        .expect("set");
+    if let Some(volume) = volume {
+        fluidbox
+            .set(
+                "get_volume",
+                lua.create_function(move |_, ()| Ok(volume))
+                    .expect("function"),
+            )
+            .expect("set");
+    }
+    fluidbox
+}
+
+fn volume_of(lua: &Lua, volume: Option<f64>) -> Option<f64> {
+    let out = call(
+        lua,
+        "serialize_fluidbox_prototype",
+        fluidbox_prototype(lua, volume),
+    );
+    let json: serde_json::Value = lua
+        .from_value(Value::Table(out))
+        .expect("the record is plain data");
+    let prototype: factorio_bot_core::types::FactorioFluidBoxPrototype =
+        serde_json::from_value(json.clone()).unwrap_or_else(|err| panic!("{err} in {json}"));
+    prototype.volume
+}
+
+/// The capacity comes from CALLING `get_volume()`.
+///
+/// It is a method on `LuaFluidBoxPrototype` and there is no `volume` attribute
+/// in 2.1.17 at all. Reading it as an attribute would hand back a function
+/// rather than raise, `helpers.table_to_json` would drop it, and the field
+/// would go missing with nothing anywhere to say it should not be -- which is
+/// exactly how `crafting_speed` arrived nil for 1,028 prototypes.
+#[test]
+fn a_fluid_boxs_capacity_comes_from_calling_get_volume() {
+    let lua = botbridge_types();
+    assert_eq!(volume_of(&lua, Some(1000.0)), Some(1000.0));
+}
+
+/// And a prototype with no `get_volume` at all sends no key rather than a
+/// zero: "this game cannot say" and "this box holds nothing" are different
+/// claims, and a planner sizing storage must not read the first as the second.
+#[test]
+fn a_fluid_box_that_cannot_report_its_volume_says_nothing_rather_than_zero() {
+    let lua = botbridge_types();
+    assert_eq!(volume_of(&lua, None), None);
+}
+
+// --------------------------------------------------------------------------
+// `status`: what the machine is DOING, which no inventory read can say.
+// --------------------------------------------------------------------------
+
+/// The record `serialize_entity` makes of an entity whose `status` attribute
+/// reads `status`, as the typed struct.
+///
+/// `status` is an ATTRIBUTE on `LuaEntity` -- `optional: true`,
+/// `subclasses: None` in 2.1.17's `runtime-api.json` -- so the stub carries a
+/// plain value and not a function. Had it been a method, reading it as an
+/// attribute would yield a function rather than raise, and the field would go
+/// missing in silence; that is how `crafting_speed` arrived nil for 1,028
+/// prototypes.
+fn furnace_with_status(lua: &Lua, status: Option<i64>) -> FactorioEntity {
+    let furnace = entity_table(lua, "stone-furnace", "furnace", true);
+    if let Some(status) = status {
+        furnace.set("status", status).expect("set");
+    }
+    let out = call(lua, "serialize_entity", furnace);
+    let json: serde_json::Value = lua
+        .from_value(Value::Table(out))
+        .expect("the serialised entity converts to json");
+    serde_json::from_value(json.clone()).unwrap_or_else(|err| panic!("{err} in {json}"))
+}
+
+/// A stopped machine has a NAME for being stopped, and the name is what
+/// crosses the wire.
+///
+/// The number never does. `defines.entity_status` is an enum whose numbering
+/// is a Factorio implementation detail: an archived `22` would need that exact
+/// version's table to be readable at all, and a version bump could silently
+/// make it mean something else.
+#[test]
+fn a_stopped_machine_says_why_by_name() {
+    let lua = botbridge_types();
+    assert_eq!(
+        furnace_with_status(&lua, Some(NO_INGREDIENTS)).status,
+        Some("no_ingredients".to_owned()),
+        "the name from the game's own defines.entity_status, never the number"
+    );
+    assert_eq!(
+        furnace_with_status(&lua, Some(WAITING_FOR_SPACE)).status,
+        Some("waiting_for_space_in_destination".to_owned()),
+        "the back-pressure half of idleness must arrive distinguishable from \
+         every other reason a machine is not running"
+    );
+    assert_eq!(
+        furnace_with_status(&lua, Some(WORKING)).status,
+        Some("working".to_owned())
+    );
+}
+
+/// **Absent stays distinguishable from every named state**, which is the
+/// whole point of the `Option`.
+///
+/// A tree, a chest and a belt have no status concept; the mod sends no key and
+/// this reads as `None`, meaning *the sender did not say*. Every world dump
+/// and run record written before the field existed reads the same way. A
+/// machine that is merely *stopped* is a different answer and has a name for
+/// itself -- so nothing may default the absent case to `working`, which would
+/// invent a duty cycle out of an archive that never measured one.
+#[test]
+fn an_entity_with_no_status_says_nothing_rather_than_working() {
+    let lua = botbridge_types();
+    assert_eq!(
+        furnace_with_status(&lua, None).status,
+        None,
+        "no status attribute must mean no key, not a fabricated `working`"
+    );
+    // And the same absence survives the trip a real archive takes: a record
+    // written before the field existed carries no `status` at all.
+    let archived: FactorioEntity = serde_json::from_value(serde_json::json!({
+        "name": "stone-furnace",
+        "entity_type": "furnace",
+        "position": { "x": 0.5, "y": 0.5 },
+        "bounding_box": {
+            "left_top": { "x": 0.1, "y": 0.1 },
+            "right_bottom": { "x": 0.9, "y": 0.9 },
+        },
+        "direction": 0,
+    }))
+    .expect("a record predating the field still deserialises");
+    assert_eq!(archived.status, None);
+}
+
+/// A value this build's `defines` cannot name still reaches the record,
+/// labelled as unresolved, rather than being dropped or written as a bare
+/// integer nobody can decode later -- the rule `transport_line_name` follows.
+#[test]
+fn a_status_this_build_cannot_name_is_labelled_unmapped() {
+    let lua = botbridge_types();
+    assert_eq!(
+        furnace_with_status(&lua, Some(UNMAPPED_STATUS)).status,
+        Some(format!("unmapped_{UNMAPPED_STATUS}")),
+    );
+}
+
+/// **The bulk path carries it, and that is not an oversight.**
+///
+/// `opts.omit_inventories` is the `writeout_entities` path -- every entity of
+/// every chunk, item contents deliberately withheld -- and it is the *only*
+/// path that fills the world model a dumped world is built from. A status
+/// gated behind that flag would leave the duty cycle unmeasurable in exactly
+/// the artefact the question is asked of. One short string is not an
+/// item-by-item inventory.
+#[test]
+fn the_bulk_path_omits_inventories_and_still_carries_the_status() {
+    let lua = botbridge_types();
+    let furnace = entity_table(&lua, "stone-furnace", "furnace", true);
+    furnace.set("status", NO_INGREDIENTS).expect("set");
+    let opts = lua.create_table().expect("table");
+    opts.set("omit_inventories", true).expect("set");
+    let serialize: Function = lua
+        .globals()
+        .get("serialize_entity")
+        .expect("the mod defines the function");
+    let out: Table = serialize
+        .call((furnace, opts))
+        .expect("the serialiser runs");
+
+    let json: serde_json::Value = lua
+        .from_value(Value::Table(out))
+        .expect("the serialised entity converts to json");
+    let entity: FactorioEntity =
+        serde_json::from_value(json.clone()).unwrap_or_else(|err| panic!("{err} in {json}"));
+    assert_eq!(
+        entity.status,
+        Some("no_ingredients".to_owned()),
+        "the bulk writeout is what a dumped world is built from"
+    );
+    assert_eq!(
+        entity.output_inventory, None,
+        "and it must still withhold the contents it was asked to withhold"
     );
 }
 

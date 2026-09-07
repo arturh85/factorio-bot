@@ -1476,6 +1476,24 @@ pub struct FactorioGraphic {
 pub struct FactorioFluidBoxPrototype {
     pub pipe_connections: Box<Option<Vec<FactorioFluidBoxConnection>>>,
     pub production_type: String,
+    // HOW MUCH THIS BOX HOLDS, in fluid units, at normal quality.
+    //
+    // `pipe_connections` and `production_type` say where a fluid box may be
+    // joined and which way fluid flows through it; neither says what it can
+    // store. A caller planning storage without this has one option left --
+    // a hard-coded table of vanilla capacities -- which is the same
+    // mod-compatibility defect as `pole_supply_half_extent` and the copied
+    // smelting rate the world-record base falsified.
+    //
+    // `None` means the sender did not say: an older mod, an archived dump, or
+    // a Factorio whose `LuaFluidBoxPrototype` has no `get_volume()`. It is a
+    // METHOD there and not an attribute, so reading it wrong yields silence
+    // rather than an error -- see the read in `mods/BotBridge/types.lua`.
+    #[schemars(
+        description = "How much this fluid box holds, in fluid units, at normal quality (`LuaFluidBoxPrototype::get_volume()`). `null` means the sender did not say -- an older mod or an archived record -- never zero."
+    )]
+    #[serde(default)]
+    pub volume: Option<f64>,
 }
 
 // #[derive(
@@ -1900,6 +1918,41 @@ pub struct FactorioEntity {
         deserialize_with = "deserialize_helpers::option_vec_or_empty_map"
     )]
     pub transport_lines: Option<Vec<TransportLine>>,
+    // WHAT THE MACHINE IS DOING, by `defines.entity_status`' own name for it:
+    // `working`, `no_ingredients`, `no_power`, `waiting_for_space_in_destination`.
+    //
+    // A `schemars(description)` rather than a `///`, like `direction`,
+    // `input_inventory` and `transport_lines` above: this type's OpenAPI schema
+    // is snapshotted in `app/src/api/openapi.snapshot.json`, and the reasoning
+    // belongs to whoever reads the code. The long version is in
+    // `mods/BotBridge/types.lua`, at the read itself.
+    //
+    // The three inventory fields above say what a machine HOLDS and none of
+    // them says whether it is running. That absence is the dominant and only
+    // unbounded term in `FlowGraph`'s error against a real base -- +16% to
+    // +23% on the world-record save -- and the back-pressure half of it
+    // (194 drills at `waiting_for_space_in_destination` on that base) is not
+    // derivable from the graph at any price. See
+    // `docs/superpowers/notes/2026-09-07-a-machine-standing-still.md`.
+    //
+    // **The NAME, never the number.** `defines.entity_status` is an enum whose
+    // numbering is a Factorio implementation detail, so an archived `12` would
+    // need that exact version's table to be readable and could silently change
+    // meaning across versions. A value the mod's build cannot name arrives as
+    // `unmapped_<n>` rather than being dropped.
+    //
+    // **`None` is not "working", and absent is not empty.** A tree, a chest or
+    // a belt has no status concept and the mod sends no key at all; a machine
+    // that is *stopped* has a name for being stopped, and that name is the
+    // measurement. Every archived record and world dump written before this
+    // field existed also reads as `None`, i.e. "the sender did not say" --
+    // which is why `#[serde(default)]` is here and why nothing may default it
+    // to a running machine.
+    #[schemars(
+        description = "What the entity is doing, as `defines.entity_status`' own name for it -- `working`, `no_power`, `no_ingredients`, `waiting_for_space_in_destination`. A name and never the raw enum number; a value the mod cannot resolve arrives as `unmapped_<n>`. `null` means the entity has no status concept (a tree, a chest) or the sender predates the field -- never \"working\"."
+    )]
+    #[serde(default)]
+    pub status: Option<String>,
     pub amount: Option<u32>,        // only type = resource
     pub recipe: Option<String>,     // only CraftingMachines
     pub ghost_name: Option<String>, // only type = entity-ghost

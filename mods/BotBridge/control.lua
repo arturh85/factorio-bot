@@ -2047,17 +2047,19 @@ local SAMPLE_BOT_INTERVAL = 60 -- 1 s at 60 UPS
 -- `output_full` (it is `full_output`, with `not_enough_space_in_output` as the
 -- separate "the output slot cannot take the next craft" case).
 
--- Every `defines.entity_status` value, by number. Built once at load: the
--- table has 72 members in 2.1.17 and none of them change at runtime.
+-- Every `defines.entity_status` value, by number -- ONE table, in `types.lua`.
+--
+-- `entity_status_name` used to be this file's own local `ENTITY_STATUS_NAMES`.
+-- It moved to `types.lua` (required at the top of this file) when
+-- `serialize_entity` needed the same mapping for `FactorioEntity.status`: two
+-- inversions of the same enum in one mod is two things to keep in step, and
+-- the sample stream and the entity record must never disagree about what a
+-- status is called.
 --
 -- Numbers are not written to the record. A status id is meaningless without
--- this table, and a reader holding an archive from a future Factorio would
+-- the table, and a reader holding an archive from a future Factorio would
 -- have no way to resolve one -- so the *name* is what crosses the wire, and an
 -- id this build cannot name is written as `unmapped_<n>` rather than dropped.
-local ENTITY_STATUS_NAMES = {}
-for status_name, status_value in pairs(defines.entity_status) do
-	ENTITY_STATUS_NAMES[status_value] = status_name
-end
 
 -- The machine types worth a row. Deliberately a short list rather than "every
 -- entity": belts, inserters, chests and pipes are numerous, and none of them
@@ -2878,10 +2880,11 @@ local function machine_row(entity, key)
 	}
 	local status = entity.status
 	if status ~= nil then
-		-- Name, not number -- see `ENTITY_STATUS_NAMES`. An id this build
-		-- cannot name still reaches the record, labelled as unresolved, rather
-		-- than being written as a bare integer nobody can decode later.
-		row.status = ENTITY_STATUS_NAMES[status] or ("unmapped_" .. tostring(status))
+		-- Name, not number -- see `entity_status_name` in types.lua, which is
+		-- the one place this mod inverts `defines.entity_status`. An id this
+		-- build cannot name still reaches the record, labelled as unresolved,
+		-- rather than being written as a bare integer nobody can decode later.
+		row.status = entity_status_name(status)
 	end
 	-- Nil for anything not wired to a network at all, which is itself the
 	-- answer to "was the pole actually connected". Matched against the

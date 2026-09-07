@@ -224,6 +224,26 @@ function serialize_fluidbox_prototype(fluidbox)
     if pipe_connections_found then
         record.pipe_connections = pipe_connections
     end
+    -- HOW MUCH THE BOX HOLDS.
+    --
+    -- Without it this record says exactly where a tank may be joined and
+    -- nothing about its capacity, so anybody planning `Goal::Stored { fluid,
+    -- amount, .. }` has to hard-code a table of vanilla numbers -- the same
+    -- mod-compatibility defect as `pole_supply_half_extent`, and the same one
+    -- the world-record base just falsified for smelting, where a copied
+    -- `1/3.2` was exactly 2.0x low on every plate because 1,196 of 1,222
+    -- furnaces are steel.
+    --
+    -- **`get_volume()` is a METHOD, not an attribute.** There is no `volume`
+    -- on `LuaFluidBoxPrototype` in 2.1.17 at all (checked against
+    -- `runtime-api.json`, not recalled) -- the same shape that made
+    -- `crafting_speed` arrive nil for 1,028 prototypes and that
+    -- `get_supply_area_distance()` above nearly repeated: the attribute read
+    -- raises, this `pcall` swallows it, and the field is simply absent with
+    -- nothing to say it should not be. No argument means normal quality,
+    -- which is what the planner plans for.
+    local ok, volume = pcall(function() return fluidbox.get_volume() end)
+    if ok then record.volume = volume end
     return record
 end
 
@@ -657,7 +677,7 @@ end
 -- not a list written down here that a Factorio version could quietly outgrow.
 -- An index this build cannot name still reaches the record, labelled as
 -- unresolved, rather than being written as a bare integer nobody can decode
--- later -- the same rule `ENTITY_STATUS_NAMES` in control.lua follows.
+-- later -- the same rule `entity_status_name` below follows.
 --
 -- The number alone is uninterpretable: line 3 is `left_underground_line` on an
 -- underground belt and a different lane on a splitter, so a caller handed the
@@ -678,6 +698,38 @@ local function transport_line_name(index)
         end
     end
     return transport_line_names[index] or ("unmapped_" .. tostring(index))
+end
+
+-- `defines.entity_status`'s own name for a status value, or `unmapped_<n>`.
+--
+-- **The NAME crosses the wire, never the number.** A status id is meaningless
+-- without this table: `defines.entity_status` is an enum whose numbering is a
+-- Factorio implementation detail, so an archive holding `12` would need the
+-- exact game version's table to be readable at all, and a version bump could
+-- silently make it mean something else. A value this build cannot name is
+-- written as `unmapped_<n>` rather than dropped -- the same rule
+-- `transport_line_name` above follows.
+--
+-- Built lazily by inverting the game's own table rather than from a list
+-- written down here, which a Factorio version could quietly outgrow: 2.1.17
+-- has 72 members.
+--
+-- `rawget(_G, "defines")` for the same reason `input_inventory_index` uses it:
+-- this file is loaded outside Factorio by `crates/core/tests/
+-- botbridge_serialisers.rs`, where a bare global read of a missing table is
+-- nil and indexing it raises.
+local entity_status_names = nil
+function entity_status_name(status)
+    if entity_status_names == nil then
+        entity_status_names = {}
+        local defines_table = rawget(_G, "defines")
+        if defines_table ~= nil and defines_table.entity_status ~= nil then
+            for name, value in pairs(defines_table.entity_status) do
+                entity_status_names[value] = name
+            end
+        end
+    end
+    return entity_status_names[status] or ("unmapped_" .. tostring(status))
 end
 
 -- `opts.omit_inventories` -- IDENTITY AND GEOMETRY IN BULK, CONTENTS ON DEMAND.
@@ -732,6 +784,40 @@ function serialize_entity(entity, opts)
     -- See docs/superpowers/notes/2026-09-06-surfaces-survey.md.
     record.surface = entity.surface and entity.surface.name or nil
     record.bounding_box = table_properties(entity.bounding_box, {"left_top", "right_bottom"}, {left_top = "left_top", right_bottom = "right_bottom"})
+    -- WHAT THE MACHINE IS DOING RIGHT NOW.
+    --
+    -- The three inventory reads below say what a machine HOLDS. None of them
+    -- says whether it is running, and that absence is the dominant term in the
+    -- flow graph's error against a real base: measured at +16% to +23% on the
+    -- world-record save, unbounded, against coverage at 1.6% and modules at 0%.
+    -- Half of it is not derivable from the graph at any price -- 194 drills on
+    -- that base were sitting at `waiting_for_space_in_destination`, which is a
+    -- fact about back-pressure downstream that no ingredient balance can see.
+    -- See docs/superpowers/notes/2026-09-07-a-machine-standing-still.md.
+    --
+    -- **An ATTRIBUTE, not a method.** `LuaEntity.status` is `optional: true`
+    -- with `subclasses: None` in this install's `runtime-api.json` (2.1.17),
+    -- so it is a plain read and it is safe on any entity. That was checked
+    -- rather than assumed, because reading a *method* as an attribute yields a
+    -- function rather than raising, and the field then goes missing in silence
+    -- -- which is how `crafting_speed` arrived nil for 1,028 prototypes.
+    --
+    -- **`nil` and a name are different answers.** A tree, a chest and a belt
+    -- have no status concept and get no key at all (`None` on the Rust side,
+    -- "the sender did not say"); a machine that is stopped has a NAME for
+    -- being stopped -- `no_ingredients`, `no_power`,
+    -- `waiting_for_space_in_destination` -- and that name is the measurement.
+    -- Defaulting the absent case to `working` would invent a duty cycle.
+    --
+    -- **Outside the `omit_inventories` guard, deliberately.** This is one
+    -- small string, not an item-by-item inventory, and the bulk writeout is
+    -- the *only* path that fills the world model a dumped world is built from
+    -- -- gating it there would leave the duty cycle unmeasurable in exactly
+    -- the artefact the question is asked of.
+    local status = entity.status
+    if status ~= nil then
+        record.status = entity_status_name(status)
+    end
     if not (opts and opts.omit_inventories) then
         local output_inventory = entity.get_output_inventory()
         if output_inventory ~= nil then

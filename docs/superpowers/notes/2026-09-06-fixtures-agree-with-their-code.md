@@ -7,6 +7,9 @@ in this project's history apart from unrepeatable measurements.
 
 ## The four
 
+*(Five, with the harness below, and seven with the two entries after it —
+the heading is kept because the four are the original set.)*
+
 1. **A blueprint fixture placed a stone furnace where a 2×2 entity cannot
    legally stand.** The belt-routing primitive passed four clean task
    reviews and a full suite while being unable to connect any real machine.
@@ -199,6 +202,42 @@ So: record the delivered tick rate in every run's note (`just analyse`
 prints it and flags below 80% of nominal), share the box freely for checks
 you expect to pass, and re-run on a quiet floor before believing any
 failure that arrived on a loaded one.
+
+## A falsification that never applied, and reported green over nothing
+
+A seventh way onto this list, found by the other session's agent and one neither
+of us would have predicted: **a substitution matched zero times because
+`rustfmt` had wrapped the call across four lines.** The edit did not apply, the
+test ran, and it would have reported green over an unmodified file.
+
+That is worse than the fourth cause ("the break was not a break"), because there
+the edit *did* apply and merely failed to change behaviour. Here nothing
+happened at all, and the only difference visible from outside is a test that
+stays green — which reads as *"the test is vacuous"*, sending you to rewrite a
+test that was fine.
+
+**The rule: assert the substitution COUNT, not that the edit succeeded.**
+`s.replace(...)` returns a string whether or not it matched; `assert
+s.count(old) == 1` before replacing is what turns a silent miss into a stop.
+
+**I am exposed to this and it is worth saying so.** Every falsification I ran
+tonight was a string substitution, and in the falsification edits specifically I
+asserted nothing:
+
+```python
+s.replace('<= POLE_WIRE_REACH_TILES', '<= 0.5')                  # no assert
+s.replace('...pole_would_supply(POLE, p, &area)', '...false')     # no assert
+s.replace('crate::enclosure::check(...)', '...Clear')             # no assert
+```
+
+All three went red, so all three applied — but **the safety came from the
+outcome, not from the method**. Had any matched zero times I would have seen a
+green test and concluded the assertion was vacuous, which is precisely the wrong
+repair. The guarded form was in my *editing* code and absent from my *breaking*
+code, which is the half where a silent miss actually costs something.
+
+Same shape as the load guard that could not run and shrugged: the check existed
+and did not check.
 
 ## One level out: instrumentation is code, and mine failed open
 

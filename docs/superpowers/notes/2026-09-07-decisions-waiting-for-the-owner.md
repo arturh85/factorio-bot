@@ -7,7 +7,14 @@
 >    `Goal::Built`'s semantics and serialised shape.
 > 2. **Ship `maximum_wire_distance` through the mod**, keeping the vanilla
 >    fallback for dumps that predate it.
-> 3. Fluids — `Goal::Stored` — not yet ruled; still open below.
+> 3. **Fluids — RULED 2026-09-07 evening.** A fluid ingredient is satisfied by
+>    **connectivity, not by a stored amount** — the question is whether the pipe
+>    run reaches, not how much is in the tank, which is what made capacity the
+>    unanswerable half. Owner, in their own words on how the rig connects:
+>    *"the fluid tank the oil arrives in from far away should be connected to
+>    the refineries."* Also ruled: **the goal names the recipe** (not planner
+>    policy, not explicit chain-building), and **every output needs a sink, else
+>    refuse.**
 > 4. **Credit solar only once accumulators are standing and sized.** A refusal
 >    at plan time beats a base that dies at 03:00.
 > 5. **Adopt a busy furnace anyway — do NOT change it.** *A deliberate ruling,
@@ -15,6 +22,37 @@
 >    cheap and mostly self-correcting, and the alternative costs stone and can
 >    turn a working adoption into a shortfall on replan. **`holds_input` stays
 >    available and unused. Do not "fix" this.**
+
+## Ruled the night of 2026-09-07, after this note was written
+
+Recorded here because this is the file people check for what the owner has
+settled. None of these has a section below — the evidence is in the session and
+in the notes each piece of work produced.
+
+6. **Build a WORKING PROTOTYPE SEARCH over plans**, not a design note — the
+   owner's *"how can we decide at all ... genetic algorithms ... or simulations,
+   trying which layout / prio maximizes achieved flow rate"*. Offered the
+   cheaper note-plus-one-measurement option and chose the prototype.
+7. **Mod edits authorised, DEBUG BUILDS ONLY** — both the fluidbox-filter field
+   (which fluid each input port accepts, the thing blocking `sulfur`) and the
+   force-level `create_space_platform` function. Debug-only is load-bearing:
+   release embeds the mod with `include_dir!`, which has no `rerun-if-changed`.
+8. **The oil milestone is DONE when a HEADLESS RUN builds the rig and petroleum
+   appears in the production samples.** A green offline plan is explicitly not
+   enough — a plan that expands has been wrong before, and `method::connect`'s
+   geometry defect passed four reviews on fixtures nobody had run.
+9. **`via` on `Producing`/`Sustain` waits until after the oil plan lands.**
+10. **After oil, science-pack automation and the beacon-lane/electric-furnace
+    rebuild proceed IN PARALLEL, on separate maps.**
+11. **Anchor parity (§6 below) is NOT settled.** The owner pushed back on the
+    framing — *"why is the blueprint not correct in the first place and needs
+    correcting?"* — and the measurement says they were right: all 15 fixture
+    blueprints are internally correct, each entity already carrying the right
+    parity for its own footprint, so **the required anchor is always a whole
+    tile** and the refuse-versus-snap choice has no parity to get wrong. Handed
+    to the peer session, which owns `blueprint.rs`.
+
+---
 
 **Five** things overnight work reached and deliberately did **not** decide. Each
 is recorded with the measurement behind it, so none has to be re-derived.

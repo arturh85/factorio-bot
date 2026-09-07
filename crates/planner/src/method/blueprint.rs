@@ -455,12 +455,83 @@ fn recover_anchor(state: &PlanState, bp: &Blueprint) -> Option<Position> {
 ///
 /// `pub`, matching `method::connect::connect_steps`: called from
 /// `resolve_site` below, and exercised directly by this module's own tests.
+/// The fractional part an anchor must have, per axis, for this block's
+/// entities to land where the planner thinks it put them.
+///
+/// **Factorio snaps a building to the grid its own footprint belongs on, and
+/// silently.** Measured 2026-09-07 (`scripts/does_the_game_snap.lua`), asking
+/// for a position and reading back what the game did with it:
+///
+/// ```text
+/// stone-furnace  (2x2)  asked (10.0, 10.0)  stands (10.0, 10.0)   exact
+/// stone-furnace  (2x2)  asked (20.5, 20.5)  stands (21.0, 21.0)   MOVED +0.5
+/// transport-belt (1x1)  asked (30.5, 30.5)  stands (30.5, 30.5)   exact
+/// transport-belt (1x1)  asked (40.0, 40.0)  stands (40.5, 40.5)   MOVED +0.5
+/// ```
+///
+/// An even footprint belongs on a tile boundary and an odd one on a tile
+/// centre ([`crate::method::util::tile_alignment`]). So an anchor of the wrong
+/// parity does not fail — **every entity quietly moves half a tile**, the block
+/// stands intact somewhere the planner never asked, and `already_stands` then
+/// cannot find it there. That is the whole of the half-tile finding, and it
+/// broke `Site::Anchored`'s first caller: the stamp reported (-15.5, -18.5)
+/// and the block stood at (-15.0, -18.0).
+///
+/// `search_site` steps in whole tiles, so every candidate inherits the SEED's
+/// parity — and `Site::Anywhere` seeds at `nearest_ore_seed`, an ore position,
+/// which is a tile centre. A block containing any 2x2 entity could therefore
+/// never be sited legally from that seed.
+///
+/// Returns `None` when the block's own entities disagree about what the anchor
+/// parity should be, which no anchor can satisfy. That is a property of the
+/// blueprint rather than of the ground, so it is reported rather than resolved
+/// by picking one — silently favouring the first entity would put the rest
+/// half a tile out and reproduce this bug inside a single block.
+fn anchor_alignment(state: &PlanState, bp: &Blueprint) -> Option<(f64, f64)> {
+    let mut wanted: Option<(f64, f64)> = None;
+    for e in &bp.entities {
+        let (ax, ay) = crate::method::util::tile_alignment(state, &e.name);
+        // `anchor + offset` must land on this entity's own grid, so the
+        // anchor's fractional part is that grid minus the offset's.
+        let want = (
+            (ax - e.offset.x()).rem_euclid(1.0),
+            (ay - e.offset.y()).rem_euclid(1.0),
+        );
+        match wanted {
+            None => wanted = Some(want),
+            Some(w) => {
+                if (w.0 - want.0).abs() > 1e-9 || (w.1 - want.1).abs() > 1e-9 {
+                    return None;
+                }
+            }
+        }
+    }
+    wanted
+}
+
+/// `seed`, moved to the nearest position whose fractional part is `frac`.
+///
+/// Whole-tile steps preserve a fractional part, so aligning the seed once
+/// aligns every candidate the ring scan visits — there is no need to snap each
+/// one, and snapping each one would let two candidates collapse onto the same
+/// anchor.
+fn align_seed(seed: &Position, frac: (f64, f64)) -> Position {
+    let axis = |v: f64, f: f64| (v - f).round() + f;
+    Position::new(axis(seed.x(), frac.0), axis(seed.y(), frac.1))
+}
+
 pub fn search_site(
     state: &PlanState,
     bp: &Blueprint,
     seed: &Position,
     max_radius: i32,
 ) -> Result<Position, PlannerError> {
+    // Align before scanning, not after choosing: an anchor of the wrong parity
+    // is not a worse site, it is a site the game will not honour.
+    let seed = &match anchor_alignment(state, bp) {
+        Some(frac) => align_seed(seed, frac),
+        None => seed.clone(),
+    };
     let mut nearest: Option<String> = None;
     for radius in 0..=max_radius {
         for dy in -radius..=radius {
@@ -2128,6 +2199,78 @@ mod tests {
             "the stamp must carry the anchor siting actually chose -- a script \
              pinning anything else rebuilds the block at the wrong tile, and \
              nothing would fail"
+        );
+    }
+
+    /// **Siting must produce an anchor the GAME will honour, not merely one
+    /// the planner likes.**
+    ///
+    /// A 2x2 entity belongs on a tile boundary. `search_site` steps in whole
+    /// tiles, so every candidate inherits the seed's parity, and
+    /// `Site::Anywhere` seeds at an ore position — a tile CENTRE. Before
+    /// 2026-09-07 that meant a block containing any 2x2 entity was sited on
+    /// half-integers, the game silently moved every entity half a tile, and
+    /// the block stood somewhere `already_stands` could not find it.
+    ///
+    /// **This must fail without `anchor_alignment`**: remove the seed
+    /// alignment from `search_site` and the anchor comes back on the
+    /// half-integer the seed was given.
+    #[test]
+    fn siting_aligns_the_anchor_to_the_grid_the_game_will_use() {
+        let state = test_state();
+        // Stone furnaces are 2x2, so with a zero offset the anchor itself must
+        // land on a tile boundary.
+        let bp = Blueprint {
+            entities: vec![
+                at_named(0.0, 0.0, "stone-furnace"),
+                at_named(4.0, 0.0, "stone-furnace"),
+            ],
+            version: 0,
+        };
+        assert_eq!(
+            anchor_alignment(&state, &bp),
+            Some((0.0, 0.0)),
+            "a 2x2 block at integer offsets needs an integer anchor"
+        );
+
+        // Seeded on a tile centre, the way `nearest_ore_seed` seeds.
+        let sited =
+            search_site(&state, &bp, &Position::new(0.5, 0.5), 20).expect("open ground exists");
+        assert!(
+            (sited.x().fract().abs() < 1e-9) && (sited.y().fract().abs() < 1e-9),
+            "the anchor must be integral for a 2x2 block, got {sited:?} -- a \
+             half-integer anchor is not a worse site, it is one the game will \
+             not honour, and it moves the whole block half a tile"
+        );
+    }
+
+    /// The other parity, so the fix is not just "always round to integers".
+    ///
+    /// A 1x1 transport belt belongs on a tile CENTRE. Seeded on a boundary, an
+    /// unaligned search would hand back an integer anchor and the game would
+    /// move every belt.
+    #[test]
+    fn a_one_by_one_block_is_aligned_to_tile_centres_not_boundaries() {
+        let state = test_state();
+        let bp = Blueprint {
+            entities: vec![
+                at_named(0.0, 0.0, "transport-belt"),
+                at_named(2.0, 0.0, "transport-belt"),
+            ],
+            version: 0,
+        };
+        assert_eq!(
+            anchor_alignment(&state, &bp),
+            Some((0.5, 0.5)),
+            "a 1x1 block at integer offsets needs a half-integer anchor"
+        );
+
+        let sited =
+            search_site(&state, &bp, &Position::new(0.0, 0.0), 20).expect("open ground exists");
+        assert!(
+            ((sited.x().fract().abs() - 0.5).abs() < 1e-9)
+                && ((sited.y().fract().abs() - 0.5).abs() < 1e-9),
+            "the anchor must sit on a tile centre for a 1x1 block, got {sited:?}"
         );
     }
 

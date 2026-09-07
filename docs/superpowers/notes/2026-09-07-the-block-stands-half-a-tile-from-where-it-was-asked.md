@@ -94,11 +94,59 @@ discover that its bill is unbuildable"*, and *"it had no caller until
 reviews"*. This is the third instance, and the first where the feature's own
 author wrote the tests, believed them, and shipped in the same session.
 
-## Open
+## CONFIRMED, and fixed
 
-1. Confirm the snap directly (one entity, wrong parity, read the position back).
-2. Decide where the fix belongs: have siting choose a parity-correct anchor, or
-   have the stamp report the effective one. The first is better — it makes the
-   model and the ground agree everywhere, rather than teaching one caller to
-   compensate.
-3. Re-examine whether `drills_are_fed` should check the *snapped* footprint.
+**The snap is real** (`scripts/does_the_game_snap.lua`). Asked for a position,
+read back what the game did with it — with both controls, so a snap could not
+be confused with this script mis-computing parity:
+
+```
+stone-furnace  (2x2)  asked (10.0, 10.0)  stands (10.0, 10.0)   exact   <- control
+stone-furnace  (2x2)  asked (20.5, 20.5)  stands (21.0, 21.0)   MOVED +0.5
+transport-belt (1x1)  asked (30.5, 30.5)  stands (30.5, 30.5)   exact   <- control
+transport-belt (1x1)  asked (40.0, 40.0)  stands (40.5, 40.5)   MOVED +0.5
+```
+
+An even footprint belongs on a tile boundary, an odd one on a tile centre, and
+the game moves an entity that asks for the wrong one **without failing**.
+
+**The cause was in the seed, not in the search.** `search_site` steps in whole
+tiles, so every candidate inherits the seed's fractional part — and
+`Site::Anywhere` seeds at `nearest_ore_seed`, an ore position, which is a tile
+*centre*. **A block containing any 2x2 entity could therefore never be sited
+legally under `Anywhere`**, on any map, ever. It is not a rare parity accident;
+it was every drill block this project has built.
+
+`anchor_alignment` now derives the fractional part the blueprint requires — from
+every entity, refusing to guess when they disagree — and `search_site` aligns
+the seed once before scanning, since whole-tile steps preserve parity.
+
+## Measured after the fix, same map, same script
+
+```
+                        before              after
+anchor                  (-15.5, -18.5)      (-15.0, -16.0)   integral
+block stands at         (-15.0, -18.0)      (-15.0, -16.0)   agrees
+pinned replan           REFUSED             0 to place
+drills the game refused 4                   0
+```
+
+The last row is the one that matters beyond this bug. Those refusals read
+*"no entity in the footprint; tile dirt-6"* — nothing in the way, still refused,
+which is a drill with no ore under it. `drills_are_fed` checked ore at
+`anchor + offset` and the game then moved the drill somewhere the check never
+looked. **That is the stranded tile, and it is now gone from this run.**
+
+So the stranded tile had two causes, and three sessions each stopped at one:
+recovery crosstalk hijacking an anchor, and this — a check that was correct
+about a position the game did not use. Neither retracts the other.
+
+## Still open
+
+1. Whether `Site::At` and `Site::Anchored` should also be parity-checked. They
+   are caller-supplied, so the honest options are to refuse a wrong-parity
+   anchor by name or to align it; silently aligning a *recorded* anchor would
+   defeat the point of recording it.
+2. 29 `entity-ghost`s remain standing after a completed build. Harmless here —
+   the pinned replan reads the block as complete — but `recover_anchor_from_
+   ghosts` consults exactly those, so it is worth knowing why they survive.

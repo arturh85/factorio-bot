@@ -10,6 +10,7 @@ mod repl;
 #[cfg(feature = "lua")]
 mod roll_seed;
 mod score_map;
+mod search;
 #[cfg(feature = "restapi")]
 mod serve;
 mod start;
@@ -178,6 +179,7 @@ pub fn subcommands() -> Vec<Box<dyn Subcommand>> {
     playground::build(),
     plan::build(),
     score_map::build(),
+    search::build(),
     #[cfg(feature = "repl")]
     repl::build(),
     #[cfg(feature = "restapi")]

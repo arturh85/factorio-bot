@@ -1818,6 +1818,16 @@
               "null"
             ]
           },
+          "crafting_categories": {
+            "description": "The recipe categories this prototype's machine runs. Sorted by the mod\nso the order is the data's, not `pairs()`'s. Read live off a Space Age\n2.1.17 game, 18 of 1028 prototypes report any:\n\n```text\nstone-furnace         furnace              smelting\nassembling-machine-1  assembling-machine   advanced-crafting, crafting, parameters\noil-refinery          assembling-machine   oil-processing, parameters\nchemical-plant        assembling-machine   chemistry, parameters\ncentrifuge            assembling-machine   centrifuging, parameters\n```\n\n**`parameters` is not a category anybody makes anything in** -- it is\nFactorio 2.0's blueprint-parameter pseudo-category, and it sits on four\nof those five. A reader must not take a `parameters` match as evidence\nthat a machine runs a recipe. (The chemical plant's real category is\nspelled `chemistry`, not `chemical`.)\n\n# This is the field that says *what* a machine crafts\n\n[`Self::crafting_speed`] already says a prototype crafts. Nothing said\nwhat, and it could not be derived: measured over\n`crates/core/tests/live-2.1.17-world-snapshot.json`, twelve prototypes\nthere declare a crafting speed, and `oil-refinery`, `chemical-plant`,\n`centrifuge`, `electromagnetic-plant` and all three assembling machines\nare one and the same `entity_type`, `assembling-machine`. So a reader\nholding a recipe's category had no field, and no combination of fields,\nfrom which the machine that runs it follows.\n\nIt is the crafting half of the rule\n[`Self::resource_categories`] already carries for mining: a recipe\ncarries a category, a machine carries the categories it supports, and\nthe machine runs the recipe iff the former is in the latter.\n\n# `None` is not `Some(vec![])`\n\n`None` is *the sender did not say* -- every world dumped or snapshotted\nbefore 2026-09-07, and every prototype that is not a crafting machine,\nfor which the optional attribute reads nil. `Some(vec![])` is *the game\nsays this machine runs no category*. A reader that folded the two\ntogether would answer \"no machine runs `oil-processing`\" for an archive\nthat never carried the question.\n\n`deserialize_with`, because the mod sends an empty set as the JSON\nobject `{}` -- `helpers.table_to_json` renders an empty Lua table that\nway -- and a bare `Option<Vec<String>>` would reject it.\n\n# It is an attribute\n\n`LuaEntityPrototype.crafting_categories` is an attribute in 2.1.17,\nchecked in `workspace/client1/doc-html/runtime-api.json`, unlike\n`get_crafting_speed()`, `get_supply_area_distance()` and\n`get_max_wire_distance()`, which are methods with no attribute at all.\nThat distinction is not cosmetic: reading a method as an attribute\nraises, the mod's `pcall` swallows the error, and the field arrives\n`None` for every prototype in the game with nothing anywhere saying it\nshould not have -- which is how [`Self::crafting_speed`] was nil for\n1028 live prototypes.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "crafting_speed": {
             "format": "double",
             "type": [

@@ -740,6 +740,50 @@ function serialize_entity_prototype(entity)
         return names
     end)
     if ok then record.resource_categories = val end
+    -- **The crafting half of exactly the same rule, and the field that says
+    -- WHAT a machine crafts.** `crafting_speed` already says a prototype
+    -- crafts; nothing on this wire said what. Twelve prototypes declare a
+    -- crafting speed and `oil-refinery`, `chemical-plant`, `centrifuge`,
+    -- `electromagnetic-plant` and all three assembling machines share one
+    -- `entity_type` (`assembling-machine`), so a reader given a recipe's
+    -- category -- `oil-processing`, `chemistry`, `centrifuging` -- had no
+    -- field,
+    -- and no combination of fields, from which the machine that runs it
+    -- follows. Naming `oil-refinery` in Rust instead would be the hard-coded
+    -- table this project's standing rule forbids, for the same reason the
+    -- pole-supply and smelt-rate tables are defects: right for vanilla,
+    -- wrong the moment a mod ships another refinery.
+    --
+    -- `LuaEntityPrototype.crafting_categories` is an **attribute** in 2.1.17
+    -- (dictionary `string -> true`), unlike `get_crafting_speed()`,
+    -- `get_supply_area_distance()` and `get_max_wire_distance()`, which are
+    -- methods with no attribute at all. Read as an attribute, therefore, and
+    -- verified against `runtime-api.json` rather than recalled -- reading a
+    -- method as an attribute raises, the `pcall` swallows it, and the field
+    -- arrives absent for every prototype in silence.
+    --
+    -- **`{}` rather than nil for an empty set, which is the one place this
+    -- deliberately differs from `resource_categories` above.** A crafting
+    -- machine that runs no category at all is a thing a mod can ship, and it
+    -- has to stay distinguishable from a sender that never looked:
+    -- `helpers.table_to_json` renders an empty Lua table as the JSON object
+    -- `{}`, and `FactorioEntityPrototype`'s `option_vec_or_empty_map` reads
+    -- that as `Some(vec![])` -- *it crafts nothing* -- while an omitted key
+    -- reads as `None` -- *the sender did not say*. Every prototype that is not
+    -- a crafting machine takes the `None` branch here, because the attribute
+    -- is optional and reads nil.
+    ok, val = pcall(function()
+        local categories = entity.crafting_categories
+        if categories == nil then return nil end
+        local names = {}
+        for name, _ in pairs(categories) do
+            table.insert(names, name)
+        end
+        -- Sorted so the order is the data's and not `pairs()`'s.
+        table.sort(names)
+        return names
+    end)
+    if ok then record.crafting_categories = val end
     -- `required_fluid`: uranium ore needs sulfuric acid piped in, and a
     -- character has no pipe.
     if entity.mineable_properties and entity.mineable_properties.minable then
@@ -1158,5 +1202,46 @@ function serialize_surface_daylight(surface)
     -- Named, because a curve is only about the surface it was read from and a
     -- record that cannot say which one is not a fact about anything.
     record.surface = surface.name
+    return record
+end
+
+--- One row of the surface census: what a surface IS, not what is on it.
+---
+--- **This exists so that "this save has no other surfaces" stops looking like
+--- "we never looked".** The Nauvis guard in `control.lua`'s
+--- `on_chunk_generated` drops every non-Nauvis chunk and says so, which is
+--- honest about each chunk it refuses -- but nothing anywhere enumerated
+--- `game.surfaces`, so a world model holding one surface was equally
+--- consistent with a single-planet save and with a five-planet save whose
+--- other four were never mentioned. The world-record base was loaded and read
+--- as 39,237 entities all on `nauvis`; that number could not distinguish the
+--- two readings either.
+---
+--- Deliberately three fields and no chunk counts, entities or tiles: this is
+--- the census, not the ingest. Ingesting a second surface is gated on moving
+--- the game-global fields off `FactorioSurface` and is a much larger task
+--- (`FactorioWorld::insert_surface` refuses the second surface by name).
+---
+--- `planet` is the **planet's own name** (`nauvis`, `vulcanus`, `gleba`), from
+--- `LuaSurface.planet`, an optional attribute returning a `LuaPlanet` --
+--- verified against `runtime-api.json`, not recalled. `nil` is the honest
+--- answer for a surface that is not a planet at all, which is what a space
+--- platform is, and that is exactly the distinction a caller wants: a platform
+--- moves and a planet does not.
+---
+--- `index` is `LuaSurface.index`, and it is why `game.surfaces[1]` is not the
+--- same claim as `game.surfaces['nauvis']` -- the numeric index says
+--- "whichever surface was made first".
+function serialize_surface(surface)
+    local record = {
+        name = surface.name,
+        index = surface.index,
+    }
+    -- `pcall` because `planet` is optional and a Factorio without it must
+    -- report a surface with no planet rather than failing the whole census.
+    local ok, planet = pcall(function() return surface.planet end)
+    if ok and planet ~= nil then
+        record.planet = planet.name
+    end
     return record
 end

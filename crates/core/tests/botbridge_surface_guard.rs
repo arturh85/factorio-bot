@@ -57,7 +57,16 @@ const PRELUDE: &str = r#"
         return setmetatable({}, { __index = function() return noop end })
     end
     script = nooptable()
-    remote = nooptable()
+    -- `remote` stays a nooptable for everything the mod calls on it, but
+    -- `add_interface` is CAPTURED: a test that reaches a handler through its
+    -- own Lua global proves nothing about whether the mod published it under
+    -- that name, and a mutation dropping a registration line was green until
+    -- this existed.
+    _interfaces = {}
+    remote = setmetatable(
+        { add_interface = function(name, fns) _interfaces[name] = fns end },
+        { __index = function() return noop end }
+    )
     commands = nooptable()
     require = function() return {} end
 
@@ -271,4 +280,125 @@ fn every_dropped_chunk_reports_itself() {
         "three chunks, three lines: {:?}",
         printed(&lua)
     );
+}
+
+/// **The other half of the guard: what the drop above cannot say.**
+///
+/// Each `surface_chunk_dropped` line is honest about the chunk it refused, and
+/// the honest refusals sum to a world model that holds one surface -- which is
+/// equally consistent with a save that HAS one surface and with a save whose
+/// others were never mentioned. Nothing in this mod read `game.surfaces` until
+/// 2026-09-07, so those two readings were the same silence.
+///
+/// `collect_surfaces` ends it, and it **reports rather than ingests**: the
+/// guard is untouched, and the census is three fields per surface with no
+/// chunk, entity or tile count anywhere in it.
+///
+/// The stub is given three surfaces **out of index order**, so an
+/// implementation forwarding `pairs()` order would have to be lucky to pass,
+/// and one of them is a platform with no planet at all.
+#[test]
+fn the_census_enumerates_every_surface_in_index_order() {
+    let lua = mod_lua();
+    lua.load(
+        r#"
+        local function planet(name) return { name = name } end
+        _fulgora = { name = "fulgora", index = 5, planet = planet("fulgora") }
+        _platform = { name = "platform-1", index = 3 }
+        game.surfaces = {
+            _fulgora,
+            _platform,
+            { name = "nauvis", index = 1, planet = planet("nauvis") },
+        }
+        _census = helpers.table_to_json(collect_surfaces())
+        "#,
+    )
+    .set_name("census")
+    .exec()
+    .expect("collect_surfaces");
+
+    let census: String = lua.globals().get("_census").expect("_census");
+    // The encoder in PRELUDE sorts object keys, so this is the whole record.
+    assert_eq!(
+        census,
+        r#"{"1":{"index":1,"name":"nauvis","planet":"nauvis"},"2":{"index":3,"name":"platform-1"},"3":{"index":5,"name":"fulgora","planet":"fulgora"}}"#,
+        "three surfaces, sorted by index, with the platform carrying no planet \
+         -- a real answer about what a platform is, not a gap in the record",
+    );
+}
+
+/// The census is also askable of a **running** game, which is what a
+/// long-played save needs: `rcon_world_snapshot` carries the same list, but on
+/// a six-hour base its prototype tables are megabytes and the one question
+/// here is three fields per surface.
+#[test]
+fn the_census_is_askable_over_rcon() {
+    let lua = mod_lua();
+    lua.load(
+        r#"
+        _replies = {}
+        rcon = { print = function(s) _replies[#_replies + 1] = tostring(s) end }
+        game.surfaces = {
+            { name = "nauvis", index = 1, planet = { name = "nauvis" } },
+            { name = "platform-1", index = 2 },
+        }
+        -- Through the PUBLISHED interface, not the Lua global: a caller
+        -- reaches this as `remote.call('botbridge', 'surfaces')` and nothing
+        -- else, so a handler that exists and is not registered is a handler
+        -- nobody can ask.
+        _interfaces.botbridge.surfaces()
+        "#,
+    )
+    .set_name("rcon_surfaces")
+    .exec()
+    .expect("rcon_surfaces");
+
+    let replies: Table = lua.globals().get("_replies").expect("_replies");
+    let replies: Vec<String> = replies
+        .sequence_values::<String>()
+        .map(|v| v.expect("line"))
+        .collect();
+    assert_eq!(replies.len(), 1, "one reply, the whole census");
+    assert_eq!(
+        replies[0],
+        r#"{"1":{"index":1,"name":"nauvis","planet":"nauvis"},"2":{"index":2,"name":"platform-1"}}"#,
+    );
+
+    // **And it stays out of the executor's channel.** `rcon.print` inside a
+    // function the executor calls lands in the action's result body; this one
+    // is never called that way, and the assertion that it is registered under
+    // its own name is what keeps that true if somebody rewires it.
+    assert!(
+        !printed(&lua).iter().any(|line| line.contains('\u{a7}')),
+        "an RCON query is not a writeout -- nothing here belongs in the record",
+    );
+}
+
+/// **The census rides on `world_snapshot` too, and today Rust drops it.**
+///
+/// `WorldSnapshot` has no field for it yet: the landing site is
+/// `crates/core/src/factorio/`, which is being refactored to move the
+/// game-global fields off `FactorioSurface`, so placing it there now would be
+/// two writers in one file. The mod sends it regardless, so the day the field
+/// is added nothing in the mod changes.
+///
+/// This pins the only thing that could go wrong meanwhile: `WorldSnapshot` has
+/// no `deny_unknown_fields`, so the extra key is **ignored**, not an error. A
+/// snapshot reply carrying it must still deserialise, or every `--connect`
+/// session would break on a key nobody reads.
+#[test]
+fn a_snapshot_carrying_the_census_still_loads_before_rust_has_a_field_for_it() {
+    use factorio_bot_core::factorio::snapshot::WorldSnapshot;
+
+    let with_census = r#"{
+        "entity_prototypes": [], "item_prototypes": [], "recipes": [],
+        "forces": [], "daylight": null,
+        "surfaces": [{"index": 1, "name": "nauvis", "planet": "nauvis"}]
+    }"#;
+    let snapshot: WorldSnapshot =
+        serde_json::from_str(with_census).expect("the extra key is ignored, not rejected");
+    // Non-accidental control: the parse really produced a snapshot, so the
+    // assertion above is about tolerance and not about an empty success.
+    assert!(snapshot.recipes.is_empty());
+    assert!(snapshot.entity_prototypes.is_empty());
 }

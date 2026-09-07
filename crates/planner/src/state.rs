@@ -191,16 +191,36 @@ fn vanilla_pole_supply_half_extent(name: &str) -> Option<f64> {
     }
 }
 
-/// A pole's maximum copper-wire distance, by pole name, from vanilla 2.1.
+/// A pole's maximum copper-wire distance, by pole name, from base 2.1.17's
+/// `base/prototypes/entity/entities.lua` in this repo's `workspace/data`.
 ///
 /// Two poles are wired when their centres are within the **smaller** of their
 /// two reaches, which is the game's rule and is why this is a per-pole number
 /// rather than one constant.
+///
+/// # It is the last hand-kept supply-side table, and it had drifted
+///
+/// [`pole_supply_half_extent`] used to be a table just like this one and now
+/// derives from `FactorioEntityPrototype::supply_area_distance`. This one
+/// cannot: `maximum_wire_distance` is not a field the mod sends and
+/// `FactorioEntityPrototype` has nowhere to put it. Sending it is the
+/// follow-up that deletes this.
+///
+/// **It is worth deleting rather than maintaining, and the proof is in the
+/// numbers below.** When the four were checked against the game's own data on
+/// 2026-09-07 — the first time anybody had — `big-electric-pole` read **30.0**
+/// here against the game's **32**; Factorio 2.0 moved it and nothing noticed,
+/// because a supply table is only ever read by code that agrees with it. The
+/// supply table it sat beside was correct on all four, so the pair is one
+/// checked and one drifted. Corrected in the same change; the goals this
+/// project measures are all pre-`electric-energy-distribution-1` and none of
+/// the four offline baselines moved by a tick.
 fn pole_wire_reach(name: &str) -> Option<f64> {
     match name {
         "small-electric-pole" => Some(7.5),
         "medium-electric-pole" => Some(9.0),
-        "big-electric-pole" => Some(30.0),
+        // 32, not the 30 of Factorio 1.x.
+        "big-electric-pole" => Some(32.0),
         "substation" => Some(18.0),
         _ => None,
     }
@@ -5794,6 +5814,35 @@ mod tests {
     }
 
     // ---- electric supply ---------------------------------------------------
+
+    /// Two big poles 31 tiles apart are wired, because the game's reach is 32.
+    ///
+    /// **This table read 30.0 until 2026-09-07**, a Factorio 1.x number that
+    /// nobody had ever checked against the game's own `entities.lua`, so a
+    /// legal big-pole span read as a broken network and everything past it
+    /// lost its power. 31 is the one-tile window that tells the two apart.
+    #[test]
+    fn two_big_poles_are_wired_at_thirty_one_tiles() {
+        let mut s = state();
+        for x in [0., 31.] {
+            s.create_entity(FactorioEntity {
+                name: "big-electric-pole".into(),
+                position: Position::new(x, 0.),
+                ..Default::default()
+            });
+        }
+        s.create_entity(FactorioEntity {
+            name: "steam-engine".into(),
+            position: Position::new(31., 1.),
+            ..Default::default()
+        });
+
+        let kw = s.electric_supply_kw(&lab_area(&s, Position::new(0., 0.)));
+        assert_eq!(
+            kw, 900.,
+            "a big pole reaches 32, so a 31-tile span carries the engine's power"
+        );
+    }
 
     // ---- supply area, from the prototype -----------------------------------
 

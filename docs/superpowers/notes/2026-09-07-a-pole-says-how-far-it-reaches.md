@@ -42,9 +42,17 @@ hand-kept table, of `maximum_wire_distance`, and it says
 `big-electric-pole => 30.0` where base 2.1.17 says **32**. Factorio 2.0 moved
 it. That one cannot be derived — the mod does not send
 `maximum_wire_distance` and `FactorioEntityPrototype` has no field for it —
-so it is reported here rather than quietly corrected, and it is the answer to
-"is a hand-kept table of game data a real defect": **two tables, one of them
-already drifted.**
+so the number is corrected in place and the table stays until a
+`maximum_wire_distance` field exists to delete it. It is the answer to "is a
+hand-kept table of game data a real defect": **two tables checked for the
+first time, one of them already drifted.** None of the four baselines moves —
+big electric poles need `electric-energy-distribution-1` and every goal this
+project measures is well short of it — so the correction is free today and
+would not have been free later.
+
+The test that pins it, `two_big_poles_are_wired_at_thirty_one_tiles`, uses the
+one-tile window that tells 30 from 32, and fails when the constant is put
+back.
 
 ## Deleting the fallback refuses every plan we have
 

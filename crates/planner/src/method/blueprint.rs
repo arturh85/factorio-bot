@@ -2226,7 +2226,15 @@ mod tests {
         );
         let goal = Goal::Built {
             blueprint: blueprint_text.clone(),
-            site: Site::At(Position::new(100.5, 100.5)),
+            // (101, 101), a WHOLE TILE. Every Factorio-authored blueprint
+            // wants a whole-tile anchor, and this said (100.5, 100.5) --
+            // which would have stood the block half a tile from where the
+            // planner believed it was. It passed only because
+            // `anchor_alignment` was asking the north-facing alignment of
+            // east/west splitters, disagreeing with itself, returning None and
+            // skipping the check. Fixing the facing made the guard reachable
+            // and it caught this immediately.
+            site: Site::At(Position::new(101.0, 101.0)),
         };
         let first = BuildBlock
             .expand(&goal, &mut ctx)
@@ -2286,7 +2294,7 @@ mod tests {
         assert_eq!(restamped.entities.len(), bp.entities.len());
         assert_eq!(
             Pos::from(stamped_anchor),
-            Pos::from(&Position::new(100.5, 100.5))
+            Pos::from(&Position::new(101.0, 101.0))
         );
 
         // Now apply the stamp's own effect on a fresh state -- ghosts of

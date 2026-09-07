@@ -289,3 +289,41 @@ The ladder as it stands: `researched:oil-gathering` 1,587 actions,
 unlock). Everything up to the fluid plans. The fluid itself now refuses for the
 right reason, in words that name the fluid, the count the caller asked for, and
 the five recipes that would make it.
+
+---
+
+## Answering one of the four unsettled questions: capacity is NOT derivable today
+
+Measured 2026-09-07 against `crates/core/tests/entity-prototype-fixtures.json`
+(the live 2.1.17 capture), immediately after this branch merged. The note above
+lists *"what `fluidbox_prototypes` actually says — its shape decides whether
+capacity can be derived rather than tabulated"* as one of four things to settle
+before `Goal::Stored`. It says less than hoped:
+
+```
+storage-tank.fluidbox_prototypes[0] keys:  pipe_connections, production_type
+storage-tank prototype keys:               collision_box, collision_mask,
+                                           crafting_speed, entity_type,
+                                           fluidbox_prototypes,
+                                           max_underground_distance,
+                                           mine_result, mining_speed,
+                                           mining_time, name
+```
+
+**There is no `volume` anywhere on the wire.** So a capacity number could only
+be *tabulated*, which under this project's standing rule is a
+mod-compatibility defect — the same shape as `pole_supply_half_extent` and the
+smelt rates that were confidently wrong until the world-record base falsified
+them. `LuaFluidBoxPrototype.volume` is the field the mod would have to send.
+
+**What we DO have is the connection geometry and the direction**:
+`production_type` is `input` / `output` / `input-output`, and
+`pipe_connections.positions` gives the tile offsets, per prototype —
+`pumpjack` one output box, `oil-refinery` separate input and output boxes,
+`storage-tank` and `pipe` input-output. That is enough to decide **where** a
+tank or refinery can be joined, which is the siting half of `Goal::Stored`. It
+is not enough to say **how much** it holds.
+
+So the four questions reduce cleanly: siting is answerable from data we already
+receive; capacity needs one more mod field before it can be honest. Do not
+close that gap with a table.

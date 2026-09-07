@@ -1672,11 +1672,53 @@ entry over a log line:
   check, so `Occupant::Terrain` masked `Occupant::Refused`. We went looking for
   terrain because the error said terrain, and there was none — twice.
 
-  **The real defect is upstream and had been in the repository all along**:
-  `drills_are_fed` asks whether the mining area covers *some* extractable
-  resource, not whether *every* drill in it has ore. A drill on one of four
-  tiles merely exhausts its ground four times faster; **a drill on zero tiles
-  strands the whole block.**
+  **REOPENED AND RE-CLOSED 2026-09-07 — "the defect is in siting" was wrong,
+  because siting never ran.** This paragraph previously said `drills_are_fed`
+  asks whether the area covers *some* extractable resource. **It does not.** It
+  loops over every drill and refuses if any one covers nothing. The check was
+  correct the whole time.
+
+  The real chain: `resolve_site` opens with `recover_anchor`, **first and
+  unconditionally**. `drills_are_fed` has exactly one non-test call site, in
+  `first_obstruction`, which has exactly one, inside `search_site`'s candidate
+  loop — so **when recovery hits, none of it runs**. Recovery trusts an anchor
+  once *two* of a blueprint's entities stand at the right relative offsets, and
+  the fixtures in `scripts/rcontest.lua` are variations of one another
+  (`crates/core/tests/recovery_crosstalk_probe.rs`):
+
+  ```
+  ElectricSmelter   21 of its 28 entities  match inside FurnaceLine
+  SaturatedSmelter  17 of 33               match inside FurnaceLine
+  TwoRowSmelter     15 of 27               match inside FurnaceLine
+  OreToPlate        14 of 24               match inside MinerLine
+  ```
+
+  The chain scripts run several of these on **one map in sequence**, and
+  FurnaceLine's 179 entities stood there. **So the anchor was never chosen — it
+  was read off a different block**, putting a drill where FurnaceLine's geometry
+  wanted it, which is not on ore.
+
+  **Raising the vote threshold does not fix it**: 21 of 28 is 75% of the
+  blueprint, and any threshold loose enough to recover a genuinely half-built
+  block accepts that. Recovery by geometry is ambiguous whenever two blocks
+  share a sub-layout. **The fix is to persist the anchor with the goal rather
+  than re-derive it from the ground, which changes `Goal::Built` semantics and
+  is an OWNER DECISION, not an overnight one.**
+
+  Landed meanwhile (`06296b0a`): every anchor is screened for ore, not only the
+  ones siting chose — `Site::At` and recovered anchors both get `drills_are_fed`
+  before a step is emitted, refusing as `BlockDrillUnfed`, which names the drill,
+  the tile, and whether the remedy is to move the anchor or clear the half-built
+  block.
+
+  **The methodological lesson, which is the durable part: a check can be
+  correct, correct per item, and still say nothing about the cases that never
+  reach it.** Two sessions reasoned about that function's *logic*; one of them
+  mis-stated it, and the mis-statement changed nothing, because the logic was
+  never the problem — its one call site two frames up was. **`grep -n
+  drills_are_fed` would have shown that in a second**, and was run only after
+  the decision to change the function had already been made. Find the call
+  sites before reasoning about the body.
 
   **And a second lesson, about retracting**: the first hypothesis here
   overclaimed, and the retraction of a *later* hypothesis then **overshot in

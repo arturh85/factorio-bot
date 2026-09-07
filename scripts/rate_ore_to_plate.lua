@@ -169,6 +169,47 @@ local function plates_now()
   return total
 end
 
+-- **Drain the furnaces, or this measures storage rather than production.**
+--
+-- Measured 2026-09-07: this block stops at exactly 200 plates, which is two
+-- full stone-furnace output stacks. It has no output side -- a burner arm
+-- carries coal and ore, never plates, so nothing empties them -- and once a
+-- furnace's result slot fills it simply stops. Every window long enough to
+-- approach that ceiling is measuring the slot, not the block.
+--
+-- Emptying them here is DISCLOSED APPARATUS, not a fix: a real block would use
+-- an electric inserter onto a belt, which needs `electronics`. This stands in
+-- for that so the block's actual production rate can be seen, and so the
+-- headroom above 200 is known before anyone designs the real thing.
+--
+-- `inventory_type` 3 is a furnace's result slot -- a `defines.inventory` index
+-- handed to the game unchanged, not a name.
+local FURNACE_RESULT = 3
+local drained = 0
+local function drain()
+  local moved = 0
+  for _, f in ipairs(furnaces) do
+    local before = 0
+    local r = rcon.inventory_contents_at({
+      { name = "stone-furnace", x = f.position.x, y = f.position.y },
+    })
+    if type(r) == "table" and type(r[1]) == "table" and type(r[1].output_inventory) == "table" then
+      for _, sl in ipairs(r[1].output_inventory) do
+        if type(sl) == "table" and sl.name == "iron-plate" then before = sl.count or 0 end
+      end
+    end
+    if before > 0 then
+      pcall(function()
+        rcon.remove_from_inventory(bot1, "stone-furnace", f.position, FURNACE_RESULT,
+          "iron-plate", before)
+      end)
+      moved = moved + before
+    end
+  end
+  drained = drained + moved
+  return moved
+end
+
 local t0 = rcon.game_tick()
 print(string.format("charged at tick %s; measuring %d ticks in %d-tick marks",
   tostring(t0), WINDOW, MARK))
@@ -181,7 +222,8 @@ while true do
   if type(t) ~= "number" or type(t0) ~= "number" then break end
   local elapsed = t - t0
   if elapsed >= next_mark then
-    local p = plates_now()
+    drain()
+    local p = drained + plates_now()
     last_plates = p
     print(string.format("  %-7d %-8d %-7d %-11.1f %s",
       t, elapsed, p, elapsed > 0 and (p * 3600.0 / elapsed) or 0,
@@ -192,8 +234,11 @@ while true do
 end
 
 print("")
-print(string.format("PLATES IN %d GAME TICKS: %d  (%.1f/min)",
-  WINDOW, last_plates, last_plates * 3600.0 / WINDOW))
+print(string.format("PLATES IN %d GAME TICKS: %d  (%.1f/min)  [%d drained + %d still in furnaces]",
+  WINDOW, last_plates, last_plates * 3600.0 / WINDOW, drained, plates_now()))
+print("The furnaces were EMPTIED as the run went, so this is production rather")
+print("than storage. Compare with 200, which is what the same block reports")
+print("when nothing takes the plates away: two full output stacks and a stall.")
 -- Per furnace, because the ceiling hypothesis is about EACH slot filling and a
 -- total of 200 across two furnaces is equally consistent with 100+100 (capped)
 -- and with 150+50 (not capped). Only the split tells them apart.

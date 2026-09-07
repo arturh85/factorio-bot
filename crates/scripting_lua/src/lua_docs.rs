@@ -143,6 +143,7 @@ pub fn write_lua_docs(target_path: PathBuf) -> LuaResult<()> {
 /// no binding hands out fails; documenting a return type without a root fails.
 fn documented_type_schemas() -> Vec<Value> {
     vec![
+        serialize_schema::<crate::blocked::BlockedBoxReport>(),
         serialize_schema::<FactorioBlueprintInfo>(),
         serialize_schema::<FactorioEntity>(),
         serialize_schema::<FactorioPlayer>(),

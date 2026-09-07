@@ -274,15 +274,35 @@
 //! copper plate), so the technology is reachable long before this argument
 //! suggests. The claim was overstated.
 //!
-//! The reason that actually binds is `crate::state`'s: **a panel's output is a
+//! The reason that used to bind was `crate::state`'s: **a panel's output is a
 //! function of the map clock.** Vanilla states `production = "60kW"`, which is
 //! peak; the Nauvis daily average is about 42 kW and the value at night is
 //! zero. This crate is pure and deterministic and has no in-game time of day
 //! among its inputs, so crediting 60 plans a base that is dead for a third of
-//! every day and crediting 42 plans one that browns out every night.
-//! `generation_kw` credits zero, which under-credits — the direction every
-//! other table in that file chooses for an unknown. The honest way in later is
-//! an accumulator-backed figure, which is a model rather than a table entry.
+//! every day.
+//!
+//! **That objection is answered and the exclusion stands for a different
+//! reason.** A surface reports its own daylight curve, and an *average* over
+//! it is a function of surface constants — perfectly deterministic, whatever
+//! hour the run starts. `PlanState::solar_average_kw` derives it (0.7 of
+//! nameplate on Nauvis, from the curve and not from a table) and
+//! `PlanState::accumulators_per_panel` derives the storage a day's shortfall
+//! needs (0.85 per panel, the vanilla 25:21 scaled by the day length the game
+//! actually reports). Both come out of one channel by two different integrals.
+//!
+//! What binds now is **storage**: an array credited its average keeps a base
+//! alive only if the accumulators to carry the night are standing. That check
+//! is [`solar_supply_kw`], and the owner's framing of the trade is why it is a
+//! refusal rather than a credit — a refusal is visible at plan time, and a
+//! base that dies at 03:00 is *coverage is not capacity with a clock
+//! attached*, which reads in a run log as a stall nothing explains. The
+//! conservative-looking option is the reckless one.
+//!
+//! **The last wire is not in this crate's reach.** Feasibility is decided by
+//! `PlanState::electric_supply_kw`, which credits solar nothing; turning
+//! [`solar_supply_kw`]'s `Ok` into supply is one call there. Until then this
+//! arm's reach is the refusal path, where it turns "no pole run carries power
+//! here" into "your solar farm has no batteries".
 
 use crate::action::{Action, ActionKind, Actor, Condition, Effect, InventorySlot};
 use crate::error::PlannerError;
@@ -2665,6 +2685,305 @@ pub(crate) fn pole_run(
     Ok(Some(path))
 }
 
+/// The Factorio `entity_type` of a solar panel.
+///
+/// **A type name, not a prototype name**, so a mod's `big-solar-panel` is
+/// classified by what it *is* rather than by what this crate has heard of —
+/// the same shape as `crate::state`'s `DETERMINISTIC_GENERATOR_TYPES`, and the
+/// same reason.
+///
+/// # Why not the performance fields, which are the gate one level down
+///
+/// `PlanState::solar_average_kw` gates on the *presence* of
+/// `solar_panel_performance_at_day`, and it must: those fields carry
+/// `subclasses: ["SolarPanel"]`, so their presence is what says a prototype
+/// follows the daylight curve, and crediting a steam engine that curve would
+/// be a silent 30% under-count of a generator that runs all night.
+///
+/// This is a different question. **Classifying a standing entity must not
+/// depend on the fields the pricing needs**, or a world that reports panels
+/// without the curve — every dump this project archived before 2026-09-07 —
+/// would answer "there are no solar panels here" rather than "there are panels
+/// here that this world cannot price". The first is a lie and the second is
+/// [`PlannerError::SolarBankNotSizable`].
+const PANEL_TYPE: &str = "solar-panel";
+
+/// The Factorio `entity_type` of an accumulator, on the same terms as
+/// [`PANEL_TYPE`].
+///
+/// **Type rather than the buffer field**, and here the distinction bites
+/// harder: 48 of this install's 1,028 prototypes carry an
+/// `electric_buffer_capacity`, because a lab, a radar and an assembling
+/// machine all have a small internal buffer. Classifying on the field would
+/// count a lab as part of the bank.
+const ACCUMULATOR_TYPE: &str = "accumulator";
+
+/// The solar array and bank standing on one network.
+///
+/// Counts rather than entities: nothing downstream needs a position, and the
+/// two numbers plus the prototype names are the whole of what the sizing
+/// takes.
+struct StandingSolar {
+    /// The one panel prototype found on the network, and how many stand.
+    /// `None` when no panel does.
+    panel: Option<(String, u32)>,
+    /// The one accumulator prototype found, and how many stand.
+    accumulator: Option<(String, u32)>,
+    /// Set when more than one prototype of either kind stands on the network,
+    /// naming which kind. See [`solar_supply_kw`] for why that refuses.
+    mixed: Option<String>,
+}
+
+/// Every prototype in this world whose `entity_type` is `entity_type`, sorted.
+///
+/// Sorted because the planner is pure and `DashMap`'s iteration order is not
+/// stable: a plan that varied with hash order would not be reproducible, which
+/// is the property every collection in this crate is ordered to keep.
+fn prototype_names_of_type(state: &PlanState, entity_type: &str) -> BTreeSet<String> {
+    state
+        .base()
+        .entity_prototypes
+        .iter()
+        .filter(|prototype| prototype.entity_type == entity_type)
+        .map(|prototype| prototype.key().clone())
+        .collect()
+}
+
+/// The panels and accumulators wired to whatever occupies `area`.
+///
+/// # The network is the one the supply ledger already walked
+///
+/// [`PlanState::powering_entities`] returns the poles of every wire-connected
+/// component whose supply area meets `area` — the *same* union-find walk
+/// `PlanState::electric_supply_kw` credits generators over, not a second one.
+/// A candidate is on that network exactly when one of those poles' supply
+/// areas meets its footprint, which is
+/// [`PlanState::pole_would_supply`], i.e. the same predicate again. So there
+/// is one notion of "the same network" here and not two — the drift
+/// `ElectricNetwork`'s own doc exists to prevent.
+///
+/// # It walks the world once per prototype, and that is why it is on the
+/// refusal path
+///
+/// [`PlanState::entities_named`] has no centre to search around and reads the
+/// whole entity tree. Vanilla has one panel prototype and one accumulator
+/// prototype, so that is two walks — cheap enough for
+/// [`capacity_refusal`], which runs only when a plan is already refusing, and
+/// **not** cheap enough for a per-condition check. Crediting solar in the
+/// supply ledger wants this classification done over the network's own entity
+/// list instead, which `electric_supply_kw` already holds and this crate
+/// cannot reach; see the module note.
+fn standing_solar(state: &PlanState, area: &Rect) -> StandingSolar {
+    let carriers = state.powering_entities(area);
+    let on_network = |name: &str| -> u32 {
+        state
+            .entities_named(name)
+            .iter()
+            .filter(|entity| {
+                let footprint = state.footprint_of(entity);
+                carriers
+                    .iter()
+                    .any(|(pos, pole)| state.pole_would_supply(pole, pos, &footprint))
+            })
+            .count()
+            .try_into()
+            .unwrap_or(u32::MAX)
+    };
+    let found = |entity_type: &str| -> (Option<(String, u32)>, bool) {
+        let standing: Vec<(String, u32)> = prototype_names_of_type(state, entity_type)
+            .into_iter()
+            .map(|name| {
+                let count = on_network(&name);
+                (name, count)
+            })
+            .filter(|(_, count)| *count > 0)
+            .collect();
+        let mixed = standing.len() > 1;
+        (standing.into_iter().next(), mixed)
+    };
+    let (panel, panels_mixed) = found(PANEL_TYPE);
+    let (accumulator, bank_mixed) = found(ACCUMULATOR_TYPE);
+    StandingSolar {
+        panel,
+        accumulator,
+        mixed: if panels_mixed {
+            Some("more than one kind of solar panel stands on it".into())
+        } else if bank_mixed {
+            Some("more than one kind of accumulator stands on it".into())
+        } else {
+            None
+        },
+    }
+}
+
+/// How many accumulators of `accumulator` an array of `panels` panels of
+/// `panel` needs to carry its own average load through the night.
+///
+/// # The unit trap this function is built around
+///
+/// An accumulator answers two questions that both sound like "how much power
+/// does it hold", and they are integrals of different things:
+///
+/// | field | value on vanilla | what it is |
+/// |---|---|---|
+/// | `max_energy_production` | 300 kW | the **discharge rate**, a ceiling on delivery |
+/// | `electric_buffer_capacity` | 5 MJ | the **store**, joules it can hold |
+///
+/// **This sizes the store, and nothing here reads the rate.** A bank sized on
+/// 300 kW instead of 5 MJ is wrong by a factor that depends on how long the
+/// night is — the same conflation that read the vanilla 25:21 ratio as an
+/// output average one level up, and the reason
+/// `a_bank_is_sized_on_stored_energy_and_not_on_discharge_rate` exists.
+///
+/// The whole derivation is
+/// [`PlanState::accumulators_per_panel`](crate::state::PlanState::accumulators_per_panel):
+/// the night's shortfall against a flat average load, integrated exactly over
+/// the surface's own four day-phase boundaries, times the panel's joules per
+/// tick and the surface's `ticks_per_day`, divided by the accumulator's
+/// buffer. Nothing in this file multiplies or scales it, so there is one copy
+/// of that arithmetic and this is not it.
+///
+/// # What it does not answer
+///
+/// **Whether the bank can deliver fast enough.** A bank with enough joules can
+/// still be short of the 300 kW per unit the load wants at 03:00. That is the
+/// rate question, it is deliberately not modelled, and sizing a general
+/// storage model to answer it is out of scope — nothing needs it yet. Named
+/// here so a reader does not mistake this for it.
+///
+/// Ceiling division: two thirds of an accumulator is an accumulator that is
+/// not standing.
+///
+/// # Errors
+///
+/// [`PlannerError::SolarBankNotSizable`] when this world cannot answer — no
+/// daylight curve on the surface, no day/night endpoints on `panel`, or no
+/// buffer on `accumulator`. **Unknown, never zero**: a bank of zero would
+/// credit the array in full, which is the midnight failure with an extra step.
+pub fn solar_bank_for(
+    state: &PlanState,
+    panel: &str,
+    accumulator: &str,
+    panels: u32,
+) -> Result<u32, PlannerError> {
+    if panels == 0 {
+        return Ok(0);
+    }
+    let per_panel = state
+        .accumulators_per_panel(panel, accumulator)
+        .ok_or_else(|| PlannerError::SolarBankNotSizable {
+            panels,
+            because: format!(
+                "this surface reports no daylight curve, or `{panel}` carries no day and night \
+                 performance figures, or `{accumulator}` carries no buffer capacity"
+            ),
+        })?;
+    // `to_u32` saturating at the maximum rather than wrapping: a bank that
+    // large is refused by the count comparison either way, and a wrapped
+    // count would refuse for a number nobody can read.
+    Ok((f64::from(panels) * per_panel)
+        .ceil()
+        .to_u32()
+        .unwrap_or(u32::MAX))
+}
+
+/// What a solar array standing on the network reaching `area` may be credited,
+/// in kW — **at the daily average, and only once its bank stands.**
+///
+/// The owner's ruling, as one function: a solar supply is worth its average
+/// rather than its noon nameplate, and it is worth that only when the
+/// accumulators to carry the night are there.
+///
+/// # The three answers
+///
+/// * `Ok(0.)` — no solar panel is on this network. Nothing to credit and
+///   nothing wrong, which is every plan this project has ever made.
+/// * `Ok(kw)` — panels stand, the bank stands, and `kw` is the array's daily
+///   average. **Nothing credits this yet**; see "the last wire" below.
+/// * `Err` — panels stand and the plan may not count them, by name.
+///
+/// # An accumulator without a panel is a buffer, not a supply
+///
+/// It answers `Ok(0.)` and refuses nothing. The brief this was built from
+/// asked the refusal to name "which of the two is missing — panels or bank",
+/// and one half of that is deliberately not a refusal: an accumulator on a
+/// steam network is an ordinary thing to build for peak shaving, and refusing
+/// a working base for owning one would be exactly the false refusal this arm
+/// exists to remove. The refusal names the bank because the bank is the half
+/// whose absence is silent.
+///
+/// # Why a mixed array refuses instead of guessing
+///
+/// [`solar_bank_for`] sizes one panel prototype against one accumulator
+/// prototype. Two kinds of either on one network is a ratio this arm cannot
+/// state, and the honest answer to a question with two answers is neither of
+/// them. Vanilla has one of each, so this is a refusal nothing reaches today
+/// and a guess nobody has to audit later.
+///
+/// # The last wire, which is not in this crate's reach
+///
+/// A `Condition::Powered` is decided by
+/// `PlanState::electric_supply_kw`, which credits solar nothing — so an array
+/// this function would credit is still invisible to every feasibility check.
+/// Closing that is one call in `crates/planner/src/state.rs`, and it is left
+/// as a handover rather than taken: crediting it *here* while the condition
+/// disagrees would make [`supply_for`] adopt a network the scheduler then
+/// refuses, which is a worse failure than the one it fixes.
+///
+/// What this does reach is [`capacity_refusal`], where an uncredited array is
+/// the difference between "no pole run carries power here" and "your solar
+/// farm has no batteries". That refusal is visible at plan time, which is the
+/// whole argument: a base that dies at 03:00 is *coverage is not capacity with
+/// a clock attached*, and it reads in a run log as a stall nothing explains.
+///
+/// # Errors
+///
+/// [`PlannerError::SolarBankShort`] when the bank is too small or absent, and
+/// [`PlannerError::SolarBankNotSizable`] when this world cannot size one.
+pub fn solar_supply_kw(state: &PlanState, area: &Rect) -> Result<f64, PlannerError> {
+    let standing = standing_solar(state, area);
+    let Some((panel, panels)) = standing.panel else {
+        return Ok(0.);
+    };
+    if let Some(because) = standing.mixed {
+        return Err(PlannerError::SolarBankNotSizable { panels, because });
+    }
+    let average_kw = state
+        .solar_average_kw(&panel)
+        .map(|each| each * f64::from(panels))
+        .ok_or_else(|| PlannerError::SolarBankNotSizable {
+            panels,
+            because: format!(
+                "this surface reports no daylight curve, or `{panel}` carries no day and night \
+                 performance figures, so a panel's daily average cannot be derived"
+            ),
+        })?;
+    // With no accumulator standing there is still a bank to size, and sizing
+    // it needs an accumulator prototype to size against. The world's own,
+    // lexicographically first for determinism -- and the count it is compared
+    // against is zero, so which one it is changes the refusal's wording and
+    // never its verdict.
+    let (accumulator, accumulators_standing) = standing.accumulator.unwrap_or_else(|| {
+        (
+            prototype_names_of_type(state, ACCUMULATOR_TYPE)
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| ACCUMULATOR_TYPE.to_string()),
+            0,
+        )
+    });
+    let accumulators_needed = solar_bank_for(state, &panel, &accumulator, panels)?;
+    if accumulators_standing < accumulators_needed {
+        return Err(PlannerError::SolarBankShort {
+            panels,
+            average_kw,
+            accumulators_needed,
+            accumulators_standing,
+        });
+    }
+    Ok(average_kw)
+}
+
 /// Which of the two failures a false headroom condition is, or `None` when it
 /// is the routing one.
 ///
@@ -2680,10 +2999,28 @@ pub(crate) fn pole_run(
 /// The numbers come from [`Condition::headroom_parts`], i.e. from the same
 /// ledger the decision was made by, so the message cannot quote a figure the
 /// refusal was not decided on.
+///
+/// # A third failure hides inside the zero, and it is a solar one
+///
+/// `supply_kw = 0` means *nothing the ledger credits* reached the site, which
+/// is not the same as nothing being there. A solar array standing on this very
+/// network reads as zero, because
+/// `crate::state::PlanState::electric_supply_kw` credits solar nothing — so a
+/// base with panels and no accumulators is reported as a **pole-routing**
+/// failure, and a reader sent to look at geometry finds geometry that is
+/// perfect.
+///
+/// [`solar_supply_kw`] is asked before that verdict is returned, and its
+/// refusal replaces it when it has one. Only its refusal: an array whose bank
+/// *is* standing answers `Ok`, and this still falls through to the routing
+/// answer, because crediting it is the one call this crate cannot make. The
+/// message is the change, not the plan — nothing here makes a refusal into an
+/// acceptance.
 fn capacity_refusal(state: &PlanState, powered: &Condition) -> Option<PlannerError> {
     let parts = powered.headroom_parts(state)?;
     if parts.supply_kw.total_cmp(&0.).is_le() {
-        return None;
+        let area = state.collision_area(&parts.entity, &parts.pos)?;
+        return solar_supply_kw(state, &area).err();
     }
     Some(PlannerError::PowerHeadroomShort {
         entity: parts.entity.clone(),
@@ -6009,6 +6346,416 @@ mod block_headroom_tests {
             0.,
             "a consumer whose centre is exactly on the edge is inside the \
              block's own ground and must not be charged"
+        );
+    }
+}
+
+// -------------------------------------------------------------------------
+// The solar arm's tests.
+//
+// The vanilla results this arm reproduces -- 0.7 of nameplate averaged, 0.85
+// accumulators per panel -- are pinned where they are derived, by
+// `crate::state`'s own tests against the live 2.1.17 capture. Restating them
+// here would be a second copy of an answer, and the rule in
+// `docs/superpowers/notes/2026-09-06-fixtures-agree-with-their-code.md` cuts
+// the other way for it: what these assert is what this arm does *with* those
+// numbers, relationally, so a change to the derivation moves one file and not
+// two.
+// -------------------------------------------------------------------------
+
+#[cfg(test)]
+mod solar_tests {
+    use super::*;
+    use crate::ids::BotId;
+    use crate::state::PlanState;
+    use factorio_bot_core::test_utils::fixture_world;
+    use factorio_bot_core::types::{SurfaceDaylight, SurfaceId};
+    use std::sync::Arc;
+
+    /// Vanilla Nauvis' daylight curve, as `LuaSurface` reports it in 2.1.17.
+    /// The capture is `crates/core/tests/live-2.1.17-daylight.json`.
+    fn nauvis_daylight() -> SurfaceDaylight {
+        SurfaceDaylight {
+            surface: Some(SurfaceId::nauvis()),
+            ticks_per_day: Some(25_200),
+            dawn: Some(0.75),
+            dusk: Some(0.25),
+            evening: Some(0.45),
+            morning: Some(0.55),
+            daytime: Some(0.0),
+            solar_power_multiplier: Some(1.0),
+            always_day: Some(false),
+            freeze_daytime: Some(false),
+        }
+    }
+
+    /// A panel's NOON output, in joules per tick: the 60 kW on a vanilla
+    /// panel's tooltip, which is exactly the figure this arm must not credit.
+    const PANEL_NOON_JOULES_PER_TICK: f64 = 1000.;
+    /// A vanilla accumulator's STORE, in joules. 5 MJ.
+    const ACCUMULATOR_BUFFER_JOULES: f64 = 5_000_000.;
+    /// A vanilla accumulator's DISCHARGE RATE, in joules per tick: 300 kW.
+    /// Present in the fixture precisely so a test can prove nothing reads it.
+    const ACCUMULATOR_DISCHARGE_JOULES_PER_TICK: f64 = 5000.;
+
+    /// Where the arm's tests put things. The pole's supply area is 5x5 around
+    /// it, so everything below is inside it and the one entity at
+    /// `OFF_NETWORK` is not.
+    const POLE_AT: (f64, f64) = (10.5, 10.5);
+    const PANELS_AT: [(f64, f64); 2] = [(13.5, 10.5), (13.5, 7.5)];
+    const ACCUMULATORS_AT: [(f64, f64); 3] = [(7.5, 10.5), (7.5, 12.5), (7.5, 8.5)];
+    const OFF_NETWORK: (f64, f64) = (40.5, 40.5);
+    const CONSUMER_AT: (f64, f64) = (9.5, 12.5);
+
+    /// A world with a small pole, `panels` solar panels and `accumulators`
+    /// accumulators all inside its supply area, and optionally the surface's
+    /// daylight curve.
+    ///
+    /// The fixture ships both prototypes with none of the energy fields, so
+    /// they are set here for the reason `state.rs`'s own solar fixture gives:
+    /// a number that came from the world is distinguishable from a number that
+    /// happens to match a table. The accumulator gets its **discharge rate**
+    /// as well as its buffer, so a sizing that reached for the wrong one would
+    /// find a plausible number waiting.
+    fn solar_state(daylight: bool, panels: usize, accumulators: usize) -> PlanState {
+        let world = fixture_world();
+
+        let mut panel = world
+            .entity_prototypes
+            .get("solar-panel")
+            .expect("the fixture ships a solar panel")
+            .clone();
+        panel.max_energy_production = Some(PANEL_NOON_JOULES_PER_TICK);
+        panel.solar_panel_performance_at_day = Some(1.0);
+        panel.solar_panel_performance_at_night = Some(0.0);
+        world.entity_prototypes.insert("solar-panel".into(), panel);
+
+        let mut accumulator = world
+            .entity_prototypes
+            .get("accumulator")
+            .expect("the fixture ships an accumulator")
+            .clone();
+        accumulator.max_energy_production = Some(ACCUMULATOR_DISCHARGE_JOULES_PER_TICK);
+        accumulator.electric_buffer_capacity = Some(ACCUMULATOR_BUFFER_JOULES);
+        world
+            .entity_prototypes
+            .insert("accumulator".into(), accumulator);
+
+        if daylight {
+            world.update_daylight(nauvis_daylight());
+        }
+
+        let mut state = PlanState::from_world(Arc::new(world), &[BotId(1)]);
+        state.create_entity(FactorioEntity {
+            name: POLE.into(),
+            position: Position::new(POLE_AT.0, POLE_AT.1),
+            ..Default::default()
+        });
+        for (x, y) in PANELS_AT.iter().take(panels) {
+            state.create_entity(FactorioEntity {
+                name: "solar-panel".into(),
+                position: Position::new(*x, *y),
+                ..Default::default()
+            });
+        }
+        for (x, y) in ACCUMULATORS_AT.iter().take(accumulators) {
+            state.create_entity(FactorioEntity {
+                name: "accumulator".into(),
+                position: Position::new(*x, *y),
+                ..Default::default()
+            });
+        }
+        state
+    }
+
+    /// [`solar_state`] with the accumulator's buffer taken away and everything
+    /// else left alone — a world that prices the panel and cannot size the
+    /// bank.
+    fn bufferless_accumulator_state(panels: usize, accumulators: usize) -> PlanState {
+        let state = solar_state(true, panels, accumulators);
+        let mut proto = state
+            .base()
+            .entity_prototypes
+            .get("accumulator")
+            .expect("an accumulator")
+            .clone();
+        proto.electric_buffer_capacity = None;
+        state
+            .base()
+            .entity_prototypes
+            .insert("accumulator".into(), proto);
+        state
+    }
+
+    /// The condition [`capacity_refusal`] is asked about: a consumer inside
+    /// the pole's supply area, on a network with no generator the ledger
+    /// credits, so `supply_kw` is zero and the routing branch is the one
+    /// taken.
+    fn unpowered_site() -> Condition {
+        Condition::Powered {
+            pos: Position::new(CONSUMER_AT.0, CONSUMER_AT.1),
+            entity: "stone-furnace".into(),
+            kw: 90.,
+        }
+    }
+
+    /// The ground the arm is asked about: one consumer inside the pole's
+    /// supply area.
+    fn consumer_area(state: &PlanState) -> Rect {
+        state
+            .collision_area(
+                "stone-furnace",
+                &Position::new(CONSUMER_AT.0, CONSUMER_AT.1),
+            )
+            .expect("the fixture carries a stone-furnace prototype")
+    }
+
+    /// **The owner's ruling as an assertion**: an array whose bank stands is
+    /// credited, and credited its *daily average*.
+    ///
+    /// The average is not restated here -- it is taken from
+    /// `solar_average_kw`, which is where it is derived and where it is
+    /// pinned. What this asserts is the two things that could only be wrong
+    /// here: that the credit is the average times the panel *count*, and that
+    /// it is strictly between darkness and the noon nameplate. A pass-through
+    /// of nameplate would fail the upper bound; crediting nothing, the lower.
+    #[test]
+    fn an_array_whose_bank_stands_is_credited_its_daily_average() {
+        let s = solar_state(true, 2, 2);
+        let each = s
+            .solar_average_kw("solar-panel")
+            .expect("a surface with a curve prices its panels");
+        let credited = solar_supply_kw(&s, &consumer_area(&s)).expect("the bank stands");
+        assert_eq!(
+            credited,
+            each * 2.,
+            "two panels on the network, credited one average each"
+        );
+        let noon_kw = PANEL_NOON_JOULES_PER_TICK * 60. / 1000.;
+        assert!(
+            credited > 0. && credited < noon_kw * 2.,
+            "an average is less than noon and more than midnight: {credited} kW against a \
+             nameplate of {} kW",
+            noon_kw * 2.
+        );
+    }
+
+    /// The refusal, and it names the bank.
+    ///
+    /// One accumulator short of what two panels need, which on Nauvis is two.
+    /// The figures in the error are the ones the decision was made on, so a
+    /// reader can check the arithmetic without re-deriving it.
+    #[test]
+    fn an_array_whose_bank_is_short_refuses_and_says_it_is_the_bank() {
+        let s = solar_state(true, 2, 1);
+        match solar_supply_kw(&s, &consumer_area(&s)) {
+            Err(PlannerError::SolarBankShort {
+                panels,
+                accumulators_needed,
+                accumulators_standing,
+                average_kw,
+            }) => {
+                assert_eq!(panels, 2);
+                assert_eq!(accumulators_standing, 1);
+                assert_eq!(
+                    accumulators_needed, 2,
+                    "0.85 accumulators a panel, twice, rounded up to a whole battery"
+                );
+                assert!(average_kw > 0., "the array it refuses to credit is real");
+            }
+            other => panic!("a short bank must refuse by name, got {other:?}"),
+        }
+        // And with the second accumulator standing, the same array is
+        // credited -- so this is about the bank and not about the panels.
+        assert!(solar_supply_kw(&solar_state(true, 2, 2), &consumer_area(&s)).is_ok());
+    }
+
+    /// **An accumulator without a panel is a buffer, not a supply.**
+    ///
+    /// Credited nothing, and refusing nothing: an accumulator on a steam
+    /// network is an ordinary thing to build, and refusing a working base for
+    /// owning one would be exactly the false refusal this arm exists to
+    /// remove. The empty network is the same answer for the same reason, and
+    /// it is the answer every plan this project has ever made gets.
+    #[test]
+    fn a_bank_with_no_panels_is_credited_nothing_and_refuses_nothing() {
+        let s = solar_state(true, 0, 3);
+        assert_eq!(
+            solar_supply_kw(&s, &consumer_area(&s)).expect("a buffer is not a fault"),
+            0.
+        );
+        let empty = solar_state(true, 0, 0);
+        assert_eq!(
+            solar_supply_kw(&empty, &consumer_area(&empty)).expect("nothing solar, nothing wrong"),
+            0.
+        );
+        // And through the refusal path, which is where it would do harm: a
+        // site with no supply and no solar must still be the routing verdict.
+        // Every plan this project has ever made is this case, so a solar arm
+        // that spoke here would speak on every refusal in the archive.
+        assert!(
+            capacity_refusal(&empty, &unpowered_site()).is_none(),
+            "no panels, no solar verdict"
+        );
+    }
+
+    /// The **second** guard on "unknown, never zero", and the one the
+    /// no-daylight test above cannot reach.
+    ///
+    /// A surface with a perfectly good curve and an accumulator prototype that
+    /// carries no buffer is still a bank nobody can size. It matters because
+    /// the two guards are otherwise redundant: without daylight *both*
+    /// `solar_average_kw` and `accumulators_per_panel` answer `None`, and the
+    /// first one alone carries that test. This is the case where only the
+    /// second one can.
+    #[test]
+    fn an_accumulator_with_no_buffer_cannot_size_a_bank() {
+        let s = bufferless_accumulator_state(2, 2);
+        assert!(
+            s.solar_average_kw("solar-panel").is_some(),
+            "the premise: the panel is priced, so this is about the battery"
+        );
+        assert!(
+            matches!(
+                solar_supply_kw(&s, &consumer_area(&s)),
+                Err(PlannerError::SolarBankNotSizable { panels: 2, .. })
+            ),
+            "two accumulators that store nothing are not a bank, and a bank of \
+             zero would credit the array in full"
+        );
+    }
+
+    /// **Unknown, never zero.** A world that never reported its daylight
+    /// cannot size a bank, and the tempting reading -- no curve, no night, no
+    /// accumulators needed -- credits the array in full and is the midnight
+    /// failure with an extra step.
+    ///
+    /// This is the state of every world this project archived before the
+    /// daylight channel landed, so it is the common case rather than an edge.
+    ///
+    /// **Two independent guards hold this, and falsification is how that was
+    /// found**: without a curve, `solar_average_kw` and
+    /// `accumulators_per_panel` both answer `None`, so breaking either one
+    /// alone leaves this test green. What it therefore pins on its own is the
+    /// *classification*: a panel must still be recognised as a panel on a
+    /// world that cannot price it, or this world answers "there is no solar
+    /// here" — a lie — instead of "there is solar here I cannot size".
+    /// `an_accumulator_with_no_buffer_cannot_size_a_bank` is the case that
+    /// reaches the second guard by itself.
+    #[test]
+    fn a_world_with_no_daylight_refuses_rather_than_sizing_a_bank_of_zero() {
+        let s = solar_state(false, 2, 3);
+        assert!(
+            matches!(
+                solar_supply_kw(&s, &consumer_area(&s)),
+                Err(PlannerError::SolarBankNotSizable { panels: 2, .. })
+            ),
+            "three accumulators is more than enough for two panels on any curve, and \
+             without a curve there is no 'enough' to be more than"
+        );
+    }
+
+    /// **The unit trap, as an experiment.**
+    ///
+    /// An accumulator answers two questions that both sound like "how much
+    /// power does it hold": `electric_buffer_capacity` is its 5 MJ **store**
+    /// and `max_energy_production` is its 300 kW **discharge rate**. A bank
+    /// sized on the rate is wrong by a factor that depends on how long the
+    /// night is.
+    ///
+    /// So: doubling the store halves the bank, and changing the discharge rate
+    /// by any amount changes nothing at all.
+    #[test]
+    fn a_bank_is_sized_on_stored_energy_and_not_on_discharge_rate() {
+        let s = solar_state(true, 0, 0);
+        let baseline = solar_bank_for(&s, "solar-panel", "accumulator", 100).expect("sizable");
+
+        let bigger_store = solar_state(true, 0, 0);
+        let mut proto = bigger_store
+            .base()
+            .entity_prototypes
+            .get("accumulator")
+            .expect("an accumulator")
+            .clone();
+        proto.electric_buffer_capacity = Some(ACCUMULATOR_BUFFER_JOULES * 2.);
+        bigger_store
+            .base()
+            .entity_prototypes
+            .insert("accumulator".into(), proto);
+        assert_eq!(
+            solar_bank_for(&bigger_store, "solar-panel", "accumulator", 100).expect("sizable"),
+            baseline.div_ceil(2),
+            "an accumulator that stores twice as much halves the bank"
+        );
+
+        let faster = solar_state(true, 0, 0);
+        let mut proto = faster
+            .base()
+            .entity_prototypes
+            .get("accumulator")
+            .expect("an accumulator")
+            .clone();
+        proto.max_energy_production = Some(ACCUMULATOR_DISCHARGE_JOULES_PER_TICK * 10.);
+        faster
+            .base()
+            .entity_prototypes
+            .insert("accumulator".into(), proto);
+        assert_eq!(
+            solar_bank_for(&faster, "solar-panel", "accumulator", 100).expect("sizable"),
+            baseline,
+            "an accumulator that discharges ten times faster stores no more, so the bank \
+             is the same size; a sizing that read the rate would be a tenth of it"
+        );
+    }
+
+    /// A panel is part of the array when the **wire** says so, not when it is
+    /// nearby. The one off the network is credited to nobody and, crucially,
+    /// refuses nobody -- otherwise a panel somebody built across the map would
+    /// refuse every unrelated plan.
+    #[test]
+    fn a_panel_off_the_network_is_not_part_of_the_array() {
+        // Stated as a difference between two worlds rather than against the
+        // average, so this asserts the exclusion and nothing else: what the
+        // credit *is* belongs to the test above, and restating it here would
+        // make one of the two redundant.
+        let without = solar_state(true, 2, 2);
+        let before =
+            solar_supply_kw(&without, &consumer_area(&without)).expect("two panels, two batteries");
+
+        let mut with = solar_state(true, 2, 2);
+        with.create_entity(FactorioEntity {
+            name: "solar-panel".into(),
+            position: Position::new(OFF_NETWORK.0, OFF_NETWORK.1),
+            ..Default::default()
+        });
+        let after = solar_supply_kw(&with, &consumer_area(&with))
+            .expect("a panel across the map is not this network's problem");
+
+        assert_eq!(
+            before, after,
+            "the third panel is on no pole's network and is credited to nobody -- had it \
+             counted, its own bank would be short and this would refuse instead"
+        );
+    }
+
+    /// **The refusal a reader actually meets.** A site with a solar farm and
+    /// no batteries used to be reported as a pole-routing failure, because
+    /// `electric_supply_kw` credits solar nothing and zero supply is what a
+    /// failed pole run looks like. It sent a reader to look at geometry that
+    /// was perfect.
+    #[test]
+    fn a_refusing_site_blames_the_missing_batteries_and_not_the_poles() {
+        let s = solar_state(true, 2, 0);
+        assert!(
+            !unpowered_site().holds(&s, BotId(1)),
+            "the premise: an uncredited array leaves the site unpowered"
+        );
+        assert!(
+            matches!(
+                capacity_refusal(&s, &unpowered_site()),
+                Some(PlannerError::SolarBankShort { .. })
+            ),
+            "an uncredited array is a battery fault, not a geometry one"
         );
     }
 }

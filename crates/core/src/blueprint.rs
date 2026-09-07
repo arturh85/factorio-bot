@@ -60,10 +60,45 @@ pub struct BlueprintEntity {
     pub underground_half: Option<UndergroundHalf>,
 }
 
+/// What a blueprint says about its own grid.
+///
+/// **`snap-to-grid` is the author's own statement of the block's PITCH** -- how
+/// far apart two copies sit when they tile. Measured across
+/// `scripts/rcontest.lua`: `FurnaceLine` is 29x11, `MinerLine` 7x21,
+/// `StarterScience` 6x11. Nothing else in a blueprint says this: a bounding box
+/// over the entities gives the extent of what was drawn, not the period the
+/// author intended, and the two differ wherever a design leaves deliberate
+/// space beside itself.
+///
+/// That makes it the missing input for placing a second block *next to* a
+/// first, which is the open half of the anchor-persistence work: a recorded
+/// anchor says where one block is, and a pitch says where the next one goes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BlueprintGrid {
+    /// Tiles between one copy of the block and the next, per axis.
+    pub pitch: Position,
+    /// Whether the author pinned the grid to the world's own origin rather
+    /// than to wherever the blueprint is dropped.
+    pub absolute: bool,
+    /// Where the block sits within its own grid cell, when the author moved it.
+    /// `None` is **not** `(0, 0)`: it means the field was absent, and a caller
+    /// that needs to know whether the author positioned it deliberately can
+    /// tell the difference.
+    pub relative_position: Option<Position>,
+}
+
 #[derive(Debug, Clone)]
 pub struct Blueprint {
     pub entities: Vec<BlueprintEntity>,
     pub version: u64,
+    /// The block's own grid, when it declares one.
+    ///
+    /// **`None` means the blueprint said nothing, never that the pitch is
+    /// zero.** Three of the fifteen fixtures declare a grid and twelve do not;
+    /// a fabricated default would make "the author tiled this at 29x11" and
+    /// "the author never said" the same answer, which is the conflation this
+    /// repo has now paid for seven times.
+    pub grid: Option<BlueprintGrid>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -115,6 +150,7 @@ const ALLOWED_BODY_KEYS: &[&str] = &[
     "description",
     "snap-to-grid",
     "absolute-snapping",
+    "position-relative-to-grid",
 ];
 
 #[derive(Deserialize)]
@@ -125,6 +161,17 @@ struct Body {
     version: u64,
     #[serde(default)]
     tiles: Vec<Value>,
+    // The three grid fields. `snap-to-grid` and `absolute-snapping` were
+    // ALLOWLISTED and then had nowhere to go -- decoded without complaint and
+    // silently discarded -- which is worse than refusing them, because the
+    // allowlist is this module's promise that a key is handled rather than
+    // dropped.
+    #[serde(default, rename = "snap-to-grid")]
+    snap_to_grid: Option<RawPos>,
+    #[serde(default, rename = "absolute-snapping")]
+    absolute_snapping: bool,
+    #[serde(default, rename = "position-relative-to-grid")]
+    position_relative_to_grid: Option<RawPos>,
 }
 
 #[derive(Deserialize)]
@@ -274,8 +321,125 @@ pub fn decode(text: &str) -> Result<Blueprint, BlueprintError> {
             underground_half,
         });
     }
+    // A grid exists only when the author gave a pitch. `absolute-snapping`
+    // alone is meaningless -- it says how to interpret a pitch that is not
+    // there -- so it does not conjure one.
+    let grid = body.snap_to_grid.map(|pitch| BlueprintGrid {
+        pitch: Position::new(pitch.x, pitch.y),
+        absolute: body.absolute_snapping,
+        relative_position: body
+            .position_relative_to_grid
+            .map(|p| Position::new(p.x, p.y)),
+    });
     Ok(Blueprint {
         entities,
         version: body.version,
+        grid,
     })
+}
+
+#[cfg(test)]
+mod grid_tests {
+    use super::decode;
+
+    /// Wrap raw blueprint JSON the way Factorio does: version byte, base64,
+    /// zlib. Written here rather than reusing `encode`, which builds a body
+    /// from entities and so cannot express the grid fields under test.
+    fn encode_for_test(json: &str) -> String {
+        use std::io::Write;
+        let mut e = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        e.write_all(json.as_bytes()).expect("in-memory write");
+        let compressed = e.finish().expect("in-memory finish");
+        format!(
+            "0{}",
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, compressed)
+        )
+    }
+
+    /// **A blueprint that declares a grid keeps it.**
+    ///
+    /// `snap-to-grid` and `absolute-snapping` were in `ALLOWED_BODY_KEYS` and
+    /// had nowhere to land, so they decoded without complaint and were thrown
+    /// away. That is worse than refusing them: this module's allowlist is a
+    /// promise that a key is *handled*, and the refusal path exists precisely
+    /// so nothing is silently dropped.
+    ///
+    /// The pitch is the load-bearing part. It is the author's own statement of
+    /// how far apart two copies of the block sit, and nothing else in a
+    /// blueprint carries it — a bounding box over the entities measures what
+    /// was drawn, not the period intended.
+    #[test]
+    fn a_declared_grid_survives_the_decode() {
+        let text = encode_for_test(
+            r#"{"blueprint":{"item":"blueprint","version":281479278886912,
+                "snap-to-grid":{"x":29,"y":11},"absolute-snapping":true,
+                "entities":[{"entity_number":1,"name":"stone-furnace",
+                             "position":{"x":0,"y":0}}]}}"#,
+        );
+        let grid = decode(&text)
+            .expect("decodes")
+            .grid
+            .expect("the blueprint declares a grid");
+        assert_eq!((grid.pitch.x(), grid.pitch.y()), (29.0, 11.0));
+        assert!(grid.absolute);
+        assert_eq!(
+            grid.relative_position, None,
+            "absent is not (0,0): the author never moved it within its cell"
+        );
+    }
+
+    /// **A blueprint that declares nothing reports nothing.**
+    ///
+    /// Twelve of the fifteen fixtures are like this. A fabricated default would
+    /// make "the author tiled this at 29x11" and "the author never said" the
+    /// same answer, which is the conflation this repo has paid for seven times.
+    #[test]
+    fn no_grid_is_none_and_not_a_zero_pitch() {
+        let text = encode_for_test(
+            r#"{"blueprint":{"item":"blueprint","version":281479278886912,
+                "entities":[{"entity_number":1,"name":"stone-furnace",
+                             "position":{"x":0,"y":0}}]}}"#,
+        );
+        assert_eq!(decode(&text).expect("decodes").grid, None);
+    }
+
+    /// `absolute-snapping` alone does not conjure a grid: it says how to
+    /// interpret a pitch, and a pitch that is not there has no interpretation.
+    #[test]
+    fn absolute_snapping_without_a_pitch_is_still_no_grid() {
+        let text = encode_for_test(
+            r#"{"blueprint":{"item":"blueprint","version":281479278886912,
+                "absolute-snapping":true,
+                "entities":[{"entity_number":1,"name":"stone-furnace",
+                             "position":{"x":0,"y":0}}]}}"#,
+        );
+        assert_eq!(decode(&text).expect("decodes").grid, None);
+    }
+
+    /// `position-relative-to-grid` used to fail the decode BY NAME, because it
+    /// was not allowlisted at all — so a blueprint carrying it could not be
+    /// built even though the other two grid fields were accepted and dropped.
+    /// Now it is modelled, and its presence is distinguishable from absence.
+    #[test]
+    fn a_relative_position_is_kept_and_distinguishable_from_absent() {
+        let text = encode_for_test(
+            r#"{"blueprint":{"item":"blueprint","version":281479278886912,
+                "snap-to-grid":{"x":6,"y":11},
+                "position-relative-to-grid":{"x":-2,"y":3},
+                "entities":[{"entity_number":1,"name":"stone-furnace",
+                             "position":{"x":0,"y":0}}]}}"#,
+        );
+        let grid = decode(&text)
+            .expect("decodes")
+            .grid
+            .expect("declares a grid");
+        let rel = grid
+            .relative_position
+            .expect("declares a relative position");
+        assert_eq!((rel.x(), rel.y()), (-2.0, 3.0));
+        assert!(
+            !grid.absolute,
+            "absent absolute-snapping is false, not unknown"
+        );
+    }
 }

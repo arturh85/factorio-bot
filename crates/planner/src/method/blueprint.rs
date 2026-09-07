@@ -2118,6 +2118,7 @@ mod tests {
                 at_named(9.0, 0.0, "stone-furnace"),
             ],
             version: 0,
+            grid: None,
         };
         let mut state = test_state();
         // The block was sited at (20.5, 20.5) on a previous plan and two of
@@ -2143,6 +2144,7 @@ mod tests {
                 at_named(3.0, 0.0, "stone-furnace"),
             ],
             version: 0,
+            grid: None,
         };
         let mut state = test_state();
         // BOTH ghosts, because `StampGhosts` stamps the whole block and a lone
@@ -2166,6 +2168,7 @@ mod tests {
         let bp = Blueprint {
             entities: vec![at_named(0.0, 0.0, "stone-furnace")],
             version: 0,
+            grid: None,
         };
 
         let mut wrong_name = test_state();
@@ -2448,6 +2451,7 @@ mod tests {
                 at_named(2.0, 0.0, "transport-belt"),
             ],
             version: 0,
+            grid: None,
         };
 
         let err = resolve_and_guard(&state, &bp, &Site::At(Position::new(5.0, 7.0)))
@@ -2536,6 +2540,7 @@ mod tests {
         let bp = Blueprint {
             entities: vec![at_named(0.0, 0.0, "burner-mining-drill")],
             version: 0,
+            grid: None,
         };
 
         // The premise: the two anchors really do differ, and both are legal.
@@ -2584,6 +2589,7 @@ mod tests {
                 at_named(4.0, 0.0, "stone-furnace"),
             ],
             version: 0,
+            grid: None,
         };
         assert_eq!(
             anchor_alignment(&state, &bp),
@@ -2616,6 +2622,7 @@ mod tests {
                 at_named(2.0, 0.0, "transport-belt"),
             ],
             version: 0,
+            grid: None,
         };
         assert_eq!(
             anchor_alignment(&state, &bp),
@@ -2663,6 +2670,7 @@ mod tests {
                 at_named(0.0, 8.0, "iron-chest"),
             ],
             version: 0,
+            grid: None,
         };
 
         // **This must fail without the corroboration rule**: restore the early
@@ -2722,6 +2730,7 @@ mod tests {
                 at_named(0.0, 6.0, "iron-chest"),
             ],
             version: 0,
+            grid: None,
         };
 
         for site in [Site::Anywhere, Site::Near(Position::new(0.5, 0.5))] {
@@ -2772,6 +2781,7 @@ mod tests {
                 at_named(0.0, 6.0, "iron-chest"),
             ],
             version: 0,
+            grid: None,
         };
         let recorded = Position::new(0.5, 0.5);
 
@@ -2832,6 +2842,7 @@ mod tests {
         let bp = Blueprint {
             entities: vec![at_named(0.0, 0.0, "burner-mining-drill")],
             version: 0,
+            grid: None,
         };
         let state = PlanState::from_world(std::sync::Arc::new(world), &[crate::ids::BotId(1)]);
 
@@ -2901,6 +2912,7 @@ mod tests {
                 at_named(0.0, 6.0, "iron-chest"),
             ],
             version: 0,
+            grid: None,
         };
 
         // The caller names a clear anchor far from block A.
@@ -2975,6 +2987,7 @@ mod tests {
         let bp = Blueprint {
             entities: vec![at_named(0.0, 0.0, "modded-pole")],
             version: 0,
+            grid: None,
         };
         let anchor = Position::new(0.5, 0.5);
 
@@ -3000,6 +3013,7 @@ mod tests {
         let known = Blueprint {
             entities: vec![at_named(0.0, 0.0, crate::method::power::POLE)],
             version: 0,
+            grid: None,
         };
         assert!(
             poles_the_model_cannot_size(&state, &known, &anchor).is_empty(),
@@ -3025,6 +3039,7 @@ mod tests {
         let bp = Blueprint {
             entities: vec![at_named(0.0, 0.0, "electric-mining-drill")],
             version: 0,
+            grid: None,
         };
         let state = test_state();
 
@@ -3078,6 +3093,7 @@ mod tests {
                 at_named(0.0, 8.0, "stone-furnace"),
             ],
             version: 0,
+            grid: None,
         };
         state.create_entity(stone_furnace_at(40.0, 44.0));
         state.create_entity(stone_furnace_at(40.0, 48.0));
@@ -3110,6 +3126,7 @@ mod tests {
         let bp = Blueprint {
             entities: vec![at_named(0.0, 0.0, "burner-mining-drill")],
             version: 0,
+            grid: None,
         };
         let (anchor, source) = resolve_site(&state, &bp, &Site::Anywhere)
             .expect("the search finds the ore this fixture placed");
@@ -3138,6 +3155,7 @@ mod tests {
                 at_named(9.0, 0.0, "stone-furnace"),
             ],
             version: 0,
+            grid: None,
         };
         let mut state = test_state();
         // Actually standing at (20.5, 20.5) ...
@@ -3169,6 +3187,7 @@ mod tests {
         let bp = Blueprint {
             entities: vec![at_named(0.0, 0.0, "stone-furnace")],
             version: 0,
+            grid: None,
         };
         let state = test_state();
         assert!(recover_anchor(&state, &bp).is_none());
@@ -3184,6 +3203,7 @@ mod tests {
                 at_named(3.0, 0.0, "stone-furnace"),
             ],
             version: 0,
+            grid: None,
         };
         let mut state = test_state();
         state.create_entity(stone_furnace_at(-40.5, -40.5)); // decoy
@@ -3201,6 +3221,7 @@ mod tests {
         let bp = Blueprint {
             entities: vec![at_named(0.0, 0.0, "stone-furnace")],
             version: 0,
+            grid: None,
         };
         let mut state = test_state();
         // Block the seed tile itself, so the search must step outward. Faced
@@ -3227,6 +3248,7 @@ mod tests {
         let bp = Blueprint {
             entities: vec![at_named(0.0, 0.0, "stone-furnace")],
             version: 0,
+            grid: None,
         };
         let mut state = test_state();
         // Wall off every tile within the search bound, faced away from the
@@ -3281,6 +3303,7 @@ mod tests {
         let bp = Blueprint {
             entities: vec![at_named(0.0, 0.0, "stone-furnace")],
             version: 0,
+            grid: None,
         };
         let seed = Position::new(0.5, 0.5);
 
@@ -3395,6 +3418,7 @@ mod tests {
         let bp = Blueprint {
             entities: vec![at_named(0.0, 0.0, "electric-mining-drill")],
             version: 0,
+            grid: None,
         };
 
         let bare = PlanState::from_world(Arc::new(drill_world()), &[BotId(1)]);
@@ -3502,6 +3526,7 @@ mod tests {
         let bp = Blueprint {
             entities: vec![at_named(0.0, 0.0, "electric-mining-drill")],
             version: 0,
+            grid: None,
         };
         let state = PlanState::from_world(std::sync::Arc::new(world), &[crate::ids::BotId(1)]);
         assert_eq!(
@@ -3535,6 +3560,7 @@ mod tests {
         let bp = Blueprint {
             entities: vec![at_named(0.0, 0.0, "burner-mining-drill")],
             version: 0,
+            grid: None,
         };
         let state = PlanState::from_world(std::sync::Arc::new(world), &[crate::ids::BotId(1)]);
         assert!(
@@ -3564,6 +3590,7 @@ mod tests {
         let bp = Blueprint {
             entities: vec![at_named(0.0, 0.0, "electric-mining-drill")],
             version: 0,
+            grid: None,
         };
         let state = PlanState::from_world(std::sync::Arc::new(world), &[crate::ids::BotId(1)]);
         assert_eq!(
@@ -3607,6 +3634,7 @@ mod tests {
         let bp = Blueprint {
             entities: vec![at_named(0.0, 0.0, "electric-mining-drill")],
             version: 0,
+            grid: None,
         };
 
         let world = drill_world();
@@ -3669,6 +3697,7 @@ mod tests {
                 at_named(9.0, 0.0, "stone-furnace"),
             ],
             version: 0,
+            grid: None,
         };
         let mut state = test_state();
         // Exactly ONE genuine entity of the block, standing at a real block
@@ -3709,6 +3738,7 @@ mod tests {
                 at_named(9.0, 0.0, "stone-furnace"),
             ],
             version: 0,
+            grid: None,
         };
         // The stable seed Ruling A mandates for `Site::Anywhere`: the world
         // origin, never the roster centroid.
@@ -3758,6 +3788,7 @@ mod tests {
                 at_named(9.0, 0.0, "stone-furnace"),
             ],
             version: 0,
+            grid: None,
         };
         let mut state = test_state();
         let site = Site::Anywhere;
@@ -4936,6 +4967,7 @@ mod block_demand_tests {
                 ent(20.0, 0.0, "big-electric-pole"),
             ],
             version: 0,
+            grid: None,
         };
         let power = blueprint_power(&s, &bp, &Position::new(0.5, 0.5));
 
@@ -5017,6 +5049,7 @@ mod block_demand_tests {
                 ent(20.0, 0.0, crate::method::power::POLE),
             ],
             version: 0,
+            grid: None,
         };
         let power = blueprint_power(&s, &bp, &Position::new(0.5, 0.5));
         assert_eq!(power.poles, 2, "both are poles");
@@ -5205,6 +5238,7 @@ mod block_demand_tests {
                 ent(4.0, 0.0, "steam-engine"),
             ],
             version: 0,
+            grid: None,
         };
         let power = blueprint_power(&s, &self_powered, &Position::new(0.0, 0.0));
         assert_eq!(power.demand.consumers, 1, "one inserter");
@@ -5221,6 +5255,7 @@ mod block_demand_tests {
         let unpowered = Blueprint {
             entities: self_powered.entities[..2].to_vec(),
             version: 0,
+            grid: None,
         };
         let power = blueprint_power(&s, &unpowered, &Position::new(0.0, 0.0));
         assert_eq!(power.generators, 0);
@@ -5315,6 +5350,7 @@ mod block_demand_tests {
                 ent(8.0, 0.0, "accumulator"),
             ],
             version: 0,
+            grid: None,
         };
         let power = blueprint_power(&s, &solar, &Position::new(0.0, 0.0));
         assert_eq!(

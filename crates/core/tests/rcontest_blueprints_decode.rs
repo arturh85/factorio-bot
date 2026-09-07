@@ -281,3 +281,51 @@ fn the_t_junction_smelter_separates_its_lanes_and_needs_no_research() {
         );
     }
 }
+
+/// **The three fixtures that declare a grid keep their pitch through decode.**
+///
+/// Until 2026-09-08 `snap-to-grid` and `absolute-snapping` were allowlisted and
+/// silently discarded, and `position-relative-to-grid` was not allowlisted at
+/// all — so a blueprint carrying it failed the decode by name while the other
+/// two were accepted and dropped.
+///
+/// The pitch is the load-bearing field: it is the author's own statement of how
+/// far apart two copies of the block sit. Nothing else in a blueprint says it —
+/// a bounding box over the entities measures what was *drawn*, and the two
+/// differ wherever a design leaves deliberate space beside itself. `MinerLine`
+/// is the clearest case: its entities span 5 tiles of x and its declared pitch
+/// is 7, which is the room its 3x3 drills actually need.
+#[test]
+fn the_fixtures_that_declare_a_grid_keep_it() {
+    let src = std::fs::read_to_string(rcontest_path()).expect("rcontest.lua readable");
+    let mut with_grid: Vec<(String, f64, f64, bool)> = Vec::new();
+    let mut without = 0usize;
+    for (name, text) in blueprint_assignments(&src) {
+        let Ok(bp) = decode(&text) else { continue };
+        match bp.grid {
+            Some(g) => with_grid.push((name, g.pitch.x(), g.pitch.y(), g.absolute)),
+            None => without += 1,
+        }
+    }
+    // By NAME: an f64 is not `Ord`, and the pitches are the values under test
+    // rather than the key.
+    with_grid.sort_by(|a, b| a.0.cmp(&b.0));
+
+    assert_eq!(
+        with_grid,
+        vec![
+            ("FurnaceLine".to_string(), 29.0, 11.0, true),
+            ("MinerLine".to_string(), 7.0, 21.0, true),
+        ],
+        "the declared pitches, read back off the real fixtures. StarterScience \
+         declares snap-to-grid 6x11 in its JSON and is absent here on purpose: \
+         it carries RECIPES, which this decoder refuses by name, so it never \
+         reaches the grid at all. A raw JSON scan sees three; the decoder sees \
+         two, and the decoder is what the planner gets"
+    );
+    assert!(
+        without >= 10,
+        "and most fixtures declare nothing, which must stay distinguishable \
+         from declaring a zero pitch; got {without}"
+    );
+}

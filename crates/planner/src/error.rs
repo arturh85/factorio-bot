@@ -793,6 +793,78 @@ pub enum PlannerError {
         headroom_kw: f64,
     },
 
+    /// Solar panels stand on this network and the accumulators to carry their
+    /// night do not.
+    ///
+    /// **The refusal exists so the failure is visible at plan time.** A solar
+    /// array with no bank does not degrade into a slow base: it runs all
+    /// afternoon and dies at 03:00, and this repo twice records that an
+    /// under-supplied network reads as *completely dead* rather than as slow.
+    /// So the choice is between a refusal a reader sees while planning and a
+    /// mystery stall a reader sees in a run log at a tick nobody can explain.
+    /// Refusing is the visible one; crediting an unbanked array is the
+    /// reckless option wearing the conservative option's clothes.
+    ///
+    /// # The two numbers are integrals of different things
+    ///
+    /// `average_kw` is **power** — what the array makes averaged over a whole
+    /// day, `crate::state::PlanState::solar_average_kw`, 0.7 of the noon
+    /// nameplate on vanilla Nauvis. `accumulators_needed` is sized from
+    /// **energy** — the night's shortfall in joules against an accumulator's
+    /// `electric_buffer_capacity`, 0.85 accumulators per panel on Nauvis.
+    /// They come from the same daylight curve by two different integrals and
+    /// neither can be computed from the other, which is why both appear here.
+    ///
+    /// **An accumulator's own `max_energy_production` is not in either.** That
+    /// is its 300 kW *discharge rate*, a per-unit ceiling on delivery, and a
+    /// bank sized on it instead of on its 5 MJ store is wrong by a factor that
+    /// depends on how long the night is. See
+    /// `crate::method::power::solar_bank_for`.
+    #[error(
+        "{panels} solar panels on this network average {average_kw} kW over a day, and carrying \
+         that load through the night needs {accumulators_needed} accumulators of which \
+         {accumulators_standing} stand, so the plan credits the array nothing"
+    )]
+    #[diagnostic(
+        code(planner::solar_bank_short),
+        help(
+            "build the accumulators, or power this from a steam plant; a solar array with no \
+             bank does not run slowly at night, it stops, and the plan cannot tell that apart \
+             from a base that was never built"
+        )
+    )]
+    SolarBankShort {
+        panels: u32,
+        average_kw: f64,
+        accumulators_needed: u32,
+        accumulators_standing: u32,
+    },
+
+    /// Solar panels stand and this world cannot say how large a bank they need.
+    ///
+    /// **Unknown, never zero.** Every term of the sizing comes from the
+    /// surface's own daylight curve and the two prototypes' fields, and any of
+    /// them can be absent — most commonly on a dump taken before the daylight
+    /// channel existed, which is every world this project has archived. A
+    /// planner that read an absent curve as "no night" would size a bank of
+    /// zero and credit the array in full, which is the midnight failure with
+    /// an extra step.
+    ///
+    /// `because` names which term was missing, so a reader can tell a stale
+    /// dump from an unrecognised prototype without re-deriving anything.
+    #[error(
+        "{panels} solar panels stand on this network and the accumulators they need cannot be \
+         sized: {because}"
+    )]
+    #[diagnostic(
+        code(planner::solar_bank_not_sizable),
+        help(
+            "re-dump the world from a game that reports its surface daylight, or power this \
+             from a steam plant, whose output is the same at every hour and needs no bank"
+        )
+    )]
+    SolarBankNotSizable { panels: u32, because: String },
+
     /// The rate asked for needs more cells than one plan may build.
     ///
     /// A bound on work rather than a claim about what a map could hold. Siting

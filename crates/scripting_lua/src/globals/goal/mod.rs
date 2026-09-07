@@ -420,6 +420,15 @@ impl std::error::Error for PlanRefusal {}
 ///   nothing is on the tile that rejection names no blocker, so the footprint
 ///   is remembered as refused and every later replan blames terrain that was
 ///   never there.
+/// - [`SolarBankShort`](PlannerError::SolarBankShort) and
+///   [`SolarBankNotSizable`](PlannerError::SolarBankNotSizable) -- verdicts
+///   about **what stands on the network**, and a refusal the caller can act on
+///   by building accumulators. A solar array with no bank does not run slowly
+///   at night, it stops, so this is a refusal a script sees at plan time
+///   instead of a run that stalls at a tick nothing explains. The second says
+///   the sizing itself is unanswerable -- most often a world dumped before it
+///   reported its surface daylight -- and a script acts on it by re-dumping,
+///   not by asking for less.
 fn refusal_for(err: &PlannerError) -> Option<PlanRefusal> {
     use miette::Diagnostic;
 
@@ -457,6 +466,8 @@ fn refusal_for(err: &PlannerError) -> Option<PlanRefusal> {
         | PlannerError::SustainNoFuelSource { .. }
         | PlannerError::SustainNoRouteForFuel { .. }
         | PlannerError::SustainNoOfftake { .. }
+        | PlannerError::SolarBankShort { .. }
+        | PlannerError::SolarBankNotSizable { .. }
         | PlannerError::ProductNotMakeable(_)
         | PlannerError::FluidNotItem(_) => true,
 

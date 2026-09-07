@@ -2593,8 +2593,16 @@ mod tests {
     /// fixture `the_miner_line_decodes_to_its_37_entities` in
     /// `crates/core/tests/blueprint_decode.rs` already pins at 13
     /// `electric-mining-drill`, 21 `transport-belt` and 3
-    /// `small-electric-pole` -- the counts asserted here are not invented,
-    /// they are that same fixture's own numbers.
+    /// `small-electric-pole` -- those counts are not invented, they are that
+    /// same fixture's own numbers.
+    ///
+    /// **The bill is larger than the block, and that is the point.** Since
+    /// `Goal::Built` gained power wiring it also bills the plant that runs the
+    /// block: 13 electric drills draw 1,170 kW, which one boiler of two engines
+    /// covers at 1,800 kW, plus the pump feeding it and a pole run from the
+    /// plant to the block. A bill that listed only the blueprint's entities
+    /// would describe a block that stands and does nothing -- which is exactly
+    /// what `FurnaceLine` did for 179 entities.
     #[test]
     fn a_plan_for_miner_line_on_an_empty_world_bills_its_materials() {
         use crate::ids::BotId;
@@ -2621,12 +2629,79 @@ mod tests {
         assert_eq!(
             bill,
             BTreeMap::from([
+                ("boiler".to_string(), 1),
+                ("coal".to_string(), 10),
                 ("electric-mining-drill".to_string(), 13),
-                ("small-electric-pole".to_string(), 3),
+                ("offshore-pump".to_string(), 1),
+                ("pipe".to_string(), 3),
+                ("small-electric-pole".to_string(), 11),
+                ("steam-engine".to_string(), 2),
                 ("transport-belt".to_string(), 21),
             ]),
-            "the bill states exactly what MinerLine's 37 entities need, and \
-             nothing else: {bill:?}"
+            "the bill states MinerLine's 37 entities AND the plant that runs \
+             them -- 13 electric drills draw 1,170 kW, so one boiler of two \
+             engines (1,800 kW) and the pump that feeds it are as much a \
+             requirement as the drills. The 8 extra poles beyond the \
+             blueprint's own 3 are the run from the plant to the block: \
+             {bill:?}"
+        );
+    }
+
+    /// **The acceptance test for power wiring: a block plans its own generator.**
+    ///
+    /// `ElectricSmelter` draws 78 kW from six electric inserters and carries no
+    /// generation at all. Before `Goal::Built` called `ensure_powered` it would
+    /// have been built exactly as `FurnaceLine` was — every entity on the right
+    /// tile, drawing nothing, reading as success. A live run had to hand-place
+    /// four solar panels to make it work, disclosed as apparatus.
+    ///
+    /// The smallest block that exercises this: at 78 kW one engine is ample, so
+    /// a plant appearing at all is the signal rather than its size.
+    #[test]
+    fn the_electric_smelter_plans_the_generator_it_needs() {
+        use crate::ids::BotId;
+        use factorio_bot_core::test_utils::fixture_world;
+        use std::sync::Arc;
+
+        let src = std::fs::read_to_string(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .and_then(|p| p.parent())
+                .expect("crates/planner -> crates -> repo root")
+                .join("scripts/rcontest.lua"),
+        )
+        .expect("rcontest.lua readable");
+        let needle = "ElectricSmelter = \"";
+        let start = src.find(needle).expect("ElectricSmelter fixture") + needle.len();
+        let end = start + src[start..].find('"').expect("closing quote");
+        let blueprint = src[start..end].to_string();
+
+        let mut ctx = ExpansionCtx::new(
+            PlanState::from_world(Arc::new(fixture_world()), &[BotId(1)]),
+            BotId(1),
+        );
+        let goal = Goal::Built {
+            blueprint,
+            site: Site::At(Position::new(0.0, 0.0)),
+        };
+        let steps = BuildBlock
+            .expand(&goal, &mut ctx)
+            .expect("a 78 kW block plans, and plans a plant for itself");
+
+        let bill = have_bills(&steps);
+        for part in ["offshore-pump", "boiler", "steam-engine"] {
+            assert!(
+                bill.contains_key(part),
+                "the block draws 78 kW and generates none, so the bill must \
+                 carry a {part}; got {bill:?}"
+            );
+        }
+        // The block's own six inserters must still be billed -- a plant that
+        // replaced the block rather than powering it would also pass the above.
+        assert_eq!(
+            bill.get("inserter"),
+            Some(&6),
+            "the block's own six arms are still its own bill: {bill:?}"
         );
     }
 

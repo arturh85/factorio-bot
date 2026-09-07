@@ -82,9 +82,12 @@
           # Only native/system libraries live here; the language toolchains are
           # pinned in mise.toml (rust, node, pnpm).
           default = pkgs.mkShell {
+            # `mold` is the linker; `.cargo/config.toml` points rustc at it
+            # with `-C link-arg=-fuse-ld=mold` (gcc 15 here, which supports
+            # the flag). Linux only -- mold does not link Mach-O.
             nativeBuildInputs = with pkgs; [ pkg-config sccache ]
               ++ lib.optionals stdenv.hostPlatform.isLinux
-                   ([ patchelf file chromium ] ++ captureTools);
+                   ([ patchelf file chromium mold ] ++ captureTools);
 
             buildInputs = libs;
 

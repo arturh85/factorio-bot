@@ -37,7 +37,7 @@
     "@vitest/coverage-v8": "^4.0.16",
     "@vueuse/core": "14.1.0",
     "ansi-html": "0.0.9",
-    "mermaid": "11.12.2",
+    "mermaid": "11.16.1",
     "monaco-editor": "0.55.1",
     "nanoid": "5.1.6",
     "pinia": "2.3.1",

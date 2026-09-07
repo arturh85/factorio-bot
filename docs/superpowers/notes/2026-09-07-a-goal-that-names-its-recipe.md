@@ -1,6 +1,6 @@
 # A goal that names its recipe
 
-2026-09-07, branch `a-goal-that-names-its-recipe`, rebased onto `76709a2b`.
+2026-09-07, branch `a-goal-that-names-its-recipe`, rebased onto `3399efed`.
 Sequel to `2026-09-07-a-machine-chosen-by-what-it-crafts.md`, whose closing
 section is this task: the planner's own refusal said *"ask for a recipe by name
 rather than for the product"*, and there was no way to do it.
@@ -148,9 +148,10 @@ vocabulary was built for is ambiguous regardless of the mod set.
 ## Baselines: nothing moved
 
 Re-measured by me on **one binary each**, release, `--bots 1,2,3,4`, master at
-`76709a2b` and the branch rebased onto it:
+`3399efed` and the branch rebased onto it. (Also measured against `76709a2b`
+before master moved twice under me; identical both times.)
 
-| goal | master `76709a2b` | branch |
+| goal | master `3399efed` | branch |
 |---|---|---|
 | `researched:automation` (`map.json`) | 176 / 21,784 | **176 / 21,784** |
 | `producing:automation-science-pack:6` | 316 / 22,457 | **316 / 22,457** |

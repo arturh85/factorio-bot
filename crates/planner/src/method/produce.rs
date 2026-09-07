@@ -1010,6 +1010,7 @@ pub(crate) fn drill_only_steps(
             item: item.into(),
             count: amount,
             whose: Holder::Share(ctx.chain_actor),
+            via: None,
         }));
     }
     let build = ctx
@@ -1131,6 +1132,7 @@ pub(crate) fn cell_steps_fuelled(
             item: item.into(),
             count: amount,
             whose: Holder::Share(ctx.chain_actor),
+            via: None,
         }));
     }
 
@@ -1617,6 +1619,7 @@ impl Method for PlaceDrill {
             need,
             whose,
             unlocks,
+            ..
         }) = demand(goal, &ctx.state)
         else {
             return Err(PlannerError::NoApplicableMethod {
@@ -1704,11 +1707,13 @@ impl Method for PlaceDrill {
                                     count: left,
                                     whose: whose.clone(),
                                     unlocks: unlocks.map(str::to_owned),
+                                    via: None,
                                 },
                                 Goal::Have { count, .. } => Goal::Have {
                                     item: item.clone(),
                                     count: count.saturating_sub(need.saturating_sub(left)),
                                     whose: whose.clone(),
+                                    via: None,
                                 },
                                 _ => unreachable!("`demand` admits only Have and Produced"),
                             };
@@ -1728,6 +1733,7 @@ impl Method for PlaceDrill {
                     count: left,
                     whose: whose.clone(),
                     unlocks: unlocks.map(str::to_owned),
+                    via: None,
                 },
                 _ => Goal::Have {
                     item: item.clone(),
@@ -1736,6 +1742,7 @@ impl Method for PlaceDrill {
                         _ => left,
                     },
                     whose: whose.clone(),
+                    via: None,
                 },
             }));
             return Ok(steps);
@@ -2314,6 +2321,7 @@ fn drain_steps(
         item: "coal".into(),
         count: drill_coal.saturating_add(furnace_coal),
         whose: Holder::Share(ctx.chain_actor),
+        via: None,
     }));
     let fuel_ids = fuel_both(
         ctx,
@@ -2549,6 +2557,7 @@ fn open_cell_steps(
             item: bill_item.into(),
             count: amount,
             whose: Holder::Share(ctx.chain_actor),
+            via: None,
         }));
     }
 
@@ -3507,11 +3516,13 @@ mod tests {
             item: "iron-plate".into(),
             count: 5,
             whose: Holder::Share(BotId(1)),
+            via: None,
         };
         let trigger_sized = Goal::Have {
             item: "iron-plate".into(),
             count: 50,
             whose: Holder::Share(BotId(1)),
+            via: None,
         };
         assert_eq!(
             reg.find(&small, &s, site).map(|m| m.name()),
@@ -3537,6 +3548,7 @@ mod tests {
                 item: "iron-plate".into(),
                 count: 50,
                 whose: Holder::Anyone,
+                via: None,
             }],
             &s,
             &crate::method::have::default_registry(),
@@ -3652,6 +3664,7 @@ mod tests {
                 item: "iron-plate".into(),
                 count: 50,
                 whose: Holder::Anyone,
+                via: None,
             }],
             &s,
             &crate::method::have::default_registry(),
@@ -3722,6 +3735,7 @@ mod tests {
                     item: "iron-plate".into(),
                     count: 5,
                     whose: Holder::Share(BotId(1)),
+                    via: None,
                 },
             ],
             &s,
@@ -3777,6 +3791,7 @@ mod tests {
                 item: "iron-plate".into(),
                 count: 50,
                 whose: Holder::Share(BotId(1)),
+                via: None,
             }],
             &s,
             &registry_for(&bots),
@@ -4249,6 +4264,7 @@ mod tests {
                 item: "iron-plate".into(),
                 count: 50,
                 whose: Holder::Share(*bot),
+                via: None,
             })
             .collect();
         let net = expand(&goals, &s, &registry_for(&bots), BotId(1)).expect("four shares plan");
@@ -4374,6 +4390,7 @@ mod tests {
                 item: "iron-plate".into(),
                 count: 50,
                 whose: Holder::Anyone,
+                via: None,
             }],
             s,
             &crate::method::have::default_registry(),
@@ -4559,6 +4576,7 @@ mod tests {
                 item: "iron-plate".into(),
                 count: 150,
                 whose: Holder::Anyone,
+                via: None,
             }],
             &s,
             &crate::method::have::default_registry(),
@@ -4611,6 +4629,7 @@ mod tests {
                 item: "iron-plate".into(),
                 count: 600,
                 whose: Holder::Anyone,
+                via: None,
             }],
             &s,
             &crate::method::have::default_registry(),

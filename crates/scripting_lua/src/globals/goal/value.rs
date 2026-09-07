@@ -38,9 +38,12 @@ pub(crate) fn install_goal_constructors(lua: &Lua, table: &LuaTable) -> LuaResul
             move |lua, (item, count, opts): (LuaValue, LuaValue, Option<LuaTable>)| {
                 let item = require_item(item)?;
                 let count = require_count(count)?;
-                let bot = match &opts {
-                    Some(opts) => require_bot(opts.get("bot")?)?,
-                    None => None,
+                let (bot, via) = match &opts {
+                    Some(opts) => (
+                        require_bot(opts.get("bot")?)?,
+                        require_via(opts.get("via")?)?,
+                    ),
+                    None => (None, None),
                 };
                 let t = lua.create_table()?;
                 t.set("kind", "have")?;
@@ -48,6 +51,13 @@ pub(crate) fn install_goal_constructors(lua: &Lua, table: &LuaTable) -> LuaResul
                 t.set("count", count)?;
                 if let Some(bot) = bot {
                     t.set("bot", bot)?;
+                }
+                // Set only when the caller named one. A goal table with no
+                // `via` key is what every existing script produces, and
+                // `goal_from_lua` reads its absence as `None` -- the caller
+                // did not choose -- rather than as an empty choice.
+                if let Some(via) = via {
+                    t.set("via", via)?;
                 }
                 t.set_metatable(Some(mt.clone()))?;
                 Ok(t)
@@ -217,7 +227,13 @@ pub(crate) fn goal_from_lua(value: &LuaTable) -> LuaResult<Goal> {
                 Some(bot) => Holder::Bot(BotId(bot)),
                 None => Holder::Anyone,
             };
-            Ok(Goal::Have { item, count, whose })
+            let via = require_via(value.get("via")?)?;
+            Ok(Goal::Have {
+                item,
+                count,
+                whose,
+                via,
+            })
         }
         "researched" => Ok(Goal::Researched(require_technology(
             value.get("technology")?,
@@ -267,7 +283,10 @@ fn render_goal(t: &LuaTable) -> LuaResult<String> {
         "have" => {
             let item = require_item(t.get("item")?)?;
             let count = require_count(t.get("count")?)?;
-            Ok(format!("have {count} {item}"))
+            match require_via(t.get("via")?)? {
+                Some(recipe) => Ok(format!("have {count} {item} via {recipe}")),
+                None => Ok(format!("have {count} {item}")),
+            }
         }
         "researched" => Ok(format!(
             "researched {}",
@@ -400,6 +419,40 @@ fn require_table_field(value: LuaValue, field: &str) -> LuaResult<LuaTable> {
 
 fn require_item(value: LuaValue) -> LuaResult<String> {
     require_nonempty_string(value, "item")
+}
+
+/// `goal.have`'s optional `via`: the **recipe** that is to make the item.
+///
+/// # Absent is not a value, and this is where the two could be confused
+///
+/// A Lua table has no null, so a missing key and an explicit `nil` arrive
+/// identically, and both mean *the caller did not choose* -- exactly what
+/// `Goal::Have::via = None` means. What is refused here is an empty string
+/// and a non-string: `{via = ""}` is a caller who meant to name a recipe and
+/// named nothing, and letting it through as `Some("")` would reach the
+/// planner as a recipe that does not exist and be refused a rung later with
+/// a message about the world instead of about the script.
+///
+/// Raises on the line that built the goal, like every other `require_*` here.
+fn require_via(value: LuaValue) -> LuaResult<Option<String>> {
+    match value {
+        LuaValue::Nil => Ok(None),
+        LuaValue::String(s) => {
+            let s = s.to_string_lossy();
+            if s.is_empty() {
+                Err(goal_error(
+                    "goal via must be a non-empty recipe name; omit it entirely to let the \
+                     planner choose",
+                ))
+            } else {
+                Ok(Some(s))
+            }
+        }
+        other => Err(goal_error(format!(
+            "goal via must be a recipe name string, got a {}",
+            other.type_name()
+        ))),
+    }
 }
 
 fn require_technology(value: LuaValue) -> LuaResult<String> {
@@ -598,6 +651,92 @@ mod tests {
         .expect("script");
     }
 
+    /// `{ via = "recipe" }` names the recipe, and **absence is not a value**:
+    /// a goal built without it has no `via` key at all, and converts to
+    /// `via: None` -- the shape every script written before this option
+    /// existed produces.
+    #[test]
+    fn have_can_name_the_recipe_that_makes_it() {
+        let lua = lua_with_goal();
+        let named: LuaTable = lua
+            .load(r#"return goal.have("petroleum-gas", 100, { via = "basic-oil-processing" })"#)
+            .eval()
+            .expect("script");
+        assert_eq!(
+            goal_from_lua(&named).expect("converts"),
+            Goal::Have {
+                item: "petroleum-gas".into(),
+                count: 100,
+                whose: Holder::Anyone,
+                via: Some("basic-oil-processing".into()),
+            }
+        );
+        assert!(
+            named.get::<LuaValue>("via").expect("via").is_string(),
+            "the key is set on the table a script can inspect"
+        );
+
+        let plain: LuaTable = lua
+            .load(r#"return goal.have("iron-plate", 5)"#)
+            .eval()
+            .expect("script");
+        assert!(
+            matches!(plain.get::<LuaValue>("via").expect("via"), LuaValue::Nil),
+            "no key at all, not an empty one"
+        );
+        assert_eq!(
+            goal_from_lua(&plain).expect("converts"),
+            Goal::Have {
+                item: "iron-plate".into(),
+                count: 5,
+                whose: Holder::Anyone,
+                via: None,
+            }
+        );
+    }
+
+    /// `tostring` shows the recipe, and shows it the way the planner's own
+    /// `Display` does -- `render_goal` is a second, hand-maintained copy and
+    /// has already drifted once for this very arm.
+    #[test]
+    fn a_named_recipe_renders_the_way_the_planner_renders_it() {
+        let lua = lua_with_goal();
+        let t: LuaTable = lua
+            .load(r#"return goal.have("petroleum-gas", 100, { via = "basic-oil-processing" })"#)
+            .eval()
+            .expect("script");
+        assert_eq!(
+            render_goal(&t).expect("render_goal"),
+            "have 100 petroleum-gas via basic-oil-processing"
+        );
+        // And the unqualified rendering is untouched, which is what every
+        // existing script's `tostring` prints.
+        let plain: LuaTable = lua
+            .load(r#"return goal.have("iron-plate", 5)"#)
+            .eval()
+            .expect("script");
+        assert_eq!(render_goal(&plain).expect("render_goal"), "have 5 iron-plate");
+    }
+
+    /// An empty `via` is a caller who meant to name a recipe and named
+    /// nothing. Refused here, on the line that built the goal, rather than
+    /// travelling to the planner as a recipe no world has.
+    #[test]
+    fn an_empty_via_is_refused_rather_than_treated_as_absent() {
+        let lua = lua_with_goal();
+        let err = lua
+            .load(r#"return goal.have("iron-plate", 5, { via = "" })"#)
+            .eval::<LuaTable>()
+            .expect_err("an empty recipe name raises");
+        assert!(err.to_string().contains("non-empty recipe name"), "{err}");
+
+        let err = lua
+            .load(r#"return goal.have("iron-plate", 5, { via = 7 })"#)
+            .eval::<LuaTable>()
+            .expect_err("a non-string recipe raises");
+        assert!(err.to_string().contains("recipe name string"), "{err}");
+    }
+
     #[test]
     fn shape_errors_raise_at_construction() {
         let lua = lua_with_goal();
@@ -742,12 +881,14 @@ mod tests {
                 Goal::Have {
                     item: "iron-plate".into(),
                     count: 5,
-                    whose: Holder::Anyone
+                    whose: Holder::Anyone,
+                    via: None,
                 },
                 Goal::Have {
                     item: "coal".into(),
                     count: 2,
-                    whose: Holder::Bot(BotId(3))
+                    whose: Holder::Bot(BotId(3)),
+                    via: None,
                 },
                 Goal::Researched("automation".into()),
                 Goal::Producing {

@@ -125,6 +125,7 @@ fn run_plan(state: &PlanState) -> ActionNetwork {
             item: "iron-plate".into(),
             count: 50,
             whose: Holder::Bot(BotId(1)),
+            via: None,
         }],
         state,
         &registry_for(&bots),

@@ -1259,7 +1259,13 @@ pub enum PlannerError {
              needs a method that stands one up first"
         )
     )]
-    ProductNotMakeable(#[from] crate::products::ProductRefusal),
+    /// Boxed, like [`PlannerError::CannotFabricate`] beside it: the refusal
+    /// carries a `Vec<Candidate>` per tier and, since a caller can name a
+    /// recipe, up to two of them at once. Unboxed it made every
+    /// `Result<_, PlannerError>` in the crate 128 bytes wide
+    /// (`clippy::result_large_err`), which is a cost paid by every function
+    /// that never refuses.
+    ProductNotMakeable(#[from] Box<crate::products::ProductRefusal>),
 
     /// A [`crate::goal::Goal::Have`] was stated about a fluid.
     ///

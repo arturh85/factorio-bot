@@ -295,6 +295,7 @@ fn a_fluid_ingredient_is_refused_with_the_machine_named() {
         item: "plastic-bar".into(),
         count: 2,
         whose: Holder::Anyone,
+        via: None,
     };
 
     let before = plan_error(
@@ -337,6 +338,7 @@ fn the_same_recipe_without_its_fluid_plans_in_the_named_machine() {
         item: "plastic-bar".into(),
         count: 2,
         whose: Holder::Anyone,
+        via: None,
     };
     let net = expand(&[goal], &state, &registry, BOTS[0])
         .expect("an all-item chemistry recipe plans once the machine is nameable");
@@ -379,6 +381,7 @@ fn a_fluid_product_is_refused_with_the_machine_named() {
             count: 50,
             whose: Holder::Anyone,
             unlocks: None,
+            via: None,
         },
     );
     assert!(said.contains("chemical-plant"), "{said}");
@@ -400,6 +403,7 @@ fn petroleum_gas_refuses_for_a_different_reason_once_the_machine_is_nameable() {
         count: 100,
         whose: Holder::Anyone,
         unlocks: None,
+        via: None,
     };
     let before = plan_error(live_state_with(&BOTS, false, |_| {}), goal());
     assert!(

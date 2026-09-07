@@ -517,6 +517,7 @@ mod tests {
             item: "iron-ore".into(),
             count,
             whose: Holder::Anyone,
+            via: None,
         }
     }
 

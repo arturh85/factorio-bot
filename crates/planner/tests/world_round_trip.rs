@@ -63,6 +63,7 @@ fn goal() -> Goal {
         item: "automation-science-pack".into(),
         count: 10,
         whose: Holder::Anyone,
+        via: None,
     }
 }
 

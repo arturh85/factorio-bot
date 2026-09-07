@@ -518,6 +518,7 @@ fn a_walled_in_bot_is_not_sized_a_share() {
         item: "iron-ore".into(),
         count: 8,
         whose: Holder::Anyone,
+        via: None,
     };
     let net = expand(&[goal], &state, &registry_for(&bots), BotId(1))
         .expect("eight iron ore, four bots, a fixture patch with room for them");
@@ -584,6 +585,7 @@ fn with_nothing_recorded_every_bot_is_still_sized_a_share() {
         item: "iron-ore".into(),
         count: 8,
         whose: Holder::Anyone,
+        via: None,
     };
     let net = expand(&[goal], &state, &registry_for(&bots), BotId(1)).expect("expands");
     let owners: BTreeSet<BotId> = net.actions().filter_map(|a| owner_of(&net, a)).collect();
@@ -649,6 +651,7 @@ fn when_every_bot_is_walled_in_the_split_is_unchanged() {
         item: "iron-ore".into(),
         count: 8,
         whose: Holder::Anyone,
+        via: None,
     };
     let net = expand(&[goal], &state, &registry_for(&bots), BotId(1))
         .expect("a plan is still made when nobody can walk");

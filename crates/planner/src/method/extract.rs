@@ -359,6 +359,7 @@ pub(crate) fn extractor_steps(
             item: extractor.clone(),
             count: 1,
             whose: Holder::Share(ctx.chain_actor),
+            via: None,
         }));
 
         // The one place that decides power, shared with `method::assemble`

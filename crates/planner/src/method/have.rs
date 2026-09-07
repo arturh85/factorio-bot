@@ -110,26 +110,46 @@ pub(crate) struct Demand<'a> {
     pub(crate) whose: &'a Holder,
     /// A technology this production unlocks. Always `None` for `Have`.
     pub(crate) unlocks: Option<&'a str>,
+    /// The recipe the caller named, if any -- see [`Goal::Produced`]'s `via`.
+    ///
+    /// Carried on `Demand` rather than read off the goal by each method for
+    /// the reason this struct exists at all: `applicable` and `expand` must
+    /// answer from one place or a method claims a goal and then refuses it
+    /// for a different reason than the one it was selected on.
+    ///
+    /// **`None` is "the caller did not choose"**, which is every goal written
+    /// before 2026-09-07 and every goal that does not need to choose. It is
+    /// not "a recipe that does not exist": that is refused by name, before
+    /// any method is asked, in [`crate::method::named_recipe_refusal`].
+    pub(crate) via: Option<&'a str>,
 }
 
 pub(crate) fn demand<'a>(goal: &'a Goal, state: &PlanState) -> Option<Demand<'a>> {
     match goal {
-        Goal::Have { item, count, whose } => Some(Demand {
+        Goal::Have {
+            item,
+            count,
+            whose,
+            via,
+        } => Some(Demand {
             item,
             need: shortfall(state, item, *count, whose),
             whose,
             unlocks: None,
+            via: via.as_deref(),
         }),
         Goal::Produced {
             item,
             count,
             whose,
             unlocks,
+            via,
         } => Some(Demand {
             item,
             need: *count,
             whose,
             unlocks: unlocks.as_deref(),
+            via: via.as_deref(),
         }),
         _ => None,
     }
@@ -209,7 +229,9 @@ pub(crate) fn attach_unlock(steps: &mut [Step], item: &ItemId, unlocks: Option<&
 /// definitely unmet settles the bundle whatever the rest are.
 pub fn holds(goal: &Goal, state: &PlanState) -> Option<bool> {
     match goal {
-        Goal::Have { item, count, whose } => Some(shortfall(state, item, *count, whose) == 0),
+        Goal::Have {
+            item, count, whose, ..
+        } => Some(shortfall(state, item, *count, whose) == 0),
         // `PlanState::is_researched` answers over two sources: the
         // technologies this plan has already scheduled research for (its own
         // overlay) and the ones the world reports as researched (reality).
@@ -1255,6 +1277,7 @@ fn smelt_steps(
         need,
         whose,
         unlocks,
+        ..
     }) = demand(goal, &ctx.state)
     else {
         return Err(PlannerError::NoApplicableMethod {
@@ -1706,6 +1729,7 @@ fn smelt_steps(
             item: ingredient.clone(),
             count: amount.saturating_mul(runs),
             whose: whose.clone(),
+            via: None,
         }));
     }
     // Zero when every furnace of the bank was handed to a supplier, and then
@@ -1717,6 +1741,7 @@ fn smelt_steps(
             item: "coal".into(),
             count: coal,
             whose: whose.clone(),
+            via: None,
         }));
     }
     // Only the furnaces that do not exist yet. A bank that adopted every
@@ -1727,6 +1752,7 @@ fn smelt_steps(
             item: "stone-furnace".into(),
             count: to_build,
             whose: whose.clone(),
+            via: None,
         }));
     }
 
@@ -1928,12 +1954,14 @@ fn smelt_steps(
                 item: "stone-furnace".into(),
                 count: 1,
                 whose: Holder::Share(supplier),
+                via: None,
             }));
         }
         block.push(Step::Subgoal(Goal::Have {
             item: "coal".into(),
             count: furnace_slot.coal,
             whose: Holder::Share(supplier),
+            via: None,
         }));
         if let Some(place_id) = place_id {
             block.push(Step::Act(Box::new(place_action(
@@ -2179,6 +2207,7 @@ fn smelt_steps(
                 item: ore.clone(),
                 count: target,
                 whose: Holder::Share(bot),
+                via: None,
             })];
             let mut left = load;
             for (slot, &(index, load_index)) in cells.iter().enumerate() {
@@ -2644,13 +2673,20 @@ impl Method for Withdraw {
 
     fn expand(&self, goal: &Goal, ctx: &mut ExpansionCtx) -> Result<Vec<Step>, PlannerError> {
         let Some(Demand {
-            item, need, whose, ..
+            item,
+            need,
+            whose,
+            via,
+            ..
         }) = demand(goal, &ctx.state)
         else {
             return Err(PlannerError::NoApplicableMethod {
                 goal: goal.to_string(),
             });
         };
+        // The goal restated at the end of this method is the *same* goal, so
+        // a recipe the caller named travels with it. See `SplitAcrossBots`.
+        let via = via.map(str::to_string);
         // One helper for both halves, so `applicable` and `expand` cannot
         // answer differently -- which is how a method comes to claim a goal it
         // then refuses.
@@ -2742,7 +2778,12 @@ impl Method for Withdraw {
         // so `shortfall` recomputes the difference itself, and handing it a
         // pre-subtracted number would subtract twice.
         if remaining > 0 {
-            steps.push(Step::Subgoal(Goal::Have { item, count, whose }));
+            steps.push(Step::Subgoal(Goal::Have {
+                item,
+                count,
+                whose,
+                via,
+            }));
         }
         Ok(steps)
     }
@@ -3350,6 +3391,7 @@ impl Method for HandCraft {
             need,
             whose,
             unlocks,
+            ..
         }) = demand(goal, &ctx.state)
         else {
             return Err(PlannerError::NoApplicableMethod {
@@ -3396,6 +3438,7 @@ impl Method for HandCraft {
                 item: ingredient.clone(),
                 count: total,
                 whose: whose.clone(),
+                via: None,
             }));
             pre.push(Condition::HasItem {
                 who: Actor::Role,
@@ -4135,6 +4178,7 @@ impl Method for Researched {
                 count: *count,
                 whose: Holder::Share(lead.unwrap_or(ctx.chain_actor)),
                 unlocks: Some(name.clone()),
+                via: None,
             }),
             (Some(TriggerRequirement::Mine { .. }), Some(MineTrigger::ByHand { item, count })) => {
                 Some(Goal::Produced {
@@ -4142,6 +4186,7 @@ impl Method for Researched {
                     count,
                     whose: Holder::Share(lead.unwrap_or(ctx.chain_actor)),
                     unlocks: Some(name.clone()),
+                    via: None,
                 })
             }
             (Some(TriggerRequirement::Mine { .. }), Some(MineTrigger::ByMachine { entity })) => {
@@ -4499,6 +4544,7 @@ impl Method for Researched {
                     item,
                     count: target,
                     whose: Holder::Share(bot),
+                    via: None,
                 }));
             }
             for (item, lab, count) in delivery.inserts {
@@ -4769,6 +4815,7 @@ fn lab_build_steps(
             item: POLE.into(),
             count: 1,
             whose: Holder::Share(builder),
+            via: None,
         }));
         let entity = pole_entity(&ctx.state, pole);
         let min_radius = ctx.state.placement_clearance(POLE).unwrap_or(0.0);
@@ -4817,6 +4864,7 @@ fn lab_build_steps(
             item: LAB.into(),
             count: 1,
             whose: Holder::Share(builder),
+            via: None,
         }));
         let lab = FactorioEntity {
             name: LAB.into(),
@@ -5153,7 +5201,10 @@ impl Method for SplitAcrossBots {
     }
 
     fn applicable(&self, goal: &Goal, state: &PlanState) -> bool {
-        let Goal::Have { item, count, whose } = goal else {
+        let Goal::Have {
+            item, count, whose, ..
+        } = goal
+        else {
             return false;
         };
         if !matches!(whose, Holder::Anyone) {
@@ -5165,7 +5216,13 @@ impl Method for SplitAcrossBots {
     }
 
     fn expand(&self, goal: &Goal, ctx: &mut ExpansionCtx) -> Result<Vec<Step>, PlannerError> {
-        let Goal::Have { item, count, whose } = goal else {
+        let Goal::Have {
+            item,
+            count,
+            whose,
+            via,
+        } = goal
+        else {
             return Err(PlannerError::NoApplicableMethod {
                 goal: goal.to_string(),
             });
@@ -5232,6 +5289,11 @@ impl Method for SplitAcrossBots {
                     item: item.clone(),
                     count: target,
                     whose: Holder::Share(bot),
+                    // A share is the same want, sized smaller: a recipe the
+                    // caller named applies to every share of it. Dropping it
+                    // here would make the shares ambiguous again and refuse
+                    // one rung down, naming a share nobody asked for.
+                    via: via.clone(),
                 })
             })
             .collect();
@@ -5726,6 +5788,7 @@ impl Method for SharedSmelt {
             item: ore,
             count: need,
             whose: Holder::Anyone,
+            via: None,
         })
     }
 
@@ -6190,6 +6253,7 @@ impl Method for Stockpile {
             item: item.clone(),
             count: need,
             whose: Holder::Anyone,
+            via: None,
         })
     }
 
@@ -6199,10 +6263,17 @@ impl Method for Stockpile {
         };
         let taker = Self::taker(goal).ok_or_else(refuse)?;
         let Demand {
-            item, need, whose, ..
+            item,
+            need,
+            whose,
+            via,
+            ..
         } = demand(goal, &ctx.state).ok_or_else(refuse)?;
         let item = item.clone();
         let whose = whose.clone();
+        // The goal restated below is the *same* goal, so the recipe the
+        // caller named travels with it. See `SplitAcrossBots`' share.
+        let via = via.map(str::to_string);
         let count = match goal {
             Goal::Have { count, .. } => *count,
             // Unreachable: `taker` refuses everything that is not a `Have`.
@@ -6225,7 +6296,12 @@ impl Method for Stockpile {
         // does -- and the fallback is byte-identical to `Mine`'s own
         // expansion, because it *is* a subgoal `Mine` will claim.
         let Some(shares) = shares else {
-            return Ok(vec![Step::Subgoal(Goal::Have { item, count, whose })]);
+            return Ok(vec![Step::Subgoal(Goal::Have {
+                item,
+                count,
+                whose,
+                via,
+            })]);
         };
 
         let mut steps: Vec<Step> = Vec::new();
@@ -6275,6 +6351,7 @@ impl Method for Stockpile {
                             item: BUFFER_CHEST.into(),
                             count: 1,
                             whose: Holder::Share(builder),
+                            via: None,
                         }),
                         Step::Act(Box::new(Action {
                             id: place_id,
@@ -6359,6 +6436,7 @@ impl Method for Stockpile {
                             .available(&Holder::Share(*supplier), &item)
                             .saturating_add(*share),
                         whose: Holder::Share(*supplier),
+                        via: None,
                     }),
                     Step::Act(Box::new(Action {
                         id,
@@ -6466,7 +6544,12 @@ impl Method for Stockpile {
         // subgoal's own `need` is smaller and cannot come back here for the
         // same items.
         if deposited < need {
-            steps.push(Step::Subgoal(Goal::Have { item, count, whose }));
+            steps.push(Step::Subgoal(Goal::Have {
+                item,
+                count,
+                whose,
+                via,
+            }));
         }
         Ok(steps)
     }
@@ -6631,6 +6714,7 @@ mod tests {
             item: item.into(),
             count,
             whose: Holder::Anyone,
+            via: None,
         }
     }
 
@@ -6794,11 +6878,13 @@ mod tests {
                     item: "lab".into(),
                     count: 1,
                     whose: Holder::Share(BotId(1)),
+                    via: None,
                 },
                 Goal::Have {
                     item: "automation-science-pack".into(),
                     count: 10,
                     whose: Holder::Share(BotId(1)),
+                    via: None,
                 }
             ]
         );
@@ -6867,11 +6953,13 @@ mod tests {
                     item: "lab".into(),
                     count: 1,
                     whose: Holder::Share(BotId(1)),
+                    via: None,
                 },
                 Goal::Have {
                     item: "automation-science-pack".into(),
                     count: 10,
                     whose: Holder::Share(BotId(1)),
+                    via: None,
                 },
             ]
         );
@@ -6884,6 +6972,7 @@ mod tests {
                 item: "automation-science-pack".into(),
                 count: 20,
                 whose: Holder::Share(BotId(1)),
+                via: None,
             }),
             "logistics costs 20 units of one pack, got {:?}",
             subgoals(&logistics)
@@ -6902,16 +6991,19 @@ mod tests {
                     item: "lab".into(),
                     count: 1,
                     whose: Holder::Share(BotId(1)),
+                    via: None,
                 },
                 Goal::Have {
                     item: "automation-science-pack".into(),
                     count: 2,
                     whose: Holder::Share(BotId(1)),
+                    via: None,
                 },
                 Goal::Have {
                     item: "iron-plate".into(),
                     count: 6,
                     whose: Holder::Share(BotId(1)),
+                    via: None,
                 },
             ]
         );
@@ -7618,6 +7710,7 @@ mod tests {
                 item: POLE.into(),
                 count: 1,
                 whose: Holder::Share(BotId(1)),
+                via: None,
             }),
             "the bot that places the pole has to be asked to hold one: {:?}",
             subgoals(&steps)
@@ -7774,6 +7867,7 @@ mod tests {
             item: "iron-plate".into(),
             count: 10,
             whose: Holder::Anyone,
+            via: None,
         };
         assert_eq!(holds(&goal, &s), Some(true), "24 between them covers 10");
 
@@ -7781,6 +7875,7 @@ mod tests {
             item: "iron-plate".into(),
             count: 10,
             whose: Holder::Share(BotId(2)),
+            via: None,
         };
         assert_eq!(
             holds(&per_bot, &s),
@@ -7804,6 +7899,7 @@ mod tests {
                     count: 50,
                     whose: Holder::Share(BotId(1)),
                     unlocks: None,
+                    via: None,
                 },
                 &s
             ),
@@ -7834,11 +7930,13 @@ mod tests {
             item: "iron-plate".into(),
             count: 4,
             whose: Holder::Anyone,
+            via: None,
         };
         let unmet = Goal::Have {
             item: "iron-plate".into(),
             count: 40,
             whose: Holder::Anyone,
+            via: None,
         };
         // `Produced` is now the only goal possession cannot settle;
         // `Producing` became answerable the day it got a method.
@@ -7847,6 +7945,7 @@ mod tests {
             count: 30,
             whose: Holder::Anyone,
             unlocks: None,
+            via: None,
         };
         assert_eq!(holds(&Goal::All(vec![met.clone()]), &s), Some(true));
         assert_eq!(
@@ -7879,6 +7978,7 @@ mod tests {
                 item: "iron-plate".into(),
                 count,
                 whose: Holder::Anyone,
+                via: None,
             };
             let net = expand(
                 std::slice::from_ref(&goal),
@@ -8120,6 +8220,7 @@ mod tests {
                 item: "automation-science-pack".into(),
                 count: 10,
                 whose: Holder::Anyone,
+                via: None,
             }],
             &s,
             &registry_for(&bots),
@@ -8169,6 +8270,7 @@ mod tests {
                 item: "iron-ore".into(),
                 count: 5,
                 whose: Holder::Anyone,
+                via: None,
             }],
             &s,
             &default_registry(),
@@ -8186,6 +8288,7 @@ mod tests {
                 item: "iron-ore".into(),
                 count: 5,
                 whose: Holder::Anyone,
+                via: None,
             }],
             &s,
             &default_registry(),
@@ -8273,6 +8376,7 @@ mod tests {
                 item: "crude-oil".into(),
                 count: 10,
                 whose: Holder::Anyone,
+                via: None,
             }],
             &s,
             &registry_for(&[BotId(1), BotId(2)]),
@@ -8330,6 +8434,7 @@ mod tests {
                 item: "crude-oil".into(),
                 count: 10,
                 whose: Holder::Anyone,
+                via: None,
             }],
             &s,
             &registry_for(&[BotId(1)]),
@@ -8361,6 +8466,7 @@ mod tests {
                 item: "crude-oil".into(),
                 count: 10,
                 whose: Holder::Bot(BotId(1)),
+                via: None,
             }],
             &s,
             &registry_for(&[BotId(1)]),
@@ -8384,6 +8490,7 @@ mod tests {
             item: "crude-oil".into(),
             count: 10,
             whose: Holder::Anyone,
+            via: None,
         };
         assert_eq!(Mine.concurrency(&goal, &s, 4), None);
         assert!(!Mine.applicable(&goal, &s));
@@ -8443,6 +8550,7 @@ mod tests {
                 item: "uranium-ore".into(),
                 count: 5,
                 whose: Holder::Anyone,
+                via: None,
             }],
             &s,
             &registry_for(&[BotId(1)]),
@@ -8505,6 +8613,7 @@ mod tests {
                 item: "unobtainium".into(),
                 count: 1,
                 whose: Holder::Anyone,
+                via: None,
             }],
             &s,
             &registry_for(&[BotId(1)]),
@@ -8536,6 +8645,7 @@ mod tests {
                 item: "iron-ore".into(),
                 count: 5,
                 whose: Holder::Anyone,
+                via: None,
             }],
             &s,
             &default_registry(),
@@ -8557,6 +8667,7 @@ mod tests {
                 item: "coal".into(),
                 count: 2,
                 whose: Holder::Anyone,
+                via: None,
             }],
             &s,
             &default_registry(),
@@ -8593,6 +8704,7 @@ mod tests {
                 item: "coal".into(),
                 count: 1,
                 whose: Holder::Anyone,
+                via: None,
             }],
             &s,
             &default_registry(),
@@ -8616,6 +8728,7 @@ mod tests {
                 item: "iron-ore".into(),
                 count: 4,
                 whose: Holder::Anyone,
+                via: None,
             }],
             &s,
             &default_registry(),
@@ -8643,6 +8756,7 @@ mod tests {
                 item: "uranium-ore".into(),
                 count: 1,
                 whose: Holder::Anyone,
+                via: None,
             }],
             &s,
             &default_registry(),
@@ -8663,6 +8777,7 @@ mod tests {
                 item: "iron-plate".into(),
                 count: 2,
                 whose: Holder::Anyone,
+                via: None,
             }],
             &s,
             &default_registry(),
@@ -8718,6 +8833,7 @@ mod tests {
                 item: "iron-plate".into(),
                 count: 2,
                 whose: Holder::Anyone,
+                via: None,
             }],
             &s,
             &default_registry(),
@@ -8824,6 +8940,7 @@ mod tests {
                 item: "iron-plate".into(),
                 count: 2,
                 whose: Holder::Anyone,
+                via: None,
             }],
             &s,
             &default_registry(),
@@ -8886,6 +9003,7 @@ mod tests {
                 item: "iron-plate".into(),
                 count: 2,
                 whose: Holder::Anyone,
+                via: None,
             }],
             &s,
             &default_registry(),
@@ -8920,6 +9038,7 @@ mod tests {
                 item: "iron-plate".into(),
                 count: 1,
                 whose: Holder::Anyone,
+                via: None,
             }],
             &s,
             &default_registry(),
@@ -8958,6 +9077,7 @@ mod tests {
                 item: "iron-plate".into(),
                 count: 2,
                 whose: Holder::Anyone,
+                via: None,
             }],
             &s,
             &default_registry(),
@@ -8977,6 +9097,7 @@ mod tests {
                 item: "iron-gear-wheel".into(),
                 count: 2,
                 whose: Holder::Anyone,
+                via: None,
             }],
             &s,
             &default_registry(),
@@ -9009,6 +9130,7 @@ mod tests {
                 item: "iron-gear-wheel".into(),
                 count: 2,
                 whose: Holder::Anyone,
+                via: None,
             }],
             &s,
             &default_registry(),
@@ -9048,6 +9170,7 @@ mod tests {
                 item: "lab".into(),
                 count: 1,
                 whose: Holder::Anyone,
+                via: None,
             }],
             &s,
             &default_registry(),
@@ -9108,6 +9231,7 @@ mod tests {
                 item: "automation-science-pack".into(),
                 count: 1,
                 whose: Holder::Anyone,
+                via: None,
             }],
             &s,
             &default_registry(),
@@ -9182,6 +9306,7 @@ mod tests {
                 item: "automation-science-pack".into(),
                 count: 1,
                 whose: Holder::Anyone,
+                via: None,
             }],
             &s,
             &default_registry(),
@@ -9211,6 +9336,7 @@ mod tests {
                 item: "iron-ore".into(),
                 count: 8,
                 whose: Holder::Anyone,
+                via: None,
             }],
             &s,
             &registry_for(&bots),
@@ -9293,6 +9419,7 @@ mod tests {
                 item: "iron-ore".into(),
                 count: 10,
                 whose: Holder::Anyone,
+                via: None,
             }],
             &s,
             &registry_for(&bots),
@@ -9320,6 +9447,7 @@ mod tests {
                 item: "iron-ore".into(),
                 count: 2,
                 whose: Holder::Anyone,
+                via: None,
             }],
             &s,
             &registry_for(&bots),
@@ -9345,11 +9473,13 @@ mod tests {
                     item: "iron-ore".into(),
                     count: 8,
                     whose: Holder::Anyone,
+                    via: None,
                 },
                 Goal::Have {
                     item: "iron-ore".into(),
                     count: 8,
                     whose: Holder::Anyone,
+                    via: None,
                 },
             ])],
             &s,
@@ -9429,6 +9559,7 @@ mod tests {
                     item: item.into(),
                     count,
                     whose: Holder::Anyone,
+                    via: None,
                 },
                 &mut ctx,
             )
@@ -9456,6 +9587,7 @@ mod tests {
                     item: item.into(),
                     count,
                     whose: Holder::Anyone,
+                    via: None,
                 },
                 &mut ctx,
             )
@@ -9667,6 +9799,7 @@ mod tests {
                 item: "iron-ore".into(),
                 count: 1,
                 whose: Holder::Anyone,
+                via: None,
             }],
             &s,
             &registry_for(&bots),
@@ -9707,6 +9840,7 @@ mod tests {
                 item: "automation-science-pack".into(),
                 count: 1,
                 whose: Holder::Anyone,
+                via: None,
             }],
             &s,
             &registry_for(&bots),
@@ -9739,6 +9873,7 @@ mod tests {
                 item: "iron-gear-wheel".into(),
                 count: 1,
                 whose: Holder::Anyone,
+                via: None,
             }],
             &s,
             &registry_for(&bots),
@@ -9781,6 +9916,7 @@ mod tests {
                 item: "iron-ore".into(),
                 count: 6,
                 whose: Holder::Anyone,
+                via: None,
             }],
             &s,
             &registry_for(&bots),
@@ -9811,6 +9947,7 @@ mod tests {
             item: "iron-ore".into(),
             count: 4,
             whose: Holder::Anyone,
+            via: None,
         };
         let steps = split.expand(&goal, &mut ctx).unwrap();
         for step in steps {
@@ -9845,6 +9982,7 @@ mod tests {
             item: "iron-ore".into(),
             count: 4,
             whose: Holder::Anyone,
+            via: None,
         };
         let steps = split.expand(&goal, &mut ctx).unwrap();
         assert_eq!(steps.len(), 2, "one subgoal per distinct bot, not per slot");
@@ -9882,6 +10020,7 @@ mod tests {
             item: "iron-ore".into(),
             count: 10,
             whose: Holder::Anyone,
+            via: None,
         };
         let steps = split.expand(&goal, &mut ctx).unwrap();
         let mut targets: BTreeMap<BotId, u32> = BTreeMap::new();
@@ -9930,6 +10069,7 @@ mod tests {
             item: "iron-plate".into(),
             count: 10,
             whose: Holder::Anyone,
+            via: None,
         };
         let steps = split.expand(&goal, &mut ctx).unwrap();
         let mut targets: BTreeMap<BotId, u32> = BTreeMap::new();
@@ -9977,6 +10117,7 @@ mod tests {
             item: "automation-science-pack".into(),
             count: 10,
             whose: Holder::Anyone,
+            via: None,
         };
 
         let forward = [BotId(1), BotId(2), BotId(3), BotId(4)];
@@ -10024,6 +10165,7 @@ mod tests {
                 item: "iron-plate".into(),
                 count: 12,
                 whose: Holder::Anyone,
+                via: None,
             }],
             &s,
             &registry_for(&bots),
@@ -10041,6 +10183,7 @@ mod tests {
                 item: "iron-plate".into(),
                 count: 13,
                 whose: Holder::Anyone,
+                via: None,
             }],
             &s,
             &registry_for(&bots),
@@ -10079,6 +10222,7 @@ mod tests {
             item: "automation-science-pack".into(),
             count: 1,
             whose: Holder::Anyone,
+            via: None,
         };
         // Both copper-plate and iron-gear-wheel must be produced: they have to
         // meet in one inventory, so this converges.
@@ -10094,6 +10238,7 @@ mod tests {
             item: "iron-gear-wheel".into(),
             count: 1,
             whose: Holder::Anyone,
+            via: None,
         };
         assert!(!HandCraft.converges(&gear, &s));
     }
@@ -10117,6 +10262,7 @@ mod tests {
             item: "iron-plate".into(),
             count: 2,
             whose: Holder::Anyone,
+            via: None,
         };
         assert!(!Smelt.converges(&plate, &s));
     }
@@ -10140,6 +10286,7 @@ mod tests {
                 item: "iron-plate".into(),
                 count: 1,
                 whose: Holder::Anyone,
+                via: None,
             }],
             &s,
             &registry_for(&bots),
@@ -10166,6 +10313,7 @@ mod tests {
                 item: "iron-plate".into(),
                 count: 4,
                 whose: Holder::Anyone,
+                via: None,
             }],
             &s,
             &registry_for(&bots),
@@ -10192,6 +10340,7 @@ mod tests {
                 item: "automation-science-pack".into(),
                 count: 1,
                 whose: Holder::Anyone,
+                via: None,
             }],
             &s,
             &registry_for(&bots),
@@ -10218,6 +10367,7 @@ mod tests {
                 item: "iron-ore".into(),
                 count: 1200,
                 whose: Holder::Anyone,
+                via: None,
             }],
             &s,
             &default_registry(),
@@ -10253,6 +10403,7 @@ mod tests {
                 item: "iron-plate".into(),
                 count: 2,
                 whose: Holder::Anyone,
+                via: None,
             }],
             &s,
             &default_registry(),
@@ -10319,6 +10470,7 @@ mod tests {
                 item: "iron-ore".into(),
                 count: 3,
                 whose: Holder::Bot(BotId(2)),
+                via: None,
             }],
             &s,
             &registry_for(&bots),
@@ -10410,6 +10562,7 @@ mod tests {
             item: "automation-science-pack".into(),
             count: 1,
             whose: Holder::Share(BotId(1)),
+            via: None,
         };
         assert!(
             !HandCraft.applicable(&goal, &s),
@@ -10426,6 +10579,7 @@ mod tests {
             item: "automation-science-pack".into(),
             count: 1,
             whose: Holder::Share(BotId(1)),
+            via: None,
         };
         assert!(HandCraft.applicable(&goal, &s));
     }
@@ -10445,6 +10599,7 @@ mod tests {
                     item: "automation-science-pack".into(),
                     count: 1,
                     whose: Holder::Share(BotId(1)),
+                    via: None,
                 },
                 &mut ctx,
             )
@@ -10485,6 +10640,7 @@ mod tests {
                     item: "iron-gear-wheel".into(),
                     count: 1,
                     whose: Holder::Share(BotId(1)),
+                    via: None,
                 },
                 &mut ctx,
             )
@@ -10562,6 +10718,7 @@ mod tests {
                     item: "automation-science-pack".into(),
                     count: 1,
                     whose: Holder::Share(BotId(1)),
+                    via: None,
                 },
                 &mut ctx,
             )
@@ -10630,6 +10787,7 @@ mod tests {
                 item: "automation-science-pack".into(),
                 count: 1,
                 whose: Holder::Share(BotId(1)),
+                via: None,
             }],
             &s,
             &registry_for(&bots),
@@ -10686,6 +10844,7 @@ mod tests {
                 item: "automation-science-pack".into(),
                 count: 2,
                 whose: Holder::Anyone,
+                via: None,
             }],
             &s,
             &registry_for(&bots),
@@ -10807,12 +10966,14 @@ mod tests {
             item: "iron-plate".into(),
             count: 10,
             whose: Holder::Share(BotId(1)),
+            via: None,
         };
         let made = Goal::Produced {
             item: "iron-plate".into(),
             count: 10,
             whose: Holder::Share(BotId(1)),
             unlocks: None,
+            via: None,
         };
 
         assert!(
@@ -10842,6 +11003,7 @@ mod tests {
                 count: 1,
                 whose: Holder::Share(BotId(1)),
                 unlocks: Some("steam-power".into()),
+                via: None,
             }],
             &s,
             &reg,
@@ -10888,6 +11050,7 @@ mod tests {
                 count: 50,
                 whose: Holder::Share(BotId(1)),
                 unlocks: Some("steam-power".into()),
+                via: None,
             }],
             "the trigger's own work must be planned, and as a production -- \
              `Have` is satisfied by possession, so a bot already carrying fifty \
@@ -11123,6 +11286,7 @@ mod tests {
                 count: 1,
                 whose: Holder::Share(BotId(1)),
                 unlocks: Some("automation-science-pack".into()),
+                via: None,
             }]
         );
     }
@@ -11247,6 +11411,7 @@ mod tests {
                 count: 5,
                 whose: Holder::Share(BotId(1)),
                 unlocks: Some("iron-processing".into()),
+                via: None,
             }]
         );
         let net = expand(
@@ -11508,6 +11673,7 @@ mod tests {
                 count: 1,
                 whose: Holder::Share(BotId(1)),
                 unlocks: Some("automation-science-pack".into()),
+                via: None,
             }],
             "another technology unlocks it, so this trigger is reachable"
         );
@@ -11538,6 +11704,7 @@ mod tests {
                 item: "automation-science-pack".into(),
                 count: 2,
                 whose: Holder::Anyone,
+                via: None,
             }],
             &s,
             &registry_for(&bots),
@@ -11731,6 +11898,7 @@ mod tests {
                 item: "automation-science-pack".into(),
                 count: 4,
                 whose: Holder::Anyone,
+                via: None,
             }],
             &s,
             &registry_for(&bots),
@@ -11848,6 +12016,7 @@ mod tests {
             item: "automation-science-pack".into(),
             count: 4,
             whose: Holder::Anyone,
+            via: None,
         };
         let real = expand(
             std::slice::from_ref(&goal),
@@ -11913,6 +12082,7 @@ mod tests {
                 item: "automation-science-pack".into(),
                 count: 4,
                 whose: Holder::Anyone,
+                via: None,
             }],
             &s,
             &registry_for(&bots),
@@ -11998,6 +12168,7 @@ mod tests {
                 item: "automation-science-pack".into(),
                 count: 4,
                 whose: Holder::Anyone,
+                via: None,
             }],
             &s,
             &registry_for(&bots),
@@ -12083,6 +12254,7 @@ mod tests {
                 item: "lab".into(),
                 count: 1,
                 whose: Holder::Anyone,
+                via: None,
             }],
             &s,
             &default_registry(),
@@ -12140,6 +12312,7 @@ mod tests {
             item: "automation-science-pack".into(),
             count: 4,
             whose: Holder::Anyone,
+            via: None,
         };
         let once = || {
             let s = unlock_state(&bots);
@@ -12188,6 +12361,7 @@ mod tests {
             item: "iron-gear-wheel".into(),
             count,
             whose: Holder::Bot(bot),
+            via: None,
         }
     }
 
@@ -12388,6 +12562,7 @@ mod tests {
             item: "iron-plate".into(),
             count: 10,
             whose: Holder::Share(BotId(1)),
+            via: None,
         };
         assert_eq!(reg.find(&goal, &s, site).map(|m| m.name()), Some("smelt"));
     }
@@ -13370,6 +13545,7 @@ mod tests {
                 item: "wood".into(),
                 count: 1,
                 whose: Holder::Share(BotId(1)),
+                via: None,
             },
             &state,
         );
@@ -13395,6 +13571,7 @@ mod tests {
                 item: "wood".into(),
                 count: 1,
                 whose: Holder::Share(BotId(1)),
+                via: None,
             },
             &state,
         );
@@ -13437,6 +13614,7 @@ mod tests {
                 item: "wood".into(),
                 count: 5,
                 whose: Holder::Share(BotId(1)),
+                via: None,
             },
             &state,
         );
@@ -13468,6 +13646,7 @@ mod tests {
                     item: "wood".into(),
                     count: 1,
                     whose: Holder::Share(BotId(1)),
+                    via: None,
                 },
                 &state,
             );
@@ -13496,6 +13675,7 @@ mod tests {
                 item: "wood".into(),
                 count: 1,
                 whose: Holder::Share(BotId(1)),
+                via: None,
             },
             &state,
         );
@@ -13541,6 +13721,7 @@ mod tests {
                 item: "stone".into(),
                 count: 4,
                 whose: Holder::Share(BotId(1)),
+                via: None,
             },
             &state,
         );
@@ -13576,6 +13757,7 @@ mod tests {
                 item: "stone".into(),
                 count: 4,
                 whose: Holder::Share(BotId(1)),
+                via: None,
             },
             &state,
         );
@@ -13636,6 +13818,7 @@ mod tests {
                 item: "stone".into(),
                 count: 3,
                 whose: Holder::Share(BotId(1)),
+                via: None,
             },
             &state,
         );
@@ -13685,6 +13868,7 @@ mod tests {
             item: "stone".into(),
             count: 3,
             whose: Holder::Share(BotId(1)),
+            via: None,
         };
         assert!(
             chop_beats_mining(&state, &"stone".to_string(), 3, &share),
@@ -13728,6 +13912,7 @@ mod tests {
                 item: "stone".into(),
                 count: 2,
                 whose: Holder::Share(BotId(1)),
+                via: None,
             },
             &mut ctx,
         )
@@ -13737,6 +13922,7 @@ mod tests {
                 item: "wood".into(),
                 count: 1,
                 whose: Holder::Share(BotId(1)),
+                via: None,
             },
             &mut ctx,
         )
@@ -13778,6 +13964,7 @@ mod tests {
                 item: "coal".into(),
                 count: 24,
                 whose: Holder::Share(BotId(1)),
+                via: None,
             },
             &state,
         );
@@ -13891,6 +14078,7 @@ mod tests {
                 item: "stone".into(),
                 count: standing + 1,
                 whose: Holder::Share(BotId(1)),
+                via: None,
             },
             &state,
         );
@@ -13920,6 +14108,7 @@ mod tests {
             item: "wood".into(),
             count: 1,
             whose: Holder::Share(BotId(1)),
+            via: None,
         };
         assert!(
             registry_for(&bots)
@@ -13951,6 +14140,7 @@ mod tests {
                 item: "small-electric-pole".into(),
                 count: 1,
                 whose: Holder::Share(BotId(1)),
+                via: None,
             }],
             &state,
             &registry_for(&bots),
@@ -14388,6 +14578,7 @@ mod tests {
                 item: LAB.into(),
                 count: 1,
                 whose: Holder::Share(bot),
+                via: None,
             })]
         };
         let produced = vec![Step::Subgoal(Goal::Produced {
@@ -14395,6 +14586,7 @@ mod tests {
             count: 1,
             whose: Holder::Share(BotId(2)),
             unlocks: Some("automation-science-pack".into()),
+            via: None,
         })];
 
         let mut covered = BTreeMap::new();
@@ -15691,11 +15883,13 @@ mod stockpiling {
                     item: "iron-plate".into(),
                     count: 30,
                     whose: Holder::Bot(BotId(1)),
+                    via: None,
                 },
                 Goal::Have {
                     item: "iron-plate".into(),
                     count: 30,
                     whose: Holder::Bot(BotId(2)),
+                    via: None,
                 },
             ],
             &state,
@@ -15794,6 +15988,7 @@ mod stockpiling {
                 item: "iron-ore".into(),
                 count: 5,
                 whose: Holder::Anyone,
+                via: None,
             }],
             &s,
             &crate::method::have::default_registry(),
@@ -15829,11 +16024,13 @@ mod stockpiling {
             item: "iron-plate".into(),
             count: 50,
             whose: Holder::Anyone,
+            via: None,
         };
         let ore = Goal::Have {
             item: "iron-ore".into(),
             count: 5,
             whose: Holder::Anyone,
+            via: None,
         };
         for goals in [vec![plates.clone(), ore.clone()], vec![ore, plates]] {
             let s = PlanState::from_world(

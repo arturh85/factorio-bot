@@ -47,12 +47,20 @@ Goal specs (--goal, repeatable; every one is planned together):
 
   have:<item>:<count>        end up holding that many, across the whole roster
   produced:<item>:<count>    cause that many to come into existence
+  have:<item>:<count>:<recipe>       ... made by that recipe, by name
+  produced:<item>:<count>:<recipe>   ... made by that recipe, by name
   producing:<item>:<rate>    stand up machinery yielding that many per minute
   researched:<technology>    finish that research
   charted:<x>:<y>:<radius>   walk bots out until that disc has been looked at
 
   have:iron-plate:50   produced:stone-furnace:2   researched:automation
-  charted:0:0:256
+  charted:0:0:256      produced:petroleum-gas:100:basic-oil-processing
+
+The trailing <recipe> is a RECIPE name, not a product and not a machine, and
+it is optional: leaving it off means what it has always meant -- the planner
+picks, and refuses when more than one recipe it can run makes the product.
+A recipe that does not produce the item, or one no machine here runs, is
+refused by name rather than quietly replaced.
 
 Anything the shorthand cannot say -- a goal held by one named bot, a nested
 Goal::All, a Produced that unlocks a technology -- goes in as --goal-json,
@@ -164,12 +172,40 @@ pub(crate) fn parse_goal(spec: &str) -> Result<Goal> {
       item: (*item).to_owned(),
       count: count(n)?,
       whose: Holder::Anyone,
+      via: None,
     }),
     ["produced", item, n] if !item.is_empty() => Ok(Goal::Produced {
       item: (*item).to_owned(),
       count: count(n)?,
       whose: Holder::Anyone,
       unlocks: None,
+      via: None,
+    }),
+    // `have:<item>:<count>:<recipe>` and `produced:<item>:<count>:<recipe>`.
+    //
+    // The recipe goes in the POSITIONAL form rather than only in
+    // `--goal-json`, deliberately: the refusal that sends a caller here says
+    // *"ask for a recipe by name rather than for the product"*, and a message
+    // whose remedy is "now rewrite your goal as JSON" is a worse seam than a
+    // fourth field. The usual objection to another colon is mis-ordering, and
+    // it does not apply: `<count>` is a number and a recipe name is not, so
+    // `produced:petroleum-gas:basic-oil-processing:100` fails loudly on the
+    // count rather than planning something.
+    //
+    // Arity keeps it unambiguous against every other shorthand -- `sustain`
+    // is the only other four-part form and its tag differs.
+    ["have", item, n, recipe] if !item.is_empty() && !recipe.is_empty() => Ok(Goal::Have {
+      item: (*item).to_owned(),
+      count: count(n)?,
+      whose: Holder::Anyone,
+      via: Some((*recipe).to_owned()),
+    }),
+    ["produced", item, n, recipe] if !item.is_empty() && !recipe.is_empty() => Ok(Goal::Produced {
+      item: (*item).to_owned(),
+      count: count(n)?,
+      whose: Holder::Anyone,
+      unlocks: None,
+      via: Some((*recipe).to_owned()),
     }),
     // `gathered:<resource-entity>` -- note the argument is an ENTITY, not an
     // item: `crude-oil` here names the well in the ground, the same way
@@ -204,8 +240,8 @@ pub(crate) fn parse_goal(spec: &str) -> Result<Goal> {
       radius: coord(radius)?,
     }),
     _ => Err(miette!(
-      "`{spec}` is not a goal. Expected have:<item>:<count>, \
-       produced:<item>:<count>, producing:<item>:<per-minute>, \
+      "`{spec}` is not a goal. Expected have:<item>:<count>[:<recipe>], \
+       produced:<item>:<count>[:<recipe>], producing:<item>:<per-minute>, \
        sustain:<item>:<per-minute>:<window-ticks>, \
        gathered:<resource-entity>, \
        charted:<x>:<y>:<radius> or researched:<technology> -- or --goal-json \
@@ -459,7 +495,8 @@ mod tests {
       Goal::Have {
         item: "iron-plate".into(),
         count: 50,
-        whose: Holder::Anyone
+        whose: Holder::Anyone,
+        via: None,
       }
     );
     assert_eq!(
@@ -468,9 +505,44 @@ mod tests {
         item: "stone-furnace".into(),
         count: 2,
         whose: Holder::Anyone,
-        unlocks: None
+        unlocks: None,
+        via: None,
       }
     );
+    // The fourth field is the recipe, and it is OPTIONAL: the two assertions
+    // above carry `via: None` and are the shape every existing script and
+    // baseline uses.
+    assert_eq!(
+      parse_goal("have:iron-gear-wheel:5:iron-gear-wheel").unwrap(),
+      Goal::Have {
+        item: "iron-gear-wheel".into(),
+        count: 5,
+        whose: Holder::Anyone,
+        via: Some("iron-gear-wheel".into()),
+      }
+    );
+    assert_eq!(
+      parse_goal("produced:petroleum-gas:100:basic-oil-processing").unwrap(),
+      Goal::Produced {
+        item: "petroleum-gas".into(),
+        count: 100,
+        whose: Holder::Anyone,
+        unlocks: None,
+        via: Some("basic-oil-processing".into()),
+      }
+    );
+    // The mis-ordering objection to a fourth colon, answered by types rather
+    // than by care: a recipe name does not parse as a count, so the swapped
+    // form is refused loudly instead of planning something.
+    let err = parse_goal("produced:petroleum-gas:basic-oil-processing:100")
+      .unwrap_err()
+      .to_string();
+    assert!(err.contains("is not a count"), "{err}");
+    // An empty recipe is not "no recipe": it falls through to the catch-all
+    // rather than becoming `via: Some("")`, which would reach the planner as
+    // a recipe nothing has.
+    assert!(parse_goal("have:iron-plate:5:").is_err());
+
     assert_eq!(
       parse_goal("producing:iron-plate:30").unwrap(),
       Goal::Producing {

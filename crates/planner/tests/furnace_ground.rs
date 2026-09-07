@@ -105,11 +105,13 @@ fn two_takers() -> Goal {
             item: "iron-plate".into(),
             count: 5,
             whose: Holder::Bot(BotId(1)),
+            via: None,
         },
         Goal::Have {
             item: "iron-plate".into(),
             count: 5,
             whose: Holder::Bot(BotId(2)),
+            via: None,
         },
     ])
 }

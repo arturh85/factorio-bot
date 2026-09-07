@@ -114,6 +114,7 @@ fn gather_for(bot: BotId, item: &str, count: u32) -> Goal {
         item: item.into(),
         count,
         whose: Holder::Bot(bot),
+        via: None,
     }
 }
 

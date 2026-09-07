@@ -86,6 +86,7 @@ fn plan(item: &str, count: u32, bots: &[BotId]) -> Result<usize, String> {
         item: item.into(),
         count,
         whose: Holder::Anyone,
+        via: None,
     }];
     let actor = pick_chain_actor(&state, bots).expect("a roster has a chain actor");
     expand(&goals, &state, &registry_for(bots), actor)
@@ -148,6 +149,7 @@ fn a_world_that_states_no_amounts_keeps_the_old_rule() {
         item: "iron-plate".into(),
         count: 40,
         whose: Holder::Anyone,
+        via: None,
     }];
     let actor = pick_chain_actor(&state, &bots).expect("a roster has a chain actor");
     expand(&goals, &state, &registry_for(&bots), actor).expect("the guessed world still plans");

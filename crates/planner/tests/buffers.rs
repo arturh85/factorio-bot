@@ -77,6 +77,7 @@ fn have(item: &str, count: u32) -> Goal {
         item: item.into(),
         count,
         whose: Holder::Bot(BotId(1)),
+        via: None,
     }
 }
 
@@ -208,11 +209,13 @@ fn two_goals_cannot_both_spend_the_same_plates() {
                 item: "iron-plate".into(),
                 count: 5,
                 whose: Holder::Bot(BotId(1)),
+                via: None,
             },
             Goal::Have {
                 item: "iron-plate".into(),
                 count: 10,
                 whose: Holder::Bot(BotId(1)),
+                via: None,
             },
         ])],
     );
@@ -354,6 +357,7 @@ fn a_produced_goal_is_never_satisfied_by_a_withdrawal() {
         count: 10,
         whose: Holder::Bot(BotId(1)),
         unlocks: None,
+        via: None,
     };
     assert!(
         !Withdraw.applicable(&produced, &state),

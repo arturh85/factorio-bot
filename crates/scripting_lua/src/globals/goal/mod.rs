@@ -754,11 +754,27 @@ local goal = {}
 -- Any bot may contribute by default: the count is satisfied by the sum across
 -- the whole roster, which is what lets the planner split the work. Pass
 -- `{ bot = id }` to demand one named bot hold them instead.
+--
+-- `{ via = "recipe-name" }` names the RECIPE that is to make it. Leave it out
+-- and the planner picks, which is what every goal did before this option
+-- existed and is still the right answer whenever one recipe makes the item.
+-- Name it when several do: `petroleum-gas` is made by four recipes the
+-- planner can run, and asking for the product alone is refused because
+-- nothing can choose between `basic-oil-processing` and the rest. It is a
+-- recipe name, not a machine name -- the machine follows from the recipe's
+-- category, and naming the machine could not tell basic from advanced oil
+-- processing, since both run in an oil refinery.
+--
+-- A recipe that does not exist, does not produce this item, or has no machine
+-- in this world is refused BY NAME at `goal.plan`, before anything is planned
+-- -- never silently replaced with the planner's own pick.
 -- @string item_name name of the item, e.g. "iron-plate"
 -- @number count how many are wanted; an integer >= 1
--- @tparam[opt] table opts `{ bot = id }` to pin the goal to one bot
+-- @tparam[opt] table opts `{ bot = id }` to pin the goal to one bot,
+--   `{ via = "recipe-name" }` to name the recipe that makes it
 -- @treturn table a goal value
--- @raise if the item name is empty, or the count is not an integer >= 1
+-- @raise if the item name is empty, the count is not an integer >= 1, or
+--   `via` is present and is not a non-empty string
 function goal.have(item_name, count, opts)
 end
 "#,
@@ -1653,6 +1669,7 @@ mod tests {
                 item: "iron-ore".into(),
                 count: 20,
                 whose: Holder::Anyone,
+                via: None,
             }],
             &state,
             &registry_for(&bots),
@@ -1687,6 +1704,7 @@ mod tests {
                 item: "automation-science-pack".into(),
                 count: 10,
                 whose: Holder::Anyone,
+                via: None,
             }],
             &state,
             &registry_for(&bots),
@@ -1762,6 +1780,7 @@ mod tests {
                 item: "iron-ore".into(),
                 count: 1,
                 whose: Holder::Anyone,
+                via: None,
             },
             world: seeded_world_for(&ids),
             roster: roster.to_vec(),

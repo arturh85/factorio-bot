@@ -942,11 +942,13 @@ impl Method for Sustain {
                 item: DRILL.into(),
                 count: 1,
                 whose: Holder::Share(ctx.chain_actor),
+                via: None,
             }));
             steps.push(Step::Subgoal(Goal::Have {
                 item: BUFFER.into(),
                 count: 1,
                 whose: Holder::Share(ctx.chain_actor),
+                via: None,
             }));
             // The drill alone: `cell_steps_fuelled` would place a furnace at
             // the second position, and a buffer is not a furnace. So the drill
@@ -1073,11 +1075,13 @@ impl Method for Sustain {
                         item: ARM.into(),
                         count: 1,
                         whose: Holder::Share(ctx.chain_actor),
+                        via: None,
                     }));
                     steps.push(Step::Subgoal(Goal::Have {
                         item: BUFFER.into(),
                         count: 1,
                         whose: Holder::Share(ctx.chain_actor),
+                        via: None,
                     }));
                     let note = format!("take {} out of the {FURNACE}", spec.item);
                     if let Some(step) = place_one(ctx, ARM, &planned.arm, planned.facing, &note) {
@@ -1138,6 +1142,7 @@ impl Method for Sustain {
                         item: BUFFER.into(),
                         count: 1,
                         whose: Holder::Share(ctx.chain_actor),
+                        via: None,
                     }));
                     if let Some(step) = place_buffer(ctx, &at) {
                         steps.push(step);

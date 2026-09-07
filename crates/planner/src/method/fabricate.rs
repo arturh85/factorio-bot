@@ -165,17 +165,27 @@ fn cannot_possibly_apply(state: &PlanState, item: &str) -> bool {
 }
 
 fn job_for(goal: &Goal, state: &PlanState) -> Option<Job> {
-    let Demand { item, need, .. } = demand(goal, state)?;
+    let Demand {
+        item, need, via, ..
+    } = demand(goal, state)?;
     if need == 0 {
         return None;
     }
-    if cannot_possibly_apply(state, item) {
+    // Skipped when the caller named a recipe: the shortcut asks whether the
+    // *product* has a same-named `crafting`/`smelting` recipe, which answers
+    // a different question than "is the recipe you asked for one of mine".
+    // A goal naming a non-crafting recipe for a product that also has a
+    // crafting one -- the modded case -- would otherwise be declined here and
+    // then claimed by `HandCraft`, silently running the other recipe.
+    if via.is_none() && cannot_possibly_apply(state, item) {
         return None;
     }
     let machines = MachineTable::from_state(state);
     let index = ProductIndex::from_state(state);
+    // `via` is `None` for every goal written before 2026-09-07, and this call
+    // then *is* `sole_recipe_producing` -- see `recipe_producing`'s doc.
     let recipe = index
-        .sole_recipe_producing(item, &Categories::planner_runs(&machines))
+        .recipe_producing(item, &Categories::planner_runs(&machines), via, &machines)
         .ok()?;
     // `crafting` and `smelting` belong to `HandCraft` and `Smelt`, which are
     // registered ahead of this and know far more about them -- banks,
@@ -214,6 +224,7 @@ impl Method for Fabricate {
             need,
             whose,
             unlocks,
+            ..
         }) = demand(goal, &ctx.state)
         else {
             return Err(PlannerError::NoApplicableMethod {
@@ -322,12 +333,14 @@ impl Method for Fabricate {
             item: machine.clone(),
             count: 1,
             whose: whose.clone(),
+            via: None,
         }));
         for (ingredient, amount) in &bill.items {
             steps.push(Step::Subgoal(Goal::Have {
                 item: ingredient.clone(),
                 count: amount.saturating_mul(runs),
                 whose: whose.clone(),
+                via: None,
             }));
         }
 

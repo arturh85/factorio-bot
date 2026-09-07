@@ -51,6 +51,7 @@ fn have(item: &str, count: u32) -> Goal {
         item: item.into(),
         count,
         whose: Holder::Anyone,
+        via: None,
     }
 }
 
@@ -401,6 +402,7 @@ fn have_for(item: &str, count: u32, bot: BotId) -> Goal {
         item: item.into(),
         count,
         whose: Holder::Bot(bot),
+        via: None,
     }
 }
 

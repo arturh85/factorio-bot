@@ -1,6 +1,28 @@
 //! What we want, stated declaratively and without reference to any bot.
 
 use crate::ids::{BotId, ItemId};
+
+/// A recipe's own name, as the game's recipe table keys it.
+///
+/// A plain `String` alias like [`ItemId`], and deliberately **not** the same
+/// alias: a recipe name and an item name coincide for 268 of 662 vanilla
+/// recipes and differ for the other 394 (`crate::products`), so a signature
+/// that said `ItemId` where it meant a recipe would be right often enough to
+/// be believed and wrong wherever it mattered.
+pub type RecipeName = String;
+
+/// Renders the ` via <recipe>` suffix, or nothing at all when no recipe was
+/// named.
+///
+/// One helper for both goal kinds. It writes **nothing** for `None`, which is
+/// what keeps every existing goal's rendering byte-identical -- and those
+/// renderings are quoted verbatim in `PlannerError::NoApplicableMethod`.
+fn write_via(f: &mut std::fmt::Formatter<'_>, via: &Option<RecipeName>) -> std::fmt::Result {
+    match via {
+        Some(recipe) => write!(f, " via {}", recipe),
+        None => Ok(()),
+    }
+}
 use factorio_bot_core::types::Position;
 use serde::{Deserialize, Serialize};
 
@@ -140,6 +162,12 @@ pub enum Goal {
         item: ItemId,
         count: u32,
         whose: Holder,
+        /// **Which recipe**, when asking for the product is ambiguous.
+        ///
+        /// See [`Goal::Produced::via`] — one meaning, two goal kinds, and
+        /// [`crate::method::have::demand`] reads it for both.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        via: Option<RecipeName>,
     },
     Researched(String),
     /// Cause `count` of `item` to come into existence.
@@ -163,6 +191,42 @@ pub enum Goal {
         /// two cannot drift apart.
         whose: Holder,
         unlocks: Option<String>,
+        /// **Which recipe** is to make it, by recipe name, when asking for
+        /// the *product* does not say.
+        ///
+        /// # Absent is not a value
+        ///
+        /// `None` is *the caller did not choose*, and it is the only shape
+        /// every existing goal, script and baseline has. It means exactly
+        /// what it meant before this field existed: the planner picks, and
+        /// [`crate::products::ProductIndex::sole_recipe_producing`] refuses
+        /// with [`crate::products::ProductRefusal::Ambiguous`] when more than
+        /// one admitted recipe produces the product. `Some(name)` is a
+        /// *choice*, and a wrong one is refused by name rather than quietly
+        /// replaced with the planner's own pick — see
+        /// [`crate::method::named_recipe_refusal`], which runs **before any
+        /// method is asked** for the same reason the fluid guard beside it
+        /// does: a goal whose recipe does not produce its product cannot be
+        /// stated, so nothing should get the chance to satisfy it some other
+        /// way.
+        ///
+        /// # Why this is a qualifier and not a goal kind
+        ///
+        /// "petroleum gas via basic-oil-processing" is the same *want* as
+        /// "petroleum gas"; what differs is how it is to be met. A tenth
+        /// `Goal` variant would have to restate the item, the count, the
+        /// holder and the unlock, and every exhaustive match over `Goal`
+        /// would gain an arm that duplicated this one.
+        ///
+        /// # It is a recipe name, not a machine name
+        ///
+        /// The machine follows from the recipe's category
+        /// ([`crate::method::machine::MachineTable`]). Naming the machine
+        /// instead would leave `advanced-oil-processing` and
+        /// `basic-oil-processing` — the choice this field exists for —
+        /// indistinguishable, since both run in an `oil-refinery`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        via: Option<RecipeName>,
     },
     /// A standing arrangement that yields `item` at `per_minute` without
     /// further intervention.
@@ -350,17 +414,29 @@ pub enum Goal {
 impl std::fmt::Display for Goal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Goal::Have { item, count, whose } => write!(f, "have {} {} ({})", count, item, whose),
+            Goal::Have {
+                item,
+                count,
+                whose,
+                via,
+            } => {
+                write!(f, "have {} {} ({})", count, item, whose)?;
+                write_via(f, via)
+            }
             Goal::Researched(tech) => write!(f, "research {}", tech),
             Goal::Produced {
                 item,
                 count,
                 unlocks,
+                via,
                 ..
-            } => match unlocks {
-                Some(tech) => write!(f, "produce {} {} to unlock {}", count, item, tech),
-                None => write!(f, "produce {} {}", count, item),
-            },
+            } => {
+                match unlocks {
+                    Some(tech) => write!(f, "produce {} {} to unlock {}", count, item, tech)?,
+                    None => write!(f, "produce {} {}", count, item)?,
+                }
+                write_via(f, via)
+            }
             Goal::Producing { item, per_minute } => {
                 write!(f, "produce {} {}/min", per_minute, item)
             }
@@ -415,16 +491,19 @@ mod tests {
             item: "iron-plate".into(),
             count: 2,
             whose: Holder::Anyone,
+            via: None,
         };
         let b = Goal::Have {
             item: "iron-plate".into(),
             count: 2,
             whose: Holder::Anyone,
+            via: None,
         };
         let c = Goal::Have {
             item: "iron-plate".into(),
             count: 3,
             whose: Holder::Anyone,
+            via: None,
         };
         assert_eq!(a, b);
         assert_ne!(a, c);
@@ -440,6 +519,7 @@ mod tests {
                 item: "iron-plate".into(),
                 count: 4,
                 whose: Holder::Bot(BotId(2)),
+                via: None,
             },
             Goal::Researched("automation".into()),
             Goal::Producing {
@@ -462,12 +542,14 @@ mod tests {
             item: "coal".into(),
             count: 4,
             whose: Holder::Bot(BotId(2)),
+            via: None,
         };
         assert_eq!(g.to_string(), "have 4 coal (bot 2)");
         let g = Goal::Have {
             item: "coal".into(),
             count: 4,
             whose: Holder::Anyone,
+            via: None,
         };
         assert_eq!(g.to_string(), "have 4 coal (anyone)");
     }

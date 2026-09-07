@@ -96,6 +96,7 @@ fn have(item: &str, count: u32) -> Goal {
         item: item.into(),
         count,
         whose: Holder::Anyone,
+        via: None,
     }
 }
 
@@ -308,6 +309,7 @@ fn a_fluid_produced_goal_names_the_recipes_instead_of_the_missing_method() {
         count: COUNT,
         whose: Holder::Anyone,
         unlocks: None,
+        via: None,
     };
     let err = expand(&[goal], &state, &registry_for(&BOTS), BotId(1))
         .expect_err("no machine in this planner runs oil-processing");

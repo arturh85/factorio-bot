@@ -656,11 +656,13 @@ pub fn connect_steps_with(
         item: BELT.into(),
         count: belts,
         whose: Holder::Share(ctx.chain_actor),
+        via: None,
     }));
     steps.push(Step::Subgoal(Goal::Have {
         item: inserter.into(),
         count: 2,
         whose: Holder::Share(ctx.chain_actor),
+        via: None,
     }));
 
     let load =

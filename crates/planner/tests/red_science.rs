@@ -89,6 +89,7 @@ fn goal(count: u32) -> Goal {
         item: "automation-science-pack".into(),
         count,
         whose: Holder::Anyone,
+        via: None,
     }
 }
 
@@ -373,6 +374,7 @@ fn every_expansion_replays_in_time_order() {
                 item: "iron-plate".into(),
                 count: 3,
                 whose: Holder::Bot(BotId(1)),
+                via: None,
             };
             for (name, state, goals) in [
                 (

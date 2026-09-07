@@ -270,6 +270,81 @@ pub enum ProductRefusal {
         /// two.
         candidates: Vec<Candidate>,
     },
+
+    // ---- the four below exist only when a caller NAMED a recipe ----
+    //
+    // They are the answers to `Goal::Produced::via`, which is the vocabulary
+    // tier 3 asks for in as many words ("ask for a recipe by name rather than
+    // for the product"). Each one is reachable only from `Some(name)`, never
+    // from `None`: absence of a choice is not a wrong choice, and conflating
+    // the two is the eighth instance of a mistake this repo has catalogued
+    // seven times.
+    /// The caller named a recipe this world's recipe table does not have.
+    ///
+    /// Distinct from [`Self::NotProduced`], which is about the *product*: the
+    /// product may be perfectly makeable and the name simply misspelt, so the
+    /// recipes that do produce it are listed.
+    NoSuchRecipe {
+        product: String,
+        /// Exactly what the caller wrote.
+        recipe: String,
+        /// Every recipe that produces the product, in recipe-name order.
+        /// Empty is legitimate -- the product may be unmakeable too.
+        producers: Vec<Candidate>,
+    },
+
+    /// The named recipe exists and does not produce the asked-for product.
+    ///
+    /// **Refused, never quietly replaced with the planner's own pick.** A
+    /// caller that names `iron-gear-wheel` for a goal about `copper-plate`
+    /// has made a mistake that a plan built from the other recipe would hide.
+    RecipeDoesNotProduce {
+        product: String,
+        recipe: String,
+        /// What the named recipe actually produces, in the game's own order.
+        produces: Vec<String>,
+        producers: Vec<Candidate>,
+    },
+
+    /// The named recipe produces the product, and its category has no machine
+    /// in this world.
+    ///
+    /// **The machine reason, not the ambiguity one.** Naming a recipe answers
+    /// "which of these", so tier 3 is unreachable here by construction; what
+    /// is left to say is the thing [`crate::method::machine::MachineTable`]
+    /// says, and it is quoted verbatim rather than paraphrased so that "the
+    /// model predates `crafting_categories`" is not flattened into "no
+    /// machine runs this".
+    NamedRecipeNotRunnable {
+        product: String,
+        recipe: String,
+        category: String,
+        /// The machine table's own words.
+        machine: crate::method::machine::MachineRefusal,
+    },
+
+    /// The named recipe is one the planner runs in a character's hands or in
+    /// a furnace, and those two methods choose their recipe by **product
+    /// name** and cannot be told otherwise.
+    ///
+    /// # Why this is refused rather than ignored
+    ///
+    /// `HandCraft` and `Smelt` reach `method::util::recipe_for`, a lookup
+    /// keyed on the *recipe* name that happens to be exact over
+    /// `crafting`+`smelting` in vanilla (see the module doc: zero products in
+    /// those two categories are made by more than one recipe). So on vanilla
+    /// a `via` naming a crafting recipe is either the one they would pick --
+    /// allowed, and a no-op -- or one they cannot honour. Accepting the
+    /// second and planning the first would be the silent substitution this
+    /// whole module exists to stop, and it is a **modded**-world case: there
+    /// is no vanilla product with two crafting recipes.
+    NamedRecipeNotHonoured {
+        product: String,
+        recipe: String,
+        category: String,
+        /// The recipe those methods would run instead, if any.
+        would_run: Option<String>,
+    },
 }
 
 impl std::fmt::Display for ProductRefusal {
@@ -347,6 +422,85 @@ impl std::fmt::Display for ProductRefusal {
                  between them; ask for a recipe by name rather than for the product",
                 plural(candidates.len(), "recipe", "recipes"),
                 list(candidates),
+            ),
+            ProductRefusal::NoSuchRecipe {
+                product,
+                recipe,
+                producers,
+            } => {
+                write!(
+                    f,
+                    "this goal asks for {product} via the recipe {recipe}, and no recipe of that \
+                     name exists in this world"
+                )?;
+                if producers.is_empty() {
+                    write!(f, "; nothing here produces {product} either")
+                } else {
+                    write!(
+                        f,
+                        ". {} produce {product}: {}",
+                        plural(producers.len(), "recipe", "recipes"),
+                        list(producers),
+                    )
+                }
+            }
+            ProductRefusal::RecipeDoesNotProduce {
+                product,
+                recipe,
+                produces,
+                producers,
+            } => {
+                write!(
+                    f,
+                    "this goal asks for {product} via the recipe {recipe}, and {recipe} does not \
+                     produce {product} -- it produces {}",
+                    if produces.is_empty() {
+                        "nothing at all".to_string()
+                    } else {
+                        produces.join(", ")
+                    },
+                )?;
+                if producers.is_empty() {
+                    write!(f, "; nothing in this world produces {product}")
+                } else {
+                    write!(
+                        f,
+                        ". {} produce {product}: {}",
+                        plural(producers.len(), "recipe", "recipes"),
+                        list(producers),
+                    )
+                }
+            }
+            ProductRefusal::NamedRecipeNotRunnable {
+                product,
+                recipe,
+                category,
+                machine,
+            } => write!(
+                f,
+                "this goal asks for {product} via the recipe {recipe}, which does produce it \
+                 -- but {recipe} is category {category}, and {machine}"
+            ),
+            ProductRefusal::NamedRecipeNotHonoured {
+                product,
+                recipe,
+                category,
+                would_run,
+            } => write!(
+                f,
+                "this goal asks for {product} via the recipe {recipe}, which is category \
+                 {category} -- and the methods that run {category} choose their recipe by \
+                 product name, so they cannot be told to use {recipe}. {}",
+                match would_run {
+                    Some(other) => format!(
+                        "they would run {other} instead, which is a different recipe, so this \
+                         goal is refused rather than silently answered with it"
+                    ),
+                    None => format!(
+                        "they would find no recipe named {product} at all, so there is nothing \
+                         they could run"
+                    ),
+                },
             ),
         }
     }
@@ -444,7 +598,26 @@ impl ProductRefusal {
         match self {
             ProductRefusal::NotProduced { product, .. }
             | ProductRefusal::NoRunnableCategory { product, .. }
-            | ProductRefusal::Ambiguous { product, .. } => product,
+            | ProductRefusal::Ambiguous { product, .. }
+            | ProductRefusal::NoSuchRecipe { product, .. }
+            | ProductRefusal::RecipeDoesNotProduce { product, .. }
+            | ProductRefusal::NamedRecipeNotRunnable { product, .. }
+            | ProductRefusal::NamedRecipeNotHonoured { product, .. } => product,
+        }
+    }
+
+    /// The recipe the caller named, for the four refusals that only exist
+    /// because one was. `None` for the three that are about the product.
+    ///
+    /// Absence here is the same absence `Goal::Produced::via` carries: no
+    /// recipe was named, not a recipe that was not found.
+    pub fn named_recipe(&self) -> Option<&str> {
+        match self {
+            ProductRefusal::NoSuchRecipe { recipe, .. }
+            | ProductRefusal::RecipeDoesNotProduce { recipe, .. }
+            | ProductRefusal::NamedRecipeNotRunnable { recipe, .. }
+            | ProductRefusal::NamedRecipeNotHonoured { recipe, .. } => Some(recipe),
+            _ => None,
         }
     }
 }
@@ -629,6 +802,110 @@ impl ProductIndex {
             }),
         }
     }
+
+    /// [`Self::sole_recipe_producing`], with the caller's own choice of recipe
+    /// honoured when they made one.
+    ///
+    /// # `via: None` is delegated verbatim
+    ///
+    /// Not "delegated in effect" -- the first line of the body is the call.
+    /// Every goal written before 2026-09-07 carries `None`, so the unqualified
+    /// path has to be the *same code*, not code that agrees with it. That is
+    /// what makes an opt-in qualifier unable to move a baseline, and it is
+    /// checked by `a_named_recipe_that_is_the_planners_own_pick_changes_nothing`.
+    ///
+    /// # The four things a named recipe can be wrong about
+    ///
+    /// In order, each refusing before the next is asked:
+    ///
+    /// 1. no recipe of that name -- [`ProductRefusal::NoSuchRecipe`];
+    /// 2. a recipe that does not produce the product --
+    ///    [`ProductRefusal::RecipeDoesNotProduce`];
+    /// 3. `crafting`/`smelting`, whose methods pick by product name and
+    ///    cannot be told -- [`ProductRefusal::NamedRecipeNotHonoured`],
+    ///    unless the named recipe *is* the one they would pick, which is the
+    ///    ordinary case and passes;
+    /// 4. a category with no machine in this world --
+    ///    [`ProductRefusal::NamedRecipeNotRunnable`], carrying
+    ///    [`MachineTable`]'s own words rather than the ambiguity message,
+    ///    because naming a recipe has already answered "which of these".
+    pub fn recipe_producing(
+        &self,
+        product: &str,
+        categories: &Categories,
+        via: Option<&str>,
+        machines: &MachineTable,
+    ) -> Result<&FactorioRecipe, ProductRefusal> {
+        let Some(via) = via else {
+            return self.sole_recipe_producing(product, categories);
+        };
+        let producers = || -> Vec<Candidate> {
+            self.recipes_producing(product)
+                .iter()
+                .map(|r| candidate(r, product))
+                .collect()
+        };
+        let Some(recipe) = self.by_recipe.get(via) else {
+            return Err(ProductRefusal::NoSuchRecipe {
+                product: product.to_string(),
+                recipe: via.to_string(),
+                producers: producers(),
+            });
+        };
+        if !recipe.products.iter().any(|p| p.name == product) {
+            return Err(ProductRefusal::RecipeDoesNotProduce {
+                product: product.to_string(),
+                recipe: via.to_string(),
+                produces: recipe.products.iter().map(|p| p.name.clone()).collect(),
+                producers: producers(),
+            });
+        }
+        if recipe.category == crate::method::util::CRAFTING_CATEGORY
+            || recipe.category == crate::method::util::SMELTING_CATEGORY
+        {
+            // `recipe_for`'s own lookup, performed here rather than through it
+            // so that this function needs no `PlanState` -- see
+            // `ProductRefusal::NamedRecipeNotHonoured` for why the answer
+            // matters.
+            let would_run = self.by_recipe.get(product).map(|r| r.name.clone());
+            if would_run.as_deref() != Some(via) {
+                return Err(ProductRefusal::NamedRecipeNotHonoured {
+                    product: product.to_string(),
+                    recipe: via.to_string(),
+                    category: recipe.category.clone(),
+                    would_run,
+                });
+            }
+            return Ok(recipe);
+        }
+        if !categories.admits(&recipe.category) {
+            return Err(match machines.machine_for(&recipe.category) {
+                Err(machine) => ProductRefusal::NamedRecipeNotRunnable {
+                    product: product.to_string(),
+                    recipe: via.to_string(),
+                    category: recipe.category.clone(),
+                    machine,
+                },
+                // A machine exists and the *caller* narrowed the categories
+                // anyway. Nothing in production does this -- the one caller
+                // passes `planner_runs(machines)`, built from this same table
+                // -- but a survey caller could, and the honest answer is the
+                // one that names what was admitted.
+                Ok(_) => ProductRefusal::NoRunnableCategory {
+                    product: product.to_string(),
+                    candidates: vec![candidate(recipe, product)],
+                    admitted: categories.names(),
+                    substance: self.substances.of(product),
+                    // Left empty rather than guessed: this branch has no
+                    // `PlanState` and so cannot ask what this surface can
+                    // supply. Empty is the field's documented "nothing filled
+                    // it in", which is exactly what happened.
+                    unreachable_inputs: Vec::new(),
+                },
+            });
+        }
+        Ok(recipe)
+    }
 }
 
 fn candidate(recipe: &FactorioRecipe, product: &str) -> Candidate {
@@ -693,9 +970,17 @@ impl Method for NoProducer {
             Goal::Have { item, .. } | Goal::Produced { item, .. } => item,
             _ => return None,
         };
+        // A named recipe never reaches here: `method::named_recipe_refusal`
+        // has already refused every way one can be wrong, before any method
+        // was asked. Passing it anyway so the two cannot disagree if that
+        // guard is ever moved.
+        let via = match goal {
+            Goal::Have { via, .. } | Goal::Produced { via, .. } => via.as_deref(),
+            _ => None,
+        };
         let index = ProductIndex::from_state(&ctx.state);
         let machines = MachineTable::from_state(&ctx.state);
-        match index.sole_recipe_producing(item, &Categories::planner_runs(&machines)) {
+        match index.recipe_producing(item, &Categories::planner_runs(&machines), via, &machines) {
             // Something can make it. Whatever stopped this goal, it is not
             // the recipe table, and saying anything here would be guessing.
             Ok(_) => None,
@@ -713,7 +998,7 @@ impl Method for NoProducer {
                         item,
                     );
                 }
-                Some(PlannerError::ProductNotMakeable(refusal))
+                Some(PlannerError::ProductNotMakeable(Box::new(refusal)))
             }
         }
     }
@@ -914,6 +1199,96 @@ mod product_index_tests {
         assert_eq!(i.len(), 4, "four recipes indexed by their own names");
     }
 
+    // -----------------------------------------------------------------
+    // A caller that names its recipe
+    // -----------------------------------------------------------------
+
+    /// **`via: None` is delegated, not merely equivalent.** Over every product
+    /// the fixture knows and both category sets, the two functions agree
+    /// exactly -- including on which refusal, not just on refusing.
+    ///
+    /// This is what makes the qualifier unable to move a baseline: no goal
+    /// written before it existed can take a different path.
+    #[test]
+    fn no_recipe_named_takes_the_path_it_always_took() {
+        let i = index();
+        let machines = MachineTable::default();
+        let products: Vec<&str> = i.products().collect();
+        assert_eq!(products.len(), 4, "the sweep is not vacuous");
+        for cats in [Categories::planner_brings(), Categories::any()] {
+            for product in &products {
+                assert_eq!(
+                    i.recipe_producing(product, &cats, None, &machines)
+                        .map(|r| r.name.clone())
+                        .map_err(|e| e.to_string()),
+                    i.sole_recipe_producing(product, &cats)
+                        .map(|r| r.name.clone())
+                        .map_err(|e| e.to_string()),
+                    "{product}"
+                );
+            }
+        }
+    }
+
+    /// Naming one of two ambiguous recipes answers the ambiguity rather than
+    /// restating it. `iron-gear-wheel` is made by a `crafting` recipe and a
+    /// `metallurgy` one, so with both categories admitted the unqualified
+    /// question has no answer and the qualified one does.
+    #[test]
+    fn naming_a_recipe_resolves_an_ambiguity_the_planner_cannot() {
+        let i = index();
+        let machines = MachineTable::default();
+        let both = Categories::only(["crafting", "metallurgy"]);
+        assert!(matches!(
+            i.sole_recipe_producing("iron-gear-wheel", &both),
+            Err(ProductRefusal::Ambiguous { .. })
+        ));
+        assert_eq!(
+            i.recipe_producing("iron-gear-wheel", &both, Some("casting-iron-gear-wheel"), &machines)
+                .expect("the caller chose")
+                .name,
+            "casting-iron-gear-wheel"
+        );
+    }
+
+    /// The four refusals a named recipe can earn, each distinguishable from
+    /// the others by variant and not only by wording.
+    #[test]
+    fn each_way_a_named_recipe_can_be_wrong_has_its_own_refusal() {
+        let i = index();
+        let machines = MachineTable::default();
+        let runs = Categories::planner_brings();
+
+        assert!(matches!(
+            i.recipe_producing("iron-gear-wheel", &runs, Some("nope"), &machines),
+            Err(ProductRefusal::NoSuchRecipe { .. })
+        ));
+        assert!(matches!(
+            i.recipe_producing("iron-gear-wheel", &runs, Some("basic-oil-processing"), &machines),
+            Err(ProductRefusal::RecipeDoesNotProduce { .. })
+        ));
+        // `metallurgy` has no machine in an empty table -- and the message is
+        // the machine table's own, saying the world never declared anything.
+        let no_machine = i
+            .recipe_producing("iron-gear-wheel", &runs, Some("casting-iron-gear-wheel"), &machines)
+            .expect_err("metallurgy has no machine here");
+        assert!(matches!(
+            no_machine,
+            ProductRefusal::NamedRecipeNotRunnable { .. }
+        ));
+        assert!(no_machine.to_string().contains("it did not say"), "{no_machine}");
+        assert_eq!(no_machine.named_recipe(), Some("casting-iron-gear-wheel"));
+
+        // And the three refusals that exist without a caller naming anything
+        // report no recipe, which is the same distinction from the other side.
+        assert_eq!(
+            i.sole_recipe_producing("petroleum-gas", &runs)
+                .expect_err("no runnable category")
+                .named_recipe(),
+            None
+        );
+    }
+
     #[test]
     fn a_runnable_product_resolves_to_its_one_recipe() {
         let i = index();
@@ -1108,6 +1483,7 @@ mod no_producer_driver_tests {
             item: item.to_string(),
             count: 100,
             whose: Holder::Anyone,
+            via: None,
         }
     }
 
@@ -1127,6 +1503,7 @@ mod no_producer_driver_tests {
             count: 100,
             whose: Holder::Anyone,
             unlocks: None,
+            via: None,
         }
     }
 

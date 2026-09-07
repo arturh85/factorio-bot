@@ -38,6 +38,7 @@ fn gather(item: &str, count: u32) -> Goal {
         item: item.into(),
         count,
         whose: Holder::Anyone,
+        via: None,
     }
 }
 

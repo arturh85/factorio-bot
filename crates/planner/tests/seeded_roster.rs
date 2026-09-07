@@ -41,6 +41,7 @@ fn smoke_goal() -> Goal {
         item: "iron-plate".into(),
         count: 5,
         whose: Holder::Anyone,
+        via: None,
     }
 }
 
@@ -141,6 +142,7 @@ fn a_bot_holding_one_furnace_crafts_the_second_one_it_needs() {
         item: "automation-science-pack".into(),
         count: 4,
         whose: Holder::Anyone,
+        via: None,
     };
     let net = expand(&[goal], &state, &registry_for(&bots), BotId(1)).expect("expands");
 

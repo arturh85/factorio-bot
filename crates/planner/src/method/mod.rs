@@ -719,6 +719,49 @@ fn fluid_have_refusal(goal: &Goal, ctx: &ExpansionCtx) -> Option<PlannerError> {
     }))
 }
 
+/// The refusal for a goal that **named a recipe** which cannot answer it, or
+/// `None` when no recipe was named or the named one is fine.
+///
+/// # Why this is here and not a `Method::refusal`
+///
+/// The same argument the fluid guard above makes, applied to a different
+/// wrong shape. `Method::refusal` is consulted only when *nobody* claimed the
+/// goal, and a goal like `have:iron-gear-wheel:5 via casting-iron-gear-wheel`
+/// is claimed immediately -- by `HandCraft`, which would then plan the
+/// ordinary gear recipe and hand back a schedule. The caller asked for one
+/// recipe and got another with no diagnostic at all, which is exactly the
+/// silent substitution `crate::products` exists to stop. So it is refused
+/// **before any method is asked**, like a fluid `Have`, because a goal whose
+/// qualifier its own methods cannot honour has not been stated, and nothing
+/// should get the chance to satisfy it some other way.
+///
+/// # Absent is not a value
+///
+/// `via: None` returns `None` on the first line, before an index is built.
+/// That is not an optimisation: it is the guarantee that a goal which named
+/// no recipe travels the path it travelled before this function existed.
+fn named_recipe_refusal(goal: &Goal, ctx: &ExpansionCtx) -> Option<PlannerError> {
+    let via = match goal {
+        Goal::Have { via, .. } | Goal::Produced { via, .. } => via.as_deref()?,
+        _ => return None,
+    };
+    let item = match goal {
+        Goal::Have { item, .. } | Goal::Produced { item, .. } => item,
+        _ => return None,
+    };
+    let machines = crate::method::machine::MachineTable::from_state(&ctx.state);
+    let index = crate::products::ProductIndex::from_state(&ctx.state);
+    match index.recipe_producing(
+        item,
+        &crate::products::Categories::planner_runs(&machines),
+        Some(via),
+        &machines,
+    ) {
+        Ok(_) => None,
+        Err(refusal) => Some(PlannerError::ProductNotMakeable(Box::new(refusal))),
+    }
+}
+
 fn expand_goal_body(
     goal: &Goal,
     ctx: &mut ExpansionCtx,
@@ -757,6 +800,13 @@ fn expand_goal_body(
     // recipes and the category this planner has no machine for. Only `Have`
     // makes a claim about an inventory.
     if let Some(refusal) = fluid_have_refusal(goal, ctx) {
+        return Err(refusal);
+    }
+
+    // Second guard, same reason, and deliberately **after** the fluid one: a
+    // `Have` about a fluid is wrong whatever recipe was named, so the sharper
+    // message wins. See `named_recipe_refusal`.
+    if let Some(refusal) = named_recipe_refusal(goal, ctx) {
         return Err(refusal);
     }
 
@@ -1001,7 +1051,9 @@ fn expand_goal_body(
     // count regardless of what is held (possession is not production), so it
     // has no credit to protect.
     let credited: Option<(Holder, ItemId, u32)> = match goal {
-        Goal::Have { item, count, whose } => {
+        Goal::Have {
+            item, count, whose, ..
+        } => {
             let held = (*count).min(ctx.state.available(whose, item));
             (held > 0).then(|| (whose.clone(), item.clone(), held))
         }
@@ -1185,7 +1237,10 @@ fn run_steps(
         match step {
             Step::Subgoal(g) => {
                 expand_goal(&g, ctx, net, registry)?;
-                if let Goal::Have { item, count, whose } = &g {
+                if let Goal::Have {
+                    item, count, whose, ..
+                } = &g
+                {
                     ctx.state.reserve(whose, item, *count);
                     promised.push((whose.clone(), item.clone(), *count));
                 }
@@ -1467,6 +1522,7 @@ mod tests {
                 count: 1,
                 whose: Holder::Bot(BotId(1)),
                 unlocks: None,
+                via: None,
             })
             .collect();
         let reg = crate::method::have::registry_for(&bots);
@@ -1529,11 +1585,13 @@ mod tests {
                     count: 50,
                     whose: Holder::Share(BotId(1)),
                     unlocks: None,
+                    via: None,
                 },
                 Goal::Have {
                     item: "iron-gear-wheel".into(),
                     count: 5,
                     whose: Holder::Share(BotId(1)),
+                    via: None,
                 },
             ],
             &state,
@@ -1617,6 +1675,7 @@ mod tests {
                 item: "wood".into(),
                 count: 1,
                 whose: Holder::Bot(BotId(1)),
+                via: None,
             }],
             &state,
             &MethodRegistry::new().with(Box::new(TwoThenTwo)),
@@ -1664,6 +1723,7 @@ mod tests {
             item: "coal".into(),
             count: 1,
             whose: Holder::Anyone,
+            via: None,
         };
         assert_eq!(
             reg.find(&goal, &c.state, GoalSite::root())
@@ -1708,6 +1768,7 @@ mod tests {
             item: "coal".into(),
             count: 1,
             whose: Holder::Anyone,
+            via: None,
         };
         assert_eq!(
             reg.find(&goal, &c.state, GoalSite::root())
@@ -1747,6 +1808,7 @@ mod tests {
             item: "coal".into(),
             count: 1,
             whose: Holder::Anyone,
+            via: None,
         };
         assert_eq!(
             reg.find(&goal, &c.state, GoalSite::root())
@@ -1802,6 +1864,7 @@ mod tests {
             item: "coal".into(),
             count: 3,
             whose: Holder::Anyone,
+            via: None,
         };
         let net = expand(&[goal], &state, &reg, BotId(1)).unwrap();
         assert_eq!(net.len(), 1);
@@ -1840,11 +1903,13 @@ mod tests {
                     item: "coal".into(),
                     count: 3,
                     whose: Holder::Anyone,
+                    via: None,
                 },
                 Goal::Have {
                     item: "coal".into(),
                     count: 5,
                     whose: Holder::Anyone,
+                    via: None,
                 },
             ],
             &state,
@@ -1879,7 +1944,7 @@ mod tests {
                 "enough"
             }
             fn applicable(&self, goal: &Goal, state: &PlanState) -> bool {
-                matches!(goal, Goal::Have { item, count, whose }
+                matches!(goal, Goal::Have { item, count, whose, .. }
                     if state.available(whose, item) >= *count)
             }
             fn expand(&self, _g: &Goal, _c: &mut ExpansionCtx) -> Result<Vec<Step>, PlannerError> {
@@ -1901,7 +1966,10 @@ mod tests {
                 goal: &Goal,
                 ctx: &mut ExpansionCtx,
             ) -> Result<Vec<Step>, PlannerError> {
-                let Goal::Have { item, count, whose } = goal else {
+                let Goal::Have {
+                    item, count, whose, ..
+                } = goal
+                else {
                     unreachable!()
                 };
                 let short = count.saturating_sub(ctx.state.available(whose, item));
@@ -1931,6 +1999,7 @@ mod tests {
                         item: "cog".into(),
                         count: 1,
                         whose: Holder::Anyone,
+                        via: None,
                     }),
                     Step::Act(Box::new(a)),
                 ])
@@ -1963,11 +2032,13 @@ mod tests {
                         item: "cog".into(),
                         count: 4,
                         whose: Holder::Anyone,
+                        via: None,
                     }),
                     Step::Subgoal(Goal::Have {
                         item: "gadget".into(),
                         count: 1,
                         whose: Holder::Anyone,
+                        via: None,
                     }),
                     Step::Act(Box::new(a)),
                 ])
@@ -1985,6 +2056,7 @@ mod tests {
                 item: "widget".into(),
                 count: 1,
                 whose: Holder::Anyone,
+                via: None,
             }],
             &state,
             &reg,
@@ -2024,7 +2096,7 @@ mod tests {
                 "enough"
             }
             fn applicable(&self, goal: &Goal, state: &PlanState) -> bool {
-                matches!(goal, Goal::Have { item, count, whose }
+                matches!(goal, Goal::Have { item, count, whose, .. }
                     if state.available(whose, item) >= *count)
             }
             fn expand(&self, _g: &Goal, _c: &mut ExpansionCtx) -> Result<Vec<Step>, PlannerError> {
@@ -2053,6 +2125,7 @@ mod tests {
                         item: "cog".into(),
                         count: 6,
                         whose: Holder::Anyone,
+                        via: None,
                     }),
                     Step::Act(Box::new(a)),
                 ])
@@ -2072,7 +2145,10 @@ mod tests {
                 goal: &Goal,
                 ctx: &mut ExpansionCtx,
             ) -> Result<Vec<Step>, PlannerError> {
-                let Goal::Have { item, count, whose } = goal else {
+                let Goal::Have {
+                    item, count, whose, ..
+                } = goal
+                else {
                     unreachable!()
                 };
                 let short = count.saturating_sub(ctx.state.available(whose, item));
@@ -2092,11 +2168,13 @@ mod tests {
                     item: "widget".into(),
                     count: 1,
                     whose: Holder::Anyone,
+                    via: None,
                 },
                 Goal::Have {
                     item: "cog".into(),
                     count: 2,
                     whose: Holder::Anyone,
+                    via: None,
                 },
             ],
             &state,
@@ -2137,6 +2215,7 @@ mod tests {
                         item: "iron-plate".into(),
                         count: 2,
                         whose: Holder::Anyone,
+                        via: None,
                     }),
                     Step::Act(Box::new(a)),
                 ])
@@ -2150,6 +2229,7 @@ mod tests {
             item: "iron-gear-wheel".into(),
             count: 1,
             whose: Holder::Anyone,
+            via: None,
         };
         let net = expand(&[goal], &state, &reg, BotId(1)).unwrap();
         assert_eq!(net.len(), 2, "the subgoal's action and the gear itself");
@@ -2209,6 +2289,7 @@ mod tests {
             item: "coal".into(),
             count: 1,
             whose: Holder::Anyone,
+            via: None,
         };
         assert!(matches!(
             expand(&[goal], &state, &reg, BotId(1)),
@@ -2517,6 +2598,7 @@ mod tests {
             item: "coal".into(),
             count: 1,
             whose: Holder::Anyone,
+            via: None,
         };
         let reg = MethodRegistry::new().with(Box::new(Nothing));
         assert!(matches!(
@@ -2532,6 +2614,7 @@ mod tests {
                     item: "iron-ore".into(),
                     count: 4,
                     whose: Holder::Anyone,
+                    via: None,
                 }],
                 &state,
                 &crate::method::have::registry_for(&bots),
@@ -2569,11 +2652,13 @@ mod tests {
                 item: "coal".into(),
                 count: 1,
                 whose: Holder::Bot(BotId(2)),
+                via: None,
             },
             Goal::Have {
                 item: "stone".into(),
                 count: 1,
                 whose: Holder::Anyone,
+                via: None,
             },
         ];
         expand(&goals, &state, &reg, BotId(1)).unwrap();
@@ -2615,12 +2700,14 @@ mod tests {
                 count: 1,
                 whose: Holder::Share(BotId(2)),
                 unlocks: None,
+                via: None,
             },
             Goal::Produced {
                 item: "stone".into(),
                 count: 1,
                 whose: Holder::Anyone,
                 unlocks: None,
+                via: None,
             },
         ];
         expand(&goals, &state, &reg, BotId(1)).unwrap();
@@ -2660,6 +2747,7 @@ mod tests {
             item: "coal".into(),
             count: 3,
             whose: Holder::Bot(BotId(2)),
+            via: None,
         };
         let net = expand(&[goal], &state, &reg, BotId(1)).unwrap();
         assert_eq!(net.len(), 3);
@@ -2693,6 +2781,7 @@ mod tests {
             count: 3,
             whose: Holder::Share(BotId(2)),
             unlocks: None,
+            via: None,
         };
         let net = expand(&[goal], &state, &reg, BotId(1)).unwrap();
         assert_eq!(net.len(), 3);
@@ -2720,6 +2809,7 @@ mod tests {
             count: 3,
             whose: Holder::Anyone,
             unlocks: None,
+            via: None,
         };
         let net = expand(&[goal], &state, &reg, BotId(1)).unwrap();
         assert!(
@@ -2737,11 +2827,13 @@ mod tests {
                 item: "coal".into(),
                 count: 1,
                 whose: Holder::Bot(BotId(1)),
+                via: None,
             },
             Goal::Have {
                 item: "stone".into(),
                 count: 1,
                 whose: Holder::Bot(BotId(2)),
+                via: None,
             },
         ];
         let net = expand(&goals, &state, &reg, BotId(1)).unwrap();
@@ -2777,6 +2869,7 @@ mod tests {
                         item: "iron-plate".into(),
                         count: 2,
                         whose: whose.clone(),
+                        via: None,
                     }),
                     Step::Act(Box::new(a)),
                 ])
@@ -2790,6 +2883,7 @@ mod tests {
             item: "iron-gear-wheel".into(),
             count: 1,
             whose: Holder::Bot(BotId(2)),
+            via: None,
         };
         let net = expand(&[goal], &state, &reg, BotId(1)).unwrap();
         let chains: Vec<Option<_>> = net.actions().map(|a| net.chain_of(a.id)).collect();
@@ -2813,11 +2907,13 @@ mod tests {
                 item: "coal".into(),
                 count: 1,
                 whose: Holder::Bot(BotId(2)),
+                via: None,
             },
             Goal::Have {
                 item: "stone".into(),
                 count: 1,
                 whose: Holder::Anyone,
+                via: None,
             },
         ];
         let net = expand(&goals, &state, &reg, BotId(1)).unwrap();
@@ -2853,6 +2949,7 @@ mod tests {
             item: "coal".into(),
             count: 1,
             whose: Holder::Bot(BotId(2)),
+            via: None,
         };
         assert!(expand_goal(&goal, &mut ctx, &mut net, &reg).is_err());
         assert_eq!(ctx.chain, None, "the chain must survive an error");
@@ -2867,11 +2964,13 @@ mod tests {
                 item: "coal".into(),
                 count: 1,
                 whose: Holder::Anyone,
+                via: None,
             },
             Goal::Have {
                 item: "stone".into(),
                 count: 1,
                 whose: Holder::Anyone,
+                via: None,
             },
         ]);
         let net = expand(&[goal], &state, &reg, BotId(1)).unwrap();
@@ -2907,6 +3006,7 @@ mod tests {
             item: "coal".into(),
             count: 1,
             whose: Holder::Bot(BotId(2)),
+            via: None,
         };
 
         assert!(expand_goal(&goal, &mut ctx, &mut net, &reg).is_err());
@@ -2952,6 +3052,7 @@ mod tests {
             item: "iron-plate".into(),
             count: 40,
             whose: Holder::Anyone,
+            via: None,
         };
         let registry = have::registry_for(&bots);
         let net =
@@ -2997,6 +3098,7 @@ mod tests {
                 item: "cog".into(),
                 count: 3,
                 whose: Holder::Share(BotId(1)),
+                via: None,
             }],
             &state,
             &reg,
@@ -3027,6 +3129,7 @@ mod tests {
                 item: "cog".into(),
                 count: 3,
                 whose: Holder::Anyone,
+                via: None,
             }],
             &state,
             &reg,
@@ -3083,6 +3186,7 @@ mod tests {
             item: "cog".into(),
             count,
             whose: Holder::Share(BotId(1)),
+            via: None,
         };
         let net = expand(&[share(5), share(5)], &state, &reg, BotId(1)).expect("expands");
         assert_eq!(
@@ -3114,11 +3218,13 @@ mod tests {
                     item: "cog".into(),
                     count: 5,
                     whose: Holder::Share(BotId(1)),
+                    via: None,
                 },
                 Goal::Have {
                     item: "cog".into(),
                     count: 5,
                     whose: Holder::Anyone,
+                    via: None,
                 },
             ],
             &state,
@@ -3169,6 +3275,7 @@ mod tests {
                     item: "cog".into(),
                     count: 5,
                     whose: Holder::Anyone,
+                    via: None,
                 })])
             }
         }
@@ -3185,11 +3292,13 @@ mod tests {
                     item: "widget".into(),
                     count: 1,
                     whose: Holder::Anyone,
+                    via: None,
                 },
                 Goal::Have {
                     item: "cog".into(),
                     count: 5,
                     whose: Holder::Share(BotId(1)),
+                    via: None,
                 },
             ],
             &state,
@@ -3224,11 +3333,13 @@ mod tests {
                     item: "cog".into(),
                     count: 5,
                     whose: Holder::Share(BotId(1)),
+                    via: None,
                 },
                 Goal::Have {
                     item: "cog".into(),
                     count: 5,
                     whose: Holder::Share(BotId(1)),
+                    via: None,
                 },
             ],
             &state,
@@ -3282,6 +3393,7 @@ mod tests {
                         item: "cog".into(),
                         count: 1,
                         whose: whose.clone(),
+                        via: None,
                     })
                 };
                 let a = gain_action(ctx, "widget", 1);
@@ -3303,7 +3415,10 @@ mod tests {
                 goal: &Goal,
                 ctx: &mut ExpansionCtx,
             ) -> Result<Vec<Step>, PlannerError> {
-                let Goal::Have { item, count, whose } = goal else {
+                let Goal::Have {
+                    item, count, whose, ..
+                } = goal
+                else {
                     unreachable!()
                 };
                 let short = count.saturating_sub(ctx.state.available(whose, item));
@@ -3325,6 +3440,7 @@ mod tests {
                 item: "widget".into(),
                 count: 1,
                 whose: Holder::Share(BotId(1)),
+                via: None,
             }],
             &state,
             &reg,
@@ -3353,7 +3469,7 @@ mod tests {
             "enough"
         }
         fn applicable(&self, goal: &Goal, state: &PlanState) -> bool {
-            matches!(goal, Goal::Have { item, count, whose }
+            matches!(goal, Goal::Have { item, count, whose, .. }
                 if state.available(whose, item) >= *count)
         }
         fn expand(&self, _g: &Goal, _c: &mut ExpansionCtx) -> Result<Vec<Step>, PlannerError> {
@@ -3553,6 +3669,7 @@ mod tests {
                     item: "coal".into(),
                     count: 1,
                     whose: Holder::Anyone,
+                    via: None,
                 })]
             } else {
                 vec![]
@@ -3713,7 +3830,7 @@ mod tests {
                 "enough"
             }
             fn applicable(&self, goal: &Goal, state: &PlanState) -> bool {
-                matches!(goal, Goal::Have { item, count, whose }
+                matches!(goal, Goal::Have { item, count, whose, .. }
                     if state.available(whose, item) >= *count)
             }
             fn expand(&self, _g: &Goal, _c: &mut ExpansionCtx) -> Result<Vec<Step>, PlannerError> {
@@ -3729,7 +3846,7 @@ mod tests {
                 "assemble"
             }
             fn applicable(&self, goal: &Goal, state: &PlanState) -> bool {
-                matches!(goal, Goal::Have { item, count, whose }
+                matches!(goal, Goal::Have { item, count, whose, .. }
                     if item == "plate"
                         && *count >= 10
                         && state.available(whose, item) < *count)
@@ -3739,7 +3856,10 @@ mod tests {
                 goal: &Goal,
                 ctx: &mut ExpansionCtx,
             ) -> Result<Vec<Step>, PlannerError> {
-                let Goal::Have { item, count, whose } = goal else {
+                let Goal::Have {
+                    item, count, whose, ..
+                } = goal
+                else {
                     unreachable!()
                 };
                 let short = count.saturating_sub(ctx.state.available(whose, item));
@@ -3748,6 +3868,7 @@ mod tests {
                         item: "tool".into(),
                         count: 1,
                         whose: whose.clone(),
+                        via: None,
                     }),
                     Step::Act(Box::new(gain_action(ctx, "plate", short))),
                 ])
@@ -3761,7 +3882,7 @@ mod tests {
                 "smelt"
             }
             fn applicable(&self, goal: &Goal, state: &PlanState) -> bool {
-                matches!(goal, Goal::Have { item, count, whose }
+                matches!(goal, Goal::Have { item, count, whose, .. }
                     if item == "plate"
                         && *count < 10
                         && state.available(whose, item) < *count)
@@ -3771,7 +3892,10 @@ mod tests {
                 goal: &Goal,
                 ctx: &mut ExpansionCtx,
             ) -> Result<Vec<Step>, PlannerError> {
-                let Goal::Have { item, count, whose } = goal else {
+                let Goal::Have {
+                    item, count, whose, ..
+                } = goal
+                else {
                     unreachable!()
                 };
                 let short = count.saturating_sub(ctx.state.available(whose, item));
@@ -3807,6 +3931,7 @@ mod tests {
                         item: "plate".into(),
                         count: 3,
                         whose: whose.clone(),
+                        via: None,
                     }),
                     Step::Act(Box::new(a)),
                 ])
@@ -3841,6 +3966,7 @@ mod tests {
                         item: "plate".into(),
                         count: 10,
                         whose: whose.clone(),
+                        via: None,
                     }),
                     Step::Act(Box::new(a)),
                 ])
@@ -3863,6 +3989,7 @@ mod tests {
                 item: "gadget".into(),
                 count: 1,
                 whose: Holder::Bot(BotId(1)),
+                via: None,
             }],
             &state,
             &reg,

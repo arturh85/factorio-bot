@@ -61,6 +61,7 @@ fn trivially_true() -> Goal {
         item: "iron-plate".into(),
         count: 0,
         whose: Holder::Anyone,
+        via: None,
     }
 }
 

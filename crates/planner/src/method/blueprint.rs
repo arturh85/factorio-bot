@@ -1908,6 +1908,7 @@ impl Method for BuildBlock {
                     item,
                     count,
                     whose: Holder::Share(bot),
+                    via: None,
                 }));
             }
             for idx in indices {

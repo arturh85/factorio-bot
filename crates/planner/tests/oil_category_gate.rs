@@ -282,6 +282,7 @@ fn a_fluid_ingredient_recurses_into_obtaining_the_fluid() {
         item: "plastic-bar".into(),
         count: 2,
         whose: Holder::Anyone,
+        via: None,
     };
     let err = expand(&[goal], &state, &registry_for(&BOTS), BotId(1))
         .expect_err("a recipe whose bill contains a fluid cannot be planned");
@@ -341,6 +342,7 @@ fn the_same_recipe_without_its_fluid_plans_fine() {
         item: "plastic-bar".into(),
         count: 2,
         whose: Holder::Anyone,
+        via: None,
     };
     let net = expand(&[goal], &state, &registry_for(&BOTS), BotId(1))
         .expect("coal-only plastic bars are an ordinary hand craft");
@@ -382,6 +384,7 @@ fn opening_the_category_silences_the_diagnosis_that_named_the_blocker() {
         count: 45,
         whose: Holder::Anyone,
         unlocks: None,
+        via: None,
     };
 
     // The control first, on the *unmodified* tables: the good message.

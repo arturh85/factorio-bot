@@ -2165,6 +2165,7 @@ pub fn plant_steps(ctx: &mut ExpansionCtx, plant: &Plant) -> (Vec<Step>, Vec<Act
             item: item.into(),
             count,
             whose: Holder::Share(ctx.chain_actor),
+            via: None,
         }));
     }
 
@@ -2503,6 +2504,7 @@ pub fn ensure_powered(
             item: POLE.into(),
             count: 1,
             whose: Holder::Share(ctx.chain_actor),
+            via: None,
         }));
         let (step, id) = place_step(ctx, POLE, &pole);
         steps.push(step);
@@ -5655,6 +5657,7 @@ mod capacity_tests {
             item: "wood".into(),
             count: 26,
             whose: Holder::Anyone,
+            via: None,
         };
         let bots = [BotId(1)];
 

@@ -2233,6 +2233,7 @@ fn cell_steps(
                 item,
                 count: amount,
                 whose: Holder::Share(ctx.chain_actor),
+                via: None,
             }));
         }
         for build in builds {
@@ -2255,6 +2256,7 @@ fn cell_steps(
                 item: "coal".into(),
                 count: coal,
                 whose: Holder::Share(ctx.chain_actor),
+                via: None,
             }));
         }
         let mut bundles: BTreeMap<ItemId, Bundle> = BTreeMap::new();
@@ -2286,6 +2288,7 @@ fn cell_steps(
                 item: item.clone(),
                 count: bundle.need,
                 whose: Holder::Share(bot),
+                via: None,
             }));
             block.extend(bundle.places);
             for mut action in bundle.charges {

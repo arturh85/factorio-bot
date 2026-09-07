@@ -67,6 +67,7 @@ fn plan_for(world: Arc<FactorioSurfaceAlias>, plates: u32) -> (ActionNetwork, Pl
             item: "iron-plate".into(),
             count: plates,
             whose: Holder::Bot(BotId(1)),
+            via: None,
         }],
         &state,
         &registry_for(&bots),

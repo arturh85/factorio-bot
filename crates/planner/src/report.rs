@@ -215,6 +215,7 @@ mod tests {
             item: "automation-science-pack".into(),
             count: 4,
             whose: Holder::Anyone,
+            via: None,
         };
         let net = expand(&[goal], &state, &registry_for(bots), bots[0]).expect("expands");
         let plan = schedule(&net, &state, bots).expect("schedules");

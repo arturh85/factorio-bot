@@ -247,6 +247,7 @@ impl Method for Gather {
                 item: tank.clone(),
                 count: 1,
                 whose: Holder::Share(ctx.chain_actor),
+                via: None,
             }));
             let entity_to_place = plain_entity(&ctx.state, &tank, &tank_site);
             steps.push(place_step(
@@ -261,6 +262,7 @@ impl Method for Gather {
             item: pipe.clone(),
             count,
             whose: Holder::Share(ctx.chain_actor),
+            via: None,
         }));
         for position in &run {
             let entity_to_place = plain_entity(&ctx.state, &pipe, position);

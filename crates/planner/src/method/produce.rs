@@ -191,6 +191,7 @@ pub fn cell_spec(state: &PlanState, item: &str) -> Option<CellSpec> {
     // `PlanState::stands_on_resources` reads from the other side.
     if state
         .base()
+        .globals
         .entity_prototypes
         .get(ore.as_str())
         .map(|proto| proto.entity_type.clone())
@@ -221,12 +222,14 @@ pub fn cell_spec(state: &PlanState, item: &str) -> Option<CellSpec> {
 fn drill_ticks_per_item(state: &PlanState, ore: &str) -> Option<Ticks> {
     let mining_time = state
         .base()
+        .globals
         .entity_prototypes
         .get(ore)
         .and_then(|p| p.mining_time)
         .unwrap_or(1.0);
     let speed = state
         .base()
+        .globals
         .entity_prototypes
         .get(DRILL)
         .and_then(|p| p.mining_speed)
@@ -408,6 +411,7 @@ fn machine(
 ) -> FactorioEntity {
     let entity_type = state
         .base()
+        .globals
         .entity_prototypes
         .get(name)
         .map(|proto| proto.entity_type.clone())
@@ -582,6 +586,7 @@ pub(crate) fn rate_cell_ore(spec: &CellSpec) -> u32 {
 fn load_ore(state: &PlanState, ore: &str) -> u32 {
     let item = state
         .base()
+        .globals
         .recipes
         .iter()
         .find(|entry| {
@@ -2869,6 +2874,7 @@ mod tests {
             );
             let character = s
                 .base()
+                .globals
                 .entity_prototypes
                 .get("character")
                 .map(|p| p.collision_box.width())

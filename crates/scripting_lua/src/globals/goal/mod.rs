@@ -2368,7 +2368,11 @@ mod tests {
         planner.update_plan_world();
         let world = planner.world();
         for id in roster {
-            let player = world.players.get(&id).expect("the run seeded this player");
+            let player = world
+                .globals
+                .players
+                .get(&id)
+                .expect("the run seeded this player");
             assert_eq!(
                 player.main_inventory.get("stone-furnace").copied(),
                 Some(1),
@@ -2641,7 +2645,7 @@ mod tests {
         }
         world.update_chunk_entities(ring).expect("the ring loads");
         for (id, position) in [(1u8, boxed_in.clone()), (2, outside)] {
-            world.players.insert(
+            world.globals.players.insert(
                 id,
                 FactorioPlayer {
                     player_id: id,

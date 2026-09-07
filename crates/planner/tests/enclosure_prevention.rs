@@ -141,7 +141,7 @@ fn world_of(entities: &[Snapshot], extra: Vec<FactorioEntity>) -> FactorioSurfac
 /// a `characters` entry for `check` to consult: bot 3 alone is close enough
 /// to the reconstructed ring to matter.
 fn place_bot_3(world: &FactorioSurface, run: &Frozen) {
-    world.players.insert(
+    world.globals.players.insert(
         3,
         FactorioPlayer {
             player_id: 3,
@@ -388,7 +388,7 @@ fn a_bot_only_the_second_engine_would_wall_in_is_examined() {
     let pump = Position::new(PLANT_PUMP.0, PLANT_PUMP.1);
 
     let world = bare_world(pen(-3.5, -22.5, &GAP));
-    world.players.insert(
+    world.globals.players.insert(
         3,
         FactorioPlayer {
             player_id: 3,
@@ -464,7 +464,7 @@ fn a_bot_on_the_diagonal_is_examined_too() {
     let pump = Position::new(PLANT_PUMP.0, PLANT_PUMP.1);
 
     let world = bare_world(pen(-10.5, -20.5, &DIAGONAL_GAP));
-    world.players.insert(
+    world.globals.players.insert(
         3,
         FactorioPlayer {
             player_id: 3,
@@ -550,7 +550,7 @@ fn smelter_state() -> PlanState {
         })
         .collect();
     let world = world_of(&standing, Vec::new());
-    world.players.insert(
+    world.globals.players.insert(
         1,
         FactorioPlayer {
             player_id: 1,
@@ -656,7 +656,7 @@ fn belts_already_standing_around_a_bot_are_not_a_pen() {
         })
         .collect();
     let world = world_of(&standing, Vec::new());
-    world.players.insert(
+    world.globals.players.insert(
         1,
         FactorioPlayer {
             player_id: 1,

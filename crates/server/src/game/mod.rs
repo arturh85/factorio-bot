@@ -41,6 +41,7 @@ pub fn require_player(
     player_id: PlayerId,
 ) -> Result<FactorioPlayer, ErrorResponse> {
     world
+        .globals
         .players
         .get(&player_id)
         .map(|player| player.clone())

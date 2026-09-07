@@ -178,11 +178,13 @@ impl SubstanceTable {
         // `from_parts` wants, and because the result must not depend on the
         // order the map was walked in.
         let recipes: Vec<FactorioRecipe> = world
+            .globals
             .recipes
             .iter()
             .map(|entry| entry.value().clone())
             .collect();
         let items: Vec<String> = world
+            .globals
             .item_prototypes
             .iter()
             .map(|entry| entry.key().clone())
@@ -417,6 +419,7 @@ impl FluidSource {
 
     pub fn of_world(world: &FactorioSurface, fluid: &str) -> FluidSource {
         let recipes: Vec<FactorioRecipe> = world
+            .globals
             .recipes
             .iter()
             .map(|entry| entry.value().clone())

@@ -319,6 +319,7 @@ fn sized(
     let area = state.collision_area_facing(name, at, facing)?;
     let entity_type = state
         .base()
+        .globals
         .entity_prototypes
         .get(name)
         .map(|proto| proto.entity_type.clone())

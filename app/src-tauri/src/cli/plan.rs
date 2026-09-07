@@ -248,6 +248,7 @@ pub(crate) fn parse_roster(raw: &str) -> Result<Vec<BotId>> {
 /// that took this dump actually had" rather than a number invented here.
 pub(crate) fn roster_from(world: &FactorioSurface) -> Vec<BotId> {
   let mut bots: Vec<BotId> = world
+    .globals
     .players
     .iter()
     .map(|entry| BotId(*entry.key()))

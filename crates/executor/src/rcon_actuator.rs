@@ -141,7 +141,7 @@ rcon.print(helpers.table_to_json(t))";
 /// hand-built [`FactorioSurface`]; [`RconActuator`] itself needs a live
 /// [`FactorioRcon`] to exist.
 pub fn technology_researched_in(world: &FactorioSurface, tech: &str) -> Option<bool> {
-    let force = world.forces.get(BOT_FORCE)?;
+    let force = world.globals.forces.get(BOT_FORCE)?;
     force.technologies.get(tech).map(|t| t.researched)
 }
 
@@ -224,7 +224,7 @@ impl RconActuator {
         // a character". The membership check still refuses a bot the game
         // has never seen; a dead one goes through to `get_player`'s
         // `has no character` refusal and is classified as such.
-        connected.extend(world.players.iter().map(|p| *p.key()));
+        connected.extend(world.globals.players.iter().map(|p| *p.key()));
         if connected.is_empty() {
             return Err(ActuatorError::Rejected("no connected players".to_string()));
         }
@@ -305,7 +305,13 @@ impl RconActuator {
     /// error). Turning a completed walk into a failed one here would replan a
     /// batch over a step, which is the opposite of the point.
     async fn close_reach_gap(&self, p: PlayerId, to: &Position, min_radius: f64, radius: f64) {
-        let Some(cached) = self.world.players.get(&p).map(|pl| pl.position.clone()) else {
+        let Some(cached) = self
+            .world
+            .globals
+            .players
+            .get(&p)
+            .map(|pl| pl.position.clone())
+        else {
             return;
         };
         if reach_distance(&self.world, &cached, to) <= radius {
@@ -463,6 +469,7 @@ impl Actuator for RconActuator {
         // the planner does not.
         let here = self
             .world
+            .globals
             .players
             .get(&p)
             .map(|player| player.position.clone());

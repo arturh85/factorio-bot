@@ -752,7 +752,8 @@ const MAX_PLAUSIBLE_RESOURCE_REACH: f64 = 1000.;
 /// world can lack one. Read rather than hardcoded because it is prototype data
 /// a mod can change, exactly like `character_mining_speed`'s.
 fn character_half_box(base: &FactorioSurface) -> (f64, f64) {
-    base.entity_prototypes
+    base.globals
+        .entity_prototypes
         .get("character")
         .map(|p| {
             let b = &p.collision_box;
@@ -2083,7 +2084,7 @@ impl PlanState {
         let mut map = BTreeMap::new();
         let mut unknown_bots = BTreeSet::new();
         for id in bots {
-            let state = match base.players.get(&id.0) {
+            let state = match base.globals.players.get(&id.0) {
                 Some(player) => BotState {
                     position: player.position.clone(),
                     inventory: player.main_inventory.clone(),
@@ -2099,6 +2100,7 @@ impl PlanState {
             map.insert(*id, state);
         }
         let max_prototype_half_diagonal = base
+            .globals
             .entity_prototypes
             .iter()
             .map(|entry| {
@@ -2111,7 +2113,11 @@ impl PlanState {
             );
         // By name, never by sort. See the `force` field's own doc for the run
         // that established what the sort actually selected.
-        let force = base.forces.get(BOT_FORCE).map(|entry| entry.key().clone());
+        let force = base
+            .globals
+            .forces
+            .get(BOT_FORCE)
+            .map(|entry| entry.key().clone());
         // The roster's worst case, not each bot's own: a tile is claimed by
         // one action and has to keep *every* other bot off it, so the bound
         // that matters is the largest reach anybody in the roster swings from.
@@ -2134,6 +2140,7 @@ impl PlanState {
         // showed a roster bot is not a bot the plan is going to move.
         let (half_x, half_y) = character_half_box(&base);
         let characters: BTreeMap<PlayerId, Rect> = base
+            .globals
             .players
             .iter()
             .map(|player| {
@@ -2177,6 +2184,7 @@ impl PlanState {
                     .and_then(Direction::from_u8)
                     .unwrap_or(Direction::North);
                 let area = base
+                    .globals
                     .entity_prototypes
                     .get(&refusal.entity)
                     .map(|proto| {
@@ -2528,6 +2536,7 @@ impl PlanState {
     pub fn technology(&self, name: &str) -> Option<FactorioTechnology> {
         let force = self.force.as_deref()?;
         self.base
+            .globals
             .forces
             .get(force)
             .and_then(|entry| entry.technologies.get(name).cloned())
@@ -2549,6 +2558,7 @@ impl PlanState {
             return 0.;
         };
         self.base
+            .globals
             .forces
             .get(force)
             .and_then(|entry| entry.manual_mining_speed_modifier.as_deref().copied())
@@ -2566,6 +2576,7 @@ impl PlanState {
             return Vec::new();
         };
         self.base
+            .globals
             .forces
             .get(force)
             .map(|entry| entry.technologies.keys().cloned().collect())
@@ -2580,7 +2591,11 @@ impl PlanState {
     /// all 342 of them — and in this crate's fixtures happens constantly. See
     /// [`PlanState::slot_capacity`] for what a caller must do with that.
     pub fn stack_size(&self, item: &str) -> Option<u32> {
-        self.base.item_prototypes.get(item).map(|p| p.stack_size)
+        self.base
+            .globals
+            .item_prototypes
+            .get(item)
+            .map(|p| p.stack_size)
     }
 
     /// The most of `item` one machine's `slot` can hold at once.
@@ -3087,7 +3102,7 @@ impl PlanState {
         position: &Position,
         direction: Direction,
     ) -> Option<Rect> {
-        let proto = self.base.entity_prototypes.get(name)?;
+        let proto = self.base.globals.entity_prototypes.get(name)?;
         let box_ = rotated_collision_box(&proto.collision_box, direction)?;
         Some(add_to_rect(&box_, position))
     }
@@ -3113,7 +3128,7 @@ impl PlanState {
     /// A prototype with **no** mask at all collides: an unstated mask is not a
     /// licence to build in a lake.
     pub fn collides_with_water(&self, name: &str) -> bool {
-        match self.base.entity_prototypes.get(name) {
+        match self.base.globals.entity_prototypes.get(name) {
             Some(proto) => match &proto.collision_mask {
                 Some(layers) => layers
                     .iter()
@@ -3158,7 +3173,7 @@ impl PlanState {
     /// name is not something this can vouch for, and the callers all read a
     /// `true` as licence to site *at* ore.
     pub fn stands_on_resources(&self, name: &str) -> bool {
-        match self.base.entity_prototypes.get(name) {
+        match self.base.globals.entity_prototypes.get(name) {
             Some(proto) => proto.entity_type == "mining-drill",
             None => false,
         }
@@ -3171,6 +3186,7 @@ impl PlanState {
     /// caller that needs to say *why* it cannot answer asks both.
     pub fn resource_category(&self, name: &str) -> Option<String> {
         self.base
+            .globals
             .entity_prototypes
             .get(name)
             .filter(|proto| proto.entity_type == "resource")
@@ -3182,6 +3198,7 @@ impl PlanState {
     /// does not know or one that yields nothing.
     pub fn mine_products(&self, name: &str) -> Vec<String> {
         self.base
+            .globals
             .entity_prototypes
             .get(name)
             .and_then(|proto| proto.mine_result.clone())
@@ -3193,6 +3210,7 @@ impl PlanState {
     /// of the ground -- whatever else the capture knows about it.
     pub fn is_resource(&self, name: &str) -> bool {
         self.base
+            .globals
             .entity_prototypes
             .get(name)
             .is_some_and(|proto| proto.entity_type == "resource")
@@ -3211,6 +3229,7 @@ impl PlanState {
     pub fn extractors_for(&self, category: &str) -> Vec<String> {
         let mut drills: Vec<String> = self
             .base
+            .globals
             .entity_prototypes
             .iter()
             .filter(|proto| proto.entity_type == "mining-drill")
@@ -3241,6 +3260,7 @@ impl PlanState {
     pub fn resource_names(&self) -> Vec<String> {
         let mut names: Vec<String> = self
             .base
+            .globals
             .entity_prototypes
             .iter()
             .filter(|proto| proto.entity_type == "resource")
@@ -3553,7 +3573,7 @@ impl PlanState {
     /// [`VANILLA_CHARACTER_COLLISION_HALF_SIDE`] when the world carries no
     /// `character` prototype; see that constant's doc for where it comes from.
     pub fn placement_clearance(&self, name: &str) -> Option<f64> {
-        let entity = self.base.entity_prototypes.get(name)?;
+        let entity = self.base.globals.entity_prototypes.get(name)?;
         let entity_half_diag = {
             let b = &entity.collision_box;
             (b.width() / 2.).hypot(b.height() / 2.)
@@ -4409,7 +4429,8 @@ impl PlanState {
             .entities_within(from, radius)
             .into_iter()
             .filter_map(|entity| {
-                let supply = pole_supply_half_extent(&self.base.entity_prototypes, &entity.name)?;
+                let supply =
+                    pole_supply_half_extent(&self.base.globals.entity_prototypes, &entity.name)?;
                 let box_ = Rect::new(
                     &Position::new(entity.position.x() - supply, entity.position.y() - supply),
                     &Position::new(entity.position.x() + supply, entity.position.y() + supply),
@@ -4456,7 +4477,8 @@ impl PlanState {
     /// `false` for a pole this crate does not know the supply area of, which
     /// refuses rather than over-credits.
     pub fn pole_would_supply(&self, name: &str, position: &Position, area: &Rect) -> bool {
-        let Some(supply) = pole_supply_half_extent(&self.base.entity_prototypes, name) else {
+        let Some(supply) = pole_supply_half_extent(&self.base.globals.entity_prototypes, name)
+        else {
             return false;
         };
         let box_ = Rect::new(
@@ -4548,7 +4570,7 @@ impl PlanState {
         // 3. Capacity on those components.
         let mut total = 0.;
         for entity in &net.nearby {
-            let Some(kw) = generation_kw(&self.base.entity_prototypes, &entity.name) else {
+            let Some(kw) = generation_kw(&self.base.globals.entity_prototypes, &entity.name) else {
                 continue;
             };
             if net.carries(&self.footprint_of(entity)) {
@@ -4611,7 +4633,7 @@ impl PlanState {
     /// zero — that table is the one in this file whose unknown name errs
     /// towards permitting, and its own doc says so.
     pub fn consumer_draw_kw(&self, name: &str) -> Option<f64> {
-        consumer_kw(&self.base.entity_prototypes, name)
+        consumer_kw(&self.base.globals.entity_prototypes, name)
     }
 
     /// What one generator of `name` contributes, in kW, as
@@ -4631,7 +4653,7 @@ impl PlanState {
     /// is the **safe** direction: an unknown generator makes nothing, so a
     /// caller sizing against it refuses rather than promising.
     pub fn generator_output_kw(&self, name: &str) -> Option<f64> {
-        generation_kw(&self.base.entity_prototypes, name)
+        generation_kw(&self.base.globals.entity_prototypes, name)
     }
 
     /// How far a pole of `name` can throw a wire, in tiles.
@@ -4672,7 +4694,7 @@ impl PlanState {
     /// `Some(0.0)`, which is the game's own statement and is a different fact
     /// from silence — [`pole_wire_reach`] believes it rather than falling back.
     pub fn pole_wire_reach_tiles(&self, name: &str) -> Option<f64> {
-        pole_wire_reach(&self.base.entity_prototypes, name)
+        pole_wire_reach(&self.base.globals.entity_prototypes, name)
     }
 
     /// What one solar panel of `name` contributes **averaged over a day**, in
@@ -4711,7 +4733,7 @@ impl PlanState {
     /// is still not *credited* there.
     pub fn solar_average_kw(&self, name: &str) -> Option<f64> {
         let daylight = self.base.daylight()?;
-        let prototype = self.base.entity_prototypes.get(name)?;
+        let prototype = self.base.globals.entity_prototypes.get(name)?;
         let noon_kw = prototype.max_energy_production_kw().filter(|kw| *kw > 0.)?;
         // The two endpoints gate this as much as they scale it: they carry
         // `subclasses: ["SolarPanel"]`, so their presence is what says the
@@ -4769,7 +4791,7 @@ impl PlanState {
     pub fn accumulators_per_panel(&self, panel: &str, accumulator: &str) -> Option<f64> {
         let daylight = self.base.daylight()?;
         let ticks_per_day = f64::from(daylight.ticks_per_day?);
-        let panel = self.base.entity_prototypes.get(panel)?;
+        let panel = self.base.globals.entity_prototypes.get(panel)?;
         let deficit_fraction = daylight.night_deficit_fraction(
             panel.solar_panel_performance_at_day?,
             panel.solar_panel_performance_at_night?,
@@ -4781,6 +4803,7 @@ impl PlanState {
             panel.max_energy_production.filter(|j| *j > 0.)? * ticks_per_day * deficit_fraction;
         let buffer_joules = self
             .base
+            .globals
             .entity_prototypes
             .get(accumulator)?
             .electric_buffer_capacity
@@ -4875,7 +4898,7 @@ impl PlanState {
             if except.covers(&entity.position) {
                 continue;
             }
-            let Some(kw) = consumer_kw(&self.base.entity_prototypes, &entity.name) else {
+            let Some(kw) = consumer_kw(&self.base.globals.entity_prototypes, &entity.name) else {
                 continue;
             };
             if takes_a_recipe(&entity.name) && entity.recipe.is_none() {
@@ -4921,9 +4944,11 @@ impl PlanState {
         // the same order, recovers each pole's index.
         let mut pole_index = 0;
         for entity in &net.nearby {
-            let is_pole = pole_supply_half_extent(&self.base.entity_prototypes, &entity.name)
-                .is_some()
-                && pole_wire_reach(&self.base.entity_prototypes, &entity.name).is_some();
+            let is_pole =
+                pole_supply_half_extent(&self.base.globals.entity_prototypes, &entity.name)
+                    .is_some()
+                    && pole_wire_reach(&self.base.globals.entity_prototypes, &entity.name)
+                        .is_some();
             if is_pole {
                 if net.supplying.contains(&net.root(pole_index)) {
                     out.push((entity.position.clone(), entity.name.clone()));
@@ -4931,7 +4956,7 @@ impl PlanState {
                 pole_index += 1;
                 continue;
             }
-            if generation_kw(&self.base.entity_prototypes, &entity.name).is_some()
+            if generation_kw(&self.base.globals.entity_prototypes, &entity.name).is_some()
                 && net.carries(&self.footprint_of(entity))
             {
                 out.push((entity.position.clone(), entity.name.clone()));
@@ -4992,7 +5017,8 @@ impl PlanState {
                     if expanded.contains(key) {
                         return None;
                     }
-                    let reach = pole_wire_reach(&self.base.entity_prototypes, &entity.name)?;
+                    let reach =
+                        pole_wire_reach(&self.base.globals.entity_prototypes, &entity.name)?;
                     Some((key.clone(), entity.position.clone(), reach))
                 })
                 .collect();
@@ -5025,8 +5051,9 @@ impl PlanState {
         let poles: Vec<(Position, Rect, f64)> = nearby
             .iter()
             .filter_map(|entity| {
-                let supply = pole_supply_half_extent(&self.base.entity_prototypes, &entity.name)?;
-                let wire = pole_wire_reach(&self.base.entity_prototypes, &entity.name)?;
+                let supply =
+                    pole_supply_half_extent(&self.base.globals.entity_prototypes, &entity.name)?;
+                let wire = pole_wire_reach(&self.base.globals.entity_prototypes, &entity.name)?;
                 let box_ = Rect::new(
                     &Position::new(entity.position.x() - supply, entity.position.y() - supply),
                     &Position::new(entity.position.x() + supply, entity.position.y() + supply),
@@ -5873,7 +5900,7 @@ impl PlanState {
     /// [`FactorioEntityPrototype::hand_mining_obstacle`]:
     /// factorio_bot_core::types::FactorioEntityPrototype::hand_mining_obstacle
     pub fn hand_mining_obstacle(&self, resource: &str) -> Option<HandMiningObstacle> {
-        let prototypes = &self.base.entity_prototypes;
+        let prototypes = &self.base.globals.entity_prototypes;
         let character_categories: Vec<String> = prototypes
             .get("character")
             .and_then(|character| character.resource_categories.clone())
@@ -5887,7 +5914,7 @@ impl PlanState {
                     .map(|category| (*category).to_string())
                     .collect()
             });
-        let items = &self.base.item_prototypes;
+        let items = &self.base.globals.item_prototypes;
         let is_item = |name: &str| items.is_empty() || items.contains_key(name);
         let proto = prototypes.get(resource)?;
         proto.hand_mining_obstacle(&character_categories, &is_item)
@@ -5914,7 +5941,7 @@ impl PlanState {
                     .as_ref()
                     .is_some_and(|products| products.contains_key(item))
         };
-        let prototypes = &self.base.entity_prototypes;
+        let prototypes = &self.base.globals.entity_prototypes;
         if prototypes.get(item).is_some_and(|proto| yields(&proto)) {
             return Some(item.to_string());
         }
@@ -6353,12 +6380,16 @@ mod tests {
     fn state_with_supply_area(name: &str, distance: Option<f64>) -> PlanState {
         let world = fixture_world();
         let mut prototype = world
+            .globals
             .entity_prototypes
             .get(name)
             .expect("the fixture ships this prototype")
             .clone();
         prototype.supply_area_distance = distance;
-        world.entity_prototypes.insert(name.into(), prototype);
+        world
+            .globals
+            .entity_prototypes
+            .insert(name.into(), prototype);
         PlanState::from_world(Arc::new(world), &[BotId(1)])
     }
 
@@ -6420,12 +6451,16 @@ mod tests {
     fn state_with_wire_reach(name: &str, distance: Option<f64>) -> PlanState {
         let world = fixture_world();
         let mut prototype = world
+            .globals
             .entity_prototypes
             .get(name)
             .expect("the fixture ships this prototype")
             .clone();
         prototype.maximum_wire_distance = distance;
-        world.entity_prototypes.insert(name.into(), prototype);
+        world
+            .globals
+            .entity_prototypes
+            .insert(name.into(), prototype);
         PlanState::from_world(Arc::new(world), &[BotId(1)])
     }
 
@@ -6536,13 +6571,17 @@ mod tests {
     ) -> PlanState {
         let world = fixture_world();
         let mut prototype = world
+            .globals
             .entity_prototypes
             .get(name)
             .expect("the fixture ships this prototype")
             .clone();
         prototype.electric_energy_usage = usage_joules_per_tick;
         prototype.max_energy_production = production_joules_per_tick;
-        world.entity_prototypes.insert(name.into(), prototype);
+        world
+            .globals
+            .entity_prototypes
+            .insert(name.into(), prototype);
         PlanState::from_world(Arc::new(world), &[BotId(1)])
     }
 
@@ -6713,6 +6752,7 @@ mod tests {
     fn state_with_solar(daylight: Option<factorio_bot_core::types::SurfaceDaylight>) -> PlanState {
         let world = fixture_world();
         let mut panel = world
+            .globals
             .entity_prototypes
             .get("solar-panel")
             .expect("the fixture ships a solar panel")
@@ -6722,9 +6762,13 @@ mod tests {
         panel.max_energy_production = Some(1000.);
         panel.solar_panel_performance_at_day = Some(1.0);
         panel.solar_panel_performance_at_night = Some(0.0);
-        world.entity_prototypes.insert("solar-panel".into(), panel);
+        world
+            .globals
+            .entity_prototypes
+            .insert("solar-panel".into(), panel);
 
         let mut accumulator = world
+            .globals
             .entity_prototypes
             .get("accumulator")
             .expect("the fixture ships an accumulator")
@@ -6732,6 +6776,7 @@ mod tests {
         accumulator.max_energy_production = Some(5000.);
         accumulator.electric_buffer_capacity = Some(5_000_000.);
         world
+            .globals
             .entity_prototypes
             .insert("accumulator".into(), accumulator);
 
@@ -6836,6 +6881,7 @@ mod tests {
     fn an_accumulator_with_no_buffer_declared_cannot_be_sized_against() {
         let world = fixture_world();
         let mut panel = world
+            .globals
             .entity_prototypes
             .get("solar-panel")
             .expect("the fixture ships a solar panel")
@@ -6843,9 +6889,13 @@ mod tests {
         panel.max_energy_production = Some(1000.);
         panel.solar_panel_performance_at_day = Some(1.0);
         panel.solar_panel_performance_at_night = Some(0.0);
-        world.entity_prototypes.insert("solar-panel".into(), panel);
+        world
+            .globals
+            .entity_prototypes
+            .insert("solar-panel".into(), panel);
 
         let mut accumulator = world
+            .globals
             .entity_prototypes
             .get("accumulator")
             .expect("the fixture ships an accumulator")
@@ -6854,6 +6904,7 @@ mod tests {
         accumulator.max_energy_production = Some(5000.);
         accumulator.electric_buffer_capacity = None;
         world
+            .globals
             .entity_prototypes
             .insert("accumulator".into(), accumulator);
         world.update_daylight(nauvis_daylight());
@@ -7383,6 +7434,7 @@ mod tests {
         assert!(credited > 0., "a credited array is not a zero");
         let noon_kw = s
             .base
+            .globals
             .entity_prototypes
             .get("solar-panel")
             .expect("the fixture ships a panel")
@@ -7458,6 +7510,7 @@ mod tests {
         // read 1,200 rather than 900.
         assert_eq!(
             s.base
+                .globals
                 .entity_prototypes
                 .get("accumulator")
                 .expect("the fixture ships an accumulator")
@@ -8275,7 +8328,7 @@ mod tests {
         use factorio_bot_core::types::FactorioPlayer;
 
         let world = fixture_world();
-        world.players.insert(
+        world.globals.players.insert(
             1,
             FactorioPlayer {
                 player_id: 1,
@@ -8313,7 +8366,7 @@ mod tests {
         use factorio_bot_core::types::FactorioPlayer;
 
         let world = fixture_world();
-        world.players.insert(
+        world.globals.players.insert(
             1,
             FactorioPlayer {
                 player_id: 1,
@@ -8606,7 +8659,7 @@ mod tests {
         use factorio_bot_core::types::FactorioPlayer;
 
         let world = fixture_world();
-        world.players.insert(
+        world.globals.players.insert(
             1,
             FactorioPlayer {
                 player_id: 1,

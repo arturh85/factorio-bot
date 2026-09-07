@@ -589,6 +589,7 @@ fn locked_recipe_world(recipe: &str, unlockers: &[&str], researched: bool) -> Fa
     let world = fixture_world();
 
     let mut locked = world
+        .globals
         .recipes
         .get(recipe)
         .unwrap_or_else(|| panic!("the shared fixture must define the {recipe} recipe"))
@@ -669,6 +670,7 @@ pub(crate) fn world_with_trigger(
 
     if let Some(recipe) = locked_recipe {
         let mut locked = world
+            .globals
             .recipes
             .get(recipe)
             .unwrap_or_else(|| panic!("the shared fixture must define the {recipe} recipe"))
@@ -801,16 +803,19 @@ pub(crate) fn world_with_oil(fixture: OilFixture) -> FactorioSurface {
     }
     if fixture.categories {
         world
+            .globals
             .entity_prototypes
             .get_mut("crude-oil")
             .expect("the fixture has a crude-oil prototype")
             .resource_category = Some("basic-fluid".into());
         world
+            .globals
             .entity_prototypes
             .get_mut("pumpjack")
             .expect("the fixture has a pumpjack prototype")
             .resource_categories = Some(vec!["basic-fluid".into()]);
         world
+            .globals
             .entity_prototypes
             .get_mut("character")
             .expect("the fixture has a character prototype")
@@ -1044,22 +1049,30 @@ pub(crate) fn world_with_technologies_and_no_water() -> FactorioSurface {
     let wet = world_with_technologies();
     let dry = FactorioSurface::new();
     dry.update_entity_prototypes(
-        wet.entity_prototypes
+        wet.globals
+            .entity_prototypes
             .iter()
             .map(|e| e.value().clone())
             .collect(),
     )
     .expect("prototypes copy");
     dry.update_item_prototypes(
-        wet.item_prototypes
+        wet.globals
+            .item_prototypes
             .iter()
             .map(|e| e.value().clone())
             .collect(),
     )
     .expect("item prototypes copy");
-    dry.update_recipes(wet.recipes.iter().map(|e| e.value().clone()).collect())
-        .expect("recipes copy");
-    for force in wet.forces.iter() {
+    dry.update_recipes(
+        wet.globals
+            .recipes
+            .iter()
+            .map(|e| e.value().clone())
+            .collect(),
+    )
+    .expect("recipes copy");
+    for force in wet.globals.forces.iter() {
         dry.update_force(force.value().clone()).expect("force copy");
     }
     dry
@@ -1079,7 +1092,7 @@ mod tests {
     /// silently start reading someone else's technology table.
     #[test]
     fn the_shared_fixture_world_still_carries_no_forces() {
-        assert_eq!(fixture_world().forces.len(), 0);
+        assert_eq!(fixture_world().globals.forces.len(), 0);
     }
 
     /// The seam D1 named: `is_researched` used to answer over *any* force
@@ -1226,7 +1239,11 @@ mod tests {
     #[test]
     fn the_fixture_force_parses_and_carries_the_expected_technologies() {
         let world = world_with_technologies();
-        let force = world.forces.get("player").expect("the player force");
+        let force = world
+            .globals
+            .forces
+            .get("player")
+            .expect("the player force");
         let names: Vec<&str> = force.technologies.keys().map(String::as_str).collect();
         assert_eq!(
             names,

@@ -147,10 +147,12 @@ end
     )?;
     map_table.set(
         "recipe",
-        lua.create_function(move |lua, name: String| match world.recipes.get(&name) {
-            Some(recipe) => lua.to_value(&*recipe),
-            None => Ok(LuaValue::Nil),
-        })?,
+        lua.create_function(
+            move |lua, name: String| match world.globals.recipes.get(&name) {
+                Some(recipe) => lua.to_value(&*recipe),
+                None => Ok(LuaValue::Nil),
+            },
+        )?,
     )?;
 
     let world = _world.clone();
@@ -169,12 +171,12 @@ end
     )?;
     map_table.set(
         "player",
-        lua.create_function(
-            move |lua, player_id: PlayerId| match world.players.get(&player_id) {
+        lua.create_function(move |lua, player_id: PlayerId| {
+            match world.globals.players.get(&player_id) {
                 Some(player) => lua.to_value(&*player),
                 None => Ok(LuaValue::Nil),
-            },
-        )?,
+            }
+        })?,
     )?;
 
     let world = _world.clone();
@@ -240,7 +242,7 @@ end
             let decoded = BlueprintCodec::decode_string(&blueprint).map_err(|err| {
                 LuaError::RuntimeError(format!("failed to parse blueprint: {err}"))
             })?;
-            let rect = blueprint_build_area(world.entity_prototypes.clone(), &blueprint);
+            let rect = blueprint_build_area(world.globals.entity_prototypes.clone(), &blueprint);
             let response = FactorioBlueprintInfo {
                 rect: rect.clone(),
                 label,
@@ -477,7 +479,7 @@ end
     map_table.set(
         "inventory",
         lua.create_function(move |_lua, (player_id, item_name): (PlayerId, String)| {
-            match world.players.get(&player_id) {
+            match world.globals.players.get(&player_id) {
                 Some(player) => match player.main_inventory.get(&item_name) {
                     Some(cnt) => Ok(*cnt),
                     None => Ok(0),

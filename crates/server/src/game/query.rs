@@ -274,7 +274,7 @@ pub async fn all_players(State(state): State<AppState>) -> ApiResult<Vec<Factori
     let instance = instance.as_ref().ok_or_else(ErrorResponse::not_started)?;
     let world = require_surface(instance)?;
     let mut all_players: Vec<FactorioPlayer> = Vec::new();
-    for player in world.players.iter() {
+    for player in world.globals.players.iter() {
         all_players.push(player.clone());
     }
     Ok(Json(all_players))
@@ -297,7 +297,7 @@ pub async fn item_prototypes(
     let instance = instance.as_ref().ok_or_else(ErrorResponse::not_started)?;
     let world = require_surface(instance)?;
     let mut data: HashMap<String, FactorioItemPrototype> = HashMap::new();
-    for item_prototype in world.item_prototypes.iter() {
+    for item_prototype in world.globals.item_prototypes.iter() {
         data.insert(item_prototype.name.clone(), item_prototype.clone());
     }
     Ok(Json(data))
@@ -320,7 +320,7 @@ pub async fn entity_prototypes(
     let instance = instance.as_ref().ok_or_else(ErrorResponse::not_started)?;
     let world = require_surface(instance)?;
     let mut data: HashMap<String, FactorioEntityPrototype> = HashMap::new();
-    for prototype in world.entity_prototypes.iter() {
+    for prototype in world.globals.entity_prototypes.iter() {
         data.insert(prototype.name.clone(), prototype.clone());
     }
     Ok(Json(data))

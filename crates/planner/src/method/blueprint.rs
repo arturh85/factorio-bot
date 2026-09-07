@@ -119,6 +119,7 @@ pub fn bands(entities: &[BlueprintEntity], bots: usize) -> Vec<Vec<usize>> {
 fn entity_for(state: &PlanState, e: &BlueprintEntity, position: &Position) -> FactorioEntity {
     let entity_type = state
         .base()
+        .globals
         .entity_prototypes
         .get(e.name.as_str())
         .map(|proto| proto.entity_type.clone())
@@ -627,6 +628,7 @@ fn poles_the_model_cannot_size(
     for e in &bp.entities {
         let is_pole = state
             .base()
+            .globals
             .entity_prototypes
             .get(&e.name)
             .is_some_and(|proto| proto.entity_type == "electric-pole");
@@ -872,6 +874,7 @@ fn mining_area(
 ) -> Option<Rect> {
     let radius = state
         .base()
+        .globals
         .entity_prototypes
         .get(name)
         .and_then(|proto| proto.mining_drill_radius);
@@ -2342,6 +2345,7 @@ mod tests {
         // the vanilla fallback table, so its reach is UNKNOWN.
         let proto = {
             let any = world
+                .globals
                 .entity_prototypes
                 .get("stone-furnace")
                 .expect("fixture has a stone furnace");
@@ -2352,6 +2356,7 @@ mod tests {
             p
         };
         world
+            .globals
             .entity_prototypes
             .insert("modded-pole".to_string(), proto);
         let state = PlanState::from_world(std::sync::Arc::new(world), &[crate::ids::BotId(1)]);
@@ -2677,7 +2682,7 @@ mod tests {
         // one expansion and the next (modelled here as a second, later world
         // snapshot, which is how two real expansions actually differ).
         let occupied_world = fixture_world();
-        occupied_world.players.insert(
+        occupied_world.globals.players.insert(
             99,
             FactorioPlayer {
                 player_id: 99,
@@ -2733,11 +2738,13 @@ mod tests {
 
         let world = fixture_world();
         world
+            .globals
             .entity_prototypes
             .get_mut("iron-ore")
             .expect("the fixture has an iron-ore prototype")
             .resource_category = Some("basic-solid".to_string());
         world
+            .globals
             .entity_prototypes
             .get_mut("electric-mining-drill")
             .expect("the fixture has an electric-mining-drill prototype")
@@ -2836,6 +2843,7 @@ mod tests {
         let world = drill_world();
         {
             let mut proto = world
+                .globals
                 .entity_prototypes
                 .get_mut(drill_name)
                 .unwrap_or_else(|| panic!("the fixture has a {drill_name} prototype"));
@@ -3715,7 +3723,7 @@ mod tests {
         let on_top = anchor.add(&bp.entities[0].offset);
 
         let world = fixture_world();
-        world.players.insert(
+        world.globals.players.insert(
             1,
             FactorioPlayer {
                 player_id: 1,
@@ -3766,7 +3774,7 @@ mod tests {
         let blueprint = encode_test_blueprint(&[("stone-furnace", 0.0, 0.0)]);
 
         let world = fixture_world();
-        world.players.insert(
+        world.globals.players.insert(
             1,
             FactorioPlayer {
                 player_id: 1,
@@ -4043,7 +4051,7 @@ mod enclosure_guard_tests {
         // Bot 1 stands in the ring's interior. This is a bot ON THE ROSTER, not
         // a bystander: the case a researcher building a block near their own
         // bots actually hits.
-        world.players.insert(
+        world.globals.players.insert(
             1,
             FactorioPlayer {
                 player_id: 1,

@@ -295,27 +295,36 @@ pub struct RconOutOfResourceReach {
     pub reach: f64,
 }
 
-/// A second surface was offered to a [`FactorioWorld`](crate::factorio::world::FactorioWorld)
-/// that cannot hold one yet.
+/// A surface was offered to a [`FactorioWorld`](crate::factorio::world::FactorioWorld)
+/// that does not share the world's game-global state.
 ///
-/// The world's game- and force-global state -- recipes, prototypes, forces
-/// and their research, the action id counter -- still lives on
-/// [`FactorioSurface`](crate::factorio::world::FactorioSurface) rather than
-/// on the world, so accepting a second surface would give the run **two
-/// copies of the research state**: the aliasing bug the surface split exists
-/// to prevent, wearing different clothes. Refusing by name is the honest
-/// answer until those fields move; a container that silently forks what the
-/// force has researched would be discovered by a plan that thinks a
-/// technology is open on one planet and closed on the other.
+/// A world holds one [`GameGlobals`](crate::factorio::globals::GameGlobals) --
+/// recipes, prototypes, forces and their research, the action id counter --
+/// and every surface in it holds the **same** `Arc` to it. That is what makes
+/// two surfaces safe to hold at once: they cannot disagree about what is
+/// researched, because there is only one answer for them to read.
+///
+/// A surface built with its own globals, or one that has been *cloned* (a
+/// clone is a fork, so its globals are a copy by design -- see
+/// [`FactorioSurface`](crate::factorio::world::FactorioSurface)'s `Clone`),
+/// would bring a second copy in with it. Refusing by name is the honest
+/// answer: a container that silently forks what the force has researched
+/// would be discovered by a plan that thinks a technology is open on one
+/// planet and closed on the other.
+///
+/// Build the surface with
+/// [`FactorioSurface::with_globals`](crate::factorio::world::FactorioSurface::with_globals),
+/// handed the world's own
+/// [`globals()`](crate::factorio::world::FactorioWorld::globals).
 #[derive(Error, Debug, Diagnostic)]
-#[error("cannot hold surface [{offered}] beside [{held}] yet")]
+#[error("surface [{offered}] does not share the globals of the world holding [{held}]")]
 #[diagnostic(
-    code(factorio::world::surface_not_yet_separable),
+    code(factorio::world::surface_globals_not_shared),
     help(
-        "game-global state (recipes, prototypes, forces and their research, the action id counter) still lives on FactorioSurface; move it onto FactorioWorld before a second surface can be held"
+        "construct it with FactorioSurface::with_globals(world.globals().clone()) -- a surface with its own GameGlobals would give the run two copies of the research state"
     )
 )]
-pub struct SurfaceNotYetSeparable {
+pub struct SurfaceGlobalsNotShared {
     pub held: crate::types::SurfaceId,
     pub offered: crate::types::SurfaceId,
 }

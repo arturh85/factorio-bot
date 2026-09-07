@@ -4,11 +4,16 @@
 //! time, and the surviving claims are the ones that failed when broken.
 
 use factorio_bot_core::factorio::world::{FactorioSurface, FactorioWorld};
-use factorio_bot_core::types::SurfaceId;
+use factorio_bot_core::types::{FactorioForce, SurfaceId};
 use std::sync::Arc;
 
 fn surface() -> Arc<FactorioSurface> {
     Arc::new(FactorioSurface::new())
+}
+
+/// A surface that shares `world`'s globals -- the only kind a world accepts.
+fn sibling(world: &FactorioWorld) -> Arc<FactorioSurface> {
+    Arc::new(FactorioSurface::with_globals(world.globals().clone()))
 }
 
 #[test]
@@ -64,8 +69,8 @@ fn a_world_built_under_another_name_still_answers_only_surface_but_not_nauvis() 
 #[test]
 fn re_inserting_the_held_surface_replaces_it_and_stays_one_surface() {
     let first = surface();
-    let second = surface();
     let mut world = FactorioWorld::nauvis_only(first.clone());
+    let second = sibling(&world);
 
     world
         .insert_surface(SurfaceId::nauvis(), second.clone())
@@ -76,13 +81,124 @@ fn re_inserting_the_held_surface_replaces_it_and_stays_one_surface() {
     assert!(!Arc::ptr_eq(world.nauvis().expect("nauvis"), &first));
 }
 
+/// **The refusal that used to stand here is gone, and this is what earned
+/// its removal.**
+///
+/// `insert_surface` refused *every* second surface by name
+/// (`SurfaceNotYetSeparable`) for as long as recipes, prototypes, forces and
+/// the action id counter were fields on `FactorioSurface`: accepting one
+/// would have handed the run two copies of the research state. Those fields
+/// live in one `GameGlobals` now, shared by `Arc`, so this holds two surfaces
+/// and reads the globals **through both of them**.
+///
+/// Three facts, one per row of the type's own table -- a force's research, an
+/// entry of the prototype data, and the action id counter -- each written
+/// through one surface and read back through the other.
 #[test]
-fn a_second_surface_is_refused_by_name_rather_than_forking_the_research_state() {
+fn two_surfaces_share_one_force_one_recipe_table_and_one_action_id_counter() {
+    let nauvis = surface();
+    let mut world = FactorioWorld::nauvis_only(nauvis.clone());
+    let vulcanus = sibling(&world);
+    world
+        .insert_surface(SurfaceId::from("vulcanus"), vulcanus.clone())
+        .expect("a surface sharing the world's globals is not a second world");
+
+    assert_eq!(world.len(), 2, "both are held");
+
+    // 1. Research. Written through Nauvis, read through Vulcanus.
+    let force: FactorioForce = serde_json::from_str(
+        r#"{
+          "name": "player",
+          "force_id": 1,
+          "current_research": null,
+          "research_progress": null,
+          "technologies": {
+            "automation": {
+              "name": "automation",
+              "enabled": true,
+              "upgrade": false,
+              "researched": true,
+              "prerequisites": [],
+              "research_unit_ingredients": [],
+              "research_unit_count": 10,
+              "research_unit_energy": 600.0,
+              "order": "a-a",
+              "level": 1,
+              "valid": true
+            }
+          }
+        }"#,
+    )
+    .expect("the force fixture parses");
+    nauvis.update_force(force).expect("a force update");
+    let seen_from_vulcanus = vulcanus
+        .globals
+        .forces
+        .get("player")
+        .expect("the same force is visible from the other surface");
+    assert!(
+        seen_from_vulcanus
+            .technologies
+            .get("automation")
+            .expect("the technology travelled with it")
+            .researched,
+        "two surfaces disagreeing about what is researched is the bug this \
+         whole split exists to prevent",
+    );
+
+    // 2. Prototype data. One table, not two.
+    assert!(
+        Arc::ptr_eq(&nauvis.globals.recipes, &vulcanus.globals.recipes),
+        "the recipe table is the same object, not an equal copy",
+    );
+    assert!(Arc::ptr_eq(
+        &nauvis.globals.entity_prototypes,
+        &vulcanus.globals.entity_prototypes
+    ));
+
+    // 3. The action id space. Minting through one surface must advance the
+    //    counter the other reads: two counters would hand two surfaces the
+    //    same `action_id`, and the executor keys its completion signal on it.
+    let minted = {
+        let mut next = nauvis
+            .globals
+            .next_action_id
+            .try_lock()
+            .expect("uncontended");
+        let id = *next;
+        *next += 1;
+        id
+    };
+    let next_from_vulcanus = *vulcanus
+        .globals
+        .next_action_id
+        .try_lock()
+        .expect("uncontended");
+    assert_eq!(
+        next_from_vulcanus,
+        minted + 1,
+        "the counter advanced for both, because there is only one",
+    );
+
+    // And it really is one object, not two that happen to agree so far.
+    assert!(Arc::ptr_eq(&nauvis.globals, &vulcanus.globals));
+    assert!(Arc::ptr_eq(world.globals(), &vulcanus.globals));
+}
+
+/// A surface carrying **its own** globals is still refused, by name.
+///
+/// This is what is left of `SurfaceNotYetSeparable`, and it is the narrower,
+/// sharper version: not "a second surface is impossible" but "this particular
+/// surface would bring a second research state with it".
+#[test]
+fn a_surface_with_its_own_globals_is_refused_by_name() {
     let mut world = FactorioWorld::nauvis_only(surface());
 
     let refusal = world
+        // `surface()`, not `sibling()`: a freshly built surface has globals
+        // of its own.
         .insert_surface(SurfaceId::from("vulcanus"), surface())
-        .expect_err("a second surface would duplicate the force's research");
+        .expect_err("its own globals would duplicate the force's research");
 
     assert_eq!(refusal.held, SurfaceId::nauvis());
     assert_eq!(refusal.offered, SurfaceId::from("vulcanus"));
@@ -95,6 +211,31 @@ fn a_second_surface_is_refused_by_name_rather_than_forking_the_research_state() 
     // And the refusal is total: the world is unchanged, not half-updated.
     assert_eq!(world.len(), 1);
     assert!(world.surface(&SurfaceId::from("vulcanus")).is_none());
+}
+
+/// **A cloned surface is a fork and cannot be put back**, which is the one
+/// consequence of the design worth pinning.
+///
+/// `Clone` deep-copies the globals on purpose: the plan world is speculative
+/// and its writes must not reach the live model. That makes a clone's globals
+/// a different object, so inserting one would be exactly the duplication the
+/// check exists to stop -- and it looks harmless, because the copy starts out
+/// equal.
+#[test]
+fn a_cloned_surface_is_refused_because_a_clone_forks_the_globals() {
+    let nauvis = surface();
+    let mut world = FactorioWorld::nauvis_only(nauvis.clone());
+
+    let forked = Arc::new((*nauvis).clone());
+    assert!(
+        !Arc::ptr_eq(&forked.globals, &nauvis.globals),
+        "a clone forks the globals -- if this ever shares them, the plan \
+         world's imagined research reaches the executor",
+    );
+    world
+        .insert_surface(SurfaceId::from("vulcanus"), forked)
+        .expect_err("a fork brings a second copy of the research state");
+    assert_eq!(world.len(), 1);
 }
 
 /// **A dump has to carry the daylight curve, because an offline plan has no

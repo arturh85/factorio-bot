@@ -273,6 +273,7 @@ fn score_dump(
     ));
   }
   let far_players: Vec<String> = world
+    .globals
     .players
     .iter()
     .filter(|entry| {

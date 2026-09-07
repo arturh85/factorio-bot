@@ -440,6 +440,7 @@ fn prototype_of_type(state: &PlanState, entity_type: &str) -> Option<String> {
     // defined by.
     state
         .base()
+        .globals
         .entity_prototypes
         .iter()
         .filter(|proto| proto.entity_type == entity_type)
@@ -655,6 +656,7 @@ pub(crate) fn fluid_ports(
     };
     let proto = state
         .base()
+        .globals
         .entity_prototypes
         .get(name)
         .ok_or_else(|| refuse("this world has no prototype of that name"))?;
@@ -967,6 +969,7 @@ fn overlay_boxes(state: &PlanState, area: &Rect) -> Vec<Rect> {
 fn plain_entity(state: &PlanState, name: &str, position: &Position) -> FactorioEntity {
     let entity_type = state
         .base()
+        .globals
         .entity_prototypes
         .get(name)
         .map(|proto| proto.entity_type.clone())
@@ -1175,6 +1178,7 @@ mod gather_tests {
     fn live_capture_state() -> PlanState {
         let world: FactorioSurface = world_with_oil(OPEN);
         world
+            .globals
             .entity_prototypes
             .get_mut("pumpjack")
             .expect("the fixture has a pumpjack")
@@ -1204,6 +1208,7 @@ mod gather_tests {
     fn a_connection_off_the_footprints_corner_is_refused() {
         let world: FactorioSurface = world_with_oil(OPEN);
         world
+            .globals
             .entity_prototypes
             .get_mut("pumpjack")
             .expect("the fixture has a pumpjack")
@@ -1639,6 +1644,7 @@ mod gather_tests {
     fn a_world_with_nothing_to_buffer_a_fluid_refuses_by_name() {
         let world: FactorioSurface = world_with_oil(OPEN);
         world
+            .globals
             .entity_prototypes
             .get_mut("storage-tank")
             .expect("the fixture has a storage-tank")
@@ -1789,6 +1795,7 @@ mod gather_tests {
         // Strip the unlock from `oil-gathering`, leaving the recipe disabled
         // and nothing in the tree able to turn it on.
         let mut force = world
+            .globals
             .forces
             .get("player")
             .expect("the oil fixture has a player force")

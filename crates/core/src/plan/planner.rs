@@ -330,7 +330,7 @@ impl Planner {
         let mut present: Vec<u8> = vec![];
         let mut absent: Vec<u8> = vec![];
         for player_id in 1u8..=bot_count {
-            if self.real_world.players.contains_key(&player_id) {
+            if self.real_world.globals.players.contains_key(&player_id) {
                 present.push(player_id);
             } else {
                 absent.push(player_id);
@@ -368,7 +368,7 @@ impl Planner {
         for player_id in 1u8..=bot_count {
             player_ids.push(player_id);
             // initialize missing players with default inventory
-            if self.real_world.players.get(&player_id).is_none() {
+            if self.real_world.globals.players.get(&player_id).is_none() {
                 let mut main_inventory: BTreeMap<String, u32> = BTreeMap::new();
                 main_inventory.insert(EntityName::Wood.to_string(), 1);
                 main_inventory.insert(EntityName::StoneFurnace.to_string(), 1);
@@ -425,7 +425,12 @@ mod tests {
         let bound = planner.plan_world.clone();
 
         assert_eq!(
-            bound.players.get(&1).expect("seeded player").position,
+            bound
+                .globals
+                .players
+                .get(&1)
+                .expect("seeded player")
+                .position,
             Position::new(0., 0.),
             "precondition: the handle starts out agreeing with the world"
         );
@@ -443,7 +448,7 @@ mod tests {
             ))
             .expect("give the player plates");
 
-        let player = bound.players.get(&1).expect("player still present");
+        let player = bound.globals.players.get(&1).expect("player still present");
         assert_eq!(
             player.position,
             Position::new(-22.29, 35.34),
@@ -476,7 +481,12 @@ mod tests {
             .expect("seed the player");
 
         assert_eq!(
-            taken_early.players.get(&1).expect("player").position,
+            taken_early
+                .globals
+                .players
+                .get(&1)
+                .expect("player")
+                .position,
             Position::new(7., 9.),
             "a handle taken before the refresh was orphaned by it"
         );
@@ -511,7 +521,7 @@ mod tests {
             "the roster must be who the game has, not who was asked for"
         );
         assert!(
-            world.players.get(&4).is_none(),
+            world.globals.players.get(&4).is_none(),
             "asking for the roster invented a player the game does not have"
         );
     }
@@ -569,6 +579,7 @@ mod tests {
         );
         assert_eq!(
             world
+                .globals
                 .players
                 .get(&4)
                 .expect("seeded")

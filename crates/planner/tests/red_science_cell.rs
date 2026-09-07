@@ -537,6 +537,7 @@ fn the_live_four_bot_run_adopts_the_plant_it_already_built() {
         .map(|part| {
             state
                 .base()
+                .globals
                 .entity_prototypes
                 .get(part.name)
                 .map(|proto| proto.entity_type.clone())

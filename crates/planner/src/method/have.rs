@@ -3593,6 +3593,7 @@ fn pole_entity(state: &PlanState, position: &Position) -> FactorioEntity {
         name: POLE.to_string(),
         entity_type: state
             .base()
+            .globals
             .entity_prototypes
             .get(POLE)
             .map(|proto| proto.entity_type.clone())
@@ -8297,6 +8298,7 @@ mod tests {
         let world = world_holding(crude_oil_wells());
         {
             let mut well = world
+                .globals
                 .entity_prototypes
                 .get_mut("crude-oil")
                 .expect("the fixture has a crude-oil prototype");
@@ -8304,6 +8306,7 @@ mod tests {
         }
         {
             let mut character = world
+                .globals
                 .entity_prototypes
                 .get_mut("character")
                 .expect("the fixture has a character prototype");
@@ -9391,12 +9394,14 @@ mod tests {
         world.update_recipes(vec![steel]).expect("recipes update");
         if let Some(speed) = speed {
             let mut furnace = world
+                .globals
                 .entity_prototypes
                 .get("stone-furnace")
                 .expect("the fixture ships a stone furnace")
                 .clone();
             furnace.crafting_speed = Some(speed);
             world
+                .globals
                 .entity_prototypes
                 .insert("stone-furnace".into(), furnace);
         }
@@ -9461,12 +9466,14 @@ mod tests {
     fn state_with_furnace_speed(speed: f64) -> PlanState {
         let world = fixture_world();
         let mut furnace = world
+            .globals
             .entity_prototypes
             .get("stone-furnace")
             .expect("the fixture ships a stone furnace")
             .clone();
         furnace.crafting_speed = Some(speed);
         world
+            .globals
             .entity_prototypes
             .insert("stone-furnace".into(), furnace);
         PlanState::from_world(Arc::new(world), &[BotId(1)])
@@ -13169,6 +13176,7 @@ mod tests {
             .iter()
             .map(|part| {
                 s.base()
+                    .globals
                     .entity_prototypes
                     .get(part.name)
                     .map(|proto| proto.entity_type.clone())
@@ -13577,6 +13585,7 @@ mod tests {
         let half_diag = {
             let b = &state
                 .base()
+                .globals
                 .entity_prototypes
                 .get("rock-huge")
                 .unwrap()
@@ -15745,6 +15754,7 @@ mod stockpiling {
         let world = fixture_world();
         let drill_at = Position::new(-35., 36.);
         let collision = world
+            .globals
             .entity_prototypes
             .get("burner-mining-drill")
             .map(|proto| proto.collision_box.clone())

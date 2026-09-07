@@ -185,7 +185,7 @@ async fn research_reports_success_only_when_the_game_finishes_it() {
 
     // What `OutputParser` does when the mod's `action_completed` writeout
     // arrives on the server's stdout.
-    world.actions.insert(
+    world.globals.actions.insert(
         action_id,
         ActionOutcome {
             tick: FINISHED_AT,
@@ -233,7 +233,7 @@ async fn a_completion_for_another_action_does_not_release_this_one() {
         .expect("a research dispatch");
     let action_id = action_id_of(dispatch);
 
-    world.actions.insert(
+    world.globals.actions.insert(
         action_id.wrapping_add(1),
         ActionOutcome {
             tick: FINISHED_AT,

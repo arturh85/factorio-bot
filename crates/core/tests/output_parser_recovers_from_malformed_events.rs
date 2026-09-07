@@ -120,7 +120,11 @@ fn a_malformed_entity_prototype_is_skipped_and_parsing_continues() {
 
     let world = parser.world();
     assert!(
-        world.entity_prototypes.get("stone-furnace").is_some(),
+        world
+            .globals
+            .entity_prototypes
+            .get("stone-furnace")
+            .is_some(),
         "the well-formed prototype that followed the malformed one must \
          still reach the world"
     );
@@ -136,7 +140,7 @@ fn a_malformed_item_prototype_is_skipped_and_parsing_continues() {
 
     let world = parser.world();
     assert!(
-        world.item_prototypes.get("iron-plate").is_some(),
+        world.globals.item_prototypes.get("iron-plate").is_some(),
         "the well-formed prototype that followed the malformed one must \
          still reach the world"
     );
@@ -152,7 +156,7 @@ fn a_malformed_recipe_is_skipped_and_parsing_continues() {
 
     let world = parser.world();
     assert!(
-        world.recipes.get("iron-plate").is_some(),
+        world.globals.recipes.get("iron-plate").is_some(),
         "the well-formed recipe that followed the malformed one must still \
          reach the world"
     );
@@ -169,7 +173,7 @@ fn an_unrecognized_action_status_is_skipped_not_recorded_and_parsing_continues()
 
     let world = parser.world();
     assert!(
-        world.actions.get(&7).is_none(),
+        world.globals.actions.get(&7).is_none(),
         "an action whose status could not be understood must NOT be \
          recorded as completed -- doing so would make the caller believe \
          action 7 finished when it did not"
@@ -184,12 +188,12 @@ fn an_unrecognized_action_status_is_skipped_not_recorded_and_parsing_continues()
         "the well-formed event must parse: {result:?}"
     );
     assert_eq!(
-        world.actions.get(&8).map(|v| v.result.clone()),
+        world.globals.actions.get(&8).map(|v| v.result.clone()),
         Some(String::from("ok")),
         "parsing must continue past the unrecognized status"
     );
     assert_eq!(
-        world.actions.get(&8).map(|v| v.tick),
+        world.globals.actions.get(&8).map(|v| v.tick),
         Some(2),
         "the completion must carry the event's own game tick"
     );
@@ -214,7 +218,7 @@ fn a_fail_completion_with_no_message_is_recorded_as_failed_and_parsing_continues
     );
 
     let world = parser.world();
-    let recorded = world.actions.get(&7).map(|v| v.clone());
+    let recorded = world.globals.actions.get(&7).map(|v| v.clone());
     assert!(
         recorded.is_some(),
         "a failure with no message is still a failure and must be recorded, not dropped"
@@ -238,7 +242,7 @@ fn a_fail_completion_with_no_message_is_recorded_as_failed_and_parsing_continues
         "the well-formed event must parse: {result:?}"
     );
     assert_eq!(
-        world.actions.get(&8).map(|v| v.result.clone()),
+        world.globals.actions.get(&8).map(|v| v.result.clone()),
         Some(String::from("ok")),
         "parsing must continue past the messageless failure"
     );
@@ -345,6 +349,7 @@ fn a_malformed_graphic_is_skipped_and_a_well_formed_one_keeps_distinct_width_and
 
     let world = parser.world();
     let graphic = world
+        .globals
         .graphics
         .get("furnace")
         .expect("the well-formed graphic that followed the malformed one must reach the world");

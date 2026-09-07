@@ -257,6 +257,21 @@ export interface FactorioEntity {
      * separating those two is the whole reason the field exists.
      */
     transport_lines: TransportLine[] | null;
+    /**
+     * What the entity is *doing*, as `defines.entity_status`' own name for it:
+     * `working`, `no_power`, `no_ingredients`,
+     * `waiting_for_space_in_destination`.
+     *
+     * A name and never the raw enum number, whose meaning lives in a table
+     * nobody joins and can change across Factorio versions; a value the mod
+     * cannot resolve arrives as `unmapped_<n>`.
+     *
+     * `null` means the entity has no status concept (a tree, a chest) or the
+     * record predates the field -- **never** "working". The three inventory
+     * fields above say what a machine holds and none of them says whether it
+     * is running.
+     */
+    status: string | null;
     /** Only present (non-null) for `entity_type: "resource"`. */
     amount: number | null;
     /** Only present for crafting machines. */

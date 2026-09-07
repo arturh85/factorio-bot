@@ -1180,6 +1180,9 @@ mod gather_tests {
             .expect("the fixture has a pumpjack")
             .fluidbox_prototypes = Some(vec![FactorioFluidBoxPrototype {
             production_type: "output".into(),
+            // A pumpjack fixture that is about pipe GEOMETRY: the capacity
+            // is real on the live prototype and irrelevant here.
+            volume: None,
             pipe_connections: Box::new(Some(vec![FactorioFluidBoxConnection {
                 max_underground_distance: None,
                 connection_type: Some("normal".into()),
@@ -1206,6 +1209,9 @@ mod gather_tests {
             .expect("the fixture has a pumpjack")
             .fluidbox_prototypes = Some(vec![FactorioFluidBoxPrototype {
             production_type: "output".into(),
+            // A pumpjack fixture that is about pipe GEOMETRY: the capacity
+            // is real on the live prototype and irrelevant here.
+            volume: None,
             pipe_connections: Box::new(Some(vec![FactorioFluidBoxConnection {
                 max_underground_distance: None,
                 connection_type: Some("normal".into()),

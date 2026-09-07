@@ -1746,6 +1746,12 @@
               "null"
             ]
           },
+          "status": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "surface": {
             "oneOf": [
               {
@@ -1967,6 +1973,13 @@
           },
           "production_type": {
             "type": "string"
+          },
+          "volume": {
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
           }
         },
         "required": [

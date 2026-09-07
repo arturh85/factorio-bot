@@ -216,6 +216,10 @@ export function parseFactorioEntity(value: unknown, path = '$'): FactorioEntity 
         // none and on every capture written before 2026-09-06.
         input_inventory: parseInventoryOrNull(obj.input_inventory, path + '.input_inventory'),
         transport_lines: parseTransportLinesOrNull(obj.transport_lines, path + '.transport_lines'),
+        // What the machine is DOING, by name. `null` on every capture written
+        // before 2026-09-07 and on everything with no status concept -- and
+        // `null` there means "the sender did not say", never "working".
+        status: asStringOrNull(obj.status, path + '.status'),
         amount: asNumberOrNull(obj.amount, path + '.amount'),
         recipe: asStringOrNull(obj.recipe, path + '.recipe'),
         ghost_name: asStringOrNull(obj.ghost_name, path + '.ghost_name'),

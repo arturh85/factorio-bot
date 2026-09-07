@@ -16,6 +16,15 @@ function entity(overrides: Partial<FactorioEntity>): FactorioEntity {
         pickup_position: null,
         output_inventory: null,
         fuel_inventory: null,
+        // `input_inventory` and `transport_lines` landed on `FactorioEntity`
+        // on 2026-09-06 and `status` on 2026-09-07 without reaching this
+        // helper, which left `tsc --noEmit` red on master while `vitest`
+        // stayed green -- vitest does not type-check. `null` is the honest
+        // value for all three on a plain container: no input inventory, no
+        // lanes, and nothing said about what it is doing.
+        input_inventory: null,
+        transport_lines: null,
+        status: null,
         amount: null,
         recipe: null,
         ghost_name: null,

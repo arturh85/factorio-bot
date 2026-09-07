@@ -386,7 +386,6 @@ end
             }
         })?,
     )?;
-    let rcon = _rcon.clone();
     map_table.set(
         "__doc_entry_cheat_item",
         String::from(
@@ -401,6 +400,52 @@ end
 "#,
         ),
     )?;
+    map_table.set(
+        "__doc_entry_create_space_platform",
+        String::from(
+            r#"
+--- Creates a space platform for the player force, awaiting its starter pack.
+-- The ONE capability our entity-scoped actions cannot express: it is a
+-- force-level call with no entity receiver, so there is nothing for `place` to
+-- place or `insert_to_inventory` to insert into.
+--
+-- The rest of the way to a platform is already expressible:
+--   1. this call -- the platform appears `waiting_for_starter_pack`
+--   2. `rcon.insert_to_inventory` the starter pack into a silo WHILE IT IS
+--      BUILDING a rocket, so it loads as cargo rather than sitting in the queue
+--   3. nothing -- the silo launches itself and the surface appears
+--
+-- There is no launch call, deliberately: a rocket with valid cargo and a
+-- destination launches on its own, and `launch_rocket` returns false throughout.
+--
+-- Raises when the game refuses, with the game's own reason.
+-- @string name name for the platform, e.g. "p1"
+-- @string planet planet name to launch from, e.g. "nauvis"
+-- @string starter_pack item name, e.g. "space-platform-starter-pack"
+-- @return string the created platform's name
+function rcon.create_space_platform(name, planet, starter_pack)
+end
+"#,
+        ),
+    )?;
+    let rcon = _rcon.clone();
+    map_table.set(
+        "create_space_platform",
+        lua.create_async_function(
+            move |_lua, (name, planet, starter_pack): (String, String, String)| {
+                let _rcon = rcon.clone();
+                async move {
+                    let created = _rcon
+                        .as_ref()
+                        .create_space_platform(&name, &planet, &starter_pack)
+                        .await
+                        .map_err(rcon_error)?;
+                    Ok(created)
+                }
+            },
+        )?,
+    )?;
+    let rcon = _rcon.clone();
     map_table.set(
         "cheat_item",
         lua.create_async_function(

@@ -2948,6 +2948,25 @@ impl std::error::Error for ActionFailure {}
 /// ([`take_tick_stamp`]) reads a tick off a reply, whoever wrote it.
 pub const GAME_TICK_QUERY: &str = "/silent-command rcon.print(\"§tick§\"..game.tick)";
 
+/// The prefix a [`FactorioRcon::create_space_platform`] reply carries.
+pub const PLATFORM_STAMP_PREFIX: &str = "§platform§";
+
+/// Read the reply to a platform creation.
+///
+/// `Ok(name)` when the game made one, `Err(reason)` when it said why not, and
+/// `None` when no line carried the stamp -- the same three-way split the mod
+/// list uses, and for the same reason: "we could not ask" is not "it refused".
+pub fn parse_platform_reply(lines: &[String]) -> Option<Result<String, String>> {
+    let body = lines
+        .iter()
+        .find_map(|line| line.split_once(PLATFORM_STAMP_PREFIX).map(|(_, rest)| rest))?;
+    let body = body.trim();
+    match body.strip_prefix("ok=") {
+        Some(name) => Some(Ok(name.to_string())),
+        None => Some(Err(body.trim_start_matches("err=").to_string())),
+    }
+}
+
 /// The prefix [`ACTIVE_MODS_QUERY`]'s reply carries, so one parser reads it.
 pub const MODS_STAMP_PREFIX: &str = "§mods§";
 
@@ -5387,6 +5406,67 @@ impl FactorioRcon {
     /// without the stamp — and is never to be read as "no mods". An empty map
     /// is the positive answer that the game is vanilla. See
     /// [`ACTIVE_MODS_QUERY`] for why this asks the game rather than BotBridge.
+    /// Create a space platform for the player force, awaiting its starter pack.
+    ///
+    /// **This is the one capability an entity-scoped action vocabulary cannot
+    /// express.** Our verbs (Mine, Chop, Craft, Place, Insert, Remove,
+    /// Research, SetRecipe, Evacuate) all name an entity or an item.
+    /// `LuaForce.create_space_platform` names neither: it is a **force-level**
+    /// call with no `LuaEntity` receiver, so there is nothing for `Place` to
+    /// place or `Insert` to insert into. That is a structural fact about the
+    /// vocabulary rather than a gap somebody forgot to fill.
+    ///
+    /// Everything else on the way to a platform is already expressible, which
+    /// is why this is the whole of the addition (established live 2026-09-07,
+    /// `docs/superpowers/notes/2026-09-07-a-space-platform-needs-one-new-verb.md`):
+    ///
+    /// 1. this call -- the platform appears `waiting_for_starter_pack`, with
+    ///    `surface = nil`;
+    /// 2. **`Insert`** the starter pack into a silo *while it is building a
+    ///    rocket*, so it loads as cargo rather than sitting in the queue;
+    /// 3. nothing. The silo launches itself and the surface appears.
+    ///
+    /// **There is deliberately no launch call here**, and that is the finding
+    /// rather than an omission. A rocket with valid cargo and somewhere to send
+    /// it launches on its own; `LuaEntity.launch_rocket` returned `false`
+    /// throughout the run that produced a platform. In Factorio 1.x the
+    /// behaviour was the writable `LuaEntity.auto_launch`; on 2.1.17 that
+    /// attribute **does not exist at all** (zero occurrences in
+    /// `runtime-api.json`) and three read-only Factorio prototype properties
+    /// govern it instead -- launch_to_space_platforms, launch_wait_time and
+    /// can_launch_without_landing_pads, named here without backticks because
+    /// they are the game's names and resolve to nothing in this tree. So there
+    /// is nothing to configure and nothing to trigger.
+    ///
+    /// Vanilla Lua rather than a BotBridge function, for the reason
+    /// [`GAME_TICK_QUERY`] gives and one more: the mod's `action_start_*`
+    /// family is per-player and per-entity, and a force-level call has neither.
+    pub async fn create_space_platform(
+        &self,
+        name: &str,
+        planet: &str,
+        starter_pack: &str,
+    ) -> Result<String> {
+        let command = format!(
+            "/silent-command local ok,r = pcall(function() return \
+             game.forces.player.create_space_platform{{name=\"{name}\", planet=\"{planet}\", \
+             starter_pack=\"{starter_pack}\"}} end) \
+             if ok and r then rcon.print(\"§platform§ok=\"..r.name) \
+             else rcon.print(\"§platform§err=\"..tostring(r)) end"
+        );
+        let lines = self.send(&command).await?;
+        match lines.as_deref().and_then(parse_platform_reply) {
+            Some(Ok(name)) => Ok(name),
+            Some(Err(why)) => Err(miette!(
+                "the game refused to create a space platform: {why}"
+            )),
+            None => Err(miette!(
+                "create_space_platform: the game answered nothing -- not a refusal, an \
+                 unanswered command"
+            )),
+        }
+    }
+
     pub async fn active_mods(&self) -> Result<Option<std::collections::BTreeMap<String, String>>> {
         let lines = self.send(ACTIVE_MODS_QUERY).await?;
         Ok(lines.as_deref().and_then(parse_active_mods))
@@ -10677,5 +10757,48 @@ mod active_mods_tests {
         assert_eq!(got.len(), 2, "the malformed entry is dropped: {got:?}");
         assert!(!got.contains_key("broken"));
         assert_eq!(got.get("base").map(String::as_str), Some("2.1.17"));
+    }
+}
+
+#[cfg(test)]
+mod platform_reply_tests {
+    use super::{PLATFORM_STAMP_PREFIX, parse_platform_reply};
+
+    fn lines(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    /// **Three answers, not two.** A refusal and an unanswered command are
+    /// different facts, and this project has paid for collapsing that
+    /// distinction in five other places. `None` means the game never spoke;
+    /// `Some(Err)` means it spoke and said no.
+    #[test]
+    fn a_refusal_and_an_unanswered_command_are_different() {
+        assert!(
+            parse_platform_reply(&lines(&["unrelated"])).is_none(),
+            "no stamp means the game did not answer -- never a refusal"
+        );
+        assert!(
+            parse_platform_reply(&lines(&[])).is_none(),
+            "and neither does an empty reply"
+        );
+        let refused = parse_platform_reply(&lines(&[&format!(
+            "{PLATFORM_STAMP_PREFIX}err=no such planet"
+        )]))
+        .expect("a stamped reply is an answer");
+        assert_eq!(refused, Err("no such planet".to_string()));
+    }
+
+    /// The created platform's own name comes back, because the game may not
+    /// use the name that was asked for -- and a caller that needs to find the
+    /// platform afterwards must use the game's answer, not its own request.
+    #[test]
+    fn a_created_platform_reports_the_name_the_game_gave_it() {
+        let ok = parse_platform_reply(&lines(&[
+            "chatter",
+            &format!("{PLATFORM_STAMP_PREFIX}ok=platform-1"),
+        ]))
+        .expect("the stamp is found on a later line");
+        assert_eq!(ok, Ok("platform-1".to_string()));
     }
 }

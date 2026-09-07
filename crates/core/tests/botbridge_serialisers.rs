@@ -1639,6 +1639,83 @@ fn the_supply_area_comes_from_the_method_and_not_the_attribute() {
     );
 }
 
+/// A pole's wire reach crosses the bridge, and it comes from the **method**.
+///
+/// `crates/planner/src/state.rs` kept this as a hand-typed table of four
+/// vanilla names, and it is the one that had **drifted**: `big-electric-pole`
+/// read 30.0 against the game's 32, because Factorio 2.0 moved the value and a
+/// hand-kept table of game data is only ever read by code that agrees with it.
+///
+/// **The trap this fixture holds shut is the spelling.** `maximum_wire_distance`
+/// is the DATA-stage name — it is what `base/prototypes/entity/entities.lua`
+/// writes, and it is what anybody reaching for this would try first — and there
+/// is no such attribute on `LuaEntityPrototype` in 2.1.17. So the fixture
+/// carries a *decoy* attribute with a different value: a serialiser that read
+/// the attribute would pass a test asserting only "some number arrived" and
+/// fail here, and on the live game it would raise, be swallowed by the mod's
+/// `pcall`, and report `None` for every prototype in silence.
+#[test]
+fn a_serialised_pole_carries_the_wire_reach_from_the_method() {
+    let lua = botbridge_types();
+    let pole = machine_prototype(&lua, "big-electric-pole", "electric-pole");
+    pole.set(
+        "get_max_wire_distance",
+        lua.create_function(|_, ()| Ok(32.0)).expect("function"),
+    )
+    .expect("set");
+    // The data-stage spelling, which the live API does not have. Present here
+    // with the WRONG number so that reading it cannot look like success.
+    pole.set("maximum_wire_distance", 30.0).expect("set");
+
+    let prototype = prototype_through_serde(&lua, pole);
+    assert_eq!(
+        prototype.maximum_wire_distance,
+        Some(32.0),
+        "read through get_max_wire_distance(); 30 is the Factorio 1.x value \
+         sitting on the data-stage attribute name the live API lacks",
+    );
+}
+
+/// **A wireless entity's zero is sent, and that is the whole point of sending
+/// it.** `get_max_wire_distance()` carries no `subclasses` restriction and
+/// answers 0 rather than raising, unlike `get_supply_area_distance()`, so
+/// there is nothing for the mod's `pcall` to gate on and a collector that
+/// wanted to drop the zeros would have to decide what a pole is in Lua.
+///
+/// Sending it keeps two different facts apart: `Some(0.0)` is *the game says
+/// nothing connects to this*, `None` is *the sender did not say*, which is
+/// every world dumped before 2026-09-07. `crates/planner/src/state.rs` falls
+/// back to its vanilla table on exactly one of those.
+///
+/// **A tree, not a furnace, because the zero is rarer than it sounds.**
+/// Measured over 1,028 live prototypes, a `stone-furnace` reports **9** — its
+/// *circuit* wire distance — and so do chests and assembling machines; the
+/// 930 that report 0 are trees, explosions and corpses. An earlier version of
+/// this test used a furnace and asserted a zero the live game does not give.
+#[test]
+fn an_unconnectable_prototype_reports_zero_rather_than_nothing() {
+    let lua = botbridge_types();
+    let tree = machine_prototype(&lua, "tree-01", "tree");
+    tree.set(
+        "get_max_wire_distance",
+        lua.create_function(|_, ()| Ok(0.0)).expect("function"),
+    )
+    .expect("set");
+    assert_eq!(
+        prototype_through_serde(&lua, tree).maximum_wire_distance,
+        Some(0.0),
+        "the game's own zero, not absence -- a reader must be able to tell \
+         'nothing connects to this' from 'nobody asked'",
+    );
+
+    // And an entity the sender never asked about stays absent.
+    let older = machine_prototype(&lua, "tree-01", "tree");
+    assert_eq!(
+        prototype_through_serde(&lua, older).maximum_wire_distance,
+        None,
+    );
+}
+
 /// A prototype table shaped like the live API presents a machine: a square
 /// collision box, plus whatever `extra` the caller wants set on it.
 fn machine_prototype(lua: &Lua, name: &str, entity_type: &str) -> Table {

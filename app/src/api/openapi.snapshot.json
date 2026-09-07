@@ -1833,6 +1833,14 @@
               "null"
             ]
           },
+          "electric_energy_usage": {
+            "description": "What one of these draws from an **electric** network while running, in\n**joules per tick** — the game's own unit, unconverted. Use\n[`Self::energy_usage_kw`] rather than scaling it at a call site.\n\n# The gate is the field, not a caller's responsibility\n\nThe mod sends this **only when the prototype has an electric energy\nsource**. A `stone-furnace` has an `energy_usage` of 90 kW *of coal*,\nand a burner machine charged against an electric budget is a number in\nthe wrong units that every test would agree with. That is why\n`crates/planner/src/state.rs`'s `consumer_kw` leaves burner machines\nout rather than zeroing them, and the gate lives upstream where the\nenergy source is visible.\n\n# An inserter is electric and still has no figure here\n\nMeasured on all 1,028 prototypes of a live 2.1.17 game: **28 carry this\nfield and not one of them reports 0.** An `inserter` has an electric\nenergy source and passes the gate, but `energy_usage` is an *optional*\nattribute and is simply absent on it — its cost is\n`energy_per_movement` and `energy_per_rotation`, per swing, not a\nstanding draw. What a budget wants is what a *busy* one costs, which is\na duty cycle rather than a prototype field, so `state.rs` keeps its\n`INSERTER_DUTY_KW` and reaches it through the ordinary absent-field\nfallback.\n\n`state.rs` treats a zero the same way for safety, but that path has\nnever fired in vanilla and the reason to expect absence rather than\nzero is stated here so nobody re-derives it from the guard.\n\n`default`, so every dump and snapshot written before this field\nexisted reads `None` — *the sender did not say*, never zero draw.",
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
           "entity_type": {
             "type": "string"
           },
@@ -1842,6 +1850,14 @@
             },
             "type": [
               "array",
+              "null"
+            ]
+          },
+          "max_energy_production": {
+            "description": "What one of these contributes to an electric network at full output, in\n**joules per tick**. [`Self::max_energy_production_kw`] converts it.\n\n`LuaEntityPrototype::get_max_energy_production()`, a **method** in\n2.1.17 — there is no attribute of that name, and reading one raises.\n\n# It is the only way to a generator's output, because the inputs are\nnot exposed\n\nA `steam-engine` carries no output figure at the data stage either: its\n900 kW is `fluid_usage_per_tick * 60 * heat_capacity *\n(maximum_temperature - default_temperature) * effectivity`. Of those,\n`LuaEntityPrototype` exposes `maximum_temperature` and `effectivity`\nand **not** `fluid_usage_per_tick` -- doclint-allow: a Factorio\ndata-stage name, and its ABSENCE from this tree is exactly the claim.\nSo the physics cannot be reassembled downstream: the runtime does it\nand hands over the answer.\n\n# Nameplate, and for a solar panel that is a trap\n\nThis is maximum production, so a `solar-panel` reports its **noon**\nfigure and an `accumulator` reports its discharge limit. Neither is\nwhat a day averages, and the average is not derivable from any\nprototype — the day/night curve lives on `LuaSurface`\n(`ticks_per_day`, `dawn`, `dusk`, `evening`, `morning`,\n`solar_power_multiplier`), which nothing sends. `state.rs` credits\ndeterministic sources only and says so.\n\n`default`: `None` on every world written before this field, meaning\n*unknown*, never \"produces nothing\".",
+            "format": "double",
+            "type": [
+              "number",
               "null"
             ]
           },

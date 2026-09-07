@@ -575,6 +575,45 @@ function serialize_entity_prototype(entity)
     -- of the square it supplies, so 2.5 for a small pole's 5x5.
     ok, val = pcall(function() return entity.get_supply_area_distance() end)
     if ok then record.supply_area_distance = val end
+    -- ELECTRICAL DRAW AND OUTPUT. `crates/planner/src/state.rs` writes
+    -- `consumer_kw` and `generation_kw` out by hand -- 14 rows and 2 -- and
+    -- says in its own doc that sending these is what deletes them. The
+    -- milestone arithmetic (24 electric furnaces at 180 kW against a 1.8 MW
+    -- plant) rests on numbers no code has ever checked against the game.
+    --
+    -- **`energy_usage` is an ATTRIBUTE and `get_max_energy_production()` is a
+    -- METHOD**, checked against this install's `runtime-api.json` rather than
+    -- recalled -- the two are opposite answers and reading a method as an
+    -- attribute raises, `pcall` swallows it, and the field arrives nil with
+    -- nothing saying it should not have (that is how `crafting_speed` was nil
+    -- for all 1028 prototypes of a live game).
+    --
+    -- Both are **joules per tick**, the game's own unit, sent unconverted.
+    -- `FactorioEntityPrototype::energy_usage_kw` does the x60/1000, in one
+    -- place, so a reader cannot pick a different conversion.
+    --
+    -- **`energy_usage` is gated on the entity having an ELECTRIC energy
+    -- source, and that gate is the whole safety of the field.** A stone
+    -- furnace's `energy_usage` is 90 kW *of coal*; charged against an
+    -- electric network's budget it is a number in the wrong units that every
+    -- test would agree with. `state.rs` names exactly that as the reason
+    -- burner machines are absent from `consumer_kw` rather than zero in it,
+    -- so the gate lives here where the energy source is visible, and the
+    -- field's name says it holds.
+    ok, val = pcall(function()
+        if entity.electric_energy_source_prototype == nil then return nil end
+        return entity.energy_usage
+    end)
+    if ok then record.electric_energy_usage = val end
+    -- The generation half. There is no `max_energy_production` attribute and
+    -- no `fluid_usage_per_tick` on `LuaEntityPrototype` at all in 2.1.17, so
+    -- the physics (fluid usage x heat capacity x temperature delta x
+    -- effectivity) cannot be re-derived out here -- the runtime does it and
+    -- hands over the answer. Not gated on an energy *source*: a generator
+    -- consumes steam and produces electricity, so it has no electric energy
+    -- source to test.
+    ok, val = pcall(function() return entity.get_max_energy_production() end)
+    if ok then record.max_energy_production = val end
     -- Beacon only: the fraction of a module's effect the receiver gets.
     ok, val = pcall(function() return entity.distribution_effectivity end)
     if ok then record.distribution_effectivity = val end

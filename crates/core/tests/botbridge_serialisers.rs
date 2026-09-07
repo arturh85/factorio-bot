@@ -1639,6 +1639,136 @@ fn the_supply_area_comes_from_the_method_and_not_the_attribute() {
     );
 }
 
+/// A prototype table shaped like the live API presents a machine: a square
+/// collision box, plus whatever `extra` the caller wants set on it.
+fn machine_prototype(lua: &Lua, name: &str, entity_type: &str) -> Table {
+    let point = |x: f64, y: f64| {
+        let table = lua.create_table().expect("table");
+        table.set("x", x).expect("set");
+        table.set("y", y).expect("set");
+        table
+    };
+    let collision_box = lua.create_table().expect("table");
+    collision_box
+        .set("left_top", point(-1.2, -1.2))
+        .expect("set");
+    collision_box
+        .set("right_bottom", point(1.2, 1.2))
+        .expect("set");
+    let entity = lua.create_table().expect("table");
+    entity.set("name", name).expect("set");
+    entity.set("type", entity_type).expect("set");
+    entity.set("collision_box", collision_box).expect("set");
+    entity
+}
+
+/// The planner's `consumer_kw` and `generation_kw` were 14 hand-typed rows and
+/// 2, and nothing electrical had ever crossed this bridge: the only `energy`
+/// the mod sent anywhere was a recipe's crafting time. The milestone
+/// arithmetic that says a second boiler is needed (24 electric furnaces at
+/// 180 kW against a 1.8 MW plant) rested entirely on numbers no code had
+/// checked against the game.
+///
+/// **Both values are joules per tick and are sent unconverted.** 3,000 J/tick
+/// is an electric furnace's 180 kW; 15,000 is a steam engine's 900 kW.
+/// `FactorioEntityPrototype::energy_usage_kw` does the x60/1000 in one place.
+///
+/// Goes the whole way into the struct, like the beacon test above, because a
+/// correctly spelled key can still reach no field.
+#[test]
+fn a_serialised_electric_machine_carries_its_draw_and_output() {
+    let lua = botbridge_types();
+
+    let furnace = machine_prototype(&lua, "electric-furnace", "furnace");
+    // Present, and its contents never read: the mod uses it only as the
+    // is-this-electric gate.
+    furnace
+        .set(
+            "electric_energy_source_prototype",
+            lua.create_table().expect("table"),
+        )
+        .expect("set");
+    furnace.set("energy_usage", 3000.0).expect("set");
+    let prototype = prototype_through_serde(&lua, furnace);
+    assert_eq!(
+        prototype.electric_energy_usage,
+        Some(3000.0),
+        "joules per tick, the game's own unit, unconverted",
+    );
+    assert_eq!(
+        prototype.energy_usage_kw(),
+        Some(180.0),
+        "3000 J/tick x 60 / 1000 is the 180 kW on the tooltip",
+    );
+
+    let engine = machine_prototype(&lua, "steam-engine", "generator");
+    // A generator consumes steam and PRODUCES electricity, so it has no
+    // electric energy source -- and must still report its output.
+    engine
+        .set(
+            "get_max_energy_production",
+            lua.create_function(|_, ()| Ok(15000.0)).expect("function"),
+        )
+        .expect("set");
+    let prototype = prototype_through_serde(&lua, engine);
+    assert_eq!(prototype.electric_energy_usage, None);
+    assert_eq!(
+        prototype.max_energy_production_kw(),
+        Some(900.0),
+        "15000 J/tick is the steam engine's 900 kW",
+    );
+}
+
+/// **The gate that keeps coal out of the electricity budget.**
+///
+/// A `stone-furnace`'s `energy_usage` is 90 kW *of coal*. Charged against an
+/// electric network it is a number in the wrong units that every test would
+/// agree with, which is why `crates/planner/src/state.rs` leaves burner
+/// machines out of `consumer_kw` rather than zeroing them. The gate lives in
+/// the mod, where the energy source is visible, so the field must be **absent**
+/// for a burner even though `energy_usage` reads fine on it.
+#[test]
+fn a_burner_machine_reports_no_electric_energy_usage() {
+    let lua = botbridge_types();
+    let furnace = machine_prototype(&lua, "stone-furnace", "furnace");
+    // The attribute is there and answers; only the electric energy source is
+    // missing. That is exactly a burner as the live API presents it.
+    furnace.set("energy_usage", 1500.0).expect("set");
+
+    let prototype = prototype_through_serde(&lua, furnace);
+    assert_eq!(
+        prototype.electric_energy_usage, None,
+        "90 kW of coal is not 90 kW of electricity, and absent is the only \
+         honest answer -- Some(0.0) would claim a machine that draws nothing",
+    );
+    assert_eq!(prototype.energy_usage_kw(), None);
+}
+
+/// **`get_max_energy_production` is a METHOD, and `energy_usage` is an
+/// ATTRIBUTE.** Opposite shapes, both checked against this install's
+/// `runtime-api.json` rather than recalled.
+///
+/// Reading a method as an attribute raises, the `pcall` swallows it, and the
+/// field arrives `None` with nothing saying it should not have -- that is how
+/// `crafting_speed` was nil for all 1,028 prototypes of a live game. So a
+/// prototype whose ONLY route to the output is the method must still answer;
+/// if this fails, the read went to an attribute that does not exist.
+#[test]
+fn the_max_energy_production_comes_from_the_method_and_not_the_attribute() {
+    let lua = botbridge_types();
+    let engine = machine_prototype(&lua, "steam-engine", "generator");
+    engine
+        .set(
+            "get_max_energy_production",
+            lua.create_function(|_, ()| Ok(15000.0)).expect("function"),
+        )
+        .expect("set");
+    assert_eq!(
+        prototype_through_serde(&lua, engine).max_energy_production,
+        Some(15000.0),
+    );
+}
+
 // --------------------------------------------------------------------------
 // Transport lines: what is riding on the belt, lane by lane.
 // --------------------------------------------------------------------------

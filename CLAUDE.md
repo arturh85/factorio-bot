@@ -107,9 +107,8 @@ just start          # or: cd app && pnpm start
 # "the viewer". It builds `factorio-bot`'s `viewer` feature alias (cli, lua,
 # restapi -- no repl, no tokio-console), equivalent to
 # `cargo run --release --no-default-features --features viewer -- serve --web-root app/dist`.
-# Do NOT reach for `--all-features` to get `restapi`: it also builds
-# `tokio-console`, whose fixed debug port then contends with any other build
-# of this binary run alongside it (see the tokio-console note below).
+# Do NOT reach for `--all-features` to get `restapi` -- see the tokio-console
+# note below the block.
 just serve
 
 # REPL mode (faster build, no GUI, for testing scripting)
@@ -159,8 +158,9 @@ of Factorio. For the viewer specifically, use `just serve` or
 `--features viewer` (an alias for `cli,lua,restapi`, deliberately excluding
 `tokio-console`) rather than `--all-features`.
 
-*LSP tools**: Prefer `mcp__rust__lsp_*` tools for refactoring (rename_symbol, find_references, get_definitions)
-These leverage rust-analyzer for accuracy with macros and trait implementations
+**LSP tools**: prefer language-server-backed refactoring tools (rename symbol,
+find references, go to definition) over textual search-and-replace — they read
+macros and trait implementations correctly, which `grep` does not.
 
 ### The shell here is aliased, and the aliases fail in ways that look like data
 
@@ -276,11 +276,19 @@ destroys it unless you copy it aside first. That has already happened once.
 
 **Three blind spots, each of which has produced a wrong "the bug is absent":**
 
-- **`world.dump` never calls `Planner::refresh_buffers`**, so a dump's
-  `inventories` is `[]`, and the `plan` CLI does not refresh either (only the
-  Lua `goal.plan` path does). **The entire `Withdraw` path -- furnaces handing
-  their contents over -- is unreachable offline.** A real double-spend bug lived
-  exactly there and needed hand-injected inventories to reproduce.
+- **CORRECTED: `world.dump` DOES refresh buffers now**, so the `Withdraw` path
+  is reachable offline. `create_lua_world`
+  (`crates/scripting_lua/src/globals/world.rs`) builds a `BufferRefresher` over
+  `Planner::refresh_buffers` and hands it to the binding, which asks the game
+  what is in those containers before serialising — exactly as `goal.plan` does.
+  The readings ride in the dump and `PlanState::from_world` loads them.
+  **Still true, and still the trap**: the refresher exists only when there is
+  an RCON connection, and the `plan` CLI has none — it refreshes nothing and
+  relies entirely on what the dump carried. So a dump taken without a live game,
+  or one written before this landed, still has `inventories: []`, and against
+  such a dump the `Withdraw` path is unreachable. A real double-spend bug lived
+  exactly there and needed hand-injected inventories to reproduce. Check the
+  dump for readings before concluding a `Withdraw` bug is absent.
 - **A dump is t=0-shaped unless you make it otherwise.** A `--resume-from`
   savepoint restores *saved* inventories and positions, not the live ones at the
   moment of failure. Two separate bugs needed the dump perturbed -- one with bot
@@ -378,53 +386,26 @@ BotBridge Mod (Factorio mod for RPC)
   - `graph/entity_graph.rs` - Spatial entity relationships
   - `graph/flow_graph.rs` - Material flow throughput. **Validated against a
     world-record base on 2026-09-07 and now within 1-32% of the game's own
-    production statistics.** Most of what this entry used to say about it was
-    true when written and is now wrong; the corrections are at the end of the
-    section, kept rather than deleted because the *reasoning* that was wrong is
+    production statistics.** Everything below is current as of that date; the
+    entry that stood here through 2026-09-06 was wrong on three separate
+    counts, and the *reasoning* that was wrong is kept at the end because it is
     the transferable part.
 
-    History, still accurate: `flow_graph.update()` is called from
-    `process/output_parser.rs::on_init` and `factorio/snapshot.rs::attach_world`,
-    and an earlier version of this entry said that meant "work on every parser
-    update". It does not: `on_init` fires **once**, when Factorio logs
-    `initial discovery done`, and `attach_world` is the `--connect` path. The
-    traversal iterates only graph roots that are an offshore pump or a drill
-    with ore, of which a freshly-initialised world has essentially none. **So
-    there is no per-update cost to reclaim; the liability is dead code, not
-    CPU.** What is true is that no `condense()`, `node_at()`, `inner_graph()` or
-    `graphviz_dot()` call exists anywhere outside the file and its own tests.
+    **What is true now.** It has real readers: `throughput_at` and `node_at`
+    are called from `crates/planner/src/method/sustain.rs`. It refreshes
+    itself: `ensure_current` is called by every public reader and rebuilds --
+    clearing first -- whenever `EntityGraph::generation` has moved, and the
+    entity graph bumps that on every mutation. Rates are **derived from
+    prototypes**: `smelting_output` computes
+    `product.amount * crafting_speed / recipe.energy`. Nothing in
+    `crates/executor` or `crates/server` mentions it. `condense()`,
+    `inner_graph()`, `graphviz_dot()` and `graphviz_dot_condensed()` still have
+    no caller outside the file and its own tests.
 
-    **And it never refreshes, which is the trap for whoever makes it relevant.**
-    Those two calls are the *only* ones: nothing updates the flow graph when an
-    entity is placed, mined or destroyed. `entity_graph` is maintained
-    continuously through the parser, and the flow graph built from it is not —
-    so every machine a run builds is invisible to it, and the moment somebody
-    reads it they get the world **as it was at tick 0**, silently and with no
-    error. The owner has said this file should become relevant soon, so treat
-    "add a reader" and "refresh on entity add/remove" as one piece of work, not
-    two: a reader without the refresh is worse than no reader, because a stale
-    answer looks exactly like a current one.
-
-    **And the refresh cannot be "call `update()` again".** It appends to
-    `self.inner`, which is built once in `new()` and **never cleared**.
-    Re-running on an *unchanged* world is harmless — `get_or_create_flow_node`
-    dedupes by position via `node_at`, and `update_flow_edge` uses petgraph's
-    `update_edge`, which replaces a weight rather than adding a parallel edge.
-    On a *changed* world it is wrong in two ways: **a removed entity's node and
-    edges stay forever**, since nothing deletes; and **a position reused by a
-    different entity keeps the old `FlowNode`**, because `node_at` matches on
-    position alone and returns before the prototype is ever consulted. So the
-    refresh has to rebuild.
-    **CORRECTED 2026-09-07 — three claims above are no longer true.** The
-    refresh is generation-keyed; `throughput_at` and `production_rates()` are
-    real readers; and `furnace_output` with its hard-coded `1/3.2` **does not
-    exist** — `smelting_output` derives `product.amount * crafting_speed /
-    recipe.energy` from prototypes. Do not act on the paragraphs above without
-    re-reading the file.
-
-    **The "give it a reader before the fix" instruction was right, and the
-    world-record save is what finally supplied one.** Against a 6:39:53 Space
-    Age base at tick ~1,447,000 (`docs/superpowers/notes/
+    **The validation is documentation, not a harness.** The error figures live
+    in doc comments and in `docs/superpowers/notes/`; there is no automated
+    check that would catch a regression. Against a 6:39:53 Space Age base at
+    tick ~1,447,000 (`docs/superpowers/notes/
     2026-09-06-what-the-record-base-knows.md`):
 
     | item | game /min | model /min | ratio |
@@ -447,9 +428,10 @@ BotBridge Mod (Factorio mod for RPC)
       −9%. A machine standing still is invisible here; 194 drills were sitting
       at `waiting_for_space_in_destination` during the measurement. **This, not
       modules, is the next piece of work.**
-    - **The old `1/3.2` would have been exactly 2.0x low on every plate**, since
-      1,196 of the 1,222 furnaces are `steel-furnace` at `crafting_speed` 2. The
-      fix had landed but had never been *verified*; this is the verification.
+    - **The old hard-coded `1/3.2` would have been exactly 2.0x low on every
+      plate**, since 1,196 of the 1,222 furnaces are `steel-furnace` at
+      `crafting_speed` 2. The fix had landed but had never been *verified*;
+      this is the verification.
     - **A furnace was running every recipe at once.** The furnace arm added a
       full-rate edge per smeltable input, so one furnace on a mixed belt
       reported smelting iron AND copper AND stone at 100% each — stone-brick
@@ -471,6 +453,31 @@ BotBridge Mod (Factorio mod for RPC)
     The 12% divided by *every* entity within 1,000 tiles, 83% of which are ore
     tiles — and ore lives in `EntityGraph::resources`, a `Pos`-keyed map, not in
     `entity_tree`. Comparing against `entity_tree` could never have found them.
+
+    **What this entry got wrong, kept for the shape of the mistakes.** Three
+    claims stood here and were each falsified:
+
+    - *"There is no per-update cost to reclaim; the liability is dead code, not
+      CPU."* The premise was checked and is still right — `update()`'s two
+      original call sites are `output_parser.rs::on_init`, which fires **once**
+      when Factorio logs `initial discovery done`, and `snapshot.rs::attach_world`,
+      the `--connect` path — but "dead code" did not survive a reader arriving.
+    - *"It never refreshes, so a reader gets the world as it was at tick 0,
+      silently and with no error."* True when written, and the instruction it
+      carried — **treat "add a reader" and "refresh" as one piece of work,
+      because a stale answer looks exactly like a current one** — is why the
+      refresh landed with the readers. Keep the rule; the defect is fixed.
+    - *"The refresh cannot be `update()` again, because `self.inner` is never
+      cleared."* Correct diagnosis, and the fix took its advice. The two failure
+      modes it named are worth remembering for any graph built from another —
+      **a removed entity's node and edges stay forever** when nothing deletes,
+      and **a position reused by a different entity keeps the old node**,
+      because `node_at` matches on position alone and returns before the
+      prototype is consulted.
+    - It also placed the `1/3.2` in a function called `furnace_output`. **No
+      such function exists**; the constant survives only as an expected value
+      in tests, because vanilla's iron recipe genuinely has `energy = 3.2`. A
+      grep for it found the tests and was read as finding the defect.
   - `process/` - Factorio process spawning/control
   - `plan/planner.rs` - `Planner`, the Lua runtime's context holder (rcon,
     real_world, plan_world). NOT a planner any more: the task-graph planner it
@@ -493,19 +500,32 @@ BotBridge Mod (Factorio mod for RPC)
   **not** go on `Position` — a coordinate is only comparable within a surface,
   and `p1 - p2` across two has no answer an `f64` can carry.
 
-  Two things to know before touching it. **It holds one surface and refuses
-  the second by name** (`SurfaceNotYetSeparable`): the game- and force-global
-  fields — recipes, prototypes, `forces` and their research, the action id
-  counter — still live on `FactorioSurface`, so a second surface would give
-  the run two copies of the research state. The type's own doc carries the
-  field-by-field split and names `players` and `benches` as genuinely
-  ambiguous. And **`only_surface()` is the porting seam, not `nauvis()`**: it
-  answers only while there is exactly one surface, so a caller that never said
-  which surface it meant stops working rather than silently getting Nauvis.
-  `FactorioInstance::surface()` and `require_surface` are its two users.
-  The mod's Nauvis guard in `mods/BotBridge/control.lua` is the matching half
-  upstream and must stay until callers are ported. See
-  `docs/superpowers/notes/2026-09-06-surfaces-survey.md`.
+  Two things to know before touching it. **A second surface is safe now, and
+  the refusal that used to forbid it has narrowed** (2026-09-07). The
+  game- and force-global fields — recipes, prototypes, `forces` and their
+  research, the action id counter — moved off `FactorioSurface` into
+  `GameGlobals`; the world owns one `Arc<GameGlobals>` and `insert_surface`
+  checks with `Arc::ptr_eq` that every surface holds *that* one. So two
+  surfaces cannot disagree about what is researched, hand out the same
+  `action_id`, or carry two recipe tables — by construction rather than by
+  care, the same argument that put the surface on the container instead of on
+  `Position`. `SurfaceNotYetSeparable` (refuse *any* second surface) is gone;
+  what is left is `SurfaceGlobalsNotShared`, which refuses a surface carrying
+  **its own** globals. **A cloned surface is a fork and cannot be inserted
+  back** — `Clone` deep-copies the globals on purpose, so the plan world's
+  writes never reach the live model. Build a second surface with
+  `FactorioSurface::with_globals`, never by cloning one.
+
+  And **`only_surface()` is the porting seam, not `nauvis()`**: it answers only
+  while there is exactly one surface, so a caller that never said which surface
+  it meant stops working rather than silently getting Nauvis. `nauvis()` is for
+  a caller that genuinely means Nauvis. The mod's Nauvis guard in
+  `mods/BotBridge/control.lua` is the matching half upstream — no non-Nauvis
+  chunk reaches Rust at all, and what it drops is counted in
+  `surface_chunk_drops` rather than discarded silently. The type's own doc
+  carries the field-by-field split and names `players` and `benches` as
+  genuinely ambiguous; read it rather than this paragraph before changing
+  anything. See `docs/superpowers/notes/2026-09-06-surfaces-survey.md`.
 
   - **`method::connect`** (`connect_steps`, built on `graph::route::route_belt`
     in `crates/core`) routes a `transport-belt` run between two **machines**
@@ -555,7 +575,12 @@ BotBridge Mod (Factorio mod for RPC)
     geometry defect through four reviews** — nothing but a fixture ever
     exercised the code, and the fixtures were written alongside it.
 
-    **It has one now, and it worked** (`84c3259a`, the self-fed cell). A
+    **It has one now, and it worked** (`84c3259a`, the self-fed cell). The
+    live caller is `connect_steps_with`, from `method::sustain` (fuel routing,
+    refusing as `PlannerError::SustainNoRouteForFuel`), which is in the
+    production registry and so reached by `goal.plan`, `score-map` and the
+    executor's recovery alike. The plain `connect_steps` wrapper still has only
+    test callers — check which of the two you are reading about. A
     belted burner cell ran with **no bot in the loop for 27,249 ticks**, and
     the rate table read **`factory`** at two intervals — the first
     non-`roster-fed` attribution this project has ever produced, against
@@ -602,23 +627,23 @@ BotBridge Mod (Factorio mod for RPC)
       **What was missing was one machine, and that is now measured** (peer
       session, 2026-09-06, computed offline from the fixture with no world):
       **13 of 13 poles wired into one component, 48 of 48 inserters inside a
-      pole's supply area, 624.0 kW of demand -- **and that 624 was itself
-      incomplete, corrected 2026-09-07 when `electric_energy_usage` began
-      crossing the bridge.** It counted the 48 inserters and priced the
-      block's **three `small-lamp`s at nothing**, because `consumer_kw` had
-      no row for a lamp and the unknown-name branch errs towards permitting.
-      A lamp draws 5 kW, so the live figure is **639 kW**. The error is 2.4%
-      and harmless here; the shape of it is not, and it is the reason
-      `BlockDemand` carries an `unpriced` set: **a table's silence means "I
-      have never heard of this", not "it draws nothing", and those were the
-      same answer.** 17 electric consumers were missing from that table
-      (`foundry` 2,500 kW, `electromagnetic-plant` 2,000, `crusher` 540,
-      `rocket-silo` 250, `recycler` 180 ...), every one of them headroom
-      that was not there.** The block is *internally
+      pole's supply area, 639 kW of demand.** The block is *internally
       complete* — its own poles connect and cover its own consumers. It was
       never a coverage or a distribution problem, and nothing in the planner
       was at fault: **nobody ever gave it a generator.** "13 poles and no
       generator at all" meant exactly what it said.
+
+      **That figure was 624 kW until 2026-09-07**, when `electric_energy_usage`
+      began crossing the bridge. The old number counted the 48 inserters and
+      priced the block's **three `small-lamp`s at nothing**, because
+      `consumer_kw` had no row for a lamp and the unknown-name branch errs
+      towards permitting. The 2.4% error is harmless here; **the shape of it is
+      not, and it is why `BlockDemand` carries an `unpriced` set: a table's
+      silence means "I have never heard of this", not "it draws nothing", and
+      those were the same answer.** 17 electric consumers were missing from that
+      table (`foundry` 2,500 kW, `electromagnetic-plant` 2,000, `crusher` 540,
+      `rocket-silo` 250, `recycler` 180 ...), every one of them headroom that
+      was not there.
 
       So closing it needs **generation**, not power *in* the blueprint: one
       hop from a supply anchor to any one of the block's own poles, which is
@@ -860,9 +885,8 @@ Three things that cost a run each to learn:
   script must hold the game open — a tick-wait loop at the end — for a frame to
   be taken from outside.
 
-This is not a cadence and must not become one: the retirement above is about
-2,164 JPEGs for 947 MB and `take_screenshot` rendering *synchronously inside the
-game loop*. One frame, on demand, when something is invisible.
+This is not a cadence and must not become one — see the retirement above for
+why. One frame, on demand, when something is invisible.
 
 Three unrelated things are still called "frame" and must survive a grep:
 entity-map **keyframes** (`map.jsonl`, `lib/runMap.ts`), **video frames**
@@ -949,9 +973,9 @@ entity, and a run is all of one or all of the other.** The mix is refused by
 name, in the mod and in core, before a process is spawned.
 
 ```bash
-# Iterate: four character bots, no client, world at 5x
+# Iterate: four character bots, no client, world at HEADLESS_SPEED (10x)
 just headless factory_stage2.lua
-factorio-bot lua <script> --headless --bots 4 --game-speed 5
+factorio-bot lua <script> --headless --bots 4 --game-speed 10
 
 # Measure or film: clients, 1x, the number you quote
 just bench <script>
@@ -981,7 +1005,13 @@ Three things that are **not** interchangeable between the modes:
 - **Provenance says which mode ran**: `bot_mode` (`clients` / `characters`) and
   `game_speed`, written at run start from `<instance>/run-mode.json`.
   `just analyse` treats a difference as a note, not a refusal, but **do not
-  compare a 5x headless run's timings against a 1x client run**.
+  compare a headless run's wall timings against a 1x client run**.
+  **`HEADLESS_SPEED` is 10, raised from 5 on 2026-09-07 because 5 was never
+  chosen** -- it was a hard-coded constant with no recorded justification. The
+  measurement that replaced it (same script, same map, four headless bots) is
+  in the `justfile` beside the constant: 10x nearly halves iteration wall time
+  for a +1.5% tick cost, and 20x is real and usable at +5.7% but opt-in. One
+  sample per speed; take more if a decision rests on the tick cost.
 - **Trigger technologies: the game fires `mine-entity` itself, the mod
   emulates `craft-item` and `build-entity`, and prerequisites gate both.**
   Factorio 2.0 unlocks 32 technologies by *doing* — `automation-science-pack`
@@ -1082,7 +1112,9 @@ Three things that are **not** interchangeable between the modes:
 - **Archive extraction**: 8-10 minutes per client instance on first setup (macOS DMG extraction)
 - **Server startup**: ~12-17 seconds to initialize and be ready for connections
 - **Client loading**: ~26 seconds per client to load sprites before connecting
-- **Connection wait**: System polls for up to 90 seconds waiting for clients to connect
+- **Connection wait**: polled every second, bounded by 300 s of *no progress*
+  (`CONNECT_STALL_TIMEOUT`) -- see Expected Behavior step 4 below for why the
+  bound is on progress rather than on total time
 - **Total time**:
   - First run with new clients: 15-20 minutes (due to archive extraction)
   - Subsequent runs: 120-180 seconds for multi-client tests (2-4 clients)
@@ -1218,6 +1250,11 @@ timeout 180 target/release/factorio-bot lua multi_client_test.lua -c 2
 6. **Script runs** - clients should be connected by this point
 7. **Multi-bot coordination** verified via task graph execution
 
+### Measuring a run, and the traps that have produced wrong answers
+
+**Every wrong conclusion drawn on 2026-09-03 came from a measurement, not from
+carelessness.** Read this before quoting a number.
+
 **A measurement an iteration cap or a wall clock can move is a broken
 instrument, not a scheduling problem.** Bound a window in **game ticks** and it
 is immune to whatever else the box is doing — starvation only makes the wall
@@ -1240,11 +1277,6 @@ The exception is real and narrow: **anything whose subject IS the wall clock**
 need a quiet box. That is a small set, and naming it is what stops every other
 measurement being pessimised into serial execution.
 
-### Measuring a run, and the traps that have produced wrong answers
-
-**Every wrong conclusion drawn on 2026-09-03 came from a measurement, not from
-carelessness.** Read this before quoting a number.
-
 **Use `just analyse` (`tools/run_analysis.py`).** It reports milestone spans in
 game time, per-verb dispatch->settle ticks, `steps/bot`, `planned ticks/bot`,
 per-bot failed walks, frozen-position detection, repeated refused destinations,
@@ -1259,8 +1291,9 @@ production and /min at fixed game-time marks (5/10/15/20/25/30 min from
 spans follow as a peer section; the headline line carries both (`rates: iron
 32->57->43 /min at 5/10/15; ... | milestone 3 satisfied at 17:20`). Judge a
 `producing:`/rate goal on the curve and a `researched:`/first-event goal on
-the tick it flipped. Marks are game time, so a 5x headless run and a 1x client
-run are comparable *on rates* (not on wall time). `--rates-md` /
+the tick it flipped. Marks are game time, so a headless run at any
+`--game-speed` and a 1x client run are comparable *on rates* (not on wall
+time). `--rates-md` /
 `tools/rates_table.py` print the record's table -- generate it, do not type
 it. **Known limit as of 2026-09-05: production plateaus at the plan's bill.**
 In runs 13-15 iron stops at ~670 around minute 15 and red packs at 85, then
@@ -1493,7 +1526,8 @@ entry over a log line:
   `FactorioEntity` had nowhere to put it and serde discarded it without a
   word. **The tell is that the field is UNIFORMLY absent rather than sometimes
   absent** — a real "the game does not know" is almost never perfectly
-  uniform. Cousin of the stale-mod trap below, and it bites from the opposite
+  uniform. Cousin of the stale-mod trap in the debug-vs-release build note
+  under "Running Multi-Client Tests" above, and it bites from the opposite
   side: there, the binary is new and the mod is old. Rebuild before concluding
   anything about a field added in the same session.
 
@@ -1549,8 +1583,9 @@ entry over a log line:
   uncommitted work in a file you need, committing yours ships theirs under your
   message. Land one, then the other -- or hand over a patch. Two agents have
   had to stop for this.
-- **Develop in a throwaway worktree** (`git worktree add /tmp/x HEAD`) when a
-  live run holds `target/debug/factorio-bot`.
+- **Develop in a throwaway worktree** (`git worktree add .worktrees/x HEAD` --
+  inside the repo, not `/tmp`) when a live run holds
+  `target/debug/factorio-bot`.
 
   **Be precise about why, because the obvious statement of it is wrong.**
   Linux does not lock a running binary the way Windows does -- you can
@@ -1864,9 +1899,8 @@ entry over a log line:
   never needs fuelling — but an arm that touches only ore, or only plates, has
   no fuel source at all and stops when its hand charge burns out. That is not a
   bug to route around: it is why the electric `inserter` matters, and it puts a
-  hard shape on t=0 blocks. `electronics` (which unlocks `inserter` and
-  `small-electric-pole`) is a **trigger technology fired by 10 copper plates**,
-  no lab and no science packs — about 32 seconds of one stone furnace.
+  hard shape on t=0 blocks — the way out is the `electronics` trigger in the
+  entry above, not a fuelling route.
 - **`only_ghosts = true` validates nothing.** Ghosts do not collide, so a
   blueprint whose entities overlap places exactly as many ghosts as a correct
   one. A ghost-placement count is not evidence that geometry is legal; only a
@@ -1903,22 +1937,17 @@ entry over a log line:
 
 ### Critical Bug Fix (Jan 2026): config.ini Creation
 
-**Problem**: Client instances would fail to launch with "Error: Specified config file doesn't exist" even though setup completed successfully.
+**Clients crashed on spawn with "Error: Specified config file doesn't exist"
+while setup reported success**, because archive extraction creates an **empty**
+`config/` directory and the guard tested the *directory* rather than the file.
+`if !config_path.exists()` skipped writing `config.ini` whenever the directory
+was already there. Fixed by testing `config_ini_path` instead
+(`crates/core/src/process/instance_setup.rs`, `if config_ini_path.exists()`).
 
-**Root Cause**:
-- Factorio archive extraction creates an empty `config/` directory
-- Original code in `instance_setup.rs:298` checked `if !config_path.exists()`
-- When the directory existed (but was empty), it skipped creating `config.ini`
-- Clients would then crash immediately after spawning
-
-**Fix**: Changed condition to `if !config_ini_path.exists()` (instance_setup.rs:299)
-- Now checks for the actual file, not just the directory
-- Creates `config.ini` even if `config/` directory already exists
-- Properly handles the case where archive extraction creates empty config directory
-
-**File**: `crates/core/src/process/instance_setup.rs:297-309`
-
-**Verification**: On macOS, successful multi-client launch shows N Factorio icons in the Dock (one per client + server if graphical).
+**The durable rule: a guard that means "is this artefact present" must name the
+artefact, not its container.** Verification on macOS: a successful multi-client
+launch shows N Factorio icons in the Dock (one per client, plus the server if
+graphical).
 
 **Debugging Multi-Client Issues**:
 1. Add diagnostic logging to process spawn loop (see process_control.rs:161-166 for example)

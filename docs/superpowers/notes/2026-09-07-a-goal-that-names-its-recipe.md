@@ -138,6 +138,13 @@ Error: × the goal did not expand: 4 recipes this planner can run produce petrol
 Master, given the qualified spec, says `is not a goal` — which is the honest
 before-picture: the vocabulary did not exist.
 
+**And this particular ambiguity is not a mod artefact.** CLAUDE.md's Space Age
+section makes the distinction: three of sulfur's four producers are Space Age,
+so *"produce sulfur"* has one answer in base Factorio — but petroleum gas's four
+runnable producers (`advanced-oil-processing`, `basic-oil-processing`,
+`coal-liquefaction`, `light-oil-cracking`) are all base game. The goal this
+vocabulary was built for is ambiguous regardless of the mod set.
+
 ## Baselines: nothing moved
 
 Re-measured by me on **one binary each**, release, `--bots 1,2,3,4`, master at
@@ -243,21 +250,25 @@ the exit code alone. This is the repo's own standing warning about pipelines,
 found again in a new place.
 
 **Break 6 kills exactly one test, and that one test needs an invented world.**
-`NamedRecipeNotHonoured` is **unreachable in vanilla**, measured rather than
-assumed: over `crates/core/tests/live-2.1.17-world-snapshot.json`, no product
-made by a `crafting` or `smelting` recipe lacks a same-named one, and none has
-two — so `method::util::recipe_for` is accidentally exact there, exactly as the
-`products` module doc says. The test injects a second `crafting` recipe to
-create the modded case.
+`NamedRecipeNotHonoured` is **unreachable on the game this project actually
+runs** — Factorio 2.1.17 **with Space Age**, per CLAUDE.md's standing correction
+that nothing here is base Factorio. Measured rather than assumed: over
+`crates/core/tests/live-2.1.17-world-snapshot.json`, no product made by a
+`crafting` or `smelting` recipe lacks a same-named one, and none has two, so
+`method::util::recipe_for` is accidentally exact there, exactly as the
+`products` module doc says. Space Age's own extra producers do not create the
+case — `casting-*`, `*-recycling` and the asteroid crushers are all in other
+categories, which is why they land on `NamedRecipeNotRunnable` instead. The test
+injects a second `crafting` recipe to make the modded case exist.
 
 
 
 ## What this does not prove
 
 * **That anything now plans that did not before.** It cannot: naming a recipe
-  answers "which one", and every vanilla recipe in a newly-nameable category
-  still has a fluid somewhere in its bill. The qualifier moves a refusal one
-  rung; it does not build a factory.
+  answers "which one", and every recipe on this install in a newly-nameable
+  category still has a fluid somewhere in its bill. The qualifier moves a
+  refusal one rung; it does not build a factory.
 * **That the emitted plan would execute.** `Fabricate` still does not call
   `power::ensure_powered`, and a chemical plant is electric — unchanged from
   the predecessor's note, and unaddressed here.

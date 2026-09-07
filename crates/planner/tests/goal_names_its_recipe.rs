@@ -386,7 +386,7 @@ fn a_recipe_that_does_not_produce_the_product_is_refused_by_name() {
 }
 
 /// **The machine reason, not the ambiguity one.** `casting-iron-gear-wheel` is
-/// `metallurgy`, which no vanilla machine in this capture declares, so naming
+/// `metallurgy`, which no machine in this capture declares, so naming
 /// it must produce the machine table's own words.
 ///
 /// The control that makes it a claim about the *named* recipe: unqualified,
@@ -484,14 +484,17 @@ fn a_named_recipe_that_is_the_planners_own_pick_changes_nothing() {
 /// A `crafting` recipe the hand-craft methods **cannot** be told about is
 /// refused rather than silently answered with the one they would run.
 ///
-/// # This case does not exist in vanilla, and that was measured
+/// # This case does not exist on the game this project runs, and that was measured
 ///
-/// Over the live 2.1.17 capture, no product made by a `crafting` or `smelting`
-/// recipe lacks a same-named one, and none has two -- so `method::util::
-/// recipe_for`'s recipe-name-keyed lookup is accidentally exact there (the
-/// `products` module doc states the same measurement). The case is a modded
-/// one, so the world is edited to create it: a second `crafting` recipe named
-/// `alt-gear` that also produces `iron-gear-wheel`.
+/// Over the live 2.1.17 capture -- Factorio with Space Age, which is what every
+/// instance here extracts -- no product made by a `crafting` or `smelting`
+/// recipe lacks a same-named one, and none has two, so
+/// `method::util::recipe_for`'s recipe-name-keyed lookup is accidentally exact
+/// there (the `products` module doc states the same measurement). Space Age's
+/// own extra producers do not create the case: `casting-*`, `*-recycling` and
+/// the asteroid crushers are all in other categories. It needs a mod, so the
+/// world is edited to create it: a second `crafting` recipe named `alt-gear`
+/// that also produces `iron-gear-wheel`.
 #[test]
 fn a_crafting_recipe_the_hand_methods_cannot_be_told_about_is_refused() {
     let said = plan_error(
@@ -540,10 +543,11 @@ fn a_crafting_recipe_the_hand_methods_cannot_be_told_about_is_refused() {
 /// share nobody asked for -- which is the exact failure shape
 /// `fluid_have_refusal`'s own doc describes for the fluid case.
 ///
-/// # The world is an experiment, because vanilla has no such ambiguity left
+/// # The world is an experiment, because this install has no such ambiguity left
 ///
-/// Since the recycling filter landed, no vanilla product has two recipes this
-/// planner can run *and* an all-item bill. So a second `chemistry` recipe for
+/// Since the recycling filter landed, no product on this game -- Factorio
+/// 2.1.17 with Space Age -- has two recipes this planner can run *and* an
+/// all-item bill. So a second `chemistry` recipe for
 /// `plastic-bar` is injected, and both are stripped of their fluids. The
 /// control is the first assertion: **unqualified, this goal refuses as
 /// ambiguous** -- so a plan appearing at all is caused by the qualifier, and

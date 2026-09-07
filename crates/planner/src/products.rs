@@ -331,13 +331,21 @@ pub enum ProductRefusal {
     ///
     /// `HandCraft` and `Smelt` reach `method::util::recipe_for`, a lookup
     /// keyed on the *recipe* name that happens to be exact over
-    /// `crafting`+`smelting` in vanilla (see the module doc: zero products in
-    /// those two categories are made by more than one recipe). So on vanilla
-    /// a `via` naming a crafting recipe is either the one they would pick --
-    /// allowed, and a no-op -- or one they cannot honour. Accepting the
-    /// second and planning the first would be the silent substitution this
-    /// whole module exists to stop, and it is a **modded**-world case: there
-    /// is no vanilla product with two crafting recipes.
+    /// `crafting`+`smelting` **on the game this project runs** -- Factorio
+    /// 2.1.17 with Space Age, which is what
+    /// `crates/core/tests/live-2.1.17-world-snapshot.json` captured. Measured
+    /// there: zero products in those two categories are made by more than one
+    /// recipe, and zero lack a same-named one. So here a `via` naming a
+    /// crafting recipe is either the one they would pick -- allowed, and a
+    /// no-op -- or one they cannot honour. Accepting the second and planning
+    /// the first would be the silent substitution this whole module exists to
+    /// stop.
+    ///
+    /// **Reachable only under a mod that adds a second `crafting` recipe for
+    /// an existing product.** Space Age itself does not: its extra producers
+    /// (`casting-*`, `*-recycling`, the asteroid crushers) are all in other
+    /// categories, which is why they surface as
+    /// [`Self::NamedRecipeNotRunnable`] rather than here.
     NamedRecipeNotHonoured {
         product: String,
         recipe: String,

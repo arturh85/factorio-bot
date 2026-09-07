@@ -73,6 +73,85 @@ struct ProductionLine {
     needs: BTreeMap<String, f64>,
 }
 
+/// A consuming line's share of one ingredient, or the admission that the
+/// model cannot say.
+///
+/// The whole reason this is an enum and not an `f64` is that
+/// [`Supply::Unmodelled`] and a share of **zero** are different facts and have
+/// opposite consequences: zero stops a line, unknown constrains it not at all.
+/// Returning one number for both is the shape this repository has now found
+/// seven times -- `consumer_kw`'s unknown name, `occupant_of`'s ordering,
+/// `blocked_tree`'s anonymous boxes, `pole_would_supply`'s two falses, and
+/// this.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Share {
+    /// This line may run at this multiple of what it is running at now.
+    /// `0.0` is a real answer: every gram is spoken for.
+    Of(f64),
+    /// Nothing in the model produces the ingredient. **Not a shortage** -- see
+    /// [`FlowGraph::input_provenance`] for what is actually behind it.
+    Unmodelled,
+}
+
+/// Whether the model can account for where an item comes from.
+///
+/// [`Supply::Unmodelled`] carries **no rate on purpose**. Off-map imports,
+/// producers the flow walk never reached, and fluids the graph has no producer
+/// type for all land here, and inventing a number for any of them would be a
+/// fabricated supply -- which is worse than an honest gap, because a fabricated
+/// one is indistinguishable from a measured one downstream.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Supply {
+    /// Modelled producers make this many per second at nameplate.
+    Modelled(f64),
+    /// Nothing modelled makes it.
+    Unmodelled,
+}
+
+/// One item that modelled producers eat, and what the model can say about
+/// where it comes from. See [`FlowGraph::input_provenance`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct InputProvenance {
+    /// Items per second modelled consumers eat at nameplate. Always a real
+    /// number: this map has an entry only for something somebody eats.
+    pub eaten: f64,
+    /// Where it comes from, as far as the model can tell.
+    pub supply: Supply,
+}
+
+/// One producing machine at nameplate: what it makes, and what the game says
+/// it is set to make it with.
+#[derive(Debug, Clone)]
+struct ProducerNameplate {
+    /// The recipe the **game** has set on this machine.
+    ///
+    /// # This is layout, not status
+    ///
+    /// `FactorioEntity::status` is a transient reading and this file's rule is
+    /// that observed status validates a prediction and never feeds it. A
+    /// crafting machine's recipe is not that: it is a configuration somebody
+    /// set, the same class of fact as where the machine stands and which way
+    /// its inserters face, and it is already what
+    /// [`FlowGraph::update`]'s assembler arm derives the machine's *output*
+    /// from. Reading it here only makes the ingredient side agree with the
+    /// product side.
+    ///
+    /// **`None` has two meanings and neither is "unknown recipe" in the same
+    /// sense.** A drill and an offshore pump have no recipe by nature. A
+    /// **furnace** has one at runtime, but the game sets it from whatever ore
+    /// last arrived, and the mod does not send it: on the 6:39:53 record base
+    /// all 1,215 furnaces report `null` and all 827 assembling machines report
+    /// a name. So a furnace still has to be charged through
+    /// [`FlowGraph::recipe_making`], which is why that function is kept rather
+    /// than replaced.
+    recipe: Option<String>,
+    /// Whether this machine crafts, as opposed to taking its output from the
+    /// ground. A drill and a pump are charged nothing.
+    crafts: bool,
+    /// What it makes, per item, in items per second, ingredients assumed.
+    made: BTreeMap<String, f64>,
+}
+
 pub struct FlowGraph {
     entity_graph: Arc<EntityGraph>,
     entity_prototypes: Arc<DashMap<String, FactorioEntityPrototype>>,
@@ -600,8 +679,8 @@ impl FlowGraph {
     pub fn production_rates(&self) -> BTreeMap<String, f64> {
         self.ensure_current();
         let mut total: BTreeMap<String, f64> = BTreeMap::new();
-        for (_, made) in self.producer_nameplates() {
-            for (name, rate) in made {
+        for machine in self.producer_nameplates() {
+            for (name, rate) in machine.made {
                 *total.entry(name).or_insert(0.) += rate;
             }
         }
@@ -613,9 +692,9 @@ impl FlowGraph {
     /// [`FlowGraph::production_rates`], factored out because
     /// [`FlowGraph::sustained_production_rates`] needs the machines and not
     /// just the sum.
-    fn producer_nameplates(&self) -> Vec<(bool, BTreeMap<String, f64>)> {
+    fn producer_nameplates(&self) -> Vec<ProducerNameplate> {
         let graph = self.inner.read();
-        let mut per_machine: Vec<(bool, BTreeMap<String, f64>)> = vec![];
+        let mut per_machine: Vec<ProducerNameplate> = vec![];
         for node_index in graph.node_indices() {
             let Some(node) = graph.node_weight(node_index) else {
                 continue;
@@ -654,7 +733,20 @@ impl FlowGraph {
                     node.entity_type,
                     EntityType::Furnace | EntityType::AssemblingMachine
                 );
-                per_machine.push((crafts, best));
+                // The recipe the GAME has set on this machine, when it has
+                // one. Read here rather than guessed back from the product
+                // name in `nameplate_lines` -- see `ProducerNameplate::recipe`
+                // for why that guess was wrong on the record base and why this
+                // is not the `status` field's kind of observation.
+                let recipe = node
+                    .entity_id
+                    .and_then(|id| self.entity_graph.entity_by_id(id))
+                    .and_then(|entity| entity.recipe);
+                per_machine.push(ProducerNameplate {
+                    recipe,
+                    crafts,
+                    made: best,
+                });
             }
         }
         per_machine
@@ -681,17 +773,18 @@ impl FlowGraph {
         // only to pick which recipe an item is being made BY -- see
         // `recipe_making`.
         let mut standing: BTreeMap<String, f64> = BTreeMap::new();
-        for (_, made) in &nameplate {
-            for (item, rate) in made {
+        for machine in &nameplate {
+            for (item, rate) in &machine.made {
                 *standing.entry(item.clone()).or_insert(0.) += rate;
             }
         }
         let mut lines: Vec<ProductionLine> = vec![];
-        for (crafts, made) in nameplate {
-            for (item, rate) in made {
+        for machine in nameplate {
+            for (item, rate) in machine.made {
                 let mut needs: BTreeMap<String, f64> = BTreeMap::new();
-                if crafts
-                    && let Some(recipe_name) = self.recipe_making(&item, &standing)
+                if machine.crafts
+                    && let Some(recipe_name) =
+                        self.recipe_charged_for(&item, machine.recipe.as_deref(), &standing)
                     && let Some(recipe) = self.recipes.get(&recipe_name)
                     && let Some(product) = recipe.products.iter().find(|p| p.name == item)
                     && product.amount > 0
@@ -1030,8 +1123,8 @@ impl FlowGraph {
                 let mut ratio = f64::INFINITY;
                 for ingredient in line.needs.keys() {
                     match Self::supply_ratio(ingredient, &supply, &demand, floor) {
-                        Some(share) => ratio = ratio.min(share),
-                        None => continue,
+                        Share::Of(share) => ratio = ratio.min(share),
+                        Share::Unmodelled => continue,
                     }
                 }
                 // The outlet. `needs` is empty for a drill and an offshore
@@ -1064,30 +1157,108 @@ impl FlowGraph {
     }
 
     /// A line's share of one ingredient, as a multiple of what it is running
-    /// at: `Some(1.0)` means exactly its current draw is available.
+    /// at: `Share::Of(1.0)` means exactly its current draw is available.
     ///
-    /// `None` is **unknown, not zero** -- nobody in the model makes the item,
-    /// so it constrains nobody, or every machine fed a fluid or fed from
-    /// another surface would read as stopped. `Some(0.0)` is the other case,
-    /// and only phase two can see it: the item has a *residual* of zero, which
-    /// means every gram is already spoken for rather than that the model has
-    /// never heard of it.
+    /// [`Share::Unmodelled`] is **unknown, not zero** -- nobody in the model
+    /// makes the item, so it constrains nobody, or every machine fed a fluid,
+    /// fed from an unreached part of the graph, or fed from another surface
+    /// would read as stopped. `Share::Of(0.0)` is the other case, and only
+    /// phase two can see it: the item has a *residual* of zero, which means
+    /// every gram is already spoken for rather than that the model has never
+    /// heard of it.
+    ///
+    /// The two are a **named pair and not one number**, for the reason this
+    /// repository has now recorded seven times: a lookup that cannot answer
+    /// must not return the value of one that answers zero. What the model
+    /// cannot account for is reported rather than assumed away -- see
+    /// [`FlowGraph::input_provenance`].
     fn supply_ratio(
         ingredient: &str,
         supply: &BTreeMap<String, f64>,
         demand: &BTreeMap<String, f64>,
         floor: &BTreeMap<String, f64>,
-    ) -> Option<f64> {
+    ) -> Share {
         let have = supply.get(ingredient).copied().unwrap_or_default();
         if have <= 0. {
             return if floor.contains_key(ingredient) {
-                Some(0.)
+                Share::Of(0.)
             } else {
-                None
+                Share::Unmodelled
             };
         }
         let want = demand.get(ingredient).copied().unwrap_or_default();
-        if want > 0. { Some(have / want) } else { None }
+        if want > 0. {
+            Share::Of(have / want)
+        } else {
+            Share::Unmodelled
+        }
+    }
+
+    /// Per item that modelled producers **eat**, whether the model can say
+    /// where it comes from.
+    ///
+    /// # Three answers, not two
+    ///
+    /// An item with no modelled producer is not an item in shortage.
+    /// [`FlowGraph::sustained_production_rates`] has always treated it that
+    /// way -- [`Share::Unmodelled`] constrains nobody -- but the fact was
+    /// only ever a control-flow branch, so nothing could report it and a
+    /// reader had no way to tell "the base makes plenty" from "the model has
+    /// never heard of this". This is that third state made legible, and it is
+    /// deliberately **not** a rate: the model refuses to guess what an
+    /// unmodelled supply is worth.
+    ///
+    /// # What is actually behind it on the record base
+    ///
+    /// Three different causes, and they must not be conflated:
+    ///
+    /// - **The graph never reached the producer.** The dominant one. A flow
+    ///   node exists only for an entity [`FlowGraph::update`]'s walk reaches
+    ///   from a root, and on the 6:39:53 record base **all 55 oil refineries
+    ///   set to `advanced-oil-processing` are in the entity graph and none of
+    ///   them is in the flow graph**, along with 114 of 146 chemical plants.
+    ///   That is why `petroleum-gas` has no producer here, and it is a fact
+    ///   about `EntityGraph::connect` -- a pipe is wired to another pipe, a
+    ///   storage tank, a pipe-to-ground or a boiler, and an assembling machine
+    ///   is not in that list -- not a fact about the base.
+    /// - **The item comes from off the map.** Space Age ships goods between
+    ///   planets, and this base has nine cargo landing pads, ten rocket silos
+    ///   and 28 bioflux entities standing on Nauvis that nothing on Nauvis
+    ///   makes. `mods/BotBridge/control.lua` drops every non-Nauvis chunk, so
+    ///   the model cannot see the producer even in principle.
+    /// - **The model does not model that kind of production at all** -- a
+    ///   fluid arriving by pipe from a source this graph has no producer type
+    ///   for, or an item a bot carried in.
+    ///
+    /// **Nothing here distinguishes the three**, and it should not pretend to:
+    /// what it reports is that the model cannot account for the supply, and
+    /// how much is being eaten in the dark.
+    pub fn input_provenance(&self) -> BTreeMap<String, InputProvenance> {
+        self.ensure_current();
+        Self::provenance_of(&self.nameplate_lines())
+    }
+
+    /// The pure half of [`FlowGraph::input_provenance`], over lines rather
+    /// than over a world, so its rule can be tested without a fixture graph.
+    fn provenance_of(lines: &[ProductionLine]) -> BTreeMap<String, InputProvenance> {
+        let mut made: BTreeMap<String, f64> = BTreeMap::new();
+        let mut eaten: BTreeMap<String, f64> = BTreeMap::new();
+        for line in lines {
+            *made.entry(line.item.clone()).or_insert(0.) += line.rate;
+            for (ingredient, rate) in &line.needs {
+                *eaten.entry(ingredient.clone()).or_insert(0.) += rate;
+            }
+        }
+        eaten
+            .into_iter()
+            .map(|(item, eaten)| {
+                let supply = match made.get(&item) {
+                    Some(rate) if *rate > 0. => Supply::Modelled(*rate),
+                    _ => Supply::Unmodelled,
+                };
+                (item, InputProvenance { eaten, supply })
+            })
+            .collect()
     }
 
     /// Per item, what its consumers would take **if it were abundant**.
@@ -1135,7 +1306,8 @@ impl FlowGraph {
             let mut runner_up = f64::INFINITY;
             let mut scarcest: Option<&str> = None;
             for ingredient in line.needs.keys() {
-                let Some(share) = Self::supply_ratio(ingredient, supply, demand, &BTreeMap::new())
+                let Share::Of(share) =
+                    Self::supply_ratio(ingredient, supply, demand, &BTreeMap::new())
                 else {
                     continue;
                 };
@@ -1165,7 +1337,63 @@ impl FlowGraph {
         pull
     }
 
+    /// Which recipe's ingredients `item` is charged to, given what the game
+    /// says this machine is **set** to.
+    ///
+    /// The machine's own recipe wins whenever it is the recipe's **first**
+    /// product, and otherwise nothing changes and
+    /// [`FlowGraph::recipe_making`] answers as it always did. Two reasons for
+    /// that narrow condition:
+    ///
+    /// - a by-product must not be charged the whole bill. One
+    ///   `advanced-oil-processing` refinery is three lines here -- heavy oil,
+    ///   light oil, petroleum gas -- and charging each of them the full water
+    ///   and crude would treble the demand for both.
+    /// - it is the same convention `recipe_making` already states: a recipe is
+    ///   named for its main output.
+    ///
+    /// # What this fixes, measured
+    ///
+    /// `recipe_making` has to guess the recipe back from the product's *name*,
+    /// and its tie-break prefers a candidate whose ingredients the base
+    /// **all** supplies. On the 6:39:53 record base that guess is wrong for
+    /// **36 of 827 configured machines**, and every one of them is a case the
+    /// tie-break could not have got right:
+    ///
+    /// | machines | set to | charged to instead |
+    /// |---|---|---|
+    /// | 24 | `plastic-bar` (coal + petroleum gas) | `bioplastic` (bioflux + yumako mash) |
+    /// | 12 | `uranium-processing` (uranium ore) | `kovarex-enrichment-process` (U-235 + U-238) |
+    ///
+    /// Plastic failed the tie-break because **`petroleum-gas` has no modelled
+    /// producer** -- see [`FlowGraph::input_provenance`] -- so it fell through
+    /// to alphabetical order and `bioplastic` sorts first. A predecessor note
+    /// read that as the base importing bioflux by rocket, which it does: this
+    /// base has nine cargo landing pads and 28 bioflux entities. **It is not
+    /// what feeds these chemical plants.** All 24 are set to `plastic-bar`,
+    /// and 18 of them read `working` in the same dump.
+    fn recipe_charged_for(
+        &self,
+        item: &str,
+        set_recipe: Option<&str>,
+        standing: &BTreeMap<String, f64>,
+    ) -> Option<String> {
+        if let Some(name) = set_recipe
+            && self
+                .recipes
+                .get(name)
+                .is_some_and(|recipe| recipe.products.first().is_some_and(|p| p.name == item))
+        {
+            return Some(name.to_string());
+        }
+        self.recipe_making(item, standing)
+    }
+
     /// The name of the recipe that makes `item`, for charging its ingredients.
+    ///
+    /// **Only reached for a producer whose recipe the game did not report** --
+    /// a furnace, or anything a dump written before that field existed. See
+    /// [`FlowGraph::recipe_charged_for`].
     ///
     /// Only a recipe whose **first** product is `item` counts: a recipe is
     /// named for its main output, and taking any recipe that mentions the item
@@ -2654,6 +2882,237 @@ mod tests {
         );
     }
 
+    /// A [`FlowGraph`] holding nothing but a recipe table, for the recipe
+    /// tests below: `recipe_charged_for` and `recipe_making` read `recipes`
+    /// and nothing else.
+    fn graph_with_recipes(extra: &[FactorioRecipe]) -> FlowGraph {
+        let recipes = crate::test_utils::fixture_recipes();
+        for recipe in extra {
+            recipes.insert(recipe.name.clone(), recipe.clone());
+        }
+        FlowGraph::new(Arc::new(EntityGraph::new(
+            Arc::new(crate::test_utils::fixture_entity_prototypes()),
+            Arc::new(recipes),
+        )))
+    }
+
+    /// One recipe, for `graph_with_recipes`.
+    fn recipe(name: &str, products: &[&str], ingredients: &[&str]) -> FactorioRecipe {
+        FactorioRecipe {
+            name: name.to_string(),
+            valid: true,
+            enabled: true,
+            category: "crafting".to_string(),
+            ingredients: Some(
+                ingredients
+                    .iter()
+                    .map(|name| crate::types::FactorioIngredient {
+                        name: (*name).to_string(),
+                        ingredient_type: "item".to_string(),
+                        amount: 1,
+                    })
+                    .collect(),
+            ),
+            products: products
+                .iter()
+                .map(|name| crate::types::FactorioProduct {
+                    name: (*name).to_string(),
+                    product_type: "item".to_string(),
+                    amount: 1,
+                    probability: Box::new(noisy_float::types::r64(1.)),
+                })
+                .collect(),
+            hidden: false,
+            energy: Box::new(noisy_float::types::r64(1.)),
+            order: String::new(),
+            group: String::new(),
+            subgroup: String::new(),
+        }
+    }
+
+    /// **The machine's own recipe beats the guess, and the guess is wrong in
+    /// exactly the way the record base's plastic is.**
+    ///
+    /// `widget` is made by two recipes: `a-widget`, out of an ingredient
+    /// nothing here produces, and `widget`, out of one that is produced. The
+    /// tie-break in [`FlowGraph::recipe_making`] wants a candidate whose
+    /// ingredients are **all** supplied; neither qualifies, because
+    /// `unobtainium` has no producer either, so it falls through to
+    /// alphabetical order and picks `a-widget`. That is `plastic-bar` being
+    /// charged to `bioplastic` in one fixture.
+    #[test]
+    fn a_machine_is_charged_the_recipe_the_game_set_on_it() {
+        let graph = graph_with_recipes(&[
+            recipe("a-widget", &["widget"], &["moondust"]),
+            recipe("widget", &["widget", "slag"], &["unobtainium"]),
+        ]);
+        let standing: BTreeMap<String, f64> =
+            [("iron-plate".to_string(), 1.)].into_iter().collect();
+
+        assert_eq!(
+            graph.recipe_making("widget", &standing).as_deref(),
+            Some("a-widget"),
+            "the guess this replaces really does pick the wrong recipe here,              or the test below proves nothing"
+        );
+        assert_eq!(
+            graph
+                .recipe_charged_for("widget", Some("widget"), &standing)
+                .as_deref(),
+            Some("widget"),
+            "the recipe the game set on the machine wins"
+        );
+        assert_eq!(
+            graph
+                .recipe_charged_for("widget", None, &standing)
+                .as_deref(),
+            Some("a-widget"),
+            "a machine with no recipe reported -- a furnace -- is still guessed              for, which is why recipe_making is kept"
+        );
+        assert_eq!(
+            graph
+                .recipe_charged_for("slag", Some("widget"), &standing)
+                .as_deref(),
+            None,
+            "a BY-product is not charged the whole bill: one refinery running              advanced-oil-processing is three lines here, and charging each of              them the full crude would treble the demand"
+        );
+    }
+
+    /// **The recipe charged is read off the machine, end to end.**
+    ///
+    /// `a_machine_is_charged_the_recipe_the_game_set_on_it` tests the rule;
+    /// this tests that [`FlowGraph::nameplate_lines`] actually asks the entity
+    /// for it. Without this, deleting the read in
+    /// [`FlowGraph::producer_nameplates`] and always passing `None` breaks
+    /// nothing -- the rule would still be right and never reached, which is
+    /// how `method::connect`'s geometry defect survived four reviews.
+    ///
+    /// One assembler set to `widget`, reached by the walk through a drill and a
+    /// belt. **Neither** candidate recipe's ingredient is produced in this
+    /// fixture, which is what makes the tie-break fall through to alphabetical
+    /// order and pick `a-widget` -- the `plastic-bar`/`bioplastic` situation in
+    /// miniature.
+    ///
+    /// The first version of this fixture charged the correct recipe to
+    /// `iron-ore`, which the fixture's own drill mines, so the tie-break picked
+    /// the right recipe by itself and **deleting the read from
+    /// `producer_nameplates` broke no test at all.** The mutation sweep found
+    /// that; nothing else would have.
+    #[test]
+    fn the_bill_a_machine_is_charged_comes_off_the_machine() {
+        let recipes = crate::test_utils::fixture_recipes();
+        for extra in [
+            recipe("a-widget", &["widget"], &["moondust"]),
+            recipe("widget", &["widget"], &["unobtainium"]),
+        ] {
+            recipes.insert(extra.name.clone(), extra);
+        }
+        let mut assembler = FactorioEntity {
+            name: "assembling-machine-1".to_string(),
+            entity_type: EntityType::AssemblingMachine.to_string(),
+            position: Position::new(0.5, 3.5),
+            bounding_box: crate::factorio::util::add_to_rect(
+                &Rect::from_wh(2.4, 2.4),
+                &Position::new(0.5, 3.5),
+            ),
+            recipe: Some("widget".to_string()),
+            ..Default::default()
+        };
+        assembler.direction = Direction::South.to_u8().unwrap();
+        let entity_graph = EntityGraph::new(
+            Arc::new(crate::test_utils::fixture_entity_prototypes()),
+            Arc::new(recipes),
+        );
+        entity_graph
+            .add(
+                vec![
+                    FactorioEntity::new_resource(
+                        &Position::new(0.5, -1.5),
+                        Direction::South,
+                        &EntityName::IronOre.to_string(),
+                    ),
+                    FactorioEntity::new_electric_mining_drill(
+                        &Position::new(0.5, -1.5),
+                        Direction::South,
+                    ),
+                    FactorioEntity::new_transport_belt(&Position::new(0.5, 0.5), Direction::South),
+                    FactorioEntity::new_inserter(&Position::new(0.5, 1.5), Direction::North),
+                    assembler,
+                    FactorioEntity::new_inserter(&Position::new(0.5, 5.5), Direction::North),
+                    FactorioEntity::new_transport_belt(&Position::new(0.5, 6.5), Direction::South),
+                ],
+                None,
+            )
+            .unwrap();
+        entity_graph.connect().unwrap();
+        let flow = FlowGraph::new(Arc::new(entity_graph));
+
+        let lines = flow.nameplate_lines();
+        let widget: Vec<&ProductionLine> =
+            lines.iter().filter(|line| line.item == "widget").collect();
+        assert_eq!(
+            widget.len(),
+            1,
+            "the fixture must reach the assembler at all, or nothing below              means anything"
+        );
+        assert_eq!(
+            widget[0].needs.keys().collect::<Vec<_>>(),
+            vec!["unobtainium"],
+            "charged the recipe the machine is SET to, and only that one"
+        );
+        assert!(
+            !widget[0].needs.contains_key("moondust"),
+            "and not the one its product name sorts to: {:?}",
+            widget[0].needs
+        );
+    }
+
+    /// **An ingredient nothing here makes is recorded as unaccounted for, not
+    /// as short.**
+    ///
+    /// `import` has no producer at all -- the shape of `petroleum-gas` on the
+    /// record base, where all 55 refineries are missing from the flow graph,
+    /// and of bioflux, which arrives on Nauvis by rocket. It must not read as
+    /// a supply of zero.
+    #[test]
+    fn an_ingredient_nothing_here_makes_is_unaccounted_for_and_not_short() {
+        let lines = vec![
+            line("plate", 3., &[]),
+            line("widget", 1., &[("plate", 4.), ("import", 5.)]),
+        ];
+        let provenance = FlowGraph::provenance_of(&lines);
+
+        assert_eq!(
+            provenance.get("import").copied(),
+            Some(InputProvenance {
+                eaten: 5.,
+                supply: Supply::Unmodelled
+            }),
+            "no producer is UNMODELLED, and the 5/s eaten in the dark is              reported beside it rather than lost"
+        );
+        assert_eq!(
+            provenance.get("plate").copied(),
+            Some(InputProvenance {
+                eaten: 4.,
+                supply: Supply::Modelled(3.)
+            }),
+            "an item with a producer reports the rate, so the Unmodelled above              is a decision this call made and not the whole map coming back empty"
+        );
+        assert!(
+            !provenance.contains_key("widget"),
+            "the map is over what is EATEN; nobody eats widget"
+        );
+
+        // And the whole point: the unaccounted-for ingredient must not throttle
+        // anybody. `widget` is held to 1.5 by the plate it is genuinely short
+        // of, and by nothing else.
+        assert_close(
+            &balanced(&lines),
+            "widget",
+            0.75,
+            "an import constrains nobody; the plate, 3/s against the 4/s wanted,              holds it to three quarters",
+        );
+    }
+
     /// One machine making one item out of `needs`, for the pure tests of
     /// [`FlowGraph::balance`] below.
     fn line(item: &str, rate: f64, needs: &[(&str, f64)]) -> ProductionLine {
@@ -2972,6 +3431,12 @@ mod tests {
         // dump through the same binary -- this repository's standing warning
         // is that a baseline compared across two builds measures the builds.
         let descent = totals(&lines, &balance_by_descent(&lines));
+        // The lines as they were charged before 2026-09-07's recipe change:
+        // the ingredient bill guessed back from the product's name rather than
+        // read off the machine. Computed on this binary, on this dump, for the
+        // same reason the descent column above is.
+        let guessed = surface.flow_graph.nameplate_lines_by_guessing();
+        let by_guess = totals(&guessed, &FlowGraph::balance(&guessed));
         println!("-- production_rates of {path} --");
         println!(
             "{:>28}  {:>14}  {:>14}  {:>14}  {:>14}",
@@ -2990,11 +3455,20 @@ mod tests {
         println!();
         println!("-- against the game's own ten-minute statistics --");
         println!(
-            "{:>22} {:>10} {:>10} {:>7} {:>10} {:>7} {:>10} {:>7}",
-            "item", "game/min", "nameplate", "ratio", "descent", "ratio", "sustained", "ratio"
+            "{:>22} {:>10} {:>10} {:>7} {:>10} {:>7} {:>10} {:>7} {:>10} {:>7}",
+            "item",
+            "game/min",
+            "nameplate",
+            "ratio",
+            "descent",
+            "ratio",
+            "guessed",
+            "ratio",
+            "sustained",
+            "ratio"
         );
-        let columns = [&rates, &descent, &sustained];
-        let mut error = [0_f64; 3];
+        let columns = [&rates, &descent, &by_guess, &sustained];
+        let mut error = [0_f64; 4];
         for (item, game) in game_reported_rates() {
             print!("{item:>22} {game:>10.0}");
             for (slot, column) in columns.iter().enumerate() {
@@ -3007,12 +3481,13 @@ mod tests {
         }
         let count = game_reported_rates().len() as f64;
         println!(
-            "{:>22} {:>10} {:>19.3} {:>19.3} {:>19.3}",
+            "{:>22} {:>10} {:>19.3} {:>19.3} {:>19.3} {:>19.3}",
             "mean abs log error",
             "",
             error[0] / count,
             error[1] / count,
-            error[2] / count
+            error[2] / count,
+            error[3] / count
         );
     }
 
@@ -3044,6 +3519,48 @@ mod tests {
             *total.entry(line.item.clone()).or_insert(0.) += line.rate * scale[index];
         }
         total
+    }
+
+    impl FlowGraph {
+        /// [`FlowGraph::nameplate_lines`] as it charged before the recipe a
+        /// machine is **set** to was read: the bill guessed back from the
+        /// product's name by [`FlowGraph::recipe_making`] alone.
+        ///
+        /// Kept, and kept only here, so the before column of the record base's
+        /// table is computed on the same binary and the same dump as the after
+        /// column instead of being quoted from a note. It is
+        /// `nameplate_lines`'s body with `recipe_charged_for` replaced by
+        /// `recipe_making`, and nothing else.
+        fn nameplate_lines_by_guessing(&self) -> Vec<ProductionLine> {
+            self.ensure_current();
+            let nameplate = self.producer_nameplates();
+            let mut standing: BTreeMap<String, f64> = BTreeMap::new();
+            for machine in &nameplate {
+                for (item, rate) in &machine.made {
+                    *standing.entry(item.clone()).or_insert(0.) += rate;
+                }
+            }
+            let mut lines: Vec<ProductionLine> = vec![];
+            for machine in nameplate {
+                for (item, rate) in machine.made {
+                    let mut needs: BTreeMap<String, f64> = BTreeMap::new();
+                    if machine.crafts
+                        && let Some(recipe_name) = self.recipe_making(&item, &standing)
+                        && let Some(recipe) = self.recipes.get(&recipe_name)
+                        && let Some(product) = recipe.products.iter().find(|p| p.name == item)
+                        && product.amount > 0
+                    {
+                        let crafts = rate / f64::from(product.amount);
+                        for ingredient in recipe.ingredients.iter().flatten() {
+                            *needs.entry(ingredient.name.clone()).or_insert(0.) +=
+                                crafts * f64::from(ingredient.amount);
+                        }
+                    }
+                    lines.push(ProductionLine { item, rate, needs });
+                }
+            }
+            lines
+        }
     }
 
     /// [`FlowGraph::balance`] as it was shipped between 2026-09-07 and this
@@ -3207,7 +3724,7 @@ mod tests {
             }
             let mut tightest = f64::INFINITY;
             for ingredient in line.needs.keys() {
-                if let Some(share) =
+                if let Share::Of(share) =
                     FlowGraph::supply_ratio(ingredient, &supply, &demand, &BTreeMap::new())
                 {
                     tightest = tightest.min(share);
@@ -3239,7 +3756,7 @@ mod tests {
                 let mut tightest = f64::INFINITY;
                 let mut who = "unconstrained".to_string();
                 for ingredient in line.needs.keys() {
-                    if let Some(share) =
+                    if let Share::Of(share) =
                         FlowGraph::supply_ratio(ingredient, &supply, &demand, &BTreeMap::new())
                         && share < tightest
                     {
@@ -3385,5 +3902,181 @@ mod tests {
                 seen * 60.
             );
         }
+    }
+
+    /// **Probe.** What recipe does each crafting machine on the record base
+    /// actually have set, and does [`FlowGraph::recipe_making`] agree?
+    ///
+    /// Printed, not asserted: it is a census of one particular base.
+    #[test]
+    #[ignore = "needs a world dump named by FACTORIO_BOT_WORLD_DUMP"]
+    fn what_recipe_each_machine_really_runs() {
+        let Ok(path) = std::env::var("FACTORIO_BOT_WORLD_DUMP") else {
+            panic!("set FACTORIO_BOT_WORLD_DUMP to a world.dump JSON");
+        };
+        let json = std::fs::read_to_string(&path).expect("the dump reads");
+        let surface: crate::factorio::world::FactorioSurface =
+            serde_json::from_str(&json).expect("the dump parses");
+        let flow = &surface.flow_graph;
+        let standing = flow.production_rates();
+        // Per (entity_type, recipe): how many machines, and their statuses.
+        let mut census: BTreeMap<(String, String), usize> = BTreeMap::new();
+        let mut plastic_status: BTreeMap<String, usize> = BTreeMap::new();
+        let mut plastic_inputs: BTreeMap<String, (usize, u32)> = BTreeMap::new();
+        let mut no_recipe: BTreeMap<String, usize> = BTreeMap::new();
+        {
+            let graph = flow.inner_graph();
+            for node_index in graph.node_indices() {
+                let Some(node) = graph.node_weight(node_index) else {
+                    continue;
+                };
+                if !matches!(
+                    node.entity_type,
+                    EntityType::Furnace | EntityType::AssemblingMachine
+                ) {
+                    continue;
+                }
+                let Some(id) = node.entity_id else { continue };
+                let Some(entity) = surface.entity_graph.entity_by_id(id) else {
+                    continue;
+                };
+                match entity.recipe.as_deref() {
+                    Some(recipe) => {
+                        *census
+                            .entry((entity.entity_type.clone(), recipe.to_string()))
+                            .or_insert(0) += 1;
+                        if recipe == "plastic-bar" || recipe == "bioplastic" {
+                            *plastic_status
+                                .entry(entity.status.clone().unwrap_or("<none>".into()))
+                                .or_insert(0) += 1;
+                            for item in entity.input_inventory.iter().flatten() {
+                                let slot =
+                                    plastic_inputs.entry(item.name.clone()).or_insert((0, 0));
+                                slot.0 += 1;
+                                slot.1 += item.count;
+                            }
+                        }
+                    }
+                    None => *no_recipe.entry(entity.name.clone()).or_insert(0) += 1,
+                }
+            }
+        }
+        // How many of each interesting entity the ENTITY graph holds against
+        // how many reached the FLOW graph. A flow node exists only for an
+        // entity the walk from a root actually reached.
+        {
+            let mut in_entity: BTreeMap<String, usize> = BTreeMap::new();
+            let graph = surface.entity_graph.inner_graph();
+            for node_index in graph.node_indices() {
+                if let Some(node) = graph.node_weight(node_index) {
+                    *in_entity.entry(node.entity_name.clone()).or_insert(0) += 1;
+                }
+            }
+            let mut in_flow: BTreeMap<String, usize> = BTreeMap::new();
+            let flow_inner = flow.inner_graph();
+            for node_index in flow_inner.node_indices() {
+                if let Some(node) = flow_inner.node_weight(node_index) {
+                    *in_flow.entry(node.entity_name.clone()).or_insert(0) += 1;
+                }
+            }
+            println!("-- entity graph vs flow graph, by entity name --");
+            println!("{:>28} {:>10} {:>10}", "entity", "entity", "flow");
+            for (name, count) in &in_entity {
+                println!(
+                    "{name:>28} {count:>10} {:>10}",
+                    in_flow.get(name).copied().unwrap_or_default()
+                );
+            }
+        }
+        println!("-- machines with NO recipe set --");
+        for (name, count) in &no_recipe {
+            println!("{name:>32}  {count:>6}");
+        }
+        println!("-- (type, recipe) census, and what recipe_making would pick --");
+        println!(
+            "{:>24} {:>28} {:>7}  {:>28}",
+            "entity_type", "recipe set", "count", "recipe_making(first product)"
+        );
+        let mut disagreements = 0_usize;
+        for ((entity_type, recipe_name), count) in &census {
+            let picked = surface
+                .flow_graph
+                .recipes
+                .get(recipe_name)
+                .and_then(|recipe| recipe.products.first().map(|p| p.name.clone()))
+                .and_then(|item| flow.recipe_making(&item, &standing))
+                .unwrap_or_else(|| "<none>".into());
+            let flag = if &picked == recipe_name {
+                ""
+            } else {
+                disagreements += count;
+                "  <-- DISAGREES"
+            };
+            println!("{entity_type:>24} {recipe_name:>28} {count:>7}  {picked:>28}{flag}");
+        }
+        println!("{disagreements} machines whose set recipe recipe_making disagrees with");
+        println!("-- plastic/bioplastic machine status --");
+        for (status, count) in &plastic_status {
+            println!("{status:>32}  {count:>6}");
+        }
+        println!("-- what those machines hold as input --");
+        for (item, (machines, total)) in &plastic_inputs {
+            println!("{item:>32}  in {machines:>6} machines, {total:>8} held");
+        }
+    }
+
+    /// **Probe.** What [`FlowGraph::input_provenance`] cannot account for on a
+    /// real base, and how much of it is being eaten in the dark.
+    ///
+    /// Printed rather than asserted: which items land here is a fact about one
+    /// base and about how far the flow walk reached on it.
+    #[test]
+    #[ignore = "needs a world dump named by FACTORIO_BOT_WORLD_DUMP"]
+    fn what_the_model_cannot_account_for() {
+        let Ok(path) = std::env::var("FACTORIO_BOT_WORLD_DUMP") else {
+            panic!("set FACTORIO_BOT_WORLD_DUMP to a world.dump JSON");
+        };
+        let json = std::fs::read_to_string(&path).expect("the dump reads");
+        let surface: crate::factorio::world::FactorioSurface =
+            serde_json::from_str(&json).expect("the dump parses");
+        let provenance = surface.flow_graph.input_provenance();
+        // The same ledger as it read when the ingredient bill was guessed back
+        // from the product name, on this binary and this dump -- the only way
+        // to show which entries the recipe change moved.
+        let before = FlowGraph::provenance_of(&surface.flow_graph.nameplate_lines_by_guessing());
+        let mut items: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+        items.extend(provenance.keys().map(String::as_str));
+        items.extend(before.keys().map(String::as_str));
+        println!("-- input provenance of {path} --");
+        println!(
+            "{:>28} {:>14} {:>14} {:>16}",
+            "item", "guessed/min", "eaten/min", "made/min"
+        );
+        let mut unmodelled = 0_usize;
+        for item in items {
+            let was = match before.get(item) {
+                Some(entry) => format!("{:.1}", entry.eaten * 60.),
+                None => "-".to_string(),
+            };
+            let Some(entry) = provenance.get(item) else {
+                println!("{item:>28} {was:>14} {:>14} {:>16}", "-", "-");
+                continue;
+            };
+            let made = match entry.supply {
+                Supply::Modelled(rate) => format!("{:.1}", rate * 60.),
+                Supply::Unmodelled => {
+                    unmodelled += 1;
+                    "UNMODELLED".to_string()
+                }
+            };
+            println!(
+                "{item:>28} {was:>14} {:>14.1} {made:>16}",
+                entry.eaten * 60.
+            );
+        }
+        println!(
+            "{unmodelled} of {} eaten items have no modelled producer",
+            provenance.len()
+        );
     }
 }

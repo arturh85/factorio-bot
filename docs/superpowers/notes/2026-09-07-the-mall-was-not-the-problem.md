@@ -284,6 +284,16 @@ because it moves nothing in this table -- coal is in surplus 5,130 against 630
 eaten -- and mixing it into a change about the solver would make both harder to
 attribute.
 
+**CORRECTED 2026-09-07 by `2026-09-07-the-recipe-was-in-the-dump-all-along.md`.**
+Two things above are wrong. Bioflux is not something "nothing on Nauvis makes"
+in the sense implied -- it arrives by rocket, and the base has nine cargo
+landing pads -- but that is beside the point, because **the recipe each machine
+is set to is a field on `FactorioEntity` that the flow graph already reads for
+the machine's output**, and all 24 of these chemical plants are set to
+`plastic-bar`. The tie-break did not need mending; it needed not to be consulted.
+"It moves nothing in this table" was right: fixing it leaves all fourteen ratios
+and the 0.141 unchanged, and removes 4,800 items/min of fictional demand.
+
 ## 6. What is in the tree, and what was verified
 
 `crates/core/src/graph/flow_graph.rs` only. No planner, mod, `types.rs` or

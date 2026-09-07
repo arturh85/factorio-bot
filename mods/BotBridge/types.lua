@@ -617,6 +617,46 @@ function serialize_entity_prototype(entity)
     -- No argument means normal quality, which is what the planner plans for.
     ok, val = pcall(function() return entity.get_max_wire_distance() end)
     if ok then record.maximum_wire_distance = val end
+    -- FLUID PRODUCED PER TICK by an offshore pump, or moved per tick by a
+    -- normal pump. `crates/core/src/graph/flow_graph.rs`'s `OffshorePump` arm
+    -- hard-coded **1.0 per second** from the day the file was written, which
+    -- made water the largest wrong number in the whole model: 600/min
+    -- supplied on the world-record base against 68,250/min that the machines
+    -- the game has configured were eating. The game says 20 per tick.
+    --
+    -- **`get_pumping_speed()` is a METHOD and there is no `pumping_speed`
+    -- attribute at all.** Not recalled -- measured on a live 2.1.17 server on
+    -- 2026-09-07, which answered:
+    --
+    --     offshore get_pumping_speed=20  pump get=20
+    --     attribute_ok=false
+    --     attribute_val=LuaEntityPrototype doesn't contain key pumping_speed.
+    --
+    -- That error is precisely the shape the `pcall` around every read here
+    -- swallows: reading the attribute raises, the field arrives nil for every
+    -- prototype in the game, and nothing anywhere says it should not have.
+    -- Four field pairs this week went attribute/method one each way and
+    -- `crafting_speed` spent a whole session nil for 1028 live prototypes.
+    --
+    -- **The unit is fluid units per TICK**, the game's own, sent unconverted.
+    -- `PrototypeBase::pumping_speed` at the data stage is documented "How many
+    -- units of fluid are produced per tick" and `base/prototypes/entity/
+    -- entities.lua` writes 20 for both `offshore-pump` and `pump`; the runtime
+    -- method answers the same 20, not 1200, so it is per tick as well.
+    -- `FactorioEntityPrototype::pumping_speed_per_second` does the x60 in one
+    -- place so a reader cannot pick a different conversion. Verified against
+    -- the running game rather than against the docs: an offshore pump piped
+    -- into a storage tank filled it at **19.53 units/tick** over two
+    -- consecutive 203-tick windows (3,964.84 units each), 97.7% of 20 with the
+    -- pipe run taking the rest. Read as per *second* the same figure would
+    -- have been 60x wrong and every check against a doc would still agree.
+    --
+    -- `subclasses` are `OffshorePump` and `Pump`, so this raises on anything
+    -- else and the `pcall` is what makes a furnace report nothing -- the same
+    -- gate `get_supply_area_distance()` above relies on. No argument means
+    -- normal quality, which is what the planner plans for.
+    ok, val = pcall(function() return entity.get_pumping_speed() end)
+    if ok then record.pumping_speed = val end
     -- ELECTRICAL DRAW AND OUTPUT. `crates/planner/src/state.rs` writes
     -- `consumer_kw` and `generation_kw` out by hand -- 14 rows and 2 -- and
     -- says in its own doc that sending these is what deletes them. The

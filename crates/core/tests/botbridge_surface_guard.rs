@@ -282,6 +282,208 @@ fn every_dropped_chunk_reports_itself() {
     );
 }
 
+/// **The once-per-chunk guard on ground now carries the surface in its key.**
+///
+/// `tile_chunks` was keyed `chunk_x.."/"..chunk_y` with no surface, so a
+/// Nauvis chunk at (0, 0) would have suppressed the tiles writeout for chunk
+/// (0, 0) on every other surface — and silently, because a suppressed writeout
+/// is indistinguishable from a chunk that was never generated. The Nauvis guard
+/// above meant it could not fire yet; that makes it latent, not absent.
+///
+/// **Every "the other surface was not suppressed" assertion here is paired
+/// with a suppression that must still happen**, from the same table. A key
+/// that never suppresses anything would pass the vulcanus row on its own,
+/// which is exactly the vacuity `ground_names_its_own_surface.rs` was built to
+/// avoid.
+///
+/// This calls `ground_chunk_first_seen` directly rather than firing
+/// `on_chunk_generated`, because reaching the second surface through
+/// `on_chunk_generated` would mean disabling the guard, and no test may do
+/// that.
+#[test]
+fn ground_is_written_once_per_chunk_per_surface() {
+    let lua = mod_lua();
+    let first = |surface: &str, x: i32, y: i32| -> bool {
+        lua.load(format!(
+            "return ground_chunk_first_seen({surface}, {x}, {y})"
+        ))
+        .set_name("ground_chunk_first_seen")
+        .eval()
+        .expect("ground_chunk_first_seen")
+    };
+
+    assert!(first("_nauvis", 0, 0), "the first sighting writes ground");
+    assert!(
+        !first("_nauvis", 0, 0),
+        "and the second does not -- without this the vulcanus row below \
+         proves nothing, because a key that suppresses nothing passes it"
+    );
+    assert!(
+        first("_vulcanus", 0, 0),
+        "the SAME chunk coordinate on another surface is a different chunk: \
+         under the old key this returned false and a whole planet's ground \
+         went unwritten with nothing to say so"
+    );
+    assert!(
+        !first("_vulcanus", 0, 0),
+        "and it suppresses on its own surface exactly as Nauvis does"
+    );
+    assert!(
+        first("_nauvis", 32, 0),
+        "a different chunk on a seen surface is still first-seen, so the \
+         surface is a component of the key and not the whole of it"
+    );
+}
+
+/// The same fact end-to-end, through `on_chunk_generated` and the real
+/// `writeout_tiles`, rather than through the predicate alone.
+///
+/// The Nauvis guard is not lifted or edited: the stub is re-pointed so that
+/// `game.surfaces['nauvis']` **is** the vulcanus table for the second call,
+/// which is precisely the world the guard's removal will create. What is being
+/// asserted is that the second surface's chunk (0, 0) writes ground of its
+/// own after Nauvis's chunk (0, 0) already did — and the header names it, so
+/// the parser routes it (`ground_names_its_own_surface.rs`).
+///
+/// Paired with a repeat of the Nauvis chunk that must write **nothing**, from
+/// the same table, so this cannot pass by the guard never suppressing.
+#[test]
+fn ground_from_a_second_surface_survives_the_first_surfaces_chunk() {
+    let lua = mod_lua();
+    generate_chunk(&lua, "_nauvis", 0, 0);
+    assert_eq!(
+        writeouts(&lua, "tiles").len(),
+        1,
+        "the first chunk writes its ground: {:?}",
+        printed(&lua)
+    );
+
+    generate_chunk(&lua, "_nauvis", 0, 0);
+    assert_eq!(
+        writeouts(&lua, "tiles").len(),
+        1,
+        "the same chunk again writes nothing -- the guard is doing its job, \
+         which is what makes the next assertion mean something: {:?}",
+        printed(&lua)
+    );
+
+    lua.load("game.surfaces['nauvis'] = _vulcanus")
+        .set_name("repoint")
+        .exec()
+        .expect("repoint");
+    generate_chunk(&lua, "_vulcanus", 0, 0);
+
+    let tiles = writeouts(&lua, "tiles");
+    assert_eq!(
+        tiles.len(),
+        2,
+        "the other surface's chunk (0,0) must write its OWN ground: {:?}",
+        printed(&lua)
+    );
+    assert!(
+        tiles[1].starts_with("0,0;32,32;vulcanus:"),
+        "and it names its surface on the wire, so the parser routes it \
+         somewhere other than Nauvis: {:?}",
+        tiles[1]
+    );
+}
+
+/// **The charted-area box belongs to one surface, and nothing else reads it.**
+///
+/// `storage.map_area` was a single `{x1,y1,x2,y2}` across every surface. A
+/// space platform's coordinates are its own frame — that is why `SurfaceId`
+/// went on the container and not on `Position` — so a union of a Nauvis
+/// rectangle and a platform rectangle describes no region of anything.
+///
+/// **This test exists because the mutation that reverted the fix came back
+/// GREEN**, and that was the useful result: `storage.map_area` has no reader
+/// anywhere — not the mod, not `crates/`, not `scripts/`, not the frontend —
+/// so its shape was unobservable and the correction was unverifiable, the same
+/// no-caller shape that let `flow_graph`'s own rates go unchecked for months.
+/// A shape test is not a reader and does not pretend to be one; it is what
+/// makes the change falsifiable at all.
+///
+/// The pairing that stops it being vacuous: Nauvis's box must actually move,
+/// from the same call sequence that leaves Vulcanus's alone.
+#[test]
+fn each_surface_charts_its_own_bounding_box() {
+    let lua = mod_lua();
+    lua.load(
+        r#"
+        local nauvis = map_area_of(_nauvis)
+        nauvis.x1, nauvis.x2 = -64, 96
+        _vul = map_area_of(_vulcanus)
+        _nau = map_area_of(_nauvis)
+        "#,
+    )
+    .set_name("two boxes")
+    .exec()
+    .expect("map_area_of");
+
+    let read = |name: &str, field: &str| -> f64 {
+        lua.load(format!("return {name}.{field}"))
+            .eval()
+            .expect("field")
+    };
+    assert_eq!(
+        (read("_nau", "x1"), read("_nau", "x2")),
+        (-64., 96.),
+        "the surface that charted ground keeps it -- without this the vulcanus \
+         row below passes for a function that returns a fresh box every call"
+    );
+    assert_eq!(
+        (read("_vul", "x1"), read("_vul", "x2")),
+        (0., 0.),
+        "and the other surface's box is its own: a shared box would read \
+         -64..96 here, in a coordinate frame it has nothing to do with"
+    );
+}
+
+/// **A save taken before 2026-09-07 holds the flat box, and `storage` survives
+/// save/load.** So the shape change has to migrate itself: an `x1` at the top
+/// level is the tell, and the old union is discarded rather than split,
+/// because there is no honest way to attribute a union to a surface.
+///
+/// Paired with the ordinary already-migrated case, so this cannot pass by
+/// resetting the table on every call — which would throw away every box on
+/// every chunk and read exactly like a correct migration on the first one.
+#[test]
+fn a_pre_surface_map_area_migrates_instead_of_raising() {
+    let lua = mod_lua();
+    lua.load(
+        r#"
+        storage.map_area = { x1 = -256, y1 = -256, x2 = 256, y2 = 256 }
+        _migrated = map_area_of(_nauvis)
+        _flat_gone = storage.map_area.x1 == nil
+        -- and once migrated, a box that HAS been charted survives the next call
+        _migrated.x2 = 128
+        _again = map_area_of(_nauvis)
+        "#,
+    )
+    .set_name("migrate")
+    .exec()
+    .expect("map_area_of");
+
+    let flag: bool = lua.globals().get("_flat_gone").expect("_flat_gone");
+    assert!(
+        flag,
+        "the flat pre-surface box must be gone from the top level, not left \
+         beside the per-surface entries where a reader could take it for one"
+    );
+    let fresh: f64 = lua.load("return _migrated.x2").eval().expect("x2");
+    assert_eq!(
+        fresh, 128.,
+        "the migrated box starts at zero and is then charted normally"
+    );
+    let again: f64 = lua.load("return _again.x2").eval().expect("x2");
+    assert_eq!(
+        again, 128.,
+        "and the SECOND call returns the same box -- a function that reset \
+         `storage.map_area` unconditionally would satisfy every assertion \
+         above and lose a surface's charted area on every chunk"
+    );
+}
+
 /// **The other half of the guard: what the drop above cannot say.**
 ///
 /// Each `surface_chunk_dropped` line is honest about the chunk it refused, and

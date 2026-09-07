@@ -394,8 +394,35 @@ impl FlowGraph {
                                 Control::Continue
                             }
                             EntityType::OffshorePump => {
+                                // The rate is the PROTOTYPE's, not a constant.
+                                // This arm emitted a flat `1.` per second from
+                                // the day the file was written, against the
+                                // game's 20 per tick -- 1,200 per second, a
+                                // factor of 1,200 -- which made water the
+                                // largest wrong number anywhere in the model:
+                                // 600/min supplied on the world-record base
+                                // against 68,250/min that the machines the
+                                // game has configured were eating.
+                                let Some(production_rate) =
+                                    self.pumping_rate_per_second(&source_node.entity_name)
+                                else {
+                                    // The same policy as a drill with no ore
+                                    // above: the honest edge is no edge. A pump
+                                    // this build has never heard of, on a world
+                                    // that did not send the field, has no rate
+                                    // anybody can state -- and inventing one
+                                    // is how this arm came to say 1.
+                                    warn!(
+                                        "no flow out of {} @ {}: nothing says how fast it pumps",
+                                        source_node.entity_name, source_node.position
+                                    );
+                                    return Control::Continue;
+                                };
                                 self.update_flow_edge(
-                                    FlowEdge::Single(vec![(EntityName::Water.to_string(), 1.)]),
+                                    FlowEdge::Single(vec![(
+                                        EntityName::Water.to_string(),
+                                        production_rate,
+                                    )]),
                                     source_node,
                                     target_node,
                                 );
@@ -1855,6 +1882,42 @@ impl FlowGraph {
             .map_or(1., f64::from)
     }
 
+    /// How much fluid the pump prototype named `pump` produces **per second**,
+    /// or `None` when nothing in the model or in vanilla can say.
+    ///
+    /// # The number the game gives, and the unit it gives it in
+    ///
+    /// [`FactorioEntityPrototype::pumping_speed`] is fluid units **per tick** —
+    /// `LuaEntityPrototype::get_pumping_speed()`, a method, measured at `20`
+    /// for `offshore-pump` and `pump` on a live 2.1.17 server. The x60 happens
+    /// once, in [`FactorioEntityPrototype::pumping_speed_per_second`], so no
+    /// caller can pick a different conversion. That distinction is the whole
+    /// bug class: `mining_speed / mining_time` counts mining *operations* and
+    /// was emitted here as items per second for months, and every solid ore
+    /// yielding one item per operation is what hid it.
+    ///
+    /// # The vanilla fallback, and why it is not the defect it looks like
+    ///
+    /// A world dumped before 2026-09-07 — including the 2.94 GB world-record
+    /// census this rate was validated against — carries no `pumping_speed` at
+    /// all, because the mod did not send one. Falling back to a table keyed by
+    /// **vanilla prototype name** is the same shape
+    /// `crates/planner/src/state.rs` uses for `maximum_wire_distance`: it
+    /// fires only when *the sender did not say*, a `Some` from the wire always
+    /// wins, and a modded pump this build has never heard of gets `None` and
+    /// no flow rather than a vanilla pump's rate. Writing `1200.` into the arm
+    /// itself, with no field behind it, would be the mod-compatibility defect
+    /// — and writing `1.` into it, which is what this file did, was a
+    /// 1,200-fold one.
+    fn pumping_rate_per_second(&self, pump: &str) -> Option<f64> {
+        if let Some(prototype) = self.entity_prototypes.get(pump)
+            && let Some(per_second) = prototype.pumping_speed_per_second()
+        {
+            return Some(per_second);
+        }
+        vanilla_pumping_rate_per_second(pump)
+    }
+
     /// What a furnace named `machine` turns `input` into, and how many per
     /// second, **derived from the game's own recipe table**.
     ///
@@ -2090,6 +2153,36 @@ fn fresh_flow_tree() -> FlowQuadTree {
         32,
         8,
     )
+}
+
+/// Vanilla's `pumping_speed`, in fluid units **per tick**, for the two
+/// prototypes that carry one — `base/prototypes/entity/entities.lua` writes
+/// `20` for `offshore-pump` and `20` for `pump`, and a live 2.1.17 server
+/// answers `20` from `get_pumping_speed()` for both.
+///
+/// **This is a fallback for worlds that did not send the field, never a
+/// substitute for asking.** [`FlowGraph::pumping_rate_per_second`] reaches it
+/// only after [`FactorioEntityPrototype::pumping_speed`] came back `None`, so
+/// a modded pump, or a vanilla one whose speed a mod changed, is read off the
+/// wire and this table never sees it.
+const VANILLA_PUMPING_SPEED_PER_TICK: f64 = 20.;
+
+/// The ticks a second, for the one conversion this file's fallback needs.
+/// [`FactorioEntityPrototype::pumping_speed_per_second`] holds the same
+/// constant for the value that came off the wire.
+const TICKS_PER_SECOND: f64 = 60.;
+
+/// The vanilla rate for `pump`, in fluid units per **second**, or `None` for a
+/// prototype vanilla has no figure for.
+///
+/// `None` is what makes the fallback safe: a pump nobody has ever heard of
+/// produces no flow edge and a warning that names it, rather than silently
+/// inheriting an offshore pump's throughput.
+fn vanilla_pumping_rate_per_second(pump: &str) -> Option<f64> {
+    match pump {
+        "offshore-pump" | "pump" => Some(VANILLA_PUMPING_SPEED_PER_TICK * TICKS_PER_SECOND),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -3763,12 +3856,96 @@ mod tests {
         );
         assert_eq!(
             flow_graph.sum_incoming_edge_weights(&engine),
-            vec![("water".to_string(), 1.)],
-            "the magnitude passes through 1:1; the NAME is still the input fluid's"
+            vec![("water".to_string(), 1_200.)],
+            "the magnitude passes through 1:1 from the pump's own 1,200/s; the \
+             NAME is still the input fluid's"
         );
         assert!(
             flow_graph.node_at(&stranded).is_none(),
             "an engine nothing reaches must stay out -- the walk admits it, not its type"
+        );
+    }
+
+    /// **A pump pumps what its own prototype says**, not what this file used
+    /// to say (`1.` per second) and not a constant standing in for the game.
+    ///
+    /// The pairing is what makes it worth running: a *modded* offshore pump at
+    /// `30` per tick and vanilla's at `20` are read off the same map in the
+    /// same call, so neither a blanket multiplier nor a hard-coded 1,200
+    /// survives. The modded number is deliberately not a multiple of anything
+    /// vanilla, and 1,800 could not arrive from the vanilla table at all.
+    ///
+    /// **The unit is per TICK on the wire and per SECOND in the graph**, and
+    /// the two figures below are 60x their prototypes. A conversion done at
+    /// the call site, or not done, is exactly the shape of the units bug that
+    /// had this file reporting a pumpjack at a tenth of its rate for months.
+    #[test]
+    fn a_pump_produces_what_its_own_prototype_says_per_tick() {
+        let prototypes = crate::test_utils::fixture_entity_prototypes();
+        let mut vanilla = prototypes.get("offshore-pump").unwrap().clone();
+        vanilla.pumping_speed = Some(20.);
+        prototypes.insert("offshore-pump".to_string(), vanilla.clone());
+        let mut modded = vanilla;
+        modded.name = "big-offshore-pump".to_string();
+        modded.pumping_speed = Some(30.);
+        prototypes.insert("big-offshore-pump".to_string(), modded);
+
+        let graph = FlowGraph::new(Arc::new(EntityGraph::new(
+            Arc::new(prototypes),
+            Arc::new(crate::test_utils::fixture_recipes()),
+        )));
+        assert_eq!(
+            graph.pumping_rate_per_second("offshore-pump"),
+            Some(1_200.),
+            "20 per tick is 1,200 per second -- the figure the game shows on \
+             an offshore pump, and 1,200x what this arm used to emit"
+        );
+        assert_eq!(
+            graph.pumping_rate_per_second("big-offshore-pump"),
+            Some(1_800.),
+            "the prototype's own 30 per tick, which no vanilla table holds -- \
+             so the number came off the wire and not from a name"
+        );
+    }
+
+    /// The two answers a world that **said nothing** gets, and they are
+    /// different on purpose.
+    ///
+    /// Every world dumped before 2026-09-07 carries no `pumping_speed`,
+    /// including the 2.94 GB world-record census. A vanilla `offshore-pump`
+    /// there falls back to vanilla's own 20 per tick; a pump nobody has heard
+    /// of gets **`None`**, which the `OffshorePump` arm turns into no flow
+    /// edge and a warning naming it. Inheriting an offshore pump's throughput
+    /// for an unknown prototype is precisely how this arm came to claim `1.`
+    /// for everything.
+    ///
+    /// Paired with the wire-fed case above, so the fallback cannot pass by the
+    /// prototype lookup never running.
+    #[test]
+    fn a_pump_the_world_said_nothing_about_falls_back_only_when_vanilla_knows_it() {
+        let prototypes = crate::test_utils::fixture_entity_prototypes();
+        let mut silent = prototypes.get("offshore-pump").unwrap().clone();
+        silent.pumping_speed = None;
+        prototypes.insert("offshore-pump".to_string(), silent.clone());
+        let mut unknown = silent;
+        unknown.name = "quiet-pump".to_string();
+        prototypes.insert("quiet-pump".to_string(), unknown);
+
+        let graph = FlowGraph::new(Arc::new(EntityGraph::new(
+            Arc::new(prototypes),
+            Arc::new(crate::test_utils::fixture_recipes()),
+        )));
+        assert_eq!(
+            graph.pumping_rate_per_second("offshore-pump"),
+            Some(1_200.),
+            "the sender did not say, and vanilla does -- 20 per tick from \
+             base/prototypes/entity/entities.lua"
+        );
+        assert_eq!(
+            graph.pumping_rate_per_second("quiet-pump"),
+            None,
+            "nobody said and vanilla has never heard of it: no rate, so no \
+             flow, rather than an offshore pump's borrowed throughput"
         );
     }
 

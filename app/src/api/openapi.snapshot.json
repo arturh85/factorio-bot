@@ -1941,6 +1941,14 @@
           "name": {
             "type": "string"
           },
+          "pumping_speed": {
+            "description": "How much fluid an **offshore pump produces, or a normal pump moves, per\nTICK** — `20` for both of vanilla's, i.e. 1,200 per second. Use\n[`Self::pumping_speed_per_second`] rather than scaling it at a call\nsite.\n\n# The unit is per tick, and that is measured\n\nThe prototype stage documents `pumping_speed` as \"How many units of\nfluid are produced per tick\" and `base/prototypes/entity/entities.lua`\nwrites `20` for `offshore-pump` and for `pump`. The *runtime* method\nanswers the same `20` on a live 2.1.17 game (2026-09-07), so it did not\nconvert on the way out.\n\n**Checked against the running game and not only against the docs**: an\noffshore pump piped into a storage tank filled it 3,964.84 units in\neach of two consecutive 203-tick windows, i.e. **19.53 units/tick** —\n97.7% of 20, the pipe run taking the rest. Read as per *second* that\nsame figure is 60x wrong, and every doc string would still have agreed.\nA units error of exactly this shape (`mining_speed / mining_time`\ncounting *operations*, not items) hid in [`FlowGraph`]'s drill arm for\nmonths, because every solid ore yields one item per operation.\n\n# It is a method on the runtime API, and there is no attribute\n\n`LuaEntityPrototype::get_pumping_speed(quality)`, subclasses\n`OffshorePump` and `Pump`. Reading `entity.pumping_speed` on a live\nserver raises `LuaEntityPrototype doesn't contain key pumping_speed.`\n— measured, not recalled — the mod's `pcall` swallows it, and the field\narrives `None` for every prototype in the game with nothing saying it\nshould not have. See [`Self::crafting_speed`], which did exactly that\nfor 1028 prototypes of a live game.\n\n# `None` is *the sender did not say*\n\n`default`, so every world dumped before 2026-09-07 reads `None` —\nincluding the 2.94 GB world-record census this rate was measured\nagainst. `crates/core/src/graph/flow_graph.rs` falls back to a\n**vanilla table keyed by prototype name** on exactly that answer, the\nsame shape `crates/planner/src/state.rs` uses for\n[`Self::maximum_wire_distance`], and warns and emits no flow for a pump\nit has never heard of rather than inventing a rate for it.",
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
           "resource_categories": {
             "description": "The categories a `character` or `mining-drill` prototype can mine.\nSorted by the mod so the order is the data's, not `pairs()`'s.",
             "items": {

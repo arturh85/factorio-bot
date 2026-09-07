@@ -220,6 +220,16 @@ fn exhausted_tier_one(net: &ActionNetwork, log: &ExecutionLog) -> bool {
 /// footprint of a planned build is an ordinary transient and exactly what
 /// tier 1 is for; escalating on it would spend a re-expansion on a bot that
 /// is about to walk away.
+///
+/// That last sentence is now enforced from *both* ends rather than only from
+/// the write side. `PlanState::from_world` drops a refusal whose own recorded
+/// blockers are nothing but transients
+/// (`PlacementRefusal::names_only_transient_blockers`), so a ledger entry that
+/// reached the world anyway — from a dumped world, a `--resume-from`
+/// savepoint, or a mod older than the two filters that are supposed to keep
+/// them out — no longer suppresses the tier-1 retry that a blocker which walks
+/// away is exactly the right recovery for. Nothing here changed; this reads
+/// `is_site_refused`, and `is_site_refused` now answers a filtered ledger.
 fn refused_by_the_game(net: &ActionNetwork, log: &ExecutionLog, state: &PlanState) -> bool {
     net.actions().any(|action| {
         log.status(action.id) == Status::Failed

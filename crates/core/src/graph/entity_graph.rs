@@ -355,6 +355,71 @@ pub const ENEMY_STRUCTURE_TYPES: [&str; 2] = ["unit-spawner", "turret"];
 /// stood at that tile in that run is open.
 pub const GHOST_ENTITY_TYPES: [&str; 2] = ["entity-ghost", "tile-ghost"];
 
+/// File one collision box into `blocked_tree`, unless that exact box with that
+/// exact `is_minable` bit is already filed.
+///
+/// **Every box used to be filed twice.** The mod writes a chunk's entities out
+/// from `on_chunk_generated`, and `initial_discovery` calls
+/// `on_chunk_generated` again by hand for every chunk that already existed when
+/// the server came up (`mods/BotBridge/control.lua`) -- `writeout_entities` is
+/// unguarded on that path, unlike `writeout_tiles`, which `tile_chunks` gates.
+/// So a chunk generated after the parser attached and before the discovery
+/// snapshot reaches [`EntityGraph::add`] twice, and every collision box in it
+/// was inserted twice. Measured on a clean seed-31337 map over one wooded
+/// rectangle: **26 boxes for 13 trees**, 13 `BOTH` and 13 `DUPLICATE` with zero
+/// `MODEL ONLY` (`scripts/blocked_diff.lua`; see
+/// `docs/superpowers/notes/2026-09-07-ask-what-is-in-the-blocked-tree.md`).
+///
+/// This is the same defect [`EntityGraph::resources`] was made a `Pos`-keyed
+/// map to fix, from the same two writeout paths. **A `Pos` key is not enough
+/// here**, and that is the reason this is a box comparison rather than a map:
+/// a blocked box is *sub-tile* and unaligned -- a tree sits at
+/// `(-18.211, -99.148)..(-17.414, -98.352)` -- so several genuinely different
+/// boxes share one floored tile, and a water tile's `1x1` box shares its tile
+/// with nothing at all. The identity of a blocked box is the rectangle plus the
+/// one bit the tree stores, so that is what is compared.
+///
+/// **Exact equality, and the `minable` bit is part of the key.** The two
+/// filings of one entity are byte-identical `f32`, so nothing needs an epsilon;
+/// widening to one would collapse *neighbouring* boxes, which is a different
+/// and much worse bug. Two boxes with the same rectangle but different
+/// `minable` bits are two different claims about that ground -- a rock and
+/// something that is not one -- and both are kept, because
+/// [`EntityGraph::blocking_boxes_within_minable`] hands that bit to callers
+/// deciding whether an obstacle can be chopped.
+///
+/// **Not done with the quad tree's own `allow_duplicates: false`**, which
+/// `entity_tree` and `tile_tree` use, and the first reason is decisive: that
+/// flag does not *skip* a duplicate, it **panics** on one. `QuadNode::insert`
+/// ends `panic!("didn't insert {..} into {..}")` when no node accepted the
+/// item, in release as much as in debug, and `[profile.release]` sets
+/// `panic = "abort"` -- so flipping the flag here would have killed the run on
+/// the first replayed chunk. (`entity_tree` survives it only because `add`
+/// checks `entity_at` and `continue`s before inserting; `tile_tree` survives
+/// it only because the mod's `tile_chunks` guards the tile writeout. Both are
+/// upstream conventions, not properties of the tree.) Two lesser reasons: the
+/// flag compares rectangles with an epsilon and ignores the payload, so it
+/// would collapse the two different claims above; and it is serialised with
+/// the tree, so a graph loaded from a `world.dump` would keep whatever flag it
+/// was written with. This check runs on every insert regardless of where the
+/// tree came from.
+///
+/// **A dump already written is not repaired by this.** A `world.dump` taken
+/// before this landed carries its duplicates inside the serialised tree;
+/// deduplication happens on the way in, and there is no pass over an existing
+/// tree.
+fn file_blocked_box(blocked: &mut BlockedQuadTree, minable: bool, rect: QuadTreeRect) {
+    // `query` is a narrowing pass -- it admits boxes that merely come close --
+    // so the exact test happens here, on each candidate it hands back.
+    let already_filed = blocked
+        .query(rect)
+        .into_iter()
+        .any(|(filed_minable, filed_rect, _)| *filed_minable == minable && filed_rect == rect);
+    if !already_filed {
+        blocked.insert_with_box(minable, rect);
+    }
+}
+
 impl EntityGraph {
     #[allow(clippy::new_without_default)]
     pub fn new(
@@ -1309,7 +1374,7 @@ impl EntityGraph {
             .into();
             if tile.player_collidable {
                 let minable = false; // player_collidable tiles like water are not minable
-                blocked.insert_with_box(minable, rect);
+                file_blocked_box(&mut blocked, minable, rect);
             }
             tree.insert_with_box(tile, rect);
         }
@@ -1417,7 +1482,11 @@ impl EntityGraph {
                 && entity.entity_type != EntityType::CurvedRail.to_string()
                 && !GHOST_ENTITY_TYPES.contains(&entity.entity_type.as_str())
             {
-                blocked.insert_with_box(entity.is_minable(), entity.bounding_box.clone().into());
+                file_blocked_box(
+                    &mut blocked,
+                    entity.is_minable(),
+                    entity.bounding_box.clone().into(),
+                );
                 // The same `is_minable` the line above hands to the blocked
                 // tree, kept here by name and position as well. `blocked_tree`
                 // stores a bare rectangle, so a caller reading it back can say
@@ -3030,6 +3099,84 @@ mod tests {
         println!("  positions where `entity_at` is ambiguous: {ambiguous}");
     }
 
+    /// **What the double filing costs on the largest world available offline.**
+    ///
+    /// Ignored by default and gated on `FACTORIO_BOT_WORLD_DUMP`, like its
+    /// sibling above: the dump it was built for is ~2.9 GB and lives in a
+    /// workspace, not in the repository.
+    ///
+    /// ```text
+    /// FACTORIO_BOT_WORLD_DUMP=workspace/wrload/scripts/wr-census-status.json \
+    ///   cargo test -p factorio-bot-core --release \
+    ///   what_the_blocked_tree_costs_at_world_record_scale -- --ignored --nocapture
+    /// ```
+    ///
+    /// **It measures a dump written by the OLD code**, which is the point: the
+    /// tree it deserialises is exactly what a live run built, duplicates and
+    /// all. Re-filing every one of those boxes through [`file_blocked_box`] --
+    /// in id order, so the run is repeatable -- gives the count the same world
+    /// would produce today. The difference between the two is what the defect
+    /// was costing.
+    ///
+    /// The bytes are a **lower bound** and are reported as one: each element
+    /// occupies one entry in the tree's `elements` map and at least one
+    /// `(ItemId, Rect)` in a node, and a box straddling a node boundary is
+    /// filed in more than one node.
+    #[test]
+    #[ignore = "needs a world dump named by FACTORIO_BOT_WORLD_DUMP"]
+    fn what_the_blocked_tree_costs_at_world_record_scale() {
+        let Ok(path) = std::env::var("FACTORIO_BOT_WORLD_DUMP") else {
+            panic!("set FACTORIO_BOT_WORLD_DUMP to a world.dump JSON");
+        };
+
+        let read_started = Instant::now();
+        let json = std::fs::read_to_string(&path).expect("the dump reads");
+        let surface: crate::factorio::world::FactorioSurface =
+            serde_json::from_str(&json).expect("the dump parses");
+        drop(json);
+        let loaded = read_started.elapsed();
+
+        let mut filed: Vec<(ItemId, bool, QuadTreeRect)> = {
+            let tree = surface.entity_graph.blocked_tree();
+            tree.iter()
+                .map(|(id, (minable, rect))| (*id, *minable, *rect))
+                .collect()
+        };
+        // `iter` walks a HashMap, whose order is not a promise. Id order is
+        // insertion order, which is the order a live run filed them in.
+        filed.sort_by_key(|(id, _, _)| *id);
+
+        let mut refiled: BlockedQuadTree = QuadTree::new(
+            QuadTreeRect::new(Point2D::new(-5120., -5120.), Size2D::new(10240., 10240.)),
+            true,
+            8,
+            64,
+            1024,
+            8,
+        );
+        let refile_started = Instant::now();
+        for (_, minable, rect) in &filed {
+            file_blocked_box(&mut refiled, *minable, *rect);
+        }
+        let refiled_in = refile_started.elapsed();
+
+        let before = filed.len();
+        let after = refiled.len();
+        const PER_ELEMENT: usize = std::mem::size_of::<(ItemId, (bool, QuadTreeRect))>()
+            + std::mem::size_of::<(ItemId, QuadTreeRect)>();
+
+        println!("-- blocked tree of {path} --");
+        println!("  load                    {loaded:?}");
+        println!("  boxes as the dump has them   {before}");
+        println!("  boxes after deduplication    {after}");
+        println!("  duplicates                   {}", before - after);
+        println!("  re-file cost                 {refiled_in:?}");
+        println!(
+            "  at >= {PER_ELEMENT} bytes each, that is >= {} KiB reclaimed",
+            (before - after) * PER_ELEMENT / 1024
+        );
+    }
+
     /// **The defect this branch exists for.** `add` inserted nodes and stopped;
     /// `connect` ran from `OutputParser::on_init` (once, at `initial discovery
     /// done`), `factorio::snapshot` and `FactorioSurface::import` and nowhere
@@ -3483,6 +3630,158 @@ mod tests {
                 "edge {got} is more than one position step from {want}"
             );
         }
+    }
+
+    /// **The same chunk written out twice files each box once.**
+    ///
+    /// The mod calls `writeout_entities` from `on_chunk_generated`, and
+    /// `initial_discovery` calls `on_chunk_generated` again by hand for every
+    /// chunk that already existed when the server came up -- unguarded, unlike
+    /// the tile writeout beside it, which `tile_chunks` gates. So a chunk
+    /// reaches [`EntityGraph::add`] twice and every box in it used to be filed
+    /// twice: measured live as **26 boxes for 13 trees** over one wooded
+    /// rectangle of a clean seed-31337 map.
+    ///
+    /// The second `add` here is that replay, not a contrivance: it is the same
+    /// entity, in the same shape, arriving a second time.
+    #[test]
+    fn a_chunk_written_out_twice_files_each_box_once() {
+        let tree = FactorioEntity::new_tree(&Position::new(3.5, 3.5));
+        let graph = entity_graph_from(vec![tree.clone()]).expect("adding must not fail");
+        graph
+            .add(vec![tree.clone()], None)
+            .expect("the discovery replay must not fail");
+
+        let boxes =
+            graph.blocking_boxes_within(&Rect::new(&Position::new(3., 3.), &Position::new(4., 4.)));
+        assert_eq!(
+            boxes.len(),
+            1,
+            "one tree written out twice is one obstacle, not two: {boxes:?}"
+        );
+    }
+
+    /// An empty blocked tree shaped exactly like [`EntityGraph::new`]'s.
+    fn empty_blocked_tree(allow_duplicates: bool) -> BlockedQuadTree {
+        QuadTree::new(
+            QuadTreeRect::new(Point2D::new(-5120., -5120.), Size2D::new(10240., 10240.)),
+            allow_duplicates,
+            8,
+            64,
+            1024,
+            8,
+        )
+    }
+
+    /// The water arm of the same fault, which `add_tiles` cannot be made to
+    /// exercise: `tile_tree` refuses the duplicate tile first, and refusing is
+    /// a panic (see the test below). The blocked insert happens *before* that
+    /// refusal, so this arm is real in a release build -- it is only untestable
+    /// through the public entry point.
+    #[test]
+    fn filing_one_box_twice_files_it_once() {
+        let mut tree = empty_blocked_tree(true);
+        let water = QuadTreeRect::new(Point2D::new(-70., 42.), Size2D::new(1., 1.));
+        file_blocked_box(&mut tree, false, water);
+        file_blocked_box(&mut tree, false, water);
+        assert_eq!(tree.len(), 1, "one tile is one obstacle");
+    }
+
+    /// **Why this is not the quad tree's own `allow_duplicates: false`**, which
+    /// is how `entity_tree` and `tile_tree` are built.
+    ///
+    /// That flag does not *skip* a duplicate. `QuadNode::insert` panics
+    /// outright when no node accepted the item, in release as well as debug,
+    /// and `[profile.release]` sets `panic = "abort"`. So flipping the flag on
+    /// `blocked_tree` would not have deduplicated the replayed chunk -- it
+    /// would have killed the run on it.
+    #[test]
+    #[should_panic(expected = "didn't insert")]
+    fn a_deduplicating_quad_tree_panics_on_the_duplicate_rather_than_skipping_it() {
+        let mut tree = empty_blocked_tree(false);
+        let water = QuadTreeRect::new(Point2D::new(-70., 42.), Size2D::new(1., 1.));
+        tree.insert_with_box(false, water);
+        tree.insert_with_box(false, water);
+    }
+
+    /// **Why this is not keyed by `Pos` the way `resources` is.**
+    ///
+    /// [`EntityGraph::resources`] fixed the identical double-filing by keying
+    /// on the floored tile, and that key is wrong here: a blocked box is
+    /// sub-tile and unaligned, so two entirely different trees can stand on one
+    /// tile. Collapsing them would erase ground that really is blocked.
+    #[test]
+    fn two_different_boxes_on_one_tile_are_both_filed() {
+        let near = FactorioEntity::new_tree(&Position::new(3.2, 3.2));
+        let far = FactorioEntity::new_tree(&Position::new(3.8, 3.8));
+        assert_ne!(
+            near.bounding_box, far.bounding_box,
+            "the fixture must be two different boxes, or it asserts nothing"
+        );
+        let graph = entity_graph_from(vec![near, far]).expect("adding must not fail");
+
+        let boxes =
+            graph.blocking_boxes_within(&Rect::new(&Position::new(3., 3.), &Position::new(4., 4.)));
+        assert_eq!(
+            boxes.len(),
+            2,
+            "two obstacles sharing a tile are two obstacles: {boxes:?}"
+        );
+    }
+
+    /// The `is_minable` bit is part of a box's identity, not decoration.
+    ///
+    /// [`EntityGraph::blocking_boxes_within_minable`] hands that bit to callers
+    /// deciding whether an obstacle can be chopped out of the way. Two claims
+    /// over one rectangle -- one minable, one not -- are two different answers
+    /// to that question, so both are kept.
+    #[test]
+    fn one_rectangle_with_two_different_minable_bits_keeps_both() {
+        let graph = graph_with_terrain(vec![terrain(10., 10., "water")]);
+        let mut rock = FactorioEntity::new_tree(&Position::new(10.5, 10.5));
+        rock.bounding_box = Rect::new(&Position::new(10., 10.), &Position::new(11., 11.));
+        graph.add(vec![rock], None).expect("adding must not fail");
+
+        let boxes = graph.blocking_boxes_within_minable(&Rect::new(
+            &Position::new(10., 10.),
+            &Position::new(11., 11.),
+        ));
+        assert_eq!(boxes.len(), 2, "both claims are kept: {boxes:?}");
+        assert!(
+            boxes.iter().any(|(_, minable)| *minable) && boxes.iter().any(|(_, minable)| !*minable),
+            "and they are kept because they disagree: {boxes:?}"
+        );
+    }
+
+    /// **The double filing was not merely wasteful: a belt read as a wall.**
+    ///
+    /// `enclosure::drop_walkable` is a *multiset* subtraction -- it removes one
+    /// occurrence per walkable entity, deliberately, so that a coincidence of
+    /// geometry cannot delete a real blocker. `entity_tree` deduplicates and
+    /// `blocked_tree` did not, so a belt written out twice offered two boxes
+    /// against one walkable entity and one survived, standing in the enclosure
+    /// grid as an obstacle a character walks straight over.
+    ///
+    /// This is the reader the fix is *for*; the rest are `any`, `find`,
+    /// `fill(true)` and bounding-box queries, which a duplicate cannot move.
+    #[test]
+    fn a_belt_written_out_twice_does_not_read_as_a_wall() {
+        let belt = FactorioEntity::new_transport_belt(&Position::new(3.5, 3.5), Direction::North);
+        let graph = entity_graph_from(vec![belt.clone()]).expect("adding must not fail");
+        graph
+            .add(vec![belt.clone()], None)
+            .expect("the discovery replay must not fail");
+
+        let window = Rect::new(&Position::new(2., 2.), &Position::new(5., 5.));
+        let standing = crate::graph::enclosure::drop_walkable(
+            graph.blocking_boxes_within(&window),
+            std::slice::from_ref(&belt.bounding_box),
+        );
+        assert!(
+            standing.is_empty(),
+            "a belt is walkable, so nothing may be left blocking after it is \
+             dropped: {standing:?}"
+        );
     }
 
     /// A ghost is not an obstacle, and `blocked_tree` used to say it was.

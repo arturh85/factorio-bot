@@ -408,6 +408,18 @@ impl std::error::Error for PlanRefusal {}
 ///   two by clearing ground or choosing another field, and on the outer two by
 ///   not asking, or by dumping the world again from a mod that describes
 ///   fluidboxes.
+/// - [`BlockDrillUnfed`](PlannerError::BlockDrillUnfed) -- a verdict about
+///   **the ground**, and the sibling of `BlockGroundOccupied`: that one says
+///   something is on the tile, this one says something is missing under it.
+///   A mining drill would stand where there is nothing it can mine, at an
+///   anchor the planner's own siting search never screened -- a caller's
+///   fixed `Site::At`, or a recovered anchor, which cannot be moved. A script
+///   acts on the first by naming a different anchor and on the second by
+///   clearing the half-built block, and the message says which it is. Left
+///   unrefused it becomes a placement the GAME rejects mid-build, and because
+///   nothing is on the tile that rejection names no blocker, so the footprint
+///   is remembered as refused and every later replan blames terrain that was
+///   never there.
 fn refusal_for(err: &PlannerError) -> Option<PlanRefusal> {
     use miette::Diagnostic;
 
@@ -439,6 +451,7 @@ fn refusal_for(err: &PlannerError) -> Option<PlanRefusal> {
         | PlannerError::NoPipeRoute { .. }
         | PlannerError::FluidPortUnknown { .. }
         | PlannerError::BlockGroundOccupied { .. }
+        | PlannerError::BlockDrillUnfed { .. }
         | PlannerError::NoSiteFound { .. }
         | PlannerError::SustainSupplyNotStanding { .. }
         | PlannerError::SustainNoFuelSource { .. }

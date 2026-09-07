@@ -951,6 +951,48 @@ pub enum PlannerError {
         occupant: String,
     },
 
+    /// A [`crate::goal::Goal::Built`] would stand a mining drill on ground
+    /// with nothing under it that the drill can mine.
+    ///
+    /// **This is the refusal siting already made, applied to the anchors
+    /// siting never saw.** `drills_are_fed` has always run inside
+    /// `search_site`, so a `Site::Near`/`Site::Anywhere` block is screened
+    /// per drill before an anchor is chosen. The other two ways an anchor is
+    /// produced were not screened at all: a caller-chosen `Site::At`, and --
+    /// the one that cost two sessions -- a **recovered** anchor, which
+    /// `resolve_site` returns before it reaches the `Site` match, because an
+    /// anchor must not move across a replan.
+    ///
+    /// Unscreened, such an anchor plans cleanly and the *game* refuses the
+    /// drill mid-build. That refusal is durable and names no blocker (there
+    /// is nothing on the tile -- the problem is what is absent), so the
+    /// footprint is remembered as refused, the next replan reports it as
+    /// occupied ground, and the block is stranded with a message pointing at
+    /// terrain that was never there. Two sessions hunted a tree that did not
+    /// exist. See `docs/superpowers/notes/2026-09-07-the-stranded-tile-was-
+    /// siting-all-along.md`.
+    ///
+    /// `provenance` says which unscreened path produced the anchor, because
+    /// the remedy differs: a caller-chosen anchor is moved, while a recovered
+    /// one means a half-built block is standing on ground it cannot finish on
+    /// and must be cleared before it can be rebuilt elsewhere.
+    ///
+    /// This is deliberately **not** a quality threshold. A drill sharing one
+    /// ore tile with three neighbours is a slow block, and slow blocks work;
+    /// refusing them would refuse layouts that run. Zero is different in
+    /// kind: it is a placement the game itself will reject, and it is
+    /// knowable before anything is committed.
+    #[error("cannot build this block at anchor {anchor}: {reason}")]
+    #[diagnostic(
+        code(planner::block_drill_unfed),
+        help("the anchor came from {provenance}, which siting never screened for ore")
+    )]
+    BlockDrillUnfed {
+        anchor: String,
+        reason: String,
+        provenance: String,
+    },
+
     /// Siting searched out to its bound and every candidate footprint was
     /// occupied.
     ///

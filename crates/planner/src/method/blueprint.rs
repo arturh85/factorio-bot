@@ -950,22 +950,146 @@ fn nearest_ore_seed(state: &PlanState, bp: &Blueprint) -> Option<Position> {
 /// drill at all; both are stable across replans (see `nearest_ore_seed`'s own
 /// doc), which a roster centroid is not. Both are `true`: the search chose
 /// the anchor in this call.
+/// Where a block's anchor came from -- and therefore what has already been
+/// checked about it.
+///
+/// This was a bare `bool` (`sited_by_search`) until 2026-09-07. The bool was
+/// right about the one thing it was asked (did the search choose this ground,
+/// and may a character therefore veto it) and silently wrong about the thing
+/// nobody asked until the stranded tile: **`false` conflates two very
+/// different anchors.** A caller-chosen anchor is moved by changing the call;
+/// a recovered one cannot be moved at all, because moving it is what
+/// `recover_anchor` exists to prevent. Naming them separately is what lets a
+/// refusal say which remedy applies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AnchorSource {
+    /// `search_site` chose this ground, so every candidate footprint --
+    /// this one included -- has already passed `first_obstruction`, which
+    /// includes the per-drill ore check.
+    Search,
+    /// The caller named it (`Site::At`). Screened for nothing.
+    Caller,
+    /// Read back off the ground by `recover_anchor`, because part of this
+    /// block already stands. Screened for nothing, and deliberately immune
+    /// to re-siting.
+    Recovered,
+}
+
+impl AnchorSource {
+    /// Did the planner's own search choose this ground?
+    ///
+    /// The character predicate turns on exactly this: a bot standing where
+    /// the search just looked cannot veto ground the search chose one line
+    /// earlier, while for the other two sources the ground was never
+    /// screened for characters and the caller needs telling.
+    fn sited_by_search(self) -> bool {
+        matches!(self, AnchorSource::Search)
+    }
+
+    /// How the refusal messages name this source.
+    fn provenance(self) -> &'static str {
+        match self {
+            AnchorSource::Search => "the planner's own siting search",
+            AnchorSource::Caller => "the caller, which named a fixed anchor",
+            AnchorSource::Recovered => {
+                "recovery -- part of this block already stands, so the anchor cannot move"
+            }
+        }
+    }
+}
+
 fn resolve_site(
     state: &PlanState,
     bp: &Blueprint,
     site: &Site,
-) -> Result<(Position, bool), PlannerError> {
+) -> Result<(Position, AnchorSource), PlannerError> {
     if let Some(recovered) = recover_anchor(state, bp) {
-        return Ok((recovered, false));
+        return Ok((recovered, AnchorSource::Recovered));
     }
     match site {
-        Site::At(p) => Ok((p.clone(), false)),
-        Site::Near(p) => Ok((search_site(state, bp, p, SEARCH_RADIUS)?, true)),
+        Site::At(p) => Ok((p.clone(), AnchorSource::Caller)),
+        Site::Near(p) => Ok((
+            search_site(state, bp, p, SEARCH_RADIUS)?,
+            AnchorSource::Search,
+        )),
         Site::Anywhere => {
             let seed = nearest_ore_seed(state, bp).unwrap_or_else(|| Position::new(0.0, 0.0));
-            Ok((search_site(state, bp, &seed, SEARCH_RADIUS)?, true))
+            Ok((
+                search_site(state, bp, &seed, SEARCH_RADIUS)?,
+                AnchorSource::Search,
+            ))
         }
     }
+}
+
+/// [`resolve_site`], plus the per-drill ore check on the anchors siting never
+/// screened.
+///
+/// **Every drill in this block must have ore under it, whoever chose the
+/// anchor.** `search_site` has always applied `drills_are_fed` to each
+/// candidate footprint, so an [`AnchorSource::Search`] anchor arrives already
+/// screened and re-checking it would be a redundant pass over every entity
+/// against every resource. The other two sources reach here unscreened.
+///
+/// An unscreened drill on bare ground is not a slow block. It is a placement
+/// the GAME refuses, mid-build, naming no blocker -- because nothing is on
+/// the tile; the problem is what is absent -- which strands the whole block
+/// behind a durable refusal that reads like terrain. Refusing here costs a
+/// block that would have failed anyway, and buys a message naming the drill,
+/// its tile, and which remedy applies.
+///
+/// **This does not make `drills_are_fed` a threshold**, and must not become
+/// one: a drill sharing one ore tile with three neighbours is a slow block,
+/// and slow blocks work. Zero is a different kind of fact.
+/// Can the model say what these drills mine at all?
+///
+/// **`drills_are_fed` answers "not fed" for two different reasons, and only
+/// one of them is a fact about the ground.** Either no resource in reach
+/// matches a category this drill extracts -- ore is genuinely absent -- or
+/// the prototype table cannot say what the drill extracts in the first place,
+/// because `resource_category` or `resource_categories` is missing. Every
+/// world dumped before those fields existed is the second case, and so is
+/// every hand-built fixture that does not wire them.
+///
+/// Inside `search_site` the distinction does not matter much: a conservative
+/// refusal skips a candidate and the search moves on. **As a hard refusal it
+/// matters completely** -- it would turn "I cannot describe this drill" into
+/// "there is no ore here" and refuse a block the game would have built.
+/// That is the error this repo keeps paying for in both directions: an
+/// unsupported claim, and then an unsupported retraction of it. Absent
+/// evidence stays unknown.
+///
+/// So the guard refuses only when the model is in a position to be right.
+fn drill_capability_is_known(state: &PlanState, bp: &Blueprint) -> bool {
+    bp.entities
+        .iter()
+        .filter(|e| state.stands_on_resources(&e.name))
+        .all(|e| {
+            state.resource_names().iter().any(|resource| {
+                state.resource_category(resource).is_some_and(|category| {
+                    state.extractors_for(&category).iter().any(|d| d == &e.name)
+                })
+            })
+        })
+}
+
+fn resolve_and_guard(
+    state: &PlanState,
+    bp: &Blueprint,
+    site: &Site,
+) -> Result<(Position, AnchorSource), PlannerError> {
+    let (anchor, source) = resolve_site(state, bp, site)?;
+    if !source.sited_by_search()
+        && drill_capability_is_known(state, bp)
+        && let Some(reason) = drills_are_fed(state, bp, &anchor)
+    {
+        return Err(PlannerError::BlockDrillUnfed {
+            anchor: format!("({}, {})", anchor.x(), anchor.y()),
+            reason,
+            provenance: source.provenance().to_string(),
+        });
+    }
+    Ok((anchor, source))
 }
 
 /// Build a designed block by hand, one band per bot.
@@ -1004,7 +1128,8 @@ impl Method for BuildBlock {
         // stands, `recover_anchor`'s ghost pass finds it on every later
         // expansion and this is never true again for this block.
         let is_fresh_site = recover_anchor(&ctx.state, &bp).is_none();
-        let (anchor, sited_by_search) = resolve_site(&ctx.state, &bp, site)?;
+        let (anchor, anchor_source) = resolve_and_guard(&ctx.state, &bp, site)?;
+        let sited_by_search = anchor_source.sited_by_search();
 
         // This used to refuse the whole goal, by name, whenever it contained
         // an underground belt: neither `FactorioEntity` nor the mod's
@@ -1785,6 +1910,177 @@ mod tests {
         );
     }
 
+    /// **The stranded tile, as a test.** A `Site::At` block whose drill
+    /// stands on nothing it can mine must be refused BY THE PLANNER, naming
+    /// the drill and its tile, instead of planning cleanly and letting the
+    /// game refuse the placement mid-build.
+    ///
+    /// The live chain this reproduces (seed 31337, closed 2026-09-07): the
+    /// game refused a `burner-mining-drill` on a footprint with 0 ore under
+    /// it while 41 ore sat elsewhere in the same rectangle; the refusal named
+    /// no blocker, because nothing was on the tile -- the problem was what was
+    /// absent; so the footprint was remembered as refused, and every later
+    /// replan reported occupied ground. Two sessions went looking for a tree
+    /// that never existed.
+    ///
+    /// **This must fail without the guard**: `drills_are_fed` runs inside
+    /// `search_site`, and `Site::At` never reaches it.
+    #[test]
+    fn a_fixed_anchor_whose_drill_has_no_ore_is_refused_by_name() {
+        // Ore at (0, 0), and a drill anchored far enough away that its 2x2
+        // mining area cannot reach it.
+        let (world, _) = drill_reach_world(
+            "burner-mining-drill",
+            Position::new(2.0, 2.0),
+            Some(0.99),
+            (0, 0),
+        );
+        let bp = Blueprint {
+            entities: vec![at_named(0.0, 0.0, "burner-mining-drill")],
+            version: 0,
+        };
+        let state = PlanState::from_world(std::sync::Arc::new(world), &[crate::ids::BotId(1)]);
+
+        // Sanity: the check itself says unfed at this anchor. If this ever
+        // stops holding, the test below would pass for the wrong reason.
+        let barren = Position::new(40.0, 40.0);
+        assert!(
+            drills_are_fed(&state, &bp, &barren).is_some(),
+            "fixture must place the drill away from its ore, or this proves nothing"
+        );
+
+        let err = resolve_and_guard(&state, &bp, &Site::At(barren.clone()))
+            .expect_err("a drill on no ore must be refused before anything is emitted");
+        let PlannerError::BlockDrillUnfed {
+            reason, provenance, ..
+        } = &err
+        else {
+            panic!("expected BlockDrillUnfed, got {err:?}");
+        };
+        assert!(
+            reason.contains("burner-mining-drill") && reason.contains("no ore"),
+            "the refusal must name the drill and why: {reason}"
+        );
+        assert!(
+            provenance.contains("caller"),
+            "a caller-chosen anchor is moved by changing the call, and the \
+             message must say so: {provenance}"
+        );
+    }
+
+    /// **Unknown is not zero, and a hard refusal must not confuse them.**
+    ///
+    /// `fixture_world()` declares no `resource_category` on its ore and no
+    /// `resource_categories` on its drills -- as does every world dumped
+    /// before those fields existed. `drills_are_fed` then answers "not fed"
+    /// for a drill sitting directly on top of ore, because it cannot match
+    /// the two. Inside `search_site` that is merely conservative. As the
+    /// guard's hard refusal it would reject blocks the game builds happily,
+    /// turning "I cannot describe this drill" into "there is no ore here".
+    ///
+    /// **This must fail without `drill_capability_is_known`**: drop that
+    /// call from `resolve_and_guard` and this refuses.
+    #[test]
+    fn a_drill_the_model_cannot_describe_is_unknown_not_unfed() {
+        let bp = Blueprint {
+            entities: vec![at_named(0.0, 0.0, "electric-mining-drill")],
+            version: 0,
+        };
+        let state = test_state();
+
+        // The premise: on this world the check DOES answer "not fed" ...
+        assert!(
+            drills_are_fed(&state, &bp, &Position::new(0.5, 0.5)).is_some(),
+            "premise: the fixture world cannot match drill to ore, so the \
+             check answers not-fed -- if this stops holding the test below \
+             passes for the wrong reason"
+        );
+        // ... and the reason is missing metadata, not missing ore.
+        assert!(
+            !drill_capability_is_known(&state, &bp),
+            "premise: the fixture declares no resource_categories"
+        );
+
+        // So the guard must let it through rather than refuse.
+        let (anchor, source) = resolve_and_guard(&state, &bp, &Site::At(Position::new(0.5, 0.5)))
+            .expect(
+                "a drill whose capability the model cannot describe must not be \
+                 refused for having no ore -- that is a claim the evidence does \
+                 not reach",
+            );
+        assert_eq!(source, AnchorSource::Caller);
+        assert_eq!(Pos::from(&anchor), Pos::from(&Position::new(0.5, 0.5)));
+    }
+
+    /// The same guard on a **recovered** anchor -- the path that actually
+    /// stranded the live block, and the one whose remedy is different.
+    ///
+    /// Recovery is correct and must stay: an anchor that moves across a
+    /// replan builds two half-factories with no error. So the refusal cannot
+    /// be "re-site it", and the message must not imply that. It says the
+    /// block already stands where it cannot finish.
+    #[test]
+    fn a_recovered_anchor_whose_drill_has_no_ore_is_refused_as_recovered() {
+        let (world, _) = drill_reach_world(
+            "burner-mining-drill",
+            Position::new(2.0, 2.0),
+            Some(0.99),
+            (0, 0),
+        );
+        let mut state = PlanState::from_world(std::sync::Arc::new(world), &[crate::ids::BotId(1)]);
+        // Two entities of the block already stand, far from the ore, so
+        // `recover_anchor` returns their anchor and `resolve_site` never
+        // reaches the `Site` match at all.
+        let bp = Blueprint {
+            entities: vec![
+                at_named(0.0, 0.0, "burner-mining-drill"),
+                at_named(0.0, 4.0, "stone-furnace"),
+                at_named(0.0, 8.0, "stone-furnace"),
+            ],
+            version: 0,
+        };
+        state.create_entity(stone_furnace_at(40.0, 44.0));
+        state.create_entity(stone_furnace_at(40.0, 48.0));
+
+        let err = resolve_and_guard(&state, &bp, &Site::Anywhere)
+            .expect_err("a recovered anchor is screened for ore like any other");
+        let PlannerError::BlockDrillUnfed { provenance, .. } = &err else {
+            panic!("expected BlockDrillUnfed, got {err:?}");
+        };
+        assert!(
+            provenance.contains("recovery") && provenance.contains("cannot move"),
+            "a recovered anchor cannot be moved, and the remedy differs: {provenance}"
+        );
+    }
+
+    /// **A searched anchor is not double-screened, and must not start
+    /// refusing.** `search_site` already applies `drills_are_fed` to every
+    /// candidate, so a block that sites successfully must still site
+    /// successfully with the guard in place -- the guard adds refusals only
+    /// on the two unscreened paths.
+    #[test]
+    fn the_guard_does_not_touch_a_block_the_search_sited() {
+        let (world, _) = drill_reach_world(
+            "burner-mining-drill",
+            Position::new(2.0, 2.0),
+            Some(0.99),
+            (0, 0),
+        );
+        let state = PlanState::from_world(std::sync::Arc::new(world), &[crate::ids::BotId(1)]);
+        let bp = Blueprint {
+            entities: vec![at_named(0.0, 0.0, "burner-mining-drill")],
+            version: 0,
+        };
+        let (anchor, source) = resolve_site(&state, &bp, &Site::Anywhere)
+            .expect("the search finds the ore this fixture placed");
+        assert_eq!(source, AnchorSource::Search);
+        assert_eq!(
+            drills_are_fed(&state, &bp, &anchor),
+            None,
+            "the anchor the search chose must be fed -- that is what it screened for"
+        );
+    }
+
     /// **Ruling B: recovery outranks even an explicit `Site::At`.** A caller
     /// naming an anchor is a hint about where to start looking, not a fact --
     /// standing entities are the fact. A goal replanned with the SAME
@@ -1811,7 +2107,7 @@ mod tests {
         // ... but the caller names a different anchor entirely.
         let site = Site::At(Position::new(0.5, 0.5));
 
-        let (resolved, sited_by_search) =
+        let (resolved, source) =
             resolve_site(&state, &bp, &site).expect("recovery answers even for At");
         assert_eq!(
             Pos::from(&resolved),
@@ -1819,10 +2115,12 @@ mod tests {
             "the ground outranks the caller's explicit anchor: building at \
              (0.5, 0.5) here would start a second, unrelated furnace line"
         );
-        assert!(
-            !sited_by_search,
+        assert_eq!(
+            source,
+            AnchorSource::Recovered,
             "a recovered anchor is a fact about the world, not something \
-             this call's search chose"
+             this call's search chose -- and it is distinct from a caller's \
+             fixed anchor, which CAN be moved"
         );
     }
 

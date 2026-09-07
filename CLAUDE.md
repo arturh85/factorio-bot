@@ -1470,6 +1470,14 @@ entry over a log line:
   Zero hits means the edit is not in there. Touching any `crates/core` source
   file forces the re-embed.
 
+  **And the same family bites a falsification harness, producing a false RED.**
+  `shutil.copy2` (and `cp -p`) **preserve mtime**, so restoring a mutated file
+  leaves it *older* than the artifact cargo built from the mutation — cargo
+  then sees nothing to rebuild and **re-runs the mutated binary against restored
+  source**. On 2026-09-07 that reported two entity-graph tests failing over a
+  `git status`-clean tree. `touch` the restored file and re-run before believing
+  any red that appears after a mutation sweep.
+
 - the `Using mods directory` line was gated behind `if !silent`, which every CLI
   path sets, so the authoritative "did my edit ship" answer printed on no run;
 - 19 of 20 walk failures were archived as `kind: "other"` because

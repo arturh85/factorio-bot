@@ -21,14 +21,25 @@ use petgraph::visit::{Bfs, EdgeRef};
 use serde::de::{MapAccess, Visitor};
 use serde::ser::{SerializeMap, SerializeStruct};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::ops::Deref;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
-use tracing::{error, warn};
+use tracing::{debug, error, warn};
+
+/// `rect` grown by `by` tiles on every side.
+///
+/// Used to turn an entity's footprint into the area an edge could reach it
+/// from; see [`EntityGraph::connect_nodes_near`].
+fn grow_rect(rect: &Rect, by: f64) -> Rect {
+    Rect::new(
+        &Position::new(rect.left_top.x() - by, rect.left_top.y() - by),
+        &Position::new(rect.right_bottom.x() + by, rect.right_bottom.y() + by),
+    )
+}
 
 /// What [`EntityGraph::resource_mined`] did with a mine's result.
 ///
@@ -1325,6 +1336,10 @@ impl EntityGraph {
     }
 
     pub fn add(&self, entities: Vec<FactorioEntity>, _clear_rect: Option<Rect>) -> Result<()> {
+        // Every node this call mints, with the footprint it stands on -- the
+        // input to the incremental wiring at the end of this method. See
+        // `connect_nodes_near`.
+        let mut added: Vec<(NodeIndex, Rect)> = vec![];
         let mut resource_tree = self.resource_tree.write();
         for entity in &entities {
             if entity.entity_type == EntityType::Resource.to_string() {
@@ -1544,6 +1559,7 @@ impl EntityGraph {
                             let mut inner = self.entity_graph.write();
                             let new_node_index = inner.add_node(new_node);
                             self.entity_nodes.insert(entity_id, new_node_index);
+                            added.push((new_node_index, entity.bounding_box.clone()));
                         } else {
                             warn!("failed to insert entity into quad tree");
                         }
@@ -1552,10 +1568,99 @@ impl EntityGraph {
                 }
             }
         }
+        // Released before the wiring below, which takes `entity_tree` and
+        // `entity_graph` and must not be holding a second write guard while it
+        // does.
+        drop(blocked);
+        drop(resource_tree);
+        // **The edges, not only the nodes.** Until 2026-09-07 this method
+        // added nodes and stopped, and `connect` ran from exactly three
+        // places -- `OutputParser::on_init` (once, at `initial discovery
+        // done`), `factorio::snapshot` (the `--connect` path) and
+        // `FactorioSurface::import`. So every machine, belt and inserter a
+        // *run* built entered the graph unwired, and everything reading
+        // connectivity -- `FlowGraph`, which is rebuilt on this graph's
+        // generation, `PlanState`'s electric network walk, `method::connect`
+        // -- was answering about the world as it stood at tick 0, with a stale
+        // answer that looks exactly like a current one.
+        self.connect_nodes_near(&added);
         // The mutation is complete: anything built from this graph is now
         // one generation behind. See `generation`.
         self.bump_generation();
         Ok(())
+    }
+
+    /// The distance past its own footprint at which an entity that is *not* an
+    /// underground belt or pipe can still draw an edge to a newly added one.
+    ///
+    /// Every rule in [`Self::connect_node`] but the two underground ones is
+    /// local: a drop or pickup position just outside the machine that owns it,
+    /// a belt or splitter output one tile on, a storage tank's connection
+    /// points two tiles from its centre. Three tiles past the footprint covers
+    /// all of them with a tile to spare.
+    const NEAR_REACH: f64 = 3.;
+
+    /// How far the two long-range rules reach, **derived from the prototypes**
+    /// rather than tabled, so it survives a mod that changes an underground
+    /// belt's span. Vanilla's longest is the underground pipe at 10.
+    fn underground_reach(&self) -> f64 {
+        self.entity_prototypes
+            .iter()
+            .filter_map(|prototype| prototype.max_underground_distance)
+            .max()
+            .map(f64::from)
+            .unwrap_or(Self::NEAR_REACH)
+            .max(Self::NEAR_REACH)
+    }
+
+    /// Wire the nodes just added **and everything that might point at them**.
+    ///
+    /// The second half is why this is not simply "connect the new nodes": an
+    /// edge is drawn while visiting its *source*, so a belt built downstream of
+    /// one that was already standing needs the standing belt re-visited, not
+    /// the new one. The candidate set is therefore the new nodes plus their
+    /// neighbourhood, deduplicated, which keeps the work proportional to what
+    /// changed instead of to the size of the world.
+    ///
+    /// Safe to re-run over nodes that are already wired: see [`Self::connect`]
+    /// on appending, deduplication and deletion.
+    fn connect_nodes_near(&self, added: &[(NodeIndex, Rect)]) {
+        if added.is_empty() {
+            return;
+        }
+        let far = self.underground_reach();
+        let mut candidates: BTreeSet<NodeIndex> = BTreeSet::new();
+        for (node_index, bounding_box) in added {
+            candidates.insert(*node_index);
+            let near_box = grow_rect(bounding_box, Self::NEAR_REACH);
+            let far_box = grow_rect(bounding_box, far);
+            let hits: Vec<(Position, Option<EntityType>, ItemId)> = {
+                let tree = self.entity_tree.read();
+                tree.query(far_box.into())
+                    .iter()
+                    .map(|(entity, _rect, item_id)| {
+                        (
+                            entity.position.clone(),
+                            EntityType::from_str(&entity.entity_type).ok(),
+                            *item_id,
+                        )
+                    })
+                    .collect()
+            };
+            for (position, entity_type, item_id) in hits {
+                // Anything further away than `NEAR_REACH` can only reach this
+                // footprint by tunnelling, and only those two types tunnel.
+                let reaches = near_box.contains(&position)
+                    || matches!(
+                        entity_type,
+                        Some(EntityType::UndergroundBelt) | Some(EntityType::PipeToGround)
+                    );
+                if reaches && let Some(index) = self.entity_nodes.get(&item_id) {
+                    candidates.insert(*index);
+                }
+            }
+        }
+        self.connect_nodes(candidates.into_iter().collect());
     }
 
     pub fn condense(&self) -> EntityGraphInner {
@@ -1874,277 +1979,47 @@ impl EntityGraph {
         Ok(())
     }
 
+    /// Wire the whole graph: every node's outgoing and incoming edges, from
+    /// its drop and pickup positions and its type's own adjacency rules.
+    ///
+    /// # It appends, it dedupes, and it is not the only maintainer
+    ///
+    /// Three facts about this method decide how it may be called, established
+    /// 2026-09-07 (`docs/superpowers/notes/2026-09-07-edges-that-outlive-tick-zero.md`):
+    ///
+    /// * **It appends.** Nothing here clears an edge, so it can only ever add.
+    /// * **It dedupes**, twice: every candidate is guarded by `contains_edge`
+    ///   when it is gathered and again when it is applied, so re-running it on
+    ///   an unchanged world adds nothing and is a no-op.
+    /// * **It does not have to delete**, because [`Self::remove`] already
+    ///   does: it drops the entity's node, both directions of its edges and
+    ///   its `entity_nodes` mapping, over a `StableGraph` whose indices
+    ///   survive a removal. `node_at` resolves through `entity_tree`, which
+    ///   `remove` also empties, so the position-reuse trap that forced
+    ///   `FlowGraph::update` to rebuild from scratch does not exist here.
+    ///
+    /// Together those make it safe to re-run incrementally, which is what
+    /// [`Self::add`] does through [`Self::connect_nodes`]. This full sweep is
+    /// still what a bulk install wants (`OutputParser::on_init`,
+    /// `factorio::snapshot`, `FactorioSurface::import`).
     pub fn connect(&self) -> Result<()> {
-        let _started = Instant::now();
-        let tree = self.entity_tree.read();
-        let mut edges_to_add: Vec<(NodeIndex, NodeIndex, f64)> = vec![];
         let nodes: Vec<NodeIndex> = self.entity_graph.read().node_indices().collect();
-        println!("connecting {} nodes", nodes.len());
-        for node_index in nodes {
-            let inner = self.entity_graph.read();
-            if let Some(node) = inner.node_weight(node_index) {
-                let node_entity = tree.get(node.entity_id.unwrap()).unwrap();
-                if let Some(drop_position) = node_entity.drop_position.as_ref() {
-                    // if node_entity.entity_type == "mining-drill" {
-                    //     info!(
-                    //         "drop position for {} -> {} @ {}",
-                    //         node_entity.name, node_entity.position, drop_position
-                    //     );
-                    // }
-                    match self.node_at(drop_position) {
-                        Some(drop_index) => {
-                            // if node_entity.name == "pumpjack" {
-                            //     info!(
-                            //         "found pipe?",
-                            //     );
-                            // }
+        self.connect_nodes(nodes);
+        // The mutation is complete: anything built from this graph is now
+        // one generation behind. See `generation`.
+        self.bump_generation();
+        Ok(())
+    }
 
-                            if !inner.contains_edge(node_index, drop_index) {
-                                edges_to_add.push((node_index, drop_index, 1.));
-                            }
-                        }
-                        None => error!(
-                            "connect entity graph could not find entity at Drop position {} for {} @ {}",
-                            drop_position, node_entity.name, node_entity.position
-                        ),
-                    }
-                }
-                if let Some(pickup_position) = node_entity.pickup_position.as_ref() {
-                    match self.node_at(pickup_position) {
-                        Some(pickup_index) => {
-                            if !inner.contains_edge(pickup_index, node_index) {
-                                edges_to_add.push((pickup_index, node_index, 1.));
-                            }
-                        }
-                        None => error!(
-                            "connect entity graph could not find entity at Pickup position {} for {} @ {}",
-                            pickup_position, node_entity.name, node_entity.position
-                        ),
-                    }
-                }
-                match node.entity_type {
-                    EntityType::Splitter => {
-                        // `turn` is `None` for anything but a cardinal; a
-                        // splitter facing one of the 2.x half-diagonals has no
-                        // computable output tiles, so it gets no output edges
-                        // rather than fabricated ones.
-                        let (Some(o1), Some(o2)) = (
-                            Position::new(-0.5, -1.).turn(node.direction),
-                            Position::new(0.5, -1.).turn(node.direction),
-                        ) else {
-                            continue;
-                        };
-                        let out1 = node.position.add(&o1);
-                        let out2 = node.position.add(&o2);
-                        for pos in &[&out1, &out2] {
-                            if let Some(next_index) = self.node_at(pos) {
-                                let next = inner.node_weight(next_index).unwrap();
-                                // info!(
-                                //     "found splitter output: {} @ {}",
-                                //     next.entity.name, next.entity.position
-                                // );
-                                if !inner.contains_edge(node_index, next_index)
-                                    && self.is_entity_belt_connectable(node, next)
-                                {
-                                    edges_to_add.push((node_index, next_index, 1.));
-                                }
-                                // } else {
-                                //     warn!(
-                                //         "NOT found splitter output: for {} @ {} -> searched @ {}",
-                                //         node.entity.name, node.entity.position, pos
-                                //     );
-                            }
-                        }
-                    }
-                    EntityType::TransportBelt => {
-                        if let Some(next_index) =
-                            self.node_at_moved(&node.position, node.direction, 1.0)
-                        {
-                            let next = inner.node_weight(next_index).unwrap();
-                            if !inner.contains_edge(node_index, next_index)
-                                && self.is_entity_belt_connectable(node, next)
-                            {
-                                edges_to_add.push((node_index, next_index, 1.));
-                                // } else {
-                                //     warn!(
-                                //         "2 not found transport belt connect from {} to {} ({:?})",
-                                //         node.position,
-                                //         move_position(&node.position, node.direction, 1.0),
-                                //         node.direction
-                                //     )
-                            }
-                            // } else {
-                            //     warn!(
-                            //         "1 not found transport belt connect from {} to {} ({:?})",
-                            //         node.position,
-                            //         move_position(&node.position, node.direction, 1.0),
-                            //         node.direction
-                            //     )
-                        }
-                    }
-                    EntityType::OffshorePump => {
-                        if let Some(next_index) =
-                            self.node_at_moved(&node.position, node.direction, -1.)
-                        {
-                            let next = inner.node_weight(next_index).unwrap();
-                            if next.entity_type.is_fluid_input()
-                                && !inner.contains_edge(node_index, next_index)
-                            {
-                                edges_to_add.push((node_index, next_index, 1.));
-                            }
-                        }
-                    }
-                    EntityType::Pipe => {
-                        for direction in Direction::orthogonal() {
-                            if let Some(next_index) =
-                                self.node_at_moved(&node.position, direction, 1.)
-                            {
-                                let next = inner.node_weight(next_index).unwrap();
-                                if next.entity_type.is_fluid_input() {
-                                    if !inner.contains_edge(node_index, next_index) {
-                                        edges_to_add.push((node_index, next_index, 1.));
-                                    }
-                                    if !inner.contains_edge(next_index, node_index) {
-                                        edges_to_add.push((next_index, node_index, 1.));
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    EntityType::StorageTank => {
-                        // A storage tank is two-way only: the game stores
-                        // `north` or `east` and never the other fourteen
-                        // values. North and south share one connection set, the
-                        // other orientation the mirrored one. Spelling `South`
-                        // out matters after the 2.x widening -- `8` used to be
-                        // unreadable and now means south.
-                        for position in &match node.direction {
-                            Direction::North | Direction::South => [
-                                node.position.add(&Position::new(-1., -2.)),
-                                node.position.add(&Position::new(-2., -1.)),
-                                node.position.add(&Position::new(2., 1.)),
-                                node.position.add(&Position::new(1., 2.)),
-                            ],
-                            _ => [
-                                node.position.add(&Position::new(2., -1.)),
-                                node.position.add(&Position::new(1., -2.)),
-                                node.position.add(&Position::new(-2., 1.)),
-                                node.position.add(&Position::new(-1., 2.)),
-                            ],
-                        } {
-                            if let Some(next_index) = self.node_at(position) {
-                                let next = inner.node_weight(next_index).unwrap();
-                                if next.entity_type.is_fluid_input() {
-                                    if !inner.contains_edge(node_index, next_index) {
-                                        edges_to_add.push((node_index, next_index, 1.));
-                                    }
-                                    if !inner.contains_edge(next_index, node_index) {
-                                        edges_to_add.push((next_index, node_index, 1.));
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    EntityType::UndergroundBelt => {
-                        let mut found = false;
-                        if let Some(prototype) = self.entity_prototypes.get(&node.entity_name) {
-                            if let Some(max_distance) = prototype.max_underground_distance.as_ref()
-                            {
-                                for length in 1..=*max_distance {
-                                    if let Some(next_index) = self.node_at_moved(
-                                        &node.position,
-                                        node.direction.opposite(),
-                                        length as f64,
-                                    ) {
-                                        let next = inner.node_weight(next_index).unwrap();
-                                        if next.entity_type == EntityType::UndergroundBelt
-                                            && next.direction == node.direction
-                                        {
-                                            if !inner.contains_edge(next_index, node_index) {
-                                                edges_to_add.push((
-                                                    next_index,
-                                                    node_index,
-                                                    length as f64,
-                                                ));
-                                            }
-                                            found = true;
-                                            break;
-                                        }
-                                    }
-                                }
-                            } else {
-                                warn!("underground belt without max distance?!");
-                            }
-                        } else {
-                            warn!("underground belt prototype not found");
-                        }
-                        if found
-                            && let Some(next_index) =
-                                self.node_at_moved(&node.position, node.direction, 1.)
-                        {
-                            let next = inner.node_weight(next_index).unwrap();
-                            if !inner.contains_edge(node_index, next_index)
-                                && self.is_entity_belt_connectable(node, next)
-                            {
-                                edges_to_add.push((node_index, next_index, 1.));
-                            }
-                        }
-                    }
-                    EntityType::PipeToGround => {
-                        let mut found = false;
-                        if let Some(prototype) = self.entity_prototypes.get(&node.entity_name) {
-                            if let Some(max_distance) = prototype.max_underground_distance.as_ref()
-                            {
-                                for length in 1..=*max_distance {
-                                    if let Some(next_index) = self.node_at_moved(
-                                        &node.position,
-                                        node.direction,
-                                        -(length as f64),
-                                    ) {
-                                        let next = inner.node_weight(next_index).unwrap();
-                                        if next.entity_type == EntityType::PipeToGround
-                                            && next.direction == node.direction.opposite()
-                                        {
-                                            if !inner.contains_edge(next_index, node_index) {
-                                                edges_to_add.push((
-                                                    next_index,
-                                                    node_index,
-                                                    length as f64,
-                                                ));
-                                            }
-                                            if !inner.contains_edge(node_index, next_index) {
-                                                edges_to_add.push((
-                                                    node_index,
-                                                    next_index,
-                                                    length as f64,
-                                                ));
-                                            }
-                                            found = true;
-                                            break;
-                                        }
-                                    }
-                                }
-                            } else {
-                                warn!("underground pipe without max distance?!");
-                            }
-                        } else {
-                            warn!("underground pipe prototype not found");
-                        }
-                        if found
-                            && let Some(next_index) =
-                                self.node_at_moved(&node.position, node.direction, 1.)
-                        {
-                            let next = inner.node_weight(next_index).unwrap();
-                            if next.entity_type.is_fluid_input()
-                                && !inner.contains_edge(node_index, next_index)
-                            {
-                                edges_to_add.push((node_index, next_index, 1.));
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
+    /// [`Self::connect`] restricted to a chosen set of nodes, and
+    /// **deliberately not bumping the generation** -- it is called from inside
+    /// [`Self::add`], which is one mutation and bumps once for the whole of
+    /// it. A second bump there would invalidate every generation-keyed cache
+    /// twice per add for no change.
+    fn connect_nodes(&self, nodes: Vec<NodeIndex>) {
+        let mut edges_to_add: Vec<(NodeIndex, NodeIndex, f64)> = vec![];
+        for node_index in nodes {
+            self.connect_node(node_index, &mut edges_to_add);
         }
         let mut inner = self.entity_graph.write();
         for (a, b, w) in edges_to_add {
@@ -2152,15 +2027,300 @@ impl EntityGraph {
                 inner.add_edge(a, b, w);
             }
         }
-        // info!(
-        //     "entity graph connecting {} entities took {:?}",
-        //     inner.node_indices().count(),
-        //     started.elapsed()
-        // );
-        // The mutation is complete: anything built from this graph is now
-        // one generation behind. See `generation`.
-        self.bump_generation();
-        Ok(())
+    }
+
+    /// Every edge one node draws, gathered into `edges_to_add` rather than
+    /// written, so the caller can apply a whole sweep under one write lock.
+    ///
+    /// **It holds no `entity_tree` guard across the body**, and that is not
+    /// tidiness. `node_at` -- called from nearly every rule below -- takes
+    /// `entity_tree.read()` itself, and parking_lot documents a recursive read
+    /// as a deadlock hazard: a writer queued between the outer and the inner
+    /// acquisition blocks both. The sweep used to hold one guard for its whole
+    /// pass, which was survivable while it ran twice in a process; it now runs
+    /// on every `add`, on the parser thread, beside readers on others. So the
+    /// two positions this needs are copied out under a guard released at once,
+    /// and the rest of the identity comes off the `EntityNode`.
+    fn connect_node(
+        &self,
+        node_index: NodeIndex,
+        edges_to_add: &mut Vec<(NodeIndex, NodeIndex, f64)>,
+    ) {
+        let inner = self.entity_graph.read();
+        if let Some(node) = inner.node_weight(node_index) {
+            let (drop_position, pickup_position) = {
+                let tree = self.entity_tree.read();
+                let Some(node_entity) = node.entity_id.and_then(|id| tree.get(id)) else {
+                    return;
+                };
+                (
+                    node_entity.drop_position.clone(),
+                    node_entity.pickup_position.clone(),
+                )
+            };
+            if let Some(drop_position) = drop_position.as_ref() {
+                // if node_entity.entity_type == "mining-drill" {
+                //     info!(
+                //         "drop position for {} -> {} @ {}",
+                //         node_entity.name, node_entity.position, drop_position
+                //     );
+                // }
+                match self.node_at(drop_position) {
+                    Some(drop_index) => {
+                        // if node_entity.name == "pumpjack" {
+                        //     info!(
+                        //         "found pipe?",
+                        //     );
+                        // }
+
+                        if !inner.contains_edge(node_index, drop_index) {
+                            edges_to_add.push((node_index, drop_index, 1.));
+                        }
+                    }
+                    // `debug!`, not `error!`. Nothing is wrong here: a drill
+                    // dropping ore on the ground, or an inserter whose target
+                    // is not a type this graph models, is ordinary. It read as
+                    // an error only while this swept twice in a process; on
+                    // every `add` it is thousands of false alarms per run.
+                    None => debug!(
+                        "connect entity graph could not find entity at Drop position {} for {} @ {}",
+                        drop_position, node.entity_name, node.position
+                    ),
+                }
+            }
+            if let Some(pickup_position) = pickup_position.as_ref() {
+                match self.node_at(pickup_position) {
+                    Some(pickup_index) => {
+                        if !inner.contains_edge(pickup_index, node_index) {
+                            edges_to_add.push((pickup_index, node_index, 1.));
+                        }
+                    }
+                    None => debug!(
+                        "connect entity graph could not find entity at Pickup position {} for {} @ {}",
+                        pickup_position, node.entity_name, node.position
+                    ),
+                }
+            }
+            match node.entity_type {
+                EntityType::Splitter => {
+                    // `turn` is `None` for anything but a cardinal; a
+                    // splitter facing one of the 2.x half-diagonals has no
+                    // computable output tiles, so it gets no output edges
+                    // rather than fabricated ones.
+                    let (Some(o1), Some(o2)) = (
+                        Position::new(-0.5, -1.).turn(node.direction),
+                        Position::new(0.5, -1.).turn(node.direction),
+                    ) else {
+                        return;
+                    };
+                    let out1 = node.position.add(&o1);
+                    let out2 = node.position.add(&o2);
+                    for pos in &[&out1, &out2] {
+                        if let Some(next_index) = self.node_at(pos) {
+                            let next = inner.node_weight(next_index).unwrap();
+                            // info!(
+                            //     "found splitter output: {} @ {}",
+                            //     next.entity.name, next.entity.position
+                            // );
+                            if !inner.contains_edge(node_index, next_index)
+                                && self.is_entity_belt_connectable(node, next)
+                            {
+                                edges_to_add.push((node_index, next_index, 1.));
+                            }
+                            // } else {
+                            //     warn!(
+                            //         "NOT found splitter output: for {} @ {} -> searched @ {}",
+                            //         node.entity.name, node.entity.position, pos
+                            //     );
+                        }
+                    }
+                }
+                EntityType::TransportBelt => {
+                    if let Some(next_index) =
+                        self.node_at_moved(&node.position, node.direction, 1.0)
+                    {
+                        let next = inner.node_weight(next_index).unwrap();
+                        if !inner.contains_edge(node_index, next_index)
+                            && self.is_entity_belt_connectable(node, next)
+                        {
+                            edges_to_add.push((node_index, next_index, 1.));
+                            // } else {
+                            //     warn!(
+                            //         "2 not found transport belt connect from {} to {} ({:?})",
+                            //         node.position,
+                            //         move_position(&node.position, node.direction, 1.0),
+                            //         node.direction
+                            //     )
+                        }
+                        // } else {
+                        //     warn!(
+                        //         "1 not found transport belt connect from {} to {} ({:?})",
+                        //         node.position,
+                        //         move_position(&node.position, node.direction, 1.0),
+                        //         node.direction
+                        //     )
+                    }
+                }
+                EntityType::OffshorePump => {
+                    if let Some(next_index) =
+                        self.node_at_moved(&node.position, node.direction, -1.)
+                    {
+                        let next = inner.node_weight(next_index).unwrap();
+                        if next.entity_type.is_fluid_input()
+                            && !inner.contains_edge(node_index, next_index)
+                        {
+                            edges_to_add.push((node_index, next_index, 1.));
+                        }
+                    }
+                }
+                EntityType::Pipe => {
+                    for direction in Direction::orthogonal() {
+                        if let Some(next_index) = self.node_at_moved(&node.position, direction, 1.)
+                        {
+                            let next = inner.node_weight(next_index).unwrap();
+                            if next.entity_type.is_fluid_input() {
+                                if !inner.contains_edge(node_index, next_index) {
+                                    edges_to_add.push((node_index, next_index, 1.));
+                                }
+                                if !inner.contains_edge(next_index, node_index) {
+                                    edges_to_add.push((next_index, node_index, 1.));
+                                }
+                            }
+                        }
+                    }
+                }
+                EntityType::StorageTank => {
+                    // A storage tank is two-way only: the game stores
+                    // `north` or `east` and never the other fourteen
+                    // values. North and south share one connection set, the
+                    // other orientation the mirrored one. Spelling `South`
+                    // out matters after the 2.x widening -- `8` used to be
+                    // unreadable and now means south.
+                    for position in &match node.direction {
+                        Direction::North | Direction::South => [
+                            node.position.add(&Position::new(-1., -2.)),
+                            node.position.add(&Position::new(-2., -1.)),
+                            node.position.add(&Position::new(2., 1.)),
+                            node.position.add(&Position::new(1., 2.)),
+                        ],
+                        _ => [
+                            node.position.add(&Position::new(2., -1.)),
+                            node.position.add(&Position::new(1., -2.)),
+                            node.position.add(&Position::new(-2., 1.)),
+                            node.position.add(&Position::new(-1., 2.)),
+                        ],
+                    } {
+                        if let Some(next_index) = self.node_at(position) {
+                            let next = inner.node_weight(next_index).unwrap();
+                            if next.entity_type.is_fluid_input() {
+                                if !inner.contains_edge(node_index, next_index) {
+                                    edges_to_add.push((node_index, next_index, 1.));
+                                }
+                                if !inner.contains_edge(next_index, node_index) {
+                                    edges_to_add.push((next_index, node_index, 1.));
+                                }
+                            }
+                        }
+                    }
+                }
+                EntityType::UndergroundBelt => {
+                    let mut found = false;
+                    if let Some(prototype) = self.entity_prototypes.get(&node.entity_name) {
+                        if let Some(max_distance) = prototype.max_underground_distance.as_ref() {
+                            for length in 1..=*max_distance {
+                                if let Some(next_index) = self.node_at_moved(
+                                    &node.position,
+                                    node.direction.opposite(),
+                                    length as f64,
+                                ) {
+                                    let next = inner.node_weight(next_index).unwrap();
+                                    if next.entity_type == EntityType::UndergroundBelt
+                                        && next.direction == node.direction
+                                    {
+                                        if !inner.contains_edge(next_index, node_index) {
+                                            edges_to_add.push((
+                                                next_index,
+                                                node_index,
+                                                length as f64,
+                                            ));
+                                        }
+                                        found = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        } else {
+                            warn!("underground belt without max distance?!");
+                        }
+                    } else {
+                        warn!("underground belt prototype not found");
+                    }
+                    if found
+                        && let Some(next_index) =
+                            self.node_at_moved(&node.position, node.direction, 1.)
+                    {
+                        let next = inner.node_weight(next_index).unwrap();
+                        if !inner.contains_edge(node_index, next_index)
+                            && self.is_entity_belt_connectable(node, next)
+                        {
+                            edges_to_add.push((node_index, next_index, 1.));
+                        }
+                    }
+                }
+                EntityType::PipeToGround => {
+                    let mut found = false;
+                    if let Some(prototype) = self.entity_prototypes.get(&node.entity_name) {
+                        if let Some(max_distance) = prototype.max_underground_distance.as_ref() {
+                            for length in 1..=*max_distance {
+                                if let Some(next_index) = self.node_at_moved(
+                                    &node.position,
+                                    node.direction,
+                                    -(length as f64),
+                                ) {
+                                    let next = inner.node_weight(next_index).unwrap();
+                                    if next.entity_type == EntityType::PipeToGround
+                                        && next.direction == node.direction.opposite()
+                                    {
+                                        if !inner.contains_edge(next_index, node_index) {
+                                            edges_to_add.push((
+                                                next_index,
+                                                node_index,
+                                                length as f64,
+                                            ));
+                                        }
+                                        if !inner.contains_edge(node_index, next_index) {
+                                            edges_to_add.push((
+                                                node_index,
+                                                next_index,
+                                                length as f64,
+                                            ));
+                                        }
+                                        found = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        } else {
+                            warn!("underground pipe without max distance?!");
+                        }
+                    } else {
+                        warn!("underground pipe prototype not found");
+                    }
+                    if found
+                        && let Some(next_index) =
+                            self.node_at_moved(&node.position, node.direction, 1.)
+                    {
+                        let next = inner.node_weight(next_index).unwrap();
+                        if next.entity_type.is_fluid_input()
+                            && !inner.contains_edge(node_index, next_index)
+                        {
+                            edges_to_add.push((node_index, next_index, 1.));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
     }
     pub fn entity_by_id(&self, id: ItemId) -> Option<FactorioEntity> {
         self.entity_tree.read().get(id).cloned()
@@ -2745,6 +2905,498 @@ mod tests {
     /// This used **12**, which was out of range on the Factorio 1.x scale and
     /// is `West` on the 2.x one. 16 is the first value still outside
     /// `defines.direction`, so it is what keeps this path covered.
+    /// A helper naming an edge by the two tiles it runs between, so a failure
+    /// says *which* connection is missing rather than "3 != 4".
+    fn has_edge(graph: &EntityGraph, from: &Position, to: &Position) -> bool {
+        let (Some(a), Some(b)) = (graph.node_at(from), graph.node_at(to)) else {
+            return false;
+        };
+        graph.inner_graph().contains_edge(a, b)
+    }
+
+    /// Every edge in the graph, as `(from tile, to tile)` pairs, sorted -- the
+    /// comparable form of "what this graph is wired like".
+    fn edge_set(graph: &EntityGraph) -> Vec<(Pos, Pos)> {
+        let inner = graph.inner_graph();
+        let mut edges: Vec<(Pos, Pos)> = inner
+            .edge_indices()
+            .map(|edge| {
+                let (source, target) = inner.edge_endpoints(edge).unwrap();
+                (
+                    (&inner.node_weight(source).unwrap().position).into(),
+                    (&inner.node_weight(target).unwrap().position).into(),
+                )
+            })
+            .collect();
+        edges.sort();
+        edges
+    }
+
+    /// **What the wiring costs on the largest world available offline**, and
+    /// whether the incremental sweep agrees with the full one at that size.
+    ///
+    /// Ignored by default and gated on `FACTORIO_BOT_WORLD_DUMP` naming a
+    /// `world.dump` JSON, like its siblings in `flow_graph.rs`: the dump it was
+    /// built for is ~2.9 GB and lives in a workspace, not in the repository.
+    ///
+    /// ```text
+    /// FACTORIO_BOT_WORLD_DUMP=workspace/wrload/scripts/wr-census-status.json \
+    ///   cargo test -p factorio-bot-core --release \
+    ///   the_cost_of_wiring_a_recorded_base -- --ignored --nocapture
+    /// ```
+    ///
+    /// It replays the dump's entities back through `add` in chunk-sized
+    /// batches -- the shape the parser delivers them in during a live run --
+    /// and then runs one full `connect` on top. **The edges the full sweep
+    /// still finds is the number that matters**: zero means the incremental
+    /// wiring is complete on a real base, not only on this file's fixtures.
+    #[test]
+    #[ignore = "needs a world dump named by FACTORIO_BOT_WORLD_DUMP"]
+    fn the_cost_of_wiring_a_recorded_base() {
+        let Ok(path) = std::env::var("FACTORIO_BOT_WORLD_DUMP") else {
+            panic!("set FACTORIO_BOT_WORLD_DUMP to a world.dump JSON");
+        };
+        let batch: usize = std::env::var("FACTORIO_BOT_WIRING_BATCH")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(50);
+
+        let read_started = Instant::now();
+        let json = std::fs::read_to_string(&path).expect("the dump reads");
+        let surface: crate::factorio::world::FactorioSurface =
+            serde_json::from_str(&json).expect("the dump parses");
+        drop(json);
+        let loaded = read_started.elapsed();
+
+        let source = surface.entity_graph.clone();
+        let entities: Vec<FactorioEntity> = {
+            let inner = source.entity_graph.read();
+            let tree = source.entity_tree.read();
+            inner
+                .node_indices()
+                .filter_map(|index| inner.node_weight(index))
+                .filter_map(|node| node.entity_id)
+                .filter_map(|id| tree.get(id).cloned())
+                .collect()
+        };
+
+        let graph = EntityGraph::new(source.entity_prototypes.clone(), source.recipes.clone());
+        let replay_started = Instant::now();
+        for chunk in entities.chunks(batch) {
+            graph.add(chunk.to_vec(), None).expect("the replay adds");
+        }
+        let replayed = replay_started.elapsed();
+        let edges_after_replay = graph.entity_graph.read().edge_count();
+
+        let sweep_started = Instant::now();
+        graph.connect().expect("the sweep connects");
+        let swept = sweep_started.elapsed();
+        let edges_after_sweep = graph.entity_graph.read().edge_count();
+
+        println!("-- wiring cost of {path} --");
+        println!("  load                {loaded:?}");
+        println!("  entities replayed   {}", entities.len());
+        println!("  batch size          {batch}");
+        println!(
+            "  nodes               {}",
+            graph.entity_graph.read().node_count()
+        );
+        println!("  replay (add x N)    {replayed:?}");
+        println!("  edges after replay  {edges_after_replay}");
+        println!("  one full connect    {swept:?}");
+        println!("  edges after sweep   {edges_after_sweep}");
+        println!(
+            "  edges the sweep still found: {}",
+            edges_after_sweep - edges_after_replay
+        );
+        // `entity_at` answers `results[0]` when a 0.1-tile query hits more than
+        // one entity, and a quad tree's result order is not a promise. So an
+        // ambiguous tile can resolve to a different neighbour depending on how
+        // populated the tree was when it was asked -- which is exactly the
+        // difference between wiring during the replay and wiring after it. This
+        // counts them, so a one-edge disagreement between the two orders has a
+        // named candidate rather than a shrug.
+        let ambiguous = {
+            let tree = graph.entity_tree.read();
+            entities
+                .iter()
+                .filter(|entity| {
+                    tree.query(add_to_rect(&Rect::from_wh(0.1, 0.1), &entity.position).into())
+                        .len()
+                        > 1
+                })
+                .count()
+        };
+        println!("  positions where `entity_at` is ambiguous: {ambiguous}");
+    }
+
+    /// **The defect this branch exists for.** `add` inserted nodes and stopped;
+    /// `connect` ran from `OutputParser::on_init` (once, at `initial discovery
+    /// done`), `factorio::snapshot` and `FactorioSurface::import` and nowhere
+    /// else. So a belt a *run* built was a node with no edges, for ever.
+    ///
+    /// Asserted on the **edge**, not on the node count, because the node was
+    /// never the thing that was missing.
+    #[test]
+    fn an_entity_added_after_the_graph_was_connected_is_wired_to_it() {
+        // `entity_graph_from` adds and connects: this is the world as it stands
+        // at `initial discovery done`.
+        let graph = entity_graph_from(vec![FactorioEntity::new_transport_belt(
+            &Position::new(0.5, 0.5),
+            Direction::South,
+        )])
+        .unwrap();
+
+        // ... and this is a run building one more belt, hours later.
+        graph
+            .add(
+                vec![FactorioEntity::new_transport_belt(
+                    &Position::new(0.5, 1.5),
+                    Direction::South,
+                )],
+                None,
+            )
+            .unwrap();
+
+        assert!(
+            has_edge(&graph, &Position::new(0.5, 0.5), &Position::new(0.5, 1.5)),
+            "the standing belt must feed the one built after it"
+        );
+    }
+
+    /// The half that makes this more than "connect the new node": the edge is
+    /// drawn while visiting its **source**, so a belt built *upstream* of one
+    /// that was already standing needs the new node visited, and a belt built
+    /// *downstream* needs the standing one re-visited. Both directions, one
+    /// test, because getting only the easy one is the plausible half-fix.
+    #[test]
+    fn a_later_entity_is_wired_from_both_sides() {
+        let graph = entity_graph_from(vec![FactorioEntity::new_transport_belt(
+            &Position::new(0.5, 1.5),
+            Direction::South,
+        )])
+        .unwrap();
+
+        graph
+            .add(
+                vec![
+                    // upstream of the standing belt
+                    FactorioEntity::new_transport_belt(&Position::new(0.5, 0.5), Direction::South),
+                    // downstream of it
+                    FactorioEntity::new_transport_belt(&Position::new(0.5, 2.5), Direction::South),
+                ],
+                None,
+            )
+            .unwrap();
+
+        assert!(
+            has_edge(&graph, &Position::new(0.5, 0.5), &Position::new(0.5, 1.5)),
+            "the new belt above must feed the standing one (source is new)"
+        );
+        assert!(
+            has_edge(&graph, &Position::new(0.5, 1.5), &Position::new(0.5, 2.5)),
+            "the standing belt must feed the new one below (source was already standing)"
+        );
+    }
+
+    /// A drill's ore lands on a belt the run lays afterwards. This is the
+    /// `drop_position` rule rather than the belt rule, and it is the shape a
+    /// real cell is built in: the machine first, the logistics after.
+    #[test]
+    fn a_drop_position_finds_a_target_built_after_the_machine() {
+        let graph = entity_graph_from(vec![
+            FactorioEntity::new_resource(
+                &Position::new(0.5, -1.5),
+                Direction::South,
+                &EntityName::IronOre.to_string(),
+            ),
+            FactorioEntity::new_electric_mining_drill(&Position::new(0.5, -1.5), Direction::South),
+        ])
+        .unwrap();
+
+        graph
+            .add(
+                vec![FactorioEntity::new_transport_belt(
+                    &Position::new(0.5, 0.5),
+                    Direction::South,
+                )],
+                None,
+            )
+            .unwrap();
+
+        assert!(
+            has_edge(&graph, &Position::new(0.5, -1.5), &Position::new(0.5, 0.5)),
+            "the drill must drop onto the belt built after it"
+        );
+    }
+
+    /// The long-range rule, which is why the neighbourhood is not a tile or
+    /// two: an underground belt pairs with its other half up to its
+    /// prototype's `max_underground_distance` away.
+    ///
+    /// Arranged so the **standing** half is the one that draws the edge --
+    /// `connect_node` searches backwards from the exit, so building the
+    /// *entrance* last is the case that needs a node four tiles away
+    /// re-visited. Building the exit last would pass on the new node alone and
+    /// prove nothing about the reach.
+    #[test]
+    fn an_underground_pair_is_found_across_its_whole_span() {
+        use crate::blueprint::UndergroundHalf;
+        let graph = entity_graph_from(vec![FactorioEntity::new_underground_belt(
+            &Position::new(0.5, 4.5),
+            Direction::South,
+            UndergroundHalf::Output,
+        )])
+        .unwrap();
+
+        graph
+            .add(
+                vec![FactorioEntity::new_underground_belt(
+                    &Position::new(0.5, 0.5),
+                    Direction::South,
+                    UndergroundHalf::Input,
+                )],
+                None,
+            )
+            .unwrap();
+
+        assert!(
+            has_edge(&graph, &Position::new(0.5, 0.5), &Position::new(0.5, 4.5)),
+            "the entrance built afterwards must reach the standing exit"
+        );
+    }
+
+    /// **The oracle.** Incremental wiring is only worth anything if it agrees
+    /// with the full sweep, so build the same layout three ways and compare
+    /// the edge sets: all at once, one entity per `add`, and the old
+    /// add-then-`connect`.
+    ///
+    /// Built in a deliberately awkward order -- downstream before upstream,
+    /// the underground exit before its entrance -- because an incremental
+    /// scheme that only ever wires forwards passes a layout built in order.
+    #[test]
+    fn wiring_one_entity_at_a_time_agrees_with_one_full_sweep() {
+        use crate::blueprint::UndergroundHalf;
+        let layout = || {
+            vec![
+                FactorioEntity::new_resource(
+                    &Position::new(0.5, -1.5),
+                    Direction::South,
+                    &EntityName::IronOre.to_string(),
+                ),
+                FactorioEntity::new_transport_belt(&Position::new(0.5, 6.5), Direction::South),
+                FactorioEntity::new_underground_belt(
+                    &Position::new(0.5, 5.5),
+                    Direction::South,
+                    UndergroundHalf::Output,
+                ),
+                FactorioEntity::new_transport_belt(&Position::new(0.5, 0.5), Direction::South),
+                FactorioEntity::new_electric_mining_drill(
+                    &Position::new(0.5, -1.5),
+                    Direction::South,
+                ),
+                FactorioEntity::new_underground_belt(
+                    &Position::new(0.5, 1.5),
+                    Direction::South,
+                    UndergroundHalf::Input,
+                ),
+            ]
+        };
+
+        let all_at_once = {
+            let graph = EntityGraph::new(
+                Arc::new(fixture_entity_prototypes()),
+                Arc::new(DashMap::new()),
+            );
+            graph.add(layout(), None).unwrap();
+            edge_set(&graph)
+        };
+
+        let one_at_a_time = {
+            let graph = EntityGraph::new(
+                Arc::new(fixture_entity_prototypes()),
+                Arc::new(DashMap::new()),
+            );
+            for entity in layout() {
+                graph.add(vec![entity], None).unwrap();
+            }
+            edge_set(&graph)
+        };
+
+        let full_sweep = {
+            let graph = EntityGraph::new(
+                Arc::new(fixture_entity_prototypes()),
+                Arc::new(DashMap::new()),
+            );
+            graph.add(layout(), None).unwrap();
+            graph.connect().unwrap();
+            edge_set(&graph)
+        };
+
+        assert!(
+            full_sweep.len() >= 4,
+            "the fixture must actually wire something, or this compares two empties: {full_sweep:?}"
+        );
+        assert_eq!(
+            one_at_a_time, full_sweep,
+            "wiring one entity per add must give the same edges as one sweep"
+        );
+        assert_eq!(all_at_once, full_sweep, "and so must one batched add");
+    }
+
+    /// **The one place the append-only sweep disagrees with itself**, found by
+    /// replaying a 39,191-entity world-record base through `add` and comparing
+    /// the result against one full `connect`: 41,670 edges against 41,669.
+    /// This is that single edge, reduced to three entities.
+    ///
+    /// `connect_node`'s underground arm pairs a half with the **nearest**
+    /// matching half behind it and stops there. Build the far pair first and it
+    /// is drawn; drop a third half into the gap afterwards and the two short
+    /// pairs are drawn as well -- but nothing removes the long one, because
+    /// this graph only ever appends. A world built in one sweep has two edges
+    /// here; a world built in the order a run builds it has three.
+    ///
+    /// **This is asserted as a known divergence, not as correct behaviour.**
+    /// It is strictly better than what it replaces -- before 2026-09-07 a
+    /// run-built belt had no edges at all -- and it is bounded: it needs an
+    /// underground half placed *between* an already-paired one, which severs
+    /// the pair in the game. Whoever removes the stale edge should delete this
+    /// test rather than update it. See
+    /// `docs/superpowers/notes/2026-09-07-edges-that-outlive-tick-zero.md`.
+    #[test]
+    fn a_half_dropped_into_a_tunnel_leaves_the_long_pair_behind() {
+        use crate::blueprint::UndergroundHalf;
+        let entrance = || {
+            FactorioEntity::new_underground_belt(
+                &Position::new(0.5, 0.5),
+                Direction::South,
+                UndergroundHalf::Input,
+            )
+        };
+        let middle = || {
+            FactorioEntity::new_underground_belt(
+                &Position::new(0.5, 2.5),
+                Direction::South,
+                UndergroundHalf::Output,
+            )
+        };
+        let exit = || {
+            FactorioEntity::new_underground_belt(
+                &Position::new(0.5, 4.5),
+                Direction::South,
+                UndergroundHalf::Output,
+            )
+        };
+
+        // Built in the order a run builds one: the long tunnel, then a half
+        // dropped into its gap.
+        let incrementally = EntityGraph::new(
+            Arc::new(fixture_entity_prototypes()),
+            Arc::new(DashMap::new()),
+        );
+        incrementally.add(vec![entrance()], None).unwrap();
+        incrementally.add(vec![exit()], None).unwrap();
+        incrementally.add(vec![middle()], None).unwrap();
+
+        // The same three entities, wired in one sweep.
+        let in_one_sweep = EntityGraph::new(
+            Arc::new(fixture_entity_prototypes()),
+            Arc::new(DashMap::new()),
+        );
+        in_one_sweep
+            .add(vec![entrance(), exit(), middle()], None)
+            .unwrap();
+
+        let long_pair = (Pos(0, 0), Pos(0, 4));
+        assert!(
+            !edge_set(&in_one_sweep).contains(&long_pair),
+            "one sweep pairs each half with its nearest neighbour only: {:?}",
+            edge_set(&in_one_sweep)
+        );
+        assert!(
+            edge_set(&incrementally).contains(&long_pair),
+            "and the incremental order keeps the pair it drew before the gap was filled: {:?}",
+            edge_set(&incrementally)
+        );
+        assert_eq!(
+            edge_set(&incrementally).len(),
+            edge_set(&in_one_sweep).len() + 1,
+            "exactly one stale edge, not a cascade"
+        );
+    }
+
+    /// Question two of three about re-running the wiring: **it dedupes**. Every
+    /// candidate is guarded by `contains_edge` when gathered and again when
+    /// applied, so a second sweep over an unchanged world is a no-op. This is
+    /// what makes calling it from `add` safe at all.
+    #[test]
+    fn connecting_an_unchanged_world_twice_adds_no_edges() {
+        let graph = entity_graph_from(vec![
+            FactorioEntity::new_transport_belt(&Position::new(0.5, 0.5), Direction::South),
+            FactorioEntity::new_transport_belt(&Position::new(0.5, 1.5), Direction::South),
+            FactorioEntity::new_transport_belt(&Position::new(0.5, 2.5), Direction::South),
+        ])
+        .unwrap();
+        let before = edge_set(&graph);
+        assert!(!before.is_empty(), "the fixture must have wired something");
+
+        for _ in 0..3 {
+            graph.connect().unwrap();
+        }
+
+        assert_eq!(
+            edge_set(&graph),
+            before,
+            "re-running the sweep must not duplicate an edge"
+        );
+    }
+
+    /// Question three: **`remove` deletes**, which is why the append-only
+    /// sweep above is sound and why this graph needs no rebuild-from-scratch.
+    /// `FlowGraph::update` had to clear precisely because nothing deleted for
+    /// it, and because its `node_at` matched on position alone. Here `remove`
+    /// takes the node, both directions of its edges and the `entity_tree` entry
+    /// `node_at` resolves through, so a tile reused by something else cannot
+    /// inherit the old node.
+    #[test]
+    fn removing_an_entity_takes_its_edges_and_frees_its_tile() {
+        let graph = entity_graph_from(vec![
+            FactorioEntity::new_transport_belt(&Position::new(0.5, 0.5), Direction::South),
+            FactorioEntity::new_transport_belt(&Position::new(0.5, 1.5), Direction::South),
+            FactorioEntity::new_transport_belt(&Position::new(0.5, 2.5), Direction::South),
+        ])
+        .unwrap();
+        assert_eq!(edge_set(&graph).len(), 2, "a three-belt run has two edges");
+
+        let middle = FactorioEntity::new_transport_belt(&Position::new(0.5, 1.5), Direction::South);
+        graph.remove(&middle).unwrap();
+
+        assert_eq!(
+            edge_set(&graph),
+            vec![],
+            "both of the middle belt's edges must go with it"
+        );
+        assert_eq!(graph.node_at(&Position::new(0.5, 1.5)), None);
+
+        // And the freed tile takes a different entity, which gets its own node
+        // rather than inheriting the belt's.
+        graph
+            .add(
+                vec![FactorioEntity::new_inserter(
+                    &Position::new(0.5, 1.5),
+                    Direction::South,
+                )],
+                None,
+            )
+            .unwrap();
+        let node = graph.node_at(&Position::new(0.5, 1.5)).unwrap();
+        assert_eq!(
+            graph.inner_graph().node_weight(node).unwrap().entity_name,
+            "inserter",
+            "the tile's new occupant is an inserter, not the belt that stood there"
+        );
+    }
+
     #[test]
     fn an_entity_whose_direction_cannot_be_read_is_skipped_not_aborted() {
         let mut belt =

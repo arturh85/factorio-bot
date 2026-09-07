@@ -1256,6 +1256,26 @@ fn resolve_and_guard(
     site: &Site,
 ) -> Result<(Position, AnchorSource), PlannerError> {
     let (anchor, source) = resolve_site(state, bp, site)?;
+
+    // A caller-supplied anchor must sit on the grid the game will use. Siting
+    // aligns its own seed, so `Search` cannot be wrong here; `Recovered` is
+    // read back off entities that are already standing legally, so it cannot
+    // be either. Only `Caller` and `Recorded` can, and both are refused rather
+    // than corrected -- see `BlockAnchorMisaligned` for why moving them would
+    // be worse than saying so.
+    if matches!(source, AnchorSource::Caller | AnchorSource::Recorded)
+        && let Some(frac) = anchor_alignment(state, bp)
+    {
+        let aligned = align_seed(&anchor, frac);
+        if (aligned.x() - anchor.x()).abs() > 1e-9 || (aligned.y() - anchor.y()).abs() > 1e-9 {
+            return Err(PlannerError::BlockAnchorMisaligned {
+                anchor: format!("({}, {})", anchor.x(), anchor.y()),
+                aligned: format!("({}, {})", aligned.x(), aligned.y()),
+                provenance: source.provenance().to_string(),
+            });
+        }
+    }
+
     if !source.sited_by_search()
         && drill_capability_is_known(state, bp)
         && let Some(reason) = drills_are_fed(state, bp, &anchor)
@@ -2200,6 +2220,59 @@ mod tests {
              pinning anything else rebuilds the block at the wrong tile, and \
              nothing would fail"
         );
+    }
+
+    /// **A caller's anchor on the wrong grid is refused by name, not quietly
+    /// moved.**
+    ///
+    /// Siting aligns its own seed, so `Anywhere`/`Near` cannot be misaligned
+    /// and `Recovered` is read off entities already standing legally. Only the
+    /// two anchors a caller supplies can be wrong, and both are refused:
+    /// `Site::At` promises *"this exact anchor, or refuse"*, and a
+    /// `Site::Anchored` that needs moving means something upstream already is.
+    ///
+    /// **The refusal earned its place immediately.** Adding it broke exactly
+    /// one existing test, which anchored a block of tile-centre entities at
+    /// (30, 30) — an anchor that would have put every entity in it half a tile
+    /// out in a real game. The fixture world does not snap, so that test had
+    /// passed for as long as it existed. A fixture fitted to the code rather
+    /// than to the game, which is the trap this repo has paid for before.
+    #[test]
+    fn a_caller_anchor_on_the_wrong_grid_is_refused_with_the_right_one() {
+        let state = test_state();
+        // 1x1 belts belong on tile centres, so an integer anchor is wrong.
+        let bp = Blueprint {
+            entities: vec![
+                at_named(0.0, 0.0, "transport-belt"),
+                at_named(2.0, 0.0, "transport-belt"),
+            ],
+            version: 0,
+        };
+
+        let err = resolve_and_guard(&state, &bp, &Site::At(Position::new(5.0, 7.0)))
+            .expect_err("an integer anchor cannot hold a block of 1x1 entities");
+        let PlannerError::BlockAnchorMisaligned {
+            anchor, aligned, ..
+        } = &err
+        else {
+            panic!("expected BlockAnchorMisaligned, got {err:?}");
+        };
+        assert!(
+            anchor.contains('5') && anchor.contains('7'),
+            "names what was asked: {anchor}"
+        );
+        assert!(
+            aligned.contains("5.5") && aligned.contains("7.5"),
+            "and names an anchor that WOULD work, so the caller need not know \
+             the parity rule to act on it: {aligned}"
+        );
+
+        // The aligned anchor is accepted, which is what makes the message
+        // actionable rather than merely correct.
+        let (ok, source) = resolve_and_guard(&state, &bp, &Site::At(Position::new(5.5, 7.5)))
+            .expect("the anchor the refusal recommends must actually work");
+        assert_eq!(source, AnchorSource::Caller);
+        assert_eq!(Pos::from(&ok), Pos::from(&Position::new(5.5, 7.5)));
     }
 
     /// **Siting must produce an anchor the GAME will honour, not merely one
@@ -4163,7 +4236,13 @@ mod tests {
 
         let goal = Goal::Built {
             blueprint,
-            site: Site::At(Position::new(30.0, 30.0)),
+            // (30.5, 30.5), not (30, 30): this block's entities belong on tile
+            // CENTRES, and an integer anchor would put every one of them half a
+            // tile from where the game actually stands them. The fixture world
+            // does not snap, so this test passed with the wrong anchor until
+            // `BlockAnchorMisaligned` existed to say so -- a fixture fitted to
+            // the code rather than to the game.
+            site: Site::At(Position::new(30.5, 30.5)),
         };
 
         let net = expand(&[goal], &state, &registry_for(&bots), BotId(1))

@@ -1065,6 +1065,48 @@ pub enum PlannerError {
         provenance: String,
     },
 
+    /// A caller-supplied anchor sits on the wrong grid for this block, so the
+    /// game would silently move every entity in it.
+    ///
+    /// **Factorio snaps a building to the grid its own footprint belongs on,
+    /// and does not fail when asked for the wrong one** — an even footprint to
+    /// a tile boundary, an odd one to a tile centre. Measured 2026-09-07
+    /// (`scripts/does_the_game_snap.lua`): a `stone-furnace` asked for at
+    /// (20.5, 20.5) stands at (21.0, 21.0). So a wrong-parity anchor does not
+    /// produce a refusal from the game; it produces a **block standing half a
+    /// tile from where the planner believes it is**, which then reads as
+    /// missing when anything asks `already_stands`, and takes a whole
+    /// investigation to find.
+    ///
+    /// `Site::Anywhere` and `Site::Near` cannot hit this — `search_site`
+    /// aligns its seed. This is only reachable for the two anchors a caller
+    /// supplies, and both are refused rather than quietly corrected:
+    ///
+    /// * [`Site::At`](crate::goal::Site::At) promises *"this exact anchor, or
+    ///   refuse"*, and moving it would break that promise in the one direction
+    ///   the caller cannot see.
+    /// * [`Site::Anchored`](crate::goal::Site::Anchored) is a *recorded* fact.
+    ///   An anchor that was recorded from a real siting is already aligned, so
+    ///   a misaligned one means something upstream is wrong — and silently
+    ///   moving it would defeat the entire point of recording it.
+    ///
+    /// `aligned` names the nearest anchor that would work, so the caller does
+    /// not have to know the parity rule to act on this.
+    #[error(
+        "cannot build this block at anchor {anchor}: it sits on the wrong tile grid,          and the game would move every entity in the block. Use {aligned}"
+    )]
+    #[diagnostic(
+        code(planner::block_anchor_misaligned),
+        help(
+            "the anchor came from {provenance}; siting aligns its own anchors, callers must align theirs"
+        )
+    )]
+    BlockAnchorMisaligned {
+        anchor: String,
+        aligned: String,
+        provenance: String,
+    },
+
     /// Siting searched out to its bound and every candidate footprint was
     /// occupied.
     ///

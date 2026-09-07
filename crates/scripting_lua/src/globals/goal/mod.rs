@@ -429,6 +429,16 @@ impl std::error::Error for PlanRefusal {}
 ///   the sizing itself is unanswerable -- most often a world dumped before it
 ///   reported its surface daylight -- and a script acts on it by re-dumping,
 ///   not by asking for less.
+/// - [`BlockAnchorMisaligned`](PlannerError::BlockAnchorMisaligned) -- a
+///   verdict about **the request**, and the only one of the block refusals
+///   that is about neither the ground nor the prototypes. A caller-supplied
+///   anchor sits on the wrong tile grid for this block, so the game would move
+///   every entity in it half a tile and the block would stand somewhere the
+///   planner cannot find it. A script acts on it by using the aligned anchor
+///   the message names -- it is refused rather than silently corrected because
+///   `Site::At` promises "this exact anchor, or refuse", and because a
+///   `Site::Anchored` value that needs moving means something upstream is
+///   already wrong.
 fn refusal_for(err: &PlannerError) -> Option<PlanRefusal> {
     use miette::Diagnostic;
 
@@ -461,6 +471,7 @@ fn refusal_for(err: &PlannerError) -> Option<PlanRefusal> {
         | PlannerError::FluidPortUnknown { .. }
         | PlannerError::BlockGroundOccupied { .. }
         | PlannerError::BlockDrillUnfed { .. }
+        | PlannerError::BlockAnchorMisaligned { .. }
         | PlannerError::NoSiteFound { .. }
         | PlannerError::SustainSupplyNotStanding { .. }
         | PlannerError::SustainNoFuelSource { .. }

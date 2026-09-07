@@ -98,6 +98,24 @@ changed, **all three offline goals refuse to expand at all** — every archived
 world predates the prototype field, so every pole supplies nothing. And the
 refusal blames *the water*, one layer downstream, with no mention of poles.
 
+**The electrical tables were then checked the same way, and they are CLEAN.** All
+11 checkable `consumer_kw` rows match the game's own prototypes exactly —
+`electric-furnace` 180, `beacon` 480, `assembling-machine-3` 375, `oil-refinery`
+420 and the rest. **So the milestone arithmetic in CLAUDE.md (24 electric
+furnaces × 180 kW = 4,320 kW against a 1.8 MW plant) is sound as written, and
+the second boiler really is needed.** Shipping the energy fields is therefore a
+**mod-compatibility fix, not a bug fix** — worth knowing before deciding how much
+it is worth.
+
+One real discrepancy, and it is instructive rather than urgent: `steam-turbine`
+is tabulated at **5,800** against a derived **5,820** (0.34%), in an entity
+nothing builds yet. It exists because a generator has **no production field at
+all** — output is physics, `fluid_usage_per_tick × 60 × heat_capacity ×
+(maximum_temperature − default_temperature) × effectivity`, which gives
+`steam-engine` exactly 900. **The derivation survives a mod changing a
+temperature or a fluid; a tabulated scalar does not, and neither would a
+synthesised one.**
+
 ---
 
 ## 3. Fluids: `Goal::Stored` needs a design, and one of its four unknowns is now

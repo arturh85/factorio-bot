@@ -191,31 +191,67 @@ fn vanilla_pole_supply_half_extent(name: &str) -> Option<f64> {
     }
 }
 
-/// A pole's maximum copper-wire distance, by pole name, from base 2.1.17's
-/// `base/prototypes/entity/entities.lua` in this repo's `workspace/data`.
+/// How far a pole of `name` can throw a wire, in tiles, read off **its own
+/// prototype** — `FactorioEntityPrototype::maximum_wire_distance`.
 ///
 /// Two poles are wired when their centres are within the **smaller** of their
 /// two reaches, which is the game's rule and is why this is a per-pole number
-/// rather than one constant.
+/// rather than one constant. What this answers is one pole's contribution to
+/// that minimum, never a verdict about a pair.
 ///
-/// # It is the last hand-kept supply-side table, and it had drifted
+/// **The `entity_type == "electric-pole"` gate is not caution, it is the
+/// difference between 4 poles and 98.** `get_max_wire_distance()` is the
+/// maximum over *every* wire kind, so a machine reports its **circuit** wire
+/// distance: measured over all 1,028 prototypes of a live 2.1.17 game, four
+/// report a pole's copper span and 94 more report 9, 10 or 30 tiles of
+/// circuit reach — `stone-furnace`, `wooden-chest`, `power-switch`,
+/// `agricultural-tower`. Without the gate a network wires itself through an
+/// assembling machine.
 ///
-/// [`pole_supply_half_extent`] used to be a table just like this one and now
-/// derives from `FactorioEntityPrototype::supply_area_distance`. This one
-/// cannot: `maximum_wire_distance` is not a field the mod sends and
-/// `FactorioEntityPrototype` has nowhere to put it. Sending it is the
-/// follow-up that deletes this.
+/// **`Some(0.0)` is not the same as absent.** The mod sends the game's own
+/// zero for an entity with no wires, and that zero is believed: only `None` —
+/// *the sender did not say* — falls back to [`vanilla_pole_wire_reach`].
 ///
-/// **It is worth deleting rather than maintaining, and the proof is in the
-/// numbers below.** When the four were checked against the game's own data on
-/// 2026-09-07 — the first time anybody had — `big-electric-pole` read **30.0**
-/// here against the game's **32**; Factorio 2.0 moved it and nothing noticed,
-/// because a supply table is only ever read by code that agrees with it. The
-/// supply table it sat beside was correct on all four, so the pair is one
-/// checked and one drifted. Corrected in the same change; the goals this
-/// project measures are all pre-`electric-energy-distribution-1` and none of
-/// the four offline baselines moved by a tick.
-fn pole_wire_reach(name: &str) -> Option<f64> {
+/// # This is the table that had drifted
+///
+/// It was a hand-kept table of four vanilla names until 2026-09-07, when the
+/// four were checked against the game's own data for the first time and
+/// `big-electric-pole` read **30.0** against the game's **32**. Factorio 2.0
+/// moved the value and nothing noticed, **because a hand-kept table of game
+/// data is only ever read by code that agrees with it**: a legal big-pole span
+/// read as a broken network, silently. The number was corrected in place that
+/// day, and the field it should have come from was shipped through the mod
+/// immediately after — which is this function.
+fn pole_wire_reach(
+    prototypes: &DashMap<String, FactorioEntityPrototype>,
+    name: &str,
+) -> Option<f64> {
+    let prototype = prototypes.get(name)?;
+    if prototype.entity_type != "electric-pole" {
+        return None;
+    }
+    prototype
+        .maximum_wire_distance
+        .or_else(|| vanilla_pole_wire_reach(name))
+}
+
+/// What [`pole_wire_reach`] answers for a **vanilla pole on a world whose
+/// sender predates `maximum_wire_distance`**, from base 2.1.17's
+/// `base/prototypes/entity/entities.lua` in this repo's `workspace/data`.
+///
+/// Not a table anybody should extend, and the twin of
+/// [`vanilla_pole_supply_half_extent`] in every respect — including *why it
+/// survives*. Deleting the supply shim was measured rather than reasoned
+/// about: with it gone and nothing else changed, all three offline goals
+/// refused to expand at all, because every archived world predates the field
+/// and so every pole supplied nothing — and the refusal blamed **the water**,
+/// one layer downstream, with no mention of poles. Every dump this project
+/// owns reads `None` here for exactly the same reason.
+///
+/// A world that declares the field overrides this before it is ever consulted;
+/// a pole name it does not know answers `None`, which is no reach at all and
+/// under-credits rather than over-credits.
+fn vanilla_pole_wire_reach(name: &str) -> Option<f64> {
     match name {
         "small-electric-pole" => Some(7.5),
         "medium-electric-pole" => Some(9.0),
@@ -505,8 +541,8 @@ const INSERTER_DUTY_KW: f64 = 13.0;
 /// # It was checked before it was replaced, and it had not drifted
 ///
 /// All 11 checkable rows of [`vanilla_consumer_kw`] matched the live game
-/// exactly on 2026-09-07 — unlike [`pole_wire_reach`], whose neighbour table
-/// had silently drifted 30 against 32. So the maintenance half of this change
+/// exactly on 2026-09-07 — unlike [`vanilla_pole_wire_reach`], the neighbour
+/// table that had silently drifted 30 against 32. So the maintenance half of this change
 /// found no bug, and the milestone arithmetic that rests on `electric-furnace`
 /// = 180 kW stands as written.
 ///
@@ -548,9 +584,9 @@ fn consumer_kw(prototypes: &DashMap<String, FactorioEntityPrototype>, name: &str
 /// the same way, and every world recorded from here on overrides it before it
 /// is ever consulted.
 ///
-/// [`pole_wire_reach`] and [`delivery_offset`] are the two supply-side tables
-/// still waiting for a field of their own (`maximum_wire_distance` and
-/// `vector_to_place_result`).
+/// [`delivery_offset`] is the last supply-side table still waiting for a field
+/// of its own (`vector_to_place_result`); [`pole_wire_reach`] stopped waiting
+/// on 2026-09-07, when `maximum_wire_distance` began crossing the bridge.
 ///
 /// # The direction an unknown name errs in, which is not the usual one
 ///
@@ -626,10 +662,10 @@ fn takes_a_recipe(name: &str) -> bool {
 /// and written down here for the same reason as
 /// [`vanilla_pole_supply_half_extent`], [`generation_kw`] and `power.rs`'s
 /// fluid-connection tables: **`FactorioEntityPrototype` carries no such field
-/// and the mod does not send one.** Sending `vector_to_place_result`,
-/// `maximum_wire_distance` and `energy_usage` is what deletes the three that
-/// are left; `supply_area_distance` was the fourth and it has landed, so
-/// [`pole_supply_half_extent`] now derives.
+/// and the mod does not send one.** Sending `vector_to_place_result` is what
+/// deletes the one that is left; `supply_area_distance`, `energy_usage` and
+/// `maximum_wire_distance` have all landed, so [`pole_supply_half_extent`],
+/// [`consumer_kw`] and [`pole_wire_reach`] now derive.
 ///
 /// A machine this table does not name delivers into nothing at all, which
 /// refuses rather than over-credits — the same direction
@@ -4552,14 +4588,15 @@ impl PlanState {
     /// [`generator_output_kw`](Self::generator_output_kw) exposes, for exactly
     /// their reason: a method deciding whether a blueprint's poles are
     /// *connected* has to ask in the units [`pole_wire_reach`] answers in, and
-    /// a second copy of that table elsewhere is a copy that can disagree.
+    /// a second copy of that number elsewhere is a copy that can disagree.
     ///
     /// # It is a per-pole fact, and the pairwise rule is the trap
     ///
     /// `method::power`'s `POLE_WIRE_REACH_TILES` is **7.5 — a small pole's**
     /// reach, as its own doc says — and it was being applied to every pole in
     /// a blueprint. Medium is 9, substation 18, and `big-electric-pole` is the
-    /// **32** that this table read as 30 until 2026-09-07. So the universal is
+    /// **32** that the table behind this read as 30 until 2026-09-07. So the
+    /// universal is
     /// wrong for three of the four types, always in the direction that
     /// *under*-reaches: a block whose poles really are wired reports
     /// `disconnected_poles` and is refused for a distribution fault it does
@@ -4575,12 +4612,15 @@ impl PlanState {
     /// StarterSteamEngineBoiler 2). It stops being latent the moment a real
     /// Factorio blueprint is imported, which routinely mixes pole types.
     ///
-    /// `None` for a name the table does not carry — **unknown, never zero**. A
-    /// caller must not read that as "cannot reach anything"; see
-    /// [`pole_would_supply`](Self::pole_would_supply), whose gate on
-    /// `entity_type` exists so an unsizable pole is not silently not-a-pole.
+    /// `None` for a name this world does not describe as a pole —
+    /// **unknown, never zero**. A caller must not read that as "cannot reach
+    /// anything"; see [`pole_would_supply`](Self::pole_would_supply), whose
+    /// gate on `entity_type` exists so an unsizable pole is not silently
+    /// not-a-pole. A pole whose prototype declares a reach of **0** answers
+    /// `Some(0.0)`, which is the game's own statement and is a different fact
+    /// from silence — [`pole_wire_reach`] believes it rather than falling back.
     pub fn pole_wire_reach_tiles(&self, name: &str) -> Option<f64> {
-        pole_wire_reach(name)
+        pole_wire_reach(&self.base.entity_prototypes, name)
     }
 
     /// What one solar panel of `name` contributes **averaged over a day**, in
@@ -4831,7 +4871,7 @@ impl PlanState {
         for entity in &net.nearby {
             let is_pole = pole_supply_half_extent(&self.base.entity_prototypes, &entity.name)
                 .is_some()
-                && pole_wire_reach(&entity.name).is_some();
+                && pole_wire_reach(&self.base.entity_prototypes, &entity.name).is_some();
             if is_pole {
                 if net.supplying.contains(&net.root(pole_index)) {
                     out.push((entity.position.clone(), entity.name.clone()));
@@ -4900,7 +4940,7 @@ impl PlanState {
                     if expanded.contains(key) {
                         return None;
                     }
-                    let reach = pole_wire_reach(&entity.name)?;
+                    let reach = pole_wire_reach(&self.base.entity_prototypes, &entity.name)?;
                     Some((key.clone(), entity.position.clone(), reach))
                 })
                 .collect();
@@ -4934,7 +4974,7 @@ impl PlanState {
             .iter()
             .filter_map(|entity| {
                 let supply = pole_supply_half_extent(&self.base.entity_prototypes, &entity.name)?;
-                let wire = pole_wire_reach(&entity.name)?;
+                let wire = pole_wire_reach(&self.base.entity_prototypes, &entity.name)?;
                 let box_ = Rect::new(
                     &Position::new(entity.position.x() - supply, entity.position.y() - supply),
                     &Position::new(entity.position.x() + supply, entity.position.y() + supply),
@@ -6313,6 +6353,117 @@ mod tests {
         assert!(
             !s.pole_would_supply("small-electric-pole", &Position::new(0., 0.), &outside),
             "and it must still end at 2.5, not become unbounded"
+        );
+    }
+
+    // ---- wire reach, from the prototype ------------------------------------
+
+    /// A `PlanState` whose `name` prototype declares `maximum_wire_distance`,
+    /// or, with `None`, has it explicitly cleared.
+    ///
+    /// The fixture ships every vanilla pole with the field **absent**, which
+    /// is what every world dumped before 2026-09-07 looks like, so setting it
+    /// in place is what lets a test say "the reach came from the world" rather
+    /// than "the reach happens to equal the table".
+    fn state_with_wire_reach(name: &str, distance: Option<f64>) -> PlanState {
+        let world = fixture_world();
+        let mut prototype = world
+            .entity_prototypes
+            .get(name)
+            .expect("the fixture ships this prototype")
+            .clone();
+        prototype.maximum_wire_distance = distance;
+        world.entity_prototypes.insert(name.into(), prototype);
+        PlanState::from_world(Arc::new(world), &[BotId(1)])
+    }
+
+    /// A pole's wire reach is read off its own prototype, not off the vanilla
+    /// table.
+    ///
+    /// **The whole point of the change.** A modded `small-electric-pole` that
+    /// throws 40 tiles must throw 40 here, and the only way to see that is to
+    /// state a number the table does not contain and watch connectivity follow
+    /// it. Two small poles 31 tiles apart are wired at 40 and are not at
+    /// vanilla's 7.5, so the number is doing the work.
+    #[test]
+    fn a_poles_wire_reach_comes_from_its_own_prototype() {
+        let wired = |reach: Option<f64>| {
+            let mut s = state_with_wire_reach("small-electric-pole", reach);
+            for x in [0., 31.] {
+                s.create_entity(FactorioEntity {
+                    name: "small-electric-pole".into(),
+                    position: Position::new(x, 0.),
+                    ..Default::default()
+                });
+            }
+            s.create_entity(FactorioEntity {
+                name: "steam-engine".into(),
+                position: Position::new(31., 1.),
+                ..Default::default()
+            });
+            s.electric_supply_kw(&lab_area(&s, Position::new(0., 0.)))
+        };
+
+        assert_eq!(
+            wired(Some(40.)),
+            900.,
+            "the prototype says 40, so a 31-tile span carries the engine"
+        );
+        assert_eq!(
+            wired(Some(7.5)),
+            0.,
+            "at vanilla's 7.5 the same two poles are not wired at all"
+        );
+    }
+
+    /// **A declared zero is believed, and that is what keeps it different from
+    /// silence.** `get_max_wire_distance()` answers 0 for an entity with no
+    /// wires and the mod sends that zero, so `Some(0.0)` is the game speaking
+    /// and `None` is the sender saying nothing. Only the second falls back.
+    ///
+    /// Merging them would either blind the planner on every archived world or
+    /// silently re-credit a wireless prototype with a vanilla pole's span.
+    ///
+    /// The absent half is also covered end-to-end, through connectivity rather
+    /// than through this accessor, by
+    /// `two_big_poles_are_wired_at_thirty_one_tiles`: the fixture ships
+    /// every pole with the field absent, so that test *is* the shim's live
+    /// case, and a separate one written here for it was deleted as a
+    /// duplicate of it — a falsification run found the two dying to the same
+    /// mutation.
+    #[test]
+    fn a_declared_zero_wire_reach_is_not_the_same_as_an_absent_one() {
+        assert_eq!(
+            state_with_wire_reach("small-electric-pole", Some(0.))
+                .pole_wire_reach_tiles("small-electric-pole"),
+            Some(0.),
+            "the world says zero, so zero it is -- the table must not fire"
+        );
+        assert_eq!(
+            state_with_wire_reach("small-electric-pole", None)
+                .pole_wire_reach_tiles("small-electric-pole"),
+            Some(7.5),
+            "and silence is the case the table exists for"
+        );
+    }
+
+    /// Only an `electric-pole` gets a reach out of this, however loudly its
+    /// prototype declares one.
+    ///
+    /// `get_max_wire_distance()` is the maximum over *every* wire kind, so a
+    /// machine reports its **circuit** wire distance. Measured over 1,028 live
+    /// prototypes: **4 poles and 94 other entities report a positive number**
+    /// — `stone-furnace` and `wooden-chest` both 9, `power-switch` 10,
+    /// `agricultural-tower` 30. Without this gate a plan would wire its
+    /// network through an assembling machine. The gate is the same one
+    /// [`pole_supply_half_extent`] uses, from the same side.
+    #[test]
+    fn only_an_electric_pole_gets_a_wire_reach() {
+        let s = state_with_wire_reach("stone-furnace", Some(10.));
+        assert_eq!(
+            s.pole_wire_reach_tiles("stone-furnace"),
+            None,
+            "a furnace that reports a wire distance is still not a pole"
         );
     }
 

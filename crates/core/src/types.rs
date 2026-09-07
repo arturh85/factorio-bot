@@ -1684,6 +1684,60 @@ pub struct FactorioEntityPrototype {
     /// two changes, and the second one moves plans.
     #[serde(default)]
     pub supply_area_distance: Option<f64>,
+    /// How far this entity can throw a wire, in tiles — `7.5` for a
+    /// `small-electric-pole`, `32` for a `big-electric-pole`.
+    ///
+    /// Independent of [`Self::supply_area_distance`], which is what a pole
+    /// *covers*: a big pole covers 4x4 and spans 32 tiles, a `substation`
+    /// covers 18x18 and spans 18. The two are not orderable against each other
+    /// and neither can be derived from the other.
+    ///
+    /// # This is one pole's reach, never a verdict about a pair
+    ///
+    /// **The game wires two poles when their centres are within the SMALLER of
+    /// the two distances**, so a reader holding one of these numbers holds an
+    /// input to a pairwise minimum. `method::power`'s `POLE_WIRE_REACH_TILES`
+    /// is what happens when that is forgotten: a single 7.5 — a *small* pole's
+    /// reach — applied to every pole in a blueprint, manufacturing
+    /// `disconnected_poles` refusals for blocks whose poles really are wired.
+    ///
+    /// # It is the maximum over EVERY wire kind, so it is not "is this a pole"
+    ///
+    /// Measured over all 1,028 prototypes of a live 2.1.17 game (seed 31337,
+    /// 2026-09-07): **4 report a pole's copper span** — 7.5, 9, 32, 18,
+    /// matching the data stage exactly — **94 more report a CIRCUIT wire
+    /// distance** (`stone-furnace` 9, `wooden-chest` 9, `power-switch` 10,
+    /// `agricultural-tower` 30), and 930 report 0. So a caller that read a
+    /// positive number here as "this is a pole" would find 98 poles in
+    /// vanilla, and would wire a network through an assembling machine.
+    /// `crates/planner/src/state.rs`'s `pole_wire_reach` gates on
+    /// `entity_type == "electric-pole"` before believing it; this field is
+    /// what the game says, not a classification.
+    ///
+    /// # `Some(0.0)` and `None` are different answers
+    ///
+    /// `get_max_wire_distance()` answers **0** for an entity nothing connects
+    /// to — a tree, an explosion, a corpse, and also a `steam-engine` — and
+    /// the mod sends that zero rather than dropping it, so `Some(0.0)` is the
+    /// game speaking. `None` is *the sender did not say*: every dump and
+    /// snapshot written before 2026-09-07, `workspace/scripts/map.json`
+    /// included. Only the second falls back to
+    /// `crates/planner/src/state.rs`'s `vanilla_pole_wire_reach`, and merging
+    /// the two would either blind the planner on every archived world or
+    /// silently re-credit a wireless entity with a vanilla pole's span.
+    ///
+    /// # It is a method on the runtime API, and the attribute spelling exists
+    ///
+    /// `maximum_wire_distance` is the **data-stage** name — it is what
+    /// `base/prototypes/entity/entities.lua` writes and what a reader would
+    /// try first — and there is no such attribute on `LuaEntityPrototype` in
+    /// 2.1.17. `get_max_wire_distance(quality)` is the only way to it.
+    /// Reading the attribute raises, the mod's `pcall` swallows it, and the
+    /// field arrives `None` for every prototype in the game with nothing
+    /// saying it should not have; see [`Self::crafting_speed`], which did
+    /// exactly that for all 1028 prototypes of a live game.
+    #[serde(default)]
+    pub maximum_wire_distance: Option<f64>,
     /// A **beacon's** `distribution_effectivity`: the fraction of a module's
     /// effect a receiver in range actually gets. `None` for anything that is
     /// not a beacon.
@@ -3151,6 +3205,7 @@ mod tests {
             resource_categories: None,
             mining_fluid: None,
             supply_area_distance: None,
+            maximum_wire_distance: None,
             distribution_effectivity: None,
             beacon_profile: None,
             electric_energy_usage: None,

@@ -575,6 +575,48 @@ function serialize_entity_prototype(entity)
     -- of the square it supplies, so 2.5 for a small pole's 5x5.
     ok, val = pcall(function() return entity.get_supply_area_distance() end)
     if ok then record.supply_area_distance = val end
+    -- How far this entity can throw a wire, in tiles. The supply area above
+    -- says what ground a pole COVERS; this says what other pole it can REACH,
+    -- and the two are independent numbers -- a `big-electric-pole` covers 4x4
+    -- and spans 32 tiles, a `substation` covers 18x18 and spans 18.
+    --
+    -- **`get_max_wire_distance()` is a METHOD, and there is no
+    -- `maximum_wire_distance` attribute on `LuaEntityPrototype` at all** in
+    -- 2.1.17 (checked against this install's `runtime-api.json`, not
+    -- recalled). `maximum_wire_distance` is the DATA-stage spelling, which is
+    -- the trap: it is what `base/prototypes/entity/entities.lua` says and what
+    -- anybody would try first, and reading it here raises, `pcall` swallows
+    -- it, and the field arrives nil for every prototype in the game with
+    -- nothing anywhere saying it should not have. That is exactly how
+    -- `crafting_speed` was nil for all 1028 prototypes of a live game.
+    --
+    -- **Sent for EVERY entity, including the ones with no wires**, unlike
+    -- `get_supply_area_distance()` above. This method carries no `subclasses`
+    -- restriction and answers **0** for an entity that supports no wires, so
+    -- the read never raises and there is nothing for the `pcall` to gate on.
+    -- Sending the honest 0 is what keeps `Some(0.0)` -- "the game says this
+    -- entity has no wires" -- distinguishable from `None` -- "the sender did
+    -- not say", which is every world dumped before 2026-09-07. A collector
+    -- that dropped the zeros would merge those two into one answer, and
+    -- `crates/planner/src/state.rs`'s fallback table fires on exactly one of
+    -- them.
+    --
+    -- **It is the maximum over EVERY wire kind, not a pole's copper span, and
+    -- that is measured rather than reasoned about.** Over all 1,028
+    -- prototypes of a live 2.1.17 game (seed 31337, 2026-09-07): 4 read a
+    -- pole's span (7.5 / 9 / 32 / 18, matching the data stage exactly), 94
+    -- more read a **circuit** wire distance -- `stone-furnace` 9,
+    -- `wooden-chest` 9, `power-switch` 10, `agricultural-tower` 30 -- and 930
+    -- read 0, which are trees, explosions, corpses and other things nothing
+    -- connects to. So a reader that took this for "is a pole" would find 98
+    -- of them. The gate that stops it lives in the planner
+    -- (`entity_type == "electric-pole"`), not here: this collector's job is
+    -- to report what the game says, and deciding what a pole is in Lua is the
+    -- kind of prototype-shape decision no Rust test can see.
+    --
+    -- No argument means normal quality, which is what the planner plans for.
+    ok, val = pcall(function() return entity.get_max_wire_distance() end)
+    if ok then record.maximum_wire_distance = val end
     -- ELECTRICAL DRAW AND OUTPUT. `crates/planner/src/state.rs` writes
     -- `consumer_kw` and `generation_kw` out by hand -- 14 rows and 2 -- and
     -- says in its own doc that sending these is what deletes them. The

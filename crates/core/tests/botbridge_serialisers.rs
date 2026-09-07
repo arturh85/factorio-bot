@@ -970,6 +970,121 @@ fn a_fluid_box_that_cannot_report_its_volume_says_nothing_rather_than_zero() {
 }
 
 // --------------------------------------------------------------------------
+// `filter`: which fluid the box will ever accept, which its geometry cannot
+// say. Three states, and the whole point is that two of them look alike.
+// --------------------------------------------------------------------------
+
+/// How the fixture should answer `fluidbox.filter`.
+enum FilterFixture {
+    /// The attribute yields a `LuaFluidPrototype` with this name.
+    Named(&'static str),
+    /// The attribute yields `nil` -- an unfiltered box, which is every
+    /// crafting machine. A real `LuaFluidBoxPrototype` always *has* the
+    /// attribute, so this is the shape the game presents for "any fluid".
+    Nil,
+    /// Reading the attribute raises: an older Factorio that has no such
+    /// attribute at all. Modelled with a metatable rather than an absent key,
+    /// because a plain Lua table cannot otherwise tell `nil` from missing --
+    /// and that is exactly the distinction under test.
+    Raises,
+}
+
+fn fluidbox_prototype_with_filter(lua: &Lua, filter: &FilterFixture) -> Table {
+    let fluidbox = fluidbox_prototype(lua, None);
+    match filter {
+        FilterFixture::Named(name) => {
+            let fluid = lua.create_table().expect("table");
+            fluid.set("name", *name).expect("set");
+            fluidbox.set("filter", fluid).expect("set");
+        }
+        FilterFixture::Nil => {}
+        FilterFixture::Raises => {
+            let meta = lua.create_table().expect("table");
+            meta.set(
+                "__index",
+                lua.create_function(|_, (_t, _k): (Table, String)| {
+                    Err::<Value, _>(mlua::Error::runtime("no such attribute in this version"))
+                })
+                .expect("function"),
+            )
+            .expect("set");
+            fluidbox.set_metatable(Some(meta)).expect("metatable");
+        }
+    }
+    fluidbox
+}
+
+fn filter_of(lua: &Lua, filter: &FilterFixture) -> factorio_bot_core::types::FluidFilter {
+    let out = call(
+        lua,
+        "serialize_fluidbox_prototype",
+        fluidbox_prototype_with_filter(lua, filter),
+    );
+    let json: serde_json::Value = lua
+        .from_value(Value::Table(out))
+        .expect("the record is plain data");
+    let prototype: factorio_bot_core::types::FactorioFluidBoxPrototype =
+        serde_json::from_value(json.clone()).unwrap_or_else(|err| panic!("{err} in {json}"));
+    prototype.filter
+}
+
+/// A filtered box names its fluid. This is the offshore pump, and it is the
+/// fact that closes `method::pipe`'s water rule.
+#[test]
+fn a_filtered_fluid_box_names_the_one_fluid_it_takes() {
+    let lua = botbridge_types();
+    assert_eq!(
+        filter_of(&lua, &FilterFixture::Named("water")),
+        factorio_bot_core::types::FluidFilter::Only {
+            fluid: "water".to_owned()
+        }
+    );
+}
+
+/// An UNFILTERED box says `any`, which is an answer and not an absence.
+///
+/// Every crafting machine is this case -- a chemical plant's input takes
+/// whatever its recipe names -- so reading it as "we could not tell" would
+/// throw away the majority of the field's value. `Unknown` here would be the
+/// `absent-is-not-a-value` defect committed by the code that is supposed to
+/// prevent it.
+#[test]
+fn an_unfiltered_fluid_box_says_any_rather_than_unknown() {
+    let lua = botbridge_types();
+    assert_eq!(
+        filter_of(&lua, &FilterFixture::Nil),
+        factorio_bot_core::types::FluidFilter::Any
+    );
+}
+
+/// And a game that cannot be asked says `unknown`, which is neither.
+#[test]
+fn a_fluid_box_whose_filter_cannot_be_read_says_unknown_rather_than_any() {
+    let lua = botbridge_types();
+    assert_eq!(
+        filter_of(&lua, &FilterFixture::Raises),
+        factorio_bot_core::types::FluidFilter::Unknown
+    );
+}
+
+/// An archived record written before this field existed deserialises to
+/// `unknown` -- not to `any`, which would assert that every box in every dump
+/// this project holds is unfiltered.
+#[test]
+fn a_record_predating_the_field_reads_as_unknown() {
+    let json = serde_json::json!({
+        "pipe_connections": null,
+        "production_type": "output",
+    });
+    let prototype: factorio_bot_core::types::FactorioFluidBoxPrototype =
+        serde_json::from_value(json).expect("the archived shape still parses");
+    assert_eq!(
+        prototype.filter,
+        factorio_bot_core::types::FluidFilter::Unknown
+    );
+}
+
+// --------------------------------------------------------------------------
 // `status`: what the machine is DOING, which no inventory read can say.
 // --------------------------------------------------------------------------
 

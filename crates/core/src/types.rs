@@ -1498,11 +1498,96 @@ pub struct FactorioGraphic {
                      //picspec.filename..":"..picspec.width..":"..picspec.height..":"..shiftx..":"..shifty..":"..xx..":"..yy..":"..scale
 }
 
+/// Which fluid a fluid box will ever accept, as its **prototype** declares it.
+///
+/// # Three answers, and the two that look alike are the point
+///
+/// This is `LuaFluidBoxPrototype::filter`, which is an *attribute* and not a
+/// method (checked against `runtime-api.json` for 2.1.17, not recalled -- the
+/// shape that made `volume` need a `pcall` two fields down). It is the
+/// question *"what will this machine ever take here"*, asked of the
+/// prototype. It is **not** `LuaEntity::get_fluid_filter`, the runtime filter
+/// a pump can be set to, and it is not what a box currently contains --
+/// nothing in this crate models either.
+///
+/// An `Option<String>` would have two slots for three states and would
+/// silently merge the middle one into the last:
+///
+/// - [`FluidFilter::Only`] -- *"a boiler's output is steam"*. Definite.
+/// - [`FluidFilter::Any`] -- *"a chemical plant's input has no filter, so the
+///   recipe decides"*. **Also definite, and a completely different fact.**
+/// - [`FluidFilter::Unknown`] -- the sender never said: an archived dump, a
+///   mod predating this field, a build whose read raised. Not a fact about
+///   the game at all.
+///
+/// `Any` is the common case for the machines this project cares about most:
+/// every crafting machine's boxes are unfiltered, because the recipe is what
+/// picks the fluid. Reading that as "we could not tell" would throw away the
+/// one thing that makes the chemistry rung composable.
+///
+/// # Two predicates, neither the negation of the other
+///
+/// [`Self::is_only`] and [`Self::excludes`] are both *positive* claims, and
+/// both are false for `Any` and for `Unknown`. That is deliberate: a single
+/// `accepts(fluid) -> bool` cannot distinguish its own two meanings, which is
+/// the defect class this type exists to avoid.
+#[derive(
+    Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema, utoipa::ToSchema,
+)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum FluidFilter {
+    /// The prototype names exactly one fluid this box accepts.
+    Only { fluid: String },
+    /// The prototype sets no filter: the box accepts whatever the machine's
+    /// recipe (or its neighbours) put in it. An answer, not an absence.
+    Any,
+    /// Nobody said. The default, so an archived record or an older mod
+    /// deserialises to *"not captured"* rather than to `Any`.
+    #[default]
+    Unknown,
+}
+
+impl FluidFilter {
+    /// Does this box definitely accept `fluid` and nothing else?
+    ///
+    /// False for [`FluidFilter::Any`] -- an unfiltered box does accept
+    /// `fluid`, but not *only* it, and callers use this to attribute a
+    /// source, where "only" is the claim that carries.
+    pub fn is_only(&self, fluid: &str) -> bool {
+        matches!(self, FluidFilter::Only { fluid: f } if f == fluid)
+    }
+
+    /// Does this box definitely **not** accept `fluid`?
+    ///
+    /// Only a named filter for a different fluid can say so. `Any` cannot
+    /// (it accepts everything) and `Unknown` must not (it knows nothing).
+    pub fn excludes(&self, fluid: &str) -> bool {
+        matches!(self, FluidFilter::Only { fluid: f } if f != fluid)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct FactorioFluidBoxPrototype {
     pub pipe_connections: Box<Option<Vec<FactorioFluidBoxConnection>>>,
     pub production_type: String,
+    // WHICH FLUID THIS BOX WILL EVER ACCEPT.
+    //
+    // `production_type` says which way fluid flows through a box and
+    // `pipe_connections` says where it may be joined; neither says *what*.
+    // Geometry cannot answer it -- a pipe reaching a machine's port is the
+    // same picture whether that port wants water, steam or petroleum gas --
+    // and `method::pipe` named the gap in place: a water rule "becomes
+    // reachable the day the fluidbox's accepted fluid crosses the bridge".
+    //
+    // `Unknown` is the default rather than `Any`, so a record written before
+    // this field existed says *"not captured"* instead of asserting that
+    // every box in it is unfiltered.
+    #[schemars(
+        description = "Which fluid this box will ever accept, from the prototype (`LuaFluidBoxPrototype::filter`) -- `only` names one fluid, `any` means the prototype sets no filter, `unknown` means the sender did not say. Not the runtime filter and not the contents."
+    )]
+    #[serde(default)]
+    pub filter: FluidFilter,
     // HOW MUCH THIS BOX HOLDS, in fluid units, at normal quality.
     //
     // `pipe_connections` and `production_type` say where a fluid box may be

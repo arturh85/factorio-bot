@@ -674,6 +674,9 @@ mod gather_tests {
             // A pumpjack fixture that is about pipe GEOMETRY: the capacity
             // is real on the live prototype and irrelevant here.
             volume: None,
+            // ...and about geometry rather than about which fluid, so the
+            // filter stays at what the capture carries.
+            filter: factorio_bot_core::types::FluidFilter::Unknown,
             pipe_connections: Box::new(Some(vec![FactorioFluidBoxConnection {
                 max_underground_distance: None,
                 connection_type: Some("normal".into()),
@@ -704,6 +707,9 @@ mod gather_tests {
             // A pumpjack fixture that is about pipe GEOMETRY: the capacity
             // is real on the live prototype and irrelevant here.
             volume: None,
+            // ...and about geometry rather than about which fluid, so the
+            // filter stays at what the capture carries.
+            filter: factorio_bot_core::types::FluidFilter::Unknown,
             pipe_connections: Box::new(Some(vec![FactorioFluidBoxConnection {
                 max_underground_distance: None,
                 connection_type: Some("normal".into()),

@@ -3832,6 +3832,11 @@ mod block_demand_tests {
     /// entities have never moved an item — coverage without capacity. Pinning
     /// the figure turns "it needs power" into a number a plant can be sized
     /// against.
+    /// How many entities named `name` a decoded fixture ships.
+    fn bp_entity_count(bp: &Blueprint, name: &str) -> usize {
+        bp.entities.iter().filter(|e| e.name == name).count()
+    }
+
     #[test]
     fn furnace_line_draws_624_kw_and_carries_nothing_that_makes_any() {
         let demand = blueprint_demand(&state(), &fixture("FurnaceLine"));
@@ -3841,9 +3846,26 @@ mod block_demand_tests {
             "48 inserters at 13 kW is 624, got {}",
             demand.kw
         );
-        // Everything else in the block is passive or burner-fuelled: belts,
-        // furnaces, poles, lamps, splitters, underground belts. None of them
-        // draws from a network, and none of them makes any either.
+        // Everything else here is UNPRICED on this fixture, which is not the
+        // same as drawing nothing -- see the `unpriced` assertions below.
+        // Belts, furnaces, poles, splitters and underground belts are passive
+        // or burner-fuelled and genuinely draw no electricity. **A lamp does
+        // not belong in that list**, and this comment claimed it did until
+        // 2026-09-07: a `small-lamp` draws 5 kW, so a live world that prices
+        // it puts this block at 639 kW, not 624.
+        let lamps = bp_entity_count(&fixture("FurnaceLine"), "small-lamp");
+        assert_eq!(lamps, 3, "FurnaceLine ships three lamps");
+        assert!(
+            demand.unpriced.contains("small-lamp"),
+            "the fixture world carries no energy fields, so the lamp must be \
+             reported as UNPRICED rather than silently costed at zero -- that \
+             distinction is the whole reason `unpriced` exists, and the \
+             unknown-name branch errs towards permitting: a table's silence \
+             means 'never heard of it', not 'draws nothing'. unpriced: {:?}",
+            demand.unpriced
+        );
+        // None of the unpriced names may be a GENERATOR, which is a different
+        // claim and the one this fixture exists to make.
         for name in &demand.unpriced {
             assert!(
                 !matches!(name.as_str(), "steam-engine" | "solar-panel" | "boiler"),

@@ -1453,6 +1453,23 @@ entry over a log line:
   side: there, the binary is new and the mod is old. Rebuild before concluding
   anything about a field added in the same session.
 
+  **And rebuilding is not always enough — `include_dir!` has no
+  `rerun-if-changed`.** A release binary embeds `mods/` at compile time and
+  **cargo does not know that editing a `.lua` file should invalidate it**, so a
+  rebuild after a mod edit can legitimately produce a binary carrying the *old*
+  mod. The field then reads uniformly absent exactly as if the game never sent
+  it: the tell fires correctly and points at the wrong cause. Cost an agent a
+  false conclusion on 2026-09-07.
+
+  **Interrogate the binary, not the game:**
+
+  ```
+  strings -a target/release/factorio-bot | grep get_max_wire_distance
+  ```
+
+  Zero hits means the edit is not in there. Touching any `crates/core` source
+  file forces the re-embed.
+
 - the `Using mods directory` line was gated behind `if !silent`, which every CLI
   path sets, so the authoritative "did my edit ship" answer printed on no run;
 - 19 of 20 walk failures were archived as `kind: "other"` because

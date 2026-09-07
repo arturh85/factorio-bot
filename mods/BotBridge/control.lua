@@ -1987,10 +1987,36 @@ function on_chunk_generated(event)
 
 	-- ONE SURFACE, AND THE DROP IS NOW RECORDED RATHER THAN PRINTED.
 	--
-	-- This guard is the only thing standing between this system and silent
-	-- aliasing: the entity graph keys by position alone, so a chunk from a
-	-- second surface would merge into Nauvis with no error anywhere. Space Age
-	-- is enabled in this workspace, so the second surface is one rocket away.
+	-- This guard used to be the only thing standing between this system and
+	-- silent aliasing: the entity graph keys by position alone, so a chunk from
+	-- a second surface would merge into Nauvis with no error anywhere. Space
+	-- Age is enabled in this workspace, so the second surface is one rocket
+	-- away.
+	--
+	-- **THE WIRE REASON IS GONE AND THE GUARD STILL STANDS**, 2026-09-07.
+	-- Everything this function emits now names its surface: `writeout_entities`
+	-- through `serialize_entity` since 2026-09-06, `writeout_tiles` through
+	-- `ground_header` since today. What blocks lifting it is no longer
+	-- serialisation, and each of these is a separate piece of work:
+	--
+	--   1. `tile_chunks` (line 86) is keyed `chunk_x.."/"..chunk_y` with **no
+	--      surface in the key**, so Nauvis chunk (0,0) would suppress the tiles
+	--      writeout for chunk (0,0) on every other surface -- and silently.
+	--   2. `storage.map_area` is ONE bounding box over all charted chunks. A
+	--      space platform at its own coordinates would stretch it and the
+	--      512-tile clamps above would then be applied to the union.
+	--   3. The initial-discovery replay is hard-coded to `game.surfaces[1]` at
+	--      both ends (collection ~line 1332, replay ~line 1364), so on a LOADED
+	--      save -- which generates no chunks at all, and where this guard has
+	--      therefore never once run; `surface_chunk_dropped` read 0 across a
+	--      whole ten-surface run -- lifting it changes nothing whatsoever.
+	--   4. Downstream, `OutputParser::on_init` connects only the default
+	--      surface's graph, and `FactorioWorld::only_surface()` refuses on a
+	--      multi-surface world, so `factorio-bot lua` cannot start against one.
+	--
+	-- So the guard is now a stand-in for four unported call sites rather than
+	-- for a missing field. Do not lift it without 1 and 2 at minimum: those two
+	-- fail silently, which is the failure mode this file keeps paying for.
 	--
 	-- It used to `print("unknown surface")`, which is NOT a writeout: it
 	-- carries no `§tick§key§` envelope, so it reached the server log and no
@@ -3349,9 +3375,34 @@ function player_collides_with_tile(tile)
 	return cached
 end
 
+-- The header the two GROUND writeouts share: `x1,y1;x2,y2;<surface>: `.
+--
+-- Ground is the one thing on the wire that could not say where it was. Every
+-- `FactorioEntity`-shaped writeout has carried `record.surface` since
+-- 2026-09-06 (`serialize_entity` in types.lua) and the parser routes on it;
+-- `tiles` and `resources` had a positional header with two fields and no third,
+-- so `FactorioTile::surface` was filled with `None` by the parser and the mod's
+-- Nauvis guard in `on_chunk_generated` was the only thing stopping a second
+-- surface's ground from merging into Nauvis by position alone.
+--
+-- **A third `;`-separated field, not a new envelope.** `writeout` emits
+-- `§tick§key§body` and has no surface slot either, so carrying it there would
+-- mean changing the frame every writeout and both readers share, to give a
+-- surface to twenty-odd keys that have no use for one. The body header is
+-- where the fact belongs and it is the smaller change.
+--
+-- **Two fields still parse, and mean "an older sender did not say".** The Rust
+-- side splits this on `;` and only reads a surface when there are three parts;
+-- with two it leaves `FactorioTile::surface` at `None`, which is what every
+-- archived server log and both world dumps contain. Absent is not "a surface
+-- called nothing" and it is not Nauvis-by-assertion either.
+function ground_header(surface, area)
+	return area.left_top.x..","..area.left_top.y..";"..area.right_bottom.x..","..area.right_bottom.y..";"..surface.name..": "
+end
+
 function writeout_tiles(tick, surface, area) -- SLOW! beastie can do ~2.8 per tick
 	--if my_client_id ~= 1 then return end
-	local header = area.left_top.x..","..area.left_top.y..";"..area.right_bottom.x..","..area.right_bottom.y..": "
+	local header = ground_header(surface, area)
 	local tile = nil
 	local line = {}
 	for y = area.left_top.y, area.right_bottom.y-1 do
@@ -3363,9 +3414,21 @@ function writeout_tiles(tick, surface, area) -- SLOW! beastie can do ~2.8 per ti
 	writeout(tick, "tiles", header .. table.concat(line, ","))
 end
 
+-- **DEAD ON BOTH ENDS, verified 2026-09-07 -- nothing calls this and nothing
+-- parses it.** `grep -rn writeout_resources mods/` finds only this definition,
+-- and `crates/core/src/process/output_parser.rs` has no `"resources"` arm, so a
+-- line emitted here would be logged as `unexpected action: resources`. Resource
+-- entities reach the model through the bulk `entities` writeout instead --
+-- `surface.find_entities(area)` returns them and `serialize_entity` names their
+-- surface -- so they have been routed correctly since `b0bb7f53`.
+--
+-- It carries the surface anyway, on the same `ground_header` as `tiles`: the
+-- asymmetry is what would bite whoever revives it, since a header that silently
+-- meant Nauvis is exactly the shape this change exists to remove. **Nothing
+-- exercises this tag**, which is stated rather than implied by its presence.
 function writeout_resources(tick, surface, area) -- quite fast. beastie can do > 40, up to 75 per tick
 	--if my_client_id ~= 1 then return end
-	header = area.left_top.x..","..area.left_top.y..";"..area.right_bottom.x..","..area.right_bottom.y..": "
+	header = ground_header(surface, area)
 	line = ''
 	lines={}
 	for idx, ent in pairs(surface.find_entities_filtered{area=area, type='resource'}) do

@@ -33,14 +33,18 @@ pub struct OutputParser {
     /// **The route from a writeout to the surface it is about**, added
     /// 2026-09-07.
     ///
-    /// Only the four writeouts whose payload is a [`FactorioEntity`] can be
-    /// routed, because only they name a surface on the wire
-    /// (`serialize_entity` in `mods/BotBridge/types.lua`): the bulk
-    /// `entities` line and the three `on_some_entity_*` events. `tiles` and
-    /// `resources` travel in a compact header (`x,y;x,y: name:0,...`) with no
-    /// slot for a surface and stay on `world` -- and the mod's Nauvis guard in
-    /// `on_chunk_generated` is what makes that safe, so **it must not be
-    /// lifted before those two headers carry a surface**.
+    /// Five writeouts route. Four carry a [`FactorioEntity`] and have named
+    /// their surface on the wire since 2026-09-06 (`serialize_entity` in
+    /// `mods/BotBridge/types.lua`): the bulk `entities` line and the three
+    /// `on_some_entity_*` events. The fifth is `tiles`, whose compact header
+    /// grew a third field on 2026-09-07 -- `x,y;x,y;<surface>: name:0,...`,
+    /// see [`parse_ground_header`]. **Ground was the last thing on this wire
+    /// that could not say where it was.**
+    ///
+    /// Still unrouted: `daylight`, which is per-surface and lands here anyway.
+    /// (`resources` shares `tiles`' header in the mod but has no caller there
+    /// and no arm here -- resource entities arrive on the bulk `entities`
+    /// line.)
     ///
     /// This was not a hypothetical gap. Loading the world-record save on
     /// 2026-09-07 produced 2,609 `on_some_entity_deleted` writeouts, 2,601 of
@@ -49,6 +53,47 @@ pub struct OutputParser {
     /// See `docs/superpowers/notes/2026-09-07-a-chunk-knows-which-surface-it-is-on.md`.
     game_world: Arc<FactorioWorld>,
     // websocket_server: Option<Addr<FactorioWebSocketServer>>,
+}
+
+/// Splits the header the two **ground** writeouts share into its rectangle
+/// and, if the sender said one, its surface.
+///
+/// The mod writes `x1,y1;x2,y2;<surface>: ` (`ground_header` in
+/// `mods/BotBridge/control.lua`). Everything before the first `:` is this
+/// function's input.
+///
+/// # Why a third field rather than a bigger envelope
+///
+/// `writeout` frames every line as `§tick§key§body`, which has no surface slot
+/// either. Adding one there would change the frame that every writeout and both
+/// readers share, to give a surface to twenty-odd keys that have no place. The
+/// body header is where the fact belongs, and it is the smaller change.
+///
+/// # Two fields is an older sender, not an unknown surface
+///
+/// A header with two fields parses exactly as it always did and yields `None`
+/// -- which is what every archived server log, `workspace/scripts/map.json` and
+/// `map-31337-explored.json` contain, because they all predate the field. `None`
+/// means **nobody said**, never "a surface called nothing" and never Nauvis by
+/// assertion; [`OutputParser::route`] turns it into the default surface, which
+/// is the same decision the entity writeouts already make for a record with no
+/// `surface` key. An empty third field is read the same way: a sender that
+/// emitted a separator and no name has still not said which surface.
+fn parse_ground_header(header: &str) -> Result<(Rect, Option<SurfaceId>)> {
+    let parts: Vec<&str> = header.split(';').collect();
+    if parts.len() == 3 {
+        // Re-joined and handed to `Rect`'s own `FromStr` rather than parsed
+        // here, so the rectangle has one encoding and not two.
+        let rect: Rect = format!("{};{}", parts[0], parts[1]).parse()?;
+        let name = parts[2].trim();
+        let surface = if name.is_empty() {
+            None
+        } else {
+            Some(SurfaceId::from(name))
+        };
+        return Ok((rect, surface));
+    }
+    Ok((header.parse()?, None))
 }
 
 impl OutputParser {
@@ -114,7 +159,7 @@ impl OutputParser {
                         return Ok(());
                     }
                 };
-                let rect: Rect = rest[0..colon_pos].parse()?;
+                let (rect, tile_surface) = parse_ground_header(&rest[0..colon_pos])?;
                 let pos: Pos = (&rect.left_top).into();
                 let chunk_position: ChunkPosition = (&pos).into();
                 let tiles: Vec<FactorioTile> = rest[colon_pos + 1..]
@@ -170,27 +215,31 @@ impl OutputParser {
                                 (chunk_position.x * 32 + (index % 32) as i32) as f64,
                                 (chunk_position.y * 32 + (index / 32) as i32) as f64,
                             ),
-                            // `None`, NOT `Some(nauvis)`, even though this
-                            // line can only be Nauvis today.
+                            // Whatever the header's third field said, and
+                            // `None` when it had none.
                             //
-                            // The bulk `tiles` writeout is a compact text
-                            // format -- `x,y;x,y: name:0,name:1,...` -- with no
-                            // slot for a surface, and it is only reached at all
-                            // because `on_chunk_generated` drops every chunk
-                            // that is not on Nauvis. So the surface is a fact
-                            // about the *guard*, not about these bytes.
-                            // Filling it in here would put that inference
-                            // inside the data, where it would quietly become
-                            // false the day the guard is replaced by routing --
-                            // and nothing would catch it. `None` says "the
-                            // sender did not say", which is exactly true and
-                            // stays true.
-                            surface: None,
+                            // Until 2026-09-07 this was hard-coded `None` with
+                            // a comment explaining that the wire had no slot
+                            // for it: the header was `x,y;x,y: ` and the only
+                            // thing making the tile Nauvis was the mod's guard
+                            // in `on_chunk_generated`, i.e. a fact about the
+                            // *guard* rather than about these bytes. The
+                            // header now carries `x,y;x,y;<surface>: ` and this
+                            // is that field. `None` still means exactly what it
+                            // meant -- **the sender did not say** -- and is
+                            // still what every archived server log and both
+                            // world dumps produce; it is never "an unknown
+                            // surface" and never Nauvis by assertion.
+                            surface: tile_surface.clone(),
                         };
                         Some(tile)
                     })
                     .collect();
-                self.world.update_chunk_tiles(tiles)?;
+                // Routed exactly like the four `FactorioEntity`-shaped
+                // writeouts, through the same `route`. One `tiles` line is one
+                // chunk and a chunk is on one surface, so the whole batch
+                // routes once.
+                self.route(&tile_surface).update_chunk_tiles(tiles)?;
             }
             "graphics" => {
                 // 0 graphics: spark-explosion*__core__/graphics/empty.png:1:1:0:0:0:0:1|spark-explosion-higher*__core__/graphics/empty.png:1:1:0:0:0:0:1|

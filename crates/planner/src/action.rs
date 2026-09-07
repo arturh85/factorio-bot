@@ -2,10 +2,10 @@
 
 use crate::error::PlannerError;
 use crate::ids::{ActionId, BotId, ItemId, Ticks};
-use crate::state::PlanState;
+use crate::state::{Excluded, PlanState};
 use factorio_bot_core::factorio::util::calculate_distance;
 use factorio_bot_core::num_traits::FromPrimitive;
-use factorio_bot_core::types::{Direction, FactorioEntity, Pos, Position};
+use factorio_bot_core::types::{Direction, FactorioEntity, Pos, Position, Rect};
 use serde::{Deserialize, Serialize};
 
 /// Who an action's condition or effect applies to.
@@ -121,6 +121,50 @@ pub enum Condition {
         entity: ItemId,
         kw: f64,
     },
+    /// [`Condition::Powered`] asked for a **block**: `kw` is the summed draw
+    /// of every consumer a caller is about to place inside `own_ground`, and
+    /// the consumers standing on that ground are not charged against it.
+    ///
+    /// # Why this is a sibling and not a flag on `Powered`
+    ///
+    /// `Powered` is per-entity by construction — one `pos`, one `entity`, one
+    /// `kw` — and it is right as it stands: fourteen call sites state one
+    /// machine and every one of them keeps working unchanged. What breaks for
+    /// a block is not the predicate but its **exclusion**, which is a single
+    /// tile. `FurnaceLine` draws 624 kW across 48 inserters and 24 furnaces;
+    /// by the time the check runs they are all in the plan overlay, so the
+    /// ledger charges 611 kW of them as *existing* demand and is then asked
+    /// for 624 kW on top. 900 − 611 = 289 < 624: refused by its own
+    /// arithmetic, on a plant with room to spare.
+    ///
+    /// A caller siting a region therefore needs to say "these N consumers are
+    /// what I am asking about", and a region says it in O(1) and without
+    /// changing as the block goes down — see
+    /// [`Excluded`](crate::state::Excluded) for that argument in full.
+    ///
+    /// **The two share one arithmetic**, [`crate::state::PlanState::electric_headroom_kw`],
+    /// so there is one headroom ledger and not two. The alternative — a
+    /// second copy of supply-minus-demand for the region case — is exactly
+    /// the drift `consumer_draw_kw` and `generator_output_kw` exist to
+    /// prevent one level down.
+    ///
+    /// `pos` and `entity` are a **probe**: one of the block's own entities,
+    /// whose footprint is the ground the supply lookup reads the network
+    /// from. It is not a bigger box on purpose — supply is found by whichever
+    /// networks *meet* the area, so a block-sized rectangle would credit a
+    /// foreign network that merely brushed a corner. Coverage is read at one
+    /// machine; capacity is read over the whole block. Two regions, because
+    /// they are two questions.
+    ///
+    /// Nothing produces this either, for the same reason `Powered` produces
+    /// nothing: it is a statement about the world, and a caller that emits it
+    /// must order its placements after the plant itself.
+    BlockPowered {
+        pos: Position,
+        entity: ItemId,
+        kw: f64,
+        own_ground: Rect,
+    },
     /// The machine standing at `from` delivers what it makes into the machine
     /// standing at `to`.
     ///
@@ -218,6 +262,30 @@ pub enum Condition {
     },
 }
 
+/// What a power-headroom decision was made of, as
+/// [`Condition::headroom_parts`] reports it.
+///
+/// Four numbers and the machine they were read at, so a refusal can be
+/// written from the decision rather than beside it. `committed_kw` already
+/// excludes whatever the condition was asking about, so
+/// `supply_kw - committed_kw >= needed_kw` is exactly the test that ran.
+#[derive(Clone, Debug)]
+pub struct HeadroomParts {
+    pub entity: ItemId,
+    pub pos: Position,
+    pub needed_kw: f64,
+    pub supply_kw: f64,
+    pub committed_kw: f64,
+}
+
+impl HeadroomParts {
+    /// Uncommitted capacity, in kW. Negative is a real answer.
+    #[must_use]
+    pub fn headroom_kw(&self) -> f64 {
+        self.supply_kw - self.committed_kw
+    }
+}
+
 impl Condition {
     pub fn holds(&self, state: &PlanState, binding: BotId) -> bool {
         match self {
@@ -267,10 +335,27 @@ impl Condition {
                     // machine this plan already placed is charged against its
                     // own budget and the second check of an identical plan
                     // refuses what the first accepted.
-                    let headroom = state.electric_supply_kw(&area)
-                        - state.electric_demand_kw(&area, Some(pos));
-                    headroom.total_cmp(kw).is_ge()
+                    state
+                        .electric_headroom_kw(&area, Excluded::Consumer(pos))
+                        .total_cmp(kw)
+                        .is_ge()
                 }
+                None => false,
+            },
+            // The same ledger, read over the block's ground instead of one
+            // tile. `pos`/`entity` size the *supply* lookup and `own_ground`
+            // scopes the *exclusion*; see the variant's own doc on why those
+            // are deliberately two different rectangles.
+            Condition::BlockPowered {
+                pos,
+                entity,
+                kw,
+                own_ground,
+            } => match state.collision_area(entity, pos) {
+                Some(area) => state
+                    .electric_headroom_kw(&area, Excluded::Ground(own_ground))
+                    .total_cmp(kw)
+                    .is_ge(),
                 None => false,
             },
             Condition::Feeds { from, to } => state.delivers_into(from, to),
@@ -282,6 +367,41 @@ impl Condition {
                 matches!(state.entity_at(pos), Some(e) if e.recipe.as_deref() == Some(recipe.as_str()))
             }
         }
+    }
+
+    /// The figures a [`Condition::Powered`] or [`Condition::BlockPowered`]
+    /// decision was made of, or `None` for every other condition.
+    ///
+    /// **So that a refusal quotes the arithmetic it was decided by**, rather
+    /// than a second computation of it that is free to disagree — the same
+    /// reason [`crate::method::power::Powering`] carries the condition rather
+    /// than letting its caller restate one.
+    ///
+    /// It is also the only way a caller can tell the two shapes of "not
+    /// powered" apart: `supply_kw` at zero means nothing reached the site at
+    /// all (a routing or coverage answer), and `supply_kw` above it with the
+    /// difference short means the wire arrived at a network without the room
+    /// (a capacity answer). `method::power` turns exactly that split into
+    /// `Ok(None)` versus [`crate::error::PlannerError::PowerHeadroomShort`].
+    pub fn headroom_parts(&self, state: &PlanState) -> Option<HeadroomParts> {
+        let (pos, entity, kw, excluded) = match self {
+            Condition::Powered { pos, entity, kw } => (pos, entity, *kw, Excluded::Consumer(pos)),
+            Condition::BlockPowered {
+                pos,
+                entity,
+                kw,
+                own_ground,
+            } => (pos, entity, *kw, Excluded::Ground(own_ground)),
+            _ => return None,
+        };
+        let area = state.collision_area(entity, pos)?;
+        Some(HeadroomParts {
+            entity: entity.clone(),
+            pos: pos.clone(),
+            needed_kw: kw,
+            supply_kw: state.electric_supply_kw(&area),
+            committed_kw: state.electric_demand_kw_excluding(&area, excluded),
+        })
     }
 
     /// The position this condition requires the acting bot to stand near, if
@@ -334,6 +454,16 @@ impl std::fmt::Display for Condition {
             Condition::Powered { pos, entity, kw } => {
                 write!(f, "{} at {} has {} kW of supply", entity, pos, kw)
             }
+            Condition::BlockPowered {
+                pos,
+                entity,
+                kw,
+                own_ground,
+            } => write!(
+                f,
+                "the network at {} at {} has {} kW of supply beyond the block on {}..{}",
+                entity, pos, kw, own_ground.left_top, own_ground.right_bottom
+            ),
             Condition::Feeds { from, to } => {
                 write!(f, "the machine at {} feeds the one at {}", from, to)
             }

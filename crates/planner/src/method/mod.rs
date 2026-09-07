@@ -5,6 +5,7 @@ pub mod assemble;
 pub mod blueprint;
 pub mod connect;
 pub mod extract;
+pub mod gather;
 pub mod have;
 pub mod power;
 pub mod produce;
@@ -17,6 +18,8 @@ use crate::error::PlannerError;
 use crate::goal::{Goal, Holder};
 use crate::ids::{ActionId, ActionIdGen, BotId, ChainId, ChainIdGen, ItemId, Ticks};
 use crate::state::{ClaimRunner, PlanState};
+use crate::substance::{FluidRefusal, FluidSource, SubstanceTable};
+use std::cell::OnceCell;
 use std::collections::BTreeMap;
 
 /// One element of a method's expansion.
@@ -161,6 +164,21 @@ pub struct ExpansionCtx {
     /// producers a consumer draws on -- see `run_steps` for why that edge is
     /// stated rather than left to `ActionNetwork::infer_edges`.
     pub(crate) stock: BTreeMap<(BotId, ItemId), Vec<(ActionId, u32)>>,
+    /// What this world calls each prototype name, built on first ask and then
+    /// only read.
+    ///
+    /// Memoised rather than built per goal because building walks the whole
+    /// recipe table and the whole item-prototype table -- 662 + 342 entries on
+    /// a real capture, cloned out from behind two `DashMap`s -- and
+    /// `expand_goal_body` asks once per goal, of which one plan has hundreds.
+    /// [`crate::substance::SubstanceTable`]'s own doc states the rule this
+    /// obeys: cheap enough to build per expansion, too expensive per lookup.
+    ///
+    /// Safe to cache for a whole context because it is derived from
+    /// `PlanState::base()` alone -- recipes and prototypes are game data, and
+    /// no plan overlay adds or removes one. `ctx.state` is never reassigned
+    /// after construction, so the base cannot change underneath it.
+    substances: OnceCell<SubstanceTable>,
 }
 
 impl ExpansionCtx {
@@ -195,7 +213,18 @@ impl ExpansionCtx {
             converging: false,
             rehearsing: false,
             depth: 0,
+            substances: OnceCell::new(),
         }
+    }
+
+    /// What this world calls each prototype name -- an item a character can
+    /// hold, or a fluid that no character can hold in any amount.
+    ///
+    /// Built on the first ask and reused for the rest of the expansion; see
+    /// the field's own doc for why that is sound and why it matters.
+    pub fn substances(&self) -> &SubstanceTable {
+        self.substances
+            .get_or_init(|| SubstanceTable::from_world(self.state.base()))
     }
 }
 
@@ -657,6 +686,37 @@ fn expand_goal(
     result
 }
 
+/// The refusal for a [`Goal::Have`] whose item this world calls a fluid, or
+/// `None` for every other goal and every item.
+///
+/// **Positive evidence only.** `SubstanceTable::is_fluid` answers `false` for
+/// a name the world says nothing about, which is every name in this crate's
+/// hand-built fixture worlds; a guard that refused on absence of evidence
+/// would refuse most of the test suite and would be stating something nobody
+/// established.
+///
+/// The count is carried into the message unchanged, including zero. A `Have
+/// { count: 0 }` about a fluid is trivially "satisfied" in the arithmetic
+/// sense and is still a statement about an inventory holding a fluid, so it is
+/// refused for the same reason the others are -- the shape is wrong, not the
+/// number. Nothing emits one today: a fluid can only enter a bill through a
+/// recipe, and over the two categories this planner runs (`crafting`,
+/// `smelting`) the live 2.1.17 capture has no recipe with a fluid ingredient
+/// at all.
+fn fluid_have_refusal(goal: &Goal, ctx: &ExpansionCtx) -> Option<PlannerError> {
+    let Goal::Have { item, count, .. } = goal else {
+        return None;
+    };
+    if !ctx.substances().is_fluid(item) {
+        return None;
+    }
+    Some(PlannerError::FluidNotItem(FluidRefusal::NotCarryable {
+        fluid: item.to_string(),
+        count: *count,
+        produced_by: FluidSource::of_world(ctx.state.base(), item),
+    }))
+}
+
 fn expand_goal_body(
     goal: &Goal,
     ctx: &mut ExpansionCtx,
@@ -673,6 +733,29 @@ fn expand_goal_body(
             expand_goal(g, ctx, net, registry)?;
         }
         return Ok(());
+    }
+
+    // **Before any method is asked**, and deliberately not as a
+    // `Method::refusal`.
+    //
+    // A `Goal::Have` about a fluid is not a goal no method happens to know how
+    // to satisfy; it is a goal that cannot be *stated*, because `Have` means
+    // "this is in an inventory" and no character inventory holds a fluid. If
+    // the registry gets to answer first, `SplitAcrossBots` claims the goal and
+    // divides 100 petroleum-gas into four shares of 25 -- and the refusal that
+    // eventually surfaces reads `no method can satisfy goal: have 25
+    // petroleum-gas (a share sized for bot 1)`, which describes a bot's share
+    // of something no bot can hold any of. The share is an artefact of the
+    // refusal path, not a fact about the request, and saying it at all is the
+    // lie this guard exists to stop.
+    //
+    // `Goal::Produced` is deliberately **not** covered: "cause 100
+    // petroleum-gas to come into existence" is a perfectly meaningful thing to
+    // ask of a refinery, and `products::NoProducer` answers it by naming the
+    // recipes and the category this planner has no machine for. Only `Have`
+    // makes a claim about an inventory.
+    if let Some(refusal) = fluid_have_refusal(goal, ctx) {
+        return Err(refusal);
     }
 
     let chain_on_entry = ctx.chain;

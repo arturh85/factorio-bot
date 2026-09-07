@@ -7,6 +7,9 @@ in this project's history apart from unrepeatable measurements.
 
 ## The four
 
+*(Five, with the harness below, and seven with the two entries after it —
+the heading is kept because the four are the original set.)*
+
 1. **A blueprint fixture placed a stone furnace where a 2×2 entity cannot
    legally stand.** The belt-routing primitive passed four clean task
    reviews and a full suite while being unable to connect any real machine.
@@ -199,6 +202,82 @@ So: record the delivered tick rate in every run's note (`just analyse`
 prints it and flags below 80% of nominal), share the box freely for checks
 you expect to pass, and re-run on a quiet floor before believing any
 failure that arrived on a loaded one.
+
+## A falsification that never applied, and reported green over nothing
+
+A seventh way onto this list, found by the other session's agent and one neither
+of us would have predicted: **a substitution matched zero times because
+`rustfmt` had wrapped the call across four lines.** The edit did not apply, the
+test ran, and it would have reported green over an unmodified file.
+
+That is worse than the fourth cause ("the break was not a break"), because there
+the edit *did* apply and merely failed to change behaviour. Here nothing
+happened at all, and the only difference visible from outside is a test that
+stays green — which reads as *"the test is vacuous"*, sending you to rewrite a
+test that was fine.
+
+**The rule: assert the substitution COUNT, not that the edit succeeded.**
+`s.replace(...)` returns a string whether or not it matched; `assert
+s.count(old) == 1` before replacing is what turns a silent miss into a stop.
+
+**I am exposed to this and it is worth saying so.** Every falsification I ran
+tonight was a string substitution, and in the falsification edits specifically I
+asserted nothing:
+
+```python
+s.replace('<= POLE_WIRE_REACH_TILES', '<= 0.5')                  # no assert
+s.replace('...pole_would_supply(POLE, p, &area)', '...false')     # no assert
+s.replace('crate::enclosure::check(...)', '...Clear')             # no assert
+```
+
+All three went red, so all three applied — but **the safety came from the
+outcome, not from the method**. Had any matched zero times I would have seen a
+green test and concluded the assertion was vacuous, which is precisely the wrong
+repair. The guarded form was in my *editing* code and absent from my *breaking*
+code, which is the half where a silent miss actually costs something.
+
+Same shape as the load guard that could not run and shrugged: the check existed
+and did not check.
+
+## One level out: instrumentation is code, and mine failed open
+
+Every entry above is a check that was **weak**. This one is a check that was
+**absent and reported as present**, which is a different and worse shape — and
+it was in my own measuring harness rather than in the code under test.
+
+Measuring what a bot costs in tick rate needs a quiet machine: this repo already
+records that a cargo build in a worktree starved a server to 2-10 tps and froze
+a walking bot. So the runs were gated on 1-minute load:
+
+```bash
+if [ "$(echo "$L < 4" | bc -l)" = "1" ]; then break; fi
+```
+
+**`bc` is not installed here.** Every comparison therefore evaluated false, the
+guard waited its whole window, and then measured anyway — on a box that had
+climbed from load 24 to 37 while it waited. The same missing `bc` meant no wall
+times were computed, so the run produced no usable number in either direction.
+Forty `command not found` lines went into a log nobody was reading.
+
+**A guard that cannot run must refuse, not shrug.** The failure is exactly
+`only_ghosts = true` validating nothing, the `Using mods directory` line that
+printed on no run at all, and `0 uncovered` passing because the loop never ran —
+except that those are in the product and this was in the instrument.
+
+The rule that follows is narrow and worth stating on its own:
+
+- **Instrumentation is code and gets the same bar.** A harness, a probe, a
+  timing gate, a load check — falsify it before trusting a number it produced.
+  Spending a day rigorously falsifying the *code's* checks while never
+  falsifying the harness is precisely how this happened.
+- **Self-test a comparator in BOTH directions before using it.** A comparator
+  stuck at false and one stuck at true are both broken, and asserting one
+  direction catches half of them. The fix here asserts `lt(1,2)` is true *and*
+  `lt(2,1)` is false, and refuses to measure if either fails.
+- **A refusal must say what it could not do.** The rewrite prints "load still N
+  after 600s -- a tick-rate number taken here would measure the build farm, not
+  the bots" instead of a figure. Absence of a number is a result; a number taken
+  under unknown conditions is not.
 
 ## The rarer, opposite case: an independent oracle that disagrees
 

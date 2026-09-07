@@ -266,6 +266,14 @@ pub fn holds(goal: &Goal, state: &PlanState) -> Option<bool> {
         // well": nothing in the overlay records an extractor standing on a
         // patch, and nothing observes output. Unanswerable, not unmet.
         Goal::Extracted { .. } => None,
+        // The same answer, for a stronger reason. `Extracted` is unanswerable
+        // because nothing observes a machine extracting; this one is
+        // unanswerable because the *arrangement* it names -- a tank with pipe
+        // reaching a working pumpjack -- is a fluid-network fact, and
+        // `PlanState` models no fluid network at all. `method::gather` adopts
+        // a standing tank rather than duplicating it, which is where the
+        // idempotence a `Some(true)` would have bought actually lives.
+        Goal::Gathered { .. } => None,
         Goal::Built { .. } => None,
         // A *state*, and one the model can answer exactly. Answering here as
         // well as inside `Scout` is what makes a charted disc
@@ -2551,7 +2559,7 @@ fn smelt_steps(
 /// and the plan is remade, the plates are sitting in that furnace **and the
 /// ore they were smelted from is gone from the ground**. Before this method,
 /// the replan could not see them: `PlanState` modelled no container contents,
-/// `FactorioWorld::on_some_entity_updated` was a no-op, and the only path that
+/// `FactorioSurface::on_some_entity_updated` was a no-op, and the only path that
 /// could read contents at all (`rcon_inventory_contents_at`) was reached only
 /// by the HTTP handler and the Lua binding, never by anything that plans. So
 /// the replan asked for the whole bill again, out of ore that no longer
@@ -5041,6 +5049,10 @@ pub fn default_registry() -> MethodRegistry {
         .with(Box::new(Chop))
         .with(Box::new(Mine))
         .with(Box::new(crate::method::extract::Extract))
+        // Claims `Goal::Gathered`, which nothing else claims, so where it
+        // sits changes no other goal's method. Beside `Extract` because it is
+        // the rung above it and calls into it -- see `method::gather`.
+        .with(Box::new(crate::method::gather::Gather))
         // Claims `Goal::Charted`, which nothing else claims, so where it sits
         // changes no other goal's method. See `method::scout`.
         .with(Box::new(crate::method::scout::Scout))
@@ -5060,6 +5072,21 @@ pub fn default_registry() -> MethodRegistry {
         // anywhere is correct and beside them is where it reads.
         .with(Box::new(crate::method::sustain::Sustain))
         .with(Box::new(crate::method::blueprint::BuildBlock))
+        // **Dead last, and that is the whole contract.** `NoProducer` claims
+        // nothing and satisfies nothing -- `applicable` and `claims` are both
+        // hard `false` -- so it can never take a goal from a method above it.
+        // It answers only `Method::refusal`, and `MethodRegistry::refusal`
+        // takes the *first* method that offers one, so every method that knows
+        // more about why a goal failed (`Mine` knows the ore is uncharted,
+        // `Extract` walks a four-tier ladder) still speaks first. All it can
+        // do is replace the driver's `no method can satisfy goal: have 100
+        // solid-fuel` -- true and unactionable -- with the recipes that
+        // produce the item and the category no machine here runs.
+        //
+        // This is `products::ProductIndex`'s first production caller. Until
+        // now the honest product-to-recipe lookup existed and nothing asked
+        // it, which by this repo's own record makes it a hypothesis.
+        .with(Box::new(crate::products::NoProducer))
 }
 
 /// Split a shared goal into one independent chain per bot.
@@ -6493,6 +6520,10 @@ pub fn registry_for(bots: &[BotId]) -> MethodRegistry {
         }))
         .with(Box::new(Mine))
         .with(Box::new(crate::method::extract::Extract))
+        // Claims `Goal::Gathered`, which nothing else claims, so where it
+        // sits changes no other goal's method. Beside `Extract` because it is
+        // the rung above it and calls into it -- see `method::gather`.
+        .with(Box::new(crate::method::gather::Gather))
         // Claims `Goal::Charted`, which nothing else claims, so where it sits
         // changes no other goal's method. See `method::scout`.
         .with(Box::new(crate::method::scout::Scout))
@@ -6526,6 +6557,21 @@ pub fn registry_for(bots: &[BotId]) -> MethodRegistry {
         // `plan`/`score-map` CLIs all build their registry from this
         // function, not from `default_registry`.
         .with(Box::new(crate::method::blueprint::BuildBlock))
+        // **Dead last, and that is the whole contract.** `NoProducer` claims
+        // nothing and satisfies nothing -- `applicable` and `claims` are both
+        // hard `false` -- so it can never take a goal from a method above it.
+        // It answers only `Method::refusal`, and `MethodRegistry::refusal`
+        // takes the *first* method that offers one, so every method that knows
+        // more about why a goal failed (`Mine` knows the ore is uncharted,
+        // `Extract` walks a four-tier ladder) still speaks first. All it can
+        // do is replace the driver's `no method can satisfy goal: have 100
+        // solid-fuel` -- true and unactionable -- with the recipes that
+        // produce the item and the category no machine here runs.
+        //
+        // This is `products::ProductIndex`'s first production caller. Until
+        // now the honest product-to-recipe lookup existed and nothing asked
+        // it, which by this repo's own record makes it a hypothesis.
+        .with(Box::new(crate::products::NoProducer))
 }
 
 #[cfg(test)]
@@ -8152,8 +8198,8 @@ mod tests {
     /// state exactly which resources are charted.
     fn world_holding(
         entities: Vec<FactorioEntity>,
-    ) -> factorio_bot_core::factorio::world::FactorioWorld {
-        let world = factorio_bot_core::factorio::world::FactorioWorld::new();
+    ) -> factorio_bot_core::factorio::world::FactorioSurface {
+        let world = factorio_bot_core::factorio::world::FactorioSurface::new();
         world
             .update_entity_prototypes(
                 factorio_bot_core::test_utils::fixture_entity_prototypes()
@@ -8421,8 +8467,21 @@ mod tests {
         );
     }
 
-    /// An item no resource yields is still `NoApplicableMethod`: the refusal
-    /// hook adds names to answers, never answers to names.
+    /// An item no resource yields still **refuses**: the refusal hook adds
+    /// names to answers, never answers to names.
+    ///
+    /// The variant changed on 2026-09-07, when `products::NoProducer` was
+    /// registered last in [`registry_for`]. It used to be
+    /// `NoApplicableMethod`, whose whole text was `no method can satisfy goal:
+    /// have 1 unobtainium`; it is now `ProductNotMakeable`, which says no
+    /// recipe produces the name **and** that no prototype table in this world
+    /// mentions it at all -- i.e. check the spelling. That is strictly more
+    /// than the old message said and it is still a refusal, so the property
+    /// this test is named for is unchanged: the hook did not turn a
+    /// non-answer into a plan. What is asserted below is therefore the
+    /// property, plus the name, plus the new diagnosis -- not the variant
+    /// alone, which is what let the meaning of this test drift in the first
+    /// place.
     #[test]
     fn an_item_nothing_yields_is_still_no_applicable_method() {
         let s = state(&[BotId(1)]);
@@ -8438,8 +8497,18 @@ mod tests {
         )
         .expect_err("nothing makes unobtainium");
         assert!(
-            matches!(err, PlannerError::NoApplicableMethod { .. }),
+            matches!(err, PlannerError::ProductNotMakeable(_)),
             "got {err}"
+        );
+        let text = err.to_string();
+        assert!(
+            text.contains("unobtainium"),
+            "the refusal names the item: {text}"
+        );
+        assert!(
+            text.contains("check the spelling"),
+            "and says the world has never heard of the name, which is the whole \
+             diagnosis for a typo: {text}"
         );
     }
 
@@ -13733,7 +13802,7 @@ mod tests {
     /// The rocks reach the planner through the door the mod's own events use.
     ///
     /// `fixture_world` builds its rocks with `FactorioEntity::new_rock` and
-    /// hands them to `FactorioWorld::update_chunk_entities` -- the same call
+    /// hands them to `FactorioSurface::update_chunk_entities` -- the same call
     /// `output_parser.rs` makes for every chunk the game reports -- rather
     /// than through `PlanState`'s overlay. That matters more than it looks:
     /// the overlay can only ever *hide* an entity from `EntityGraph::minables`
@@ -13745,7 +13814,7 @@ mod tests {
     /// Nothing here is asserted about the planner; this is the seam itself.
     #[test]
     fn rocks_reach_minable_sources_through_update_chunk_entities() {
-        let world = factorio_bot_core::factorio::world::FactorioWorld::new();
+        let world = factorio_bot_core::factorio::world::FactorioSurface::new();
         world
             .update_entity_prototypes(
                 factorio_bot_core::test_utils::fixture_entity_prototypes()
@@ -15005,7 +15074,7 @@ mod stockpiling {
 
     /// Rung 1's starting inventories, on whichever world a test wants them.
     fn rung_one_on(
-        world: factorio_bot_core::factorio::world::FactorioWorld,
+        world: factorio_bot_core::factorio::world::FactorioSurface,
         bots: &[BotId],
     ) -> PlanState {
         let mut state = PlanState::from_world(Arc::new(world), bots);
@@ -15026,8 +15095,8 @@ mod stockpiling {
     /// no chest, and `Stockpile` refuses. These four `tree-01`s are what turn
     /// the same fixture into one a stockpile can be built on.
     fn wooded(
-        world: factorio_bot_core::factorio::world::FactorioWorld,
-    ) -> factorio_bot_core::factorio::world::FactorioWorld {
+        world: factorio_bot_core::factorio::world::FactorioSurface,
+    ) -> factorio_bot_core::factorio::world::FactorioSurface {
         crate::test_world::with_trees(
             world,
             &[

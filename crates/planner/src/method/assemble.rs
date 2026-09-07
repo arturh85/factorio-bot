@@ -114,8 +114,8 @@ use crate::method::have::{
 use crate::method::power::{POLE, supply_anchor};
 use crate::method::produce::cells_for;
 use crate::method::util::{
-    CRAFTING_CATEGORY, RecipeGate, ingredients_of, output_per_craft, recipe_for, recipe_gate,
-    smelting_ticks, tile_alignment_facing,
+    BEACON, CRAFTING_CATEGORY, RecipeGate, beacon_geometry, ingredients_of, output_per_craft,
+    recipe_for, recipe_gate, smelting_ticks, tile_alignment_facing,
 };
 use crate::method::{ExpansionCtx, Method, Step};
 use crate::state::PlanState;
@@ -223,7 +223,7 @@ const ANCHOR_SEARCH_RADIUS: f64 = 64.0;
 
 /// How far from the supplying pole the boiler that feeds it is looked for.
 ///
-/// `crate::method::power::layout` builds the pump, the boiler, the engine and
+/// `crate::method::power::layout` builds the pump, the boilers, the engines and
 /// the pole as one rigid body a handful of tiles across, so a boiler within
 /// sixteen tiles of the pole a cell hangs off is that plant's boiler. It is a
 /// heuristic and it is named as one: a map with an unrelated boiler nearer
@@ -231,6 +231,28 @@ const ANCHOR_SEARCH_RADIUS: f64 = 64.0;
 /// into a fuel slot, so the cost of being wrong is a few coal in the wrong
 /// machine rather than a wrong plan.
 const BOILER_SEARCH_RADIUS: f64 = 16.0;
+
+/// How far past the nearest boiler [`boilers_near`] keeps collecting, in
+/// tiles.
+///
+/// **A plant is a chain now, and this is its length.** Since 2026-09-06
+/// `power::layout` stands up to `power::BOILERS_PER_PUMP` boilers end to end
+/// along the shore at `power::BOILER_PITCH_TILES`, so the last boiler of a
+/// full chain is `4 x 19 = 76` tiles from the first. A search that stopped at
+/// [`BOILER_SEARCH_RADIUS`] would find the near end of a long plant and fuel
+/// that, leaving the far end cold -- everything standing, everything wired,
+/// and a fraction of the nameplate delivered.
+///
+/// It is deliberately measured **from the nearest boiler**, not from the
+/// anchor: widening `BOILER_SEARCH_RADIUS` itself to 92 tiles would start
+/// sweeping in unrelated plants (`run-1788408407-02764`'s second pump stood 86
+/// tiles from the first, and a 92-tile disc from a cell between them reaches
+/// both). Anchoring on the nearest boiler and reaching one chain-length past
+/// it keeps the group to one plant on every map where two plants are further
+/// apart than a plant is long -- which is the case this planner creates,
+/// since `power::PLANT_ADOPT_RADIUS` is 256.
+const BOILER_CHAIN_SPAN: f64 = crate::method::power::BOILER_PITCH_TILES
+    * ((crate::method::power::BOILERS_PER_PUMP - 1) as f64);
 
 /// What the boiler burns, in kJ per unit, and how many of them fit in its one
 /// fuel slot.
@@ -702,6 +724,81 @@ const POLE_OFFSET: (f64, f64) = (-1., 2.);
 /// hoped for.
 const LANE: [(f64, f64); 5] = [(-4., 0.), (-4., 1.), (-4., 2.), (-4., 3.), (-4., 4.)];
 
+/// The ground east of the machine column, left clear so a beacon can be
+/// added later without tearing the cell down.
+///
+/// # Why the cell reserves ground for a machine it cannot yet use
+///
+/// The owner's ask is *"leave space for beacons from the beginning so we can
+/// cheaply improve the production rates/productivity later"*. Empty ground is
+/// cheap today; a beacon lane retrofitted into a built and belted base is a
+/// teardown. So this is a **deliberate gap, not an oversight** -- if you are
+/// reading this because a layout has a hole in it, the hole is the feature,
+/// and deleting it costs the teardown it exists to avoid.
+///
+/// # Why east, and why one column rather than a lane between the machines
+///
+/// The two machines sit at `(0, 0)` and `(0, 4)`, four tiles apart, and that
+/// distance is **forced**: [`Role::LinkInserter`] at `(0, 2)` carries the
+/// intermediate's output into the product machine, and an inserter reaches
+/// exactly one tile. Widening the gap to fit a beacon between them would
+/// break the one link the cell is built around. The machines are therefore a
+/// single column, both faces on the same side, and **one beacon column to
+/// their east reaches both** -- the "does it reach both rows" question
+/// [`crate::method::util::BeaconGeometry`] exists to answer does not even
+/// arise here, because there is only one row.
+///
+/// East rather than west because west is taken: the feed and supply chests
+/// are at `x = -3` and [`LANE`], the ground a bot stands on to fill them, is
+/// at `x = -4`.
+///
+/// # Width is derived, not chosen
+///
+/// The column is [`crate::method::util::BeaconGeometry::lane_tiles`] wide --
+/// the beacon's own footprint, read off its `collision_box`. That is the
+/// narrowest lane that can ever work and it needs no `supply_area_distance`,
+/// which is just as well because the mod does not send one; see that type's
+/// doc for the derivation and for what is still missing. A world with no
+/// beacon prototype reserves **nothing**, so a mod that removes beacons pays
+/// no footprint for them.
+///
+/// # It spans the machines' own rows and no more
+///
+/// `y = -1 ..= 5` -- the seven rows the two 3x3 machines occupy. Reserving
+/// less would leave a beacon standing beside only part of the column;
+/// reserving more would buy nothing, and every tile is a tile that can refuse
+/// a site.
+const BEACON_FLANK_ROWS: [f64; 7] = [-1., 0., 1., 2., 3., 4., 5.];
+
+/// The first column east of the machines, whose east faces are at `x = 1.5`.
+///
+/// Flush against them, so the gap between beacon footprint and machine is
+/// zero and the beacon reaches the column for any `supply_area_distance`
+/// above zero -- see [`crate::method::util::BeaconGeometry`].
+const BEACON_FLANK_FIRST_COLUMN: f64 = 2.;
+
+/// The tiles a cell at `origin` facing `facing` keeps clear for a beacon.
+///
+/// Empty when the world carries no beacon prototype, which is the only way
+/// this costs nothing.
+fn beacon_flank(state: &PlanState, origin: &Position, facing: Direction) -> Option<Vec<Position>> {
+    let Some(geometry) = beacon_geometry(state, BEACON) else {
+        return Some(Vec::new());
+    };
+    let columns = geometry.lane_tiles().max(0.).round();
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let columns = columns as usize;
+    let mut tiles = Vec::with_capacity(columns * BEACON_FLANK_ROWS.len());
+    for column in 0..columns {
+        #[allow(clippy::cast_precision_loss)]
+        let x = BEACON_FLANK_FIRST_COLUMN + column as f64;
+        for y in BEACON_FLANK_ROWS {
+            tiles.push(origin.add(&Position::new(x, y).turn(facing)?));
+        }
+    }
+    Some(tiles)
+}
+
 /// A cell, sited and checked, ready to be turned into steps.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Cell {
@@ -948,6 +1045,17 @@ fn fit(
         }
     }
     for tile in &lane {
+        if !state.is_position_free(tile) {
+            return None;
+        }
+    }
+    // Ground kept clear for a beacon that no plan places yet -- see
+    // `BEACON_FLANK_ROWS` for why a cell refuses a site over a machine it
+    // cannot use, and `tests::a_cell_leaves_room_for_a_beacon_to_its_east`
+    // for the shape. Checked here and NOT in `fit_partial`: a cell already
+    // standing was sited before this rule existed, and refusing to finish it
+    // would strand a half-built cell to protect ground that is already gone.
+    for tile in &beacon_flank(state, origin, facing)? {
         if !state.is_position_free(tile) {
             return None;
         }
@@ -1686,13 +1794,32 @@ fn boiler_coal(state: &PlanState, demand_kw: f64) -> u32 {
     u32::try_from(coal).unwrap_or(cap).min(cap)
 }
 
-/// The boiler this cell's power comes out of, if the plan can see one.
+/// Every boiler this cell's power comes out of, nearest first.
 ///
-/// `None` is not a refusal: a world powered by something this planner did not
+/// Empty is not a refusal: a world powered by something this planner did not
 /// build has no boiler to top up, and the cell is perfectly buildable on it.
-/// What `None` costs is the fuel guarantee, and that is stated in
+/// What empty costs is the fuel guarantee, and that is stated in
 /// [`CELL_CHARGE_TICKS`]'s doc rather than hidden here.
-fn boiler_near(state: &PlanState, anchor: &Position) -> Option<Position> {
+///
+/// # A list, because a plant is a chain
+///
+/// This returned *the* boiler until 2026-09-06, which was right while
+/// `power::Plant` carried exactly one. It now silently found *a* boiler of
+/// several, and topping one up out of four leaves three cold: the plant reads
+/// as built at its full nameplate and delivers a quarter of it. So the nearest
+/// boiler anchors a group and everything within [`BOILER_CHAIN_SPAN`] of *it*
+/// joins -- see that constant for why the reach hangs off the boiler rather
+/// than off `anchor`.
+///
+/// Deterministic: candidates are ordered by `(distance from the anchor, x, y)`
+/// with `total_cmp`, exactly as the single-boiler version was, so a one-boiler
+/// world gets the identical one-element answer.
+fn boilers_near(state: &PlanState, anchor: &Position) -> Vec<Position> {
+    let order = |a: &(f64, Position), b: &(f64, Position)| {
+        a.0.total_cmp(&b.0)
+            .then(a.1.x.total_cmp(&b.1.x))
+            .then(a.1.y.total_cmp(&b.1.y))
+    };
     let mut candidates: Vec<(f64, Position)> = state
         .entities_within(anchor, BOILER_SEARCH_RADIUS)
         .into_iter()
@@ -1704,12 +1831,23 @@ fn boiler_near(state: &PlanState, anchor: &Position) -> Option<Position> {
             )
         })
         .collect();
-    candidates.sort_by(|a, b| {
-        a.0.total_cmp(&b.0)
-            .then(a.1.x.total_cmp(&b.1.x))
-            .then(a.1.y.total_cmp(&b.1.y))
-    });
-    candidates.into_iter().next().map(|(_, position)| position)
+    candidates.sort_by(order);
+    let Some((_, nearest)) = candidates.first().cloned() else {
+        return Vec::new();
+    };
+    let mut chain: Vec<(f64, Position)> = state
+        .entities_within(&nearest, BOILER_CHAIN_SPAN)
+        .into_iter()
+        .filter(|entity| entity.name == BOILER)
+        .map(|entity| {
+            (
+                calculate_distance(&entity.position, anchor),
+                entity.position,
+            )
+        })
+        .collect();
+    chain.sort_by(order);
+    chain.into_iter().map(|(_, position)| position).collect()
 }
 
 /// A `Place` step for one part, with its site reserved as it is emitted.
@@ -1799,7 +1937,7 @@ fn cell_steps(
     spec: &AssemblySpec,
     cells: &[Cell],
     coal: u32,
-    boiler: Option<Position>,
+    boilers: &[Position],
     roster: &[BotId],
 ) -> Result<(Vec<Step>, Vec<ActionId>), PlannerError> {
     let mut steps: Vec<Step> = Vec::new();
@@ -2177,43 +2315,51 @@ fn cell_steps(
     // stack and at this cell's draw `power::PLANT_COAL`'s five coal is under
     // two minutes. Topping it up is what makes the difference between a cell
     // that stands and a cell a witness can watch.
-    if let (Some(boiler), true) = (boiler, coal > 0) {
-        let id = ctx.ids.next();
-        steps.push(Step::Act(Box::new(Action {
-            id,
-            kind: ActionKind::Insert {
-                pos: boiler.clone(),
-                entity: BOILER.into(),
-                slot: InventorySlot::Fuel,
-                item: "coal".into(),
-                count: coal,
-            },
-            pre: vec![
-                Condition::AtPosition {
-                    who: Actor::Role,
+    //
+    // **Every boiler of the chain, each with its share.** Topping up only the
+    // nearest -- which is what this did while `power::Plant` carried a single
+    // `boiler` -- leaves the rest of a grown plant cold, and a plant delivering
+    // a fraction of its nameplate while every entity stands is exactly the
+    // failure `Condition::Powered`'s capacity accounting exists to prevent.
+    if coal > 0 {
+        for boiler in boilers {
+            let id = ctx.ids.next();
+            steps.push(Step::Act(Box::new(Action {
+                id,
+                kind: ActionKind::Insert {
                     pos: boiler.clone(),
-                    radius: reach,
-                    min_radius: 0.0,
-                },
-                Condition::EntityAt {
-                    pos: boiler.clone(),
-                    name: BOILER.into(),
-                },
-                Condition::HasItem {
-                    who: Actor::Role,
+                    entity: BOILER.into(),
+                    slot: InventorySlot::Fuel,
                     item: "coal".into(),
                     count: coal,
                 },
-            ],
-            eff: vec![Effect::LoseItem {
-                who: Actor::Role,
-                item: "coal".into(),
-                count: coal,
-            }],
-            duration: TRANSFER_TICKS,
-            pinned: None,
-            label: format!("top the boiler up with {} coal", coal),
-        })));
+                pre: vec![
+                    Condition::AtPosition {
+                        who: Actor::Role,
+                        pos: boiler.clone(),
+                        radius: reach,
+                        min_radius: 0.0,
+                    },
+                    Condition::EntityAt {
+                        pos: boiler.clone(),
+                        name: BOILER.into(),
+                    },
+                    Condition::HasItem {
+                        who: Actor::Role,
+                        item: "coal".into(),
+                        count: coal,
+                    },
+                ],
+                eff: vec![Effect::LoseItem {
+                    who: Actor::Role,
+                    item: "coal".into(),
+                    count: coal,
+                }],
+                duration: TRANSFER_TICKS,
+                pinned: None,
+                label: format!("top the boiler up with {} coal", coal),
+            })));
+        }
     }
 
     Ok((steps, needs_power))
@@ -2445,9 +2591,9 @@ impl Method for BuildAssemblyCell {
         let (anchor, plant_steps_taken, power_links) =
             supply_anchor(ctx, &from, ANCHOR_SEARCH_RADIUS, want_kw)?;
         let cells = plan_cells(&ctx.state, &anchor, &spec, build)?;
-        let (coal, boiler) = fuel_for(&ctx.state, &anchor, &cells, &spec);
+        let (coal, boilers) = fuel_for(&ctx.state, &anchor, &cells, &spec);
         let roster = self.roster(ctx.chain_actor);
-        let (built, needs_power) = cell_steps(ctx, &spec, &cells, coal, boiler, &roster)?;
+        let (built, needs_power) = cell_steps(ctx, &spec, &cells, coal, &boilers, &roster)?;
         let mut steps = plant_steps_taken;
         steps.extend(built);
         // Every id, not just the generator's: an engine with no steam produces
@@ -2479,25 +2625,32 @@ fn fuel_for(
     anchor: &Position,
     cells: &[Cell],
     spec: &AssemblySpec,
-) -> (u32, Option<Position>) {
+) -> (u32, Vec<Position>) {
     let mut trial = state.fork();
     for cell in cells {
         if reserve_in(&mut trial, cell, spec).is_err() {
-            return (0, None);
+            return (0, Vec::new());
         }
     }
     let Some(ground) = cells.first().and_then(Cell::on_network_at) else {
-        return (0, None);
+        return (0, Vec::new());
     };
     let Some(area) = trial.collision_area(MACHINE, ground) else {
-        return (0, None);
+        return (0, Vec::new());
     };
     let demand = trial.electric_demand_kw(&area, None);
-    let boiler = boiler_near(state, anchor);
-    match boiler {
-        Some(boiler) => (boiler_coal(state, demand), Some(boiler)),
-        None => (0, None),
+    let boilers = boilers_near(state, anchor);
+    if boilers.is_empty() {
+        return (0, Vec::new());
     }
+    // **Split, not repeated.** The boilers of one chain share the network's
+    // load, so each carries `demand / n` of it and is charged for that -- a
+    // full charge each would put `n` times the coal the network burns into
+    // slots that hold one stack, and `boiler_coal`'s cap would then quietly
+    // truncate the difference rather than report it. With one boiler this is
+    // the identical arithmetic to the single-boiler version.
+    let share = demand / boilers.len() as f64;
+    (boiler_coal(state, share), boilers)
 }
 
 #[cfg(test)]
@@ -2508,7 +2661,7 @@ mod tests {
     use crate::method::expand;
     use crate::method::have::registry_for;
     use crate::network::ActionNetwork;
-    use factorio_bot_core::factorio::world::FactorioWorld;
+    use factorio_bot_core::factorio::world::FactorioSurface;
     use factorio_bot_core::test_utils::fixture_world;
     use std::sync::Arc;
 
@@ -2520,7 +2673,7 @@ mod tests {
     /// Ingredients and energy are the **live 2.1.17** ones, asserted against
     /// the capture in `tests/red_science_cell.rs`. They are added `enabled` so
     /// these tests are about the layout rather than about the research ladder.
-    fn world() -> FactorioWorld {
+    fn world() -> FactorioSurface {
         let world = fixture_world();
         let green: factorio_bot_core::types::FactorioRecipe =
             factorio_bot_core::serde_json::from_str(
@@ -2657,6 +2810,94 @@ mod tests {
             &registry_for(&bots),
             BotId(1),
         )
+    }
+
+    // ---- room for a beacon ------------------------------------------------
+
+    /// The reserved ground is real ground, and it is exactly as wide as the
+    /// beacon's own footprint.
+    ///
+    /// A furnace in **any** of the three flank columns refuses the site, and
+    /// a furnace well east of them does not -- the control, without which
+    /// this would also pass if merely adding an entity anywhere refused.
+    ///
+    /// **The width is pinned elsewhere, deliberately.** The column
+    /// immediately past the flank cannot be the control: at the origin this
+    /// test finds it refuses too, for reasons of the fixture's own that
+    /// predate this reservation (the flank is columns 2, 3 and 4, so column 5
+    /// is not ground this code looks at). The claim "three columns, and three
+    /// because the beacon is 3x3" is checked directly on the tile list in
+    /// `a_world_without_beacons_reserves_no_ground_for_them`, and the
+    /// derivation itself in
+    /// `crate::method::util::tests::the_lane_follows_the_prototype_and_not_the_number_three`.
+    #[test]
+    fn a_cell_leaves_room_for_a_beacon_to_its_east() {
+        let spec = spec();
+        let origin = (6..=20)
+            .flat_map(|x| {
+                (6..=20).map(move |y| Position::new(f64::from(x) + 0.5, f64::from(y) + 0.5))
+            })
+            .find(|origin| {
+                fit(&powered(&[BotId(1)]), origin, Direction::North, true, &spec).is_some()
+            })
+            .expect("the fixture has room for a cell somewhere beside its plant");
+
+        let blocked = |dx: f64| {
+            let mut state = powered(&[BotId(1)]);
+            state.create_entity(FactorioEntity {
+                name: "stone-furnace".into(),
+                entity_type: "furnace".into(),
+                position: origin.add(&Position::new(dx, 0.)),
+                ..Default::default()
+            });
+            fit(&state, &origin, Direction::North, true, &spec).is_none()
+        };
+
+        let width = beacon_geometry(&powered(&[BotId(1)]), BEACON)
+            .expect("the fixture ships a beacon")
+            .lane_tiles();
+        assert!(
+            (width - 3.0).abs() < f64::EPSILON,
+            "vanilla's beacon is 3x3; this test's columns are derived from that"
+        );
+
+        for column in 0..3 {
+            let dx = BEACON_FLANK_FIRST_COLUMN + f64::from(column);
+            assert!(
+                blocked(dx),
+                "a furnace at dx={dx} stands in the beacon flank and must refuse the site"
+            );
+        }
+        // The control that stops this passing on "any extra entity refuses":
+        // a furnace well clear of the flank leaves the site standing.
+        assert!(
+            !blocked(BEACON_FLANK_FIRST_COLUMN + 10.0),
+            "a furnace ten tiles past the flank is nothing to do with the cell"
+        );
+    }
+
+    /// A world with no beacon in it reserves nothing, so a mod that removes
+    /// beacons pays no footprint for them.
+    #[test]
+    fn a_world_without_beacons_reserves_no_ground_for_them() {
+        let origin = Position::new(10.5, 10.5);
+        let with_beacons = powered(&[BotId(1)]);
+        assert_eq!(
+            beacon_flank(&with_beacons, &origin, Direction::North)
+                .expect("north is a cardinal facing")
+                .len(),
+            3 * BEACON_FLANK_ROWS.len(),
+            "a 3x3 beacon reserves three columns of the machines' seven rows"
+        );
+
+        let world = world();
+        world.entity_prototypes.remove(BEACON);
+        let without = PlanState::from_world(Arc::new(world), &[BotId(1)]);
+        assert_eq!(
+            beacon_flank(&without, &origin, Direction::North),
+            Some(vec![]),
+            "no beacon prototype means no reservation at all"
+        );
     }
 
     // ---- what a cell is ---------------------------------------------------
@@ -3494,6 +3735,91 @@ mod tests {
         );
     }
 
+    /// **Every boiler of a chain is topped up, not the nearest one.**
+    ///
+    /// The correctness bug this change had to avoid, from the assemble side:
+    /// `boiler_near` returned *the* boiler, which was right while
+    /// `power::Plant` carried exactly one and silently wrong the moment the
+    /// plant grew a chain. Coal in one boiler of four leaves three cold, the
+    /// plan reads as fully powered, and the cell it was built for stalls with
+    /// every entity standing.
+    ///
+    /// Four boilers on `power::BOILER_PITCH_TILES`, which is the chain
+    /// `power::layout` actually stands up, and the charge is **split** across
+    /// them rather than repeated: the network's draw is what is burnt,
+    /// however many slots it is burnt out of.
+    #[test]
+    fn every_boiler_of_a_chain_is_topped_up_and_the_charge_is_split() {
+        let bots = [BotId(1)];
+        let mut state = powered(&bots);
+        // Three more boilers alongside the fixture's one, on the real pitch.
+        let pitch = crate::method::power::BOILER_PITCH_TILES;
+        let entity_type = state
+            .base()
+            .entity_prototypes
+            .get(BOILER)
+            .map(|p| p.entity_type.clone())
+            .unwrap_or_else(|| BOILER.to_string());
+        for step in 1..4 {
+            state.create_entity(FactorioEntity {
+                name: BOILER.into(),
+                entity_type: entity_type.clone(),
+                position: Position::new(12.5 + pitch * f64::from(step), 14.5),
+                ..Default::default()
+            });
+        }
+
+        let found = boilers_near(&state, &Position::new(10.5, 10.5));
+        assert_eq!(
+            found.len(),
+            4,
+            "the whole chain, not the nearest boiler: found {found:?}"
+        );
+
+        let net = expand(
+            &[Goal::Producing {
+                item: PACK.into(),
+                per_minute: 6,
+            }],
+            &state,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .expect("a powered fixture can build a cell");
+        let mut fuelled: Vec<(Position, u32)> = net
+            .actions()
+            .filter_map(|a| match &a.kind {
+                ActionKind::Insert {
+                    pos,
+                    entity,
+                    slot: InventorySlot::Fuel,
+                    count,
+                    ..
+                } if entity == BOILER => Some((pos.clone(), *count)),
+                _ => None,
+            })
+            .collect();
+        fuelled.sort_by(|a, b| a.0.x.total_cmp(&b.0.x));
+        assert_eq!(
+            fuelled.len(),
+            4,
+            "four boilers stand and {} are fuelled: {fuelled:?}",
+            fuelled.len()
+        );
+        for boiler in &found {
+            assert!(
+                fuelled.iter().any(|(pos, _)| pos == boiler),
+                "the boiler at {boiler} is never topped up"
+            );
+        }
+        // Split, not repeated: one boiler took 8 coal for the whole 189 kW,
+        // so a quarter of that draw is 2 apiece rather than 8 apiece.
+        assert!(
+            fuelled.iter().all(|(_, count)| *count == 2),
+            "the charge should be the network's draw split four ways: {fuelled:?}"
+        );
+    }
+
     /// The arithmetic on its own, including the stack bound a fuel slot is.
     #[test]
     fn the_coal_bill_is_bounded_by_the_one_slot_it_goes_in() {
@@ -3686,7 +4012,7 @@ mod tests {
     /// Every other test here stands its cell with `PlanState::create_entity`
     /// and `PlanState::set_recipe`, which write the overlay. A *replan* has no
     /// overlay: `PlanState::from_world` starts empty and everything standing
-    /// comes back out of `FactorioWorld`'s entity graph. So the overlay tests
+    /// comes back out of `FactorioSurface`'s entity graph. So the overlay tests
     /// could all pass while the predicate was unsatisfiable against a real
     /// world, and that is exactly what happened -- in `run-1788485718-45723`
     /// four consecutive replans each built a whole new cell, every action

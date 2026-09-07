@@ -21,7 +21,7 @@
 //! pairs of touching tiles, ten tiles apart, is three seats by construction —
 //! and, being *six* tiles, also says the count is seats rather than tiles.
 
-use factorio_bot_core::factorio::world::FactorioWorld;
+use factorio_bot_core::factorio::world::FactorioSurface;
 use factorio_bot_core::test_utils::{
     fixture_entity_prototypes, fixture_item_prototypes, fixture_recipes,
 };
@@ -36,8 +36,8 @@ use std::sync::Arc;
 /// tiles asked for and nothing else on the map.
 ///
 /// Deliberately not `fixture_world()` plus claims — see the module doc.
-fn world_with_iron_at(tiles: &[Position]) -> FactorioWorld {
-    let world = FactorioWorld::new();
+fn world_with_iron_at(tiles: &[Position]) -> FactorioSurface {
+    let world = FactorioSurface::new();
     world
         .update_entity_prototypes(
             fixture_entity_prototypes()

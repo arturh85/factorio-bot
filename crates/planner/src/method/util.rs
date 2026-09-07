@@ -1069,13 +1069,207 @@ pub fn research_ticks_in_labs(tech: &FactorioTechnology, labs: u32) -> Ticks {
     ticks.ceil() as Ticks
 }
 
+/// The vanilla beacon's prototype name.
+///
+/// A name, not a rate: naming a prototype is how every method in this crate
+/// asks the world about one (`assemble::MACHINE`, `assemble::CHEST`), and a
+/// world that does not carry it answers `None` everywhere below rather than
+/// being given a made-up beacon.
+pub const BEACON: &str = "beacon";
+
+/// How much ground a beacon needs, and how far it reaches, **derived from the
+/// beacon's own prototype rather than from a remembered 9x9.**
+///
+/// # Why this type exists before anything places a beacon
+///
+/// Modules and beacons multiply a machine's effective speed (see
+/// [`machine_crafting_speed`]), and retrofitting a beacon lane into a base
+/// that is already built and belted means tearing the base down. Reserving
+/// the ground costs nothing but ground *now*, so the reservation is worth
+/// making before the beacon is, which is the whole reason this is here with
+/// no beacon in any plan yet.
+///
+/// # The geometry, and why the two halves are not equally available
+///
+/// A beacon supplies its effect to every machine whose bounding box meets its
+/// **supply area**, which is the beacon's own footprint grown by
+/// `supply_area_distance` tiles on all four sides. That is *not* the electric
+/// pole convention and the difference is a trap: the prototype docs say a
+/// pole's `supply_area_distance` "corresponds to **half** of the supply area"
+/// (2.5 gives 5x5, centred on a 1x1 pole), while a beacon's is "the maximum
+/// distance that this beacon can supply its neighbors" — 3 on a 3x3 footprint
+/// gives 9x9, which is footprint + 2d and not 2d. Reading one convention off
+/// the other is how a beacon lane ends up three tiles too narrow.
+///
+/// Write `b` for the footprint and `d` for `supply_area_distance`, both in
+/// tiles, and put a beacon in a lane between two machine rows:
+///
+/// ```text
+///        row A          lane           row B
+///   ...####|<-- gA -->|#####|<-- gB -->|####...
+///                       b
+/// ```
+///
+/// The supply area reaches `d` tiles past each edge of `b`, so **row A is
+/// reached iff `gA < d`**, and a beacon is worth its ground only when it
+/// reaches *both* rows, i.e. `gA < d` **and** `gB < d`. Centring the beacon
+/// makes the two gaps equal, so the two rows may sit at most
+/// `S = b + 2d` apart, edge to edge, and no less than `b` apart or the beacon
+/// does not fit. That is [`Self::lane_tiles`] and
+/// [`Self::max_row_separation_tiles`].
+///
+/// # `b` is available today and `d` is not, and the cheap answer needs only `b`
+///
+/// `b` comes from `collision_box`, which the mod sends. **`d` does not exist
+/// in our data at all**: `FactorioEntityPrototype` carries no
+/// `supply_area_distance`, `distribution_effectivity` or `profile`, so
+/// [`Self::supply_area_distance`] is `None` for every beacon in every world
+/// this planner has ever seen, and every question that needs it answers
+/// `None` rather than a guess.
+///
+/// The saving grace is that **the reservation decision does not need `d`.**
+/// Set `gA = gB = 0` — machines flush against the beacon's footprint — and
+/// the reach condition becomes `0 < d`, which holds for every beacon that
+/// supplies anything at all. So the *narrowest* lane that can ever work is
+/// exactly `b` wide, it is derived from data we have, and it is also the
+/// cheapest ground to reserve. `d` bounds only how much *wider* a lane may
+/// usefully be, which is a question nobody has to answer to leave room.
+///
+/// # What is still missing when `d` lands
+///
+/// The *benefit* needs two more absent fields — `distribution_effectivity`
+/// (the multiplier applied to a module's effect when shared) and `profile`
+/// (2.0's extra multiplier indexed by how many beacons reach one receiver, so
+/// the benefit of the n-th beacon is **not** the benefit of the first). This
+/// type deliberately models neither: it answers where a beacon may stand, not
+/// what it is worth, and inventing the worth from a remembered table is the
+/// mod-compatibility defect this whole approach exists to avoid.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BeaconGeometry {
+    footprint_tiles: f64,
+    supply_area_distance: Option<f64>,
+}
+
+impl BeaconGeometry {
+    /// A beacon of `footprint_tiles` across reaching `supply_area_distance`
+    /// tiles beyond itself.
+    ///
+    /// Public so that the arithmetic above can be exercised with a `d` fed to
+    /// it, which no world can supply yet. Without this the only reachable
+    /// answer would be `None`, and a rule that is only ever asked the
+    /// question it cannot answer is not a rule anybody has checked.
+    #[must_use]
+    pub fn new(footprint_tiles: f64, supply_area_distance: Option<f64>) -> Self {
+        Self {
+            footprint_tiles,
+            supply_area_distance,
+        }
+    }
+
+    /// The beacon's footprint in whole tiles, from its `collision_box`.
+    ///
+    /// Factorio sizes an n-tile box at slightly under n (a 3x3 beacon's box is
+    /// `+/-1.19921875`, i.e. 2.3984375 across) so that two of them may abut,
+    /// which is why this rounds **up** rather than to nearest: 2.3984375 is a
+    /// three-tile building, not a two-tile one.
+    #[must_use]
+    pub fn footprint_tiles(&self) -> f64 {
+        self.footprint_tiles
+    }
+
+    /// `supply_area_distance`, in tiles beyond the footprint — `None` for
+    /// every world today. See the type doc.
+    #[must_use]
+    pub fn supply_area_distance(&self) -> Option<f64> {
+        self.supply_area_distance
+    }
+
+    /// The narrowest lane a beacon can stand in and still reach a machine row
+    /// flush against each side: its own footprint, and **no function of
+    /// `supply_area_distance` at all**.
+    #[must_use]
+    pub fn lane_tiles(&self) -> f64 {
+        self.footprint_tiles
+    }
+
+    /// The widest two machine rows may be apart, edge to edge, for one beacon
+    /// centred between them to reach both: `b + 2d`.
+    ///
+    /// `None` while `d` is absent — a caller that needs this number cannot
+    /// have it yet, and is told so rather than handed `b` and a shrug.
+    #[must_use]
+    pub fn max_row_separation_tiles(&self) -> Option<f64> {
+        self.supply_area_distance
+            .map(|d| self.footprint_tiles + 2.0 * d)
+    }
+
+    /// Whether a machine row whose near face is `gap` tiles from the beacon's
+    /// footprint is inside the supply area: `gap < d`.
+    ///
+    /// `None` while `d` is absent.
+    #[must_use]
+    pub fn reaches_gap(&self, gap: f64) -> Option<bool> {
+        self.supply_area_distance.map(|d| gap < d)
+    }
+}
+
+/// [`BeaconGeometry`] for `beacon`, or `None` for a world that does not carry
+/// that prototype.
+///
+/// A refusal rather than a default, following [`machine_crafting_speed`]'s
+/// neighbours in `crate::state`: an unknown name contributes nothing, which
+/// under-credits instead of over-crediting.
+#[must_use]
+pub fn beacon_geometry(state: &PlanState, beacon: &str) -> Option<BeaconGeometry> {
+    let prototype = state.base().entity_prototypes.get(beacon)?;
+    let box_ = &prototype.collision_box;
+    let footprint_tiles = box_.width().max(box_.height()).ceil();
+    if footprint_tiles <= 0.0 {
+        return None;
+    }
+    Some(BeaconGeometry {
+        footprint_tiles,
+        supply_area_distance: beacon_supply_area_distance(state, beacon),
+    })
+}
+
+/// A beacon's `supply_area_distance`, which **nothing in this workspace can
+/// answer yet**.
+///
+/// The one seam between [`BeaconGeometry`] and the world, kept as a named
+/// function so that the day the mod starts sending the field there is exactly
+/// one body to change and nothing downstream to re-derive.
+///
+/// Deliberately **not** a table of vanilla names in the manner of
+/// `crate::state`'s `pole_supply_half_extent`. That table is honest about
+/// being a stopgap and is still a mod-compatibility defect: a mod that
+/// retunes a beacon gets our number rather than its own, silently and with
+/// every test still passing. One such table already exists; a second would be
+/// two.
+///
+/// What the mod must send, by exact prototype field name, for this to become
+/// answerable — all three are readable at runtime off `LuaEntityPrototype`:
+///
+/// * `get_supply_area_distance()` (a method in 2.0, not an attribute) — the
+///   geometry, and the only one this function needs;
+/// * `distribution_effectivity` — the effect multiplier, needed to price a
+///   beacon rather than to site one;
+/// * `profile` — 2.0's per-beacon-count multiplier, likewise for pricing.
+///
+/// Module effects come from the *item* side, `LuaItemPrototype::module_effects`,
+/// which `FactorioItemPrototype` does not carry either.
+#[must_use]
+pub fn beacon_supply_area_distance(_state: &PlanState, _beacon: &str) -> Option<f64> {
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::ids::BotId;
     use crate::state::{ClaimRunner, DEFAULT_RESOURCE_PER_TILE, PlanState};
     use factorio_bot_core::factorio::util::add_to_rect;
-    use factorio_bot_core::factorio::world::FactorioWorld;
+    use factorio_bot_core::factorio::world::FactorioSurface;
     use factorio_bot_core::serde_json;
     use factorio_bot_core::test_utils::fixture_world;
     use factorio_bot_core::types::{Direction, FactorioEntity, FactorioForce, Position, Rect};
@@ -2041,7 +2235,7 @@ mod tests {
     /// A machine an earlier plan left standing on the iron patch, reaching
     /// the world through the same door the mod's `on_some_entity_created`
     /// uses. `at` is the entity position; the box is the prototype's own.
-    fn world_with_standing(name: &str, entity_type: &str, at: Position) -> Arc<FactorioWorld> {
+    fn world_with_standing(name: &str, entity_type: &str, at: Position) -> Arc<FactorioSurface> {
         let world = fixture_world();
         let collision = world
             .entity_prototypes
@@ -2062,7 +2256,7 @@ mod tests {
 
     /// A burner drill at (-35, 36) covers the four iron tiles nearest the
     /// origin, `NEAREST_IRON` among them.
-    fn standing_drill() -> (Arc<FactorioWorld>, Position) {
+    fn standing_drill() -> (Arc<FactorioSurface>, Position) {
         let at = Position::new(-35., 36.);
         (
             world_with_standing("burner-mining-drill", "mining-drill", at.clone()),
@@ -2194,5 +2388,88 @@ mod tests {
             "a lab with no unit is idle, not negative"
         );
         assert_eq!(research_ticks_in_labs(&tech, 0), research_ticks(&tech));
+    }
+
+    /// The lane is the beacon's own footprint, read off `collision_box`, and
+    /// the fixture's beacon is the live 2.1.17 one (+/-1.19921875, i.e.
+    /// 2.3984375 across -- a *three*-tile building rounded up, not a two-tile
+    /// one rounded down).
+    #[test]
+    fn a_beacons_lane_is_its_own_footprint_from_the_prototype() {
+        let state = state();
+        let geometry = beacon_geometry(&state, BEACON).expect("the fixture ships a beacon");
+        assert!(
+            (geometry.footprint_tiles() - 3.0).abs() < f64::EPSILON,
+            "a 2.3984375-wide collision box is a 3x3 building, got {}",
+            geometry.footprint_tiles()
+        );
+        assert!((geometry.lane_tiles() - 3.0).abs() < f64::EPSILON);
+    }
+
+    /// The falsifier for the whole approach: the lane must follow the
+    /// prototype, so a beacon a mod made 5x5 must get a five-tile lane. A
+    /// hard-coded three passes the test above and fails this one.
+    #[test]
+    fn the_lane_follows_the_prototype_and_not_the_number_three() {
+        let world = fixture_world();
+        let mut beacon = world
+            .entity_prototypes
+            .get(BEACON)
+            .expect("the fixture ships a beacon")
+            .clone();
+        beacon.collision_box = Rect::new(
+            &Position::new(-2.19921875, -2.19921875),
+            &Position::new(2.19921875, 2.19921875),
+        );
+        world.entity_prototypes.insert(BEACON.into(), beacon);
+        let state = PlanState::from_world(Arc::new(world), &[BotId(1)]);
+        let geometry = beacon_geometry(&state, BEACON).expect("the beacon is still there");
+        assert!(
+            (geometry.lane_tiles() - 5.0).abs() < f64::EPSILON,
+            "a 4.3984375-wide beacon needs a five-tile lane, got {}",
+            geometry.lane_tiles()
+        );
+    }
+
+    /// `supply_area_distance` is absent from our data, so every question that
+    /// needs it answers `None`. This is what makes the gap visible instead of
+    /// letting a default stand in for a measurement.
+    #[test]
+    fn an_absent_supply_area_distance_answers_none_rather_than_a_default() {
+        let state = state();
+        let geometry = beacon_geometry(&state, BEACON).expect("the fixture ships a beacon");
+        assert_eq!(geometry.supply_area_distance(), None);
+        assert_eq!(geometry.max_row_separation_tiles(), None);
+        assert_eq!(geometry.reaches_gap(0.0), None);
+        assert_eq!(beacon_supply_area_distance(&state, BEACON), None);
+    }
+
+    /// The rule the absent field will feed: a row is reached iff its gap is
+    /// **strictly under** `d`, and two rows may sit `b + 2d` apart.
+    ///
+    /// Fed by hand through [`BeaconGeometry::new`] because no world can feed
+    /// it. Vanilla's 3x3 beacon at `d = 3` gives the 9x9 supply area the game
+    /// shows, which is `b + 2d` and emphatically not `2d`.
+    #[test]
+    fn a_fed_supply_area_distance_reaches_a_row_inside_it_and_not_one_at_it() {
+        let geometry = BeaconGeometry::new(3.0, Some(3.0));
+        assert_eq!(geometry.reaches_gap(0.0), Some(true), "flush is reached");
+        assert_eq!(geometry.reaches_gap(2.9), Some(true));
+        assert_eq!(
+            geometry.reaches_gap(3.0),
+            Some(false),
+            "the supply area ends at d, so a row exactly d away is outside it"
+        );
+        assert_eq!(geometry.max_row_separation_tiles(), Some(9.0));
+    }
+
+    /// A world with no beacon prototype gets no geometry, rather than a
+    /// vanilla one invented for it.
+    #[test]
+    fn a_world_with_no_beacon_prototype_refuses() {
+        let world = fixture_world();
+        world.entity_prototypes.remove(BEACON);
+        let state = PlanState::from_world(Arc::new(world), &[BotId(1)]);
+        assert!(beacon_geometry(&state, BEACON).is_none());
     }
 }

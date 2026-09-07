@@ -48,7 +48,7 @@
 //! the patch, which is `smelt_steps`' `own_grow` — the one arm that asks for a
 //! *new* furnace whatever else stands there — and there is nowhere to put it.
 
-use factorio_bot_core::factorio::world::FactorioWorld;
+use factorio_bot_core::factorio::world::FactorioSurface;
 use factorio_bot_core::test_utils::{fixture_world, spawn_water};
 use factorio_bot_core::types::{Direction, FactorioEntity, FactorioTile, Position, Rect};
 use factorio_bot_planner::action::{ActionKind, InventorySlot};
@@ -62,7 +62,7 @@ use std::sync::Arc;
 /// siting search can ever return it.
 const STANDING: Position = Position { x: -40., y: 40. };
 
-fn boxed_in_world() -> FactorioWorld {
+fn boxed_in_world() -> FactorioSurface {
     let world = fixture_world();
     // Four bands round the iron patch (`x -45..-35, y 35..45`), 14 tiles deep
     // on every side -- comfortably past the 12 rings `free_area_near` walks

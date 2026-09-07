@@ -136,6 +136,33 @@ wrong answer in this repo rather than an error you would notice.
   `git diff --no-ext-diff` when something machine-readable is wanted, or
   `git revert`.
 
+**A backtick in `git commit -m "..."` is COMMAND SUBSTITUTION, and it silently
+deletes what it cannot run.** `-m` is passed in double quotes, so the shell
+expands backticks before git ever sees the string. A message written as
+
+```
+Gating runs on load with `bc`, which is not installed here.
+```
+
+lands in the log as `Gating runs on load with , which is not installed here.` —
+the word gone, the sentence still grammatical, and `zsh: command not found: bc`
+scrolling past in output nobody re-reads. This happened **four times in one
+session** to four different commits, each time removing exactly the identifier
+the sentence was about, because prose about code is mostly backticked
+identifiers. Two of them silently dropped the names of the technologies a
+finding was about.
+
+Write the message to a file with a **quoted** heredoc and use `git commit -F`:
+
+```bash
+cat > /tmp/msg <<'EOF'
+fix(thing): `identifier` survives here
+EOF
+git commit -F /tmp/msg -- <paths>
+```
+
+`<<'EOF'` (quoted delimiter) suppresses every expansion; `<<EOF` does not.
+
 **A pipeline reports the LAST command's exit code, not the interesting one.**
 `cargo test --workspace | grep -E "^test result"` exits 0 whenever *grep*
 matched something, even with a failing test in the output. That has already
@@ -305,7 +332,101 @@ BotBridge Mod (Factorio mod for RPC)
   - `types.rs` - Shared data models
   - `factorio/rcon.rs` - RCON protocol implementation
   - `graph/entity_graph.rs` - Spatial entity relationships
-  - `graph/flow_graph.rs` - Material flow throughput
+  - `graph/flow_graph.rs` - Material flow throughput. **Validated against a
+    world-record base on 2026-09-07 and now within 1-32% of the game's own
+    production statistics.** Most of what this entry used to say about it was
+    true when written and is now wrong; the corrections are at the end of the
+    section, kept rather than deleted because the *reasoning* that was wrong is
+    the transferable part.
+
+    History, still accurate: `flow_graph.update()` is called from
+    `process/output_parser.rs::on_init` and `factorio/snapshot.rs::attach_world`,
+    and an earlier version of this entry said that meant "work on every parser
+    update". It does not: `on_init` fires **once**, when Factorio logs
+    `initial discovery done`, and `attach_world` is the `--connect` path. The
+    traversal iterates only graph roots that are an offshore pump or a drill
+    with ore, of which a freshly-initialised world has essentially none. **So
+    there is no per-update cost to reclaim; the liability is dead code, not
+    CPU.** What is true is that no `condense()`, `node_at()`, `inner_graph()` or
+    `graphviz_dot()` call exists anywhere outside the file and its own tests.
+
+    **And it never refreshes, which is the trap for whoever makes it relevant.**
+    Those two calls are the *only* ones: nothing updates the flow graph when an
+    entity is placed, mined or destroyed. `entity_graph` is maintained
+    continuously through the parser, and the flow graph built from it is not —
+    so every machine a run builds is invisible to it, and the moment somebody
+    reads it they get the world **as it was at tick 0**, silently and with no
+    error. The owner has said this file should become relevant soon, so treat
+    "add a reader" and "refresh on entity add/remove" as one piece of work, not
+    two: a reader without the refresh is worse than no reader, because a stale
+    answer looks exactly like a current one.
+
+    **And the refresh cannot be "call `update()` again".** It appends to
+    `self.inner`, which is built once in `new()` and **never cleared**.
+    Re-running on an *unchanged* world is harmless — `get_or_create_flow_node`
+    dedupes by position via `node_at`, and `update_flow_edge` uses petgraph's
+    `update_edge`, which replaces a weight rather than adding a parallel edge.
+    On a *changed* world it is wrong in two ways: **a removed entity's node and
+    edges stay forever**, since nothing deletes; and **a position reused by a
+    different entity keeps the old `FlowNode`**, because `node_at` matches on
+    position alone and returns before the prototype is ever consulted. So the
+    refresh has to rebuild.
+    **CORRECTED 2026-09-07 — three claims above are no longer true.** The
+    refresh is generation-keyed; `throughput_at` and `production_rates()` are
+    real readers; and `furnace_output` with its hard-coded `1/3.2` **does not
+    exist** — `smelting_output` derives `product.amount * crafting_speed /
+    recipe.energy` from prototypes. Do not act on the paragraphs above without
+    re-reading the file.
+
+    **The "give it a reader before the fix" instruction was right, and the
+    world-record save is what finally supplied one.** Against a 6:39:53 Space
+    Age base at tick ~1,447,000 (`docs/superpowers/notes/
+    2026-09-06-what-the-record-base-knows.md`):
+
+    | item | game /min | model /min | ratio |
+    |---|---:|---:|---:|
+    | copper-cable | 22,367 | 22,680 | 1.01 |
+    | copper-plate | 15,147 | 16,580 | 1.09 |
+    | iron-plate | 15,170 | 19,016 | 1.25 |
+    | electronic-circuit | 6,694 | 8,820 | 1.32 |
+
+    Four things that only a real base could have shown, each of which
+    contradicted an expectation held going in:
+
+    - **We OVER-predict.** The gap was expected in the other direction, on the
+      theory that modules and beacons we cannot model would make the real base
+      faster. **Falsified where the volume is**: all 1,222 furnaces and all 559
+      iron drills read `speed_bonus` and `productivity_bonus` of exactly 0.000,
+      and not one of the base's 2,226 modules sits in a furnace or an ore drill.
+    - **The dominant term is idleness, and nothing in the graph represents it**
+      — +16% to +23%, unbounded, against coverage at ~1.6% and force bonuses at
+      −9%. A machine standing still is invisible here; 194 drills were sitting
+      at `waiting_for_space_in_destination` during the measurement. **This, not
+      modules, is the next piece of work.**
+    - **The old `1/3.2` would have been exactly 2.0x low on every plate**, since
+      1,196 of the 1,222 furnaces are `steel-furnace` at `crafting_speed` 2. The
+      fix had landed but had never been *verified*; this is the verification.
+    - **A furnace was running every recipe at once.** The furnace arm added a
+      full-rate edge per smeltable input, so one furnace on a mixed belt
+      reported smelting iron AND copper AND stone at 100% each — stone-brick
+      read 7,125/min against the game's 450. Outputs now share the furnace's
+      time.
+
+    **And copper-cable's 1.01 is a coincidence, stated as one**: its +12% beacon
+    speed and +3% productivity nearly exactly cancel its 18% idle. This repo's
+    rule that a match is more suspicious than a 3x, measured for once rather
+    than asserted.
+
+    Two standing limits: the model holds **one surface** (Nauvis is 86.5% of the
+    base by entity count but 99% of plate and circuit production), and
+    `EntityGraph::add`'s whitelist deliberately excludes 763 entities including
+    **all 249 beacons**, which are therefore invisible by construction.
+
+    **A denominator artefact worth not repeating**: this base was reported for
+    weeks as "the model holds 12% of it". It holds **98.0% of the built base**.
+    The 12% divided by *every* entity within 1,000 tiles, 83% of which are ore
+    tiles — and ore lives in `EntityGraph::resources`, a `Pos`-keyed map, not in
+    `entity_tree`. Comparing against `entity_tree` could never have found them.
   - `process/` - Factorio process spawning/control
   - `plan/planner.rs` - `Planner`, the Lua runtime's context holder (rcon,
     real_world, plan_world). NOT a planner any more: the task-graph planner it
@@ -315,7 +436,32 @@ BotBridge Mod (Factorio mod for RPC)
 - **crates/planner**: the goal planner. Pure and deterministic — no I/O, no
   async, no wall-clock, ordered collections only, floats via `total_cmp`.
   `Goal` -> `expand()` -> `ActionNetwork` -> `schedule()` -> `Schedule`.
-  Methods live in `method/`; `state.rs` overlays a `FactorioWorld` snapshot.
+  Methods live in `method/`; `state.rs` overlays a `FactorioSurface` snapshot.
+
+  **`FactorioWorld` was renamed to `FactorioSurface` on 2026-09-06, and the
+  name `FactorioWorld` now means something else.** The old type was never a
+  world — one `EntityGraph`, one `FlowGraph`, one set of `Pos`-keyed overlays,
+  all of them describing a single surface, so a chest at (10, 10) on Nauvis
+  and a chest at (10, 10) on a platform were the same key everywhere. The new
+  `FactorioWorld` (`crates/core/src/factorio/world.rs`) is the aggregate: a
+  `BTreeMap<SurfaceId, Arc<FactorioSurface>>`, one graph per surface, so the
+  aliasing is impossible by construction rather than by care. The surface does
+  **not** go on `Position` — a coordinate is only comparable within a surface,
+  and `p1 - p2` across two has no answer an `f64` can carry.
+
+  Two things to know before touching it. **It holds one surface and refuses
+  the second by name** (`SurfaceNotYetSeparable`): the game- and force-global
+  fields — recipes, prototypes, `forces` and their research, the action id
+  counter — still live on `FactorioSurface`, so a second surface would give
+  the run two copies of the research state. The type's own doc carries the
+  field-by-field split and names `players` and `benches` as genuinely
+  ambiguous. And **`only_surface()` is the porting seam, not `nauvis()`**: it
+  answers only while there is exactly one surface, so a caller that never said
+  which surface it meant stops working rather than silently getting Nauvis.
+  `FactorioInstance::surface()` and `require_surface` are its two users.
+  The mod's Nauvis guard in `mods/BotBridge/control.lua` is the matching half
+  upstream and must stay until callers are ported. See
+  `docs/superpowers/notes/2026-09-06-surfaces-survey.md`.
 
   - **`method::connect`** (`connect_steps`, built on `graph::route::route_belt`
     in `crates/core`) routes a `transport-belt` run between two **machines**
@@ -407,8 +553,32 @@ BotBridge Mod (Factorio mod for RPC)
       run cheated in no power source. Power coverage is not power capacity.
       So 87 belts, 48 inserters, 2 splitters and 2 underground belts --
       **138 of 179 entities, 77% of the block** -- are proven to stand and
-      have **never been shown to move a single item**. Closing that needs
-      power in the blueprint and a source/sink to count at each end.
+      have **never been shown to move a single item**.
+
+      **What was missing was one machine, and that is now measured** (peer
+      session, 2026-09-06, computed offline from the fixture with no world):
+      **13 of 13 poles wired into one component, 48 of 48 inserters inside a
+      pole's supply area, 624.0 kW of demand.** The block is *internally
+      complete* — its own poles connect and cover its own consumers. It was
+      never a coverage or a distribution problem, and nothing in the planner
+      was at fault: **nobody ever gave it a generator.** "13 poles and no
+      generator at all" meant exactly what it said.
+
+      So closing it needs **generation**, not power *in* the blueprint: one
+      hop from a supply anchor to any one of the block's own poles, which is
+      point-to-point and is what `method::power::ensure_powered` does. A
+      900 kW plant covers 624 kW with headroom.
+
+      **And 624 kW is the PRE-ELECTRIC number.** Those furnaces burn coal; the
+      draw is 48 inserters at 13 kW. Convert them to electric furnaces at
+      **180 kW each** and one yellow belt's worth (24 furnaces, see the
+      smelting ratios) is **4,320 kW** against a plant that tops out at 1.8 MW
+      with two engines. That is the owner's *"a second boiler is usually
+      needed after the electricity demands skyrocket once we start using
+      electric smelters"* with arithmetic under it, and it says the plant
+      ceiling binds on a block that exists rather than on a hypothetical one.
+      Design for growing the plant: `docs/superpowers/notes/
+      2026-09-06-one-place-that-decides-power.md`.
     - **It has no siting story, and refuses rather than guessing.** The
       block is placed at a fixed offset. Since 2026-09-05 `expand()` scans
       the whole footprint **before emitting anything** and refuses with
@@ -516,6 +686,20 @@ declaration in `app/src/api/types.ts` via `objectContract<T>`. Adding a field
 in Rust fails the Rust snapshot test until regenerated, then fails the
 TypeScript contract test until mirrored. Neither half can drift quietly.
 
+**But a THIRD place can, and did (2026-09-07).** `vitest` does **not**
+type-check — it strips types and runs. So a test *helper* that constructs a
+`FactorioEntity` literal can go stale when a field is added, and every test
+still passes while `tsc --noEmit` fails. `MapEntities.spec.ts` sat broken on
+master exactly that way after `input_inventory` and `transport_lines` landed:
+`cargo test --workspace` green, `pnpm test` green, **`pnpm lint` red**.
+
+Two consequences worth internalising. **`pnpm lint` is part of the seam, not a
+style pass** — run it before calling a frontend-touching change done. And a
+type error in a file `git status` reports as *clean* is not evidence of
+anything: a committed file can be committed-broken. Asking "is this file
+dirty?" answers a different question from "does this compile", and that
+substitution has already produced one confident wrong dismissal here.
+
 ### Logging: two systems, on purpose
 
 **Narration is `paris`, on stdout. Diagnostics are `tracing`, on stderr.**
@@ -592,6 +776,37 @@ reading `docs/superpowers/notes/2026-09-02-screenshots-retired.md`: one run
 wrote 2,164 JPEGs / 947 MB against 290 MB for the same 45 minutes of video, and
 `take_screenshot` renders *synchronously inside the game loop* where the video
 grabber reads a frame the GPU already drew.
+
+**One diagnostic frame, taken by hand, is a different thing and it works.**
+Nothing in the retirement removed `game.take_screenshot`, and the mod still
+exposes it: `remote.call('botbridge', 'screenshot', {...})` forwards straight to
+it. Verified 2026-09-06 to answer a question four separate measurements could
+not — where ore was sitting on a belt, which no binding can read.
+
+```bash
+# while a run is holding the game open
+factorio-bot rcon -s localhost --settings <settings> -- \
+  "/silent-command remote.call('botbridge','screenshot',{player=game.players[1], \
+   surface=game.surfaces[1], position={x,y}, resolution={1400,1400}, zoom=3, \
+   path='shot.png', show_entity_info=true})"
+```
+
+Three things that cost a run each to learn:
+
+- **A headless server cannot render.** The call reaches the game and *creates*
+  `script-output/`, then writes nothing. **The empty directory is the tell** —
+  there is no error anywhere.
+- **A graphical client can**, and the file lands in the **client's**
+  `script-output`, never the server's. So this needs `--clients 1` and
+  `DISPLAY=:0` (see the Platform Notes); the first such run extracts the client,
+  which is minutes.
+- **The script keeps the game alive.** When it returns the server dies, so a
+  script must hold the game open — a tick-wait loop at the end — for a frame to
+  be taken from outside.
+
+This is not a cadence and must not become one: the retirement above is about
+2,164 JPEGs for 947 MB and `take_screenshot` rendering *synchronously inside the
+game loop*. One frame, on demand, when something is invisible.
 
 Three unrelated things are still called "frame" and must survive a grep:
 entity-map **keyframes** (`map.jsonl`, `lib/runMap.ts`), **video frames**
@@ -761,8 +976,47 @@ Three things that are **not** interchangeable between the modes:
   cost. `PlayerId` is `u8`, so 255 is the arithmetic ceiling; before that,
   the mod polls **every bot every tick** (whole main inventory, sorted
   signature, crafting-queue scan) and every action is its own RCON round
-  trip, so bot count is what costs tick rate (eight bots still held 242 of
-  300 requested tps). Parallel *runs* are the cheap axis: two headless
+  trip, so bot count is what costs tick rate.
+
+  **Measured 2026-09-06: a bot costs ~16.3 us per tick, and at eight bots that
+  is 42% of all tick time.** `tools/measure_tick_cost.sh` with
+  `scripts/tickrate.lua`, idle roster, release build, seed 31337:
+
+  | roster | tps | us/tick |
+  |---|---|---|
+  | 1 | 5,145 | 194 |
+  | 4 | 4,147 | 241 |
+  | 8 | 3,242 | 308 |
+
+  Fit: **178 us base + 16.3 us per bot per tick**, with the two intervals
+  agreeing to 8% (15.6 and 16.8 us/bot), so the relationship is linear rather
+  than two points and a hope.
+
+  **Taken on a quiet box, and the number is only worth its conditions**:
+  `load_start=1.82`, `load_end=4.01` on 20 cores, with the harness refusing
+  outright above load 6 and waiting up to 30 minutes for the box to drop below
+  cores/4. **This is one of the few measurements here that a busy tree can
+  move** — game speed and tick rate are wall-clock quantities, so there is no
+  tick-bounded form of the question. Re-run it only on a quiet box, and state
+  the load beside any new figure.
+
+  **The old figure here — "eight bots still held 242 of 300 requested tps" —
+  had no baseline**, so it said where eight bots ended up and could not say what
+  one costs. Anything quoted as a per-bot cost needs a 1/4/8 sweep behind it.
+
+  Three things that make the number readable, each of which was wrong in an
+  earlier attempt: startup is cancelled by **differencing two tick spans**
+  (60k and 180k) rather than estimated, because a single-span run was 17.5s
+  wall of which ~16s was server start; the probe's own RCON polling is in the
+  **base and not the slope**, verified by poll counts being identical across
+  rosters (12,000 short / 36,002 long for all three); and the roster is read
+  from `rcon.players()` and asserted, never taken from the `--bots` flag.
+
+  **Scale it before acting on it.** 130 us at eight bots is under 1% of a 60 Hz
+  tick, so this is invisible at 1x and only bites headless at high speed, where
+  the tick budget is whatever the CPU can do. That is the regime this project
+  iterates in, so it is worth fixing — as a throughput optimisation for our own
+  loop, not as a correctness or playability problem. Parallel *runs* are the cheap axis: two headless
   instances on their own ports and workspaces each held ~220 tps and
   finished in the wall time of one (`docs/superpowers/notes/
   2026-09-05-headless-experiments.md`).
@@ -907,6 +1161,28 @@ timeout 180 target/release/factorio-bot lua multi_client_test.lua -c 2
    one-bot run misread as a four-bot regression cost a good commit a revert.
 6. **Script runs** - clients should be connected by this point
 7. **Multi-bot coordination** verified via task graph execution
+
+**A measurement an iteration cap or a wall clock can move is a broken
+instrument, not a scheduling problem.** Bound a window in **game ticks** and it
+is immune to whatever else the box is doing — starvation only makes the wall
+clock longer, and the run still covers the ticks you asked for. Two failures on
+2026-09-06 came from ignoring this, both mine:
+
+- **`for _ = 1, 5000` polls is not a duration.** On a faster box more game ticks
+  pass per RCON round trip, so the same poll count covers more game time. A
+  block compared this way was published at **4.6x** and re-measured at **2.6x**
+  on a fixed 6,300-tick window.
+- **A terminal value against a non-terminal one is not a comparison.** Two runs
+  had plateaued — they had stopped producing — while the third was still
+  climbing when its cap closed. One number was finished and the other was not.
+- **And a shared mutable substrate is the same fault.** The first re-measure
+  built three variants on **one map in sequence**, so the second was sited on
+  ground the first had changed. One fresh map per variant.
+
+The exception is real and narrow: **anything whose subject IS the wall clock**
+— game-speed choice, tick rate, per-bot cost — has no tick-bounded form and does
+need a quiet box. That is a small set, and naming it is what stops every other
+measurement being pessimised into serial execution.
 
 ### Measuring a run, and the traps that have produced wrong answers
 
@@ -1150,9 +1426,20 @@ never read `map_gen_settings`, so the maps behind every timing quoted in the
 
 ### Silence is not success
 
-Four separate mechanisms have been found reporting nothing while broken. When
+Five separate mechanisms have been found reporting nothing while broken. When
 adding any check, ask what a reader sees when it *fails*, and prefer a record
 entry over a log line:
+
+- **A STALE BINARY drops a newly-added field in silence, and it reads exactly
+  like "the game does not report it"** (2026-09-07). A session added
+  `entity.status` to the mod, then read it back as `nil` for every furnace. The
+  mod was correct; the **release binary predated the field by 89 minutes**, so
+  `FactorioEntity` had nowhere to put it and serde discarded it without a
+  word. **The tell is that the field is UNIFORMLY absent rather than sometimes
+  absent** — a real "the game does not know" is almost never perfectly
+  uniform. Cousin of the stale-mod trap below, and it bites from the opposite
+  side: there, the binary is new and the mod is old. Rebuild before concluding
+  anything about a field added in the same session.
 
 - the `Using mods directory` line was gated behind `if !silent`, which every CLI
   path sets, so the authoritative "did my edit ship" answer printed on no run;
@@ -1311,6 +1598,30 @@ entry over a log line:
   does work: an inserter picks from **both** lanes, preferring the far one, so
   two rows meeting opposite lanes first self-correct once a furnace's ore slot
   fills. See `docs/superpowers/notes/2026-09-06-two-rows-off-one-belt.md`.
+
+  **NARROWED 2026-09-07 by `entity.status`: the gradient is real, "not short of
+  fuel" is NOT general.** The claim above was inferred from plate counts on one
+  block. Read directly instead — 3,058 status samples across the window, on a
+  four-furnace chain:
+
+  ```
+  furnace 1 (near)  working 91%  no_ingredients  2%  no_fuel  7%
+  furnace 2         working 43%  no_ingredients 42%  no_fuel 15%
+  furnace 3         working  7%  no_ingredients 62%  no_fuel 31%
+  furnace 4 (far)   working  0%  no_ingredients 58%  no_fuel 42%
+  ```
+
+  **`no_fuel` climbs 7% → 42% alongside `no_ingredients`**, so the far end
+  starves of *everything the belt carries*, not of ore specifically. The
+  original reading took its mechanism from the commodity that happened to be
+  counted. The buffer-size story survives but is narrower than stated: a fuel
+  slot capping at 5 lets coal ride past a **satisfied** furnace, and does
+  nothing for a furnace whose arm never gets a turn at all.
+
+  The general lesson is the one this file keeps relearning: **a mechanism
+  inferred from the one quantity you were measuring will be about that
+  quantity.** The status field cost nothing to read and corrected an inference
+  within an hour of landing.
 - **RETRACTED 2026-09-06: "ungenerated ground reads as clear".** This entry
   claimed that a siting search picked a tile with a tree on it because the chunk
   was not generated yet, and that "zero entities in a 10-tile disc of a fresh

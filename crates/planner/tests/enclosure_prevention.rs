@@ -31,7 +31,7 @@
 //! relative path rather than duplicated, since `include_str!` resolves at
 //! compile time and crosses no crate boundary.
 
-use factorio_bot_core::factorio::world::FactorioWorld;
+use factorio_bot_core::factorio::world::FactorioSurface;
 use factorio_bot_core::num_traits::FromPrimitive;
 use factorio_bot_core::test_utils::fixture_entity_prototypes;
 use factorio_bot_core::types::{Direction, FactorioEntity, FactorioPlayer, Position};
@@ -103,12 +103,12 @@ fn ring_sides(around: &Position, radius: f64) -> [Vec<FactorioEntity>; 4] {
     sides
 }
 
-/// A `FactorioWorld` carrying run 13's own furnaces and ore, converted
+/// A `FactorioSurface` carrying run 13's own furnaces and ore, converted
 /// through the same fixture prototypes `enclosure_run13.rs` uses so each gets
 /// a real collision box, plus `extra` (a partial reconstructed ring).
-fn world_of(entities: &[Snapshot], extra: Vec<FactorioEntity>) -> FactorioWorld {
+fn world_of(entities: &[Snapshot], extra: Vec<FactorioEntity>) -> FactorioSurface {
     let prototypes = Arc::new(fixture_entity_prototypes());
-    let world = FactorioWorld::new();
+    let world = FactorioSurface::new();
     let proto_vec: Vec<_> = prototypes.iter().map(|v| v.clone()).collect();
     world
         .update_entity_prototypes(proto_vec)
@@ -140,7 +140,7 @@ fn world_of(entities: &[Snapshot], extra: Vec<FactorioEntity>) -> FactorioWorld 
 /// one non-participating bystander this scenario is about. Nobody else needs
 /// a `characters` entry for `check` to consult: bot 3 alone is close enough
 /// to the reconstructed ring to matter.
-fn place_bot_3(world: &FactorioWorld, run: &Frozen) {
+fn place_bot_3(world: &FactorioSurface, run: &Frozen) {
     world.players.insert(
         3,
         FactorioPlayer {
@@ -335,9 +335,9 @@ fn pen(low_x: f64, low_y: f64, gap: &[(f64, f64)]) -> Vec<FactorioEntity> {
 
 /// A world holding only `entities`, with the fixture prototypes so the steam
 /// engine below gets its real collision box.
-fn bare_world(entities: Vec<FactorioEntity>) -> FactorioWorld {
+fn bare_world(entities: Vec<FactorioEntity>) -> FactorioSurface {
     let prototypes = Arc::new(fixture_entity_prototypes());
-    let world = FactorioWorld::new();
+    let world = FactorioSurface::new();
     world
         .update_entity_prototypes(prototypes.iter().map(|v| v.clone()).collect())
         .expect("prototypes load");

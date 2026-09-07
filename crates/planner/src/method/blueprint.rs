@@ -567,6 +567,16 @@ pub(crate) struct BlockPower {
     pub disconnected_poles: usize,
     /// Consumers no pole of this block supplies, by name and offset.
     pub uncovered: Vec<(String, Position)>,
+    /// What the block's own generators contribute, in kW.
+    ///
+    /// `FurnaceLine` is why this is worth carrying beside the draw. The record
+    /// has always described it as having "no generator at all", which is a
+    /// statement about generation with no number attached — and a block that
+    /// brings its own power needs no plant planned for it, so the two figures
+    /// answer different questions and both are needed.
+    pub generation_kw: f64,
+    /// How many entities that generation came from.
+    pub generators: usize,
 }
 
 impl BlockPower {
@@ -629,6 +639,15 @@ pub(crate) fn blueprint_power(state: &PlanState, bp: &Blueprint, anchor: &Positi
     }
     let disconnected_poles = reached.iter().filter(|r| !**r).count();
 
+    let mut generation_kw = 0.0;
+    let mut generators = 0usize;
+    for e in &bp.entities {
+        if let Some(kw) = state.generator_output_kw(&e.name) {
+            generation_kw += kw;
+            generators += 1;
+        }
+    }
+
     let mut uncovered = Vec::new();
     for e in &bp.entities {
         if state.consumer_draw_kw(&e.name).is_none() {
@@ -655,6 +674,8 @@ pub(crate) fn blueprint_power(state: &PlanState, bp: &Blueprint, anchor: &Positi
         poles: poles.len(),
         disconnected_poles,
         uncovered,
+        generation_kw,
+        generators,
     }
 }
 
@@ -692,6 +713,26 @@ fn first_obstruction(state: &PlanState, bp: &Blueprint, anchor: &Position) -> Op
     None
 }
 
+/// # A drill can pass this check while standing mostly off the patch
+///
+/// This asks whether the mining area covers **some** extractable resource, not
+/// how much, and that is right for a feasibility check: a drill on one ore tile
+/// mines at the full nameplate rate, because Factorio does not scale a drill's
+/// speed by how many tiles it covers.
+///
+/// It is wrong as a **siting quality** measure, and nothing else measures that.
+/// A burner drill's 0.99 radius works its own 2x2 — four tiles — and a block
+/// sited live on 2026-09-06 put its two drills on **two** tiles and **one**.
+/// Same rate, but such a drill exhausts its ground up to four times faster, so
+/// the block needs re-siting far sooner than its nameplate suggests. A later
+/// run of a differently-shaped block landed a drill on all four (1,224 ore in
+/// reach against 150), which is the same siting code finding a better spot by
+/// luck of footprint rather than by preference.
+///
+/// So: the check is correct as specified, and the specification is what is
+/// missing. Coverage belongs beside the re-siting question rather than inside
+/// this boolean — turning it into a threshold would refuse blocks that work.
+///
 /// Does `area` cover a tile of some resource `drill` can actually extract?
 ///
 /// Inverts the game's own rule ([`PlanState::extractors_for`]): a resource is
@@ -1122,8 +1163,11 @@ impl Method for BuildBlock {
             }
             return Err(PlannerError::BlueprintRefused {
                 reason: format!(
-                    "the block draws {:.0} kW but cannot distribute it: {}",
+                    "the block draws {:.0} kW and generates {:.0} kW from {} \
+                     generator(s), but cannot distribute it: {}",
                     power.demand.kw,
+                    power.generation_kw,
+                    power.generators,
                     why.join("; ")
                 ),
             });
@@ -1962,7 +2006,7 @@ mod tests {
     /// ore-covered cases below, so the only difference between them is
     /// whether ore actually sits on the ground -- not whether the category
     /// data exists to judge it by.
-    fn drill_world() -> factorio_bot_core::factorio::world::FactorioWorld {
+    fn drill_world() -> factorio_bot_core::factorio::world::FactorioSurface {
         use factorio_bot_core::test_utils::fixture_world;
 
         let world = fixture_world();
@@ -2063,7 +2107,10 @@ mod tests {
         drill_pos: Position,
         radius: Option<f64>,
         ore_tile_offset: (i32, i32),
-    ) -> (factorio_bot_core::factorio::world::FactorioWorld, Position) {
+    ) -> (
+        factorio_bot_core::factorio::world::FactorioSurface,
+        Position,
+    ) {
         let world = drill_world();
         {
             let mut proto = world
@@ -3305,6 +3352,18 @@ mod block_demand_tests {
         PlanState::from_world(Arc::new(fixture_world()), &[BotId(1)])
     }
 
+    /// One blueprint entity at an offset. The sibling `tests` module has its
+    /// own; this module cannot reach it, and duplicating four lines beats
+    /// widening the other one's visibility for a test helper.
+    fn ent(x: f64, y: f64, name: &str) -> BlueprintEntity {
+        BlueprintEntity {
+            name: name.to_string(),
+            offset: Position::new(x, y),
+            direction: 0,
+            underground_half: None,
+        }
+    }
+
     fn fixture(name: &str) -> Blueprint {
         let src = std::fs::read_to_string(
             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -3385,6 +3444,186 @@ mod block_demand_tests {
             (power.demand.kw - 624.0).abs() < 1e-9,
             "and the hop has to carry 624 kW, got {}",
             power.demand.kw
+        );
+    }
+
+    /// The electric smelter distributes its own power, and needs a generator.
+    ///
+    /// This is the block the whole `electronics` bootstrap was for. Every
+    /// prototype in it is research-gated, and `electronics` -- a trigger
+    /// technology fired by 10 copper plates -- unlocks both `inserter` and
+    /// `small-electric-pole`. A burner block earns that from its own output, so
+    /// the scaffolding builds its successor.
+    ///
+    /// The assertions are the two halves `blueprint_power` separates: the block
+    /// can distribute (its own poles are one component covering every arm), and
+    /// it draws a real number that a plant has to cover.
+    #[test]
+    fn the_electric_smelter_distributes_its_own_power() {
+        let s = state();
+        let bp = fixture("ElectricSmelter");
+        let power = blueprint_power(&s, &bp, &Position::new(0.0, 0.0));
+
+        assert_eq!(power.poles, 3, "three small poles");
+        assert_eq!(power.disconnected_poles, 0, "all wired to each other");
+        assert!(
+            power.uncovered.is_empty(),
+            "every arm must sit in some pole's supply area; uncovered: {:?}",
+            power.uncovered
+        );
+        assert_eq!(power.demand.consumers, 6, "six electric inserters");
+        assert!(
+            (power.demand.kw - 78.0).abs() < 1e-9,
+            "6 inserters at 13 kW is 78, got {}",
+            power.demand.kw
+        );
+
+        // It has an OUTPUT SIDE, which is what distinguishes it from every
+        // burner block here: those all end at the furnace because an arm
+        // carrying plates has no fuel source. Two arms south of the furnace row
+        // and a belt below them.
+        let at = |n: &str, x: f64, y: f64| {
+            bp.entities.iter().any(|e| {
+                e.name == n && (e.offset.x() - x).abs() < 1e-9 && (e.offset.y() - y).abs() < 1e-9
+            })
+        };
+        for x in [7.5f64, 8.5] {
+            assert!(at("inserter", x, 4.5), "output arm at x={x}");
+            assert!(
+                at("transport-belt", x, 5.5),
+                "output belt under the arm at x={x}"
+            );
+        }
+
+        // And nothing in it is buildable on a fresh force -- the opposite of
+        // the burner blocks. If this ever passes at t=0 the fixture has been
+        // quietly downgraded to burner parts.
+        assert!(
+            bp.entities
+                .iter()
+                .any(|e| e.name == "inserter" || e.name == "small-electric-pole"),
+            "this block is defined by needing electronics"
+        );
+    }
+
+    /// The FurnaceLine finding, now quantified on BOTH sides.
+    ///
+    /// CLAUDE.md has always said the block has "no generator at all" — a
+    /// statement about generation with no number attached, sitting beside a
+    /// draw that was equally unquantified until today. Both halves are numbers
+    /// now, and the pair is what says a plant is needed rather than either one
+    /// alone.
+    #[test]
+    fn furnace_line_generates_nothing_against_its_624_kw() {
+        let power = blueprint_power(&state(), &fixture("FurnaceLine"), &Position::new(0.0, 0.0));
+        assert_eq!(power.generators, 0, "13 poles and not one generator");
+        assert_eq!(power.generation_kw, 0.0);
+        assert!(
+            (power.demand.kw - 624.0).abs() < 1e-9,
+            "against 624 kW of draw"
+        );
+        assert!(
+            power.generation_kw < power.demand.kw,
+            "624 kW of draw against nothing that makes any"
+        );
+    }
+
+    /// A block carrying its own generation is visible as such.
+    ///
+    /// There is deliberately **no `powers_itself()` predicate yet**: its only
+    /// real caller is the power wiring in `expand`, which is blocked on
+    /// `ensure_powered` charging a block's own consumers against its own
+    /// budget. Shipping the predicate ahead of that caller is the shape clippy
+    /// caught twice in this file today, and the shape that let
+    /// `method::connect`'s geometry defect survive four reviews.
+    ///
+    /// Built inline rather than as a fixture: the claim is about the
+    /// arithmetic, not about a layout anyone builds.
+    #[test]
+    fn a_block_carrying_its_own_generation_powers_itself() {
+        let s = state();
+        let self_powered = Blueprint {
+            entities: vec![
+                ent(0.0, 0.0, "inserter"),
+                ent(1.0, 0.0, "small-electric-pole"),
+                ent(4.0, 0.0, "steam-engine"),
+            ],
+            version: 0,
+        };
+        let power = blueprint_power(&s, &self_powered, &Position::new(0.0, 0.0));
+        assert_eq!(power.demand.consumers, 1, "one inserter");
+        assert!((power.demand.kw - 13.0).abs() < 1e-9, "13 kW of draw");
+        assert_eq!(power.generators, 1, "one steam engine");
+        assert!(
+            (power.generation_kw - 900.0).abs() < 1e-9,
+            "900 kW nameplate"
+        );
+        assert!(power.generation_kw >= power.demand.kw);
+
+        // Remove the engine and the same block cannot: the assertion is about
+        // the generation term, not about the block being small.
+        let unpowered = Blueprint {
+            entities: self_powered.entities[..2].to_vec(),
+            version: 0,
+        };
+        let power = blueprint_power(&s, &unpowered, &Position::new(0.0, 0.0));
+        assert_eq!(power.generators, 0);
+        assert_eq!(power.generation_kw, 0.0, "no engine, no generation");
+    }
+
+    /// **A solar block reads as unpowered — and the owner has OVERRULED that,
+    /// so this test pins behaviour that is on its way out.**
+    ///
+    /// Owner, 2026-09-06: *"for solar it should just assume the average output,
+    /// we have batteries to smooth out the power generation later."* That is
+    /// right, and the justification in `generation_kw` is weaker than it reads:
+    /// **the average is a constant.** 60 kW peak and its day/night average are
+    /// both fixed numbers, so crediting one costs nothing in determinism — a
+    /// planner given identical inputs still produces identical plans. Only the
+    /// *instantaneous* output varies, and what that actually threatens is a
+    /// brownout at night, which is a capacity-over-time question that
+    /// accumulators answer rather than a determinism question.
+    ///
+    /// Left green rather than inverted because `generation_kw` lives in
+    /// `state.rs`, which the other session is editing right now. When the
+    /// average lands this test inverts, and `a_block_carrying_its_own_
+    /// generation_powers_itself` gains a solar case.
+    ///
+    /// `generation_kw` credits deterministic sources only, and says why: a
+    /// steam engine's 900 kW is the same at every hour, while a solar panel's
+    /// 60 kW is a day/night average whose instantaneous value is whatever the
+    /// map clock says. A planner whose output must be identical for identical
+    /// inputs cannot credit a number that is not.
+    ///
+    /// The live evidence was always on the owner's side.
+    /// `electric_smelter_live.lua` powers its block with **four hand-placed
+    /// solar panels and makes 78 plates**, so the block plainly runs while this
+    /// planner refuses to plan it. A model that cannot express a thing the
+    /// hardware does is the model's problem.
+    #[test]
+    fn a_solar_block_reads_as_unpowered_on_purpose() {
+        let s = state();
+        let solar = Blueprint {
+            entities: vec![
+                ent(0.0, 0.0, "inserter"),
+                ent(1.0, 0.0, "small-electric-pole"),
+                ent(4.0, 0.0, "solar-panel"),
+                ent(8.0, 0.0, "accumulator"),
+            ],
+            version: 0,
+        };
+        let power = blueprint_power(&s, &solar, &Position::new(0.0, 0.0));
+        assert_eq!(
+            power.generators, 0,
+            "solar and accumulators are absent from the generation table today; \
+             the owner has overruled the reason, so this asserts the current \
+             behaviour rather than endorsing it"
+        );
+        assert_eq!(power.generation_kw, 0.0);
+        assert_eq!(
+            power.generation_kw, 0.0,
+            "a solar block reads as unpowered here even though a live run \
+             proved one delivers 78 plates"
         );
     }
 

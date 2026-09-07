@@ -57,7 +57,7 @@
 //! `even_shares` / `participants_that_can_work` in
 //! `crates/planner/src/method/have.rs`.
 
-use factorio_bot_core::factorio::world::{Enclosure, FactorioWorld, WalkRefusal};
+use factorio_bot_core::factorio::world::{Enclosure, FactorioSurface, WalkRefusal};
 use factorio_bot_core::test_utils::fixture_world;
 use factorio_bot_core::types::{FactorioEntity, FactorioPlayer, Position};
 use factorio_bot_planner::action::{Action, ActionKind, Actor, Condition, Effect};
@@ -96,9 +96,9 @@ fn refusal(player: u8, from: (f64, f64), to: &Position) -> WalkRefusal {
     }
 }
 
-/// A fixture world carrying `refusals`, the way a run's `FactorioWorld`
+/// A fixture world carrying `refusals`, the way a run's `FactorioSurface`
 /// carries them from one plan to the next.
-fn world_with(refusals: &[WalkRefusal]) -> Arc<FactorioWorld> {
+fn world_with(refusals: &[WalkRefusal]) -> Arc<FactorioSurface> {
     let world = fixture_world();
     for refusal in refusals {
         world.record_walk_refusal(refusal.clone());
@@ -430,7 +430,7 @@ fn tree_ring(around: &Position, radius: f64) -> Vec<FactorioEntity> {
 /// the character was standing at, and `SEARCH_RADIUS` for the window. The
 /// `pocket_tiles` value is not read by anything under test; it is carried into
 /// the plan's own narration.
-fn frozen_run_world() -> Arc<FactorioWorld> {
+fn frozen_run_world() -> Arc<FactorioSurface> {
     let world = fixture_world();
     let midpoint = Position::new(
         (FROZEN_BOT_2.0 + FROZEN_BOT_3.0) / 2.,
@@ -663,7 +663,7 @@ fn when_every_bot_is_walled_in_the_split_is_unchanged() {
 /// **Un-exclusion does not wait for the bot to move**, which matters because
 /// being unable to move is the condition.
 ///
-/// `FactorioWorld::enclosures` is append-only and never drained — a standing
+/// `FactorioSurface::enclosures` is append-only and never drained — a standing
 /// fact, not an event — so the observation for bot 2 and bot 3 is still in the
 /// ledger here. What is gone is the wall. `PlanState` re-runs the fill on every
 /// `from_world` and the second witness disagrees, so both bots are back in the
@@ -740,7 +740,7 @@ fn a_bot_whose_pocket_has_opened_is_sized_a_share_again() {
 /// and 3 and left bot 1 working, so every observation this file is built on
 /// happens to exonerate the bot that gets picked. That is exactly why the hole
 /// has to be closed against a fixture rather than against a log.
-fn world_with_the_first_bot_walled_in() -> Arc<FactorioWorld> {
+fn world_with_the_first_bot_walled_in() -> Arc<FactorioSurface> {
     let world = fixture_world();
     let ring_centre = Position::new(FROZEN_BOT_2.0, FROZEN_BOT_2.1);
     world

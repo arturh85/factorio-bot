@@ -1,6 +1,6 @@
 use crate::error::{ApiResult, ErrorResponse};
 use crate::extract::ApiQuery;
-use crate::game::{require_player, require_world};
+use crate::game::{require_player, require_surface};
 use crate::state::AppState;
 use axum::Json;
 use axum::extract::State;
@@ -124,7 +124,7 @@ pub async fn plan_path(
 
     let instance = state.instance.read().await;
     let instance = instance.as_ref().ok_or_else(ErrorResponse::not_started)?;
-    let world = require_world(instance)?;
+    let world = require_surface(instance)?;
     let entities = instance
         .rcon
         .plan_path(
@@ -254,7 +254,7 @@ pub async fn player_info(
 ) -> ApiResult<FactorioPlayer> {
     let instance = state.instance.read().await;
     let instance = instance.as_ref().ok_or_else(ErrorResponse::not_started)?;
-    let world = require_world(instance)?;
+    let world = require_surface(instance)?;
     let player = require_player(world, params.player_id)?;
     Ok(Json(player))
 }
@@ -272,7 +272,7 @@ pub async fn player_info(
 pub async fn all_players(State(state): State<AppState>) -> ApiResult<Vec<FactorioPlayer>> {
     let instance = state.instance.read().await;
     let instance = instance.as_ref().ok_or_else(ErrorResponse::not_started)?;
-    let world = require_world(instance)?;
+    let world = require_surface(instance)?;
     let mut all_players: Vec<FactorioPlayer> = Vec::new();
     for player in world.players.iter() {
         all_players.push(player.clone());
@@ -295,7 +295,7 @@ pub async fn item_prototypes(
 ) -> ApiResult<HashMap<String, FactorioItemPrototype>> {
     let instance = state.instance.read().await;
     let instance = instance.as_ref().ok_or_else(ErrorResponse::not_started)?;
-    let world = require_world(instance)?;
+    let world = require_surface(instance)?;
     let mut data: HashMap<String, FactorioItemPrototype> = HashMap::new();
     for item_prototype in world.item_prototypes.iter() {
         data.insert(item_prototype.name.clone(), item_prototype.clone());
@@ -318,7 +318,7 @@ pub async fn entity_prototypes(
 ) -> ApiResult<HashMap<String, FactorioEntityPrototype>> {
     let instance = state.instance.read().await;
     let instance = instance.as_ref().ok_or_else(ErrorResponse::not_started)?;
-    let world = require_world(instance)?;
+    let world = require_surface(instance)?;
     let mut data: HashMap<String, FactorioEntityPrototype> = HashMap::new();
     for prototype in world.entity_prototypes.iter() {
         data.insert(prototype.name.clone(), prototype.clone());

@@ -8,7 +8,7 @@
 use factorio_bot_core::draw::draw_world;
 use factorio_bot_core::factorio::rcon::FactorioRcon;
 use factorio_bot_core::factorio::util::blueprint_build_area;
-use factorio_bot_core::factorio::world::FactorioWorld;
+use factorio_bot_core::factorio::world::FactorioSurface;
 use factorio_bot_core::factorio_blueprint::BlueprintCodec;
 use factorio_bot_core::mlua::prelude::*;
 use factorio_bot_core::plan::planner::Planner;
@@ -75,7 +75,7 @@ async fn narrate_buffer_refresh(refresher: Option<&BufferRefresher>) {
 /// game, or `--clients 0` -- is a legitimate mode and simply skips the read.
 pub fn create_lua_world(
     lua: &Lua,
-    world: Arc<FactorioWorld>,
+    world: Arc<FactorioSurface>,
     scripts_root: PathBuf,
     script_dir: PathBuf,
     rcon: Option<Arc<FactorioRcon>>,
@@ -109,7 +109,7 @@ pub fn create_lua_world(
 /// drive the real bindings -- `world.dump` included -- against a stub.
 pub(crate) fn create_lua_world_with(
     lua: &Lua,
-    _world: Arc<FactorioWorld>,
+    _world: Arc<FactorioSurface>,
     scripts_root: PathBuf,
     script_dir: PathBuf,
     buffer_refresher: Option<BufferRefresher>,
@@ -442,12 +442,12 @@ mod tests {
 
     /// Builds the `world` table exactly the way a run does.
     ///
-    /// Every binding in this file closes over the one `Arc<FactorioWorld>`
+    /// Every binding in this file closes over the one `Arc<FactorioSurface>`
     /// given to `create_lua_world`, and `lua_runner` hands it that Arc once,
     /// before the chunk runs -- so taking the handle here through `Planner` in
     /// the same order is the point, not incidental setup. A test that passed
     /// the world Arc straight in would not be testing what production does.
-    fn lua_world_for(world: &Arc<FactorioWorld>) -> (Lua, LuaTable) {
+    fn lua_world_for(world: &Arc<FactorioSurface>) -> (Lua, LuaTable) {
         let mut planner = Planner::new(world.clone(), None);
         planner.initiate_missing_players_with_default_inventory(1);
         // `lua_runner` refreshes and then takes exactly this handle.
@@ -470,7 +470,7 @@ mod tests {
     /// always reported the post-mutation value would pass.
     #[test]
     fn world_player_reports_the_position_the_game_has_now() {
-        let world = Arc::new(FactorioWorld::new());
+        let world = Arc::new(FactorioSurface::new());
         world
             .player_changed_position(PlayerChangedPositionEvent {
                 player_id: 1,
@@ -515,7 +515,7 @@ mod tests {
     /// with its own captured handle.
     #[test]
     fn world_inventory_reports_the_items_the_run_produced() {
-        let world = Arc::new(FactorioWorld::new());
+        let world = Arc::new(FactorioSurface::new());
         let (lua, table) = lua_world_for(&world);
         lua.globals().set("world", table).expect("set global");
 
@@ -566,7 +566,7 @@ mod tests {
     /// Builds the `world` table over `world` with the given buffer read.
     fn dumping_world(
         lua: &Lua,
-        world: &Arc<FactorioWorld>,
+        world: &Arc<FactorioSurface>,
         root: &std::path::Path,
         refresher: Option<BufferRefresher>,
     ) -> LuaTable {
@@ -584,7 +584,7 @@ mod tests {
     }
 
     /// A furnace holding forty plates, standing where a run left it.
-    fn furnace_holding(world: &FactorioWorld, at: &Position, count: u32) {
+    fn furnace_holding(world: &FactorioSurface, at: &Position, count: u32) {
         use factorio_bot_core::types::{Direction, FactorioEntity, InventoryResponse};
         world
             .on_some_entity_created(FactorioEntity::new_stone_furnace(at, Direction::North))
@@ -615,7 +615,7 @@ mod tests {
     async fn world_dump_writes_the_world_the_run_has_now() {
         use factorio_bot_core::serde_json;
 
-        let world = Arc::new(FactorioWorld::new());
+        let world = Arc::new(FactorioSurface::new());
         let root = tempfile::tempdir().expect("a scripts root");
         let lua = crate::sandbox::new_sandboxed_lua().expect("sandbox");
         let table = dumping_world(&lua, &world, root.path(), None);
@@ -631,7 +631,7 @@ mod tests {
             .expect("dumps");
 
         let written = std::fs::read_to_string(root.path().join("world.json")).expect("a file");
-        let back: FactorioWorld = serde_json::from_str(&written).expect("a readable world");
+        let back: FactorioSurface = serde_json::from_str(&written).expect("a readable world");
         assert_eq!(
             back.observed_inventories(),
             world.observed_inventories(),
@@ -661,7 +661,7 @@ mod tests {
     async fn world_dump_reads_the_buffers_before_it_writes() {
         use factorio_bot_core::serde_json;
 
-        let world = Arc::new(FactorioWorld::new());
+        let world = Arc::new(FactorioSurface::new());
         let root = tempfile::tempdir().expect("a scripts root");
         let at = Position::new(-34., 40.);
 
@@ -691,7 +691,7 @@ mod tests {
             .expect("dumps");
 
         let written = std::fs::read_to_string(root.path().join("world.json")).expect("a file");
-        let back: FactorioWorld = serde_json::from_str(&written).expect("a readable world");
+        let back: FactorioSurface = serde_json::from_str(&written).expect("a readable world");
         let carried = back.observed_inventories();
         assert_eq!(
             carried.len(),
@@ -713,7 +713,7 @@ mod tests {
     /// game holding anything.
     #[tokio::test]
     async fn world_dump_without_a_game_writes_anyway() {
-        let world = Arc::new(FactorioWorld::new());
+        let world = Arc::new(FactorioSurface::new());
         let root = tempfile::tempdir().expect("a scripts root");
         let lua = crate::sandbox::new_sandboxed_lua().expect("sandbox");
         let table = dumping_world(&lua, &world, root.path(), None);
@@ -737,7 +737,7 @@ mod tests {
     /// at a milestone that cannot be reproduced without repeating the run.
     #[tokio::test]
     async fn world_dump_survives_a_failed_buffer_read() {
-        let world = Arc::new(FactorioWorld::new());
+        let world = Arc::new(FactorioSurface::new());
         let root = tempfile::tempdir().expect("a scripts root");
         let (refresher, calls) = counting_refresher(Err("rcon went away".to_string()));
         let lua = crate::sandbox::new_sandboxed_lua().expect("sandbox");
@@ -770,7 +770,7 @@ mod tests {
     /// game by naming a path it was never going to be allowed to write.
     #[tokio::test]
     async fn world_dump_refuses_to_leave_the_scripts_directory() {
-        let world = Arc::new(FactorioWorld::new());
+        let world = Arc::new(FactorioSurface::new());
         let root = tempfile::tempdir().expect("a scripts root");
         let (refresher, calls) = counting_refresher(Ok(3));
         let lua = crate::sandbox::new_sandboxed_lua().expect("sandbox");

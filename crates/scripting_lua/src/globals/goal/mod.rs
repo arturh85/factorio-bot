@@ -21,7 +21,7 @@ mod run;
 mod value;
 
 use factorio_bot_core::factorio::rcon::{FactorioRcon, PlacementQuery, PlacementVerdict};
-use factorio_bot_core::factorio::world::FactorioWorld;
+use factorio_bot_core::factorio::world::FactorioSurface;
 use factorio_bot_core::miette::miette;
 use factorio_bot_core::mlua::prelude::*;
 use factorio_bot_core::plan::planner::{Planner, ServerOwnership};
@@ -387,6 +387,27 @@ impl std::error::Error for PlanRefusal {}
 ///   `NotHandMinable`; no amount of exploring or researching changes it,
 ///   because it is the shape of the request that is wrong. The message names
 ///   every producing recipe and its category, which is the diagnosis.
+/// - [`FluidNotItem`](PlannerError::FluidNotItem) -- a verdict about the
+///   **shape of the request**, and the only one of these that is not about the
+///   world at all. `have:<fluid>:N` asks a character to hold something no
+///   character inventory accepts in any amount, so nothing a script can do
+///   changes the answer. A script acts on it by asking for the fluid where a
+///   fluid can be: `gathered:<fluid>` stands a pumpjack and a storage tank on
+///   the field. The message names every recipe in this world that produces the
+///   fluid and its category, so a reader can see what machine is missing.
+/// - [`NoFluidBuffer`](PlannerError::NoFluidBuffer),
+///   [`NoTankSite`](PlannerError::NoTankSite),
+///   [`NoPipeRoute`](PlannerError::NoPipeRoute) and
+///   [`FluidPortUnknown`](PlannerError::FluidPortUnknown) -- `method::gather`'s
+///   ladder, and three different kinds of verdict in a row. The first is about
+///   the **prototypes** (nothing in this world buffers or carries a fluid), the
+///   middle two about the **ground** (no clear footprint at the field centroid;
+///   no pipe route to it, with the blocking tiles named), and the last about
+///   the **capture** -- the mod sent no `fluidbox_prototypes`, so where a
+///   machine takes fluid in or out cannot be read. A script acts on the middle
+///   two by clearing ground or choosing another field, and on the outer two by
+///   not asking, or by dumping the world again from a mod that describes
+///   fluidboxes.
 fn refusal_for(err: &PlannerError) -> Option<PlanRefusal> {
     use miette::Diagnostic;
 
@@ -398,6 +419,7 @@ fn refusal_for(err: &PlannerError) -> Option<PlanRefusal> {
         | PlannerError::PowerPlantNeedsWater { .. }
         | PlannerError::PowerPlantNeedsShore { .. }
         | PlannerError::PowerPlantTooSmall { .. }
+        | PlannerError::PowerHeadroomShort { .. }
         | PlannerError::UnsupportedResearchTrigger { .. }
         | PlannerError::SelfUnlockingResearchTrigger { .. }
         | PlannerError::PreconditionUnsatisfied { .. }
@@ -412,13 +434,18 @@ fn refusal_for(err: &PlannerError) -> Option<PlanRefusal> {
         | PlannerError::NoExtractor { .. }
         | PlannerError::ExtractorLocked { .. }
         | PlannerError::ExtractionNotModelled { .. }
+        | PlannerError::NoFluidBuffer { .. }
+        | PlannerError::NoTankSite { .. }
+        | PlannerError::NoPipeRoute { .. }
+        | PlannerError::FluidPortUnknown { .. }
         | PlannerError::BlockGroundOccupied { .. }
         | PlannerError::NoSiteFound { .. }
         | PlannerError::SustainSupplyNotStanding { .. }
         | PlannerError::SustainNoFuelSource { .. }
         | PlannerError::SustainNoRouteForFuel { .. }
         | PlannerError::SustainNoOfftake { .. }
-        | PlannerError::ProductNotMakeable(_) => true,
+        | PlannerError::ProductNotMakeable(_)
+        | PlannerError::FluidNotItem(_) => true,
 
         PlannerError::InsufficientItems { .. }
         | PlannerError::UnknownBot(_)
@@ -506,8 +533,8 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 /// `bots` is the run's roster, as player ids.
 pub fn create_lua_goal(
     lua: &Lua,
-    plan_world: Arc<FactorioWorld>,
-    real_world: Arc<FactorioWorld>,
+    plan_world: Arc<FactorioSurface>,
+    real_world: Arc<FactorioSurface>,
     rcon: Option<Arc<FactorioRcon>>,
     bots: Vec<u8>,
     server: ServerOwnership,
@@ -624,7 +651,7 @@ pub fn create_lua_goal(
 /// the real bindings — `goal.start`/`goal.run` included — against a stub.
 pub(crate) fn create_lua_goal_with(
     lua: &Lua,
-    plan_world: Arc<FactorioWorld>,
+    plan_world: Arc<FactorioSurface>,
     actuator: ActuatorFactory,
     bots: Vec<u8>,
     placement_checker: Option<PlacementChecker>,
@@ -1232,7 +1259,7 @@ fn refuse_unknown_bots(state: &PlanState) -> LuaResult<()> {
 fn install_goal_holds(
     lua: &Lua,
     table: &LuaTable,
-    world: Arc<FactorioWorld>,
+    world: Arc<FactorioSurface>,
     default_roster: Vec<BotId>,
 ) -> LuaResult<()> {
     table.set(
@@ -1291,7 +1318,11 @@ fn install_goal_holds(
 use factorio_bot_planner::{ActionNetwork, Goal, expand, pick_chain_actor, registry_for};
 
 #[cfg(test)]
-fn expand_goal(goal: Goal, world: &Arc<FactorioWorld>, bots: &[BotId]) -> LuaResult<ActionNetwork> {
+fn expand_goal(
+    goal: Goal,
+    world: &Arc<FactorioSurface>,
+    bots: &[BotId],
+) -> LuaResult<ActionNetwork> {
     let state = PlanState::from_world(world.clone(), bots);
     refuse_unknown_bots(&state)?;
     let chain_actor = pick_chain_actor(&state, bots)
@@ -1639,13 +1670,13 @@ mod tests {
     /// (`every_bot_the_bindings_dispatch_to_is_a_player_the_actuator_can_drive`'s
     /// `[3, 4]` case exists precisely to do that). This gives each id in
     /// `roster` the same inventory production seeding gives, directly through
-    /// the same `FactorioWorld` event the real seeding uses, so
+    /// the same `FactorioSurface` event the real seeding uses, so
     /// `PlanState::unknown_bots()` comes back empty for it — the property
     /// `goal.plan` now requires of every bot it is asked to plan for. A bare
     /// `fixture_world()` never seeds any player at all, so every bot named
     /// against it is "unknown" by that same definition; tests that exercise
     /// the bindings above the refusal need this instead.
-    pub(crate) fn seeded_world_for(roster: &[u8]) -> Arc<FactorioWorld> {
+    pub(crate) fn seeded_world_for(roster: &[u8]) -> Arc<FactorioSurface> {
         let world = fixture_world();
         seed_players(&world, roster);
         Arc::new(world)
@@ -1656,8 +1687,8 @@ mod tests {
     /// `seeded_world_for` cannot offer on its own when a test also needs to
     /// set up something else on the same world first (e.g. a research
     /// force), since `fixture_world()` cannot be seeded twice into two
-    /// different `FactorioWorld` values and then merged.
-    fn seed_players(world: &FactorioWorld, roster: &[u8]) {
+    /// different `FactorioSurface` values and then merged.
+    fn seed_players(world: &FactorioSurface, roster: &[u8]) {
         use factorio_bot_core::types::{EntityName, PlayerChangedMainInventoryEvent};
 
         for &player_id in roster {
@@ -2305,7 +2336,7 @@ mod tests {
     /// is what let this bug live under 400-odd green tests, so the seeding is
     /// taken from the production call rather than written out here, and the
     /// assertion below states the property the test depends on.
-    fn seeded_world(bot_count: u8) -> Arc<FactorioWorld> {
+    fn seeded_world(bot_count: u8) -> Arc<FactorioSurface> {
         use factorio_bot_core::plan::planner::Planner;
 
         let mut planner = Planner::new(Arc::new(fixture_world()), None);
@@ -2645,7 +2676,7 @@ mod tests {
     /// the check cannot be hoisted to `create_lua_goal_with` or memoised on
     /// the roster: both bots are real players when the goal value is made,
     /// and bot 2 is only removed from the world afterwards -- from the same
-    /// `FactorioWorld` the run's `goal` table already closed over, so
+    /// `FactorioSurface` the run's `goal` table already closed over, so
     /// `goal.plan`'s `PlanState::from_world` call is the thing that has to
     /// notice.
     #[tokio::test]

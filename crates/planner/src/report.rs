@@ -27,7 +27,9 @@
 
 use crate::ids::{BotId, Ticks};
 use crate::network::ActionNetwork;
+use crate::rates::RateDisclosure;
 use crate::schedule::{Schedule, StepKind};
+use crate::state::PlanState;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -73,6 +75,23 @@ pub struct PlanReport {
     /// `None` when there is no roster or the makespan is zero, rather than a
     /// zero that would read as "fully idle".
     pub utilisation_percent: Option<f64>,
+    /// How far this plan's costed work disagrees with the rates the plan's
+    /// own research brings about — see [`crate::rates`].
+    ///
+    /// Every other number in this report is an answer about the plan. This one
+    /// is an answer about the *model*, and it is here rather than in a note
+    /// somewhere because the alternative was a modelling gap nobody could see:
+    /// the error is exactly zero on both goals we plan today, and it becomes
+    /// non-zero the moment a plan reaches `steel-axe`, which the speedrun
+    /// route researches immediately after `steel-processing`.
+    ///
+    /// `#[serde(default)]` so that plan reports serialised before this field
+    /// existed still load — [`RateDisclosure::default`] is the empty
+    /// disclosure, which [`RateDisclosure::is_clean`] reports as clean. That
+    /// is the one place the two readings genuinely blur, and it blurs only for
+    /// records written before the check existed.
+    #[serde(default)]
+    pub rates: RateDisclosure,
 }
 
 impl PlanReport {
@@ -81,7 +100,17 @@ impl PlanReport {
     /// `bots` is the roster the schedule was made for, not the set of bots
     /// that ended up with a step: a bot given nothing to do is the finding,
     /// and dropping it from the report is how that finding goes unnoticed.
-    pub fn of(net: &ActionNetwork, schedule: &Schedule, bots: &[BotId]) -> PlanReport {
+    ///
+    /// `state` is the state the plan was costed against, needed for
+    /// [`PlanReport::rates`] alone: the disclosure is a comparison between the
+    /// rates the durations were computed at and the rates the plan's own
+    /// research brings about, and the first of those lives only here.
+    pub fn of(
+        net: &ActionNetwork,
+        schedule: &Schedule,
+        bots: &[BotId],
+        state: &PlanState,
+    ) -> PlanReport {
         let mut per_bot: BTreeMap<BotId, BotReport> = bots
             .iter()
             .map(|bot| {
@@ -132,6 +161,7 @@ impl PlanReport {
             bots,
             planned_ticks,
             utilisation_percent,
+            rates: RateDisclosure::of(net, schedule, state),
         }
     }
 
@@ -156,6 +186,7 @@ impl PlanReport {
             )),
             None => out.push("utilisation    n/a (nothing to do)".to_string()),
         }
+        out.extend(self.rates.lines());
         out.push("bot   steps  acts  walks  planned  idle".to_string());
         for bot in &self.bots {
             out.push(format!(
@@ -175,7 +206,6 @@ mod tests {
     use crate::method::expand;
     use crate::method::have::registry_for;
     use crate::schedule::schedule;
-    use crate::state::PlanState;
     use factorio_bot_core::test_utils::fixture_world;
     use std::sync::Arc;
 
@@ -188,7 +218,7 @@ mod tests {
         };
         let net = expand(&[goal], &state, &registry_for(bots), bots[0]).expect("expands");
         let plan = schedule(&net, &state, bots).expect("schedules");
-        PlanReport::of(&net, &plan, bots)
+        PlanReport::of(&net, &plan, bots, &state)
     }
 
     #[test]
@@ -232,7 +262,8 @@ mod tests {
     /// An empty roster is not 0% utilised, it is unanswerable.
     #[test]
     fn utilisation_is_absent_rather_than_zero_when_there_is_nothing_to_divide_by() {
-        let report = PlanReport::of(&ActionNetwork::new(), &Schedule::default(), &[]);
+        let state = PlanState::from_world(Arc::new(fixture_world()), &[]);
+        let report = PlanReport::of(&ActionNetwork::new(), &Schedule::default(), &[], &state);
         assert_eq!(report.utilisation_percent, None);
         assert!(
             report.lines().iter().any(|line| line.contains("n/a")),
@@ -244,7 +275,15 @@ mod tests {
     fn the_rendered_report_names_every_bot() {
         let bots = [BotId(1), BotId(2), BotId(3), BotId(4)];
         let lines = report_for(&bots).lines();
-        // Three fixed lines, a header, then one per bot.
-        assert_eq!(lines.len(), 4 + bots.len());
+        // Four fixed lines -- actions, makespan, utilisation and the rate
+        // disclosure -- then a header, then one per bot. The disclosure line
+        // is printed even when it finds nothing, which is what makes
+        // "checked, clean" distinguishable from "not checked"; naming it here
+        // is what keeps that from being silently dropped by a later edit.
+        assert_eq!(lines.len(), 5 + bots.len(), "{lines:#?}");
+        assert!(
+            lines.iter().any(|line| line.starts_with("rate drift")),
+            "every report discloses its rate drift: {lines:#?}"
+        );
     }
 }

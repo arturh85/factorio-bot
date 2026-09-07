@@ -1039,7 +1039,7 @@
             "type": "object"
           },
           {
-            "description": "The game said this bot cannot move, and the next plan will not send it\nanywhere.\n\nAfter a walk the pathfinder refused, the executor asked the game for a\nshort path from the character in each of four directions\n(`FactorioRcon::probe_player_hops`) and every one was refused. That\nis the game's own verdict on the *character*, which neither\n[`EventKind::BotEnclosed`] (a fill over this process's occupancy\nmodel) nor a `no_path` walk (a verdict on one destination) can give:\nin `run-1788614781-38058` bot 6 stood overlapping a furnace, the fill\nsaid open, four walks said `no_path`, and seven plans in a row sent it\nthe same walk until the run halted `stuck` with seven healthy bots\nidle.\n\nUnlike `bot_enclosed`, this one is acted on: `crates/planner`'s\n`PlanState::from_world` reads the bench and gives the bot no step\nthat would need it to walk. It is lifted by [`EventKind::BotReleased`].\n\nWritten by `record.enclosures()` from `FactorioWorld::benches`.",
+            "description": "The game said this bot cannot move, and the next plan will not send it\nanywhere.\n\nAfter a walk the pathfinder refused, the executor asked the game for a\nshort path from the character in each of four directions\n(`FactorioRcon::probe_player_hops`) and every one was refused. That\nis the game's own verdict on the *character*, which neither\n[`EventKind::BotEnclosed`] (a fill over this process's occupancy\nmodel) nor a `no_path` walk (a verdict on one destination) can give:\nin `run-1788614781-38058` bot 6 stood overlapping a furnace, the fill\nsaid open, four walks said `no_path`, and seven plans in a row sent it\nthe same walk until the run halted `stuck` with seven healthy bots\nidle.\n\nUnlike `bot_enclosed`, this one is acted on: `crates/planner`'s\n`PlanState::from_world` reads the bench and gives the bot no step\nthat would need it to walk. It is lifted by [`EventKind::BotReleased`].\n\nWritten by `record.enclosures()` from `FactorioSurface::benches`.",
             "properties": {
               "bot": {
                 "format": "int32",
@@ -1108,7 +1108,7 @@
             "type": "object"
           },
           {
-            "description": "A bot was walked clear of a placement that would otherwise have sealed\nit in -- the [`EventKind::BotEnclosed`] that did not happen.\n\nWritten by `record.enclosures()` from the queue `crates/executor`'s\npre-place check fills (`FactorioWorld::step_asides`). The check runs\nbefore every placement: with the footprint added to the occupancy\nmodel, would the fill around the character about to build it close?\nIn `run-1788552801-73005` it would have, and did -- bot 1 placed an\n`assembling-machine-1` from the one patch of ground whose every exit\ncrossed it, and stood there for 40 000 ticks.\n\nThis is a bot doing something the plan did not ask for. It is in the\nrecord so that a reader comparing the plan to what happened can see\nwhy a `place` was preceded by a walk the schedule has no step for.",
+            "description": "A bot was walked clear of a placement that would otherwise have sealed\nit in -- the [`EventKind::BotEnclosed`] that did not happen.\n\nWritten by `record.enclosures()` from the queue `crates/executor`'s\npre-place check fills (`FactorioSurface::step_asides`). The check runs\nbefore every placement: with the footprint added to the occupancy\nmodel, would the fill around the character about to build it close?\nIn `run-1788552801-73005` it would have, and did -- bot 1 placed an\n`assembling-machine-1` from the one patch of ground whose every exit\ncrossed it, and stood there for 40 000 ticks.\n\nThis is a bot doing something the plan did not ask for. It is in the\nrecord so that a reader comparing the plan to what happened can see\nwhy a `place` was preceded by a walk the schedule has no step for.",
             "properties": {
               "bot": {
                 "format": "int32",
@@ -1706,6 +1706,15 @@
               "null"
             ]
           },
+          "input_inventory": {
+            "items": {
+              "$ref": "#/components/schemas/InventoryItemWithQuality"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "name": {
             "type": "string"
           },
@@ -1737,6 +1746,12 @@
               "null"
             ]
           },
+          "status": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "surface": {
             "oneOf": [
               {
@@ -1746,6 +1761,15 @@
                 "$ref": "#/components/schemas/SurfaceId",
                 "description": "Which surface this entity stands on, as the mod read it from\n`LuaEntity.surface.name`.\n\n**`None` means the sender did not say, not \"Nauvis\".** Every world dump\nand run record written before this field existed lacks it, and while\nevery one of them is in fact a Nauvis-only run, that is a fact about\nthe mod's `on_chunk_generated` guard rather than something the archived\nbytes assert. So an 865 MB dump from yesterday still deserialises --\npinned by `crates/core/tests/surface_id.rs`.\n\nNothing keys on it yet -- the containers (`EntityGraph`, `PlanState`)\nare still position-only and would alias two surfaces into one. This\ncarries the fact so the record can be read; keying is the next rung."
               }
+            ]
+          },
+          "transport_lines": {
+            "items": {
+              "$ref": "#/components/schemas/TransportLine"
+            },
+            "type": [
+              "array",
+              "null"
             ]
           },
           "underground_half": {
@@ -1771,6 +1795,17 @@
       },
       "FactorioEntityPrototype": {
         "properties": {
+          "beacon_profile": {
+            "description": "The beacon's `profile`: an extra multiplier applied to what a receiver\ngets, **indexed by how many beacons reach that receiver**. Factorio 2.0\nadded it, and it is the reason beacon effect is not a single scalar:\nthe second beacon on a machine is worth a different amount from the\nfirst.\n\nKept under a name that says what it profiles. `LuaEntityPrototype`\ncalls it `profile`, which on a struct describing every prototype in the\ngame says nothing; the mod emits `beacon_profile` to match, and\n`a_serialised_beacon_prototype_carries_its_geometry` pins the pairing,\nbecause serde drops an unrecognised key in silence and this repo has\npaid for that twice.",
+            "items": {
+              "format": "double",
+              "type": "number"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "collision_box": {
             "$ref": "#/components/schemas/Rect"
           },
@@ -1784,6 +1819,14 @@
             ]
           },
           "crafting_speed": {
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "distribution_effectivity": {
+            "description": "A **beacon's** `distribution_effectivity`: the fraction of a module's\neffect a receiver in range actually gets. `None` for anything that is\nnot a beacon.\n\nNot sufficient on its own -- see [`Self::beacon_profile`], which scales\nit by how many beacons reach the same machine.",
             "format": "double",
             "type": [
               "number",
@@ -1872,6 +1915,14 @@
               "string",
               "null"
             ]
+          },
+          "supply_area_distance": {
+            "description": "Half the side of the square this **electric pole or beacon** supplies,\nso `2.5` for a `small-electric-pole`'s 5x5. `LuaEntityPrototype`'s\nsubclasses for it are exactly `ElectricPole` and `Beacon`.\n\n**`None` is \"no supply area\", never zero.** A furnace has none; a\nbeacon with a zero one would be `Some(0.0)`, and a caller that wants to\nknow whether beacon ground is worth reserving must be able to tell\nthose apart. Every dump and snapshot written before this field existed\nalso reads `None`, i.e. \"the sender did not say\".\n\n# It is a method on the runtime API, and that is not a detail\n\nThere is no `supply_area_distance` **attribute** in 2.1.17 --\n`get_supply_area_distance(quality)` is the only way to it. Reading the\nattribute raises, the mod's `pcall` swallows it, and the field arrives\n`None` with nothing anywhere saying it should not have. That is exactly\nhow [`Self::crafting_speed`] arrived nil for all 1028 prototypes of a\nlive game while `mining_speed`, still an attribute, arrived fine.\n\n# What it is for\n\n`crates/planner/src/method/power.rs` hard-codes\n`pole_supply_half_extent` as a table of vanilla pole names, and says in\nits own doc that sending this field is the follow-up that deletes it.\n**Nothing reads this yet** -- carrying the datum and consuming it are\ntwo changes, and the second one moves plans.",
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
           }
         },
         "required": [
@@ -1922,6 +1973,13 @@
           },
           "production_type": {
             "type": "string"
+          },
+          "volume": {
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
           }
         },
         "required": [
@@ -3534,6 +3592,26 @@
         "required": [
           "w",
           "k"
+        ],
+        "type": "object"
+      },
+      "TransportLine": {
+        "description": "One of a belt-like entity's transport lines, and what is riding on it.\n\nA belt is not an inventory and modelling it as one loses the thing that\nmakes it a belt: a `transport-belt` has **two** lanes, an\n`underground-belt` four and a `splitter` eight, and which lane an item is\non decides whether a furnace arm can reach it. Two of this project's own\nmeasured failures are lane failures -- an inserter drops on the belt's\n**far** lane while a side-loading belt lands on the **near** one, and\ngetting either backwards puts ore and coal on one lane where they crowd\neach other out while every entity still places 100% correctly.\n\n**Counts, not positions.** `LuaTransportLine` also offers\n`get_detailed_contents()`, which is every item with its position along the\nline; the owner's ruling at scale is *\"the direction and, for a whole\nchain, what types of items are on it\"*, so this carries\n`get_contents()` -- one aggregated count per item kind -- and no item\npositions at all.",
+        "properties": {
+          "contents": {
+            "description": "What is on this lane, by item kind. Empty is a real and ordinary\nanswer -- most lanes of most belts are empty most of the time -- and it\nis *not* the same as the lane not existing, which is expressed by the\nlane being absent from [`FactorioEntity::transport_lines`] entirely.",
+            "items": {
+              "$ref": "#/components/schemas/InventoryItemWithQuality"
+            },
+            "type": "array"
+          },
+          "line": {
+            "description": "`defines.transport_line`'s own name for this line: `left_line`,\n`right_line`, `left_underground_line`, `secondary_right_line`,\n`left_split_line` and so on.\n\n**The name, not the raw index**, because the index alone is\nuninterpretable: line 3 is `left_underground_line` on an\nunderground-belt and something else on a splitter, so a caller reading\na number would have to re-derive the mapping from the entity type and\nwould be inventing it. An index this build's `defines` cannot name\narrives as `unmapped_<n>` rather than as a bare number, the same way\n`machine_row` reports an unknown entity status.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "line"
         ],
         "type": "object"
       },

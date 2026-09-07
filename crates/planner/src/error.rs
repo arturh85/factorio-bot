@@ -380,6 +380,94 @@ pub enum PlannerError {
     )]
     ExtractionNotModelled { entity: String, extractor: String },
 
+    /// [`Goal::Gathered`](crate::goal::Goal::Gathered) asked for a fluid
+    /// buffer and this world has no prototype that is one, or the one it has
+    /// cannot be obtained.
+    ///
+    /// Tier 2 of `method::gather`'s ladder, and asked of the **world** rather
+    /// than of a hard-coded `storage-tank`: the prototype is found by
+    /// `entity_type`, so a modded tank answers and a capture that predates the
+    /// field refuses by name instead of quietly picking nothing.
+    #[error("nothing in this world can gather the {fluid} a {machine} pumps: {why}")]
+    #[diagnostic(
+        code(planner::no_fluid_buffer),
+        help(
+            "a fluid cannot be carried in an inventory, so gathering needs a tank standing at \
+             the patch; without one there is nowhere for the output to go"
+        )
+    )]
+    NoFluidBuffer {
+        fluid: String,
+        /// The extractor whose output has nowhere to go. **Named `machine`
+        /// and not `source`**: `thiserror` treats a field called `source` as
+        /// the error's `std::error::Error` cause and tries to call
+        /// `as_dyn_error` on it, which a `String` does not implement.
+        machine: String,
+        why: String,
+    },
+
+    /// A tank was wanted within reach of a resource field and every candidate
+    /// footprint out to the search bound was occupied.
+    ///
+    /// Distinct from [`PlannerError::NoSiteFound`], which is the generic
+    /// block-siting refusal: this one names the **field** it was anchored on
+    /// and how many of its tiles it was averaging, because the two questions a
+    /// reader has are "where did it look" and "was it looking at the right
+    /// field at all".
+    #[error(
+        "no clear {tank} site within {searched} tiles of the {wells}-well {entity} field centred \
+         on {centroid}; nearest obstruction: {nearest_obstruction}"
+    )]
+    #[diagnostic(code(planner::no_tank_site))]
+    NoTankSite {
+        tank: String,
+        entity: String,
+        wells: usize,
+        centroid: String,
+        searched: i32,
+        nearest_obstruction: String,
+    },
+
+    /// Two fluid machines could not be joined by pipe.
+    ///
+    /// **Returned before anything is placed**, the same promise
+    /// `method::connect`'s `ConnectRefusal` makes and for the same reason: a
+    /// pipe run that stops halfway is worse than no pipe run, because the
+    /// machine at the near end fills up and stops with nothing to show for the
+    /// iron.
+    ///
+    /// `from` and `to` each name a machine *and* where it stands, in one
+    /// string rather than in two fields, because `PlannerError` is returned by
+    /// value everywhere and clippy's `result_large_err` is measured against
+    /// the **largest** variant: five `String`s here would have pushed the
+    /// whole enum over the threshold and cost every `Result` in the crate a
+    /// box.
+    #[error("no pipe route from {from} to {to}: {why}")]
+    #[diagnostic(code(planner::no_pipe_route))]
+    NoPipeRoute {
+        from: String,
+        to: String,
+        why: String,
+    },
+
+    /// A machine this planner wants to pipe into has no pipe connection it can
+    /// read off the prototype table.
+    ///
+    /// **Never guessed.** A fluid connection placed at the wrong tile yields a
+    /// layout that builds 100% correctly and moves nothing -- the same silent
+    /// class as an inserter facing the wrong way -- so a prototype whose
+    /// `fluidbox_prototypes` are missing, empty, or shaped in a way this
+    /// module does not understand is refused by name.
+    #[error("cannot tell where a {prototype} takes fluid in or out: {why}")]
+    #[diagnostic(
+        code(planner::fluid_port_unknown),
+        help(
+            "fluidbox_prototypes with pipe_connections.positions is what answers this; a world \
+             captured before the mod sent them cannot be piped on"
+        )
+    )]
+    FluidPortUnknown { prototype: String, why: String },
+
     /// A `Step::Owned` whose holder names no bot.
     ///
     /// Deliberately an error rather than "keep the current chain". A handover
@@ -639,15 +727,71 @@ pub enum PlannerError {
     #[diagnostic(
         code(planner::power_plant_too_small),
         help(
-            "this is a limit of the LAYOUT, not of the game: one boiler drives at most two \
-             steam engines (1.8 MW of boiler over 900 kW of engine), and this planner lays out \
-             exactly one boiler in a rigid pump-pipes-boiler-engines row. The water behind one \
-             offshore pump would carry about twenty boilers and forty engines -- ~36 MW -- \
-             because the pump moves 1200 water/s and a boiler burns 60/s (verified against \
-             base/prototypes/entity/entities.lua). Ask for less, or site a second plant"
+            "this is now a limit of the WATER, not of the layout: one offshore pump moves \
+             1200 water/s and a boiler burns 60/s, so one pump carries twenty boilers and \
+             forty engines -- about 36 MW. A twenty-first boiler would stand on the shore \
+             with nothing to boil. (Both figures read from base/prototypes/entity/\
+             entities.lua; one boiler still drives at most two engines, 1.8 MW of boiler \
+             over 900 kW of engine.) Until 2026-09-06 this said the opposite -- the planner \
+             laid out exactly one boiler and the ceiling was 1.8 MW, a fact about our row \
+             rather than about the game. Ask for less, or site a second plant against \
+             different water"
         )
     )]
     PowerPlantTooSmall { needed_kw: f64, plant_kw: f64 },
+
+    /// The poles reach, and what they reach is not big enough.
+    ///
+    /// # The two answers `Ok(None)` used to give at once
+    ///
+    /// [`ensure_powered`](crate::method::power::ensure_powered) had one
+    /// refusal for "supply exists but no pole run carries it there" and for
+    /// "a pole run carries it there and the network has no room", and its
+    /// message named only the first. A peer session wiring `Goal::Built` to
+    /// it spent **two iterations on pole geometry** for a block that routed
+    /// perfectly and was short of kilowatts; the discriminator that finally
+    /// split them was replacing the block's draw with a trivial 10 kW.
+    ///
+    /// "I cannot route to it" and "I routed to it and it is too small" send a
+    /// reader to completely different places — the first to the ground between
+    /// the plant and the site, the second to the plant. The second is not a
+    /// refusal about the site at all.
+    ///
+    /// # Why not `PowerPlantTooSmall`
+    ///
+    /// That one is a statement about the **layout**: the largest plant this
+    /// planner lays out cannot make `needed_kw`, true from every anchor on
+    /// every map, and raised before a single pole is sited. This one is a
+    /// statement about **one network at one moment**: a plant that would be
+    /// big enough on its own is already committed to other consumers, or the
+    /// site is joined to a standing network rather than to a fresh plant.
+    /// Adopting a small standing plant and building a large fresh one are
+    /// different remedies, so they are different errors.
+    ///
+    /// `committed_kw` excludes the draw being asked about — it is what the
+    /// ledger charges to consumers that are somebody else's, which is the
+    /// only figure that makes `supply_kw - committed_kw < needed_kw` read as
+    /// arithmetic the reader can check.
+    #[error(
+        "the network reaching {entity} at {site} generates {supply_kw} kW with {committed_kw} kW \
+         already committed elsewhere, leaving {headroom_kw} kW for a draw of {needed_kw} kW"
+    )]
+    #[diagnostic(
+        code(planner::power_headroom_short),
+        help(
+            "the poles route: this is capacity, not geometry. Build or grow a plant (one boiler \
+             drives at most two steam engines, 900 kW each), site this away from the consumers \
+             already on that network, or ask for less"
+        )
+    )]
+    PowerHeadroomShort {
+        entity: ItemId,
+        site: String,
+        needed_kw: f64,
+        supply_kw: f64,
+        committed_kw: f64,
+        headroom_kw: f64,
+    },
 
     /// The rate asked for needs more cells than one plan may build.
     ///
@@ -960,4 +1104,31 @@ pub enum PlannerError {
         )
     )]
     ProductNotMakeable(#[from] crate::products::ProductRefusal),
+
+    /// A [`crate::goal::Goal::Have`] was stated about a fluid.
+    ///
+    /// **Not a shortfall and not a missing method.** `Have` means "this is in
+    /// an inventory", and the game will not put a fluid in one -- so the goal
+    /// is not unsatisfiable, it is *inexpressible*, and no amount of mining,
+    /// research or exploration moves it. The driver refuses it before any
+    /// method is asked, which is what stops the roster splitter dividing 100
+    /// petroleum-gas into four shares of 25 and asking a character to carry
+    /// one; that message ("a share sized for bot 1") named the wrong thing
+    /// entirely and is the reason this variant exists.
+    ///
+    /// The wrapped [`crate::substance::FluidRefusal`] carries the fluid, the
+    /// count that was asked for, and -- via
+    /// [`crate::substance::FluidSource`] -- which recipes in *this* world
+    /// produce it and in what categories, so a reader learns where the fluid
+    /// would have to come from instead.
+    #[error("{0}")]
+    #[diagnostic(
+        code(planner::fluid_not_item),
+        help(
+            "a fluid lives in a fluidbox -- a pipe, a storage tank, a machine's own -- and this \
+             planner has no goal that names one; `gathered:<fluid>` stands a pumpjack and a tank \
+             up on a field, which is as close as the planner gets today"
+        )
+    )]
+    FluidNotItem(#[from] crate::substance::FluidRefusal),
 }

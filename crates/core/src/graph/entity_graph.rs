@@ -26,6 +26,7 @@ use std::fmt;
 use std::ops::Deref;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 use tracing::{error, warn};
 
@@ -145,6 +146,31 @@ pub fn radius_from_origin(position: &Position) -> f64 {
 }
 
 pub struct EntityGraph {
+    /// Bumped once by every method that changes what this graph says about the
+    /// world: [`EntityGraph::add`], [`EntityGraph::remove`],
+    /// [`EntityGraph::connect`] and [`EntityGraph::set_recipe`].
+    /// [`EntityGraph::add_blueprint_entities`] bumps it through `add`.
+    ///
+    /// It exists for [`crate::graph::flow_graph::FlowGraph`], which is built
+    /// *from* this graph and has no other way to learn that its answer has
+    /// gone stale. Before it existed, the flow graph was walked twice in the
+    /// life of a world -- at `initial discovery done` and on a `--connect`
+    /// snapshot -- and never again, so every machine a run built was invisible
+    /// to it and the first reader would have got the world as at tick 0, with
+    /// no error and no warning. See
+    /// `docs/superpowers/notes/2026-09-06-the-flow-graph-has-no-caller-and-no-refresh.md`.
+    ///
+    /// It counts **mutations, not versions of the content**: a mutation that
+    /// changes nothing still bumps it, so a reader may rebuild for nothing.
+    /// That direction is the safe one -- the other loses correctness -- and a
+    /// rebuild is cheap, because the flow walk starts only from offshore pumps
+    /// and drills standing on ore.
+    ///
+    /// Not serialised. A graph loaded from a snapshot starts at 0, and
+    /// `FlowGraph`'s own counter starts at a sentinel no generation can equal,
+    /// so the first read after a load rebuilds rather than trusting whatever
+    /// was cached.
+    generation: AtomicU64,
     entity_graph: RwLock<EntityGraphInner>,
     blocked_tree: RwLock<BlockedQuadTree>,
     entity_tree: RwLock<EntityQuadTree>,
@@ -281,6 +307,43 @@ pub struct EntityGraph {
 /// where the nests are".
 pub const ENEMY_STRUCTURE_TYPES: [&str; 2] = ["unit-spawner", "turret"];
 
+/// The entity types [`EntityGraph::add`] keeps **out** of `blocked_tree`,
+/// alongside resources and rails: ghosts.
+///
+/// **A ghost does not collide.** Measured live against Factorio 2.1.17 before
+/// `ActionKind::StampGhosts` existed: a real placement consumes the ghost
+/// beneath it cleanly rather than being refused by it, which is exactly why
+/// `PlanState::occupant_of` (`crates/planner`) skips `entity-ghost` by name in
+/// both of its entity loops, unconditionally, with the note that no caller
+/// should ever want a ghost to collide.
+///
+/// **`blocked_tree` defeated that skip.** `add` filed every entity with a
+/// non-zero box into the blocked tree regardless of name, and the tree stores
+/// a bare `is_minable` flag and no name -- so a ghost that reached this
+/// function came back out of `blocking_boxes_within` as an anonymous
+/// rectangle, and `occupant_of` reported it as
+/// *"occupied by a tree, cliff, rock or unit"*. The same box reached
+/// `enclosure::grid_for` and the belt router's obstacle grid, where a ghost
+/// is equally not an obstacle.
+///
+/// # What this is NOT a claim about
+///
+/// This is a **latent** defect of the same shape as
+/// `docs/superpowers/notes/2026-09-06-a-failed-placement-blames-a-tree.md`,
+/// and it is **not** established to be that note's cause. Whether a stamped
+/// ghost reaches this crate at all on the live path is contested by a
+/// measurement taken the same day: nothing printed inside an RCON-invoked mod
+/// function reaches stdout, so `rcon_place_blueprint`'s ghost writeouts were
+/// measured arriving zero times, with a non-ghost control that also never
+/// arrived (see CLAUDE.md, "Nothing printed inside an RCON-invoked mod
+/// function reaches stdout"). The executor discards the ghosts
+/// `place_blueprint` returns, so that reply is not a second path either.
+///
+/// The rule is unconditional regardless of which paths exist today: a ghost
+/// does not collide, so it must not be filed as ground that blocks. What
+/// stood at that tile in that run is open.
+pub const GHOST_ENTITY_TYPES: [&str; 2] = ["entity-ghost", "tile-ghost"];
+
 impl EntityGraph {
     #[allow(clippy::new_without_default)]
     pub fn new(
@@ -291,6 +354,7 @@ impl EntityGraph {
         EntityGraph {
             entity_prototypes,
             recipes,
+            generation: AtomicU64::new(0),
             entity_graph: RwLock::new(EntityGraphInner::new()),
             entity_tree: RwLock::new(QuadTree::new(max_area, false, 32, 128, 128, 8)),
             blocked_tree: RwLock::new(QuadTree::new(max_area, true, 8, 64, 1024, 8)),
@@ -302,6 +366,17 @@ impl EntityGraph {
             threats: DashMap::new(),
         }
     }
+    /// How many times this graph has been mutated. See [`EntityGraph`]'s
+    /// `generation` field for what it is for and what it does *not* promise.
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+
+    /// Called by every mutating method, at the point the mutation is complete.
+    fn bump_generation(&self) {
+        self.generation.fetch_add(1, Ordering::AcqRel);
+    }
+
     pub fn inner_graph(&self) -> RwLockReadGuard<'_, EntityGraphInner> {
         self.entity_graph.read()
     }
@@ -749,8 +824,9 @@ impl EntityGraph {
     /// 'no'`, and the run stuck on its first dispatched action.
     ///
     /// `blocked_tree` is the tree that does see them. `add` puts every entity
-    /// with a non-zero collision box into it except resources and rails (ore
-    /// and rails are asked about separately, by tile), and `add_tiles` adds
+    /// with a non-zero collision box into it except resources, rails (ore
+    /// and rails are asked about separately, by tile) and ghosts (which do not
+    /// collide at all -- see [`GHOST_ENTITY_TYPES`]), and `add_tiles` adds
     /// every `player_collidable` tile -- water. So this is the ground truth for
     /// buildability that the graph already had and nothing but `draw.rs` was
     /// reading.
@@ -774,6 +850,32 @@ impl EntityGraph {
     /// has far more precision than that at map coordinates, so rounding to
     /// that grid recovers the exact edge rather than approximating it.
     pub fn blocking_boxes_within(&self, bounds: &Rect) -> Vec<Rect> {
+        self.blocking_boxes_within_minable(bounds)
+            .into_iter()
+            .map(|(rect, _minable)| rect)
+            .collect()
+    }
+
+    /// [`Self::blocking_boxes_within`], keeping the one bit the tree stores.
+    ///
+    /// `blocked_tree`'s payload is a bare `is_minable` flag
+    /// ([`FactorioEntity::is_minable`]: the entity's type is `tree` or
+    /// `simple-entity`), and `blocking_boxes_within` throws it away. That is
+    /// the whole reason a refusal built on these boxes could only say
+    /// *"a tree, cliff, rock or unit"* -- four different things, one of which
+    /// it names first and none of which it read.
+    ///
+    /// The flag does not name the obstacle and this does not pretend it
+    /// does. It splits the boxes in two, honestly: `true` is a tree or a
+    /// rock, which a bot could in principle mine out of the way; `false` is
+    /// **anything else with a collision box that the entity tree does not
+    /// hold** -- a cliff, a unit, a water tile, a corpse, an item on the
+    /// ground. A caller that wants to say what it found says the first and
+    /// admits the second, rather than reciting a list it did not read.
+    ///
+    /// Same ordering, same snapping and the same narrowing-pass caveat as
+    /// [`Self::blocking_boxes_within`], which is now written in terms of this.
+    pub fn blocking_boxes_within_minable(&self, bounds: &Rect) -> Vec<(Rect, bool)> {
         /// Factorio stores map positions as fixed point with this denominator.
         const POSITION_GRID: f64 = 256.;
         fn snap(v: f32) -> f64 {
@@ -784,13 +886,16 @@ impl EntityGraph {
             .read()
             .query(query)
             .into_iter()
-            .map(|(_minable, rect, _id)| {
-                Rect::new(
-                    &Position::new(snap(rect.origin.x), snap(rect.origin.y)),
-                    &Position::new(
-                        snap(rect.origin.x + rect.size.width),
-                        snap(rect.origin.y + rect.size.height),
+            .map(|(minable, rect, _id)| {
+                (
+                    Rect::new(
+                        &Position::new(snap(rect.origin.x), snap(rect.origin.y)),
+                        &Position::new(
+                            snap(rect.origin.x + rect.size.width),
+                            snap(rect.origin.y + rect.size.height),
+                        ),
                     ),
+                    *minable,
                 )
             })
             .collect()
@@ -1295,6 +1400,7 @@ impl EntityGraph {
             if entity.entity_type != EntityType::Resource.to_string()
                 && entity.entity_type != EntityType::StraightRail.to_string()
                 && entity.entity_type != EntityType::CurvedRail.to_string()
+                && !GHOST_ENTITY_TYPES.contains(&entity.entity_type.as_str())
             {
                 blocked.insert_with_box(entity.is_minable(), entity.bounding_box.clone().into());
                 // The same `is_minable` the line above hands to the blocked
@@ -1446,6 +1552,9 @@ impl EntityGraph {
                 }
             }
         }
+        // The mutation is complete: anything built from this graph is now
+        // one generation behind. See `generation`.
+        self.bump_generation();
         Ok(())
     }
 
@@ -1759,6 +1868,9 @@ impl EntityGraph {
             tiles.remove(&(&entity.position).into());
         }
 
+        // The mutation is complete: anything built from this graph is now
+        // one generation behind. See `generation`.
+        self.bump_generation();
         Ok(())
     }
 
@@ -2045,6 +2157,9 @@ impl EntityGraph {
         //     inner.node_indices().count(),
         //     started.elapsed()
         // );
+        // The mutation is complete: anything built from this graph is now
+        // one generation behind. See `generation`.
+        self.bump_generation();
         Ok(())
     }
     pub fn entity_by_id(&self, id: ItemId) -> Option<FactorioEntity> {
@@ -2057,7 +2172,7 @@ impl EntityGraph {
     /// **The one write-back this graph has, and it exists because the graph is
     /// otherwise append-only.** Entities enter through [`Self::add`], which
     /// refuses a tile something already stands on ("failed to add ... blocked
-    /// by"), and `FactorioWorld::on_some_entity_updated` is a no-op that the
+    /// by"), and `FactorioSurface::on_some_entity_updated` is a no-op that the
     /// mod raises only on rotation. So a recipe -- which is put on a machine
     /// by an RCON call *after* it was built, never at build time -- had no
     /// route into the world model at all.
@@ -2080,13 +2195,21 @@ impl EntityGraph {
             return false;
         };
         let mut tree = self.entity_tree.write();
-        match tree.get_mut(id) {
+        let set = match tree.get_mut(id) {
             Some(entity) => {
                 entity.recipe = Some(recipe.to_string());
                 true
             }
             None => false,
+        };
+        drop(tree);
+        if set {
+            // A recipe is what an assembling machine's flow edge is computed
+            // from, so this changes what the flow graph says exactly as a
+            // placement does.
+            self.bump_generation();
         }
+        set
     }
 
     /// [`node_at`] one offset step away along `direction`.
@@ -2165,14 +2288,14 @@ impl EntityGraph {
 /// **`Pos` cannot be a JSON object key.** It is a two-field tuple struct, and
 /// `serde_json` refuses the whole document with `key must be a string` the
 /// moment one appears in key position -- so `resources` and `minables`, the
-/// two maps keyed that way, made *every* `FactorioWorld` serialization of a
+/// two maps keyed that way, made *every* `FactorioSurface` serialization of a
 /// world containing a single ore tile fail. It never showed up because nothing
 /// wrote a world to disk: the only worlds that serialised were empty ones.
 ///
 /// So the inner map travels as a list of `[pos, value]` pairs. A
 /// `BTreeMap<Pos, _>` already iterates in tile order, and the outer names are
 /// sorted here, which makes this half of a dump byte-stable for a given world
-/// -- the same discipline [`crate::factorio::world::FactorioWorld::observed_inventories`]
+/// -- the same discipline [`crate::factorio::world::FactorioSurface::observed_inventories`]
 /// exists to enforce, and for the same reason.
 struct TileMaps<'a, V>(&'a DashMap<String, BTreeMap<Pos, V>>);
 
@@ -2294,7 +2417,7 @@ impl<'de> Deserialize<'de> for EntityGraph {
             type Value = EntityGraph;
 
             fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-                formatter.write_str("struct FactorioWorld")
+                formatter.write_str("struct EntityGraph")
             }
 
             fn visit_map<V>(self, mut map: V) -> Result<Self::Value, V::Error>
@@ -2411,6 +2534,11 @@ impl<'de> Deserialize<'de> for EntityGraph {
                 let threats = tile_maps_from(threats.unwrap_or_default());
 
                 Ok(EntityGraph {
+                    // Not a serialised field: a loaded graph is generation 0
+                    // and every `FlowGraph` reading it rebuilds on its first
+                    // read, because `FlowGraph`'s own counter starts at a
+                    // sentinel no generation can equal.
+                    generation: AtomicU64::new(0),
                     entity_graph: RwLock::new(entity_graph),
                     blocked_tree: RwLock::new(blocked_tree),
                     entity_tree: RwLock::new(entity_tree),
@@ -2446,6 +2574,7 @@ impl<'de> Deserialize<'de> for EntityGraph {
 impl Clone for EntityGraph {
     fn clone(&self) -> Self {
         EntityGraph {
+            generation: AtomicU64::new(self.generation()),
             entity_graph: RwLock::new(self.entity_graph.read().clone()),
             blocked_tree: RwLock::new(self.blocked_tree.read().clone()),
             entity_tree: RwLock::new(self.entity_tree.read().clone()),
@@ -2461,6 +2590,7 @@ impl Clone for EntityGraph {
     }
 
     fn clone_from(&mut self, source: &Self) {
+        self.generation = AtomicU64::new(source.generation());
         self.entity_graph = RwLock::new(source.entity_graph.read().clone());
         self.blocked_tree = RwLock::new(source.blocked_tree.read().clone());
         self.entity_tree = RwLock::new(source.entity_tree.read().clone());
@@ -2701,6 +2831,87 @@ mod tests {
                 "edge {got} is more than one position step from {want}"
             );
         }
+    }
+
+    /// A ghost is not an obstacle, and `blocked_tree` used to say it was.
+    ///
+    /// The defect from
+    /// `docs/superpowers/notes/2026-09-06-a-failed-placement-blames-a-tree.md`:
+    /// `BuildBlock` stamps ghosts, the mod writes each one out as
+    /// `on_some_entity_created`, and `add` filed every entity with a non-zero
+    /// box into the blocked tree. The tree keeps no name, so the stamped
+    /// ghost came back an anonymous rectangle and the planner reported it as
+    /// terrain -- at a tile the game said held nothing but ore.
+    ///
+    /// The tree is the hostile half of this fixture, not decoration: it sits
+    /// one tile away, is added in the same call, and proves the query
+    /// actually reaches this ground. Without it the ghost's absence would
+    /// also be satisfied by a query that finds nothing anywhere.
+    #[test]
+    fn a_stamped_ghost_is_not_a_blocking_box() {
+        let mut ghost =
+            FactorioEntity::new_stone_furnace(&Position::new(3.5, 3.5), Direction::North);
+        ghost.name = "entity-ghost".into();
+        ghost.entity_type = "entity-ghost".into();
+        let tree = FactorioEntity::new_tree(&Position::new(6.5, 6.5));
+        let graph = entity_graph_from(vec![ghost.clone(), tree]).expect("adding must not fail");
+
+        assert_eq!(
+            graph
+                .blocking_boxes_within(&Rect::new(&Position::new(3., 3.), &Position::new(4., 4.)))
+                .len(),
+            0,
+            "a ghost does not collide: a real placement consumes it rather \
+             than being refused by it"
+        );
+        assert_eq!(
+            graph
+                .blocking_boxes_within(&Rect::new(&Position::new(6., 6.), &Position::new(7., 7.)))
+                .len(),
+            1,
+            "the control tree must be found, or the assertion above is about \
+             a query that sees nothing at all"
+        );
+    }
+
+    /// The one bit `blocked_tree` stores, kept rather than thrown away.
+    ///
+    /// `blocking_boxes_within` reduced every box to a bare rectangle, which
+    /// is why a refusal built on it could only recite "a tree, cliff, rock or
+    /// unit" -- four things, of which a reader takes the first, and none of
+    /// which it had read. `is_minable` is exactly "type is `tree` or
+    /// `simple-entity`", so it splits the boxes into "a tree or rock" and
+    /// "something this model cannot name", which is all that is honestly
+    /// available.
+    ///
+    /// Absolute counts and absolute flags, not a relation between them: a
+    /// pair of wrong numbers can satisfy a relation.
+    #[test]
+    fn blocking_boxes_keep_whether_the_obstacle_is_minable() {
+        let tree = FactorioEntity::new_tree(&Position::new(3.5, 3.5));
+        let mut cliff =
+            FactorioEntity::new_stone_furnace(&Position::new(9.5, 9.5), Direction::North);
+        cliff.name = "cliff".into();
+        cliff.entity_type = "cliff".into();
+        let graph = entity_graph_from(vec![tree, cliff]).expect("adding must not fail");
+
+        let minable = graph.blocking_boxes_within_minable(&Rect::new(
+            &Position::new(3., 3.),
+            &Position::new(4., 4.),
+        ));
+        assert_eq!(minable.len(), 1, "one tree: {minable:?}");
+        assert!(minable[0].1, "a tree is minable");
+
+        let anonymous = graph.blocking_boxes_within_minable(&Rect::new(
+            &Position::new(9., 9.),
+            &Position::new(10., 10.),
+        ));
+        assert_eq!(anonymous.len(), 1, "one cliff: {anonymous:?}");
+        assert!(
+            !anonymous[0].1,
+            "a cliff is not minable, and nothing here knows anything else \
+             about it"
+        );
     }
 
     /// A hand-built power plant has to be readable **by name**, not merely
@@ -4106,7 +4317,7 @@ mod tests {
         assert!(graph.minable_positions("tree-01").is_empty());
     }
 
-    /// `Clone` carries the map. `FactorioWorld` clones its graph, so a map
+    /// `Clone` carries the map. `FactorioSurface` clones its graph, so a map
     /// this did not copy would leave a cloned world holding a forest it could
     /// not name.
     ///
@@ -4135,7 +4346,7 @@ mod tests {
     /// It could not until 2026-09-03. `resources` and `minables` key their
     /// inner maps by [`Pos`], a two-field tuple struct, and `serde_json`
     /// refuses the whole document with `key must be a string` when one turns
-    /// up as a key -- so `FactorioWorld`'s hand-written `Serialize`, which
+    /// up as a key -- so `FactorioSurface`'s hand-written `Serialize`, which
     /// delegates here, failed on any world that had ever seen an ore tile or a
     /// tree. Nothing noticed because nothing wrote a world to disk: the only
     /// graphs that ever serialised were empty ones. Offline planning is

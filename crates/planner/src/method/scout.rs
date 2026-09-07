@@ -384,7 +384,7 @@ mod tests {
     use super::*;
     use crate::ids::BotId;
     use crate::method::GoalSite;
-    use factorio_bot_core::factorio::world::FactorioWorld;
+    use factorio_bot_core::factorio::world::FactorioSurface;
     use factorio_bot_core::types::{Direction, FactorioEntity, Rect};
     use std::sync::Arc;
 
@@ -403,8 +403,8 @@ mod tests {
     }
 
     /// A world whose ground is charted over the given box and nowhere else.
-    fn world_charted_over(rect: Option<Rect>) -> FactorioWorld {
-        let world = FactorioWorld::new();
+    fn world_charted_over(rect: Option<Rect>) -> FactorioSurface {
+        let world = FactorioSurface::new();
         if let Some(rect) = rect {
             let mut tiles = Vec::new();
             factorio_bot_core::test_utils::spawn_water(&mut tiles, rect);
@@ -420,8 +420,8 @@ mod tests {
     /// as a rect is a quarter-million tiles for a unit test. `is_charted`
     /// asks a one-tile box, so one tile per cell tests exactly the thing the
     /// method reads and nothing else.
-    fn world_charted_at(points: &[Position]) -> FactorioWorld {
-        let world = FactorioWorld::new();
+    fn world_charted_at(points: &[Position]) -> FactorioSurface {
+        let world = FactorioSurface::new();
         let mut tiles = Vec::new();
         // Deduplicated: adjacent cells share reveal edges (cell 0's edge at
         // +128 is cell 256's edge at -128), and the tile tree panics rather
@@ -467,7 +467,7 @@ mod tests {
             .collect()
     }
 
-    fn state_of(world: FactorioWorld) -> PlanState {
+    fn state_of(world: FactorioSurface) -> PlanState {
         PlanState::from_world(Arc::new(world), &[BotId(1)])
     }
 
@@ -476,7 +476,7 @@ mod tests {
     }
 
     /// A spawner at `at`, ingested the way a chunk writeout would deliver it.
-    fn with_spawner(world: &FactorioWorld, at: Position) {
+    fn with_spawner(world: &FactorioSurface, at: Position) {
         let mut entity = FactorioEntity::new_stone_furnace(&at, Direction::North);
         entity.name = "biter-spawner".to_owned();
         entity.entity_type = "unit-spawner".to_owned();

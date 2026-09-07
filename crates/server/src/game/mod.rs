@@ -3,19 +3,30 @@ pub mod query;
 
 use crate::error::ErrorResponse;
 use crate::state::AppState;
-use factorio_bot_core::factorio::world::FactorioWorld;
+use factorio_bot_core::factorio::world::FactorioSurface;
 use factorio_bot_core::process::process_control::FactorioInstance;
 use factorio_bot_core::types::{FactorioPlayer, PlayerId};
 use std::sync::Arc;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
-/// Returns the world of a running instance, or the standard error when the
+/// Returns the surface these handlers query, or the standard error when the
 /// instance is up but its world has not been populated yet.
-pub fn require_world(instance: &FactorioInstance) -> Result<&Arc<FactorioWorld>, ErrorResponse> {
+///
+/// Every `/api/v1/game/*` handler asks about *a* surface without saying
+/// which, so this goes through
+/// [`FactorioWorld::only_surface`](factorio_bot_core::factorio::world::FactorioWorld::only_surface)
+/// rather than through `nauvis()`: a run holds exactly one surface today, and
+/// the day one holds two this stops answering instead of silently picking
+/// Nauvis for a caller that never said so. The handlers, and the routes'
+/// shapes, are what would then need the surface named.
+pub fn require_surface(
+    instance: &FactorioInstance,
+) -> Result<&Arc<FactorioSurface>, ErrorResponse> {
     instance
         .world
         .as_ref()
+        .and_then(|world| world.only_surface())
         .ok_or_else(|| ErrorResponse::new("world not initialized".into(), 2))
 }
 
@@ -26,7 +37,7 @@ pub fn require_world(instance: &FactorioInstance) -> Result<&Arc<FactorioWorld>,
 /// process for an unknown id (and we do not want to mutate on behalf of a
 /// player that does not exist).
 pub fn require_player(
-    world: &FactorioWorld,
+    world: &FactorioSurface,
     player_id: PlayerId,
 ) -> Result<FactorioPlayer, ErrorResponse> {
     world

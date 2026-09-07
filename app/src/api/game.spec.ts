@@ -137,6 +137,87 @@ describe('parseFactorioEntity -- underground_half', () => {
     });
 });
 
+describe('parseFactorioEntity -- transport_lines and input_inventory', () => {
+    const belt = {
+        name: 'transport-belt',
+        entity_type: 'transport-belt',
+        position: {x: 0.5, y: 0.5},
+        bounding_box: {left_top: {x: 0.1, y: 0.1}, right_bottom: {x: 0.9, y: 0.9}},
+        direction: 0
+    };
+
+    it('keeps an empty lane as a lane, not as a missing one', () => {
+        // The left lane arrives as `{}` -- BotBridge renders an empty Lua
+        // table as an object -- and must still read as a lane running empty.
+        const parsed = parseFactorioEntity({
+            ...belt,
+            transport_lines: [
+                {line: 'left_line', contents: {}},
+                {line: 'right_line', contents: [{name: 'coal', quality: 'normal', count: 2}]}
+            ]
+        });
+        expect(parsed.transport_lines).toEqual([
+            {line: 'left_line', contents: []},
+            {line: 'right_line', contents: [{name: 'coal', quality: 'normal', count: 2}]}
+        ]);
+    });
+
+    it('reads an entity with no lanes as null, which is not the same as no items', () => {
+        expect(parseFactorioEntity(belt).transport_lines).toBeNull();
+    });
+
+    it('separates a furnace holding ore from one that never received any', () => {
+        const holding = parseFactorioEntity({
+            ...belt,
+            name: 'stone-furnace',
+            entity_type: 'furnace',
+            input_inventory: [{name: 'iron-ore', quality: 'normal', count: 34}]
+        });
+        const empty = parseFactorioEntity({...belt, name: 'stone-furnace', entity_type: 'furnace', input_inventory: {}});
+        const notAFurnace = parseFactorioEntity(belt);
+
+        expect(holding.input_inventory).toEqual([{name: 'iron-ore', quality: 'normal', count: 34}]);
+        // Present and empty: the furnace HAS an input inventory and it is
+        // empty. `null` below is the different claim -- no input inventory at
+        // all -- and the two must not collapse.
+        expect(empty.input_inventory).toEqual([]);
+        expect(notAFurnace.input_inventory).toBeNull();
+    });
+});
+
+describe('parseFactorioEntity -- status', () => {
+    const furnace = {
+        name: 'stone-furnace',
+        entity_type: 'furnace',
+        position: {x: 0.5, y: 0.5},
+        bounding_box: {left_top: {x: 0.1, y: 0.1}, right_bottom: {x: 0.9, y: 0.9}},
+        direction: 0
+    };
+
+    it('carries the name the game gave the state, not a number', () => {
+        expect(parseFactorioEntity({...furnace, status: 'no_ingredients'}).status)
+            .toBe('no_ingredients');
+        // The back-pressure half of idleness, which nothing derivable from the
+        // flow graph can see: it must arrive distinguishable from every other
+        // reason a machine is standing still.
+        expect(parseFactorioEntity({...furnace, status: 'waiting_for_space_in_destination'}).status)
+            .toBe('waiting_for_space_in_destination');
+    });
+
+    it('reads a missing status as null, which is not the same as working', () => {
+        // A tree, a chest and every capture written before 2026-09-07 send no
+        // key at all. Defaulting that to `working` would invent a duty cycle
+        // from an archive that never measured one -- so `null` here means only
+        // that the sender did not say.
+        expect(parseFactorioEntity(furnace).status).toBeNull();
+        expect(parseFactorioEntity({...furnace, status: null}).status).toBeNull();
+    });
+
+    it('throws, naming the field, when status is not a string', () => {
+        expect(() => parseFactorioEntity({...furnace, status: 22})).toThrow(/\$\.status/);
+    });
+});
+
 describe('parseFactorioEntity / parseFactorioEntities -- rejects malformed input', () => {
     it('throws EntityShapeError, naming the field, when a required field is missing', () => {
         expect(() => parseFactorioEntity({entity_type: 'resource'})).toThrow(EntityShapeError);

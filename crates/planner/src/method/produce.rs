@@ -2987,8 +2987,8 @@ mod tests {
     /// A world with every prototype and recipe the fixture has, and no ore at
     /// all — the shape of an attached snapshot, or of a run that has charted
     /// no chunks yet.
-    fn world_without_ore() -> factorio_bot_core::factorio::world::FactorioWorld {
-        let world = factorio_bot_core::factorio::world::FactorioWorld::new();
+    fn world_without_ore() -> factorio_bot_core::factorio::world::FactorioSurface {
+        let world = factorio_bot_core::factorio::world::FactorioSurface::new();
         world
             .update_entity_prototypes(
                 factorio_bot_core::test_utils::fixture_entity_prototypes()
@@ -3580,7 +3580,7 @@ mod tests {
     /// keep the fixture's default. The near edge is the one
     /// `nearest_resource_tile` anchors on from the origin, exactly as seed
     /// `31337`'s rim is the one the live run drilled dry.
-    fn world_with_a_thin_rim(rim: u32) -> factorio_bot_core::factorio::world::FactorioWorld {
+    fn world_with_a_thin_rim(rim: u32) -> factorio_bot_core::factorio::world::FactorioSurface {
         use factorio_bot_core::factorio::util::add_to_rect;
         use factorio_bot_core::types::Rect;
         let world = fixture_world();
@@ -4292,7 +4292,7 @@ mod tests {
     // ---- cells an earlier plan left standing --------------------------------
 
     /// The fixture's iron patch with every tile holding `amount` ore.
-    fn world_with_ore_amount(amount: u32) -> factorio_bot_core::factorio::world::FactorioWorld {
+    fn world_with_ore_amount(amount: u32) -> factorio_bot_core::factorio::world::FactorioSurface {
         use factorio_bot_core::factorio::util::add_to_rect;
         use factorio_bot_core::types::Rect;
         let world = fixture_world();
@@ -4316,7 +4316,7 @@ mod tests {
     /// machines standing with no queue entry, no claim and, when `fuel` says
     /// so, coal in their slots as the game would have reported it.
     fn leave_a_cell_standing(
-        world: &factorio_bot_core::factorio::world::FactorioWorld,
+        world: &factorio_bot_core::factorio::world::FactorioSurface,
         fuel: Option<(u32, u32)>,
     ) -> Cell {
         let s = PlanState::from_world(Arc::new(fixture_world()), &[BotId(1)]);

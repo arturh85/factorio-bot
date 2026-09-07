@@ -25,7 +25,7 @@ use super::{
 };
 use factorio_bot_core::blueprint::UndergroundHalf;
 use factorio_bot_core::factorio::rcon::PlacementQuery;
-use factorio_bot_core::factorio::world::FactorioWorld;
+use factorio_bot_core::factorio::world::FactorioSurface;
 use factorio_bot_core::mlua::prelude::*;
 use factorio_bot_core::types::Position;
 use factorio_bot_executor::{ExecutionLog, Recovery};
@@ -87,7 +87,7 @@ const KNOWN_PREDICATE_KEYS: &[&str] = &[
 /// recovery re-plans for exactly the roster the plan it recovers was made for.
 pub(crate) struct PlanOrigin {
     pub(crate) goal: Goal,
-    pub(crate) world: Arc<FactorioWorld>,
+    pub(crate) world: Arc<FactorioSurface>,
     pub(crate) roster: Vec<BotId>,
 }
 
@@ -427,7 +427,7 @@ pub(super) fn resolve_roster(
 pub(crate) fn install_goal_plan(
     lua: &Lua,
     table: &LuaTable,
-    world: Arc<FactorioWorld>,
+    world: Arc<FactorioSurface>,
     default_roster: Vec<BotId>,
     checker: Option<PlacementChecker>,
     refresher: Option<BufferRefresher>,
@@ -504,7 +504,7 @@ const MAX_RESITE_ROUNDS: usize = 2;
 /// # Both outcomes are narrated, and that is the point
 ///
 /// A refresh that found nothing and a refresh that never happened leave
-/// **identical worlds and identical plans**: `FactorioWorld::inventories` is
+/// **identical worlds and identical plans**: `FactorioSurface::inventories` is
 /// empty either way, `PlanState::has_buffers` is false either way, and
 /// `Withdraw` claims nothing either way. Only one of those is a defect, and
 /// nothing about the resulting plan distinguishes them -- it re-mines, and if
@@ -930,7 +930,7 @@ async fn narrate_buffer_refresh(refresher: Option<&BufferRefresher>) {
 ///
 /// Expansion and scheduling are pure functions of the world snapshot and the
 /// roster. The only thing that changes between two rounds is the world: a
-/// refused site is written into `FactorioWorld::placement_refusals` by
+/// refused site is written into `FactorioSurface::placement_refusals` by
 /// [`FactorioRcon::can_place_entities`], and `PlanState::from_world` reads
 /// that ledger on the next `from_world`, so `free_area_near` stops offering
 /// the refused footprint. That is the whole reason a pre-check needed refusal
@@ -955,7 +955,7 @@ async fn narrate_buffer_refresh(refresher: Option<&BufferRefresher>) {
 /// build is attempted", and does not close it.
 async fn plan_verified(
     goal: &Goal,
-    world: &Arc<FactorioWorld>,
+    world: &Arc<FactorioSurface>,
     roster: &[BotId],
     checker: Option<&PlacementChecker>,
     refresher: Option<&BufferRefresher>,
@@ -1114,7 +1114,7 @@ impl PlanningClock {
 /// split out so the clock around them has one entry and one exit.
 async fn plan_rounds(
     goal: &Goal,
-    world: &Arc<FactorioWorld>,
+    world: &Arc<FactorioSurface>,
     roster: &[BotId],
     checker: Option<&PlacementChecker>,
 ) -> LuaResult<(ActionNetwork, Schedule)> {
@@ -2163,7 +2163,7 @@ mod tests {
     /// tests exercise the same code path a headless run takes, not a special
     /// one.
     fn lua_with_world_and_checker(
-        world: Arc<FactorioWorld>,
+        world: Arc<FactorioSurface>,
         roster: &[u8],
         checker: Option<PlacementChecker>,
     ) -> Lua {
@@ -2171,7 +2171,7 @@ mod tests {
     }
 
     fn lua_with_world_checker_and_refresher(
-        world: Arc<FactorioWorld>,
+        world: Arc<FactorioSurface>,
         roster: &[u8],
         checker: Option<PlacementChecker>,
         refresher: Option<BufferRefresher>,
@@ -2180,7 +2180,7 @@ mod tests {
     }
 
     fn lua_with_world_checker_refresher_and_pauser(
-        world: Arc<FactorioWorld>,
+        world: Arc<FactorioSurface>,
         roster: &[u8],
         checker: Option<PlacementChecker>,
         refresher: Option<BufferRefresher>,
@@ -2466,7 +2466,7 @@ mod tests {
     /// the buffers before it plans.
     ///
     /// Without this call every piece of the buffer machinery is correct,
-    /// tested and inert: `FactorioWorld::inventories` stays empty,
+    /// tested and inert: `FactorioSurface::inventories` stays empty,
     /// `PlanState::has_buffers` answers `false`, `Withdraw` claims nothing,
     /// and the replan mines ore that may already be gone. That failure looks
     /// exactly like the code working, which is why the call is pinned rather
@@ -2720,7 +2720,7 @@ mod tests {
     /// nothing would let `plan_verified` loop forever on a world that never
     /// learns, and would be testing a checker nobody has.
     fn stub_checker(
-        world: Arc<FactorioWorld>,
+        world: Arc<FactorioSurface>,
         policy: Policy,
     ) -> (PlacementChecker, Arc<std::sync::Mutex<CheckerLog>>) {
         let log = Arc::new(std::sync::Mutex::new(CheckerLog::default()));

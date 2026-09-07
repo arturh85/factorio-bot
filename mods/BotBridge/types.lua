@@ -139,7 +139,35 @@ function serialize_force(force)
         -- manual_mining_speed_modifier: hand mining runs at
         -- character.mining_speed * (1 + this). Vanilla's steel-axe research
         -- sets it to 1, doubling it, so the planner cannot assume a constant.
-        {"name", "index", "research_progress", "manual_mining_speed_modifier"},
+        --
+        -- The rest are its siblings: every LuaForce attribute that scales a
+        -- rate rather than a distance or a slot count. A rate in this project
+        -- is `prototype x force bonus x module effect` and only the first
+        -- factor was ever carried, which made every rate a constant that
+        -- research could not move. Sending them does not by itself make the
+        -- planner read them -- today only manual_mining_speed_modifier is
+        -- read -- but a datum that never leaves the game cannot be read at
+        -- all, and that was the actual root cause.
+        --
+        -- Every name here was checked against
+        -- workspace/factorio-api-docs/runtime-api.json (2.1.17), class
+        -- LuaForce: all are non-optional read attributes, `double` except
+        -- belt_stack_size_bonus and bulk_inserter_capacity_bonus which are
+        -- `uint32`. table_properties pcalls each one, so a name this game
+        -- version does not have is dropped rather than raised.
+        {
+            "name", "index", "research_progress",
+            "manual_mining_speed_modifier",
+            "manual_crafting_speed_modifier",
+            "character_running_speed_modifier",
+            "laboratory_speed_modifier",
+            "laboratory_productivity_bonus",
+            "mining_drill_productivity_bonus",
+            "inserter_stack_size_bonus",
+            "bulk_inserter_capacity_bonus",
+            "belt_stack_size_bonus",
+            "worker_robots_speed_modifier",
+        },
         {index = "force_id", research_progress = "research_progress"}
     )
     if force.current_research ~= nil then
@@ -196,6 +224,26 @@ function serialize_fluidbox_prototype(fluidbox)
     if pipe_connections_found then
         record.pipe_connections = pipe_connections
     end
+    -- HOW MUCH THE BOX HOLDS.
+    --
+    -- Without it this record says exactly where a tank may be joined and
+    -- nothing about its capacity, so anybody planning `Goal::Stored { fluid,
+    -- amount, .. }` has to hard-code a table of vanilla numbers -- the same
+    -- mod-compatibility defect as `pole_supply_half_extent`, and the same one
+    -- the world-record base just falsified for smelting, where a copied
+    -- `1/3.2` was exactly 2.0x low on every plate because 1,196 of 1,222
+    -- furnaces are steel.
+    --
+    -- **`get_volume()` is a METHOD, not an attribute.** There is no `volume`
+    -- on `LuaFluidBoxPrototype` in 2.1.17 at all (checked against
+    -- `runtime-api.json`, not recalled) -- the same shape that made
+    -- `crafting_speed` arrive nil for 1,028 prototypes and that
+    -- `get_supply_area_distance()` above nearly repeated: the attribute read
+    -- raises, this `pcall` swallows it, and the field is simply absent with
+    -- nothing to say it should not be. No argument means normal quality,
+    -- which is what the planner plans for.
+    local ok, volume = pcall(function() return fluidbox.get_volume() end)
+    if ok then record.volume = volume end
     return record
 end
 
@@ -267,16 +315,60 @@ function serialize_technology(technology)
     -- behaviour, which broke goal.researched for every technology that
     -- unlocks anything) or visible but unreachable, which would be worse --
     -- plans that can never execute.
+    --
+    -- `record.effects` beside it is the WHOLE list, unlock-recipe included.
+    -- Discarding every other effect is why nothing downstream could know that
+    -- `steel-axe` grants `character-mining-speed +1` -- the planner was not
+    -- ignoring the datum, it had never been sent one. `unlocked_recipes` is
+    -- kept as its own key rather than derived on the Rust side because every
+    -- existing consumer reads it and every archived payload has it; the
+    -- duplication buys a seam that does not move.
+    --
+    -- The shape is flattened deliberately. `TechnologyModifier`
+    -- (runtime-api.json 2.1.17) is a table tagged by `type` with 51 variant
+    -- groups, and 44 of them carry exactly one field, `modifier`. Mirroring
+    -- 51 variants into Rust would make every future Factorio version and
+    -- every mod that adds a modifier type a deserialisation failure, which is
+    -- the opposite of what carrying this data is for. So: `kind` is the
+    -- `type` string verbatim, `modifier` is the number, and `target` is
+    -- whichever single string field the variant uses to name what it acts on.
+    --
+    -- The two variants that do not spell their number `modifier`:
+    -- `change-recipe-productivity` uses `change` (plus `recipe`), and
+    -- `give-item` has `count` (plus `item`). Boolean modifiers -- seven
+    -- variants, e.g. `mining-with-fluid` -- become 1 or 0 rather than being
+    -- dropped, so "this technology enables it" survives as a number.
+    -- `nothing` carries only a LocalisedString and reaches Rust as kind alone.
     local unlocked = {}
+    local all_effects = {}
     local ok, effects = pcall(function() return technology.prototype.effects end)
     if ok and effects ~= nil then
         for _, effect in pairs(effects) do
             if effect.type == "unlock-recipe" and effect.recipe ~= nil then
                 table.insert(unlocked, effect.recipe)
             end
+            if effect.type ~= nil then
+                local entry = {kind = effect.type}
+                local amount = effect.modifier
+                if amount == nil then amount = effect.change end
+                if amount == nil then amount = effect.count end
+                if type(amount) == "boolean" then
+                    amount = amount and 1 or 0
+                end
+                if type(amount) == "number" then
+                    entry.modifier = amount
+                end
+                -- Exactly one of these is present per variant; the order is
+                -- only a way to ask for all of them at once.
+                entry.target = effect.recipe or effect.ammo_category
+                    or effect.turret_id or effect.item or effect.quality
+                    or effect.space_location
+                table.insert(all_effects, entry)
+            end
         end
     end
     record.unlocked_recipes = unlocked
+    record.effects = all_effects
 
     -- How this technology is unlocked, when it is NOT unlocked by science
     -- packs.
@@ -464,6 +556,56 @@ function serialize_entity_prototype(entity)
     -- for a burner drill it genuinely is, because its area is its footprint.
     ok, val = pcall(function() return entity.mining_drill_radius end)
     if ok then record.mining_drill_radius = val end
+    -- BEACON AND POLE GEOMETRY. `FactorioEntityPrototype` carried nothing
+    -- electrical at all, which is why `crates/planner/src/method/power.rs`
+    -- writes `pole_supply_half_extent` out by hand as a table of vanilla
+    -- names and says in its own doc that sending this field is the follow-up
+    -- that deletes it. Two sessions were blocked on beacon spacing and both
+    -- correctly refused to invent a number.
+    --
+    -- **`get_supply_area_distance()` is a METHOD, not an attribute.** There is
+    -- no `supply_area_distance` on `LuaEntityPrototype` in 2.1.17 at all
+    -- (checked against `runtime-api.json`, not recalled) -- the same shape
+    -- that made `crafting_speed` arrive nil for all 1028 prototypes above: the
+    -- attribute read raises, `pcall` swallows it, and the field is simply
+    -- absent with nothing to say it should not be. No argument means normal
+    -- quality, which is what the planner plans for.
+    --
+    -- It answers for an `electric-pole` as well as a `beacon` -- half the side
+    -- of the square it supplies, so 2.5 for a small pole's 5x5.
+    ok, val = pcall(function() return entity.get_supply_area_distance() end)
+    if ok then record.supply_area_distance = val end
+    -- Beacon only: the fraction of a module's effect the receiver gets.
+    ok, val = pcall(function() return entity.distribution_effectivity end)
+    if ok then record.distribution_effectivity = val end
+    -- **Beacon effectiveness is NOT a single scalar in 2.0.** `profile` is an
+    -- array of multipliers indexed by how many beacons reach one receiver, so
+    -- the second beacon on a machine is worth a different amount from the
+    -- first. Sending only `distribution_effectivity` would let a caller
+    -- compute a per-beacon number that is right for exactly one beacon count
+    -- and silently wrong for every other, which is the shape of defect this
+    -- field exists to prevent rather than create.
+    --
+    -- Keyed `beacon_profile`, not `profile`: bare `profile` on a struct that
+    -- describes every prototype in the game says nothing about what it
+    -- profiles. `FactorioEntityPrototype` reads the same spelling -- a name
+    -- that matches nothing on the Rust struct is dropped by serde SILENTLY,
+    -- which has happened twice in this file (`pickupPosition`,
+    -- `belt_to_ground_type`), so the pairing is pinned by a test that goes the
+    -- whole way into the struct.
+    ok, val = pcall(function()
+        local profile = entity.profile
+        if profile == nil then return nil end
+        local multipliers = {}
+        for _, multiplier in ipairs(profile) do
+            table.insert(multipliers, multiplier)
+        end
+        -- nil rather than `{}` so an empty profile does not arrive as an empty
+        -- *map* -- `helpers.table_to_json` renders an empty Lua table as `{}`.
+        if #multipliers == 0 then return nil end
+        return multipliers
+    end)
+    if ok then record.beacon_profile = val end
     ok, val = pcall(function() return entity.resource_category end)
     if ok then record.resource_category = val end
     ok, val = pcall(function()
@@ -496,7 +638,133 @@ function serialize_entity_prototype(entity)
     return record
 end
 
-function serialize_entity(entity)
+-- Which `defines.inventory` index holds this entity type's INPUT, or nil.
+--
+-- There is no `get_input_inventory()` on `LuaEntity` -- `get_output_inventory`
+-- and `get_fuel_inventory` exist and their input counterpart does not -- so
+-- the index has to be named per type, exactly as `machine_row` in control.lua
+-- does it.
+--
+-- Factorio 2.1.17 renamed the crafting-machine inventories: this install's
+-- `defines.inventory` has `crafter_input` and has **no** `furnace_source` or
+-- `assembling_machine_input` at all (checked against
+-- `workspace/factorio-api-docs/runtime-api.json`, not recalled). The fallback
+-- is for an older Factorio, and `nil` is a supported outcome -- the caller
+-- omits the field rather than passing nil to `get_inventory`.
+--
+-- `rawget(_G, "defines")` rather than a bare `defines`, because this file is
+-- also loaded outside Factorio: `crates/core/tests/botbridge_serialisers.rs`
+-- runs these serialisers in a plain Lua 5.4 state, where a bare global read
+-- of a table that does not exist is nil and indexing it raises. The tests
+-- install a `defines` stub shaped like the real one.
+local function input_inventory_index(entity_type)
+    local defines_table = rawget(_G, "defines")
+    if defines_table == nil or defines_table.inventory == nil then
+        return nil
+    end
+    local inventory = defines_table.inventory
+    if entity_type == "furnace" or entity_type == "assembling-machine" then
+        return inventory.crafter_input or inventory.assembling_machine_input
+    elseif entity_type == "lab" then
+        return inventory.lab_input
+    end
+    return nil
+end
+
+-- `defines.transport_line`'s own name for a line index, or `unmapped_<n>`.
+--
+-- Built by inverting `defines.transport_line`, so the names are the game's and
+-- not a list written down here that a Factorio version could quietly outgrow.
+-- An index this build cannot name still reaches the record, labelled as
+-- unresolved, rather than being written as a bare integer nobody can decode
+-- later -- the same rule `entity_status_name` below follows.
+--
+-- The number alone is uninterpretable: line 3 is `left_underground_line` on an
+-- underground belt and a different lane on a splitter, so a caller handed the
+-- index would have to rebuild this mapping from the entity type and would be
+-- guessing at it.
+--
+-- `rawget(_G, "defines")` for the same reason `input_inventory_index` uses it:
+-- this file is loaded outside Factorio by the Rust tests.
+local transport_line_names = nil
+local function transport_line_name(index)
+    if transport_line_names == nil then
+        transport_line_names = {}
+        local defines_table = rawget(_G, "defines")
+        if defines_table ~= nil and defines_table.transport_line ~= nil then
+            for name, value in pairs(defines_table.transport_line) do
+                transport_line_names[value] = name
+            end
+        end
+    end
+    return transport_line_names[index] or ("unmapped_" .. tostring(index))
+end
+
+-- `defines.entity_status`'s own name for a status value, or `unmapped_<n>`.
+--
+-- **The NAME crosses the wire, never the number.** A status id is meaningless
+-- without this table: `defines.entity_status` is an enum whose numbering is a
+-- Factorio implementation detail, so an archive holding `12` would need the
+-- exact game version's table to be readable at all, and a version bump could
+-- silently make it mean something else. A value this build cannot name is
+-- written as `unmapped_<n>` rather than dropped -- the same rule
+-- `transport_line_name` above follows.
+--
+-- Built lazily by inverting the game's own table rather than from a list
+-- written down here, which a Factorio version could quietly outgrow: 2.1.17
+-- has 72 members.
+--
+-- `rawget(_G, "defines")` for the same reason `input_inventory_index` uses it:
+-- this file is loaded outside Factorio by `crates/core/tests/
+-- botbridge_serialisers.rs`, where a bare global read of a missing table is
+-- nil and indexing it raises.
+local entity_status_names = nil
+function entity_status_name(status)
+    if entity_status_names == nil then
+        entity_status_names = {}
+        local defines_table = rawget(_G, "defines")
+        if defines_table ~= nil and defines_table.entity_status ~= nil then
+            for name, value in pairs(defines_table.entity_status) do
+                entity_status_names[value] = name
+            end
+        end
+    end
+    return entity_status_names[status] or ("unmapped_" .. tostring(status))
+end
+
+-- `opts.omit_inventories` -- IDENTITY AND GEOMETRY IN BULK, CONTENTS ON DEMAND.
+--
+-- This function serves two very different callers. The RCON queries
+-- (`rcon_find_entities_filtered`, `find_entities_in_radius`, `world_snapshot`,
+-- `rcon_place_entity`'s reply) answer a question somebody asked about a handful
+-- of entities, and scripts genuinely read `output_inventory` off those --
+-- `scripts/furnace_run.lua`, `two_row_smelter_live.lua` and others count plates
+-- that way. They pass nothing and get the full record, unchanged.
+--
+-- `writeout_entities` is the other caller, and it is not a query: it ships
+-- EVERY entity of EVERY chunk through a line-oriented text protocol on stdout,
+-- once per chunk, for the whole map. Attaching each machine's
+-- `get_output_inventory()` and `get_fuel_inventory()` contents there is cheap
+-- on a fresh map -- measured at exactly **0 bytes across 50,256 records** in
+-- `workspace/server-log.txt`, because a map of trees and ore has no machine to
+-- own an inventory -- and is the entire world state, item by item, on a
+-- finished base.
+--
+-- **Nothing reads them off a bulk-ingested entity.** `EntityGraph::add` clones
+-- the whole entity into `entity_tree`, so the fields are stored, but they are
+-- a snapshot taken when the chunk was generated and `add` refuses to re-add
+-- over an occupied position -- so what is stored is permanently stale and no
+-- caller in `crates/planner`, `crates/executor` or `crates/server` looks at it.
+-- The planner's buffer model reads `FactorioSurface::inventories`, which is
+-- filled only by `observe_inventories` from the RCON reply to
+-- `inventory_contents_at`. That is the on-demand path, it already exists, and
+-- it is the one the owner's rule names:
+--
+--   "For an endgame base we cannot model each individual item produced, we'd
+--    need to simplify using flow rates too."
+--
+-- See docs/superpowers/notes/2026-09-06-identity-in-bulk-contents-on-demand.md.
+function serialize_entity(entity, opts)
     local record = table_properties(entity, {"name", "direction", "type", "position", "drop_position"}, {type = "entity_type", drop_position = "drop_position"})
     -- WHICH SURFACE, BY NAME. Carried, not yet used.
     --
@@ -516,13 +784,117 @@ function serialize_entity(entity)
     -- See docs/superpowers/notes/2026-09-06-surfaces-survey.md.
     record.surface = entity.surface and entity.surface.name or nil
     record.bounding_box = table_properties(entity.bounding_box, {"left_top", "right_bottom"}, {left_top = "left_top", right_bottom = "right_bottom"})
-    local output_inventory = entity.get_output_inventory()
-    if output_inventory ~= nil then
-        record.output_inventory = output_inventory.get_contents()
+    -- WHAT THE MACHINE IS DOING RIGHT NOW.
+    --
+    -- The three inventory reads below say what a machine HOLDS. None of them
+    -- says whether it is running, and that absence is the dominant term in the
+    -- flow graph's error against a real base: measured at +16% to +23% on the
+    -- world-record save, unbounded, against coverage at 1.6% and modules at 0%.
+    -- Half of it is not derivable from the graph at any price -- 194 drills on
+    -- that base were sitting at `waiting_for_space_in_destination`, which is a
+    -- fact about back-pressure downstream that no ingredient balance can see.
+    -- See docs/superpowers/notes/2026-09-07-a-machine-standing-still.md.
+    --
+    -- **An ATTRIBUTE, not a method.** `LuaEntity.status` is `optional: true`
+    -- with `subclasses: None` in this install's `runtime-api.json` (2.1.17),
+    -- so it is a plain read and it is safe on any entity. That was checked
+    -- rather than assumed, because reading a *method* as an attribute yields a
+    -- function rather than raising, and the field then goes missing in silence
+    -- -- which is how `crafting_speed` arrived nil for 1,028 prototypes.
+    --
+    -- **`nil` and a name are different answers.** A tree, a chest and a belt
+    -- have no status concept and get no key at all (`None` on the Rust side,
+    -- "the sender did not say"); a machine that is stopped has a NAME for
+    -- being stopped -- `no_ingredients`, `no_power`,
+    -- `waiting_for_space_in_destination` -- and that name is the measurement.
+    -- Defaulting the absent case to `working` would invent a duty cycle.
+    --
+    -- **Outside the `omit_inventories` guard, deliberately.** This is one
+    -- small string, not an item-by-item inventory, and the bulk writeout is
+    -- the *only* path that fills the world model a dumped world is built from
+    -- -- gating it there would leave the duty cycle unmeasurable in exactly
+    -- the artefact the question is asked of.
+    local status = entity.status
+    if status ~= nil then
+        record.status = entity_status_name(status)
     end
-    local fuel_inventory = entity.get_fuel_inventory()
-    if fuel_inventory ~= nil then
-        record.fuel_inventory = fuel_inventory.get_contents()
+    if not (opts and opts.omit_inventories) then
+        local output_inventory = entity.get_output_inventory()
+        if output_inventory ~= nil then
+            record.output_inventory = output_inventory.get_contents()
+        end
+        local fuel_inventory = entity.get_fuel_inventory()
+        if fuel_inventory ~= nil then
+            record.fuel_inventory = fuel_inventory.get_contents()
+        end
+        -- WHAT THE MACHINE WAS GIVEN AND HAS NOT TURNED INTO ANYTHING YET.
+        --
+        -- The two reads above answer "what has it made" and "what is it
+        -- burning", and between them they leave a hole a day was spent in: a
+        -- furnace holding ore it is not smelting and a furnace no ore ever
+        -- reached serialise IDENTICALLY -- `output_inventory` empty,
+        -- `fuel_inventory` whatever, and nothing at all about the ore. A run
+        -- that mined 46 ore and got 17 plates could not say where the other
+        -- 29 went, and eliminating ore exhaustion, arm starvation and a full
+        -- belt by measurement still left the question open, because the one
+        -- inventory that would have answered it was never sent.
+        --
+        -- **`nil` and empty are different answers and must stay different.**
+        -- A belt has no input inventory at all and gets no key (`None` on the
+        -- Rust side); a furnace standing empty gets `{}`, which
+        -- `option_vec_or_empty_map` reads as `Some(empty)`. Collapsing those
+        -- would rebuild the same ambiguity one layer up.
+        local input_index = input_inventory_index(entity.type)
+        if input_index ~= nil then
+            local input_inventory = entity.get_inventory(input_index)
+            if input_inventory ~= nil then
+                record.input_inventory = input_inventory.get_contents()
+            end
+        end
+        -- WHAT IS RIDING ON THE BELT, LANE BY LANE.
+        --
+        -- The three reads above describe machines and say nothing at all about
+        -- the thing between them. `LuaTransportLine::get_contents()` has now
+        -- blocked four separate questions here, the fourth a diagnosis: a run
+        -- mined 46 ore, made 17 plates and stranded 29, and neither a full belt
+        -- nor an empty one could be ruled in or out because the belt's contents
+        -- had never left the game.
+        --
+        -- **Lanes, not one number.** A `transport-belt` has two, an
+        -- `underground-belt` four and a `splitter` eight, and which lane an
+        -- item is on is exactly what decides whether an arm can take it -- an
+        -- inserter drops on the FAR lane and a side-load arrives on the NEAR
+        -- one, and this project has already measured a block where getting
+        -- that backwards put ore and coal on one lane and produced a single
+        -- plate.
+        --
+        -- **Counts, not positions.** `get_detailed_contents()` would give every
+        -- item's position along the line; the owner's ruling at scale is the
+        -- direction and what types of items are on it, so this is the
+        -- aggregated `get_contents()` and nothing finer.
+        --
+        -- Guarded on `get_max_transport_line_index`, which is declared for
+        -- `TransportBeltConnectable` only: reading it off a furnace raises,
+        -- exactly like the `crafting_progress` read that once took a live run
+        -- down from inside a sampler. A non-belt gets no key rather than an
+        -- empty list, so "this belt is running empty" stays a different answer
+        -- from "this is not a belt".
+        if entity.get_max_transport_line_index ~= nil then
+            local ok, max_index = pcall(function()
+                return entity.get_max_transport_line_index()
+            end)
+            if ok and max_index ~= nil and max_index > 0 then
+                local lines = {}
+                for index = 1, max_index do
+                    local line = entity.get_transport_line(index)
+                    table.insert(lines, {
+                        line = transport_line_name(index),
+                        contents = line.get_contents(),
+                    })
+                end
+                record.transport_lines = lines
+            end
+        end
     end
 
     if entity.type == "resource" then

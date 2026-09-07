@@ -26,7 +26,7 @@
 //! and refused every scheduler pairing that would make it walk -- while
 //! still allowed to act where it stands.
 
-use factorio_bot_core::factorio::world::{Bench, FactorioWorld, HOP_DISTANCE};
+use factorio_bot_core::factorio::world::{Bench, FactorioSurface, HOP_DISTANCE};
 use factorio_bot_core::test_utils::fixture_world;
 use factorio_bot_core::types::{FactorioPlayer, Position};
 use factorio_bot_planner::action::{Action, ActionKind, Actor, Condition, Effect};
@@ -59,8 +59,8 @@ fn bench(player: u8, at_pos: (f64, f64)) -> Bench {
 }
 
 /// A fixture world whose players stand where the run had them, carrying
-/// `benches` the way a run's `FactorioWorld` carries them into the next plan.
-fn world_with(benches: &[Bench]) -> Arc<FactorioWorld> {
+/// `benches` the way a run's `FactorioSurface` carries them into the next plan.
+fn world_with(benches: &[Bench]) -> Arc<FactorioSurface> {
     let world = fixture_world();
     for (id, position) in [
         (1u8, ELSEWHERE),
@@ -298,7 +298,7 @@ fn the_chain_actor_is_not_a_benched_bot() {
 fn a_bench_survives_the_world_round_trip() {
     let live = world_with(&[bench(2, BENCHED_AT)]);
     let json = serde_json::to_string(&*live).expect("a world serialises");
-    let loaded: FactorioWorld = serde_json::from_str(&json).expect("and loads");
+    let loaded: FactorioSurface = serde_json::from_str(&json).expect("and loads");
     assert_eq!(loaded.benches(), live.benches());
     let state = PlanState::from_world(Arc::new(loaded), &roster());
     assert!(state.is_benched(BotId(2)));

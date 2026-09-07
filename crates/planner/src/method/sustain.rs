@@ -76,7 +76,7 @@ use crate::error::PlannerError;
 use crate::goal::{Goal, Holder};
 use crate::ids::{ItemId, Ticks};
 use crate::method::connect::{ConnectRefusal, connect_steps_with};
-use crate::method::produce::{CellSpec, DRILL, FURNACE, cell_spec, cells_for};
+use crate::method::produce::{Cell, CellSpec, DRILL, FURNACE, cell_spec, cells_for};
 use crate::method::util::nearest_resource_tile;
 use crate::method::{ExpansionCtx, Method, Step};
 use crate::state::PlanState;
@@ -236,11 +236,70 @@ struct FuelSource {
 /// answer rather than a restatement of it. A drill dropping into a furnace
 /// makes the furnace fed for *ore* and says nothing about its coal, so the
 /// caller asks this once per burner and not once per cell.
+///
+/// # And an arm that stands is not an arm that delivers
+///
+/// The clause above is **structural**: it asks where an inserter stands and
+/// which tile it drops on, and answers the same whether the belt behind it is
+/// running or was never connected to anything. That is the wrong shape of
+/// answer for a [`Goal::Sustain`], whose whole subject is what keeps turning
+/// with no bot in the loop.
+///
+/// So the flow graph gets a veto, and only a veto. It is consulted through
+/// [`flow_reaches`], which answers **`true` for anything it does not model** --
+/// see that function for why the ignorance has to be read that way and what it
+/// costs. The composition is deliberately one-directional: this predicate can
+/// only ever become *stricter* than it was, never looser, so the worst a wrong
+/// flow answer can do is make a replan build a feed that already exists, which
+/// the belt primitive refuses by name. It cannot make this method skip a feed
+/// it should have built.
 fn fed_by_machine(state: &PlanState, at: &Position) -> bool {
     state
         .entities_within(at, FED_RADIUS)
         .into_iter()
-        .any(|arm| state.pickup_position(&arm).is_some() && state.delivers_into(&arm.position, at))
+        .any(|arm| {
+            state.pickup_position(&arm).is_some()
+                && state.delivers_into(&arm.position, at)
+                && flow_reaches(state, &arm.position)
+        })
+}
+
+/// Does anything actually arrive at the arm standing at `at`, as far as the
+/// world's flow graph can tell?
+///
+/// The first question anything in this crate has ever asked
+/// [`FlowGraph::throughput_at`], and the first time a flow-graph number has
+/// affected a planning decision at all. Two things about the answer matter more
+/// than the arithmetic.
+///
+/// # It is a question about the STANDING world, and cannot be otherwise
+///
+/// [`PlanState`] is an **overlay**: entities this expansion plans live in the
+/// overlay and never reach `base().entity_graph`, which is what the flow graph
+/// is built from. So an arm this plan is about to place is invisible here, and
+/// asking about it would answer "nothing arrives" for the entirely wrong
+/// reason.
+///
+/// That is why **an arm the flow graph has no node for reads as `true`**.
+/// Ignorance is not evidence of a dead belt: the flow walk starts only from
+/// offshore pumps and drills standing on ore, so an arm fed by hand, or one in
+/// a corner of the world nothing has been walked from, has no node either. The
+/// veto fires only where the graph positively models the arm **and** reports
+/// nothing reaching it -- which is what a belt whose source has been mined out
+/// or removed looks like.
+///
+/// # It cannot see back-pressure, and this predicate is not evidence of health
+///
+/// [`FlowGraph::throughput_at`] computes forwards from a source and models no
+/// blocked sink and no buffer, so a full belt nobody unloads reports its rate
+/// unchanged. A `true` here means "something is on its way", never "this arm is
+/// working".
+fn flow_reaches(state: &PlanState, at: &Position) -> bool {
+    let flow = &state.base().flow_graph;
+    if flow.node_at(at).is_none() {
+        return true;
+    }
+    !flow.throughput_at(at).is_empty()
 }
 
 /// The entity a machine standing at `at` really is, sized from its prototype.
@@ -736,6 +795,56 @@ fn plan_offtake(
     ))
 }
 
+/// What the world's flow graph says is arriving at each standing cell's
+/// furnace, in items per minute, as one sentence for a refusal to carry.
+///
+/// # Why a number appears in an error string rather than in a decision
+///
+/// Because this is the only place in this method where it can be honest.
+/// Everything above is being *planned*, and a planned entity lives in
+/// [`PlanState`]'s overlay where the flow graph cannot see it (see
+/// [`flow_reaches`]). Here, and only here, every entity the arrangement
+/// consists of is known to stand -- that is what `steps.is_empty()` means -- so
+/// the flow graph is being asked about exactly the world it was built from.
+///
+/// It is deliberately **not** turned into a verdict. A `Sustain` goal is a
+/// claim about a window of history, this crate has no clock to read one with,
+/// and [`FlowGraph::throughput_at`] models neither back-pressure nor buffers --
+/// so a modelled rate is an upper bound under ideal distribution and cannot
+/// settle whether the arrangement sustains anything. Reporting it beside the
+/// refusal is what lets a human compare the model against the run, which is the
+/// only way the model gets validated at all.
+fn modelled_delivery(state: &PlanState, cells: &[Cell], ore: &str) -> String {
+    let flow = &state.base().flow_graph;
+    let mut per_minute = 0.;
+    let mut modelled = 0usize;
+    for cell in cells {
+        if flow.node_at(&cell.furnace).is_none() {
+            continue;
+        }
+        modelled += 1;
+        per_minute += flow
+            .throughput_at(&cell.furnace)
+            .into_iter()
+            .filter(|(item, _)| item == ore)
+            .map(|(_, rate)| rate * 60.)
+            .sum::<f64>();
+    }
+    if modelled == 0 {
+        return format!(
+            "the flow graph models none of the {} furnace(s), so it has nothing to say about \
+             what reaches them",
+            cells.len()
+        );
+    }
+    format!(
+        "the flow graph models {modelled} of {} furnace(s) and puts {per_minute:.1} {ore}/min \
+         into them -- an upper bound under ideal distribution, blind to back-pressure and to \
+         buffers, and no evidence that anything moved",
+        cells.len()
+    )
+}
+
 /// The belt nearest `at` among the placements in `steps`.
 ///
 /// Deterministic without a float tie-break reaching the ordering: distances are
@@ -1142,8 +1251,10 @@ impl Method for Sustain {
                 window_ticks: *window_ticks,
                 inputs: format!(
                     "the whole arrangement stands -- the {} cell, its {FUEL} source, and a \
-                     belted deliverer for every burner -- so there is nothing left to build",
-                    spec.ore
+                     belted deliverer for every burner -- so there is nothing left to build. \
+                     {}",
+                    spec.ore,
+                    modelled_delivery(&ctx.state, &cells, &spec.ore)
                 ),
             });
         }
@@ -1157,7 +1268,7 @@ mod tests {
     use crate::ids::BotId;
     use crate::{expand, holds, registry_for};
     use factorio_bot_core::factorio::util::add_to_rect;
-    use factorio_bot_core::factorio::world::FactorioWorld;
+    use factorio_bot_core::factorio::world::FactorioSurface;
     use factorio_bot_core::test_utils::{fixture_world, spawn_ore};
     use factorio_bot_core::types::Rect;
     use std::sync::Arc;
@@ -1199,7 +1310,7 @@ mod tests {
     /// one input for which `EntityGraph`'s flooring round-trip is lossless, so
     /// a geometry defect that depends on the half-tile offset would not show
     /// here. The offline plan against `map.json` is the check that does see it.
-    fn world_with_coal_beside_the_iron() -> FactorioWorld {
+    fn world_with_coal_beside_the_iron() -> FactorioSurface {
         let world = fixture_world();
         let mut entities = Vec::new();
         spawn_ore(
@@ -1213,6 +1324,98 @@ mod tests {
 
     fn near_state() -> PlanState {
         PlanState::from_world(Arc::new(world_with_coal_beside_the_iron()), &[BotId(1)])
+    }
+
+    /// The ignorance rule, asserted on its own because everything else in this
+    /// module depends on it and it is the half that could quietly break the
+    /// method.
+    ///
+    /// A planner's world is an **overlay**: every entity this expansion is
+    /// about to place lives there and never reaches the flow graph, which is
+    /// built from `base().entity_graph`. If ignorance read as "nothing arrives"
+    /// the veto would fire on every arm this method plans, and the arrangement
+    /// would never converge.
+    ///
+    /// The falsification for this is the interesting one: flipping the `true`
+    /// to `false` turns the whole module red, which is what says the flow graph
+    /// is genuinely wired into `fed_by_machine` rather than merely referenced
+    /// there.
+    #[test]
+    fn an_arm_the_flow_graph_knows_nothing_about_is_not_vetoed() {
+        let state = near_state();
+        assert!(
+            state
+                .base()
+                .flow_graph
+                .node_at(&Position::new(0., 0.))
+                .is_none(),
+            "the fixture world has no source root, so its flow graph is empty"
+        );
+        assert!(
+            flow_reaches(&state, &Position::new(0., 0.)),
+            "a position the flow graph has never heard of must not be read as a dead belt"
+        );
+    }
+
+    /// The other half of the veto: a modelled arm that nothing reaches.
+    ///
+    /// A furnace fed **only fuel** smelts nothing, so the arm on its output is
+    /// a node the flow graph positively knows about and reports an empty rate
+    /// for. That is the one condition `flow_reaches` refuses on, and without a
+    /// fixture holding it the refusal branch is never executed by any test in
+    /// this crate -- which is exactly what removing the call from
+    /// `fed_by_machine` demonstrated: the whole module stayed green.
+    ///
+    /// **This task wrote both the code and this fixture.** What it assumes: a
+    /// stone furnace whose only input is coal produces nothing (true of the
+    /// game, and of the recipe table, where coal is an ingredient of no
+    /// smelting recipe), and `EntityGraph::connect` links drill -> belt ->
+    /// inserter -> furnace -> inserter by drop and pickup positions. The
+    /// preconditions are asserted below rather than assumed, so the test fails
+    /// loudly instead of vacuously if either stops holding.
+    #[test]
+    fn an_arm_on_a_furnace_that_only_gets_fuel_is_refused() {
+        use factorio_bot_core::types::{Direction as Dir, FactorioEntity as E};
+        let world = fixture_world();
+        let mut entities = Vec::new();
+        spawn_ore(
+            &mut entities,
+            add_to_rect(&Rect::from_wh(4., 4.), &Position::new(0., -2.)),
+            FUEL,
+        );
+        entities.extend(vec![
+            E::new_electric_mining_drill(&Position::new(0.5, -1.5), Dir::South),
+            E::new_transport_belt(&Position::new(0.5, 0.5), Dir::South),
+            E::new_inserter(&Position::new(0.5, 1.5), Dir::North),
+            E::new_stone_furnace(&Position::new(1., 3.), Dir::South),
+            E::new_inserter(&Position::new(0.5, 4.5), Dir::North),
+        ]);
+        world.update_chunk_entities(entities).unwrap();
+        // Explicitly, because `update_chunk_entities` adds NODES and does not
+        // connect them -- `EntityGraph::connect` has exactly two callers in the
+        // whole workspace, `OutputParser::on_init` and `factorio::snapshot`,
+        // and both are one-shot at world initialisation. Without this the flow
+        // graph is empty and the preconditions below fail rather than the
+        // assertion, which is the point of asserting them.
+        world.entity_graph.connect().unwrap();
+        let state = PlanState::from_world(Arc::new(world), &[BotId(1)]);
+
+        let furnace = Position::new(1., 3.);
+        let arm = Position::new(0.5, 4.5);
+        assert!(
+            !state.base().flow_graph.throughput_at(&furnace).is_empty(),
+            "precondition: the chain is connected and coal reaches the furnace"
+        );
+        assert!(
+            state.base().flow_graph.node_at(&arm).is_some(),
+            "precondition: the output arm is a node the flow graph models"
+        );
+
+        assert!(
+            !flow_reaches(&state, &arm),
+            "a furnace with fuel and no ore smelts nothing, so nothing reaches the arm \
+             taking from it -- and this is the case the veto exists for"
+        );
     }
 
     fn goal() -> Goal {

@@ -210,7 +210,7 @@ fn exhausted_tier_one(net: &ActionNetwork, log: &ExecutionLog) -> bool {
 /// chest briefly full — so re-running the same actions is worth a try. A
 /// `Place` whose footprint the game itself turned down is the opposite of
 /// that: `PlanState` carries the refusal forward for the rest of the run
-/// (`FactorioWorld::placement_refusals`), so a reschedule would dispatch a
+/// (`FactorioSurface::placement_refusals`), so a reschedule would dispatch a
 /// command we already believe cannot succeed, three times, before
 /// `MAX_TIER_ONE_ATTEMPTS` let the decision escalate to a re-expansion that
 /// would have sited it elsewhere on the first try.
@@ -220,6 +220,16 @@ fn exhausted_tier_one(net: &ActionNetwork, log: &ExecutionLog) -> bool {
 /// footprint of a planned build is an ordinary transient and exactly what
 /// tier 1 is for; escalating on it would spend a re-expansion on a bot that
 /// is about to walk away.
+///
+/// That last sentence is now enforced from *both* ends rather than only from
+/// the write side. `PlanState::from_world` drops a refusal whose own recorded
+/// blockers are nothing but transients
+/// (`PlacementRefusal::names_only_transient_blockers`), so a ledger entry that
+/// reached the world anyway — from a dumped world, a `--resume-from`
+/// savepoint, or a mod older than the two filters that are supposed to keep
+/// them out — no longer suppresses the tier-1 retry that a blocker which walks
+/// away is exactly the right recovery for. Nothing here changed; this reads
+/// `is_site_refused`, and `is_site_refused` now answers a filtered ledger.
 fn refused_by_the_game(net: &ActionNetwork, log: &ExecutionLog, state: &PlanState) -> bool {
     net.actions().any(|action| {
         log.status(action.id) == Status::Failed

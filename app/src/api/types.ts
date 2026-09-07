@@ -180,6 +180,31 @@ export interface InventoryItemWithQuality {
 }
 
 /**
+ * One lane of a belt-like entity and what is on it. Mirrors `TransportLine` in
+ * `crates/core/src/types.rs`.
+ *
+ * A belt is not an inventory: a `transport-belt` has two lanes, an
+ * `underground-belt` four and a `splitter` eight, and which lane an item is on
+ * is what decides whether an inserter can take it.
+ */
+export interface TransportLine {
+    /**
+     * `defines.transport_line`'s own name for this lane -- `left_line`,
+     * `right_line`, `left_underground_line` and so on -- or `unmapped_<n>` for
+     * an index the running game's `defines` could not name.
+     */
+    line: string;
+    /**
+     * What is riding on this lane, by item kind. Counts only: item positions
+     * along the line are deliberately not carried.
+     *
+     * An empty array is an ordinary answer and means the lane is running
+     * empty -- not that the lane is missing.
+     */
+    contents: InventoryItemWithQuality[];
+}
+
+/**
  * Which half of an underground-belt pair a `FactorioEntity` is. Mirrors
  * `crate::blueprint::UndergroundHalf` in `crates/core/src/blueprint.rs`,
  * carried onto `FactorioEntity::underground_half` (task 5) so the two halves
@@ -212,6 +237,41 @@ export interface FactorioEntity {
     pickup_position: Position | null;
     output_inventory: InventoryItemWithQuality[] | null;
     fuel_inventory: InventoryItemWithQuality[] | null;
+    /**
+     * What the machine has been given and not yet consumed -- a furnace's ore,
+     * an assembler's ingredients, a lab's science.
+     *
+     * `null` and `[]` are different answers and both are real. `null` means
+     * the entity has no input inventory at all (a belt, a chest, a tree) or
+     * the record predates the field; `[]` means it has one and it is empty.
+     * Without this field a furnace holding ore it is not smelting and a
+     * furnace no ore ever reached looked identical from here.
+     */
+    input_inventory: InventoryItemWithQuality[] | null;
+    /**
+     * The lanes of a belt-like entity and what is riding on each, in
+     * `defines.transport_line` order.
+     *
+     * `null` for anything that is not belt-connectable. A belt running empty
+     * is *not* `null` -- it is a list of lanes with empty `contents`, and
+     * separating those two is the whole reason the field exists.
+     */
+    transport_lines: TransportLine[] | null;
+    /**
+     * What the entity is *doing*, as `defines.entity_status`' own name for it:
+     * `working`, `no_power`, `no_ingredients`,
+     * `waiting_for_space_in_destination`.
+     *
+     * A name and never the raw enum number, whose meaning lives in a table
+     * nobody joins and can change across Factorio versions; a value the mod
+     * cannot resolve arrives as `unmapped_<n>`.
+     *
+     * `null` means the entity has no status concept (a tree, a chest) or the
+     * record predates the field -- **never** "working". The three inventory
+     * fields above say what a machine holds and none of them says whether it
+     * is running.
+     */
+    status: string | null;
     /** Only present (non-null) for `entity_type: "resource"`. */
     amount: number | null;
     /** Only present for crafting machines. */

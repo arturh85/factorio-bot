@@ -3,7 +3,7 @@
 //!
 //! This is the property the whole offline-planning workstream rests on. A
 //! planner change costs a 20-minute live run to evaluate; dumping a
-//! `FactorioWorld` to a file and planning against the file makes that
+//! `FactorioSurface` to a file and planning against the file makes that
 //! evaluation sub-second. But an offline result is only worth having if it is
 //! *the same result* — if the two can differ, nobody can act on the cheap one,
 //! and the expensive one has to be run anyway.
@@ -35,7 +35,7 @@
 //! in `refusal_memory.rs` and `unreachable_memory.rs`.
 
 use factorio_bot_core::factorio::world::{
-    Bench, Enclosure, FactorioWorld, HOP_DISTANCE, PlacementRefusal, WalkRefusal,
+    Bench, Enclosure, FactorioSurface, HOP_DISTANCE, PlacementRefusal, WalkRefusal,
 };
 use factorio_bot_core::serde_json;
 use factorio_bot_core::test_utils::fixture_world;
@@ -78,7 +78,7 @@ struct Plan {
     schedule: Schedule,
 }
 
-fn plan_of(world: Arc<FactorioWorld>) -> Plan {
+fn plan_of(world: Arc<FactorioSurface>) -> Plan {
     let state = PlanState::from_world(world, &BOTS);
     let net = expand(&[goal()], &state, &registry_for(&BOTS), BotId(1)).expect("the goal expands");
     let schedule = schedule(&net, &state, &BOTS).expect("the network schedules");
@@ -102,7 +102,7 @@ fn plan_of(world: Arc<FactorioWorld>) -> Plan {
 /// has been refused, a walk has been refused and a bot has been found boxed
 /// in. All four are ledgers `PlanState::from_world` reads and nothing else
 /// reconstructs.
-fn world_mid_run() -> FactorioWorld {
+fn world_mid_run() -> FactorioSurface {
     let world = fixture_world();
 
     world
@@ -155,7 +155,7 @@ fn world_mid_run() -> FactorioWorld {
 }
 
 /// Round-trips a world the way a dump does: to a JSON string and back.
-fn dumped(world: &FactorioWorld) -> FactorioWorld {
+fn dumped(world: &FactorioSurface) -> FactorioSurface {
     let json = serde_json::to_string(world).expect("a world serialises");
     serde_json::from_str(&json).expect("and comes back")
 }
@@ -240,7 +240,7 @@ fn the_ledgers_are_load_bearing_for_this_fixture() {
     ] {
         assert!(object.remove(gone).is_some(), "{gone} was written");
     }
-    let forgetful: FactorioWorld =
+    let forgetful: FactorioSurface =
         serde_json::from_value(value).expect("an older dump is still readable");
 
     let with = plan_of(Arc::new(live));

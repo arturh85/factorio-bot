@@ -14,7 +14,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use factorio_bot_core::factorio::rcon::FactorioRcon;
-use factorio_bot_core::factorio::world::FactorioWorld;
+use factorio_bot_core::factorio::world::FactorioSurface;
 use factorio_bot_core::plan::planner::Planner;
 use factorio_bot_scripting::{OutputSink, Stream};
 // `Stream` above is the script's stdout/stderr discriminant, so the async
@@ -172,11 +172,17 @@ pub async fn post_execute(
         let instance = instance
             .as_ref()
             .ok_or_else(|| ErrorResponse::not_running("not started"))?;
-        let world = instance
+        // The script runs against one surface, and says which by not saying:
+        // `only_surface` answers only while the world holds exactly one, so a
+        // multi-surface world would refuse here rather than hand a script
+        // whichever surface sorted first.
+        let surface = instance
             .world
-            .clone()
+            .as_ref()
+            .and_then(|world| world.only_surface())
+            .cloned()
             .ok_or_else(|| ErrorResponse::not_running("the running instance has no world"))?;
-        (world, instance.rcon.clone())
+        (surface, instance.rcon.clone())
     };
 
     let bot_count = match request.bot_count {
@@ -230,7 +236,7 @@ pub async fn post_execute(
 fn spawn_run(
     state: &AppState,
     handle: JobHandle,
-    world: Arc<FactorioWorld>,
+    world: Arc<FactorioSurface>,
     rcon: Arc<FactorioRcon>,
     scripts_root: PathBuf,
     source: ScriptSource,

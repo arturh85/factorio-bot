@@ -3239,7 +3239,7 @@ mod tests {
     ///
     /// This is the shape that killed `run-1788432181-42528` at tick 211399:
     /// `boiler_coal` sizes a top-up from demand alone -- nothing in
-    /// `FactorioWorld` reports a fuel level -- so it asked for 17 coal into a
+    /// `FactorioSurface` reports a fuel level -- so it asked for 17 coal into a
     /// boiler already holding 47, the fuel slot took 3, and the executor read
     /// the mod's honest arithmetic as a verdict of failure and abandoned the
     /// rest of that bot's chain.

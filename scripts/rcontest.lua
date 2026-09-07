@@ -60,6 +60,62 @@ blueprints = {
     -- each other. See
     -- docs/superpowers/notes/2026-09-06-saturation-and-ungenerated-ground.md.
     SaturatedSmelter = "0eNqdlE1ugzAQRu/iNUT+wYC5RpZVVUEyVS2BiYypGkW5e02iJq3iJDPdgQc/Hh6+ObCun2HnrQusOTAbYGDNr7WM9W0HfVxbt2H2bYDteoA+gI8lcMEGCxNrXg7nm/2bm4cuFhuRMdcOEDcG37ppN/qQR9BC3I1T3Da65YVf8cmVztieNXyljxnbWg+bc7U4ZjdYicZKClahsYqCLdDYgoLVaKymYEs0tqRgKzS2omBrNLamYA0aayhYwfF54CQwIWikpIlr1KwfXb75gOlBevN4cUxhrtHqZu/A59ZN4M8D5B7rRpCnyAVKUD4T1HhBSRMsUYLqmWCFF1Q0wZo8SE6Sf8B1CmzoYI4BS4460gtUpY9UCvyRXlgSc6RS4sk/406gwNccTWF0kL9HfLuBBPYEVcnvLvB2hmSnsXbmgV1JGBWCpFdh9ZZxetevpvcW+VsbWnNzmfJTnN5dnJ8StPbe8ZP/6C9SUBEbvBi+ZuwT/HSq6VKawhitCimUiMVvK5iiXA==",
+    -- TJunctionSmelter's proven geometry with the two changes electricity buys:
+    -- the arms are `inserter` rather than `burner-inserter`, and the block has
+    -- an OUTPUT SIDE. That output side is the whole point. A burner arm
+    -- carrying iron plates never touches coal, so it has no fuel source and
+    -- stops when its hand charge burns out -- measured on SmeltingBlock, and
+    -- the reason every burner block here ends at the furnace.
+    --
+    -- Nothing in it is enabled on a fresh force: `inserter` and
+    -- `small-electric-pole` both arrive with `electronics`, a trigger
+    -- technology fired by 10 copper plates -- which a burner block earns from
+    -- its own output in about 37 seconds of game time (2026-09-06,
+    -- block_earns_electronics.lua). So the scaffolding builds its successor.
+    --
+    -- 3 poles, all wired to each other, supplying all 6 arms: 78 kW, checked by
+    -- `the_electric_smelter_distributes_its_own_power` rather than asserted.
+    ElectricSmelter = "0eNqd1s1ugzAMAOB3yRkq8kcJ9z3BjtM0UeZpSCGgJJ1WVbz7Urq1nQqTvSOx8iWxYocj29k9jL5zkdVH1kXoWX0zljHb7MCmsQcLbfRd+9iDjeBTBFzsYgeB1U/H88fhxe37XQrWPGOu6SHNi75xYRx8zJNzAschpGmDO633yWq50Rk7sLrY6Cljr51Py8xRNWV3rECzisJKNKsprEKzJYXVaHZLYUs0W1HYLZo1FLZCs7yguObidn5wefsO4Y9Lm/NkLii8uDIugD8XzBpyt7FiieTkSzrv7hdcLcGCDhcoWKJyeUHlSi4VIpcXRKByqRHkT/FwlFgixIokXgsnxMFB/rb3rmlhYaMzKhdzV2ER8wdiCNlSmLOJgpAtnMjJvVajHhxBbrY4V5K7Lc5V5HaLczW93+Lga+GEvrE2h+//jHwcLKy/62udV2xpXnlTk0tc9T/udGmn54x9gA9zVJfCKGO0VIJLLqbpC6RSGTE=",
+    -- The front end: four burner drills delivering straight onto a belt with
+    -- NO INSERTER between them, because a mining drill drops onto the tile in
+    -- front of it. `MinerLine` encodes this shape and had never been built.
+    --
+    -- Drop tiles are derived, not eyeballed: `delivery_offset` gives a
+    -- burner-mining-drill (-0.35, -1.3) facing north, turned by direction, so a
+    -- drill at (2,y) facing east drops at (3.3, y-0.35) -- belt tile (3.5,
+    -- y-0.5). All four were checked that way before the string was encoded and
+    -- then confirmed live.
+    --
+    -- Built with NO site, on purpose, so `Site::Anywhere` reaches
+    -- `nearest_ore_seed`: the planner sited it on an iron patch 25 tiles from
+    -- spawn by itself and delivered 221 ore. That path had unit tests and had
+    -- never run in a game.
+    BurnerMinerLine = "0eNqd1M1qwzAMAOB30dkp8V/+jj1vTzDGSFqxGRIn2M5YCXn3Oc3Y1jYbdi8GS+izwbImaNoRB6O0g2oC5bCD6leMQFs32PrYfjQazaPyy4NffAa1U06hheppWjenFz12DRqoKAFdd+jrnKm1HXrjEu8s4NBbX9br5bwPqPhOEjhBle7kTOCoDB7WbDGTG5ZFszSE5dEsC2FFNMtDWBnNihA2i2ZlCJtHs1kIW0SzeQhbRrNFCEvTb7c5/6OkU1rp1+RoVNve4mzt3UtYbMH0HlgGwCwO/urfS5iyLZnfI+chsriWlbZonM/9+Xzl9fOlW/DPl1Om18nhDe1/M2eZZfMzgXc09pyWGStFWUouGOX+7vMnnmXOXw==",
+    -- The whole t=0 chain in one blueprint: ore never touches a chest between
+    -- the ground and the plate. Drills WEST of the belt facing east drop on the
+    -- FAR (east) lane; coal joins from the WEST as a T-junction and sideloads
+    -- the NEAR (west) lane; the furnace arms sit EAST picking west, so they
+    -- meet coal first and fall back to ore once a fuel slot fills. Two
+    -- commodities, two lanes, one belt, nothing merging them but the belts.
+    --
+    -- Built with NO site, so the drills force it onto ore -- which also means
+    -- the furnaces are sited by the ore rather than by clear ground, the first
+    -- block here where that is true.
+    OreToPlate = "0eNqd09FugyAUgOF34VobD6BVX2K72N2yLNqebSSKDdBlTeO7j65L2k2anNNLIXwg+h9FP+xx54wNoj0KE3AU7dVYJoauxyGOPTh8mh6HLmAcRBtMMOhF+3w8Pxxe7X7s0YkWMmG7EeOS4Drrd5MLeSRO1m7ycdlkT1t9iVatykwcRFusyjkTW+Nwc56t52zBSjYLFFaxWUlhNZtVFLZks5rCVmy2pLBrNltR2JrNrilsw2ZrCgsF221ILr8zIIUGd5RGSg34rQEpNuDXBqTc4NJbv3cWXT4aa+x7vnVmGJa6PNt/YZ2Cq3vgkgBfmjNusvnmA33iGvLi6hdOMfX/8xnr0YU4t7CKWzWATMn0zOAWnHpxSc9Mslyg34S+2VnyKuQlNB8mi/lb3KDb4BKuftnUp5LqjgMq2gE184Bqnl8y8YnO/0yVlWx005RKS1Bxh/kb9fTEwQ==",
+    -- The chain done right: a REAL T junction, both inputs meeting at the top.
+    --
+    -- Ore arrives on its own belt from the west, coal on its own belt from the
+    -- east, and both sideload into the same stem tile from opposite sides -- so
+    -- each claims its own lane by geometry and neither can crowd the other.
+    --
+    -- `OreToPlate` had the drills dropping straight onto the main belt, which
+    -- fills BOTH lanes, with coal sideloading in downstream. A screenshot showed
+    -- the belt packed solid with ore and the coal branch backed up behind a
+    -- junction it could not enter. Moving the junction upstream barely helped
+    -- (17 -> 18 plates) because the topology was wrong, not the ordering. This
+    -- shape gives 78, and the coal chest drains 100 -> 11 where the broken one
+    -- left 55 unused.
+    OreToPlateTee = "0eNqd1dFuwiAUgOF34bo1Hgpt6UtsF94ty9K6s42kpQZwmTF996FeaCYm5+xSSL8S4adHMYx73HnrouiOwkacRHczVoixH3BMY08eN/Pz2EfcIKZxdNFGi0F0L8fLj8Ob208DetFBIVw/YXoq+t6F3exjmZQTt5tDemx2p7f9iK5e6UIcRLde6aUQ79bj9jLbLsUdK9ksUNiKzUoKq9hsRWE1m1UUtmazmsI2bLamsC2bbSisYbMthYU12zUkl98ZkEKDf5RGSg34rQEpNqDXBo+uHJVz6blJlkvvrWK59OAUy6UXp1kuPTnzyAWZ+1bQm2t5MD26hgdfo7N+duX2C0Pu+N6e3xxzTWzYe4e+tC6gj2nu3lpz9kqqv/JknXWf5bu345gJ4kyXQPiwa56s6HJN/zeaR3d6fruupYU4Oyw/kt9vMXNwL2p2s1r+8u5v2vz6DG99AMvyWohv9OE8pWtplDG6UhKq9IblFxoeVrE=",
 }
 
 rcon.cheat_technology("automation")

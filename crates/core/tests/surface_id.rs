@@ -20,7 +20,7 @@
 //!    confidently about the wrong object is the one defect a reader cannot
 //!    detect.
 
-use factorio_bot_core::factorio::world::FactorioWorld;
+use factorio_bot_core::factorio::world::FactorioSurface;
 use factorio_bot_core::process::output_parser::OutputParser;
 use factorio_bot_core::types::{FactorioEntity, FactorioPlayer, FactorioTile, SurfaceId};
 use std::sync::Arc;
@@ -34,7 +34,7 @@ fn drop_line(surface: &str, x: i32, y: i32) -> String {
 
 #[test]
 fn a_dropped_chunk_reaches_the_world_as_a_tally() {
-    let world = Arc::new(FactorioWorld::new());
+    let world = Arc::new(FactorioSurface::new());
     let mut parser = OutputParser::with_world(world.clone());
 
     parser
@@ -61,7 +61,7 @@ fn a_dropped_chunk_reaches_the_world_as_a_tally() {
 /// is the interesting one.
 #[test]
 fn chunks_fold_per_surface_and_keep_the_first_one_seen() {
-    let world = Arc::new(FactorioWorld::new());
+    let world = Arc::new(FactorioSurface::new());
     let mut parser = OutputParser::with_world(world.clone());
 
     for (tick, line) in [
@@ -101,7 +101,7 @@ fn chunks_fold_per_surface_and_keep_the_first_one_seen() {
 /// second flush with nothing in between must write no row at all.
 #[test]
 fn a_drain_empties_the_tally() {
-    let world = Arc::new(FactorioWorld::new());
+    let world = Arc::new(FactorioSurface::new());
     let mut parser = OutputParser::with_world(world.clone());
 
     parser
@@ -135,7 +135,7 @@ fn a_drain_empties_the_tally() {
 /// `output_parser_recovers_from_malformed_events.rs`.
 #[test]
 fn a_malformed_drop_line_is_skipped_and_nothing_is_tallied() {
-    let world = Arc::new(FactorioWorld::new());
+    let world = Arc::new(FactorioSurface::new());
     let mut parser = OutputParser::with_world(world.clone());
 
     let result = parser.parse(1, "surface_chunk_dropped", r#"{"surface":"vulcanus""#);

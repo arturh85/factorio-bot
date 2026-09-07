@@ -639,7 +639,7 @@ pub enum EventKind {
         //
         // NOT JOINABLE TO `ActionDispatched::id`, and the two names look far
         // more alike than the things they name. This is the RCON/mod action id
-        // minted by `FactorioRcon` from `FactorioWorld::next_action_id`, a
+        // minted by `FactorioRcon` from `FactorioSurface::next_action_id`, a
         // run-global counter that wraps at 1000; `ActionDispatched::id` is the
         // planner's `ActionId`, which restarts at 0 with every plan. Joining
         // them produces confident nonsense.
@@ -784,7 +784,7 @@ pub enum EventKind {
     /// `PlanState::from_world` reads the bench and gives the bot no step
     /// that would need it to walk. It is lifted by [`EventKind::BotReleased`].
     ///
-    /// Written by `record.enclosures()` from `FactorioWorld::benches`.
+    /// Written by `record.enclosures()` from `FactorioSurface::benches`.
     BotBenched {
         bot: u32,
         /// Where the character stood when every hop was refused. Observed.
@@ -809,7 +809,7 @@ pub enum EventKind {
     /// it in -- the [`EventKind::BotEnclosed`] that did not happen.
     ///
     /// Written by `record.enclosures()` from the queue `crates/executor`'s
-    /// pre-place check fills (`FactorioWorld::step_asides`). The check runs
+    /// pre-place check fills (`FactorioSurface::step_asides`). The check runs
     /// before every placement: with the footprint added to the occupancy
     /// model, would the fill around the character about to build it close?
     /// In `run-1788552801-73005` it would have, and did -- bot 1 placed an

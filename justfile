@@ -63,10 +63,31 @@ bench SCRIPT *ARGS:
     cargo run --release --no-default-features --features cli,lua -- lua {{SCRIPT}} --seed {{BENCHMARK_SEED}} --new --clients {{BENCH_CLIENTS}} {{ARGS}}
 
 # Headless: bots are server-side characters, no graphical client, world at
-# 5x. Seconds to start instead of minutes; same record, no video. Use it to
-# iterate; use `bench` (clients, 1x, filmable) for a number you will quote.
+# HEADLESS_SPEED. Seconds to start instead of minutes; same record, no video.
+# Use it to iterate; use `bench` (clients, 1x, filmable) for a number you will
+# quote.
+#
+# **10, raised from 5 on 2026-09-07 because 5 was never chosen.** It was a
+# hard-coded constant with no recorded justification, and the box was never
+# asked what it could deliver. Measured on this machine, same script and map,
+# four headless bots, whole-run ticks over wall seconds:
+#
+#   speed   game ticks   wall    delivered      tick cost vs 5x
+#     5x       36,253    122 s   297 of 300      --
+#    10x       36,811     63 s   584 of 600     +1.5%
+#    20x       38,320     34 s  1127 of 1200    +5.7%
+#
+# So 10x nearly HALVES iteration wall time for a tick cost small enough to be
+# run-to-run noise. 20x is real and usable -- it held 94% with two cargo builds
+# running -- but its +5.7% is probably the lag waits' sleep granularity, and a
+# game-time measurement is what this project quotes, so it is opt-in rather
+# than the default: `just headless script.lua --game-speed 20` still works.
+#
+# One sample per speed. If a decision rests on the tick cost, take more.
+HEADLESS_SPEED := "10"
+
 headless SCRIPT *ARGS:
-    cargo run --no-default-features --features cli,lua -- lua {{SCRIPT}} --headless --bots 4 --game-speed 5 {{ARGS}}
+    cargo run --no-default-features --features cli,lua -- lua {{SCRIPT}} --headless --bots 4 --game-speed {{HEADLESS_SPEED}} {{ARGS}}
 
 # Fast iteration: connect to already-running Factorio (start with 'just factorio' first)
 lua-connect SCRIPT *ARGS:

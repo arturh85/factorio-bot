@@ -735,7 +735,7 @@ fn string_global(lua: &Lua, name: &str) -> String {
 /// through to the generic `can_place_entity said 'no'` — which is the exact
 /// substring `note_placement_refusal` (`crates/core/src/factorio/rcon.rs`)
 /// matches. So a bot parked for a few thousand ticks put open ground into
-/// `FactorioWorld::placement_refusals`, which is never expired.
+/// `FactorioSurface::placement_refusals`, which is never expired.
 ///
 /// The ledger entry is the smaller half of the cost. `recover`'s tier 1
 /// reschedules the same network, which is *precisely* the recovery a blocker

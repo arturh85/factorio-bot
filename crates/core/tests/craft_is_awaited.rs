@@ -18,7 +18,7 @@
 
 use factorio_bot_core::factorio::rcon::{Dispatch, FactorioRcon, RconSettings};
 use factorio_bot_core::factorio::ticks::ActionOutcome;
-use factorio_bot_core::factorio::world::FactorioWorld;
+use factorio_bot_core::factorio::world::FactorioSurface;
 use parking_lot::RwLock;
 use std::collections::VecDeque;
 use std::net::SocketAddr;
@@ -128,7 +128,7 @@ async fn connect_to(server: &FakeServer) -> Arc<FactorioRcon> {
 }
 
 /// The action id the dispatch carried, read off the command the server was
-/// actually sent, rather than assumed from `FactorioWorld`'s counter.
+/// actually sent, rather than assumed from `FactorioSurface`'s counter.
 fn action_id_of(command: &str) -> u32 {
     let args = command
         .split_once("'action_start_crafting', ")
@@ -147,7 +147,7 @@ fn action_id_of(command: &str) -> u32 {
 async fn a_craft_reports_success_only_when_the_game_finishes_it() {
     let server = spawn_fake_server(vec![format!("§tick§{QUEUED_AT}")]).await;
     let rcon = connect_to(&server).await;
-    let world = Arc::new(FactorioWorld::new());
+    let world = Arc::new(FactorioSurface::new());
 
     let waiting = {
         let (rcon, world) = (rcon.clone(), world.clone());
@@ -206,7 +206,7 @@ async fn a_craft_reports_success_only_when_the_game_finishes_it() {
 async fn a_refused_craft_fails_at_once_rather_than_waiting() {
     let server = spawn_fake_server(vec!["Error: no such recipe: nonsuch".to_string()]).await;
     let rcon = connect_to(&server).await;
-    let world = Arc::new(FactorioWorld::new());
+    let world = Arc::new(FactorioSurface::new());
 
     let failure = tokio::time::timeout(
         Duration::from_secs(5),
@@ -232,7 +232,7 @@ async fn a_refused_craft_fails_at_once_rather_than_waiting() {
 async fn a_completion_for_another_action_does_not_release_this_craft() {
     let server = spawn_fake_server(vec![format!("§tick§{QUEUED_AT}")]).await;
     let rcon = connect_to(&server).await;
-    let world = Arc::new(FactorioWorld::new());
+    let world = Arc::new(FactorioSurface::new());
 
     let waiting = {
         let (rcon, world) = (rcon.clone(), world.clone());

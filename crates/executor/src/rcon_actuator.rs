@@ -757,20 +757,41 @@ impl Actuator for RconActuator {
     /// blueprint (`method::blueprint::BuildBlock`) places entity by entity
     /// through [`Actuator::place`] instead; the bulk call was previously
     /// reachable only from a Lua script (`rcon.place_blueprint`, see
-    /// `crates/scripting_lua/src/lua_docs.rs`). That matters for one reason:
-    /// `place_blueprint` mines, unconditionally and regardless of
+    /// `crates/scripting_lua/src/lua_docs.rs`).
+    ///
+    /// # The hazard this doc used to argue away, and why the argument was wrong
+    ///
+    /// `place_blueprint` used to mine, unconditionally and regardless of
     /// `only_ghosts`, any non-character, non-resource entity its own build
-    /// area already contains -- correct for a real build clearing its own
-    /// footprint, but a live hazard here if this were ever dispatched over a
-    /// block that already has real entities standing in it. It is not,
-    /// today: `method::blueprint`'s `is_fresh_site` gate emits
+    /// area contained. This doc argued that could not bite, because
+    /// `method::blueprint`'s `is_fresh_site` gate emits
     /// `ActionKind::StampGhosts` exactly once, on the expansion where
-    /// `recover_anchor` finds NOTHING -- neither a ghost nor two real
-    /// entities -- so nothing this call's mining sweep could reach has been
-    /// placed yet. That gate is a planner-side promise, not something this
-    /// method can see or enforce; if a future caller ever dispatches this
-    /// action against a block that is already partly real, that promise is
-    /// what stands between a marker and a bot mining its own furnace.
+    /// `recover_anchor` finds NOTHING -- so nothing of *the block* has been
+    /// placed yet.
+    ///
+    /// **That argument covers the block's own entities and nothing else.**
+    /// The pole run that powers the block is emitted in the *same* expansion;
+    /// its poles are ordinary `Place` actions with no ordering against the
+    /// stamp; the scheduler ran them first, and the sweep ate one:
+    ///
+    /// ```text
+    /// WARN mining entity in build area: small-electric-pole @ 3.5/-2.5
+    /// build: done=true failed=0 lost=0 pending=0
+    /// ```
+    ///
+    /// `failed = 0` is a true statement about placement -- the placement had
+    /// already succeeded -- and a false statement about the outcome. Nothing
+    /// in the record says the block is dark. Reproduced twice live on seed
+    /// 31337; see
+    /// `docs/superpowers/notes/2026-09-07-the-stamp-mines-the-pole-run.md`.
+    ///
+    /// **Closed in `place_blueprint` itself rather than here**: the sweep is
+    /// now skipped entirely under `only_ghosts`, which is the only value this
+    /// method ever passes. A ghost collides with nothing and this call builds
+    /// nothing, so there is no footprint to clear. The safety no longer rests
+    /// on a planner-side promise this method cannot see, and there is no
+    /// counter to make honest, because there is no longer anything for it to
+    /// report.
     ///
     /// `game_tick` after the call, not from it: `place_blueprint` dispatches
     /// through the untimed `remote_call` and reports no stamp of its own, so

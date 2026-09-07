@@ -7,7 +7,7 @@ use std::{fs::File, sync::Arc};
 // use tokio::sync::mpsc::channel;
 
 use crate::factorio::rcon::{FactorioRcon, RconSettings};
-use crate::factorio::world::FactorioSurface;
+use crate::factorio::world::FactorioWorld;
 use crate::process::InteractiveProcess;
 use crate::process::output_parser::OutputParser;
 use crate::process::process_control::FactorioStartCondition;
@@ -22,7 +22,7 @@ pub async fn read_output(
     write_logs: bool,
     silent: Arc<RwLock<bool>>,
     wait_until: FactorioStartCondition,
-) -> Result<(Arc<FactorioSurface>, InteractiveProcess, FactorioRcon)> {
+) -> Result<(Arc<FactorioWorld>, InteractiveProcess, FactorioRcon)> {
     let log_file = Mutex::new(match write_logs {
         true => Some(File::create(log_path).into_diagnostic()?),
         false => None,
@@ -35,7 +35,7 @@ pub async fn read_output(
     let error_buffer: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let error_buffer_stdout = error_buffer.clone();
     let error_buffer_stderr = error_buffer.clone();
-    let _world = output_parser.world();
+    let _world = output_parser.game_world();
     let _silent = silent.clone();
     let proc = InteractiveProcess::new_with_stderr(
         cmd,

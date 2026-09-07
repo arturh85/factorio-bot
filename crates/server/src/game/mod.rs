@@ -22,7 +22,7 @@ use utoipa_axum::routes;
 /// shapes, are what would then need the surface named.
 pub fn require_surface(
     instance: &FactorioInstance,
-) -> Result<&Arc<FactorioSurface>, ErrorResponse> {
+) -> Result<Arc<FactorioSurface>, ErrorResponse> {
     instance
         .world
         .as_ref()

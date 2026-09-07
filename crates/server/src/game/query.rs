@@ -124,7 +124,11 @@ pub async fn plan_path(
 
     let instance = state.instance.read().await;
     let instance = instance.as_ref().ok_or_else(ErrorResponse::not_started)?;
+    // Owned since 2026-09-07: `only_surface` answers by value now that the
+    // world's surface map is behind a lock so the parser can grow it. Re-bound
+    // to a reference here so the handlers below read as they did.
     let world = require_surface(instance)?;
+    let world = &world;
     let entities = instance
         .rcon
         .plan_path(
@@ -254,7 +258,11 @@ pub async fn player_info(
 ) -> ApiResult<FactorioPlayer> {
     let instance = state.instance.read().await;
     let instance = instance.as_ref().ok_or_else(ErrorResponse::not_started)?;
+    // Owned since 2026-09-07: `only_surface` answers by value now that the
+    // world's surface map is behind a lock so the parser can grow it. Re-bound
+    // to a reference here so the handlers below read as they did.
     let world = require_surface(instance)?;
+    let world = &world;
     let player = require_player(world, params.player_id)?;
     Ok(Json(player))
 }
@@ -272,7 +280,11 @@ pub async fn player_info(
 pub async fn all_players(State(state): State<AppState>) -> ApiResult<Vec<FactorioPlayer>> {
     let instance = state.instance.read().await;
     let instance = instance.as_ref().ok_or_else(ErrorResponse::not_started)?;
+    // Owned since 2026-09-07: `only_surface` answers by value now that the
+    // world's surface map is behind a lock so the parser can grow it. Re-bound
+    // to a reference here so the handlers below read as they did.
     let world = require_surface(instance)?;
+    let world = &world;
     let mut all_players: Vec<FactorioPlayer> = Vec::new();
     for player in world.globals.players.iter() {
         all_players.push(player.clone());
@@ -295,7 +307,11 @@ pub async fn item_prototypes(
 ) -> ApiResult<HashMap<String, FactorioItemPrototype>> {
     let instance = state.instance.read().await;
     let instance = instance.as_ref().ok_or_else(ErrorResponse::not_started)?;
+    // Owned since 2026-09-07: `only_surface` answers by value now that the
+    // world's surface map is behind a lock so the parser can grow it. Re-bound
+    // to a reference here so the handlers below read as they did.
     let world = require_surface(instance)?;
+    let world = &world;
     let mut data: HashMap<String, FactorioItemPrototype> = HashMap::new();
     for item_prototype in world.globals.item_prototypes.iter() {
         data.insert(item_prototype.name.clone(), item_prototype.clone());
@@ -318,7 +334,11 @@ pub async fn entity_prototypes(
 ) -> ApiResult<HashMap<String, FactorioEntityPrototype>> {
     let instance = state.instance.read().await;
     let instance = instance.as_ref().ok_or_else(ErrorResponse::not_started)?;
+    // Owned since 2026-09-07: `only_surface` answers by value now that the
+    // world's surface map is behind a lock so the parser can grow it. Re-bound
+    // to a reference here so the handlers below read as they did.
     let world = require_surface(instance)?;
+    let world = &world;
     let mut data: HashMap<String, FactorioEntityPrototype> = HashMap::new();
     for prototype in world.globals.entity_prototypes.iter() {
         data.insert(prototype.name.clone(), prototype.clone());

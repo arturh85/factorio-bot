@@ -23,7 +23,7 @@ async fn run(matches: ArgMatches, context: &mut Context) -> Result<Option<String
     let instance_state = instance_state.read().await;
     if let Some(instance_state) = instance_state.as_ref() {
       let mut planner = Planner::new(
-        instance_state.surface().cloned().unwrap(),
+        instance_state.surface().unwrap(),
         Some(instance_state.rcon.clone()),
       );
       // The settings the REPL was started with, override and all -- not a

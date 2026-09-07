@@ -2,9 +2,10 @@ use std::sync::Arc;
 
 use crate::factorio::ticks::ActionOutcome;
 use crate::factorio::world::{
-    DeathEvent, FactorioSurface, ResearchTriggerEvent, RespawnEvent, SurfaceChunkDropEvent,
-    TeleportEvent,
+    DeathEvent, FactorioSurface, FactorioWorld, ResearchTriggerEvent, RespawnEvent,
+    SurfaceChunkDropEvent, TeleportEvent,
 };
+use std::collections::BTreeMap;
 // use crate::factorio::ws::{
 //     FactorioWebSocketServer, PlayerChangedMainInventoryMessage, PlayerChangedPositionMessage,
 //     PlayerDistanceChangedMessage, PlayerLeftMessage, ResearchCompletedMessage,
@@ -13,16 +14,57 @@ use crate::types::{
     ChunkPosition, FactorioEntity, FactorioEntityPrototype, FactorioForce, FactorioGraphic,
     FactorioItemPrototype, FactorioRecipe, FactorioTile, PlayerChangedDistanceEvent,
     PlayerChangedMainInventoryEvent, PlayerChangedPositionEvent, PlayerId, Pos, Position, Rect,
-    SurfaceDaylight,
+    SurfaceDaylight, SurfaceId,
 };
 use miette::{IntoDiagnostic, Result, miette};
 
 pub struct OutputParser {
+    /// **The default surface: where a writeout that does not name one goes.**
+    ///
+    /// Most of this file writes here, and that is correct rather than lazy.
+    /// A force's research, a recipe table, a player's inventory, a completed
+    /// action -- none of those are about a place, and the ones that *are*
+    /// about a place mostly cannot say which place (see `game_world`).
+    ///
+    /// Held beside `game_world` rather than fetched from it on every line
+    /// because it is the hot path and it can never change: this is
+    /// `game_world`'s Nauvis, pinned at construction.
     world: Arc<FactorioSurface>,
+    /// **The route from a writeout to the surface it is about**, added
+    /// 2026-09-07.
+    ///
+    /// Only the four writeouts whose payload is a [`FactorioEntity`] can be
+    /// routed, because only they name a surface on the wire
+    /// (`serialize_entity` in `mods/BotBridge/types.lua`): the bulk
+    /// `entities` line and the three `on_some_entity_*` events. `tiles` and
+    /// `resources` travel in a compact header (`x,y;x,y: name:0,...`) with no
+    /// slot for a surface and stay on `world` -- and the mod's Nauvis guard in
+    /// `on_chunk_generated` is what makes that safe, so **it must not be
+    /// lifted before those two headers carry a surface**.
+    ///
+    /// This was not a hypothetical gap. Loading the world-record save on
+    /// 2026-09-07 produced 2,609 `on_some_entity_deleted` writeouts, 2,601 of
+    /// them from space platforms, and every one was applied to Nauvis by
+    /// position alone -- entity events never pass through the chunk guard.
+    /// See `docs/superpowers/notes/2026-09-07-a-chunk-knows-which-surface-it-is-on.md`.
+    game_world: Arc<FactorioWorld>,
     // websocket_server: Option<Addr<FactorioWebSocketServer>>,
 }
 
 impl OutputParser {
+    /// The surface a record naming `surface` belongs to, creating it the first
+    /// time one is seen.
+    ///
+    /// `None` -- the mod did not say -- is the **default surface**, never a
+    /// surface called nothing: every archived server log and every 865 MB
+    /// world dump predates the field, and they are all Nauvis.
+    fn route(&self, surface: &Option<SurfaceId>) -> Arc<FactorioSurface> {
+        match surface {
+            None => self.world.clone(),
+            Some(id) => self.game_world.surface_or_create(id),
+        }
+    }
+
     /// `tick` is the game tick the mod stamped on the line
     /// (`writeout(tick, key, value)`). Most branches have no use for it; the
     /// `action_completed` branch is the exception, and it is the executor's
@@ -46,7 +88,23 @@ impl OutputParser {
                 }
                 let entities: Vec<FactorioEntity> =
                     serde_json::from_str(entities).into_diagnostic()?;
-                self.world.update_chunk_entities(entities)?;
+                // Grouped, not routed one at a time: `update_chunk_entities`
+                // takes a batch and `EntityGraph::add` connects what it
+                // added, so per-entity calls would be a different and slower
+                // operation. One chunk is one surface in practice -- the
+                // grouping is defensive, and it keeps the arm honest if the
+                // mod ever batches differently.
+                let mut by_surface: BTreeMap<Option<SurfaceId>, Vec<FactorioEntity>> =
+                    BTreeMap::new();
+                for entity in entities {
+                    by_surface
+                        .entry(entity.surface.clone())
+                        .or_default()
+                        .push(entity);
+                }
+                for (surface, entities) in by_surface {
+                    self.route(&surface).update_chunk_entities(entities)?;
+                }
             }
             "tiles" => {
                 let colon_pos = match rest.find(':') {
@@ -368,19 +426,25 @@ impl OutputParser {
                 }
             },
             "on_some_entity_created" => match serde_json::from_str::<FactorioEntity>(rest) {
-                Ok(entity) => self.world.on_some_entity_created(entity)?,
+                Ok(entity) => self
+                    .route(&entity.surface.clone())
+                    .on_some_entity_created(entity)?,
                 Err(err) => {
                     error!("<red>failed to deserialize entity</>: {:?} '{}'", err, rest);
                 }
             },
             "on_some_entity_updated" => match serde_json::from_str::<FactorioEntity>(rest) {
-                Ok(entity) => self.world.on_some_entity_updated(entity)?,
+                Ok(entity) => self
+                    .route(&entity.surface.clone())
+                    .on_some_entity_updated(entity)?,
                 Err(err) => {
                     error!("<red>failed to deserialize entity</>: {:?} '{}'", err, rest);
                 }
             },
             "on_some_entity_deleted" => match serde_json::from_str::<FactorioEntity>(rest) {
-                Ok(entity) => self.world.on_some_entity_deleted(entity)?,
+                Ok(entity) => self
+                    .route(&entity.surface.clone())
+                    .on_some_entity_deleted(entity)?,
                 Err(err) => {
                     error!("<red>failed to deserialize entity</>: {:?} '{}'", err, rest);
                 }
@@ -601,10 +665,25 @@ impl OutputParser {
 
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
-        OutputParser {
-            // websocket_server,
-            world: Arc::new(FactorioSurface::new()),
-        }
+        OutputParser::with_world(Arc::new(FactorioSurface::new()))
+    }
+
+    /// A parser writing into a world the caller already holds -- **the
+    /// routing constructor**, and the one `read_output` uses.
+    ///
+    /// The world it is handed must hold a Nauvis surface, which every
+    /// constructor of [`FactorioWorld`] used in this project produces; a
+    /// world without one gets a fresh empty Nauvis rather than a panic,
+    /// because a parser that cannot start is worse than one whose default
+    /// surface is empty.
+    pub fn with_game_world(game_world: Arc<FactorioWorld>) -> Self {
+        let world = game_world.surface_or_create(&SurfaceId::nauvis());
+        OutputParser { world, game_world }
+    }
+
+    /// The world this parser routes into, surfaces and all.
+    pub fn game_world(&self) -> Arc<FactorioWorld> {
+        self.game_world.clone()
     }
 
     /// Like [`OutputParser::new`], but parsing into a world the caller
@@ -613,7 +692,8 @@ impl OutputParser {
     /// exact [`FactorioSurface`] it landed in, e.g. via
     /// [`FactorioSurface::drain_teleports`].
     pub fn with_world(world: Arc<FactorioSurface>) -> Self {
-        OutputParser { world }
+        let game_world = Arc::new(FactorioWorld::nauvis_only(world.clone()));
+        OutputParser { world, game_world }
     }
 
     pub fn world(&self) -> Arc<FactorioSurface> {

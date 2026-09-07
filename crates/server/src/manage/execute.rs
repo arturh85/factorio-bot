@@ -180,7 +180,6 @@ pub async fn post_execute(
             .world
             .as_ref()
             .and_then(|world| world.only_surface())
-            .cloned()
             .ok_or_else(|| ErrorResponse::not_running("the running instance has no world"))?;
         (surface, instance.rcon.clone())
     };

@@ -46,7 +46,11 @@ pub async fn move_player(
 
     let instance = state.instance.read().await;
     let instance = instance.as_ref().ok_or_else(ErrorResponse::not_started)?;
+    // Owned since 2026-09-07: `only_surface` answers by value now that the
+    // world's surface map is behind a lock so the parser can grow it. Re-bound
+    // to a reference here so the handlers below read as they did.
     let world = require_surface(instance)?;
+    let world = &world;
     // Validate the player id before mutating anything, see `require_player`.
     require_player(world, body.player_id)?;
     instance
@@ -92,7 +96,11 @@ pub async fn place_entity(
 
     let instance = state.instance.read().await;
     let instance = instance.as_ref().ok_or_else(ErrorResponse::not_started)?;
+    // Owned since 2026-09-07: `only_surface` answers by value now that the
+    // world's surface map is behind a lock so the parser can grow it. Re-bound
+    // to a reference here so the handlers below read as they did.
     let world = require_surface(instance)?;
+    let world = &world;
     // Validate the player id before mutating anything, see `require_player`.
     require_player(world, body.player_id)?;
     // `None`: this HTTP endpoint has no request field for an underground
@@ -138,7 +146,11 @@ pub async fn cheat_item(
 ) -> ApiResult<FactorioPlayer> {
     let instance = state.instance.read().await;
     let instance = instance.as_ref().ok_or_else(ErrorResponse::not_started)?;
+    // Owned since 2026-09-07: `only_surface` answers by value now that the
+    // world's surface map is behind a lock so the parser can grow it. Re-bound
+    // to a reference here so the handlers below read as they did.
     let world = require_surface(instance)?;
+    let world = &world;
     // Validate the player id before mutating anything, see `require_player`.
     require_player(world, body.player_id)?;
     instance
@@ -233,7 +245,11 @@ pub async fn insert_to_inventory(
 
     let instance = state.instance.read().await;
     let instance = instance.as_ref().ok_or_else(ErrorResponse::not_started)?;
+    // Owned since 2026-09-07: `only_surface` answers by value now that the
+    // world's surface map is behind a lock so the parser can grow it. Re-bound
+    // to a reference here so the handlers below read as they did.
     let world = require_surface(instance)?;
+    let world = &world;
     // Validate the player id before mutating anything, see `require_player`.
     require_player(world, body.player_id)?;
     instance
@@ -285,7 +301,11 @@ pub async fn remove_from_inventory(
 
     let instance = state.instance.read().await;
     let instance = instance.as_ref().ok_or_else(ErrorResponse::not_started)?;
+    // Owned since 2026-09-07: `only_surface` answers by value now that the
+    // world's surface map is behind a lock so the parser can grow it. Re-bound
+    // to a reference here so the handlers below read as they did.
     let world = require_surface(instance)?;
+    let world = &world;
     // Validate the player id before mutating anything, see `require_player`.
     require_player(world, body.player_id)?;
     instance

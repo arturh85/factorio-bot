@@ -11,6 +11,7 @@ use crate::types::{
 use dashmap::DashMap;
 use miette::{IntoDiagnostic, Result};
 use parking_lot::Mutex as SyncMutex;
+use parking_lot::RwLock as SyncRwLock;
 use serde::de::{MapAccess, Visitor};
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
@@ -1240,7 +1241,23 @@ pub struct FactorioWorld {
     /// The one copy of everything that is not about a place, shared with
     /// every surface below.
     globals: Arc<GameGlobals>,
-    surfaces: BTreeMap<SurfaceId, Arc<FactorioSurface>>,
+    /// **Interior-mutable on purpose, and this is the whole enabling change
+    /// of 2026-09-07.**
+    ///
+    /// A world used to be built *from* the parser's one surface and then
+    /// frozen: `read_output` made an `OutputParser`, took its
+    /// `Arc<FactorioSurface>` back out, and `process_control` wrapped that in
+    /// [`FactorioWorld::nauvis_only`]. So the parser held the surface and the
+    /// world held the parser's output, and there was no direction in which a
+    /// writeout naming a second surface could travel. Routing needs the
+    /// parser to hold the *aggregate* and to be able to grow it while
+    /// parsing, which is `&self` and not `&mut self`.
+    ///
+    /// A `BTreeMap` under a lock rather than a `DashMap` because ordering is
+    /// part of the contract: [`FactorioWorld::surface_ids`] answers in name
+    /// order, and a census whose order changes between reads is a census two
+    /// runs cannot be compared on.
+    surfaces: SyncRwLock<BTreeMap<SurfaceId, Arc<FactorioSurface>>>,
 }
 
 impl FactorioWorld {
@@ -1253,7 +1270,10 @@ impl FactorioWorld {
         let globals = surface.globals.clone();
         let mut surfaces = BTreeMap::new();
         surfaces.insert(id, surface);
-        FactorioWorld { globals, surfaces }
+        FactorioWorld {
+            globals,
+            surfaces: SyncRwLock::new(surfaces),
+        }
     }
 
     /// The game- and force-global state every surface in this world shares.
@@ -1275,13 +1295,40 @@ impl FactorioWorld {
     /// `None` means **not observed**, never "empty": the mod drops every
     /// chunk that is not on Nauvis, so an unknown surface is a surface
     /// nothing was ever told about.
-    pub fn surface(&self, id: &SurfaceId) -> Option<&Arc<FactorioSurface>> {
-        self.surfaces.get(id)
+    ///
+    /// Answers by value rather than by reference since 2026-09-07: the map is
+    /// behind a lock so that the parser can grow it, and a borrow out of a
+    /// guard cannot outlive the guard.
+    pub fn surface(&self, id: &SurfaceId) -> Option<Arc<FactorioSurface>> {
+        self.surfaces.read().get(id).cloned()
     }
 
     /// The Nauvis surface, when this world has one.
-    pub fn nauvis(&self) -> Option<&Arc<FactorioSurface>> {
+    pub fn nauvis(&self) -> Option<Arc<FactorioSurface>> {
         self.surface(&SurfaceId::nauvis())
+    }
+
+    /// The surface under `id`, creating an empty one if this world has never
+    /// seen it. **The route the parser takes**, and the only place a surface
+    /// is born outside a constructor.
+    ///
+    /// A created surface is built with [`FactorioSurface::with_globals`] from
+    /// *this world's* globals, so the `Arc::ptr_eq` invariant
+    /// [`FactorioWorld::insert_surface`] enforces holds by construction and
+    /// there is nothing here that can fail. Two surfaces in one world can
+    /// never hold two research states, whoever created them.
+    pub fn surface_or_create(&self, id: &SurfaceId) -> Arc<FactorioSurface> {
+        if let Some(held) = self.surfaces.read().get(id) {
+            return held.clone();
+        }
+        let mut surfaces = self.surfaces.write();
+        // Re-checked under the write lock: two parser threads asking for the
+        // same new surface must get the same object, not two graphs one of
+        // which is silently discarded along with everything written to it.
+        surfaces
+            .entry(id.clone())
+            .or_insert_with(|| Arc::new(FactorioSurface::with_globals(self.globals.clone())))
+            .clone()
     }
 
     /// The one surface this world holds, for callers written before there
@@ -1293,30 +1340,32 @@ impl FactorioWorld {
     /// have to be looked at again on a world with two, which is exactly the
     /// review the later rungs need. `nauvis()` is for a caller that genuinely
     /// means Nauvis.
-    pub fn only_surface(&self) -> Option<&Arc<FactorioSurface>> {
-        let mut surfaces = self.surfaces.values();
-        let first = surfaces.next()?;
-        // Not `is_empty`-style: a second surface cannot exist today, and if
-        // one ever does this must stop answering rather than pick one.
-        match surfaces.next() {
-            None => Some(first),
+    pub fn only_surface(&self) -> Option<Arc<FactorioSurface>> {
+        let surfaces = self.surfaces.read();
+        let mut values = surfaces.values();
+        let first = values.next()?;
+        // Not `is_empty`-style: on a single-surface world this answers, and
+        // on a world the parser has routed a second surface into it must stop
+        // answering rather than pick one.
+        match values.next() {
+            None => Some(first.clone()),
             Some(_) => None,
         }
     }
 
     /// Every surface id this world holds, in name order.
-    pub fn surface_ids(&self) -> impl Iterator<Item = &SurfaceId> {
-        self.surfaces.keys()
+    pub fn surface_ids(&self) -> Vec<SurfaceId> {
+        self.surfaces.read().keys().cloned().collect()
     }
 
-    /// How many surfaces this world holds. One, today, always.
+    /// How many surfaces this world holds.
     pub fn len(&self) -> usize {
-        self.surfaces.len()
+        self.surfaces.read().len()
     }
 
     /// True when nothing has been observed yet.
     pub fn is_empty(&self) -> bool {
-        self.surfaces.is_empty()
+        self.surfaces.read().is_empty()
     }
 
     /// Adds a surface, or refuses because it does not share this world's
@@ -1332,14 +1381,14 @@ impl FactorioWorld {
     /// A cloned surface is refused, and that is correct: `Clone` forks the
     /// globals on purpose. Build one with [`FactorioSurface::with_globals`].
     pub fn insert_surface(
-        &mut self,
+        &self,
         id: SurfaceId,
         surface: Arc<FactorioSurface>,
     ) -> Result<(), crate::errors::SurfaceGlobalsNotShared> {
+        let mut surfaces = self.surfaces.write();
         if !Arc::ptr_eq(&self.globals, &surface.globals) {
             return Err(crate::errors::SurfaceGlobalsNotShared {
-                held: self
-                    .surfaces
+                held: surfaces
                     .keys()
                     .next()
                     .cloned()
@@ -1347,7 +1396,7 @@ impl FactorioWorld {
                 offered: id,
             });
         }
-        self.surfaces.insert(id, surface);
+        surfaces.insert(id, surface);
         Ok(())
     }
 }

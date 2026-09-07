@@ -49,7 +49,7 @@ impl FactorioInstance {
     /// `None` also covers the ordinary case of an instance with no world at
     /// all -- a `--connect` session builds its own -- which every existing
     /// caller already handled.
-    pub fn surface(&self) -> Option<&Arc<FactorioSurface>> {
+    pub fn surface(&self) -> Option<Arc<FactorioSurface>> {
         self.world.as_ref()?.only_surface()
     }
 }
@@ -243,7 +243,11 @@ impl FactorioInstance {
                 )
                 .await?;
                 factorio_port = Some(used_factorio_port);
-                world = Some(Arc::new(FactorioWorld::nauvis_only(_world)));
+                // The parser already owns this world and routes into it,
+                // so it is taken as-is rather than rebuilt around one surface:
+                // wrapping the default surface again here would throw away
+                // every surface the parser had routed.
+                world = Some(_world);
                 // report_child_death(child);
                 server_child = Some(child);
                 if !params.silent {
@@ -523,7 +527,7 @@ impl FactorioInstance {
         // own `level.zip`, which is every ordinary run.
         resume_save: Option<PathBuf>,
     ) -> Result<(
-        Arc<FactorioSurface>,
+        Arc<FactorioWorld>,
         Arc<FactorioRcon>,
         InteractiveProcess,
         u16,

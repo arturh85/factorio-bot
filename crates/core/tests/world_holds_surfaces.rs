@@ -24,14 +24,14 @@ fn a_nauvis_only_world_holds_exactly_that_surface_under_that_name() {
     assert_eq!(world.len(), 1);
     assert!(!world.is_empty());
     assert_eq!(
-        world.surface_ids().collect::<Vec<_>>(),
-        vec![&SurfaceId::nauvis()]
+        world.surface_ids(),
+        vec![SurfaceId::nauvis()]
     );
     // The same surface, not an equal one: the world holds a handle, so a
     // caller reaching through it observes what the output parser writes.
-    assert!(Arc::ptr_eq(world.nauvis().expect("nauvis"), &held));
+    assert!(Arc::ptr_eq(&world.nauvis().expect("nauvis"), &held));
     assert!(Arc::ptr_eq(
-        world.surface(&SurfaceId::nauvis()).expect("by id"),
+        &world.surface(&SurfaceId::nauvis()).expect("by id"),
         &held
     ));
 }
@@ -51,7 +51,7 @@ fn only_surface_answers_while_the_world_holds_one() {
     let held = surface();
     let world = FactorioWorld::nauvis_only(held.clone());
 
-    assert!(Arc::ptr_eq(world.only_surface().expect("one"), &held));
+    assert!(Arc::ptr_eq(&world.only_surface().expect("one"), &held));
 }
 
 #[test]
@@ -62,14 +62,14 @@ fn a_world_built_under_another_name_still_answers_only_surface_but_not_nauvis() 
     // `only_surface` is the porting seam and does not care what the surface
     // is called; `nauvis()` is for a caller that genuinely means Nauvis, and
     // must not invent one.
-    assert!(Arc::ptr_eq(world.only_surface().expect("one"), &held));
+    assert!(Arc::ptr_eq(&world.only_surface().expect("one"), &held));
     assert!(world.nauvis().is_none());
 }
 
 #[test]
 fn re_inserting_the_held_surface_replaces_it_and_stays_one_surface() {
     let first = surface();
-    let mut world = FactorioWorld::nauvis_only(first.clone());
+    let world = FactorioWorld::nauvis_only(first.clone());
     let second = sibling(&world);
 
     world
@@ -77,8 +77,8 @@ fn re_inserting_the_held_surface_replaces_it_and_stays_one_surface() {
         .expect("the same surface refreshed is not a second surface");
 
     assert_eq!(world.len(), 1);
-    assert!(Arc::ptr_eq(world.nauvis().expect("nauvis"), &second));
-    assert!(!Arc::ptr_eq(world.nauvis().expect("nauvis"), &first));
+    assert!(Arc::ptr_eq(&world.nauvis().expect("nauvis"), &second));
+    assert!(!Arc::ptr_eq(&world.nauvis().expect("nauvis"), &first));
 }
 
 /// **The refusal that used to stand here is gone, and this is what earned
@@ -97,7 +97,7 @@ fn re_inserting_the_held_surface_replaces_it_and_stays_one_surface() {
 #[test]
 fn two_surfaces_share_one_force_one_recipe_table_and_one_action_id_counter() {
     let nauvis = surface();
-    let mut world = FactorioWorld::nauvis_only(nauvis.clone());
+    let world = FactorioWorld::nauvis_only(nauvis.clone());
     let vulcanus = sibling(&world);
     world
         .insert_surface(SurfaceId::from("vulcanus"), vulcanus.clone())
@@ -192,7 +192,7 @@ fn two_surfaces_share_one_force_one_recipe_table_and_one_action_id_counter() {
 /// surface would bring a second research state with it".
 #[test]
 fn a_surface_with_its_own_globals_is_refused_by_name() {
-    let mut world = FactorioWorld::nauvis_only(surface());
+    let world = FactorioWorld::nauvis_only(surface());
 
     let refusal = world
         // `surface()`, not `sibling()`: a freshly built surface has globals
@@ -224,7 +224,7 @@ fn a_surface_with_its_own_globals_is_refused_by_name() {
 #[test]
 fn a_cloned_surface_is_refused_because_a_clone_forks_the_globals() {
     let nauvis = surface();
-    let mut world = FactorioWorld::nauvis_only(nauvis.clone());
+    let world = FactorioWorld::nauvis_only(nauvis.clone());
 
     let forked = Arc::new((*nauvis).clone());
     assert!(

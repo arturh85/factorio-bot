@@ -1540,13 +1540,29 @@ pub struct PlanState {
     /// outward walk find the next one, so a refused site costs the *nearest*
     /// alternative and never a wider search than the one already run.
     ///
-    /// # Believed for the whole run
+    /// # Believed for the whole run, unless the game's own evidence retires it
     ///
     /// Read from `FactorioSurface::placement_refusals` on every
-    /// [`PlanState::from_world`], and that ledger is never expired. Purity
-    /// survives it: this is an input, read once at construction like every
-    /// other field, and two `PlanState`s built from the same world and roster
-    /// still expand to the same plan.
+    /// [`PlanState::from_world`]. That ledger is still never expired -- it is
+    /// the record of what the game said -- but this field drops the entries
+    /// whose recorded blockers are *only* transients (a character, a ghost):
+    /// see `PlacementRefusal::names_only_transient_blockers`, which keeps
+    /// everything else, an empty blocker list included, because an absent
+    /// observation is unknown and not clear.
+    ///
+    /// Without that, a footprint refused because a bot happened to be standing
+    /// on it was fenced off for the rest of the run, and a `BuildBlock` that
+    /// lost one placement could never be finished by a replan -- the property
+    /// `goal.built` exists for. Purity survives it: the rule is a pure
+    /// function of the refusal's own recorded fields, this is still an input
+    /// read once at construction like every other field, and two `PlanState`s
+    /// built from the same world and roster still expand to the same plan.
+    ///
+    /// It runs identically offline and live, deliberately. A rule that
+    /// re-asked the game when one was attached and used the record otherwise
+    /// would make `factorio-bot plan --world <dump>` and a live replan
+    /// disagree about the same ledger, and that difference would be
+    /// discovered at 2am rather than read here.
     ///
     /// # It carries the game's own evidence, not just the box
     ///
@@ -1852,6 +1868,18 @@ impl PlanState {
         let mut refused: Vec<RefusedFootprint> = base
             .placement_refusals()
             .iter()
+            // Expired here, and only here. A refusal whose own recorded
+            // evidence names nothing but transients -- a character, a ghost --
+            // is not a fact about the ground, and believing it for the rest of
+            // the run is what stopped a partial `BuildBlock` from ever being
+            // finished by a replan: `goal.built` re-derives the entities not
+            // yet standing, and one permanently fenced footprint refuses the
+            // whole block. See
+            // `PlacementRefusal::names_only_transient_blockers`, which is
+            // careful in the other direction too: an empty blocker list is
+            // kept, because "the mod appended nothing" is not "nothing was
+            // there".
+            .filter(|refusal| !refusal.names_only_transient_blockers())
             .map(|refusal| {
                 let facing = refusal
                     .direction

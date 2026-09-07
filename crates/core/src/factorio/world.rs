@@ -257,7 +257,79 @@ pub struct PlacementRefusal {
     pub tile: Option<String>,
 }
 
+/// Blocker names that are **not** a fact about the ground.
+///
+/// Every other name in a [`PlacementRefusal::blockers`] list is something
+/// standing on the map that nothing in a plan removes, so a refusal naming
+/// one is a standing verdict. These three are the exceptions, and each is an
+/// exception for a reason that is already established elsewhere in the tree
+/// rather than asserted here:
+///
+/// - `character` — walks away on its own. Both sites that *write* the ledger
+///   already refuse to record one (`rcon_place_entity`'s
+///   `report_character_in_footprint` in `mods/BotBridge/control.lua`, and
+///   [`crate::factorio::rcon::PlacementVerdict::is_durable_refusal`] for the
+///   pre-check), so this list is the same judgement made once more where the
+///   ledger is *read*. That is not redundancy: a ledger arrives from a dumped
+///   world, a `--resume-from` savepoint, or a mod older than either filter,
+///   and a third write site added later would have to rediscover the rule.
+/// - `entity-ghost`, `tile-ghost` — measured not to block a real build at all
+///   (a placement consumes the ghost beneath it), which is why
+///   [`crate::graph::entity_graph::GHOST_ENTITY_TYPES`] keeps them out of
+///   `blocked_tree` and why both of `PlanState::occupant_of`'s entity loops
+///   skip them by name. A ledger entry blaming a ghost is blaming something
+///   that is not an obstacle. The names and the types coincide for these two,
+///   which is why one list can serve both a `name` field and a `type` one.
+///
+/// Deliberately short and deliberately hard-coded to *names*: the game hands
+/// the mod a name, the mod hands us the name, and a category derived from a
+/// prototype lookup would be a second model of the thing the refusal exists
+/// to contradict.
+pub const TRANSIENT_BLOCKERS: [&str; 3] = ["character", "entity-ghost", "tile-ghost"];
+
 impl PlacementRefusal {
+    /// Whether the game's own evidence says this refusal's cause has since
+    /// stopped being one — i.e. whether a reader should stop believing it.
+    ///
+    /// # Three answers, not two
+    ///
+    /// A refusal is expired only when it **named** what it found and every
+    /// name it gave is in [`TRANSIENT_BLOCKERS`]. The other two cases both
+    /// keep it, and conflating them is the mistake this whole method exists
+    /// to prevent:
+    ///
+    /// | `blockers` | `tile` | reading | kept? |
+    /// |---|---|---|---|
+    /// | only transient names | any | the cause has walked off | **no** |
+    /// | any other name | any | something is standing there | yes |
+    /// | empty | `Some` | the game looked and found no entity, so the ground itself is the answer | yes |
+    /// | empty | `None` | the mod appended nothing — *not asked* | yes |
+    ///
+    /// The last row is the one that must not drift. An empty list with no
+    /// tile is an **absence of observation**, and this repo's house rule for
+    /// exactly that shape — `EntityGraph::resource_fingerprint`,
+    /// `app/src/api/runMatch.ts` — is that equal means equal and different
+    /// means *unknown*. Reading "we did not look" as "nothing was there"
+    /// would expire every refusal recorded before the mod started naming
+    /// anything, on no evidence at all, and re-introduce the four-run failure
+    /// [`PlacementRefusals`] was built for.
+    ///
+    /// # Why this is a read-side rule and not a drain
+    ///
+    /// The ledger stays whole. `record.refusals()` still reports every
+    /// refusal, because "the game said no here and here is what it saw" is
+    /// worth recording whatever a planner later decides to do about it; only
+    /// the planner's occupancy view (`PlanState::from_world`) drops the
+    /// expired ones. A ledger that forgot would also forget the evidence that
+    /// explains why it forgot.
+    pub fn names_only_transient_blockers(&self) -> bool {
+        !self.blockers.is_empty()
+            && self
+                .blockers
+                .iter()
+                .all(|name| TRANSIENT_BLOCKERS.contains(&name.as_str()))
+    }
+
     /// A refusal observed **at dispatch**: a bot tried to build `entity` at
     /// `position` facing `direction` and the game said no.
     ///

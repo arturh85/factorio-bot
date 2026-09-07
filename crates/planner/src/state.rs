@@ -274,18 +274,16 @@ fn vanilla_pole_wire_reach(name: &str) -> Option<f64> {
 /// does not run depending on when the run starts". A planner whose output must
 /// be identical for identical inputs cannot credit a number that is not.
 ///
-/// **The daylight channel does not lift this gate, and that is deliberate.**
-/// [`PlanState::solar_average_kw`] now derives a panel's *average* output,
-/// which is a function of surface constants and so is perfectly deterministic
-/// — the determinism objection is answered. What is not answered is storage: an
-/// array credited its average keeps a base alive only if the accumulators to
-/// carry the night are actually standing, and
-/// [`PlanState::accumulators_per_panel`] says how many that is without anything
-/// yet checking that they exist. Crediting the average here before that check
-/// exists would turn a *false refusal* into a base that dies at midnight, which
-/// is the wrong direction to be wrong in. The two accessors are the arithmetic
-/// a solar arm of `method::power` needs; wiring them into supply is that arm's
-/// work, not this table's.
+/// **Solar is credited now, and still not by this table.**
+/// [`PlanState::electric_supply_kw`] adds an array's daily average through
+/// `crate::method::power`'s `solar_supply_kw`, which checks that the bank
+/// [`PlanState::accumulators_per_panel`] sizes is actually standing before it
+/// credits anything. That is a *conditional* credit and this table is
+/// unconditional — a name listed here is worth its nameplate wherever it
+/// stands — so putting `solar-panel` in it would credit the noon figure with no
+/// bank check at all, which is both wrong numbers at once. `accumulator`
+/// belongs out of it for a second reason: what it answers here is a **discharge
+/// rate**, not a store, and it is not generation under either reading.
 ///
 /// These three are steady while fuelled: a steam engine's 900 kW is the same
 /// at every hour of every day. `generator` covers `steam-engine` and
@@ -4477,7 +4475,7 @@ impl PlanState {
     /// `generated_kw = 0.0` in all 541 of its force samples while the plan
     /// treated `Researched(automation)` as satisfied by crafting a lab.
     ///
-    /// Three steps, in order, and each one is load-bearing:
+    /// Four steps, in order, and each one is load-bearing:
     ///
     /// 1. **Coverage.** Which poles' supply areas overlap `area` at all.
     ///    Overlap, not containment, because that is the game's own rule: an
@@ -4489,19 +4487,51 @@ impl PlanState {
     ///    pole in that same component, summed. A generator on another network
     ///    contributes nothing, which is the failure `is_powered`-style
     ///    coverage checks miss.
+    /// 4. **Solar**, through `crate::method::power`'s `solar_supply_kw`, which
+    ///    credits an array its **daily average** and only once the
+    ///    accumulators to carry its own night are standing. See "solar is one
+    ///    call, not a second opinion" below.
+    ///
+    /// # Solar is one call, not a second opinion
+    ///
+    /// Two questions have to agree about one array — *may this plan count it*
+    /// and *how many kW is it worth* — and they are answered by the same
+    /// function, `crate::method::power`'s `solar_supply_kw`, which this calls
+    /// and `capacity_refusal` calls. Nothing about solar is computed here.
+    ///
+    /// **Its `Err` credits nothing, and the reason is not lost.** An `f64` has
+    /// no room for "unknown", so the discrimination happens one level down:
+    /// `Ok(0.)` is a network with no panel on it, and `Err` is an array
+    /// standing on it that this plan may not count — a bank too small
+    /// (`PlannerError::SolarBankShort`) or a world that cannot price the panel
+    /// at all (`PlannerError::SolarBankNotSizable`, which is every dump this
+    /// project archived before 2026-09-07). Both credit zero kW here; only the
+    /// first two are the same *fact*, and the refusal path says which.
+    ///
+    /// **Storage, not the clock, is what gates this.** Until 2026-09-07 solar
+    /// was excluded because a panel's output depends on the in-game time of
+    /// day and a deterministic planner may not decide feasibility on a number
+    /// that is not. [`Self::solar_average_kw`] answered that: an average over
+    /// the surface's own daylight constants is a function of the world and
+    /// nothing else. What remained was the bank —
+    /// [`Self::accumulators_per_panel`] — and crediting an average before the
+    /// accumulators stand trades a false refusal for a base that dies at
+    /// midnight, which is the wrong direction to be wrong in. So the gate did
+    /// not move, its *reason* did, and the sizing is now checked rather than
+    /// assumed away.
     ///
     /// # What this deliberately does not count
     ///
-    /// * **Solar panels**, still — but no longer because the number is
-    ///   unknowable. [`Self::solar_average_kw`] derives a panel's daily
-    ///   average from the surface's own curve, which is deterministic; what is
-    ///   missing is any check that the accumulators to carry the night are
-    ///   standing. Crediting an average without that check trades a false
-    ///   refusal for a base that dies at midnight. See
-    ///   [`DETERMINISTIC_GENERATOR_TYPES`].
-    /// * **Accumulators**, for the same reason once removed: they store what
-    ///   solar generated, and [`Self::accumulators_per_panel`] says how many
-    ///   are needed rather than what a standing one is worth.
+    /// * **Accumulators, as generation.** They are counted as the *bank* that
+    ///   licenses the panels, never as supply of their own: an accumulator's
+    ///   `max_energy_production` is a **discharge rate** (300 kW on vanilla)
+    ///   and its store is `electric_buffer_capacity` (5 MJ), and a bank sized
+    ///   on the first is wrong by a factor that depends on how long the night
+    ///   is. [`DETERMINISTIC_GENERATOR_TYPES`] excludes both `solar-panel` and
+    ///   `accumulator` for that reason and still does.
+    /// * **Whether a bank can deliver fast enough.** The sizing is in joules;
+    ///   a bank with the energy can still be short of the per-unit discharge
+    ///   the load wants at 03:00. Not modelled, and named in `solar_bank_for`.
     /// * **Whether the generator is actually running.** A steam engine with no
     ///   steam produces nothing, and nothing in `FactorioSurface` says whether
     ///   it has any. This counts nameplate capacity, so a boiler that is out
@@ -4525,6 +4555,28 @@ impl PlanState {
                 total += kw;
             }
         }
+        // 4. Solar, at the daily average and only once its bank stands.
+        //
+        // One call, and deliberately a call rather than a computation: the arm
+        // that *refuses* `SolarBankShort` and the ledger that *credits* kW must
+        // not be able to hold two opinions about the same array, and two
+        // encodings that agree today is the shape this codebase has been bitten
+        // by repeatedly. There is one function and this is its second caller.
+        //
+        // **`Err` credits nothing, and that is not the same as crediting
+        // nothing because there is nothing there.** The two are distinguished
+        // *before* the number reaches here, by `solar_supply_kw` itself:
+        // `Ok(0.)` is a network with no panel on it, `Err` is an array standing
+        // on this network that the plan may not count — either because its bank
+        // is short (`SolarBankShort`) or because this world cannot price it
+        // (`SolarBankNotSizable`, which is every dump archived before
+        // 2026-09-07). An `f64` has no room to carry "unknown", so what this
+        // must not do is *collapse* the distinction, and it does not:
+        // `crate::method::power`'s `capacity_refusal` asks the same function
+        // directly and surfaces the refusal by name, so a reader is told "your
+        // solar farm has no batteries" rather than being sent to look at pole
+        // geometry that is perfect.
+        total += crate::method::power::solar_supply_kw(self, area).unwrap_or(0.);
         total
     }
 
@@ -7040,13 +7092,30 @@ mod tests {
         );
     }
 
-    /// A solar panel the world carries is *readable* and still not credited.
+    /// A solar panel the world carries is *readable*, and on **this** world it
+    /// is still not credited — because this world cannot price it.
     ///
-    /// The two halves are separate claims and this is the one that could
-    /// regress quietly: widening the whitelist makes the panel visible, and
-    /// visible is one short step from counted. Its output is a function of the
-    /// in-game clock, so counting it would make the same plan feasible or not
-    /// according to when the run started.
+    /// The two halves are separate claims and the first could regress quietly:
+    /// widening the whitelist makes the panel visible, and visible is one short
+    /// step from counted.
+    ///
+    /// # The reason moved, and this is the question it moved to
+    ///
+    /// This doc used to say solar was excluded because its output depends on
+    /// the in-game clock. That objection was answered on 2026-09-07 by
+    /// [`PlanState::solar_average_kw`], and since then
+    /// [`PlanState::electric_supply_kw`] *does* credit solar — see
+    /// `a_solar_array_with_its_bank_standing_is_credited_its_daily_average`,
+    /// which is this test inverted.
+    ///
+    /// So the verdict here rests on something narrower and checkable: the
+    /// fixture ships `solar-panel` with **no** `solar_panel_performance_at_*`
+    /// and the surface with **no** daylight curve, so this world can see the
+    /// panel and cannot price it. That is
+    /// `PlannerError::SolarBankNotSizable` — *unknown*, which credits nothing,
+    /// and which is **not** the same fact as "no solar is here". The second
+    /// assertion pins that distinction, so a change that collapsed unknown into
+    /// zero would fail here even though the kW figure did not move.
     #[test]
     fn a_solar_panel_the_world_carries_is_visible_and_still_not_power() {
         let world = fixture_world();
@@ -7077,10 +7146,21 @@ mod tests {
                 .any(|entity| entity.name == "solar-panel"),
             "the panel has to be readable by name, or this asserts nothing"
         );
+        let area = lab_area(&s, Position::new(8.5, 8.5));
         assert_eq!(
-            s.electric_supply_kw(&lab_area(&s, Position::new(8.5, 8.5))),
+            s.electric_supply_kw(&area),
             0.0,
-            "a solar panel is not deterministic generation"
+            "a panel this world cannot price is credited nothing"
+        );
+        // The non-accidental half: a zero here could equally be the whole
+        // computation being skipped. This says *why* it is zero, and that the
+        // reason is unknown-not-absent.
+        assert!(
+            matches!(
+                crate::method::power::solar_supply_kw(&s, &area),
+                Err(PlannerError::SolarBankNotSizable { panels: 1, .. })
+            ),
+            "the ledger's zero must be an unpriceable panel, not an empty network"
         );
     }
 
@@ -7194,9 +7274,23 @@ mod tests {
         );
     }
 
-    /// Solar is deliberately not credited: its output depends on the in-game
-    /// time of day, and a planner whose output must be identical for identical
-    /// inputs cannot make a feasibility decision on a number that is not.
+    /// A solar panel is not generation *the generator table* credits, and on a
+    /// world with no daylight it is not credited at all.
+    ///
+    /// # This doc's reason moved on 2026-09-07: storage, not the clock
+    ///
+    /// It used to say solar was excluded because its output depends on the
+    /// in-game time of day. [`PlanState::solar_average_kw`] answered that — an
+    /// average over the surface's own daylight constants is a function of the
+    /// world and of nothing else — and
+    /// [`PlanState::electric_supply_kw`] now credits an array that average
+    /// *once its bank stands*. The condition this test still pins is the one
+    /// question a reader can settle by reading one function: **does
+    /// `electric_supply_kw` credit a panel on a world that carries no daylight
+    /// curve?** It does not, and `PlannerError::SolarBankNotSizable` is why.
+    ///
+    /// The inverted case — a priceable panel with its accumulators standing —
+    /// is `a_solar_array_with_its_bank_standing_is_credited_its_daily_average`.
     ///
     /// The steam engine in the same position *is* credited, so this is about
     /// the panel and not about the geometry.
@@ -7208,10 +7302,16 @@ mod tests {
             position: Position::new(12.5, 10.5),
             ..Default::default()
         });
+        let area = lab_area(&s, Position::new(8.5, 8.5));
         assert_eq!(
-            s.electric_supply_kw(&lab_area(&s, Position::new(8.5, 8.5))),
+            s.electric_supply_kw(&area),
             0.0,
-            "a solar panel's output is a function of the clock"
+            "a world with no daylight curve cannot price a panel, so it credits none"
+        );
+        assert_eq!(
+            s.generator_output_kw("solar-panel"),
+            None,
+            "and the unconditional generator table does not carry it either"
         );
 
         let steam = powered(
@@ -7222,6 +7322,159 @@ mod tests {
             steam.electric_supply_kw(&lab_area(&steam, Position::new(8.5, 8.5))),
             900.0,
             "the same geometry with a steam engine does count"
+        );
+    }
+
+    /// [`state_with_solar`] with a small pole, `panels` panels and
+    /// `accumulators` accumulators standing inside its 5x5 supply area.
+    ///
+    /// The geometry mirrors `crate::method::power`'s own solar fixture, so the
+    /// arm and the ledger are asked about the same shape of world.
+    fn solar_on_a_pole(
+        daylight: Option<factorio_bot_core::types::SurfaceDaylight>,
+        panels: usize,
+        accumulators: usize,
+    ) -> PlanState {
+        let mut s = state_with_solar(daylight);
+        for (name, at) in [
+            ("small-electric-pole", &[(10.5, 10.5)][..]),
+            ("solar-panel", &[(13.5, 10.5), (13.5, 7.5)][..panels]),
+            (
+                "accumulator",
+                &[(7.5, 10.5), (7.5, 12.5), (7.5, 8.5)][..accumulators],
+            ),
+        ] {
+            for (x, y) in at {
+                s.create_entity(FactorioEntity {
+                    name: name.into(),
+                    position: Position::new(*x, *y),
+                    ..Default::default()
+                });
+            }
+        }
+        s
+    }
+
+    /// **The inversion.** An array whose bank is standing IS credited by
+    /// [`PlanState::electric_supply_kw`], at its daily average.
+    ///
+    /// This is the test the two "solar is not power" tests above point at, and
+    /// the one that fails if the ledger's solar call is removed. Three claims,
+    /// and the middle one is what stops the first being an accident:
+    ///
+    /// 1. the credited figure is exactly the panels' own average, taken from
+    ///    [`PlanState::solar_average_kw`] rather than typed here — a literal
+    ///    would be a second copy of the derivation;
+    /// 2. it is strictly **less** than the array's noon nameplate, which is
+    ///    what says the average and not the tooltip figure was credited; and
+    /// 3. it is strictly above zero, which no skipped computation produces.
+    #[test]
+    fn a_solar_array_with_its_bank_standing_is_credited_its_daily_average() {
+        let s = solar_on_a_pole(Some(nauvis_daylight()), 2, 2);
+        let area = lab_area(&s, Position::new(9.5, 12.5));
+        let each = s
+            .solar_average_kw("solar-panel")
+            .expect("the fixture prices its panel");
+        let credited = s.electric_supply_kw(&area);
+        assert!(
+            (credited - each * 2.).abs() < 1e-9,
+            "two panels are worth two averages, got {credited}"
+        );
+        assert!(credited > 0., "a credited array is not a zero");
+        let noon_kw = s
+            .base
+            .entity_prototypes
+            .get("solar-panel")
+            .expect("the fixture ships a panel")
+            .max_energy_production_kw()
+            .expect("with a noon figure");
+        assert!(
+            credited < noon_kw * 2.,
+            "the DAILY AVERAGE, never the noon nameplate: {credited} against {}",
+            noon_kw * 2.
+        );
+    }
+
+    /// The same array with no accumulators is credited **nothing**, and the
+    /// zero is a refusal rather than an absence.
+    ///
+    /// The pair to the test above, and the reason the credit is safe: an array
+    /// counted without its bank keeps a base alive on paper and lets it die at
+    /// midnight. The second assertion is the non-accidental half — it names
+    /// the bank the plan is short of, which a skipped computation cannot.
+    #[test]
+    fn a_solar_array_with_no_bank_standing_is_credited_nothing() {
+        let s = solar_on_a_pole(Some(nauvis_daylight()), 2, 0);
+        let area = lab_area(&s, Position::new(9.5, 12.5));
+        assert_eq!(
+            s.electric_supply_kw(&area),
+            0.0,
+            "panels with no accumulators are worth nothing to the ledger"
+        );
+        let Err(PlannerError::SolarBankShort {
+            panels,
+            accumulators_needed,
+            accumulators_standing,
+            ..
+        }) = crate::method::power::solar_supply_kw(&s, &area)
+        else {
+            panic!("a bankless array must refuse by name, not merely read as zero");
+        };
+        assert_eq!(panels, 2);
+        assert_eq!(accumulators_standing, 0);
+        assert!(
+            accumulators_needed > 0,
+            "and it must say how many are missing"
+        );
+    }
+
+    /// An accumulator standing on a **steam** network changes nothing.
+    ///
+    /// Two separate ways this could go wrong and one test for both: an
+    /// accumulator credited as generation would add its 300 kW discharge rate
+    /// to the 900, and a solar call that ran on a panel-less network could
+    /// refuse or credit something for a bank nobody built. It is `Ok(0.)` —
+    /// buffering a steam network is an ordinary thing to do.
+    ///
+    /// # The fixture has to PRICE the accumulator or this asserts nothing
+    ///
+    /// The first version of this test built its world with [`powered`], whose
+    /// `accumulator` prototype declares no `max_energy_production` at all — so
+    /// listing `accumulator` in [`DETERMINISTIC_GENERATOR_TYPES`] added nothing
+    /// to the 900 and **no mutation could kill this test**. It was found by
+    /// exactly that: six falsifications, and this was the one every single one
+    /// of them left green. [`solar_on_a_pole`] sets the discharge rate, so the
+    /// 300 kW this refuses to credit is a number that is actually there.
+    #[test]
+    fn an_accumulator_on_a_steam_network_is_neither_supply_nor_a_refusal() {
+        let mut s = solar_on_a_pole(Some(nauvis_daylight()), 0, 1);
+        s.create_entity(FactorioEntity {
+            name: "steam-engine".into(),
+            position: Position::new(12.5, 10.5),
+            ..Default::default()
+        });
+        // The guard on the guard: the accumulator this world carries really
+        // does declare a discharge rate, so a ledger that credited one would
+        // read 1,200 rather than 900.
+        assert_eq!(
+            s.base
+                .entity_prototypes
+                .get("accumulator")
+                .expect("the fixture ships an accumulator")
+                .max_energy_production_kw(),
+            Some(300.),
+            "the discharge rate has to be present, or the 900 below is an accident"
+        );
+        let area = lab_area(&s, Position::new(9.5, 12.5));
+        assert_eq!(
+            s.electric_supply_kw(&area),
+            900.0,
+            "the engine's 900 and not a kilowatt more"
+        );
+        assert_eq!(
+            crate::method::power::solar_supply_kw(&s, &area).expect("no panels, nothing wrong"),
+            0.0,
+            "an accumulator without a panel is a buffer, not a supply"
         );
     }
 

@@ -169,6 +169,35 @@ is the natural next step once you have ruled on the anchor question above.
 
 ---
 
+---
+
+## 5. The planner reads a busy furnace as an idle one
+
+`method::have::adoptable_furnaces` filters on `!state.holds_buffer(pos)` and calls
+the survivors `Reuse::Idle` — *"nothing in this plan has loaded it. Take it as it
+is."* A furnace **mid-smelt has ore in and nothing out**, so it passes that
+filter and is adopted as idle.
+
+Until now the planner could not have known: `holds_buffer` is about the *output*
+slot, and the input inventory did not reach the on-demand path at all. It does
+now (`324e0f34`), so `holds_input` exists and the fix is one filter away.
+
+**It is left undone because it is a policy call, not a bug fix.** Excluding a
+busy furnace makes the plan **place another one** — which costs stone, and on a
+replan could turn a working adoption into a shortfall. The alternatives:
+
+| option | consequence |
+|---|---|
+| adopt it anyway (today) | the plan's first insert competes with a smelt already running |
+| exclude it, build another | costs stone; risks a shortfall on replan |
+| wait for it | needs a notion of "busy until" the planner does not have |
+
+**No offline baseline can measure any of this** — a dump's `inventories` is
+always `[]`, so the whole path is unreachable without a live game. That is why
+it wants your judgement rather than an overnight guess.
+
+---
+
 ## What is NOT waiting on anything
 
 Everything else overnight is merged and green: gathering bills its own unlock,

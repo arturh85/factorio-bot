@@ -244,6 +244,41 @@ function serialize_fluidbox_prototype(fluidbox)
     -- which is what the planner plans for.
     local ok, volume = pcall(function() return fluidbox.get_volume() end)
     if ok then record.volume = volume end
+
+    -- WHICH FLUID THIS BOX WILL EVER ACCEPT.
+    --
+    -- `production_type` says which way fluid moves and `pipe_connections`
+    -- says where a pipe may meet it. Neither says what the box wants, and
+    -- geometry never can: the planner sees a pipe reaching an oil refinery's
+    -- port and cannot see whether that port takes crude or water. That is the
+    -- fact `crates/planner/src/method/pipe.rs` names as the one thing keeping
+    -- its water rule unreachable.
+    --
+    -- **`filter` is an ATTRIBUTE on `LuaFluidBoxPrototype`, not a method** --
+    -- checked in `runtime-api.json` for 2.1.17 rather than recalled, because
+    -- the opposite mistake is what made `get_volume()` above need its `pcall`
+    -- and what made `crafting_speed` arrive nil for 1,028 prototypes. It
+    -- yields a `LuaFluidPrototype` or `nil`.
+    --
+    -- **Three states, and `nil` is the middle one, not the last.** A `nil`
+    -- filter is the prototype saying *"this box takes anything"* -- which is
+    -- every crafting machine, where the recipe picks the fluid. That is an
+    -- answer. Sending nothing at all is the third state, and it is what the
+    -- reader sees when this `pcall` fails or when a record predates this
+    -- field; `FluidFilter`'s default is `unknown`, so those never masquerade
+    -- as `any`.
+    --
+    -- This is the PROTOTYPE filter, deliberately. `LuaEntity::get_fluid_filter`
+    -- is a different question -- what one standing pump is currently set to --
+    -- and nothing in the Rust model has anywhere to put it.
+    local filter_ok, filter = pcall(function() return fluidbox.filter end)
+    if filter_ok then
+        if filter == nil then
+            record.filter = { kind = "any" }
+        else
+            record.filter = { kind = "only", fluid = filter.name }
+        end
+    end
     return record
 end
 

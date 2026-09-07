@@ -50,7 +50,7 @@ use crate::state::PlanState;
 use factorio_bot_core::factorio::util::calculate_distance;
 use factorio_bot_core::graph::enclosure;
 use factorio_bot_core::graph::route::{RouteError, TileKind, route_belt};
-use factorio_bot_core::types::{Direction, FactorioEntity, Position, Rect};
+use factorio_bot_core::types::{Direction, FactorioEntity, FluidFilter, Position, Rect};
 
 use crate::action::{Action, ActionKind, Actor, Condition, Effect};
 use std::collections::BTreeSet;
@@ -431,8 +431,10 @@ pub(crate) fn fluidbox_entities(
 /// and a boiler's steam box supplies. A refinery piped to a boiler builds
 /// perfectly and makes nothing, which is this repo's standing silent class.
 ///
-/// So a candidate must be *attributable* to the fluid, by one of three tests,
-/// each derived from the world rather than from a list of names:
+/// So a candidate must be *attributable* to the fluid. The box's own
+/// [`FluidFilter`] answers first when it has one -- see [`attributable_to`],
+/// which is also what now rejects that boiler -- and otherwise one of three
+/// tests, each derived from the world rather than from a list of names:
 ///
 /// 1. **the plan told it what to make** -- `entity.recipe` names a recipe
 ///    whose products include the fluid. This is the test that will make the
@@ -445,19 +447,51 @@ pub(crate) fn fluidbox_entities(
 ///    entity within [`gather::FIELD_RADIUS`] of a charted tile of the fluid,
 ///    which is precisely the tank `method::gather` stands up.
 ///
-/// # What it cannot do, and what would close it
+/// # Water is STILL open, and the condition this doc named for closing it
+/// turned out to be the wrong one
 ///
 /// **Water has no answer here**, because water is not a charted resource and
-/// an offshore pump carries no recipe -- so rule 4, "a supplying fluidbox
-/// adjacent to water tiles", is missing. That is deliberate rather than
-/// forgotten: the only recipes needing water also need a second fluid, and
-/// [`crate::method::fabricate`] refuses those before a source is ever looked
-/// for, so a water rule would be code with no reachable caller. It becomes
-/// reachable the day the fluidbox's accepted fluid crosses the bridge.
+/// an offshore pump carries no recipe, so all three inferences fail on the
+/// one entity that produces it. This doc used to name its own unblocking
+/// condition -- *"it becomes reachable the day the fluidbox's accepted fluid
+/// crosses the bridge"* -- on the unstated assumption that an offshore pump's
+/// output box is filtered to water.
 ///
-/// **And nothing here reads what a tank contains**, because nothing in the
-/// model does. Rule 3 attributes a tank by *where it stands*, which is an
-/// inference from the map and not an observation of the fluid.
+/// **The filter crossed on 2026-09-08 and that assumption is false.**
+/// Measured off a live seed-31337 dump, every one of the 56 fluid boxes in
+/// this mod set answered, and:
+///
+/// ```text
+/// offshore-pump   output any
+/// boiler          input  only=water    output only=steam
+/// heat-exchanger  input  only=water    output only=steam
+/// chemical-plant  input any   input any   output any   output any
+/// ```
+///
+/// A 2.0 offshore pump takes its fluid from the **tile it stands on**
+/// (`LuaEntity::get_fluid_source_fluid`), not from a box filter, so the box
+/// is honestly unfiltered and [`FluidFilter::Any`] is the correct answer.
+/// The only two `only=water` boxes in the entire mod set are boiler and
+/// heat-exchanger **inputs**, and an input supplies nothing. So the water
+/// rule needs a *tile* reading that this bridge does not carry, and naming a
+/// sufficient condition for a fix was not the same as checking it.
+///
+/// # What the filter did close
+///
+/// Four prototypes have supplying boxes that are *all* filtered: `boiler`
+/// and `heat-exchanger` (steam), `fusion-generator` (fluoroketone-hot),
+/// `fusion-reactor` (fusion-plasma). Both directions now answer on a fact for
+/// those -- see [`attributable_to`]. **Steam had no rule at all before**, for
+/// precisely water's reason, and has one now.
+///
+/// # What it still cannot do
+///
+/// **Nothing here reads what a tank contains**, because nothing in the model
+/// does. Rule 3 attributes a tank by *where it stands*, which is an inference
+/// from the map and not an observation of the fluid. The prototype filter
+/// does not help there: a `storage-tank`'s box is
+/// [`FluidFilter::Any`] -- correctly, since a tank will hold anything.
+///
 pub(crate) fn sources_of(
     state: &PlanState,
     fluid: &str,
@@ -546,13 +580,81 @@ fn is_buffer(state: &PlanState, name: &str) -> bool {
         .is_some_and(|proto| proto.entity_type == "storage-tank")
 }
 
-/// The three tests [`sources_of`] documents, in that order.
+/// The filters on every box of `name` that could supply a fluid, in
+/// `fluidbox_prototypes` order.
+///
+/// Empty when the prototype is unknown to the model or declares no supplying
+/// box at all -- which is a different thing from a box that answered
+/// [`FluidFilter::Unknown`], and callers must not treat the two alike.
+fn supplying_filters(state: &PlanState, name: &str) -> Vec<FluidFilter> {
+    state
+        .base()
+        .globals
+        .entity_prototypes
+        .get(name)
+        .and_then(|proto| proto.fluidbox_prototypes.clone())
+        .map(|boxes| {
+            boxes
+                .into_iter()
+                .filter(|b| SUPPLYING.contains(&b.production_type.as_str()))
+                .map(|b| b.filter)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The three tests [`sources_of`] documents, in that order, with the box's
+/// own filter consulted first when it has one.
+///
+/// # The box gets to answer before anything is inferred
+///
+/// The three original tests are inferences from the map -- what the plan told
+/// a machine to craft, what it stands on, what it stands near. Since the
+/// prototype's [`FluidFilter`] crosses the bridge there is a fourth test that
+/// is not an inference at all: **the box says so**. It runs first because a
+/// definite answer should not be reached through three guesses, and it does
+/// two things nothing here could do before:
+///
+/// - **it gives steam a rule, where none of the three could reach.** A boiler
+///   carries no recipe, steam is not a charted resource and a boiler is not a
+///   buffer, so every inference fails on it and always would have -- the same
+///   shape as the water hole [`sources_of`] documents, which this does *not*
+///   close (read that doc: the pump's box turned out to be unfiltered);
+/// - **it refuses the boiler by name.** The bug that motivated the three
+///   tests was a refinery piped to a boiler, because a boiler's steam box
+///   supplies and distance chose it. A box filtered `steam` definitely does
+///   not supply petroleum gas, so it is now rejected on a fact rather than
+///   surviving to be rejected on the absence of one.
+///
+/// # What [`FluidFilter::Unknown`] does, and why
+///
+/// **Nothing.** It neither attributes nor excludes, so a prototype that never
+/// said falls through to exactly the three inferences that ran before this
+/// field existed. That is the only choice with no regression in it: erring
+/// towards permitting would make every unreadable box a phantom source, and
+/// erring towards refusing would make every archived dump -- all of which
+/// predate the field, so every box in them is `Unknown` -- unplannable.
+/// [`FluidFilter::Any`] behaves the same way here for a different reason: an
+/// unfiltered box genuinely does accept the fluid, and *which* recipe fills
+/// it is what the three inferences are for.
 fn attributable_to(
     state: &PlanState,
     fluid: &str,
     field: &[Position],
     entity: &FactorioEntity,
 ) -> bool {
+    let filters = supplying_filters(state, &entity.name);
+    if filters.iter().any(|f| f.is_only(fluid)) {
+        return true;
+    }
+    // Every supplying box names a *different* fluid, so no recipe, no
+    // footprint and no neighbourhood can make this entity a source. Guarded
+    // on non-empty: an entity with no supplying box at all reaches here only
+    // if `fluidbox_entities` let it through, and "no boxes" is not a claim
+    // that they all exclude the fluid.
+    if !filters.is_empty() && filters.iter().all(|f| f.excludes(fluid)) {
+        return false;
+    }
     if let Some(recipe) = &entity.recipe
         && state
             .base()
@@ -969,6 +1071,150 @@ mod pipe_tests {
 
     fn state() -> PlanState {
         PlanState::from_world(Arc::new(world_with_oil(OIL)), &[BotId(1)])
+    }
+
+    /// Overwrite the filter on every supplying box of `name`, the way the mod
+    /// now reports it. The fixture capture predates the field, so everything
+    /// in it reads [`FluidFilter::Unknown`] -- which is exactly the control
+    /// these tests need.
+    fn filter_supplying(state: &PlanState, name: &str, filter: &FluidFilter) {
+        let mut proto = state
+            .base()
+            .globals
+            .entity_prototypes
+            .get_mut(name)
+            .expect("the fixture has this prototype");
+        for b in proto
+            .fluidbox_prototypes
+            .as_mut()
+            .expect("the fixture prototype has fluid boxes")
+            .iter_mut()
+            .filter(|b| SUPPLYING.contains(&b.production_type.as_str()))
+        {
+            b.filter = filter.clone();
+        }
+    }
+
+    fn standing(state: &mut PlanState, name: &str, at: Position) {
+        state.create_entity(FactorioEntity {
+            name: name.into(),
+            entity_type: name.into(),
+            position: at,
+            direction: 0,
+            ..Default::default()
+        });
+    }
+
+    fn is_source(state: &PlanState, fluid: &str, name: &str) -> bool {
+        let (attributable, _rejected) = sources_of(state, fluid, &Position::new(0., 0.));
+        attributable.iter().any(|e| e.name == name)
+    }
+
+    /// **A box filtered to the fluid is a source with no inference at all.**
+    ///
+    /// Steam is the live case, verified against a seed-31337 dump: a boiler
+    /// carries no recipe, stands on no charted resource -- steam is not one --
+    /// and is not a buffer, so all three inference rules fail on it and always
+    /// would have. Its output box really is `only=steam`, so this test asserts
+    /// a fact about the shipped mod set and not a hypothetical.
+    ///
+    /// **The exemplar used to be an offshore pump and water, and that was
+    /// wrong** -- a 2.0 pump takes its fluid from the tile it stands on, so
+    /// its box is unfiltered and water is still unsolved. The mechanism this
+    /// test pins is unaffected; the claim about which fluid it rescued was
+    /// not.
+    ///
+    /// The control is the same boiler carrying [`FluidFilter::Unknown`], the
+    /// filter the fixture capture actually holds, which must still be refused:
+    /// without it this test would pass for a version that had simply stopped
+    /// attributing anything.
+    #[test]
+    fn a_box_filtered_to_the_fluid_is_a_source_where_no_inference_reaches() {
+        let mut state = state();
+        // Well away from the crude field, so the footprint inference cannot
+        // fire for any fluid.
+        standing(&mut state, "boiler", Position::new(60.5, 60.5));
+
+        assert!(
+            !is_source(&state, "steam", "boiler"),
+            "an unread filter must attribute nothing -- the three inferences \
+             cannot see steam, and that is the same gap water is still in"
+        );
+
+        filter_supplying(
+            &state,
+            "boiler",
+            &FluidFilter::Only {
+                fluid: "steam".to_owned(),
+            },
+        );
+        assert!(
+            is_source(&state, "steam", "boiler"),
+            "a box that names steam IS a steam source"
+        );
+    }
+
+    /// **A box filtered to another fluid is refused even where an inference
+    /// would have accepted it.**
+    ///
+    /// This is the boiler that motivated the three tests in the first place:
+    /// a refinery piped to a boiler builds perfectly and makes nothing. Here
+    /// the boiler stands on the crude field, so inference 2 -- "its footprint
+    /// covers a charted tile of the fluid" -- accepts it, and the control
+    /// half of this test proves that it does. A box that names `steam`
+    /// definitely does not supply crude, and that fact now outranks the
+    /// inference rather than being unavailable to it.
+    #[test]
+    fn a_box_filtered_to_another_fluid_outranks_an_inference_that_would_accept() {
+        let mut state = state();
+        standing(&mut state, "boiler", Position::new(20.5, 20.5));
+
+        assert!(
+            is_source(&state, "crude-oil", "boiler"),
+            "control: standing on the field, the footprint inference accepts \
+             this boiler -- which is the defect, not the desired answer"
+        );
+
+        filter_supplying(
+            &state,
+            "boiler",
+            &FluidFilter::Only {
+                fluid: "steam".to_owned(),
+            },
+        );
+        assert!(
+            !is_source(&state, "crude-oil", "boiler"),
+            "a box that names steam is not a crude source, whatever it stands on"
+        );
+    }
+
+    /// **[`FluidFilter::Any`] is not [`FluidFilter::Only`] and not a veto.**
+    ///
+    /// An unfiltered box -- every crafting machine, and a storage tank -- is a
+    /// definite answer that says nothing about *which* fluid, so the three
+    /// inferences must still decide. Pinned separately from `Unknown` so that
+    /// collapsing the two states would fail something: the two agree here on
+    /// purpose, and a reader should see that the agreement was chosen.
+    #[test]
+    fn an_unfiltered_box_neither_attributes_nor_vetoes() {
+        let mut on_field = state();
+        standing(&mut on_field, "boiler", Position::new(20.5, 20.5));
+        filter_supplying(&on_field, "boiler", &FluidFilter::Any);
+        assert!(
+            is_source(&on_field, "crude-oil", "boiler"),
+            "`any` leaves the inferences in charge"
+        );
+
+        // And the live shape of the thing that made the old exemplar wrong:
+        // an offshore pump's output box really is `any`, and `any` attributes
+        // nothing by itself -- so water is exactly as unsolved as it was.
+        let mut elsewhere = state();
+        standing(&mut elsewhere, "offshore-pump", Position::new(60.5, 60.5));
+        filter_supplying(&elsewhere, "offshore-pump", &FluidFilter::Any);
+        assert!(
+            !is_source(&elsewhere, "water", "offshore-pump"),
+            "`any` attributes nothing by itself"
+        );
     }
 
     fn tank(state: &mut PlanState, at: Position) {

@@ -2028,6 +2028,9 @@
       },
       "FactorioFluidBoxPrototype": {
         "properties": {
+          "filter": {
+            "$ref": "#/components/schemas/FluidFilter"
+          },
           "pipe_connections": {
             "items": {
               "$ref": "#/components/schemas/FactorioFluidBoxConnection"
@@ -2273,6 +2276,60 @@
           "other"
         ],
         "type": "string"
+      },
+      "FluidFilter": {
+        "description": "Which fluid a fluid box will ever accept, as its **prototype** declares it.\n\n# Three answers, and the two that look alike are the point\n\nThis is `LuaFluidBoxPrototype::filter`, which is an *attribute* and not a\nmethod (checked against `runtime-api.json` for 2.1.17, not recalled -- the\nshape that made `volume` need a `pcall` two fields down). It is the\nquestion *\"what will this machine ever take here\"*, asked of the\nprototype. It is **not** `LuaEntity::get_fluid_filter`, the runtime filter\na pump can be set to, and it is not what a box currently contains --\nnothing in this crate models either.\n\nAn `Option<String>` would have two slots for three states and would\nsilently merge the middle one into the last:\n\n- [`FluidFilter::Only`] -- *\"a boiler's output is steam\"*. Definite.\n- [`FluidFilter::Any`] -- *\"a chemical plant's input has no filter, so the\n  recipe decides\"*. **Also definite, and a completely different fact.**\n- [`FluidFilter::Unknown`] -- the sender never said: an archived dump, a\n  mod predating this field, a build whose read raised. Not a fact about\n  the game at all.\n\n`Any` is the common case for the machines this project cares about most:\nevery crafting machine's boxes are unfiltered, because the recipe is what\npicks the fluid. Reading that as \"we could not tell\" would throw away the\none thing that makes the chemistry rung composable.\n\n# Two predicates, neither the negation of the other\n\n[`Self::is_only`] and [`Self::excludes`] are both *positive* claims, and\nboth are false for `Any` and for `Unknown`. That is deliberate: a single\n`accepts(fluid) -> bool` cannot distinguish its own two meanings, which is\nthe defect class this type exists to avoid.",
+        "oneOf": [
+          {
+            "description": "The prototype names exactly one fluid this box accepts.",
+            "properties": {
+              "fluid": {
+                "type": "string"
+              },
+              "kind": {
+                "enum": [
+                  "only"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "fluid",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The prototype sets no filter: the box accepts whatever the machine's\nrecipe (or its neighbours) put in it. An answer, not an absence.",
+            "properties": {
+              "kind": {
+                "enum": [
+                  "any"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Nobody said. The default, so an archived record or an older mod\ndeserialises to *\"not captured\"* rather than to `Any`.",
+            "properties": {
+              "kind": {
+                "enum": [
+                  "unknown"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "GuiSettings": {
         "properties": {

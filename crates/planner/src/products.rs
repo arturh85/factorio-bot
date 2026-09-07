@@ -239,6 +239,21 @@ pub enum ProductRefusal {
     /// Tier 2: recipes produce it, and none is in an admitted category.
     NoRunnableCategory {
         product: String,
+        /// Ingredients of the refused recipes that this surface cannot supply
+        /// **either way** — no recipe in a runnable category produces them,
+        /// and they are not a resource here. Empty when the ingredients are
+        /// all locally reachable, or when nothing filled it in.
+        ///
+        /// **This is what turns a misleading refusal into an honest one.**
+        /// Every off-world science pack refuses at this tier, and the message
+        /// without this clause reads as "add a machine for category organic" —
+        /// so a reader goes and looks at biochambers. A biochamber on Nauvis
+        /// still cannot make `agricultural-science-pack`, because its
+        /// ingredients are `bioflux` and `pentapod-egg`, which come from
+        /// Gleba. The category is true and the conclusion it invites is
+        /// wrong, which is the same defect shape as an occupancy error naming
+        /// terrain for a footprint the game refused.
+        unreachable_inputs: Vec<String>,
         /// Every producer, in recipe-name order. Never empty: an empty list is
         /// tier 1.
         candidates: Vec<Candidate>,
@@ -285,6 +300,7 @@ impl std::fmt::Display for ProductRefusal {
                 candidates,
                 admitted,
                 substance,
+                unreachable_inputs,
             } => {
                 write!(
                     f,
@@ -294,6 +310,25 @@ impl std::fmt::Display for ProductRefusal {
                     list(candidates),
                     admitted.join(", "),
                 )?;
+                if !unreachable_inputs.is_empty() {
+                    write!(
+                        f,
+                        ". Its {} {} {} not producible here and not a resource on this \
+                         surface, so this is a SUPPLY problem rather than a missing machine -- \
+                         a machine for that category would still have nothing to feed it",
+                        if unreachable_inputs.len() == 1 {
+                            "ingredient"
+                        } else {
+                            "ingredients"
+                        },
+                        list_plain(unreachable_inputs),
+                        if unreachable_inputs.len() == 1 {
+                            "is"
+                        } else {
+                            "are"
+                        },
+                    )?;
+                }
                 if *substance == Some(Substance::Fluid) {
                     write!(
                         f,
@@ -314,6 +349,81 @@ impl std::fmt::Display for ProductRefusal {
                 list(candidates),
             ),
         }
+    }
+}
+
+/// Ingredients of `product`'s recipes that this surface cannot supply at all.
+///
+/// An ingredient counts as unsupplyable when **both** are true: it is not a
+/// resource this world has, and no recipe in a runnable category produces it.
+/// Either alone is not enough — `iron-plate` is not a resource but smelting
+/// makes it, and `coal` is not craftable but the ground supplies it.
+///
+/// **Shallow on purpose.** One level of ingredients, no recursion. A deeper
+/// walk would have to cope with the recipe graph being cyclic, which it is:
+/// Space Age's `X-recycling` recipes produce `X` from `X`. Those are skipped
+/// here for the same reason — a recycling recipe as evidence of how to obtain
+/// something is circular, since you must already have it.
+///
+/// One level is enough for what this is for. Every off-world science pack
+/// names its foreign material immediately: `agricultural-science-pack` asks
+/// for `bioflux` and `pentapod-egg`, `metallurgic-science-pack` for
+/// `tungsten-plate` and `molten-copper`, `electromagnetic-science-pack` for
+/// `holmium-solution`. None needs a search to find.
+fn inputs_this_surface_cannot_supply(
+    state: &PlanState,
+    index: &ProductIndex,
+    categories: &Categories,
+    product: &str,
+) -> Vec<String> {
+    let here: std::collections::BTreeSet<String> = state.resource_names().into_iter().collect();
+    let unreachable_for = |recipe: &FactorioRecipe| -> Vec<String> {
+        let mut out: std::collections::BTreeSet<String> = Default::default();
+        for ingredient in recipe.ingredients.iter().flatten() {
+            let name = &ingredient.name;
+            if here.contains(name) {
+                continue;
+            }
+            let makeable_here = index
+                .recipes_producing(name)
+                .iter()
+                .any(|r| categories.admits(&r.category));
+            if !makeable_here {
+                out.insert(name.clone());
+            }
+        }
+        out.into_iter().collect()
+    };
+
+    // **The NEAREST recipe's inputs, not the union of every recipe's.**
+    //
+    // Pooling them names ingredients the caller does not all need. `plastic-bar`
+    // has a local chemistry recipe wanting `petroleum-gas` and a Gleba
+    // `bioplastic` recipe wanting `bioflux` and `yumako-mash`; the union reads
+    // as though all three were required, when in fact oil alone opens the path.
+    // Reporting the recipe with the fewest unreachable inputs answers the
+    // question a reader is actually asking -- what is the least that has to
+    // change -- and a union answers no question at all.
+    //
+    // Ties break on recipe name so the message is stable between runs; the
+    // planner is deterministic and its refusals have to be too.
+    index
+        .recipes_producing(product)
+        .into_iter()
+        .filter(|r| r.category != "recycling")
+        .map(|r| (unreachable_for(r), r.name.clone()))
+        .filter(|(missing, _)| !missing.is_empty())
+        .min_by(|a, b| a.0.len().cmp(&b.0.len()).then_with(|| a.1.cmp(&b.1)))
+        .map(|(missing, _)| missing.into_iter().take(4).collect())
+        .unwrap_or_default()
+}
+
+/// `a`, `a and b`, `a, b and c` -- for names that are not recipe candidates.
+fn list_plain(names: &[String]) -> String {
+    match names {
+        [] => String::new(),
+        [one] => one.clone(),
+        [head @ .., last] => format!("{} and {last}", head.join(", ")),
     }
 }
 
@@ -506,6 +616,11 @@ impl ProductIndex {
                 candidates: all.iter().map(|r| candidate(r, product)).collect(),
                 admitted: categories.names(),
                 substance: self.substances.of(product),
+                // Filled in by `ProductRefusal::with_unreachable_inputs`,
+                // which needs a `PlanState` this function does not have.
+                // Empty here means "not examined", and the message says
+                // nothing rather than claiming the inputs are fine.
+                unreachable_inputs: Vec::new(),
             }),
             1 => Ok(runnable[0]),
             _ => Err(ProductRefusal::Ambiguous {
@@ -584,7 +699,22 @@ impl Method for NoProducer {
             // Something can make it. Whatever stopped this goal, it is not
             // the recipe table, and saying anything here would be guessing.
             Ok(_) => None,
-            Err(refusal) => Some(PlannerError::ProductNotMakeable(refusal)),
+            Err(mut refusal) => {
+                // Say WHY the missing category is not the actionable fact,
+                // when it is not. See `NoRunnableCategory::unreachable_inputs`.
+                if let ProductRefusal::NoRunnableCategory {
+                    unreachable_inputs, ..
+                } = &mut refusal
+                {
+                    *unreachable_inputs = inputs_this_surface_cannot_supply(
+                        &ctx.state,
+                        &index,
+                        &Categories::planner_runs(&machines),
+                        item,
+                    );
+                }
+                Some(PlannerError::ProductNotMakeable(refusal))
+            }
         }
     }
 }
@@ -1095,6 +1225,105 @@ mod no_producer_driver_tests {
         assert!(
             matches!(err, PlannerError::NoApplicableMethod { .. }),
             "the method must stay quiet when a runnable recipe exists: {err:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod unreachable_input_tests {
+    use super::*;
+    use crate::ids::BotId;
+    use factorio_bot_core::factorio::world::FactorioSurface;
+    use factorio_bot_core::serde_json;
+    use std::sync::Arc;
+
+    fn recipe(json: &str) -> FactorioRecipe {
+        serde_json::from_str(json).expect("fixture recipe parses")
+    }
+
+    fn r(name: &str, category: &str, ingredient: &str, product: &str) -> FactorioRecipe {
+        recipe(&format!(
+            r#"{{"name":"{name}","valid":true,"enabled":true,"hidden":false,"energy":1,
+                 "order":"a","category":"{category}","group":"g","subgroup":"s",
+                 "ingredients":[{{"name":"{ingredient}","ingredient_type":"item","amount":1}}],
+                 "products":[{{"name":"{product}","product_type":"item","amount":1,
+                               "independent_probability":1,
+                               "shared_probability":{{"min":0,"max":1}}}}]}}"#
+        ))
+    }
+
+    /// Three recipes: an off-world pack, a locally craftable gear, and the
+    /// plate the gear needs.
+    fn parts() -> (PlanState, Vec<FactorioRecipe>) {
+        let recipes = vec![
+            // `bioflux` is produced by nothing here at all.
+            r("agri-pack", "organic", "bioflux", "agri-pack"),
+            // A recycling variant: produces the pack FROM the pack. A cycle,
+            // and useless as evidence of how to obtain one.
+            r("agri-pack-recycling", "recycling", "agri-pack", "agri-pack"),
+            r("gear", "crafting", "iron-plate", "gear"),
+            r("iron-plate", "smelting", "iron-ore", "iron-plate"),
+        ];
+        let world = FactorioSurface::new();
+        world
+            .update_recipes(recipes.clone())
+            .expect("update_recipes");
+        (PlanState::from_world(Arc::new(world), &[BotId(1)]), recipes)
+    }
+
+    fn index_of(recipes: &[FactorioRecipe]) -> ProductIndex {
+        ProductIndex::from_parts(recipes.iter(), ["agri-pack", "gear", "iron-plate"])
+    }
+
+    /// **An ingredient nothing here can produce is named**, which is what stops
+    /// the refusal reading as "add a machine for category organic". A machine
+    /// for that category would still have no `bioflux` to feed it.
+    #[test]
+    fn an_ingredient_no_runnable_recipe_produces_is_reported() {
+        let (state, recipes) = parts();
+        let missing = inputs_this_surface_cannot_supply(
+            &state,
+            &index_of(&recipes),
+            &Categories::only(["crafting", "smelting"]),
+            "agri-pack",
+        );
+        assert_eq!(missing, vec!["bioflux".to_string()]);
+    }
+
+    /// **An ingredient a runnable recipe DOES produce is not reported**, or the
+    /// clause would name ordinary local materials and become noise. `gear`
+    /// needs `iron-plate`, which smelting makes, so nothing is unsupplyable.
+    #[test]
+    fn a_locally_craftable_ingredient_is_not_reported() {
+        let (state, recipes) = parts();
+        let missing = inputs_this_surface_cannot_supply(
+            &state,
+            &index_of(&recipes),
+            &Categories::only(["crafting", "smelting"]),
+            "gear",
+        );
+        assert!(
+            missing.is_empty(),
+            "iron-plate is smeltable here: {missing:?}"
+        );
+    }
+
+    /// **A recycling recipe is never the evidence.** `agri-pack-recycling`
+    /// produces the pack from the pack, so treating it as a path would say the
+    /// way to obtain one is to already have one. Space Age adds one of these
+    /// for nearly every item, so the recipe graph really is cyclic.
+    #[test]
+    fn a_recycling_recipe_is_not_treated_as_a_path() {
+        let (state, recipes) = parts();
+        let missing = inputs_this_surface_cannot_supply(
+            &state,
+            &index_of(&recipes),
+            &Categories::only(["crafting", "smelting"]),
+            "agri-pack",
+        );
+        assert!(
+            !missing.iter().any(|m| m == "agri-pack"),
+            "the pack must not be reported as its own missing input: {missing:?}"
         );
     }
 }

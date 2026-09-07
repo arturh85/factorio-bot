@@ -306,9 +306,9 @@ async fn run(matches: &ArgMatches, _context: &mut Context) -> Result<()> {
     let world = attach_world(&rcon, None).await?;
     info!(
       "Attached: {} entity prototypes, {} recipes, {} player(s)",
-      world.entity_prototypes.len(),
-      world.recipes.len(),
-      world.players.len()
+      world.globals.entity_prototypes.len(),
+      world.globals.recipes.len(),
+      world.globals.players.len()
     );
     // Attached: this is someone else's server, and `goal.plan` must not
     // stop its clock (see `ServerOwnership`).

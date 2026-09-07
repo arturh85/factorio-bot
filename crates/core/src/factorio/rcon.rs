@@ -1209,7 +1209,7 @@ fn boxes_overlap(a: &Rect, b: &Rect) -> bool {
 /// a building" instead of "does a character fit here" — because guessing an
 /// extent we were never told would refuse walks on an invented number.
 fn character_footprint(world: &FactorioSurface, at: &Position) -> Rect {
-    match world.entity_prototypes.get(CHARACTER_PROTOTYPE) {
+    match world.globals.entity_prototypes.get(CHARACTER_PROTOTYPE) {
         Some(prototype) => add_to_rect(&prototype.collision_box, at),
         None => Rect::new(at, at),
     }
@@ -1312,6 +1312,7 @@ const ARRIVAL_HALF_WIDTH: f64 = 0.3;
 /// and its own position is on the near side of every ring it is aimed at.
 fn bystander_boxes(world: &FactorioSurface, walker: Option<PlayerId>) -> Vec<Rect> {
     let mut boxes: Vec<(PlayerId, Rect)> = world
+        .globals
         .players
         .iter()
         .filter(|player| Some(*player.key()) != walker)
@@ -3598,7 +3599,7 @@ impl FactorioRcon {
         technology_name: &str,
         expected_ticks: u32,
     ) -> Result<ActionTicks, ActionFailure> {
-        let mut next_action_id = world.as_ref().next_action_id.lock().await;
+        let mut next_action_id = world.as_ref().globals.next_action_id.lock().await;
         let action_id: ActionId = *next_action_id;
         *next_action_id = (*next_action_id + 1) % 1000;
         drop(next_action_id);
@@ -3674,7 +3675,7 @@ impl FactorioRcon {
         inventory_player_ids: Vec<u8>,
         world: &Arc<FactorioSurface>,
     ) -> Result<Vec<FactorioEntity>> {
-        let player = world.players.get(&player_id);
+        let player = world.globals.players.get(&player_id);
         if player.is_none() {
             return Err(RconPlayerNotFound { player_id }.into());
         }
@@ -3689,7 +3690,7 @@ impl FactorioRcon {
         }
         // TODO: move inventory players close too
 
-        let build_area = blueprint_build_area(world.entity_prototypes.clone(), &blueprint);
+        let build_area = blueprint_build_area(world.globals.entity_prototypes.clone(), &blueprint);
         let width_2 = build_area.width() / 2.0;
         let height_2 = build_area.height() / 2.0;
         let build_area = Rect {
@@ -3756,7 +3757,7 @@ impl FactorioRcon {
         position: &Position,
         world: &Arc<FactorioSurface>,
     ) -> Result<FactorioEntity> {
-        let player = world.players.get(&player_id);
+        let player = world.globals.players.get(&player_id);
         if player.is_none() {
             return Err(RconPlayerNotFound { player_id }.into());
         }
@@ -3913,7 +3914,7 @@ impl FactorioRcon {
             // then calling `remove` holds the shard's read guard across a call
             // that needs the same shard's write guard, which self-deadlocks the
             // whole task on the first tick the reply is actually there.
-            if let Some((_, outcome)) = world.actions.remove(&action_id) {
+            if let Some((_, outcome)) = world.globals.actions.remove(&action_id) {
                 let ticks = ActionTicks::new(dispatched, Some(outcome.tick));
                 if outcome.is_ok() {
                     return Ok(ticks);
@@ -3952,7 +3953,7 @@ impl FactorioRcon {
         loop {
             sleep(Duration::from_millis(50)).await;
             // Take the reply in one operation -- see sleep_for_action_result.
-            if let Some((_, mut result)) = world.path_requests.remove(&request_id) {
+            if let Some((_, mut result)) = world.globals.path_requests.remove(&request_id) {
                 if result == "{}" {
                     result = String::from("[]");
                 }
@@ -4139,7 +4140,7 @@ impl FactorioRcon {
         goal: &Position,
         radius: Option<f64>,
     ) -> Result<ActionTicks, ActionFailure> {
-        let mut next_action_id = world.as_ref().next_action_id.lock().await;
+        let mut next_action_id = world.as_ref().globals.next_action_id.lock().await;
         let action_id: ActionId = *next_action_id;
         *next_action_id = (*next_action_id + 1) % 1000;
         drop(next_action_id);
@@ -4157,7 +4158,11 @@ impl FactorioRcon {
         // goal, so the path is judged against what the caller asked for. An
         // unknown player position with an empty path leaves nothing to judge,
         // and an unjudgeable walk is dispatched rather than refused on a guess.
-        let here = world.players.get(&player_id).map(|p| p.position.clone());
+        let here = world
+            .globals
+            .players
+            .get(&player_id)
+            .map(|p| p.position.clone());
         judge_path(world, goal, radius, &waypoints, here.as_ref())?;
 
         let dispatched = self
@@ -4239,14 +4244,14 @@ impl FactorioRcon {
         position: &Position,
         count: u32,
     ) -> Result<ActionTicks, ActionFailure> {
-        let player = world.players.get(&player_id);
+        let player = world.globals.players.get(&player_id);
         if player.is_none() {
             return Err(ActionFailure::not_dispatched(
                 RconPlayerNotFound { player_id }.into(),
             ));
         }
         let player = player.unwrap();
-        let mut next_action_id = world.as_ref().next_action_id.lock().await;
+        let mut next_action_id = world.as_ref().globals.next_action_id.lock().await;
         let action_id: ActionId = *next_action_id;
         *next_action_id = (*next_action_id + 1) % 1000;
         drop(next_action_id);
@@ -4273,6 +4278,7 @@ impl FactorioRcon {
             // Where the walk *ended*, not where it was aimed. The two differ by
             // about a tile, and that difference is the whole of this fault.
             let landed = world
+                .globals
                 .players
                 .get(&player_id)
                 .map(|p| p.position.clone())
@@ -4375,7 +4381,7 @@ impl FactorioRcon {
         recipe: &str,
         count: u32,
     ) -> Result<ActionTicks, ActionFailure> {
-        let mut next_action_id = world.as_ref().next_action_id.lock().await;
+        let mut next_action_id = world.as_ref().globals.next_action_id.lock().await;
         let action_id: ActionId = *next_action_id;
         *next_action_id = (*next_action_id + 1) % 1000;
         drop(next_action_id);
@@ -4413,6 +4419,7 @@ impl FactorioRcon {
         // it lost at 360 s while the character was still crafting (queue 1 on
         // the live game), then replanned around a craft that finished anyway.
         let energy = world
+            .globals
             .recipes
             .get(recipe)
             .map(|r| f64::from(*r.energy))
@@ -4674,7 +4681,7 @@ impl FactorioRcon {
         underground_half: Option<UndergroundHalf>,
         world: &Arc<FactorioSurface>,
     ) -> Result<(FactorioEntity, ActionTicks), ActionFailure> {
-        let player = world.players.get(&player_id);
+        let player = world.globals.players.get(&player_id);
         if player.is_none() {
             return Err(ActionFailure::not_dispatched(
                 RconPlayerNotFound { player_id }.into(),
@@ -4981,7 +4988,7 @@ impl FactorioRcon {
         item_count: u32,
         world: &Arc<FactorioSurface>,
     ) -> Result<TransferOutcome, ActionFailure> {
-        let player = world.players.get(&player_id);
+        let player = world.globals.players.get(&player_id);
         if player.is_none() {
             return Err(ActionFailure::not_dispatched(
                 RconPlayerNotFound { player_id }.into(),
@@ -5059,7 +5066,7 @@ impl FactorioRcon {
         item_count: u32,
         world: &Arc<FactorioSurface>,
     ) -> Result<ActionTicks, ActionFailure> {
-        let player = world.players.get(&player_id);
+        let player = world.globals.players.get(&player_id);
         if player.is_none() {
             return Err(ActionFailure::not_dispatched(
                 RconPlayerNotFound { player_id }.into(),
@@ -5148,7 +5155,7 @@ impl FactorioRcon {
         recipe: String,
         world: &Arc<FactorioSurface>,
     ) -> Result<ActionTicks, ActionFailure> {
-        let player = world.players.get(&player_id);
+        let player = world.globals.players.get(&player_id);
         if player.is_none() {
             return Err(ActionFailure::not_dispatched(
                 RconPlayerNotFound { player_id }.into(),
@@ -5526,7 +5533,7 @@ impl FactorioRcon {
                     goal.y(),
                     err
                 );
-                let Some(player) = world.players.get(&player_id) else {
+                let Some(player) = world.globals.players.get(&player_id) else {
                     // Nowhere to search *from*. The fallback needs the
                     // player's position to pick a direction, and inventing one
                     // would aim the substituted goal at random.
@@ -5720,7 +5727,7 @@ impl FactorioRcon {
             .await?;
 
         build_entity_path(
-            world.entity_prototypes.clone(),
+            world.globals.entity_prototypes.clone(),
             entity_name,
             entity_type,
             underground_entity_name,
@@ -5754,7 +5761,7 @@ impl FactorioRcon {
                 continue;
             }
             let mapped = map_blocked_tiles(
-                world.entity_prototypes.clone(),
+                world.globals.entity_prototypes.clone(),
                 &vec![],
                 &tiles.iter().collect(),
             );
@@ -5976,7 +5983,7 @@ mod wait_for_reply_tests {
         // The waiter polls every 50ms; deliver the reply the way the output
         // parser does, once it is certainly polling.
         std::thread::sleep(Duration::from_millis(200));
-        world.path_requests.insert(
+        world.globals.path_requests.insert(
             1,
             r#"[{"x":0.0,"y":0.0},{"x":-15.5,"y":-35.5}]"#.to_string(),
         );
@@ -5988,7 +5995,7 @@ mod wait_for_reply_tests {
         let path = waited.expect("the delivered path should have parsed");
         assert_eq!(path.len(), 2, "got {path:?}");
         assert!(
-            world.path_requests.get(&1).is_none(),
+            world.globals.path_requests.get(&1).is_none(),
             "the consumed reply should have been removed from the world"
         );
     }
@@ -6008,7 +6015,7 @@ mod wait_for_reply_tests {
                 block_on(quiet_rcon().sleep_for_path_request_result(&waiter_world, 3))
             });
             std::thread::sleep(Duration::from_millis(200));
-            world.path_requests.insert(3, reason.to_string());
+            world.globals.path_requests.insert(3, reason.to_string());
 
             let err = waited
                 .recv_timeout(DEADLINE)
@@ -6034,7 +6041,10 @@ mod wait_for_reply_tests {
         let waited =
             start(move || block_on(quiet_rcon().sleep_for_path_request_result(&waiter_world, 4)));
         std::thread::sleep(Duration::from_millis(200));
-        world.path_requests.insert(4, "[{\"x\":0.0,".to_string());
+        world
+            .globals
+            .path_requests
+            .insert(4, "[{\"x\":0.0,".to_string());
 
         let err = waited
             .recv_timeout(DEADLINE)
@@ -6059,7 +6069,7 @@ mod wait_for_reply_tests {
             block_on(quiet_rcon().sleep_for_action_result(&waiter_world, 7, Some(4200)))
         });
         std::thread::sleep(Duration::from_millis(200));
-        world.actions.insert(
+        world.globals.actions.insert(
             7,
             ActionOutcome {
                 tick: 4242,
@@ -6085,7 +6095,7 @@ mod wait_for_reply_tests {
             "the dispatch stamp must be carried through, not recomputed"
         );
         assert!(
-            world.actions.get(&7).is_none(),
+            world.globals.actions.get(&7).is_none(),
             "the consumed reply should have been removed from the world"
         );
     }
@@ -6098,7 +6108,7 @@ mod wait_for_reply_tests {
             block_on(quiet_rcon().sleep_for_action_result(&waiter_world, 8, Some(4200)))
         });
         std::thread::sleep(Duration::from_millis(200));
-        world.actions.insert(
+        world.globals.actions.insert(
             8,
             ActionOutcome {
                 tick: 11,
@@ -6127,7 +6137,7 @@ mod wait_for_reply_tests {
         // Action ids are reused (mod 1000). A failure left behind in the map
         // makes the next action with that id fail instantly.
         assert!(
-            world.actions.get(&8).is_none(),
+            world.globals.actions.get(&8).is_none(),
             "a failed reply must also be consumed, or it poisons the reused action id"
         );
     }
@@ -6262,7 +6272,7 @@ mod dispatch_evidence_tests {
     #[test]
     fn a_refused_dispatch_keeps_the_stamps_the_game_produced() {
         let world = Arc::new(FactorioSurface::new());
-        world.actions.insert(
+        world.globals.actions.insert(
             5,
             ActionOutcome {
                 tick: 4_270,
@@ -8817,7 +8827,7 @@ mod walk_destination_tests {
                     None,
                     None,
                     None,
-                    world.entity_prototypes.clone(),
+                    world.globals.entity_prototypes.clone(),
                 )
                 .expect("the fixture has a stone-furnace prototype")
             })
@@ -8986,7 +8996,7 @@ mod walk_destination_tests {
     #[test]
     fn without_a_character_prototype_the_question_narrows_rather_than_guesses() {
         let world = world_with(&[Position::new(-22., 18.)]);
-        world.entity_prototypes.remove(CHARACTER_PROTOTYPE);
+        world.globals.entity_prototypes.remove(CHARACTER_PROTOTYPE);
 
         assert!(
             matches!(
@@ -9781,7 +9791,7 @@ mod mining_reach_tests {
                     None,
                     None,
                     None,
-                    world.entity_prototypes.clone(),
+                    world.globals.entity_prototypes.clone(),
                 )
                 .expect("the fixture has a stone-furnace prototype")
             })
@@ -9953,14 +9963,14 @@ mod mining_reach_tests {
                     None,
                     None,
                     None,
-                    world.entity_prototypes.clone(),
+                    world.globals.entity_prototypes.clone(),
                 )
                 .expect("the fixture has an assembling-machine-1 prototype")
             })
             .collect();
         world.update_chunk_entities(entities).unwrap();
         for (id, position) in players {
-            world.players.insert(
+            world.globals.players.insert(
                 *id,
                 FactorioPlayer {
                     player_id: *id,

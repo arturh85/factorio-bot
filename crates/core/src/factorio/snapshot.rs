@@ -186,7 +186,7 @@ pub async fn attach_world(rcon: &FactorioRcon, area: Option<Rect>) -> Result<Arc
         .map(|player| player.position.clone())
         .unwrap_or_else(|| Position::new(0., 0.));
     for player in players {
-        world.players.insert(player.player_id, player);
+        world.globals.players.insert(player.player_id, player);
     }
 
     let area = area.unwrap_or_else(|| area_around(&center, DEFAULT_ATTACH_RADIUS));
@@ -560,16 +560,17 @@ mod tests {
 
         assert_eq!(
             world
+                .globals
                 .entity_prototypes
                 .get("stone-furnace")
                 .map(|p| p.collision_box.width()),
             Some(1.4),
             "the prototype the planner reads collision boxes from is missing"
         );
-        assert!(world.item_prototypes.contains_key("iron-plate"));
-        assert!(world.recipes.contains_key("iron-plate"));
+        assert!(world.globals.item_prototypes.contains_key("iron-plate"));
+        assert!(world.globals.recipes.contains_key("iron-plate"));
         assert!(
-            world.forces.contains_key("player"),
+            world.globals.forces.contains_key("player"),
             "without a force the planner has no technology table"
         );
     }

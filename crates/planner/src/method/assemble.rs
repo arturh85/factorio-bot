@@ -946,6 +946,7 @@ fn entity_for(state: &PlanState, part: &CellPart) -> FactorioEntity {
     let name = part.role.name();
     let entity_type = state
         .base()
+        .globals
         .entity_prototypes
         .get(name)
         .map(|proto| proto.entity_type.clone())
@@ -2752,6 +2753,7 @@ mod tests {
         ] {
             let entity_type = state
                 .base()
+                .globals
                 .entity_prototypes
                 .get(name)
                 .map(|p| p.entity_type.clone())
@@ -2891,7 +2893,7 @@ mod tests {
         );
 
         let world = world();
-        world.entity_prototypes.remove(BEACON);
+        world.globals.entity_prototypes.remove(BEACON);
         let without = PlanState::from_world(Arc::new(world), &[BotId(1)]);
         assert_eq!(
             beacon_flank(&without, &origin, Direction::North),
@@ -3756,6 +3758,7 @@ mod tests {
         let pitch = crate::method::power::BOILER_PITCH_TILES;
         let entity_type = state
             .base()
+            .globals
             .entity_prototypes
             .get(BOILER)
             .map(|p| p.entity_type.clone())
@@ -4092,6 +4095,7 @@ mod tests {
         ] {
             let world = world();
             let entity_type = world
+                .globals
                 .entity_prototypes
                 .get(name)
                 .map(|p| p.entity_type.clone())

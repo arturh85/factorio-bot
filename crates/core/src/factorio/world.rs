@@ -1,5 +1,5 @@
+use crate::factorio::globals::GameGlobals;
 use crate::factorio::snapshot::WorldSnapshot;
-use crate::factorio::ticks::ActionOutcome;
 use crate::graph::entity_graph::EntityGraph;
 use crate::graph::flow_graph::FlowGraph;
 use crate::types::{
@@ -9,7 +9,6 @@ use crate::types::{
     PlayerId, Pos, Position, SurfaceDaylight, SurfaceId,
 };
 use dashmap::DashMap;
-use image::RgbaImage;
 use miette::{IntoDiagnostic, Result};
 use parking_lot::Mutex as SyncMutex;
 use serde::de::{MapAccess, Visitor};
@@ -18,7 +17,6 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::{fmt, fs};
-use tokio::sync::Mutex;
 
 /// The payload of a `"teleport"` writeout, emitted by both of
 /// `mods/BotBridge/control.lua`'s remaining `player.teleport` call sites (see
@@ -993,6 +991,20 @@ impl<'de> Deserialize<'de> for Benches {
 }
 
 impl Benches {
+    /// A copy carrying the benches the game has declared, with the change
+    /// queue reset.
+    ///
+    /// Knowledge -- the game's own verdict on who can move -- survives; the
+    /// queue does not, because a second recorder has been told about none of
+    /// it and a condition worth naming once is worth naming once in each
+    /// record that could otherwise not explain a frozen bot.
+    pub(crate) fn fork(&self) -> Benches {
+        Benches {
+            active: self.active.clone(),
+            changes: Vec::new(),
+        }
+    }
+
     /// Benches a player, or does nothing if it is already benched within
     /// [`WalkRefusal::SAME_PLACE_TOLERANCE`] of this spot. Returns whether
     /// anything changed.
@@ -1198,33 +1210,58 @@ impl ObservedInventory {
 ///   ("this bot cannot move from *here*") is positional. It follows
 ///   `players` for now, for the same reason.
 ///
-/// # One surface today, and it refuses to hold two
+/// # Where the globals live, and why a second surface is safe now
 ///
-/// The split above is **written down and not yet enforced by the types**:
-/// every field named global still lives on [`FactorioSurface`], so a second
-/// surface added here would duplicate them. [`FactorioWorld::insert_surface`]
-/// therefore **refuses** a second surface by name
-/// ([`SurfaceNotYetSeparable`](crate::errors::SurfaceNotYetSeparable))
-/// rather than accepting one and quietly forking the research state. A
-/// refusal that names the reason is worth more than a container that is
-/// silently wrong; this repo has paid for the other choice enough times to
-/// have a rule about it. Lifting the refusal means moving the global fields
-/// off the surface first, which is a mechanical change of its own and is
-/// deliberately not in this commit.
+/// The split above **is enforced by the types** since the globals moved off
+/// [`FactorioSurface`] into [`GameGlobals`]. The world owns one
+/// `Arc<GameGlobals>`; every surface it holds holds the same `Arc`, and
+/// [`FactorioWorld::insert_surface`] checks that with `Arc::ptr_eq` before
+/// accepting one. So two surfaces cannot disagree about what is researched,
+/// cannot hand out the same `action_id` twice, and cannot carry two recipe
+/// tables -- by construction rather than by care, which is the same argument
+/// that put the surface on the container instead of on [`Position`].
+///
+/// It used to refuse *any* second surface (`SurfaceNotYetSeparable`), because
+/// the globals were still fields on the surface and accepting one would have
+/// quietly forked the research state. What is left of that refusal is
+/// narrower and sharper: a surface with **its own** globals is still refused,
+/// by name, as
+/// [`SurfaceGlobalsNotShared`](crate::errors::SurfaceGlobalsNotShared).
+///
+/// The one thing to know: **a cloned surface is a fork and cannot be inserted
+/// back**, because `Clone` deep-copies the globals on purpose (the plan
+/// world's writes must not reach the live model). Build a second surface with
+/// [`FactorioSurface::with_globals`], not by cloning one.
 ///
 /// The mod's Nauvis guard in `mods/BotBridge/control.lua` is the matching
 /// half upstream: no non-Nauvis chunk reaches Rust at all, and what it drops
 /// is recorded in `surface_chunk_drops`.
 pub struct FactorioWorld {
+    /// The one copy of everything that is not about a place, shared with
+    /// every surface below.
+    globals: Arc<GameGlobals>,
     surfaces: BTreeMap<SurfaceId, Arc<FactorioSurface>>,
 }
 
 impl FactorioWorld {
     /// A world holding exactly the one surface it was handed, under `id`.
+    ///
+    /// The world adopts that surface's globals, so the pair is consistent by
+    /// construction and every later [`FactorioWorld::insert_surface`] is
+    /// checked against them.
     pub fn new(id: SurfaceId, surface: Arc<FactorioSurface>) -> Self {
+        let globals = surface.globals.clone();
         let mut surfaces = BTreeMap::new();
         surfaces.insert(id, surface);
-        FactorioWorld { surfaces }
+        FactorioWorld { globals, surfaces }
+    }
+
+    /// The game- and force-global state every surface in this world shares.
+    ///
+    /// Hand this to [`FactorioSurface::with_globals`] to build a surface this
+    /// world will accept.
+    pub fn globals(&self) -> &Arc<GameGlobals> {
+        &self.globals
     }
 
     /// A world holding one Nauvis surface. The shape every run has had so
@@ -1282,23 +1319,31 @@ impl FactorioWorld {
         self.surfaces.is_empty()
     }
 
-    /// Adds a surface, or refuses because the world's global state has not
-    /// been separated from the surface's yet.
+    /// Adds a surface, or refuses because it does not share this world's
+    /// globals.
     ///
-    /// Re-inserting the id this world already holds is accepted and replaces
-    /// it -- that is one surface being refreshed, not two coexisting. Any
-    /// *other* id is refused: see the type's doc for what would be
-    /// duplicated and why a refusal is the honest answer.
+    /// Re-inserting the id this world already holds replaces it -- that is
+    /// one surface being refreshed -- and a *new* id is accepted, which is
+    /// what the globals move bought. Both go through the same check: the
+    /// surface's [`GameGlobals`] must be the **same object** as this world's,
+    /// by `Arc::ptr_eq` and not by value, because equal-looking copies are
+    /// exactly what would drift apart later.
+    ///
+    /// A cloned surface is refused, and that is correct: `Clone` forks the
+    /// globals on purpose. Build one with [`FactorioSurface::with_globals`].
     pub fn insert_surface(
         &mut self,
         id: SurfaceId,
         surface: Arc<FactorioSurface>,
-    ) -> Result<(), crate::errors::SurfaceNotYetSeparable> {
-        if !self.surfaces.contains_key(&id)
-            && let Some(held) = self.surfaces.keys().next()
-        {
-            return Err(crate::errors::SurfaceNotYetSeparable {
-                held: held.clone(),
+    ) -> Result<(), crate::errors::SurfaceGlobalsNotShared> {
+        if !Arc::ptr_eq(&self.globals, &surface.globals) {
+            return Err(crate::errors::SurfaceGlobalsNotShared {
+                held: self
+                    .surfaces
+                    .keys()
+                    .next()
+                    .cloned()
+                    .unwrap_or_else(SurfaceId::nauvis),
                 offered: id,
             });
         }
@@ -1317,62 +1362,17 @@ impl FactorioWorld {
 /// field argument for which of the fields below are per-surface and which
 /// are global. Read it before adding a field here.
 pub struct FactorioSurface {
-    pub players: DashMap<PlayerId, FactorioPlayer>,
-    pub forces: DashMap<String, FactorioForce>,
-    pub graphics: DashMap<String, FactorioGraphic>,
-    pub recipes: Arc<DashMap<String, FactorioRecipe>>,
-    pub entity_prototypes: Arc<DashMap<String, FactorioEntityPrototype>>,
-    pub item_prototypes: DashMap<String, FactorioItemPrototype>,
-    pub image_cache: DashMap<String, Box<RgbaImage>>,
-    /// Outcomes the game reported for dispatched actions, keyed by the
-    /// `action_id` the dispatch used.
+    /// The game- and force-global half of the model, shared with every other
+    /// surface in the same [`FactorioWorld`].
     ///
-    /// The value carries the game tick alongside the result. The mod has always
-    /// stamped one on its `action_completed` event; until this map could hold
-    /// it, `OutputParser` threw it away -- which is why the executor had no
-    /// game-clock source, and why every "duration" it reported was a plan value
-    /// round-tripped through the log.
-    pub actions: DashMap<u32, ActionOutcome>,
-    pub path_requests: DashMap<u32, String>,
-    pub next_action_id: Mutex<u32>,
+    /// **Shared, never copied.** `FactorioWorld::insert_surface` refuses a
+    /// surface whose globals are not `Arc::ptr_eq` to the world's, so two
+    /// surfaces in one world cannot hold two research states. Reach through
+    /// here for recipes, prototypes, forces, the action id space and the
+    /// roster: `surface.globals.recipes`, not a field on the surface.
+    pub globals: Arc<GameGlobals>,
     pub entity_graph: Arc<EntityGraph>,
     pub flow_graph: Arc<FlowGraph>,
-    /// Teleports the mod has reported since the last
-    /// [`FactorioSurface::drain_teleports`], each tagged with the game tick the
-    /// mod stamped on its `writeout` line.
-    ///
-    /// `OutputParser` (`crates/core/src/process/output_parser.rs`) parses the
-    /// line and pushes here; `crates/scripting_lua`'s `record.teleports()`
-    /// drains it into `events.jsonl`. The queue exists because those two live
-    /// in different crates and the dependency only runs one way -- this
-    /// crate cannot depend on `crates/scripting_lua`, where the run recorder
-    /// lives -- so a teleport crosses the boundary as data sitting here
-    /// rather than as a direct call, the same shape `actions` already uses
-    /// for `action_completed`.
-    pub teleports: SyncMutex<Vec<(u64, TeleportEvent)>>,
-    /// Deaths and respawns the mod has reported since the last
-    /// [`FactorioSurface::drain_deaths`], each tagged with the game tick the
-    /// mod stamped on its `writeout` line. Same shape and same reason as
-    /// `teleports`: `OutputParser` pushes, `record.deaths()` drains.
-    pub deaths: SyncMutex<Vec<(u64, BotLifeEvent)>>,
-    /// Trigger technologies the mod has completed on a headless run since the
-    /// last [`FactorioSurface::drain_research_triggers`], each tagged with the
-    /// game tick. Same shape as `deaths`: `OutputParser` pushes,
-    /// `record.research_triggers()` drains. Until this queue existed the
-    /// mod's line reached only the server log, and `events.jsonl` showed a
-    /// research finishing with no research ever started.
-    pub research_triggers: SyncMutex<Vec<(u64, ResearchTriggerEvent)>>,
-    /// Chunks the mod refused because they are not on Nauvis, aggregated per
-    /// surface since the last [`FactorioSurface::drain_surface_chunk_drops`].
-    ///
-    /// **A map, not a `Vec`, and that is the whole design.** The mod writes one
-    /// line per dropped chunk because keeping a counter there would mean
-    /// keeping it in `storage` across save/load; a generated planet is tens of
-    /// thousands of chunks, and tens of thousands of `events.jsonl` rows saying
-    /// the same thing is not a disclosure, it is a denial of service on the
-    /// reader. Folding here costs one map lookup per line and gives the record
-    /// one row per surface per flush, carrying the count.
-    pub surface_chunk_drops: SyncMutex<BTreeMap<SurfaceId, SurfaceChunkDrops>>,
     /// Sites the game has refused a build at, for the life of this world.
     ///
     /// Two readers, which is why it sits here rather than in either of them.
@@ -1453,12 +1453,6 @@ pub struct FactorioSurface {
     /// since the last [`FactorioSurface::drain_step_asides`]. A queue, not
     /// knowledge -- see [`StepAside`].
     pub step_asides: SyncMutex<Vec<StepAside>>,
-    /// Characters the game itself has said cannot move from where they
-    /// stand, and which the next plan must not send anywhere -- see
-    /// [`Bench`] for the run that needed it and why neither ledger above
-    /// could have said so. Read by `crates/planner`'s `PlanState::from_world`,
-    /// written and released by `crates/executor`.
-    pub benches: SyncMutex<Benches>,
     /// This surface's day/night curve, or `None` because nobody has said.
     ///
     /// **Per-surface, unambiguously** — `ticks_per_day` and
@@ -1494,7 +1488,8 @@ impl FactorioSurface {
         entity_prototypes: Vec<FactorioEntityPrototype>,
     ) -> Result<()> {
         for entity_prototype in entity_prototypes {
-            self.entity_prototypes
+            self.globals
+                .entity_prototypes
                 .insert(entity_prototype.name.clone(), entity_prototype);
         }
         Ok(())
@@ -1505,20 +1500,21 @@ impl FactorioSurface {
         item_prototypes: Vec<FactorioItemPrototype>,
     ) -> Result<()> {
         for item_prototype in item_prototypes {
-            self.item_prototypes
+            self.globals
+                .item_prototypes
                 .insert(item_prototype.name.clone(), item_prototype);
         }
         Ok(())
     }
 
     pub fn remove_player(&self, player_id: PlayerId) -> Result<()> {
-        self.players.remove(&player_id);
+        self.globals.players.remove(&player_id);
         Ok(())
     }
 
     pub fn player_changed_distance(&self, event: PlayerChangedDistanceEvent) -> Result<()> {
-        let player = if self.players.contains_key(&event.player_id) {
-            let existing_player = self.players.get(&event.player_id).unwrap();
+        let player = if self.globals.players.contains_key(&event.player_id) {
+            let existing_player = self.globals.players.get(&event.player_id).unwrap();
             FactorioPlayer {
                 player_id: event.player_id,
                 position: existing_player.position.clone(),
@@ -1547,13 +1543,13 @@ impl FactorioSurface {
                 ..Default::default()
             }
         };
-        self.players.insert(event.player_id, player);
+        self.globals.players.insert(event.player_id, player);
         Ok(())
     }
 
     pub fn player_changed_position(&self, event: PlayerChangedPositionEvent) -> Result<()> {
-        let player = if self.players.contains_key(&event.player_id) {
-            let existing_player = self.players.get(&event.player_id).unwrap();
+        let player = if self.globals.players.contains_key(&event.player_id) {
+            let existing_player = self.globals.players.get(&event.player_id).unwrap();
             FactorioPlayer {
                 player_id: event.player_id,
                 position: event.position,
@@ -1580,13 +1576,13 @@ impl FactorioSurface {
                 ..Default::default()
             }
         };
-        self.players.insert(event.player_id, player);
+        self.globals.players.insert(event.player_id, player);
         Ok(())
     }
 
     pub fn update_force(&self, force: FactorioForce) -> Result<()> {
         let name = force.name.clone();
-        self.forces.insert(name, force);
+        self.globals.forces.insert(name, force);
         Ok(())
     }
 
@@ -1712,8 +1708,8 @@ impl FactorioSurface {
                     acc
                 });
 
-        let player = if self.players.contains_key(&event.player_id) {
-            let existing_player = self.players.get(&event.player_id).unwrap();
+        let player = if self.globals.players.contains_key(&event.player_id) {
+            let existing_player = self.globals.players.get(&event.player_id).unwrap();
             FactorioPlayer {
                 player_id: event.player_id,
                 position: existing_player.position.clone(),
@@ -1735,7 +1731,7 @@ impl FactorioSurface {
                 ..Default::default()
             }
         };
-        self.players.insert(event.player_id, player);
+        self.globals.players.insert(event.player_id, player);
         Ok(())
     }
 
@@ -1767,14 +1763,16 @@ impl FactorioSurface {
 
     pub fn update_recipes(&self, recipes: Vec<FactorioRecipe>) -> Result<()> {
         for recipe in recipes {
-            self.recipes.insert(recipe.name.clone(), recipe);
+            self.globals.recipes.insert(recipe.name.clone(), recipe);
         }
         Ok(())
     }
 
     pub fn update_graphics(&self, graphics: Vec<FactorioGraphic>) -> Result<()> {
         for graphic in graphics {
-            self.graphics.insert(graphic.entity_name.clone(), graphic);
+            self.globals
+                .graphics
+                .insert(graphic.entity_name.clone(), graphic);
         }
         Ok(())
     }
@@ -1791,22 +1789,30 @@ impl FactorioSurface {
     }
 
     pub fn import(&mut self, world: Arc<FactorioSurface>) -> Result<()> {
-        for player in world.players.iter() {
-            self.players.insert(player.player_id, player.clone());
+        for player in world.globals.players.iter() {
+            self.globals
+                .players
+                .insert(player.player_id, player.clone());
         }
-        for entity_prototype in world.entity_prototypes.iter() {
-            self.entity_prototypes
+        for entity_prototype in world.globals.entity_prototypes.iter() {
+            self.globals
+                .entity_prototypes
                 .insert(entity_prototype.name.clone(), entity_prototype.clone());
         }
-        for item_prototype in world.item_prototypes.iter() {
-            self.item_prototypes
+        for item_prototype in world.globals.item_prototypes.iter() {
+            self.globals
+                .item_prototypes
                 .insert(item_prototype.name.clone(), item_prototype.clone());
         }
-        for recipe in world.recipes.iter() {
-            self.recipes.insert(recipe.name.clone(), recipe.clone());
+        for recipe in world.globals.recipes.iter() {
+            self.globals
+                .recipes
+                .insert(recipe.name.clone(), recipe.clone());
         }
-        for force in world.forces.iter() {
-            self.forces.insert(force.name.clone(), force.clone());
+        for force in world.globals.forces.iter() {
+            self.globals
+                .forces
+                .insert(force.name.clone(), force.clone());
         }
         self.entity_graph.connect()?;
         Ok(())
@@ -1814,39 +1820,30 @@ impl FactorioSurface {
 
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
-        let forces: DashMap<String, FactorioForce> = DashMap::new();
-        let players: DashMap<PlayerId, FactorioPlayer> = DashMap::new();
-        let graphics: DashMap<String, FactorioGraphic> = DashMap::new();
-        let image_cache: DashMap<String, Box<RgbaImage>> = DashMap::new();
-        let item_prototypes: DashMap<String, FactorioItemPrototype> = DashMap::new();
-        let recipes: Arc<DashMap<String, FactorioRecipe>> = Arc::new(DashMap::new());
-        let entity_prototypes: Arc<DashMap<String, FactorioEntityPrototype>> =
-            Arc::new(DashMap::new());
-        let entity_graph = Arc::new(EntityGraph::new(entity_prototypes.clone(), recipes.clone()));
+        FactorioSurface::with_globals(Arc::new(GameGlobals::new()))
+    }
+
+    /// A surface sharing an existing game's globals.
+    ///
+    /// **This is how a world gets a second surface**: the caller hands it the
+    /// `Arc<GameGlobals>` the world already holds, so both surfaces read one
+    /// force table, one recipe table and one action id counter.
+    /// [`FactorioWorld::insert_surface`] refuses anything else.
+    pub fn with_globals(globals: Arc<GameGlobals>) -> Self {
+        let entity_graph = Arc::new(EntityGraph::new(
+            globals.entity_prototypes.clone(),
+            globals.recipes.clone(),
+        ));
         let flow_graph = Arc::new(FlowGraph::new(entity_graph.clone()));
         FactorioSurface {
-            image_cache,
-            players,
-            graphics,
-            recipes,
-            forces,
-            entity_prototypes,
-            item_prototypes,
-            actions: DashMap::new(),
-            path_requests: DashMap::new(),
-            next_action_id: Mutex::new(1),
+            globals,
             entity_graph,
             flow_graph,
-            teleports: SyncMutex::new(Vec::new()),
-            deaths: SyncMutex::new(Vec::new()),
-            research_triggers: SyncMutex::new(Vec::new()),
-            surface_chunk_drops: SyncMutex::new(BTreeMap::new()),
             inventories: DashMap::new(),
             placement_refusals: SyncMutex::new(PlacementRefusals::default()),
             walk_refusals: SyncMutex::new(WalkRefusals::default()),
             enclosures: SyncMutex::new(Enclosures::default()),
             step_asides: SyncMutex::new(Vec::new()),
-            benches: SyncMutex::new(Benches::default()),
             daylight: SyncMutex::new(None),
         }
     }
@@ -1854,24 +1851,28 @@ impl FactorioSurface {
     /// Queues a teleport `OutputParser` just parsed, for
     /// [`FactorioSurface::drain_teleports`] to pick up.
     pub fn record_teleport(&self, tick: u64, event: TeleportEvent) {
-        self.teleports.lock().push((tick, event));
+        self.globals.teleports.lock().push((tick, event));
     }
 
     /// Takes every teleport queued since the last drain, oldest first.
     pub fn drain_teleports(&self) -> Vec<(u64, TeleportEvent)> {
-        std::mem::take(&mut *self.teleports.lock())
+        std::mem::take(&mut *self.globals.teleports.lock())
     }
 
     /// Queues a death `OutputParser` just parsed, for
     /// [`FactorioSurface::drain_deaths`] to pick up.
     pub fn record_death(&self, tick: u64, event: DeathEvent) {
-        self.deaths.lock().push((tick, BotLifeEvent::Died(event)));
+        self.globals
+            .deaths
+            .lock()
+            .push((tick, BotLifeEvent::Died(event)));
     }
 
     /// Queues a respawn `OutputParser` just parsed, behind whatever death
     /// preceded it.
     pub fn record_respawn(&self, tick: u64, event: RespawnEvent) {
-        self.deaths
+        self.globals
+            .deaths
             .lock()
             .push((tick, BotLifeEvent::Respawned(event)));
     }
@@ -1879,18 +1880,18 @@ impl FactorioSurface {
     /// Takes every death and respawn queued since the last drain, oldest
     /// first.
     pub fn drain_deaths(&self) -> Vec<(u64, BotLifeEvent)> {
-        std::mem::take(&mut *self.deaths.lock())
+        std::mem::take(&mut *self.globals.deaths.lock())
     }
 
     /// Queues a trigger technology the mod just completed, for
     /// [`FactorioSurface::drain_research_triggers`] to pick up.
     pub fn record_research_trigger(&self, tick: u64, event: ResearchTriggerEvent) {
-        self.research_triggers.lock().push((tick, event));
+        self.globals.research_triggers.lock().push((tick, event));
     }
 
     /// Takes every emulated trigger queued since the last drain, oldest first.
     pub fn drain_research_triggers(&self) -> Vec<(u64, ResearchTriggerEvent)> {
-        std::mem::take(&mut *self.research_triggers.lock())
+        std::mem::take(&mut *self.globals.research_triggers.lock())
     }
 
     /// Folds one refused chunk into the per-surface tally for
@@ -1900,7 +1901,7 @@ impl FactorioSurface {
     /// its tick: it is the moment the surface first appeared, which is the
     /// interesting one. Later chunks only raise the count.
     pub fn record_surface_chunk_dropped(&self, tick: u64, event: SurfaceChunkDropEvent) {
-        let mut drops = self.surface_chunk_drops.lock();
+        let mut drops = self.globals.surface_chunk_drops.lock();
         drops
             .entry(event.surface)
             .and_modify(|seen| seen.chunks += 1)
@@ -1914,7 +1915,7 @@ impl FactorioSurface {
     /// Takes every surface's dropped-chunk tally since the last drain, in
     /// surface-name order.
     pub fn drain_surface_chunk_drops(&self) -> BTreeMap<SurfaceId, SurfaceChunkDrops> {
-        std::mem::take(&mut *self.surface_chunk_drops.lock())
+        std::mem::take(&mut *self.globals.surface_chunk_drops.lock())
     }
 
     /// Remembers a build the game refused. Returns whether the site was new.
@@ -1987,30 +1988,36 @@ impl FactorioSurface {
     /// mobility probe, never from a fill over this crate's own model: see
     /// [`Bench`] for why the model's answer is not admissible here.
     pub fn record_bench(&self, bench: Bench) -> bool {
-        self.benches.lock().note(bench)
+        self.globals.benches.lock().note(bench)
     }
 
     /// Lifts a player's bench because the game has shown it can move --
     /// see [`BenchRelease`]. Returns whether it was benched.
     pub fn release_bench(&self, player: PlayerId, tick: Option<u64>, why: BenchRelease) -> bool {
-        self.benches.lock().release(player, tick, why)
+        self.globals.benches.lock().release(player, tick, why)
     }
 
     /// Every character currently benched, in player order. Non-destructive:
     /// this is the planner's read, once per plan.
     pub fn benches(&self) -> Vec<Bench> {
-        self.benches.lock().active.values().cloned().collect()
+        self.globals
+            .benches
+            .lock()
+            .active
+            .values()
+            .cloned()
+            .collect()
     }
 
     /// Whether this player is benched right now.
     pub fn is_benched(&self, player: PlayerId) -> bool {
-        self.benches.lock().active.contains_key(&player)
+        self.globals.benches.lock().active.contains_key(&player)
     }
 
     /// Takes every bench change queued since the last drain, oldest first,
     /// for the record.
     pub fn drain_bench_changes(&self) -> Vec<BenchChange> {
-        std::mem::take(&mut self.benches.lock().changes)
+        std::mem::take(&mut self.globals.benches.lock().changes)
     }
 
     /// The enclosures no record has been told about yet, oldest first, marking
@@ -2075,7 +2082,8 @@ impl FactorioSurface {
     }
 
     pub fn dump_entitiy_prototypes(&self, save_path: Option<&str>) -> Result<()> {
-        let content = serde_json::to_string_pretty(&*self.entity_prototypes).into_diagnostic()?;
+        let content =
+            serde_json::to_string_pretty(&*self.globals.entity_prototypes).into_diagnostic()?;
         if let Some(save_path) = save_path {
             fs::write(save_path, &content).into_diagnostic()?;
         } else {
@@ -2086,7 +2094,8 @@ impl FactorioSurface {
     }
 
     pub fn dump_item_prototypes(&self, save_path: Option<&str>) -> Result<()> {
-        let content = serde_json::to_string_pretty(&self.item_prototypes).into_diagnostic()?;
+        let content =
+            serde_json::to_string_pretty(&self.globals.item_prototypes).into_diagnostic()?;
         if let Some(save_path) = save_path {
             fs::write(save_path, &content).into_diagnostic()?;
         } else {
@@ -2097,7 +2106,7 @@ impl FactorioSurface {
     }
 
     pub fn dump_recipes(&self, save_path: Option<&str>) -> Result<()> {
-        let content = serde_json::to_string_pretty(&*self.recipes).into_diagnostic()?;
+        let content = serde_json::to_string_pretty(&*self.globals.recipes).into_diagnostic()?;
         if let Some(save_path) = save_path {
             fs::write(save_path, &content).into_diagnostic()?;
         } else {
@@ -2117,14 +2126,14 @@ impl Serialize for FactorioSurface {
         S: Serializer,
     {
         let mut state = serializer.serialize_struct("FactorioSurface", 15)?;
-        state.serialize_field("players", &self.players)?;
-        state.serialize_field("forces", &self.forces)?;
-        state.serialize_field("graphics", &self.graphics)?;
-        state.serialize_field("recipes", &*self.recipes)?;
-        state.serialize_field("entity_prototypes", &*self.entity_prototypes)?;
-        state.serialize_field("item_prototypes", &self.item_prototypes)?;
-        state.serialize_field("actions", &self.actions)?;
-        state.serialize_field("path_requests", &self.path_requests)?;
+        state.serialize_field("players", &self.globals.players)?;
+        state.serialize_field("forces", &self.globals.forces)?;
+        state.serialize_field("graphics", &self.globals.graphics)?;
+        state.serialize_field("recipes", &*self.globals.recipes)?;
+        state.serialize_field("entity_prototypes", &*self.globals.entity_prototypes)?;
+        state.serialize_field("item_prototypes", &self.globals.item_prototypes)?;
+        state.serialize_field("actions", &self.globals.actions)?;
+        state.serialize_field("path_requests", &self.globals.path_requests)?;
         state.serialize_field("entity_graph", &*self.entity_graph)?;
         // The four ledgers `PlanState::from_world` reads and the derived
         // fields above do not carry. Without them a mid-run dump plans
@@ -2146,7 +2155,7 @@ impl Serialize for FactorioSurface {
         // The fifth ledger, the one the game wrote: a dump taken with a bot
         // benched must plan with it benched, or the offline plan re-sends
         // exactly the walk the live run halted on.
-        state.serialize_field("benches", &*self.benches.lock())?;
+        state.serialize_field("benches", &*self.globals.benches.lock())?;
         // Surface state, and the one field here a *prototype* can never
         // reconstruct: an offline plan against a dump has no game to ask, so a
         // dump that dropped the curve would make every solar question
@@ -2379,7 +2388,11 @@ impl<'de> Deserialize<'de> for FactorioSurface {
 
                 let entity_graph: Arc<EntityGraph> = Arc::new(entity_graph);
                 let flow_graph = Arc::new(FlowGraph::new(entity_graph.clone()));
-                Ok(FactorioSurface {
+                // The wire shape is unchanged by the globals move: a dump is
+                // still one flat object with `recipes` and `forces` beside
+                // `entity_graph`, so every archived `map.json` still loads.
+                // What changed is where they land once loaded.
+                let globals = Arc::new(GameGlobals {
                     players,
                     forces,
                     graphics,
@@ -2390,18 +2403,21 @@ impl<'de> Deserialize<'de> for FactorioSurface {
                     actions,
                     path_requests,
                     next_action_id: Default::default(),
-                    entity_graph,
-                    flow_graph,
                     teleports: Default::default(),
                     deaths: Default::default(),
                     research_triggers: Default::default(),
                     surface_chunk_drops: Default::default(),
+                    benches: SyncMutex::new(benches),
+                });
+                Ok(FactorioSurface {
+                    globals,
+                    entity_graph,
+                    flow_graph,
                     inventories,
                     placement_refusals: SyncMutex::new(placement_refusals),
                     walk_refusals: SyncMutex::new(walk_refusals),
                     enclosures: SyncMutex::new(enclosures),
                     step_asides: Default::default(),
-                    benches: SyncMutex::new(benches),
                     daylight: SyncMutex::new(daylight),
                 })
             }
@@ -2429,30 +2445,22 @@ impl<'de> Deserialize<'de> for FactorioSurface {
 }
 
 impl Clone for FactorioSurface {
+    /// A deep, independent copy -- the plan world's fork.
+    ///
+    /// The globals are **cloned, not shared**: `Planner`'s plan world is a
+    /// speculative fork whose writes must not reach the live model, so an
+    /// `Arc` share here would let an imagined research escape into the world
+    /// the executor reads. See [`GameGlobals`]'s `Clone`.
+    ///
+    /// A clone of a surface therefore leaves the [`FactorioWorld`] it came
+    /// from: `insert_surface` will refuse it, correctly, because its globals
+    /// are a different object.
     fn clone(&self) -> Self {
-        let entity_prototypes = Arc::new((*self.entity_prototypes).clone());
-        let recipes = Arc::new((*self.recipes).clone());
         let entity_graph = Arc::new((*self.entity_graph).clone());
         let _entity_graph = entity_graph.clone();
         FactorioSurface {
+            globals: Arc::new((*self.globals).clone()),
             entity_graph,
-            recipes,
-            entity_prototypes,
-            players: self.players.clone(),
-            forces: self.forces.clone(),
-            graphics: self.graphics.clone(),
-            item_prototypes: self.item_prototypes.clone(),
-            image_cache: self.image_cache.clone(),
-            actions: self.actions.clone(),
-            path_requests: self.path_requests.clone(),
-            next_action_id: Mutex::new(0),
-            // Ephemeral, like `next_action_id` above: a clone starts with an
-            // empty queue rather than duplicating in-flight teleports across
-            // two independent recorders.
-            teleports: SyncMutex::new(Vec::new()),
-            deaths: SyncMutex::new(Vec::new()),
-            research_triggers: SyncMutex::new(Vec::new()),
-            surface_chunk_drops: SyncMutex::new(BTreeMap::new()),
             // Knowledge, like `placement_refusals` below and for the same
             // reason: what a chest was last seen holding does not stop being
             // our best reading because the world was cloned. Stale in exactly
@@ -2482,15 +2490,8 @@ impl Clone for FactorioSurface {
                 found: self.enclosures.lock().found.clone(),
                 reported: 0,
             }),
-            // Ephemeral, like `teleports` above: an event, not knowledge.
+            // Ephemeral: an event, not knowledge.
             step_asides: SyncMutex::new(Vec::new()),
-            // Knowledge -- the game's own verdict on who can move -- with its
-            // change queue reset like the cursors above: a second recorder
-            // has been told about none of it.
-            benches: SyncMutex::new(Benches {
-                active: self.benches.lock().active.clone(),
-                changes: Vec::new(),
-            }),
             // Knowledge about the surface itself, and cheap: a clone that
             // dropped it would plan solar as unknown on a world that knows.
             daylight: SyncMutex::new(self.daylight.lock().clone()),
@@ -2511,26 +2512,12 @@ mod tests {
     #[allow(clippy::redundant_clone)]
     fn test_tile_boundaries_0() {
         let world = FactorioSurface {
-            players: Default::default(),
-            forces: Default::default(),
-            graphics: Default::default(),
-            recipes: Arc::new(Default::default()),
-            entity_prototypes: Arc::new(Default::default()),
-            item_prototypes: Default::default(),
-            image_cache: Default::default(),
-            actions: Default::default(),
-            path_requests: Default::default(),
-            next_action_id: Default::default(),
-            teleports: Default::default(),
-            deaths: Default::default(),
-            research_triggers: Default::default(),
-            surface_chunk_drops: Default::default(),
+            globals: Arc::new(GameGlobals::new()),
             inventories: Default::default(),
             placement_refusals: Default::default(),
             walk_refusals: Default::default(),
             enclosures: Default::default(),
             step_asides: Default::default(),
-            benches: Default::default(),
             daylight: Default::default(),
             entity_graph: Arc::new(EntityGraph::new(
                 Arc::new(DashMap::new()),

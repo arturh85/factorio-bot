@@ -124,6 +124,7 @@ pub fn judge_placement(
     direction: u8,
 ) -> PrePlace {
     let Some((here, build_distance)) = world
+        .globals
         .players
         .get(&player)
         .map(|p| (p.position.clone(), f64::from(p.build_distance)))
@@ -150,7 +151,7 @@ pub fn judge_placement(
     // placement -- it cannot seal anybody in, and standing on its tile is not
     // a refusal -- so the check declines by name rather than emitting a walk
     // nobody needs. See `graph::enclosure::blocks_character`.
-    if !blocks_character(&world.entity_prototypes, name) {
+    if !blocks_character(&world.globals.entity_prototypes, name) {
         info!(
             player,
             name,
@@ -299,7 +300,7 @@ fn footprint_of(world: &FactorioSurface, name: &str, at: &Position, direction: u
         Direction::from_u8(direction),
         None,
         None,
-        world.entity_prototypes.clone(),
+        world.globals.entity_prototypes.clone(),
     )
     .ok()?;
     (entity.bounding_box.width() > 0. && entity.bounding_box.height() > 0.)
@@ -387,7 +388,7 @@ mod tests {
             })
             .collect();
         world.update_chunk_entities(built).expect("the cell loads");
-        world.players.insert(
+        world.globals.players.insert(
             1,
             FactorioPlayer {
                 player_id: 1,
@@ -442,7 +443,7 @@ mod tests {
     #[test]
     fn a_placement_from_open_ground_proceeds() {
         let world = world_with_the_old_cell();
-        world.players.get_mut(&1).unwrap().position = Position::new(28.5, -4.5);
+        world.globals.players.get_mut(&1).unwrap().position = Position::new(28.5, -4.5);
         assert_eq!(
             judge_placement(&world, 1, "assembling-machine-1", &the_site(), 0),
             PrePlace::Proceed
@@ -461,7 +462,7 @@ mod tests {
     fn placing_a_belt_under_the_character_is_not_a_step_aside() {
         let world = world_with_the_old_cell();
         let site = Position::new(28.5, -4.5);
-        world.players.get_mut(&1).unwrap().position = site.clone();
+        world.globals.players.get_mut(&1).unwrap().position = site.clone();
         assert_eq!(
             judge_placement(&world, 1, "transport-belt", &site, 4),
             PrePlace::Proceed
@@ -480,7 +481,7 @@ mod tests {
     #[test]
     fn a_bot_already_walled_in_is_not_this_placements_doing() {
         let world = world_with_the_old_cell();
-        let prototypes = world.entity_prototypes.clone();
+        let prototypes = world.globals.entity_prototypes.clone();
         // Build the assembler that sealed bot 1 in, then ask about another
         // placement from the same spot.
         let assembler = FactorioEntity::from_prototype(

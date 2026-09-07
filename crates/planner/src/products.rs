@@ -385,11 +385,13 @@ impl ProductIndex {
         // guards cannot be held across `from_parts`, and the result must not
         // depend on the order they were walked in.
         let recipes: Vec<FactorioRecipe> = world
+            .globals
             .recipes
             .iter()
             .map(|entry| entry.value().clone())
             .collect();
         let items: Vec<String> = world
+            .globals
             .item_prototypes
             .iter()
             .map(|entry| entry.key().clone())

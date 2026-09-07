@@ -211,6 +211,7 @@ pub async fn reprobe_benched(rcon: &FactorioRcon, world: &Arc<FactorioSurface>) 
     let mut released = Vec::new();
     for bench in world.benches() {
         let at = world
+            .globals
             .players
             .get(&bench.player)
             .map(|player| player.position.clone())

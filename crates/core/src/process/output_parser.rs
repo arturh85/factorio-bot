@@ -294,7 +294,7 @@ impl OutputParser {
                     if let Some(result) = result {
                         // The tick comes from the event line, not from any
                         // plan: it is when the game said the action finished.
-                        self.world.actions.insert(
+                        self.world.globals.actions.insert(
                             action_id,
                             ActionOutcome {
                                 tick,
@@ -316,7 +316,10 @@ impl OutputParser {
                     miette!("on_script_path_request_finished without a '#': {rest}")
                 })?;
                 let id: u32 = id.parse().into_diagnostic()?;
-                self.world.path_requests.insert(id, String::from(result));
+                self.world
+                    .globals
+                    .path_requests
+                    .insert(id, String::from(result));
             }
             "STATIC_DATA_END" => {
                 // handled by OutputReader
@@ -722,7 +725,12 @@ mod path_request_tests {
             .parse(1, "on_script_path_request_finished", "7#a#b")
             .expect("a well-formed line parses");
         assert_eq!(
-            parser.world().path_requests.get(&7).map(|v| v.clone()),
+            parser
+                .world()
+                .globals
+                .path_requests
+                .get(&7)
+                .map(|v| v.clone()),
             Some("a#b".to_string())
         );
     }
@@ -741,7 +749,12 @@ mod path_request_tests {
             )
             .expect("a refusal parses");
         assert_eq!(
-            parser.world().path_requests.get(&9).map(|v| v.clone()),
+            parser
+                .world()
+                .globals
+                .path_requests
+                .get(&9)
+                .map(|v| v.clone()),
             Some("Error: try again later!".to_string())
         );
     }

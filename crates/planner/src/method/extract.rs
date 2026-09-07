@@ -600,6 +600,7 @@ fn extractor_entity(
 ) -> factorio_bot_core::types::FactorioEntity {
     let entity_type = state
         .base()
+        .globals
         .entity_prototypes
         .get(name)
         .map(|proto| proto.entity_type.clone())
@@ -1196,6 +1197,7 @@ mod extract_siting_tests {
     fn an_extractor_with_no_modelled_draw_is_refused_as_not_modelled() {
         let world = world_with_oil(OPEN);
         world
+            .globals
             .entity_prototypes
             .get_mut("iron-ore")
             .expect("the fixture charts iron")
@@ -1204,6 +1206,7 @@ mod extract_siting_tests {
         // solid drills are an older capture with no categories at all, and a
         // drill that lists none is never returned by `extractors_for`.
         world
+            .globals
             .entity_prototypes
             .get_mut("burner-mining-drill")
             .expect("the fixture has a burner drill")

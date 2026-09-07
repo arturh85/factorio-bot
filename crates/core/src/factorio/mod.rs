@@ -1,4 +1,5 @@
 pub mod factorio_planner;
+pub mod globals;
 pub mod rcon;
 pub mod snapshot;
 pub mod ticks;

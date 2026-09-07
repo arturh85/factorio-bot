@@ -93,6 +93,7 @@ fn entity(
 ) -> FactorioEntity {
     let entity_type = state
         .base()
+        .globals
         .entity_prototypes
         .get(name)
         .map(|proto| proto.entity_type.clone())

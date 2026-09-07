@@ -1671,6 +1671,7 @@ mod tests {
         ] {
             let entity_type = state
                 .base()
+                .globals
                 .entity_prototypes
                 .get(name)
                 .map(|p| p.entity_type.clone())
@@ -2500,6 +2501,7 @@ mod tests {
         use factorio_bot_core::factorio::world::{Bench, HOP_DISTANCE};
         let world = seeded_world_for(&[1, 2]);
         let at = world
+            .globals
             .players
             .get(&1)
             .map(|p| p.position.clone())

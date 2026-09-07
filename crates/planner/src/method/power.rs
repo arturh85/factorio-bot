@@ -2043,6 +2043,7 @@ fn engine_row_centre(engines: &[Position]) -> Position {
 pub(crate) fn entity_for(state: &PlanState, part: &PlantPart) -> FactorioEntity {
     let entity_type = state
         .base()
+        .globals
         .entity_prototypes
         .get(part.name)
         .map(|proto| proto.entity_type.clone())
@@ -2742,6 +2743,7 @@ struct StandingSolar {
 fn prototype_names_of_type(state: &PlanState, entity_type: &str) -> BTreeSet<String> {
     state
         .base()
+        .globals
         .entity_prototypes
         .iter()
         .filter(|prototype| prototype.entity_type == entity_type)
@@ -3306,6 +3308,7 @@ mod tests {
         let positions = |name: &str, box_index: usize, connection: usize| -> (f64, f64) {
             let proto = s
                 .base()
+                .globals
                 .entity_prototypes
                 .get(name)
                 .expect("the fixture carries the plant's prototypes");
@@ -3341,7 +3344,12 @@ mod tests {
         // rotation for these tables.
         let s = state();
         for name in [PUMP, BOILER, ENGINE, PIPE] {
-            let proto = s.base().entity_prototypes.get(name).expect("prototype");
+            let proto = s
+                .base()
+                .globals
+                .entity_prototypes
+                .get(name)
+                .expect("prototype");
             for fluid in proto.fluidbox_prototypes.as_ref().expect("fluidboxes") {
                 for connection in fluid
                     .pipe_connections
@@ -3953,6 +3961,7 @@ mod tests {
         let dry = factorio_bot_core::factorio::world::FactorioSurface::new();
         dry.update_entity_prototypes(
             world
+                .globals
                 .entity_prototypes
                 .iter()
                 .map(|e| e.value().clone())
@@ -5192,6 +5201,7 @@ mod capacity_tests {
         let dry = factorio_bot_core::factorio::world::FactorioSurface::new();
         dry.update_entity_prototypes(
             world
+                .globals
                 .entity_prototypes
                 .iter()
                 .map(|e| e.value().clone())
@@ -5232,6 +5242,7 @@ mod capacity_tests {
         world
             .update_entity_prototypes(
                 fixture_world()
+                    .globals
                     .entity_prototypes
                     .iter()
                     .map(|e| e.value().clone())
@@ -5296,6 +5307,7 @@ mod capacity_tests {
         world
             .update_entity_prototypes(
                 fixture_world()
+                    .globals
                     .entity_prototypes
                     .iter()
                     .map(|e| e.value().clone())
@@ -5398,6 +5410,7 @@ mod capacity_tests {
         let s = state();
         let recipe = |name: &str| {
             s.base()
+                .globals
                 .recipes
                 .get(name)
                 .unwrap_or_else(|| panic!("the fixture carries {name}"))
@@ -5459,6 +5472,7 @@ mod capacity_tests {
         let s = state();
         let ingredient = |name: &str, item: &str| -> u32 {
             s.base()
+                .globals
                 .recipes
                 .get(name)
                 .unwrap_or_else(|| panic!("the fixture carries {name}"))
@@ -6421,6 +6435,7 @@ mod solar_tests {
         let world = fixture_world();
 
         let mut panel = world
+            .globals
             .entity_prototypes
             .get("solar-panel")
             .expect("the fixture ships a solar panel")
@@ -6428,9 +6443,13 @@ mod solar_tests {
         panel.max_energy_production = Some(PANEL_NOON_JOULES_PER_TICK);
         panel.solar_panel_performance_at_day = Some(1.0);
         panel.solar_panel_performance_at_night = Some(0.0);
-        world.entity_prototypes.insert("solar-panel".into(), panel);
+        world
+            .globals
+            .entity_prototypes
+            .insert("solar-panel".into(), panel);
 
         let mut accumulator = world
+            .globals
             .entity_prototypes
             .get("accumulator")
             .expect("the fixture ships an accumulator")
@@ -6438,6 +6457,7 @@ mod solar_tests {
         accumulator.max_energy_production = Some(ACCUMULATOR_DISCHARGE_JOULES_PER_TICK);
         accumulator.electric_buffer_capacity = Some(ACCUMULATOR_BUFFER_JOULES);
         world
+            .globals
             .entity_prototypes
             .insert("accumulator".into(), accumulator);
 
@@ -6475,6 +6495,7 @@ mod solar_tests {
         let state = solar_state(true, panels, accumulators);
         let mut proto = state
             .base()
+            .globals
             .entity_prototypes
             .get("accumulator")
             .expect("an accumulator")
@@ -6482,6 +6503,7 @@ mod solar_tests {
         proto.electric_buffer_capacity = None;
         state
             .base()
+            .globals
             .entity_prototypes
             .insert("accumulator".into(), proto);
         state
@@ -6673,6 +6695,7 @@ mod solar_tests {
         let bigger_store = solar_state(true, 0, 0);
         let mut proto = bigger_store
             .base()
+            .globals
             .entity_prototypes
             .get("accumulator")
             .expect("an accumulator")
@@ -6680,6 +6703,7 @@ mod solar_tests {
         proto.electric_buffer_capacity = Some(ACCUMULATOR_BUFFER_JOULES * 2.);
         bigger_store
             .base()
+            .globals
             .entity_prototypes
             .insert("accumulator".into(), proto);
         assert_eq!(
@@ -6691,6 +6715,7 @@ mod solar_tests {
         let faster = solar_state(true, 0, 0);
         let mut proto = faster
             .base()
+            .globals
             .entity_prototypes
             .get("accumulator")
             .expect("an accumulator")
@@ -6698,6 +6723,7 @@ mod solar_tests {
         proto.max_energy_production = Some(ACCUMULATOR_DISCHARGE_JOULES_PER_TICK * 10.);
         faster
             .base()
+            .globals
             .entity_prototypes
             .insert("accumulator".into(), proto);
         assert_eq!(

@@ -125,7 +125,7 @@ pub fn seconds_to_ticks(seconds: f64) -> Ticks {
 /// lookup: keyed by product, one-to-many in both directions, and it refuses by
 /// name in three tiers instead of answering `None`.
 pub fn recipe_for(state: &PlanState, item: &str) -> Option<FactorioRecipe> {
-    state.base().recipes.get(item).map(|r| r.clone())
+    state.base().globals.recipes.get(item).map(|r| r.clone())
 }
 
 /// A vanilla character's mining speed, used only when the world carries no
@@ -159,6 +159,7 @@ const VANILLA_CHARACTER_MINING_SPEED: f64 = 0.5;
 pub fn character_mining_speed(state: &PlanState) -> f64 {
     let base = state
         .base()
+        .globals
         .entity_prototypes
         .get("character")
         .and_then(|p| p.mining_speed)
@@ -183,6 +184,7 @@ pub fn character_mining_speed(state: &PlanState) -> f64 {
 pub fn mining_ticks(state: &PlanState, item: &str) -> Ticks {
     let seconds = state
         .base()
+        .globals
         .entity_prototypes
         .get(item)
         .and_then(|p| p.mining_time)
@@ -233,6 +235,7 @@ pub fn mining_ticks(state: &PlanState, item: &str) -> Ticks {
 pub fn mine_bill(state: &PlanState, entity: &str) -> BTreeMap<String, u32> {
     state
         .base()
+        .globals
         .entity_prototypes
         .get(entity)
         .and_then(|proto| proto.mine_result.clone())
@@ -650,7 +653,7 @@ pub fn tile_alignment_facing(state: &PlanState, entity: &str, direction: Directi
         let (w, h) = if swapped { (h, w) } else { (w, h) };
         return (parity(w), parity(h));
     }
-    let Some(prototype) = state.base().entity_prototypes.get(entity) else {
+    let Some(prototype) = state.base().globals.entity_prototypes.get(entity) else {
         return (0., 0.);
     };
     let box_ = &prototype.collision_box;
@@ -777,6 +780,7 @@ const VANILLA_STONE_FURNACE_CRAFTING_SPEED: f64 = 1.0;
 pub fn machine_crafting_speed(state: &PlanState, machine: &str) -> f64 {
     state
         .base()
+        .globals
         .entity_prototypes
         .get(machine)
         .and_then(|p| p.crafting_speed)
@@ -1232,7 +1236,7 @@ impl BeaconGeometry {
 /// under-credits instead of over-crediting.
 #[must_use]
 pub fn beacon_geometry(state: &PlanState, beacon: &str) -> Option<BeaconGeometry> {
-    let prototype = state.base().entity_prototypes.get(beacon)?;
+    let prototype = state.base().globals.entity_prototypes.get(beacon)?;
     let box_ = &prototype.collision_box;
     let footprint_tiles = box_.width().max(box_.height()).ceil();
     if footprint_tiles <= 0.0 {
@@ -1276,7 +1280,7 @@ pub fn beacon_geometry(state: &PlanState, beacon: &str) -> Option<BeaconGeometry
 /// `FactorioItemPrototype` does not carry at all.
 #[must_use]
 pub fn beacon_supply_area_distance(state: &PlanState, beacon: &str) -> Option<f64> {
-    let prototype = state.base().entity_prototypes.get(beacon)?;
+    let prototype = state.base().globals.entity_prototypes.get(beacon)?;
     if prototype.entity_type != "beacon" {
         return None;
     }
@@ -1310,17 +1314,19 @@ mod tests {
         match speed {
             Some(speed) => {
                 let mut character = world
+                    .globals
                     .entity_prototypes
                     .get("character")
                     .expect("the fixture ships a character prototype")
                     .clone();
                 character.mining_speed = Some(speed);
                 world
+                    .globals
                     .entity_prototypes
                     .insert("character".into(), character);
             }
             None => {
-                world.entity_prototypes.remove("character");
+                world.globals.entity_prototypes.remove("character");
             }
         }
         PlanState::from_world(Arc::new(world), &[BotId(1)])
@@ -2144,15 +2150,19 @@ mod tests {
         match speed {
             Some(speed) => {
                 let mut prototype = world
+                    .globals
                     .entity_prototypes
                     .get(machine)
                     .unwrap_or_else(|| panic!("the fixture ships a {machine} prototype"))
                     .clone();
                 prototype.crafting_speed = Some(speed);
-                world.entity_prototypes.insert(machine.into(), prototype);
+                world
+                    .globals
+                    .entity_prototypes
+                    .insert(machine.into(), prototype);
             }
             None => {
-                world.entity_prototypes.remove(machine);
+                world.globals.entity_prototypes.remove(machine);
             }
         }
         PlanState::from_world(Arc::new(world), &[BotId(1)])
@@ -2258,6 +2268,7 @@ mod tests {
     fn world_with_standing(name: &str, entity_type: &str, at: Position) -> Arc<FactorioSurface> {
         let world = fixture_world();
         let collision = world
+            .globals
             .entity_prototypes
             .get(name)
             .map(|proto| proto.collision_box.clone())
@@ -2433,6 +2444,7 @@ mod tests {
     fn the_lane_follows_the_prototype_and_not_the_number_three() {
         let world = fixture_world();
         let mut beacon = world
+            .globals
             .entity_prototypes
             .get(BEACON)
             .expect("the fixture ships a beacon")
@@ -2441,7 +2453,10 @@ mod tests {
             &Position::new(-2.19921875, -2.19921875),
             &Position::new(2.19921875, 2.19921875),
         );
-        world.entity_prototypes.insert(BEACON.into(), beacon);
+        world
+            .globals
+            .entity_prototypes
+            .insert(BEACON.into(), beacon);
         let state = PlanState::from_world(Arc::new(world), &[BotId(1)]);
         let geometry = beacon_geometry(&state, BEACON).expect("the beacon is still there");
         assert!(
@@ -2496,12 +2511,16 @@ mod tests {
     fn state_with_supply_area(name: &str, distance: Option<f64>) -> PlanState {
         let world = fixture_world();
         let mut prototype = world
+            .globals
             .entity_prototypes
             .get(name)
             .expect("the fixture ships this prototype")
             .clone();
         prototype.supply_area_distance = distance;
-        world.entity_prototypes.insert(name.into(), prototype);
+        world
+            .globals
+            .entity_prototypes
+            .insert(name.into(), prototype);
         PlanState::from_world(Arc::new(world), &[BotId(1)])
     }
 
@@ -2568,7 +2587,7 @@ mod tests {
     #[test]
     fn a_world_with_no_beacon_prototype_refuses() {
         let world = fixture_world();
-        world.entity_prototypes.remove(BEACON);
+        world.globals.entity_prototypes.remove(BEACON);
         let state = PlanState::from_world(Arc::new(world), &[BotId(1)]);
         assert!(beacon_geometry(&state, BEACON).is_none());
     }

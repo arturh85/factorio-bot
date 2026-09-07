@@ -68,7 +68,7 @@ fn world_with(benches: &[Bench]) -> Arc<FactorioSurface> {
         (3, BENCHED_AT),
         (4, ELSEWHERE),
     ] {
-        world.players.insert(
+        world.globals.players.insert(
             id,
             FactorioPlayer {
                 player_id: id,

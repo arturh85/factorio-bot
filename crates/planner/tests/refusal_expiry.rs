@@ -239,7 +239,7 @@ const BLOCK_ANCHOR: (f64, f64) = (-40., -58.);
 /// A world holding one bot with enough reach to build, plus `refusals`.
 fn block_state(refusals: &[PlacementRefusal]) -> PlanState {
     let world = fixture_world();
-    world.players.insert(
+    world.globals.players.insert(
         1,
         FactorioPlayer {
             player_id: 1,

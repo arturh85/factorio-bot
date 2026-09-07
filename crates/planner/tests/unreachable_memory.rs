@@ -445,7 +445,7 @@ fn frozen_run_world() -> Arc<FactorioSurface> {
         (3, FROZEN_BOT_3),
         (4, (ELSEWHERE.0 + 2., ELSEWHERE.1)),
     ] {
-        world.players.insert(
+        world.globals.players.insert(
             id,
             FactorioPlayer {
                 player_id: id,
@@ -565,7 +565,7 @@ fn with_nothing_recorded_every_bot_is_still_sized_a_share() {
         (3, FROZEN_BOT_3),
         (4, (ELSEWHERE.0 + 2., ELSEWHERE.1)),
     ] {
-        world.players.insert(
+        world.globals.players.insert(
             id,
             FactorioPlayer {
                 player_id: id,
@@ -621,7 +621,7 @@ fn when_every_bot_is_walled_in_the_split_is_unchanged() {
         (4, (midpoint.x() + 1., midpoint.y() + 1.)),
     ];
     for (id, at_) in positions {
-        world.players.insert(
+        world.globals.players.insert(
             id,
             FactorioPlayer {
                 player_id: id,
@@ -684,7 +684,7 @@ fn a_bot_whose_pocket_has_opened_is_sized_a_share_again() {
         (3, FROZEN_BOT_3),
         (4, (ELSEWHERE.0 + 2., ELSEWHERE.1)),
     ] {
-        world.players.insert(
+        world.globals.players.insert(
             id,
             FactorioPlayer {
                 player_id: id,
@@ -752,7 +752,7 @@ fn world_with_the_first_bot_walled_in() -> Arc<FactorioSurface> {
         (3, (ELSEWHERE.0 + 2., ELSEWHERE.1)),
         (4, (ELSEWHERE.0 + 4., ELSEWHERE.1)),
     ] {
-        world.players.insert(
+        world.globals.players.insert(
             id,
             FactorioPlayer {
                 player_id: id,
@@ -847,7 +847,7 @@ fn when_every_bot_is_walled_in_the_chain_actor_is_the_first_bot_anyway() {
         (4, (midpoint.x() + 1., midpoint.y() + 1.)),
     ];
     for (id, at_) in positions {
-        world.players.insert(
+        world.globals.players.insert(
             id,
             FactorioPlayer {
                 player_id: id,

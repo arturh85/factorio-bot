@@ -3971,6 +3971,72 @@ mod block_demand_tests {
         bp.entities.iter().filter(|e| e.name == name).count()
     }
 
+    /// **`blueprint_power`'s wire flood assumes every pole is a SMALL pole,
+    /// and this guard fails the moment a fixture stops being one.**
+    ///
+    /// The connectivity half of `blueprint_power` asks
+    /// `calculate_distance(a, b) <= POLE_WIRE_REACH_TILES`, and that constant
+    /// is **7.5 — a `small-electric-pole`'s `maximum_wire_distance`**, as its
+    /// own doc in `method::power` says. Wire reach is per pole type:
+    /// medium 9, substation 18, **big 32**. And the game's rule is the
+    /// *smaller* of the two poles' distances, not one global number.
+    ///
+    /// So a block carrying a medium or big pole has poles that ARE wired
+    /// reported as `disconnected_poles`, and is refused for a distribution
+    /// fault it does not have — a false refusal of a block that works, the
+    /// same shape as `poles_the_model_cannot_size` and in the same function.
+    ///
+    /// **Latent today, not demonstrated**: measured 2026-09-07, all four
+    /// pole-carrying fixtures (`FurnaceLine` 13, `MinerLine` 3,
+    /// `ElectricSmelter` 3, `StarterSteamEngineBoiler` 2) are small poles
+    /// only, so nothing currently misbehaves. It goes live the moment anyone
+    /// imports a real Factorio blueprint, which routinely uses medium and big
+    /// poles — and the milestone's larger self-contained block is exactly
+    /// that case.
+    ///
+    /// The real fix needs a per-pole reach, which is `pole_wire_reach` in
+    /// `state.rs` — private, and that file's own doc explains why a second
+    /// copy of such a table is the thing to avoid. `POLE_WIRE_REACH_TILES`
+    /// used as a universal is precisely that second copy, and it is the wrong
+    /// one for three of the four pole types. Until an accessor is exposed,
+    /// this guard makes the assumption explicit and self-reporting instead of
+    /// silent.
+    #[test]
+    fn every_fixture_pole_is_a_small_pole_because_the_wire_flood_assumes_it() {
+        const POLE_FIXTURES: &[&str] = &[
+            "FurnaceLine",
+            "MinerLine",
+            "ElectricSmelter",
+            "StarterSteamEngineBoiler",
+        ];
+        let mut seen = 0usize;
+        for name in POLE_FIXTURES {
+            let bp = fixture(name);
+            for e in &bp.entities {
+                if e.name.contains("electric-pole") || e.name == "substation" {
+                    seen += 1;
+                    assert_eq!(
+                        e.name,
+                        crate::method::power::POLE,
+                        "{name} carries a {}, whose wire reach is NOT the 7.5 \
+                         that blueprint_power's flood assumes -- that block's \
+                         wired poles will read as disconnected and it will be \
+                         refused for a distribution fault it does not have. \
+                         Give the flood a per-pole reach before adding this \
+                         fixture",
+                        e.name
+                    );
+                }
+            }
+        }
+        assert!(
+            seen >= 21,
+            "expected the 21 known fixture poles (13+3+3+2); found {seen}. If \
+             the fixtures changed, fix this list rather than letting the guard \
+             quietly check nothing"
+        );
+    }
+
     #[test]
     fn furnace_line_draws_624_kw_and_carries_nothing_that_makes_any() {
         let demand = blueprint_demand(&state(), &fixture("FurnaceLine"));

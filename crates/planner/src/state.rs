@@ -226,20 +226,83 @@ fn pole_wire_reach(name: &str) -> Option<f64> {
     }
 }
 
-/// What a generator contributes to a network, in kW, when it is running.
+/// The `entity_type`s whose [`generation_kw`] this planner will credit.
 ///
-/// **Deterministic sources only.** A steam engine's 900 kW is the same at
-/// every hour of every day; a solar panel's 60 kW is an average over a
-/// day/night cycle and its instantaneous output is whatever the map's clock
-/// says. CLAUDE.md records what that costs: "the same blueprint runs or does
-/// not run depending on when the run starts". A planner whose output must be
-/// identical for identical inputs cannot credit a number that is not, so solar
-/// panels and accumulators are absent from this table and a solar base reads
-/// as unpowered.
+/// **The gate is a determinism gate, not a completeness gate**, and it is the
+/// reason reading `max_energy_production` off the prototype did not silently
+/// switch solar on. `LuaEntityPrototype::get_max_energy_production()` answers
+/// for a `solar-panel` too — with its **noon** figure — and for an
+/// `accumulator` with its discharge limit. Crediting either would make the
+/// same plan feasible or not according to what time of day the run started,
+/// which is exactly the trap CLAUDE.md records as "the same blueprint runs or
+/// does not run depending on when the run starts". A planner whose output must
+/// be identical for identical inputs cannot credit a number that is not.
+///
+/// These three are steady while fuelled: a steam engine's 900 kW is the same
+/// at every hour of every day. `generator` covers `steam-engine` and
+/// `steam-turbine`, `burner-generator` and `fusion-generator` the Space Age
+/// pair. A type not listed falls back to [`vanilla_generation_kw`] and thence
+/// to `None` — no generation, which refuses rather than promises, the
+/// direction every table in this file errs in.
+const DETERMINISTIC_GENERATOR_TYPES: [&str; 3] =
+    ["generator", "burner-generator", "fusion-generator"];
+
+/// What a generator contributes to a network, in kW, when it is running,
+/// **from its own prototype**.
+///
+/// `FactorioEntityPrototype::max_energy_production` is
+/// `get_max_energy_production()`, a **method** on the 2.1.17 runtime API. It
+/// is the only route to the number: a `steam-engine` carries no output figure
+/// anywhere, at the data stage or on the runtime prototype. Its 900 kW is
+/// `fluid_usage_per_tick * 60 * heat_capacity * (maximum_temperature -
+/// default_temperature) * effectivity`, and `LuaEntityPrototype` exposes
+/// `maximum_temperature` and `effectivity` but **not**
+/// `fluid_usage_per_tick` -- doclint-allow: a Factorio data-stage name whose
+/// absence from this tree is precisely the claim being made. So the physics
+/// cannot be reassembled out here, and the runtime's own answer is what the
+/// mod forwards.
 ///
 /// Nameplate capacity, not observed output: nothing in `FactorioSurface` says
 /// whether a steam engine has steam. See [`PlanState::electric_supply_kw`].
-fn generation_kw(name: &str) -> Option<f64> {
+///
+/// Gated on [`DETERMINISTIC_GENERATOR_TYPES`], and falling back to
+/// [`vanilla_generation_kw`] for a world whose sender predates the field —
+/// which is every dump this project has archived.
+fn generation_kw(prototypes: &DashMap<String, FactorioEntityPrototype>, name: &str) -> Option<f64> {
+    let from_prototype = prototypes.get(name).and_then(|prototype| {
+        if !DETERMINISTIC_GENERATOR_TYPES.contains(&prototype.entity_type.as_str()) {
+            return None;
+        }
+        // A zero is a generator that produces nothing, which is not a fact
+        // worth crediting and is indistinguishable here from a runtime that
+        // declined to answer.
+        prototype.max_energy_production_kw().filter(|kw| *kw > 0.)
+    });
+    from_prototype.or_else(|| vanilla_generation_kw(name))
+}
+
+/// What [`generation_kw`] answers for a **vanilla generator on a world whose
+/// sender predates `max_energy_production`**, from base 2.1.17's
+/// `base/prototypes/entity/entities.lua` in this repo's `workspace/data`.
+///
+/// The counterpart of [`vanilla_pole_supply_half_extent`] and kept for the
+/// same measured reason: deleting that one, with nothing else changed, made
+/// **all three offline goals refuse to expand at all** — and the refusal
+/// blamed the water, one layer downstream, with no mention of poles. Every
+/// archived world here, `workspace/scripts/map.json` included, predates every
+/// electrical field, so a fallback is the difference between a planner and a
+/// planner that has gone blind.
+///
+/// Not a table anybody should extend. A name it does not know contributes
+/// nothing.
+///
+/// **`steam-turbine`'s 5,800 is this project's number and the game's is
+/// 5,820** — `1.0 * 60 * 0.2 * (500 - 15) * 1.0` — a 0.34% under-credit in an
+/// entity nothing builds yet. Left as it was found rather than corrected,
+/// because this table's whole job is to say what a pre-field world *would have
+/// answered*, and every world it applies to was planned against 5,800.
+/// `steam-engine`'s 900 is exact.
+fn vanilla_generation_kw(name: &str) -> Option<f64> {
     match name {
         "steam-engine" => Some(900.0),
         "steam-turbine" => Some(5800.0),
@@ -393,24 +456,88 @@ impl ElectricNetwork {
 /// this one's 5 kJ, so there is one duty cycle in this file and not four.
 const INSERTER_DUTY_KW: f64 = 13.0;
 
-/// What a consumer draws from an electric network, in kW, when it is running.
+/// What a consumer draws from an electric network, in kW, **from its own
+/// prototype**.
 ///
-/// The other half of [`generation_kw`], and the table
-/// [`PlanState::electric_demand_kw`] sums. Every figure except
-/// [`INSERTER_DUTY_KW`] is the prototype's own `energy_usage`, read off
+/// The other half of [`generation_kw`], and what
+/// [`PlanState::electric_demand_kw`] sums.
+/// `FactorioEntityPrototype::electric_energy_usage` is the runtime's
+/// `energy_usage` **attribute** (not a method, unlike
+/// `get_supply_area_distance` and `get_max_energy_production` — the two shapes
+/// were checked against this install's `runtime-api.json` rather than
+/// recalled), converted from joules per tick by
+/// `FactorioEntityPrototype::energy_usage_kw`.
+///
+/// # Two gates, and neither is optional
+///
+/// **The mod sends this field only for a prototype with an electric energy
+/// source.** A `stone-furnace`'s `energy_usage` is 90 kW *of coal*; charged
+/// against an electric budget it is a number in the wrong units that every
+/// test would agree with. That is why the fallback below leaves burner
+/// machines out rather than zeroing them, and the gate lives upstream where
+/// the energy source is visible.
+///
+/// **An inserter is electric and still has no figure**, so the four inserter
+/// rows below are reached through the ordinary absent-field fallback rather
+/// than by an exception. Measured on all 1,028 prototypes of a live 2.1.17
+/// game: 28 carry `energy_usage` and **not one reports 0**. An `inserter`
+/// passes the electric gate and the attribute is simply absent on it — its
+/// cost is `energy_per_movement` and `energy_per_rotation`, per swing. What a
+/// budget needs is what a *busy* one costs, which is a duty cycle rather than
+/// a prototype field. The `> 0` filter below is kept as a guard against a
+/// modded prototype that says zero, and it has never fired in vanilla.
+/// Sending the per-swing energies and deriving the four inserter rows from
+/// them is the follow-up that would delete the last non-prototype number here.
+///
+/// # It was checked before it was replaced, and it had not drifted
+///
+/// All 11 checkable rows of [`vanilla_consumer_kw`] matched the live game
+/// exactly on 2026-09-07 — unlike [`pole_wire_reach`], whose neighbour table
+/// had silently drifted 30 against 32. So the maintenance half of this change
+/// found no bug, and the milestone arithmetic that rests on `electric-furnace`
+/// = 180 kW stands as written.
+///
+/// # The correctness half is what the table could not have: the names it never
+/// knew
+///
+/// This table's unknown name errs **towards permitting** — a consumer it does
+/// not carry draws nothing, so an unmodelled machine on the network is
+/// headroom that is not there — and its own doc below has always said so. The
+/// live game names **17 electric consumers it never carried**, including
+/// several this project can already place: `small-lamp` at 5 kW (the
+/// `FurnaceLine` fixture stands three of them and was budgeting zero for all
+/// three), `recycler` at 180, `roboport` at 50, `pump` at 29, and the three
+/// combinators at 1 each. The prototype path charges every one of them without
+/// anybody having to have thought of it, which is the whole argument for
+/// deriving rather than tabulating.
+fn consumer_kw(prototypes: &DashMap<String, FactorioEntityPrototype>, name: &str) -> Option<f64> {
+    let from_prototype = prototypes
+        .get(name)
+        .and_then(|prototype| prototype.energy_usage_kw())
+        .filter(|kw| *kw > 0.);
+    from_prototype.or_else(|| vanilla_consumer_kw(name))
+}
+
+/// What [`consumer_kw`] answers for a **vanilla consumer on a world whose
+/// sender predates `electric_energy_usage`**, and for the inserters, whose
+/// draw is not a prototype field at all.
+///
+/// Every figure except [`INSERTER_DUTY_KW`] is the prototype's own
+/// `energy_usage`, read off
 /// `base/prototypes/entity/entities.lua` and
 /// `base/prototypes/entity/mining-drill.lua` in this repo's `workspace/data`
-/// (base 2.1.17), and written down here for the same reason as
-/// [`vanilla_pole_supply_half_extent`], [`pole_wire_reach`], [`generation_kw`]
-/// and [`delivery_offset`]: **the mod does not send `energy_usage`** and
-/// `FactorioEntityPrototype` has no field for it. Sending it is the one
-/// follow-up that deletes all five tables at once.
+/// (base 2.1.17). It kept its numbers for the same reason
+/// [`vanilla_pole_supply_half_extent`] keeps its: **every archived world here
+/// predates the field**, `workspace/scripts/map.json` — the seed-31337 t=0 dump
+/// the offline baselines are all measured on — included. Deleting the pole
+/// fallback with nothing else changed made all three offline goals refuse to
+/// expand at all, blaming the water; this one would blind the demand ledger
+/// the same way, and every world recorded from here on overrides it before it
+/// is ever consulted.
 ///
-/// **One of those five is already gone**, and it is the precedent for the
-/// rest: [`pole_supply_half_extent`] reads
-/// `FactorioEntityPrototype::supply_area_distance` off the world and keeps a
-/// vanilla table only as a fallback for dumps taken before that field
-/// existed.
+/// [`pole_wire_reach`] and [`delivery_offset`] are the two supply-side tables
+/// still waiting for a field of their own (`maximum_wire_distance` and
+/// `vector_to_place_result`).
 ///
 /// # The direction an unknown name errs in, which is not the usual one
 ///
@@ -430,8 +557,10 @@ const INSERTER_DUTY_KW: f64 = 13.0;
 /// of electricity, and an entry for it here would be a number in the wrong
 /// units that every test would agree with. So are `offshore-pump` (its
 /// `energy_source` is `type = "void"`, whatever its 60 kW `energy_usage`
-/// says), `boiler` and `steam-engine`.
-fn consumer_kw(name: &str) -> Option<f64> {
+/// says), `boiler` and `steam-engine`. The prototype path above is absent for
+/// exactly the same set, because the mod gates on an *electric* energy source
+/// — so the two halves agree by construction rather than by care.
+fn vanilla_consumer_kw(name: &str) -> Option<f64> {
     match name {
         "assembling-machine-1" => Some(75.0),
         "assembling-machine-2" => Some(150.0),
@@ -4229,7 +4358,7 @@ impl PlanState {
         // 3. Capacity on those components.
         let mut total = 0.;
         for entity in &net.nearby {
-            let Some(kw) = generation_kw(&entity.name) else {
+            let Some(kw) = generation_kw(&self.base.entity_prototypes, &entity.name) else {
                 continue;
             };
             if net.carries(&self.footprint_of(entity)) {
@@ -4270,7 +4399,7 @@ impl PlanState {
     /// zero — that table is the one in this file whose unknown name errs
     /// towards permitting, and its own doc says so.
     pub fn consumer_draw_kw(&self, name: &str) -> Option<f64> {
-        consumer_kw(name)
+        consumer_kw(&self.base.entity_prototypes, name)
     }
 
     /// What one generator of `name` contributes, in kW, as
@@ -4290,7 +4419,7 @@ impl PlanState {
     /// is the **safe** direction: an unknown generator makes nothing, so a
     /// caller sizing against it refuses rather than promising.
     pub fn generator_output_kw(&self, name: &str) -> Option<f64> {
-        generation_kw(name)
+        generation_kw(&self.base.entity_prototypes, name)
     }
 
     /// How much draw, in kW, is already committed on the network that reaches
@@ -4380,7 +4509,7 @@ impl PlanState {
             if except.covers(&entity.position) {
                 continue;
             }
-            let Some(kw) = consumer_kw(&entity.name) else {
+            let Some(kw) = consumer_kw(&self.base.entity_prototypes, &entity.name) else {
                 continue;
             };
             if takes_a_recipe(&entity.name) && entity.recipe.is_none() {
@@ -4436,7 +4565,9 @@ impl PlanState {
                 pole_index += 1;
                 continue;
             }
-            if generation_kw(&entity.name).is_some() && net.carries(&self.footprint_of(entity)) {
+            if generation_kw(&self.base.entity_prototypes, &entity.name).is_some()
+                && net.carries(&self.footprint_of(entity))
+            {
                 out.push((entity.position.clone(), entity.name.clone()));
             }
         }
@@ -5908,6 +6039,170 @@ mod tests {
         assert!(
             !s.pole_would_supply("small-electric-pole", &Position::new(0., 0.), &outside),
             "and it must still end at 2.5, not become unbounded"
+        );
+    }
+
+    // ---- electrical draw and output, from the prototype --------------------
+
+    /// A `PlanState` whose `name` prototype declares `electric_energy_usage`
+    /// and `max_energy_production`, **in joules per tick** as the game reports
+    /// them, or has either explicitly cleared with `None`.
+    ///
+    /// The fixture ships all 528 prototypes with both fields **absent**, which
+    /// is what every world dumped before 2026-09-07 looks like, so setting one
+    /// in place is what lets a test say "the number came from the world"
+    /// rather than "the number happens to equal the table".
+    fn state_with_energy(
+        name: &str,
+        usage_joules_per_tick: Option<f64>,
+        production_joules_per_tick: Option<f64>,
+    ) -> PlanState {
+        let world = fixture_world();
+        let mut prototype = world
+            .entity_prototypes
+            .get(name)
+            .expect("the fixture ships this prototype")
+            .clone();
+        prototype.electric_energy_usage = usage_joules_per_tick;
+        prototype.max_energy_production = production_joules_per_tick;
+        world.entity_prototypes.insert(name.into(), prototype);
+        PlanState::from_world(Arc::new(world), &[BotId(1)])
+    }
+
+    /// A consumer's draw is read off its own prototype, not off the vanilla
+    /// table.
+    ///
+    /// **The whole point of the change**, and stated in the game's own unit:
+    /// 4,000 joules per tick is 240 kW, a number the table does not contain
+    /// for any name, so a table read cannot produce it by accident. It also
+    /// pins the x60/1000 conversion at a value where a missing or doubled
+    /// factor of 60 is unmistakable.
+    #[test]
+    fn a_consumers_draw_comes_from_its_own_prototype() {
+        let s = state_with_energy("electric-furnace", Some(4000.), None);
+        assert_eq!(
+            s.consumer_draw_kw("electric-furnace"),
+            Some(240.),
+            "4000 J/tick is 240 kW, and vanilla's 180 must not win"
+        );
+    }
+
+    /// A consumer prototype with no `electric_energy_usage` — every world
+    /// dumped before the field existed, `workspace/scripts/map.json` included
+    /// — falls back to the vanilla number rather than reading as a machine
+    /// that draws nothing.
+    ///
+    /// A compatibility shim, documented as one on [`vanilla_consumer_kw`].
+    /// Deleting the equivalent pole shim made all three offline goals refuse
+    /// to expand at all, blaming the water.
+    #[test]
+    fn a_consumer_prototype_without_the_field_falls_back_to_vanilla() {
+        let s = state_with_energy("electric-furnace", None, None);
+        assert_eq!(
+            s.consumer_draw_kw("electric-furnace"),
+            Some(180.),
+            "the sender said nothing, so vanilla's 180 kW still stands"
+        );
+    }
+
+    /// **An inserter keeps its duty cycle whether the prototype says nothing
+    /// or says zero**, and the live game says nothing.
+    ///
+    /// Measured on all 1,028 prototypes of a 2.1.17 game: 28 carry
+    /// `energy_usage` and none reports 0, `inserter` included — it has an
+    /// electric energy source, so it passes the mod's gate, but the attribute
+    /// is optional and absent on it. The absent case is therefore the real
+    /// one; the zero case is a guard against a modded prototype that states a
+    /// standing draw of nothing, and both are asserted because a reader who
+    /// saw only the guard would conclude the wrong thing about vanilla.
+    ///
+    /// Silent if got wrong, and expensively so: a 48-inserter block would read
+    /// as 0 kW of demand, pass its own headroom check and brown out — the
+    /// *coverage is not capacity* failure this file exists to prevent.
+    #[test]
+    fn an_inserter_keeps_its_duty_cycle_whether_absent_or_zero() {
+        for stated in [None, Some(0.)] {
+            let s = state_with_energy("inserter", stated, None);
+            assert_eq!(
+                s.consumer_draw_kw("inserter"),
+                Some(INSERTER_DUTY_KW),
+                "{stated:?} is 'the prototype does not answer', not 'draws nothing'"
+            );
+        }
+    }
+
+    /// **A machine the hand-kept table never named now costs what it costs.**
+    ///
+    /// The old table's unknown name drew *nothing*, which is the one direction
+    /// this file's tables err towards permitting: an unmodelled machine on the
+    /// network is headroom that is not there. A live 2.1.17 game names 17
+    /// electric consumers the table did not carry, and `small-lamp` is not
+    /// hypothetical — the `FurnaceLine` fixture stands three of them and was
+    /// budgeting zero for all three.
+    ///
+    /// Falsifiable in one line: delete the prototype read and this is `None`.
+    #[test]
+    fn a_consumer_the_table_never_named_is_charged_from_its_prototype() {
+        assert_eq!(
+            vanilla_consumer_kw("small-lamp"),
+            None,
+            "the hand-kept table never heard of a lamp"
+        );
+        let s = state_with_energy("small-lamp", Some(5000. / 60.), None);
+        assert_eq!(
+            s.consumer_draw_kw("small-lamp"),
+            Some(5.),
+            "and the game says 5 kW, which is now what the ledger charges"
+        );
+    }
+
+    /// A generator's output is read off its own prototype.
+    ///
+    /// 20,000 J/tick is 1,200 kW — not 900, not 5,800, and not any multiple of
+    /// either, so nothing but the prototype can produce it.
+    #[test]
+    fn a_generators_output_comes_from_its_own_prototype() {
+        let s = state_with_energy("steam-engine", None, Some(20000.));
+        assert_eq!(
+            s.generator_output_kw("steam-engine"),
+            Some(1200.),
+            "20000 J/tick is 1200 kW, and vanilla's 900 must not win"
+        );
+    }
+
+    /// The generation half of the compatibility shim.
+    #[test]
+    fn a_generator_prototype_without_the_field_falls_back_to_vanilla() {
+        let s = state_with_energy("steam-engine", None, None);
+        assert_eq!(
+            s.generator_output_kw("steam-engine"),
+            Some(900.),
+            "every archived world predates the field and must still see engines"
+        );
+    }
+
+    /// **A solar panel answers `get_max_energy_production()` and must still
+    /// generate nothing here.**
+    ///
+    /// The number it answers with is its *noon* output, so crediting it makes
+    /// the same plan feasible or not according to what time of day the run
+    /// started. That is the trap CLAUDE.md names, and reading the prototype
+    /// without [`DETERMINISTIC_GENERATOR_TYPES`] would have walked straight
+    /// into it — `solar-panel` was absent from the old table by omission, and
+    /// omission is not a gate.
+    #[test]
+    fn a_solar_panel_declaring_production_generates_nothing() {
+        let s = state_with_energy("solar-panel", None, Some(1000.));
+        assert_eq!(
+            s.generator_output_kw("solar-panel"),
+            None,
+            "noon output is not a deterministic number and is not credited"
+        );
+        let accumulators = state_with_energy("accumulator", None, Some(5000.));
+        assert_eq!(
+            accumulators.generator_output_kw("accumulator"),
+            None,
+            "an accumulator's discharge limit is not generation either"
         );
     }
 

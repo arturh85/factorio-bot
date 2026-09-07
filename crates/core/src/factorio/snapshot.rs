@@ -223,6 +223,8 @@ mod tests {
             supply_area_distance: None,
             distribution_effectivity: None,
             beacon_profile: None,
+            electric_energy_usage: None,
+            max_energy_production: None,
             mining_drill_radius: None,
         }
     }
@@ -437,6 +439,8 @@ mod tests {
             supply_area_distance: None,
             distribution_effectivity: None,
             beacon_profile: None,
+            electric_energy_usage: None,
+            max_energy_production: None,
             mining_drill_radius: None,
         });
         assert!(
@@ -484,6 +488,8 @@ mod tests {
             supply_area_distance: None,
             distribution_effectivity: None,
             beacon_profile: None,
+            electric_energy_usage: None,
+            max_energy_production: None,
             mining_drill_radius: None,
         });
         snapshot.item_prototypes.push(FactorioItemPrototype {

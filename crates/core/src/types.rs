@@ -1682,7 +1682,84 @@ pub struct FactorioEntityPrototype {
         deserialize_with = "deserialize_helpers::option_vec_or_empty_map"
     )]
     pub beacon_profile: Option<Vec<f64>>,
+    /// What one of these draws from an **electric** network while running, in
+    /// **joules per tick** — the game's own unit, unconverted. Use
+    /// [`Self::energy_usage_kw`] rather than scaling it at a call site.
+    ///
+    /// # The gate is the field, not a caller's responsibility
+    ///
+    /// The mod sends this **only when the prototype has an electric energy
+    /// source**. A `stone-furnace` has an `energy_usage` of 90 kW *of coal*,
+    /// and a burner machine charged against an electric budget is a number in
+    /// the wrong units that every test would agree with. That is why
+    /// `crates/planner/src/state.rs`'s `consumer_kw` leaves burner machines
+    /// out rather than zeroing them, and the gate lives upstream where the
+    /// energy source is visible.
+    ///
+    /// # An inserter is electric and still has no figure here
+    ///
+    /// Measured on all 1,028 prototypes of a live 2.1.17 game: **28 carry this
+    /// field and not one of them reports 0.** An `inserter` has an electric
+    /// energy source and passes the gate, but `energy_usage` is an *optional*
+    /// attribute and is simply absent on it — its cost is
+    /// `energy_per_movement` and `energy_per_rotation`, per swing, not a
+    /// standing draw. What a budget wants is what a *busy* one costs, which is
+    /// a duty cycle rather than a prototype field, so `state.rs` keeps its
+    /// `INSERTER_DUTY_KW` and reaches it through the ordinary absent-field
+    /// fallback.
+    ///
+    /// `state.rs` treats a zero the same way for safety, but that path has
+    /// never fired in vanilla and the reason to expect absence rather than
+    /// zero is stated here so nobody re-derives it from the guard.
+    ///
+    /// `default`, so every dump and snapshot written before this field
+    /// existed reads `None` — *the sender did not say*, never zero draw.
+    #[serde(default)]
+    pub electric_energy_usage: Option<f64>,
+    /// What one of these contributes to an electric network at full output, in
+    /// **joules per tick**. [`Self::max_energy_production_kw`] converts it.
+    ///
+    /// `LuaEntityPrototype::get_max_energy_production()`, a **method** in
+    /// 2.1.17 — there is no attribute of that name, and reading one raises.
+    ///
+    /// # It is the only way to a generator's output, because the inputs are
+    /// not exposed
+    ///
+    /// A `steam-engine` carries no output figure at the data stage either: its
+    /// 900 kW is `fluid_usage_per_tick * 60 * heat_capacity *
+    /// (maximum_temperature - default_temperature) * effectivity`. Of those,
+    /// `LuaEntityPrototype` exposes `maximum_temperature` and `effectivity`
+    /// and **not** `fluid_usage_per_tick` -- doclint-allow: a Factorio
+    /// data-stage name, and its ABSENCE from this tree is exactly the claim.
+    /// So the physics cannot be reassembled downstream: the runtime does it
+    /// and hands over the answer.
+    ///
+    /// # Nameplate, and for a solar panel that is a trap
+    ///
+    /// This is maximum production, so a `solar-panel` reports its **noon**
+    /// figure and an `accumulator` reports its discharge limit. Neither is
+    /// what a day averages, and the average is not derivable from any
+    /// prototype — the day/night curve lives on `LuaSurface`
+    /// (`ticks_per_day`, `dawn`, `dusk`, `evening`, `morning`,
+    /// `solar_power_multiplier`), which nothing sends. `state.rs` credits
+    /// deterministic sources only and says so.
+    ///
+    /// `default`: `None` on every world written before this field, meaning
+    /// *unknown*, never "produces nothing".
+    #[serde(default)]
+    pub max_energy_production: Option<f64>,
 }
+
+/// Ticks in a Factorio second at nominal speed, which is what turns the
+/// runtime API's joules-per-tick into watts.
+///
+/// The runtime reports every energy figure per **tick**, while every number a
+/// human reads — the 180 kW on an electric furnace's tooltip, the 900 kW of a
+/// steam engine — is per second. So `J/tick * 60 / 1000` is kW, and this
+/// constant exists so that conversion is written once. It is deliberately not
+/// scaled by `game.speed`: a prototype's draw per tick does not change when
+/// the game runs faster, only how many ticks pass per wall second does.
+const TICKS_PER_SECOND: f64 = 60.;
 
 /// The resource categories a vanilla character mines, used when the world's
 /// prototype table has no `character` entry or one captured before
@@ -1741,6 +1818,27 @@ impl std::fmt::Display for HandMiningObstacle {
 }
 
 impl FactorioEntityPrototype {
+    /// [`Self::electric_energy_usage`] in kW, or `None` when the sender did
+    /// not say.
+    ///
+    /// **`Some(0.0)` is passed through rather than folded into `None`.** An
+    /// `inserter` genuinely reports zero and a reader has to be able to tell
+    /// "electric, and the prototype says zero" from "nobody told us", because
+    /// the first needs a duty cycle and the second needs a fallback table.
+    #[must_use]
+    pub fn energy_usage_kw(&self) -> Option<f64> {
+        self.electric_energy_usage
+            .map(|joules_per_tick| joules_per_tick * TICKS_PER_SECOND / 1000.)
+    }
+
+    /// [`Self::max_energy_production`] in kW, or `None` when the sender did
+    /// not say.
+    #[must_use]
+    pub fn max_energy_production_kw(&self) -> Option<f64> {
+        self.max_energy_production
+            .map(|joules_per_tick| joules_per_tick * TICKS_PER_SECOND / 1000.)
+    }
+
     /// Why a character could not mine this prototype by hand, or `None` when
     /// nothing in the prototype says it cannot.
     ///
@@ -2662,6 +2760,8 @@ mod tests {
             supply_area_distance: None,
             distribution_effectivity: None,
             beacon_profile: None,
+            electric_energy_usage: None,
+            max_energy_production: None,
             mining_drill_radius: None,
         }
     }

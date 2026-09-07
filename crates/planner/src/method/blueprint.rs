@@ -544,14 +544,33 @@ fn recover_anchor(state: &PlanState, bp: &Blueprint) -> Option<Position> {
 /// never be sited legally from that seed.
 ///
 /// Returns `None` when the block's own entities disagree about what the anchor
-/// parity should be, which no anchor can satisfy. That is a property of the
+/// parity should be, which no anchor can satisfy.
+///
+/// **On a Factorio-authored blueprint that should never happen**, and if it
+/// does the bug is here rather than in the block. Factorio only emits entities
+/// already carrying the parity their own footprint needs, so every well-formed
+/// blueprint wants the same thing: a whole-tile anchor, `(0.0, 0.0)`. Measured
+/// across all of `scripts/rcontest.lua`. So this branch is reachable in
+/// practice only for a HAND-AUTHORED blueprint whose offsets are internally
+/// inconsistent -- and it fired for `FurnaceLine` until 2026-09-07 purely
+/// because this function asked the north-facing alignment of two splitters
+/// that face east and west. That is a property of the
 /// blueprint rather than of the ground, so it is reported rather than resolved
 /// by picking one — silently favouring the first entity would put the rest
 /// half a tile out and reproduce this bug inside a single block.
 fn anchor_alignment(state: &PlanState, bp: &Blueprint) -> Option<(f64, f64)> {
     let mut wanted: Option<(f64, f64)> = None;
     for e in &bp.entities {
-        let (ax, ay) = crate::method::util::tile_alignment(state, &e.name);
+        // **Facing matters, and asking the north-facing form was a live bug.**
+        // `tile_alignment_facing` swaps width and height for an entity facing
+        // East or West, because a 2x1 splitter turned on its side is 1x2 and
+        // wants the opposite parity. `FurnaceLine` carries two splitters facing
+        // East and West; evaluated as north they demanded a fraction the
+        // furnaces did not, the entities "disagreed", and this returned `None`
+        // -- which silently skips alignment and makes `BlockAnchorMisaligned`
+        // unreachable for the largest blueprint this project has ever built.
+        let facing = Direction::from_u8(e.direction).unwrap_or(Direction::North);
+        let (ax, ay) = crate::method::util::tile_alignment_facing(state, &e.name, facing);
         // `anchor + offset` must land on this entity's own grid, so the
         // anchor's fractional part is that grid minus the offset's.
         let want = (
@@ -4806,6 +4825,51 @@ mod block_demand_tests {
     ///
     /// **This must fail without the per-pole reach**: restore the constant in
     /// the flood and the two poles read as disconnected.
+    /// **Does `anchor_alignment` actually agree with itself on our largest
+    /// real blueprint?** Reported by the other session as a probable live bug,
+    /// verified here before acting on it.
+    ///
+    /// The claim: `anchor_alignment` asks
+    /// `method::util::tile_alignment`, the NORTH-facing form, while
+    /// `tile_alignment_facing` exists and handles the East/West `swapped`
+    /// case. `FurnaceLine` carries two splitters facing 2 and 6 -- exactly
+    /// swapped -- so evaluated as north they would demand a different anchor
+    /// fraction from the furnaces, the entities would disagree, and
+    /// `anchor_alignment` would return `None`. `None` means the seed is used
+    /// unaligned and `BlockAnchorMisaligned` can never fire.
+    #[test]
+    fn anchor_alignment_agrees_with_itself_on_every_real_fixture() {
+        let s = state();
+        for name in [
+            "FurnaceLine",
+            "MinerLine",
+            "SmeltRow24",
+            "OreToPlateTee",
+            "OreToPlateThree",
+            "ElectricSmelter",
+            "TJunctionSmelter",
+        ] {
+            let bp = fixture(name);
+            let got = anchor_alignment(&s, &bp);
+            assert!(
+                got.is_some(),
+                "{name}: its own entities disagree about the anchor parity, so \
+                 siting cannot align it and BlockAnchorMisaligned can never \
+                 fire for it -- Factorio authored this blueprint, so a \
+                 disagreement is ours and not the block's"
+            );
+            // Every entity in a Factorio-authored blueprint already carries the
+            // parity its own footprint needs, so the anchor it wants is a whole
+            // tile. If this ever fails, the interesting number is WHICH
+            // fraction, not merely that it differs.
+            assert_eq!(
+                got,
+                Some((0.0, 0.0)),
+                "{name}: a well-formed blueprint wants a whole-tile anchor"
+            );
+        }
+    }
+
     /// **The saturating smelting module reads as a coherent block: it
     /// distributes its own power, and it draws what 48 inserters draw.**
     ///

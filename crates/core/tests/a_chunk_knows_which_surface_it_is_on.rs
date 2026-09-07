@@ -27,12 +27,17 @@
 //! `FactorioEntity` and therefore **already names its surface**: the bulk
 //! `entities` line and the three `on_some_entity_*` events.
 //!
-//! `tiles` and `resources` are **not** routed and must not be: their wire
-//! format is a compact header (`x,y;x,y: ...`) with no surface slot, so the
-//! parser has nothing to route on and guessing would put the inference inside
-//! the data. They stay on the default surface, and the mod's guard stays,
-//! which together mean they can only ever be Nauvis. Lifting the guard needs
-//! the wire change first.
+//! `tiles` was **not** routed when this file was written, because its compact
+//! header (`x,y;x,y: ...`) had no surface slot. It grew a third field on
+//! 2026-09-07 and is routed now; its own tests are in
+//! `ground_names_its_own_surface.rs`. `resources` shares that header in the mod
+//! but has no caller there and no arm here -- resource entities arrive on the
+//! bulk `entities` line below.
+//!
+//! **The mod's Nauvis guard still stands**, for reasons that are no longer
+//! about the wire: `tile_chunks` and `storage.map_area` in `on_chunk_generated`
+//! are keyed and accumulated per *chunk coordinate* with no surface in the key,
+//! and the initial-discovery replay is hard-coded to `game.surfaces[1]`.
 
 use factorio_bot_core::factorio::world::{FactorioSurface, FactorioWorld};
 use factorio_bot_core::process::output_parser::OutputParser;

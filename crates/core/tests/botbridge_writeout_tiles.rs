@@ -102,6 +102,10 @@ const PRELUDE: &str = r#"
     prototypes = { item = {}, entity = {} }
 
     _surface = {
+        -- `ground_header` reads this: since 2026-09-07 a tiles line names the
+        -- surface it was read off, so ground can be routed the way entities
+        -- already are.
+        name = "nauvis",
         get_tile = function(x, y)
             local name = _tile_names[x .. "/" .. y] or "grass-1"
             return {
@@ -210,7 +214,7 @@ fn water_and_deepwater_are_written_out_as_solid() {
 
     assert_eq!(
         tiles_record(&lua),
-        "0,0;2,2: water:1,deepwater:1,grass-1:0,grass-1:0",
+        "0,0;2,2;nauvis: water:1,deepwater:1,grass-1:0,grass-1:0",
         "the flag after each tile name is what output_parser.rs turns into \
          FactorioTile::player_collidable, and EntityGraph::add_tiles inserts a \
          blocking box only when it is true. Hardcoding it to 0 -- which every \
@@ -259,7 +263,7 @@ fn walkable_ground_is_still_written_out_as_walkable() {
 
     assert_eq!(
         tiles_record(&lua),
-        "0,0;2,1: grass-1:0,sand-1:0",
+        "0,0;2,1;nauvis: grass-1:0,sand-1:0",
         "grass and sand collide with nothing; flagging them solid would put a \
          blocking box under every tile of the map"
     );
@@ -298,7 +302,7 @@ fn the_collision_flag_is_asked_once_per_tile_prototype_not_once_per_tile() {
     // And the memoised answer still has to be the right one per name.
     assert_eq!(
         tiles_record(&lua),
-        "0,0;2,2: water:1,water:1,grass-1:0,grass-1:0"
+        "0,0;2,2;nauvis: water:1,water:1,grass-1:0,grass-1:0"
     );
 }
 
@@ -354,5 +358,52 @@ fn the_mods_own_tiles_line_makes_water_block_and_leaves_grass_open() {
         over_grass.is_empty(),
         "and grass must still be open ground, or nothing can be built anywhere. \
          Got {over_grass:?}"
+    );
+}
+
+/// **The header names the surface it was READ OFF, not a constant.**
+///
+/// `writeout_tiles` has always been handed a `surface` and, until 2026-09-07,
+/// never put it on the wire -- so ground was the last position-keyed writeout
+/// that could not say where it came from, and the mod's Nauvis guard in
+/// `on_chunk_generated` was the only thing preventing a second surface's tiles
+/// from merging into Nauvis by position alone.
+///
+/// The two halves matter together. A hard-coded `nauvis` would satisfy every
+/// other test in this file, all of which run on the default stub; only reading
+/// a *different* surface back distinguishes "the field is filled in" from "the
+/// field is filled in from the argument". And the same tile bodies are asserted
+/// either side, so the surface is the only thing that moved.
+#[test]
+fn the_tiles_header_names_the_surface_it_was_read_off() {
+    let lua = mod_lua();
+    lua.load(
+        r#"
+        set_tile(0, 0, "water")
+        _surface.name = "vulcanus"
+        writeout_tiles(3, _surface, area(0, 0, 1, 1))
+        "#,
+    )
+    .set_name("writeout_tiles")
+    .exec()
+    .expect("writeout_tiles");
+
+    assert_eq!(
+        tiles_record(&lua),
+        "0,0;1,1;vulcanus: water:1",
+        "the third header field is the surface the tiles were read off, which \
+         is what output_parser.rs routes on"
+    );
+
+    let lua = mod_lua();
+    lua.load(r#"set_tile(0, 0, "water") writeout_tiles(3, _surface, area(0, 0, 1, 1))"#)
+        .set_name("writeout_tiles")
+        .exec()
+        .expect("writeout_tiles");
+    assert_eq!(
+        tiles_record(&lua),
+        "0,0;1,1;nauvis: water:1",
+        "and the default stub still says nauvis -- the two lines differ in the \
+         surface and in nothing else"
     );
 }

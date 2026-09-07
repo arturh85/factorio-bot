@@ -4657,7 +4657,22 @@ mod block_demand_tests {
     #[test]
     fn a_burner_block_distributes_itself_vacuously() {
         let s = state();
-        let power = blueprint_power(&s, &fixture("TJunctionSmelter"), &Position::new(0.0, 0.0));
+        let bp = fixture("TJunctionSmelter");
+        // **Every value this test asserts is one the system produces by
+        // accident**: zero poles, zero consumers, and a `true` from
+        // `distributes_itself()`, all of which an EMPTY blueprint yields.
+        // Without this line the test passes if `fixture` returns nothing at
+        // all -- and mutating the code under test would not reveal it, because
+        // the mutant produces the same zeros. That is vacuity masquerading as
+        // redundancy, which is why it needs a positive guard rather than a
+        // sharper mutation.
+        assert!(
+            bp.entities.len() >= 18,
+            "TJunctionSmelter must actually decode to a block before its \
+             zeros mean anything; got {} entities",
+            bp.entities.len()
+        );
+        let power = blueprint_power(&s, &bp, &Position::new(0.0, 0.0));
         assert_eq!(power.poles, 0);
         assert_eq!(power.demand.consumers, 0);
         assert!(

@@ -646,14 +646,27 @@ fn poles_the_model_cannot_size(
 }
 
 pub(crate) fn blueprint_power(state: &PlanState, bp: &Blueprint, anchor: &Position) -> BlockPower {
-    use crate::method::power::{POLE, POLE_WIRE_REACH_TILES};
+    use crate::method::power::POLE_WIRE_REACH_TILES;
 
     // Identify poles through [`PlanState::pole_would_supply`] rather than by
     // name: it answers `false` for any prototype whose supply extent this crate
     // does not know, so testing a candidate against its own tile recognises
     // EVERY pole type the planner models, not just `POLE`. `power.rs` compares
     // `name == POLE` because it places small poles; a blueprint may carry any.
-    let poles: Vec<Position> = bp
+    // Each pole with **its own** wire reach, because reach is per pole type:
+    // small 7.5, medium 9, substation 18, big 32. `POLE_WIRE_REACH_TILES` is
+    // the small pole's number and was applied to every pole here until
+    // 2026-09-07 -- always under-reaching, which is the direction that
+    // manufactures a false refusal (wired poles reported disconnected, and the
+    // block refused for a distribution fault it does not have).
+    //
+    // `None` means the table cannot size this pole, never that it reaches
+    // nothing. Such a pole is already excluded above by `pole_would_supply`,
+    // and `poles_the_model_cannot_size` is what turns that into an honest
+    // refusal rather than a silent not-a-pole; the fallback here is only for
+    // a pole that supplies but has no wire entry, where the small pole's
+    // reach is the conservative choice.
+    let poles: Vec<(Position, f64, String)> = bp
         .entities
         .iter()
         .filter(|e| {
@@ -664,7 +677,15 @@ pub(crate) fn blueprint_power(state: &PlanState, bp: &Blueprint, anchor: &Positi
             );
             state.pole_would_supply(&e.name, &at, &own_tile)
         })
-        .map(|e| anchor.add(&e.offset))
+        .map(|e| {
+            (
+                anchor.add(&e.offset),
+                state
+                    .pole_wire_reach_tiles(&e.name)
+                    .unwrap_or(POLE_WIRE_REACH_TILES),
+                e.name.clone(),
+            )
+        })
         .collect();
 
     // One flood over the wire graph. `poles` is small (13 for the largest
@@ -675,8 +696,11 @@ pub(crate) fn blueprint_power(state: &PlanState, bp: &Blueprint, anchor: &Positi
         let mut stack = vec![0usize];
         while let Some(i) = stack.pop() {
             for j in 0..poles.len() {
-                if !reached[j] && calculate_distance(&poles[i], &poles[j]) <= POLE_WIRE_REACH_TILES
-                {
+                // The game wires two poles when they are within the SMALLER
+                // of their two maximum wire distances, so one pole's reach is
+                // the input to a minimum and never the answer on its own.
+                let span = poles[i].1.min(poles[j].1);
+                if !reached[j] && calculate_distance(&poles[i].0, &poles[j].0) <= span {
                     reached[j] = true;
                     stack.push(j);
                 }
@@ -707,9 +731,17 @@ pub(crate) fn blueprint_power(state: &PlanState, bp: &Blueprint, anchor: &Positi
             uncovered.push((e.name.clone(), world));
             continue;
         };
+        // Ask each pole about ITS OWN supply area, not the small pole's.
+        // This passed `POLE` for every pole until 2026-09-07, and unlike the
+        // wire reach that error runs in BOTH directions: a `big-electric-pole`
+        // supplies 2.0 against a small pole's 2.5, so hard-coding the small
+        // one **over**-reaches there and reports a consumer covered that is
+        // not -- a block passing its own power check with dark machines, which
+        // is the failure `blueprint_power` exists to prevent. Medium (3.5) and
+        // substation (9.0) it under-reaches, giving the false refusal instead.
         if !poles
             .iter()
-            .any(|p| state.pole_would_supply(POLE, p, &area))
+            .any(|(at, _, name)| state.pole_would_supply(name, at, &area))
         {
             uncovered.push((e.name.clone(), world));
         }
@@ -3971,69 +4003,121 @@ mod block_demand_tests {
         bp.entities.iter().filter(|e| e.name == name).count()
     }
 
-    /// **`blueprint_power`'s wire flood assumes every pole is a SMALL pole,
-    /// and this guard fails the moment a fixture stops being one.**
+    /// **A big pole's wire reaches 32 tiles, and the flood must use it.**
     ///
-    /// The connectivity half of `blueprint_power` asks
-    /// `calculate_distance(a, b) <= POLE_WIRE_REACH_TILES`, and that constant
-    /// is **7.5 — a `small-electric-pole`'s `maximum_wire_distance`**, as its
-    /// own doc in `method::power` says. Wire reach is per pole type:
-    /// medium 9, substation 18, **big 32**. And the game's rule is the
-    /// *smaller* of the two poles' distances, not one global number.
+    /// This test replaces a guard that asserted every fixture pole was a
+    /// SMALL pole, "because the wire flood assumes it". The flood no longer
+    /// assumes it, so that guard's stated reason had expired — and a guard
+    /// whose reason has expired is the thing this file spent a night
+    /// correcting elsewhere. It is replaced rather than deleted because the
+    /// behaviour it protected is now testable directly.
     ///
-    /// So a block carrying a medium or big pole has poles that ARE wired
-    /// reported as `disconnected_poles`, and is refused for a distribution
-    /// fault it does not have — a false refusal of a block that works, the
-    /// same shape as `poles_the_model_cannot_size` and in the same function.
+    /// Until 2026-09-07 `blueprint_power` compared every pole pair against
+    /// `POLE_WIRE_REACH_TILES`, which is **a small pole's** 7.5. Two big poles
+    /// 20 tiles apart are wired in the game (20 <= 32) and read as
+    /// `disconnected_poles` here, so the block was refused for a distribution
+    /// fault it did not have.
     ///
-    /// **Latent today, not demonstrated**: measured 2026-09-07, all four
-    /// pole-carrying fixtures (`FurnaceLine` 13, `MinerLine` 3,
-    /// `ElectricSmelter` 3, `StarterSteamEngineBoiler` 2) are small poles
-    /// only, so nothing currently misbehaves. It goes live the moment anyone
-    /// imports a real Factorio blueprint, which routinely uses medium and big
-    /// poles — and the milestone's larger self-contained block is exactly
-    /// that case.
-    ///
-    /// The real fix needs a per-pole reach, which is `pole_wire_reach` in
-    /// `state.rs` — private, and that file's own doc explains why a second
-    /// copy of such a table is the thing to avoid. `POLE_WIRE_REACH_TILES`
-    /// used as a universal is precisely that second copy, and it is the wrong
-    /// one for three of the four pole types. Until an accessor is exposed,
-    /// this guard makes the assumption explicit and self-reporting instead of
-    /// silent.
+    /// **This must fail without the per-pole reach**: restore the constant in
+    /// the flood and the two poles read as disconnected.
     #[test]
-    fn every_fixture_pole_is_a_small_pole_because_the_wire_flood_assumes_it() {
-        const POLE_FIXTURES: &[&str] = &[
-            "FurnaceLine",
-            "MinerLine",
-            "ElectricSmelter",
-            "StarterSteamEngineBoiler",
-        ];
-        let mut seen = 0usize;
-        for name in POLE_FIXTURES {
-            let bp = fixture(name);
-            for e in &bp.entities {
-                if e.name.contains("electric-pole") || e.name == "substation" {
-                    seen += 1;
-                    assert_eq!(
-                        e.name,
-                        crate::method::power::POLE,
-                        "{name} carries a {}, whose wire reach is NOT the 7.5 \
-                         that blueprint_power's flood assumes -- that block's \
-                         wired poles will read as disconnected and it will be \
-                         refused for a distribution fault it does not have. \
-                         Give the flood a per-pole reach before adding this \
-                         fixture",
-                        e.name
-                    );
-                }
-            }
-        }
+    fn two_big_poles_twenty_tiles_apart_are_wired_because_a_big_pole_reaches_32() {
+        let s = state();
+        let bp = Blueprint {
+            entities: vec![
+                ent(0.0, 0.0, "big-electric-pole"),
+                ent(20.0, 0.0, "big-electric-pole"),
+            ],
+            version: 0,
+        };
+        let power = blueprint_power(&s, &bp, &Position::new(0.5, 0.5));
+
+        assert_eq!(
+            power.poles, 2,
+            "both must be recognised as poles -- `pole_would_supply` sizes a \
+             big pole through the vanilla fallback"
+        );
+        assert_eq!(
+            power.disconnected_poles, 0,
+            "20 tiles is within a big pole's 32, so these are one wired \
+             component; reading them as disconnected is the false refusal \
+             this change removes"
+        );
+    }
+
+    /// **Coverage is per pole type too, and there the small-pole assumption
+    /// erred towards a FALSE ACCEPT.**
+    ///
+    /// `blueprint_power` asked `pole_would_supply(POLE, ...)` for every pole
+    /// until 2026-09-07 — the small pole's name, hard-coded. Verified against
+    /// the game's own prototype files on 2026-09-07:
+    ///
+    /// ```text
+    ///                       supply_area_distance   maximum_wire_distance
+    /// small-electric-pole            2.5                   7.5
+    /// medium-electric-pole           3.5                   9
+    /// big-electric-pole              2.0                  32
+    /// substation                     9.0                  18
+    /// ```
+    ///
+    /// **A big pole supplies LESS than a small one while reaching four times
+    /// further on wire** — the two quantities do not even move together, which
+    /// is why one constant could never have stood in for both. So assuming 2.5
+    /// over-reports coverage for a big pole: a consumer is called covered that
+    /// the game leaves dark, the block passes its own power check, and half of
+    /// it never powers on. That is the failure `blueprint_power` exists to
+    /// prevent, produced by the check itself.
+    ///
+    /// Tested through [`PlanState::pole_would_supply`] directly rather than a
+    /// blueprint, deliberately: a 3x3 consumer must sit on a tile centre and a
+    /// 2x2 pole on a boundary, so a blueprint-level version of this would be
+    /// pinning footprint parity at the same time as the supply distance and
+    /// would break for the wrong reason.
+    #[test]
+    fn a_big_pole_supplies_less_than_a_small_one_so_the_name_matters() {
+        let s = state();
+        let pole = Position::new(0.0, 0.0);
+        // A consumer-sized box whose near edge is 2.35 tiles out: inside a
+        // small pole's 2.5 and outside a big pole's 2.0.
+        let area = Rect::new(&Position::new(2.35, -0.15), &Position::new(2.65, 0.15));
+
         assert!(
-            seen >= 21,
-            "expected the 21 known fixture poles (13+3+3+2); found {seen}. If \
-             the fixtures changed, fix this list rather than letting the guard \
-             quietly check nothing"
+            s.pole_would_supply(crate::method::power::POLE, &pole, &area),
+            "premise: a small pole's 2.5 does reach this box"
+        );
+        assert!(
+            !s.pole_would_supply("big-electric-pole", &pole, &area),
+            "a big pole supplies only 2.0, so hard-coding the small pole's \
+             name here would report this consumer COVERED when the game \
+             leaves it dark -- a false accept, not a false refusal"
+        );
+    }
+
+    /// The pairwise rule, from the other side: **the SMALLER of the two
+    /// reaches decides**, so a big pole does not lend its 32 to a small one.
+    ///
+    /// A single per-pole number is the input to a minimum, never the answer
+    /// on its own — the accessor's own doc says so, and this pins it. Taking
+    /// the first pole's reach, or the larger, wires a pair the game leaves
+    /// dark, which is a false ACCEPT: the block passes its own check and half
+    /// of it never powers on.
+    #[test]
+    fn a_big_pole_does_not_lend_its_reach_to_a_small_one() {
+        let s = state();
+        let bp = Blueprint {
+            entities: vec![
+                ent(0.0, 0.0, "big-electric-pole"),
+                ent(20.0, 0.0, crate::method::power::POLE),
+            ],
+            version: 0,
+        };
+        let power = blueprint_power(&s, &bp, &Position::new(0.5, 0.5));
+        assert_eq!(power.poles, 2, "both are poles");
+        assert_eq!(
+            power.disconnected_poles, 1,
+            "the small pole reaches 7.5, so min(32, 7.5) = 7.5 and 20 tiles \
+             leaves it unwired -- taking the larger would promise power the \
+             game does not deliver"
         );
     }
 

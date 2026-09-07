@@ -146,7 +146,90 @@ because 270,870 of them are ore tiles.
 
 ## 7. What was landed
 
-*(filled in below once the change is in — see the commit.)*
+`b0bb7f53` — **the enabling refactor, with the guard left standing.**
+
+- `FactorioWorld.surfaces` moves behind a `RwLock` so the aggregate can grow
+  while it is held as an `Arc`. `surface_or_create(&self, id)` builds a missing
+  surface from **the world's own globals**, so `insert_surface`'s `Arc::ptr_eq`
+  invariant holds by construction and a parser-created surface can never bring
+  a second research state. A `BTreeMap` under a lock rather than a `DashMap`,
+  because `surface_ids` answers in name order and a census whose order changes
+  between reads is one two runs cannot be compared on.
+- `OutputParser` holds that world beside its default surface and routes the
+  four `FactorioEntity`-shaped writeouts. `read_output` returns the world it
+  built rather than one surface, so a routed surface reaches
+  `FactorioInstance` instead of being wrapped away by a second
+  `nauvis_only`.
+- `surface()`, `nauvis()` and `only_surface()` answer by value; ten call sites
+  in `crates/server` and the REPL follow.
+
+### The falsification that came back green, and what it found
+
+Six mutations, each verified to substitute **exactly once**. Five kill exactly
+one test; the first kills five, and that is the feature rather than
+redundancy — each of the five asserts a different consequence of routing.
+
+| mutation | tests killed |
+|---|---|
+| `route` ignores the surface the mod named | 5 |
+| `surface_or_create` forks the globals | 1 |
+| the bulk `entities` arm routes the whole batch by nothing | 1 |
+| `only_surface` picks one instead of refusing | 1 |
+| `surface_or_create` never remembers what it created | 1 |
+| a record that says nothing invents a surface | 1 |
+
+**The fifth came back GREEN on the first attempt, and investigating it found a
+real gap.** The first version of that mutation disabled the read-lock fast
+path in `surface_or_create`; the suite stayed green because that path is an
+*optimisation* — the `or_insert_with` below is where the remembering happens.
+So the mutation was wrong. But rewriting it to break the actual memory
+revealed that **nothing asserted routing twice to one surface lands in one
+graph**: a `surface_or_create` returning a fresh graph per call would have
+passed the whole file while dropping 2,263 of the world-record save's 2,264
+platform-4 events — a routing bug that looks exactly like a routing fix,
+because the entities do leave Nauvis.
+`two_records_on_one_surface_land_in_one_graph` exists because of that.
+
+### Live confirmation
+
+A headless run on this branch (`workspace/headless-a.toml`, one character bot,
+seed as the workspace had it) with the release binary:
+
+```
+§0§surfaces§[{"name":"nauvis","index":1,"planet":"nauvis"}]
+unexpected action errors:   0
+entity records, by surface: 14,188 nauvis  (nothing else)
+```
+
+Three things confirmed at once. **The census crosses a running game** — the
+peer session that landed it had never seen its own writeout parsed, and
+`surfaces: None` on a dump is the same reading a broken arm would give; it is
+not broken. **Routing is inert on a single-surface world**, which is what
+every measured run is. And `only_surface()` **answered**, because the plan ran
+and printed a roster — so the world held exactly one surface and routing did
+not quietly split Nauvis in two.
+
+The run ends on `a real plan must take a positive number of ticks`, which is
+`goal_smoke.lua` behaving as documented: that assertion is true only of the
+fabricated `--clients 0` roster, and on `--headless` the goal is already
+satisfied.
+
+### Verification
+
+- `cargo test --workspace` — **107 test blocks, exit 0** (master carries 106;
+  this branch adds one file). Exit code taken from the command, not a pipe.
+- `cargo clippy --workspace --all-features --all-targets -- --deny warnings` —
+  clean.
+- **Four offline baselines, byte-identical, on one binary**, re-measured by
+  this session before and after: `researched:automation` 176 / 21,784 ·
+  `producing:automation-science-pack:6` 316 / 22,457 ·
+  `producing:logistic-science-pack:6` 441 / 47,478 on
+  `workspace/scripts/map.json`, and `gathered:crude-oil` 2,115 / 317,283 on
+  `map-31337-explored.json`. `gathered:crude-oil` still refuses on `map.json`
+  with `no crude-oil is charted anywhere this plan can`.
+- **Both dumps loaded** — `map.json` and `map-31337-explored.json`. Nothing
+  about the wire shape moved: a dump is a `FactorioSurface`, and
+  `FactorioWorld` has no serde at all.
 
 ## What was deliberately not done
 
@@ -163,3 +246,34 @@ parser that files them wrong. Lifting it needs, in order:
 **Nothing was ingested from a second surface end to end**, and no run was made
 that tried. What was proved is that the entity half routes correctly, in tests,
 including the aliasing case the whole surface refactor exists to prevent.
+
+## A latent defect nobody has to act on yet
+
+The guard compares `surface ~= game.surfaces['nauvis']` **by name** while the
+replay feeds it `game.surfaces[1]` **by index**. Those are two different
+claims and they agree only because Nauvis happens to be created first. The
+census (`collect_surfaces`) can now settle it per save; on the world-record
+save it does agree — `nauvis` is index 1. Spotted by the census session, left
+standing here because changing it without a reason to would be churn.
+
+## What ten surfaces would mean
+
+Not a recommendation — the numbers, so whoever decides has them.
+
+- **Time: 4.43x**, and it is arithmetic rather than a guess, because the
+  replay is one chunk per tick. 2,962 ticks becomes 13,109; 49 s becomes
+  3 m 38 s at 60 UPS. **The replay rate is the thing to change first**, and it
+  is a one-line `maxi` in `on_tick` — 10 chunks per tick would put ten
+  surfaces back inside Nauvis's current cost. Nothing was measured about what
+  the game can sustain there; `writeout_tiles`'s own comment says ~2.8
+  chunks/tick on this box, which suggests the current rate is already
+  conservative by a factor of two or three and that the ceiling is real.
+- **Memory: roughly 2x the modelled entities** (332,600 added against
+  323,542 held), inside a 375 MB process.
+- **And most of it buys very little.** The other nine surfaces hold 6,783
+  player-force entities between them against Nauvis's 39,998, and the flow
+  graph's own validation puts 99% of plate and circuit production on Nauvis.
+  So ten surfaces roughly doubles the model to gain ~15% more built factory.
+  **Vulcanus alone** — 2,083 chunks, 221,591 entities, 1,399 player entities —
+  is the natural first one to prove the pipeline on, and it is also the most
+  expensive of the nine.

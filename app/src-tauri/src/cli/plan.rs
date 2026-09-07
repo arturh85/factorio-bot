@@ -155,9 +155,7 @@ pub(crate) fn parse_goal(spec: &str) -> Result<Goal> {
   let coord = |raw: &str| -> Result<f64> {
     match raw.parse::<f64>() {
       Ok(value) if value.is_finite() => Ok(value),
-      _ => Err(miette!(
-        "`{raw}` in `{spec}` is not a finite coordinate"
-      )),
+      _ => Err(miette!("`{raw}` in `{spec}` is not a finite coordinate")),
     }
   };
   match parts.as_slice() {
@@ -346,7 +344,11 @@ fn plan_from_dump(
   } else {
     Vec::new()
   };
-  Ok((PlanReport::of(&net, &scheduled, &bots, &state), notes, listing))
+  Ok((
+    PlanReport::of(&net, &scheduled, &bots, &state),
+    notes,
+    listing,
+  ))
 }
 
 /// Every scheduled step, per bot, with the gap that precedes it.
@@ -495,7 +497,10 @@ mod tests {
       "the refusal names the shape it wanted: {err}"
     );
     assert!(parse_goal("sustain:iron-plate:15:forever").is_err());
-    assert!(parse_goal("sustain::15:7200").is_err(), "an item is required");
+    assert!(
+      parse_goal("sustain::15:7200").is_err(),
+      "an item is required"
+    );
   }
 
   /// A misspelled goal is refused, not guessed at.

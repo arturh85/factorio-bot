@@ -11,7 +11,9 @@ use factorio_bot_core::factorio::rcon::{
     ActionFailure, Approach, DestinationFull, Dispatch, FactorioRcon, approach_standing,
     reach_distance,
 };
-use factorio_bot_core::factorio::world::{FactorioSurface, HOP_DISTANCE, StepAside, StepAsideReason};
+use factorio_bot_core::factorio::world::{
+    FactorioSurface, HOP_DISTANCE, StepAside, StepAsideReason,
+};
 use factorio_bot_core::record::map::{EntitySnapshot, Placement, drift_between};
 use factorio_bot_core::types::{PlayerId, Position};
 use factorio_bot_planner::{BotId, InventorySlot};

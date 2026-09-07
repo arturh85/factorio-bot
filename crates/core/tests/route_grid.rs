@@ -238,10 +238,7 @@ fn a_wall_exactly_as_wide_as_the_prototype_allows_still_succeeds() {
         1
     );
     assert!(
-        (12..=15).all(|x| route
-            .tiles
-            .iter()
-            .all(|t| t.position.x() != x as f64 + 0.5)),
+        (12..=15).all(|x| route.tiles.iter().all(|t| t.position.x() != x as f64 + 0.5)),
         "nothing is placed inside the wall"
     );
 }
@@ -306,7 +303,8 @@ fn adjacent_jumps_cannot_share_a_tile_as_both_exit_and_entry() {
         .filter(|t| t.kind == TileKind::UndergroundExit)
         .count();
     assert_eq!(
-        entries, exits,
+        entries,
+        exits,
         "every underground entry must have a matching exit -- got {entries} entries and \
          {exits} exits: {:?}",
         route
@@ -318,10 +316,7 @@ fn adjacent_jumps_cannot_share_a_tile_as_both_exit_and_entry() {
     assert_eq!(entries, 2, "both walls are crossed underground");
     for x in [12, 13, 14, 16, 17, 18] {
         assert!(
-            route
-                .tiles
-                .iter()
-                .all(|t| t.position.x() != x as f64 + 0.5),
+            route.tiles.iter().all(|t| t.position.x() != x as f64 + 0.5),
             "nothing is placed inside either wall"
         );
     }

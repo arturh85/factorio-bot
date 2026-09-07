@@ -374,9 +374,18 @@ impl FlowGraph {
                                     .to_f64()
                                     .unwrap();
                                 // https://wiki.factorio.com/Mining
-                                // The rate at which resources are produced is given by:
-                                // Mining speed / Mining time = Production rate (in resource/sec)
-                                let production_rate = mining_speed / mining_time;
+                                // Mining speed / Mining time is the rate of
+                                // mining **operations**, and one operation
+                                // yields whatever the resource's own `minable`
+                                // products say -- 1 for every solid ore in the
+                                // base game, **10** for `crude-oil`. Treating
+                                // operations as items reported every pumpjack
+                                // in the record base at a tenth of its rate;
+                                // see `mining_yield_per_operation`, which also
+                                // records the one factor still missing (the
+                                // well's yield).
+                                let production_rate = mining_speed / mining_time
+                                    * self.mining_yield_per_operation(miner_ore);
                                 self.update_flow_edge(
                                     FlowEdge::Single(vec![(miner_ore.clone(), production_rate)]),
                                     source_node,
@@ -508,6 +517,55 @@ impl FlowGraph {
                                 }
                                 self.update_flow_edge(
                                     FlowEdge::Single(output),
+                                    source_node,
+                                    target_node,
+                                );
+                                Control::Continue
+                            }
+                            // **A fluid conversion the walk used to stop at.**
+                            //
+                            // A boiler takes water and hands out steam; a
+                            // steam engine takes steam, burns some of it for
+                            // electricity and passes the rest along the row.
+                            // Neither was an arm, so `_ => Prune` ended the
+                            // walk at the boiler and the 896 steam engines on
+                            // the record base had **692 incoming entity-graph
+                            // edges and zero flow nodes** -- the second half of
+                            // the fluid-reachability finding, whose first half
+                            // (2026-09-07) drew those edges in the first place.
+                            //
+                            // # What is carried through, and what is a lie
+                            //
+                            // The **magnitude** is right and is not a rate
+                            // table: a Factorio boiler converts one unit of
+                            // fluid into one unit of its output fluid, and a
+                            // generator's fluid box passes what it does not
+                            // consume to the next machine in the row. So the
+                            // incoming sum is what leaves, exactly as for a
+                            // pipe.
+                            //
+                            // The **name** is the input fluid's, and for a
+                            // boiler that is wrong: water arrives and steam
+                            // leaves. The output fluid's identity lives in
+                            // `LuaFluidBoxPrototype::filter`, which
+                            // `mods/BotBridge/types.lua` does not send, and
+                            // renaming it here would mean hard-coding
+                            // `water -> steam` -- the mod-compatibility defect
+                            // this project rules against. It is inert today,
+                            // because `producer_nameplates` counts only
+                            // drills, furnaces, assemblers and pumps, so
+                            // nothing reads this edge's item names; it is
+                            // written down rather than silently accepted
+                            // because the day something does read them is the
+                            // day it matters. The same gap hides a generator's
+                            // *consumption* (`energy_usage`, `effectivity`,
+                            // `maximum_temperature`), so a row of engines is
+                            // modelled as passing its steam along undiminished.
+                            EntityType::Boiler | EntityType::Generator => {
+                                let incoming =
+                                    self.sum_incoming_edge_weights(&source_node.position);
+                                self.update_flow_edge(
+                                    FlowEdge::Single(incoming),
                                     source_node,
                                     target_node,
                                 );
@@ -1736,6 +1794,65 @@ impl FlowGraph {
             .get(machine)
             .and_then(|proto| proto.crafting_speed)
             .unwrap_or(1.)
+    }
+
+    /// **How much one mining operation on `resource` yields**, read off the
+    /// resource's own `minable` products rather than assumed to be one.
+    ///
+    /// # A drill's rate has three factors and this file modelled two
+    ///
+    /// `mining_speed / mining_time` is the wiki's formula for *operations per
+    /// second*, and this file emitted it as if it were *items per second*.
+    /// That holds for every solid ore in the base game and for nothing else:
+    /// `iron-ore`, `copper-ore`, `coal`, `stone` and `uranium-ore` all declare
+    /// `mine_result` of exactly **1**, so the missing factor was invisible for
+    /// as long as the flow walk could not reach an oil chain.
+    ///
+    /// `crude-oil` declares **10**. So a `pumpjack` -- `mining_speed` 1 on a
+    /// resource whose `mining_time` is 1 -- was reported at 1 crude oil per
+    /// second when the game's own data says ten. Measured on the 6:39:53
+    /// record base: 23 pumpjacks at 1,380/min against 13,333/min that the
+    /// refineries standing there are configured to eat, which rationed the
+    /// entire oil chain and every line downstream of it.
+    ///
+    /// # What this still does NOT model: the well's yield
+    ///
+    /// `crude-oil` is an **infinite** resource, and Factorio scales an
+    /// infinite resource's yield by `amount / normal_resource_amount` -- the
+    /// percentage the game shows on the well. The left half of that fraction
+    /// *is* on the wire ([`EntityGraph::resource_amount`], populated from
+    /// `FactorioEntity::amount`, which the mod has always sent for a
+    /// `type == "resource"` entity); the right half is not. Neither
+    /// `LuaEntityPrototype::normal_resource_amount` nor `infinite_resource`
+    /// nor `minimum_resource_amount` -- all three attributes on the 2.1.17
+    /// runtime API -- reaches [`FactorioEntityPrototype`], so nothing here can
+    /// tell an infinite resource from a finite one, let alone divide by the
+    /// right constant. Hard-coding 300,000 is exactly the mod-compatibility
+    /// defect this project rules against, so the yield is **handed over, not
+    /// guessed**, and this function reports the 100%-yield rate.
+    ///
+    /// The unmodelled factor is therefore `amount / normal`, which on the
+    /// record base's wells is well above 1 -- so this is a floor, and the
+    /// direction of the remaining error is known even though its size is not.
+    ///
+    /// # `unwrap_or(1.)` is the honest default, not a fallback rate
+    ///
+    /// A resource with no `mine_result` at all (every fixture built by
+    /// `FactorioEntity::new_resource`, and any dump written before the field
+    /// existed) yields one per operation, which is what this file assumed
+    /// unconditionally until now. So a world that says nothing keeps the
+    /// answer it always had.
+    fn mining_yield_per_operation(&self, resource: &str) -> f64 {
+        self.entity_prototypes
+            .get(resource)
+            .and_then(|proto| {
+                proto
+                    .mine_result
+                    .as_ref()
+                    .and_then(|products| products.get(resource))
+                    .copied()
+            })
+            .map_or(1., f64::from)
     }
 
     /// What a furnace named `machine` turns `input` into, and how many per
@@ -3424,6 +3541,237 @@ mod tests {
         .unwrap()
     }
 
+    /// An entity with a fluid box, built at `position` with a symmetric
+    /// collision box of the given half-extents. The prototypes the fixtures
+    /// carry supply the fluid boxes; this only has to put the footprint in the
+    /// right place, because the joint rule is stated on footprints.
+    fn fluid_entity(
+        name: &str,
+        entity_type: &str,
+        half_width: f64,
+        half_height: f64,
+        position: Position,
+    ) -> FactorioEntity {
+        FactorioEntity {
+            name: name.into(),
+            entity_type: entity_type.into(),
+            bounding_box: crate::factorio::util::add_to_rect(
+                &Rect::from_wh(half_width * 2., half_height * 2.),
+                &position,
+            ),
+            position,
+            ..Default::default()
+        }
+    }
+
+    /// **A pumpjack was reported at a tenth of its rate**, because
+    /// `mining_speed / mining_time` counts mining *operations* and this file
+    /// emitted that as items per second.
+    ///
+    /// The pumpjack's own numbers are 1 and 1, so the old code said one crude
+    /// oil per second; `crude-oil`'s `minable` products say an operation
+    /// yields **ten**. On the 6:39:53 record base that was 23 pumpjacks at
+    /// 1,380/min against 13,333/min the refineries standing there are
+    /// configured to eat -- a supply short by an order of magnitude, rationing
+    /// every line below it.
+    ///
+    /// The iron drill in the same test is the pairing that makes the number
+    /// non-accidental: it comes out of the same expression and does **not**
+    /// move, because `iron-ore` declares one product per operation. A blanket
+    /// multiplier would fail here.
+    #[test]
+    fn a_pumpjack_yields_ten_crude_oil_per_operation() {
+        let pumpjack = Position::new(0.5, 0.5);
+        let outlet = Position::new(1.5, -1.5);
+        let entity_graph = entity_graph_from(vec![
+            FactorioEntity::new_resource(
+                &pumpjack,
+                Direction::North,
+                &EntityName::CrudeOil.to_string(),
+            ),
+            fluid_entity(
+                "pumpjack",
+                "mining-drill",
+                1.199_218_75,
+                1.199_218_75,
+                pumpjack.clone(),
+            ),
+            fluid_entity("pipe", "pipe", 0.289_062_5, 0.289_062_5, outlet.clone()),
+        ])
+        .unwrap();
+        let flow_graph = FlowGraph::new(Arc::new(entity_graph));
+        flow_graph.update().unwrap();
+        assert_eq!(
+            flow_graph.sum_incoming_edge_weights(&outlet),
+            vec![("crude-oil".to_string(), 10.)],
+            "one operation a second, ten crude oil an operation"
+        );
+
+        let ore = Position::new(0.5, -1.5);
+        let belt = Position::new(0.5, 0.5);
+        let solid = entity_graph_from(vec![
+            FactorioEntity::new_resource(&ore, Direction::South, &EntityName::IronOre.to_string()),
+            FactorioEntity::new_electric_mining_drill(&ore, Direction::South),
+            FactorioEntity::new_transport_belt(&belt, Direction::South),
+        ])
+        .unwrap();
+        let solid = FlowGraph::new(Arc::new(solid));
+        solid.update().unwrap();
+        assert_eq!(
+            solid.sum_incoming_edge_weights(&belt),
+            vec![("iron-ore".to_string(), 0.5)],
+            "a solid ore yields one per operation, so this rate must NOT move"
+        );
+    }
+
+    /// The `unwrap_or(1.)` in [`FlowGraph::mining_yield_per_operation`] is the
+    /// answer this file gave unconditionally before the factor existed, kept
+    /// for a world that says nothing: `FactorioEntity::new_resource` leaves no
+    /// `mine_result`, and so does any dump written before the field did.
+    ///
+    /// Paired with the same map's untouched `crude-oil`, so the default cannot
+    /// pass by the lookup never running.
+    #[test]
+    fn a_resource_that_reports_no_mine_result_yields_one_per_operation() {
+        let prototypes = crate::test_utils::fixture_entity_prototypes();
+        let mut silent = prototypes.get("crude-oil").unwrap().clone();
+        silent.name = "quiet-oil".to_string();
+        silent.mine_result = None;
+        prototypes.insert("quiet-oil".to_string(), silent);
+        let graph = FlowGraph::new(Arc::new(EntityGraph::new(
+            Arc::new(prototypes),
+            Arc::new(crate::test_utils::fixture_recipes()),
+        )));
+        assert_eq!(
+            graph.mining_yield_per_operation("quiet-oil"),
+            1.,
+            "a resource that reports no products yields the one this file always assumed"
+        );
+        assert_eq!(
+            graph.mining_yield_per_operation("crude-oil"),
+            10.,
+            "and the resource that does report them is read, not defaulted"
+        );
+    }
+
+    /// **The product looked up is the one the drill is credited with**, not
+    /// whichever the map happens to hold first.
+    ///
+    /// This exists because a mutation that swapped `products.get(resource)`
+    /// for `products.values().next()` came back **green**: every resource in
+    /// the base game declares exactly one product, keyed by its own name, so
+    /// the two readings coincide on every fixture and on the record base. A
+    /// mod's resource need not, and `mine_result` is a `BTreeMap`, so "first"
+    /// means alphabetically first -- here a byproduct at a different rate.
+    ///
+    /// Paired with the same prototype's own name, so it cannot pass by the
+    /// lookup returning nothing.
+    #[test]
+    fn a_resource_with_two_products_is_credited_with_the_one_being_mined() {
+        let prototypes = crate::test_utils::fixture_entity_prototypes();
+        let mut twin = prototypes.get("crude-oil").unwrap().clone();
+        twin.name = "twin-oil".to_string();
+        twin.mine_result = Some(
+            [
+                ("a-byproduct".to_string(), 7_u32),
+                ("twin-oil".to_string(), 4),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        prototypes.insert("twin-oil".to_string(), twin);
+        let graph = FlowGraph::new(Arc::new(EntityGraph::new(
+            Arc::new(prototypes),
+            Arc::new(crate::test_utils::fixture_recipes()),
+        )));
+        assert_eq!(
+            graph.mining_yield_per_operation("twin-oil"),
+            4.,
+            "the resource's own product, not the alphabetically first one"
+        );
+        assert_eq!(
+            graph.mining_yield_per_operation("a-byproduct"),
+            1.,
+            "and a name that is a product here but no resource of its own defaults"
+        );
+    }
+
+    /// **The walk used to stop at a boiler**, so 896 steam engines on the
+    /// record base had 692 incoming entity-graph edges and no flow node at
+    /// all. A boiler is a fluid conversion and a generator passes what it does
+    /// not burn along the row; neither was an arm of `update`, so
+    /// `_ => Prune` ended the walk one machine short of every engine.
+    ///
+    /// Two claims, and the second is the honest half:
+    ///
+    /// * the engine is **in** the flow graph, with the magnitude carried
+    ///   through -- a boiler converts one unit of fluid into one unit of its
+    ///   output fluid;
+    /// * the item is still named `water`, because the output fluid's identity
+    ///   lives in `LuaFluidBoxPrototype::filter`, which the mod does not send.
+    ///   Renaming it here would be a hard-coded `water -> steam`. The test
+    ///   pins the misnomer rather than hiding it, so the day the field arrives
+    ///   this fails and says why.
+    ///
+    /// The disconnected engine is the pairing: it shows the graph admits an
+    /// engine because something reached it, not because engines are admitted.
+    #[test]
+    fn a_boiler_carries_its_water_through_to_the_steam_engine() {
+        let pump = Position::new(0.5, 0.5);
+        let feed = Position::new(0.5, 1.5);
+        let feed_on = Position::new(0.5, 2.5);
+        let boiler = Position::new(2.5, 2.0);
+        let steam = Position::new(2.5, 0.5);
+        let engine = Position::new(2.5, -2.5);
+        let stranded = Position::new(20.5, 20.5);
+        let entity_graph = entity_graph_from(vec![
+            FactorioEntity {
+                name: "offshore-pump".into(),
+                entity_type: "offshore-pump".into(),
+                bounding_box: Rect::new(
+                    &Position::new(pump.x() - 0.597_656_25, pump.y() - 1.046_875),
+                    &Position::new(pump.x() + 0.597_656_25, pump.y() + 0.296_875),
+                ),
+                position: pump.clone(),
+                ..Default::default()
+            },
+            fluid_entity("pipe", "pipe", 0.289_062_5, 0.289_062_5, feed),
+            fluid_entity("pipe", "pipe", 0.289_062_5, 0.289_062_5, feed_on),
+            fluid_entity("boiler", "boiler", 1.289_062_5, 0.789_062_5, boiler),
+            fluid_entity("pipe", "pipe", 0.289_062_5, 0.289_062_5, steam.clone()),
+            fluid_entity(
+                "steam-engine",
+                "generator",
+                1.25,
+                2.347_656_25,
+                engine.clone(),
+            ),
+            fluid_entity(
+                "steam-engine",
+                "generator",
+                1.25,
+                2.347_656_25,
+                stranded.clone(),
+            ),
+        ])
+        .unwrap();
+        let flow_graph = FlowGraph::new(Arc::new(entity_graph));
+        flow_graph.update().unwrap();
+        assert!(
+            flow_graph.node_at(&engine).is_some(),
+            "the engine the boiler feeds must reach the flow graph"
+        );
+        assert_eq!(
+            flow_graph.sum_incoming_edge_weights(&engine),
+            vec![("water".to_string(), 1.)],
+            "the magnitude passes through 1:1; the NAME is still the input fluid's"
+        );
+        assert!(
+            flow_graph.node_at(&stranded).is_none(),
+            "an engine nothing reaches must stay out -- the walk admits it, not its type"
+        );
+    }
+
     /// The falsification harness for every rate in this file, run against a
     /// **real** base rather than a fixture this repository wrote.
     ///
@@ -4118,6 +4466,84 @@ mod tests {
         println!("-- what those machines hold as input --");
         for (item, (machines, total)) in &plastic_inputs {
             println!("{item:>32}  in {machines:>6} machines, {total:>8} held");
+        }
+    }
+
+    /// **Probe.** What every pumpjack in a dumped world is standing on.
+    ///
+    /// The question this answers is whether the missing factor -- the well's
+    /// yield -- is *on the wire*, and it is: `FactorioEntity::amount` is sent
+    /// for every `type == "resource"` entity, kept per tile in
+    /// [`EntityGraph::resources`], and read back by
+    /// [`EntityGraph::resource_amount`]. What is **not** on the wire is the
+    /// constant the game divides it by, `normal_resource_amount`, so the ratio
+    /// cannot be formed inside the model. This probe prints the numerator and
+    /// says what the ratio would be for a caller who supplies the denominator
+    /// from outside -- deliberately here, in a probe, and not in `update`.
+    #[test]
+    #[ignore = "needs a world dump named by FACTORIO_BOT_WORLD_DUMP"]
+    fn what_every_pumpjack_is_standing_on() {
+        let Ok(path) = std::env::var("FACTORIO_BOT_WORLD_DUMP") else {
+            panic!("set FACTORIO_BOT_WORLD_DUMP to a world.dump JSON");
+        };
+        let json = std::fs::read_to_string(&path).expect("the dump reads");
+        let surface: crate::factorio::world::FactorioSurface =
+            serde_json::from_str(&json).expect("the dump parses");
+        surface
+            .entity_graph
+            .connect()
+            .expect("the graph reconnects");
+        let graph = surface.entity_graph.inner_graph();
+        let mut wells: Vec<(Position, Option<u32>)> = vec![];
+        for index in graph.node_indices() {
+            let Some(node) = graph.node_weight(index) else {
+                continue;
+            };
+            if node.entity_type != EntityType::MiningDrill
+                || node.miner_ore.as_deref() != Some("crude-oil")
+            {
+                continue;
+            }
+            let amount = crate::factorio::util::rect_fields(&crate::factorio::util::rect_floor(
+                &node.bounding_box,
+            ))
+            .iter()
+            .find_map(|tile| {
+                surface
+                    .entity_graph
+                    .resource_amount("crude-oil", &tile.into())
+            });
+            wells.push((node.position.clone(), amount));
+        }
+        wells.sort_by(|a, b| a.0.x().total_cmp(&b.0.x()));
+        println!("-- pumpjacks of {path} --");
+        let mut reported = 0_usize;
+        let mut total = 0_f64;
+        for (position, amount) in &wells {
+            match amount {
+                Some(amount) => {
+                    reported += 1;
+                    total += f64::from(*amount);
+                    println!("{position:>28}  amount {amount:>12}");
+                }
+                None => println!("{position:>28}  amount {:>12}", "-"),
+            }
+        }
+        println!(
+            "{} pumpjacks, {reported} standing on a well whose amount the mod reported",
+            wells.len()
+        );
+        // The denominator is `normal_resource_amount`, an attribute of the
+        // resource prototype on the 2.1.17 runtime API that the mod does not
+        // send. `base/prototypes/entity/resources.lua` gives `crude-oil`
+        // `normal = 300000`; it is quoted HERE, in a probe that prints, and
+        // deliberately not in `update`, where it would be a hard-coded rate.
+        const NORMAL_IN_THE_DATA_FILES: f64 = 300_000.;
+        if reported > 0 {
+            println!(
+                "mean yield if normal is {NORMAL_IN_THE_DATA_FILES}: {:.2}x",
+                total / (reported as f64) / NORMAL_IN_THE_DATA_FILES
+            );
         }
     }
 

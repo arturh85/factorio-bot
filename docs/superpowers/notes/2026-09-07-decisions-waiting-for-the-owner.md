@@ -41,6 +41,33 @@ sub-layout.
 | identify blocks by a marker entity | needs something on the ground that is not part of the design |
 | keep re-deriving, accept the ambiguity | leaves the failure in place; it is silent and strands whole blocks |
 
+### And `Site::At` is not a workaround — so there is currently NO way to put two of these blocks on one map
+
+This was going to be handed over as the mitigation ("use explicit anchors until
+the anchor is persisted"). It was checked first, and it is false.
+
+`resolve_site` runs `recover_anchor` **before** the `Site` match and
+unconditionally, so **an explicit anchor is outranked** by any two of the
+block's entities standing at the right relative offsets — including when those
+entities belong to a *different* block sharing a sub-layout. Test in `a22089f7`:
+build a four-furnace block A, ask for block B at `(0.5, 0.5)`, get an anchor
+inside A.
+
+**Both rulings are individually correct**, which is what makes this worth
+stating rather than filing as a bug. Recovery outranking `Site::At` is
+deliberate — a stale caller anchor must not start a second half-block, and
+`resolve_site_prefers_the_recovered_anchor_over_an_explicit_site_at` is the
+guarantee that says so. Recovering on two matching entities is what makes a
+genuinely half-built block resumable. **Jointly they leave no way to express
+"this is a new block, put it here"**, and closing that gap is exactly what
+anchor persistence would do.
+
+**So the practical consequence, which is the version worth deciding on: one
+block per fresh map is no longer a measurement-hygiene preference, it is the
+only thing that works.** The electric-smelter milestone — several blocks growing
+on one map, with solar — is **blocked** on this rather than inconvenienced by
+it.
+
 Nobody implemented any of these overnight, deliberately. **Landed instead**
 (`06296b0a`): every anchor is now screened for ore rather than only the ones
 siting chose, refusing as `BlockDrillUnfed`, which names the drill, the tile, and

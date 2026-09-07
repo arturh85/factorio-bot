@@ -17,6 +17,36 @@ longer line produce more?
 distribution is not a gradient, it is a cliff: the near furnace takes ~65%, the
 second ~32%, the third 4%, the fourth **nothing at all**.
 
+## Measured, and it corrects the claim above
+
+The plate counts were inferred from; `entity.status` can be read. Sampled 3,058
+times across the same 6,300-tick window — a share of samples, not one instant,
+because "87.7% working at tick N" and "working 87.7% of the time" are different
+quantities:
+
+| furnace | working | no_ingredients | no_fuel |
+|---|---|---|---|
+| 1 (near) | **91%** | 2% | 7% |
+| 2 | 43% | 42% | 15% |
+| 3 | 7% | 62% | 31% |
+| 4 (far) | **0%** | 58% | **42%** |
+
+**The gradient is confirmed and the attribution was wrong.** I wrote that the far
+end "starves", meaning ore. `no_ingredients` is indeed the largest single idle
+cause and grows with distance — but **`no_fuel` grows just as steadily, 7% to
+42%**, and at the far furnace the two are comparable.
+
+So the effect is **not about ore**. Coal is consumed near-first for exactly the
+same reason ore is: each arm takes what passes it, on whichever lane. A
+first-come-first-served belt starves the far end of **everything it carries**,
+and naming ore was reading the mechanism off the commodity I happened to be
+counting.
+
+That also makes the buffer-size explanation narrower than I stated it. A fuel
+slot capping at 5 does let coal ride past a *satisfied* furnace — but it does
+nothing for a furnace whose arm never gets a turn, which is what the far end
+actually suffers.
+
 ## Why: a belt is first-come-first-served, not fair
 
 Two burner drills supply about 0.5 ore/s. Two stone furnaces can eat 0.625

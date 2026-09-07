@@ -1274,6 +1274,51 @@ function collect_surface_daylight()
 	return serialize_surface_daylight(surface)
 end
 
+-- **What surfaces EXIST**, which is a different question from what this
+-- bridge observes.
+--
+-- `on_chunk_generated` drops every non-Nauvis chunk and names the surface it
+-- dropped, so each refusal is honest; but nothing enumerated `game.surfaces`,
+-- so "this save has one surface" and "we never looked" were the same silence.
+-- Space Age is enabled in this workspace and defines five planets, so the
+-- second surface is one rocket away rather than a future modding decision.
+--
+-- **Reports what exists; ingests nothing.** The Nauvis guard stays, and
+-- `FactorioWorld::insert_surface` still refuses a second surface by name --
+-- the game-global fields (recipes, prototypes, forces and their research)
+-- live on `FactorioSurface`, so holding two would give a run two copies of
+-- the research state.
+function collect_surfaces()
+    local result = {}
+    for _, surface in pairs(game.surfaces) do
+        table.insert(result, serialize_surface(surface))
+    end
+    -- Sorted by index so the order is the game's and not `pairs()`'s. A
+    -- census whose order changes between reads is a census two runs cannot be
+    -- compared on.
+    table.sort(result, function(a, b) return a.index < b.index end)
+    return result
+end
+
+-- **There is deliberately no `writeout_surfaces` yet.** `output_parser.rs`
+-- logs `unexpected action: <key>` as an ERROR for any writeout key it has no
+-- arm for, so emitting the census on the stdout transport before the Rust side
+-- can receive it would put a red line in every run that looks like a defect and
+-- is not. The stdout half and its parser arm land together; see
+-- `docs/superpowers/notes/2026-09-07-two-things-the-mod-could-not-say.md`.
+
+-- The census on demand, for `factorio-bot rcon -s <host> -- ...` and for an
+-- attached (`--connect`) session. `rcon_world_snapshot` carries the same list
+-- as one of its fields; this is the cheap way to ask the one question, against
+-- a long-played save whose prototype tables are megabytes.
+--
+-- `rcon.print` is safe here for the reason the whole family above is: this is
+-- not a function the executor ever calls, so nothing reads its output as an
+-- action's result.
+function rcon_surfaces()
+    rcon.print(helpers.table_to_json(collect_surfaces()))
+end
+
 function writeout_daylight()
 	local daylight = collect_surface_daylight()
 	if daylight == nil then return end
@@ -5139,6 +5184,7 @@ function rcon_world_snapshot()
 		recipes = collect_recipes(),
 		forces = {collect_player_force()},
 		daylight = collect_surface_daylight(),
+		surfaces = collect_surfaces(),
 	}))
 end
 
@@ -6997,6 +7043,7 @@ remote.add_interface("botbridge", {
 	savepoint=rcon_savepoint,
 	session_reset=rcon_session_reset,
 	whoami=rcon_whoami,
+	surfaces=rcon_surfaces,
 
 	cheat_item=rcon_cheat_item,
 	cheat_technology=rcon_cheat_technology,

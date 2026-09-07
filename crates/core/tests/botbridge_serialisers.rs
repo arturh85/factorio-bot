@@ -2123,3 +2123,229 @@ fn daylight_through_serde(lua: &Lua, surface: Table) -> factorio_bot_core::types
         .expect("the serialised daylight converts to json");
     serde_json::from_value(json.clone()).unwrap_or_else(|err| panic!("{err} in {json}"))
 }
+
+/// Sets `crafting_categories` on a prototype table the way the live API
+/// presents it: a **dictionary** `name -> true`, not a list.
+fn with_crafting_categories(lua: &Lua, entity: &Table, categories: &[&str]) {
+    let dictionary = lua.create_table().expect("table");
+    for name in categories {
+        dictionary.set(*name, true).expect("set");
+    }
+    entity.set("crafting_categories", dictionary).expect("set");
+}
+
+/// **The field that says what a machine crafts.** `crafting_speed` already
+/// said a prototype crafts; nothing said what, and it could not be derived --
+/// `oil-refinery`, `chemical-plant`, `centrifuge`, `electromagnetic-plant` and
+/// all three assembling machines are one and the same `entity_type`
+/// (`assembling-machine`) on a live 2.1.17 world. So a reader holding
+/// `basic-oil-processing`'s category had no field, and no combination of
+/// fields, from which `oil-refinery` follows.
+///
+/// Goes the whole way into the struct rather than checking the Lua table,
+/// because a correctly spelled key can still reach no field: serde drops an
+/// unrecognised one in silence, and this file already records two live bugs of
+/// exactly that shape (`pickupPosition`, `belt_to_ground_type`).
+///
+/// The dictionary is deliberately built in a non-sorted order so that an
+/// implementation forwarding `pairs()` order would have to be lucky to pass.
+#[test]
+fn a_crafting_machine_says_which_categories_it_runs() {
+    let lua = botbridge_types();
+    let refinery = machine_prototype(&lua, "oil-refinery", "assembling-machine");
+    with_crafting_categories(&lua, &refinery, &["oil-processing", "chemical"]);
+
+    let prototype = prototype_through_serde(&lua, refinery);
+    assert_eq!(
+        prototype.crafting_categories,
+        Some(vec!["chemical".to_string(), "oil-processing".to_string()]),
+        "the dictionary's KEYS, sorted, so the order is the data's and not \
+         `pairs()`'s",
+    );
+    // Non-accidental control from the same call: a serialiser that returned an
+    // empty record, or that this harness failed to reach at all, would satisfy
+    // an assertion about categories alone.
+    assert_eq!(prototype.name, "oil-refinery");
+    assert_eq!(prototype.entity_type, "assembling-machine");
+}
+
+/// **`entity_type` cannot name the machine and this field can** -- the premise
+/// the field exists for, asserted rather than recited.
+///
+/// Two prototypes that a reader must be able to tell apart share one
+/// `entity_type`, so any rule written over `entity_type` answers the same for
+/// both; their categories are disjoint.
+#[test]
+fn two_machines_with_one_entity_type_are_separated_by_their_categories() {
+    let lua = botbridge_types();
+
+    let refinery = machine_prototype(&lua, "oil-refinery", "assembling-machine");
+    with_crafting_categories(&lua, &refinery, &["oil-processing"]);
+    let refinery = prototype_through_serde(&lua, refinery);
+
+    let assembler = machine_prototype(&lua, "assembling-machine-1", "assembling-machine");
+    with_crafting_categories(&lua, &assembler, &["crafting", "basic-crafting"]);
+    let assembler = prototype_through_serde(&lua, assembler);
+
+    assert_eq!(
+        refinery.entity_type, assembler.entity_type,
+        "premise: the discriminator a reader had before this field says the \
+         same thing about both",
+    );
+    assert_eq!(
+        refinery.crafting_categories,
+        Some(vec!["oil-processing".to_string()])
+    );
+    assert_eq!(
+        assembler.crafting_categories,
+        Some(vec!["basic-crafting".to_string(), "crafting".to_string()])
+    );
+}
+
+/// **`None` is not `Some(vec![])`, and this is the one place the crafting half
+/// deliberately differs from `resource_categories` above.**
+///
+/// A machine the game says runs no category at all has to stay
+/// distinguishable from a sender that never looked -- every world dumped
+/// before 2026-09-07, and every prototype that is not a crafting machine, for
+/// which the optional attribute reads nil. Folding the two together would
+/// answer "no machine runs `oil-processing`" for an archive that never carried
+/// the question.
+///
+/// The mod sends the empty set as the JSON object `{}`, because
+/// `helpers.table_to_json` renders an empty Lua table that way;
+/// `FactorioEntityPrototype`'s `option_vec_or_empty_map` is what accepts it.
+#[test]
+fn a_machine_that_crafts_nothing_is_distinguishable_from_one_that_never_said() {
+    let lua = botbridge_types();
+
+    let empty = machine_prototype(&lua, "modded-machine", "assembling-machine");
+    with_crafting_categories(&lua, &empty, &[]);
+    let empty = prototype_through_serde(&lua, empty);
+    assert_eq!(
+        empty.crafting_categories,
+        Some(vec![]),
+        "the game's own empty set -- this machine runs no category",
+    );
+    // Non-accidental control: the record really was produced, so `Some(vec![])`
+    // is the serialiser's answer and not a default some other path supplied.
+    assert_eq!(empty.name, "modded-machine");
+
+    let silent = machine_prototype(&lua, "stone-furnace", "furnace");
+    let silent = prototype_through_serde(&lua, silent);
+    assert_eq!(
+        silent.crafting_categories, None,
+        "the attribute is optional and reads nil for anything that is not a \
+         crafting machine -- the sender did not say",
+    );
+    assert_eq!(silent.name, "stone-furnace");
+}
+
+/// **The trap this fixture holds shut, and it points the opposite way from the
+/// beacon's.** `crafting_categories` is an ATTRIBUTE in 2.1.17 -- checked in
+/// `workspace/client1/doc-html/runtime-api.json`, where it is listed under
+/// attributes with a read type of `dictionary string -> literal true` and
+/// there is no `get_crafting_categories` method at all. `crafting_speed`,
+/// `supply_area_distance` and `maximum_wire_distance` are the other way round:
+/// methods with no attribute.
+///
+/// So a serialiser "corrected" to call a method here would find nothing on the
+/// live game, the mod's `pcall` would swallow it, and the field would arrive
+/// `None` for every prototype in silence. The fixture carries a **decoy
+/// method** with different values: reading it cannot look like success.
+#[test]
+fn the_crafting_categories_come_from_the_attribute_and_not_a_method() {
+    let lua = botbridge_types();
+    let refinery = machine_prototype(&lua, "oil-refinery", "assembling-machine");
+    with_crafting_categories(&lua, &refinery, &["oil-processing"]);
+    refinery
+        .set(
+            "get_crafting_categories",
+            lua.create_function(|lua, ()| {
+                let wrong = lua.create_table()?;
+                wrong.set("smelting", true)?;
+                Ok(wrong)
+            })
+            .expect("function"),
+        )
+        .expect("set");
+
+    assert_eq!(
+        prototype_through_serde(&lua, refinery).crafting_categories,
+        Some(vec!["oil-processing".to_string()]),
+        "read as an attribute; `smelting` is the decoy method's answer and \
+         2.1.17 has no such method",
+    );
+}
+
+/// A `LuaSurface` table with the two non-optional attributes the census reads,
+/// plus a `planet` when the caller wants one.
+fn surface_table(lua: &Lua, name: &str, index: u32, planet: Option<&str>) -> Table {
+    let surface = lua.create_table().expect("table");
+    surface.set("name", name).expect("set");
+    surface.set("index", index).expect("set");
+    if let Some(planet) = planet {
+        let planet_table = lua.create_table().expect("table");
+        planet_table.set("name", planet).expect("set");
+        // `LuaPlanet` also carries `prototype`, `surface`, `valid` and
+        // `object_name`; only `name` is read, and the extras are here so the
+        // fixture is the shape the game presents rather than the shape the
+        // serialiser happens to need.
+        planet_table.set("object_name", "LuaPlanet").expect("set");
+        planet_table.set("valid", true).expect("set");
+        surface.set("planet", planet_table).expect("set");
+    }
+    surface
+}
+
+fn surface_through_serde(
+    lua: &Lua,
+    surface: Table,
+) -> factorio_bot_core::types::FactorioSurfaceInfo {
+    let out = call(lua, "serialize_surface", surface);
+    let json: serde_json::Value = lua
+        .from_value(Value::Table(out))
+        .expect("the serialised surface converts to json");
+    serde_json::from_value(json.clone()).unwrap_or_else(|err| panic!("{err} in {json}"))
+}
+
+/// **A planet says which planet it is, and that is not its surface's name in
+/// general.** `LuaSurface.planet` is an optional attribute returning a
+/// `LuaPlanet` (checked in `workspace/client1/doc-html/runtime-api.json`), and
+/// the name read off it is the planet's, not the surface's.
+///
+/// The fixture uses a surface whose name **differs** from its planet's, so a
+/// serialiser that copied `surface.name` into both fields -- the obvious wrong
+/// implementation, and one that would pass on Nauvis, where the two agree --
+/// fails here.
+#[test]
+fn a_surface_on_a_planet_names_the_planet() {
+    let lua = botbridge_types();
+    let info = surface_through_serde(
+        &lua,
+        surface_table(&lua, "vulcanus-2", 3, Some("vulcanus")),
+    );
+    assert_eq!(info.name, "vulcanus-2");
+    assert_eq!(info.index, 3);
+    assert_eq!(
+        info.planet.as_deref(),
+        Some("vulcanus"),
+        "the PLANET's name, read through LuaSurface.planet.name -- not the \
+         surface's, which differs here on purpose",
+    );
+}
+
+/// **A surface with no planet is a real answer, not a missing one.** That is
+/// what a space platform is, and telling it apart from a planet is the point:
+/// a platform moves and a planet does not.
+///
+/// Paired with a positive assertion from the same call, because "the field is
+/// absent" is satisfied by a serialiser that produced nothing at all.
+#[test]
+fn a_surface_that_is_not_a_planet_says_so_rather_than_going_missing() {
+    let lua = botbridge_types();
+    let info = surface_through_serde(&lua, surface_table(&lua, "platform-1", 7, None));
+    assert_eq!(info.planet, None);
+    assert_eq!(info.name, "platform-1", "the record was produced");
+    assert_eq!(info.index, 7);
+}

@@ -1651,6 +1651,69 @@ pub struct FactorioEntityPrototype {
         deserialize_with = "deserialize_helpers::option_vec_or_empty_map"
     )]
     pub resource_categories: Option<Vec<String>>,
+    /// The recipe categories this prototype's machine runs. Sorted by the mod
+    /// so the order is the data's, not `pairs()`'s. Read live off a Space Age
+    /// 2.1.17 game, 18 of 1028 prototypes report any:
+    ///
+    /// ```text
+    /// stone-furnace         furnace              smelting
+    /// assembling-machine-1  assembling-machine   advanced-crafting, crafting, parameters
+    /// oil-refinery          assembling-machine   oil-processing, parameters
+    /// chemical-plant        assembling-machine   chemistry, parameters
+    /// centrifuge            assembling-machine   centrifuging, parameters
+    /// ```
+    ///
+    /// **`parameters` is not a category anybody makes anything in** -- it is
+    /// Factorio 2.0's blueprint-parameter pseudo-category, and it sits on four
+    /// of those five. A reader must not take a `parameters` match as evidence
+    /// that a machine runs a recipe. (The chemical plant's real category is
+    /// spelled `chemistry`, not `chemical`.)
+    ///
+    /// # This is the field that says *what* a machine crafts
+    ///
+    /// [`Self::crafting_speed`] already says a prototype crafts. Nothing said
+    /// what, and it could not be derived: measured over
+    /// `crates/core/tests/live-2.1.17-world-snapshot.json`, twelve prototypes
+    /// there declare a crafting speed, and `oil-refinery`, `chemical-plant`,
+    /// `centrifuge`, `electromagnetic-plant` and all three assembling machines
+    /// are one and the same `entity_type`, `assembling-machine`. So a reader
+    /// holding a recipe's category had no field, and no combination of fields,
+    /// from which the machine that runs it follows.
+    ///
+    /// It is the crafting half of the rule
+    /// [`Self::resource_categories`] already carries for mining: a recipe
+    /// carries a category, a machine carries the categories it supports, and
+    /// the machine runs the recipe iff the former is in the latter.
+    ///
+    /// # `None` is not `Some(vec![])`
+    ///
+    /// `None` is *the sender did not say* -- every world dumped or snapshotted
+    /// before 2026-09-07, and every prototype that is not a crafting machine,
+    /// for which the optional attribute reads nil. `Some(vec![])` is *the game
+    /// says this machine runs no category*. A reader that folded the two
+    /// together would answer "no machine runs `oil-processing`" for an archive
+    /// that never carried the question.
+    ///
+    /// `deserialize_with`, because the mod sends an empty set as the JSON
+    /// object `{}` -- `helpers.table_to_json` renders an empty Lua table that
+    /// way -- and a bare `Option<Vec<String>>` would reject it.
+    ///
+    /// # It is an attribute
+    ///
+    /// `LuaEntityPrototype.crafting_categories` is an attribute in 2.1.17,
+    /// checked in `workspace/client1/doc-html/runtime-api.json`, unlike
+    /// `get_crafting_speed()`, `get_supply_area_distance()` and
+    /// `get_max_wire_distance()`, which are methods with no attribute at all.
+    /// That distinction is not cosmetic: reading a method as an attribute
+    /// raises, the mod's `pcall` swallows the error, and the field arrives
+    /// `None` for every prototype in the game with nothing anywhere saying it
+    /// should not have -- which is how [`Self::crafting_speed`] was nil for
+    /// 1028 live prototypes.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_helpers::option_vec_or_empty_map"
+    )]
+    pub crafting_categories: Option<Vec<String>>,
     /// `mineable_properties.required_fluid`: the fluid that must be piped in
     /// to mine this at all. Uranium ore needs sulfuric acid, and a character
     /// has no pipe.
@@ -2007,6 +2070,70 @@ pub struct SurfaceDaylight {
     /// can be true and the integral still wrong.
     #[serde(default)]
     pub freeze_daytime: Option<bool>,
+}
+
+/// One row of the surface census: what a surface **is**, not what is on it.
+///
+/// # It exists so that "one surface" stops looking like "we never looked"
+///
+/// The mod's `on_chunk_generated` drops every non-Nauvis chunk and names the
+/// surface it dropped, so each individual refusal is honest. But **nothing
+/// enumerated `game.surfaces`**, so a world model holding one surface was
+/// equally consistent with a save that has one surface and with a save whose
+/// other surfaces were never mentioned. The world-record base was loaded and
+/// its census read 39,237 entities, every one on `nauvis`; that number could
+/// not distinguish the two readings either, because the entities that would
+/// have said otherwise were dropped upstream.
+///
+/// So this reports **what exists**. It does not ingest anything, and the mod's
+/// Nauvis guard is untouched.
+///
+/// # Absent is not empty
+///
+/// **Store a census as `Option<Vec<Self>>`, never a bare `Vec`.** `None` is
+/// *nobody enumerated* -- every world dumped or snapshotted before 2026-09-07,
+/// and any BotBridge older than the field -- while an empty list would be the
+/// claim that the game has no surfaces at all, which is impossible. Folding
+/// the two together puts the field straight back into the silence it exists to
+/// end.
+///
+/// # Where it comes from, and where it does not go yet
+///
+/// The mod answers `remote.call('botbridge', 'surfaces')` and carries the same
+/// list as a `surfaces` field on its `world_snapshot` reply. **Nothing in Rust
+/// receives it yet**: the landing sites are `WorldSnapshot`, a home on the
+/// world aggregate, and a `"surfaces"` arm in `output_parser.rs` (which must
+/// land in the same commit as the mod's `writeout_surfaces`, because the
+/// parser logs an *error* for a writeout key it has no arm for). The extra
+/// snapshot key is ignored rather than rejected meanwhile. See
+/// `docs/superpowers/notes/2026-09-07-two-things-the-mod-could-not-say.md`.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema, utoipa::ToSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub struct FactorioSurfaceInfo {
+    /// `LuaSurface.name`: `nauvis`, `vulcanus`, or a platform's own name.
+    /// This is the key `SurfaceId` is built from.
+    pub name: String,
+    /// `LuaSurface.index`, and the reason `game.surfaces[1]` is a different
+    /// claim from `game.surfaces['nauvis']` -- the numeric index says
+    /// "whichever surface was made first", which happens to be Nauvis on
+    /// every save this project has run and is not guaranteed to be.
+    ///
+    /// The census is sorted by it, so two reads of one game are comparable.
+    pub index: u32,
+    /// The name of the planet this surface **is**, from `LuaSurface.planet`
+    /// (an optional attribute returning a `LuaPlanet`, checked against
+    /// `runtime-api.json` rather than recalled) -- so `nauvis` for Nauvis and
+    /// `vulcanus` for Vulcanus.
+    ///
+    /// **`None` is a real answer here, not absence of one**, and it is the
+    /// distinction worth having: a space platform is a surface that is not a
+    /// planet, and a platform moves while a planet does not. A caller reading
+    /// `None` as "we did not ask" would mistake every platform for a gap in
+    /// the record.
+    #[serde(default)]
+    pub planet: Option<String>,
 }
 
 /// One straight run of the daylight curve: a length in days, and the
@@ -3203,6 +3330,7 @@ mod tests {
             fluidbox_prototypes: None,
             resource_category: None,
             resource_categories: None,
+            crafting_categories: None,
             mining_fluid: None,
             supply_area_distance: None,
             maximum_wire_distance: None,

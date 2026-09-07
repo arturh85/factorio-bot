@@ -134,6 +134,41 @@ closing that gap with a table would repeat the defect §2 just found.
 
 ---
 
+---
+
+## 4. Solar is derivable now, and deliberately not yet credited
+
+**Your 25:21 was right, and our reading of it was not.** It is the **accumulator**
+ratio, not a statement that average output is 0.84 of nameplate. Two different
+integrals of the same curve, and treating one as the other sizes an array **20%
+short**:
+
+```
+average       0.70 of nameplate   60 kW noon -> 42 kW
+              0.50*1 + 0.20*0.5 + 0.10*0 + 0.20*0.5
+accumulators  0.84 per panel      integral of max(0, average - instantaneous)
+              0.168 of a day's output -> 4.2 MJ against a 5 MJ buffer -> 25:21
+```
+
+One channel now reproduces **both** vanilla ratios by independent paths, and
+neither `0.7`, `42` nor `0.84` appears anywhere in code — only in doc comments,
+as results.
+
+**A live 2.1.17 day is 25,200 ticks, not the 25,000 every reference gives** —
+seven minutes exactly. The average is a fraction of a day so it does not move;
+the accumulator ratio is proportional, so it is **0.8467** here. The 0.8% gap
+from your 0.84 is entirely day length. Captured as a fixture rather than
+asserted.
+
+**What is deliberately NOT done: solar is still not credited in
+`electric_supply_kw`.** The determinism objection is answered — the average is
+derivable and reproducible — but **nothing checks the accumulators are
+standing**, and crediting generation without that trades a false refusal for a
+base that dies at midnight. Closing it is a solar arm of `method::power`, and it
+is the natural next step once you have ruled on the anchor question above.
+
+---
+
 ## What is NOT waiting on anything
 
 Everything else overnight is merged and green: gathering bills its own unlock,

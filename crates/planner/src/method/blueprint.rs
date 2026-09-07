@@ -2027,6 +2027,107 @@ mod tests {
         );
     }
 
+    /// **The loop closes: the anchor a caller must pin is the anchor the plan
+    /// hands back.**
+    ///
+    /// `Site::Anchored` is only usable if a caller can learn a resolved
+    /// anchor, and this is the mechanism — `ActionKind::StampGhosts` carries
+    /// it, and `plan.rs` exposes it to Lua as the `stamp_ghosts` step's `pos`.
+    /// So the full pattern is:
+    ///
+    /// ```lua
+    /// local plan = goal.plan(goal.built(BP))
+    /// local anchor
+    /// for _, st in ipairs(plan.steps) do
+    ///   if st.kind == "stamp_ghosts" then anchor = st.pos end
+    /// end
+    /// -- every later plan of this block, immune to cross-block recovery:
+    /// goal.plan(goal.built(BP, { anchored = anchor }))
+    /// ```
+    ///
+    /// This test exists because the two halves are in different crates and
+    /// could drift into disagreement silently: if the stamp ever carried
+    /// something other than the anchor `resolve_site` chose — the caller's
+    /// seed, say, or the first entity's tile — a script following the
+    /// documented pattern would pin the wrong tile and rebuild the block
+    /// somewhere else, with nothing failing anywhere.
+    #[test]
+    fn the_stamp_carries_the_anchor_a_caller_must_pin() {
+        use crate::ids::BotId;
+        use factorio_bot_core::test_utils::fixture_world;
+        use std::sync::Arc;
+
+        // `moving_block`, not `miner_line`: the fixture world has no ore, so a
+        // block of drills correctly refuses to site at all (`drills_are_fed`),
+        // and this test is about the stamp rather than about siting quality.
+        let blueprint = include_str!("../../../core/tests/blueprints/moving_block.txt")
+            .trim()
+            .to_string();
+        let bp = decode(&blueprint).expect("fixture decodes");
+        let seed = Position::new(0.5, 0.5);
+
+        // **The origin is blocked on purpose.** Unobstructed, this block sites
+        // at (0, 0) — and a test whose expected anchor is the origin cannot
+        // tell a stamp carrying the resolved anchor from one carrying a
+        // default, a zero, or the caller's seed. The first version of this
+        // test did exactly that and passed against a stamp hard-coded to
+        // (0, 0). An obstacle pushes the search to a tile no constant would
+        // coincide with, which is what gives the assertion content.
+        let mut state = PlanState::from_world(Arc::new(fixture_world()), &[BotId(1)]);
+        state.create_entity(stone_furnace_at(0.0, 0.0));
+
+        let (resolved, source) = resolve_and_guard(&state, &bp, &Site::Near(seed.clone()))
+            .expect("open ground exists in the fixture world");
+        assert_ne!(
+            Pos::from(&resolved),
+            Pos::from(&Position::new(0.0, 0.0)),
+            "the obstacle must actually move the anchor, or this test is \
+             vacuous again"
+        );
+        assert_eq!(
+            source,
+            AnchorSource::Search,
+            "premise: this is a searched anchor, so it is one the caller could \
+             not have known in advance -- which is why it must be handed back"
+        );
+
+        // The same world the anchor was resolved against, obstacle included:
+        // expanding against a *different* world would compare two answers to
+        // two different questions.
+        let mut ctx = ExpansionCtx::new(state.clone(), BotId(1));
+        let goal = Goal::Built {
+            blueprint,
+            site: Site::Near(seed),
+        };
+        let steps = BuildBlock
+            .expand(&goal, &mut ctx)
+            .expect("the block expands");
+
+        let stamped: Vec<&Position> = steps
+            .iter()
+            .filter_map(|s| match s {
+                Step::Act(a) => match &a.kind {
+                    ActionKind::StampGhosts { anchor, .. } => Some(anchor),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            stamped.len(),
+            1,
+            "a fresh block stamps exactly once, and that stamp is where the \
+             caller reads the anchor from"
+        );
+        assert_eq!(
+            Pos::from(stamped[0]),
+            Pos::from(&resolved),
+            "the stamp must carry the anchor siting actually chose -- a script \
+             pinning anything else rebuilds the block at the wrong tile, and \
+             nothing would fail"
+        );
+    }
+
     /// **A recorded anchor survives another block standing on top of the
     /// answer — the crosstalk defect, closed.**
     ///

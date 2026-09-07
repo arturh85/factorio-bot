@@ -529,6 +529,93 @@ fn a_crafting_recipe_the_hand_methods_cannot_be_told_about_is_refused() {
 }
 
 // ---------------------------------------------------------------------------
+// The choice survives being split across bots
+// ---------------------------------------------------------------------------
+
+/// **A share is the same want, sized smaller, so it carries the recipe.**
+///
+/// `SplitAcrossBots` deals a `Holder::Anyone` goal out as `Holder::Share(b)`
+/// subgoals. If the share dropped `via`, each share would be an *unqualified*
+/// goal about an ambiguous product and would refuse one rung down, naming a
+/// share nobody asked for -- which is the exact failure shape
+/// `fluid_have_refusal`'s own doc describes for the fluid case.
+///
+/// # The world is an experiment, because vanilla has no such ambiguity left
+///
+/// Since the recycling filter landed, no vanilla product has two recipes this
+/// planner can run *and* an all-item bill. So a second `chemistry` recipe for
+/// `plastic-bar` is injected, and both are stripped of their fluids. The
+/// control is the first assertion: **unqualified, this goal refuses as
+/// ambiguous** -- so a plan appearing at all is caused by the qualifier, and
+/// a plan appearing with more than one machine placed proves the split really
+/// happened rather than the goal being satisfied by one bot.
+#[test]
+fn a_share_of_a_split_goal_keeps_the_recipe_the_caller_named() {
+    let world = |recipes: &mut Vec<FactorioRecipe>| {
+        enable(recipes, "plastic-bar");
+        drop_fluid_ingredients(recipes, "plastic-bar");
+        let base = recipes
+            .iter()
+            .find(|r| r.name == "plastic-bar")
+            .expect("the capture has plastic-bar")
+            .clone();
+        let mut alt = base.clone();
+        alt.name = "alt-plastic".to_string();
+        assert_eq!(alt.category, "chemistry");
+        recipes.push(alt);
+    };
+
+    let ambiguous = plan_error(
+        live_state_with(&BOTS, true, world),
+        Goal::Have {
+            item: "plastic-bar".into(),
+            count: 8,
+            whose: Holder::Anyone,
+            via: None,
+        },
+    );
+    assert!(
+        ambiguous.contains("nothing here can choose between them"),
+        "the control: unqualified, this product is ambiguous here -- {ambiguous}"
+    );
+
+    let state = live_state_with(&BOTS, true, world);
+    let registry = registry_for(&BOTS);
+    let net = expand(
+        &[Goal::Have {
+            item: "plastic-bar".into(),
+            count: 8,
+            whose: Holder::Anyone,
+            via: Some("alt-plastic".into()),
+        }],
+        &state,
+        &registry,
+        BOTS[0],
+    )
+    .expect("the qualifier answers the ambiguity for every share too");
+    let labels: Vec<String> = net.actions().map(|a| a.label.clone()).collect();
+    let plants = labels
+        .iter()
+        .filter(|l| l.starts_with("place chemical-plant"))
+        .count();
+    assert!(
+        plants > 1,
+        "the goal must really have been split, or this test proves nothing about a share: \
+         {labels:?}"
+    );
+    // And every one of them runs the recipe that was named, not the other.
+    let set: Vec<&String> = labels
+        .iter()
+        .filter(|l| l.starts_with("set chemical-plant to"))
+        .collect();
+    assert_eq!(set.len(), plants);
+    assert!(
+        set.iter().all(|l| l.ends_with("alt-plastic")),
+        "every share runs the named recipe: {set:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // It refuses before anything is planned
 // ---------------------------------------------------------------------------
 

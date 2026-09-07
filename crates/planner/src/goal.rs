@@ -509,6 +509,90 @@ mod tests {
         assert_ne!(a, c);
     }
 
+    /// **The `via` suffix, which nothing asserted until a mutation went green.**
+    ///
+    /// `Goal::Display`'s output is quoted verbatim into
+    /// `PlannerError::NoApplicableMethod`, so a goal whose recipe vanished
+    /// from its rendering would refuse under a description of a *different*
+    /// goal. Found by breaking `write_via` to emit nothing for `Some` and
+    /// watching the whole suite stay green: the Lua binding's `render_goal`
+    /// was pinned and this was not.
+    ///
+    /// Paired with the unqualified rendering, which must be **unchanged** --
+    /// that half is what every pre-existing diagnostic depends on.
+    #[test]
+    fn a_named_recipe_appears_in_the_rendering_and_absence_changes_nothing() {
+        let have = |via: Option<&str>| Goal::Have {
+            item: "petroleum-gas".into(),
+            count: 100,
+            whose: Holder::Anyone,
+            via: via.map(str::to_string),
+        };
+        assert_eq!(have(None).to_string(), "have 100 petroleum-gas (anyone)");
+        assert_eq!(
+            have(Some("basic-oil-processing")).to_string(),
+            "have 100 petroleum-gas (anyone) via basic-oil-processing"
+        );
+
+        let produced = |via: Option<&str>, unlocks: Option<&str>| Goal::Produced {
+            item: "iron-plate".into(),
+            count: 50,
+            whose: Holder::Anyone,
+            unlocks: unlocks.map(str::to_string),
+            via: via.map(str::to_string),
+        };
+        assert_eq!(produced(None, None).to_string(), "produce 50 iron-plate");
+        assert_eq!(
+            produced(Some("iron-plate"), None).to_string(),
+            "produce 50 iron-plate via iron-plate"
+        );
+        // Both qualifiers at once, so neither swallows the other.
+        assert_eq!(
+            produced(Some("iron-plate"), Some("steam-power")).to_string(),
+            "produce 50 iron-plate to unlock steam-power via iron-plate"
+        );
+    }
+
+    /// A named recipe survives JSON, and a document written before the field
+    /// existed still parses -- which is what `--goal-json` documents already
+    /// on disk depend on.
+    #[test]
+    fn a_named_recipe_survives_json_and_an_older_document_still_parses() {
+        use factorio_bot_core::serde_json;
+        let goal = Goal::Produced {
+            item: "petroleum-gas".into(),
+            count: 100,
+            whose: Holder::Anyone,
+            unlocks: None,
+            via: Some("basic-oil-processing".into()),
+        };
+        let json = serde_json::to_string(&goal).expect("serialises");
+        assert!(json.contains("basic-oil-processing"), "{json}");
+        assert_eq!(
+            serde_json::from_str::<Goal>(&json).expect("deserialises"),
+            goal
+        );
+
+        // `skip_serializing_if`: an unqualified goal writes no `via` key at
+        // all, so a document round-tripped through this crate is byte-for-byte
+        // what it was before the field existed.
+        let plain = Goal::Have {
+            item: "iron-plate".into(),
+            count: 4,
+            whose: Holder::Anyone,
+            via: None,
+        };
+        let json = serde_json::to_string(&plain).expect("serialises");
+        assert!(!json.contains("via"), "{json}");
+
+        // And `serde(default)`: a hand-written document with no `via` is
+        // *absent*, not malformed.
+        let older: Goal =
+            serde_json::from_str(r#"{"Have":{"item":"iron-plate","count":4,"whose":"Anyone"}}"#)
+                .expect("a document written before the field parses");
+        assert_eq!(older, plain);
+    }
+
     #[test]
     fn goals_survive_a_json_round_trip() {
         // The next increment ships schedules to an HTTP server and a Vue

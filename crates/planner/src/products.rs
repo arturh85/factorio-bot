@@ -1244,9 +1244,14 @@ mod product_index_tests {
             Err(ProductRefusal::Ambiguous { .. })
         ));
         assert_eq!(
-            i.recipe_producing("iron-gear-wheel", &both, Some("casting-iron-gear-wheel"), &machines)
-                .expect("the caller chose")
-                .name,
+            i.recipe_producing(
+                "iron-gear-wheel",
+                &both,
+                Some("casting-iron-gear-wheel"),
+                &machines
+            )
+            .expect("the caller chose")
+            .name,
             "casting-iron-gear-wheel"
         );
     }
@@ -1264,19 +1269,32 @@ mod product_index_tests {
             Err(ProductRefusal::NoSuchRecipe { .. })
         ));
         assert!(matches!(
-            i.recipe_producing("iron-gear-wheel", &runs, Some("basic-oil-processing"), &machines),
+            i.recipe_producing(
+                "iron-gear-wheel",
+                &runs,
+                Some("basic-oil-processing"),
+                &machines
+            ),
             Err(ProductRefusal::RecipeDoesNotProduce { .. })
         ));
         // `metallurgy` has no machine in an empty table -- and the message is
         // the machine table's own, saying the world never declared anything.
         let no_machine = i
-            .recipe_producing("iron-gear-wheel", &runs, Some("casting-iron-gear-wheel"), &machines)
+            .recipe_producing(
+                "iron-gear-wheel",
+                &runs,
+                Some("casting-iron-gear-wheel"),
+                &machines,
+            )
             .expect_err("metallurgy has no machine here");
         assert!(matches!(
             no_machine,
             ProductRefusal::NamedRecipeNotRunnable { .. }
         ));
-        assert!(no_machine.to_string().contains("it did not say"), "{no_machine}");
+        assert!(
+            no_machine.to_string().contains("it did not say"),
+            "{no_machine}"
+        );
         assert_eq!(no_machine.named_recipe(), Some("casting-iron-gear-wheel"));
 
         // And the three refusals that exist without a caller naming anything

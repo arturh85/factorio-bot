@@ -28,7 +28,6 @@
 //! capture with `crafting_categories` injected from the game's own data files,
 //! and every test that needs the contrast carries its **undeclared control**.
 
-
 use factorio_bot_core::factorio::snapshot::WorldSnapshot;
 use factorio_bot_core::serde_json;
 use factorio_bot_core::test_utils::fixture_world;
@@ -214,7 +213,6 @@ fn plan_error(state: PlanState, goal: Goal) -> String {
     }
 }
 
-
 // ---------------------------------------------------------------------------
 // Absent is not a value
 // ---------------------------------------------------------------------------
@@ -240,7 +238,10 @@ fn a_goal_that_names_no_recipe_gets_the_message_it_always_got() {
             via: None,
         },
     );
-    assert!(said.contains("nothing here can choose between them"), "{said}");
+    assert!(
+        said.contains("nothing here can choose between them"),
+        "{said}"
+    );
     assert!(said.contains("ask for a recipe by name"), "{said}");
     for runnable in [
         "advanced-oil-processing",
@@ -321,7 +322,10 @@ fn naming_the_recipe_moves_the_refusal_to_the_fluid_ingredient() {
         !said.contains("nothing here can choose between them"),
         "the ambiguity is answered: {said}"
     );
-    assert!(said.contains("basic-oil-processing runs in oil-refinery"), "{said}");
+    assert!(
+        said.contains("basic-oil-processing runs in oil-refinery"),
+        "{said}"
+    );
     assert!(said.contains("100 crude-oil"), "{said}");
     assert!(said.contains("which is a fluid"), "{said}");
 }
@@ -349,7 +353,10 @@ fn naming_a_different_recipe_for_the_same_product_reaches_a_different_wall() {
             via: Some("light-oil-cracking".into()),
         },
     );
-    assert!(said.contains("light-oil-cracking runs in chemical-plant"), "{said}");
+    assert!(
+        said.contains("light-oil-cracking runs in chemical-plant"),
+        "{said}"
+    );
     assert!(said.contains("nowhere for it to land"), "{said}");
 }
 
@@ -436,10 +443,7 @@ fn on_a_world_that_never_said_the_machine_reason_says_it_did_not_say() {
         },
     );
     assert!(said.contains("it did not say"), "{said}");
-    assert!(
-        said.contains("predates `crafting_categories`"),
-        "{said}"
-    );
+    assert!(said.contains("predates `crafting_categories`"), "{said}");
 }
 
 /// A `crafting` recipe the hand-craft methods **would** pick is honoured, and

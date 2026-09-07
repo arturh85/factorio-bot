@@ -715,7 +715,10 @@ mod tests {
             .load(r#"return goal.have("iron-plate", 5)"#)
             .eval()
             .expect("script");
-        assert_eq!(render_goal(&plain).expect("render_goal"), "have 5 iron-plate");
+        assert_eq!(
+            render_goal(&plain).expect("render_goal"),
+            "have 5 iron-plate"
+        );
     }
 
     /// An empty `via` is a caller who meant to name a recipe and named

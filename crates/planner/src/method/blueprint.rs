@@ -5122,6 +5122,99 @@ mod block_demand_tests {
         );
     }
 
+    /// **The modular unit tiles at a period it declares, and the period leaves
+    /// a beacon lane.**
+    ///
+    /// `Site::Beside` and `SmeltRow24` were built for each other — the owner
+    /// chose the modular 24-furnace unit over one wide layout so units could
+    /// be stamped repeatedly — and for a day they did not compose. The verb
+    /// requires a declared pitch; the block declared none; so the one block
+    /// tiling exists for was refused by name. Two halves, each correct alone,
+    /// disagreeing at the boundary.
+    ///
+    /// Every number below is derived, none chosen:
+    ///
+    /// - **24 x 11 is the footprint.** Twelve 2x2 furnaces at x = 1, 3 … 23
+    ///   tile x to exactly [0, 24); the outer belts at y = -4.5 and y = 5.5
+    ///   bound y to [-5, 6).
+    /// - **+3 is one beacon.** Its `collision_box` of ±1.2 makes it 3x3, so
+    ///   three tiles is the narrowest lane that can hold one.
+    /// - **The lane is useful because a beacon in it reaches both
+    ///   neighbours.** `supply_area_distance = 3` grows that 3x3 box to 9x9,
+    ///   so a beacon centred in the lane supplies y[3, 12] — which meets this
+    ///   unit's south furnace row at y[2, 4] and the next unit's north row at
+    ///   y[11, 13].
+    ///
+    /// **The lane buys nothing today, which is the point.** `stone-furnace`
+    /// and `steel-furnace` have no module slots at all; `electric-furnace`
+    /// has 2. It is empty ground now against a teardown at the
+    /// electric-smelter milestone — the owner's standing instruction, and the
+    /// same reason `MinerLine` declares a pitch of 7 for an extent of 5.
+    ///
+    /// **y is the tiling axis; x is width, not an invitation.** Stamping at
+    /// x + 24 continues one feed belt into a second unit, and 24 furnaces
+    /// already saturate that belt — the far unit would starve exactly as the
+    /// measured gradient says it does.
+    ///
+    /// One fragility, recorded because the number sits *on* the boundary
+    /// rather than inside it: a medium pole's `maximum_wire_distance` is 9,
+    /// and this period puts one unit's y = 4.5 pole exactly 9.0 tiles from
+    /// the next unit's y = 13.5 pole, so tiled units share one electric
+    /// network. Widen the lane by a single tile and they silently stop
+    /// connecting.
+    #[test]
+    fn the_modular_unit_declares_a_period_that_leaves_a_beacon_lane() {
+        let s = state();
+        let bp = fixture("SmeltRow24");
+        let grid = bp.grid.clone().expect("SmeltRow24 declares a period");
+
+        assert_eq!(
+            (grid.pitch.x(), grid.pitch.y()),
+            (24.0, 14.0),
+            "the declared period: a 24 x 11 footprint plus a 3-tile beacon lane"
+        );
+
+        // Non-vacuous in the way the MinerLine test is: the period must differ
+        // from the drawn extent, or tiling at the extent would pass too.
+        let span_y = {
+            let ys: Vec<f64> = bp.entities.iter().map(|e| e.offset.y()).collect();
+            ys.iter().cloned().fold(f64::MIN, f64::max)
+                - ys.iter().cloned().fold(f64::MAX, f64::min)
+        };
+        assert_eq!(span_y, 10.0, "the drawn extent of its entity centres");
+        assert!(
+            grid.pitch.y() > span_y + 1.0,
+            "the period must exceed the 11-tile footprint, or the lane the \
+             owner asked to reserve is not there"
+        );
+
+        // The composition this test exists for: a second unit, one step down.
+        let (at, source) = resolve_and_guard(
+            &s,
+            &bp,
+            &Site::Beside {
+                of: Position::new(0.0, 0.0),
+                steps: (0, 1),
+            },
+        )
+        .expect("a declared period is enough to place the next unit");
+        assert_eq!((at.x(), at.y()), (0.0, 14.0));
+        assert_eq!(source, AnchorSource::Recorded);
+
+        // And stacking is what the y axis buys: two steps is two periods, not
+        // two extents.
+        let (two, _) = resolve_and_guard(
+            &s,
+            &bp,
+            &Site::Beside {
+                of: Position::new(0.0, 0.0),
+                steps: (0, 2),
+            },
+        )
+        .expect("resolves");
+        assert_eq!(two.y(), 28.0, "units stack at the period, not the extent");
+    }
+
     #[test]
     fn two_big_poles_twenty_tiles_apart_are_wired_because_a_big_pole_reaches_32() {
         let s = state();

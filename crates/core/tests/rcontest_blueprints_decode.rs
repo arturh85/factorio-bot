@@ -282,7 +282,7 @@ fn the_t_junction_smelter_separates_its_lanes_and_needs_no_research() {
     }
 }
 
-/// **The three fixtures that declare a grid keep their pitch through decode.**
+/// **The fixtures that declare a grid keep their pitch through decode.**
 ///
 /// Until 2026-09-08 `snap-to-grid` and `absolute-snapping` were allowlisted and
 /// silently discarded, and `position-relative-to-grid` was not allowlisted at
@@ -316,12 +316,17 @@ fn the_fixtures_that_declare_a_grid_keep_it() {
         vec![
             ("FurnaceLine".to_string(), 29.0, 11.0, true),
             ("MinerLine".to_string(), 7.0, 21.0, true),
+            ("SmeltRow24".to_string(), 24.0, 14.0, false),
         ],
         "the declared pitches, read back off the real fixtures. StarterScience \
          declares snap-to-grid 6x11 in its JSON and is absent here on purpose: \
          it carries RECIPES, which this decoder refuses by name, so it never \
-         reaches the grid at all. A raw JSON scan sees three; the decoder sees \
-         two, and the decoder is what the planner gets"
+         reaches the grid at all. A raw JSON scan sees four; the decoder sees \
+         three, and the decoder is what the planner gets. SmeltRow24 is the \
+         one with RELATIVE snapping: its period is a claim about how far apart \
+         two copies sit, which is all `Site::Beside` reads, and absolute \
+         snapping would additionally pin it to a global lattice — a claim \
+         nothing here has grounds to make"
     );
     assert!(
         without >= 10,

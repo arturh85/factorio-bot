@@ -32,14 +32,18 @@ MUTATIONS = [
     (
         "the pre-check never fires (bound raised past any map)",
         FILE,
-        """    let reach = PIPE_RUN_REACH;""",
-        """    let reach = PIPE_RUN_REACH * 1_000_000.;""",
+        """    let reach = PIPE_RUN_REACH;
+    if let Some((fluid, _, away)) = furthest_source(&anchor, &sources)""",
+        """    let reach = PIPE_RUN_REACH * 1_000_000.;
+    if let Some((fluid, _, away)) = furthest_source(&anchor, &sources)""",
     ),
     (
         "the loose bound the fixture caught: reach + the ring radius",
         FILE,
-        """    let reach = PIPE_RUN_REACH;""",
-        """    let reach = PIPE_RUN_REACH + ring_reach();""",
+        """    let reach = PIPE_RUN_REACH;
+    if let Some((fluid, _, away)) = furthest_source(&anchor, &sources)""",
+        """    let reach = PIPE_RUN_REACH + ring_reach();
+    if let Some((fluid, _, away)) = furthest_source(&anchor, &sources)""",
     ),
     (
         "distance measured Euclidean instead of Chebyshev",

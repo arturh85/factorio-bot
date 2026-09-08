@@ -1377,7 +1377,26 @@ impl EntityGraph {
 
     pub fn resource_patches(&self, resource_name: &str) -> Vec<ResourcePatch> {
         let mut patches: Vec<ResourcePatch> = vec![];
-        let mut positions_by_id: HashMap<Pos, Option<u32>> = HashMap::new();
+        // `BTreeMap`, not `HashMap`, and the ordering is load-bearing twice
+        // over. `HashMap`'s `RandomState` is seeded **per process**, so with
+        // one this function was nondeterministic across runs of the same
+        // binary on the same input, in two separate places:
+        //
+        //   * the `.find(|(_, v)| v.is_none())` below picks the seed tile of
+        //     the next flood fill, so *which* patch is numbered 1 and which 2
+        //     was hash order; and
+        //   * the `for (k, v) in &positions_by_id` that collects a patch's
+        //     tiles decided the order of `elements` within it.
+        //
+        // Nothing observed depended on either -- the offline baselines have
+        // been stable -- but `crates/planner` promises pure, deterministic
+        // planning over ordered collections only, and this sits directly on
+        // its path (`resource_patches` is called ~14.5k times in one crude-oil
+        // plan). An unordered collection that has not bitten yet is a latent
+        // baseline that moves for no reason anyone can reproduce, which is the
+        // hardest kind of regression this project could have. Keyed by `Pos`,
+        // which derives `Ord`, so the sort is by position and free of surprise.
+        let mut positions_by_id: BTreeMap<Pos, Option<u32>> = BTreeMap::new();
         let resource = self.resources.get(resource_name);
         if resource.is_none() {
             warn!("no resource patch found for '{}'", resource_name);

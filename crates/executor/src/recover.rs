@@ -1015,6 +1015,25 @@ mod tests {
             walk_halted_on_a_stall(&log),
             "halting on the last step is still halting"
         );
+
+        // **One stalled halt is enough, among any number of good walks.** The
+        // question is "did this happen at all", not "did it happen every
+        // time": a plan whose other nineteen walks arrived is still a plan
+        // that cannot get this bot to this tile, and asking every walk to
+        // agree would silence the check on every run but the pathological one.
+        log.start_walk(BotId(2), 0, Position::new(1., 1.), 0, 60);
+        log.observe_walk(
+            BotId(2),
+            0,
+            crate::ActionTicks {
+                dispatched: Some(0),
+                replied: Some(30),
+            },
+        );
+        assert!(
+            walk_halted_on_a_stall(&log),
+            "a walk that arrived does not un-halt the one that did not"
+        );
     }
 
     #[test]

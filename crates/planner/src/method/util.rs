@@ -8,7 +8,7 @@ use crate::state::PlanState;
 use factorio_bot_core::factorio::util::calculate_distance;
 use factorio_bot_core::num_traits::ToPrimitive;
 use factorio_bot_core::types::{
-    Direction, FactorioRecipe, FactorioTechnology, Position, Rect, ResearchTrigger,
+    Direction, FactorioRecipe, FactorioTechnology, Position, Rect, ResearchTrigger, ResourcePatch,
 };
 use std::collections::BTreeMap;
 
@@ -283,6 +283,70 @@ fn threatened_tile(state: &PlanState, tile: &Position) -> bool {
     state.threat_covering(tile).is_some()
 }
 
+/// The threats that can reach any tile of one set of patches, resolved once
+/// per query instead of once per tile.
+///
+/// [`threatened_tile`] is the right question for one tile and the wrong one
+/// for a patch walk: `threat_covering` rebuilds and sorts the whole threat
+/// list on every call, and the walks in this module ask it for every tile of
+/// every patch of an item, once per goal, once per expansion pass. Measured
+/// on 2026-09-08 (`gathered:crude-oil`, seed 31337, explored dump, 32
+/// threats): 17.4 million `threats_from` calls in one plan, about a fifth of
+/// its 199 s. The answer each of those calls was reduced to is a boolean --
+/// *does any threat reach this tile* -- which needs no order, so the sort was
+/// paying for a tie-break nobody read.
+///
+/// The set kept is exactly the threats that could cover *some* tile of the
+/// patches: a threat further from the patches' bounding-box centre than its
+/// standoff plus the box's half-diagonal cannot be within its standoff of any
+/// tile inside the box (triangle inequality). For every tile inside the box,
+/// [`ThreatField::covers`] therefore agrees with [`threatened_tile`] exactly;
+/// what changed is the work, not the verdict. With no threat charted -- every
+/// t=0 dump -- the field is empty and a tile costs nothing.
+///
+/// Distances are Euclidean, as `threats_from` measures them and as
+/// `2bf76bd7` settled.
+struct ThreatField {
+    reaching: Vec<(Position, f64)>,
+}
+
+impl ThreatField {
+    fn over(state: &PlanState, patches: &[ResourcePatch]) -> Self {
+        let mut tiles = patches.iter().flat_map(|patch| patch.elements.iter());
+        let Some(first) = tiles.next() else {
+            return ThreatField {
+                reaching: Vec::new(),
+            };
+        };
+        let (mut min_x, mut min_y, mut max_x, mut max_y) = (first.x, first.y, first.x, first.y);
+        for tile in tiles {
+            min_x = min_x.min(tile.x);
+            min_y = min_y.min(tile.y);
+            max_x = max_x.max(tile.x);
+            max_y = max_y.max(tile.y);
+        }
+        let centre = Position::new((min_x + max_x) / 2.0, (min_y + max_y) / 2.0);
+        let half_diagonal = calculate_distance(&centre, &Position::new(max_x, max_y));
+        let reaching = state
+            .base()
+            .entity_graph
+            .threats_from(&centre)
+            .into_iter()
+            .filter_map(|(name, at, distance)| {
+                let standoff = state.threat_standoff(&name).tiles;
+                (distance < standoff + half_diagonal).then_some((at, standoff))
+            })
+            .collect();
+        ThreatField { reaching }
+    }
+
+    fn covers(&self, tile: &Position) -> bool {
+        self.reaching
+            .iter()
+            .any(|(at, standoff)| calculate_distance(tile, at) < *standoff)
+    }
+}
+
 pub fn nearest_resource_tile(
     state: &PlanState,
     item: &str,
@@ -290,7 +354,9 @@ pub fn nearest_resource_tile(
     need: u32,
 ) -> Option<Position> {
     let mut best: Option<(f64, Position)> = None;
-    for patch in state.resource_patches(item) {
+    let patches = state.resource_patches(item);
+    let threats = ThreatField::over(state, &patches);
+    for patch in patches {
         for tile in patch.elements {
             if state.resource_unclaimed(&tile, item) < need {
                 continue;
@@ -298,7 +364,7 @@ pub fn nearest_resource_tile(
             // Passed over, not refused: ore fields are thousands of tiles and
             // a threatened one always has a safe neighbour on our maps. See
             // `threatened_tile` for why all four selectors ask this.
-            if threatened_tile(state, &tile) {
+            if threats.covers(&tile) {
                 continue;
             }
             let distance = calculate_distance(from, &tile);
@@ -354,13 +420,15 @@ pub fn resource_tiles_for(
     need: u32,
 ) -> Vec<(Position, u32)> {
     let mut candidates: Vec<(f64, Position, u32)> = Vec::new();
-    for patch in state.resource_patches(item) {
+    let patches = state.resource_patches(item);
+    let threats = ThreatField::over(state, &patches);
+    for patch in patches {
         for tile in patch.elements {
             let available = state.resource_unclaimed(&tile, item);
             if available == 0 {
                 continue;
             }
-            if threatened_tile(state, &tile) {
+            if threats.covers(&tile) {
                 continue;
             }
             candidates.push((calculate_distance(from, &tile), tile, available));
@@ -451,9 +519,11 @@ pub fn resource_supply_at_least(state: &PlanState, item: &str, need: u32) -> boo
     if need == 0 {
         return true;
     }
-    for patch in state.resource_patches(item) {
+    let patches = state.resource_patches(item);
+    let threats = ThreatField::over(state, &patches);
+    for patch in patches {
         for tile in patch.elements {
-            if threatened_tile(state, &tile) {
+            if threats.covers(&tile) {
                 continue;
             }
             total = total.saturating_add(state.resource_unclaimed(&tile, item));
@@ -501,8 +571,9 @@ pub fn resource_seats(state: &PlanState, item: &str, cap: u32) -> u32 {
     if cap == 0 {
         return 0;
     }
-    let mut tiles: Vec<Position> = state
-        .resource_patches(item)
+    let patches = state.resource_patches(item);
+    let threats = ThreatField::over(state, &patches);
+    let mut tiles: Vec<Position> = patches
         .into_iter()
         .flat_map(|patch| patch.elements)
         .collect();
@@ -522,7 +593,7 @@ pub fn resource_seats(state: &PlanState, item: &str, cap: u32) -> u32 {
         if state.resource_unclaimed_for(&tile, item, None) == 0 {
             continue;
         }
-        if threatened_tile(state, &tile) {
+        if threats.covers(&tile) {
             continue;
         }
         if seats

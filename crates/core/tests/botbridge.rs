@@ -11,8 +11,13 @@
 //! a change whose whole safety argument is that it edits no test.
 //!
 //! **Adding a test file means adding a line to one of the two roots**,
-//! otherwise it is compiled by nothing and runs on no one. `tests/common.rs`
-//! is in neither: it is empty, and has been since it was added.
+//! otherwise it is compiled by nothing and runs on no one. It does not fail:
+//! it simply never runs, and a suite missing a file looks exactly like a
+//! suite that passes. The same hazard, and the same remedy, is in
+//! `crates/core/tests/{suite,botbridge}.rs`, `crates/planner/tests/suite.rs`
+//! and `crates/server/tests/suite.rs`.
+//!
+//! `tests/common.rs` is in neither root: it is empty, and always has been.
 //!
 //! The other root is `tests/suite.rs`.
 #[path = "botbridge_bot_polling.rs"]

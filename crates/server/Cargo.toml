@@ -3,6 +3,10 @@ name = "factorio-bot-server"
 version = "0.2.4-dev"
 authors = ["Artur Hallmann <arturh@arturh.de>"]
 edition = "2024"
+# Integration tests are two `[[test]]` targets rather than one
+# auto-discovered binary per file in `tests/`; see `tests/suite.rs` for why,
+# and for why `openapi` is deliberately still a target of its own.
+autotests = false
 
 [package.metadata.release]
 tag = false
@@ -56,3 +60,16 @@ tempfile = "3"
 # `test-util` in a production build would let a stray `tokio::time::pause()`
 # stop the clock for the whole server.
 tokio = { version = "1", features = ["test-util"] }
+
+[[test]]
+name = "suite"
+path = "tests/suite.rs"
+
+# Its own target so that the snapshot-regenerating command named in
+# `CLAUDE.md`, and printed by this test's own failure message,
+# keeps working verbatim:
+#   UPDATE_OPENAPI_SNAPSHOT=1 cargo test -p factorio-bot-server \
+#       --features lua --test openapi
+[[test]]
+name = "openapi"
+path = "tests/openapi.rs"

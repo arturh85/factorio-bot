@@ -13,8 +13,12 @@
 //! would have rewritten those paths in a change whose whole safety argument is
 //! that it edits no test.
 //!
-//! **Adding a test file means adding a line here**, otherwise it is compiled
-//! by nothing and runs on no one -- the one cost of this arrangement.
+//! **Adding a test file means adding a line here**, and that is the one cost
+//! otherwise it is compiled by nothing and runs on no one. It does not fail:
+//! it simply never runs, and a suite missing a file looks exactly like a
+//! suite that passes. The same hazard, and the same remedy, is in
+//! `crates/core/tests/{suite,botbridge}.rs`, `crates/planner/tests/suite.rs`
+//! and `crates/server/tests/suite.rs`.
 #[path = "common/mod.rs"]
 mod common;
 

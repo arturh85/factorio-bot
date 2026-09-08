@@ -334,3 +334,79 @@ fn the_fixtures_that_declare_a_grid_keep_it() {
          from declaring a zero pitch; got {without}"
     );
 }
+
+
+/// **`SmeltRow24`'s output arms must take plates OUT of the furnaces.**
+///
+/// An inserter's `direction` names the side it PICKS UP from, so the arm north
+/// of the north furnace row -- between that row and the output belt -- must
+/// face **south**, into the furnace. Facing north it runs backwards, lifting
+/// plates off the output belt and pushing them into the machine that made them.
+///
+/// Asserted through the real decoder rather than off the raw JSON, because the
+/// decoder applies `blueprint_direction`, and that migration is exactly what
+/// this test exists to keep honest. A blueprint declaring a pre-2.0 `version`
+/// has its directions DOUBLED, since 1.x's eight-value `defines.direction`
+/// sits on 2.x's even values. The migration is correct. What it cannot check
+/// is whether the version stamp tells the truth, and a blueprint stamped 1.x
+/// while carrying 2.x values is silently rotated by it: `east` (4) becomes
+/// `south` (8), and `south` (8) becomes `north` (0).
+///
+/// Not hypothetical -- it is the bug this test was written to catch, present
+/// since the fixture was first authored in `4d597c1c`. `SmeltRow24` carried
+/// 2.x values under a **1.1** stamp, so every south-facing arm decoded as
+/// north-facing: the northern half of the block ran inside out while the
+/// southern half was correct. Nothing else could see it. The entity count is
+/// unchanged, every arm still lands on a legal tile beside a real machine,
+/// `blueprint_power` never reads direction, and a live run reads
+/// `waiting_for_source_items` -- which is also what an unfed block reads.
+#[test]
+fn the_saturating_modules_output_arms_face_the_furnace_they_empty() {
+    let src = std::fs::read_to_string(rcontest_path()).expect("rcontest.lua readable");
+    let (_, text) = blueprint_assignments(&src)
+        .into_iter()
+        .find(|(n, _)| n == "SmeltRow24")
+        .expect("SmeltRow24 in rcontest.lua");
+    let bp = decode(&text).expect("SmeltRow24 decodes");
+
+    // The north furnace row is centred on y = -2.0 and spans y[-3, -1]; the
+    // output belt above it is at y = -4.5. The arms between them sit at
+    // y = -3.5 and must pick up from the SOUTH.
+    let north: Vec<_> = bp
+        .entities
+        .iter()
+        .filter(|e| e.name == "inserter" && (e.offset.y() + 3.5).abs() < 1e-9)
+        .collect();
+    assert_eq!(north.len(), 12, "one output arm per furnace in the north row");
+    for arm in &north {
+        assert_eq!(
+            arm.direction, 8,
+            "the arm at ({}, {}) must face SOUTH into the furnace it empties; \
+             facing north it lifts plates off the output belt and feeds them \
+             back into the machine. Blueprint version stamp is {} -- if that is \
+             pre-2.0, the migration has doubled every direction in the block",
+            arm.offset.x(),
+            arm.offset.y(),
+            bp.version
+        );
+    }
+
+    // The matching row on the south side must face NORTH, for the same reason.
+    // Asserting both is what makes this a test about FLOW rather than about
+    // one constant: a uniform rotation moves them together, so two rows that
+    // end up pointing the same way is the tell.
+    let south: Vec<_> = bp
+        .entities
+        .iter()
+        .filter(|e| e.name == "inserter" && (e.offset.y() - 4.5).abs() < 1e-9)
+        .collect();
+    assert_eq!(south.len(), 12, "one per furnace in the south row");
+    for arm in &south {
+        assert_eq!(arm.direction, 0, "the south row's output arms face NORTH");
+    }
+    assert_ne!(
+        north[0].direction, south[0].direction,
+        "the two output rows empty their furnaces in OPPOSITE directions; if \
+         they agree, the whole block has been rotated by the version migration"
+    );
+}

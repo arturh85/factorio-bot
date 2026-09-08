@@ -63,6 +63,21 @@ def report(name, text):
     # The declared PERIOD, which cannot be derived from the entities: MinerLine
     # spans 4 tiles of x between its outermost entity centres and declares a
     # pitch of 7. The difference is room the author left on purpose.
+    # The version stamp decides how every direction in the block is read, so a
+    # wrong one silently rotates the whole thing. A genuine 1.x blueprint can
+    # only contain directions 0..7 -- its `defines.direction` had eight values
+    # -- so a pre-2.0 stamp over a direction >= 8 is PROOF the stamp is wrong,
+    # not a judgement call. SmeltRow24 shipped that way from its first commit:
+    # stamped 1.1, carrying 2.x values, every south-facing arm decoding north.
+    version = body.get("version", 0)
+    raw = [e.get("direction", 0) for e in ents]
+    scale = "2.x" if version >= (2 << 48) else f"{version >> 48}.x"
+    note = ""
+    if version < (2 << 48) and raw and max(raw) >= 8:
+        note = ("   ** MIS-STAMPED: carries direction >= 8, which 1.x could not "
+                "emit; decode DOUBLES every direction")
+    print(f"    version    {version} ({scale} direction scale){note}")
+
     grid = body.get("snap-to-grid")
     if grid:
         extras = []

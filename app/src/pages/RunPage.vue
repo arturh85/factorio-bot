@@ -13,6 +13,7 @@ import {compareSplits, formatTicks, formatWhen, startedUnixOf} from '@/lib/runTi
 import {rateItems} from '@/lib/runRates';
 import {headline} from '@/lib/runHeadline';
 import {lagTicks} from '@/lib/runCoverage';
+import {machineRows, positionKey} from '@/lib/machineTimeline';
 import BandFrame from '@/components/run/BandFrame.vue';
 import TickAxis from '@/components/run/TickAxis.vue';
 import ProductionBand from '@/components/run/ProductionBand.vue';
@@ -77,6 +78,22 @@ const sentence = computed(() => {
 const lag = computed(() => (win.value ? lagTicks(win.value.hi, store.samples) : null));
 const deltas = computed(() => store.reference === null ? null
     : new Map(compareSplits(store.detail?.splits ?? [], store.reference.splits).map((r) => [r.goal, r])));
+/**
+ * The selected machine as a MAP position key.
+ *
+ * `store.selectedMachine` is the machines-sample key (`unit_number` as a
+ * string, e.g. `"13"`); the map joins on `${x},${y}`. Nothing translated
+ * between the two, so selecting a row in the Machines band changed nothing a
+ * reader could see. `machineRows` already carries each row's position, so
+ * this is the whole translation -- and a key with no row simply highlights
+ * nothing, which is the honest answer for a machine the entity map has not
+ * placed.
+ */
+const highlight = computed(() => {
+    if (store.selectedMachine === null) return null;
+    const row = machineRows(store.samples).find((r) => r.key === store.selectedMachine);
+    return row ? positionKey(row.position) : null;
+});
 const otherRuns = computed(() => store.runs.filter((r) => r.run_id !== id.value));
 
 const LEGEND = [
@@ -155,7 +172,7 @@ const LEGEND = [
       <RunSidePanel :run-id="id" :cursor="store.cursor"
                     :video="store.video" :video-ticks="store.videoTicks" :video-error="store.videoError"
                     :entities="store.entities" :bots="store.mapBots" :trail="store.trail" :records="store.map" :bounds="store.mapBounds"
-                    :map-error="store.mapError" :fills="store.machineFills"
+                    :map-error="store.mapError" :fills="store.machineFills" :highlight="highlight"
                     @seek="store.seek($event)" @pause="store.playing && store.togglePlay()"/>
 
       <div class="border-t border-divider px-5 py-4">

@@ -19,6 +19,8 @@ import ProductionBand from '@/components/run/ProductionBand.vue';
 import PowerBand from '@/components/run/PowerBand.vue';
 import ResearchBand from '@/components/run/ResearchBand.vue';
 import MachineBand from '@/components/run/MachineBand.vue';
+import MapPanel from '@/components/MapPanel.vue';
+import {machineRows, positionKey} from '@/lib/machineTimeline';
 import RunPage from './RunPage.vue';
 
 const run = loadFixtureRun();
@@ -77,6 +79,20 @@ describe('RunPage', () => {
         const seg = w.get('.seg');
         expect(seg.text()).toContain('satisfied at 6:06');
         expect(seg.text()).not.toContain('6:03');
+    });
+
+    it('translates a selected machine into the position key the map joins on', async () => {
+        // `selectedMachine` is the machines-sample key (`unit_number`); the map
+        // knows only positions. Nothing translated between them, so selecting
+        // a row changed nothing a reader could see.
+        const w = await mountPage();
+        const store = useRunsStore();
+        expect(w.findComponent(MapPanel).props('highlight')).toBeNull();
+        const row = machineRows(store.samples)[0];
+        store.selectMachine(row.key);
+        await flushPromises();
+        expect(row.key).toMatch(/^\d+$/);
+        expect(w.findComponent(MapPanel).props('highlight')).toBe(positionKey(row.position));
     });
 
     it('reports a failed /samples fetch in every band that needs samples', async () => {

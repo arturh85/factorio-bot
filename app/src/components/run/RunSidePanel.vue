@@ -12,6 +12,12 @@ const props = defineProps<{
     video: VideoManifest | null; videoTicks: VideoTicksResponse | null; videoError: string | null;
     entities: EntitySnapshot[]; bots: BotDot[]; trail: Record<number, Position[]>; records: MapRecord[]; bounds: Bounds | null;
     mapError: string | null; fills: Map<string, string | null>;
+    /**
+     * The position key of the machine selected in the Machines band, passed
+     * straight to the map. Optional: a caller with no selection to report
+     * (a test, another page) leaves it out and the map marks nothing.
+     */
+    highlight?: string | null;
 }>();
 const emit = defineEmits<{seek: [tick: number]; pause: []}>();
 
@@ -57,7 +63,7 @@ function onVideoPlay() { emit('pause'); }
     </div>
     <div v-if="tab === 'map'" class="p-3">
       <p v-if="mapError" class="rounded border border-warn/40 bg-warn/10 px-3 py-2 text-sm text-warn-dark">{{ mapError }}</p>
-      <MapPanel v-else :entities="entities" :bots="bots" :trail="trail" :records="records" :bounds="bounds" :fills="fills"/>
+      <MapPanel v-else :entities="entities" :bots="bots" :trail="trail" :records="records" :bounds="bounds" :fills="fills" :highlight="highlight ?? null"/>
     </div>
     <div v-else class="p-3">
       <p v-if="videoError" class="rounded border border-warn/40 bg-warn/10 px-3 py-2 text-sm text-warn-dark">{{ videoError }}</p>

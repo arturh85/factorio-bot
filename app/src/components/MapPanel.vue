@@ -82,8 +82,19 @@ const props = withDefaults(
          * feed (an offline map view, a test) gets for free.
          */
         fills?: Map<string, string | null>;
+        /**
+         * The position key (`${x},${y}`, the same key `fills` uses) of the
+         * one entity the viewer has selected elsewhere -- today the machine
+         * band, whose rows are keyed by `unit_number` and whose selection had
+         * nowhere to land. `null` when nothing is selected.
+         *
+         * A key with no entity at that position simply marks nothing: the
+         * machine samples and the entity map are separate streams and a
+         * machine can be sampled at a tick the map has not placed yet.
+         */
+        highlight?: string | null;
     }>(),
-    {records: () => [], fills: () => new Map()}
+    {records: () => [], fills: () => new Map(), highlight: null}
 );
 
 /**
@@ -97,6 +108,11 @@ const props = withDefaults(
 function fillFor(feature: EntityFeature): string {
     const status = props.fills.get(`${feature.position.x},${feature.position.y}`);
     return typeof status === 'string' ? `var(--color-status-${statusClass(status)})` : feature.color;
+}
+
+/** Whether this marker is the selected one -- joined on position, like `fills`. */
+function isHighlighted(feature: EntityFeature): boolean {
+    return props.highlight !== null && `${feature.position.x},${feature.position.y}` === props.highlight;
 }
 
 /** The status at a marker's position, or null when `fills` says nothing about it. */
@@ -396,6 +412,9 @@ const tooltipStyle = computed(() => {
                             :data-entity="marker.title"
                             :class="['map-panel__entity', {'is-active': marker.id === activeId}]"
                             :data-testid="`map-feature-${marker.id}`"
+                            :data-highlighted="isHighlighted(marker) ? 'true' : undefined"
+                            :stroke="isHighlighted(marker) ? 'var(--color-verdict-roster)' : undefined"
+                            :stroke-width="isHighlighted(marker) ? 2 : undefined"
                             vector-effect="non-scaling-stroke"
                             role="button"
                             tabindex="0"
@@ -594,6 +613,15 @@ const tooltipStyle = computed(() => {
 .map-panel__entity:focus-visible {
     stroke: #ffffff;
     stroke-width: 2.5;
+}
+/* The selected machine, and it must outrank hover: a selection made in
+   another band is durable, while a pointer resting on the marker is not.
+   Equal specificity to the rule above, so being last is what decides it --
+   and the presentation attributes on the element cannot, since CSS beats
+   them. */
+.map-panel__entity[data-highlighted='true'] {
+    stroke: var(--color-verdict-roster);
+    stroke-width: 2;
 }
 
 .map-panel__bot {

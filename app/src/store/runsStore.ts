@@ -131,7 +131,16 @@ export const useRunsStore = defineStore('runs', {
         /** The run's raw event log. */
         events: [] as Event[],
         eventsError: null as string | null,
-        /** The machine the map panel's inspector reports on, keyed `"x,y"`. */
+        /**
+         * The machine the Machines band has selected, keyed by the
+         * MACHINES-SAMPLE key -- the entity's `unit_number` as a string, e.g.
+         * `"13"`, which is what `machineRows` and `statusMatrix` key on.
+         *
+         * NOT a `"x,y"` position key, which this comment claimed while the
+         * value never was one. The map joins on position, so a reader that
+         * wants to show this selection there translates through
+         * `machineRows`; `RunPage` does exactly that.
+         */
         selectedMachine: null as string | null
     }),
 
@@ -392,7 +401,7 @@ export const useRunsStore = defineStore('runs', {
             this.bot = bot;
         },
 
-        /** Points the map inspector at another machine, keyed `"x,y"`. */
+        /** Points the viewer at another machine, keyed by its machines-sample key. */
         selectMachine(key: string | null) {
             this.selectedMachine = key;
         },

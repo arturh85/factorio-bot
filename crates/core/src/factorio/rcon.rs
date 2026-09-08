@@ -4193,6 +4193,52 @@ impl FactorioRcon {
             // that needs the same shard's write guard, which self-deadlocks the
             // whole task on the first tick the reply is actually there.
             if let Some((_, outcome)) = world.globals.actions.remove(&action_id) {
+                // **An outcome stamped before this action was dispatched is
+                // not this action's verdict.** Action ids are per-plan and
+                // reused across plans (`run-1788465258-49050`: 44 of 147 ids
+                // collide in one run), while `globals.actions` is keyed by id
+                // alone and outlives the plan that filled it. So a verdict the
+                // executor never collected -- an action refused at dispatch,
+                // whose `action_completed` the mod wrote anyway -- sits in the
+                // table until some LATER plan reuses the number, and the next
+                // action wearing it takes the dead one's answer in the tick it
+                // was dispatched.
+                //
+                // Measured, not feared. In `run-1788895333-40607` three
+                // actions settled with an outcome tick ~176,000 ticks BEFORE
+                // their own dispatch: `craft 3 iron-gear-wheel` dispatched at
+                // 203,558 settled at 27,585, `mine 1 iron-ore` at 243,388
+                // settled at 49,200, `mine 2 iron-ore` at 246,583 settled at
+                // 74,081. All three reported `ERROR: the mod failed this
+                // action without saying why`, which is the mining branch's
+                // reasonless `action_failed` from a plan two replans earlier.
+                //
+                // The failing direction is the loud one and is how this was
+                // found; the dangerous direction is the quiet one. A stale
+                // `ok` marks an action SUCCEEDED that the game never even
+                // began, and nothing downstream can tell the difference --
+                // `silence is not success`, with a wrong success in place of
+                // the silence. Both are refused here.
+                //
+                // Strictly `<`: an action that settles in the tick it was
+                // dispatched is ordinary (`place`, `insert`, `fuel` and `take`
+                // all do), so only an outcome from BEFORE the dispatch is
+                // impossible. The entry is dropped rather than put back: it
+                // belongs to a plan that has already been abandoned, and
+                // leaving it would hand it to the next reuse of the id.
+                if let Some(dispatched_tick) = dispatched
+                    && outcome.tick < dispatched_tick
+                {
+                    warn!(
+                        action_id,
+                        outcome_tick = outcome.tick,
+                        dispatched_tick,
+                        result = %outcome.result,
+                        "discarding a stale action outcome: it is stamped before this action was \
+                         dispatched, so it belongs to an earlier plan that reused this id"
+                    );
+                    continue;
+                }
                 let ticks = ActionTicks::new(dispatched, Some(outcome.tick));
                 if outcome.is_ok() {
                     return Ok(ticks);
@@ -6510,6 +6556,13 @@ mod wait_for_reply_tests {
         );
     }
 
+    /// The reply tick is 4242 against a dispatch at 4200 because a verdict
+    /// arrives **after** the command it judges. It read `11` until 2026-09-08
+    /// -- a reply from 4,189 ticks before its own dispatch, which no game
+    /// produces -- and the freshness check
+    /// `an_outcome_stamped_before_the_dispatch_is_not_this_action_s_verdict`
+    /// added that day correctly refuses it. The fixture was wrong, not the
+    /// check; nothing else about what this test asserts has changed.
     #[test]
     fn failed_action_result_is_reported_and_consumed() {
         let world = Arc::new(FactorioSurface::new());
@@ -6521,7 +6574,7 @@ mod wait_for_reply_tests {
         world.globals.actions.insert(
             8,
             ActionOutcome {
-                tick: 11,
+                tick: 4242,
                 result: "target is out of reach".to_string(),
             },
         );
@@ -6541,11 +6594,15 @@ mod wait_for_reply_tests {
         );
         assert_eq!(
             err.ticks,
-            ActionTicks::new(Some(4200), Some(11)),
+            ActionTicks::new(Some(4200), Some(4242)),
             "a refused dispatch keeps both stamps the game produced"
         );
         // Action ids are reused (mod 1000). A failure left behind in the map
-        // makes the next action with that id fail instantly.
+        // makes the next action with that id fail instantly. Consuming it here
+        // is necessary and was never sufficient: a verdict for an action the
+        // executor had already given up on is never waited for, so nothing
+        // consumes it and it waits for the next plan to reuse the number --
+        // which is the defect the tick guard closes.
         assert!(
             world.globals.actions.get(&8).is_none(),
             "a failed reply must also be consumed, or it poisons the reused action id"
@@ -6674,6 +6731,102 @@ mod dispatch_evidence_tests {
             "an unparseable stamp does not un-dispatch the command"
         );
         assert_eq!(failure.ticks, ActionTicks::UNKNOWN);
+    }
+
+    /// **An answer from before the question is not an answer.** The regression
+    /// for `run-1788895333-40607`, where three actions settled with an outcome
+    /// tick ~176,000 ticks earlier than their own dispatch, all reporting the
+    /// mod's reasonless `ERROR: the mod failed this action without saying why`.
+    ///
+    /// Action ids are per-plan and reused across replans, while
+    /// `globals.actions` is keyed by id alone and survives the plan that
+    /// filled it, so a verdict nobody collected waits there for the next
+    /// action to wear the same number.
+    ///
+    /// The wait must not take it, and must not be *ended* by it either: this
+    /// action's real verdict may still be coming, so the stale entry is
+    /// dropped and the loop keeps waiting. It reaches its deadline as
+    /// [`Dispatch::NoVerdict`] -- "the game took the command and never
+    /// answered", which is the truth -- rather than as a refusal it did not
+    /// earn.
+    #[test]
+    fn an_outcome_stamped_before_the_dispatch_is_not_this_action_s_verdict() {
+        let world = Arc::new(FactorioSurface::new());
+        world.globals.actions.insert(
+            6,
+            ActionOutcome {
+                tick: 27_585,
+                result: "ERROR: the mod failed this action without saying why".to_string(),
+            },
+        );
+        let failure = block_on(FactorioRcon::new_empty().sleep_for_action_result_until(
+            &world,
+            6,
+            Some(203_558),
+            Duration::from_millis(120),
+        ))
+        .expect_err("the stale entry must not settle this action");
+        assert_eq!(
+            failure.dispatch,
+            Dispatch::NoVerdict,
+            "an earlier plan's answer is not evidence that THIS action was refused"
+        );
+        assert_eq!(
+            failure.ticks.replied, None,
+            "nothing answered this action, so no reply tick may be reported"
+        );
+        assert!(
+            world.globals.actions.get(&6).is_none(),
+            "the stale entry belongs to an abandoned plan and must not be left for the next \
+             reuse of the id"
+        );
+    }
+
+    /// The quiet half of the same defect, and the dangerous one. A stale `ok`
+    /// would mark an action SUCCEEDED that the game never began, and nothing
+    /// downstream could tell the difference -- a wrong success in place of the
+    /// silence this repo already knows not to trust.
+    #[test]
+    fn a_stale_ok_does_not_succeed_an_action_the_game_never_ran() {
+        let world = Arc::new(FactorioSurface::new());
+        world.globals.actions.insert(
+            7,
+            ActionOutcome {
+                tick: 1_000,
+                result: "ok".to_string(),
+            },
+        );
+        block_on(FactorioRcon::new_empty().sleep_for_action_result_until(
+            &world,
+            7,
+            Some(200_000),
+            Duration::from_millis(120),
+        ))
+        .expect_err("a success from before the dispatch is not this action's success");
+    }
+
+    /// The bound is `<`, not `<=`, and this is why: `place`, `insert`, `fuel`
+    /// and `take` all settle in the tick they are dispatched, so an outcome
+    /// stamped AT the dispatch tick is the ordinary case and must still be
+    /// taken.
+    #[test]
+    fn an_outcome_stamped_in_the_dispatch_tick_is_ordinary_and_is_taken() {
+        let world = Arc::new(FactorioSurface::new());
+        world.globals.actions.insert(
+            8,
+            ActionOutcome {
+                tick: 12_345,
+                result: "ok".to_string(),
+            },
+        );
+        let ticks = block_on(FactorioRcon::new_empty().sleep_for_action_result_until(
+            &world,
+            8,
+            Some(12_345),
+            Duration::from_millis(120),
+        ))
+        .expect("an action that settles in its own dispatch tick is not stale");
+        assert_eq!(ticks.replied, Some(12_345));
     }
 
     /// Fact 1, the direction that used to drop a measurement: the game stamped
@@ -9011,6 +9164,94 @@ mod transfer_guarantee_tests {
         assert!(
             printed[1].ends_with("fail 8 ERROR: too far too mine"),
             "a real reason must survive unchanged; got {printed:?}"
+        );
+    }
+
+    /// **"no entity to mine" was one sentence for three different facts**, and
+    /// the reasonless `action_failed` beside it is where
+    /// `run-1788895333-40607`'s `ERROR: the mod failed this action without
+    /// saying why` came from.
+    ///
+    /// The stub's `find_entity` answers nil, so this is the middle branch:
+    /// something was named and nothing of that name stands on that tile. The
+    /// message has to carry both, because `find_entity` matches the position
+    /// EXACTLY -- a mine aimed half a tile off reads as "nothing there", which
+    /// is this repo's own documented half-tile defect, and the old sentence
+    /// could not tell that from a tile another bot had already emptied.
+    ///
+    /// `print` is redirected into the RCON buffer for the reason
+    /// `a_failed_action_always_carries_words` gives: `writeout` is `print`.
+    #[test]
+    fn a_mine_that_finds_nothing_names_what_it_looked_for_and_where() {
+        let printed = run_handler(
+            stub_place(true, 1),
+            r#"
+            print = function(s) _rcon_lines[#_rcon_lines + 1] = tostring(s) end
+            game.players[1].connected = true
+            storage = { p = { [1] = {} } }
+            rcon_action_start_mining(42, 1, "iron-ore", {x = -40.5, y = -48.5}, 1)
+            "#,
+        );
+        let all = printed.join("
+");
+        assert!(
+            !all.contains("without saying why"),
+            "the mining branch must name its reason; got {all}"
+        );
+        for expected in ["iron-ore", "-40.5", "-48.5"] {
+            assert!(
+                all.contains(expected),
+                "the verdict must carry {expected}; got {all}"
+            );
+        }
+        assert!(
+            all.contains("fail 42 "),
+            "the action's own id must be failed; got {all}"
+        );
+    }
+
+    /// The branch where the caller named nothing at all. It must not raise
+    /// while building its own diagnosis -- `pos_str` indexes its argument, so
+    /// formatting an absent position would turn one failure into two, and the
+    /// second would be a Lua error inside an RCON call rather than a verdict.
+    #[test]
+    fn a_mine_with_no_target_says_so_instead_of_raising() {
+        let printed = run_handler(
+            stub_place(true, 1),
+            r#"
+            print = function(s) _rcon_lines[#_rcon_lines + 1] = tostring(s) end
+            game.players[1].connected = true
+            storage = { p = { [1] = {} } }
+            rcon_action_start_mining(43, 1, nil, nil, 1)
+            "#,
+        );
+        let all = printed.join("
+");
+        assert!(
+            !all.contains("without saying why") && all.contains("fail 43 "),
+            "got {all}"
+        );
+    }
+
+    /// A mine already in flight is thrown away by the branch that refuses the
+    /// new one. Failing it by name is the difference between a verdict and a
+    /// `Lost` action: nothing else would ever settle it, so the executor would
+    /// wait out its whole deadline and report an action it cannot explain.
+    #[test]
+    fn a_refused_mine_fails_the_one_it_displaces_rather_than_dropping_it() {
+        let printed = run_handler(
+            stub_place(true, 1),
+            r#"
+            print = function(s) _rcon_lines[#_rcon_lines + 1] = tostring(s) end
+            game.players[1].connected = true
+            storage = { p = { [1] = { mining = { action_id = 11 } } } }
+            rcon_action_start_mining(12, 1, "iron-ore", {x = 1.5, y = 2.5}, 1)
+            "#,
+        );
+        let all = printed.join("\n");
+        assert!(
+            all.contains("fail 11 ") && all.contains("fail 12 "),
+            "both the displaced action and the refused one need a verdict; got {all}"
         );
     }
 

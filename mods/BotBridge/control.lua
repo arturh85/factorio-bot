@@ -402,6 +402,17 @@ function pos_str(pos)
 	end
 end
 
+-- `pos_str` for a position that may be absent, because the caller not having
+-- sent one is exactly the case an error message has to be able to state.
+-- `pos_str` itself indexes its argument and would raise on nil, turning a
+-- diagnosis into a second failure.
+function pos_or_nil(pos)
+	if pos == nil then
+		return "(none)"
+	end
+	return "(" .. pos_str(pos) .. ")"
+end
+
 function aabb_str(aabb)
 	return pos_str(aabb.left_top) .. ";" .. pos_str(aabb.right_bottom)
 end
@@ -4463,9 +4474,46 @@ function rcon_action_start_mining(action_id, player_id, name, position, count)
 		storage.p[player_id].mining = nil
 	else
 --		print("MINING ERROR")
-		rcon.print("Error: no entity to mine")
+		-- **Name which of the three it is.** "no entity to mine" was one
+		-- sentence for three different facts -- the caller named nothing to
+		-- look for, nothing of that name stands on that exact tile, or the
+		-- thing is standing there and is not minable -- and a reader could not
+		-- tell a planner bug from a tile another bot had already emptied.
+		--
+		-- `find_entity` matches the position EXACTLY, and a resource entity
+		-- sits at a tile CENTRE, so the position is echoed: a mine aimed at
+		-- (-41, -49) instead of (-40.5, -48.5) is the repo's own half-tile
+		-- defect and reads as "nothing there" without it.
+		local why
+		if name == nil or position == nil then
+			why = "ERROR: nothing to mine was named (name=" .. tostring(name)
+				.. ", position=" .. pos_or_nil(position) .. ")"
+		elseif ent == nil then
+			why = "ERROR: no '" .. tostring(name) .. "' stands at "
+				.. pos_or_nil(position)
+				.. " (find_entity matches the exact position, and a resource sits at a tile"
+				.. " centre such as (x.5, y.5))"
+		else
+			why = "ERROR: the '" .. tostring(name) .. "' at " .. pos_or_nil(position)
+				.. " is not minable"
+		end
+		rcon.print(why)
+		-- A mine already in flight for this bot is being thrown away. Failing
+		-- it by name is the difference between a verdict and a `Lost` action:
+		-- nothing else would ever settle it, so the executor would wait out
+		-- its whole deadline and then report an action it could not explain.
+		local displaced = storage.p[player_id].mining
+		if displaced ~= nil and displaced.action_id ~= nil
+			and displaced.action_id ~= action_id then
+			action_failed(game.tick, displaced.action_id,
+				"ERROR: mining was replaced by a request this mod then refused (" .. why .. ")")
+		end
 		storage.p[player_id].mining = nil
-		action_failed(last_tick, action_id)
+		-- `game.tick`, not the `last_tick` this used to send: `last_tick` is
+		-- whatever the last stamp happened to leave behind, so a failure could
+		-- be stamped tens of thousands of ticks before it happened -- and the
+		-- executor reads that stamp as the action's reply tick.
+		action_failed(game.tick, action_id, why)
 	end
 	stamp_tick()
 end

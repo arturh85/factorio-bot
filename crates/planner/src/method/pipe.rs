@@ -50,7 +50,8 @@ use crate::state::PlanState;
 use factorio_bot_core::factorio::util::calculate_distance;
 use factorio_bot_core::graph::enclosure;
 use factorio_bot_core::graph::route::{RouteError, TileKind, route_belt};
-use factorio_bot_core::types::{Direction, FactorioEntity, FluidFilter, Position, Rect};
+use factorio_bot_core::num_traits::FromPrimitive;
+use factorio_bot_core::types::{Direction, FactorioEntity, FluidFilter, Position, Rect, TileFluid};
 
 use crate::action::{Action, ActionKind, Actor, Condition, Effect};
 use std::collections::BTreeSet;
@@ -431,10 +432,13 @@ pub(crate) fn fluidbox_entities(
 /// and a boiler's steam box supplies. A refinery piped to a boiler builds
 /// perfectly and makes nothing, which is this repo's standing silent class.
 ///
-/// So a candidate must be *attributable* to the fluid. The box's own
-/// [`FluidFilter`] answers first when it has one -- see [`attributable_to`],
-/// which is also what now rejects that boiler -- and otherwise one of three
-/// tests, each derived from the world rather than from a list of names:
+/// So a candidate must be *attributable* to the fluid. Two **observations**
+/// answer first when they can -- the box's own [`FluidFilter`], which is what
+/// now rejects that boiler, and the ground under a
+/// [ground-drawing](drawn_from_ground) entity's source tile, which is what
+/// answers water. Only when neither says anything do the three original
+/// *inferences* run, each derived from the world rather than from a list of
+/// names:
 ///
 /// 1. **the plan told it what to make** -- `entity.recipe` names a recipe
 ///    whose products include the fluid. This is the test that will make the
@@ -447,19 +451,17 @@ pub(crate) fn fluidbox_entities(
 ///    entity within [`gather::FIELD_RADIUS`] of a charted tile of the fluid,
 ///    which is precisely the tank `method::gather` stands up.
 ///
-/// # Water is STILL open, and the condition this doc named for closing it
-/// turned out to be the wrong one
+/// # Water: closed on 2026-09-08, and the condition this doc twice named was
+/// twice the wrong one
 ///
-/// **Water has no answer here**, because water is not a charted resource and
-/// an offshore pump carries no recipe, so all three inferences fail on the
-/// one entity that produces it. This doc used to name its own unblocking
-/// condition -- *"it becomes reachable the day the fluidbox's accepted fluid
-/// crosses the bridge"* -- on the unstated assumption that an offshore pump's
-/// output box is filtered to water.
-///
-/// **The filter crossed on 2026-09-08 and that assumption is false.**
-/// Measured off a live seed-31337 dump, every one of the 56 fluid boxes in
-/// this mod set answered, and:
+/// **Water used to have no answer here**, because water is not a charted
+/// resource and an offshore pump carries no recipe, so all three inferences
+/// failed on the one entity that produces it. This doc named its own
+/// unblocking condition -- *"it becomes reachable the day the fluidbox's
+/// accepted fluid crosses the bridge"* -- on the unstated assumption that an
+/// offshore pump's output box is filtered to water. **The filter crossed and
+/// that assumption was false.** Measured off a live seed-31337 dump, every one
+/// of the 56 fluid boxes in this mod set answered, and:
 ///
 /// ```text
 /// offshore-pump   output any
@@ -468,13 +470,25 @@ pub(crate) fn fluidbox_entities(
 /// chemical-plant  input any   input any   output any   output any
 /// ```
 ///
-/// A 2.0 offshore pump takes its fluid from the **tile it stands on**
-/// (`LuaEntity::get_fluid_source_fluid`), not from a box filter, so the box
-/// is honestly unfiltered and [`FluidFilter::Any`] is the correct answer.
-/// The only two `only=water` boxes in the entire mod set are boiler and
-/// heat-exchanger **inputs**, and an input supplies nothing. So the water
-/// rule needs a *tile* reading that this bridge does not carry, and naming a
-/// sufficient condition for a fix was not the same as checking it.
+/// A 2.0 offshore pump takes its fluid from the **tile it stands in front
+/// of**, so the box is honestly unfiltered and [`FluidFilter::Any`] is the
+/// correct answer; the only two `only=water` boxes in the entire mod set are
+/// boiler and heat-exchanger *inputs*, and an input supplies nothing.
+///
+/// The successor condition was a lead too -- *"ask
+/// `LuaEntity::get_fluid_source_fluid`"* -- and it is **also** not what
+/// closed this. That call is a method with `subclasses: ["OffshorePump"]`, so
+/// it can only be asked of a pump that already stands, which is precisely the
+/// thing a planner choosing a site does not have. What closed it is the
+/// *prototype* pair [`drawn_from_ground`] reads: `fluid_source_offset` (which
+/// tile) and `LuaTilePrototype::fluid` (what that tile gives), neither
+/// requiring an entity or a runtime call.
+///
+/// **So this doc named a sufficient condition twice and was wrong twice, in
+/// the same way both times: it wrote down where the answer ought to live
+/// instead of checking `runtime-api.json` for where it does.** The rule that
+/// survives is the cheap one -- the shipped API description is one grep away,
+/// and both wrong guesses cost more than the grep would have.
 ///
 /// # What the filter did close
 ///
@@ -626,6 +640,19 @@ fn supplying_filters(state: &PlanState, name: &str) -> Vec<FluidFilter> {
 ///   not supply petroleum gas, so it is now rejected on a fact rather than
 ///   surviving to be rejected on the absence of one.
 ///
+/// # The ground answers too, and it is the only thing that can answer water
+///
+/// A [ground-drawing](drawn_from_ground) entity -- one whose prototype has a
+/// `fluid_source_offset`, which in this mod set is the offshore pump and
+/// nothing else -- produces whatever the tile at that offset yields, because
+/// its output box carries no filter to say otherwise. So the second test is
+/// **the ground**, and unlike the three inferences below it can refuse as
+/// well as attribute: a pump on dry land, or on a lava tile when petroleum
+/// gas was asked for, is definitely not a source and the inferences must not
+/// be allowed to talk it back up. `TileFluid::Unknown` -- unexplored ground,
+/// an archived dump, a mod predating the field -- does neither, for the
+/// reason the next section gives.
+///
 /// # What [`FluidFilter::Unknown`] does, and why
 ///
 /// **Nothing.** It neither attributes nor excludes, so a prototype that never
@@ -646,6 +673,19 @@ fn attributable_to(
     let filters = supplying_filters(state, &entity.name);
     if filters.iter().any(|f| f.is_only(fluid)) {
         return true;
+    }
+    // THE GROUND ANSWERS BEFORE ANYTHING IS INFERRED, exactly as the box
+    // filter does, and for the same reason: it is an observation, not a guess.
+    match drawn_from_ground(state, entity) {
+        Some(ground) if ground.yields(fluid) => return true,
+        // Definitely dry, or definitely a different fluid. A ground-drawing
+        // entity has *no other* source -- its box is unfiltered and it carries
+        // no recipe -- so this is a refusal on a fact, and the three
+        // inferences below must not be allowed to talk it back up.
+        Some(ground) if ground.is_dry() || ground.named().is_some() => return false,
+        // `TileFluid::Unknown`, or an entity that does not draw from the
+        // ground at all. Falls through, inert.
+        _ => {}
     }
     // Every supplying box names a *different* fluid, so no recipe, no
     // footprint and no neighbourhood can make this entity a source. Guarded
@@ -682,6 +722,71 @@ fn attributable_to(
         && field
             .iter()
             .any(|tile| calculate_distance(tile, &entity.position) <= gather::FIELD_RADIUS)
+}
+
+/// What the ground under `entity`'s fluid source tile yields, or `None` when
+/// this entity does not draw from the ground at all.
+///
+/// # Why this is two prototype facts and not a name
+///
+/// A Factorio 2.0 offshore pump takes its fluid from the **tile it stands in
+/// front of**, so nothing about the pump itself says what it produces. That
+/// was measured, not assumed: on 2026-09-08 every one of the 56 fluid boxes
+/// in this mod set answered its filter, and `offshore-pump`'s *output* box is
+/// [`factorio_bot_core::types::FluidFilter::Any`] -- the only `only=water`
+/// boxes anywhere are the boiler's and heat-exchanger's inputs, which supply
+/// nothing. So [`sources_of`]'s three inferences could never reach water: it
+/// is not a charted resource, a pump carries no recipe, and a pump is not a
+/// buffer.
+///
+/// The two halves that do answer are both prototype data, so neither this
+/// function nor its caller names `offshore-pump`, `water`, or `{0, -1}`:
+///
+/// - [`FactorioEntityPrototype::fluid_source_offset`] -- which tile, as an
+///   offset in the north frame. The runtime API marks it
+///   `subclasses: ["OffshorePump"]`, so **its absence is the discriminator**:
+///   a boiler standing on a shoreline has none and is declined here without
+///   anybody having to exclude boilers by name;
+/// - [`factorio_bot_core::types::TileFluid`] on the tile that offset lands on
+///   -- from `LuaTilePrototype::fluid`, *"The fluid offshore pump produces on
+///   this tile, if any"*.
+///
+/// **The runtime call `LuaEntity::get_fluid_source_fluid` is NOT what
+/// crosses**, and could not be: it is a method with the same `OffshorePump`
+/// subclass restriction, so it can only be asked of a pump that already
+/// stands. A planner deciding where to *put* one has no such entity. The
+/// prototype pair answers the same question with no entity at all, which is
+/// strictly more than the runtime call could have given.
+///
+/// # Three answers out, and `Unknown` is inert
+///
+/// [`Some(TileFluid::Yields)`](factorio_bot_core::types::TileFluid::Yields)
+/// and [`Some(TileFluid::Dry)`](factorio_bot_core::types::TileFluid::Dry) are
+/// both claims about the map.
+/// [`Some(TileFluid::Unknown)`](factorio_bot_core::types::TileFluid::Unknown)
+/// is not: it is unexplored ground, an archived dump, or a mod predating the
+/// field, and it falls through to exactly the inferences that ran before this
+/// existed. `None` -- no `fluid_source_offset` -- is a different absence
+/// again, and also falls through, since every other supplying entity in the
+/// game is judged by those inferences and must go on being.
+///
+/// A non-cardinal `direction` yields `None` rather than an answer: `turn`
+/// only names the four rotations, and a pump at a diagonal is not something
+/// this can site or read.
+fn drawn_from_ground(state: &PlanState, entity: &FactorioEntity) -> Option<TileFluid> {
+    let offset = state
+        .base()
+        .globals
+        .entity_prototypes
+        .get(entity.name.as_str())?
+        .fluid_source_offset
+        .clone()?;
+    let turned = offset.turn(Direction::from_u8(entity.direction)?)?;
+    let tile = Position::new(
+        entity.position.x() + turned.x(),
+        entity.position.y() + turned.y(),
+    );
+    Some(state.base().entity_graph.fluid_at(&tile))
 }
 
 // ---------------------------------------------------------------------------
@@ -1119,10 +1224,10 @@ mod pipe_tests {
     /// a fact about the shipped mod set and not a hypothetical.
     ///
     /// **The exemplar used to be an offshore pump and water, and that was
-    /// wrong** -- a 2.0 pump takes its fluid from the tile it stands on, so
-    /// its box is unfiltered and water is still unsolved. The mechanism this
-    /// test pins is unaffected; the claim about which fluid it rescued was
-    /// not.
+    /// wrong** -- a 2.0 pump takes its fluid from the tile in front of it, so
+    /// its box is unfiltered and the filter never rescued water. The mechanism
+    /// this test pins is unaffected; the claim about which fluid it rescued
+    /// was not. Water is answered by [`drawn_from_ground`] instead.
     ///
     /// The control is the same boiler carrying [`FluidFilter::Unknown`], the
     /// filter the fixture capture actually holds, which must still be refused:
@@ -1138,7 +1243,7 @@ mod pipe_tests {
         assert!(
             !is_source(&state, "steam", "boiler"),
             "an unread filter must attribute nothing -- the three inferences \
-             cannot see steam, and that is the same gap water is still in"
+             cannot see steam, and water used to sit in the same gap"
         );
 
         filter_supplying(
@@ -1207,13 +1312,190 @@ mod pipe_tests {
 
         // And the live shape of the thing that made the old exemplar wrong:
         // an offshore pump's output box really is `any`, and `any` attributes
-        // nothing by itself -- so water is exactly as unsolved as it was.
+        // nothing by itself. Water is answered now, but by the GROUND -- see
+        // `a_pump_draws_the_fluid_the_tile_in_front_of_it_yields`; this pump
+        // has no `fluid_source_offset` and stands on nothing charted, so the
+        // filter alone still says nothing about it.
         let mut elsewhere = state();
         standing(&mut elsewhere, "offshore-pump", Position::new(60.5, 60.5));
         filter_supplying(&elsewhere, "offshore-pump", &FluidFilter::Any);
         assert!(
             !is_source(&elsewhere, "water", "offshore-pump"),
             "`any` attributes nothing by itself"
+        );
+    }
+
+    /// Give `name` a `fluid_source_offset`, the way the mod now reports it for
+    /// an offshore pump. The fixture capture predates the field, so every
+    /// prototype in it reads `None` -- which is the control these tests need.
+    fn draws_from(state: &PlanState, name: &str, offset: Position) {
+        state
+            .base()
+            .globals
+            .entity_prototypes
+            .get_mut(name)
+            .expect("the fixture has this prototype")
+            .fluid_source_offset = Some(offset);
+    }
+
+    /// Chart one tile, at its corner, with the fluid it yields.
+    fn ground(state: &PlanState, x: f64, y: f64, fluid: TileFluid) {
+        state
+            .base()
+            .entity_graph
+            .add_tiles(
+                vec![factorio_bot_core::types::FactorioTile {
+                    name: match &fluid {
+                        TileFluid::Yields { .. } => "water",
+                        _ => "grass-1",
+                    }
+                    .to_owned(),
+                    player_collidable: matches!(fluid, TileFluid::Yields { .. }),
+                    position: Position::new(x, y),
+                    color: None,
+                    surface: None,
+                    fluid,
+                }],
+                None,
+            )
+            .expect("charting one tile cannot fail");
+    }
+
+    fn water() -> TileFluid {
+        TileFluid::Yields {
+            fluid: "water".to_owned(),
+        }
+    }
+
+    /// **The ground answers water, where the box filter and all three
+    /// inferences cannot.**
+    ///
+    /// This is the hole [`sources_of`] carried in its own doc for two
+    /// sessions. Water is not a charted resource, an offshore pump carries no
+    /// recipe and is not a buffer, and its output box is honestly
+    /// [`FluidFilter::Any`] -- so every other rule in `attributable_to` fails
+    /// on it and always would have.
+    ///
+    /// **Three states, asserted in one test on purpose**, because the whole
+    /// design is that they are three and not two: an uncharted source tile
+    /// attributes nothing, a charted dry one attributes nothing, and only a
+    /// tile that names the fluid does. Splitting them would let a version that
+    /// collapsed `Unknown` into `Dry` pass both halves.
+    #[test]
+    fn a_pump_draws_the_fluid_the_tile_in_front_of_it_yields() {
+        let mut state = state();
+        // Well away from the crude field, so no inference can fire.
+        standing(&mut state, "offshore-pump", Position::new(60.5, 60.5));
+        filter_supplying(&state, "offshore-pump", &FluidFilter::Any);
+
+        assert!(
+            !is_source(&state, "water", "offshore-pump"),
+            "control: with no `fluid_source_offset` on the prototype this is              the pre-2026-09-08 world, and water has no answer at all"
+        );
+
+        draws_from(&state, "offshore-pump", Position::new(0., -1.));
+        assert!(
+            !is_source(&state, "water", "offshore-pump"),
+            "the offset alone says WHICH tile, never what is in it -- and the              tile is uncharted, so `TileFluid::Unknown` must attribute nothing"
+        );
+
+        // The tile the offset names: north of a pump at (60.5, 60.5), by its
+        // corner, is (60, 59).
+        ground(&state, 60., 59., water());
+        assert!(
+            is_source(&state, "water", "offshore-pump"),
+            "a pump in front of water IS a water source"
+        );
+        assert!(
+            !is_source(&state, "steam", "offshore-pump"),
+            "and it is a source of that fluid only"
+        );
+    }
+
+    /// **Charted dry ground REFUSES a pump an inference would have accepted.**
+    ///
+    /// The ground is an observation, not a guess, so it outranks the three
+    /// inferences below it exactly as the box filter does -- and a
+    /// ground-drawing entity has no other source, since its box is unfiltered
+    /// and it carries no recipe.
+    ///
+    /// The control is the same pump with the same footprint over the same
+    /// crude field and no `fluid_source_offset`: inference 2 accepts it, which
+    /// is the wrong answer this rule exists to outrank. Without that half the
+    /// test would pass for a version that had simply stopped attributing
+    /// anything.
+    #[test]
+    fn dry_ground_outranks_the_footprint_inference() {
+        let mut state = state();
+        standing(&mut state, "offshore-pump", Position::new(20.5, 20.5));
+        filter_supplying(&state, "offshore-pump", &FluidFilter::Any);
+        assert!(
+            is_source(&state, "crude-oil", "offshore-pump"),
+            "control: standing on the crude field, the footprint inference              accepts this pump -- which is the defect, not the desired answer"
+        );
+
+        draws_from(&state, "offshore-pump", Position::new(0., -1.));
+        ground(&state, 20., 19., TileFluid::Dry);
+        assert!(
+            !is_source(&state, "crude-oil", "offshore-pump"),
+            "a pump facing dry land draws nothing, whatever it stands on"
+        );
+    }
+
+    /// **The offset is in the pump's own frame, so its DIRECTION decides which
+    /// tile is read.**
+    ///
+    /// Two pumps, one lake, one facing it and one not. Without the rotation a
+    /// north-frame `{0, -1}` would read the tile above both of them and this
+    /// test's two halves would return the same answer.
+    #[test]
+    fn the_source_tile_turns_with_the_pump() {
+        // Facing east (Factorio 2.x direction 4): the source tile is the one
+        // to the pump's east, at (61, 60).
+        let mut facing_the_lake = state();
+        facing_the_lake.create_entity(FactorioEntity {
+            name: "offshore-pump".into(),
+            entity_type: "offshore-pump".into(),
+            position: Position::new(60.5, 60.5),
+            direction: 4,
+            ..Default::default()
+        });
+        filter_supplying(&facing_the_lake, "offshore-pump", &FluidFilter::Any);
+        draws_from(&facing_the_lake, "offshore-pump", Position::new(0., -1.));
+        ground(&facing_the_lake, 61., 60., water());
+        assert!(
+            is_source(&facing_the_lake, "water", "offshore-pump"),
+            "facing east, the pump reads the tile to its east"
+        );
+
+        // The same lake tile, the same offset, a pump facing north instead:
+        // it reads (60, 59), which nobody charted.
+        let mut facing_away = state();
+        standing(&mut facing_away, "offshore-pump", Position::new(60.5, 60.5));
+        filter_supplying(&facing_away, "offshore-pump", &FluidFilter::Any);
+        draws_from(&facing_away, "offshore-pump", Position::new(0., -1.));
+        ground(&facing_away, 61., 60., water());
+        assert!(
+            !is_source(&facing_away, "water", "offshore-pump"),
+            "facing north, the tile to its east is not what it draws from"
+        );
+    }
+
+    /// **An entity with no `fluid_source_offset` is not judged by the ground
+    /// at all**, and that absence is the discriminator -- not a name.
+    ///
+    /// A boiler standing beside the same lake must go on being judged by the
+    /// three inferences, because every other supplying entity in the game is.
+    /// The runtime API marks `fluid_source_offset`
+    /// `subclasses: ["OffshorePump"]`, so the boiler genuinely has none.
+    #[test]
+    fn an_entity_that_does_not_draw_from_the_ground_is_unaffected_by_it() {
+        let mut state = state();
+        standing(&mut state, "boiler", Position::new(20.5, 20.5));
+        ground(&state, 20., 19., TileFluid::Dry);
+        assert!(
+            is_source(&state, "crude-oil", "boiler"),
+            "the boiler has no fluid source offset, so dry ground in front of              it says nothing -- the footprint inference still decides"
         );
     }
 

@@ -5483,6 +5483,8 @@ mod capacity_tests {
                     player_collidable: false,
                     color: None,
                     surface: None,
+                    // Grass yields nothing, and says so.
+                    fluid: factorio_bot_core::types::TileFluid::Dry,
                 });
             }
         }

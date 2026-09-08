@@ -191,26 +191,7 @@ end
 -- Returns `true` when every planned action settled. `obs.done` alone is the
 -- executor judging that no further progress is possible, NOT that the plan
 -- completed, so `pending == 0` is the part that makes the claim true.
-local function dispatch(n, plan)
-  local steps = {}
-  local per_bot = {}
-  for i, s in ipairs(plan.steps) do
-    local detail
-    if s.kind == "walk" then
-      detail = string.format("-> (%.2f,%.2f)", s.to.x, s.to.y)
-    elseif s.kind == "place" then
-      detail = string.format("%s @ (%.2f,%.2f) dir=%s", s.entity, s.pos.x, s.pos.y, tostring(s.direction))
-    else
-      detail = s.kind
-    end
-    steps[i] = { index = i, bot = s.bot, kind = s.kind, id = s.id, detail = detail,
-                 start = s.start, finish = s.finish }
-    per_bot[s.bot] = (per_bot[s.bot] or 0) + 1
-  end
-  for _, b in ipairs(plan.bots) do
-    print(string.format("  bot %s: %s planned step(s)", tostring(b), tostring(per_bot[b] or 0)))
-  end
-
+local function dispatch(n, plan, steps)
   print("  dispatching...")
   local tick_before = rcon.game_tick()
   local obs = goal.run(plan)
@@ -275,10 +256,67 @@ local function phase(n, label, g)
     record.milestone_stuck(n, "refused", tostring(message), nil)
     return false, code, message
   end
+  -- `PlanValue.steps` is a Lua field getter and each read rebuilds the whole
+  -- array from the schedule, so it is read ONCE here and both shapes are
+  -- built from that one array. At 2,798 steps the difference is not academic.
+  local step_list = plan.steps
   print(string.format("  PLAN: %d step(s), %d bot(s), makespan=%s",
-    #plan.steps, #plan.bots, tostring(plan.makespan)))
-  record.plan_created(n, plan, plan.bots)
-  if #plan.steps == 0 then
+    #step_list, #plan.bots, tostring(plan.makespan)))
+
+  -- Two different shapes, for two different recorders, and passing one to the
+  -- other is exactly the mistake this script made on its second run:
+  -- `record.plan_created` takes an **array of shaped step tables**, not the
+  -- `PlanValue`, and a `PlanValue` is userdata, so it fails with `bad
+  -- argument #2: error converting Lua userdata to table` -- after the plan is
+  -- made and before anything is dispatched, which is the most expensive place
+  -- to fail. `oil_milestone.lua` has the same call and would fail the same
+  -- way the moment its goal ever planned.
+  --
+  -- `deps` is read by TYPE, not by truthiness: `Option::None` reaches Lua as
+  -- mlua's null sentinel, which is light userdata and therefore truthy, so
+  -- `s.deps or {}` does not substitute the empty table.
+  local record_steps = {}
+  local per_bot = {}
+  for _, s in ipairs(step_list) do
+    per_bot[s.bot] = (per_bot[s.bot] or 0) + 1
+    -- A step with no `id` is skipped rather than erroring: a walk has no
+    -- action id to report.
+    if s.id ~= nil then
+      local deps = {}
+      if type(s.deps) == "table" then
+        for _, d in ipairs(s.deps) do deps[#deps + 1] = d end
+      end
+      -- `planned_step_from_lua` requires `action` to be a string and the two
+      -- tick fields to be numbers, and raises otherwise -- **after** the plan
+      -- has been made, which on this goal is three minutes of paused game.
+      -- Defaulted rather than trusted: a step with no label is recorded under
+      -- its kind, which is worse information than a label and infinitely
+      -- better than losing the run to it. `supervisor.lua` passes `s.label`
+      -- bare; nothing has yet shown a step without one, so this is belt and
+      -- braces, not a fix for an observed gap.
+      local start = s.start or 0
+      record_steps[#record_steps + 1] = {
+        id = s.id,
+        bot = s.bot,
+        action = s.label or s.kind or "step",
+        deps = deps,
+        planned_start = start,
+        planned_duration = (s.finish or start) - start,
+      }
+    end
+  end
+  -- The tick `goal.plan` handed the plan back at. Without it the event takes
+  -- the last RCON reply's tick, which on a headless run is the run's start --
+  -- so the plan would read as made before the minutes of planning that went
+  -- into it.
+  record_steps.tick = plan.tick
+  record.plan_created(n, record_steps, plan.bots)
+
+  for _, b in ipairs(plan.bots) do
+    print(string.format("  bot %s: %s planned step(s)", tostring(b), tostring(per_bot[b] or 0)))
+  end
+
+  if #step_list == 0 then
     print("  EMPTY PLAN: the planner found nothing to do for this goal.")
     print("    That is NOT the milestone -- either it already held or nothing was")
     print("    planned. Check goal.holds and the world before reading any")
@@ -286,7 +324,15 @@ local function phase(n, label, g)
     record.milestone_stuck(n, "plan_empty", nil, nil)
     return false, "plan_empty", nil
   end
-  return dispatch(n, plan), nil, nil
+  -- **`plan.steps` itself, not a reshape of it.** `record.actions` reads
+  -- `label`, and `kind`/`item`/`count`/`entity`/`slot` to reconstruct what a
+  -- hand delivery put into what. `oil_milestone.lua` (and this script, until
+  -- the shapes were checked against the recorder rather than copied) passes a
+  -- reshaped array carrying `detail` instead of `label` and none of the
+  -- delivery fields, so every `action_dispatched` in its record would have an
+  -- empty action name and no delivery at all -- silently, since a missing
+  -- field is read as "no delivery" and not as an error.
+  return dispatch(n, plan, step_list), nil, nil
 end
 
 --- Closes the run: the idle observation window, then `record.finish`.

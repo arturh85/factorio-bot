@@ -626,7 +626,7 @@ fn inputs_this_surface_cannot_supply(
 /// So this returns resources only on every archived world, and the preference
 /// built on it stays inert there -- which is why no baseline taken on
 /// `map.json` can move.
-fn ground_supply(world: &FactorioSurface) -> BTreeSet<String> {
+pub(crate) fn ground_supply(world: &FactorioSurface) -> BTreeSet<String> {
     let mut supply: BTreeSet<String> = world
         .entity_graph
         .resource_names_present()

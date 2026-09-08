@@ -240,6 +240,31 @@ impl MachineTable {
         P: IntoIterator<Item = &'a FactorioEntityPrototype>,
         R: IntoIterator<Item = &'r FactorioRecipe>,
     {
+        MachineTable::from_parts_recipes_and_ground(prototypes, recipes, &BTreeSet::new())
+    }
+
+    /// The full form: prototypes, the recipes to price them with, and **what
+    /// this surface supplies with no recipe at all**.
+    ///
+    /// The ground seed is not a refinement, it is what makes pricing work at
+    /// all on a real world. Space Age produces `iron-ore`, `stone` and
+    /// `coal` from asteroid crushing, so *nothing* in the shipped recipe set
+    /// is un-produced and a cost graph seeded only on "no recipe makes this"
+    /// has no base case: measured against
+    /// `workspace/scripts/map-31337-water-and-oil.json`, every machine and
+    /// every furnace priced infinite and the preference stayed inert. The
+    /// seed is [`crate::products::ground_supply`] — the same charted
+    /// resources and ground fluids the recipe preference is built on, so the
+    /// two rules answer "what can this map supply" once.
+    pub fn from_parts_recipes_and_ground<'a, 'r, P, R>(
+        prototypes: P,
+        recipes: R,
+        ground: &BTreeSet<String>,
+    ) -> Self
+    where
+        P: IntoIterator<Item = &'a FactorioEntityPrototype>,
+        R: IntoIterator<Item = &'r FactorioRecipe>,
+    {
         let mut table = MachineTable::default();
         for proto in prototypes {
             let Some(categories) = proto.crafting_categories.as_ref() else {
@@ -273,7 +298,7 @@ impl MachineTable {
             .filter(|m| m.len() > 1)
             .flat_map(|m| m.iter().cloned())
             .collect();
-        table.obtain_cost = obtain_costs(recipes, &wanted);
+        table.obtain_cost = obtain_costs(recipes, &wanted, ground);
         table
     }
 
@@ -293,7 +318,11 @@ impl MachineTable {
             .iter()
             .map(|entry| entry.value().clone())
             .collect();
-        MachineTable::from_parts_and_recipes(protos.iter(), recipes.iter())
+        MachineTable::from_parts_recipes_and_ground(
+            protos.iter(),
+            recipes.iter(),
+            &crate::products::ground_supply(state.base()),
+        )
     }
 
     /// Does any prototype in this world declare any crafting category?
@@ -404,7 +433,11 @@ impl MachineTable {
 ///
 /// Only `wanted` names are returned: this exists to break ties between
 /// machines, and nothing else reads it.
-fn obtain_costs<'r, R>(recipes: R, wanted: &BTreeSet<String>) -> BTreeMap<String, u64>
+fn obtain_costs<'r, R>(
+    recipes: R,
+    wanted: &BTreeSet<String>,
+    ground: &BTreeSet<String>,
+) -> BTreeMap<String, u64>
 where
     R: IntoIterator<Item = &'r FactorioRecipe>,
 {
@@ -435,6 +468,12 @@ where
                 cost.insert(&ingredient.name, 1.0);
             }
         }
+    }
+    // And anything the GROUND supplies is raw too, whatever recipes also make
+    // it. Without this there is no base case on a real Space Age world -- see
+    // `MachineTable::from_parts_recipes_and_ground`.
+    for name in ground {
+        cost.insert(name.as_str(), 1.0);
     }
     for _ in 0..RELAX_ROUNDS {
         let mut improved = false;
@@ -886,7 +925,7 @@ mod tests {
             .iter()
             .map(|s| s.to_string())
             .collect();
-        let costs = obtain_costs(vanilla_recipes().iter(), &wanted);
+        let costs = obtain_costs(vanilla_recipes().iter(), &wanted, &BTreeSet::new());
         let cheapest = costs
             .iter()
             .min_by_key(|(_, c)| **c)
@@ -1046,7 +1085,7 @@ mod tests {
             // The other half of the cycle, which returns the barrel.
             recipe("empty-barrel", "crafting", &[("full-barrel", 1)], 1),
         ];
-        let costs = obtain_costs(recipes.iter(), &wanted);
+        let costs = obtain_costs(recipes.iter(), &wanted, &BTreeSet::new());
         assert_eq!(costs["empty-barrel"], 5_000);
         assert_eq!(costs["full-barrel"], 55_000);
     }
@@ -1112,12 +1151,53 @@ mod tests {
                 .iter()
                 .map(|s| s.to_string())
                 .collect();
-        let costs = obtain_costs(vanilla_recipes().iter(), &wanted);
+        let costs = obtain_costs(vanilla_recipes().iter(), &wanted, &BTreeSet::new());
         // One copper plate makes two cables.
         assert_eq!(costs["copper-cable"], 500);
         // One iron plate plus three cables.
         assert_eq!(costs["electronic-circuit"], 2_500);
         // 3 circuits + 5 gears (2 iron each) + 9 iron plates.
         assert_eq!(costs["assembling-machine-1"], 26_500);
+    }
+    /// **The measured defect the fixtures could not show.** Space Age makes
+    /// `iron-ore`, `stone` and `coal` out of asteroids, so on a real world
+    /// nothing at all is un-produced and a cost graph with no ground seed has
+    /// no base case: every machine prices infinite and the preference goes
+    /// inert. That is the safe direction -- the refusal is the one that stood
+    /// before -- which is exactly why it was invisible until the rung was
+    /// planned against the dump and did not move.
+    ///
+    /// Here `ore` is both a recipe's product and a thing in the ground.
+    #[test]
+    fn a_world_where_everything_is_produced_needs_the_ground_to_price() {
+        let protos = [
+            proto("small-mill", "assembling-machine", Some(&["milling"])),
+            proto("big-mill", "assembling-machine", Some(&["milling"])),
+        ];
+        let recipes = [
+            // The asteroid arm: ore comes from a recipe as well as the ground.
+            recipe("ore", "crushing", &[("chunk", 1)], 1),
+            recipe("chunk", "crushing", &[("ore", 2)], 1),
+            recipe("small-mill", "crafting", &[("ore", 4)], 1),
+            recipe("big-mill", "crafting", &[("ore", 40)], 1),
+        ];
+        let unseeded = MachineTable::from_parts_and_recipes(protos.iter(), recipes.iter());
+        assert!(
+            unseeded.obtain_cost.is_empty(),
+            "nothing can be priced without a base case: {:?}",
+            unseeded.obtain_cost
+        );
+        assert!(matches!(
+            unseeded.machine_for("milling"),
+            Err(MachineRefusal::Ambiguous { .. })
+        ));
+
+        let ground: BTreeSet<String> = ["ore".to_string()].into_iter().collect();
+        let seeded =
+            MachineTable::from_parts_recipes_and_ground(protos.iter(), recipes.iter(), &ground);
+        assert_eq!(
+            seeded.machine_for("milling"),
+            Ok(Machine::Entity("small-mill".into()))
+        );
     }
 }

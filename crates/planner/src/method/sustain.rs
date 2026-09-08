@@ -2042,6 +2042,30 @@ mod tests {
     /// perimeter tile, a fact about ground that
     /// [`PlannerError::SustainNoRouteForFuel`] carries with the tiles named.
     /// `SustainNoOfftake` here means the plate chest has been adopted again.
+    /// # What this test does NOT cover, measured rather than assumed
+    ///
+    /// Three defects were fixed together and each was reverted in place, one
+    /// at a time, against this module's tests **and** against seed 31337's
+    /// dump. Only one of the three is caught here:
+    ///
+    /// | reverted | this module | `plan --world workspace/scripts/map.json` |
+    /// |---|---|---|
+    /// | the cumulative plate-chest exclusion | **green** | catches it: the coal buffer becomes `[-5.5, -29.5]`, cell 1's plate chest |
+    /// | the whole-plan tap search | **this test goes red** | catches it |
+    /// | siting each cell after its predecessors' belts | **green** | catches it: back to `no belt route, blocked by 10 tile(s)` |
+    ///
+    /// So two of the three are falsifiable only against the real map. The
+    /// fixture's two patches sit differently enough that cell 2 never reaches
+    /// for cell 1's plate chest there, and a fixture cannot be talked into a
+    /// geometry it does not have. **A green mutation is a finding, not a
+    /// pass**, and the finding is that this module's fixture is not a
+    /// two-cell fixture -- it exercises the first cell thoroughly and the
+    /// second hardly at all. The falsifier for the other two is:
+    ///
+    /// ```text
+    /// factorio-bot plan --world workspace/scripts/map.json \
+    ///     --goal sustain:iron-plate:16:36000 --bots 1,2,3,4
+    /// ```
     #[test]
     fn a_second_cell_refuses_about_ground_and_not_about_a_belt_that_stands() {
         let roster = [BotId(1)];

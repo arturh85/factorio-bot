@@ -66,11 +66,28 @@ function itemOf(m: MachineSample): string | null {
     return m.recipe ?? m.mining ?? null;
 }
 
-/** What each machine itself produced in `(lo, hi]`, from its own counter. */
-export function machineProduction(samples: Sample[], lo: number, hi: number): MachineProduction {
-    const rows = samples
+/**
+ * The `machines` samples in tick order, memoised on the array's identity --
+ * the same shape, and the same reason, as `runRates.forceSamples`:
+ * `attributionIntervals` calls this once per minute of the run and the answer
+ * cannot change while the array does not. See that function's doc for why
+ * identity is the key and what it cannot survive.
+ */
+const MACHINE_ORDER = new WeakMap<Sample[], MachinesSample[]>();
+
+function machinesSamples(samples: Sample[]): MachinesSample[] {
+    const cached = MACHINE_ORDER.get(samples);
+    if (cached !== undefined) return cached;
+    const ordered = samples
         .filter((s): s is MachinesSample => s.kind === 'machines')
         .sort((a, b) => a.tick - b.tick);
+    MACHINE_ORDER.set(samples, ordered);
+    return ordered;
+}
+
+/** What each machine itself produced in `(lo, hi]`, from its own counter. */
+export function machineProduction(samples: Sample[], lo: number, hi: number): MachineProduction {
+    const rows = machinesSamples(samples);
     let baseAt: MachinesSample | null = null;
     let endAt: MachinesSample | null = null;
     // The last item each machine was ever seen making, up to `hi`: an idle

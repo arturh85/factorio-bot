@@ -44,10 +44,30 @@ export interface Mark {
     rateWindow: number | null;
 }
 
-function forceSamples(samples: Sample[]): ForceSample[] {
-    return samples
+/**
+ * The `force` samples in tick order, memoised on the ARRAY'S IDENTITY.
+ *
+ * Every rate on this page bottoms out here: `madeAt` calls `forceAt` twice
+ * and `rateSeries` calls `madeAt` twice per point, so one band re-filtered
+ * and re-sorted the whole sample list thousands of times for a picture that
+ * cannot change while the array does not. The store hands the same array to
+ * every reader for the life of a run, so identity is the right key and the
+ * cache costs one entry per loaded run, collected with it.
+ *
+ * The one thing this cannot survive is a sample list mutated IN PLACE. The
+ * store never does -- `openRun` assigns a fresh array -- and a caller that
+ * did would be changing what the whole page has already drawn.
+ */
+const FORCE_ORDER = new WeakMap<Sample[], ForceSample[]>();
+
+export function forceSamples(samples: Sample[]): ForceSample[] {
+    const cached = FORCE_ORDER.get(samples);
+    if (cached !== undefined) return cached;
+    const ordered = samples
         .filter((s): s is ForceSample => s.kind === 'force')
         .sort((a, b) => a.tick - b.tick);
+    FORCE_ORDER.set(samples, ordered);
+    return ordered;
 }
 
 /** The latest `force` sample at or before `tick`, or null before the first. */

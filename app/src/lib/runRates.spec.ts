@@ -1,7 +1,7 @@
 import {describe, expect, it} from 'vitest';
 import {Sample} from '@/api/types';
 import {loadFixtureRun} from './fixtureRun';
-import {DEFAULT_MARKS, forceAt, madeAt, markAt, rateItems, rateSeries} from './runRates';
+import {DEFAULT_MARKS, forceAt, forceSamples, madeAt, markAt, rateItems, rateSeries} from './runRates';
 
 const force = (tick: number, made: Record<string, number> = {}): Sample => ({
     kind: 'force', research: null, techs_unlocked: 0,
@@ -75,5 +75,17 @@ describe('markAt against just analyse --json', () => {
         expect(forceAt(run.samples, 20100)?.tick).toBe(20100);
         expect(forceAt(run.samples, 20399)?.tick).toBe(20100);
         expect(forceAt(run.samples, 100)).toBeNull();
+    });
+    it('sorts one array once: the order is memoised on the array\'s identity, not its contents', () => {
+        // `madeAt` calls `forceAt` twice and `rateSeries` calls `madeAt` twice
+        // per point, so this filter and sort ran thousands of times per band.
+        const once = forceSamples(run.samples);
+        expect(forceSamples(run.samples)).toBe(once);
+        // A DIFFERENT array is a different key even with identical contents --
+        // identity is what makes the cache safe to hold.
+        const copy = forceSamples([...run.samples]);
+        expect(copy).not.toBe(once);
+        expect(copy).toEqual(once);
+        expect(once.map((s) => s.tick)).toEqual([...once.map((s) => s.tick)].sort((a, b) => a - b));
     });
 });

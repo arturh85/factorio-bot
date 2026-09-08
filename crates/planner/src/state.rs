@@ -707,11 +707,34 @@ fn delivery_offset(
 ///
 /// An inserter stands at a tile *centre*, so a vector `v` from it lands at
 /// `0.5 + v` inside its own tile's frame and the tile that contains it is
-/// `(0.5 + v).floor()`. **Flooring rather than rounding is the whole point**:
-/// vanilla's drop is `1.2`, and `0.5 + 1.2 = 1.7` floors to tile `1` -- the
-/// tile immediately south -- while rounding `1.2` would say the same thing by
-/// luck and rounding a long-handed `2.2` would too, right up until a mod ships
-/// a `1.6` and rounding jumps a tile the game does not.
+/// `(0.5 + v).floor()`. Vanilla's drop is `1.2`, and `0.5 + 1.2 = 1.7` floors
+/// to tile `1`, the tile immediately south.
+///
+/// # This is NOT "flooring rather than rounding", and saying so was wrong
+///
+/// An earlier version of this doc claimed flooring was load-bearing against
+/// `v.round()` and that a modded `1.6` would separate them.
+/// `tools/falsify_inserter_reach.py` swapped the body for `v.round()` and the
+/// suite stayed **green** -- a finding, and the finding is that the two are
+/// the *same function* over almost the whole domain. Rust's `f64::round` is
+/// half-away-from-zero, so `(0.5 + v).floor()` and `v.round()` agree for every
+/// `v` except a **negative half-integer**: measured over `[-4, 4]` at `0.01`
+/// they differ at exactly `-0.5`, `-1.5`, `-2.5` and `-3.5` and nowhere else.
+/// `1.6` was invented, not checked -- `0.5 + 1.6 = 2.1` floors to `2` and
+/// `1.6` rounds to `2`.
+///
+/// So the choice is real in exactly one place and it is not the one the old
+/// doc named: [`axis_reach`] passes the vector's **sideways** component here,
+/// which *can* be a negative half-integer -- a hand landing on a tile
+/// boundary. There flooring calls it on-axis and rounding calls it off-axis.
+/// The `along` component is oriented positive before it ever arrives, so for
+/// the reach itself the two are indistinguishable and no test can or should
+/// pretend otherwise.
+///
+/// Kept as `floor` because it is the definition -- *which tile contains this
+/// point* -- rather than because it beats an alternative. The general lesson
+/// is the one this repo keeps paying for: **a doc that asserts a distinction
+/// matters must have measured it**, and this one had reasoned about it.
 fn vector_tile_offset(v: f64) -> f64 {
     (0.5 + v).floor()
 }

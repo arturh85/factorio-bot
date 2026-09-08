@@ -606,7 +606,30 @@ pub fn connect_steps(
 /// Geometry, bill and refusals are identical either way: both prototypes have
 /// the same collision box, the same one-tile reach, and the same convention
 /// that `direction` names the side the arm picks up from
-/// (`crate::state`'s `inserter_reach` already lists them together).
+/// (`crate::state`'s `vanilla_inserter_reach` lists them together).
+///
+/// # A ONE-TILE REACH IS A PRECONDITION HERE, AND NOTHING CHECKS IT
+///
+/// That sentence is true of `inserter` and `burner-inserter`, the only two
+/// names this module has ever been given, and **false of
+/// `long-handed-inserter`**, which reaches two
+/// (`crate::state::inserter_reach`, prototype-derived since 2026-09-08).
+/// This parameter takes any name.
+///
+/// [`Endpoint`] is three *collinear adjacent* cells -- anchor, inserter, belt
+/// -- built as `inserter = anchor + d` and `belt = inserter + d` in
+/// [`first_free_perimeter`], with no reach anywhere in the construction. Hand
+/// it a long inserter and it places the belt **one** tile from an arm that
+/// picks up **two** tiles away: the arm reaches straight over the belt this
+/// module just laid, and drops two tiles into the machine rather than one. The
+/// belt would stand, the inserter would stand, every refusal would stay
+/// silent, and nothing would move -- this crate's most expensive failure
+/// shape, arrived at from the one direction its geometry does not check.
+///
+/// So: **this is belts-and-one-tile-inserters, and a caller wanting reach 2
+/// needs [`Endpoint`] to carry a reach rather than assume one.** Scoped, not
+/// built -- see the report on `inserter_pickup_position`. Until then, pass
+/// only a prototype whose `inserter_reach` is 1.
 pub fn connect_steps_with(
     ctx: &mut ExpansionCtx,
     from: &FactorioEntity,

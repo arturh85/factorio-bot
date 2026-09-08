@@ -108,14 +108,16 @@ use crate::action::{Action, ActionKind, Actor, Condition, Effect, InventorySlot}
 use crate::error::PlannerError;
 use crate::goal::{Goal, Holder};
 use crate::ids::{ActionId, BotId, ItemId, Ticks};
+use crate::method::have::{COAL_BURN_TICKS, fuel_visits};
 use crate::method::have::{
     HANDOVER_WALK_TICKS, PLACE_TICKS, TRANSFER_TICKS, participants_that_can_work,
 };
 use crate::method::power::{POLE, supply_anchor};
-use crate::method::produce::cells_for;
+use crate::method::produce::{FURNACE, cell_spec, cells_for, fuel_for_duration};
 use crate::method::util::{
-    BEACON, CRAFTING_CATEGORY, RecipeGate, beacon_geometry, ingredients_of, output_per_craft,
-    recipe_for, recipe_gate, smelting_ticks, tile_alignment_facing,
+    BEACON, CRAFTING_CATEGORY, RecipeGate, SMELTING_CATEGORY, beacon_geometry, ingredients_of,
+    output_per_craft, recipe_for, recipe_gate, smelting_ticks, tile_alignment,
+    tile_alignment_facing,
 };
 use crate::method::{ExpansionCtx, Method, Step};
 use crate::state::PlanState;
@@ -390,8 +392,37 @@ pub struct AssemblySpec {
     ///
     /// This is what goes in the supply chest.
     pub supplied: (ItemId, u32),
-    /// The ingredient it can, and the machine that does it.
-    pub intermediate: Intermediate,
+    /// The ingredient it can, and the machine that does it — `None` for a
+    /// **one-machine** cell, whose single machine is fed from the supply chest
+    /// and nothing else.
+    ///
+    /// A steel furnace is the case this became an `Option` for: `steel-plate`
+    /// is five iron plates and nothing else, so there is no second ingredient
+    /// for the cell to build a machine for and no link inserter to carry it.
+    /// The layout is the same body with the intermediate half left out — see
+    /// [`layout_table`].
+    pub intermediate: Option<Intermediate>,
+    /// What the product machine is.
+    ///
+    /// [`MACHINE`] for a **crafting** recipe and [`FURNACE`] for a
+    /// **smelting** one. It is a field rather than a constant because the two
+    /// differ in more than a name: a furnace is 2x2 and an assembling machine
+    /// 3x3 (see [`AssemblySpec::product_offset`]), a furnace burns coal where
+    /// an assembling machine draws kilowatts, and a furnace **takes no
+    /// recipe** at all (see [`AssemblySpec::sets_recipe`]).
+    pub machine: &'static str,
+    /// Where [`Role::Product`] stands, as a north-frame offset from the
+    /// cell's origin.
+    ///
+    /// Derived from the machine's own [`tile_alignment`], never chosen. The
+    /// origin is a tile centre, so a 3x3 machine sits at `(0, 4)` and a 2x2
+    /// one at `(-0.5, 3.5)` — the north-west 2x2 of the same 3x3 footprint,
+    /// which is what keeps [`Role::SupplyInserter`]'s drop tile and
+    /// [`Role::OutputInserter`]'s pickup tile inside the machine at both
+    /// sizes. Both components are half-integers or both are integers, so a
+    /// quarter turn about the origin preserves the machine's build grid
+    /// exactly as it does for every other part.
+    pub product_offset: (f64, f64),
     /// Ticks per product for the whole cell: the **slower** of its two
     /// machines.
     ///
@@ -419,10 +450,34 @@ impl AssemblySpec {
     /// recipe yielding two per run needs `ceil(n / 2)` runs, and each run eats
     /// its whole ingredient amount whether or not the last one is fully used.
     pub fn intermediate_runs(&self) -> u32 {
+        let Some(intermediate) = self.intermediate.as_ref() else {
+            return 0;
+        };
         let wanted = self
             .charge_products()
-            .saturating_mul(self.intermediate.per_product);
-        wanted.div_ceil(self.intermediate.per_run.max(1))
+            .saturating_mul(intermediate.per_product);
+        wanted.div_ceil(intermediate.per_run.max(1))
+    }
+
+    /// How many feed chests a cell for this spec has — one per ingredient of
+    /// the intermediate's recipe, and **zero** when there is no intermediate.
+    pub fn feeds(&self) -> usize {
+        self.intermediate
+            .as_ref()
+            .map_or(0, |made| made.ingredients.len())
+    }
+
+    /// Does this cell's product machine take a recipe?
+    ///
+    /// **Only an assembling machine does.** A furnace picks its recipe from
+    /// what is put into it and the game refuses `set_recipe` on one, so a
+    /// `SetRecipe` action emitted for a furnace would be an action that
+    /// cannot run — and a `Condition::RecipeSet` on one would be a condition
+    /// that can never hold. Read off the recipe's category rather than off
+    /// the machine's name, because the category is what decides which machine
+    /// runs it in the first place.
+    pub fn sets_recipe(&self) -> bool {
+        self.recipe.category == CRAFTING_CATEGORY
     }
 
     /// What goes in each feed chest for one charge, in chest order.
@@ -432,7 +487,10 @@ impl AssemblySpec {
     /// [`Role::FeedChest`]'s indices are assigned in.
     pub fn feed_charges(&self) -> Vec<(ItemId, u32)> {
         let runs = self.intermediate_runs();
-        self.intermediate
+        let Some(intermediate) = self.intermediate.as_ref() else {
+            return Vec::new();
+        };
+        intermediate
             .ingredients
             .iter()
             .map(|(item, amount)| (item.clone(), runs.saturating_mul(*amount)))
@@ -484,6 +542,9 @@ impl AssemblySpec {
 /// hand.
 pub fn assembly_spec(state: &PlanState, item: &str) -> Option<AssemblySpec> {
     let recipe = recipe_for(state, item)?;
+    if recipe.category == SMELTING_CATEGORY {
+        return furnace_spec(state, item, recipe);
+    }
     if recipe.category != CRAFTING_CATEGORY {
         return None;
     }
@@ -521,9 +582,93 @@ pub fn assembly_spec(state: &PlanState, item: &str) -> Option<AssemblySpec> {
     }
     Some(AssemblySpec {
         item: item.to_string(),
+        product_offset: product_offset(state, MACHINE),
+        machine: MACHINE,
         recipe,
         supplied,
-        intermediate,
+        intermediate: Some(intermediate),
+        ticks_per_item,
+    })
+}
+
+/// Where [`Role::Product`] stands for a cell whose product machine is
+/// `machine`, in the north frame.
+///
+/// The 3x3 case is `(0, 4)` — the offset this layout was written with — and
+/// every other size falls out of the machine's own [`tile_alignment`]. The
+/// derivation is one sentence: the machine has to cover the tile
+/// [`Role::SupplyInserter`] drops into (north-frame `(-1, 4)`) and the tile
+/// [`Role::OutputInserter`] picks up from (`(-1, 3)`), and it has to sit on
+/// its own build grid. Pinning the machine's north-west corner to the
+/// north-west corner of the 3x3 footprint does both for any size, and that
+/// corner is `(-1.5, 2.5)`: a machine `n` tiles across is centred half its
+/// width from it, which is exactly what `alignment - 0.5` reads out for the
+/// only two sizes a crafting machine has (`0.5 -> 0`, `0 -> -0.5`).
+fn product_offset(state: &PlanState, machine: &str) -> (f64, f64) {
+    let (ax, ay) = tile_alignment(state, machine);
+    (ax - 0.5, ay + 3.5)
+}
+
+/// Can a **one-machine** cell make `item` in a furnace, and out of what?
+///
+/// Three conditions, and the third is the one that keeps this method and
+/// [`crate::method::produce`] disjoint:
+///
+/// * the recipe takes exactly **one** ingredient, because the cell has one
+///   supply chest and one inserter into the machine. The *amount* is free —
+///   `steel-plate` is five iron plates and an inserter carries five as
+///   happily as one, which is precisely the constraint a drill-fed cell
+///   cannot relax;
+/// * that ingredient is **not something a drill can stand on**, which is
+///   `cell_spec` answering for itself rather than a second copy of its rule.
+///   `iron-plate` and `copper-plate` are stage 1's cells and stay stage 1's:
+///   a drill mining its own input is autonomous where a hand-filled chest is
+///   charged once, so where both shapes exist the drill wins;
+/// * and the furnace has a tempo, so the cell count is a division by
+///   something.
+///
+/// In vanilla 2.1 what this admits is `steel-plate` (five iron plates) and
+/// `stone-brick` (two stone) — the two smelting recipes stage 1 refuses, and
+/// for the same reason in both cases. **Steel is why it exists**: nothing in
+/// this project has ever made a steel plate, and steel gates the rocket silo,
+/// solar panels and every electric furnace past them.
+///
+/// # What fuels it
+///
+/// A stone furnace is a **burner**, and the block's own rule is that a burner
+/// works where coal flows *through* it — which a steel furnace's does not, its
+/// input being iron plates and its output steel. So the coal is hand-loaded,
+/// the same way [`crate::method::produce`]'s furnace is: [`CELL_CHARGE_TICKS`]
+/// worth at [`COAL_BURN_TICKS`] each, billed with the rest of the cell and
+/// inserted beside the boiler top-up. It runs out when the charge does, and
+/// nothing detects either — see [`CELL_CHARGE_TICKS`].
+///
+/// The **inserters** are electric ([`INSERTER`]), so the cell still wants a
+/// pole and a network with capacity left. Only two of them, and no electric
+/// machine at all, so a furnace cell's draw is ~26 kW against a red cell's
+/// ~200.
+fn furnace_spec(state: &PlanState, item: &str, recipe: FactorioRecipe) -> Option<AssemblySpec> {
+    let ingredients = ingredients_of(&recipe);
+    let [(input, amount)] = ingredients.as_slice() else {
+        return None;
+    };
+    // Stage 1's cells stay stage 1's. Asked of `cell_spec` itself rather than
+    // restated here, so the two can never drift into claiming the same item.
+    if cell_spec(state, item).is_some() {
+        return None;
+    }
+    let ticks_per_item =
+        smelting_ticks(state, &recipe, FURNACE).div_ceil(output_per_craft(&recipe, item).max(1));
+    if ticks_per_item == 0 {
+        return None;
+    }
+    Some(AssemblySpec {
+        item: item.to_string(),
+        product_offset: product_offset(state, FURNACE),
+        machine: FURNACE,
+        recipe,
+        supplied: (input.clone(), *amount),
+        intermediate: None,
         ticks_per_item,
     })
 }
@@ -625,11 +770,19 @@ pub enum Role {
 }
 
 impl Role {
-    /// What stands in this role.
-    fn name(self) -> &'static str {
+    /// What stands in this role, given the cell's product machine.
+    ///
+    /// `machine` is [`AssemblySpec::machine`] and is the whole reason this
+    /// takes an argument: a cell's machine roles are an
+    /// `assembling-machine-1` for a crafting recipe and a `stone-furnace` for
+    /// a smelting one, and a constant here would have placed an assembling
+    /// machine and asked it to smelt. Callers read [`CellPart::name`]
+    /// instead, which is this answer recorded at layout time so that a part
+    /// and its prototype cannot disagree.
+    fn name(self, machine: &'static str) -> &'static str {
         match self {
             Role::Pole => POLE,
-            Role::Intermediate | Role::Product => MACHINE,
+            Role::Intermediate | Role::Product => machine,
             Role::FeedChest(_) | Role::SupplyChest | Role::OutputChest => CHEST,
             Role::FeedInserter(_)
             | Role::LinkInserter
@@ -645,6 +798,10 @@ pub struct CellPart {
     pub role: Role,
     pub position: Position,
     pub direction: Direction,
+    /// The prototype that stands here — [`Role::name`] resolved against the
+    /// cell's own product machine, carried rather than recomputed so that no
+    /// caller has to have the spec in hand to ask what a part is.
+    pub name: &'static str,
 }
 
 /// The cell, in build order, as north-frame offsets from the intermediate
@@ -687,12 +844,23 @@ pub struct CellPart {
 /// rather than the old sequence renumbered. The plan still moves — it has two
 /// more buildings in it and a longer bill — but the diff is an addition rather
 /// than a permutation.
-fn layout_table(feeds: usize) -> Vec<(Role, (f64, f64), Direction)> {
+fn layout_table(feeds: usize, product_offset: (f64, f64)) -> Vec<(Role, (f64, f64), Direction)> {
     let feeds = feeds.min(MAX_FEED);
-    let mut out = vec![
-        (Role::Intermediate, (0., 0.), Direction::North),
-        (Role::Product, (0., 4.), Direction::North),
-    ];
+    // **The intermediate half is present only when there is one to build.**
+    // A one-machine cell (a furnace: see `furnace_spec`) has no feed chest,
+    // no feed inserter, no intermediate machine and no link inserter -- its
+    // single machine is fed from the supply chest and drained into the output
+    // chest, which is this same body with one half left out rather than a
+    // second layout. The ground the intermediate would have stood on is
+    // simply left clear.
+    let mut out = if feeds == 0 {
+        vec![(Role::Product, product_offset, Direction::North)]
+    } else {
+        vec![
+            (Role::Intermediate, (0., 0.), Direction::North),
+            (Role::Product, product_offset, Direction::North),
+        ]
+    };
     for (index, y) in FEED_ROWS.iter().take(feeds).enumerate() {
         #[allow(clippy::cast_possible_truncation)]
         out.push((Role::FeedChest(index as u8), (-3., *y), Direction::North));
@@ -702,7 +870,9 @@ fn layout_table(feeds: usize) -> Vec<(Role, (f64, f64), Direction)> {
         #[allow(clippy::cast_possible_truncation)]
         out.push((Role::FeedInserter(index as u8), (-2., *y), Direction::West));
     }
-    out.push((Role::LinkInserter, (0., 2.), Direction::North));
+    if feeds > 0 {
+        out.push((Role::LinkInserter, (0., 2.), Direction::North));
+    }
     out.push((Role::SupplyInserter, (-2., 4.), Direction::West));
     out.push((Role::OutputChest, OUTPUT_CHEST_OFFSET, Direction::North));
     out.push((
@@ -958,17 +1128,20 @@ fn layout(
     origin: &Position,
     facing: Direction,
     with_pole: bool,
-    feeds: usize,
+    spec: &AssemblySpec,
 ) -> Option<Vec<CellPart>> {
-    // A cell with no feed chest has a machine nothing puts anything into, and
-    // one with more than `MAX_FEED` has an inserter the pole cannot light.
-    // Both are refusals rather than truncations: a truncated cell places
-    // perfectly and starves.
-    if feeds == 0 || feeds > MAX_FEED {
+    let feeds = spec.feeds();
+    // A cell with more than `MAX_FEED` feed chests has an inserter the pole
+    // cannot light. A refusal rather than a truncation: a truncated cell
+    // places perfectly and starves. **Zero is not that case** -- it is a cell
+    // with no intermediate machine at all, whose one machine is fed from the
+    // supply chest (see `layout_table`), and `assembly_spec` only ever
+    // answers zero together with `intermediate: None`.
+    if feeds > MAX_FEED {
         return None;
     }
     let pole = with_pole.then_some((Role::Pole, POLE_OFFSET, Direction::North));
-    layout_table(feeds)
+    layout_table(feeds, spec.product_offset)
         .into_iter()
         .chain(pole)
         .map(|(role, offset, direction)| {
@@ -976,6 +1149,7 @@ fn layout(
                 role,
                 position: origin.add(&Position::new(offset.0, offset.1).turn(facing)?),
                 direction: compose(direction, facing)?,
+                name: role.name(spec.machine),
             })
         })
         .collect()
@@ -996,7 +1170,7 @@ fn lane(origin: &Position, facing: Direction) -> Option<Vec<Position>> {
 /// name, and `EntityGraph::add`'s whitelist and `PlanState::withdraw_slot` are
 /// both keyed on the type.
 fn entity_for(state: &PlanState, part: &CellPart) -> FactorioEntity {
-    let name = part.role.name();
+    let name = part.name;
     let entity_type = state
         .base()
         .globals
@@ -1028,8 +1202,14 @@ fn links(cell: &Cell) -> Option<Vec<(Position, Position)>> {
         out.push((p(Role::FeedChest(index))?, p(Role::FeedInserter(index))?));
         out.push((p(Role::FeedInserter(index))?, p(Role::Intermediate)?));
     }
-    out.push((p(Role::Intermediate)?, p(Role::LinkInserter)?));
-    out.push((p(Role::LinkInserter)?, p(Role::Product)?));
+    // Only when there is an intermediate machine. A one-machine cell's items
+    // go chest -> inserter -> machine and no further in, so asking for a link
+    // through a part that does not exist would refuse every furnace cell on
+    // the `?`.
+    if let Some(intermediate) = p(Role::Intermediate) {
+        out.push((intermediate, p(Role::LinkInserter)?));
+        out.push((p(Role::LinkInserter)?, p(Role::Product)?));
+    }
     out.push((p(Role::SupplyChest)?, p(Role::SupplyInserter)?));
     out.push((p(Role::SupplyInserter)?, p(Role::Product)?));
     // Out of the machine, not into it: the last link of the cell and the only
@@ -1053,7 +1233,7 @@ fn consumers(state: &PlanState, cell: &Cell) -> Vec<(Position, &'static str, f64
     cell.parts
         .iter()
         .filter_map(|part| {
-            let name = part.role.name();
+            let name = part.name;
             let kw = state.consumer_draw_kw(name)?;
             Some((part.position.clone(), name, kw))
         })
@@ -1090,11 +1270,10 @@ fn fit(
     with_pole: bool,
     spec: &AssemblySpec,
 ) -> Option<Cell> {
-    let feeds = spec.intermediate.ingredients.len();
-    let parts = layout(origin, facing, with_pole, feeds)?;
+    let parts = layout(origin, facing, with_pole, spec)?;
     let lane = lane(origin, facing)?;
     for part in &parts {
-        if !state.is_area_free_facing(part.role.name(), &part.position, part.direction) {
+        if !state.is_area_free_facing(part.name, &part.position, part.direction) {
             return None;
         }
     }
@@ -1185,12 +1364,19 @@ fn reserve_in(state: &mut PlanState, cell: &Cell, spec: &AssemblySpec) -> Result
     for part in cell.missing() {
         state.create_entity(entity_for(state, part));
     }
-    for (role, recipe) in [
-        (Role::Intermediate, &spec.intermediate.recipe),
-        (Role::Product, &spec.recipe),
-    ] {
-        if let Some(part) = cell.at(role) {
-            state.set_recipe(&part.position, &recipe.name)?;
+    // **Only machines that take one.** A furnace picks its recipe from what
+    // is put into it and the game refuses `set_recipe` on one, so the model
+    // must not carry a recipe the world could never hold -- see
+    // `AssemblySpec::sets_recipe`.
+    if spec.sets_recipe() {
+        let intermediate = spec.intermediate.as_ref().map(|made| &made.recipe);
+        for (role, recipe) in [
+            (Role::Intermediate, intermediate),
+            (Role::Product, Some(&spec.recipe)),
+        ] {
+            if let (Some(part), Some(recipe)) = (cell.at(role), recipe) {
+                state.set_recipe(&part.position, &recipe.name)?;
+            }
         }
     }
     Ok(())
@@ -1198,8 +1384,14 @@ fn reserve_in(state: &mut PlanState, cell: &Cell, spec: &AssemblySpec) -> Result
 
 /// The recipe a standing machine in `role` may already carry.
 fn recipe_for_role(spec: &AssemblySpec, role: Role) -> Option<&str> {
+    if !spec.sets_recipe() {
+        return None;
+    }
     match role {
-        Role::Intermediate => Some(spec.intermediate.recipe.name.as_str()),
+        Role::Intermediate => spec
+            .intermediate
+            .as_ref()
+            .map(|made| made.recipe.name.as_str()),
         Role::Product => Some(spec.recipe.name.as_str()),
         _ => None,
     }
@@ -1240,11 +1432,16 @@ fn fit_partial(
     spec: &AssemblySpec,
     exclude: &BTreeSet<Pos>,
 ) -> Option<Cell> {
-    let feeds = spec.intermediate.ingredients.len();
-    let table = layout_table(feeds);
+    let table = layout_table(spec.feeds(), spec.product_offset);
     let mut best: Option<(usize, Cell)> = None;
+    // A one-machine cell has only the product to recover a layout around.
+    let roles: &[Role] = if spec.intermediate.is_some() {
+        &[Role::Intermediate, Role::Product]
+    } else {
+        &[Role::Product]
+    };
     for facing in Direction::orthogonal() {
-        for role in [Role::Intermediate, Role::Product] {
+        for &role in roles {
             let Some((_, offset, _)) = table.iter().find(|(r, _, _)| *r == role) else {
                 continue;
             };
@@ -1256,7 +1453,7 @@ fn fit_partial(
                 machine.position.y() - turned.y(),
             );
             for with_pole in [false, true] {
-                let Some(parts) = layout(&origin, facing, with_pole, feeds) else {
+                let Some(parts) = layout(&origin, facing, with_pole, spec) else {
                     continue;
                 };
                 let Some(lane) = lane(&origin, facing) else {
@@ -1303,7 +1500,7 @@ fn fit_partial(
 fn standing_parts(state: &PlanState, parts: &[CellPart], spec: &AssemblySpec) -> Option<Vec<Role>> {
     let mut standing = Vec::new();
     for part in parts {
-        let name = part.role.name();
+        let name = part.name;
         match state.entity_at(&part.position) {
             // The same name **centred on the same tile**: `entity_at` answers
             // for any entity covering the point, and a machine one tile off
@@ -1360,7 +1557,7 @@ pub fn complete_cell(
     let mut machines: Vec<(f64, FactorioEntity)> = state
         .entities_within(anchor, PARTIAL_CELL_SCAN_RADIUS)
         .into_iter()
-        .filter(|entity| entity.name == MACHINE)
+        .filter(|entity| entity.name == spec.machine)
         .filter(|entity| !exclude.contains(&Pos::from(&entity.position)))
         .map(|entity| (calculate_distance(&entity.position, anchor), entity))
         .collect();
@@ -1384,16 +1581,23 @@ pub fn complete_cell(
 /// one. Read off the spec rather than a constant, because a two-feed cell has
 /// a fourth inserter and an anchor sized for three would be sized short.
 fn cell_demand_kw(state: &PlanState, spec: &AssemblySpec) -> f64 {
-    let machines = state.consumer_draw_kw(MACHINE).unwrap_or(0.);
+    // `unwrap_or(0.)` is the right answer and not a fallback here: a burner
+    // furnace draws nothing from the network, so a furnace cell's whole
+    // demand is its two inserters.
+    let machines = state.consumer_draw_kw(spec.machine).unwrap_or(0.);
     let inserters = state.consumer_draw_kw(INSERTER).unwrap_or(0.);
     let count = inserter_count(spec).to_f64().unwrap_or(3.);
-    2. * machines + count * inserters
+    let machine_count = if spec.intermediate.is_some() { 2. } else { 1. };
+    machine_count * machines + count * inserters
 }
 
 /// How many inserters a cell for `spec` has: one per feed chest, one link, one
 /// supply, one output.
 fn inserter_count(spec: &AssemblySpec) -> u32 {
-    u32::try_from(spec.intermediate.ingredients.len()).unwrap_or(1) + 3
+    // One per feed chest, the link, the supply and the output -- and a cell
+    // with no intermediate has neither feed chests nor a link, so two.
+    let link = u32::from(spec.intermediate.is_some());
+    u32::try_from(spec.feeds()).unwrap_or(1) + link + 2
 }
 
 /// How many chests a cell for `spec` has: one per feed chest, one supply, one
@@ -1403,7 +1607,7 @@ fn inserter_count(spec: &AssemblySpec) -> u32 {
 /// parts, so this is the number a cell sited on clear ground has to place.
 #[cfg(test)]
 fn chest_count(spec: &AssemblySpec) -> u32 {
-    u32::try_from(spec.intermediate.ingredients.len()).unwrap_or(1) + 2
+    u32::try_from(spec.feeds()).unwrap_or(1) + 2
 }
 
 /// Find somewhere powered to put one cell, or say why not.
@@ -1574,21 +1778,35 @@ pub fn complete_cells(state: &PlanState, spec: &AssemblySpec) -> Vec<Position> {
     let mut out = Vec::new();
     let nearby = state.entities_within(&Position::new(0., 0.), CELL_SCAN_RADIUS);
     for machine in &nearby {
-        if machine.name != MACHINE {
+        if machine.name != spec.machine {
             continue;
         }
-        if machine.recipe.as_deref() != Some(spec.recipe.name.as_str()) {
-            continue;
-        }
-        let Some(kw) = state.consumer_draw_kw(MACHINE) else {
-            continue;
+        // **A machine that takes a recipe must carry this one; a furnace,
+        // which takes none, must merely not be busy with something else.**
+        // A furnace reports whatever it last smelted, so `Some(other)` is a
+        // furnace in somebody else's arrangement and `None` is one that has
+        // not run -- which, standing between a loaded feeder and a drain, is
+        // this cell.
+        let recipe_ok = if spec.sets_recipe() {
+            machine.recipe.as_deref() == Some(spec.recipe.name.as_str())
+        } else {
+            machine
+                .recipe
+                .as_deref()
+                .is_none_or(|set| set == spec.recipe.name.as_str())
         };
-        if !(Condition::Powered {
-            pos: machine.position.clone(),
-            entity: MACHINE.into(),
-            kw,
-        })
-        .holds(state, crate::ids::BotId(0))
+        if !recipe_ok {
+            continue;
+        }
+        // A burner draws nothing, so there is no capacity clause to check for
+        // one -- `Powered` is asked of exactly the machines that consume.
+        if let Some(kw) = state.consumer_draw_kw(spec.machine)
+            && !(Condition::Powered {
+                pos: machine.position.clone(),
+                entity: spec.machine.into(),
+                kw,
+            })
+            .holds(state, crate::ids::BotId(0))
         {
             continue;
         }
@@ -1653,7 +1871,7 @@ pub fn cell_machines(state: &PlanState, spec: &AssemblySpec) -> Vec<Position> {
             .filter(|inserter| state.delivers_into(&inserter.position, &product))
         {
             for source in nearby.iter().filter(|source| {
-                source.name == MACHINE
+                source.name == spec.machine
                     && source.position != product
                     && state.delivers_into(&source.position, &inserter.position)
             }) {
@@ -1824,11 +2042,11 @@ pub fn holds_assembling(state: &PlanState, item: &str, per_minute: u32) -> bool 
 fn bill(spec: &AssemblySpec, cells: &[Cell], coal: u32) -> Vec<(ItemId, u32)> {
     let count = cells.len() as u32;
     let mut out: Vec<(ItemId, u32)> = Vec::new();
-    for name in [MACHINE, INSERTER, CHEST] {
+    for name in [spec.machine, INSERTER, CHEST] {
         let missing = cells
             .iter()
             .flat_map(Cell::missing)
-            .filter(|part| part.role.name() == name && part.role != Role::Pole)
+            .filter(|part| part.name == name && part.role != Role::Pole)
             .count() as u32;
         if missing > 0 {
             out.push((name.to_string(), missing));
@@ -2032,6 +2250,15 @@ fn cell_steps(
     roster: &[BotId],
 ) -> Result<(Vec<Step>, Vec<ActionId>), PlannerError> {
     let mut steps: Vec<Step> = Vec::new();
+    // What one burner product machine burns over a charge, and zero for an
+    // electric one. Billed with the boiler's coal so that a single
+    // `Goal::Have` covers both -- two separate `Have`s for the same item in
+    // the same hands are satisfied by the same items, which is the merge
+    // `bill` exists to do.
+    let furnace_coal = furnace_charge_coal(&ctx.state, spec);
+    let coal_bill = coal.saturating_add(
+        furnace_coal.saturating_mul(u32::try_from(cells.len()).unwrap_or(u32::MAX)),
+    );
     // The actions that cannot run before the network exists: the ones carrying
     // a `Condition::Powered`, which no effect satisfies and which therefore
     // orders nothing by itself.
@@ -2052,7 +2279,10 @@ fn cell_steps(
         }
     };
     let product_gate = gate_pre(&spec.recipe, &mut steps);
-    let intermediate_gate = gate_pre(&spec.intermediate.recipe, &mut steps);
+    let intermediate_gate = match spec.intermediate.as_ref() {
+        Some(made) => gate_pre(&made.recipe.clone(), &mut steps),
+        None => Vec::new(),
+    };
 
     let reach = ctx
         .state
@@ -2092,7 +2322,7 @@ fn cell_steps(
             if let Step::Act(action) = &step {
                 part_ids.push(action.id);
             }
-            build.places.push((part.role.name().to_string(), step));
+            build.places.push((part.name.to_string(), step));
         }
         for evacuation_id in &evacuation_ids {
             for part_id in &part_ids {
@@ -2111,19 +2341,21 @@ fn cell_steps(
         let entity_at = |role: Role| -> Option<Condition> {
             cell.at(role).map(|part| Condition::EntityAt {
                 pos: part.position.clone(),
-                name: part.role.name().into(),
+                name: part.name.into(),
             })
         };
         // Read before the loop below starts mutating `ctx.state`, and read
         // from the ledger rather than restated: the kilowatts a cell claims
         // are the kilowatts `electric_demand_kw` will bill it.
-        let machine_kw = ctx.state.consumer_draw_kw(MACHINE);
+        let machine_kw = ctx.state.consumer_draw_kw(spec.machine);
         let inserter_kw = ctx.state.consumer_draw_kw(INSERTER);
         let powered = |role: Role| -> Option<Condition> {
             let part = cell.at(role)?;
-            let name = part.role.name();
+            let name = part.name;
+            // `None` for a burner furnace, which is the honest answer and not
+            // a missing row: it draws nothing, so it has no capacity clause.
             let kw = match name {
-                MACHINE => machine_kw,
+                _ if name == spec.machine => machine_kw,
                 INSERTER => inserter_kw,
                 _ => None,
             }?;
@@ -2134,20 +2366,31 @@ fn cell_steps(
             })
         };
         let recipe_set = |role: Role, recipe: &str| -> Option<Condition> {
+            if !spec.sets_recipe() {
+                return None;
+            }
             cell.at(role).map(|part| Condition::RecipeSet {
                 pos: part.position.clone(),
                 recipe: recipe.to_string(),
             })
         };
 
-        for (role, recipe, gate) in [
-            (
-                Role::Intermediate,
-                &spec.intermediate.recipe,
-                &intermediate_gate,
-            ),
-            (Role::Product, &spec.recipe, &product_gate),
-        ] {
+        // Nothing to set on a furnace -- see `AssemblySpec::sets_recipe`.
+        let settings: Vec<(Role, &FactorioRecipe, &Vec<Condition>)> = if spec.sets_recipe() {
+            spec.intermediate
+                .as_ref()
+                .map(|made| (Role::Intermediate, &made.recipe, &intermediate_gate))
+                .into_iter()
+                .chain(std::iter::once((
+                    Role::Product,
+                    &spec.recipe,
+                    &product_gate,
+                )))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        for (role, recipe, gate) in settings {
             let Some(part) = cell.at(role) else {
                 continue;
             };
@@ -2173,7 +2416,7 @@ fn cell_steps(
                 },
                 Condition::EntityAt {
                     pos: part.position.clone(),
-                    name: MACHINE.into(),
+                    name: spec.machine.into(),
                 },
             ];
             pre.extend(gate.iter().cloned());
@@ -2182,7 +2425,7 @@ fn cell_steps(
                 id,
                 kind: ActionKind::SetRecipe {
                     pos: part.position.clone(),
-                    entity: MACHINE.into(),
+                    entity: spec.machine.into(),
                     recipe: recipe.name.clone(),
                 },
                 pre,
@@ -2192,7 +2435,7 @@ fn cell_steps(
                 }],
                 duration: SET_RECIPE_TICKS,
                 pinned: None,
-                label: format!("set {} to {}", MACHINE, recipe.name),
+                label: format!("set {} to {}", spec.machine, recipe.name),
             })));
             // Kept in step with the emission, so a second cell's `Powered`
             // and a later `Condition::RecipeSet` both read a state that
@@ -2271,11 +2514,10 @@ fn cell_steps(
                 }
             }
             pre.extend(recipe_set(Role::Product, &spec.recipe.name));
-            if branch.contains(&Role::Intermediate) {
-                pre.extend(recipe_set(
-                    Role::Intermediate,
-                    &spec.intermediate.recipe.name,
-                ));
+            if let Some(made) = spec.intermediate.as_ref()
+                && branch.contains(&Role::Intermediate)
+            {
+                pre.extend(recipe_set(Role::Intermediate, &made.recipe.name));
             }
             let id = ctx.ids.next();
             let label = format!(
@@ -2361,7 +2603,7 @@ fn cell_steps(
     // it replaces.
     let builders = participants_that_can_work(&ctx.state, roster.to_vec());
     if builders.len() < 2 {
-        for (item, amount) in bill(spec, cells, coal) {
+        for (item, amount) in bill(spec, cells, coal_bill) {
             steps.push(Step::Subgoal(Goal::Have {
                 item,
                 count: amount,
@@ -2384,10 +2626,10 @@ fn cell_steps(
         // this method opened, and the first `Holder::Share` a chain meets is
         // what names its owner (`expand_goal_body`), so it must be met
         // before any dealt block opens a chain of its own.
-        if coal > 0 {
+        if coal_bill > 0 {
             steps.push(Step::Subgoal(Goal::Have {
                 item: "coal".into(),
-                count: coal,
+                count: coal_bill,
                 whose: Holder::Share(ctx.chain_actor),
                 via: None,
             }));
@@ -2499,7 +2741,78 @@ fn cell_steps(
         }
     }
 
+    // The product machine's own fuel, when it is a burner.
+    //
+    // A stone furnace smelting steel is fed iron plates and hands out steel,
+    // so **no coal ever flows through it** and the burner-inserter trick that
+    // makes stage 1's belted blocks self-fuelling does not apply. It is
+    // hand-loaded, exactly as `produce`'s furnace is, and it runs out when
+    // the charge does -- see `CELL_CHARGE_TICKS`. Split across visits by
+    // `fuel_visits`, because a fuel inventory is one slot and a single
+    // oversized insert puts the remainder nowhere.
+    if furnace_coal > 0 {
+        for cell in cells {
+            let Some(part) = cell.at(Role::Product) else {
+                continue;
+            };
+            for load in fuel_visits(&ctx.state, "coal", furnace_coal) {
+                let id = ctx.ids.next();
+                steps.push(Step::Act(Box::new(Action {
+                    id,
+                    kind: ActionKind::Insert {
+                        pos: part.position.clone(),
+                        entity: part.name.into(),
+                        slot: InventorySlot::Fuel,
+                        item: "coal".into(),
+                        count: load,
+                    },
+                    pre: vec![
+                        Condition::AtPosition {
+                            who: Actor::Role,
+                            pos: part.position.clone(),
+                            radius: reach,
+                            min_radius: 0.0,
+                        },
+                        Condition::EntityAt {
+                            pos: part.position.clone(),
+                            name: part.name.into(),
+                        },
+                        Condition::HasItem {
+                            who: Actor::Role,
+                            item: "coal".into(),
+                            count: load,
+                        },
+                    ],
+                    eff: vec![Effect::LoseItem {
+                        who: Actor::Role,
+                        item: "coal".into(),
+                        count: load,
+                    }],
+                    duration: TRANSFER_TICKS,
+                    pinned: None,
+                    label: format!("fuel the {} with {} coal", part.name, load),
+                })));
+            }
+        }
+    }
+
     Ok((steps, needs_power))
+}
+
+/// How much coal one cell's product machine burns over a whole charge, and
+/// zero when it burns none.
+///
+/// **A burner is a machine the network does not power.** That is the test —
+/// `consumer_draw_kw` answering `None` for a machine this crate is about to
+/// place — rather than the name `stone-furnace`, so a world whose smelting
+/// machine is something else is priced by the same rule. `fuel_for_duration`
+/// and [`COAL_BURN_TICKS`] are `produce`'s, so a furnace in a stage-2 cell
+/// and a furnace in a stage-1 cell are fuelled off one arithmetic.
+fn furnace_charge_coal(state: &PlanState, spec: &AssemblySpec) -> u32 {
+    if state.consumer_draw_kw(spec.machine).is_some() {
+        return 0;
+    }
+    fuel_for_duration(CELL_CHARGE_TICKS, COAL_BURN_TICKS)
 }
 
 /// One cell's steps, built before any is emitted -- see `cell_steps`.
@@ -2772,7 +3085,7 @@ fn fuel_for(
     let Some(ground) = cells.first().and_then(Cell::on_network_at) else {
         return (0, Vec::new());
     };
-    let Some(area) = trial.collision_area(MACHINE, ground) else {
+    let Some(area) = trial.collision_area(spec.machine, ground) else {
         return (0, Vec::new());
     };
     let demand = trial.electric_demand_kw(&area, None);
@@ -2869,6 +3182,34 @@ mod tests {
         world
             .update_recipes(vec![recipe])
             .expect("update_recipes cannot fail for a well-formed recipe");
+        // The live 2.1.17 steel recipe: five iron plates, sixteen seconds,
+        // **smelting**. It is the one-machine cell's whole reason to exist,
+        // and it is added here rather than to the shared fixture because the
+        // shared fixture is what every other method's tests read.
+        let steel: factorio_bot_core::types::FactorioRecipe =
+            factorio_bot_core::serde_json::from_str(
+                r#"{
+              "name": "steel-plate",
+              "valid": true,
+              "enabled": true,
+              "category": "smelting",
+              "ingredients": [
+                { "name": "iron-plate", "ingredient_type": "item", "amount": 5 }
+              ],
+              "products": [
+                { "name": "steel-plate", "product_type": "item", "amount": 1, "probability": 1.0 }
+              ],
+              "hidden": false,
+              "energy": 16.0,
+              "order": "c",
+              "group": "intermediate-products",
+              "subgroup": "raw-material"
+            }"#,
+            )
+            .expect("the steel recipe parses");
+        world
+            .update_recipes(vec![steel])
+            .expect("update_recipes cannot fail for a well-formed recipe");
         world
     }
 
@@ -2914,6 +3255,19 @@ mod tests {
         assembly_spec(&bare(&[BotId(1)]), PACK).expect("red science is a two-ingredient craft")
     }
 
+    /// Red science's spec with its intermediate widened to `feeds`
+    /// ingredients, for the geometry tests that vary the feed side alone.
+    ///
+    /// `layout` reads the feed count off the spec now, because the spec is
+    /// also what carries the product machine and its offset -- a furnace cell
+    /// differs from a red one in all three at once.
+    fn spec_feeds(feeds: usize) -> AssemblySpec {
+        let mut spec = spec();
+        let made = spec.intermediate.as_mut().expect("red science has one");
+        made.ingredients = vec![("iron-plate".to_string(), 1); feeds];
+        spec
+    }
+
     /// A cell standing in `state`, built the way the planner would build it,
     /// recipes and all.
     fn stand_a_cell(state: &mut PlanState) -> Cell {
@@ -2933,7 +3287,7 @@ mod tests {
         state
             .set_recipe(
                 &cell.at(Role::Intermediate).unwrap().position,
-                &spec.intermediate.recipe.name,
+                &spec.intermediate.as_ref().unwrap().recipe.name,
             )
             .expect("the machine was just placed");
         state
@@ -3052,16 +3406,20 @@ mod tests {
     fn only_a_two_ingredient_craft_with_exactly_one_makeable_half_is_a_cell() {
         let s = bare(&[BotId(1)]);
         let pack = assembly_spec(&s, PACK).expect("red science is the case this exists for");
-        assert_eq!(pack.intermediate.item, "iron-gear-wheel");
+        assert_eq!(pack.intermediate.as_ref().unwrap().item, "iron-gear-wheel");
         assert_eq!(pack.supplied, ("copper-plate".to_string(), 1));
 
         // Generality, not a special case: an electronic circuit is one iron
         // plate and three copper cables, and a cable is crafted from one
         // copper plate. Same shape, different numbers.
         let circuit = assembly_spec(&s, "electronic-circuit").expect("a circuit is the same shape");
-        assert_eq!(circuit.intermediate.item, "copper-cable");
-        assert_eq!(circuit.intermediate.per_product, 3);
-        assert_eq!(circuit.intermediate.per_run, 2, "a cable recipe yields two");
+        assert_eq!(circuit.intermediate.as_ref().unwrap().item, "copper-cable");
+        assert_eq!(circuit.intermediate.as_ref().unwrap().per_product, 3);
+        assert_eq!(
+            circuit.intermediate.as_ref().unwrap().per_run,
+            2,
+            "a cable recipe yields two"
+        );
         assert_eq!(circuit.supplied, ("iron-plate".to_string(), 1));
 
         // And the four ways to not be one.
@@ -3095,16 +3453,20 @@ mod tests {
     fn green_science_puts_the_belt_in_a_machine_and_the_inserters_in_a_chest() {
         let s = bare(&[BotId(1)]);
         let green = assembly_spec(&s, GREEN).expect("green science is a two-feed cell");
-        assert_eq!(green.intermediate.item, "transport-belt");
+        assert_eq!(green.intermediate.as_ref().unwrap().item, "transport-belt");
         assert_eq!(
-            green.intermediate.ingredients,
+            green.intermediate.as_ref().unwrap().ingredients,
             vec![
                 ("iron-plate".to_string(), 1),
                 ("iron-gear-wheel".to_string(), 1)
             ],
             "one feed chest per ingredient, in the recipe's own order"
         );
-        assert_eq!(green.intermediate.per_run, 2, "a belt recipe yields two");
+        assert_eq!(
+            green.intermediate.as_ref().unwrap().per_run,
+            2,
+            "a belt recipe yields two"
+        );
         assert_eq!(
             green.supplied,
             ("inserter".to_string(), 1),
@@ -3153,7 +3515,8 @@ mod tests {
         let pack = assembly_spec(&s, "repair-pack")
             .expect("repair-pack was a cell before MAX_FEED widened");
         assert_eq!(
-            pack.intermediate.item, "iron-gear-wheel",
+            pack.intermediate.as_ref().unwrap().item,
+            "iron-gear-wheel",
             "the gear, not the deeper circuit"
         );
 
@@ -3199,7 +3562,11 @@ mod tests {
         // The gear machine is nowhere near the bottleneck: 0.5 s at speed 0.5
         // is one second a gear against ten seconds a pack.
         assert_eq!(
-            smelting_ticks(&bare(&[BotId(1)]), &spec.intermediate.recipe, MACHINE),
+            smelting_ticks(
+                &bare(&[BotId(1)]),
+                &spec.intermediate.as_ref().unwrap().recipe,
+                MACHINE
+            ),
             60
         );
         assert_eq!(cells_for(6, spec.ticks_per_item).unwrap(), 1);
@@ -3251,9 +3618,9 @@ mod tests {
         // 9,000 / 1,000 is nine products, each wanting one intermediate, out
         // of a recipe that makes two per run: five runs, not four and a half.
         spec.ticks_per_item = 1_000;
-        spec.intermediate.per_product = 1;
-        spec.intermediate.per_run = 2;
-        spec.intermediate.ingredients = vec![("iron-plate".to_string(), 3)];
+        spec.intermediate.as_mut().unwrap().per_product = 1;
+        spec.intermediate.as_mut().unwrap().per_run = 2;
+        spec.intermediate.as_mut().unwrap().ingredients = vec![("iron-plate".to_string(), 3)];
         assert_eq!(spec.charge_products(), 9);
         assert_eq!(
             spec.feed_charges(),
@@ -3274,8 +3641,10 @@ mod tests {
         for feeds in 1..=MAX_FEED {
             for facing in Direction::orthogonal() {
                 let origin = Position::new(10.5, 10.5);
-                for part in layout(&origin, facing, true, feeds).expect("a cardinal facing") {
-                    let name = part.role.name();
+                for part in
+                    layout(&origin, facing, true, &spec_feeds(feeds)).expect("a cardinal facing")
+                {
+                    let name = part.name;
                     let (offset_x, offset_y) = tile_alignment_facing(&s, name, part.direction);
                     assert!(
                         (part.position.x() - offset_x).fract().abs() < 1. / 512.
@@ -3295,14 +3664,15 @@ mod tests {
         for (feeds, facing) in
             (1..=MAX_FEED).flat_map(|f| Direction::orthogonal().into_iter().map(move |d| (f, d)))
         {
-            let parts = layout(&Position::new(10.5, 10.5), facing, true, feeds).unwrap();
+            let parts =
+                layout(&Position::new(10.5, 10.5), facing, true, &spec_feeds(feeds)).unwrap();
             for (i, a) in parts.iter().enumerate() {
                 for b in parts.iter().skip(i + 1) {
                     let a_box = s
-                        .collision_area_facing(a.role.name(), &a.position, a.direction)
+                        .collision_area_facing(a.name, &a.position, a.direction)
                         .unwrap();
                     let b_box = s
-                        .collision_area_facing(b.role.name(), &b.position, b.direction)
+                        .collision_area_facing(b.name, &b.position, b.direction)
                         .unwrap();
                     assert!(
                         a_box.right_bottom.x() <= b_box.left_top.x()
@@ -3339,7 +3709,7 @@ mod tests {
                 let cell = Cell {
                     origin: origin.clone(),
                     facing,
-                    parts: layout(&origin, facing, true, feeds).unwrap(),
+                    parts: layout(&origin, facing, true, &spec_feeds(feeds)).unwrap(),
                     standing: Vec::new(),
                     lane: lane(&origin, facing).unwrap(),
                     evacuate: Vec::new(),
@@ -3385,7 +3755,7 @@ mod tests {
         for role in roles {
             let s = bare(&[BotId(1)]);
             let origin = Position::new(10.5, 10.5);
-            let mut parts = layout(&origin, Direction::North, true, MAX_FEED).unwrap();
+            let mut parts = layout(&origin, Direction::North, true, &spec_feeds(MAX_FEED)).unwrap();
             for part in parts.iter_mut() {
                 if part.role == role {
                     part.direction = compose(part.direction, Direction::South).unwrap();
@@ -3401,7 +3771,7 @@ mod tests {
             };
             let turned = cell.at(role).unwrap();
             assert!(
-                s.is_area_free_facing(turned.role.name(), &turned.position, turned.direction),
+                s.is_area_free_facing(turned.name, &turned.position, turned.direction),
                 "{role:?} turned round still places: that is the whole trap"
             );
             let mut trial = s.fork();
@@ -3436,13 +3806,13 @@ mod tests {
             (1..=MAX_FEED).flat_map(|f| Direction::orthogonal().into_iter().map(move |d| (f, d)))
         {
             let origin = Position::new(10.5, 10.5);
-            let parts = layout(&origin, facing, true, feeds).unwrap();
+            let parts = layout(&origin, facing, true, &spec_feeds(feeds)).unwrap();
             let lane = lane(&origin, facing).unwrap();
             assert_eq!(lane.len(), 5);
             for tile in &lane {
                 for part in &parts {
                     let box_ = s
-                        .collision_area_facing(part.role.name(), &part.position, part.direction)
+                        .collision_area_facing(part.name, &part.position, part.direction)
                         .unwrap();
                     let dx = (box_.left_top.x() - tile.x()).max(tile.x() - box_.right_bottom.x());
                     let dy = (box_.left_top.y() - tile.y()).max(tile.y() - box_.right_bottom.y());
@@ -3457,7 +3827,13 @@ mod tests {
         }
         // And the lane really does reach both chests: a bot standing on it is
         // within a vanilla reach distance of each.
-        let parts = layout(&Position::new(10.5, 10.5), Direction::North, true, MAX_FEED).unwrap();
+        let parts = layout(
+            &Position::new(10.5, 10.5),
+            Direction::North,
+            true,
+            &spec_feeds(MAX_FEED),
+        )
+        .unwrap();
         let lane = lane(&Position::new(10.5, 10.5), Direction::North).unwrap();
         let chests = (0..MAX_FEED)
             .map(|index| {
@@ -3597,11 +3973,12 @@ mod tests {
         for (feeds, facing) in
             (1..=MAX_FEED).flat_map(|f| Direction::orthogonal().into_iter().map(move |d| (f, d)))
         {
-            let parts = layout(&Position::new(10.5, 10.5), facing, true, feeds).unwrap();
+            let parts =
+                layout(&Position::new(10.5, 10.5), facing, true, &spec_feeds(feeds)).unwrap();
             let pole = parts.iter().find(|p| p.role == Role::Pole).unwrap();
             let consumers = parts
                 .iter()
-                .filter(|p| s.consumer_draw_kw(p.role.name()).is_some());
+                .filter(|p| s.consumer_draw_kw(p.name).is_some());
             assert_eq!(
                 consumers.clone().count(),
                 5 + feeds,
@@ -3609,7 +3986,7 @@ mod tests {
             );
             for part in consumers {
                 let area = s
-                    .collision_area_facing(part.role.name(), &part.position, part.direction)
+                    .collision_area_facing(part.name, &part.position, part.direction)
                     .unwrap();
                 assert!(
                     s.pole_would_supply(POLE, &pole.position, &area),
@@ -3652,7 +4029,7 @@ mod tests {
         let s = bare(&[BotId(1)]);
         let origin = Position::new(10.5, 10.5);
         for facing in Direction::orthogonal() {
-            let parts = layout(&origin, facing, true, MAX_FEED).unwrap();
+            let parts = layout(&origin, facing, true, &spec_feeds(MAX_FEED)).unwrap();
             let pole = parts.iter().find(|p| p.role == Role::Pole).unwrap();
             let at = |offset: (f64, f64)| -> Position {
                 origin.add(&Position::new(offset.0, offset.1).turn(facing).unwrap())
@@ -4273,7 +4650,7 @@ mod tests {
         }
         s.set_recipe(
             &cell.at(Role::Intermediate).unwrap().position,
-            &spec.intermediate.recipe.name,
+            &spec.intermediate.as_ref().unwrap().recipe.name,
         )
         .unwrap();
         assert!(
@@ -4420,7 +4797,7 @@ mod tests {
         vec![
             (
                 cell.at(Role::Intermediate).unwrap().position.clone(),
-                spec.intermediate.recipe.name.clone(),
+                spec.intermediate.as_ref().unwrap().recipe.name.clone(),
             ),
             (
                 cell.at(Role::Product).unwrap().position.clone(),
@@ -4558,7 +4935,11 @@ mod tests {
     fn a_green_cell_holds_at_the_seam_and_a_half_fed_one_does_not() {
         let bots = [BotId(1)];
         let spec = assembly_spec(&bare(&bots), GREEN).expect("green science is a cell");
-        assert_eq!(spec.intermediate.ingredients.len(), 2, "two feed chests");
+        assert_eq!(
+            spec.intermediate.as_ref().unwrap().ingredients.len(),
+            2,
+            "two feed chests"
+        );
 
         let mut planned = powered(&bots);
         let cell = stand_a_cell_for(&mut planned, &spec);
@@ -4753,6 +5134,205 @@ mod tests {
         );
     }
 
+    // ---- the one-machine (furnace) cell -----------------------------------
+
+    const STEEL: &str = "steel-plate";
+
+    /// The shape rule for a smelting recipe, and the three things about it
+    /// that are not the crafting rule.
+    #[test]
+    fn a_smelting_recipe_no_drill_can_feed_is_a_one_machine_cell() {
+        let s = bare(&[BotId(1)]);
+        let steel = assembly_spec(&s, STEEL).expect("steel is a furnace cell");
+        assert_eq!(
+            steel.machine, FURNACE,
+            "a furnace, not an assembling machine"
+        );
+        assert!(
+            steel.intermediate.is_none(),
+            "one machine and never two: steel has a single ingredient"
+        );
+        assert_eq!(steel.feeds(), 0, "no feed chest, so no feed side at all");
+        assert_eq!(
+            steel.feed_charges(),
+            Vec::new(),
+            "and nothing to charge it with"
+        );
+        // **The amount is free, and that is the whole difference from stage
+        // 1.** `produce::cell_spec` demands exactly one because a drill
+        // delivers one thing; an inserter carries five as happily as one.
+        assert_eq!(steel.supplied, ("iron-plate".to_string(), 5));
+        assert!(
+            !steel.sets_recipe(),
+            "a furnace picks its recipe from what is put into it"
+        );
+        // 16 s at a stone furnace's crafting speed of 1.
+        assert_eq!(steel.ticks_per_item, 960);
+        assert_eq!(
+            steel.charge_products(),
+            9,
+            "9,000 ticks of charge at 960 each"
+        );
+        assert_eq!(
+            steel.supply_charge(),
+            45,
+            "nine plates of steel is 45 of iron"
+        );
+    }
+
+    /// Stage 1 keeps what stage 1 can do, and the two methods stay disjoint.
+    ///
+    /// `iron-plate` and `copper-plate` are smelting recipes too. A drill
+    /// standing on ore renews its own input where a chest is charged once, so
+    /// where both shapes exist the drill wins -- and the rule is `cell_spec`
+    /// answering for itself rather than a second copy of it here.
+    #[test]
+    fn a_plate_a_drill_can_feed_stays_stage_ones() {
+        let s = bare(&[BotId(1)]);
+        for plate in ["iron-plate", "copper-plate"] {
+            assert!(
+                crate::method::produce::cell_spec(&s, plate).is_some(),
+                "{plate} is a stage-1 cell"
+            );
+            assert!(
+                assembly_spec(&s, plate).is_none(),
+                "{plate} must not also be a stage-2 one"
+            );
+        }
+    }
+
+    /// The 2x2 furnace covers the tile the supply inserter drops into and the
+    /// tile the output inserter picks up from, at every facing.
+    ///
+    /// This is what `AssemblySpec::product_offset` exists for: the layout was
+    /// written around a 3x3 machine, and a 2x2 one placed at the same offset
+    /// would sit half a tile off its own build grid *and* miss both mouths.
+    /// Asked through `delivers_into`, which is the same predicate
+    /// `Condition::Feeds` is checked with.
+    #[test]
+    fn the_furnace_meets_both_of_its_inserters_at_every_facing() {
+        let spec = assembly_spec(&bare(&[BotId(1)]), STEEL).unwrap();
+        for facing in Direction::orthogonal() {
+            let origin = Position::new(10.5, 10.5);
+            let s = bare(&[BotId(1)]);
+            let parts = layout(&origin, facing, true, &spec).expect("a cardinal facing");
+            assert!(
+                parts.iter().all(|p| p.role != Role::Intermediate
+                    && p.role != Role::LinkInserter
+                    && !matches!(p.role, Role::FeedChest(_) | Role::FeedInserter(_))),
+                "a one-machine cell has no intermediate half"
+            );
+            // The furnace is 2x2, so its centre belongs on a tile *boundary*
+            // -- the grid `tile_alignment` reads off its own collision box,
+            // and the reason the product offset is half a tile from the one a
+            // 3x3 machine uses.
+            let product = parts
+                .iter()
+                .find(|part| part.role == Role::Product)
+                .expect("a one-machine cell has a product");
+            assert_eq!(product.name, FURNACE);
+            let (ax, ay) = tile_alignment(&s, FURNACE);
+            assert_eq!(product.position.x().rem_euclid(1.), ax, "at {facing:?}");
+            assert_eq!(product.position.y().rem_euclid(1.), ay, "at {facing:?}");
+            let mut trial = s.fork();
+            for part in &parts {
+                trial.create_entity(entity_for(&s, part));
+            }
+            let s = trial;
+            let lane = lane(&origin, facing).unwrap();
+            let cell = Cell {
+                origin,
+                facing,
+                parts,
+                standing: Vec::new(),
+                lane,
+                evacuate: Vec::new(),
+            };
+            for (from, to) in links(&cell).expect("a one-machine cell has links") {
+                assert!(
+                    s.delivers_into(&from, &to),
+                    "{from} -> {to} at facing {facing:?}"
+                );
+            }
+        }
+    }
+
+    /// A furnace cell is emitted with **no `SetRecipe` at all** and with coal
+    /// in the furnace.
+    ///
+    /// Both halves are failures that place 100 % and produce nothing: a
+    /// `SetRecipe` on a furnace is an action the game refuses, and an
+    /// unfuelled burner is a machine that never starts. The coal is
+    /// hand-loaded because no coal flows through a steel furnace -- its input
+    /// is iron plates and its output steel.
+    #[test]
+    fn a_furnace_cell_sets_no_recipe_and_gets_its_own_coal() {
+        let bots = vec![BotId(1)];
+        let s = powered(&bots);
+        let spec = assembly_spec(&s, STEEL).unwrap();
+        let net = expand(
+            &[Goal::Producing {
+                item: STEEL.to_string(),
+                per_minute: 1,
+            }],
+            &s,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .expect("a furnace cell plans on a powered world");
+        assert!(
+            !net.actions()
+                .any(|a| matches!(a.kind, ActionKind::SetRecipe { .. })),
+            "nothing in a furnace cell takes a recipe"
+        );
+        assert_eq!(
+            placed(&net, MACHINE),
+            Vec::<Position>::new(),
+            "no assembling machine anywhere: the cell's machine is a furnace"
+        );
+        assert_eq!(
+            placed(&net, INSERTER).len(),
+            2,
+            "supply and output, no link"
+        );
+        assert_eq!(placed(&net, CHEST).len(), 2, "supply and output, no feed");
+        // The plan also stands `Smelt`'s hand-fed furnaces for the iron
+        // plates the charge is made of, so the cell's own furnace is found by
+        // what it is charged with rather than by being the only one: a
+        // full-charge coal load is this method's and nothing else's.
+        let charge = fuel_for_duration(CELL_CHARGE_TICKS, COAL_BURN_TICKS);
+        let fuelled: Vec<Position> = net
+            .actions()
+            .filter_map(|a| match &a.kind {
+                ActionKind::Insert {
+                    pos,
+                    slot: InventorySlot::Fuel,
+                    item,
+                    count,
+                    entity,
+                } if item == "coal" && *count == charge && entity == FURNACE => Some(pos.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            fuelled.len(),
+            1,
+            "exactly one furnace is fuelled for a whole charge"
+        );
+        assert!(
+            placed(&net, FURNACE).contains(&fuelled[0]),
+            "and it is one this plan placed"
+        );
+        assert!(
+            net.actions().any(|a| matches!(
+                &a.kind,
+                ActionKind::Insert { item, count, .. }
+                    if item == "iron-plate" && *count == spec.supply_charge()
+            )),
+            "and its supply chest is charged with the plates it smelts"
+        );
+    }
+
     /// A world that already holds a whole plant and a lab gets a cell beside
     /// them and none of them again.
     #[test]
@@ -4881,10 +5461,10 @@ mod tests {
         for a in &cells[0].parts {
             for b in &cells[1].parts {
                 let a_box = s
-                    .collision_area_facing(a.role.name(), &a.position, a.direction)
+                    .collision_area_facing(a.name, &a.position, a.direction)
                     .unwrap();
                 let b_box = s
-                    .collision_area_facing(b.role.name(), &b.position, b.direction)
+                    .collision_area_facing(b.name, &b.position, b.direction)
                     .unwrap();
                 assert!(
                     a_box.right_bottom.x() <= b_box.left_top.x()

@@ -894,7 +894,7 @@ fn bill(count: u32, coal: u32) -> Vec<(&'static str, u32)> {
 
 /// How much coal one machine of `burn_ticks` per coal takes to run for
 /// `duration` ticks.
-fn fuel_for_duration(duration: Ticks, burn_ticks: Ticks) -> u32 {
+pub(crate) fn fuel_for_duration(duration: Ticks, burn_ticks: Ticks) -> u32 {
     duration.div_ceil(burn_ticks.max(1)).max(1)
 }
 

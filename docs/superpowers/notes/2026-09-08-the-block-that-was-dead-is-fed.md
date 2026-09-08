@@ -145,6 +145,18 @@ block fails instead of proving nothing. Five poles is about 30 tiles against
 the live 48, so the fixture is a smaller hop than the map forces — the
 assertion pins "not adjacent", not "as far as reality".
 
+**The first mutation I chose to falsify that assertion came back GREEN, and it
+was a finding about my own reasoning rather than about the test.** Moving the
+fixture's block from (60, 56) to (6, 6) — "put it next to the lake" — produced
+**7** poles, more than the 5 it replaced. The plant is sited *at the water
+wherever the block is*, so the block's position does not shorten the run; there
+is no hub position that makes them adjacent. The mutation that does kill the
+test is the one that describes the defect the assertion is guarding against:
+`for pole in run` → `for pole in run.into_iter().take(1)`, a version that lays
+one pole beyond the plant and can therefore only power an adjacent site. It
+fails with `got 2 pole placement(s)` and kills exactly that one test, 5 of 6
+in the module still passing.
+
 ## Baselines: none moved
 
 Debug binary, this worktree, `b5376c94` plus the doc and assertion changes

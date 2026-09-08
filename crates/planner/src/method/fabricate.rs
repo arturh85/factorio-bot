@@ -403,6 +403,69 @@ pub enum FabricateRefusal {
         search_radius: i32,
     },
 
+    /// Every fluid source is standing, and **no one footprint can be piped to
+    /// all of them**, because they are too far apart for any site to reach.
+    ///
+    /// # Why this is not [`FabricateRefusal::NoMachineSite`]
+    ///
+    /// `NoMachineSite` counts candidates and says how each failed. When the
+    /// sources are far apart every count is a route failure, and that reads as
+    /// a pathfinding problem: on the seed-31337 water-and-oil dump
+    /// `have:sulfur:10` reported **234 of 348 footprints** as
+    /// `no pipe route back to the source`, with nothing wrong with the ground
+    /// at any of them. The `chemical-plant` needs water *and* petroleum-gas,
+    /// and the offshore pump at spawn is **369 tiles** from the storage tank at
+    /// the crude field. No site exists. No pathfinder finds one.
+    ///
+    /// So this is decided **before** the ring search runs, from the sources'
+    /// own geometry, and the search that cannot succeed is not walked at all.
+    /// The remedy is a long-distance trunk run or a nearer source, and the
+    /// message says so instead of inviting a fix to the search.
+    ///
+    /// # It reports every supply, not just the offending one
+    ///
+    /// The refusal that made this diagnosable named every fluid supply with its
+    /// distance, and that is kept verbatim here: two sources is the smallest
+    /// case and three is not rare, so "which one is out of reach" is a fact a
+    /// reader needs and a single worst-offender line cannot give.
+    #[error(
+        "{recipe} runs in {machine}, which needs {fluids} fluid(s) at once, and its supplies \
+         stand too far apart for any one site to reach: the {fluid} supply is {furthest:.1} \
+         tiles (Chebyshev) from the best anchor at {anchor}, against {reach:.0} a pipe run can \
+         cross plus {search_radius} the site search can move. Its fluid supplies are {}. This \
+         needs a long-distance trunk run or a nearer source; no site and no pathfinder can \
+         close it",
+        sources.join("; ")
+    )]
+    #[diagnostic(
+        code(planner::fluid_sources_too_far_apart),
+        help(
+            "produce the distant fluid nearer the others -- or run a trunk, which this planner \
+             cannot yet express"
+        )
+    )]
+    FluidSourcesTooFarApart {
+        recipe: String,
+        machine: String,
+        /// How many fluid ingredients the recipe has; two is where this starts.
+        fluids: usize,
+        /// The fluid whose supply is furthest from the anchor.
+        fluid: String,
+        /// The best anchor available -- the centre of the sources' bounding
+        /// box, which minimises exactly the distance below. See
+        /// [`siting_anchor`].
+        anchor: String,
+        /// Chebyshev distance from `anchor` to the furthest supply.
+        furthest: f64,
+        /// [`PIPE_RUN_REACH`].
+        reach: f64,
+        /// [`crate::method::util::FREE_TILE_SEARCH_RADIUS`].
+        search_radius: i32,
+        /// One entry per fluid ingredient, exactly as
+        /// [`FabricateRefusal::NoMachineSite`] reports them.
+        sources: Vec<String>,
+    },
+
     /// The buffer this world offers cannot hold what this **goal** will put
     /// in it.
     ///
@@ -737,33 +800,118 @@ fn buffer_capacity(state: &PlanState, name: &str) -> BufferCapacity {
         .map_or(BufferCapacity::NotReported, BufferCapacity::Declared)
 }
 
+/// How far from a fluid source a machine can stand and still be piped to it.
+///
+/// **This is not a policy, it is the size of the window
+/// [`crate::method::pipe::route_between`] searches**: that function rasterises
+/// `enclosure::window(from.position)`, a square of `SEARCH_RADIUS` tiles on
+/// every axis around the **source**, and a sink whose junction falls outside it
+/// refuses with *"outside the searched window"*. So a machine further than this
+/// from one of its sources cannot be routed to it however clear the ground is,
+/// and no better pathfinder changes that -- only a trunk run, which this
+/// planner cannot yet express.
+///
+/// Quoted from `enclosure` rather than restated, so widening the window widens
+/// this with it. Compared on the **Chebyshev** metric, because the window is a
+/// square: a source 24 tiles east and 24 north of a machine is inside it, and a
+/// Euclidean 33.9 would say otherwise.
+pub(crate) const PIPE_RUN_REACH: f64 = crate::enclosure::SEARCH_RADIUS;
+
+/// The furthest a candidate site can be from the anchor and still be walked by
+/// [`free_area_near_where`], as an `f64` for arithmetic against
+/// [`PIPE_RUN_REACH`].
+fn ring_reach() -> f64 {
+    f64::from(crate::method::util::FREE_TILE_SEARCH_RADIUS)
+}
+
+/// Where to centre the search for a machine's site, given every source it must
+/// reach.
+///
+/// # The first source is not the right one, and there is no right one
+///
+/// This used to be `sources.first()`, which privileges whichever fluid the
+/// recipe happens to list first: a `chemical-plant` running `sulfur` was sited
+/// around the **water**, so every candidate was 369 tiles from the
+/// petroleum-gas and all 234 of them read as route failures. Anchoring on the
+/// petroleum instead would have been exactly as arbitrary and exactly as
+/// doomed, in the other direction.
+///
+/// The honest anchor is the point that is **as near as possible to the
+/// furthest source** -- the centre of the sources' bounding box, which
+/// minimises the maximum Chebyshev distance, the metric
+/// [`PIPE_RUN_REACH`] is measured in. With one source it is that source's own
+/// position exactly, so every single-fluid rig sites where it always did.
+///
+/// It does not conjure reach out of nothing: two sources 369 tiles apart are
+/// 184.5 from the midpoint and still unreachable. What it buys is the whole
+/// middle band -- sources up to `2 * (PIPE_RUN_REACH + FREE_TILE_SEARCH_RADIUS)`
+/// apart are now sitable, and were not -- and, for the band beyond it, a
+/// refusal that is about the *sources'* geometry rather than about 234
+/// candidates that never had a chance. See
+/// [`FabricateRefusal::FluidSourcesTooFarApart`].
+fn siting_anchor(sources: &[(String, FactorioEntity)], origin: &Position) -> Position {
+    let mut positions = sources.iter().map(|(_, entity)| &entity.position);
+    let Some(first) = positions.next() else {
+        return origin.clone();
+    };
+    let (mut min_x, mut max_x) = (first.x(), first.x());
+    let (mut min_y, mut max_y) = (first.y(), first.y());
+    for position in positions {
+        min_x = min_x.min(position.x());
+        max_x = max_x.max(position.x());
+        min_y = min_y.min(position.y());
+        max_y = max_y.max(position.y());
+    }
+    Position::new(f64::midpoint(min_x, max_x), f64::midpoint(min_y, max_y))
+}
+
+/// The source furthest from `anchor` on the Chebyshev metric, and how far.
+///
+/// `None` for no sources at all. See [`siting_anchor`] for why Chebyshev.
+fn furthest_source<'a>(
+    anchor: &Position,
+    sources: &'a [(String, FactorioEntity)],
+) -> Option<(&'a str, &'a FactorioEntity, f64)> {
+    sources
+        .iter()
+        .map(|(fluid, entity)| {
+            let away = (entity.position.x() - anchor.x())
+                .abs()
+                .max((entity.position.y() - anchor.y()).abs());
+            (fluid.as_str(), entity, away)
+        })
+        .max_by(|a, b| a.2.total_cmp(&b.2))
+}
+
 /// Each fluid supply with its distance from the anchor, and how many of them
 /// the ring search can never reach.
 ///
 /// # Why a count of unreachable sources is worth its own function
 ///
 /// [`FabricateRefusal::NoMachineSite`] reports how each *candidate* failed,
-/// and with two fluid inputs that cannot say the thing that matters: the rings
-/// are [`crate::method::util::FREE_TILE_SEARCH_RADIUS`] around the **first**
-/// source, so a second one further away than that is unreachable from every
-/// candidate the search will ever try, and all of them read as route failures.
-/// On the seed-31337 water-and-oil dump that is 234 of 348 for
-/// `have:sulfur:10` -- a number that invites a pathfinding fix for a
-/// petroleum-gas tank **369 tiles** from the water.
+/// and with two fluid inputs that cannot say the thing that matters: a
+/// candidate is at most `FREE_TILE_SEARCH_RADIUS` from the anchor and a pipe
+/// run reaches at most [`PIPE_RUN_REACH`] from a source, so a source further
+/// from the anchor than their sum is unreachable from every candidate the
+/// search will ever try, and all of them read as route failures. On the
+/// seed-31337 water-and-oil dump that was 234 of 348 for `have:sulfur:10` --
+/// a number that invites a pathfinding fix for a petroleum-gas tank **369
+/// tiles** from the water.
+///
+/// `radius` is that sum, passed in rather than taken from the constant, so the
+/// count here and [`FabricateRefusal::FluidSourcesTooFarApart`]'s pre-check cannot disagree about
+/// what "in reach" means.
 ///
 /// Distances are **Euclidean**, spelled out because [`Position`] carries only
-/// `manhattan_distance`: the rings are a square of side `2 * radius`, so a
-/// straight line is the honest comparison and Manhattan would overstate every
-/// diagonal.
-///
-/// A source exactly at the radius is *in* reach; only strictly beyond it
-/// counts, which is the same boundary the ring walk itself uses
-/// (`0..=FREE_TILE_SEARCH_RADIUS`).
+/// `manhattan_distance`: a straight line is the honest thing to show a reader.
+/// The *decision* is Chebyshev (see [`siting_anchor`]), so this count is
+/// deliberately the conservative one -- it can only under-report, never claim a
+/// source is unreachable when it is not.
 fn describe_sources(
     anchor: &Position,
     sources: &[(String, FactorioEntity)],
+    radius: f64,
 ) -> (Vec<String>, usize) {
-    let radius = f64::from(crate::method::util::FREE_TILE_SEARCH_RADIUS);
     let mut out_of_reach = 0usize;
     let lines = sources
         .iter()
@@ -977,10 +1125,57 @@ fn plan_fluid_rig(
         };
         sources.push((fluid.clone(), source));
     }
-    let anchor = sources
-        .first()
-        .map(|(_, entity)| entity.position.clone())
-        .unwrap_or_else(|| origin.clone());
+    // **Not `sources.first()`.** See [`siting_anchor`]: the first fluid a
+    // recipe happens to list is an arbitrary one to build a search around,
+    // and with two sources it is the wrong one half the time by
+    // construction. The bounding-box centre is as near as one point can be
+    // to the furthest supply, and is the source's own position exactly when
+    // there is one source -- so every single-fluid rig sites where it did.
+    let anchor = siting_anchor(&sources, origin);
+    // **Refuse on the sources' geometry BEFORE walking a search that cannot
+    // succeed.** A candidate is at most `FREE_TILE_SEARCH_RADIUS` from the
+    // anchor and `route_between` reaches at most `PIPE_RUN_REACH` from a
+    // source, so a supply further than their sum from the best possible
+    // anchor is unreachable from every site there will ever be. Reported here
+    // it is one fact about two entities; reported from the search below it is
+    // 234 route failures on clear ground.
+    //
+    // **The bound is `PIPE_RUN_REACH`, not `PIPE_RUN_REACH + ring_reach()`,
+    // and the difference is the whole point of the check.** The naive sum says
+    // "some candidate can reach this source", which is true of each source
+    // separately and is not the question: one machine must reach **all** of
+    // them, so the feasible set is the intersection of the sources' windows.
+    // The anchor is the point that minimises the furthest of those distances,
+    // so if even it is out of reach the intersection is empty. Written the
+    // loose way first, and a test caught it: two supplies 60 tiles apart --
+    // 30 from the midpoint, inside 24 + 12 -- passed the pre-check and then
+    // read `routes_failed: 1248, ports_failed: 0`, which is exactly the
+    // uninformative refusal this exists to replace. 60 > 2 * 24, so nothing
+    // could ever have been sited between them.
+    let reach = PIPE_RUN_REACH;
+    if let Some((fluid, _, away)) = furthest_source(&anchor, &sources)
+        && away > reach
+    {
+        // The **wider** radius here, deliberately: `out_of_reach` answers
+        // "could any candidate have reached this one at all", which is the
+        // per-source question, while the refusal above is about all of them
+        // at once. Both are honest and they are not the same number.
+        let (source_lines, _) = describe_sources(&anchor, &sources, PIPE_RUN_REACH + ring_reach());
+        let (fluid, machine_name) = (fluid.to_string(), machine.to_string());
+        return Err(PlannerError::CannotFabricate(Box::new(
+            FabricateRefusal::FluidSourcesTooFarApart {
+                recipe: recipe.name.clone(),
+                machine: machine_name,
+                fluids: sources.len(),
+                fluid,
+                anchor: anchor.to_string(),
+                furthest: away,
+                reach: PIPE_RUN_REACH,
+                search_radius: crate::method::util::FREE_TILE_SEARCH_RADIUS,
+                sources: source_lines,
+            },
+        )));
+    }
     // **The machine goes where its own ports fit.** A site flush against the
     // source puts the machine's input port inside the source; see
     // `pipe::port_is_placeable`, which is that refusal turned into a siting
@@ -1122,7 +1317,8 @@ fn plan_fluid_rig(
         // failure, which invites a routing fix for a problem routing cannot
         // reach. Distances are Euclidean and to the anchor, the one point
         // every candidate is near.
-        let (source_lines, out_of_reach) = describe_sources(&anchor, &sources);
+        let (source_lines, out_of_reach) =
+            describe_sources(&anchor, &sources, PIPE_RUN_REACH + ring_reach());
         return Err(PlannerError::CannotFabricate(Box::new(
             FabricateRefusal::NoMachineSite {
                 recipe: recipe.name.clone(),
@@ -2927,6 +3123,12 @@ mod fabricate_fluid_tests {
     /// reason the sulfur goal still refuses on a real map until something
     /// upstream stands a supply up.
     fn sulfur_state() -> PlanState {
+        sulfur_state_with_petroleum_at(Position::new(24.5, 36.5))
+    }
+
+    /// [`sulfur_state`] with the petroleum source moved, so the distance
+    /// between the two supplies is the variable under test.
+    fn sulfur_state_with_petroleum_at(petroleum_at: Position) -> PlanState {
         let world = oil_world(true);
         world
             .update_recipes(vec![
@@ -2938,7 +3140,7 @@ mod fabricate_fluid_tests {
         let mut state = state_of(world);
         for (recipe, at) in [
             ("water-source", Position::new(24.5, 26.5)),
-            ("petroleum-source", Position::new(24.5, 36.5)),
+            ("petroleum-source", petroleum_at.clone()),
         ] {
             state.create_entity(FactorioEntity {
                 name: "oil-refinery".into(),
@@ -3357,6 +3559,7 @@ mod fabricate_fluid_tests {
                 ("water".to_string(), near),
                 ("petroleum-gas".to_string(), far),
             ],
+            f64::from(crate::method::util::FREE_TILE_SEARCH_RADIUS),
         );
         assert_eq!(
             out_of_reach, 1,
@@ -3370,6 +3573,196 @@ mod fabricate_fluid_tests {
             lines[1].contains("petroleum-gas from the storage-tank")
                 && lines[1].contains("369.1 tiles"),
             "the distance is Euclidean, not Manhattan (which would read 456.0): {lines:?}"
+        );
+    }
+
+    /// **One source anchors exactly where it always did.** The whole
+    /// single-fluid world -- every rig `produced:petroleum-gas:45` builds --
+    /// has to be untouched by a change that is about several sources, and
+    /// "the bounding box of one point is that point" is the reason it is.
+    #[test]
+    fn one_source_anchors_on_itself_exactly() {
+        let only = FactorioEntity {
+            name: "pumpjack".into(),
+            position: Position::new(143.5, -358.5),
+            ..Default::default()
+        };
+        let anchor = siting_anchor(
+            &[("crude-oil".to_string(), only.clone())],
+            &Position::new(0.0, 0.0),
+        );
+        assert_eq!(anchor.x(), only.position.x());
+        assert_eq!(anchor.y(), only.position.y());
+    }
+
+    /// **No sources at all falls back on the origin**, which is what the
+    /// caller passed and what the code did before this function existed.
+    #[test]
+    fn no_sources_anchors_on_the_origin() {
+        let origin = Position::new(7.5, -3.5);
+        let anchor = siting_anchor(&[], &origin);
+        assert_eq!(anchor.x(), origin.x());
+        assert_eq!(anchor.y(), origin.y());
+    }
+
+    /// **Two sources anchor between them, and the ORDER does not matter.**
+    /// The defect was `sources.first()`: with the water listed first the
+    /// search sat on the water, and with the petroleum first it would have sat
+    /// on the petroleum -- two different searches for one recipe, neither of
+    /// them the best available. Both orderings must now give one answer.
+    #[test]
+    fn two_sources_anchor_between_them_whichever_order_they_come_in() {
+        let a = (
+            "water".to_string(),
+            FactorioEntity {
+                name: "offshore-pump".into(),
+                position: Position::new(0.0, 0.0),
+                ..Default::default()
+            },
+        );
+        let b = (
+            "petroleum-gas".to_string(),
+            FactorioEntity {
+                name: "storage-tank".into(),
+                position: Position::new(60.0, 20.0),
+                ..Default::default()
+            },
+        );
+        let origin = Position::new(-500.0, -500.0);
+        let forwards = siting_anchor(&[a.clone(), b.clone()], &origin);
+        let backwards = siting_anchor(&[b, a], &origin);
+        assert_eq!((forwards.x(), forwards.y()), (30.0, 10.0));
+        assert_eq!((backwards.x(), backwards.y()), (30.0, 10.0));
+    }
+
+    /// **The whole point of the midpoint: it buys the middle band.** Sources
+    /// 40 tiles apart are 20 from the midpoint, inside `PIPE_RUN_REACH` = 24,
+    /// so a site between them can be piped to both. Anchored on the first
+    /// source -- what this used to do -- the furthest is 40 away and every
+    /// candidate is doomed. This is the case that goes from refusing to
+    /// planning; `sulfur`'s 369 tiles is the case that stays refused.
+    ///
+    /// **The band is `2 * PIPE_RUN_REACH` wide and no wider**, because one
+    /// machine must reach every source: 60 apart is 30 from the midpoint and
+    /// still out. An earlier draft of this test asserted otherwise and the
+    /// end-to-end fixture refused it with 1,248 route failures.
+    #[test]
+    fn sources_forty_apart_are_reachable_from_the_midpoint_and_not_from_either_end() {
+        let sources = vec![
+            (
+                "water".to_string(),
+                FactorioEntity {
+                    name: "offshore-pump".into(),
+                    position: Position::new(0.0, 0.0),
+                    ..Default::default()
+                },
+            ),
+            (
+                "petroleum-gas".to_string(),
+                FactorioEntity {
+                    name: "storage-tank".into(),
+                    position: Position::new(40.0, 0.0),
+                    ..Default::default()
+                },
+            ),
+        ];
+        let reach = PIPE_RUN_REACH;
+        let midpoint = siting_anchor(&sources, &Position::new(0.0, 0.0));
+        let from_midpoint = furthest_source(&midpoint, &sources).expect("two sources").2;
+        assert!(
+            from_midpoint <= reach,
+            "20 tiles is inside {reach}, so the pre-check must not refuse: {from_midpoint}"
+        );
+        let from_first = furthest_source(&sources[0].1.position.clone(), &sources)
+            .expect("two sources")
+            .2;
+        assert!(
+            from_first > reach,
+            "the old anchor put the far source {from_first} out, beyond {reach}"
+        );
+    }
+
+    /// **369 tiles is not a midpoint problem**, and the fix must not pretend
+    /// otherwise. Halving it is still 184.5, five times the reach.
+    #[test]
+    fn the_sulfur_sources_are_out_of_reach_from_their_own_midpoint_too() {
+        let sources = vec![
+            (
+                "water".to_string(),
+                FactorioEntity {
+                    name: "offshore-pump".into(),
+                    position: Position::new(46.5, -8.5),
+                    ..Default::default()
+                },
+            ),
+            (
+                "petroleum-gas".to_string(),
+                FactorioEntity {
+                    name: "storage-tank".into(),
+                    position: Position::new(147.5, -363.5),
+                    ..Default::default()
+                },
+            ),
+        ];
+        let anchor = siting_anchor(&sources, &Position::new(0.0, 0.0));
+        let (fluid, _, away) = furthest_source(&anchor, &sources).expect("two sources");
+        assert!(
+            away > PIPE_RUN_REACH,
+            "{fluid} is {away} from the midpoint and must still refuse"
+        );
+        // Chebyshev, so the y span decides it: (363.5 - 8.5) / 2.
+        assert!((away - 177.5).abs() < 1e-9, "{away}");
+    }
+
+    /// **End to end: two supplies too far apart refuse on their own geometry,
+    /// before a single footprint is tried.** The pure functions above say the
+    /// arithmetic is right; this says the arithmetic is WIRED -- the case that
+    /// used to come back as `NoMachineSite` with hundreds of route failures on
+    /// clear ground now names the two entities and the distance between them.
+    #[test]
+    fn two_supplies_too_far_apart_refuse_by_distance_and_not_as_a_route() {
+        let state = sulfur_state_with_petroleum_at(Position::new(24.5, 336.5));
+        let error = expand(state, &sulfur_goal()).expect_err("310 tiles is out of reach");
+        let text = error.to_string();
+        assert!(
+            text.contains("too far apart"),
+            "must be the geometric refusal, not a route one: {text}"
+        );
+        assert!(
+            text.contains("petroleum-gas") && !text.contains("no pipe route"),
+            "it names the offending fluid and does not blame routing: {text}"
+        );
+    }
+
+    /// **And the near case still plans**, so the pre-check is a bound rather
+    /// than a blanket refusal for anything with two fluids.
+    #[test]
+    fn two_supplies_within_reach_still_plan() {
+        let state = sulfur_state();
+        expand(state, &sulfur_goal()).expect("ten tiles apart is well inside the reach");
+    }
+
+    /// **The band the midpoint buys, end to end.** 40 tiles apart is beyond
+    /// what a search anchored on either source could reach and inside what the
+    /// midpoint can, so this is the case that goes from refusing to planning.
+    #[test]
+    fn supplies_forty_apart_plan_from_the_midpoint() {
+        let state = sulfur_state_with_petroleum_at(Position::new(24.5, 66.5));
+        expand(state, &sulfur_goal()).expect("40 apart is 20 from the midpoint, inside 24");
+    }
+
+    /// **And the far edge of that band refuses by distance, not by route.**
+    /// 60 apart is 30 from the midpoint against a 24-tile reach, so no site
+    /// exists -- and this is the case that caught a too-loose pre-check, which
+    /// let it through to report 1,248 route failures on clear ground.
+    #[test]
+    fn supplies_sixty_apart_are_past_the_band_and_say_so() {
+        let state = sulfur_state_with_petroleum_at(Position::new(24.5, 86.5));
+        let error = expand(state, &sulfur_goal()).expect_err("60 is past 2 * 24");
+        let text = error.to_string();
+        assert!(
+            text.contains("too far apart") && !text.contains("no pipe route"),
+            "{text}"
         );
     }
 
@@ -3389,8 +3782,8 @@ mod fabricate_fluid_tests {
                 },
             )
         };
-        assert_eq!(describe_sources(&anchor, &[at(radius)]).1, 0);
-        assert_eq!(describe_sources(&anchor, &[at(radius + 0.5)]).1, 1);
+        assert_eq!(describe_sources(&anchor, &[at(radius)], radius).1, 0);
+        assert_eq!(describe_sources(&anchor, &[at(radius + 0.5)], radius).1, 1);
     }
 
     /// **Every co-product gets a consumer, and the one the goal asked for does

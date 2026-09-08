@@ -2523,6 +2523,54 @@ mod trace_tests {
         state.entity_at(at).expect("the tank stands")
     }
 
+    /// **One named producer beside one that nothing names is still not an
+    /// answer.** The tank is joined to a refinery's heavy-oil box *and* to a
+    /// pumpjack, which carries no recipe -- so the network could be delivering
+    /// either, and `Ambiguous` is what that is. Taking the one fluid that
+    /// happened to be nameable would be the "a mechanism inferred from the one
+    /// quantity you were measuring" mistake, in a function whose whole job is
+    /// to say which fluid arrives.
+    #[test]
+    fn a_named_producer_beside_an_unnamed_one_is_still_ambiguous() {
+        let (mut state, tank) = refinery_piped_to_tank(Some("advanced-oil-processing"), 0);
+        let pumpjack = Position::new(-6.5, -15.5);
+        machine(&mut state, "pumpjack", &pumpjack, None);
+        let pumpjack_area = state
+            .collision_area("pumpjack", &pumpjack)
+            .expect("a pumpjack footprint");
+        let tank_area = state
+            .collision_area("storage-tank", &tank)
+            .expect("a tank footprint");
+        lay(
+            &mut state,
+            PipeEnd {
+                name: "pumpjack",
+                position: &pumpjack,
+                area: pumpjack_area,
+                production_type: Some("output"),
+                port_index: None,
+            },
+            PipeEnd {
+                name: "storage-tank",
+                position: &tank,
+                area: tank_area,
+                production_type: None,
+                port_index: None,
+            },
+        );
+        let traced = traced(&state, &tank_entity(&state, &tank));
+        assert!(
+            matches!(&traced, Traced::Ambiguous(fluids)
+                if fluids.len() == 1 && fluids.contains("heavy-oil")),
+            "one named fluid plus a producer nothing names is ambiguous, not that \
+             fluid: {traced:?}"
+        );
+        assert!(
+            !attributes(&state, "heavy-oil", "storage-tank"),
+            "so the buffer is not attributed to the nameable one"
+        );
+    }
+
     fn attributes(state: &PlanState, fluid: &str, name: &str) -> bool {
         sources_of(state, fluid, &Position::new(0., 0.))
             .0

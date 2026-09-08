@@ -2539,9 +2539,12 @@ pub fn supply_anchor(
 ///    rest separately (`blueprint_power`'s `distributes_itself`), and a
 ///    caller that does not check is not covered by anything here.
 /// 3. **That the poles it emits are still standing when the caller's own
-///    build finishes.** They are not, today, for `Goal::Built`.
+///    build finishes.** **Fixed 2026-09-07 in `crates/core`, and confirmed
+///    live 2026-09-08** -- see "The third one, measured, and closed" below.
+///    Nothing here changed; the promise is the same and the one mechanism
+///    that used to break it is gone.
 ///
-/// ## The third one, measured
+/// ## The third one, measured, and closed
 ///
 /// `ActionKind::StampGhosts` dispatches `FactorioRcon::place_blueprint`, which
 /// **mines every non-character, non-resource entity inside its build area**
@@ -2579,12 +2582,53 @@ pub fn supply_anchor(
 /// pole is at risk on ground the block will never occupy, and moving the run
 /// out of the block's envelope would not save it.
 ///
-/// **Nothing here can fix that**; it lives in `crates/core` and
-/// `crates/executor`. What this function could stop doing is *forgetting*:
+/// **Nothing here could fix that**; it lived in `crates/core` and
+/// `crates/executor`, and it was fixed there on 2026-09-07 — the ghost stamp
+/// issues no area query and no mine at all, so no entity the plan placed can
+/// be mined by the plan's own stamp. See
+/// `docs/superpowers/notes/2026-09-07-the-stamp-clears-only-its-own-ground.md`.
+///
+/// ### Confirmed live 2026-09-08, and the confirmation is that items MOVED
+///
+/// The note that reported the dead block
+/// (`2026-09-07-a-powered-block-that-is-not-powered.md`) does not reproduce on
+/// master. Two headless runs, seed 31337, four bots, 10x, debug binary,
+/// recorded in `docs/superpowers/notes/2026-09-08-the-block-that-was-dead-is-fed.md`:
+///
+/// ```text
+/// ElectricOreToPlate, no siting hint, plant ~48 tiles from the block
+///   41 of 41 entities at the planned tile   (was 40 of 41)
+///   boiler / offshore-pump / steam-engine   working
+///   6 inserters   waiting_for_source_items | waiting_for_space_in_destination
+///   coal in the block's two chests          50 -> 14 and 50 -> 6
+///   coal in both furnaces' FUEL slots       7 and 5, carried there by belt
+///
+/// SmeltRow24, 152 entities, 624 kW, zero generators in the blueprint
+///   165 of 166 entities at the planned tile
+///   boiler / offshore-pump working, TWO steam engines working
+///   48 of 48 inserters   waiting_for_source_items
+/// ```
+///
+/// **`no_power` appears zero times in either run.** That is the reading that
+/// settles it: an unpowered inserter says so by name, and 54 electric arms
+/// across two blocks say something else. The peer's Run A had *zero* coal
+/// consumed and not one inserter swing; the same block now drains its chests
+/// through the belt into the furnaces with no bot in the loop. The furnaces
+/// still make no plates — they read `no_ingredients` / `no_fuel`, which is a
+/// question about what feeds the block, not about whether it is powered.
+///
+/// **`Ok(Some(_))` is still only a claim about a plan**, and the three
+/// exclusions above still stand unchanged. What changed is that the one
+/// mechanism that used to break the third one is gone.
+///
+/// What this function could *additionally* stop doing is *forgetting*:
 /// [`Powering::powered`] is handed back for a caller to put on its own
 /// placements, `method::extract` does, and `method::blueprint` drops it — so
 /// the one caller siting a whole block is the one with no precondition left to
-/// notice that its power went away.
+/// notice that its power went away. That is now **defence in depth against
+/// some other cause, not this fix**: there is no known way left for a block's
+/// power to evaporate between here and dispatch, so it buys a loud refusal in
+/// place of a silent dead factory and nothing more.
 ///
 /// # Why it takes `kw` rather than computing it
 ///
@@ -6363,6 +6407,23 @@ mod block_headroom_tests {
             placed.contains(&"steam-engine"),
             "the plan must BUILD the generator, not merely leave one in the \
              overlay; placed: {placed:?}"
+        );
+
+        // **And the plant is NOT adjacent to the block.** On seed 31337 it
+        // cannot be: drills want ore at 18.4 tiles from spawn and a plant
+        // wants water at 48.1, so no anchor satisfies both and the live hop
+        // measured 2026-09-08 was ~48 tiles / 8 poles. A fixture where the
+        // lake sits beside the block would exercise none of the pole run and
+        // would pass for a version that only ever powers an adjacent site --
+        // the shape `method::connect`'s geometry defect had, where four
+        // reviews passed because the fixtures had been built to fit the code.
+        // This asserts the fixture keeps a multi-pole run between the two.
+        let poles = placed.iter().filter(|name| **name == POLE).count();
+        assert!(
+            poles >= 3,
+            "the fixture must keep the plant a real pole run away from the \
+             block, or it proves nothing about the ~48-tile hop seed 31337 \
+             forces; got {poles} pole placement(s) in {placed:?}"
         );
 
         assert!(

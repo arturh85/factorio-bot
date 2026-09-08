@@ -389,37 +389,74 @@ fn the_same_recipe_without_its_fluid_plans_in_the_named_machine() {
     );
 }
 
-/// **Several** fluid products are refused with the machine named, and that is
-/// said separately from a fluid ingredient -- the two are different problems
-/// with different remedies.
+/// **Several fluid products are no longer refused on their count** -- each one
+/// gets its own buffer, its own output fluidbox and its own pipe run.
 ///
-/// One fluid product is no longer a refusal at all: since 2026-09-07 it is
-/// given a buffer and a pipe run, because the owner's rule is that a machine
-/// whose output has nowhere to go stalls, and a buffer *is* somewhere to go.
-/// What survives is the multi-output rule, which is
-/// `advanced-oil-processing`'s three fluids and a separate owner decision.
+/// # What this test used to assert, and why that assertion was a proxy
 ///
-/// Its fluid *ingredients* are dropped so the refusal that fires is the one
-/// about products; with them the plan refuses one rung earlier, on two fluids
-/// in.
+/// It required the words `3 fluids` and `stalls`, which were
+/// `FabricateRefusal::ManyFluidProducts` -- a refusal on the *number* of fluid
+/// products. The number was never the thing that goes wrong. What goes wrong is
+/// a product with nowhere to go, and "nowhere to go" is answerable: a buffer
+/// this plan builds is somewhere, exactly as it already was for one product.
+/// So the count refusal was replaced by arithmetic on sinks, and this test now
+/// pins the capability rather than the wall.
+///
+/// # The one thing that must not regress
+///
+/// The three runs must stay on **three separate pipe segments**. A Factorio
+/// pipe segment holds one fluid, so two of the refinery's output boxes joined
+/// into one segment is a refinery that jams and then produces none of its three
+/// fluids, having placed every entity correctly.
+///
+/// Its fluid *ingredients* are dropped so the rig is exercised from the product
+/// side alone; with them the plan refuses one rung earlier, on a crude source
+/// this fixture has no wellhead for.
 #[test]
-fn several_fluid_products_are_refused_with_the_machine_named() {
-    let said = plan_error(
-        live_state_with(&BOTS, true, |r| {
-            enable(r, "advanced-oil-processing");
-            drop_fluid_ingredients(r, "advanced-oil-processing");
-        }),
-        Goal::Produced {
-            item: "petroleum-gas".into(),
-            count: 55,
-            whose: Holder::Anyone,
-            unlocks: None,
-            via: Some("advanced-oil-processing".into()),
-        },
+fn several_fluid_products_each_get_their_own_sink_and_their_own_pipe() {
+    let mut state = live_state_with(&BOTS, true, |r| {
+        enable(r, "advanced-oil-processing");
+        drop_fluid_ingredients(r, "advanced-oil-processing");
+    });
+    // The rig's parts are put in a hand rather than crafted: this test is
+    // about the *geometry* of three sinks, and a `storage-tank`'s own bill
+    // wants steel this fixture cannot smelt. Obtaining them is
+    // `method::have`'s problem and is tested where that lives.
+    for bot in BOTS {
+        for (item, count) in [("oil-refinery", 1u32), ("storage-tank", 3), ("pipe", 200)] {
+            state.gain(bot, item, count);
+        }
+    }
+    let registry = registry_for(&BOTS);
+    let goal = Goal::Produced {
+        item: "petroleum-gas".into(),
+        count: 55,
+        whose: Holder::Anyone,
+        unlocks: None,
+        via: Some("advanced-oil-processing".into()),
+    };
+    let net = expand(&[goal], &state, &registry, BOTS[0])
+        .expect("three fluid products are three sinks, not a refusal");
+    let labels: Vec<String> = net.actions().map(|a| a.label.clone()).collect();
+    assert!(
+        labels.iter().any(|l| l.contains("place oil-refinery")),
+        "the machine is stood up: {labels:?}"
     );
-    assert!(said.contains("oil-refinery"), "{said}");
-    assert!(said.contains("3 fluids"), "{said}");
-    assert!(said.contains("stalls"), "{said}");
+    // One buffer per fluid product.
+    let tanks = labels
+        .iter()
+        .filter(|l| l.contains("place storage-tank"))
+        .count();
+    assert_eq!(tanks, 3, "one buffer per fluid product: {labels:?}");
+    // And a run for each, each naming its own fluid.
+    for fluid in ["heavy-oil", "light-oil", "petroleum-gas"] {
+        assert!(
+            labels
+                .iter()
+                .any(|l| l.contains("place pipe") && l.contains(&format!("carry {fluid} "))),
+            "a pipe run carries {fluid}: {labels:?}"
+        );
+    }
 }
 
 /// The rung the whole ladder is aimed at. `produced:petroleum-gas` does not

@@ -1138,13 +1138,30 @@ fn plan_fluid_rig(
         // every other reservation is shared, because a pipe and a tank both
         // have to keep off the machine, the other boxes' ports and the runs
         // already resolved.
-        let own_port: Vec<Rect> = output_port_tiles
+        let own_lane: Vec<&(usize, Position, Rect)> = output_port_tiles
             .iter()
             .filter(|(other, _, _)| *other == ordinal)
-            .map(|(_, _, area)| area.clone())
             .collect();
+        // **The buffer is searched from the far end of this port's own lane,
+        // not from the machine.**
+        //
+        // Ring-searching around the machine puts every product's tank in the
+        // same crowded annulus, and the runs then have to cross each other to
+        // reach them: the first two products succeed and the third is walled
+        // in -- measured on the live prototypes, `advanced-oil-processing`
+        // reached petroleum-gas and read 794 of 1,194 candidates as
+        // `no_route`. Searching outward from the lane end instead puts each
+        // tank straight out from its own box, so the three runs are parallel
+        // by construction rather than by reservation, which is what a person
+        // laying this out by hand would draw.
+        //
+        // The lane tiles are in `output_port_tiles` in outward order, so the
+        // last one is the far end.
+        let lane_end = own_lane
+            .last()
+            .map_or_else(|| site.clone(), |(_, tile, _)| tile.clone());
         let taken_route = taken.clone();
-        taken.extend(own_port);
+        taken.extend(own_lane.iter().map(|(_, _, area)| area.clone()));
         // **A site is only clear if a run can actually reach it.**
         //
         // Siting and routing were two searches: `free_area_near_where`
@@ -1231,7 +1248,7 @@ fn plan_fluid_rig(
                     && routes_to(candidate, area.clone())
             })
         };
-        let Some(tank_site) = free_area_near_where(state, &site, &tank, clear) else {
+        let Some(tank_site) = free_area_near_where(state, &lane_end, &tank, clear) else {
             // Re-walk the same rings, counting why each candidate lost. One
             // extra search, paid only on the refusal path.
             let counts = std::cell::Cell::new((0usize, 0usize, 0usize, 0usize));
@@ -1245,7 +1262,7 @@ fn plan_fluid_rig(
                 }
                 counts.set(c);
             };
-            let _ = free_area_near_where(state, &site, &tank, |candidate: &Position| {
+            let _ = free_area_near_where(state, &lane_end, &tank, |candidate: &Position| {
                 bump(0);
                 match state.collision_area(&tank, candidate) {
                     None => bump(1),

@@ -1678,6 +1678,11 @@ def score_window(w: Window, events: list[dict], joined: list[dict], map_rows: li
     walk_lost_by_bot = collections.Counter()
     walk_failure_kinds = collections.Counter()
     walk_stall_causes = collections.Counter()
+    recovered_stalls = collections.Counter()
+    stall_blockers = collections.Counter()
+    # One-element lists so the loop below can add to them without `nonlocal`.
+    walks_watched_for_stalls = [0]
+    walks_unwatched_for_stalls = [0]
     repeat_failures = collections.Counter()
     walk_dispatched = 0
     for e in events:
@@ -1692,6 +1697,28 @@ def score_window(w: Window, events: list[dict], joined: list[dict], map_rows: li
         bot = e.get("bot")
         walks_by_bot[bot] += 1
         walk_ticks_by_bot[bot] += e.get("elapsed_ticks") or 0
+        # RECOVERED STALLS, and they are counted BEFORE the success branch
+        # returns, because a stall the retry survived settles `success` and is
+        # invisible everywhere else. Counted over `workspace/session-logs` on
+        # 2026-09-08: 17 recovered stalls, none of them in any `events.jsonl`,
+        # against the single stall the whole archive held.
+        #
+        # `null` and `[]` are different answers and are kept apart here too:
+        # `null` (or a run archived before the field existed) is "nobody
+        # watched", `[]` is "watched, and it did not stall". A run where NO
+        # walk was watched reports that instead of reporting zero stalls.
+        stalls = e.get("stalls")
+        if stalls is None:
+            walks_unwatched_for_stalls[0] += 1
+        else:
+            walks_watched_for_stalls[0] += 1
+            for s in stalls:
+                recovered_stalls[bot] += 1
+                stall_blockers[
+                    s.get("blocker_name")
+                    or s.get("blocker")
+                    or "(no cause recorded -- mod predates the probe)"
+                ] += 1
         status = e.get("status")
         if status == "success":
             continue
@@ -1786,6 +1813,10 @@ def score_window(w: Window, events: list[dict], joined: list[dict], map_rows: li
             for (r, d), c in walk_failure_kinds.most_common()
         ],
         "walk_stall_causes": dict(walk_stall_causes.most_common()),
+        "recovered_stalls": dict(sorted(recovered_stalls.items(), key=lambda kv: str(kv[0]))),
+        "recovered_stall_blockers": dict(stall_blockers.most_common()),
+        "walks_watched_for_stalls": walks_watched_for_stalls[0],
+        "walks_unwatched_for_stalls": walks_unwatched_for_stalls[0],
         "repeated_walk_failures": [
             {"bot": b, "to": [x, y], "count": c}
             for (b, x, y), c in repeat_failures.most_common()
@@ -4936,6 +4967,27 @@ def report(a: dict, out=sys.stdout, top: int = 12) -> None:
                 flag = "   <- recorded before the classifier knew this wording (see 1f498593)"
             p(f"      walk failure: recorded={f['recorded_kind']:<18} "
               f"from-text={f['derived_from_text']:<18} n={f['count']}{flag}")
+        # RECOVERED STALLS. Printed whenever anything was watched, INCLUDING
+        # when the count is zero, because "zero stalls, and we looked" is a
+        # result and silence is not. When nothing was watched it says that
+        # instead -- never a zero, which would read as a clean run.
+        watched = w.get("walks_watched_for_stalls") or 0
+        unwatched = w.get("walks_unwatched_for_stalls") or 0
+        if watched:
+            total = sum((w.get("recovered_stalls") or {}).values())
+            per_bot_stalls = ", ".join(
+                f"bot {b}: {n}" for b, n in (w.get("recovered_stalls") or {}).items()
+            )
+            p(f"      stalls the retry recovered: {total}"
+              f"{' (' + per_bot_stalls + ')' if per_bot_stalls else ''}"
+              f"  [watched {watched} walk(s)"
+              f"{f', {unwatched} unwatched' if unwatched else ''}]")
+            for cause, n in (w.get("recovered_stall_blockers") or {}).items():
+                p(f"        blocked by {cause:<38} x{n}")
+        elif unwatched:
+            p(f"      stalls the retry recovered: UNKNOWN -- none of the {unwatched} "
+              "walk(s) carried a `stalls` field (pre-2026-09-08 run, or an "
+              "actuator that does not report them). NOT the same as zero.")
         if w.get("walk_stall_causes"):
             p("      what the mod found at the blocked tile (stalls only):")
             for cause, n in w["walk_stall_causes"].items():

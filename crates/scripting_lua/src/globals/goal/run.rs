@@ -315,6 +315,31 @@ fn build_observation(
         if let Some(abandoned) = w.abandoned {
             t.set("abandoned", abandoned)?;
         }
+        // Present whenever the actuator was able to look, EMPTY INCLUDED: an
+        // empty list is "this walk did not stall", and the key being absent is
+        // "nobody was watching". `record.walks` keeps the two apart all the
+        // way into `events.jsonl`, because a recovered stall used to leave no
+        // trace anywhere and 17 of 18 went unrecorded that way. See
+        // `factorio_bot_executor::WalkObservation::stalls`.
+        if let Some(stalls) = &w.stalls {
+            let list = lua.create_table()?;
+            for (n, stall) in stalls.iter().enumerate() {
+                let s = lua.create_table()?;
+                // Built field by field rather than with `lua.to_value`, whose
+                // serde bridge turns `None` into a truthy light-userdata
+                // sentinel -- see `placement_to_lua` above.
+                s.set("tick", stall.tick)?;
+                s.set("attempt", stall.attempt)?;
+                s.set("blocker", stall.blocker.as_ref().map(|b| b.kind.name()))?;
+                s.set(
+                    "blocker_name",
+                    stall.blocker.as_ref().and_then(|b| b.name.clone()),
+                )?;
+                s.set("error", stall.error.clone())?;
+                list.set(n as i64 + 1, s)?;
+            }
+            t.set("stalls", list)?;
+        }
         walks.set(i as i64 + 1, t)?;
     }
 

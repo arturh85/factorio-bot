@@ -27,7 +27,7 @@ use parking_lot::RwLock;
 use rcon::Connection;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ops::Add;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -2389,6 +2389,29 @@ pub enum WalkBlockerKind {
     Unknown,
 }
 
+impl WalkBlockerKind {
+    /// The name a record writes for this kind, spelled exactly as `serde`'s
+    /// `rename_all = "snake_case"` spells it.
+    ///
+    /// One function rather than two spellings: `crates/core`'s record
+    /// (`WalkStallRecord::blocker`) carries the name as a string, and if it
+    /// were written by hand there it could drift from the serialised form
+    /// without anything failing. `every_blocker_kind_has_its_serde_name` holds
+    /// the two together.
+    pub const fn name(self) -> &'static str {
+        match self {
+            WalkBlockerKind::Character => "character",
+            WalkBlockerKind::Entity => "entity",
+            WalkBlockerKind::Tree => "tree",
+            WalkBlockerKind::Rock => "rock",
+            WalkBlockerKind::Cliff => "cliff",
+            WalkBlockerKind::Nothing => "nothing",
+            WalkBlockerKind::ProbeFailed => "probe_failed",
+            WalkBlockerKind::Unknown => "unknown",
+        }
+    }
+}
+
 /// What a stalled walk was pressed against, read out of the mod's own clause.
 ///
 /// Carried *beside* the error string rather than instead of it, for the same
@@ -2447,6 +2470,46 @@ pub struct WalkBlocker {
     /// The unparsed cause text, for [`WalkBlockerKind::ProbeFailed`] and
     /// [`WalkBlockerKind::Unknown`].
     pub detail: Option<String>,
+}
+
+/// One stall that [`FactorioRcon::move_player_timed`] answered with a fresh
+/// path, whether or not the fresh path then worked.
+///
+/// # Why a recovered stall has to be written down
+///
+/// A stall the retry recovers from leaves the run looking perfect: the walk
+/// settles `success`, `walk_settled` carries no failure, and the only trace is
+/// one `warn!` on stdout, which the next run overwrites and no query can read.
+/// Counted off `workspace/session-logs` on 2026-09-08, **17 stalls were
+/// recovered and every one of them was invisible in `events.jsonl`**, against
+/// exactly one stall the archive records -- the `tree-01` of
+/// `run-1788833726-34821`, which is the one the retry could not fix. So the
+/// record could not distinguish "walking went fine" from "walking failed 17
+/// times and the retry saved us", which is this project's most repeated defect
+/// shape and has its own heading in `CLAUDE.md`: *silence is not success*.
+///
+/// Carried on the walk itself ([`crate::record::EventKind::WalkSettled`]'s
+/// `stalls`) rather than in a ledger of its own, for the reason
+/// `WalkSettled::abandoned` gives in as many words: every existing caller of
+/// `record.walks` gets it with no new call to forget.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WalkStall {
+    /// `game.tick` the stalled attempt was dispatched at, when the game
+    /// stamped one. `None` is a tick nobody observed, never tick zero.
+    pub tick: Option<u64>,
+    /// Which attempt stalled, counting from 1. With `WALK_ATTEMPTS` = 3 the
+    /// last possible value here is 2: a third stall is not retried, it is
+    /// returned as the walk's failure.
+    pub attempt: u32,
+    /// What the mod's probe said was in the way, parsed by [`walk_blocker`].
+    /// `None` means **the message carried no clause at all** -- an older mod,
+    /// or a stall wording this build cannot read. It never means "nothing was
+    /// in the way": that is [`WalkBlockerKind::Nothing`].
+    pub blocker: Option<WalkBlocker>,
+    /// The verdict as the game and the mod worded it, kept beside `blocker`
+    /// and never replaced by it -- the string is what a person reads, the
+    /// blocker is what a query groups by.
+    pub error: String,
 }
 
 impl WalkBlocker {
@@ -3142,6 +3205,16 @@ pub struct FactorioRcon {
     /// should. See [`scale_deadline`]. Initialised to `1.0` and updated by
     /// [`FactorioRcon::set_game_speed`] and [`FactorioRcon::game_speed`].
     speed: Arc<std::sync::atomic::AtomicU64>,
+    /// Every stall [`FactorioRcon::move_player_timed`] answered with a fresh
+    /// path, per player, until somebody takes them.
+    ///
+    /// A side channel because the retry is *inside* the walk: by the time the
+    /// walk returns `Ok`, the stalls it survived are gone from every value on
+    /// the path back to the executor, and adding them to [`ActionTicks`] would
+    /// put a walk-only fact on the type every action shares. Drained by
+    /// [`FactorioRcon::take_walk_stalls`] immediately after each walk, so it
+    /// cannot grow across a run.
+    walk_stalls: Arc<std::sync::Mutex<BTreeMap<PlayerId, Vec<WalkStall>>>>,
 }
 
 /// A wall-clock deadline sized for normal speed, rescaled to `speed`.
@@ -3180,6 +3253,7 @@ impl FactorioRcon {
                     .into_diagnostic()?,
             ),
             silent,
+            walk_stalls: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
         })
     }
 
@@ -3194,6 +3268,28 @@ impl FactorioRcon {
             speed: Arc::new(std::sync::atomic::AtomicU64::new(1.0f64.to_bits())),
             pool: None,
             silent: Arc::new(RwLock::new(true)),
+            walk_stalls: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
+        }
+    }
+
+    /// Takes and clears every stall recorded for `player` since the last take.
+    ///
+    /// `None` means **nothing was recorded**, which for a caller that drains
+    /// after every walk is "this walk did not stall". It is deliberately not
+    /// `Some(vec![])`: an empty vector would be indistinguishable from a
+    /// reading nobody took, and the executor turns the two into different
+    /// record entries (see `WalkObservation::stalls`).
+    pub fn take_walk_stalls(&self, player: PlayerId) -> Option<Vec<WalkStall>> {
+        self.walk_stalls
+            .lock()
+            .ok()
+            .and_then(|mut stalls| stalls.remove(&player))
+    }
+
+    /// Records one stall a fresh path was asked for. See [`WalkStall`].
+    fn note_walk_stall(&self, player: PlayerId, stall: WalkStall) {
+        if let Ok(mut stalls) = self.walk_stalls.lock() {
+            stalls.entry(player).or_default().push(stall);
         }
     }
 
@@ -4286,12 +4382,26 @@ impl FactorioRcon {
                     // renders only the outermost error, so a wrapper added
                     // between here and the mod would silently take the cause
                     // away while everything still compiled.
-                    let blocked_by = failure
+                    let blocker = failure
                         .error
                         .downcast_ref::<RconError>()
-                        .and_then(|refused| walk_blocker(&refused.message))
+                        .and_then(|refused| walk_blocker(&refused.message));
+                    let blocked_by = blocker
+                        .as_ref()
                         .map(|blocker| format!("blocked by {}, ", blocker.summary()))
                         .unwrap_or_default();
+                    // The record, not just the log. A stall the next attempt
+                    // recovers from is otherwise invisible to every query --
+                    // see `WalkStall` for the 17 that were.
+                    self.note_walk_stall(
+                        player_id,
+                        WalkStall {
+                            tick: failure.ticks.dispatched,
+                            attempt: WALK_ATTEMPTS - attempts_left,
+                            blocker,
+                            error: failure.error.to_string(),
+                        },
+                    );
                     warn!(
                         "#{} stalled walking to {}/{} ({}{}), asking the game for a fresh path ({} attempts left)",
                         player_id,
@@ -6934,6 +7044,69 @@ mod positioning_tests {
         assert!(
             !path_search_found_nothing(&timeout),
             "a reply that never came is not a search that found nothing"
+        );
+    }
+
+    /// [`WalkBlockerKind::name`] is the serialised spelling, not a second one.
+    ///
+    /// The record carries the blocker as that string
+    /// (`crate::record::WalkStallRecord::blocker`), so a name written by hand
+    /// there could drift from what `serde` writes everywhere else and nothing
+    /// would fail. This holds the two together, for every variant.
+    #[test]
+    fn every_blocker_kind_has_its_serde_name() {
+        for kind in [
+            WalkBlockerKind::Character,
+            WalkBlockerKind::Entity,
+            WalkBlockerKind::Tree,
+            WalkBlockerKind::Rock,
+            WalkBlockerKind::Cliff,
+            WalkBlockerKind::Nothing,
+            WalkBlockerKind::ProbeFailed,
+            WalkBlockerKind::Unknown,
+        ] {
+            let serialised = serde_json::to_string(&kind).expect("a blocker kind serialises");
+            assert_eq!(
+                serialised.trim_matches('"'),
+                kind.name(),
+                "{kind:?} is written one way by serde and another by `name()`"
+            );
+        }
+    }
+
+    /// Taking stalls nobody recorded answers `None`, **not an empty list**.
+    ///
+    /// The whole point of the field downstream is that "we looked and there
+    /// were none" and "nobody looked" are different facts
+    /// (`WalkObservation::stalls`). The distinction is made here, at the
+    /// source: this ledger only ever holds stalls somebody observed, so an
+    /// absent entry is an absent observation. `RconActuator::take_walk_stalls`
+    /// is the one that turns it into `Some(vec![])`, because *it* did look.
+    #[test]
+    fn taking_stalls_nobody_recorded_is_absent_rather_than_empty() {
+        let rcon = FactorioRcon::new_empty();
+        assert_eq!(rcon.take_walk_stalls(1), None);
+
+        rcon.note_walk_stall(
+            1,
+            WalkStall {
+                tick: Some(7_980),
+                attempt: 1,
+                blocker: None,
+                error: "stuck while walking".into(),
+            },
+        );
+        let taken = rcon.take_walk_stalls(1).expect("one stall");
+        assert_eq!(taken.len(), 1);
+        assert_eq!(
+            rcon.take_walk_stalls(1),
+            None,
+            "taken means taken -- a stall must not ride onto the next walk"
+        );
+        assert_eq!(
+            rcon.take_walk_stalls(2),
+            None,
+            "and it belongs to the bot that stalled, not to the next one asked"
         );
     }
 

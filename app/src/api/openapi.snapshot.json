@@ -884,6 +884,16 @@
                 ],
                 "type": "string"
               },
+              "stalls": {
+                "description": "Every stall this walk was retried through, in the order the game\nanswered them. See [`WalkStallRecord`] for what their absence cost.\n\n**`null` and `[]` are different answers.** `null` is \"nobody was\nwatching for stalls on this walk\" -- an actuator that does not\nreport them, or a run archived before this field existed, which\n`#[serde(default)]` makes an absence rather than a parse error.\n`[]` is \"watched, and this walk did not stall\". A reader that\ncollapses them turns an uninstrumented run into a clean one, which\nis the substitution this field was added to end.\n\nA **failed** walk's last stall is not here: the attempt that is not\nretried becomes this event's own `error` and `failure.kind:\nstalled`. So a stalled failure's true total is `stalls.len() + 1`,\nand on a successful walk `stalls.len()` is the whole story.",
+                "items": {
+                  "$ref": "#/components/schemas/WalkStallRecord"
+                },
+                "type": [
+                  "array",
+                  "null"
+                ]
+              },
               "status": {
                 "type": "string"
               },
@@ -4289,6 +4299,49 @@
           "other"
         ],
         "type": "string"
+      },
+      "WalkStallRecord": {
+        "description": "One stall a walk was retried through, as `events.jsonl` carries it.\n\nThe archive's shape of [`crate::factorio::rcon::WalkStall`]: the same facts,\nwith the blocker reduced to what a query groups by. The full clause is still\nin `error`, and [`crate::factorio::rcon::walk_blocker`] re-reads it, so\nnothing is lost -- the reduction only spares the record a nested object\nwhose fields no reader has asked for yet.\n\n**This exists because a recovered stall used to leave no trace at all.**\n`FactorioRcon::move_player_timed` answers a stalled leg with a fresh path\nand the walk then settles `success`; the only evidence was one `warn!` on\nstdout, which the next run overwrites. Counted 2026-09-08 over\n`workspace/session-logs`: **17 recovered stalls, none of them in any\n`events.jsonl`**, against exactly one stall the whole 80-file archive holds\n-- the `tree-01` of `run-1788833726-34821`, which is the one the retry could\nnot fix. A record that shows 1 of 18 cannot tell a healthy run from a run\nrecovery is carrying.",
+        "properties": {
+          "attempt": {
+            "description": "Which attempt stalled, counting from 1.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "blocker": {
+            "description": "What the mod's probe found in the way, as\n[`crate::factorio::rcon::WalkBlockerKind::name`] spells it\n(`character`, `tree`, `entity`, `nothing`, `probe_failed`, ...).\n\n**`None` means the message carried no clause this build could read** --\nan older mod, or a reworded one. It does not mean the tile was clear:\nthat is `\"nothing\"`, which is an answer. And a wording this build's\ngrammar does not cover is `\"unknown\"`, a third thing again; the census\nthat read 19 of 20 walk failures as `other` is what those three\nseparate answers exist to prevent.\n\nA string rather than the enum, for the reason\n[`EventKind::Teleport`]'s `reason` gives: the record does not need to\npublish a closed list, and a name that survives a re-read verbatim\ncannot be silently remapped onto the wrong variant on the way in.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "blocker_name": {
+            "description": "The prototype name of whatever was in the way (`tree-01`,\n`stone-furnace`), when the blocker had one.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "error": {
+            "description": "The verdict as the game and the mod worded it. Kept because `blocker`\nis derived from it and a reader must be able to check the derivation --\nthe `kind: \"other\"` census that cost this project a day was exactly a\nclassifier that had fallen behind the wording.",
+            "type": "string"
+          },
+          "tick": {
+            "description": "`game.tick` the stalled attempt was dispatched at, when the game\nstamped one. `None` is a tick nobody observed, never tick zero.",
+            "format": "int64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "attempt",
+          "error"
+        ],
+        "type": "object"
       },
       "u8": {
         "format": "int32",

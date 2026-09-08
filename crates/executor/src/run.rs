@@ -586,6 +586,15 @@ async fn run_walk(
     // Left before the verdict is written, so nothing can read a settled walk
     // that is still listed as walking.
     drop(walking);
+    // Taken on BOTH paths and before either verdict: the stalls a successful
+    // walk survived are the whole reason this exists -- a stall the retry
+    // recovered from used to leave nothing behind but a `warn!` line, and 17
+    // of the 18 stalls this project has ever observed were invisible to
+    // `events.jsonl` for exactly that reason. Untaken stalls would also ride
+    // onto the bot's *next* walk, so the take is unconditional.
+    if let Some(stalls) = act.take_walk_stalls(bot) {
+        lock(log).note_walk_stalls(bot, index, stalls);
+    }
     match outcome {
         Ok(ticks) => {
             // Same order and same reasoning as the action arm: the
@@ -1364,7 +1373,7 @@ const EVACUATE_RADIUS: f64 = 0.5;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use factorio_bot_core::factorio::rcon::DestinationFull;
+    use factorio_bot_core::factorio::rcon::{DestinationFull, WalkStall};
     use factorio_bot_core::record::map::{EntitySnapshot, Placement};
     use factorio_bot_core::types::{FactorioEntity, Position};
     use factorio_bot_planner::{Action, Actor, Condition, Effect, InventorySlot};
@@ -2204,6 +2213,156 @@ mod tests {
         );
         assert_eq!(log.observed_walk_duration(BotId(0), 0), None);
         assert_ne!(w.dispatched_tick, Some(w.planned_start_tick));
+    }
+
+    /// An actuator that walks successfully **after** stalling, which is the
+    /// case the record could not see: `move_player_timed` retries a stalled
+    /// leg with a fresh path, so the walk settles `success` and every field on
+    /// it says the walk went fine.
+    struct StallingAct {
+        stalls: std::sync::Mutex<Vec<WalkStall>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Actuator for StallingAct {
+        async fn walk(
+            &self,
+            _bot: BotId,
+            _to: Position,
+            _min_radius: f64,
+            _radius: f64,
+        ) -> Result<ActionTicks, ActuatorFailure> {
+            Ok(some_ticks())
+        }
+        fn take_walk_stalls(&self, _bot: BotId) -> Option<Vec<WalkStall>> {
+            Some(std::mem::take(&mut *self.stalls.lock().expect("stalls")))
+        }
+        async fn mine(
+            &self,
+            _bot: BotId,
+            _item: &str,
+            _at: Position,
+            _count: u32,
+        ) -> Result<ActionTicks, ActuatorFailure> {
+            Ok(some_ticks())
+        }
+        async fn craft(
+            &self,
+            _bot: BotId,
+            _recipe: &str,
+            _count: u32,
+        ) -> Result<ActionTicks, ActuatorFailure> {
+            Ok(some_ticks())
+        }
+        async fn place(
+            &self,
+            _bot: BotId,
+            _item: &str,
+            _at: Position,
+            _direction: u8,
+            _underground_half: Option<factorio_bot_core::blueprint::UndergroundHalf>,
+        ) -> Result<ActionTicks, ActuatorFailure> {
+            Ok(some_ticks())
+        }
+        async fn insert(
+            &self,
+            _bot: BotId,
+            _entity: &str,
+            _at: Position,
+            _slot: InventorySlot,
+            _item: &str,
+            _count: u32,
+        ) -> Result<ActionTicks, ActuatorFailure> {
+            Ok(some_ticks())
+        }
+        async fn remove(
+            &self,
+            _bot: BotId,
+            _entity: &str,
+            _at: Position,
+            _slot: InventorySlot,
+            _item: &str,
+            _count: u32,
+        ) -> Result<ActionTicks, ActuatorFailure> {
+            Ok(some_ticks())
+        }
+        async fn research(
+            &self,
+            _tech: &str,
+            _expected_ticks: u32,
+        ) -> Result<ActionTicks, ActuatorFailure> {
+            Ok(some_ticks())
+        }
+        async fn set_recipe(
+            &self,
+            _bot: BotId,
+            _entity: &str,
+            _at: Position,
+            _recipe: &str,
+        ) -> Result<ActionTicks, ActuatorFailure> {
+            Ok(some_ticks())
+        }
+    }
+
+    /// **A stall the retry recovered from must survive on a walk that
+    /// SUCCEEDED**, because that is the only walk it can hide on.
+    ///
+    /// Counted over `workspace/session-logs` on 2026-09-08: 17 recovered
+    /// stalls, none in any `events.jsonl`, against the one stall the archive
+    /// held -- the `tree-01` the retry could not fix. The record therefore
+    /// showed 1 of 18 and could not tell a run where walking went fine from
+    /// one recovery was carrying.
+    #[tokio::test]
+    async fn a_stall_the_retry_recovered_survives_on_a_successful_walk() {
+        let act = StallingAct {
+            stalls: std::sync::Mutex::new(vec![WalkStall {
+                tick: Some(7_980),
+                attempt: 1,
+                blocker: None,
+                error: "stuck while walking: blocked by tree-01".into(),
+            }]),
+        };
+
+        let (net, sched) = walk_then_mine_fixture();
+        let log = run(&act, &sched, &net).await.expect("the run should start");
+
+        let w = log.walk(BotId(0), 0).expect("the walk was dispatched");
+        assert_eq!(
+            w.status,
+            Status::Success,
+            "premise: the retry worked, which is exactly why nothing else on \
+             this walk says anything happened"
+        );
+        let stalls = w
+            .stalls
+            .as_ref()
+            .expect("the actuator reported, so this is a reading and not an absence");
+        assert_eq!(stalls.len(), 1, "the recovered stall is on the record");
+        assert_eq!(stalls[0].attempt, 1);
+    }
+
+    /// The other half, and the one that keeps this from becoming a second
+    /// silent mechanism: an actuator that does not observe stalls says so with
+    /// `None`, and **never with an empty list**, which would archive an
+    /// uninstrumented run as a run with no trouble.
+    #[tokio::test]
+    async fn an_actuator_that_cannot_see_stalls_reports_absence_not_zero() {
+        let mut act = MockAct::new();
+        act.expect_walk().returning(|_, _, _, _| Ok(some_ticks()));
+        act.expect_mine().returning(|_, _, _, _| Ok(some_ticks()));
+        act.expect_craft().returning(|_, _, _| Ok(some_ticks()));
+
+        let (net, sched) = walk_then_mine_fixture();
+        let log = run(&act, &sched, &net).await.expect("the run should start");
+
+        assert_eq!(
+            log.walk(BotId(0), 0)
+                .expect("the walk was dispatched")
+                .stalls,
+            None,
+            "the mock does not watch for stalls; saying `Some(vec![])` would \
+             claim it looked"
+        );
     }
 
     #[tokio::test]

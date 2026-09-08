@@ -27,7 +27,7 @@ use factorio_bot_core::record::savepoint;
 use factorio_bot_core::record::video::Resolution;
 use factorio_bot_core::record::{
     ActionFailure, Delivery, EventKind, FailureKind, PlannedStep, Provenance, RunRecorder,
-    SatisfiedReason, VideoOptions, VideoRecorder, WalkFailure, WalkFailureKind,
+    SatisfiedReason, VideoOptions, VideoRecorder, WalkFailure, WalkFailureKind, WalkStallRecord,
     choose_map_exchange_string, git_provenance,
 };
 use factorio_bot_core::types::{AreaFilter, EntityType, PlayerId, Position, Rect};
@@ -1861,6 +1861,32 @@ end
                     // it. See `EventKind::WalkSettled::abandoned` for the run
                     // that made the absence of this number expensive.
                     let abandoned: Option<u32> = walk.get("abandoned")?;
+                    // Absent key and empty list are DIFFERENT and stay so all
+                    // the way to `events.jsonl`: absent is "nobody watched for
+                    // stalls on this walk", empty is "watched, and it did not
+                    // stall". Collapsing them would archive an uninstrumented
+                    // run as a clean one, which is exactly the reading that
+                    // hid 17 recovered stalls. See
+                    // `EventKind::WalkSettled::stalls`.
+                    let stalls: Option<Vec<WalkStallRecord>> = walk
+                        .get::<Option<LuaTable>>("stalls")?
+                        .map(|list| {
+                            list.sequence_values::<LuaTable>()
+                                .map(|stall| {
+                                    let stall = stall?;
+                                    Ok(WalkStallRecord {
+                                        tick: stall.get("tick")?,
+                                        attempt: stall.get::<Option<u32>>("attempt")?.unwrap_or(0),
+                                        blocker: stall.get("blocker")?,
+                                        blocker_name: stall.get("blocker_name")?,
+                                        error: stall
+                                            .get::<Option<String>>("error")?
+                                            .unwrap_or_default(),
+                                    })
+                                })
+                                .collect::<LuaResult<Vec<_>>>()
+                        })
+                        .transpose()?;
 
                     if let Some(dispatched) = dispatched {
                         recorder
@@ -1918,6 +1944,7 @@ end
                                     error,
                                     failure,
                                     abandoned,
+                                    stalls,
                                 },
                             )
                             .map_err(record_error)?;

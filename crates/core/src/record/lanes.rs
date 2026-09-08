@@ -344,6 +344,10 @@ mod tests {
                 // Lanes are about where a bot was, not about what a halt
                 // cost, so no fixture here halts a bot.
                 abandoned: None,
+                // `None`, not `Some(vec![])`: these fixtures are hand-built
+                // and nobody watched them for stalls, which is the exact
+                // distinction the field carries.
+                stalls: None,
             },
         )
     }

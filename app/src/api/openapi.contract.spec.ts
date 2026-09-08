@@ -100,7 +100,8 @@ import type {
     VideoStatus,
     VideoTicksResponse,
     WalkFailure,
-    WalkFailureKind
+    WalkFailureKind,
+    WalkStallRecord
 } from './types';
 
 interface SchemaObject {
@@ -844,7 +845,12 @@ const SCHEMAS: Record<string, SchemaContract> = {
             // How many steps the bot's halt abandoned. Nullable and not the
             // same as 0: `null` is "this walk did not halt its bot", 0 is
             // "it did, and there was nothing behind it".
-            abandoned: {required: false, type: 'integer', nullable: true}
+            abandoned: {required: false, type: 'integer', nullable: true},
+            // Every stall the retry recovered from. Nullable and NOT the same
+            // as an empty array: `null` is "nobody watched this walk for
+            // stalls", `[]` is "watched, and it did not stall". Collapsing
+            // them is what hid 17 of 18 recovered stalls from the archive.
+            stalls: {required: false, arrayOf: 'WalkStallRecord', nullable: true}
         },
         teleport: {
             bot: {required: true, type: 'integer'},
@@ -1033,6 +1039,17 @@ const SCHEMAS: Record<string, SchemaContract> = {
         // really steering at.
         from: {required: false, ref: 'Position', nullable: true},
         destination: {required: false, ref: 'Position', nullable: true}
+    }),
+    // One stall a walk was retried through. `blocker` is null only when the
+    // mod's message carried no clause this build could read -- "the tile was
+    // clear" is the value `nothing`, and "this build could not read the
+    // wording" is `unknown`, three answers rather than one absence.
+    WalkStallRecord: objectContract<WalkStallRecord>({
+        tick: {required: false, type: 'integer', nullable: true},
+        attempt: {required: true, type: 'integer'},
+        blocker: {required: false, type: 'string', nullable: true},
+        blocker_name: {required: false, type: 'string', nullable: true},
+        error: {required: true, type: 'string'}
     }),
 
     // -- world-state samples (crates/core/src/record/samples.rs) ----------
@@ -1367,7 +1384,20 @@ function expectFieldTypesMatch(
             continue;
         }
         if (expected.arrayOf) {
-            expect(property.type, fieldWhere + ' is no longer an array').toBe('array');
+            // An `Option<Vec<_>>` publishes as `type: ['array', 'null']`, so
+            // the array-ness and the nullability come out of the same key --
+            // exactly as they do for a nullable primitive below. Checked
+            // rather than accepted: a field that quietly stops being nullable
+            // is the difference between "nobody looked" and "we looked and
+            // found none", which is a distinction this record depends on.
+            const arrayTypes = Array.isArray(property.type) ? property.type : [property.type];
+            expect(arrayTypes, fieldWhere + ' is no longer an array').toContain('array');
+            expect(
+                isNullable(property),
+                fieldWhere + (expected.nullable
+                    ? ' is no longer nullable, but types.ts declares `| null`'
+                    : ' became nullable, and types.ts does not declare `| null`')
+            ).toBe(expected.nullable === true);
             expect(
                 schemaName(property.items),
                 fieldWhere + ' is no longer an array of ' + expected.arrayOf

@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use factorio_bot_core::blueprint::UndergroundHalf;
 use factorio_bot_core::constants::BOT_FORCE;
 use factorio_bot_core::factorio::rcon::{
-    ActionFailure, Approach, DestinationFull, Dispatch, FactorioRcon, approach_standing,
+    ActionFailure, Approach, DestinationFull, Dispatch, FactorioRcon, WalkStall, approach_standing,
     reach_distance,
 };
 use factorio_bot_core::factorio::world::{
@@ -447,6 +447,19 @@ pub fn classify(f: ActionFailure) -> ActuatorFailure {
 /// outstanding work into the log on the strength of a guess.
 #[async_trait]
 impl Actuator for RconActuator {
+    /// The one implementation that can answer: `FactorioRcon` records every
+    /// stall its retry loop answers with a fresh path, and this drains them
+    /// for the bot that just walked. `Some(vec![])` for a walk that did not
+    /// stall -- an answer, not an absence. See
+    /// [`factorio_bot_core::factorio::rcon::WalkStall`].
+    ///
+    /// An unmapped bot has no player to ask about, and says so with `None`
+    /// rather than with an empty reading it did not take.
+    fn take_walk_stalls(&self, bot: BotId) -> Option<Vec<WalkStall>> {
+        let player = self.player(bot).ok()?;
+        Some(self.rcon.take_walk_stalls(player).unwrap_or_default())
+    }
+
     async fn walk(
         &self,
         bot: BotId,

@@ -634,6 +634,23 @@ pub enum EventKind {
         /// means "halted, taking nothing with it" -- a different fact from
         /// `None`, which means "did not halt".
         abandoned: Option<u32>,
+        /// Every stall this walk was retried through, in the order the game
+        /// answered them. See [`WalkStallRecord`] for what their absence cost.
+        ///
+        /// **`null` and `[]` are different answers.** `null` is "nobody was
+        /// watching for stalls on this walk" -- an actuator that does not
+        /// report them, or a run archived before this field existed, which
+        /// `#[serde(default)]` makes an absence rather than a parse error.
+        /// `[]` is "watched, and this walk did not stall". A reader that
+        /// collapses them turns an uninstrumented run into a clean one, which
+        /// is the substitution this field was added to end.
+        ///
+        /// A **failed** walk's last stall is not here: the attempt that is not
+        /// retried becomes this event's own `error` and `failure.kind:
+        /// stalled`. So a stalled failure's true total is `stalls.len() + 1`,
+        /// and on a successful walk `stalls.len()` is the whole story.
+        #[serde(default)]
+        stalls: Option<Vec<WalkStallRecord>>,
     },
     /// A bot was moved by `player.teleport` rather than by walking.
     ///
@@ -1584,6 +1601,56 @@ pub struct WalkFailure {
     /// hidden exactly the fact that had to be reconstructed by hand from
     /// `workspace/server-log.txt`.
     pub destination: Option<Position>,
+}
+
+/// One stall a walk was retried through, as `events.jsonl` carries it.
+///
+/// The archive's shape of [`crate::factorio::rcon::WalkStall`]: the same facts,
+/// with the blocker reduced to what a query groups by. The full clause is still
+/// in `error`, and [`crate::factorio::rcon::walk_blocker`] re-reads it, so
+/// nothing is lost -- the reduction only spares the record a nested object
+/// whose fields no reader has asked for yet.
+///
+/// **This exists because a recovered stall used to leave no trace at all.**
+/// `FactorioRcon::move_player_timed` answers a stalled leg with a fresh path
+/// and the walk then settles `success`; the only evidence was one `warn!` on
+/// stdout, which the next run overwrites. Counted 2026-09-08 over
+/// `workspace/session-logs`: **17 recovered stalls, none of them in any
+/// `events.jsonl`**, against exactly one stall the whole 80-file archive holds
+/// -- the `tree-01` of `run-1788833726-34821`, which is the one the retry could
+/// not fix. A record that shows 1 of 18 cannot tell a healthy run from a run
+/// recovery is carrying.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct WalkStallRecord {
+    /// `game.tick` the stalled attempt was dispatched at, when the game
+    /// stamped one. `None` is a tick nobody observed, never tick zero.
+    pub tick: Option<u64>,
+    /// Which attempt stalled, counting from 1.
+    pub attempt: u32,
+    /// What the mod's probe found in the way, as
+    /// [`crate::factorio::rcon::WalkBlockerKind::name`] spells it
+    /// (`character`, `tree`, `entity`, `nothing`, `probe_failed`, ...).
+    ///
+    /// **`None` means the message carried no clause this build could read** --
+    /// an older mod, or a reworded one. It does not mean the tile was clear:
+    /// that is `"nothing"`, which is an answer. And a wording this build's
+    /// grammar does not cover is `"unknown"`, a third thing again; the census
+    /// that read 19 of 20 walk failures as `other` is what those three
+    /// separate answers exist to prevent.
+    ///
+    /// A string rather than the enum, for the reason
+    /// [`EventKind::Teleport`]'s `reason` gives: the record does not need to
+    /// publish a closed list, and a name that survives a re-read verbatim
+    /// cannot be silently remapped onto the wrong variant on the way in.
+    pub blocker: Option<String>,
+    /// The prototype name of whatever was in the way (`tree-01`,
+    /// `stone-furnace`), when the blocker had one.
+    pub blocker_name: Option<String>,
+    /// The verdict as the game and the mod worded it. Kept because `blocker`
+    /// is derived from it and a reader must be able to check the derivation --
+    /// the `kind: "other"` census that cost this project a day was exactly a
+    /// classifier that had fallen behind the wording.
+    pub error: String,
 }
 
 /// One line of `events.jsonl`.

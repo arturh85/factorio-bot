@@ -1,3 +1,4 @@
+use factorio_bot_core::factorio::rcon::WalkStall;
 use factorio_bot_core::factorio::ticks::ActionTicks;
 use factorio_bot_core::record::map::Placement;
 use factorio_bot_core::types::Position;
@@ -346,6 +347,28 @@ pub struct WalkObservation {
     /// forget — which is exactly how `record.deaths()` came to be uncalled for
     /// the one run in this project's history that had deaths in it.
     pub abandoned: Option<u32>,
+    /// Every stall this walk survived, in the order the game answered them.
+    ///
+    /// `None` means **the actuator does not report stalls** -- a mock, a
+    /// replay, anything that is not the RCON actuator -- and `Some(vec![])`
+    /// means it looked and this walk did not stall. Collapsing those would
+    /// make a run with no instrumentation read exactly like a run with no
+    /// trouble, which is the whole reason this field exists.
+    ///
+    /// A stall that was *not* retried is not here: the third one becomes the
+    /// walk's own `error` and its `failure.kind: stalled`. So the honest
+    /// reading is "stalls the retry answered with a fresh path", and a failed
+    /// walk's total is `stalls.len() + 1`.
+    ///
+    /// **What its absence cost**, counted 2026-09-08 over
+    /// `workspace/session-logs`: 17 stalls were recovered by
+    /// `FactorioRcon::move_player_timed`'s retry and **not one of them reached
+    /// `events.jsonl`**, against the single stall the archive holds -- the
+    /// `tree-01` the retry could not fix. The record could not tell a run
+    /// where walking went fine from one where it failed 17 times and recovery
+    /// saved it.
+    #[serde(default)]
+    pub stalls: Option<Vec<WalkStall>>,
 }
 
 /// What a step is doing while it is not dispatching anything.
@@ -931,8 +954,26 @@ impl ExecutionLog {
                 replied_tick: None,
                 error: None,
                 abandoned: None,
+                stalls: None,
             },
         );
+    }
+
+    /// Records the stalls this walk survived, as the actuator reported them.
+    ///
+    /// Called by [`crate::run`]'s `run_walk` after every walk, success or
+    /// failure, because **a stall the retry recovered from is otherwise
+    /// invisible**: the walk settles `success` and nothing anywhere says the
+    /// game had to be asked three times. See [`WalkObservation::stalls`].
+    ///
+    /// `Some(vec![])` is written when the actuator looked and found none, and
+    /// this writer is simply not called when the actuator cannot answer. The
+    /// two are different facts and stay different, exactly as `abandoned`'s
+    /// `Some(0)` does.
+    pub fn note_walk_stalls(&mut self, bot: BotId, step_index: usize, stalls: Vec<WalkStall>) {
+        if let Some(w) = self.walk_mut(bot, step_index) {
+            w.stalls = Some(stalls);
+        }
     }
 
     /// Records that this walk's failure halted its bot, abandoning `abandoned`

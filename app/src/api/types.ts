@@ -1030,6 +1030,33 @@ export interface WalkFailure {
 }
 
 /**
+ * One stall a walk was retried through.
+ *
+ * `FactorioRcon::move_player_timed` answers a stalled leg with a fresh path,
+ * so a recovered stall used to leave the walk settling `success` with no
+ * trace anywhere but a log line. This is that trace, made queryable.
+ */
+export interface WalkStallRecord {
+    /** `game.tick` the stalled attempt was dispatched at. `null` is a tick nobody observed, never tick zero. */
+    tick: number | null;
+    /** Which attempt stalled, counting from 1. */
+    attempt: number;
+    /**
+     * What the mod's probe found in the way (`character`, `tree`, `entity`,
+     * `nothing`, `probe_failed`, `unknown`, ...).
+     *
+     * `null` means the message carried no clause this build could read. It
+     * does NOT mean the tile was clear -- that is `"nothing"` -- and it does
+     * not mean the wording was unreadable -- that is `"unknown"`.
+     */
+    blocker: string | null;
+    /** The prototype name of whatever was in the way, when it had one. */
+    blocker_name: string | null;
+    /** The verdict as the game and the mod worded it -- what `blocker` was derived from. */
+    error: string;
+}
+
+/**
  * What happened, tagged by `kind`.
  *
  * Mirrors `factorio_bot_core::record::EventKind`, an internally tagged Rust
@@ -1319,6 +1346,25 @@ export type EventKind =
            * step was the failed walk. That is a different fact from `null`.
            */
           abandoned: number | null;
+          /**
+           * Every stall this walk was retried through, in the order the game
+           * answered them.
+           *
+           * **`null` and `[]` are different answers.** `null` is "nobody
+           * watched this walk for stalls" -- a run archived before the field
+           * existed, or an actuator that does not report them; `[]` is
+           * "watched, and it did not stall". Collapsing them turns an
+           * uninstrumented run into a clean one, which is what hid **17 of
+           * the 18 stalls this project has observed**: the retry in
+           * `move_player_timed` recovered them, the walk settled `success`,
+           * and the only trace was a log line the next run overwrote.
+           *
+           * A failed walk's last stall is not in here -- the attempt that is
+           * not retried becomes this event's own `error` and
+           * `failure.kind: "stalled"`, so that walk's true total is
+           * `stalls.length + 1`.
+           */
+          stalls: WalkStallRecord[] | null;
       }
     | {
           /**

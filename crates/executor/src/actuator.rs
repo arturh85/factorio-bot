@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use factorio_bot_core::blueprint::UndergroundHalf;
-use factorio_bot_core::factorio::rcon::DestinationFull;
+use factorio_bot_core::factorio::rcon::{DestinationFull, WalkStall};
 pub use factorio_bot_core::factorio::ticks::ActionTicks;
 use factorio_bot_core::record::map::Placement;
 use factorio_bot_core::types::Position;
@@ -149,6 +149,26 @@ pub trait Actuator: Send + Sync {
         min_radius: f64,
         radius: f64,
     ) -> Result<ActionTicks, ActuatorFailure>;
+
+    /// Take the stalls the walk just finished had to be retried through.
+    ///
+    /// Called once per walk, straight after [`Actuator::walk`], and it takes
+    /// rather than reads so nothing carries over to the next walk.
+    ///
+    /// **`None` and `Some(vec![])` are different answers and must stay that
+    /// way.** `None` is "this actuator does not observe stalls", which is what
+    /// the default returns and what every stub in this workspace means;
+    /// `Some(vec![])` is "I looked, and that walk did not stall". A mock that
+    /// answered with an empty vector would archive a run with no
+    /// instrumentation as a run with no trouble -- the exact substitution this
+    /// field exists to prevent (see
+    /// [`crate::log::WalkObservation::stalls`]).
+    ///
+    /// Defaulted for the reason [`Actuator::reach_corrections`] is: an
+    /// actuator with no game underneath it has nothing to report.
+    fn take_walk_stalls(&self, _bot: BotId) -> Option<Vec<WalkStall>> {
+        None
+    }
 
     /// How many walks have come to rest outside the action's reach and needed
     /// a corrective step, since this actuator was built.

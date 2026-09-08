@@ -5222,6 +5222,11 @@ pub fn default_registry() -> MethodRegistry {
         // applicable method before this one is consulted and no existing plan
         // can move -- it can only claim goals that previously refused. See
         // `method::fabricate`.
+        // Immediately ahead of `Fabricate`, and applicable only to goals
+        // `Fabricate` itself claims and would then refuse for want of a
+        // standing fluid source -- so it can only claim goals that refuse
+        // today, and no existing plan can move. See `method::supply`.
+        .with(Box::new(crate::method::supply::SupplyFluid))
         .with(Box::new(crate::method::fabricate::Fabricate))
         .with(Box::new(crate::products::NoProducer))
 }
@@ -6748,6 +6753,11 @@ pub fn registry_for(bots: &[BotId]) -> MethodRegistry {
         // applicable method before this one is consulted and no existing plan
         // can move -- it can only claim goals that previously refused. See
         // `method::fabricate`.
+        // Immediately ahead of `Fabricate`, and applicable only to goals
+        // `Fabricate` itself claims and would then refuse for want of a
+        // standing fluid source -- so it can only claim goals that refuse
+        // today, and no existing plan can move. See `method::supply`.
+        .with(Box::new(crate::method::supply::SupplyFluid))
         .with(Box::new(crate::method::fabricate::Fabricate))
         .with(Box::new(crate::products::NoProducer))
 }

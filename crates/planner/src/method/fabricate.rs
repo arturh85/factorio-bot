@@ -335,11 +335,45 @@ pub enum FabricateRefusal {
     /// running `advanced-oil-processing` needs **five** ports to fit at once,
     /// two in and three out, against one in and one out for
     /// `basic-oil-processing` in the same machine.
+    /// # And the sources, because with more than one the counts cannot
+    /// distinguish the two things that go wrong
+    ///
+    /// The counts above say *how* each candidate failed. They cannot say
+    /// **why every candidate was doomed**, and with two fluid inputs there is
+    /// a case where every one of them is: the search walks
+    /// [`crate::method::util::FREE_TILE_SEARCH_RADIUS`] tiles of rings around
+    /// the **first** source, and a machine must reach *all* of them, so a
+    /// second source further away than that radius cannot be reached from any
+    /// candidate the search will ever try. No amount of clearer ground, and no
+    /// better pathfinder, moves it: it is a fact about where the two sources
+    /// stand.
+    ///
+    /// Measured 2026-09-08 on the seed-31337 water-and-oil dump,
+    /// `have:sulfur:10` -- `sulfur` wants water **and** petroleum-gas, the
+    /// water is at spawn and the petroleum comes out of a refinery at the
+    /// crude field, and the two are hundreds of tiles apart. 234 candidates
+    /// read `routes_failed`, which invited a routing fix for something
+    /// routing cannot reach. So `sources` names each one with its distance
+    /// from the anchor and `out_of_reach` counts those beyond the rings: a
+    /// non-zero `out_of_reach` means **this is a fluid-trunk problem, not a
+    /// pathfinding one**, and the remedy is a long-distance run or a
+    /// differently sited source, not a better search.
     #[error(
         "{recipe} runs in {machine}, which needs {inputs} input and {outputs} output fluid \
          port(s) all clear at once, and none of the {considered} footprint(s) around {anchor} \
          can hold it: {ports_failed} had a port that could not take a pipe and {routes_failed} \
-         had every port clear but no pipe route back to the source"
+         had every port clear but no pipe route back to the source. Its fluid supplies are {}{}",
+        sources.join("; "),
+        if *out_of_reach == 0 {
+            String::new()
+        } else {
+            format!(
+                " -- {out_of_reach} of them further from the anchor than the {search_radius}-tile \
+                 search, so NO site this search can reach touches all {inputs} at once and no \
+                 pipe route exists to be found: this is a long-distance fluid problem, not a \
+                 pathfinding one"
+            )
+        }
     )]
     #[diagnostic(
         code(planner::no_machine_site),
@@ -357,6 +391,16 @@ pub enum FabricateRefusal {
         considered: usize,
         ports_failed: usize,
         routes_failed: usize,
+        /// One entry per fluid ingredient: the fluid, what supplies it, where
+        /// it stands, and how far that is from `anchor`.
+        sources: Vec<String>,
+        /// How many of them are further from `anchor` than `search_radius`.
+        /// **Non-zero means no candidate could ever have worked**, whatever
+        /// the two counts above say.
+        out_of_reach: usize,
+        /// [`crate::method::util::FREE_TILE_SEARCH_RADIUS`], quoted so the
+        /// distances above are readable against something.
+        search_radius: i32,
     },
 
     /// The buffer this world offers cannot hold what this **goal** will put
@@ -693,6 +737,50 @@ fn buffer_capacity(state: &PlanState, name: &str) -> BufferCapacity {
         .map_or(BufferCapacity::NotReported, BufferCapacity::Declared)
 }
 
+/// Each fluid supply with its distance from the anchor, and how many of them
+/// the ring search can never reach.
+///
+/// # Why a count of unreachable sources is worth its own function
+///
+/// [`FabricateRefusal::NoMachineSite`] reports how each *candidate* failed,
+/// and with two fluid inputs that cannot say the thing that matters: the rings
+/// are [`crate::method::util::FREE_TILE_SEARCH_RADIUS`] around the **first**
+/// source, so a second one further away than that is unreachable from every
+/// candidate the search will ever try, and all of them read as route failures.
+/// On the seed-31337 water-and-oil dump that is 234 of 348 for
+/// `have:sulfur:10` -- a number that invites a pathfinding fix for a
+/// petroleum-gas tank **369 tiles** from the water.
+///
+/// Distances are **Euclidean**, spelled out because [`Position`] carries only
+/// `manhattan_distance`: the rings are a square of side `2 * radius`, so a
+/// straight line is the honest comparison and Manhattan would overstate every
+/// diagonal.
+///
+/// A source exactly at the radius is *in* reach; only strictly beyond it
+/// counts, which is the same boundary the ring walk itself uses
+/// (`0..=FREE_TILE_SEARCH_RADIUS`).
+fn describe_sources(
+    anchor: &Position,
+    sources: &[(String, FactorioEntity)],
+) -> (Vec<String>, usize) {
+    let radius = f64::from(crate::method::util::FREE_TILE_SEARCH_RADIUS);
+    let mut out_of_reach = 0usize;
+    let lines = sources
+        .iter()
+        .map(|(fluid, entity)| {
+            let away = (entity.position.x() - anchor.x()).hypot(entity.position.y() - anchor.y());
+            if away > radius {
+                out_of_reach += 1;
+            }
+            format!(
+                "{fluid} from the {} at {} ({away:.1} tiles from the anchor)",
+                entity.name, entity.position
+            )
+        })
+        .collect();
+    (lines, out_of_reach)
+}
+
 /// One fluid co-product and the subgoal that consumes it.
 struct Disposed {
     fluid: String,
@@ -1027,6 +1115,14 @@ fn plan_fluid_rig(
         });
         let (considered, ports_failed, routes_failed) =
             (considered.get(), ports_failed.get(), routes_failed.get());
+        // **Where the sources actually stand, which the counts cannot say.**
+        // The rings are `FREE_TILE_SEARCH_RADIUS` around the FIRST source, so
+        // a second one beyond that radius is unreachable from every candidate
+        // the search will ever try -- and every one of those reads as a route
+        // failure, which invites a routing fix for a problem routing cannot
+        // reach. Distances are Euclidean and to the anchor, the one point
+        // every candidate is near.
+        let (source_lines, out_of_reach) = describe_sources(&anchor, &sources);
         return Err(PlannerError::CannotFabricate(Box::new(
             FabricateRefusal::NoMachineSite {
                 recipe: recipe.name.clone(),
@@ -1037,6 +1133,9 @@ fn plan_fluid_rig(
                 considered,
                 ports_failed,
                 routes_failed,
+                sources: source_lines,
+                out_of_reach,
+                search_radius: crate::method::util::FREE_TILE_SEARCH_RADIUS,
             },
         )));
     };
@@ -3227,6 +3326,71 @@ mod fabricate_fluid_tests {
                 via: Some("advanced-oil-processing".into()),
             },
         )
+    }
+
+    /// **A second fluid source beyond the search radius is named as such, and
+    /// the refusal says the remedy is not a better pathfinder.**
+    ///
+    /// This is the whole of what `routes_failed` could not say. Measured
+    /// 2026-09-08 on the seed-31337 water-and-oil dump: `have:sulfur:10`,
+    /// `researched:rocket-silo` and `have:space-platform-starter-pack:1` all
+    /// refuse here with 234-284 candidates reading `no pipe route back to the
+    /// source`, and the cause in every one is a petroleum-gas tank **360-369
+    /// tiles** from the water the search is anchored on. A routing fix cannot
+    /// reach it; a long-distance run or a differently sited source can.
+    #[test]
+    fn a_source_beyond_the_search_radius_is_named_as_a_distance_not_a_route() {
+        let far = FactorioEntity {
+            name: "storage-tank".into(),
+            position: Position::new(147.5, -363.5),
+            ..Default::default()
+        };
+        let near = FactorioEntity {
+            name: "offshore-pump".into(),
+            position: Position::new(46.5, -8.5),
+            ..Default::default()
+        };
+        let anchor = near.position.clone();
+        let (lines, out_of_reach) = describe_sources(
+            &anchor,
+            &[
+                ("water".to_string(), near),
+                ("petroleum-gas".to_string(), far),
+            ],
+        );
+        assert_eq!(
+            out_of_reach, 1,
+            "the water is under the anchor and the petroleum is 369 tiles away: {lines:?}"
+        );
+        assert!(
+            lines[0].contains("water from the offshore-pump") && lines[0].contains("0.0 tiles"),
+            "{lines:?}"
+        );
+        assert!(
+            lines[1].contains("petroleum-gas from the storage-tank")
+                && lines[1].contains("369.1 tiles"),
+            "the distance is Euclidean, not Manhattan (which would read 456.0): {lines:?}"
+        );
+    }
+
+    /// The boundary, because "further than the radius" is where an off-by-one
+    /// would silently turn a reachable source into a diagnosis and back.
+    #[test]
+    fn a_source_exactly_at_the_search_radius_is_still_in_reach() {
+        let radius = f64::from(crate::method::util::FREE_TILE_SEARCH_RADIUS);
+        let anchor = Position::new(0.0, 0.0);
+        let at = |dx: f64| {
+            (
+                "water".to_string(),
+                FactorioEntity {
+                    name: "storage-tank".into(),
+                    position: Position::new(dx, 0.0),
+                    ..Default::default()
+                },
+            )
+        };
+        assert_eq!(describe_sources(&anchor, &[at(radius)]).1, 0);
+        assert_eq!(describe_sources(&anchor, &[at(radius + 0.5)]).1, 1);
     }
 
     /// **Every co-product gets a consumer, and the one the goal asked for does

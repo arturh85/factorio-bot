@@ -2333,7 +2333,31 @@ end
                 })?;
                 let mut written = 0u32;
                 for (tick, event) in world.drain_deaths() {
-                    let tick = recorder.not_before(tick);
+                    // **NOT `not_before`.** A death arrives with the game's
+                    // own `event.tick`, measured, so clamping it forward to
+                    // the record's high-water mark replaces a real instant
+                    // with a bookkeeping artefact. `record.walks` uses
+                    // `not_before` for the opposite case and says so: only
+                    // where the game gave no tick at all.
+                    //
+                    // Measured in `run-1788852300-80960`, the first run to
+                    // record deaths: the drain happens after `record.actions`
+                    // and `record.walks`, so **all nineteen death and respawn
+                    // events were stamped 12,033** -- deaths at 3,988 and
+                    // 12,033 collapsed onto one tick, and every pairing read
+                    // `respawned at tick 12033 (0 ticks without a
+                    // character)`. The gap between a death and its respawn is
+                    // the whole point of the pairing: `EventKind::BotDied`'s
+                    // own doc calls it "the stretch during which every action
+                    // for that bot was refused". It was reported as zero,
+                    // nineteen times.
+                    //
+                    // `events.jsonl` is not a sorted file -- action settles
+                    // already appear out of order, since each bot's are
+                    // written when its slice ends -- so nothing downstream
+                    // needed the clamp. This restores the timeline the doc
+                    // above already promised: "calling late blurs when it is
+                    // written, not when it happened."
                     let kind = match event {
                         BotLifeEvent::Died(death) => EventKind::BotDied {
                             bot: u32::from(death.player_id),
@@ -4932,6 +4956,101 @@ mod tests {
             .eval()
             .expect("record.deaths() runs on an empty queue");
         assert_eq!(again, 0);
+    }
+
+    /// **A death keeps the tick the game gave it, even when it is drained
+    /// late.**
+    ///
+    /// `record.deaths()` is called after `record.actions` and `record.walks`
+    /// in every script that calls it, so by the time the queue is drained the
+    /// recorder's high-water mark is already at the end of the run. It used
+    /// to run each death through `not_before`, which is `max`, so every death
+    /// was stamped with that mark.
+    ///
+    /// `run-1788852300-80960` -- the first run in this project's history to
+    /// record a death at all -- wrote **nineteen death and respawn events all
+    /// stamped 12,033**, over deaths that really happened at 3,988 and
+    /// 12,033. Every pairing then read `respawned at tick 12033 (0 ticks
+    /// without a character)`, and that gap is the entire reason the two
+    /// events are paired: `EventKind::BotDied`'s doc calls it "the stretch
+    /// during which every action for that bot was refused".
+    ///
+    /// The walk recorder uses `not_before` for the opposite case and is right
+    /// to -- a lost walk has no tick from the game and needs a synthesized
+    /// one. A death always has one.
+    #[test]
+    fn a_death_drained_after_later_events_keeps_its_own_tick() {
+        let lua = crate::sandbox::new_sandboxed_lua().expect("sandbox");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let recorder = RunRecorder::start(tmp.path(), "run-1").expect("recorder starts");
+        let run_dir = recorder.dir().to_path_buf();
+        let slot: Slot = Arc::new(Mutex::new(Some(recorder)));
+        let world = Arc::new(FactorioSurface::new());
+
+        let table = create_lua_record_with_slot(
+            &lua,
+            Arc::new(FactorioRcon::new_empty()),
+            world.clone(),
+            tmp.path().join("scripts"),
+            vec![],
+            slot,
+        )
+        .expect("record table");
+        lua.globals().set("record", table).expect("install");
+
+        let mut parser = factorio_bot_core::process::output_parser::OutputParser::with_world(world);
+        parser
+            .parse(
+                3988,
+                "player_died",
+                r#"{"cause":"small-worm-turret","cause_type":"turret","player_id":2,"position":{"x":1,"y":2},"respawn_in":600}"#,
+            )
+            .expect("death parses");
+        parser
+            .parse(
+                4588,
+                "player_respawned",
+                r#"{"player_id":2,"position":{"x":0,"y":0}}"#,
+            )
+            .expect("respawn parses");
+
+        // Something far later goes in FIRST, exactly as a run does: the walk
+        // recorder runs before the death recorder and pushes the high-water
+        // mark to the end of the batch.
+        //
+        // **It has to be a recorder that carries its own tick.** The first
+        // version of this fixture used `record.milestone_stuck`, which stamps
+        // the last tick the RCON connection saw -- and this sandbox has an
+        // empty one, so the prior event landed at 0, `not_before(3988)`
+        // answered 3988, and the test passed against the very code it was
+        // written to catch. A green mutation found that, not review.
+        lua.load(
+            r#"record.walks({{bot = 1, step_index = 0, to = {x = 1, y = 1},
+                             status = "success", dispatched_tick = 19000,
+                             replied_tick = 20000}})"#,
+        )
+        .exec()
+        .expect("a later event");
+        let ticks_before = read_event_ticks(&run_dir);
+        assert!(
+            ticks_before.iter().copied().max() == Some(20_000),
+            "the fixture must push the high-water mark PAST the death, or the \
+             clamp it exists to catch never fires; got {ticks_before:?}"
+        );
+
+        let written: u32 = lua
+            .load("return record.deaths()")
+            .eval()
+            .expect("record.deaths() runs");
+        assert_eq!(written, 2);
+
+        let ticks = read_event_ticks(&run_dir);
+        assert_eq!(
+            &ticks[ticks.len() - 2..],
+            &[3988, 4588],
+            "the death and the respawn keep the game's own ticks; clamping them \
+             forward reports a 600-tick gap as zero"
+        );
     }
 
     // ---------------------------------------------------- roster_changed

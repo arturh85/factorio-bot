@@ -1,0 +1,167 @@
+/**
+ * WHO MADE IT. A port of `attribute_output` / `attribute_from_counters` /
+ * `machine_production` / `feeding_dispatches` in `tools/run_analysis.py`,
+ * pinned to that tool's JSON by `runAttribution.spec.ts`.
+ *
+ * `production.made` counts what a MACHINE produced, and a stone furnace a bot
+ * hand-loaded is a machine, so a rising curve is not evidence of a working
+ * factory. The split is arithmetic: what the machines' own counters say they
+ * made against what the force's statistics say was made; the remainder is
+ * hand work. The count of feeding dispatches -- not their ticks, five of the
+ * six settle in the tick they dispatch -- decides roster-fed against factory.
+ */
+import {Event, MachineSample, Sample} from '@/api/types';
+import {madeAt} from './runRates';
+import {TICKS_PER_MINUTE} from './tickScale';
+
+export const FEEDING_VERBS = ['insert', 'stock', 'charge', 'fuel', 'take', 'mine'];
+
+export type Verdict = 'roster-fed' | 'factory' | 'hand-made' | 'mixed' | 'unclear' | 'no output';
+
+export interface MachineProduction {
+    /** False for a run archived before the counters existed; never "made nothing". */
+    available: boolean;
+    byItem: Record<string, number>;
+    byName: Record<string, Record<string, number>>;
+    total: number;
+    unattributed: number;
+    shared: string[];
+}
+
+export interface Attribution {
+    verdict: Verdict;
+    machineMade: number;
+    rosterMade: number;
+    feeds: number;
+    delta: number;
+    source: 'counters' | 'inference';
+    why: string;
+}
+
+type MachinesSample = Extract<Sample, {kind: 'machines'}>;
+
+export function verbOf(action: string): string {
+    return action.trim().split(/\s+/)[0] ?? '';
+}
+
+/** Feeding-verb dispatches in `(lo, hi]` -- the count, deliberately. */
+export function feedingDispatches(events: Event[], lo: number, hi: number): number {
+    let n = 0;
+    for (const e of events) {
+        if (e.kind !== 'action_dispatched') continue;
+        if (!(lo < e.tick && e.tick <= hi)) continue;
+        if (FEEDING_VERBS.includes(verbOf(e.action))) n += 1;
+    }
+    return n;
+}
+
+function itemOf(m: MachineSample): string | null {
+    return m.recipe ?? m.mining ?? null;
+}
+
+/** What each machine itself produced in `(lo, hi]`, from its own counter. */
+export function machineProduction(samples: Sample[], lo: number, hi: number): MachineProduction {
+    const rows = samples
+        .filter((s): s is MachinesSample => s.kind === 'machines')
+        .sort((a, b) => a.tick - b.tick);
+    let baseAt: MachinesSample | null = null;
+    let endAt: MachinesSample | null = null;
+    // The last item each machine was ever seen making, up to `hi`: an idle
+    // stone furnace reports no recipe, and reading only the final row would
+    // file every plate it smelted under "unattributed".
+    const named = new Map<string, string>();
+    for (const s of rows) {
+        if (s.tick <= lo) baseAt = s;
+        if (s.tick <= hi) endAt = s;
+        else continue;
+        for (const [key, m] of Object.entries(s.machines)) {
+            const item = itemOf(m);
+            if (item !== null) named.set(key, item);
+        }
+    }
+    const baseRows = baseAt?.machines ?? {};
+    const endRows = endAt?.machines ?? {};
+    const out: MachineProduction = {
+        available: Object.values(endRows).every((m) => m.produced_source !== null && m.produced_source !== undefined),
+        byItem: {}, byName: {}, total: 0, unattributed: 0, shared: []
+    };
+    for (const [key, m] of Object.entries(endRows)) {
+        const source = m.produced_source;
+        if (source === 'not-a-producer' || source === 'unavailable') continue;
+        if (source === null || source === undefined || m.produced === null) continue;
+        const before = baseRows[key]?.produced ?? 0;
+        const delta = m.produced - before;
+        if (delta <= 0) continue;
+        out.total += delta;
+        const item = itemOf(m) ?? named.get(key) ?? null;
+        if (item === null) {
+            out.unattributed += delta;
+            continue;
+        }
+        out.byItem[item] = (out.byItem[item] ?? 0) + delta;
+        (out.byName[item] ??= {})[m.name] = (out.byName[item]?.[m.name] ?? 0) + delta;
+        if (m.produced_shared) out.shared.push(m.name);
+    }
+    return out;
+}
+
+function fromCounters(delta: number, produced: MachineProduction, item: string, feeds: number): Attribution {
+    const machineMade = produced.byItem[item] ?? 0;
+    const names = Object.entries(produced.byName[item] ?? {}).map(([n, c]) => `${n}x${c}`).join(', ');
+    const fed = `; the roster ran ${feeds} feeding action(s)`;
+    const common = {machineMade, rosterMade: Math.max(0, delta - machineMade), feeds, delta, source: 'counters' as const};
+    if (machineMade > delta * 1.05 + 1) {
+        const shared = [...new Set(produced.shared)].sort().join(', ') || 'none flagged';
+        return {...common, verdict: 'unclear', why: `the machines' own counters say ${machineMade} while the force's statistics say ${delta} was made -- they cannot both be right. Drills sharing a resource tile double-count and are flagged: ${shared}`};
+    }
+    if (machineMade === 0) {
+        return {...common, verdict: 'hand-made', why: `no machine produced any of the ${delta} made in this interval -- every one of them came out of the roster's own hands (hand crafting and hand mining pass through no machine)${fed}`};
+    }
+    const share = machineMade / delta;
+    if (share >= 0.95) {
+        if (feeds > 0) {
+            return {...common, verdict: 'roster-fed', why: `machines made ${machineMade} of the ${delta} (${Math.round(share * 100)}%) -- ${names} -- and the roster ran ${feeds} feeding action(s), so the machines produced it and the bots carried what went in`};
+        }
+        return {...common, verdict: 'factory', why: `machines made ${machineMade} of the ${delta} (${Math.round(share * 100)}%) -- ${names} -- and the roster fed nothing in this interval`};
+    }
+    return {...common, verdict: 'mixed', why: `machines made ${machineMade} of the ${delta} (${Math.round(share * 100)}%) -- ${names} -- and the remaining ${delta - machineMade} was hand-made${fed}`};
+}
+
+/**
+ * The fallback for a run archived before the per-machine counters existed.
+ * It INFERS, and says so in `source`: feeding dispatches plus any generation
+ * decide, and `unclear` is said freely.
+ */
+function byInference(delta: number, feeds: number, samples: Sample[], lo: number, hi: number): Attribution {
+    const anyGeneration = samples.some((s) => s.kind === 'force' && s.tick > lo && s.tick <= hi && s.power.generated_kw > 0);
+    const common = {machineMade: 0, rosterMade: 0, feeds, delta, source: 'inference' as const};
+    if (feeds > 0 && !anyGeneration) return {...common, verdict: 'roster-fed', why: `the roster ran ${feeds} feeding action(s) and nothing generated electricity, so the bots carried what the machines ate (inferred: this run has no machine counters)`};
+    if (feeds === 0 && anyGeneration) return {...common, verdict: 'factory', why: 'electricity was drawn and the roster fed nothing in this interval (inferred: this run has no machine counters)'};
+    return {...common, verdict: 'unclear', why: `${feeds} feeding action(s) and ${anyGeneration ? 'some' : 'no'} generation -- the record cannot separate the roster from the factory here (inferred)`};
+}
+
+/** Who earned `item`'s output over `(lo, hi]`. */
+export function attributeInterval(samples: Sample[], events: Event[], lo: number, hi: number, item: string): Attribution {
+    const c = madeAt(samples, hi, item, lo);
+    const cPrev = madeAt(samples, lo, item, lo) ?? 0;
+    const delta = c === null ? 0 : c - cPrev;
+    if (delta <= 0) {
+        return {verdict: 'no output', machineMade: 0, rosterMade: 0, feeds: 0, delta: 0, source: 'counters', why: 'nothing made in this interval'};
+    }
+    const feeds = feedingDispatches(events, lo, hi);
+    const produced = machineProduction(samples, lo, hi);
+    if (produced.available) return fromCounters(delta, produced, item, feeds);
+    return byInference(delta, feeds, samples, lo, hi);
+}
+
+/** The verdict per fixed-width interval across `[lo, hi]`; the last interval may be short. */
+export function attributionIntervals(
+    samples: Sample[], events: Event[], lo: number, hi: number, item: string, stepTicks = TICKS_PER_MINUTE
+): (Attribution & {from: number; to: number})[] {
+    const out: (Attribution & {from: number; to: number})[] = [];
+    for (let from = lo; from < hi; from += stepTicks) {
+        const to = Math.min(hi, from + stepTicks);
+        out.push({from, to, ...attributeInterval(samples, events, from, to, item)});
+    }
+    return out;
+}

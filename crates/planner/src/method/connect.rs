@@ -1464,7 +1464,7 @@ mod tests {
             .collect();
         for side in [Position::new(11.5, 2.5), Position::new(10.5, 2.5)] {
             assert!(
-                !laid.iter().any(|p| *p == side),
+                !laid.contains(&side),
                 "the run hugs the chest's west side at {side}: {laid:?}"
             );
         }
@@ -1472,6 +1472,45 @@ mod tests {
             laid.len() > 10,
             "the detour is the long way round, not a shorter run through the wall: {laid:?}"
         );
+    }
+
+    /// The ground beneath a standing pair is not free ground, even where it
+    /// is empty. The lab's only open north pair sits on the span between a
+    /// standing `input` and `output` (see the fixture); the run must not end
+    /// there, on either free span cell, and must still be made from another
+    /// side. The tunnel-axis bit alone cannot enforce this -- it gates jumps,
+    /// not perimeter choice -- so this is the reservation-as-blocked rule's
+    /// own test.
+    #[test]
+    fn a_run_does_not_end_on_the_ground_beneath_a_standing_pair() {
+        let (mut ctx, from, to) = crate::test_world::furnace_and_lab_beside_a_standing_span();
+        let standing_in = FactorioEntity::new_underground_belt(
+            &Position::new(6.5, 2.5),
+            Direction::East,
+            UndergroundHalf::Input,
+        );
+        let standing_out = FactorioEntity::new_underground_belt(
+            &Position::new(10.5, 2.5),
+            Direction::East,
+            UndergroundHalf::Output,
+        );
+        let span = tunnel_cells(&standing_in.position, &standing_out.position);
+        ctx.state.create_entity(standing_in);
+        ctx.state.create_entity(standing_out);
+        let steps = connect_steps(&mut ctx, &from, &to, &"iron-plate".into())
+            .expect("the lab has other sides");
+        let laid: Vec<Position> = placements(&steps, "transport-belt")
+            .into_iter()
+            .chain(placements(&steps, "inserter"))
+            .chain(placements(&steps, "underground-belt"))
+            .map(|(p, _)| p)
+            .collect();
+        for tile in &span {
+            assert!(
+                !laid.contains(tile),
+                "{tile} lies beneath the standing pair {span:?}: {laid:?}"
+            );
+        }
     }
 
     /// **The IMPORTANT-2 regression test.** Each end is found by a search

@@ -458,3 +458,86 @@ fn a_jump_never_runs_along_an_existing_tunnel_of_the_same_axis() {
         "one pair crosses the wall"
     );
 }
+
+/// An exit half emits onto the tile in front of it. With the wall crossed
+/// eastward and the destination two rows down, the search must surface,
+/// take ONE straight tile east, and only then turn -- never surface and
+/// turn on the exit tile, which would leave an `output` half facing the
+/// next turn and emitting onto ground no belt stands on. The launch gate
+/// cannot catch this (no second jump is involved); only the exit rule does.
+#[test]
+fn the_tile_after_an_exit_is_straight_ahead_of_it() {
+    let mut grid = open_grid();
+    for y in 0..GRID {
+        block(&mut grid, 12, y);
+        // Every launch tile west of the wall is on row 10, so every exit
+        // is at (13, 10) and the destination three rows down cannot be
+        // the exit itself.
+        if y != 10 {
+            for x in 8..=11 {
+                block(&mut grid, x, y);
+            }
+        }
+    }
+    let route = route_belt(&grid, (0.0, 0.0), (10, 10), (13, 13), Some(5))
+        .expect("the wall is crossed and the destination reached below it");
+    let tiles = shape(&route);
+    let exit = tiles
+        .iter()
+        .position(|t| t.2 == TileKind::UndergroundExit)
+        .expect("surfaces");
+    let entry = tiles
+        .iter()
+        .position(|t| t.2 == TileKind::UndergroundEntry)
+        .expect("dives");
+    assert_eq!(
+        tiles[exit].3, tiles[entry].3,
+        "the exit half faces the tunnel's direction: {tiles:?}"
+    );
+    let after = tiles
+        .get(exit + 1)
+        .expect("the exit is not the last tile here");
+    assert_eq!(
+        (after.0, after.1),
+        (tiles[exit].0 + 1, tiles[exit].1),
+        "the tile after the exit is straight ahead of it (east): {tiles:?}"
+    );
+}
+
+/// The exit cell itself may not sit on an existing same-axis tunnel even
+/// when nothing beneath the span is tunnelled: a two-column wall at
+/// x = 12..=13 with every row tunnelled east-west at x = 14 only. Every
+/// jump that clears the wall surfaces at 14, so no route exists; allowing
+/// the exit there would pair the new output with whatever runs beneath.
+#[test]
+fn a_jump_never_surfaces_on_an_existing_tunnel_of_the_same_axis() {
+    let mut grid = open_grid();
+    for y in 0..GRID {
+        block(&mut grid, 12, y);
+        block(&mut grid, 13, y);
+    }
+    let mut tunnels = vec![0u8; GRID * GRID];
+    for y in 0..GRID {
+        tunnels[y * GRID + 14] |= TUNNEL_EW;
+    }
+    let err = route_belt_with_tunnels(&grid, &tunnels, (0.0, 0.0), (10, 10), (16, 10), Some(5))
+        .expect_err("the only exit cells that clear the wall are tunnelled");
+    assert!(matches!(err, RouteError::NoPath { .. }), "{err:?}");
+}
+
+/// A pair is a last resort, not a shortcut: one blocked cell on the line is
+/// walked round (two extra tiles and some corners), never tunnelled under,
+/// because a pair costs the iron of some sixteen belts and reserves the
+/// ground beneath it. Priced like walking, the search would dive here.
+#[test]
+fn a_single_obstacle_is_walked_round_not_tunnelled_under() {
+    let mut grid = open_grid();
+    block(&mut grid, 12, 10);
+    let route = route_belt(&grid, (0.0, 0.0), (10, 10), (14, 10), Some(5))
+        .expect("open ground on either side");
+    assert!(
+        route.tiles.iter().all(|t| t.kind == TileKind::Belt),
+        "a one-tile obstacle is a detour, not a pair: {:?}",
+        shape(&route)
+    );
+}

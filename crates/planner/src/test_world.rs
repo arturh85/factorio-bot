@@ -261,6 +261,29 @@ pub(crate) fn furnace_and_chest_hugged_on_the_way_in()
     (connect_ctx(entities), furnace, chest)
 }
 
+/// The furnace at `(5.0, 5.0)` and a `lab` at `(7.5, 5.5)` right beside it,
+/// with one `stone-wall` at `(8.5, 2.5)` for a standing underground pair to
+/// cross (the test creates the pair: `input` at `(6.5, 2.5)`, `output` at
+/// `(10.5, 2.5)`, facing east, so the span holds the free cells `(7.5, 2.5)`
+/// and `(9.5, 2.5)` and the wall).
+///
+/// The lab's north perimeter is scanned `x = 6.5, 7.5, 8.5`: the first pair
+/// is blocked by the input half, the third by the wall -- and the second,
+/// arm at `(7.5, 3.5)` and belt at `(7.5, 2.5)`, is free ground **beneath
+/// the tunnel**. Nothing but the span reservation keeps a run from ending
+/// there.
+pub(crate) fn furnace_and_lab_beside_a_standing_span()
+-> (ExpansionCtx, FactorioEntity, FactorioEntity) {
+    let furnace = FactorioEntity::new_stone_furnace(&Position::new(5.0, 5.0), Direction::North);
+    let lab = lab(&Position::new(7.5, 5.5));
+    let entities = vec![
+        furnace.clone(),
+        lab.clone(),
+        stone_wall(&Position::new(8.5, 2.5)),
+    ];
+    (connect_ctx(entities), furnace, lab)
+}
+
 /// [`furnace_and_lab_on_open_ground`] with one `tree-42` standing on the row
 /// the belt would otherwise run straight along.
 ///

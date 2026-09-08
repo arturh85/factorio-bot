@@ -140,6 +140,15 @@ impl PartialOrd for Node {
     }
 }
 
+/// `a` is the exact opposite of `b`, by the deltas in [`DIRECTIONS`].
+fn reverses(a: Direction, b: Direction) -> bool {
+    let delta = |d: Direction| DIRECTIONS.iter().find(|(x, _)| *x == d).map(|(_, v)| *v);
+    match (delta(a), delta(b)) {
+        (Some((ax, ay)), Some((bx, by))) => ax == -bx && ay == -by,
+        _ => false,
+    }
+}
+
 fn dir_key(d: Direction) -> u8 {
     Direction::to_u8(&d).unwrap_or(0)
 }
@@ -289,9 +298,18 @@ pub fn route_belt_with_tunnels(
             // The second clause is the "straight after an exit" rule from
             // the doc above: a surfaced node offers only the one step that
             // continues the tunnel's direction.
+            //
+            // The third clause: a belt run never reverses. The state space
+            // is (cell, facing, surfaced), so stepping back onto the cell
+            // just left is a *different* state and A* is happy to take it
+            // -- and did, surfacing at an exit, stepping one tile on and
+            // stepping straight back onto the exit tile as a surface belt
+            // to turn there. A belt fed from the tile it points at is not a
+            // thing, so the reverse of `node.facing` is never offered.
             if let Some(next) = step(node.cell, dx, dy)
                 && !blocked[cell_index(next.0, next.1)]
                 && (!node.surfaced || dir == node.facing)
+                && !reverses(dir, node.facing)
             {
                 let cost = node.cost + STEP + if dir == node.facing { 0 } else { TURN_PENALTY };
                 // A normal step always lands on an ordinary tile: whether or

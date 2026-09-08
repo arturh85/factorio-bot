@@ -10284,59 +10284,6 @@ mod tests {
         assert!(!HandCraft.hands_over(&gear, &held));
     }
 
-    /// The driver acts on it: one chain over the whole hand-over subtree.
-    ///
-    /// The behavioural half of the test above. `converges` is false here, so
-    /// before `hands_over` existed these actions carried no `ChainId` at all
-    /// and the scheduler was free to mine the ore on one bot and craft on
-    /// another.
-    #[test]
-    fn a_one_ingredient_craft_is_expanded_into_a_single_chain() {
-        let bots = [BotId(1), BotId(2)];
-        let s = state(&bots);
-        let net = expand(
-            &[Goal::Have {
-                item: "iron-gear-wheel".into(),
-                count: 1,
-                whose: Holder::Anyone,
-                via: None,
-            }],
-            &s,
-            &registry_for(&bots),
-            BotId(1),
-        )
-        .unwrap();
-
-        // Non-accidental: the expansion really did produce a hand-to-hand
-        // sequence, so there is something for a chain to hold together.
-        let craft = net
-            .actions()
-            .find(
-                |a| matches!(&a.kind, ActionKind::Craft { item, .. } if item == "iron-gear-wheel"),
-            )
-            .expect("the gear is crafted");
-        assert!(
-            net.actions()
-                .any(|a| a.tied_to_runner() && a.id != craft.id),
-            "control: the craft must be fed by other runner-tied actions"
-        );
-
-        let chains: BTreeSet<Option<crate::ids::ChainId>> = net
-            .actions()
-            .filter(|a| a.tied_to_runner())
-            .map(|a| net.chain_of(a.id))
-            .collect();
-        assert_eq!(
-            chains.len(),
-            1,
-            "every runner-tied action belongs to one chain, got {chains:?}"
-        );
-        assert!(
-            chains.iter().all(Option::is_some),
-            "and that chain is a real one, not the absence of one: {chains:?}"
-        );
-    }
-
     #[test]
     fn hand_crafting_converges_only_when_two_ingredients_need_producing() {
         let mut s = state(&[BotId(1)]);

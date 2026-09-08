@@ -1899,6 +1899,113 @@ mod tests {
         }
     }
 
+    /// **The driver opens a chain for a method that only hands over.**
+    ///
+    /// [`Method::hands_over`] is the weaker sibling of [`Method::converges`],
+    /// and this is the clause that acts on it. `Gizmo` converges by default —
+    /// it never overrides it — and states `Holder::Anyone` throughout, so
+    /// `one_inventory` is false and `converges` is false: the chain can only
+    /// come from `hands_over`.
+    ///
+    /// # Written after a falsification caught the first attempt
+    ///
+    /// The first version of this test expanded `have:iron-gear-wheel:1`
+    /// through the real registry and asserted one chain. It passed with the
+    /// `hands_over` clause **deleted from the driver**, because a top-level
+    /// `Holder::Anyone` goal is claimed by `SplitAcrossBots`, which restates
+    /// it as `Holder::Share(bot)` subgoals — so `one_inventory` opened that
+    /// chain and the test never touched the thing it was named for. The real
+    /// defect reached `HandCraft` under `Holder::Anyone` from *inside*
+    /// `Fabricate`, where `SplitAcrossBots::claims` is false. A stub says what
+    /// is meant without depending on which production method happens to claim.
+    #[test]
+    fn the_driver_chains_a_method_that_hands_over_without_converging() {
+        struct Gizmo {
+            hands_over: bool,
+        }
+        impl Method for Gizmo {
+            fn name(&self) -> &'static str {
+                "gizmo"
+            }
+            fn applicable(&self, goal: &Goal, _s: &PlanState) -> bool {
+                matches!(goal, Goal::Have { item, .. } if item == "gizmo")
+            }
+            fn hands_over(&self, _goal: &Goal, _state: &PlanState) -> bool {
+                self.hands_over
+            }
+            fn expand(
+                &self,
+                _goal: &Goal,
+                _ctx: &mut ExpansionCtx,
+            ) -> Result<Vec<Step>, PlannerError> {
+                Ok(vec![Step::Subgoal(Goal::Have {
+                    item: "cog".into(),
+                    count: 5,
+                    whose: Holder::Anyone,
+                    via: None,
+                })])
+            }
+        }
+
+        let chains = |hands_over: bool| {
+            let state = PlanState::from_world(Arc::new(fixture_world()), &[BotId(1), BotId(2)]);
+            let reg = MethodRegistry::new()
+                .with(Box::new(Gizmo { hands_over }))
+                .with(Box::new(Produce));
+            let net = expand(
+                &[Goal::Have {
+                    item: "gizmo".into(),
+                    count: 1,
+                    whose: Holder::Anyone,
+                    via: None,
+                }],
+                &state,
+                &reg,
+                BotId(1),
+            )
+            .expect("expands");
+            let tied: Vec<Option<ChainId>> = net
+                .actions()
+                .filter(|a| a.tied_to_runner())
+                .map(|a| net.chain_of(a.id))
+                .collect();
+            tied
+        };
+
+        // Not accidental: the expansion really emits runner-tied work, so
+        // there is something for a chain to hold. Without this the two arms
+        // below would agree trivially on an empty list.
+        let owned = chains(true);
+        assert!(
+            !owned.is_empty(),
+            "control: the stub must emit at least one runner-tied action"
+        );
+        assert!(
+            owned.iter().all(Option::is_some),
+            "a method that hands over gets its subtree chained, got {owned:?}"
+        );
+        let first = owned[0];
+        assert!(
+            owned.iter().all(|c| *c == first),
+            "and it is one chain, not several, got {owned:?}"
+        );
+
+        // The same stub answering `false` is the control that shows the
+        // assertion above can fail: nothing else in this registry opens a
+        // chain, so the very same actions come back unstamped.
+        let free = chains(false);
+        assert_eq!(
+            free.len(),
+            owned.len(),
+            "control: the two arms must emit the same work"
+        );
+        assert!(
+            free.iter().all(Option::is_none),
+            "a method that neither converges nor hands over leaves its subtree \
+             freely assignable, got {free:?}"
+        );
+    }
+
     #[test]
     fn the_driver_turns_a_goal_into_a_network() {
         let state = PlanState::from_world(Arc::new(fixture_world()), &[BotId(1)]);

@@ -808,7 +808,7 @@ async fn take_savepoint(
     rcon: &factorio_bot_core::factorio::rcon::FactorioRcon,
     workspace: &std::path::Path,
     milestone_index: u32,
-) {
+) -> Option<String> {
     // The run directory and id are read and the lock released before anything
     // is awaited: `slot` is a `parking_lot::Mutex`, which is not held across
     // an await point anywhere in this file and must not start being.
@@ -821,7 +821,7 @@ async fn take_savepoint(
         // No recording is running, so there is no run directory to put a
         // savepoint in and nothing that would ever read one. `record_live`
         // above has already refused for the same reason.
-        return;
+        return None;
     };
 
     let instance = workspace.join("server");
@@ -834,6 +834,7 @@ async fn take_savepoint(
         timeout: savepoint::SAVE_TIMEOUT,
     };
     let outcome = savepoint::capture(rcon, request).await;
+    let mut written: Option<String> = None;
     let event = match outcome {
         Ok((savepoint, elapsed)) => {
             info!(
@@ -843,6 +844,7 @@ async fn take_savepoint(
                 savepoint.bytes,
                 elapsed.as_millis()
             );
+            written = Some(format!("{}/{}", savepoint::SAVEPOINTS_DIR, savepoint.file));
             EventKind::SavepointWritten {
                 milestone_index,
                 file: format!("{}/{}", savepoint::SAVEPOINTS_DIR, savepoint.file),
@@ -868,6 +870,35 @@ async fn take_savepoint(
     if let Err(err) = record_live(slot, rcon, event) {
         warn!("could not record the savepoint outcome: {}", err);
     }
+    written
+}
+
+/// The first milestone index at or after `from` with no savepoint zip already
+/// on disk.
+///
+/// A savepoint taken at a *fault* has no milestone of its own, and reusing the
+/// current milestone's index would overwrite the savepoint of the milestone
+/// that succeeded -- which is precisely the one somebody would want to resume
+/// from. Probing forward costs a handful of `is_file` calls and cannot destroy
+/// anything.
+///
+/// `from` when there is no recording: with no run directory there is nothing
+/// to collide with, and `take_savepoint` will decline for the same reason.
+fn next_free_savepoint_index(slot: &Slot, from: u32) -> u32 {
+    let Some(run_dir) = ({
+        let guard = slot.lock();
+        guard.as_ref().map(|recorder| recorder.dir().to_path_buf())
+    }) else {
+        return from;
+    };
+    let mut index = from;
+    while savepoint::Savepoint::zip_path(&run_dir, index).is_file() {
+        let Some(next) = index.checked_add(1) else {
+            return index;
+        };
+        index = next;
+    }
+    index
 }
 
 pub fn create_lua_record(
@@ -1403,11 +1434,69 @@ end
                                 reason,
                             },
                         )?;
-                        take_savepoint(&slot, &rcon, &workspace, index).await;
+                        let _ = take_savepoint(&slot, &rcon, &workspace, index).await;
                         Ok(())
                     }
                 },
             )?,
+        )?;
+    }
+
+    map_table.set(
+        "__doc_entry_savepoint",
+        String::from(
+            r#"
+--- writes the world out NOW, outside any milestone
+-- The savepoint every milestone takes is a souvenir of a success. This one is
+-- for a failure: called from a driver's fault branch it makes the world at the
+-- moment of the fault resumable with `--resume-from <run>:<index>`, so a run
+-- that dies sixteen minutes in does not have to be paid for again.
+--
+-- It never overwrites: the index it uses is the first one at or after `index`
+-- (default 0) with no savepoint zip already on disk, and that index is what it
+-- returns. Overwriting `milestone-N.zip` would destroy the savepoint of the
+-- milestone that *worked*, which is the one worth resuming from.
+--
+-- **Ask for this BEFORE pausing the game.** The engine writes a save at the
+-- end of a tick, and a paused game never ends one, so a savepoint requested
+-- inside a `rcon.hold` would never arrive.
+--
+-- Like every other savepoint here it cannot fail the run: a failure is
+-- narrated and recorded as `savepoint_failed`, and this answers `nil, nil`.
+-- @number[opt=0] index the milestone index to start probing from
+-- @treturn string|nil the path inside the run directory, e.g. `savepoints/milestone-3.zip`
+-- @treturn number|nil the index it was written at, for `--resume-from <run>:<index>`
+function record.savepoint(index)
+end
+    "#,
+        ),
+    )?;
+    {
+        let slot = slot.clone();
+        let rcon = rcon.clone();
+        let workspace = workspace.clone();
+        map_table.set(
+            "savepoint",
+            lua.create_async_function(move |_lua, index: Option<u32>| {
+                let slot = slot.clone();
+                let rcon = rcon.clone();
+                let workspace = workspace.clone();
+                async move {
+                    let index = next_free_savepoint_index(&slot, index.unwrap_or(0));
+                    let file = take_savepoint(&slot, &rcon, &workspace, index).await;
+                    // The index rides back only when a file did: an index
+                    // beside no file would name a savepoint that does not
+                    // exist, and `--resume-from` would fail on it later
+                    // rather than here.
+                    // `LuaMultiValue`, not an `Option<(..)>`: mlua has no
+                    // `IntoLua` for a tuple, and two returns is the shape the
+                    // doc promises -- path, then index.
+                    Ok(match file {
+                        Some(f) => (Some(f), Some(index)),
+                        None => (None, None),
+                    })
+                }
+            })?,
         )?;
     }
 

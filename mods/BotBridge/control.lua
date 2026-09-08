@@ -6989,6 +6989,49 @@ function rcon_set_tick_paused(v)
 	rcon.print(tostring(game.tick_paused))
 end
 
+-- The release channel for a HELD run, and the ONLY thing in this file whose
+-- reader is a human at a terminal.
+--
+-- A run that faults used to return, which killed the server and took the built
+-- world with it. It can instead pause (`rcon_set_tick_paused` above) and wait
+-- -- but a wait with no exit is a hang, and this project has already killed a
+-- healthy run for being quiet. So the waiter polls `hold_state` and a person
+-- ends the hold with `hold_release`:
+--
+--   factorio-bot rcon -s localhost -- \
+--     "/silent-command remote.call('botbridge','hold_release','continue')"
+--
+-- **Why `storage` and not a console command.** A `/c` cannot see a mod's
+-- storage, so the two halves have to be mod functions; and neither of these
+-- may print anything except its reply, because Factorio redirects console
+-- output to the RCON client while a command is in flight -- `writeout` from
+-- here would land in the reply body and be read as the answer. `rcon.print`
+-- of the state IS the answer, which is the one supported shape.
+--
+-- No `stamp_tick`: the clock is stopped, so a stamp would report the same
+-- number on every poll and read as a frozen game rather than a held one. The
+-- waiter asks `game.tick` separately when it wants to prove the freeze.
+--
+-- Anything other than "continue" or "stop" is refused rather than stored: a
+-- typo must not release a hold into an unknown verdict.
+function rcon_hold_release(v)
+	if v == nil or v == "" or v == "nil" or v == "clear" then
+		storage.hold_release = nil
+	elseif v == "continue" or v == "stop" then
+		storage.hold_release = v
+	else
+		rcon.print("refused: hold_release wants 'continue', 'stop' or 'clear', got " .. tostring(v))
+		return
+	end
+	rcon.print(tostring(storage.hold_release))
+end
+
+-- What `hold_release` last recorded: "continue", "stop", or "nil" for nothing
+-- asked for yet. A held waiter polls this; nothing else reads it.
+function rcon_hold_state()
+	rcon.print(tostring(storage.hold_release))
+end
+
 -- ---------------------------------------------------------------------------
 -- How often a bot's main inventory is scanned, and why it is not every tick.
 --
@@ -7575,6 +7618,8 @@ remote.add_interface("botbridge", {
 	set_game_speed=rcon_set_game_speed,
 	game_speed=rcon_game_speed,
 	set_tick_paused=rcon_set_tick_paused,
+	hold_release=rcon_hold_release,
+	hold_state=rcon_hold_state,
 	player_force=rcon_player_force,
 	world_snapshot=rcon_world_snapshot,
 	generate_chunks=rcon_generate_chunks,

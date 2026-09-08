@@ -151,7 +151,13 @@ local sup = supervisor.new(supervisor.list(goals),
 -- The loop is wrapped so a raise still closes the recording. A run that died
 -- part-way is the one most worth opening, and it is no use if it never got a
 -- manifest, splits or its video copied out of the workspace.
-local ok, err = pcall(function()
+-- Wrapped in a retry, so a fault does not have to cost the world it happened
+-- in. `supervisor.hold_fault` writes a savepoint at the fault, pauses the game
+-- and holds it for a bounded window; released with 'continue' the supervisor
+-- resumes here, released with 'stop' -- or left to lapse -- the run tears down
+-- with the world still resumable from the savepoint.
+local held
+local function drive() return pcall(function()
 repeat
     local t = sup:step()
     -- `t.plan` rides on both the "planned" and "satisfied" transitions (see
@@ -256,7 +262,13 @@ repeat
             .. (t.refusal and (" -- refused: " .. t.refusal.message) or ""))
     end
 until sup:finished()
-end)
+end) end
+
+local ok, err
+repeat
+    ok, err = drive()
+    held = (not ok) and supervisor.hold_fault(err, { index = sup.index, run = run_id }) or nil
+until ok or held == nil or held.released ~= "continue"
 
 if not ok then
     print("RAISED: " .. tostring(err))
@@ -281,6 +293,10 @@ record.refusals()
 -- look up.
 record.enclosures()
 
-local id = record.finish(ok and sup.state or "crashed")
-print("RUN FINISHED state=" .. (ok and sup.state or "crashed") .. " id=" .. id)
+-- `held` outranks `crashed`: a run somebody paused and looked at, or one that
+-- lapsed unattended, is not the same event as one that exited on the spot --
+-- and neither may read as a run that finished.
+local final_state = ok and sup.state or ((held and held.held) and "held" or "crashed")
+local id = record.finish(final_state)
+print("RUN FINISHED state=" .. final_state .. " id=" .. id)
 print(sup:report())

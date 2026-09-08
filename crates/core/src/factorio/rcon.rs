@@ -42,6 +42,30 @@ const RCON_INTERFACE: &str = "botbridge";
 /// reachable from a test.
 const ACTION_RESULT_DEADLINE: Duration = Duration::from_secs(360);
 
+/// How often a held run asks whether a person has released it.
+///
+/// One second: the hold is measured in minutes and the poll is one remote call
+/// reading one `storage` field, so this is cheap enough to be invisible and
+/// short enough that a release feels immediate.
+const HOLD_POLL_INTERVAL: Duration = Duration::from_secs(1);
+
+/// What a [`FactorioRcon::hold`] ended as.
+///
+/// `released` is `"continue"`, `"stop"` or `"timeout"` -- and `"timeout"` is
+/// its own answer rather than a `"stop"`, because nobody said stop. A caller
+/// that collapses them records a run nobody watched as one somebody ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HoldOutcome {
+    /// `"continue"`, `"stop"` or `"timeout"`.
+    pub released: String,
+    /// The tick the clock stopped at, so a reader can tell the held world from
+    /// whatever it becomes after resuming.
+    pub paused_at_tick: u64,
+    /// Wall-clock seconds spent held. Wall clock on purpose: no game time
+    /// passes during a hold, so a tick figure here would always be zero.
+    pub held_seconds: u64,
+}
+
 /// The `/silent-command remote.call(...)` text for a BotBridge function.
 /// Renders `value` as a Lua string literal safe to paste into a `remote.call`
 /// command line.
@@ -3712,6 +3736,171 @@ impl FactorioRcon {
             ));
         }
         tick.ok_or_else(|| miette!("set_tick_paused: the mod answered without a tick stamp"))
+    }
+
+    /// Clears, or sets, the release verdict a held run is waiting for.
+    ///
+    /// `None` clears it, which is what a hold does on the way *in*: the value
+    /// lives in the mod's `storage` and therefore survives a savepoint load,
+    /// so a stale "continue" from an earlier hold would release the next one
+    /// before anybody looked at it.
+    // Owned for the same reason [`FactorioRcon::hold`]'s `run` is: this impl
+    // block is `#[automock]`ed, and mockall cannot elide a lifetime inside a
+    // generic.
+    pub async fn hold_release(&self, verdict: Option<String>) -> Result<()> {
+        let arg = verdict.unwrap_or_else(|| "clear".to_string());
+        let lines = self.remote_call("hold_release", vec![arg]).await?;
+        let reply = lines.unwrap_or_default().join("").trim().to_string();
+        if reply.starts_with("refused:") {
+            return Err(miette!("hold_release: {reply}"));
+        }
+        Ok(())
+    }
+
+    /// The verdict a person has asked for, or `None` while nobody has.
+    ///
+    /// `None` is "not asked yet" and never "stop" -- absent is not a value.
+    /// An unreadable reply is an error rather than a `None`, because a held
+    /// run reading a broken channel as "keep holding" is the failure mode
+    /// this whole path exists to avoid.
+    pub async fn hold_state(&self) -> Result<Option<String>> {
+        let lines = self.remote_call("hold_state", vec![]).await?;
+        let reply = lines.unwrap_or_default().join("").trim().to_string();
+        match reply.as_str() {
+            "nil" | "" => Ok(None),
+            "continue" | "stop" => Ok(Some(reply)),
+            other => Err(miette!("hold_state: unreadable reply {other:?}")),
+        }
+    }
+
+    /// Stop the clock and wait for a person, so a faulted run can be looked at
+    /// instead of thrown away.
+    ///
+    /// # What this is for
+    ///
+    /// A script that raises returns, and when the script returns the server
+    /// dies and the built world goes with it. Run `run-1788895333-40607`
+    /// settled 2,501 actions over sixteen minutes and then exited on
+    /// `bot 1 has 0 coal, needs 2`, with nothing left to ask which bot, which
+    /// chest, or what the ground held. This holds instead.
+    ///
+    /// # What pausing does and does not freeze
+    ///
+    /// `game.tick_paused` stops `game.tick`, every machine, every character
+    /// and the mod's `on_tick` polling, while RCON keeps being served -- so
+    /// every read a person makes from `factorio-bot rcon -s localhost` is a
+    /// read of a world that is not moving. Three things it does **not** stop,
+    /// each checked rather than assumed:
+    ///
+    /// - **The executor's wall-clock deadlines.** These scale with
+    ///   `game.speed` ([`FactorioRcon::speed_factor`]) and would expire
+    ///   against a frozen clock. They do not here, because
+    ///   `crates/executor` contains no `tokio::spawn` at all: every deadline
+    ///   lives inside the future `goal.run` awaits, so by the time a fault has
+    ///   propagated out to a script's `pcall` there is nothing in flight to
+    ///   time out. **A hold is only safe after that unwinding**, which is why
+    ///   the supported hook is the driver's fault branch and not somewhere
+    ///   inside a batch.
+    /// - **Anything the game answers on a *later* tick**, which is the reason
+    ///   [`FactorioRcon::set_tick_paused`] carries its own warning: a path
+    ///   request waits forever in a paused window. Nothing here probes a path,
+    ///   and nothing a person types while inspecting should either.
+    /// - **`ffmpeg`.** A video recording is wall-clock and keeps writing the
+    ///   last drawn frame, so a held run's `ticks.jsonl` gets a long flat span
+    ///   at one tick. That is the already-documented "a stalled game keeps
+    ///   writing the last drawn image"; the event log stays tick-exact.
+    ///
+    /// # Releasing, and why a hold is bounded
+    ///
+    /// A hold with no exit is a hang, and a quiet run has already been killed
+    /// here for looking like one. So: a person releases it over the same RCON
+    /// connection they are already inspecting with
+    /// (`remote.call('botbridge','hold_release','continue' | 'stop')`), the
+    /// wait is bounded by `timeout`, and a heartbeat line every `heartbeat`
+    /// says the hold is alive and re-reads `game.tick` to show the clock
+    /// standing still. Timing out is reported as `timeout`, never as `stop`:
+    /// nobody said stop.
+    ///
+    /// The stale-verdict clear on the way in is not defensive tidying --
+    /// `storage` survives a savepoint load, so a `continue` left by an earlier
+    /// hold would release this one before anybody looked at it.
+    pub async fn hold(
+        &self,
+        why: &str,
+        // Owned, not `Option<&str>`: this impl block is `#[automock]`ed and
+        // mockall cannot elide a lifetime inside a generic -- the same reason
+        // `sampling_start` takes an owned run id.
+        run: Option<String>,
+        timeout: Duration,
+        heartbeat: Duration,
+    ) -> Result<HoldOutcome> {
+        self.hold_release(None)
+            .await
+            .wrap_err("hold: the release channel is unreachable, so a hold could not be exited")?;
+        let tick = self.set_tick_paused(true).await?;
+        // No `<bright-red>` markup: this file logs through `tracing`
+        // (`use tracing::{info, warn}` at the top), not `paris`, and paris
+        // colour tags reach a tracing subscriber as literal angle brackets.
+        // The first live run of this banner printed `<bright-red>RUN HELD</>`
+        // exactly as written.
+        info!(
+            "\nRUN HELD -- the game is PAUSED at tick {tick} and \
+             this script is waiting.\n  fault: {why}\n  run:   {}\n\n  look around:\n    \
+             factorio-bot rcon -s localhost -- '/c rcon.print(game.tick)'\n\n  release (either \
+             one ends the hold):\n    factorio-bot rcon -s localhost -- \
+             \"/silent-command remote.call('botbridge','hold_release','continue')\"\n    \
+             factorio-bot rcon -s localhost -- \
+             \"/silent-command remote.call('botbridge','hold_release','stop')\"\n\n  \
+             unreleased, this hold ends by itself in {} s and the run is recorded as HELD.",
+            run.as_deref().unwrap_or("<unrecorded>"),
+            timeout.as_secs(),
+        );
+        let started = std::time::Instant::now();
+        let mut last_beat = started;
+        let mut released: Option<String> = None;
+        let mut poll_error: Option<miette::Report> = None;
+        loop {
+            match self.hold_state().await {
+                Ok(Some(verdict)) => {
+                    released = Some(verdict);
+                    break;
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    poll_error = Some(err);
+                    break;
+                }
+            }
+            if started.elapsed() >= timeout {
+                break;
+            }
+            if last_beat.elapsed() >= heartbeat {
+                last_beat = std::time::Instant::now();
+                let now = self.game_tick().await.ok().flatten();
+                info!(
+                    "still HELD: {} s of {} s, clock at tick {} (paused at {tick}) -- release \
+                     with remote.call('botbridge','hold_release','continue')",
+                    started.elapsed().as_secs(),
+                    timeout.as_secs(),
+                    now.map_or_else(|| "unreadable".to_string(), |t| t.to_string()),
+                );
+            }
+            tokio::time::sleep(HOLD_POLL_INTERVAL).await;
+        }
+        // Unpause on every exit, including the failed-poll one: whatever the
+        // caller does next -- save, finish the record, replan -- it does it
+        // against a game whose clock runs.
+        let resumed = self.set_tick_paused(false).await;
+        self.hold_release(None).await.ok();
+        if let Some(err) = poll_error {
+            return Err(err.wrap_err("hold: lost the release channel while holding"));
+        }
+        resumed?;
+        Ok(HoldOutcome {
+            released: released.unwrap_or_else(|| "timeout".to_string()),
+            paused_at_tick: tick,
+            held_seconds: started.elapsed().as_secs(),
+        })
     }
 
     /// The speed the deadlines are scaled by: the last value set or read,

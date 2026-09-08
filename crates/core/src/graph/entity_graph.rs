@@ -335,6 +335,22 @@ pub struct EntityGraph {
     /// Not serialised and not cloned: a loaded or cloned graph starts empty
     /// and fills itself on demand, which is always correct and never stale.
     patch_cache: RwLock<PatchCache>,
+    /// Every charted resource tile of every name in one set, for
+    /// [`EntityGraph::any_resource_at`], valid at one `generation`.
+    ///
+    /// `any_resource_at` asks whether a tile is buildable, which is a question
+    /// about *any* ore, so it swept the whole `resources` map on every call --
+    /// and a `DashMap` sweep costs a fixed lock-and-release per shard however
+    /// few names are in it, 128 of them on this box, because that is what
+    /// `available_parallelism * 4` rounds up to. The planner asks 916,000
+    /// times in one `gathered:crude-oil` plan.
+    ///
+    /// Keyed on `generation` and rebuilt on demand, like `patch_cache`. The
+    /// `Option` is not decoration: without it a map with no charted ore at all
+    /// would be indistinguishable from one that has never been asked and would
+    /// rebuild on every call -- *absent is not a value*, the defect class this
+    /// repository has now found half a dozen times.
+    resource_union: RwLock<ResourceUnion>,
 }
 
 /// The entity types [`EntityGraph::add`] records as enemy structures.
@@ -454,6 +470,14 @@ fn file_blocked_box(blocked: &mut BlockedQuadTree, minable: bool, rect: QuadTree
 /// One generation for the whole map rather than one per name: the counter is
 /// bumped by any mutation, so a per-name stamp would claim more precision than
 /// the counter can supply.
+/// [`EntityGraph::any_resource_at`]'s index, and the generation it is true at.
+#[derive(Debug, Default)]
+struct ResourceUnion {
+    generation: u64,
+    /// `None` means *never built*, which is not the same as *built and empty*.
+    tiles: Option<BTreeSet<Pos>>,
+}
+
 #[derive(Debug, Default)]
 struct PatchCache {
     generation: u64,
@@ -477,10 +501,26 @@ impl EntityGraph {
             resource_tree: RwLock::new(QuadTree::new(max_area, true, 8, 64, 1024, 8)),
             tile_tree: RwLock::new(QuadTree::new(max_area, false, 32, 128, 128, 8)),
             entity_nodes: DashMap::new(),
-            resources: DashMap::new(),
-            minables: DashMap::new(),
-            threats: DashMap::new(),
+            // Two shards, not the 128 `DashMap` picks by default.
+            //
+            // The default is `available_parallelism * 4` rounded up to a power
+            // of two -- 128 on this box -- and it is sized for contention
+            // between threads. These three maps have no contention to relieve:
+            // planning is single-threaded, and each holds a handful of *names*
+            // (`copper-ore`, `coal`, `crude-oil`, `iron-ore`, `stone`,
+            // `uranium-ore` on seed 31337) whose values are `BTreeMap`s of
+            // tiles. What the shards do buy is a fixed lock-and-release per
+            // shard on every full iteration, and `threats_from` iterates
+            // 1,435,611 times in one `gathered:crude-oil` plan.
+            //
+            // Two is `DashMap`'s own minimum (`with_shard_amount` asserts
+            // `> 1`). `Clone` preserves the shard count, so this is set here
+            // and in `tile_maps_from` -- the only two places one is built.
+            resources: DashMap::with_shard_amount(2),
+            minables: DashMap::with_shard_amount(2),
+            threats: DashMap::with_shard_amount(2),
             patch_cache: RwLock::new(PatchCache::default()),
+            resource_union: RwLock::new(ResourceUnion::default()),
         }
     }
     /// How many times this graph has been mutated. See [`EntityGraph`]'s
@@ -892,9 +932,25 @@ impl EntityGraph {
     /// ore. Read-only and allocation-free — a short-circuiting scan of the same
     /// `resources` map `resource_contains` indexes into.
     pub fn any_resource_at(&self, pos: &Pos) -> bool {
-        self.resources
+        let generation = self.generation();
+        {
+            let index = self.resource_union.read();
+            if index.generation == generation
+                && let Some(tiles) = &index.tiles
+            {
+                return tiles.contains(pos);
+            }
+        }
+        let tiles: BTreeSet<Pos> = self
+            .resources
             .iter()
-            .any(|entry| entry.value().contains_key(pos))
+            .flat_map(|entry| entry.value().keys().cloned().collect::<Vec<Pos>>())
+            .collect();
+        let answer = tiles.contains(pos);
+        let mut index = self.resource_union.write();
+        index.generation = generation;
+        index.tiles = Some(tiles);
+        answer
     }
 
     pub fn find_entities_in_radius(
@@ -2717,9 +2773,15 @@ type WireTileMaps<V> = BTreeMap<String, Vec<(Pos, V)>>;
 
 /// The other half of [`TileMaps`]: pair lists back into tile-keyed maps.
 fn tile_maps_from<V>(wire: WireTileMaps<V>) -> DashMap<String, BTreeMap<Pos, V>> {
-    wire.into_iter()
-        .map(|(name, pairs)| (name, pairs.into_iter().collect()))
-        .collect()
+    // `with_shard_amount(2)` rather than `collect()`, for the reason
+    // `EntityGraph::new` gives: a graph loaded from a dump is the one that then
+    // gets iterated 1.4M times by a plan, so it is exactly the one that must
+    // not carry 128 shards.
+    let out = DashMap::with_shard_amount(2);
+    for (name, pairs) in wire {
+        out.insert(name, pairs.into_iter().collect());
+    }
+    out
 }
 
 impl Serialize for EntityGraph {
@@ -2949,6 +3011,7 @@ impl<'de> Deserialize<'de> for EntityGraph {
                     // has never answered a patch query, so there is nothing to
                     // be stale about.
                     patch_cache: RwLock::new(PatchCache::default()),
+                    resource_union: RwLock::new(ResourceUnion::default()),
                 })
             }
         }
@@ -2991,6 +3054,7 @@ impl Clone for EntityGraph {
             // world's writes never reach the live model), and an empty memo
             // that refills itself cannot be wrong about a fork.
             patch_cache: RwLock::new(PatchCache::default()),
+            resource_union: RwLock::new(ResourceUnion::default()),
         }
     }
 
@@ -3008,6 +3072,7 @@ impl Clone for EntityGraph {
         self.minables = source.minables.clone();
         self.threats = source.threats.clone();
         *self.patch_cache.write() = PatchCache::default();
+        *self.resource_union.write() = ResourceUnion::default();
     }
 }
 
@@ -4713,6 +4778,40 @@ mod tests {
         let (after, refilled) = crate::plan_work::measure(|| graph.resource_patches(&iron));
         assert_eq!(refilled.resource_patches, 1, "a mutation invalidates the memo");
         assert_eq!(after, first, "and the ore has not moved, so the answer stands");
+    }
+
+    /// The union index answers for every ore, and stops answering when the
+    /// ore does.
+    ///
+    /// The second half is the one worth having: a `resources` map that has
+    /// been *emptied* must not keep reporting a tile as ore, and an index
+    /// keyed on a generation that never moved would do exactly that.
+    #[test]
+    fn any_resource_at_sees_every_ore_and_notices_when_one_leaves() {
+        let world = fixture_world();
+        let graph = &world.entity_graph;
+        let iron = graph
+            .resource_patches(&EntityName::IronOre.to_string())
+            .remove(0);
+        let copper = graph
+            .resource_patches(&EntityName::CopperOre.to_string())
+            .remove(0);
+        let iron_tile: Pos = (&iron.elements[0]).into();
+        let copper_tile: Pos = (&copper.elements[0]).into();
+
+        // Both names, from one index -- the question is "any ore", so a
+        // per-name answer would be the wrong one however fast it was.
+        assert!(graph.any_resource_at(&iron_tile));
+        assert!(graph.any_resource_at(&copper_tile));
+        assert!(!graph.any_resource_at(&Pos(9_000, 9_000)));
+
+        // Mining a tile out retires it, which bumps the generation.
+        assert!(graph.retire_resource(&EntityName::IronOre.to_string(), &iron.elements[0]));
+        assert!(
+            !graph.any_resource_at(&iron_tile),
+            "a retired tile is not ore, and a stale index would still say it is"
+        );
+        assert!(graph.any_resource_at(&copper_tile), "the copper is untouched");
     }
 
     #[test]

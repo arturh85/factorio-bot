@@ -548,6 +548,23 @@ pub fn schedule(
     net.validate()?;
     let remaining = critical_path(net)?;
     let durations: BTreeMap<ActionId, Ticks> = net.actions().map(|a| (a.id, a.duration)).collect();
+    // Adjacency, read once.
+    //
+    // `ActionNetwork::preds` is a linear scan of every edge in the network,
+    // and the round loop below asked it for *every* unfinished action on
+    // *every* round -- 8,055,137 scans in one `gathered:crude-oil` plan, each
+    // over ~3,000 edges. The network cannot change while this function runs
+    // (`net` is a shared reference), so the answers are computed once here.
+    //
+    // A `BTreeMap` of the `Vec`s `preds` already returns, in the order it
+    // already returned them (ascending by predecessor id), so nothing about
+    // the scheduler's determinism moves: this is the same data, asked for
+    // fewer times.
+    let preds: BTreeMap<ActionId, Vec<(ActionId, Ticks)>> =
+        net.actions().map(|a| (a.id, net.preds(a.id))).collect();
+    let preds_of = |id: ActionId| -> &[(ActionId, Ticks)] {
+        preds.get(&id).map_or(&[][..], Vec::as_slice)
+    };
 
     factorio_bot_core::plan_work::count(|c| c.forks += 1);
     let mut sim = state.fork();
@@ -572,7 +589,7 @@ pub fn schedule(
         let ready: Vec<&crate::action::Action> = net
             .actions()
             .filter(|a| !done.contains(&a.id))
-            .filter(|a| net.preds(a.id).iter().all(|(p, _)| done.contains(p)))
+            .filter(|a| preds_of(a.id).iter().all(|(p, _)| done.contains(p)))
             .collect();
 
         let stuck = net.actions().find(|a| !done.contains(&a.id)).map(|a| a.id);
@@ -585,8 +602,7 @@ pub fn schedule(
         let mut feasible: Vec<Candidate> = Vec::new();
         let mut best_rejected: Option<Rejected> = None;
         for action in &ready {
-            let deps_ready = net
-                .preds(action.id)
+            let deps_ready = preds_of(action.id)
                 .iter()
                 .map(|(p, lag)| finished[p] + lag)
                 .max()
@@ -844,9 +860,26 @@ pub fn schedule(
                     // tested against a fork with the bot already moved. Forking is
                     // an overlay clone — cheap enough to do per candidate, which is
                     // what the shared `Arc` base is for.
-                    factorio_bot_core::plan_work::count(|c| c.forks += 1);
-                    let mut trial = sim.fork();
-                    if travel > 0 {
+                    //
+                    // # Only when the fork would say something different
+                    //
+                    // The fork exists to move the bot before the
+                    // preconditions are read. When there is no walk, or the
+                    // action names no position to walk to, the fork is a
+                    // byte-for-byte copy of `sim` that is read once and
+                    // dropped -- and it was made 948,981 times in one
+                    // `gathered:crude-oil` schedule. Borrowing `sim` in that
+                    // case is not an approximation: it is the same state the
+                    // fork would have held.
+                    let moved = if travel > 0 {
+                        action.required_position()
+                    } else {
+                        None
+                    };
+                    let forked;
+                    let trial: &PlanState = if let Some((pos, min_radius, radius)) = moved {
+                        factorio_bot_core::plan_work::count(|c| c.forks += 1);
+                        let mut trial = sim.fork();
                         // The exact target is deliberately dropped *here* and
                         // only here, in favour of `arrival_point`. For a disc
                         // (`min_radius == 0.`) that is the centre, which
@@ -866,11 +899,13 @@ pub fn schedule(
                         // still not a claim about where the bot will really
                         // end up, only the least committal point that could
                         // make this precondition true.
-                        if let Some((pos, min_radius, radius)) = action.required_position() {
-                            trial.set_position(bot, arrival_point(&pos, from, min_radius, radius));
-                        }
-                    }
-                    let failing = action.pre.iter().find(|c| !c.holds(&trial, bot));
+                        trial.set_position(bot, arrival_point(&pos, from, min_radius, radius));
+                        forked = trial;
+                        &forked
+                    } else {
+                        &sim
+                    };
+                    let failing = action.pre.iter().find(|c| !c.holds(trial, bot));
 
                     match failing {
                         None => {
@@ -886,7 +921,7 @@ pub fn schedule(
                                 .is_none_or(|r| candidate.key() < r.candidate.key())
                             {
                                 best_rejected = Some(Rejected {
-                                    condition: describe_failure(condition, &trial),
+                                    condition: describe_failure(condition, trial),
                                     // `owner` names this action's chain owner
                                     // when it has one; pair it with `chain`
                                     // (guaranteed `Some` whenever `owner` is)

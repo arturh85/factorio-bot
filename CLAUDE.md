@@ -641,12 +641,47 @@ BotBridge Mod (Factorio mod for RPC)
     it refused `NotCardinal` on open ground for every stone furnace. Four
     task reviews passed it; the fixtures had been built at illegal positions
     with a shrunken box, so they fitted the code.
-    **Belts only** — `route_belt` is always called with
-    `max_underground: None`, so a route needing to cross an obstacle refuses
-    (`ConnectRefusal::NoRoute`) rather than tunnelling under it; underground
-    belts are deliberately out of scope for this version, not a bug (a
-    Factorio pair needs one `input` half and one `output` half, and neither
-    `FactorioEntity` nor the mod's `rcon_place_entity` can express which).
+    **It tunnels since 2026-09-09.** Until then this paragraph said "belts
+    only": `route_belt` was always called with `max_underground: None` on the
+    ground that "neither `FactorioEntity` nor the mod's `rcon_place_entity`
+    can express which half" of a pair an entity is. **That had been false at
+    every layer for days** — `FactorioEntity::underground_half`,
+    `new_underground_belt`, the mod's fifth `rcon_place_entity` argument, the
+    executor threading it through, and `route_belt`'s own underground search
+    all existed and were proven live by `method::blueprint` on `FurnaceLine`
+    — while the comment, the `None` and an `unreachable!()` arm outlived
+    their reason. The cost was the belt-fed `sustain` path stuck at one cell
+    (`SustainNoRouteForFuel`, "blocked by 4 tiles"). Now: the reach is read
+    from the `underground-belt` prototype's `max_underground_distance` (5 on
+    this install; `fast-` 7, `turbo-` 11), **in the prototype's unit** —
+    entry-to-exit distance, so 5 hides four tiles; `route_belt` used to count
+    hidden tiles under the prototype's name, which is the off-by-one a caller
+    reading the field would pass straight through. A world with no such
+    prototype routes on the surface only. A jump is priced at about sixteen
+    belts (`UNDERGROUND_PENALTY`, from the base recipes' iron), so a detour
+    is taken before a tunnel and a tree is walked round, not under; only
+    launched from a tile already facing its way (a side-fed entry half-loads
+    one lane); and followed by a straight tile (an exit emits forward — the
+    old search would surface and turn, which places perfectly and moves
+    nothing). The ground beneath every existing pair, base world or plan
+    overlay, is reserved twice: as a same-axis tunnel bit no new jump may run
+    along (the game pairs an input with the first same-type half on its
+    line — belt weaving works only across tiers), and as a blocked cell
+    nothing else of the plan is built on. A wall wider than the reach refuses
+    as `ConnectRefusal::SpanTooLong { needed, max }`, both numbers in the
+    prototype's unit. The recipe is **disabled at t=0** (it needs
+    `logistics`), so a plan that tunnels carries that research.
+    **And the "blocked by 4 tiles" that motivated all this was never a
+    wall.** The four tiles were a 1x1 coal chest's own four neighbours — a
+    perimeter budget, refused by `first_free_perimeter` before `route_belt`
+    ever ran. `sustain:iron-plate:30:36000` needed three sustain-side fixes
+    to plan (a standing chest is reused only with one free side per unfed
+    burner; a later cell's chest is hauled from the nearest coal chest with a
+    side to spare, not from a source 31 tiles off; the drill-first feed order
+    is tried on a fork and reversed when it refuses) and one in `connect`: a
+    route may not hug the chest it serves (its other sides, two tiles deep,
+    are closed to that route). Read the tiles a refusal names before naming
+    the mechanism — adjacent-to-the-source is a perimeter, not an obstacle.
     It **refuses before placing anything**: every `ConnectRefusal` variant is
     returned before an action is emitted or a single entity lands in the
     plan overlay, because a half-built belt run is worse than none — items

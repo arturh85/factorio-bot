@@ -18,8 +18,10 @@ use std::collections::BinaryHeap;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TileKind {
     Belt,
-    /// Task 2 fills these in; a surface-only route never emits them.
+    /// The half where a pair dives (Factorio's `input`); a surface-only
+    /// route (`max_underground_distance: None`) never emits one.
     UndergroundEntry,
+    /// The half where it surfaces (`output`).
     UndergroundExit,
 }
 
@@ -41,7 +43,11 @@ pub enum RouteError {
     /// the occupied tiles adjacent to the frontier the search died on -- the
     /// reader wants to know *what* stopped it, not merely that something did.
     NoPath { blocked: Vec<Position> },
-    /// An underground span longer than the prototype allows.
+    /// An underground span longer than the prototype allows. Both numbers are
+    /// in the prototype's own unit, the distance from the entry half to the
+    /// exit half (`max_underground_distance`, see [`route_belt`]): `needed`
+    /// is the widest wall on the direct line plus one, i.e. the shortest
+    /// pair that could cross it.
     SpanTooLong { needed: u32, max: u8 },
 }
 
@@ -54,6 +60,25 @@ const STEP: u32 = 10;
 /// straight run to a shorter staircase without ever preferring a detour that
 /// costs more than one extra tile per corner.
 const TURN_PENALTY: u32 = 6;
+
+/// What an underground pair costs over and above the tiles it spans.
+///
+/// A pair is a last resort, not a shortcut: in the base recipes one
+/// `underground-belt` craft is 10 iron plates and 5 belts for two halves --
+/// about 25 plates -- against 1.5 plates per surface belt, so a pair is worth
+/// roughly sixteen belt tiles of iron, and it also reserves the ground it
+/// runs beneath for nothing else. Sixteen steps' worth makes the search
+/// prefer any detour shorter than that to tunnelling, and step around a
+/// tree rather than under it, while still crossing a wall the surface
+/// cannot pass. This is a preference weight for a search, not a game
+/// constant: a mod that reprices the recipe moves where the search's
+/// indifference point sits, not whether it can route.
+const UNDERGROUND_PENALTY: u32 = 16 * STEP;
+
+/// A hidden tile costs this on top of [`STEP`], so that of two jumps that
+/// both clear the wall the shorter one wins: a longer span reserves more
+/// ground beneath it and is otherwise the same price.
+const HIDDEN_TILE_COST: u32 = 1;
 
 /// Search state: a cell plus the direction we entered it from, because the
 /// cost of leaving depends on it, plus whether this cell is the surfacing
@@ -130,20 +155,90 @@ const DIRECTIONS: [(Direction, (i64, i64)); 4] = [
     (Direction::West, (-1, 0)),
 ];
 
-/// Route a belt from `from` to `to` across `blocked`.
-///
-/// `origin` is the window origin `enclosure::window` returned for the same
-/// grid; it is only used to turn cells back into positions.
-///
-/// `max_underground` is the belt prototype's `max_underground_distance`.
-/// `None` means undergrounds are not available and the search is surface-only.
+/// Bit set in a tunnel grid cell for a tunnel running east-west.
+pub const TUNNEL_EW: u8 = 0b01;
+/// Bit set in a tunnel grid cell for a tunnel running north-south.
+pub const TUNNEL_NS: u8 = 0b10;
+
+/// The tunnel-grid bit an underground pair running in `direction` occupies.
+pub fn tunnel_axis(direction: Direction) -> u8 {
+    match direction {
+        Direction::East | Direction::West => TUNNEL_EW,
+        _ => TUNNEL_NS,
+    }
+}
+
+/// Route a belt from `from` to `to` across `blocked`, with no existing
+/// tunnels to keep clear of. See [`route_belt_with_tunnels`].
 pub fn route_belt(
     blocked: &[bool],
     origin: (f64, f64),
     from: (usize, usize),
     to: (usize, usize),
-    max_underground: Option<u8>,
+    max_underground_distance: Option<u8>,
 ) -> Result<Route, RouteError> {
+    let tunnels = vec![0u8; GRID * GRID];
+    route_belt_with_tunnels(
+        blocked,
+        &tunnels,
+        origin,
+        from,
+        to,
+        max_underground_distance,
+    )
+}
+
+/// Route a belt from `from` to `to` across `blocked`.
+///
+/// `origin` is the window origin `enclosure::window` returned for the same
+/// grid; it is only used to turn cells back into positions.
+///
+/// `max_underground_distance` is the belt prototype's field of that name,
+/// **in the prototype's own unit and untranslated**: the distance from the
+/// entry half to the exit half, so a value of 5 (`underground-belt` on this
+/// install; `fast-` is 7 and `turbo-` 11) lets a pair dive at `x` and
+/// surface at `x + 5`, hiding four tiles. An earlier version of this
+/// parameter counted the hidden tiles instead, which is that same number
+/// minus one, under a name and a doc that said it was the prototype's
+/// field -- exactly the mismatch a caller reading the prototype would then
+/// pass through unconverted and overshoot by a tile. `None` means
+/// undergrounds are not available and the search is surface-only.
+///
+/// `tunnels` is a `GRID x GRID` grid of [`TUNNEL_EW`] / [`TUNNEL_NS`] bits
+/// naming the cells an existing underground pair of this same belt already
+/// runs beneath, its two halves included. A new pair may cross one of those
+/// at right angles but never along the same axis: the game pairs an input
+/// with the first same-type half it meets on its line, so a jump laid along
+/// an existing tunnel would connect to the wrong half. Belt weaving works
+/// only across tiers for the same reason, and this search has one tier.
+///
+/// # Two shape rules the game imposes on a pair, both enforced in the search
+///
+/// * **A jump is only launched straight.** The entry half faces the tunnel,
+///   and the belt feeding it must arrive from behind: a belt arriving from
+///   the side would side-load the entry and fill one lane. So a jump in
+///   direction `d` is offered only from a state already facing `d`; the tile
+///   before the entry may itself be a corner (a corner belt keeps both
+///   lanes), the entry may not.
+/// * **The tile after an exit is straight too.** The exit half emits onto
+///   the tile in front of it and nowhere else, so from a surfaced state the
+///   only move is one more step in the same direction. Without this, the
+///   search would happily surface at a tile and turn, leaving an output half
+///   pointing at ground no belt stands on -- a route that places perfectly
+///   and moves nothing.
+///
+/// Neither rule changes a surface-only search: both only gate moves that
+/// involve a jump.
+pub fn route_belt_with_tunnels(
+    blocked: &[bool],
+    tunnels: &[u8],
+    origin: (f64, f64),
+    from: (usize, usize),
+    to: (usize, usize),
+    max_underground_distance: Option<u8>,
+) -> Result<Route, RouteError> {
+    let max_underground = max_underground_distance;
+    debug_assert_eq!(tunnels.len(), GRID * GRID, "one tunnel byte per cell");
     let mut best: Vec<u32> = vec![u32::MAX; GRID * GRID * 8];
     let mut came: Vec<Option<Predecessor>> = vec![None; GRID * GRID * 8];
     let mut heap = BinaryHeap::new();
@@ -166,14 +261,18 @@ pub fn route_belt(
     while let Some(node) = heap.pop() {
         reached[cell_index(node.cell.0, node.cell.1)] = true;
         if node.cell == to {
-            return Ok(reconstruct(
-                &came,
-                origin,
-                from,
-                to,
-                node.facing,
-                node.surfaced,
-            ));
+            let route = reconstruct(&came, origin, from, to, node.facing, node.surfaced);
+            return match self_crossing(&route, origin) {
+                None => Ok(route),
+                // The tiles named are the ones this route's own tunnel
+                // reserved and then wanted again on the surface (or beneath
+                // a second same-axis tunnel). A refusal rather than a
+                // repair: `pipe.rs` matches this enum exhaustively, so a
+                // new variant is not free, and the case is a maze-shaped
+                // rarity -- a jump lands only where a wall forces it and
+                // the search seldom returns to the far side of that wall.
+                Some(blocked) => Err(RouteError::NoPath { blocked }),
+            };
         }
         let slot = state_index(node.cell, node.facing, node.surfaced);
         if node.cost > best[slot] {
@@ -187,8 +286,12 @@ pub fn route_belt(
             // is exactly the case where a jump is needed, when the wall
             // starts on the very next tile. Each is therefore its own `if`,
             // never a shared early `continue`.
+            // The second clause is the "straight after an exit" rule from
+            // the doc above: a surfaced node offers only the one step that
+            // continues the tunnel's direction.
             if let Some(next) = step(node.cell, dx, dy)
                 && !blocked[cell_index(next.0, next.1)]
+                && (!node.surfaced || dir == node.facing)
             {
                 let cost = node.cost + STEP + if dir == node.facing { 0 } else { TURN_PENALTY };
                 // A normal step always lands on an ordinary tile: whether or
@@ -212,10 +315,10 @@ pub fn route_belt(
 
             // An underground pair: enter at `node.cell`, surface `span` tiles
             // on in the same direction. The pair itself never turns -- that
-            // is not a thing the game has -- and it is only worth taking
-            // over ground that is actually blocked, because on open ground a
-            // pair costs two belts' worth of iron for a run a single surface
-            // tile would cover for free.
+            // is not a thing the game has -- and it is only offered over
+            // ground that is actually blocked, and then priced by
+            // `UNDERGROUND_PENALTY` so that a detour the surface can make is
+            // taken first.
             //
             // Gated on `!node.surfaced`: `node.cell` already holds a real
             // underground-belt entity (the *output* half of the previous
@@ -229,27 +332,46 @@ pub fn route_belt(
             // `UndergroundExit`) is overwritten and lost. A normal surface
             // step first (handled above, and it always clears `surfaced`)
             // is what makes a fresh launch tile legal again.
+            //
+            // Gated on `dir == node.facing` too: the "launched straight"
+            // rule from the doc above. Every start state is seeded in all
+            // four facings at cost zero, so a jump straight out of `from`
+            // is still free in every direction.
             if !node.surfaced
+                && dir == node.facing
                 && let Some(max) = max_underground
             {
-                for span in 2..=(max as i64 + 1) {
+                let axis = tunnel_axis(dir);
+                // `span` is the entry-to-exit distance, the prototype's unit.
+                for span in 2..=(max as i64) {
                     let Some(exit) = step(node.cell, dx * span, dy * span) else {
                         break;
                     };
                     if blocked[cell_index(exit.0, exit.1)] {
                         continue;
                     }
-                    let crosses_blocked = (1..span).any(|i| {
-                        step(node.cell, dx * i, dy * i)
-                            .map(|c| blocked[cell_index(c.0, c.1)])
-                            .unwrap_or(false)
-                    });
+                    if tunnels[cell_index(exit.0, exit.1)] & axis != 0 {
+                        // Surfacing on top of an existing same-axis tunnel
+                        // would pair with it; so would any longer jump.
+                        break;
+                    }
+                    let under: Vec<(usize, usize)> = (1..span)
+                        .filter_map(|i| step(node.cell, dx * i, dy * i))
+                        .collect();
+                    if under
+                        .iter()
+                        .any(|c| tunnels[cell_index(c.0, c.1)] & axis != 0)
+                    {
+                        break;
+                    }
+                    let crosses_blocked = under.iter().any(|c| blocked[cell_index(c.0, c.1)]);
                     if !crosses_blocked {
                         continue;
                     }
                     let cost = node.cost
                         + STEP * span as u32
-                        + if dir == node.facing { 0 } else { TURN_PENALTY };
+                        + UNDERGROUND_PENALTY
+                        + HIDDEN_TILE_COST * (span as u32 - 1);
                     let exit_slot = state_index(exit, dir, true);
                     if cost < best[exit_slot] {
                         best[exit_slot] = cost;
@@ -268,12 +390,11 @@ pub fn route_belt(
     }
 
     if let Some(max) = max_underground {
-        let widest = widest_blocked_run(blocked, from, to);
-        if widest > max as u32 {
-            return Err(RouteError::SpanTooLong {
-                needed: widest,
-                max,
-            });
+        // A wall `w` tiles wide needs a pair `w + 1` apart, in the
+        // prototype's unit.
+        let needed = widest_blocked_run(blocked, from, to) + 1;
+        if needed > u32::from(max) {
+            return Err(RouteError::SpanTooLong { needed, max });
         }
     }
 
@@ -435,4 +556,84 @@ fn reconstruct(
         }
     }
     Route { tiles }
+}
+
+impl Route {
+    /// The underground pairs in a route, as `(entry, exit)` indices into
+    /// `tiles`, in route order.
+    pub fn underground_pairs(&self) -> Vec<(usize, usize)> {
+        let mut pairs = Vec::new();
+        let mut open: Option<usize> = None;
+        for (i, tile) in self.tiles.iter().enumerate() {
+            match tile.kind {
+                TileKind::UndergroundEntry => open = Some(i),
+                TileKind::UndergroundExit => {
+                    if let Some(entry) = open.take() {
+                        pairs.push((entry, i));
+                    }
+                }
+                TileKind::Belt => {}
+            }
+        }
+        pairs
+    }
+}
+
+/// Every position strictly between the two halves of a pair, plus the
+/// halves themselves: the cells a tunnel occupies and the game will pair
+/// through. `entry` and `exit` must be collinear on one axis, which
+/// `route_belt` guarantees for the pairs it emits.
+pub fn tunnel_cells(entry: &Position, exit: &Position) -> Vec<Position> {
+    let (dx, dy) = (exit.x() - entry.x(), exit.y() - entry.y());
+    let steps = dx.abs().max(dy.abs()).round() as i64;
+    let unit = |d: f64| if d == 0.0 { 0.0 } else { d.signum() };
+    let (sx, sy) = (unit(dx), unit(dy));
+    (0..=steps)
+        .map(|i| Position::new(entry.x() + sx * i as f64, entry.y() + sy * i as f64))
+        .collect()
+}
+
+/// The tiles a route reserves for a tunnel and then wants again: a surface
+/// tile of the same route lying beneath one of its own tunnels, or two of
+/// its own same-axis tunnels sharing ground. `None` when the route is clean.
+fn self_crossing(route: &Route, origin: (f64, f64)) -> Option<Vec<Position>> {
+    let mut reserved: Vec<(usize, usize)> = Vec::new();
+    let mut hits: Vec<(usize, usize)> = Vec::new();
+    let cell = |p: &Position| -> (usize, usize) {
+        let x = ((p.x() - origin.0) / crate::graph::enclosure::CELL) as usize;
+        let y = ((p.y() - origin.1) / crate::graph::enclosure::CELL) as usize;
+        (x, y)
+    };
+    let pairs = route.underground_pairs();
+    let mut axes: Vec<((usize, usize), u8)> = Vec::new();
+    for (entry, exit) in &pairs {
+        let axis = tunnel_axis(route.tiles[*entry].direction);
+        for p in tunnel_cells(&route.tiles[*entry].position, &route.tiles[*exit].position) {
+            let c = cell(&p);
+            if axes.iter().any(|(other, a)| *other == c && *a == axis) {
+                hits.push(c);
+            }
+            axes.push((c, axis));
+            reserved.push(c);
+        }
+    }
+    for (i, tile) in route.tiles.iter().enumerate() {
+        if pairs.iter().any(|(e, x)| *e == i || *x == i) {
+            continue;
+        }
+        let c = cell(&tile.position);
+        if reserved.contains(&c) {
+            hits.push(c);
+        }
+    }
+    if hits.is_empty() {
+        return None;
+    }
+    hits.sort_unstable();
+    hits.dedup();
+    Some(
+        hits.into_iter()
+            .map(|c| cell_to_position(origin, c))
+            .collect(),
+    )
 }

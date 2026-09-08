@@ -8,11 +8,17 @@ use crate::method::have::PLACE_TICKS;
 use crate::method::{ExpansionCtx, Step};
 use factorio_bot_core::blueprint::UndergroundHalf;
 use factorio_bot_core::graph::enclosure::GRID;
-use factorio_bot_core::graph::route::{RouteError, TileKind, route_belt};
+use factorio_bot_core::graph::route::{
+    RouteError, TileKind, route_belt_with_tunnels, tunnel_axis, tunnel_cells,
+};
 use factorio_bot_core::types::{Direction, FactorioEntity, Position, Rect};
 
 /// The belt this module lays, and the item whose bill it states.
 const BELT: &str = "transport-belt";
+/// The underground pair that carries [`BELT`] beneath an obstacle. Paired
+/// with `BELT` by hand because the prototype does not name its partner: the
+/// day this module lays a faster belt, this is the second name to change.
+const UNDERGROUND: &str = "underground-belt";
 /// The inserter at each end when a caller does not name one.
 ///
 /// **Not craftable at stage 1**, which is the whole reason
@@ -101,16 +107,17 @@ pub fn inserter_facing(from: &Position, to: &Position) -> Option<Direction> {
 /// Which `UndergroundHalf` a `route_belt` tile of each underground
 /// `TileKind` must build as, `None` for an ordinary surface `Belt` tile.
 ///
-/// **Not called by `connect_steps` yet** -- its `TileKind::UndergroundEntry |
-/// TileKind::UndergroundExit` arm still panics on purpose, because
-/// `route_belt` is always called with `max_underground: None` and so can
-/// never produce one (see the `unreachable!()` there, and RULING 2 above
-/// `route_belt`'s call). Wiring that up -- threading a real
-/// `max_underground` through and replacing the panic with a call to this
-/// function -- is follow-on work. This function and its test exist now, on
-/// their own, so that day's edit has a pinned answer to consult rather than
-/// a chance to silently transpose the two halves and reproduce the "places
-/// perfectly, connects nothing" failure with types instead of without them.
+/// Called by [`connect_steps_with`] for every tile the route emits, since
+/// 2026-09-09. Until then the underground arm of that loop was an
+/// `unreachable!()` behind a `max_underground: None`, on the stated ground
+/// that "neither `FactorioEntity` nor the mod's `rcon_place_entity` can
+/// express which half" -- which had stopped being true at every layer
+/// (`FactorioEntity::underground_half`, `new_underground_belt`, the mod's
+/// fifth argument, the executor threading it through) while the comment and
+/// the `None` stayed. This function and its test were written first so that
+/// the wiring had a pinned answer to consult rather than a chance to
+/// transpose the two halves and reproduce "places perfectly, connects
+/// nothing" with types instead of without them.
 ///
 /// The mapping itself comes from `route_belt`'s own comment
 /// (`crates/core/src/graph/route.rs`): "the earlier tile is where the pair
@@ -137,14 +144,10 @@ pub enum ConnectRefusal {
     /// positions stood in the way -- the occupied tiles that stopped a
     /// perimeter search, or the obstacles `route_belt` itself reports.
     NoRoute { blocked: Vec<Position> },
-    /// An underground span longer than the belt prototype allows.
-    ///
-    /// Structurally unreachable while `connect_steps` always calls
-    /// `route_belt` with `max_underground: None` (RULING 2 of the task-4
-    /// brief) -- with `None`, `route_belt` never attempts an underground
-    /// move at all, so it can never report one being too long either. Kept
-    /// so this type matches `RouteError` one-to-one rather than silently
-    /// dropping a variant a future change to that call might need.
+    /// An underground span longer than the belt prototype allows: the wall
+    /// on the direct line is wider than [`UNDERGROUND`]'s
+    /// `max_underground_distance` can bridge. Both numbers are the
+    /// prototype's unit, entry-to-exit distance.
     SpanTooLong { needed: u32, max: u8 },
     /// An inserter's own machine and its belt tile were not aligned on one
     /// axis -- an inserter only ever moves items between two tiles directly
@@ -492,6 +495,162 @@ fn threatened_cells(ctx: &ExpansionCtx, origin: (f64, f64)) -> Option<Vec<bool>>
     Some(cells)
 }
 
+/// [`UNDERGROUND`]'s reach, read from the prototype the world carries --
+/// `None` when the world has no such prototype, which makes the search
+/// surface-only rather than guessing a number. On this install the field
+/// reads 5 for `underground-belt`, 7 for `fast-` and 11 for `turbo-`; a
+/// constant here would be right for one of them on one mod set.
+fn underground_reach(ctx: &ExpansionCtx) -> Option<u8> {
+    ctx.state
+        .base()
+        .globals
+        .entity_prototypes
+        .get(UNDERGROUND)
+        .and_then(|proto| proto.max_underground_distance)
+}
+
+/// Two positions on the same tile.
+fn same_tile(a: &Position, b: &Position) -> bool {
+    (a.x() - b.x()).abs() < 1e-6 && (a.y() - b.y()).abs() < 1e-6
+}
+
+/// The eight cells an arm-and-belt could stand on around every `container`
+/// inside `area` -- each of its four cardinal neighbours and the tile beyond
+/// -- paired with the chest's position, so the caller can pick out its own
+/// two endpoints' sides (the only ones it closes).
+///
+/// **A chest's sides are the scarce thing.** A 1x1 chest has four of them,
+/// and each run in or out of it takes one: an arm on the neighbour and a
+/// belt on the tile beyond. A route that merely passes a chest at one or
+/// two tiles' distance spends a side just as surely, and it did (see the
+/// caller). Only containers, by the prototype's `entity_type`, and only the
+/// cardinal lines: a furnace's or a drill's perimeter is where its arms go
+/// too, but those are sited by the method that owns them, with a room check
+/// of its own, and closing their rings here made a one-cell arrangement
+/// unbuildable in the fixtures. Read off the prototype rather than the
+/// entity's `entity_type`, which a plan-built entity may leave empty.
+fn container_sides(
+    ctx: &ExpansionCtx,
+    area: &Rect,
+    origin: (f64, f64),
+) -> Vec<((usize, usize), Position)> {
+    let centre = Position::new(
+        (area.left_top.x() + area.right_bottom.x()) / 2.,
+        (area.left_top.y() + area.right_bottom.y()) / 2.,
+    );
+    let radius = (area.width() / 2.).hypot(area.height() / 2.);
+    let is_container = |name: &str| {
+        ctx.state
+            .base()
+            .globals
+            .entity_prototypes
+            .get(name)
+            .is_some_and(|p| p.entity_type == "container")
+    };
+    let mut out = Vec::new();
+    for chest in ctx
+        .state
+        .entities_within(&centre, radius)
+        .into_iter()
+        .filter(|e| is_container(&e.name))
+    {
+        for (dx, dy) in [(0., -1.), (1., 0.), (0., 1.), (-1., 0.)] {
+            for reach in [1., 2.] {
+                let at = Position::new(
+                    chest.position.x() + dx * reach,
+                    chest.position.y() + dy * reach,
+                );
+                if let Some(cell) = cell_of(origin, &at) {
+                    out.push((cell, chest.position.clone()));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The ground every existing [`UNDERGROUND`] pair inside `area` runs beneath
+/// -- base world and this plan's overlay alike -- as a tunnel grid for
+/// `route_belt_with_tunnels` plus the same cells as a list to mark blocked.
+///
+/// **A tunnel is an entity the grid cannot see.** `overlay_boxes` and the
+/// base graph report collision boxes, and the four tiles between an entry
+/// half and its exit half have none: nothing stands there. The game still
+/// pairs through them, so a second pair of the same belt laid along that
+/// line would connect to the wrong half, and this module's own rule that
+/// nothing else of this plan's is built on a tunnel keeps the span readable
+/// as one thing. So the span is reserved twice: as an axis bit, which only
+/// a same-axis jump respects, and as a blocked cell, which everything does.
+///
+/// Pairing follows the game: an input half faces its tunnel, and the first
+/// same-name half it meets on that line within reach is its partner if it is
+/// an output facing the same way, and a dead end otherwise. A half nothing
+/// pairs with reserves only its own cell, which its collision box does
+/// already.
+fn tunnel_grid(
+    ctx: &ExpansionCtx,
+    area: &Rect,
+    origin: (f64, f64),
+    reach: u8,
+) -> (Vec<u8>, Vec<(usize, usize)>) {
+    use factorio_bot_core::num_traits::FromPrimitive;
+    let centre = Position::new(
+        (area.left_top.x() + area.right_bottom.x()) / 2.,
+        (area.left_top.y() + area.right_bottom.y()) / 2.,
+    );
+    let radius = (area.width() / 2.).hypot(area.height() / 2.);
+    let halves: Vec<FactorioEntity> = ctx
+        .state
+        .entities_within(&centre, radius)
+        .into_iter()
+        .filter(|e| e.name == UNDERGROUND)
+        .collect();
+    let mut tunnels = vec![0u8; GRID * GRID];
+    let mut reserved: Vec<(usize, usize)> = Vec::new();
+    for input in halves
+        .iter()
+        .filter(|e| e.underground_half == Some(UndergroundHalf::Input))
+    {
+        let Some(facing) = Direction::from_u8(input.direction) else {
+            continue;
+        };
+        let (dx, dy) = match facing {
+            Direction::North => (0., -1.),
+            Direction::East => (1., 0.),
+            Direction::South => (0., 1.),
+            Direction::West => (-1., 0.),
+            _ => continue,
+        };
+        let partner = (1..=i64::from(reach)).find_map(|i| {
+            let at = Position::new(
+                input.position.x() + dx * i as f64,
+                input.position.y() + dy * i as f64,
+            );
+            halves
+                .iter()
+                .find(|e| {
+                    (e.position.x() - at.x()).abs() < 1e-6 && (e.position.y() - at.y()).abs() < 1e-6
+                })
+                .map(|e| {
+                    (e.underground_half == Some(UndergroundHalf::Output)
+                        && e.direction == input.direction)
+                        .then(|| e.position.clone())
+                })
+        });
+        let Some(Some(exit)) = partner else {
+            continue;
+        };
+        let axis = tunnel_axis(facing);
+        for tile in tunnel_cells(&input.position, &exit) {
+            if let Some(cell) = cell_of(origin, &tile) {
+                tunnels[enclosure::cell_index(cell.0, cell.1)] |= axis;
+                reserved.push(cell);
+            }
+        }
+    }
+    (tunnels, reserved)
+}
+
 /// One `Place` action, with the preconditions and effects every other method
 /// in this crate emits for one -- see `method::power`'s plant parts, which
 /// this deliberately mirrors field for field.
@@ -569,17 +728,16 @@ fn place_step(ctx: &mut ExpansionCtx, entity: FactorioEntity, build: f64, note: 
 /// inserters whatever flows along it -- and appears only in the labels, which
 /// is where a reader of a plan needs it.
 ///
-/// # Scope: only the base world plus these two machines is an obstacle
+/// # Scope: obstacles are the base world, this plan's overlay, and tunnels
 ///
-/// Obstacles come from `state.base().entity_graph.blocking_boxes_within`
-/// plus the two footprints stated above -- the world as the game (or a
-/// fixture) reported it, never the rest of this plan's `added` overlay. A
-/// caller chaining two connections in the same plan must not treat the first
-/// call's output as ground truth for the second: this function cannot see a
-/// machine, inserter or belt that an *earlier* action in the same plan
-/// placed, so nothing here stops the two from overlapping. Widening this to
-/// read the whole overlay is future work, not a guarantee this function
-/// already makes.
+/// Obstacles come from `state.base().entity_graph.blocking_boxes_within`,
+/// from every collision box this plan has already added ([`overlay_boxes`]),
+/// from the two footprints stated above, and from the ground beneath every
+/// existing underground pair ([`tunnel_grid`]). A route that has to cross
+/// something goes under it with an [`UNDERGROUND`] pair, sized by the
+/// prototype's `max_underground_distance` and refused as
+/// [`ConnectRefusal::SpanTooLong`] when the wall is wider than that; a world
+/// with no such prototype is routed on the surface only.
 pub fn connect_steps(
     ctx: &mut ExpansionCtx,
     from: &FactorioEntity,
@@ -661,6 +819,32 @@ pub fn connect_steps_with(
     claim_footprint(&mut blocked, &from_footprint);
     claim_footprint(&mut blocked, &to_footprint);
 
+    // UNDERGROUNDS: the reach is the prototype's, or `None` -- surface-only
+    // -- when the world carries no `underground-belt` prototype at all.
+    // Existing pairs (base world or this plan's) reserve the ground beneath
+    // them on two grids: the tunnel grid, which stops a same-axis jump from
+    // pairing with them, and `blocked`, which keeps everything else off --
+    // applied before either end is chosen, so a perimeter pair is never
+    // picked on top of a tunnel and then argued with.
+    //
+    // This branch used to pass `None` unconditionally under a "RULING 2"
+    // that said the half of a pair could not be expressed by `FactorioEntity`
+    // or by the mod. Every layer had since learned to carry it -- see
+    // `underground_half_for_tile_kind`'s doc -- and the stuck belt-fed
+    // sustain path (one cell, its coal route "blocked by 4 tiles") was the
+    // cost of the comment outliving its reason.
+    let reach = underground_reach(ctx);
+    let tunnels = match reach {
+        Some(reach) => {
+            let (tunnels, reserved) = tunnel_grid(ctx, &area, origin, reach);
+            for cell in reserved {
+                blocked[enclosure::cell_index(cell.0, cell.1)] = true;
+            }
+            tunnels
+        }
+        None => vec![0u8; GRID * GRID],
+    };
+
     // Each end is claimed onto `blocked` as soon as it is chosen, so the
     // second search sees what the first took. Without this, both ends are
     // "the first free perimeter pair of X" against the same static grid and
@@ -678,23 +862,30 @@ pub fn connect_steps_with(
     let sink = first_free_perimeter(&blocked, origin, &to_footprint)
         .map_err(|blocked| ConnectRefusal::NoRoute { blocked })?;
     blocked[enclosure::cell_index(sink.inserter.0, sink.inserter.1)] = true;
-    // `sink.belt` itself is deliberately NOT claimed: it is the route's
-    // destination, and `route_belt` consults `blocked` for every cell it
-    // steps *into*, including that one. `source.belt` is safe to claim
-    // because `route_belt` seeds its start state unconditionally and only
-    // ever leaves that cell.
+
+    // A CHEST'S OTHER SIDES ARE RESERVED, not routed over. Measured
+    // 2026-09-09 on seed 31337: the haul into a cell's coal chest ended on
+    // its north side and ran its last belts down the chest's EAST side on
+    // the way in, so the chest's fourth side -- the one the next cell
+    // needed -- was spent by a belt that had no business there, and the
+    // next run refused with all four neighbours named. `method::sustain`'s
+    // doc had already said where the fix belonged: "a real fix reserves the
+    // perimeter in `method::connect`". So once the two ends are chosen, a
+    // chest at either end closes every other side to this route.
     //
-    // RULING 2: undergrounds are never emitted on this branch, always and
-    // deliberately -- do not "fix" this by threading a real
-    // `max_underground` through. A Factorio underground-belt pair needs one
-    // half `input` and one half `output`; `FactorioEntity` has no field to
-    // record which, and the mod's `rcon_place_entity(player_id, item_name,
-    // position, direction)` has no argument for it either. Emitting two
-    // identical halves would place both perfectly and move nothing -- this
-    // project's defining failure. A route that would need to go underground
-    // must refuse instead, which passing `None` here guarantees: `route_belt`
-    // never attempts an underground move without a `max_underground`.
-    //
+    // **Only this call's own two machines, and only if they are chests.**
+    // The first version closed every chest in the window, and the one-cell
+    // sustain arrangement in the fixtures -- three chests within a few
+    // tiles -- lost every surface route and reached for a tunnel it cannot
+    // craft. A bystander's sides are the bystander's own call's business.
+    for (cell, owner) in container_sides(ctx, &area, origin) {
+        let ours = same_tile(&owner, &from.position) || same_tile(&owner, &to.position);
+        let chosen = [source.inserter, source.belt, sink.inserter, sink.belt].contains(&cell);
+        if ours && !chosen {
+            blocked[enclosure::cell_index(cell.0, cell.1)] = true;
+        }
+    }
+
     // THREATS: a belt is a standing structure, so the route prefers to keep
     // out of a charted enemy structure's reach -- but never at the price of
     // the route itself. `threatened_cells` is OR-ed onto a *copy* of the grid
@@ -707,23 +898,33 @@ pub fn connect_steps_with(
     // The endpoints are deliberately NOT part of it: they are fixed by the
     // machines, and blocking them would refuse every route on the first
     // attempt and make the whole pass a wasted search.
-    let route = threatened_cells(ctx, origin)
-        .map(|threatened| {
-            let mut avoiding = blocked.clone();
-            for (cell, is_threatened) in threatened.iter().enumerate() {
-                if *is_threatened {
-                    avoiding[cell] = true;
-                }
+    //
+    // ORDER: surface first, on both grids, and only then a tunnel. A pair
+    // is a last resort -- it costs the iron of some sixteen belts, needs a
+    // recipe that is disabled at t=0, and reserves the ground beneath it --
+    // so a route the surface can make, however long its detour, is the
+    // route. This is what keeps every plan that routed before undergrounds
+    // existed byte-for-byte the same plan.
+    let avoiding = threatened_cells(ctx, origin).map(|threatened| {
+        let mut avoiding = blocked.clone();
+        for (cell, is_threatened) in threatened.iter().enumerate() {
+            if *is_threatened {
+                avoiding[cell] = true;
             }
-            avoiding[enclosure::cell_index(source.belt.0, source.belt.1)] = false;
-            avoiding[enclosure::cell_index(sink.belt.0, sink.belt.1)] = false;
-            avoiding
-        })
-        .and_then(|avoiding| route_belt(&avoiding, origin, source.belt, sink.belt, None).ok())
-        .map_or_else(
-            || route_belt(&blocked, origin, source.belt, sink.belt, None),
-            Ok,
-        )
+        }
+        avoiding[enclosure::cell_index(source.belt.0, source.belt.1)] = false;
+        avoiding[enclosure::cell_index(sink.belt.0, sink.belt.1)] = false;
+        avoiding
+    });
+    let search = |grid: &[bool], reach: Option<u8>| {
+        route_belt_with_tunnels(grid, &tunnels, origin, source.belt, sink.belt, reach)
+    };
+    let route = avoiding
+        .as_ref()
+        .and_then(|grid| search(grid, None).ok())
+        .or_else(|| search(&blocked, None).ok())
+        .or_else(|| reach.and_then(|_| avoiding.as_ref().and_then(|grid| search(grid, reach).ok())))
+        .map_or_else(|| search(&blocked, reach), Ok)
         .map_err(|error| match error {
             RouteError::NoPath { blocked } => ConnectRefusal::NoRoute { blocked },
             RouteError::SpanTooLong { needed, max } => ConnectRefusal::SpanTooLong { needed, max },
@@ -748,20 +949,40 @@ pub fn connect_steps_with(
     // Nothing above this line has touched `ctx`; every refusal is returned
     // before a single action is emitted or a single entity added to the
     // overlay, which is the promise `ConnectRefusal` makes.
-    let belts = u32::try_from(route.tiles.len()).unwrap_or(u32::MAX);
+    let undergrounds = u32::try_from(
+        route
+            .tiles
+            .iter()
+            .filter(|t| t.kind != TileKind::Belt)
+            .count(),
+    )
+    .unwrap_or(u32::MAX);
+    let belts = u32::try_from(route.tiles.len())
+        .unwrap_or(u32::MAX)
+        .saturating_sub(undergrounds);
     let build = ctx
         .state
         .bot(ctx.chain_actor)
         .map(|b| b.build_distance)
         .unwrap_or(10.0);
 
-    let mut steps = Vec::with_capacity(route.tiles.len() + 4);
-    steps.push(Step::Subgoal(Goal::Have {
-        item: BELT.into(),
-        count: belts,
-        whose: Holder::Share(ctx.chain_actor),
-        via: None,
-    }));
+    let mut steps = Vec::with_capacity(route.tiles.len() + 5);
+    if belts > 0 {
+        steps.push(Step::Subgoal(Goal::Have {
+            item: BELT.into(),
+            count: belts,
+            whose: Holder::Share(ctx.chain_actor),
+            via: None,
+        }));
+    }
+    if undergrounds > 0 {
+        steps.push(Step::Subgoal(Goal::Have {
+            item: UNDERGROUND.into(),
+            count: undergrounds,
+            whose: Holder::Share(ctx.chain_actor),
+            via: None,
+        }));
+    }
     steps.push(Step::Subgoal(Goal::Have {
         item: inserter.into(),
         count: 2,
@@ -776,15 +997,13 @@ pub fn connect_steps_with(
 
     let note = format!("carry {item} from {} to {}", from.name, to.name);
     for tile in &route.tiles {
-        let entity = match tile.kind {
-            TileKind::Belt => FactorioEntity::new_transport_belt(&tile.position, tile.direction),
-            // See the comment at the `route_belt` call above: with
-            // `max_underground: None` the search can never take the branch
-            // that produces these, so this arm can never run.
-            TileKind::UndergroundEntry | TileKind::UndergroundExit => unreachable!(
-                "connect_steps always calls route_belt with max_underground: None, \
-                 so it can never emit an underground route tile"
-            ),
+        let entity = match underground_half_for_tile_kind(tile.kind) {
+            None => FactorioEntity::new_transport_belt(&tile.position, tile.direction),
+            // Both halves carry the tunnel's direction; `route_belt` keeps
+            // the exit's step straight, so `tile.direction` is that for both.
+            Some(half) => {
+                FactorioEntity::new_underground_belt(&tile.position, tile.direction, half)
+            }
         };
         steps.push(place_step(ctx, entity, build, &note));
     }
@@ -1059,22 +1278,163 @@ mod tests {
         );
     }
 
+    /// A wall wider than the prototype's reach still refuses, and refuses by
+    /// the number: five columns need a pair six apart and the fixture's
+    /// `underground-belt` reads 5. Nothing is placed and no id is spent.
     #[test]
-    fn a_walled_destination_refuses_and_places_nothing() {
-        let (mut ctx, from, to) = crate::test_world::furnace_and_lab_behind_a_wall();
+    fn a_wall_wider_than_the_reach_refuses_by_span_and_places_nothing() {
+        let (mut ctx, from, to) = crate::test_world::furnace_and_lab_behind_a_wide_wall();
         let before = ctx.ids.next();
         let refusal = connect_steps(&mut ctx, &from, &to, &"iron-plate".into())
-            .expect_err("a walled destination has no route");
-        assert!(matches!(refusal, ConnectRefusal::NoRoute { .. }));
+            .expect_err("a five-wide wall is one wider than a reach of five can cross");
+        assert!(
+            matches!(refusal, ConnectRefusal::SpanTooLong { needed: 6, max: 5 }),
+            "the refusal names both numbers in the prototype's unit: {refusal}"
+        );
         assert_eq!(
             ctx.ids.next().0,
             before.0 + 1,
             "a refusal allocates no action id, because it emits no action"
         );
         assert!(
-            !refusal.to_string().is_empty(),
-            "a refusal a caller can surface"
+            ctx.state
+                .entities_within(&from.position, 30.0)
+                .iter()
+                .all(|e| e.name != "transport-belt" && e.name != "underground-belt"),
+            "a refusal leaves nothing in the overlay"
         );
+    }
+
+    /// **The unblocking test.** The one-wide wall at `x = 8.5` that used to
+    /// refuse is crossed with an underground pair: an `input` half west of
+    /// it, an `output` half east of it, both facing east, nothing placed in
+    /// the wall, and the bill states the pair as `underground-belt` and the
+    /// rest as `transport-belt`. Each half is asserted by position, half AND
+    /// direction -- two `input`s, or an `output` facing the next turn,
+    /// would place perfectly and move nothing.
+    #[test]
+    fn a_one_tile_wall_is_crossed_by_an_underground_pair() {
+        let (mut ctx, from, to) = crate::test_world::furnace_and_lab_behind_a_wall();
+        let steps = connect_steps(&mut ctx, &from, &to, &"iron-plate".into())
+            .expect("a one-wide wall is what an underground pair is for");
+
+        let halves: Vec<(Position, u8, Option<UndergroundHalf>)> = steps
+            .iter()
+            .filter_map(|step| match step {
+                Step::Act(action) => match &action.kind {
+                    ActionKind::Place { entity } if entity.name == "underground-belt" => Some((
+                        entity.position.clone(),
+                        entity.direction,
+                        entity.underground_half,
+                    )),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            halves,
+            vec![
+                (
+                    Position::new(7.5, 2.5),
+                    dir(Direction::East),
+                    Some(UndergroundHalf::Input)
+                ),
+                (
+                    Position::new(9.5, 2.5),
+                    dir(Direction::East),
+                    Some(UndergroundHalf::Output)
+                ),
+            ],
+            "the pair dives at 7.5 and surfaces at 9.5, both facing the tunnel's way"
+        );
+        assert!(
+            placements(&steps, "transport-belt")
+                .iter()
+                .all(|(p, _)| p.x() != 8.5),
+            "nothing is placed inside the wall"
+        );
+
+        let bill: Vec<(String, u32)> = steps
+            .iter()
+            .filter_map(|step| match step {
+                Step::Subgoal(Goal::Have { item, count, .. }) => Some((item.to_string(), *count)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            bill,
+            vec![
+                ("transport-belt".to_string(), 5),
+                ("underground-belt".to_string(), 2),
+                ("inserter".to_string(), 2),
+            ],
+            "eight cells between the inserters less the wall cell: five belts and one \
+             pair, stated as goals the shortfall machinery can refuse"
+        );
+    }
+
+    /// The ground beneath an existing pair is off limits to a same-axis jump.
+    /// A pair already stands across the wall on the route's own row --
+    /// `input` at 7.5, `output` at 9.5, facing east -- so the straight
+    /// route's natural move is a jump from 6.5 over the three cells 7.5,
+    /// 8.5, 9.5 to 10.5: four apart, well within reach, and it would pair
+    /// with the standing halves instead of with itself. With the tunnel
+    /// reserved the search must cross on another row with its own pair and
+    /// put nothing on the reserved cells.
+    #[test]
+    fn a_route_keeps_off_the_ground_beneath_an_existing_pair() {
+        let (mut ctx, from, to) = crate::test_world::furnace_and_lab_behind_a_wall();
+        let standing_in = FactorioEntity::new_underground_belt(
+            &Position::new(7.5, 2.5),
+            Direction::East,
+            UndergroundHalf::Input,
+        );
+        let standing_out = FactorioEntity::new_underground_belt(
+            &Position::new(9.5, 2.5),
+            Direction::East,
+            UndergroundHalf::Output,
+        );
+        let reserved = tunnel_cells(&standing_in.position, &standing_out.position);
+        ctx.state.create_entity(standing_in);
+        ctx.state.create_entity(standing_out);
+
+        let steps = connect_steps(&mut ctx, &from, &to, &"iron-plate".into())
+            .expect("the wall is still crossable on a row of its own");
+        let laid: Vec<(String, Position)> = steps
+            .iter()
+            .filter_map(|s| match s {
+                Step::Act(a) => match &a.kind {
+                    ActionKind::Place { entity }
+                        if entity.name == "underground-belt" || entity.name == "transport-belt" =>
+                    {
+                        Some((entity.name.clone(), entity.position.clone()))
+                    }
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        let pair: Vec<&Position> = laid
+            .iter()
+            .filter(|(n, _)| n == "underground-belt")
+            .map(|(_, p)| p)
+            .collect();
+        assert_eq!(
+            pair.len(),
+            2,
+            "the route still needs its own pair: {laid:?}"
+        );
+        assert!(
+            pair.iter().all(|p| p.y() != 2.5),
+            "the new pair is on a different row from the standing one: {laid:?}"
+        );
+        for (_, tile) in &laid {
+            assert!(
+                !reserved.iter().any(|p| p == tile),
+                "{tile} lies on the standing pair's tunnel {reserved:?}"
+            );
+        }
     }
 
     /// **The IMPORTANT-2 regression test.** Each end is found by a search

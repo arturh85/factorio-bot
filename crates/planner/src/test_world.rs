@@ -180,9 +180,11 @@ pub(crate) fn furnace_and_lab_on_open_ground() -> (ExpansionCtx, FactorioEntity,
 /// [`furnace_and_lab_on_open_ground`], with a `stone-wall` column at
 /// `x = 8.5` spanning `y` from -30 to 30 — past the 24-tile radius of the
 /// `enclosure::window` centred on `(5.0, 5.0)` on either side, so every row
-/// inside that window has its `x = 8.5` cell blocked and no route can cross
-/// it. The walled-destination control: `connect_steps` between the two
-/// machines must refuse.
+/// inside that window has its `x = 8.5` cell blocked and no surface route
+/// can cross it. Until 2026-09-09 this was the walled-destination control
+/// and `connect_steps` refused on it; now the one-wide wall is exactly what
+/// an underground pair is for, and [`furnace_and_lab_behind_a_wide_wall`]
+/// is the control that still refuses.
 ///
 /// The column sits strictly between the two machines' own footprints (the
 /// furnace ends at `x = 5.9`, the lab starts at `x = 11.3`), so it blocks the
@@ -194,6 +196,29 @@ pub(crate) fn furnace_and_lab_behind_a_wall() -> (ExpansionCtx, FactorioEntity, 
     let mut entities = vec![furnace.clone(), lab.clone()];
     for y in -30..=30 {
         entities.push(stone_wall(&Position::new(8.5, f64::from(y) + 0.5)));
+    }
+    (connect_ctx(entities), furnace, lab)
+}
+
+/// [`furnace_and_lab_behind_a_wall`]'s wall, five columns wide: `x = 6.5`
+/// through `10.5`, every row from -30 to 30. The cells between the two
+/// machines are `x 6..=10` (the furnace ends at cell 5, the lab starts at
+/// 11), so the wall fills them all, and crossing it needs a pair six apart
+/// -- one more than the fixture's `underground-belt` prototype allows
+/// (`max_underground_distance = 5`). The wide-wall control: `connect_steps`
+/// must refuse **by span**, naming the number, not by a bare `NoRoute`.
+pub(crate) fn furnace_and_lab_behind_a_wide_wall() -> (ExpansionCtx, FactorioEntity, FactorioEntity)
+{
+    let furnace = FactorioEntity::new_stone_furnace(&Position::new(5.0, 5.0), Direction::North);
+    let lab = lab(&Position::new(12.5, 5.5));
+    let mut entities = vec![furnace.clone(), lab.clone()];
+    for x in 6..=10 {
+        for y in -30..=30 {
+            entities.push(stone_wall(&Position::new(
+                f64::from(x) + 0.5,
+                f64::from(y) + 0.5,
+            )));
+        }
     }
     (connect_ctx(entities), furnace, lab)
 }

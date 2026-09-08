@@ -58,11 +58,34 @@
 //! # The timing claim
 //!
 //! The packs are not in the chest when the charge lands — the machines have to
-//! run. The `Remove` this method emits therefore carries the cell's own tempo
-//! in its `duration`: `ticks_per_item` per item drawn. It is the same
-//! device the crate uses everywhere a bot waits on a machine, and it is a
-//! claim about *this cell*, derived from its recipe and its machine's
-//! `crafting_speed`, rather than a constant.
+//! run, `ticks_per_item` per pack. That wait is stated as a
+//! [`Step::Link`](crate::method::Step::Link) from the action that charged the
+//! cell to the `Remove` that draws from it, with a `lag` of
+//! `ticks_per_item * take`, and the `Remove` itself costs one transfer.
+//!
+//! **It used to be the `Remove`'s own `duration`, and that stood a bot at the
+//! chest for the whole of it** — fifteen packs at 600 ticks is 9,000 ticks of
+//! a bot doing nothing but waiting, which is an artificial serialisation and
+//! not a fact about the cell. A lag edge is the device this crate already uses
+//! for machine time everywhere else (`method::have`'s smelts, `method::power`'s
+//! boilers), and the executor models it directly.
+//!
+//! **The lag is the cell's TEMPO times the count, and deliberately not
+//! `CELL_CHARGE_TICKS`.** `ticks_per_item * take` says "N items cost N of
+//! this machine's cycles", which is a fact about the recipe and the machine's
+//! `crafting_speed` and stays true whatever fills the feed chests. A cell
+//! belted from a producing machine rather than hand-charged invalidates the
+//! *ledger* above — `charge_products`, which is charge-once by construction —
+//! but not this edge. Whoever belts a cell has to revisit `BufferGain`, and
+//! need not revisit the wait.
+//!
+//! **The id crosses a method boundary, which is the part that needed
+//! machinery.** The charge is emitted by `method::assemble` and the draw by
+//! this module, so nothing here allocated the `ActionId` it has to name.
+//! `ExpansionCtx::buffer_stock` carries it: `run_steps` records, for every
+//! `Effect::BufferGain` it simulates, which action produced it — the buffer
+//! analogue of the `stock` map that states a hand's supply edges, and the same
+//! shape as `PlanState::machine_queue`'s `release`.
 
 use crate::action::{Action, ActionKind, Actor, Condition, Effect, InventorySlot};
 use crate::error::PlannerError;
@@ -189,6 +212,7 @@ impl Method for DrawFromCell {
             .map(|b| b.reach_distance)
             .unwrap_or(10.0);
         let mut steps: Vec<Step> = Vec::new();
+        let mut links: Vec<Step> = Vec::new();
         let mut drawn = 0u32;
         for (pos, held) in chests {
             if left == 0 {
@@ -200,8 +224,28 @@ impl Method for DrawFromCell {
             }
             left -= take;
             drawn = drawn.saturating_add(take);
+            let id = ctx.ids.next();
+            // The machines have to run before the chest holds this, and that
+            // wait belongs on an EDGE rather than in the taking bot's
+            // `duration` -- see this module's doc. Every action that charged
+            // this chest with this item is a predecessor; `run_steps` recorded
+            // them as it emitted them, which is the only way an id allocated
+            // inside `method::assemble`'s expansion reaches this one.
+            let wait = spec.ticks_per_item.saturating_mul(take);
+            for from in ctx
+                .buffer_stock
+                .get(&(factorio_bot_core::types::Pos::from(&pos), item.clone()))
+                .into_iter()
+                .flatten()
+            {
+                links.push(Step::Link {
+                    from: *from,
+                    to: id,
+                    lag: wait,
+                });
+            }
             steps.push(Step::Act(Box::new(Action {
-                id: ctx.ids.next(),
+                id,
                 kind: ActionKind::Remove {
                     pos: pos.clone(),
                     entity: CHEST.into(),
@@ -238,9 +282,11 @@ impl Method for DrawFromCell {
                         count: take,
                     },
                 ],
-                // The machines have to run before the chest holds this. The
-                // cell's own tempo, per item drawn -- see this module's doc.
-                duration: TRANSFER_TICKS.saturating_add(spec.ticks_per_item.saturating_mul(take)),
+                // One chest-to-hand transfer, and nothing else. The cell's own
+                // tempo is on the `Step::Link` above, where it costs the
+                // schedule its ticks without standing a bot at the chest for
+                // them.
+                duration: TRANSFER_TICKS,
                 pinned: None,
                 label: format!("take {} {} from the cell's output chest", take, item),
             })));
@@ -250,6 +296,11 @@ impl Method for DrawFromCell {
                 goal: goal.to_string(),
             });
         }
+        // After the takes, so every `to` names an action the network already
+        // holds. An edge whose endpoints are not both in the network is
+        // skipped by `infer_edges` and `as_graph`, so ordering here is not a
+        // nicety.
+        steps.append(&mut links);
         // Whatever a charge could not cover is ordinary work, stated with the
         // goal's own count for `Withdraw`'s reason: `run_steps` has already
         // simulated the take into the hand, so `shortfall` recomputes the

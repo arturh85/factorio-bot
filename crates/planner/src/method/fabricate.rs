@@ -155,39 +155,49 @@ pub enum FabricateRefusal {
         considered: Vec<String>,
     },
 
-    /// More than one fluid goes **in**, and nothing here can say which
-    /// fluidbox takes which.
+    /// A fluid of the recipe cannot be tied to one of the machine's
+    /// fluidboxes.
     ///
-    /// A machine's `fluidbox_prototypes` say where fluid may be joined and
-    /// which way it flows; **no field on our wire says which fluid a
-    /// particular input box accepts**. With one input that does not matter --
-    /// there is one box and one fluid. With two it decides everything, and a
-    /// pipe on the wrong box builds perfectly and moves nothing, the silent
-    /// class this repo has paid for with inserters and with pumps.
+    /// # This used to be "more than one fluid in", and that was too wide
     ///
-    /// So this refuses rather than guessing. It is what `sulfur` (water +
-    /// petroleum gas) and `advanced-oil-processing` (water + crude) land on,
-    /// and closing it needs a fluid filter across the bridge, not more
-    /// geometry.
+    /// Until 2026-09-08 any recipe with two fluid ingredients refused here,
+    /// on the grounds that nothing on the wire said which input box took
+    /// which. `sulfur` (water + petroleum-gas) landed on it, and through it
+    /// so did the whole rocket ladder -- `researched:rocket-silo`,
+    /// `have:rocket-part:1`, `have:low-density-structure:1`.
+    ///
+    /// **The game does say, and it was measured rather than inferred.** A
+    /// standing `chemical-plant` with the `sulfur` recipe set reports
+    /// `water` on its first input box and `petroleum-gas` on its second, and
+    /// ten more multi-fluid recipes agree. [`pipe::fluid_box_ordinals`] holds
+    /// the three rules and the one case that genuinely has no answer: a
+    /// machine declaring more boxes of a direction than the recipe has
+    /// fluids, where the game merges the surplus and the merge is not
+    /// positional. That -- `fluoroketone` in a `cryogenic-plant` -- is what
+    /// still refuses, and only for the second fluid onward.
     #[error(
-        "{recipe} runs in {machine} and takes {} fluids in -- {} -- and no field this planner \
-         receives says which of the {machine}'s input fluidboxes accepts which, so a pipe would \
-         be a guess",
-        fluids.len(),
-        fluids.join(" and ")
+        "{recipe} runs in {machine}, and its {ordinal} of {fluids} {direction} fluids is {fluid}, \
+         which cannot be tied to a fluidbox: the {machine} declares {} {direction} box(es), the \
+         recipe names no fluidbox_index for it, and when those counts differ the game merges \
+         boxes in a way that is not positional -- so a pipe would be a guess",
+        boxes.map_or_else(|| "an unknown number of".to_string(), |n| n.to_string())
     )]
     #[diagnostic(
-        code(planner::many_fluid_ingredients),
+        code(planner::fluidbox_undecidable),
         help(
-            "one fluid in is routable today; two needs the fluidbox's accepted fluid on the \
-             wire. A pipe joined to the wrong box builds 100% correctly and moves nothing"
+            "a recipe whose fluid count matches the machine's box count is routed positionally, \
+             and an explicit fluidbox_index is honoured; neither applies here. A pipe joined to \
+             the wrong box builds 100% correctly and moves nothing"
         )
     )]
-    ManyFluidIngredients {
+    FluidBoxUndecidable {
         recipe: String,
         machine: String,
-        /// In bill order, which is the recipe's own order.
-        fluids: Vec<String>,
+        fluid: String,
+        direction: &'static str,
+        ordinal: usize,
+        fluids: usize,
+        boxes: Option<usize>,
     },
 
     /// More than one fluid comes **out**, and each needs its own sink.
@@ -352,7 +362,12 @@ struct Run {
 struct FluidRig {
     site: Position,
     pipe: String,
-    inbound: Option<Run>,
+    /// One run per fluid ingredient, each to its own input fluidbox.
+    ///
+    /// A `Vec` and not an `Option` since 2026-09-08: `sulfur` needs two, and
+    /// the ordinals that say which box each joins come from
+    /// [`pipe::fluid_box_ordinals`].
+    inbound: Vec<Run>,
     outbound: Option<Run>,
     /// The buffer to obtain and place, when a fluid product needed one.
     buffer: Option<(String, Position)>,
@@ -415,15 +430,29 @@ fn plan_fluid_rig(
     origin: &Position,
 ) -> Result<FluidRig, PlannerError> {
     let state = &ctx.state;
-    if bill_fluids.len() > 1 {
-        return Err(PlannerError::CannotFabricate(Box::new(
-            FabricateRefusal::ManyFluidIngredients {
-                recipe: recipe.name.clone(),
-                machine: machine.to_string(),
-                fluids: bill_fluids.iter().map(|(f, _)| f.clone()).collect(),
-            },
-        )));
-    }
+    // **Which box takes which fluid, before anything is sited.** A refusal
+    // here costs nothing; a wrong answer builds a pipe that moves nothing.
+    let undecidable = |direction: &'static str, u: pipe::BoxUndecidable| {
+        PlannerError::CannotFabricate(Box::new(FabricateRefusal::FluidBoxUndecidable {
+            recipe: recipe.name.clone(),
+            machine: machine.to_string(),
+            fluid: u.fluid,
+            direction,
+            ordinal: u.ordinal,
+            fluids: u.fluids,
+            boxes: u.boxes,
+        }))
+    };
+    let input_ordinals = pipe::fluid_box_ordinals(state, machine, recipe, "input")
+        .map_err(|u| undecidable("input", u))?;
+    let output_ordinals = pipe::fluid_box_ordinals(state, machine, recipe, "output")
+        .map_err(|u| undecidable("output", u))?;
+    let box_of = |fluid: &str, ordinals: &[(String, usize)]| -> usize {
+        ordinals
+            .iter()
+            .find(|(name, _)| name == fluid)
+            .map_or(0, |(_, ordinal)| *ordinal)
+    };
     let products = fluid_products(ctx, recipe);
     if products.len() > 1 {
         return Err(PlannerError::CannotFabricate(Box::new(
@@ -448,7 +477,7 @@ fn plan_fluid_rig(
         return Ok(FluidRig {
             site,
             pipe: String::new(),
-            inbound: None,
+            inbound: Vec::new(),
             outbound: None,
             buffer: None,
         });
@@ -462,59 +491,79 @@ fn plan_fluid_rig(
     let pipe = pipe_prototype(state, &fluid_for_naming, machine)?;
 
     // ---- the machine's site, which the source decides when there is one ----
-    let source = match bill_fluids.first() {
-        Some((fluid, amount)) => {
-            let (attributable, rejected) = pipe::sources_of(state, fluid, origin);
-            let Some(source) = attributable.into_iter().next() else {
-                let recipes: Vec<FactorioRecipe> = state
-                    .base()
-                    .globals
-                    .recipes
-                    .iter()
-                    .map(|entry| entry.value().clone())
-                    .collect();
-                return Err(PlannerError::CannotFabricate(Box::new(
-                    FabricateRefusal::NoFluidSource {
-                        recipe: recipe.name.clone(),
-                        category: recipe.category.clone(),
-                        machine: machine.to_string(),
-                        fluid: fluid.clone(),
-                        amount: *amount,
-                        produced_by: FluidSource::of(recipes.iter(), fluid),
-                        considered: rejected
-                            .iter()
-                            .take(5)
-                            .map(|e| format!("the {} at {}", e.name, e.position))
-                            .collect(),
-                    },
-                )));
-            };
-            Some((fluid.clone(), source))
-        }
-        None => None,
-    };
-    let anchor = source
-        .as_ref()
+    //
+    // **Every fluid ingredient needs its own standing source, and every one
+    // is resolved before the machine is sited.** Two fluids in is `sulfur`
+    // (water and petroleum-gas), and a rig with one of the two connected is
+    // the "factory that quietly stops" the owner ruled against: the plant
+    // stands, the pipe is right, and nothing ever comes out.
+    let mut sources: Vec<(String, FactorioEntity)> = Vec::with_capacity(bill_fluids.len());
+    for (fluid, amount) in bill_fluids {
+        let (attributable, rejected) = pipe::sources_of(state, fluid, origin);
+        let Some(source) = attributable.into_iter().next() else {
+            let recipes: Vec<FactorioRecipe> = state
+                .base()
+                .globals
+                .recipes
+                .iter()
+                .map(|entry| entry.value().clone())
+                .collect();
+            return Err(PlannerError::CannotFabricate(Box::new(
+                FabricateRefusal::NoFluidSource {
+                    recipe: recipe.name.clone(),
+                    category: recipe.category.clone(),
+                    machine: machine.to_string(),
+                    fluid: fluid.clone(),
+                    amount: *amount,
+                    produced_by: FluidSource::of(recipes.iter(), fluid),
+                    considered: rejected
+                        .iter()
+                        .take(5)
+                        .map(|e| format!("the {} at {}", e.name, e.position))
+                        .collect(),
+                },
+            )));
+        };
+        sources.push((fluid.clone(), source));
+    }
+    let anchor = sources
+        .first()
         .map(|(_, entity)| entity.position.clone())
         .unwrap_or_else(|| origin.clone());
     // **The machine goes where its own ports fit.** A site flush against the
     // source puts the machine's input port inside the source; see
     // `pipe::port_is_placeable`, which is that refusal turned into a siting
     // predicate.
-    let wants_in = !bill_fluids.is_empty();
-    let wants_out = !products.is_empty();
+    // **Every box this recipe uses has to fit, not just the first.** A site
+    // chosen on one input port and refused on the other is the two-searches
+    // failure the outbound run already paid for once, one fluid further in.
+    let in_boxes: Vec<usize> = sources
+        .iter()
+        .map(|(fluid, _)| box_of(fluid, &input_ordinals))
+        .collect();
+    let out_box = products
+        .first()
+        .map(|(fluid, _)| box_of(fluid, &output_ordinals));
     let ports_fit = |candidate: &Position| {
-        (!wants_in
-            || pipe::port_is_placeable(state, machine, candidate, Some("input"), Some(0), &pipe))
-            && (!wants_out
-                || pipe::port_is_placeable(
-                    state,
-                    machine,
-                    candidate,
-                    Some("output"),
-                    Some(0),
-                    &pipe,
-                ))
+        in_boxes.iter().all(|ordinal| {
+            pipe::port_is_placeable(
+                state,
+                machine,
+                candidate,
+                Some("input"),
+                Some(*ordinal),
+                &pipe,
+            )
+        }) && out_box.is_none_or(|ordinal| {
+            pipe::port_is_placeable(
+                state,
+                machine,
+                candidate,
+                Some("output"),
+                Some(ordinal),
+                &pipe,
+            )
+        })
     };
     let Some(site) = free_area_near_where(state, &anchor, machine, ports_fit) else {
         return Err(PlannerError::NoApplicableMethod {
@@ -546,53 +595,60 @@ fn plan_fluid_rig(
     // Reserved here rather than inside `route_between` because only this
     // function knows a *second* run is coming: a lone run to a machine may
     // use whichever side it likes.
-    let other_port_tiles: Vec<Rect> = if source.is_some() && !products.is_empty() {
-        pipe::fluid_ports(state, machine, &site, Some("output"))?
-            .first()
-            .map(|port| port.tiles())
-            .unwrap_or_default()
-            .iter()
-            .filter_map(|tile| state.collision_area(&pipe, tile))
-            .collect()
-    } else {
-        Vec::new()
-    };
+    let mut other_port_tiles: Vec<Rect> =
+        if let Some(ordinal) = out_box.filter(|_| !sources.is_empty()) {
+            pipe::fluid_ports(state, machine, &site, Some("output"))?
+                .into_iter()
+                .filter(|port| port.box_ordinal == ordinal)
+                .flat_map(|port| port.tiles())
+                .filter_map(|tile| state.collision_area(&pipe, &tile))
+                .collect()
+        } else {
+            Vec::new()
+        };
 
     // ---- in ----
-    let inbound = match &source {
-        Some((fluid, entity)) => {
-            let area = state
-                .collision_area(&entity.name, &entity.position)
-                .unwrap_or_else(|| entity.bounding_box.clone());
-            let tiles = route_between(
-                state,
-                &PipeEnd {
-                    name: &entity.name,
-                    position: &entity.position,
-                    area,
-                    production_type: None,
-                    port_index: None,
-                },
-                &PipeEnd {
-                    name: machine,
-                    position: &site,
-                    area: machine_area.clone(),
-                    production_type: Some("input"),
-                    // The recipe has exactly one fluid ingredient -- two are
-                    // refused above -- so it is the machine's first input box.
-                    port_index: Some(0),
-                },
-                &pipe,
-                &other_port_tiles,
-            )?;
-            Some(Run {
-                fluid: fluid.clone(),
-                other: entity.name.clone(),
-                tiles,
-            })
-        }
-        None => None,
-    };
+    //
+    // One run per fluid, each routed against the ground the previous ones
+    // took. The same reservation argument as the outbound run below, one
+    // level up: two inbound runs into one chemical plant are routed one after
+    // the other against a world where neither is emitted, so the second would
+    // happily lay a pipe on the first's tiles and die on its own `AreaFree`.
+    let mut inbound: Vec<Run> = Vec::with_capacity(sources.len());
+    for (fluid, entity) in &sources {
+        let area = state
+            .collision_area(&entity.name, &entity.position)
+            .unwrap_or_else(|| entity.bounding_box.clone());
+        let tiles = route_between(
+            state,
+            &PipeEnd {
+                name: &entity.name,
+                position: &entity.position,
+                area,
+                production_type: None,
+                port_index: None,
+            },
+            &PipeEnd {
+                name: machine,
+                position: &site,
+                area: machine_area.clone(),
+                production_type: Some("input"),
+                port_index: Some(box_of(fluid, &input_ordinals)),
+            },
+            &pipe,
+            &other_port_tiles,
+        )?;
+        other_port_tiles.extend(
+            tiles
+                .iter()
+                .filter_map(|tile| state.collision_area(&pipe, tile)),
+        );
+        inbound.push(Run {
+            fluid: fluid.clone(),
+            other: entity.name.clone(),
+            tiles,
+        });
+    }
 
     // ---- out ----
     let mut buffer = None;
@@ -658,7 +714,7 @@ fn plan_fluid_rig(
                         position: &site,
                         area: machine_area.clone(),
                         production_type: Some("output"),
-                        port_index: Some(0),
+                        port_index: out_box,
                     },
                     &PipeEnd {
                         name: &tank,
@@ -703,9 +759,10 @@ fn plan_fluid_rig(
                     position: &site,
                     area: machine_area.clone(),
                     production_type: Some("output"),
-                    // Likewise the first output box: one fluid product, two
-                    // are refused above.
-                    port_index: Some(0),
+                    // The box the recipe's own `fluidbox_index` names, or the
+                    // first when it names none. One fluid product; two are
+                    // refused above.
+                    port_index: out_box,
                 },
                 &PipeEnd {
                     name: &tank,
@@ -1003,10 +1060,7 @@ impl Method for Fabricate {
         // route was searched around the machine's own footprint and the
         // `AreaFree` on every placement is the executor's check.
         let mut last_pipe: Option<usize> = None;
-        for run in [rig.inbound.as_ref(), rig.outbound.as_ref()]
-            .into_iter()
-            .flatten()
-        {
+        for run in rig.inbound.iter().chain(rig.outbound.as_ref()) {
             let count = u32::try_from(run.tiles.len()).unwrap_or(u32::MAX);
             steps.push(Step::Subgoal(Goal::Have {
                 item: rig.pipe.clone(),
@@ -1538,13 +1592,14 @@ mod fabricate_fluid_tests {
         assert!(said.contains("rejected"), "{said}");
     }
 
-    /// Two fluids in and nothing on the wire says which box takes which, so
-    /// the plan refuses instead of guessing. This is `sulfur` and
-    /// `advanced-oil-processing`.
-    #[test]
-    fn two_fluid_ingredients_refuse_rather_than_guess_a_fluidbox() {
-        let world = oil_world(true);
-        let recipe: FactorioRecipe = serde_json::from_str(
+    /// The two-fluid recipe this whole change exists for: `sulfur`, water and
+    /// petroleum-gas into a machine declaring exactly two input boxes.
+    ///
+    /// Standing in the `oil-refinery` rather than the `chemical-plant` only
+    /// because the fixture capture has the refinery's prototype; the fact
+    /// under test is the box count, which is two either way.
+    fn sulfur_recipe() -> FactorioRecipe {
+        serde_json::from_str(
             r#"{
               "name": "sulfur", "valid": true, "enabled": true, "category": "oil-processing",
               "ingredients": [
@@ -1557,24 +1612,263 @@ mod fabricate_fluid_tests {
               "hidden": false, "energy": 1.0, "order": "a-a", "group": "g", "subgroup": "s"
             }"#,
         )
-        .expect("the two-fluid recipe parses");
+        .expect("the two-fluid recipe parses")
+    }
+
+    fn sulfur_goal() -> Goal {
+        Goal::Produced {
+            item: "sulfur".into(),
+            count: 2,
+            whose: Holder::Bot(BotId(1)),
+            unlocks: None,
+            via: Some("sulfur".into()),
+        }
+    }
+
+    /// A recipe whose only product is `fluid`, so a machine standing with it
+    /// set is attributable as a source of that fluid by
+    /// `pipe::sources_of`'s recipe rule.
+    fn makes(name: &str, fluid: &str) -> FactorioRecipe {
+        serde_json::from_str(&format!(
+            r#"{{
+              "name": "{name}", "valid": true, "enabled": true, "category": "oil-processing",
+              "ingredients": [],
+              "products": [
+                {{ "name": "{fluid}", "product_type": "fluid", "amount": 50,
+                   "probability": 1.0 }}
+              ],
+              "hidden": false, "energy": 1.0, "order": "z-{name}", "group": "g",
+              "subgroup": "s"
+            }}"#
+        ))
+        .expect("the source recipe parses")
+    }
+
+    /// A world that can run `sulfur`: the recipe, plus one standing machine
+    /// per fluid whose own recipe produces it.
+    ///
+    /// **A standing source and not a tank.** A tank is attributable only by
+    /// the ground it sits on, and neither water nor petroleum-gas is a
+    /// charted resource -- which is the honest shape of the problem and the
+    /// reason the sulfur goal still refuses on a real map until something
+    /// upstream stands a supply up.
+    fn sulfur_state() -> PlanState {
+        let world = oil_world(true);
+        world
+            .update_recipes(vec![
+                sulfur_recipe(),
+                makes("water-source", "water"),
+                makes("petroleum-source", "petroleum-gas"),
+            ])
+            .expect("recipes update");
+        let mut state = state_of(world);
+        for (recipe, at) in [
+            ("water-source", Position::new(24.5, 26.5)),
+            ("petroleum-source", Position::new(24.5, 36.5)),
+        ] {
+            state.create_entity(FactorioEntity {
+                name: "oil-refinery".into(),
+                entity_type: "assembling-machine".into(),
+                position: at,
+                direction: 0,
+                recipe: Some(recipe.into()),
+                ..Default::default()
+            });
+        }
+        stock(&mut state);
+        state
+    }
+
+    /// **The claim of this change.** Two fluids in used to refuse outright,
+    /// and through that refusal the whole rocket ladder did too. A standing
+    /// `chemical-plant` set to `sulfur` reports `water` on its first input box
+    /// and `petroleum-gas` on its second -- measured live on 2026-09-08 -- so
+    /// the assignment is a read fact and the plan lays one run per fluid.
+    ///
+    /// Asserted on the *ports* and not merely on "two runs exist": two runs
+    /// into the same box would satisfy a count and is exactly the failure this
+    /// guards against.
+    #[test]
+    fn two_fluid_ingredients_get_one_run_each_to_their_own_input_box() {
+        let state = sulfur_state();
+        let steps = expand(state, &sulfur_goal()).expect("both fluids have a standing source");
+        let refineries = placed(&steps, "oil-refinery");
+        assert_eq!(refineries.len(), 1, "one machine is placed: {refineries:?}");
+        let labels: Vec<String> = steps
+            .iter()
+            .filter_map(|step| match step {
+                Step::Act(action) => Some(action.label.clone()),
+                _ => None,
+            })
+            .collect();
+        for fluid in ["water", "petroleum-gas"] {
+            assert!(
+                labels.iter().any(|label| label.contains(&format!(
+                    "carry {fluid} between the oil-refinery"
+                ))),
+                "a run carries {fluid}: {labels:?}"
+            );
+        }
+    }
+
+    /// The pipes of the two runs land on **different** ports of the machine,
+    /// which is the whole point of resolving an ordinal per fluid.
+    ///
+    /// Read off the plan rather than off the resolver: a unit test of
+    /// `fluid_box_ordinals` cannot see whether `plan_fluid_rig` passed the
+    /// ordinal on, and passing `Some(0)` twice is precisely the bug the old
+    /// code had for its single run.
+    #[test]
+    fn the_two_runs_do_not_share_a_port() {
+        let state = sulfur_state();
+        let steps = expand(state, &sulfur_goal()).expect("both fluids have a standing source");
+        let site = placed(&steps, "oil-refinery")
+            .first()
+            .expect("a refinery is placed")
+            .clone();
+        let plain = PlanState::from_world(Arc::new(oil_world(true)), &[BotId(1)]);
+        let ports =
+            pipe::fluid_ports(&plain, "oil-refinery", &site, Some("input")).expect("input ports");
+        let laid: Vec<Position> = placed(&steps, "pipe");
+        let mut touched: Vec<usize> = ports
+            .iter()
+            .filter(|port| port.tiles().iter().any(|tile| laid.contains(tile)))
+            .map(|port| port.box_ordinal)
+            .collect();
+        touched.sort_unstable();
+        touched.dedup();
+        assert_eq!(
+            touched,
+            vec![0, 1],
+            "both input boxes are joined, not one twice: pipes at {laid:?}"
+        );
+    }
+
+    /// **The latent defect this change also fixes, end to end.**
+    ///
+    /// The real `basic-oil-processing` declares `fluidbox_index = 2` for
+    /// crude oil and `= 3` for petroleum-gas -- read off a live 2.1.17 dump
+    /// on 2026-09-08, where exactly 3 of 662 recipes carry the field at all.
+    /// The fixture's copy of the recipe omits it, as every dump taken before
+    /// that date does, so the two halves are run side by side here: the same
+    /// world, the same goal, the recipe with and without the field, and the
+    /// ports the emitted pipes actually touch.
+    ///
+    /// Without it the run joins input box 0 and output box 0. With it, input
+    /// box 1 and output box 2 -- and on a live refinery box 0 of the input
+    /// side is the one the game leaves empty.
+    ///
+    /// **The output side is asserted by containment, and that is not
+    /// sloppiness.** A refinery's three output ports sit along one edge, so
+    /// the run leaving box 2 lays a pipe over box 1's connection tile on its
+    /// way out -- and in the game that tile joins box 1 as well. Reading
+    /// "which port did we aim at" off tile overlap therefore cannot be an
+    /// equality; what discriminates is that box 2 is touched *only* when the
+    /// recipe names it. The incidental join is harmless for
+    /// `basic-oil-processing`, whose other two output boxes do not exist
+    /// while that recipe is set, and is not something this change addresses.
+    #[test]
+    fn the_declared_fluidbox_moves_the_run_to_the_box_the_game_uses() {
+        let ports_touched = |declared: bool| -> (Vec<usize>, Vec<usize>) {
+            let world = oil_world(true);
+            if declared {
+                let recipe: FactorioRecipe = serde_json::from_str(
+                    r#"{
+                      "name": "basic-oil-processing", "valid": true, "enabled": true,
+                      "category": "oil-processing",
+                      "ingredients": [
+                        { "name": "crude-oil", "ingredient_type": "fluid", "amount": 100,
+                          "fluidbox_index": 2 }
+                      ],
+                      "products": [
+                        { "name": "petroleum-gas", "product_type": "fluid", "amount": 45,
+                          "probability": 1.0, "fluidbox_index": 3 }
+                      ],
+                      "hidden": false, "energy": 5.0, "order": "a-a",
+                      "group": "intermediate-products", "subgroup": "fluid-recipes"
+                    }"#,
+                )
+                .expect("the recipe parses");
+                world.update_recipes(vec![recipe]).expect("recipes update");
+            }
+            let mut state = PlanState::from_world(Arc::new(world), &[BotId(1)]);
+            state.create_entity(FactorioEntity {
+                name: "storage-tank".into(),
+                entity_type: "storage-tank".into(),
+                position: tank_site(),
+                direction: 0,
+                ..Default::default()
+            });
+            stock(&mut state);
+            let steps = expand(state, &goal()).expect("the goal expands");
+            let site = placed(&steps, "oil-refinery")
+                .first()
+                .expect("a refinery is placed")
+                .clone();
+            let laid = placed(&steps, "pipe");
+            let plain = PlanState::from_world(Arc::new(oil_world(true)), &[BotId(1)]);
+            let touched = |direction: &str| {
+                let mut seen: Vec<usize> =
+                    pipe::fluid_ports(&plain, "oil-refinery", &site, Some(direction))
+                        .expect("ports")
+                        .iter()
+                        .filter(|port| port.tiles().iter().any(|tile| laid.contains(tile)))
+                        .map(|port| port.box_ordinal)
+                        .collect();
+                seen.sort_unstable();
+                seen.dedup();
+                seen
+            };
+            (touched("input"), touched("output"))
+        };
+
+        let (silent_in, silent_out) = ports_touched(false);
+        assert_eq!(
+            (silent_in, silent_out.contains(&2)),
+            (vec![0], false),
+            "a recipe that names no box falls to the positional rule -- which is what every \
+             dump taken before 2026-09-08 does"
+        );
+        let (declared_in, declared_out) = ports_touched(true);
+        assert_eq!(
+            (declared_in, declared_out.contains(&2)),
+            (vec![1], true),
+            "the recipe's own fluidbox_index moves both runs onto the boxes the game uses"
+        );
+    }
+
+    /// The refusal that is left: a machine declaring more boxes of a
+    /// direction than the recipe has fluids, where the game merges them in a
+    /// way that is not positional. Three fluids into the refinery's two input
+    /// boxes is the same shape from the other side.
+    #[test]
+    fn a_fluid_with_no_decidable_box_refuses_by_name() {
+        let world = oil_world(true);
+        let recipe: FactorioRecipe = serde_json::from_str(
+            r#"{
+              "name": "sulfur", "valid": true, "enabled": true, "category": "oil-processing",
+              "ingredients": [
+                { "name": "water", "ingredient_type": "fluid", "amount": 30 },
+                { "name": "steam", "ingredient_type": "fluid", "amount": 30 },
+                { "name": "petroleum-gas", "ingredient_type": "fluid", "amount": 30 }
+              ],
+              "products": [
+                { "name": "sulfur", "product_type": "item", "amount": 2, "probability": 1.0 }
+              ],
+              "hidden": false, "energy": 1.0, "order": "a-a", "group": "g", "subgroup": "s"
+            }"#,
+        )
+        .expect("the three-fluid recipe parses");
         world.update_recipes(vec![recipe]).expect("recipes update");
         let mut state = state_of(world);
         stock(&mut state);
-        let error = expand(
-            state,
-            &Goal::Produced {
-                item: "sulfur".into(),
-                count: 2,
-                whose: Holder::Bot(BotId(1)),
-                unlocks: None,
-                via: Some("sulfur".into()),
-            },
-        )
-        .expect_err("two fluids in cannot be routed");
+        let error = expand(state, &sulfur_goal()).expect_err("three fluids into two boxes");
         let said = message(&error);
-        assert!(said.contains("2 fluids in"), "{said}");
-        assert!(said.contains("water"), "{said}");
+        assert!(said.contains("steam"), "the fluid is named: {said}");
+        assert!(
+            said.contains("cannot be tied to a fluidbox"),
+            "the reason is the box and not the source: {said}"
+        );
     }
 
     /// Three fluids out is `advanced-oil-processing`, whose sink rule the

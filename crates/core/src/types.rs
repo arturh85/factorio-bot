@@ -322,6 +322,27 @@ pub struct FactorioIngredient {
     #[serde(default)]
     pub ingredient_type: String,
     pub amount: u32,
+    /// Which fluidbox of the crafting machine this fluid uses, when the
+    /// recipe overrides the default — **1-based within the production type**,
+    /// so `2` on an ingredient is the machine's *second input* box and `3` on
+    /// a product is its *third output* box, never an index into
+    /// `fluidbox_prototypes`.
+    ///
+    /// `None` is *"the recipe did not say"*, which is the overwhelming
+    /// majority and means the default assignment applies — never `1`, and
+    /// never zero. It is also what an archived dump reads, since nothing sent
+    /// this field before 2026-09-08.
+    ///
+    /// # Measured on a live 2.1.17 server, not recalled
+    ///
+    /// `basic-oil-processing` declares `fluidbox_index = 2` for `crude-oil`
+    /// and `= 3` for `petroleum-gas`. A placed `oil-refinery` with that recipe
+    /// set reports crude on input box **2** (offset `(1, 2)`) and petroleum on
+    /// output box **3** (offset `(2, -2)`) — the refinery's second input and
+    /// third output. Its first input box, at `(-1, 2)`, carries nothing at
+    /// all, which is the box a positional rule would have picked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fluidbox_index: Option<u32>,
 }
 
 // Deserialised through `RawFactorioProduct`, which normalises the shapes the
@@ -335,6 +356,27 @@ pub struct FactorioProduct {
     #[serde(default)]
     pub product_type: String,
     pub amount: u32,
+    /// Which fluidbox of the crafting machine this fluid uses, when the
+    /// recipe overrides the default — **1-based within the production type**,
+    /// so `2` on an ingredient is the machine's *second input* box and `3` on
+    /// a product is its *third output* box, never an index into
+    /// `fluidbox_prototypes`.
+    ///
+    /// `None` is *"the recipe did not say"*, which is the overwhelming
+    /// majority and means the default assignment applies — never `1`, and
+    /// never zero. It is also what an archived dump reads, since nothing sent
+    /// this field before 2026-09-08.
+    ///
+    /// # Measured on a live 2.1.17 server, not recalled
+    ///
+    /// `basic-oil-processing` declares `fluidbox_index = 2` for `crude-oil`
+    /// and `= 3` for `petroleum-gas`. A placed `oil-refinery` with that recipe
+    /// set reports crude on input box **2** (offset `(1, 2)`) and petroleum on
+    /// output box **3** (offset `(2, -2)`) — the refinery's second input and
+    /// third output. Its first input box, at `(-1, 2)`, carries nothing at
+    /// all, which is the box a positional rule would have picked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fluidbox_index: Option<u32>,
     /// How likely this product is produced at all, from 0 to 1.
     ///
     /// # Parsed, and deliberately not read
@@ -391,6 +433,9 @@ pub struct RawFactorioIngredient {
     pub ingredient_type: String,
     /// `double` in the runtime API, integral for every vanilla item recipe.
     pub amount: f64,
+    /// See [`FactorioIngredient::fluidbox_index`].
+    #[serde(default)]
+    pub fluidbox_index: Option<u32>,
 }
 
 impl From<RawFactorioIngredient> for FactorioIngredient {
@@ -398,6 +443,7 @@ impl From<RawFactorioIngredient> for FactorioIngredient {
         FactorioIngredient {
             name: raw.name,
             ingredient_type: raw.ingredient_type,
+            fluidbox_index: raw.fluidbox_index,
             amount: round_to_u32(raw.amount),
         }
     }
@@ -443,6 +489,9 @@ pub struct RawFactorioProduct {
     /// product is given.
     #[serde(default)]
     pub shared_probability: Option<SharedProbabilityDefinition>,
+    /// See [`FactorioProduct::fluidbox_index`].
+    #[serde(default)]
+    pub fluidbox_index: Option<u32>,
 }
 
 /// `SharedProbabilityDefinition` from the runtime API: the product is given
@@ -481,6 +530,7 @@ impl From<RawFactorioProduct> for FactorioProduct {
             product_type: raw.product_type,
             amount: round_to_u32(amount),
             probability: Box::new(r64(probability)),
+            fluidbox_index: raw.fluidbox_index,
         }
     }
 }

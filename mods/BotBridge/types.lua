@@ -64,14 +64,38 @@ function serialize_product(product)
         product,
         {
             "name", "type", "amount", "amount_min", "amount_max",
-            "probability", "independent_probability", "shared_probability"
+            "probability", "independent_probability", "shared_probability",
+            "fluidbox_index"
         },
         {type = "product_type"}
     )
 end
 
+-- WHICH FLUIDBOX THIS INGREDIENT GOES INTO, when the recipe overrides the
+-- default.
+--
+-- `fluidbox_index` is on `IngredientPrototype`/`ProductPrototype` and is
+-- **absent whenever the recipe takes the default**, which is nearly always.
+-- It is 1-based **within the production type**, not over
+-- `fluidbox_prototypes`: measured on a live 2.1.17 server 2026-09-08,
+-- `basic-oil-processing` declares `fluidbox_index = 2` for crude-oil and
+-- `= 3` for petroleum-gas, and a placed `oil-refinery` with that recipe put
+-- crude on input box **2** at offset (1,2) and petroleum on output box
+-- **3** at (2,-2) -- the refinery's 2nd input and 3rd output, not its 2nd
+-- and 3rd fluidboxes (box 3 is the FIRST output).
+--
+-- **This is the field that makes `method::pipe`'s port choice a fact rather
+-- than a guess.** Without it the planner assigns fluids to input boxes
+-- positionally, which is right whenever the counts match and wrong for
+-- exactly this recipe -- and a pipe on the wrong box builds 100% correctly
+-- and moves nothing, the silent class this repo has already paid for with
+-- inserters and with pumps.
 function serialize_ingredient(ingredient)
-    return table_properties(ingredient, {"name", "type", "amount"}, {type = "ingredient_type"})
+    return table_properties(
+        ingredient,
+        {"name", "type", "amount", "fluidbox_index"},
+        {type = "ingredient_type"}
+    )
 end
 
 -- `speed` and `durability` were in this list and are deliberately not any

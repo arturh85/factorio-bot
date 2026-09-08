@@ -3,6 +3,10 @@ name = "factorio-bot-core"
 version = "0.2.4-dev"
 authors = ["Artur Hallmann <arturh@arturh.de>"]
 edition = "2024"
+# Integration tests are two `[[test]]` targets (`tests/suite.rs`,
+# `tests/botbridge.rs`) rather than one auto-discovered binary per file in
+# `tests/`; see either file for why.
+autotests = false
 
 [package.metadata.release]
 tag = false
@@ -79,3 +83,11 @@ windows-sys = { version = "^0.61.2", features = ["Win32_Foundation", "Win32_Syst
 mockall = "0.15.0"
 mockall_double = "0.3.1"
 tempfile = "3"
+
+[[test]]
+name = "suite"
+path = "tests/suite.rs"
+
+[[test]]
+name = "botbridge"
+path = "tests/botbridge.rs"

@@ -204,8 +204,21 @@ local function dispatch(n, plan, steps)
   local n_walks = record.walks(obs.walks)
   local n_refusals = record.refusals()
   local n_enclosures = record.enclosures()
-  print(string.format("  recorded: %d action event(s), %d walk event(s), %d refusal(s), %d enclosure(s)",
-    n_actions, n_walks, n_refusals, n_enclosures))
+  -- **Without this the record cannot tell a death from a cutscene.** The first
+  -- run of this script omitted it, and `just analyse` correctly reported "BOT
+  -- DEATHS AND ROSTER CHANGES: none recorded" over a run in which two bots
+  -- were killed -- one by a small-biter at tick 27,065, one by a
+  -- small-worm-turret at 53,619, both narrated on stdout by the run's own
+  -- `paris` lines. The analyser then says, exactly right: "4 failure(s) ARE
+  -- classified no_character, so this build knows the wording; a missing
+  -- character with no death recorded is a cutscene, a controller switch, or a
+  -- death the mod did not see." It was none of those. It was a recorder that
+  -- was never called.
+  local n_deaths = record.deaths()
+  local n_teleports = record.teleports()
+  print(string.format(
+    "  recorded: %d action event(s), %d walk event(s), %d refusal(s), %d enclosure(s), %d death event(s), %d teleport(s)",
+    n_actions, n_walks, n_refusals, n_enclosures, n_deaths, n_teleports))
   if n_enclosures > 0 then print("  WALLED IN: see record.enclosures() above") end
 
   print(string.format("  done=%s success=%s failed=%s lost=%s pending=%s running=%s",

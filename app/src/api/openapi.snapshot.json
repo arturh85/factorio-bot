@@ -1941,6 +1941,28 @@
               "null"
             ]
           },
+          "inserter_drop_position": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Position",
+                "description": "Where an inserter of this prototype **puts** what it took, as an offset\nfrom its own position in the north frame -- `LuaEntityPrototype`'s\n`inserter_drop_position`, `{0, 1.2}` for the vanilla `inserter` and\n`{0, 2.2}` for `long-handed-inserter`.\n\nThe other half of [`Self::inserter_pickup_position`]; read that field's\ndoc for why the pair is not a mirror, why `None` means two different\nthings, and what the fallback is. Named `insert_position` at data stage\nand `inserter_drop_position` on the runtime API -- the same two-names\ntrap as `mining_drill_radius`, and grepping the data files for the\nruntime spelling finds nothing.\n\n`default`, so every archived dump and snapshot still loads."
+              }
+            ]
+          },
+          "inserter_pickup_position": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Position",
+                "description": "Where an inserter of this prototype takes items **from**, as an offset\nfrom its own position in the north frame -- `LuaEntityPrototype`'s\n`inserter_pickup_position`, `{0, -1}` for the vanilla `inserter` and\n`{0, -2}` for `long-handed-inserter`.\n\n# It is what makes reach derivable instead of written out\n\n`crates/planner/src/state.rs`'s `inserter_reach` is a table of vanilla\ninserter names, and every geometry in the planner that asks \"can this\ninserter touch that tile\" reads it. A mod that adds an inserter, or\nchanges a vanilla one's swing, is invisible to a table -- the same\nmod-compatibility defect that `supply_area_distance` and\n`maximum_wire_distance` were landed to close for poles.\n\n# It is not the mirror of [`Self::inserter_drop_position`]\n\nVanilla pairs `{0, -1}` with `{0, 1.2}`, and the long-handed one pairs\n`{0, -2}` with `{0, 2.2}`. The extra fifth of a tile is the hand\nreleasing past the tile centre, so **the two vectors differ in\nmagnitude while landing on tiles that are symmetric about the\ninserter**. A reader wanting tile offsets must floor each vector into\nits own tile rather than negate one to get the other.\n\n# `None` is two different things, and a caller must not merge them\n\nThe runtime API marks the attribute `subclasses: [\"Inserter\"]`, so for\na `stone-furnace` `None` is a **fact**: a furnace does not reach out\nand take from the chest beside it, and that absence is the\ndiscriminator that keeps inserter geometry off everything else. But it\nis *also* what every world dumped before 2026-09-08 says about every\nprototype including the inserters, because the mod did not send the\nfield. Those two are indistinguishable here, which is why\n`state.rs::inserter_reach` keeps a fallback table of vanilla names --\n**documented there as a fallback for old senders and never as the\ndefinition of reach.** Deleting it would make every archived dump\nreport that a `long-handed-inserter` reaches nowhere, which is a\nplausible lie rather than a diagnosable failure.\n\n`default`, so every archived dump and snapshot still loads."
+              }
+            ]
+          },
           "max_energy_production": {
             "description": "What one of these contributes to an electric network at full output, in\n**joules per tick**. [`Self::max_energy_production_kw`] converts it.\n\n`LuaEntityPrototype::get_max_energy_production()`, a **method** in\n2.1.17 — there is no attribute of that name, and reading one raises.\n\n# It is the only way to a generator's output, because the inputs are\nnot exposed\n\nA `steam-engine` carries no output figure at the data stage either: its\n900 kW is `fluid_usage_per_tick * 60 * heat_capacity *\n(maximum_temperature - default_temperature) * effectivity`. Of those,\n`LuaEntityPrototype` exposes `maximum_temperature` and `effectivity`\nand **not** `fluid_usage_per_tick` -- doclint-allow: a Factorio\ndata-stage name, and its ABSENCE from this tree is exactly the claim.\nSo the physics cannot be reassembled downstream: the runtime does it\nand hands over the answer.\n\n# Nameplate, and for a solar panel that is a trap\n\nThis is maximum production, so a `solar-panel` reports its **noon**\nfigure and an `accumulator` reports its discharge limit. Neither is\nwhat a day averages, and neither is derivable from any prototype: the\nday/night curve lives on `LuaSurface` and arrives as\n[`SurfaceDaylight`], whose [`SurfaceDaylight::average_solar_fraction`]\nturns this figure into the average and whose\n[`SurfaceDaylight::night_deficit_fraction`] sizes the accumulators.\n`state.rs` still credits only deterministic sources in\n`electric_supply_kw` and exposes the solar answers separately.\n\n`default`: `None` on every world written before this field, meaning\n*unknown*, never \"produces nothing\".",
             "format": "double",

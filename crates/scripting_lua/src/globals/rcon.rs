@@ -947,8 +947,23 @@ end
 -- this project's bound-it-in-ticks rule it looks like: a paused game has no
 -- ticks, so a tick bound would never fire and the hold would be unbounded.
 --
+-- **It also measures what the game was exposed to while it waited**, which is
+-- the honest half of this feature: a hold is an invitation to change the world
+-- underneath a run, and a run where somebody hand-inserted 50 coal used to be
+-- byte-identical in the record to one that ran clean. The game counts every
+-- console command it sees (BotBridge's `console_census`) and this process
+-- counts every command it sends; `foreign_console_commands` is the difference,
+-- i.e. what somebody else ran. Pass the whole table to `record.exposure` and it
+-- lands in `exposure.json`.
+--
+-- Read what it means before quoting it: it counts *commands*, so a harmless
+-- `/c rcon.print(game.tick)` is one; and a person clicking items into a chest
+-- on a graphical client issues none at all, so `0` is "no foreign command was
+-- observed", never "the world was not touched". Every count is `nil` rather
+-- than `0` when it could not be measured.
+--
 -- @tparam[opt] table opts
--- @treturn table `{ released = "continue"|"stop"|"timeout", paused_at_tick = n, held_seconds = n }`
+-- @treturn table `{ released = "continue"|"stop"|"timeout", paused_at_tick = n, held_seconds = n, console_commands_observed = n|nil, console_commands_ours = n|nil, foreign_console_commands = n|nil, console_command_used = bool|nil }`
 -- @raise if the game cannot be paused, or the release channel is unreachable
 function rcon.hold(opts)
 end
@@ -1042,6 +1057,20 @@ impl IntoLua for HoldReply {
         t.set("released", self.0.released)?;
         t.set("paused_at_tick", self.0.paused_at_tick)?;
         t.set("held_seconds", self.0.held_seconds)?;
+        // Absent rather than zero when the census could not be read. `nil`
+        // in Lua is the "not captured" this project insists on keeping
+        // distinct from a measurement of none; see
+        // `factorio_bot_core::record::exposure`.
+        t.set(
+            "console_commands_observed",
+            self.0.console_commands_observed,
+        )?;
+        t.set("console_commands_ours", self.0.console_commands_ours)?;
+        t.set(
+            "foreign_console_commands",
+            self.0.foreign_console_commands,
+        )?;
+        t.set("console_command_used", self.0.console_command_used)?;
         Ok(LuaValue::Table(t))
     }
 }

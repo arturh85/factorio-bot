@@ -7033,6 +7033,51 @@ function rcon_hold_state()
 end
 
 -- ---------------------------------------------------------------------------
+-- The console census: how many commands this game has been given, and whether
+-- the engine considers itself command-modified.
+--
+-- **Why the game has to count and not the Rust side.** A hold exists so a
+-- human can attach with `factorio-bot rcon -s localhost` and look around --
+-- and, the owner's words, "cheat some missing items in". That human's
+-- connection is a *different process*: nothing in `crates/core` sees a byte of
+-- it. The engine does. So the only place a foreign command can be observed is
+-- inside the game, and the only observer the game offers is this event.
+--
+-- The count is monotonic and never reset. A reader wanting "how many during
+-- the hold" differences two readings, which is also what makes it robust: the
+-- waiter's own poll traffic is inside both readings and cancels only if it is
+-- counted the same way both times, so differencing is the only honest form.
+--
+-- `game.console_command_used` is the engine's own achievement-disabling flag.
+-- It is reported beside the count and NOT instead of it, because it is
+-- one-way, latching and set by this project's own traffic: every action the
+-- executor issues is a `/silent-command`, so it is expected to read `true`
+-- from the first command of every run and to say nothing about a human. It is
+-- carried anyway because a `false` there is a real, strong negative -- and
+-- because a future Factorio that stops latching on our own traffic would make
+-- it informative without anyone having to notice.
+local function on_console_command(event)
+	storage.console_commands = (storage.console_commands or 0) + 1
+end
+
+-- Registered HERE and not in the block of `script.on_event` calls near the top
+-- of this file, because that block runs at line ~4380 and this function is
+-- defined at line ~7030: passing it up there hands `script.on_event` a `nil`
+-- handler. Lua has no hoisting and the failure is a load-time error, so it
+-- would be noticed -- but the block is the wrong place regardless.
+script.on_event(defines.events.on_console_command, on_console_command)
+
+-- `<count>,<console_command_used>` -- two facts, one round trip, no JSON.
+--
+-- Printed rather than returned for the reason `hold_state` is: this is called
+-- through `remote.call` from an RCON command, where `rcon.print` of the answer
+-- IS the answer and anything else lands in the reply body unread.
+function rcon_console_census()
+	rcon.print(tostring(storage.console_commands or 0)
+		.. "," .. tostring(game.console_command_used))
+end
+
+-- ---------------------------------------------------------------------------
 -- How often a bot's main inventory is scanned, and why it is not every tick.
 --
 -- **This is a throughput change for headless iteration, not a correctness or
@@ -7620,6 +7665,7 @@ remote.add_interface("botbridge", {
 	set_tick_paused=rcon_set_tick_paused,
 	hold_release=rcon_hold_release,
 	hold_state=rcon_hold_state,
+	console_census=rcon_console_census,
 	player_force=rcon_player_force,
 	world_snapshot=rcon_world_snapshot,
 	generate_chunks=rcon_generate_chunks,

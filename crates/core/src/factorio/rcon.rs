@@ -17,6 +17,7 @@ use crate::factorio::world::{
     FactorioSurface, HOP_RADIUS, PlacementRefusal, RefusalSource, hop_targets,
 };
 use crate::graph::entity_graph::ResourceDepletion;
+use crate::record::exposure::ConsoleCensus;
 use crate::settings::FactorioSettings;
 use crate::types::{
     ActionId, AreaFilter, Direction, FactorioEntity, FactorioForce, FactorioPlayer, FactorioTile,
@@ -64,6 +65,34 @@ pub struct HoldOutcome {
     /// Wall-clock seconds spent held. Wall clock on purpose: no game time
     /// passes during a hold, so a tick figure here would always be zero.
     pub held_seconds: u64,
+    /// Console commands the **game** saw between the pause and the release,
+    /// this process's own included, or `None` when the census could not be
+    /// read at both ends.
+    pub console_commands_observed: Option<u64>,
+    /// Console commands **this process** sent over the same window.
+    ///
+    /// Always known -- it is a counter on [`FactorioRcon::send`] -- but
+    /// carried as an `Option` so that the pair it belongs to is present or
+    /// absent together. Half a difference is not a measurement.
+    pub console_commands_ours: Option<u64>,
+    /// The difference: what somebody else ran while the game was paused for
+    /// them. See [`crate::record::exposure`] for exactly what this can and
+    /// cannot see -- notably that it counts *commands*, so a harmless
+    /// `/c rcon.print(game.tick)` is one, and that a person clicking items
+    /// into a chest on a graphical client issues none at all.
+    ///
+    /// `None` when either counter is missing, and also when the game reports
+    /// **fewer** commands than we sent, which is impossible and therefore
+    /// evidence of nothing. Not clamped to zero: zero is the strongest claim
+    /// available here and a broken counter must not be allowed to make it.
+    pub foreign_console_commands: Option<u64>,
+    /// `game.console_command_used` at the end of the hold.
+    ///
+    /// Expected `true` on every run this project makes, because every action
+    /// the executor issues is a `/silent-command` -- measured, not assumed
+    /// (2026-09-08). Recorded so that a `false`, which would be a real strong
+    /// negative, is not thrown away.
+    pub console_command_used: Option<bool>,
 }
 
 /// The `/silent-command remote.call(...)` text for a BotBridge function.
@@ -3220,6 +3249,18 @@ pub struct FactorioRcon {
     /// `0` means "no stamped reply yet", which is why the accessor returns an
     /// `Option` rather than handing out a tick that never happened.
     last_tick: Arc<std::sync::atomic::AtomicU64>,
+    /// How many commands this process has sent, ever.
+    ///
+    /// Every RCON command in this workspace funnels through
+    /// [`FactorioRcon::send`] -- the `rcon.*` Lua bindings included -- so this
+    /// is a complete count of *our* console traffic, and it is the second half
+    /// of the foreign-command difference [`FactorioRcon::hold`] takes. The
+    /// first half is BotBridge's `on_console_command` census, which counts our
+    /// commands too; subtracting is what leaves a human's.
+    ///
+    /// Monotonic and never reset: only differences of it mean anything, and a
+    /// reset would silently turn one into nonsense.
+    sent: Arc<std::sync::atomic::AtomicU64>,
     /// `game.speed` as this process last set or read it, as `f64` bits.
     ///
     /// Every wall-clock deadline in this file is sized for a world running at
@@ -3268,6 +3309,7 @@ impl FactorioRcon {
         let manager = ConnectionManager::new(&address, &settings.pass);
         Ok(FactorioRcon {
             last_tick: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            sent: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             speed: Arc::new(std::sync::atomic::AtomicU64::new(1.0f64.to_bits())),
             pool: Some(
                 bb8::Pool::builder()
@@ -3289,6 +3331,7 @@ impl FactorioRcon {
     pub fn new_empty() -> Self {
         FactorioRcon {
             last_tick: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            sent: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             speed: Arc::new(std::sync::atomic::AtomicU64::new(1.0f64.to_bits())),
             pool: None,
             silent: Arc::new(RwLock::new(true)),
@@ -3329,6 +3372,12 @@ impl FactorioRcon {
 
     /// Sends raw command to factorio server
     pub async fn send(&self, command: &str) -> Result<Option<Vec<String>>> {
+        // Counted before the send rather than after it, and counted even when
+        // the send then fails. The game's `on_console_command` fires when a
+        // command *arrives*, whatever it goes on to do, so a command counted
+        // only on success would make our half of the difference smaller than
+        // the game's half and manufacture a foreign command out of a failure.
+        self.sent.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let silent = *self.silent.read();
         if !silent {
             info!("rcon ⮜ {}", command);
@@ -3747,6 +3796,29 @@ impl FactorioRcon {
     // Owned for the same reason [`FactorioRcon::hold`]'s `run` is: this impl
     // block is `#[automock]`ed, and mockall cannot elide a lifetime inside a
     // generic.
+    /// How many commands **this process** has sent since it connected.
+    ///
+    /// The second half of [`FactorioRcon::hold`]'s foreign-command difference;
+    /// see the `sent` field for why the game's own census is the first half.
+    /// Monotonic -- only differences of it mean anything.
+    pub fn commands_sent(&self) -> u64 {
+        self.sent.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Asks BotBridge how many console commands the **game** has seen, and
+    /// whether the engine considers itself command-modified.
+    ///
+    /// `None` when the mod predates `console_census` or answers something this
+    /// cannot read -- "not captured", never a zero. A count invented from an
+    /// unreadable reply would be indistinguishable from a measurement, which
+    /// is exactly what [`crate::record::exposure`] exists to prevent.
+    pub async fn console_census(&self) -> Result<Option<ConsoleCensus>> {
+        let Some(lines) = self.remote_call("console_census", vec![]).await? else {
+            return Ok(None);
+        };
+        Ok(ConsoleCensus::parse(&lines.join("")))
+    }
+
     pub async fn hold_release(&self, verdict: Option<String>) -> Result<()> {
         let arg = verdict.unwrap_or_else(|| "clear".to_string());
         let lines = self.remote_call("hold_release", vec![arg]).await?;
@@ -3838,6 +3910,17 @@ impl FactorioRcon {
             .await
             .wrap_err("hold: the release channel is unreachable, so a hold could not be exited")?;
         let tick = self.set_tick_paused(true).await?;
+        // The exposure window opens HERE, after the clock stops, and closes
+        // just before it starts again -- so it covers exactly the interval in
+        // which a person was invited to attach. Both counters are read at both
+        // ends and only the differences are used; the reads themselves are
+        // commands, so they are inside both counts and cancel.
+        //
+        // A failed census is `None` rather than an error: the hold is the
+        // point, and refusing to hold a broken run because we could not count
+        // its commands would trade the whole debugging loop for a field.
+        let census_at_open = self.console_census().await.ok().flatten();
+        let ours_at_open = self.commands_sent();
         // No `<bright-red>` markup: this file logs through `tracing`
         // (`use tracing::{info, warn}` at the top), not `paris`, and paris
         // colour tags reach a tracing subscriber as literal angle brackets.
@@ -3890,16 +3973,33 @@ impl FactorioRcon {
         // Unpause on every exit, including the failed-poll one: whatever the
         // caller does next -- save, finish the record, replan -- it does it
         // against a game whose clock runs.
+        let census_at_close = self.console_census().await.ok().flatten();
+        let ours_at_close = self.commands_sent();
         let resumed = self.set_tick_paused(false).await;
         self.hold_release(None).await.ok();
         if let Some(err) = poll_error {
             return Err(err.wrap_err("hold: lost the release channel while holding"));
         }
         resumed?;
+        // Both ends or neither: half a difference is not a measurement.
+        let observed = match (census_at_open, census_at_close) {
+            (Some(open), Some(close)) => Some(close.commands.saturating_sub(open.commands)),
+            _ => None,
+        };
+        let ours = observed.map(|_| ours_at_close.saturating_sub(ours_at_open));
         Ok(HoldOutcome {
             released: released.unwrap_or_else(|| "timeout".to_string()),
             paused_at_tick: tick,
             held_seconds: started.elapsed().as_secs(),
+            console_commands_observed: observed,
+            console_commands_ours: ours,
+            // `checked_sub`, not `saturating_sub`. The game seeing fewer
+            // commands than we sent is impossible, so it means the two
+            // counters are not measuring the same thing -- and clamping that
+            // to zero would report the strongest available claim ("nobody
+            // touched it") on the strength of a contradiction.
+            foreign_console_commands: observed.zip(ours).and_then(|(o, u)| o.checked_sub(u)),
+            console_command_used: census_at_close.map(|c| c.command_used),
         })
     }
 

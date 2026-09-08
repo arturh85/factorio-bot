@@ -336,6 +336,7 @@ describe('samples', () => {
         research,
         techs_unlocked: 0,
         production: {made, consumed: {}},
+        pollution: null,
         power: {generated_kw: 0, consumed_kw: 0, satisfaction: 1, networks: {}},
         schema: 1,
         tick,

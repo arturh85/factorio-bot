@@ -74,10 +74,13 @@ import type {
     WaitingStep,
     Position,
     MachineSample,
+    EvolutionSample,
     NetworkPower,
+    PollutionSample,
     PowerSample,
     ProductionSample,
     ResearchSample,
+    SurfacePollution,
     RunLanesResponse,
     RunMapResponse,
     RunSamplesResponse,
@@ -1064,7 +1067,12 @@ const SCHEMAS: Record<string, SchemaContract> = {
             research: {required: false, ref: 'ResearchSample', nullable: true},
             techs_unlocked: {required: true, type: 'integer'},
             production: {required: true, ref: 'ProductionSample'},
-            power: {required: true, ref: 'PowerSample'}
+            power: {required: true, ref: 'PowerSample'},
+            // `required: false` because `#[serde(default)]` lets a
+            // pre-schema-3 archive decode without it, and `nullable` because
+            // an absence is a REAL value here -- "we never looked" -- which a
+            // reader must be able to tell from a measured calm.
+            pollution: {required: false, ref: 'PollutionSample', nullable: true}
         },
         // `machines` is a map keyed by `unit_number`, so `type: 'object'` and
         // not `arrayOf: 'MachineSample'` -- the map shape is deliberate (the
@@ -1104,6 +1112,26 @@ const SCHEMAS: Record<string, SchemaContract> = {
         // serialises it, so `types.ts` declares it present and this row
         // carries no `nullable` -- the same reading as `EventKind`'s `plan`.
         networks: {required: false, type: 'object'}
+    }),
+    PollutionSample: objectContract<PollutionSample>({
+        surfaces: {required: true, type: 'object'}
+    }),
+    // Every field optional and nullable on purpose: the mod writes a key only
+    // after a successful read, so an absence means "not read" and must never
+    // be defaulted into a zero.
+    SurfacePollution: objectContract<SurfacePollution>({
+        pollutant: {required: false, type: 'string', nullable: true},
+        total: {required: false, type: 'number', nullable: true},
+        at_spawn: {required: false, type: 'number', nullable: true},
+        produced: {required: false, type: 'object', nullable: true},
+        absorbed: {required: false, type: 'object', nullable: true},
+        evolution: {required: false, ref: 'EvolutionSample', nullable: true}
+    }),
+    EvolutionSample: objectContract<EvolutionSample>({
+        factor: {required: true, type: 'number'},
+        by_pollution: {required: true, type: 'number'},
+        by_time: {required: true, type: 'number'},
+        by_killing_spawners: {required: true, type: 'number'}
     }),
     NetworkPower: objectContract<NetworkPower>({
         sub_ids: {required: true, type: 'array'},

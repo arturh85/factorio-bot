@@ -2199,7 +2199,7 @@ local SAMPLE_FORCE_INTERVAL = 300 -- game ticks between force samples (5 s at 60
 -- Sample schema. Bumped deliberately on every field change, because
 -- info.json has read 0.0.1 since the project began and cannot tell a stale
 -- workspace/mods from a current one. Rust refuses a schema it does not know.
-local SAMPLE_SCHEMA = 2
+local SAMPLE_SCHEMA = 3
 local SAMPLE_DIR = "botbridge"
 local SAMPLE_FILE = SAMPLE_DIR .. "/samples.jsonl"
 local SAMPLE_BOT_INTERVAL = 60 -- 1 s at 60 UPS
@@ -2463,6 +2463,116 @@ local function power_totals(force)
 	}
 end
 
+-- Pollution and enemy evolution, per surface, on the same 300-tick beat as the
+-- rest of the force sample.
+--
+-- WHY THIS EXISTS. The project could not answer, even roughly, whether its own
+-- production provokes attacks: `pollution` and `evolution` appeared nowhere in
+-- this mod, nowhere in the planner or executor, and the world dump carries only
+-- the `player` force -- the enemy force was not in the model at all. So "as
+-- soon as we have radar or more than two steam engines the biters will start to
+-- evolve" was folklore, with no number attached, on any timescale.
+--
+-- WHAT IS SAMPLED AND WHY.
+--
+-- * `total` -- `LuaSurface.get_total_pollution()`, one number per surface. It
+--   is the cheap, comparable one, and it is the denominator every other reading
+--   here is judged against.
+-- * `at_spawn` -- `get_pollution(position)` is a *chunk* reading, so it needs a
+--   position. Spawn is the one position that means the same thing on every run
+--   (the roster starts there and the first blocks are built around it), which
+--   makes it comparable across runs in a way an arbitrary probe is not. A grid
+--   was rejected: it is O(chunks) per beat and answers a question nobody has
+--   asked yet. Note it is the *player* force's spawn, asked per surface.
+-- * `produced` / `absorbed` -- `LuaGameScript.get_pollution_statistics(surface)`,
+--   the game's own decomposition of the pollution flow. This is the half that
+--   can say *which prototype* emitted it, which is exactly the "is it the steam
+--   engines or the radar" question.
+-- * `evolution` -- the enemy force's factor **and its three causes**. The
+--   decomposition is the valuable part: `by_pollution` is what our own factory
+--   did, `by_time` is what would have happened had we sat still, and
+--   `by_killing_spawners` is what our combat did. Without it a rising number
+--   cannot be attributed and the folklore stays folklore.
+--
+-- ABSENT IS NOT ZERO, at every level. A surface with no pollution and a surface
+-- we failed to read must not produce the same JSON. Every read here is
+-- individually `pcall`ed and the key is written **only on success**, so a
+-- failure leaves the key absent and the Rust side decodes `None` (= not
+-- captured) rather than `0.0` (= measured and empty). Same for `evolution`
+-- itself: a game with no `enemy` force writes no key at all. Do not "simplify"
+-- these into defaulted locals -- that collapse is the defect this project has
+-- found five times in a week.
+--
+-- `pollutant` is `LuaSurface.pollutant_type`, an ATTRIBUTE (checked in
+-- `runtime-api.json`, not guessed) returning a `LuaAirbornePollutantPrototype`
+-- or nil. Under Space Age Nauvis pollution is not the only pollutant -- Gleba
+-- has spores -- so a bare "pollution" number is not comparable across surfaces
+-- unless the pollutant is named beside it.
+local function pollution_totals()
+	local enemy = game.forces["enemy"]
+	local player_force = game.forces["player"]
+	local surfaces = {}
+	for key, surface in pairs(game.surfaces) do
+		local entry = {}
+		local ok, value
+
+		local named, pollutant = pcall(function()
+			local prototype = surface.pollutant_type
+			if prototype == nil or not prototype.valid then return nil end
+			return prototype.name
+		end)
+		if named and pollutant ~= nil then entry.pollutant = pollutant end
+
+		ok, value = pcall(function() return surface.get_total_pollution() end)
+		if ok then entry.total = value end
+
+		-- Nil-checked, not `valid`-checked. An invalidated force raises on the
+		-- call below and the `pcall` catches it, leaving the key absent -- which
+		-- is the honest answer. Demanding `.valid` here additionally rejects any
+		-- force object that simply does not carry the attribute, and that read as
+		-- "this game has no pollution at spawn" rather than as a guard firing.
+		if player_force ~= nil then
+			ok, value = pcall(function()
+				return surface.get_pollution(player_force.get_spawn_position(surface))
+			end)
+			if ok then entry.at_spawn = value end
+		end
+
+		ok, value = pcall(function()
+			local stats = game.get_pollution_statistics(surface)
+			return { produced = stats.input_counts, absorbed = stats.output_counts }
+		end)
+		if ok and value ~= nil then
+			entry.produced = value.produced
+			entry.absorbed = value.absorbed
+		end
+
+		if enemy ~= nil then
+			ok, value = pcall(function()
+				return {
+					factor = enemy.get_evolution_factor(surface),
+					by_pollution = enemy.get_evolution_factor_by_pollution(surface),
+					by_time = enemy.get_evolution_factor_by_time(surface),
+					by_killing_spawners = enemy.get_evolution_factor_by_killing_spawners(surface),
+				}
+			end)
+			if ok then entry.evolution = value end
+		end
+
+		-- Keyed by the surface's own name, falling back to whatever `pairs`
+		-- handed us. The fallback exists because `surfaces[nil] = entry`
+		-- RAISES ("table index is nil"), and a raise here would have taken the
+		-- entire force sample down with it -- research, production and power
+		-- included -- leaving a run with no force line at all and nothing to
+		-- say why. Caught by `the_world_state_samplers_run_for_the_whole_session`,
+		-- which is exactly the test that exists to notice that.
+		local name = surface.name
+		if name == nil then name = tostring(key) end
+		surfaces[name] = entry
+	end
+	return { surfaces = surfaces }
+end
+
 -- Telemetry must never be able to end a live game. A sampler is not part of
 -- what keeps the game running -- unlike an on_tick handler moving a bot --
 -- so there is never a case where propagating an error here beats skipping
@@ -2649,6 +2759,11 @@ local function sample_force_body(tick)
 		end
 	end
 
+	local pollution_ok, pollution = pcall(pollution_totals)
+	if not pollution_ok then
+		pollution = nil
+	end
+
 	write_sample({
 		kind = "force",
 		schema = SAMPLE_SCHEMA,
@@ -2658,6 +2773,14 @@ local function sample_force_body(tick)
 		techs_unlocked = unlocked,
 		production = { made = made, consumed = consumed },
 		power = power_totals(force),
+		-- Isolated behind its own `pcall`, unlike its neighbours, because it
+		-- is the newest reader and the one most likely to meet an API this
+		-- Factorio does not have. A raise here would otherwise be caught by
+		-- `sample_force`'s outer pcall and cost the WHOLE force line --
+		-- research, production and power -- for a defect in pollution alone.
+		-- On failure the key is simply absent, which the Rust side reads as
+		-- *not captured*, never as a calm world.
+		pollution = pollution,
 	})
 end
 

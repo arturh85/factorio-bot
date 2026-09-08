@@ -66,6 +66,51 @@
 //! run crosses today are empty; the hazard becomes real exactly when a second
 //! product arrives.
 //!
+//! # Where a co-product goes, and the two different jobs that answer it
+//!
+//! A buffer is a sink for a **bounded** goal and nothing more: it holds what
+//! this goal's crafts put in it (see [`FabricateRefusal::SinkTooSmall`]) and
+//! then the machine stalls. Two further rungs are wanted, and they are
+//! different jobs that are easy to confuse:
+//!
+//! **Disposal** hands a surplus fluid to a consumer, and it **terminates by
+//! type**. A *terminal* recipe is one whose products are all items; choosing
+//! disposal only from terminal recipes makes the fluid recursion exactly one
+//! deep, by construction rather than by a depth limit, because the disposal
+//! step introduces no new fluid to place. Measured from the seed-31337
+//! water-and-oil capture, every Nauvis oil fluid has one:
+//! `solid-fuel-from-heavy-oil`, `solid-fuel-from-light-oil` and
+//! `solid-fuel-from-petroleum-gas`, none of which takes any ingredient but the
+//! fluid itself. Prefer the terminal consumer with the fewest *other*
+//! ingredients, so disposal never opens a new bill -- `plastic-bar` wants coal,
+//! `sulfur` wants water, and a `*-barrel` is not disposal at all since
+//! `empty-*-barrel` inverts it.
+//!
+//! **Cracking is not disposal and cannot be bounded the same way.**
+//! `heavy-oil-cracking` and `light-oil-cracking` are fluid-to-fluid, so they
+//! are precisely the recursive case the terminal rule excludes. Cracking is the
+//! **ratio** instrument: a refinery's split is fixed (25 heavy / 45 light / 55
+//! petroleum per craft of `advanced-oil-processing`) and demand is not, so
+//! cracking is what reconciles them -- heavy to light when light is short,
+//! light to petroleum when petroleum is short.
+//!
+//! What bounds it is **demand for the cracked product minus what the refinery
+//! already yields of it**. With three fluids and three free variables --
+//! refinery crafts, heavy cracks, light cracks -- any demand vector determines
+//! the mix exactly; it is a small linear solve rather than a search, and it
+//! cannot recurse because each crack moves mass strictly down
+//! heavy -> light -> petroleum.
+//!
+//! **But that quantity is a rate, and this method cannot see one.**
+//! [`crate::method::have::demand`] answers only for
+//! [`Goal::Have`](crate::goal::Goal::Have) and
+//! [`Goal::Produced`](crate::goal::Goal::Produced) -- never for
+//! `Goal::Producing` -- so everything arriving here carries a finite count. A
+//! rate-balanced crack therefore **cannot be computed from a bounded bill**; it
+//! needs the demand side that `FlowGraph::ration` already models, and that
+//! graph has no planner caller. Owner ruling, 2026-09-08: that wiring is its
+//! own rung with its own brief, and is deliberately not started here.
+//!
 //! Every refusal is a wall rather than a shortfall, and each names the next
 //! missing thing: [`FabricateRefusal::NoFluidSource`],
 //! [`FabricateRefusal::ManyFluidIngredients`],

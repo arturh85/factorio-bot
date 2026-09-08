@@ -80,8 +80,63 @@ local sup = supervisor.new(
 )
 
 print(string.format("goal: producing:iron-plate:%d", PER_MINUTE))
-repeat sup:step() until sup:finished()
+
+-- **The supervisor does not record; the driver does.** `sup:step()` returns a
+-- transition and the record plumbing hangs off it -- `record.actions`,
+-- `record.walks`, `record.teleports`, `record.plan_created`, `record.deaths`.
+--
+-- The first version of this script was `repeat sup:step() until sup:finished()`
+-- and threw every transition away. It ran, built 24 furnaces and 3 drills, made
+-- 270 plates, got stuck, and left an `events.jsonl` containing five event kinds
+-- -- none of them an action, a walk or a refusal. So the run could not say why
+-- it had eight times as many furnaces as drills, which was the one question it
+-- existed to answer. A measurement that cannot diagnose its own failure is
+-- worse than no measurement, because it looks like one.
+--
+-- Modelled on `factory_stage3.lua`'s loop, trimmed to this run's transitions.
+while not sup:finished() do
+  local t = sup:step()
+  if type(t) == "table" then
+    if t.action == "planned" and type(t.plan) == "table" then
+      -- `t.bots` passed through even when nil: `record.plan_created` then
+      -- writes null, which says "nobody told us" rather than naming a roster
+      -- nobody established.
+      record.plan_created(t.milestone_index, t.plan, t.bots)
+      print(string.format("   planned %s steps (best %s)%s",
+        tostring(t.steps), tostring(t.best),
+        t.recovery and ("  -- recovered: " .. tostring(t.recovery)) or ""))
+    elseif t.action == "acquired" then
+      record.milestone_started(t.milestone_index, "iron-plate rate")
+    elseif t.action == "rerostered" then
+      local nd = record.deaths()
+      record.roster_changed(t.bots, t.left, t.returned, t.reason)
+      print(string.format("   ROSTER CHANGED -- %s%s",
+        tostring(t.reason), nd > 0 and (" (+" .. nd .. " death events)") or ""))
+    elseif t.action == "ran" then
+      local n = 0
+      if t.steps ~= nil and t.actions ~= nil then n = record.actions(t.steps, t.actions) end
+      -- A separate call, not a third argument: a walk is not an action. It has
+      -- no action id, is in neither `steps` nor `actions`, and `(bot,
+      -- step_index)` is the only thing that names it. Walking is most of the
+      -- wall clock in these plans.
+      local nw = 0
+      if type(t.walks) == "table" then nw = record.walks(t.walks) end
+      local nt = record.teleports()
+      local nr = record.refusals()
+      print(string.format("   ran: +%d action(s), +%d walk(s), +%d teleport(s), +%d refusal(s)",
+        n, nw, nt, nr))
+      if nr > 0 then
+        print("   REFUSALS above -- a placement the game or the planner declined;")
+        print("     these are what explain a cell count lower than the plan asked for.")
+      end
+    end
+  end
+end
 print(sup:report())
+-- Anything the loop did not drain, drained once at the end.
+record.refusals()
+record.enclosures()
+record.deaths()
 
 -- The observation window. Nothing is dispatched and nothing is fed by hand --
 -- an idle roster over the window is half of what makes the analyser's

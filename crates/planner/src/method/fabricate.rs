@@ -1139,11 +1139,28 @@ fn plan_fluid_rig(
     // anchor is unreachable from every site there will ever be. Reported here
     // it is one fact about two entities; reported from the search below it is
     // 234 route failures on clear ground.
-    let reach = PIPE_RUN_REACH + ring_reach();
+    //
+    // **The bound is `PIPE_RUN_REACH`, not `PIPE_RUN_REACH + ring_reach()`,
+    // and the difference is the whole point of the check.** The naive sum says
+    // "some candidate can reach this source", which is true of each source
+    // separately and is not the question: one machine must reach **all** of
+    // them, so the feasible set is the intersection of the sources' windows.
+    // The anchor is the point that minimises the furthest of those distances,
+    // so if even it is out of reach the intersection is empty. Written the
+    // loose way first, and a test caught it: two supplies 60 tiles apart --
+    // 30 from the midpoint, inside 24 + 12 -- passed the pre-check and then
+    // read `routes_failed: 1248, ports_failed: 0`, which is exactly the
+    // uninformative refusal this exists to replace. 60 > 2 * 24, so nothing
+    // could ever have been sited between them.
+    let reach = PIPE_RUN_REACH;
     if let Some((fluid, _, away)) = furthest_source(&anchor, &sources)
         && away > reach
     {
-        let (source_lines, _) = describe_sources(&anchor, &sources, reach);
+        // The **wider** radius here, deliberately: `out_of_reach` answers
+        // "could any candidate have reached this one at all", which is the
+        // per-source question, while the refusal above is about all of them
+        // at once. Both are honest and they are not the same number.
+        let (source_lines, _) = describe_sources(&anchor, &sources, PIPE_RUN_REACH + ring_reach());
         let (fluid, machine_name) = (fluid.to_string(), machine.to_string());
         return Err(PlannerError::CannotFabricate(Box::new(
             FabricateRefusal::FluidSourcesTooFarApart {
@@ -1300,7 +1317,8 @@ fn plan_fluid_rig(
         // failure, which invites a routing fix for a problem routing cannot
         // reach. Distances are Euclidean and to the anchor, the one point
         // every candidate is near.
-        let (source_lines, out_of_reach) = describe_sources(&anchor, &sources, reach);
+        let (source_lines, out_of_reach) =
+            describe_sources(&anchor, &sources, PIPE_RUN_REACH + ring_reach());
         return Err(PlannerError::CannotFabricate(Box::new(
             FabricateRefusal::NoMachineSite {
                 recipe: recipe.name.clone(),
@@ -3105,6 +3123,12 @@ mod fabricate_fluid_tests {
     /// reason the sulfur goal still refuses on a real map until something
     /// upstream stands a supply up.
     fn sulfur_state() -> PlanState {
+        sulfur_state_with_petroleum_at(Position::new(24.5, 36.5))
+    }
+
+    /// [`sulfur_state`] with the petroleum source moved, so the distance
+    /// between the two supplies is the variable under test.
+    fn sulfur_state_with_petroleum_at(petroleum_at: Position) -> PlanState {
         let world = oil_world(true);
         world
             .update_recipes(vec![
@@ -3116,7 +3140,7 @@ mod fabricate_fluid_tests {
         let mut state = state_of(world);
         for (recipe, at) in [
             ("water-source", Position::new(24.5, 26.5)),
-            ("petroleum-source", Position::new(24.5, 36.5)),
+            ("petroleum-source", petroleum_at.clone()),
         ] {
             state.create_entity(FactorioEntity {
                 name: "oil-refinery".into(),
@@ -3612,13 +3636,18 @@ mod fabricate_fluid_tests {
     }
 
     /// **The whole point of the midpoint: it buys the middle band.** Sources
-    /// 60 tiles apart are 30 from the midpoint, inside `PIPE_RUN_REACH + 12`
-    /// = 36, so a site between them can be piped to both. Anchored on the
-    /// first source -- what this used to do -- the furthest is 60 away and
-    /// every candidate is doomed. This is the case that goes from refusing to
+    /// 40 tiles apart are 20 from the midpoint, inside `PIPE_RUN_REACH` = 24,
+    /// so a site between them can be piped to both. Anchored on the first
+    /// source -- what this used to do -- the furthest is 40 away and every
+    /// candidate is doomed. This is the case that goes from refusing to
     /// planning; `sulfur`'s 369 tiles is the case that stays refused.
+    ///
+    /// **The band is `2 * PIPE_RUN_REACH` wide and no wider**, because one
+    /// machine must reach every source: 60 apart is 30 from the midpoint and
+    /// still out. An earlier draft of this test asserted otherwise and the
+    /// end-to-end fixture refused it with 1,248 route failures.
     #[test]
-    fn sources_sixty_apart_are_reachable_from_the_midpoint_and_not_from_either_end() {
+    fn sources_forty_apart_are_reachable_from_the_midpoint_and_not_from_either_end() {
         let sources = vec![
             (
                 "water".to_string(),
@@ -3632,17 +3661,17 @@ mod fabricate_fluid_tests {
                 "petroleum-gas".to_string(),
                 FactorioEntity {
                     name: "storage-tank".into(),
-                    position: Position::new(60.0, 0.0),
+                    position: Position::new(40.0, 0.0),
                     ..Default::default()
                 },
             ),
         ];
-        let reach = PIPE_RUN_REACH + ring_reach();
+        let reach = PIPE_RUN_REACH;
         let midpoint = siting_anchor(&sources, &Position::new(0.0, 0.0));
         let from_midpoint = furthest_source(&midpoint, &sources).expect("two sources").2;
         assert!(
             from_midpoint <= reach,
-            "30 tiles is inside {reach}, so the pre-check must not refuse: {from_midpoint}"
+            "20 tiles is inside {reach}, so the pre-check must not refuse: {from_midpoint}"
         );
         let from_first = furthest_source(&sources[0].1.position.clone(), &sources)
             .expect("two sources")
@@ -3678,11 +3707,63 @@ mod fabricate_fluid_tests {
         let anchor = siting_anchor(&sources, &Position::new(0.0, 0.0));
         let (fluid, _, away) = furthest_source(&anchor, &sources).expect("two sources");
         assert!(
-            away > PIPE_RUN_REACH + ring_reach(),
+            away > PIPE_RUN_REACH,
             "{fluid} is {away} from the midpoint and must still refuse"
         );
         // Chebyshev, so the y span decides it: (363.5 - 8.5) / 2.
         assert!((away - 177.5).abs() < 1e-9, "{away}");
+    }
+
+    /// **End to end: two supplies too far apart refuse on their own geometry,
+    /// before a single footprint is tried.** The pure functions above say the
+    /// arithmetic is right; this says the arithmetic is WIRED -- the case that
+    /// used to come back as `NoMachineSite` with hundreds of route failures on
+    /// clear ground now names the two entities and the distance between them.
+    #[test]
+    fn two_supplies_too_far_apart_refuse_by_distance_and_not_as_a_route() {
+        let state = sulfur_state_with_petroleum_at(Position::new(24.5, 336.5));
+        let error = expand(state, &sulfur_goal()).expect_err("310 tiles is out of reach");
+        let text = error.to_string();
+        assert!(
+            text.contains("too far apart"),
+            "must be the geometric refusal, not a route one: {text}"
+        );
+        assert!(
+            text.contains("petroleum-gas") && !text.contains("no pipe route"),
+            "it names the offending fluid and does not blame routing: {text}"
+        );
+    }
+
+    /// **And the near case still plans**, so the pre-check is a bound rather
+    /// than a blanket refusal for anything with two fluids.
+    #[test]
+    fn two_supplies_within_reach_still_plan() {
+        let state = sulfur_state();
+        expand(state, &sulfur_goal()).expect("ten tiles apart is well inside the reach");
+    }
+
+    /// **The band the midpoint buys, end to end.** 40 tiles apart is beyond
+    /// what a search anchored on either source could reach and inside what the
+    /// midpoint can, so this is the case that goes from refusing to planning.
+    #[test]
+    fn supplies_forty_apart_plan_from_the_midpoint() {
+        let state = sulfur_state_with_petroleum_at(Position::new(24.5, 66.5));
+        expand(state, &sulfur_goal()).expect("40 apart is 20 from the midpoint, inside 24");
+    }
+
+    /// **And the far edge of that band refuses by distance, not by route.**
+    /// 60 apart is 30 from the midpoint against a 24-tile reach, so no site
+    /// exists -- and this is the case that caught a too-loose pre-check, which
+    /// let it through to report 1,248 route failures on clear ground.
+    #[test]
+    fn supplies_sixty_apart_are_past_the_band_and_say_so() {
+        let state = sulfur_state_with_petroleum_at(Position::new(24.5, 86.5));
+        let error = expand(state, &sulfur_goal()).expect_err("60 is past 2 * 24");
+        let text = error.to_string();
+        assert!(
+            text.contains("too far apart") && !text.contains("no pipe route"),
+            "{text}"
+        );
     }
 
     /// The boundary, because "further than the radius" is where an off-by-one

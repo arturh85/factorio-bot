@@ -78,8 +78,20 @@ def report(name, text):
     if ents:
         xs = [e["position"]["x"] for e in ents]
         ys = [e["position"]["y"] for e in ents]
-        print(f"    extent     {max(xs) - min(xs):g} x {max(ys) - min(ys):g}"
-              "   (entity CENTRES; not the pitch, and not a footprint)")
+        # TWO different quantities that nearly agree, which is why both are
+        # printed with their units named. CLAUDE.md calls MinerLine "5 x 21 by
+        # position bounding box (x[1.5,5.5], y[0.5,20.5])" while the centre
+        # span of those same numbers is 4 x 20. Neither is wrong; they measure
+        # different things, and a reader who sees only one will think the
+        # other is a bug. Two sessions disagreed 4-vs-5 over exactly this.
+        print(f"    span       {max(xs) - min(xs):g} x {max(ys) - min(ys):g}"
+              "   (centre TO centre; not the pitch, and not a footprint)")
+        import math
+        cols = math.floor(max(xs)) - math.floor(min(xs)) + 1
+        rows = math.floor(max(ys)) - math.floor(min(ys)) + 1
+        print(f"    tiles      {cols} x {rows}"
+              "   (tiles holding an entity CENTRE; the true footprint")
+        print(" " * 17 + "is larger -- a 3x3 drill overhangs its centre tile)")
 
 
 def main():

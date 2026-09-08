@@ -70,6 +70,15 @@
 //! for machine time everywhere else (`method::have`'s smelts, `method::power`'s
 //! boilers), and the executor models it directly.
 //!
+//! **The lag is the cell's TEMPO times the count, and deliberately not
+//! `CELL_CHARGE_TICKS`.** `ticks_per_item * take` says "N items cost N of
+//! this machine's cycles", which is a fact about the recipe and the machine's
+//! `crafting_speed` and stays true whatever fills the feed chests. A cell
+//! belted from a producing machine rather than hand-charged invalidates the
+//! *ledger* above — `charge_products`, which is charge-once by construction —
+//! but not this edge. Whoever belts a cell has to revisit `BufferGain`, and
+//! need not revisit the wait.
+//!
 //! **The id crosses a method boundary, which is the part that needed
 //! machinery.** The charge is emitted by `method::assemble` and the draw by
 //! this module, so nothing here allocated the `ActionId` it has to name.

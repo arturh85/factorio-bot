@@ -1711,13 +1711,23 @@ mod fabricate_fluid_tests {
         }
     }
 
-    /// The pipes of the two runs land on **different** ports of the machine,
-    /// which is the whole point of resolving an ordinal per fluid.
+    /// The two runs join **different** ports of the machine, which is the
+    /// whole point of resolving an ordinal per fluid.
     ///
-    /// Read off the plan rather than off the resolver: a unit test of
-    /// `fluid_box_ordinals` cannot see whether `plan_fluid_rig` passed the
-    /// ordinal on, and passing `Some(0)` twice is precisely the bug the old
-    /// code had for its single run.
+    /// # This assertion had to be sharpened, and the mutant is why
+    ///
+    /// The first version asked which ports the plan's pipes overlap, over all
+    /// pipes at once. **A mutation that sent both runs to box 0 passed it.**
+    /// The refinery's two input ports are two tiles apart on one edge, so the
+    /// second run's *route* lies across the first port's tile on its way past
+    /// -- the set of ports touched is the same either way, and the question
+    /// "which port did this run aim at" is simply not answerable from a flat
+    /// list of tiles.
+    ///
+    /// So the pipes are partitioned by the fluid in their own `Place` label,
+    /// which is per run, and each run is required to reach its own box's
+    /// junction. Under the mutant petroleum-gas's run ends at box 0's
+    /// junction and the test fails, which is what a falsification is for.
     #[test]
     fn the_two_runs_do_not_share_a_port() {
         let state = sulfur_state();
@@ -1729,18 +1739,45 @@ mod fabricate_fluid_tests {
         let plain = PlanState::from_world(Arc::new(oil_world(true)), &[BotId(1)]);
         let ports =
             pipe::fluid_ports(&plain, "oil-refinery", &site, Some("input")).expect("input ports");
-        let laid: Vec<Position> = placed(&steps, "pipe");
-        let mut touched: Vec<usize> = ports
-            .iter()
-            .filter(|port| port.tiles().iter().any(|tile| laid.contains(tile)))
-            .map(|port| port.box_ordinal)
-            .collect();
-        touched.sort_unstable();
-        touched.dedup();
-        assert_eq!(
-            touched,
-            vec![0, 1],
-            "both input boxes are joined, not one twice: pipes at {laid:?}"
+        // Every pipe this plan places, grouped by the fluid its own label
+        // names -- which is the only per-run identity the emitted steps carry.
+        let laid_for = |fluid: &str| -> Vec<Position> {
+            let needle = format!("carry {fluid} between the oil-refinery");
+            steps
+                .iter()
+                .filter_map(|step| match step {
+                    Step::Act(action) if action.label.contains(&needle) => match &action.kind {
+                        ActionKind::Place { entity } if entity.name == "pipe" => {
+                            Some(entity.position.clone())
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                })
+                .collect()
+        };
+        let junction_of = |ordinal: usize| {
+            ports
+                .iter()
+                .find(|port| port.box_ordinal == ordinal)
+                .unwrap_or_else(|| panic!("the refinery has an input box {ordinal}"))
+                .junction
+                .clone()
+        };
+        for (fluid, ordinal) in [("water", 0usize), ("petroleum-gas", 1usize)] {
+            let tiles = laid_for(fluid);
+            assert!(!tiles.is_empty(), "a run carries {fluid}");
+            assert!(
+                tiles.contains(&junction_of(ordinal)),
+                "the {fluid} run reaches input box {ordinal}'s junction \
+                 {:?}; it laid {tiles:?}",
+                junction_of(ordinal)
+            );
+        }
+        assert_ne!(
+            junction_of(0),
+            junction_of(1),
+            "the two boxes are distinct ground, or the assertion above is vacuous"
         );
     }
 

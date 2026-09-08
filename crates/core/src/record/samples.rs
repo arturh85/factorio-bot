@@ -262,6 +262,16 @@ pub struct SurfacePollution {
     /// project: the roster starts there and the first blocks are built around
     /// it. A grid of probes was rejected -- it costs O(chunks) per beat and
     /// answers a question nobody has asked.
+    ///
+    /// **It read exactly `0.0` in 375 of 375 samples on both arms of the first
+    /// live measurement, and that is a real reading, not a broken accessor.**
+    /// A uniformly constant field is the tell for a plumbing failure, so it was
+    /// checked against a running game rather than believed:
+    /// `surface.pollute({0,0}, 50)` then `get_pollution({0,0})` answers `50`.
+    /// *Why* the spawn chunk held none while the surface held up to 41 is
+    /// **not established** -- the build sitting in a neighbouring chunk with
+    /// absorption eating the spread is a hypothesis, not a measurement. See
+    /// `docs/superpowers/notes/2026-09-08-what-our-own-pollution-provokes.md`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub at_spawn: Option<f64>,
     /// `game.get_pollution_statistics(surface).input_counts`: cumulative

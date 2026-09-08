@@ -4,7 +4,17 @@ import {Event, Sample} from '@/api/types';
 import {coverageOf, lagTicks} from '@/lib/runCoverage';
 import {AXIS_WIDTH, TickScale, tickX} from '@/lib/tickScale';
 
-const props = defineProps<{scale: TickScale; cursor: number; events: Event[]; samples: Sample[]; runEnd: number}>();
+const props = defineProps<{
+    scale: TickScale; cursor: number; events: Event[]; samples: Sample[]; runEnd: number;
+    /**
+     * Event lines the server could not parse -- in practice the torn last
+     * line of a killed run. This band is where the record says what it does
+     * NOT have, and a dropped line is exactly that; the store had the number
+     * and threw it away. Optional and defaulting to 0, because a caller that
+     * does not know is not the same as a run with none.
+     */
+    skipped?: number;
+}>();
 const ALL = ['events', 'bot samples', 'force + machine samples'];
 const COLORS: Record<string, string> = {events: 'var(--color-ink-muted)', 'bot samples': 'var(--color-verb-walk)', 'force + machine samples': 'var(--color-verb-research)'};
 const x = (t: number) => tickX(props.scale, t);
@@ -25,7 +35,7 @@ const H = computed(() => Math.max(24, rows.value.length * 11 + 8));
            recorded sample, so the record covers the run to its end rather
            than trailing behind it -- not a gap to report as a negative tick
            count. -->
-      {{ lag === null ? 'no samples' : lag <= 0 ? 'samples cover the run to its end' : `samples lag ${lag.toLocaleString()} ticks` }}<template v-if="missing.length"> · no record: {{ missing.join(', ') }}</template>
+      {{ lag === null ? 'no samples' : lag <= 0 ? 'samples cover the run to its end' : `samples lag ${lag.toLocaleString()} ticks` }}<template v-if="missing.length"> · no record: {{ missing.join(', ') }}</template><template v-if="(skipped ?? 0) > 0"> · {{ skipped }} unreadable event line{{ skipped === 1 ? '' : 's' }}</template>
     </text>
     <line :x1="x(cursor)" y1="0" :x2="x(cursor)" :y2="H" stroke="var(--color-verdict-roster)" stroke-width="1.5"/>
   </svg>

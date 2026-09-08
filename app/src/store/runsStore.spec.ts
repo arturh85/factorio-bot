@@ -608,5 +608,20 @@ describe('events enrichment', () => {
         await store.openRun('run-1');
         expect(store.detail).not.toBeNull();
         expect(store.eventsError).toContain('/events');
+        // No answer is not "none skipped": the count belongs to a reply that
+        // never came.
+        expect(store.eventsSkipped).toBe(0);
+    });
+    it('keeps the count of unreadable event lines instead of dropping it', async () => {
+        // The coverage band's job is to say what the record does NOT have,
+        // and a line nobody could parse -- the torn last line of a killed run
+        // -- is exactly that. The store had the number and threw it away.
+        vi.mocked(client.getRunEvents).mockResolvedValue({events: [], skipped: 3});
+        const store = useRunsStore();
+        await store.openRun('run-1');
+        expect(store.eventsSkipped).toBe(3);
+        vi.mocked(client.getRunEvents).mockResolvedValue({events: [], skipped: 0});
+        await store.openRun('run-1');
+        expect(store.eventsSkipped).toBe(0);
     });
 });

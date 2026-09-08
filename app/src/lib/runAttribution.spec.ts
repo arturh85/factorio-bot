@@ -31,8 +31,21 @@ describe('verbOf / feedingDispatches', () => {
 
 describe('machineProduction', () => {
     it('is unavailable, not zero, for rows without counters', () => {
+        // `source: null` stands in for a key the WIRE omits: Rust skips
+        // `produced_source` when it has none (`skip_serializing_if`), so a
+        // pre-counter archive arrives with the key absent rather than null.
+        // The Python tests key presence and this tests non-null, and the two
+        // agree because `machineProduction` checks both -- `undefined` is not
+        // writable here, since `types.ts` declares the field `string | null`
+        // and that file is generated from the snapshot, not editable to suit
+        // a test.
         const s = [machines(300, {a: {name: 'stone-furnace', recipe: 'iron-plate', produced: null, source: null}})];
         expect(machineProduction(s, 0, 300).available).toBe(false);
+        // The absent-key shape itself, cast because the declared type cannot
+        // express it. This is the one the archives actually carry.
+        const absent = [machines(300, {a: {name: 'stone-furnace', recipe: 'iron-plate', produced: null, source: null}})];
+        delete (absent[0] as unknown as {machines: Record<string, Record<string, unknown>>}).machines.a.produced_source;
+        expect(machineProduction(absent, 0, 300).available).toBe(false);
     });
     it('names an idle furnace\'s output by the last recipe it was ever seen with', () => {
         const s = [

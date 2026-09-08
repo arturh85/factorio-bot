@@ -130,6 +130,16 @@ export const useRunsStore = defineStore('runs', {
         videoError: null as string | null,
         /** The run's raw event log. */
         events: [] as Event[],
+        /**
+         * Event lines `/events` could not parse -- in practice the torn last
+         * line of a killed run.
+         *
+         * Kept rather than dropped: the coverage band's whole job is to say
+         * what the record does not have, and a line nobody could read is
+         * exactly that. Reading it as 0 when the server reported it would be
+         * the same substitution this store's error fields exist to avoid.
+         */
+        eventsSkipped: 0,
         eventsError: null as string | null,
         /**
          * The machine the Machines band has selected, keyed by the
@@ -288,6 +298,7 @@ export const useRunsStore = defineStore('runs', {
             this.mapError = null;
             this.videoError = null;
             this.eventsError = null;
+            this.eventsSkipped = 0;
             this.selectedMachine = null;
             try {
                 this.detail = await getRun(id);
@@ -335,8 +346,10 @@ export const useRunsStore = defineStore('runs', {
 
                 if (eventsResult.status === 'fulfilled') {
                     this.events = eventsResult.value.events;
+                    this.eventsSkipped = eventsResult.value.skipped;
                 } else {
                     this.events = [];
+                    this.eventsSkipped = 0;
                     this.eventsError = enrichmentUnavailable('events', '/events', eventsResult.reason);
                 }
 
@@ -373,6 +386,7 @@ export const useRunsStore = defineStore('runs', {
                 this.samples = [];
                 this.map = [];
                 this.events = [];
+                this.eventsSkipped = 0;
             } finally {
                 this.loading = false;
             }

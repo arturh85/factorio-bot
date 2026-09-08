@@ -9,6 +9,15 @@
  * made against what the force's statistics say was made; the remainder is
  * hand work. The count of feeding dispatches -- not their ticks, five of the
  * six settle in the tick they dispatch -- decides roster-fed against factory.
+ *
+ * **The counter path is a port; the inference path is a REDUCTION.**
+ * `fromCounters` follows `attribute_from_counters` question for question,
+ * and the golden tests hold it there. `byInference` keeps only the first of
+ * `_attribute_by_inference`'s four branches (`any_generation`) and can
+ * therefore be more confident than the tool on the same interval -- see its
+ * own doc for the case. Anything it returns carries `source: 'inference'`,
+ * which the band draws dashed and words as "(inferred)", so the weaker claim
+ * is never presented as the stronger one.
  */
 import {Event, MachineSample, Sample} from '@/api/types';
 import {madeAt} from './runRates';
@@ -51,7 +60,20 @@ export function verbOf(action: string): string {
     return action.trim().split(/\s+/)[0] ?? '';
 }
 
-/** Feeding-verb dispatches in `(lo, hi]` -- the count, deliberately. */
+/**
+ * Feeding-verb dispatches in `(lo, hi]` -- the count, deliberately.
+ *
+ * A port of the standalone `feeding_dispatches` (`tools/run_analysis.py`
+ * ~2326), which reads `action_dispatched` straight and needs no roster and
+ * no join. **That is not the same counter the tool reports beside a mark**:
+ * the `feed_actions` in its attribution block comes from `interval_activity`
+ * (~2126), which walks `dispatches` PER BOT, so a dispatch carrying no `bot`
+ * field is invisible to it and counted here. Identical on the archived
+ * fixture -- every feeding dispatch there names a bot -- and
+ * `runAttribution.spec.ts` compares this against the tool's number on that
+ * basis, so a run whose feeding dispatches lack a bot would diverge and the
+ * spec would be right to.
+ */
 export function feedingDispatches(events: Event[], lo: number, hi: number): number {
     let n = 0;
     for (const e of events) {
@@ -155,6 +177,22 @@ function fromCounters(delta: number, produced: MachineProduction, item: string, 
  * The fallback for a run archived before the per-machine counters existed.
  * It INFERS, and says so in `source`: feeding dispatches plus any generation
  * decide, and `unclear` is said freely.
+ *
+ * **A REDUCTION of `_attribute_by_inference` (`tools/run_analysis.py`
+ * ~3246-3320), not a port of it.** The Python walks four questions in order
+ * -- any generation, any consumption, then whether an ELECTRIC producer was
+ * working and which machines drew the power -- because power drawn is not
+ * evidence about items until the machines that made them are named: a lab at
+ * 120 kW says nothing about plates a hand-loaded furnace smelted. This keeps
+ * only the first of those, `any_generation`, because it is all the browser
+ * reads today.
+ *
+ * So the two can differ, and the case is nameable: with `feeds === 0` and
+ * generation present, this says `factory`, while the Python says `unclear`
+ * whenever no electric producer worked in the interval -- the output came out
+ * of burner machines loaded earlier, and the power went somewhere else. Any
+ * verdict from here is the weaker claim; that is exactly why it is marked
+ * `inference` and drawn dashed.
  */
 function byInference(delta: number, feeds: number, samples: Sample[], lo: number, hi: number): Attribution {
     const anyGeneration = samples.some((s) => s.kind === 'force' && s.tick > lo && s.tick <= hi && s.power.generated_kw > 0);

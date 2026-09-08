@@ -13,6 +13,14 @@ describe('CursorBar', () => {
         await w.get('input[type="range"]').setValue('4000');
         expect(w.emitted('seek')?.[0]).toEqual([4000]);
     });
+    it('shows a focus ring on every control, not only the button', () => {
+        // Keyboard reach was already there; the ring that says where the
+        // keyboard IS was on the button alone.
+        const w = mount(CursorBar, {props: {scale, cursor: 3242, playing: false, rate: 300}});
+        for (const sel of ['button', 'input[type="range"]', 'select']) {
+            expect(w.get(sel).classes()).toContain('focus-visible:ring-focus');
+        }
+    });
     it('toggles play and changes the step', async () => {
         const w = mount(CursorBar, {props: {scale, cursor: 3242, playing: true, rate: 300}});
         expect(w.get('button').text()).toBe('Pause');

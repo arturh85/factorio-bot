@@ -154,7 +154,7 @@ const LEGEND = [
         </BandFrame>
         <BandFrame title="Record" subtitle="where the record has data · a gap reads as “no record”">
           <p v-if="store.eventsError" class="px-3 py-2 text-sm text-warn-dark">{{ store.eventsError }}</p>
-          <CoverageBand v-else :scale="scale" :cursor="store.cursor" :events="store.events" :samples="store.samples" :run-end="win?.hi ?? scale.to"/>
+          <CoverageBand v-else :scale="scale" :cursor="store.cursor" :events="store.events" :samples="store.samples" :run-end="win?.hi ?? scale.to" :skipped="store.eventsSkipped"/>
         </BandFrame>
         <CursorBar :scale="scale" :cursor="store.cursor" :playing="store.playing" :rate="store.rate"
                    @seek="store.seek($event)" @toggle="store.togglePlay()" @rate="store.rate = $event"/>

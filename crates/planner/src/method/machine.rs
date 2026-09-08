@@ -1049,4 +1049,30 @@ mod tests {
         assert_eq!(costs["empty-barrel"], 5_000);
         assert_eq!(costs["full-barrel"], 55_000);
     }
+    /// The seam a unit test on `from_parts_and_recipes` cannot cover:
+    /// [`MachineTable::from_state`] must hand the world's **recipes** to the
+    /// pricing, not only its prototypes. Passing an empty recipe list there
+    /// would make the whole preference inert on every real world while every
+    /// other test in this module still passed.
+    #[test]
+    fn from_state_prices_against_the_worlds_own_recipes() {
+        use crate::ids::BotId;
+        use crate::state::PlanState;
+        use factorio_bot_core::factorio::world::FactorioSurface;
+        use std::sync::Arc;
+
+        let world = FactorioSurface::new();
+        world
+            .update_entity_prototypes(vanilla())
+            .expect("update_entity_prototypes");
+        world
+            .update_recipes(vanilla_recipes())
+            .expect("update_recipes");
+        let state = PlanState::from_world(Arc::new(world), &[BotId(1)]);
+        let table = MachineTable::from_state(&state);
+        assert_eq!(
+            table.machine_for("crafting-with-fluid"),
+            Ok(Machine::Entity("assembling-machine-2".into()))
+        );
+    }
 }

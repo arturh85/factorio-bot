@@ -87,7 +87,15 @@ def verdict_of(result, prefix):
     """
     out = result.stdout + result.stderr
     if "test result:" not in out:
-        return "DID NOT COMPILE -- reads as green, treat as no evidence"
+        # **Say WHY.** A bare "did not compile" is unactionable and, in a
+        # shared checkout, is as likely to be a torn incremental object
+        # (`mold: error: undefined symbol: anon.<hash>`) as a mutation that
+        # does not typecheck. The first `error:` line tells those apart.
+        first = next(
+            (line.strip() for line in out.splitlines() if line.strip().startswith("error")),
+            "no error line either -- the run produced no test result at all",
+        )
+        return f"DID NOT COMPILE -- reads as green, treat as no evidence: {first}"
     if result.returncode == 0:
         return "GREEN -- A FINDING: no test objects to this"
     failed = [

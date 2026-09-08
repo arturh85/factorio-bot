@@ -2449,7 +2449,7 @@ mod trace_tests {
             .iter()
             .map(|port| (port.box_ordinal, port.junction.clone()))
             .collect();
-        junctions.sort_by(|a, b| a.0.cmp(&b.0));
+        junctions.sort_by_key(|entry| entry.0);
         assert_eq!(junctions.len(), 3, "one port per output box: {junctions:?}");
         // Box 0's second candidate and box 1's only candidate are two tiles
         // apart on the same row -- the crowd this edge exists to survive.

@@ -116,6 +116,246 @@ local function refusal_of(err)
 end
 
 -- ---------------------------------------------------------------------------
+-- The ring-widening source: going and LOOKING for something the plan needs
+-- ---------------------------------------------------------------------------
+--
+-- `Goal::Charted` and its method (`crates/planner/src/method/scout.rs`) have
+-- been complete and registered since 2026-09-08, and nothing emitted the
+-- goal. That module's own doc says why, and says where the missing piece
+-- goes:
+--
+--     **Stop on find.** A plan is expanded before anything runs, so nothing
+--     at expansion time can know what a survey will reveal ... It belongs one
+--     level up and is *already expressible*: because `Goal::Charted` is
+--     idempotent and `PlanState` reads the live world, a supervisor that
+--     plans ring by ring -- widening the radius and re-planning -- stops the
+--     moment the goal it actually wanted stops raising `NotCharted`.
+--
+-- This is that loop, as a milestone source. It was written twice inline
+-- before it was written once here (`scripts/chart_then_drill.lua` and
+-- `scripts/chart_water_and_oil.lua` each carry a hand-rolled copy over a
+-- literal radius list); those loops drive `goal.run` directly and so have
+-- none of the recovery, stall, re-roster or record plumbing every other
+-- milestone gets. A survey is the run where a bot walks furthest from help,
+-- which makes it the *last* thing that should be executed off the supervisor.
+--
+-- # The stop condition is the TARGET's refusal, not a sighting
+--
+-- The source never asks "is there crude oil yet". It cannot: naming what to
+-- look for would make this a search for a specific resource, and the goal
+-- that wants it already answers the question exactly. Before every milestone
+-- it plans the target and reads `goal.refusal`:
+--
+--   * `planner::not_charted` -- the ONE refusal a bigger disc can clear
+--     (`method::extract::not_charted`; the message names where charted ground
+--     ends). Issue the next ring.
+--   * anything else, including no refusal at all -- charting is finished,
+--     whatever the world's answer turns out to be. Issue the target and stop.
+--
+-- The probe costs one expansion per ring, and a *refusing* expansion is cheap
+-- -- it stops at the missing resource. Exactly one probe, the last, expands
+-- the whole target, and the supervisor then plans it again for real. That
+-- second expansion is the price of the source not being allowed to hand the
+-- supervisor a plan (it hands goals, and a plan made before a re-roster is a
+-- plan for the wrong roster).
+--
+-- A raise the classifier does not vouch for propagates, exactly as it does in
+-- `Sup:step()`: "cannot classify" must never come out as "carry on".
+--
+-- # The bound, and what exhaustion looks like
+--
+-- `max_rings` (default `CHART_MAX_RINGS`), counted in lattice rings and
+-- reported in tiles as well, because those are the two units the answer is
+-- ever quoted in. Widening forever on a map that simply has no oil is not an
+-- option, and neither is stopping silently.
+--
+-- On exhaustion the source issues **the target anyway**, so the run ends on
+-- the planner's own `planner::not_charted` -- with its frontier sentence --
+-- recorded as a stuck milestone by whatever driver is already reading
+-- `t.refusal`. Success and exhaustion are then distinguishable three ways:
+-- `census.exhausted` is true, `census.reason` says `"exhausted"` rather than
+-- `"plannable"` or `"refused:<code>"`, and the final milestone halts instead
+-- of running. `census.reason` is `nil` only while the source has never been
+-- asked -- absent is not a value.
+--
+-- # Where the rings are, and why they are not aimed
+--
+-- Blind, concentric, and centred on `around` (the spawn by default). Nothing
+-- here reads a resource position: the roster has not charted the ground, so
+-- reading it would be exactly the foreknowledge a human speedrunner's map
+-- preview is disclosed for. A ring search that finds oil by walking is
+-- honest; one that walks at oil it looked up is not.
+
+--- The lattice pitch `method::scout::REVEAL_PITCH` measures, in tiles.
+-- A character makes the engine generate 9x9 chunks around itself, so a visit
+-- buys +/-128 and points 256 apart tile the plane. Mirrored here rather than
+-- asked, because no binding exposes it; if it moves there it must move here.
+supervisor.CHART_PITCH = 256
+
+--- What one visit reveals around itself, in tiles: half the pitch.
+supervisor.CHART_REVEAL = 128
+
+--- The default bound, in rings.
+--
+-- Three, which is `radius = 896` and the same three radii the two inline
+-- loops used. Chosen on cost, not on where anything is: ring `k` is `8k`
+-- survey points at ~`256k` tiles out, and the one measured ring (ring 1, on
+-- seed 31337) cost **8 surveys, 0 failures, 4,159 ticks**. Walking scales
+-- with points x distance, so rings 1..3 are roughly 1 + 4 + 9 = 14 ring-1s,
+-- about 58,000 ticks of game time. Ring 4 alone would add another 16.
+supervisor.CHART_MAX_RINGS = 3
+
+--- The radius that asks for rings 0..k of the survey lattice.
+--
+-- `survey_plan` takes `rings = floor(radius / 256)`, so any radius in
+-- `[256k, 256k + 255]` names the same k. `256k + 128` is chosen among them
+-- because it is **the ground the survey actually reaches**: a bot standing at
+-- `256k` reveals to `256k + 128`. So the number in the goal, in the log and
+-- in the record is the number that was looked at, and 384 / 640 / 896 are the
+-- radii this project has already quoted.
+function supervisor.chart_radius(rings)
+    return supervisor.CHART_PITCH * rings + supervisor.CHART_REVEAL
+end
+
+local Chart = {}
+Chart.__index = Chart
+
+--- The name the record should show for milestone `index`, or nil.
+-- The source issues more than one milestone, so a driver cannot hold a single
+-- constant any more; it asks here.
+function Chart:name_of(index)
+    return self.names[index]
+end
+
+--- Build a **ring-widening** milestone source: chart outwards until `target`
+--- stops refusing `planner::not_charted`, then run `target`.
+--
+--     local ch = supervisor.chart_until { target = milestone }
+--     local sup = supervisor.new(ch.source, { bots = bots })
+--
+-- Returns the object, not the function, so the census survives the run: a
+-- source that returned two values would be spliced into `supervisor.new`'s
+-- `opts` argument by Lua's own call semantics.
+--
+-- @param spec.target       the goal the rings exist to make plannable
+-- @param spec.around       centre of the rings, `{ x = , y = }`, default 0,0
+-- @param spec.max_rings    the bound, in rings; default `CHART_MAX_RINGS`
+-- @param spec.plan_opts    opts for the probe -- a table, or a function
+--                          returning one, so the probe can be made against
+--                          the roster as it stands rather than as it started
+function supervisor.chart_until(spec)
+    if type(spec) ~= "table" then
+        error("supervisor.chart_until: expected a table of options")
+    end
+    if spec.target == nil then
+        error("supervisor.chart_until: `target` is required and has no default")
+    end
+    local around = spec.around or { x = 0, y = 0 }
+    if type(around) ~= "table" or type(around.x) ~= "number" or type(around.y) ~= "number" then
+        error("supervisor.chart_until: `around` must be a position, `{ x = ..., y = ... }`")
+    end
+    local max_rings = spec.max_rings or supervisor.CHART_MAX_RINGS
+    if type(max_rings) ~= "number" or max_rings < 1 or max_rings % 1 ~= 0 then
+        error("supervisor.chart_until: `max_rings` must be a positive integer")
+    end
+    if spec.plan_opts ~= nil and type(spec.plan_opts) ~= "table"
+        and type(spec.plan_opts) ~= "function" then
+        error("supervisor.chart_until: `plan_opts` must be a table, a function, or nil")
+    end
+
+    local self = setmetatable({
+        target = spec.target,
+        around = { x = around.x, y = around.y },
+        max_rings = max_rings,
+        plan_opts = spec.plan_opts,
+        -- The census. Every field here is read after the run, so none of them
+        -- may be inferable-only: `rings` is what was walked, `radii` is where,
+        -- `probes` is how many expansions the widening cost, `reason` is why
+        -- it stopped and `exhausted` says whether that was the bound.
+        rings = 0,
+        radii = {},
+        probes = 0,
+        reason = nil,
+        exhausted = false,
+        last_code = nil,
+        -- The milestone index the TARGET was issued at, once it has been.
+        -- `nil` until then, never 0: absent is not a value.
+        target_index = nil,
+        names = {},
+        _index = 0,
+        _done = false,
+    }, Chart)
+
+    --- Plan the target and answer its refusal code: nil when it plans, the
+    -- code when it refuses. A raise nothing vouches for is re-raised.
+    local function probe()
+        local opts = self.plan_opts
+        if type(opts) == "function" then opts = opts() end
+        self.probes = self.probes + 1
+        local ok, err
+        if opts == nil then
+            ok, err = pcall(goal.plan, self.target)
+        else
+            ok, err = pcall(goal.plan, self.target, opts)
+        end
+        if ok then return nil end
+        local refusal = refusal_of(err)
+        if refusal == nil then error(err, 0) end
+        return refusal.code, refusal.message
+    end
+
+    local function issue(milestone, name)
+        self._index = self._index + 1
+        self.names[self._index] = name
+        return milestone
+    end
+
+    --- Issue the target and stop. `target_index` is what a driver keys on to
+    -- tell the milestone it cares about from the rings that made it
+    -- reachable: a survey that settles every action it dispatched is not the
+    -- rig standing, and a driver with one counter for both would say it was.
+    local function issue_target(name, reason, message, exhausted)
+        self._done = true
+        self.reason = reason
+        self.last_message = message
+        self.exhausted = exhausted or false
+        local g = issue(self.target, name)
+        self.target_index = self._index
+        return g
+    end
+
+    self.source = function(_history)
+        if self._done then return nil end
+        local code, message = probe()
+        self.last_code = code
+        if code ~= "planner::not_charted" then
+            -- Either it plans now, or it refuses for something no amount of
+            -- looking can change. Both end the widening; only one of them is
+            -- good news, and the census says which.
+            return issue_target("target: the goal the rings were for",
+                (code == nil) and "plannable" or ("refused:" .. code), message)
+        end
+        if self.rings >= self.max_rings then
+            -- The bound. Issue the target regardless: the run then ends on the
+            -- planner's own not-charted sentence, in the record, rather than
+            -- on this loop quietly running out of milestones -- which the
+            -- supervisor would report as `done`.
+            return issue_target(
+                string.format("target after %d ring(s): STILL not charted", self.rings),
+                "exhausted", message, true)
+        end
+        self.rings = self.rings + 1
+        local radius = supervisor.chart_radius(self.rings)
+        self.radii[#self.radii + 1] = radius
+        return issue(goal.charted(self.around.x, self.around.y, radius),
+            string.format("chart ring %d of %d: %d tiles around (%g, %g)",
+                self.rings, self.max_rings, radius, self.around.x, self.around.y))
+    end
+
+    return self
+end
+
+-- ---------------------------------------------------------------------------
 -- The witness: the durative half of "producing"
 -- ---------------------------------------------------------------------------
 --

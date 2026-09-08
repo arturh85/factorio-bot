@@ -2788,4 +2788,334 @@ mod tests {
             "{err}"
         );
     }
+
+    // ---- The ring-widening source (`supervisor.chart_until`) -------------
+    //
+    // A live run of this costs 15-25 minutes and a whole map; these drive the
+    // real source and the real loop against a world model small enough to
+    // state in one number -- how far charted ground reaches, and how far out
+    // the thing the target wants is. That is the entire physics the widening
+    // depends on.
+
+    /// A Lua state holding the real supervisor plus a `goal` table that
+    /// models exactly one fact: **charted ground reaches `__reach` tiles, and
+    /// the target needs ground out to `__want`**.
+    ///
+    /// `goal.plan` of the target refuses `planner::not_charted` while
+    /// `__reach < __want` and plans otherwise; `goal.plan` of a
+    /// `goal.charted(x, y, r)` emits eight surveys when `r > __reach` and
+    /// nothing when it does not -- which is the idempotence the whole loop
+    /// rests on -- and running one sets `__reach = r`. Eight because that is
+    /// ring 1 of the real lattice, and 0 failures / 4,159 ticks is what one
+    /// measured ring cost.
+    ///
+    /// `__target_code` swaps the target's refusal for one charting cannot
+    /// clear, and `"raise"` makes it a fault the classifier does not vouch
+    /// for -- the two negative controls.
+    fn chart_harness(setup: &str) -> Lua {
+        let lua = sandboxed();
+        let stub = r#"
+            -- A fresh map is generated to +/-320 before anybody walks.
+            __reach = 320
+            __want = 372.5
+            __target_code = "planner::not_charted"
+            __plan_calls = 0
+            __run_calls = 0
+            __target_ran = false
+            __charted_planned = {}
+            __keyframe_calls = 0
+            record = { keyframe = function() __keyframe_calls = __keyframe_calls + 1 end }
+            goal = {}
+            __target = { kind = "target" }
+            function goal.charted(x, y, radius)
+                return { kind = "charted", x = x, y = y, radius = radius }
+            end
+            local function steps(n)
+                local out = {}
+                for i = 1, n do
+                    out[i] = { id = i, bot = 1, label = "survey " .. i,
+                               start = (i - 1) * 10, finish = i * 10, deps = {} }
+                end
+                return out
+            end
+            __last_code = nil
+            goal.refusal = function(_err)
+                if __last_code == nil then return nil end
+                return { code = __last_code,
+                         message = "no crude-oil is charted anywhere this plan can see; "
+                             .. "charted ground reaches " .. tostring(__reach) }
+            end
+            goal.plan = function(g, _opts)
+                __plan_calls = __plan_calls + 1
+                if type(g) == "table" and g.kind == "charted" then
+                    __last_code = nil
+                    table.insert(__charted_planned, g.radius)
+                    if g.radius <= __reach then return { steps = {} } end
+                    return { steps = steps(8), radius = g.radius }
+                end
+                if __reach < __want then
+                    if __target_code == "raise" then
+                        __last_code = nil
+                        error("stub: a fault nothing vouches for", 0)
+                    end
+                    __last_code = __target_code
+                    error("goal: refused", 0)
+                end
+                __last_code = nil
+                -- Once the target has run, it holds: a stub that kept
+                -- returning work would stall the loop rather than satisfy it.
+                if __target_ran then return { steps = {} } end
+                return { steps = steps(3) }
+            end
+            goal.run = function(plan)
+                __run_calls = __run_calls + 1
+                -- The survey happened: the model now has the ground.
+                if plan.radius ~= nil then
+                    if plan.radius > __reach then __reach = plan.radius end
+                else
+                    __target_ran = true
+                end
+                return { failed = 0, lost = 0, walks_failed = 0, walks_lost = 0,
+                         pending = 0, success = #plan.steps, running = 0, done = true,
+                         actions = {} }
+            end
+            goal.holds = function(g, _opts)
+                if type(g) == "table" and g.kind == "charted" then
+                    return g.radius <= __reach
+                end
+                return true
+            end
+        "#;
+        lua.load(stub).exec().expect("stub installs");
+        lua.load(SUPERVISOR_LUA).exec().expect("supervisor loads");
+        if !setup.is_empty() {
+            lua.load(setup).exec().expect("setup runs");
+        }
+        lua
+    }
+
+    /// Drive a `chart_until` source to a terminal state and expose the census.
+    fn drive_chart(lua: &Lua, spec: &str) {
+        let driver = r#"
+            local ch = supervisor.chart_until(SPEC)
+            local sup = supervisor.new(ch.source, { bots = {1} })
+            local guard, names, halts = 0, {}, {}
+            repeat
+                local t = sup:step()
+                if t.action == "acquired" then
+                    names[#names + 1] = ch:name_of(t.milestone_index)
+                elseif t.action == "halted" then
+                    halts[#halts + 1] = t.refusal and t.refusal.code or "?"
+                end
+                guard = guard + 1
+                if guard > 500 then error("did not terminate") end
+            until sup:finished()
+            __state = sup.state
+            __rings = ch.rings
+            __radii = ch.radii
+            __probes = ch.probes
+            __reason = ch.reason
+            __exhausted = ch.exhausted
+            __names = names
+            __halts = halts
+            __milestones = #sup:history()
+        "#
+        .replace("SPEC", spec);
+        lua.load(&driver).exec().expect("driver runs");
+    }
+
+    const SPEC: &str = "{ target = __target }";
+
+    /// The whole point, end to end: one ring is walked, and then the target
+    /// runs because it stopped refusing -- not because anything named oil.
+    #[test]
+    fn one_ring_is_walked_and_then_the_target_is_planned() {
+        let lua = chart_harness("");
+        drive_chart(&lua, SPEC);
+        let g = lua.globals();
+        assert_eq!(g.get::<String>("__state").unwrap(), "done");
+        assert_eq!(
+            g.get::<i64>("__rings").unwrap(),
+            1,
+            "the oil at 372.5 is inside ring 1's reveal (384), so a second \
+             ring would be walking nobody asked for"
+        );
+        assert_eq!(g.get::<Vec<f64>>("__radii").unwrap(), vec![384.0]);
+        assert_eq!(
+            g.get::<String>("__reason").unwrap(),
+            "plannable",
+            "the census says why it stopped, and `plannable` is the good one"
+        );
+        assert!(!g.get::<bool>("__exhausted").unwrap());
+        assert_eq!(
+            g.get::<i64>("__milestones").unwrap(),
+            2,
+            "one chart milestone and the target: both closed, both in history"
+        );
+        assert!(
+            g.get::<Vec<String>>("__halts").unwrap().is_empty(),
+            "nothing halted: the target planned and ran"
+        );
+    }
+
+    /// The bound. Widening forever is not an option and stopping quietly is
+    /// not either -- the run must end on the planner's own sentence.
+    #[test]
+    fn the_bound_ends_the_run_on_the_planners_refusal_rather_than_on_silence() {
+        // Oil nowhere within reach of the bound.
+        let lua = chart_harness("__want = 5000");
+        drive_chart(&lua, SPEC);
+        let g = lua.globals();
+        assert_eq!(
+            g.get::<i64>("__rings").unwrap(),
+            3,
+            "the default bound, in rings"
+        );
+        assert_eq!(
+            g.get::<Vec<f64>>("__radii").unwrap(),
+            vec![384.0, 640.0, 896.0],
+            "each ring widens by exactly one lattice pitch: a smaller step \
+             adds no lattice cells at all and would chart nothing"
+        );
+        assert!(g.get::<bool>("__exhausted").unwrap());
+        assert_eq!(g.get::<String>("__reason").unwrap(), "exhausted");
+        assert_eq!(
+            g.get::<String>("__state").unwrap(),
+            "stuck",
+            "NOT `done`: a source that simply stopped issuing milestones would \
+             report the run as finished, which is the exact silence this bound \
+             exists to avoid"
+        );
+        assert_eq!(
+            g.get::<Vec<String>>("__halts").unwrap(),
+            vec!["planner::not_charted".to_string()],
+            "and the halt carries the planner's own code, so the record says \
+             `still not charted after three rings` rather than nothing"
+        );
+    }
+
+    /// A refusal a bigger disc cannot clear stops the widening immediately.
+    /// Charting is expensive and `not_charted` is the only refusal it treats.
+    #[test]
+    fn a_refusal_charting_cannot_clear_walks_nobody_anywhere() {
+        let lua = chart_harness(
+            "__want = 5000 __target_code = \"planner::not_hand_minable\"",
+        );
+        drive_chart(&lua, SPEC);
+        let g = lua.globals();
+        assert_eq!(g.get::<i64>("__rings").unwrap(), 0);
+        assert_eq!(g.get::<i64>("__run_calls").unwrap(), 0);
+        assert_eq!(
+            g.get::<String>("__reason").unwrap(),
+            "refused:planner::not_hand_minable",
+            "the census names WHICH refusal ended it, not merely that one did"
+        );
+        assert_eq!(g.get::<String>("__state").unwrap(), "stuck");
+    }
+
+    /// A target that is already plannable charts nothing. This is what makes
+    /// the source safe to put in front of a milestone unconditionally.
+    #[test]
+    fn a_target_that_already_plans_costs_no_walking() {
+        let lua = chart_harness("__want = 0");
+        drive_chart(&lua, SPEC);
+        let g = lua.globals();
+        assert_eq!(g.get::<i64>("__rings").unwrap(), 0);
+        assert_eq!(g.get::<String>("__reason").unwrap(), "plannable");
+        assert_eq!(g.get::<String>("__state").unwrap(), "done");
+        assert_eq!(
+            g.get::<i64>("__probes").unwrap(),
+            1,
+            "exactly one expansion is spent finding that out"
+        );
+    }
+
+    /// Ring `k` is re-issued as a disc containing every ring below it, so the
+    /// already-walked ground must plan nothing rather than be walked again.
+    #[test]
+    fn a_wider_ring_does_not_re_walk_the_ground_the_last_one_covered() {
+        let lua = chart_harness("__want = 5000");
+        drive_chart(&lua, SPEC);
+        let g = lua.globals();
+        assert_eq!(
+            g.get::<i64>("__run_calls").unwrap(),
+            3,
+            "three rings, three runs -- the replan that closes each milestone \
+             finds nothing left and does not dispatch a fourth"
+        );
+    }
+
+    /// The negative control for the classification, from the source's side:
+    /// a raise `goal.refusal` does not vouch for is a fault and must end the
+    /// run, never be read as "not charted, widen".
+    #[test]
+    fn a_raise_the_classifier_does_not_vouch_for_propagates_out_of_the_source() {
+        let lua = chart_harness("__target_code = \"raise\"");
+        let err = lua
+            .load(
+                "local ch = supervisor.chart_until { target = __target } \
+                 local sup = supervisor.new(ch.source, { bots = {1} }) \
+                 repeat sup:step() until sup:finished()",
+            )
+            .exec()
+            .expect_err("a fault must not be swallowed as a widening signal");
+        assert!(
+            err.to_string().contains("a fault nothing vouches for"),
+            "{err}"
+        );
+    }
+
+    /// The record needs a name per milestone, and the source issues more than
+    /// one, so a driver cannot hold a single constant any more.
+    #[test]
+    fn every_issued_milestone_has_its_own_name_for_the_record() {
+        let lua = chart_harness("__want = 5000");
+        drive_chart(&lua, SPEC);
+        let names: Vec<String> = lua.globals().get("__names").unwrap();
+        assert_eq!(names.len(), 4, "three rings and the target: {names:?}");
+        assert!(names[0].contains("chart ring 1 of 3") && names[0].contains("384"));
+        assert!(names[2].contains("chart ring 3 of 3") && names[2].contains("896"));
+        assert!(
+            names[3].contains("STILL not charted"),
+            "the exhausted target says so in its own name: {names:?}"
+        );
+    }
+
+    /// The radius is derived from the lattice, not typed: `floor(r / 256)`
+    /// rings, and `256k + 128` is the ground a survey at `256k` reaches.
+    #[test]
+    fn the_radius_names_the_ground_the_survey_reaches() {
+        let lua = chart_harness("");
+        lua.load(
+            "__r1 = supervisor.chart_radius(1) \
+             __r2 = supervisor.chart_radius(2) \
+             __r3 = supervisor.chart_radius(3)",
+        )
+        .exec()
+        .unwrap();
+        let g = lua.globals();
+        assert_eq!(g.get::<f64>("__r1").unwrap(), 384.0);
+        assert_eq!(g.get::<f64>("__r2").unwrap(), 640.0);
+        assert_eq!(g.get::<f64>("__r3").unwrap(), 896.0);
+    }
+
+    /// Construction errors, in the shape the witness and sustain use.
+    #[test]
+    fn a_chart_source_refuses_a_missing_target_and_a_nonsense_bound() {
+        let lua = chart_harness("");
+        for (src, wanted) in [
+            ("supervisor.chart_until {}", "`target` is required"),
+            (
+                "supervisor.chart_until { target = __target, max_rings = 0 }",
+                "positive integer",
+            ),
+            (
+                "supervisor.chart_until { target = __target, around = 5 }",
+                "must be a position",
+            ),
+        ] {
+            let err = lua.load(src).exec().expect_err(src).to_string();
+            assert!(err.contains(wanted), "{src}: {err}");
+        }
+    }
 }

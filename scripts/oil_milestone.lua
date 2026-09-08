@@ -220,7 +220,45 @@ local function current_roster()
   return nil
 end
 
-local sup = supervisor.new(supervisor.list { milestone },
+-- Forward-declared: the chart source's probe closes over it, so that the
+-- probe is planned for the roster the supervisor currently holds.
+local sup
+
+-- ---------------------------------------------------------------------------
+-- THE RINGS: how this run is allowed to FIND the oil
+-- ---------------------------------------------------------------------------
+--
+-- On a fresh seed-31337 map this milestone refused in **one second**:
+--
+--     planner::not_charted: no crude-oil is charted anywhere this plan can
+--     see ... charted ground covers 17 of 17 probes within 256 tiles
+--
+-- and that refusal is correct. Crude oil on this seed is 372.5 tiles out; a
+-- fresh map is generated to +/-320, so it is outside by 52. Every offline plan
+-- of this milestone ran against a dump of an already-explored world.
+--
+-- `supervisor.chart_until` is the loop that closes it: plan the milestone,
+-- and while it refuses `planner::not_charted`, walk one more lattice ring and
+-- ask again. The stop condition is the **refusal ceasing**, never a sighting
+-- -- this script does not name crude oil to the search, and the search does
+-- not read a resource position. Rings are concentric on the spawn, blind, and
+-- widen by exactly one lattice pitch. Nothing here uses foreknowledge: what
+-- the run knows about where the oil is, it learnt by walking there.
+--
+-- The bound is three rings (896 tiles). Exhaustion is not silence: the source
+-- issues the milestone anyway, so the run ends on the planner's own
+-- not-charted sentence in the record, and `chart.reason` says `exhausted`
+-- rather than `plannable`.
+local chart = supervisor.chart_until {
+  target = milestone,
+  -- The probe is made against the roster as it STANDS, not as the run
+  -- started. Bots die on this map -- two did, on the one live attempt -- and
+  -- a probe planned for a bot the game has no character for would refuse for
+  -- a reason that has nothing to do with charted ground.
+  plan_opts = function() return { bots = (sup and sup.bots) or bots } end,
+}
+
+sup = supervisor.new(chart.source,
   { bots = bots, stall_limit = 3, max_iterations = MAX_ITERATIONS,
     roster = current_roster })
 
@@ -234,6 +272,7 @@ local sup = supervisor.new(supervisor.list { milestone },
 -- rather than asked of the supervisor because the supervisor's verdict is
 -- about the GOAL (unanswerable, above) and this is about the PLAN.
 local runs = 0
+local target_runs = 0
 local dispatched_everything = false
 
 -- The loop is wrapped so a raise still closes the recording. A run that died
@@ -251,8 +290,12 @@ repeat
     record.plan_created(t.milestone_index, t.plan, t.bots)
   end
   if t.action == "acquired" then
-    record.milestone_started(t.milestone_index, MILESTONE_NAME)
-    print("-> " .. MILESTONE_NAME)
+    -- One name per milestone, asked of the source: the ladder is no longer a
+    -- single rung, and a run whose record called three surveys and a rig by
+    -- one name would be unreadable.
+    local name = chart:name_of(t.milestone_index) or MILESTONE_NAME
+    record.milestone_started(t.milestone_index, name)
+    print("-> " .. name)
   elseif t.action == "rerostered" then
     -- A bot has had no character past the supervisor's respawn wait and was
     -- dropped, or one dropped earlier is back. Recorded before the plan that
@@ -292,6 +335,12 @@ repeat
     end
   elseif t.action == "ran" then
     runs = runs + 1
+    -- Kept apart from `runs`: a survey ring that settles every walk it
+    -- dispatched is not the rig standing, and one counter for both would
+    -- report the charting as the milestone.
+    if chart.target_index ~= nil and t.milestone_index == chart.target_index then
+      target_runs = target_runs + 1
+    end
     local n = 0
     if t.steps ~= nil and t.actions ~= nil then n = record.actions(t.steps, t.actions) end
     -- The walks of the same batch. A separate call, not a third argument to
@@ -326,7 +375,8 @@ repeat
       print("        not recovered: " .. tostring(t.not_recovered))
     end
     dispatched_everything =
-      t.done == true and (t.failed or 0) == 0 and (t.lost or 0) == 0
+      chart.target_index ~= nil and t.milestone_index == chart.target_index
+      and t.done == true and (t.failed or 0) == 0 and (t.lost or 0) == 0
       and (t.pending or 0) == 0
   elseif t.action == "satisfied" then
     record.milestone_satisfied(t.milestone_index, t.iteration or 0, t.reason)
@@ -373,8 +423,24 @@ record.research_triggers()
 -- refused, or returned nothing to do, and neither of those is "the rig was
 -- built by this run" -- so it is said out loud rather than left to be inferred
 -- from a production sample below.
-if runs == 0 then
-  print("NOTHING WAS DISPATCHED: no plan of this milestone ever ran.")
+-- What the widening did, before anything is said about the milestone. It is
+-- printed whatever happened, because "how much ground did this run have to
+-- look at" is half of what the run costs and is not derivable from anything
+-- else in this output.
+print(string.format("CHARTING: %d ring(s) walked%s, %d probe expansion(s), stopped because: %s",
+  chart.rings,
+  (#chart.radii > 0) and (" (radii " .. table.concat(chart.radii, ", ") .. ")") or "",
+  chart.probes, tostring(chart.reason)))
+if chart.exhausted then
+  print("  THE BOUND WAS REACHED: " .. chart.rings .. " ring(s) of charting did not")
+  print("  make this milestone plannable. That is a statement about this map and")
+  print("  this bound -- not about the planner, and not about the oil. The HALTED")
+  print("  line above carries where charted ground ended.")
+end
+
+if target_runs == 0 then
+  print("NOTHING WAS DISPATCHED FOR THE MILESTONE ITSELF: no plan of it ever ran.")
+  print("  (Charting rings, above, are a different milestone and do not count.)")
   print("  That is NOT the milestone. Either the planner refused (the HALTED")
   print("  line above carries its reason), or it found nothing to do -- check")
   print("  goal.holds and the world before reading any production sample as")
@@ -428,7 +494,7 @@ if dispatched_everything then
   print("  This says the RIG WAS BUILT. It does NOT say petroleum was produced,")
   print("  and it does not say by whom -- the production samples and the")
   print("  analyser's attribution verdict answer that, not this line.")
-elseif runs > 0 then
+elseif target_runs > 0 then
   print("THE LAST RUN DID NOT SETTLE EVERYTHING IT PLANNED: see the `ran` line")
   print("  above for pending/failed/lost, and the HALTED line for why the loop")
   print("  stopped continuing.")

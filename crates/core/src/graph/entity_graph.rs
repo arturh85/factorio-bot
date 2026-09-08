@@ -480,6 +480,36 @@ impl EntityGraph {
         self.entity_nodes.get(id).map(|e| *e.value())
     }
 
+    /// Which resources are **charted on this surface**, in name order.
+    ///
+    /// # Present, not declared
+    ///
+    /// The discriminator [`crate::factorio::world::GameGlobals`]'s prototype
+    /// table cannot provide. Every `entity_type == "resource"` prototype the
+    /// game knows is in that table on every surface -- this mod set declares
+    /// twelve, `calcite`, `scrap`, `tungsten-ore`, `lithium-brine`,
+    /// `fluorine-vent` and `sulfuric-acid-geyser` among them -- and a Nauvis
+    /// map has five of them. `PlanState::resource_names` answers the declared
+    /// set and is right to; this answers the charted one.
+    ///
+    /// **Empty is "nothing charted", which is not "nothing here".** A world
+    /// attached from a snapshot, or a fresh map nobody has walked, charts no
+    /// resources at all, and a caller reading this as "this surface has no
+    /// ore" would be asserting something nobody established. The one caller
+    /// today -- `crates/planner`'s supply closure -- treats an empty answer as
+    /// *unknown* and falls back to admitting every candidate, which is the
+    /// safe direction: it refuses to choose rather than choosing wrongly.
+    #[must_use]
+    pub fn resource_names_present(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .resources
+            .iter()
+            .map(|entry| entry.key().clone())
+            .collect();
+        names.sort();
+        names
+    }
+
     pub fn resource_contains(&self, resource_name: &str, pos: Pos) -> bool {
         let elements = self.resources.get(resource_name);
         if let Some(elements) = elements {

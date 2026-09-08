@@ -103,7 +103,28 @@ use crate::method::{ExpansionCtx, Method, Step};
 use crate::state::PlanState;
 use crate::substance::{Substance, SubstanceTable};
 use factorio_bot_core::factorio::world::FactorioSurface;
-use factorio_bot_core::types::FactorioRecipe;
+use factorio_bot_core::types::{FactorioRecipe, Position, Rect};
+
+/// The prototype category Space Age's `X-recycling` recipes are in.
+///
+/// **A category name is game data; a mod name is not.** This is the one
+/// discriminator in the shipped prototypes that separates *destroying* a thing
+/// from *making* one, and it survives a mod that adds recycling recipes of its
+/// own because the mod puts them in this category too. It does not survive a
+/// mod inventing a second destructive category under another name -- that is a
+/// real limit and there is nothing in the prototype data that would close it.
+const RECYCLING_CATEGORY: &str = "recycling";
+
+/// How far from the origin [`ProductIndex::from_world`] looks for ground that
+/// yields a fluid.
+///
+/// The same 256 tiles `score-map` scores a map over, and for the same reason:
+/// far enough to find the lake a plant would be built on, small enough that
+/// the scan is one bounded quad-tree query rather than a walk of every charted
+/// tile. A fluid whose only pool is outside it is missed, and missing a seed
+/// makes the preference **less** decisive, never wrong -- see
+/// [`ProductIndex::supply`].
+const GROUND_FLUID_SCAN_RADIUS: f64 = 256.0;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Which recipe categories a caller is willing to run.
@@ -572,12 +593,53 @@ fn inputs_this_surface_cannot_supply(
     index
         .recipes_producing(product)
         .into_iter()
-        .filter(|r| r.category != "recycling")
+        .filter(|r| r.category != RECYCLING_CATEGORY)
         .map(|r| (unreachable_for(r), r.name.clone()))
         .filter(|(missing, _)| !missing.is_empty())
         .min_by(|a, b| a.0.len().cmp(&b.0.len()).then_with(|| a.1.cmp(&b.1)))
         .map(|(missing, _)| missing.into_iter().take(4).collect())
         .unwrap_or_default()
+}
+
+/// What a surface supplies with no recipe at all: charted resources, and the
+/// fluids its ground yields.
+///
+/// Both halves are read off the world rather than named here, which is what
+/// keeps the preference they seed from being a list of things somebody knew
+/// about in September 2026:
+///
+/// - `EntityGraph::resource_names_present` -- the resources **charted**, not
+///   the twelve `entity_type == "resource"` prototypes every surface declares.
+///   That distinction is the entire difference between `iron-plate` and
+///   `casting-iron`: the second wants molten iron, which wants `calcite`,
+///   which is a prototype this install has and a resource a Nauvis map does
+///   not. `no resource patch found for 'calcite'` has scrolled past in every
+///   log this project has ever written.
+/// - `TileFluid::named` on the tiles within [`GROUND_FLUID_SCAN_RADIUS`] --
+///   *"the fluid an offshore pump produces on this tile"*, straight from
+///   `LuaTilePrototype::fluid`. Not `yields_water`, and not the tile-name
+///   pair: a modded planet whose lakes are something else seeds that instead,
+///   with nothing here changed.
+///
+/// **A dump written before tiles carried `fluid` seeds no fluid**, because
+/// every tile in it is `TileFluid::Unknown` and `named()` is `None` for that.
+/// So this returns resources only on every archived world, and the preference
+/// built on it stays inert there -- which is why no baseline taken on
+/// `map.json` can move.
+fn ground_supply(world: &FactorioSurface) -> BTreeSet<String> {
+    let mut supply: BTreeSet<String> = world
+        .entity_graph
+        .resource_names_present()
+        .into_iter()
+        .collect();
+    let r = GROUND_FLUID_SCAN_RADIUS;
+    let bounds = Rect::new(&Position::new(-r, -r), &Position::new(r, r));
+    for tile in world.entity_graph.tiles_within(&bounds) {
+        if let Some(fluid) = tile.fluid.named() {
+            supply.insert(fluid.to_string());
+        }
+    }
+    supply
 }
 
 /// `a`, `a and b`, `a, b and c` -- for names that are not recipe candidates.
@@ -643,6 +705,28 @@ pub struct ProductIndex {
     /// is determinism.
     by_product: BTreeMap<String, Vec<String>>,
     substances: SubstanceTable,
+    /// What this surface supplies without a recipe: the resources charted on
+    /// it, and the fluids its ground yields.
+    ///
+    /// The seed of [`Self::reachable_here`], and the whole reason that
+    /// preference can tell `iron-plate` (smelting, from charted iron ore) from
+    /// `casting-iron` (metallurgy, from molten iron, which wants calcite this
+    /// map does not have).
+    ///
+    /// # Empty means *unknown*, and disables the preference rather than
+    /// emptying it
+    ///
+    /// [`Self::from_parts`] has no world and leaves this empty; so does a
+    /// world charting nothing, and so does **every dump written before tiles
+    /// carried `fluid`** -- their tiles are [`TileFluid::Unknown`], which
+    /// knows nothing either way and seeds nothing. With an empty supply no
+    /// candidate's ingredients are reachable, the preference finds no
+    /// survivors, and [`Self::sole_recipe_producing`] falls back to the whole
+    /// runnable set: exactly the answer it gave before this field existed.
+    ///
+    /// That is the safe direction and it is deliberate. A preference that
+    /// cannot see the ground refuses to choose; it does not choose wrongly.
+    supply: BTreeSet<String>,
 }
 
 impl ProductIndex {
@@ -686,6 +770,7 @@ impl ProductIndex {
             by_recipe,
             by_product,
             substances,
+            supply: BTreeSet::new(),
         }
     }
 
@@ -706,7 +791,26 @@ impl ProductIndex {
             .iter()
             .map(|entry| entry.key().clone())
             .collect();
-        ProductIndex::from_parts(recipes.iter(), items.iter().map(String::as_str))
+        let mut index = ProductIndex::from_parts(recipes.iter(), items.iter().map(String::as_str));
+        index.supply = ground_supply(world);
+        index
+    }
+
+    /// Replace the surface supply [`Self::from_world`] read off the ground.
+    ///
+    /// For a caller that knows what a surface supplies by other means -- a
+    /// fixture with no world, or a survey asking *"what could be made if this
+    /// were charted"*. Passing an empty set restores the pre-supply behaviour,
+    /// in which [`Self::sole_recipe_producing`] never prefers one candidate
+    /// over another.
+    #[must_use]
+    pub fn with_ground_supply<I, S>(mut self, names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.supply = names.into_iter().map(Into::into).collect();
+        self
     }
 
     /// Index the world a plan state overlays.
@@ -767,6 +871,127 @@ impl ProductIndex {
         self.by_recipe.is_empty()
     }
 
+    /// Everything this surface can make, starting from what it supplies with
+    /// no recipe and closing over the recipes this planner runs.
+    ///
+    /// A least fixpoint: seed with [`Self::supply`], then add the products of
+    /// every runnable non-recycling recipe all of whose ingredients are
+    /// already in. Recycling is excluded here for a second reason on top of
+    /// rule 1 -- the recipe graph is *cyclic* through it, and a closure over a
+    /// cycle admits everything reachable from anything.
+    ///
+    /// **Ingredients, not amounts.** This asks whether a thing can be obtained
+    /// at all, never whether enough of it can be; costing is the scheduler's
+    /// question and a different one.
+    fn reachable_here(&self, categories: &Categories) -> BTreeSet<String> {
+        let mut reachable = self.supply.clone();
+        if reachable.is_empty() {
+            return reachable;
+        }
+        let usable: Vec<&FactorioRecipe> = self
+            .by_recipe
+            .values()
+            .filter(|r| r.category != RECYCLING_CATEGORY && categories.admits(&r.category))
+            .collect();
+        loop {
+            let mut grew = false;
+            for recipe in &usable {
+                if !recipe
+                    .ingredients
+                    .iter()
+                    .flatten()
+                    .all(|i| reachable.contains(&i.name))
+                {
+                    continue;
+                }
+                for product in &recipe.products {
+                    grew |= reachable.insert(product.name.clone());
+                }
+            }
+            if !grew {
+                return reachable;
+            }
+        }
+    }
+
+    /// The candidates whose every ingredient this surface can obtain, or all
+    /// of them when that leaves none.
+    ///
+    /// # This is how "prefer the base-game recipe" is said without a mod list
+    ///
+    /// Sulfur has four producers here and three of them are Space Age, but
+    /// *"which mod shipped it"* is not a field on anything and asking for it
+    /// would be a mod-compatibility defect the day somebody installs a fifth
+    /// mod. What is a field is the ingredient list, and it separates them
+    /// cleanly on a Nauvis map:
+    ///
+    /// - `sulfur` wants petroleum gas and water -- oil is charted here and the
+    ///   ground yields water;
+    /// - `biosulfur` wants bioflux, which closes back to Gleba fruit that no
+    ///   recipe here makes and no tile here grows;
+    /// - `advanced-carbonic-asteroid-crushing` wants a carbonic asteroid
+    ///   chunk, which arrives from orbit or not at all.
+    ///
+    /// So the answer is not *"the base one"*, it is *"the one this planet can
+    /// feed"* -- which happens to be the base one on Nauvis, and would
+    /// correctly be `biosulfur` on Gleba. That is a stronger statement than
+    /// the one asked for, and it needed no mod names to make.
+    ///
+    /// # Why this is not a fifth [`crate::method::util::RecipeGate`] verdict
+    ///
+    /// It looks like one -- `biosulfur` is a recipe this planner should not
+    /// pick, and `RecipeGate` is where "should not pick" is decided. The gate
+    /// even has the neighbouring verdict: `Unobtainable`, *"disabled and no
+    /// technology unlocks it"*. `biosulfur` has one, so it comes back
+    /// `NeedsResearch` and stays live, and the planner will bill research for
+    /// a recipe whose ingredients nothing on this surface can make. That gap
+    /// is real and worth closing on its own terms.
+    ///
+    /// It could not have closed this one, and the call sites say why rather
+    /// than the bodies. **Every one of the eleven `recipe_gate` callers is
+    /// handed a recipe that has already been chosen** -- by
+    /// `method::util::recipe_for`, which keys on a name, or by
+    /// [`ProductIndex::recipe_producing`], which is this function's caller.
+    /// `method::fabricate::job_for` is the shape of all of them: it selects on
+    /// one line and gates on the next, twelve lines later. A verdict computed
+    /// for a recipe already selected cannot decide between candidates, because
+    /// the refusal that stopped these goals was raised before any of them was
+    /// selected -- and `sole_recipe_producing` has no `PlanState` to ask a gate
+    /// with, by design, so that an index is valid for a whole expansion.
+    ///
+    /// So the two belong at different times, not in one place. This chooses;
+    /// the gate judges what was chosen.
+    ///
+    /// # It is a preference and never a filter
+    ///
+    /// When nothing survives -- an unknown supply, or a product genuinely
+    /// out of reach -- the whole set comes back and the caller refuses as
+    /// `Ambiguous` exactly as before. Choosing nothing is not an improvement
+    /// on choosing wrongly, and this must not be able to turn an answerable
+    /// goal into an unanswerable one.
+    fn fed_from_the_ground<'a>(
+        &'a self,
+        candidates: &[&'a FactorioRecipe],
+        categories: &Categories,
+    ) -> Vec<&'a FactorioRecipe> {
+        let reachable = self.reachable_here(categories);
+        let fed: Vec<&FactorioRecipe> = candidates
+            .iter()
+            .copied()
+            .filter(|r| {
+                r.ingredients
+                    .iter()
+                    .flatten()
+                    .all(|i| reachable.contains(&i.name))
+            })
+            .collect();
+        if fed.is_empty() {
+            candidates.to_vec()
+        } else {
+            fed
+        }
+    }
+
     /// The one recipe in an admitted category that produces `product`, or a
     /// refusal naming which of the three walls was hit.
     ///
@@ -779,18 +1004,58 @@ impl ProductIndex {
         product: &str,
         categories: &Categories,
     ) -> Result<&FactorioRecipe, ProductRefusal> {
-        let all = self.recipes_producing(product);
-        if all.is_empty() {
+        let every = self.recipes_producing(product);
+        if every.is_empty() {
             return Err(ProductRefusal::NotProduced {
                 product: product.to_string(),
                 substance: self.substances.of(product),
             });
         }
+        // **Rule 1: a recycling recipe is not a way to make a thing.**
+        //
+        // `X-recycling` hands back a quarter of what X was built from, so it
+        // is evidence of how to *destroy* X, and reading it as production is
+        // circular -- you must already have the thing. That was written down
+        // in `inputs_this_surface_cannot_supply` a day before this, for the
+        // same reason and against the same category; it was never applied to
+        // choosing a recipe, because until `crafting_categories` crossed the
+        // bridge no machine declared `recycling` and `categories.admits` threw
+        // every one of these away one line below. The moment a `recycler`
+        // reported its category, 39 recycling recipes became candidates for
+        // `processing-unit` -- every candidate it had -- and a more accurate
+        // world produced a worse plan.
+        //
+        // A hard exclusion, not a preference. Falling back to the recycling
+        // recipes when nothing else survives would put the 39 straight back.
+        // The one thing kept is the diagnostic: if recycling is *all* there
+        // is, the whole set is restored so the refusal still names it rather
+        // than claiming nothing produces the item.
+        let productive: Vec<&FactorioRecipe> = every
+            .iter()
+            .copied()
+            .filter(|r| r.category != RECYCLING_CATEGORY)
+            .collect();
+        let all: Vec<&FactorioRecipe> = if productive.is_empty() {
+            every
+        } else {
+            productive
+        };
         let runnable: Vec<&FactorioRecipe> = all
             .iter()
             .copied()
             .filter(|r| categories.admits(&r.category))
             .collect();
+        // **Rule 2: prefer a recipe this surface can actually feed.**
+        //
+        // Only consulted when there is a choice, so it can never move a plan
+        // that had one answer -- it fires exactly where the old code refused.
+        // See `reachable_here` for what "can feed" means and for why an
+        // unknown supply leaves the set alone.
+        let runnable = if runnable.len() > 1 {
+            self.fed_from_the_ground(&runnable, categories)
+        } else {
+            runnable
+        };
         match runnable.len() {
             0 => Err(ProductRefusal::NoRunnableCategory {
                 product: product.to_string(),
@@ -1727,6 +1992,331 @@ mod unreachable_input_tests {
         assert!(
             !missing.iter().any(|m| m == "agri-pack"),
             "the pack must not be reported as its own missing input: {missing:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Rule 1 -- a recycling recipe is not a producer
+    // -----------------------------------------------------------------------
+
+    /// A recipe with any number of item ingredients.
+    fn rn(name: &str, category: &str, ingredients: &[&str], product: &str) -> FactorioRecipe {
+        let ing = ingredients
+            .iter()
+            .map(|i| format!(r#"{{"name":"{i}","ingredient_type":"item","amount":1}}"#))
+            .collect::<Vec<_>>()
+            .join(",");
+        recipe(&format!(
+            r#"{{"name":"{name}","valid":true,"enabled":true,"hidden":false,"energy":1,
+                 "order":"a","category":"{category}","group":"g","subgroup":"s",
+                 "ingredients":[{ing}],
+                 "products":[{{"name":"{product}","product_type":"item","amount":1,
+                               "independent_probability":1,
+                               "shared_probability":{{"min":0,"max":1}}}}]}}"#
+        ))
+    }
+
+    /// The `processing-unit` case, in miniature and with the same shape: the
+    /// only recipe that *makes* the thing is in a category this planner cannot
+    /// run, and three recycling recipes hand it back as scrap of something
+    /// else.
+    ///
+    /// Before rule 1 this refused as `Ambiguous` over the three recyclers --
+    /// on the live dump, over **39** of them, every candidate the product had.
+    /// The recycling category became admissible the day a `recycler` reported
+    /// its `crafting_categories`, so a *more accurate world* is what produced
+    /// the worse refusal.
+    #[test]
+    fn recycling_recipes_are_not_candidates_for_making_a_thing() {
+        let recipes = [
+            rn("chip", "crafting-with-fluid", &["plate"], "chip"),
+            rn("silo-recycling", "recycling", &["silo"], "chip"),
+            rn("armour-recycling", "recycling", &["armour"], "chip"),
+            rn("turret-recycling", "recycling", &["turret"], "chip"),
+        ];
+        let index = ProductIndex::from_parts(recipes.iter(), ["chip"]);
+        let err = index
+            .sole_recipe_producing("chip", &Categories::only(["crafting", "recycling"]))
+            .expect_err("crafting-with-fluid is not admitted, so this refuses");
+        let ProductRefusal::NoRunnableCategory { candidates, .. } = &err else {
+            panic!("expected the honest category refusal, got {err:?}");
+        };
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|c| c.recipe.as_str())
+                .collect::<Vec<_>>(),
+            vec!["chip"],
+            "only the recipe that makes a chip is a candidate"
+        );
+        // The control that says the recyclers were genuinely admissible and
+        // were dropped by rule 1 rather than by the category filter: they are
+        // in a category this `Categories` admits.
+        assert!(Categories::only(["crafting", "recycling"]).admits(RECYCLING_CATEGORY));
+    }
+
+    /// Rule 1 chooses, it does not merely improve the message: with one
+    /// runnable maker and two recyclers, the maker is the answer where before
+    /// there was none.
+    #[test]
+    fn a_maker_wins_over_its_own_recyclers() {
+        let recipes = [
+            rn("gear", "crafting", &["plate"], "gear"),
+            rn("belt-recycling", "recycling", &["belt"], "gear"),
+            rn("car-recycling", "recycling", &["car"], "gear"),
+        ];
+        let index = ProductIndex::from_parts(recipes.iter(), ["gear"]);
+        assert_eq!(
+            index
+                .sole_recipe_producing("gear", &Categories::only(["crafting", "recycling"]))
+                .map(|r| r.name.as_str()),
+            Ok("gear")
+        );
+    }
+
+    /// **The exclusion keeps the diagnostic.** When recycling is all there is,
+    /// the refusal still names it -- saying `NotProduced` would claim no
+    /// recipe in this world mentions the item, which is false and would send a
+    /// reader looking for a resource patch.
+    #[test]
+    fn a_product_only_recycling_makes_is_still_named_in_the_refusal() {
+        let recipes = [rn("hull-recycling", "recycling", &["hull"], "shard")];
+        let index = ProductIndex::from_parts(recipes.iter(), ["shard"]);
+        let err = index
+            .sole_recipe_producing("shard", &Categories::only(["crafting"]))
+            .expect_err("nothing runnable makes it");
+        let ProductRefusal::NoRunnableCategory { candidates, .. } = &err else {
+            panic!("expected NoRunnableCategory naming the recycler, got {err:?}");
+        };
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|c| c.recipe.as_str())
+                .collect::<Vec<_>>(),
+            vec!["hull-recycling"]
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Rule 2 -- prefer the recipe this surface can feed
+    // -----------------------------------------------------------------------
+
+    /// Sulfur's four producers, in miniature: one fed from charted ore, one
+    /// wanting a Gleba intermediate that closes back to fruit nothing here
+    /// grows, one wanting an asteroid chunk that arrives from orbit, and the
+    /// recycler rule 1 already dropped.
+    fn sulfur_shaped() -> Vec<FactorioRecipe> {
+        vec![
+            rn("sulfur", "chemistry", &["gas"], "sulfur"),
+            rn("gas", "chemistry", &["oil"], "gas"),
+            rn("biosulfur", "organic", &["bioflux"], "sulfur"),
+            rn("bioflux", "organic", &["yumako"], "bioflux"),
+            rn("crushing", "crushing", &["chunk"], "sulfur"),
+            rn("sulfur-recycling", "recycling", &["sulfur"], "sulfur"),
+        ]
+    }
+
+    fn cats() -> Categories {
+        Categories::only(["chemistry", "organic", "crushing", "recycling", "crafting"])
+    }
+
+    /// The whole point, stated as one assertion: `oil` is charted, `yumako`
+    /// and `chunk` are not, and that -- not which mod shipped which recipe --
+    /// is what picks `sulfur`.
+    #[test]
+    fn the_recipe_this_ground_can_feed_is_the_one_chosen() {
+        let recipes = sulfur_shaped();
+        let index = ProductIndex::from_parts(recipes.iter(), ["sulfur", "gas", "bioflux"])
+            .with_ground_supply(["oil"]);
+        assert_eq!(
+            index
+                .sole_recipe_producing("sulfur", &cats())
+                .map(|r| r.name.as_str()),
+            Ok("sulfur")
+        );
+    }
+
+    /// **Reachability is transitive, and one level would not have answered
+    /// this.** `biosulfur` asks for `bioflux`, which a runnable `organic`
+    /// recipe does produce -- so a shallow check sees no missing ingredient
+    /// and cannot tell it from `sulfur`. The closure follows `bioflux` down to
+    /// `yumako` and finds nothing that supplies it.
+    #[test]
+    fn a_shallow_check_could_not_have_separated_these() {
+        let recipes = sulfur_shaped();
+        let index = ProductIndex::from_parts(recipes.iter(), ["sulfur", "gas", "bioflux"])
+            .with_ground_supply(["oil"]);
+        assert!(
+            index
+                .recipes_producing("bioflux")
+                .iter()
+                .any(|r| cats().admits(&r.category)),
+            "the shallow check's premise: bioflux IS produced by a runnable recipe"
+        );
+        assert!(
+            !index.reachable_here(&cats()).contains("bioflux"),
+            "and the closure still finds it out of reach"
+        );
+    }
+
+    /// Charting the Gleba fruit instead flips the answer to `biosulfur`, with
+    /// nothing in the code changed. That is the evidence the rule is about the
+    /// ground rather than about a list of recipes somebody preferred -- and it
+    /// is why the doc says the rule would be right on Gleba.
+    #[test]
+    fn the_same_rule_picks_the_space_age_recipe_where_that_is_what_grows() {
+        let recipes = sulfur_shaped();
+        let index = ProductIndex::from_parts(recipes.iter(), ["sulfur", "gas", "bioflux"])
+            .with_ground_supply(["yumako"]);
+        assert_eq!(
+            index
+                .sole_recipe_producing("sulfur", &cats())
+                .map(|r| r.name.as_str()),
+            Ok("biosulfur")
+        );
+    }
+
+    /// **A preference, never a filter.** With nothing charted that feeds any
+    /// candidate, the set comes back whole and the caller refuses as before.
+    /// Choosing nothing is not an improvement on choosing wrongly.
+    #[test]
+    fn when_nothing_is_fed_the_refusal_is_the_old_one() {
+        let recipes = sulfur_shaped();
+        let index = ProductIndex::from_parts(recipes.iter(), ["sulfur", "gas", "bioflux"])
+            .with_ground_supply(["stone"]);
+        let err = index
+            .sole_recipe_producing("sulfur", &cats())
+            .expect_err("nothing distinguishes them");
+        let ProductRefusal::Ambiguous { candidates, .. } = &err else {
+            panic!("expected the unchanged ambiguity, got {err:?}");
+        };
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|c| c.recipe.as_str())
+                .collect::<Vec<_>>(),
+            vec!["biosulfur", "crushing", "sulfur"],
+            "all three runnable makers, and no recycler"
+        );
+    }
+
+    /// **This is the guard that says no archived baseline can move.** An index
+    /// with no supply -- which is every world whose dump predates tile fluid,
+    /// and every fixture -- prefers nothing, so the answer is the one the old
+    /// code gave.
+    #[test]
+    fn an_unknown_supply_prefers_nothing() {
+        let recipes = sulfur_shaped();
+        let index = ProductIndex::from_parts(recipes.iter(), ["sulfur", "gas", "bioflux"]);
+        assert!(
+            index.reachable_here(&cats()).is_empty(),
+            "no seed, no closure"
+        );
+        assert!(matches!(
+            index.sole_recipe_producing("sulfur", &cats()),
+            Err(ProductRefusal::Ambiguous { .. })
+        ));
+    }
+
+    // -----------------------------------------------------------------------
+    // The seed, read off a world
+    // -----------------------------------------------------------------------
+
+    /// `ground_supply` against a real surface: the charted resources and the
+    /// lake's own fluid, and **not** the resource prototypes the world
+    /// declares but has no patch of.
+    ///
+    /// The fluid comes from `TileFluid::named`, so this is also the test that
+    /// says an archived dump seeds no fluid: a tile whose sender never filled
+    /// the field is `TileFluid::Unknown`, `named()` is `None`, and the lake is
+    /// invisible to the seed.
+    #[test]
+    fn the_seed_is_what_is_charted_plus_what_the_ground_yields() {
+        let world = factorio_bot_core::test_utils::fixture_world();
+        let supply = ground_supply(&world);
+        assert!(
+            supply.contains("water"),
+            "the lake's own fluid seeds the closure: {supply:?}"
+        );
+        assert!(
+            supply.contains("iron-ore"),
+            "a charted patch seeds it: {supply:?}"
+        );
+        // **The discriminator, and the fixture can express it**: this world
+        // declares six `entity_type == "resource"` prototypes and spawns four
+        // patches. `uranium-ore` and `crude-oil` are the two it declares and
+        // does not have, so an implementation reading the prototype table
+        // instead of the charted map fails here.
+        //
+        // The assertion was `!supply.contains("calcite")` until a mutation
+        // sweep found it green: no fixture world declares calcite, so both the
+        // right answer and the wrong one satisfied it. It named a real
+        // resource from the live install and tested nothing.
+        let declared: Vec<String> = world
+            .globals
+            .entity_prototypes
+            .iter()
+            .filter(|p| p.value().entity_type == "resource")
+            .map(|p| p.key().clone())
+            .collect();
+        assert!(
+            declared.contains(&"uranium-ore".to_string()),
+            "the premise: this world DECLARES uranium-ore -- {declared:?}"
+        );
+        assert!(
+            !supply.contains("uranium-ore") && !supply.contains("crude-oil"),
+            "a resource declared but never charted must not seed the closure: \
+             {supply:?}"
+        );
+
+        let dry = factorio_bot_core::test_utils::fixture_world_without_water();
+        assert!(
+            !ground_supply(&dry).contains("water"),
+            "and no lake means no water in the seed"
+        );
+    }
+
+    /// **The fixpoint has to run more than once, and recipe-name order is
+    /// what decides whether one pass would have been enough.** The closure
+    /// walks `by_recipe`, which is sorted by name, so a chain whose steps
+    /// happen to be in dependency order closes on the first pass by luck.
+    /// Here `a-widget` sorts *before* the `z-part` it needs, so pass one
+    /// reaches only `z-part` and pass two is what reaches the widget.
+    ///
+    /// Found by a mutation sweep: replacing the loop with a single pass left
+    /// every other test green, because every other fixture's chain is in
+    /// alphabetical dependency order. The rule this repo keeps relearning --
+    /// a fixture that cannot express the case says nothing about it.
+    #[test]
+    fn the_closure_iterates_until_nothing_new_is_reached() {
+        let recipes = [
+            rn("a-widget", "crafting", &["z-part"], "a-widget"),
+            rn("z-part", "crafting", &["ore"], "z-part"),
+        ];
+        let index = ProductIndex::from_parts(recipes.iter(), ["a-widget", "z-part"])
+            .with_ground_supply(["ore"]);
+        let reachable = index.reachable_here(&Categories::only(["crafting"]));
+        assert!(
+            reachable.contains("a-widget"),
+            "two links away from the ground, and named out of order: {reachable:?}"
+        );
+    }
+
+    /// A recycling recipe is excluded from the closure too, not only from the
+    /// candidate list: it is the cycle in the recipe graph, and a fixpoint run
+    /// over a cycle admits whatever is reachable from anything.
+    #[test]
+    fn the_closure_does_not_walk_through_a_recycler() {
+        let recipes = [
+            rn("armour-recycling", "recycling", &["armour"], "plate"),
+            rn("armour", "crafting", &["plate"], "armour"),
+        ];
+        let index = ProductIndex::from_parts(recipes.iter(), ["plate", "armour"])
+            .with_ground_supply(["armour"]);
+        let reachable = index.reachable_here(&Categories::only(["crafting", "recycling"]));
+        assert!(
+            !reachable.contains("plate"),
+            "recycling armour must not count as a way to obtain a plate: {reachable:?}"
         );
     }
 }

@@ -190,6 +190,39 @@ across profiles):
 | `producing:logistic-science-pack:6` | `map.json` | 441 / 47,478 |
 | `gathered:crude-oil` | `map-31337-explored.json` | 2,117 / 314,345 |
 
+## The defence survey predicted this exactly, and the exactness is the point
+
+`docs/superpowers/notes/2026-09-06-defence-survey.md` (peer session, `43bf66be`) derived the coefficients from prototypes with **no
+measurement at all** — `time_factor = 4e-6`/s, `pollution_factor = 9e-7`/PU —
+concluded *"pollution is not the near-term threat, walking is"*, and
+recommended precisely this work. Against the hostile arm's own window
+(112,200 ticks = 1,870 s, 61.0 PU produced):
+
+| term | predicted from prototypes | measured live | ratio |
+|---|---:|---:|---:|
+| `by_time` | 0.007480 | 0.007480 | 1.00 |
+| `by_pollution` | 0.00005493 | 0.00005493 | 1.00 |
+
+**This is NOT two independent estimates agreeing, and must not be read as
+one.** Factorio's `get_evolution_factor_by_time` *is* `time_factor x seconds`
+and `_by_pollution` *is* `pollution_factor x pollution_produced`, so the survey
+and the run are the same formula evaluated twice. An exact match was the only
+possible outcome once both were correct — this repo's rule that a match is more
+suspicious than a 3x, and here the suspicion resolves to "they are not
+independent" rather than to a defect.
+
+What the agreement **does** buy is worth having, and it is end-to-end plumbing
+validation rather than model validation: it says the reader returns the game's
+real accumulators untouched, and that the `produced` statistics the mod records
+are the same PU the game charges evolution for. A transport bug in either would
+have shown up here as a ratio that was not 1.00.
+
+What the run adds beyond the arithmetic is the part arithmetic could not give:
+the **peaceful-mode answer**, the **per-emitter breakdown**, and the
+observation that `by_pollution` *stops accruing entirely* seven minutes in
+because the burners run dry — a fact about how our runs behave, not about
+Factorio's constants.
+
 ## Where the records are
 
 Both run records were copied out of their throwaway instances and live at

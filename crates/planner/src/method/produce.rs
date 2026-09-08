@@ -727,11 +727,31 @@ pub fn plan_cells(
 ) -> Result<Vec<Cell>, PlannerError> {
     let mut trial = state.fork();
     let mut out = Vec::new();
+    // # The anchor WALKS, and that is what decides how big a plan can be
+    //
+    // [`plan_cell`] re-derives its anchor as the resource tile nearest `from`
+    // and then rings out to [`CELL_SEARCH_RADIUS`]. Holding `from` at the
+    // bot's position for every cell therefore searches the *same* 25x25
+    // window `count` times, so a patch fifty tiles across is planned as if it
+    // were twelve: measured on the seed-31337 t=0 dump,
+    // `producing:iron-plate:195` refused `NoRoomForCell` at cell 13 while the
+    // iron patch was nowhere near full, and raising `MAX_CELLS` from 12 to 64
+    // moved that ceiling by exactly nothing.
+    //
+    // So each cell is sited from its predecessor. The first still comes from
+    // the caller's `from`, which is what keeps the one-cell plans every
+    // ladder rung makes bit-identical; each next one anchors on the drill
+    // just placed, and the search walks the patch instead of re-searching one
+    // window. A side effect worth naming because `method::sustain` depends on
+    // it: successive cells come out CONTIGUOUS rather than scattered, which
+    // is the arrangement a fuel belt can serve.
+    let mut anchor = from.clone();
     for _ in 0..count {
-        let cell = plan_cell(&trial, from, spec, want)?;
+        let cell = plan_cell(&trial, &anchor, spec, want)?;
         for entity in parts(&trial, &cell) {
             trial.create_entity(entity);
         }
+        anchor = cell.drill.clone();
         out.push(cell);
     }
     Ok(out)

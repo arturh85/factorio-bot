@@ -6884,6 +6884,67 @@ function mark_bot_inventory_dirty(id)
 	if bot ~= nil then bot.inventory_dirty = true end
 end
 
+-- How often a bot reconsiders whether to hold its fire button, and how close a
+-- hostile unit has to be for the answer to be yes.
+--
+-- The period is a compromise measured rather than guessed: a small biter
+-- crosses about 1.8 tiles in 30 ticks, so a bot re-checks roughly six times
+-- over the twelve tiles an approaching biter has to cover, and the check is
+-- one `find_enemy_units` per living bot -- the API's own "more efficient than
+-- find_entities" path. CLAUDE.md's per-bot tick cost (~16.3 us) is what makes
+-- 30 rather than 1 the right number here.
+DEFEND_PERIOD = 30
+DEFEND_RADIUS = 12
+
+-- Hold the fire button while, and only while, a hostile UNIT is near.
+--
+-- **A character does not auto-fire.** Measured 2026-09-08 on seed 31337: a
+-- single small-biter killed nine character bots in a row, each of them holding
+-- the pistol and ten `firearm-magazine` the game's own freeplay gave it at
+-- spawn, and the biter's health never moved off 15 of 15. `shooting_state` is
+-- the fire button and nothing was pressing it. Under
+-- `defines.shooting.shooting_enemies` the same encounter ends in ~106 ticks
+-- with the bot at **full health**, and a bot whose ammo was emptied still won
+-- it bare-handed for 14 hp -- so the mechanism is the ORDER, not the gun.
+--
+-- **The gate is the whole design, and it is why this is not simply set once at
+-- spawn.** `shooting_enemies` picks its own target and a structure is a
+-- target: a bot holding the button 10.7 tiles from a `biter-spawner` emptied
+-- all ten magazines into it, failed to kill it (355 -> 170 hp, then
+-- regenerating), and woke the nest. On the oil walk past 32 enemy structures a
+-- permanently-held order converts a survivable pass-by into a war. So the
+-- order is raised only when a hostile **unit** is already inside
+-- `DEFEND_RADIUS` and lowered again the moment none is, and `find_enemy_units`
+-- is the right call precisely because it answers with `type = "unit"` only --
+-- worms and spawners cannot open this gate.
+--
+-- **What it does not do**, stated because the boundary matters: it cannot
+-- answer a worm. `small-worm-turret` has range 25 against the pistol's 15 and
+-- the submachine gun's 18, and a live worm read 200 of 200 hp, unscratched,
+-- through a whole window of an ordered bot with full ammo. Not being sent
+-- inside a worm's range is a planner question (`entity_graph.threats` has no
+-- reader in `crates/planner`), not a weapons one. This covers the other half:
+-- roaming aggro, which no routing can avoid.
+--
+-- Returns whether the order is now raised, so a caller can count it.
+function defend_character_bot(entity)
+	if entity == nil or entity.valid == false then return false end
+	local surface = entity.surface
+	if surface == nil or surface.find_enemy_units == nil then return false end
+	local near = surface.find_enemy_units(entity.position, DEFEND_RADIUS, entity.force)
+	local threatened = near ~= nil and #near > 0
+	local wanted = threatened and defines.shooting.shooting_enemies or defines.shooting.not_shooting
+	local current = entity.shooting_state
+	-- Write only on a change. `shooting_state` is a setter that rebuilds the
+	-- character's input state, and a respawned character comes back with the
+	-- order cleared (a new entity, `sh0`), which this re-raises on its next
+	-- sweep without anything having to notice the death.
+	if current == nil or current.state ~= wanted then
+		entity.shooting_state = { state = wanted, position = entity.position }
+	end
+	return threatened
+end
+
 -- The per-tick substitute for the four `on_player_*` events a character bot
 -- never raises: position, main inventory, crafted items (queue deltas) and a
 -- respawn after death. Mining completion is handled in the miner itself
@@ -6906,6 +6967,7 @@ function poll_character_bots(tick)
 			end
 		else
 			poll_character_bot(tick, id, bot_handle(id))
+			if tick % DEFEND_PERIOD == 0 then defend_character_bot(bot.entity) end
 		end
 	end
 	emulate_research_triggers(tick)

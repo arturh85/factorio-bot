@@ -268,23 +268,35 @@ fn declaring_what_a_machine_crafts_names_the_machine_for_its_category() {
     );
 }
 
-/// The ambiguous categories are real vanilla ones, and they are refused rather
-/// than resolved -- so `advanced-crafting` does not silently become
-/// `assembling-machine-1`.
+/// The ambiguous categories are real vanilla ones, and since 2026-09-08 they
+/// are **answered by the cost preference rather than refused** -- not silently:
+/// `assembling-machine-1` is named because it is the cheapest of the three to
+/// obtain on this world, priced transitively from its recipes down to the
+/// charted ground.
+///
+/// The refusal is still what a tie gets, and that half lives in
+/// `method::machine`'s own tests, where a fixture can make two machines cost
+/// the same. On a live capture they never do.
 #[test]
-fn a_category_several_vanilla_machines_declare_is_still_refused() {
+fn a_category_several_vanilla_machines_declare_names_the_cheapest() {
     let declared = live_state_with(&BOTS, true, |_| {});
     let table = MachineTable::from_state(&declared);
-    let said = table
-        .machine_for("advanced-crafting")
-        .unwrap_err()
-        .to_string();
-    assert!(said.contains("assembling-machine-1"), "{said}");
-    assert!(said.contains("assembling-machine-3"), "{said}");
+    assert_eq!(
+        table.machine_for("advanced-crafting"),
+        Ok(Machine::Entity("assembling-machine-1".into()))
+    );
     assert!(
-        !table
+        table
             .runnable_categories()
             .contains(&"advanced-crafting".to_string())
+    );
+    // The control: this is a choice among three, not a category only one
+    // machine declares.
+    assert_eq!(
+        table
+            .machine_for("crafting-with-fluid")
+            .expect("two machines declare it and one is cheaper"),
+        Machine::Entity("assembling-machine-2".into())
     );
 }
 

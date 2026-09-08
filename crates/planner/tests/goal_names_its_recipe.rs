@@ -232,11 +232,18 @@ fn plan_error(state: PlanState, goal: Goal) -> String {
 /// goal that does not use it gets the message it got before the qualifier
 /// existed -- the ambiguity, naming all four runnable recipes.
 ///
-/// Paired with a non-accidental assertion from the same computation: the four
-/// names are not a list this test wrote down, they are exactly the recipes the
-/// index reports as producing petroleum-gas in a runnable category, and the
-/// fifth producer (`empty-petroleum-gas-barrel`, `crafting-with-fluid`, which
-/// is ambiguous between three assembling machines) is absent for that reason.
+/// Paired with a non-accidental assertion from the same computation: the names
+/// are not a list this test wrote down, they are exactly the recipes the index
+/// reports as producing petroleum-gas in a runnable category.
+///
+/// **There were four until 2026-09-08 and there are five now.**
+/// `empty-petroleum-gas-barrel` is `crafting-with-fluid`, which two assembling
+/// machines declare, and the machine table refused an ambiguous category
+/// outright. It now names the cheaper machine
+/// (`MachineTable::machine_for`), so the category is runnable and its recipe
+/// joins the candidates. Widening the candidate set is the honest consequence:
+/// the ambiguity this test is about is unchanged, and the fifth name is a
+/// recipe the planner really could run.
 #[test]
 fn a_goal_that_names_no_recipe_gets_the_message_it_always_got() {
     let said = plan_error(
@@ -259,13 +266,15 @@ fn a_goal_that_names_no_recipe_gets_the_message_it_always_got() {
         "basic-oil-processing",
         "coal-liquefaction",
         "light-oil-cracking",
+        // Runnable since the machine table learned to choose between the two
+        // assembling machines that declare `crafting-with-fluid`.
+        "empty-petroleum-gas-barrel",
     ] {
         assert!(said.contains(runnable), "{runnable} missing from {said}");
     }
     assert!(
-        !said.contains("empty-petroleum-gas-barrel"),
-        "the fifth producer runs in a category no single machine owns, so it is \
-         not one of the choices: {said}"
+        said.contains("5 recipes this planner can run"),
+        "the count is the set's own, not a list written down here: {said}"
     );
 }
 

@@ -46,48 +46,72 @@ CARGO_MOD = [
 PY_POLLUTION = [sys.executable, "tools/test_run_analysis_pollution.py"]
 
 
-# (name, file, find, replace, command, the test that must go red)
+# (name, file, [(find, replace), ...], command, the test that must go red)
+#
+# A LIST of substitutions, not one, because some mutations need a helper
+# function at module level as well as an attribute on a field, and splitting
+# them into two entries would leave each half compiling into nonsense.
 MUTATIONS = [
     (
         "the decoder stops accepting `by_pollution`",
         SAMPLES,
-        "    /// `get_evolution_factor_by_pollution(surface)`.\n    pub by_pollution: f64,",
-        "    /// `get_evolution_factor_by_pollution(surface)`.\n"
-        '    #[serde(rename = "by_pollution_NOPE")]\n    pub by_pollution: f64,',
+        [(
+            "    /// `get_evolution_factor_by_pollution(surface)`.\n    pub by_pollution: f64,",
+            "    /// `get_evolution_factor_by_pollution(surface)`.\n"
+            '    #[serde(rename = "by_pollution_NOPE")]\n    pub by_pollution: f64,',
+        )],
         CARGO_CORE_LIB,
         "reads_pollution_and_the_four_evolution_terms",
     ),
     # NOT "remove `#[serde(default)]`": serde's derive already yields `None`
-    # for a missing `Option<T>` field, so that edit is a no-op and the sweep
-    # reported it green. The real mutation is the one the field guards
-    # against -- a missing reading DEFAULTING to a measured zero.
+    # for a missing `Option<T>` field, so that edit is a no-op and the first
+    # sweep reported it green. The real mutation is the one the field guards
+    # against -- a missing reading DEFAULTING to a measured zero. It needs a
+    # module-level helper as well as the attribute, which is why a mutation
+    # is a LIST of substitutions.
     (
         "a missing `total` defaults to zero, so absent cannot be told from calm",
         SAMPLES,
-        '    #[serde(default, skip_serializing_if = "Option::is_none")]\n    pub total: Option<f64>,',
-        'fn mutant_zero() -> Option<f64> { Some(0.0) }\n'
-        '    #[serde(default = "mutant_zero", skip_serializing_if = "Option::is_none")]\n'
-        '    pub total: Option<f64>,',
+        [
+            (
+                "/// One surface's pollution, and the evolution of the enemies on it.",
+                "fn mutant_zero() -> Option<f64> {\n    Some(0.0)\n}\n\n"
+                "/// One surface's pollution, and the evolution of the enemies on it.",
+            ),
+            (
+                '    #[serde(default, skip_serializing_if = "Option::is_none")]\n'
+                "    pub total: Option<f64>,",
+                '    #[serde(default = "mutant_zero", skip_serializing_if = "Option::is_none")]\n'
+                "    pub total: Option<f64>,",
+            ),
+        ],
         CARGO_CORE_LIB,
         "a_surface_we_failed_to_read_is_not_a_surface_with_no_pollution",
     ),
     (
         "an archived schema-2 line decodes as an empty measurement rather than as absent",
         SAMPLES,
-        "        #[serde(default)]\n        pollution: Option<PollutionSample>,",
-        'fn mutant_empty() -> Option<PollutionSample> {\n'
-        '            Some(PollutionSample { surfaces: BTreeMap::new() })\n'
-        '        }\n'
-        '        #[serde(default = "mutant_empty")]\n'
-        '        pollution: Option<PollutionSample>,',
+        [
+            (
+                "/// One line of `samples.jsonl`.",
+                "fn mutant_empty() -> Option<PollutionSample> {\n"
+                "    Some(PollutionSample {\n        surfaces: BTreeMap::new(),\n    })\n}\n\n"
+                "/// One line of `samples.jsonl`.",
+            ),
+            (
+                "        #[serde(default)]\n        pollution: Option<PollutionSample>,",
+                '        #[serde(default = "mutant_empty")]\n'
+                "        pollution: Option<PollutionSample>,",
+            ),
+        ],
         CARGO_CORE_LIB,
         "reads_a_force_sample_with_no_research_queued",
     ),
     (
         "the mod stops putting evolution on the wire",
         CONTROL,
-        "\t\t\tif ok then entry.evolution = value end",
-        "\t\t\tif false then entry.evolution = value end",
+        [("\t\t\tif ok then entry.evolution = value end",
+          "\t\t\tif false then entry.evolution = value end")],
         CARGO_MOD,
         "pollution_and_the_four_evolution_terms_reach_the_force_sample",
     ),
@@ -98,56 +122,54 @@ MUTATIONS = [
     (
         "the surface-name fallback goes away, so a nameless surface is not keyed at all",
         CONTROL,
-        "\t\tif name == nil then name = tostring(key) end",
-        "\t\tif false then name = tostring(key) end",
+        [("\t\tif name == nil then name = tostring(key) end",
+          "\t\tif false then name = tostring(key) end")],
         CARGO_MOD,
         "a_surface_with_no_name_is_keyed_by_its_index_rather_than_raising",
     ),
     (
         "the pollution read stops being isolated, so one bad read costs the whole force line",
         CONTROL,
-        "\tlocal pollution_ok, pollution = pcall(pollution_totals)",
-        "\tlocal pollution_ok, pollution = true, pollution_totals()",
+        [("\tlocal pollution_ok, pollution = pcall(pollution_totals)",
+          "\tlocal pollution_ok, pollution = true, pollution_totals()")],
         CARGO_MOD,
-        "a_game_without_the_pollution_api_still_writes_the_rest_of_the_force_sample",
+        "a_pollution_reader_that_raises_does_not_cost_the_force_sample",
     ),
     (
         "the mod stops reading pollution at spawn",
         CONTROL,
-        "\t\t\tif ok then entry.at_spawn = value end",
-        "\t\t\tif false then entry.at_spawn = value end",
+        [("\t\t\tif ok then entry.at_spawn = value end",
+          "\t\t\tif false then entry.at_spawn = value end")],
         CARGO_MOD,
         "pollution_and_the_four_evolution_terms_reach_the_force_sample",
     ),
     (
         "`not-captured` collapses into `ok`, so a run that never looked reads as calm",
         ANALYSIS,
-        '        out["status"] = "not-captured"',
-        '        out["status"] = "ok"',
+        [('        out["status"] = "not-captured"', '        out["status"] = "ok"')],
         PY_POLLUTION,
         "test_a_run_that_never_looked_is_not_a_calm_run",
     ),
     (
         "the verdict stops naming the dominant cause",
         ANALYSIS,
-        'cause = "pollution" if d_poll > d_time else "time"',
-        'cause = "time"',
+        [('cause = "pollution" if d_poll > d_time else "time"', 'cause = "time"')],
         PY_POLLUTION,
         "test_the_verdict_names_the_dominant_cause_not_just_the_rise",
     ),
     (
         "a missing reading is rendered as 0 instead of `?`",
         ANALYSIS,
-        '        return "?" if v is None else format(v, fmt)',
-        '        return format(0.0, fmt) if v is None else format(v, fmt)',
+        [('        return "?" if v is None else format(v, fmt)',
+          '        return format(0.0, fmt) if v is None else format(v, fmt)')],
         PY_POLLUTION,
         "test_a_surface_we_failed_to_read_renders_as_unknown_not_zero",
     ),
     (
         "the emitter ranking is reversed, so the top emitter is no longer the top one",
         ANALYSIS,
-        "                    (produced or {}).items(), key=lambda kv: -kv[1]",
-        "                    (produced or {}).items(), key=lambda kv: kv[1]",
+        [("                    (produced or {}).items(), key=lambda kv: -kv[1]",
+          "                    (produced or {}).items(), key=lambda kv: kv[1]")],
         PY_POLLUTION,
         "test_emitters_are_ranked_so_the_cause_is_nameable",
     ),
@@ -175,18 +197,24 @@ def main() -> int:
 
     findings = []
     with tempfile.TemporaryDirectory() as backup_dir:
-        for name, rel, find, repl, cmd, expect in MUTATIONS:
+        for name, rel, subs, cmd, expect in MUTATIONS:
             path = os.path.join(ROOT, rel)
             backup = os.path.join(backup_dir, rel.replace("/", "_"))
             shutil.copyfile(path, backup)
             try:
                 src = open(path).read()
-                hits = src.count(find)
-                if hits != 1:
-                    findings.append(f"{name}: substitution matched {hits} times, not once")
-                    print(f"  !! {name}: matched {hits} times -- SKIPPED")
+                bad = [
+                    (find, src.count(find)) for find, _ in subs if src.count(find) != 1
+                ]
+                if bad:
+                    findings.append(
+                        f"{name}: substitution matched {bad[0][1]} times, not once"
+                    )
+                    print(f"  !! {name}: matched {bad[0][1]} times -- SKIPPED")
                     continue
-                open(path, "w").write(src.replace(find, repl, 1))
+                for find, repl in subs:
+                    src = src.replace(find, repl, 1)
+                open(path, "w").write(src)
                 code, out = run(cmd)
                 if code == 0:
                     findings.append(f"{name}: the suite stayed GREEN -- `{expect}` does not check it")

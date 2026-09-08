@@ -586,3 +586,36 @@ fn a_surface_with_no_name_is_keyed_by_its_index_rather_than_raising() {
         "and it must be keyed by the index `pairs` handed us: {force}"
     );
 }
+
+/// **A raise inside the pollution reader must not cost the force line.**
+///
+/// Every individual read is `pcall`ed, so this needs a raise the inner guards
+/// cannot catch: a surface whose `name` is NaN, which makes `surfaces[name]`
+/// raise "table index is NaN". The outer `pcall` around `pollution_totals` is
+/// the only thing between that and a run with no research, production or
+/// power sample at all -- and no symptom but a missing line.
+///
+/// This is not hypothetical. The first version of this code raised on a
+/// surface with no `name`, was caught by `sample_force`'s own pcall, and the
+/// only evidence was that the force sample was not there.
+#[test]
+fn a_pollution_reader_that_raises_does_not_cost_the_force_sample() {
+    let lua = mod_with_bots(1);
+    lua.load(STUB_POLLUTION)
+        .set_name("pollution stub")
+        .exec()
+        .expect("pollution stub");
+    lua.load("_surface.name = 0/0")
+        .set_name("nan-named surface")
+        .exec()
+        .expect("nan-named surface");
+    session(&lua, "'run-1'");
+    let force = samples(&lua)
+        .into_iter()
+        .find(|line| line.contains("\"kind\":\"force\""))
+        .expect("the force sample must survive a raise inside the pollution reader");
+    assert!(
+        force.contains("\"production\"") && force.contains("\"power\""),
+        "production and power must still be there: {force}"
+    );
+}

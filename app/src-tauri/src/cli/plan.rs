@@ -374,7 +374,13 @@ fn plan_from_dump(
   // reading finished schedules, so the CLI has to make the same choice a run
   // makes or the offline loop stops predicting it.
   let (net, scheduled) = plan_best(&goals, &state, &registry_for(&bots), chain_actor, &bots)
-    .map_err(|err| miette!("the goal did not expand: {err}"))?;
+    // "did not PLAN", not "did not expand". `plan_best` covers expansion
+    // *and* scheduling, and the two fail for different reasons -- a
+    // `ChainOwnerInfeasible` is raised in `schedule.rs`, never in `expand`.
+    // The old wording sent a session into `expand()` looking for a
+    // scheduling failure, the same way `occupant_of` once reported `Terrain`
+    // for a refusal that was `Refused`.
+    .map_err(|err| miette!("the goal did not plan: {err}"))?;
 
   let listing = if steps {
     step_lines(&scheduled, &bots)

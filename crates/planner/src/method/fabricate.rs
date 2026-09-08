@@ -72,7 +72,8 @@ use crate::ids::{ItemId, Ticks};
 use crate::method::have::{Demand, demand};
 use crate::method::machine::{Machine, MachineTable};
 use crate::method::pipe::{
-    self, PipeEnd, buffer_prototype, pipe_prototype, place_step, plain_entity, route_between,
+    self, FluidPort, PipeEnd, buffer_prototype, pipe_prototype, place_step, plain_entity,
+    route_between,
 };
 use crate::method::util::{
     CRAFTING_CATEGORY, RecipeGate, SMELTING_CATEGORY, free_area_near, free_area_near_where,
@@ -686,6 +687,17 @@ fn plan_fluid_rig(
             // Whichever is placed second fails its own `AreaFree`, and the
             // refusal names a tile rather than the two things that wanted it.
             taken.push(machine_area.clone());
+            // **And the machine's OUTPUT PORT tiles, which this very run is
+            // about to stand pipes on.** They were computed above and handed
+            // to the inbound route as ground to keep off; the buffer search
+            // needs the same fact for the same reason, and until 2026-09-08
+            // it never got it. A tank at `[145.5, -362.5]` swallowed the
+            // refinery's own output connection at `[145.5, -361.5]`, the
+            // outbound run pushed that tile in unconditionally (see
+            // `route_between`), and the plan died at schedule time on the
+            // *tank's* `AreaFree` -- `storage-tank fits at [145.5, -362.5]
+            // -- occupied by pipe`.
+            taken.extend(other_port_tiles.iter().cloned());
             // **A site is only clear if a run can actually reach it.**
             //
             // Siting and routing were two searches: `free_area_near_where`
@@ -728,9 +740,48 @@ fn plan_fluid_rig(
                 )
                 .is_ok()
             };
+            // **A buffer's own PORT TILES are ground it needs, and they are
+            // not inside its footprint.**
+            //
+            // A `storage-tank`'s pipe connections sit at its corners, one
+            // tile diagonally *out*, so a tank cleared of the machine by its
+            // footprint alone still reaches under it: on
+            // `gathered:crude-oil` + `produced:petroleum-gas:45:
+            // basic-oil-processing`, seed 31337, the ring search took the
+            // first ring whose 2.59-wide box clears a 4.4-wide `oil-refinery`
+            // -- and **every candidate on that ring** has a connection tile
+            // on the refinery's own bottom row (`[141.5, -360.5]` ...
+            // `[145.5, -360.5]` for a refinery at `[143.5, -358.5]`).
+            //
+            // `route_between` then pushes both ends' port tiles into the run
+            // *unconditionally, outside the search* -- its own doc says so --
+            // and checks them with `is_area_free`, which cannot see a machine
+            // that is not emitted yet. So the run laid a pipe on the
+            // refinery's footprint, nothing ordered the two placements, and
+            // the plan died at SCHEDULE time on the refinery's own
+            // `AreaFree`: `oil-refinery fits at [143.5, -358.5] ... does not
+            // hold there`, which named a tile and blamed a chain owner for a
+            // fact about the ground.
+            //
+            // This is the mirror of `pipe::port_is_placeable`, which asks
+            // whether the *machine's* port survives the *source*. Nobody
+            // asked the reverse until an oil field with a charted shoreline
+            // put a refinery four tiles from its buffer.
+            let ports_clear = |candidate: &Position| {
+                let Ok(ports) = pipe::fluid_ports(state, &tank, candidate, None) else {
+                    return false;
+                };
+                ports.iter().flat_map(FluidPort::tiles).all(|tile| {
+                    state
+                        .collision_area(&pipe, &tile)
+                        .is_some_and(|area| !taken.iter().any(|t| overlaps(&area, t)))
+                })
+            };
             let clear = |candidate: &Position| {
                 state.collision_area(&tank, candidate).is_some_and(|area| {
-                    !taken.iter().any(|t| overlaps(&area, t)) && routes_to(candidate, area.clone())
+                    !taken.iter().any(|t| overlaps(&area, t))
+                        && ports_clear(candidate)
+                        && routes_to(candidate, area.clone())
                 })
             };
             let Some(tank_site) = free_area_near_where(state, &site, &tank, clear) else {
@@ -1384,6 +1435,71 @@ mod fabricate_fluid_tests {
             tanks[0],
             refineries[0]
         );
+    }
+
+    /// **Nothing this rig places stands on anything else this rig places.**
+    ///
+    /// The footprint-versus-footprint check above is not enough, because a
+    /// fluid connection is a tile *outside* the entity that owns it and
+    /// [`crate::method::pipe::route_between`] pushes both ends' port tiles
+    /// into the run unconditionally, outside its own search. A buffer cleared
+    /// of the machine by footprint alone can still have a corner connection
+    /// under it -- a `storage-tank`'s connections sit one tile diagonally out
+    /// -- and the pipe that lands there is emitted with **no ordering edge**
+    /// to the machine's own `Place`.
+    ///
+    /// So the collision is invisible at expansion and surfaces at SCHEDULE
+    /// time as the machine's own `Condition::AreaFree`: on seed 31337,
+    /// `gathered:crude-oil` + `produced:petroleum-gas:45:basic-oil-processing`
+    /// died with `oil-refinery fits at [143.5, -358.5] ... does not hold
+    /// there`, blaming a chain owner for a fact about the ground.
+    ///
+    /// # THIS TEST DOES NOT FALSIFY THE GUARD, AND SAYS SO
+    ///
+    /// Checked by mutation on 2026-09-08: comment out the
+    /// `taken.extend(other_port_tiles ...)` above and this test still passes.
+    /// The fixture's rig is sited where the corner connection happens to miss,
+    /// so it pins the *invariant* and would catch a gross regression, and it
+    /// is **not** evidence that the guard is exercised. The thing that
+    /// falsifies is the offline plan against a dump with a charted oil field:
+    ///
+    /// ```text
+    /// factorio-bot plan --world workspace/scripts/map-31337-water-and-oil.json \
+    ///     --goal gathered:crude-oil \
+    ///     --goal produced:petroleum-gas:45:basic-oil-processing --bots 1
+    /// ```
+    ///
+    /// Without either guard that refuses; with both it plans. A fixture that
+    /// reproduces the tight ring is the missing piece of work.
+    #[test]
+    fn no_pipe_of_the_rig_stands_on_the_machine_or_its_buffer() {
+        let state = state_with_tank();
+        let steps = expand(state.fork(), &goal()).expect("the goal expands");
+        let refineries = placed(&steps, "oil-refinery");
+        let tanks = placed(&steps, "storage-tank");
+        let pipes = placed(&steps, "pipe");
+        // Non-accidental: an expansion that placed no pipes, or no machine,
+        // would pass a bare "nothing overlaps".
+        assert_eq!(refineries.len(), 1, "one refinery is sited, in {steps:?}");
+        assert_eq!(tanks.len(), 1, "one buffer is sited, in {steps:?}");
+        assert!(!pipes.is_empty(), "the rig lays pipes, in {steps:?}");
+        for (name, at) in [
+            ("oil-refinery", &refineries[0]),
+            ("storage-tank", &tanks[0]),
+        ] {
+            let footprint = state
+                .collision_area(name, at)
+                .expect("the fixture has a collision box for it");
+            for pipe in &pipes {
+                let area = state
+                    .collision_area("pipe", pipe)
+                    .expect("the fixture has a collision box for a pipe");
+                assert!(
+                    !overlaps(&area, &footprint),
+                    "a pipe at {pipe} stands on the {name} at {at}"
+                );
+            }
+        }
     }
 
     /// **The rig is one bot's errand, and nothing in it converges.**

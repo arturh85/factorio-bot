@@ -469,6 +469,37 @@ struct Rejected {
     owned_chain: Option<ChainId>,
 }
 
+/// The failing condition, said the way a reader can act on it.
+///
+/// A bare `Condition::Display` says what did not hold and never what is in
+/// the way -- `oil-refinery fits at [143.5, -358.5] does not hold there`
+/// names a tile and stops, which is the same "a bare `false` is a bad
+/// refusal" this crate already fixed once for
+/// [`PlanState::placement_occupant`] (see its doc, and the four runs
+/// `BuildBlock` spent on a refusal that blamed a scheduling decision for a
+/// fact about the ground).
+///
+/// Only [`Condition::AreaFree`] is enriched, because it is the only
+/// condition whose failure has a *nameable* cause the state can be asked
+/// for. Everything else is returned verbatim.
+fn describe_failure(condition: &crate::action::Condition, state: &PlanState) -> String {
+    use crate::action::Condition;
+    use factorio_bot_core::num_traits::FromPrimitive;
+    match condition {
+        Condition::AreaFree {
+            pos,
+            entity,
+            direction,
+        } => match factorio_bot_core::types::Direction::from_u8(*direction)
+            .and_then(|facing| state.placement_occupant(entity, pos, facing))
+        {
+            Some(occupant) => format!("{condition} -- {occupant}"),
+            None => condition.to_string(),
+        },
+        _ => condition.to_string(),
+    }
+}
+
 /// Assign every action in `net` to one of `bots`, travel-aware and greedy.
 ///
 /// A pure function of its three arguments. Ties break on `(ActionId, BotId)`
@@ -853,7 +884,7 @@ pub fn schedule(
                                 .is_none_or(|r| candidate.key() < r.candidate.key())
                             {
                                 best_rejected = Some(Rejected {
-                                    condition: condition.to_string(),
+                                    condition: describe_failure(condition, &trial),
                                     // `owner` names this action's chain owner
                                     // when it has one; pair it with `chain`
                                     // (guaranteed `Some` whenever `owner` is)

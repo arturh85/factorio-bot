@@ -37,6 +37,20 @@ describe('PowerBand', () => {
         const w = mount(PowerBand, {props: {scale: {from: run.lo + 175, to: run.hi}, clock, cursor: run.lo, samples: run.samples}});
         expect(w.text()).toContain('no generator until 4:06');
     });
+    it('scales to CONSUMPTION too, so a deficit is drawn rather than clipped off the top', () => {
+        // Consumption above generation is the interesting case, and it was the
+        // one the scale could not show: sized on `generated_kw` alone, the
+        // consumed line left the band entirely.
+        const starved = run.samples.map((s) => s.kind !== 'force' ? s : ({
+            ...s, power: {...s.power, generated_kw: 900, consumed_kw: 1500}
+        }));
+        const w = mount(PowerBand, {props: {scale, clock, cursor: run.lo, samples: starved}});
+        const cons = w.findAll('path').find((p) => p.attributes('stroke-dasharray') === '4 3')!;
+        const ys = [...cons.attributes('d')!.matchAll(/,(-?[\d.]+)/g)].map((m) => Number(m[1]));
+        expect(ys.length).toBeGreaterThan(0);
+        expect(Math.min(...ys)).toBeGreaterThanOrEqual(0);
+        expect(w.text()).toContain('1500 kW');
+    });
     it('says so when there are no force samples', () => {
         const w = mount(PowerBand, {props: {scale, clock, cursor: run.lo, samples: []}});
         expect(w.text()).toContain('no power samples');

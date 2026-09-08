@@ -13,7 +13,20 @@ const H = 70;
 const x = (t: number) => tickX(props.scale, t);
 
 const force = computed(() => props.samples.filter((s): s is ForceSample => s.kind === 'force').sort((a, b) => a.tick - b.tick));
-const max = computed(() => Math.max(1000, Math.ceil(Math.max(0, ...force.value.map((f) => f.power.generated_kw)) / 500) * 500));
+/**
+ * The kW ceiling, off BOTH series.
+ *
+ * Sized on `generated_kw` alone, a network drawing more than it makes -- the
+ * one case this band exists to show -- ran off the top of the drawing with
+ * nothing to say it had. Power coverage is not power capacity, and an
+ * under-supplied network reads as dead rather than slow, so the deficit has
+ * to be visible.
+ */
+const max = computed(() => Math.max(1000, Math.ceil(Math.max(
+    0,
+    ...force.value.map((f) => f.power.generated_kw),
+    ...force.value.map((f) => f.power.consumed_kw)
+) / 500) * 500));
 const y = (kw: number) => H - 8 - (kw / max.value) * (H - 22);
 const gen = computed(() => force.value.map((f, k) => `${k ? 'L' : 'M'}${x(f.tick)},${y(f.power.generated_kw)}`).join(' '));
 const cons = computed(() => force.value.map((f, k) => `${k ? 'L' : 'M'}${x(f.tick)},${y(f.power.consumed_kw)}`).join(' '));

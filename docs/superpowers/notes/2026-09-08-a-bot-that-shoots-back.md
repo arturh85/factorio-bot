@@ -174,20 +174,66 @@ that reply. **Do not arm a bot this way.** Equipping from one's own main
 inventory is a different operation from inserting into a chest, and the mod has
 no verb for it.
 
-## What to build, and the one decision that is not mine
+## What landed, and what it was verified against
 
-The defensive primitive is **one write of `shooting_state` per character**, from
-the mod. No new `ActionKind`, no planner vocabulary, no items, no research, no
-crafting — the eight kinds stay eight. But it must be **gated, and re-applied
-after every respawn**:
+`defend_character_bot` in `mods/BotBridge/control.lua`, raised from
+`poll_character_bots` every `DEFEND_PERIOD = 30` ticks: hold the fire button
+while, and only while, `surface.find_enemy_units` reports a hostile unit within
+`DEFEND_RADIUS = 12` of the character, and lower it again when none is. No new
+`ActionKind`, no planner vocabulary, no items, no research. Six stub tests in
+`crates/core/tests/botbridge_returns_fire.rs`.
 
-- gate on a hostile **unit** (`type="unit"`, force `enemy`) within a small
-  radius of the character, cleared back to `not_shooting` when none is — so a
-  bot walking past a nest does not open fire on it;
-- re-apply on respawn, because the order dies with the character.
+**Verified live on a fresh run with no manual intervention of any kind** (run 6,
+after the change, `readlink` confirming the instance loaded this worktree's
+mod):
 
-The 60-tick sweep the mod already runs for research triggers is the natural
-place, and the whole thing is a few lines.
+```
+gate closed, no enemies      sh0 sh0 sh0 sh0
+two biters spawned           kills=2, bot 250/250 hp throughout, gate back to sh0
+```
+
+And against the exact failure the gate exists to prevent — a `biter-spawner`
+placed 10 tiles away, **inside** `DEFEND_RADIUS`:
+
+```
+t=40782  C sh0 ammo9 | SPAWNER hp352      <- the nest does NOT open the gate
+t=41293  C sh1 ammo9 | SPAWNER hp352 | B  <- a biter it emitted DOES
+t=41519  C sh0 ammo9 | SPAWNER hp352      <- and it closes again
+```
+
+The nest sat at 350–352 hp across the whole window against the ungated
+version's 355 → 170, and three magazines went into the biters rather than ten
+into the building. That `find_enemy_units` answers with `type = "unit"` only is
+the entire reason it is the call being made.
+
+**A falsification sweep of eight mutations caught seven and found one real
+defect in my own tests.** `DEFEND_RADIUS = 0` — which disables return fire
+completely — left every test green, because the radius assertion compared the
+value passed to `find_enemy_units` against `DEFEND_RADIUS` itself and both
+sides moved together. Pinned to 12 with its bound stated. The other seven
+(never raise the order, hold it permanently, search from the origin, a second
+copy of the radius, assume the enemy force is called `enemy`, rewrite every
+sweep, order a dead character about) each failed the test that names them.
+
+Baselines unmoved on the final HEAD, same binary: `researched:automation`
+176 / 21,784 · `producing:automation-science-pack:6` 316 / 22,457 ·
+`producing:logistic-science-pack:6` 441 / 47,478 (`map.json`) ·
+`gathered:crude-oil` 2,117 / 325,138 (`map-31337-explored.json`).
+`cargo test --workspace --no-fail-fast`: 3,079 passed, 0 failed, cargo's own
+exit 0 — the +6 over master's 3,073 is this file's tests.
+
+## What to build next, and the one decision that is not mine
+
+This covers **roaming aggro, and only that** — which is the half that no
+routing can avoid. Bot 2 of the oil run died to a small-biter **166 tiles from
+anything static**; there is no route around that, and the standing order
+answers it for zero actions and zero items. The other half — three
+`small-worm-turret` at 20.4, 20.7 and 20.7 tiles from a rock bot 1 was sent to
+chop, all three already in the dump the planner read — is a **target-selection
+gap, not a combat gap**, and no t=0 personal weapon can close it: the worm
+reaches 25 and the pistol 15. `entity_graph.threats` is populated and has no
+reader in `crates/planner`. **That is the cheaper next move and it is not a
+weapon.**
 
 **The open question, which needs the owner and not an overnight decision:**
 `shooting_enemies` chooses its own target, so even a gated order may still pick
@@ -198,6 +244,17 @@ a 60-tick sweep shoots at where the biter was, and tightening the sweep costs
 tick rate on every bot. That trade is a policy question, and the owner reserved
 policy.
 
-`mods/BotBridge/control.lua` was held by the death-recovery branch while this
-was measured, so nothing was landed in it. The patch above is small and should
-be sequenced after that branch merges.
+The live nest test above bounds that worry rather than dismissing it: the
+spawner stayed at 350-352 hp while its own biters were being killed 10 tiles
+away, so in practice the gated order shot the units and not the building. That
+is one nest in one window, not a proof.
+
+Also open, and named because it is a real cost: **ammo is finite.** Ten
+magazines is a hundred rounds, and the nest window above spent three magazines
+in ~2,000 ticks. A bot that fights repeatedly runs dry and falls back to fists,
+which still won a one-biter fight here for 14 hp but will not win many.
+`firearm-magazine` is craftable at t=0 (4 iron plates, 34 planned actions for
+ten) if resupply turns out to matter.
+
+Landed on `mods/BotBridge/control.lua` after the death-recovery branch merged
+(`1eeeb3ac`), rebased onto it rather than developed alongside.

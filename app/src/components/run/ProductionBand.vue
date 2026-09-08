@@ -9,7 +9,7 @@
  */
 import {computed} from 'vue';
 import {Event, Sample} from '@/api/types';
-import {attributionIntervals, Verdict} from '@/lib/runAttribution';
+import {Attribution, attributionIntervals, Verdict} from '@/lib/runAttribution';
 import {markAt, rateSeries} from '@/lib/runRates';
 import {AXIS_WIDTH, formatGameTime, markTicks, TickScale, tickX} from '@/lib/tickScale';
 import {itemColor} from '@/lib/itemColor';
@@ -44,7 +44,10 @@ interface Row {
     points: {tick: number; perMinute: number}[];
     max: number;
     peak: {tick: number; perMinute: number} | null;
-    verdicts: {from: number; to: number; verdict: Verdict}[];
+    // `source` rides with the verdict because an INFERRED verdict and a
+    // MEASURED one are different claims and must not look alike: the
+    // inference fallback has no machine counters behind it at all.
+    verdicts: {from: number; to: number; verdict: Verdict; source: Attribution['source']}[];
     marks: {tick: number; label: string}[];
     empty: boolean;
 }
@@ -56,7 +59,7 @@ const rows = computed<Row[]>(() => props.items.map((item, i) => {
     const peak = points.reduce<Row['peak']>((m, p) => (m === null || p.perMinute > m.perMinute ? p : m), null);
     const verdicts = attributionIntervals(props.samples, props.events, props.lo, props.hi, item)
         .filter((v) => v.verdict !== 'no output')
-        .map(({from, to, verdict}) => ({from, to, verdict}));
+        .map(({from, to, verdict, source}) => ({from, to, verdict, source}));
     const marks = markTicks(props.scale).map((tick) => {
         const minute = (tick - props.lo) / 3600;
         const m = markAt(props.samples, props.lo, props.hi, minute, Math.max(0, minute - 5), item);
@@ -87,6 +90,10 @@ function verdictFill(v: Verdict): string {
     return 'var(--color-status-neutral)';
 }
 function verdictOpacity(v: Verdict): number { return v === 'factory' ? 0.18 : v === 'roster-fed' || v === 'hand-made' ? 1 : 0.25; }
+/** The word a reader sees -- an inference says so, in the word itself. */
+function verdictWord(v: {verdict: Verdict; source: Attribution['source']}): string {
+    return v.source === 'inference' ? `${v.verdict} (inferred)` : v.verdict;
+}
 </script>
 
 <template>
@@ -106,9 +113,11 @@ function verdictOpacity(v: Verdict): number { return v === 'factory' ? 0.18 : v 
     <text v-if="!hasForceSamples" :x="AXIS_WIDTH / 2" :y="height / 2 + 4" font-size="10" text-anchor="middle" fill="var(--color-ink-muted)">no production samples in this run</text>
     <template v-else>
     <template v-for="(row, i) in rows" :key="row.item">
-      <rect v-for="v in row.verdicts" :key="`${row.item}-${v.from}`" class="verdict" :data-verdict="v.verdict"
+      <rect v-for="v in row.verdicts" :key="`${row.item}-${v.from}`" class="verdict" :data-verdict="v.verdict" :data-source="v.source"
             :x="x(v.from)" :y="i * ROW" :width="x(v.to) - x(v.from)" :height="ROW"
-            :fill="verdictFill(v.verdict)" :opacity="verdictOpacity(v.verdict)"/>
+            :fill="verdictFill(v.verdict)" :opacity="verdictOpacity(v.verdict)"
+            :stroke="v.source === 'inference' ? 'var(--color-ink-muted)' : undefined"
+            :stroke-dasharray="v.source === 'inference' ? '3 2' : undefined"/>
       <line :x1="0" :y1="y0(i)" :x2="AXIS_WIDTH" :y2="y0(i)" stroke="var(--color-plot-grid)" stroke-width="1"/>
       <path :data-testid="`area-${row.item}`" :d="areaPath(row, i)" :fill="row.color" opacity="0.18"/>
       <path :d="linePath(row, i)" fill="none" :stroke="row.color" stroke-width="1.8" stroke-linejoin="round"/>
@@ -126,7 +135,7 @@ function verdictOpacity(v: Verdict): number { return v === 'factory' ? 0.18 : v 
           <text :x="x(m.tick) + 4" :y="i * ROW + 24" font-size="10" font-weight="500" fill="var(--color-verdict-roster)">{{ m.label }}</text>
         </template>
         <text v-for="v in row.verdicts" :key="`w-${row.item}-${v.from}`" :x="x(v.from) + 4" :y="(i + 1) * ROW - 2" font-size="9"
-              :fill="v.verdict === 'roster-fed' ? 'var(--color-verdict-roster)' : 'var(--color-ink-muted)'">{{ v.verdict }}</text>
+              :fill="v.verdict === 'roster-fed' ? 'var(--color-verdict-roster)' : 'var(--color-ink-muted)'">{{ verdictWord(v) }}</text>
       </template>
     </template>
     </template>

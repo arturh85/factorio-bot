@@ -28,6 +28,28 @@ describe('ProductionBand', () => {
         expect(verdicts.has('factory')).toBe(false);
         expect(w.text()).toContain('roster-fed');
     });
+    it('draws an INFERRED verdict differently from a measured one, and says so in the word', () => {
+        // Two mounts, because this fixture's machine counters cover every
+        // minute it produced anything: on the run as archived every verdict is
+        // counter-sourced, and the inference fallback is only reachable by
+        // taking the `machines` samples away -- which is exactly the shape of
+        // a run archived before those counters existed.
+        const measured = mountBand(['iron-plate']).findAll('rect.verdict');
+        expect(measured.length).toBeGreaterThan(0);
+        expect(measured.every((r) => r.attributes('data-source') === 'counters')).toBe(true);
+        expect(measured.some((r) => r.attributes('data-verdict') === 'roster-fed')).toBe(true);
+        expect(measured[0].attributes('stroke-dasharray')).toBeUndefined();
+
+        const preCounters = run.samples.filter((s) => s.kind !== 'machines');
+        const w = mount(ProductionBand, {props: {scale, cursor: run.lo, samples: preCounters, events: run.events, items: ['iron-plate'], lo: run.lo, hi: run.hi}});
+        const inferred = w.findAll('rect.verdict');
+        expect(inferred.length).toBeGreaterThan(0);
+        expect(inferred.every((r) => r.attributes('data-source') === 'inference')).toBe(true);
+        expect(inferred[0].attributes('stroke')).toBe('var(--color-ink-muted)');
+        expect(inferred[0].attributes('stroke-dasharray')).toBe('3 2');
+        expect(w.text()).toContain('unclear (inferred)');
+        expect(w.text()).toContain('roster-fed (inferred)');
+    });
     it('labels the 5:00 mark with the tool\'s rate for that item', () => {
         const w = mountBand(['iron-plate']);
         // rate_window at 5:00 for iron-plate is 8.0 /min in rates.json

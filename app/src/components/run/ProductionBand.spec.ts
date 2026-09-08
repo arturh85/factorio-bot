@@ -1,0 +1,41 @@
+// @vitest-environment jsdom
+import {describe, expect, it} from 'vitest';
+import {mount} from '@vue/test-utils';
+import {loadFixtureRun} from '@/lib/fixtureRun';
+import ProductionBand from './ProductionBand.vue';
+
+const run = loadFixtureRun();
+const scale = {from: run.lo, to: run.hi};
+
+function mountBand(items = ['iron-plate', 'copper-plate']) {
+    return mount(ProductionBand, {props: {scale, cursor: run.lo, samples: run.samples, events: run.events, items, lo: run.lo, hi: run.hi}});
+}
+
+describe('ProductionBand', () => {
+    it('draws one small multiple per item with an area and a line', () => {
+        const w = mountBand();
+        expect(w.find('[data-testid="area-iron-plate"]').exists()).toBe(true);
+        expect(w.find('[data-testid="area-copper-plate"]').exists()).toBe(true);
+        expect(w.get('svg').attributes('viewBox')).toBe('0 0 1000 100');
+    });
+    it('paints the verdict per minute behind the curve, and every rect carries its verdict', () => {
+        const w = mountBand(['iron-plate']);
+        const rects = w.findAll('rect.verdict');
+        expect(rects.length).toBeGreaterThan(0);
+        // On this run every producing minute for iron is roster-fed.
+        const verdicts = new Set(rects.map((r) => r.attributes('data-verdict')));
+        expect(verdicts.has('roster-fed')).toBe(true);
+        expect(verdicts.has('factory')).toBe(false);
+        expect(w.text()).toContain('roster-fed');
+    });
+    it('labels the 5:00 mark with the tool\'s rate for that item', () => {
+        const w = mountBand(['iron-plate']);
+        // rate_window at 5:00 for iron-plate is 8.0 /min in rates.json
+        expect(w.text()).toContain('8/min at 5:00');
+    });
+    it('says "no output" for an item nothing made, not 0/min everywhere', () => {
+        const w = mountBand(['logistic-science-pack']);
+        expect(w.findAll('rect.verdict')).toHaveLength(0);
+        expect(w.text()).toContain('no output in this run');
+    });
+});

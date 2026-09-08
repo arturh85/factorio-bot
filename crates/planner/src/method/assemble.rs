@@ -2552,17 +2552,19 @@ fn cell_steps(
                 count: amount,
             }];
             //
-            // **Only for a science pack**, and that limit was bought by a
-            // measured regression rather than chosen: with the ledger written
-            // for every product, `producing:transport-belt:6` went from a
+            // **Only when spending the output cannot pay for the cell**, which
+            // is asked of the recipe graph rather than of a name. The limit was
+            // bought by a measured regression: with the ledger written for
+            // every product, `producing:transport-belt:6` went from a
             // 307-action plan to `4 transport-belt in the buffer at
             // [33.5, -12.5] does not hold there` -- `Withdraw` spent the belts
-            // the cell had yet to make on building the cell. No machine,
-            // chest, inserter, belt or pole has a pack in its bill, so the
-            // loop is impossible for a pack by construction. See
-            // `crate::method::cellstock::is_science_pack`.
+            // the cell had yet to make on building the cell, because
+            // `method::sustain` belts its fuel. A `transport-belt` is in its
+            // own cell's bill and a `steel-plate` is not, and
+            // `crate::method::cellstock::output_is_spendable` is what tells
+            // them apart.
             if chest_role == Role::SupplyChest
-                && crate::method::cellstock::is_science_pack(&ctx.state, &spec.item)
+                && crate::method::cellstock::output_is_spendable(&ctx.state, spec)
                 && let Some(sink) = cell.at(Role::OutputChest)
             {
                 eff.push(Effect::BufferGain {
@@ -3125,11 +3127,7 @@ mod tests {
     fn world() -> FactorioSurface {
         // `world_with_technologies` rather than `fixture_world`: the force's
         // technology table is what says an item is a science pack (see
-        // `crate::method::cellstock::is_science_pack`), and a world with no
-        // technologies at all says of every item that it is not one. That
-        // default is the safe direction -- no ledger entry, and the plan a
-        // cell built before this rung would have produced -- but it also
-        // makes a fixture with no force unable to exercise the ledger.
+        // `crate::method::have::Researched`), and several tests here read it.
         let world = crate::test_world::world_with_technologies();
         let green: factorio_bot_core::types::FactorioRecipe =
             factorio_bot_core::serde_json::from_str(
@@ -4342,26 +4340,141 @@ mod tests {
         );
     }
 
-    /// **The ledger is written for a pack and for nothing else**, and the
-    /// asymmetry is the whole of what keeps a cell from paying for itself out
-    /// of its own future output.
+    /// **The ledger is written when spending the output cannot pay for the
+    /// cell**, and that is asked of the recipe graph rather than of a name.
     ///
     /// `transport-belt` is the case that found it: a belt cell's charge
-    /// promised belts, `Withdraw` spent them on the belt run that fuels the
-    /// cell, and `producing:transport-belt:6` -- 307 actions on `master` --
-    /// refused with `4 transport-belt in the buffer at [33.5, -12.5] does not
-    /// hold there`. A pack cannot close that loop because nothing a cell is
-    /// built from has a pack in its bill.
+    /// promised belts, `Withdraw` spent them on the belt run
+    /// [`crate::method::sustain`] lays to fuel the cell, and
+    /// `producing:transport-belt:6` -- 307 actions on `master` -- refused with
+    /// `4 transport-belt in the buffer at [33.5, -12.5] does not hold there`.
+    ///
+    /// The three cases in one test, because the point is the *contrast*: a
+    /// pack is in nothing a cell is built from, a belt is a seed of the
+    /// closure itself, and an iron plate is reached through one of the cell's
+    /// own buildings rather than being one.
     #[test]
-    fn only_a_science_pack_gets_a_ledger_entry_on_the_output_chest() {
+    fn the_ledger_is_withheld_from_an_item_in_its_own_cells_bill() {
+        use crate::method::cellstock::{cell_output_loop, output_is_spendable};
         let state = bare(&[BotId(1)]);
+        let pack = assembly_spec(&state, PACK).expect("a cell for the pack");
         assert!(
-            crate::method::cellstock::is_science_pack(&state, PACK),
-            "a technology in the fixture eats {PACK}"
+            output_is_spendable(&state, &pack),
+            "nothing a cell is built or charged with has {PACK} in its bill"
+        );
+
+        let mut belt = pack.clone();
+        belt.item = "transport-belt".into();
+        let looped = cell_output_loop(&state, &belt).expect("sustain belts the cell's fuel");
+        assert_eq!(
+            looped.path,
+            vec!["transport-belt".to_string()],
+            "a belt IS a seed, so the loop is one step long"
         );
         assert!(
-            !crate::method::cellstock::is_science_pack(&state, "transport-belt"),
-            "no lab eats a transport-belt, so its cell writes no ledger entry"
+            looped
+                .to_string()
+                .contains("transport-belt is in its own cell's construction bill"),
+            "the refusal names the loop: {looped}"
+        );
+
+        // **The case the name check refused for no reason.** Steel is not a
+        // science pack, and it is also in nothing a cell is built or charged
+        // with -- its own charge is iron plates, and no building here is made
+        // of steel.
+        let steel = assembly_spec(&state, "steel-plate").expect("a furnace cell for steel");
+        assert!(
+            output_is_spendable(&state, &steel),
+            "steel is in no cell's construction bill: {:?}",
+            cell_output_loop(&state, &steel)
+        );
+
+        let mut cable = pack.clone();
+        cable.item = "copper-cable".into();
+        let deep = cell_output_loop(&state, &cable).expect("the cell's pole is made of cable");
+        assert!(
+            deep.path.len() >= 2 && deep.path.last() == Some(&"copper-cable".to_string()),
+            "the path runs from a thing the cell is made of down to the cable: {deep:?}"
+        );
+
+        // And the charge is a loop by a shorter route: `iron-plate` is not a
+        // building, it is what the feed chest is filled with, and drawing the
+        // output to fill the cell's own chest is the same hazard.
+        let mut plate = pack.clone();
+        plate.item = "iron-plate".into();
+        assert!(cell_output_loop(&state, &plate).is_some());
+    }
+
+    /// **What the ground supplies is a base case**, exactly as it is in
+    /// [`crate::method::machine::obtain_costs`] -- and without it the check
+    /// follows recipes the plan would never run.
+    ///
+    /// Measured on the real seed-31337 dump before this cut existed:
+    ///
+    /// ```text
+    /// steel-plate is in its own cell's construction bill
+    ///   (coal -> water -> water-barrel -> barrel -> steel-plate)
+    /// ```
+    ///
+    /// Every edge real, and not one of them a route a bot would take: coal is
+    /// mined, water comes out of the ground, and the barrelling pair is the
+    /// cycle `crate::products` documents at length. A fixture cannot carry
+    /// Space Age's barrel recipes, so the *shape* is reproduced instead -- one
+    /// recipe making a charted resource out of the cell's own product.
+    #[test]
+    fn the_walk_stops_at_what_the_ground_supplies() {
+        use crate::method::cellstock::{cell_output_loop, output_is_spendable};
+        fn recipe(json: &str) -> factorio_bot_core::types::FactorioRecipe {
+            factorio_bot_core::serde_json::from_str(json).expect("the recipe parses")
+        }
+        /// Coal out of steel: absurd as a recipe, and exactly the edge the
+        /// barrel path opened. `coal` is a seed of the closure because
+        /// `method::sustain` fuels a cell with it.
+        const COAL_FROM_STEEL: &str = r#"{
+              "name": "coal-from-steel", "valid": true, "enabled": true,
+              "category": "crafting",
+              "ingredients": [ { "name": "steel-plate", "ingredient_type": "item", "amount": 1 } ],
+              "products": [ { "name": "coal", "product_type": "item", "amount": 1, "probability": 1.0 } ],
+              "hidden": false, "energy": 1.0, "order": "z",
+              "group": "intermediate-products", "subgroup": "raw-material"
+            }"#;
+        /// The same edge onto a seed the ground does *not* supply. An iron
+        /// chest is crafted, so this one genuinely closes the loop.
+        const CHEST_FROM_STEEL: &str = r#"{
+              "name": "iron-chest-from-steel", "valid": true, "enabled": true,
+              "category": "crafting",
+              "ingredients": [ { "name": "steel-plate", "ingredient_type": "item", "amount": 1 } ],
+              "products": [ { "name": "iron-chest", "product_type": "item", "amount": 1, "probability": 1.0 } ],
+              "hidden": false, "energy": 1.0, "order": "z",
+              "group": "logistics", "subgroup": "storage"
+            }"#;
+        let with = |json: &str| {
+            let w = world();
+            w.update_recipes(vec![recipe(json)])
+                .expect("a fixture accepts a recipe");
+            PlanState::from_world(Arc::new(w), &[BotId(1)])
+        };
+
+        let mined = with(COAL_FROM_STEEL);
+        assert!(
+            mined.resource_names().iter().any(|n| n == "coal"),
+            "the fixture charts coal, which is what makes it a base case"
+        );
+        let steel = assembly_spec(&mined, "steel-plate").expect("a furnace cell for steel");
+        assert!(
+            output_is_spendable(&mined, &steel),
+            "coal is mined here, not synthesised out of steel: {:?}",
+            cell_output_loop(&mined, &steel)
+        );
+
+        let crafted = with(CHEST_FROM_STEEL);
+        let steel = assembly_spec(&crafted, "steel-plate").expect("a furnace cell for steel");
+        let looped = cell_output_loop(&crafted, &steel)
+            .expect("nothing supplies an iron chest, so the walk expands it");
+        assert_eq!(
+            looped.path,
+            vec!["iron-chest".to_string(), "steel-plate".to_string()],
+            "and the path names the building that closed the loop"
         );
     }
 

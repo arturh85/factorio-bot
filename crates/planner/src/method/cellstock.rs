@@ -91,7 +91,7 @@ use crate::action::{Action, ActionKind, Actor, Condition, Effect, InventorySlot}
 use crate::error::PlannerError;
 use crate::goal::Goal;
 use crate::ids::Ticks;
-use crate::method::assemble::{AssemblySpec, CHEST, assembly_spec, cell_output_chests};
+use crate::method::assemble::{AssemblySpec, CHEST, INSERTER, assembly_spec, cell_output_chests};
 use crate::method::have::demand;
 use crate::method::{ExpansionCtx, Method, Step};
 use crate::state::PlanState;
@@ -100,46 +100,186 @@ use factorio_bot_core::types::Position;
 /// Ticks one chest-to-hand transfer costs, as everywhere else in the crate.
 const TRANSFER_TICKS: Ticks = 10;
 
-/// Is `item` something a lab eats -- named by *some* technology's
-/// `research_unit_ingredients`?
+/// Can a cell's output be spent, or would spending it pay for the cell?
 ///
-/// # This is a scope limit bought by a measured regression, not a preference
+/// # The question the `is_science_pack` allowlist was standing in for
 ///
-/// Without it this method claims **any** `Goal::Have` for an item a cell can
-/// make, and `producing:transport-belt:6` -- a plan of 307 actions on
-/// `master` -- became a refusal:
+/// Until 2026-09-09 this was a name check: a cell's output was spendable only
+/// if some technology ate it. That was bought by a measured regression --
+/// `producing:transport-belt:6`, a 307-action plan, became
 ///
 /// ```text
 /// bot 1 owns chain ChainId(22) because its bill was sized against it, but
 /// 4 transport-belt in the buffer at [33.5, -12.5] does not hold there
 /// ```
 ///
-/// The belts a belt cell *will* make were drawn to pay for building the belt
-/// cell. The chest's ledger correctly refused -- loudly, at schedule time,
-/// which is the right failure -- but the plan was gone.
+/// because [`crate::method::sustain`] belts the cell's fuel, so the belts a
+/// belt cell had yet to make were drawn to pay for building it. A science pack
+/// cannot close that loop -- no machine, chest, inserter, belt or pole has one
+/// in its bill -- so the allowlist closed the hole by construction.
 ///
-/// A science pack cannot close that loop: **no machine, chest, inserter, belt
-/// or pole has a science pack in its bill**, so a pack drawn from a cell can
-/// never be spent on building one. The class is derived from the world's own
-/// technology table rather than named, so a mod that adds a pack gets the
-/// same treatment and a mod that renames one does not break this.
+/// **It closed it for the wrong reason.** `steel-plate` is not a science pack
+/// and is also not in any cell's bill, so the name check refuses it for no
+/// reason at all; and an allowlist that grows an item at a time is a list of
+/// things somebody remembered. This asks the question directly: is
+/// `spec.item` in the **transitive bill of this cell's own construction**?
 ///
-/// It is a *bound on what has been shown to work*, not a claim that nothing
-/// else should ever be drawn from a cell. Widening it means answering "is this
-/// goal inside the cell's own construction", which this rung does not.
+/// # What is seeded, and what is deliberately not
 ///
-/// **The same question gates the ledger itself**, in
-/// `crate::method::assemble`: gating only this method left the regression in
-/// place, because `Withdraw` reads the very same buffer and claimed the belts
-/// first. A ledger entry nothing may safely spend should not be written.
-pub(crate) fn is_science_pack(state: &PlanState, item: &str) -> bool {
-    state.technology_names().into_iter().any(|name| {
-        state.technology(&name).is_some_and(|tech| {
-            tech.research_unit_ingredients
-                .iter()
-                .any(|ingredient| ingredient.name == item)
-        })
-    })
+/// The seed is what the plan spends on one cell: the buildings
+/// ([`bill`](super::assemble)), the power plant
+/// [`crate::method::power::ensure_powered`] may raise for it, the belt run
+/// [`crate::method::sustain`] may lay to fuel it, and the charge that goes
+/// into its chests. A charge is in the seed on purpose -- drawing the output
+/// to fill the cell's own supply chest is the same loop by a shorter route.
+///
+/// **The subject is not seeded.** `crate::products::reachable_here` once
+/// seeded its closure with the product it was choosing for, which for `water`
+/// eliminated every genuine producer; the same shape here would report every
+/// cell as looping. `spec.item` enters the closure only if a recipe reachable
+/// from a seed genuinely lists it.
+///
+/// Recycling is excluded, for the reason [`crate::products`] and
+/// [`crate::method::machine::obtain_costs`] exclude it: `X-recycling` produces
+/// `X` from `X`, so a walk that followed it would find every item in its own
+/// bill. Cycles are otherwise safe because the walk carries a visited set.
+///
+/// # The direction it errs in
+///
+/// The closure is the **union** over every non-recycling recipe producing a
+/// seed, not the cheapest one `obtain_costs` would pick. That over-approximates
+/// -- it can name an item the plan would never actually route through -- and
+/// over-approximating means *refusing to write a ledger entry*, which is
+/// exactly the behaviour every non-pack item had before this existed. The
+/// other direction is the regression above.
+pub(crate) fn cell_output_loop(state: &PlanState, spec: &AssemblySpec) -> Option<CellLoop> {
+    let mut seed: Vec<String> = vec![
+        spec.machine.to_string(),
+        INSERTER.to_string(),
+        CHEST.to_string(),
+        // The plant `method::power` raises when a cell needs kilowatts, and
+        // the pole that reaches it.
+        crate::method::power::POLE.to_string(),
+        crate::method::power::PUMP.to_string(),
+        crate::method::power::PIPE.to_string(),
+        crate::method::power::BOILER.to_string(),
+        crate::method::power::ENGINE.to_string(),
+    ];
+    // What `method::sustain` lays to keep a burner cell fed. Named here rather
+    // than imported because they are function-local constants over there; the
+    // test `a_belt_cell_loops_on_the_fuel_run` is what holds the two lists
+    // together, by failing if a belt cell ever becomes drawable.
+    seed.extend(
+        ["transport-belt", "burner-inserter", "coal"]
+            .iter()
+            .map(|s| (*s).to_string()),
+    );
+    // And the charge. `supplied` is what the supply chest holds; `feed_charges`
+    // is what the feed chests hold, empty for a one-machine cell.
+    seed.push(spec.supplied.0.clone());
+    seed.extend(spec.feed_charges().into_iter().map(|(item, _)| item));
+
+    let index = crate::products::ProductIndex::from_state(state);
+    // `from` records, for each item reached, the seed-side item whose recipe
+    // listed it -- enough to reconstruct the path back out for the message.
+    let mut from: std::collections::BTreeMap<String, String> = Default::default();
+    let mut seen: std::collections::BTreeSet<String> = Default::default();
+    let mut queue: std::collections::VecDeque<String> = Default::default();
+    for name in seed {
+        if seen.insert(name.clone()) {
+            queue.push_back(name);
+        }
+    }
+    while let Some(item) = queue.pop_front() {
+        if item == spec.item {
+            let mut path = vec![item.clone()];
+            let mut cursor = item;
+            while let Some(parent) = from.get(&cursor) {
+                path.push(parent.clone());
+                cursor = parent.clone();
+            }
+            path.reverse();
+            return Some(CellLoop {
+                item: spec.item.clone(),
+                path,
+            });
+        }
+        // **The ground is a base case, exactly as it is in
+        // [`crate::method::machine::obtain_costs`]**, and it is what keeps
+        // this from following a recipe the plan would never run. Without it
+        // the check reported, on the real seed-31337 dump:
+        //
+        // ```text
+        // steel-plate is in its own cell's construction bill
+        //   (coal -> water -> water-barrel -> barrel -> steel-plate)
+        // ```
+        //
+        // Every step of which is a real recipe and none of which the plan
+        // would ever take: a bot mines coal, and coal is charted here. Water
+        // is a ground fluid, and the barrel pair is the same cycle
+        // `crate::products` documents at length -- `fill-water-barrel` makes
+        // a `water-barrel` out of water and `empty-water-barrel` makes water
+        // out of a `water-barrel`, so any walk that enters it reaches
+        // `barrel`, which is a steel plate.
+        //
+        // **Empty means unknown here too**: a world that charted nothing
+        // supplies nothing, and the walk falls back to the loose union --
+        // more refusals, which is the safe direction.
+        if index.ground_supplies(&item) {
+            continue;
+        }
+        for recipe in index.recipes_producing(&item) {
+            if recipe.category == crate::products::RECYCLING_CATEGORY {
+                continue;
+            }
+            for ingredient in recipe.ingredients.iter().flatten() {
+                if seen.insert(ingredient.name.clone()) {
+                    from.insert(ingredient.name.clone(), item.clone());
+                    queue.push_back(ingredient.name.clone());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Why a cell's output may not be spent: the chain from something the cell is
+/// built or charged with, down to the cell's own product.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct CellLoop {
+    /// What the cell makes.
+    pub item: String,
+    /// Seed item first, `item` last. A one-element path means the cell's
+    /// product *is* one of the things the cell is built with.
+    pub path: Vec<String>,
+}
+
+impl std::fmt::Display for CellLoop {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} is in its own cell's construction bill ({})",
+            self.item,
+            self.path.join(" -> ")
+        )
+    }
+}
+
+/// May the cell's output chest carry a ledger entry, and may anything spend it?
+///
+/// One answer for two call sites -- this module's [`DrawFromCell`] and
+/// `method::assemble`'s `Effect::BufferGain`. **Gating only the first leaves
+/// the regression standing**, because `method::have::Withdraw` reads the same
+/// buffer and would claim the goal first; a ledger entry nothing may safely
+/// spend should not be written.
+pub(crate) fn output_is_spendable(state: &PlanState, spec: &AssemblySpec) -> bool {
+    match cell_output_loop(state, spec) {
+        None => true,
+        Some(loop_) => {
+            factorio_bot_core::tracing::debug!("cell output withheld from the ledger: {}", loop_);
+            false
+        }
+    }
 }
 
 /// What this method can draw for `goal`, if anything: the spec of the cell
@@ -159,9 +299,6 @@ fn drawable(goal: &Goal, state: &PlanState) -> Option<(AssemblySpec, Vec<(Positi
     if want.via.is_some() {
         return None;
     }
-    if !is_science_pack(state, want.item) {
-        return None;
-    }
     let spec = assembly_spec(state, want.item)?;
     let chests: Vec<(Position, u32)> = cell_output_chests(state, &spec)
         .into_iter()
@@ -172,6 +309,11 @@ fn drawable(goal: &Goal, state: &PlanState) -> Option<(AssemblySpec, Vec<(Positi
         .filter(|(_, held)| *held > 0)
         .collect();
     if chests.is_empty() {
+        return None;
+    }
+    // Last, because it is the most expensive question here and the cheap
+    // filters above decline almost every goal before it is asked.
+    if !output_is_spendable(state, &spec) {
         return None;
     }
     Some((spec, chests))

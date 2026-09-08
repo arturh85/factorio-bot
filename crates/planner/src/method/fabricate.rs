@@ -140,7 +140,7 @@ use crate::method::have::{Demand, demand};
 use crate::method::machine::{Machine, MachineTable};
 use crate::method::pipe::{
     self, FluidPort, PipeEnd, buffer_prototype, pipe_prototype, place_step, plain_entity,
-    route_between,
+    route_between, supplying_end,
 };
 use crate::method::util::{
     CRAFTING_CATEGORY, RecipeGate, SMELTING_CATEGORY, free_area_near, free_area_near_where,
@@ -832,14 +832,17 @@ fn plan_fluid_rig(
             let source_area = state
                 .collision_area(&entity.name, &entity.position)
                 .unwrap_or_else(|| entity.bounding_box.clone());
+            // Which of the source's boxes carries this fluid; every box, as
+            // before, for a source that does not say. See `supplying_end`.
+            let (source_type, source_box) = supplying_end(state, entity, fluid);
             route_between(
                 state,
                 &PipeEnd {
                     name: &entity.name,
                     position: &entity.position,
                     area: source_area,
-                    production_type: None,
-                    port_index: None,
+                    production_type: source_type,
+                    port_index: source_box,
                 },
                 &PipeEnd {
                     name: machine,
@@ -1033,14 +1036,17 @@ fn plan_fluid_rig(
         let area = state
             .collision_area(&entity.name, &entity.position)
             .unwrap_or_else(|| entity.bounding_box.clone());
+        // The same box selection the siting probe above used -- the two must
+        // agree, or a site chosen against every port is built against one.
+        let (source_type, source_box) = supplying_end(state, entity, fluid);
         let tiles = route_between(
             state,
             &PipeEnd {
                 name: &entity.name,
                 position: &entity.position,
                 area,
-                production_type: None,
-                port_index: None,
+                production_type: source_type,
+                port_index: source_box,
             },
             &PipeEnd {
                 name: machine,

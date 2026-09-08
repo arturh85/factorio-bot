@@ -857,7 +857,7 @@ end
             },
         )?,
     )?;
-    let rcon = _rcon;
+    let rcon = _rcon.clone();
     let world = _world;
     map_table.set(
         "__doc_entry_remove_from_inventory",
@@ -913,7 +913,137 @@ end
             },
         )?,
     )?;
+
+    map_table.set(
+        "__doc_entry_hold",
+        String::from(
+            r#"
+--- pauses the running game and waits for a person, instead of exiting
+-- Sends /silent-command remote.call('hold_state', ...) once a second while it
+-- waits, having first stopped the clock with `set_tick_paused`.
+--
+-- **What this is for.** A script that raises returns, and when the script
+-- returns the server dies and the whole built world goes with it. Run
+-- `run-1788895333-40607` settled 2,501 actions over sixteen minutes and then
+-- exited on `bot 1 has 0 coal, needs 2`, leaving nobody able to ask which bot,
+-- which chest, or what the ground held. Call this from a driver's fault branch
+-- and the game stays up to be looked at.
+--
+-- **Call it only after the fault has unwound.** `crates/executor` spawns no
+-- detached tasks, so once a raise has reached your `pcall` there is no action
+-- in flight and no wall-clock deadline still running. Holding from *inside* a
+-- batch would freeze the clock underneath deadlines that keep ticking, and the
+-- state you paused to inspect would be corrupted when it thawed.
+--
+-- **Take a savepoint first** (`record.savepoint`), so losing the paused game
+-- costs nothing: the hold is bounded and will tear itself down.
+--
+-- `opts` is a table, every field optional: `error` (the fault text, printed in
+-- the banner), `run` (the run id, so a later reader of the log can find it),
+-- `timeout` (seconds to hold before tearing itself down, default 300) and
+-- `heartbeat` (seconds between "still held" lines, default 30).
+--
+-- The timeout is **wall clock**, deliberately, and that is not the violation of
+-- this project's bound-it-in-ticks rule it looks like: a paused game has no
+-- ticks, so a tick bound would never fire and the hold would be unbounded.
+--
+-- @tparam[opt] table opts
+-- @treturn table `{ released = "continue"|"stop"|"timeout", paused_at_tick = n, held_seconds = n }`
+-- @raise if the game cannot be paused, or the release channel is unreachable
+function rcon.hold(opts)
+end
+    "#,
+        ),
+    )?;
+    {
+        let rcon = _rcon.clone();
+        map_table.set(
+            "hold",
+            lua.create_async_function(move |_lua, opts: Option<LuaTable>| {
+                let rcon = rcon.clone();
+                // Read out of the table before the async block: a `LuaTable`
+                // is not `Send`, and every other binding in this file reads
+                // its arguments the same way for the same reason.
+                let parsed = hold_options(&opts);
+                async move {
+                    let (why, run, timeout, heartbeat) = parsed?;
+                    let outcome = rcon
+                        .as_ref()
+                        .hold(&why, run, timeout, heartbeat)
+                        .await
+                        .map_err(rcon_error)?;
+                    Ok(HoldReply(outcome))
+                }
+            })?,
+        )?;
+    }
+
     Ok(map_table)
+}
+
+/// The `rcon.hold` options, read off the Lua table and defaulted.
+///
+/// The timeout defaults to five minutes and is **wall clock**, which looks
+/// like a violation of this project's bound-it-in-ticks rule and is not: a
+/// paused game has no ticks at all, so a tick bound would never fire and the
+/// hold would be unbounded. This is the rare question whose subject *is* the
+/// wall clock.
+///
+/// A non-positive timeout is refused rather than clamped: "hold for zero
+/// seconds" is much more likely to be a bug in the caller than a request.
+type HoldOptions = (
+    String,
+    Option<String>,
+    std::time::Duration,
+    std::time::Duration,
+);
+
+fn hold_options(opts: &Option<LuaTable>) -> LuaResult<HoldOptions> {
+    const DEFAULT_TIMEOUT_SECS: f64 = 300.0;
+    const DEFAULT_HEARTBEAT_SECS: f64 = 30.0;
+    let (why, run, timeout, heartbeat) = match opts {
+        None => (None, None, None, None),
+        Some(t) => (
+            t.get::<Option<String>>("error")?,
+            t.get::<Option<String>>("run")?,
+            t.get::<Option<f64>>("timeout")?,
+            t.get::<Option<f64>>("heartbeat")?,
+        ),
+    };
+    let seconds =
+        |name: &str, value: Option<f64>, default: f64| -> LuaResult<std::time::Duration> {
+            let v = value.unwrap_or(default);
+            if !v.is_finite() || v <= 0.0 {
+                return Err(LuaError::RuntimeError(format!(
+                    "rcon.hold: `{name}` must be a positive number of seconds, got {v}"
+                )));
+            }
+            Ok(std::time::Duration::from_secs_f64(v))
+        };
+    Ok((
+        why.unwrap_or_else(|| "no reason given".to_string()),
+        run,
+        seconds("timeout", timeout, DEFAULT_TIMEOUT_SECS)?,
+        seconds("heartbeat", heartbeat, DEFAULT_HEARTBEAT_SECS)?,
+    ))
+}
+
+/// A [`HoldOutcome`] as a plain Lua table.
+///
+/// Every field is present on every answer, including `released = "timeout"` --
+/// a caller reading `held.released` must never have to tell "nobody came" from
+/// "the field is missing", which is this project's `absent is not a value`
+/// defect in its most literal form.
+struct HoldReply(factorio_bot_core::factorio::rcon::HoldOutcome);
+
+impl IntoLua for HoldReply {
+    fn into_lua(self, lua: &Lua) -> LuaResult<LuaValue> {
+        let t = lua.create_table()?;
+        t.set("released", self.0.released)?;
+        t.set("paused_at_tick", self.0.paused_at_tick)?;
+        t.set("held_seconds", self.0.held_seconds)?;
+        Ok(LuaValue::Table(t))
+    }
 }
 
 /// The `-- Sends /silent-command remote.call('X', ...)` line in a doc block is

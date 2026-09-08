@@ -1852,6 +1852,104 @@ function Sup:step()
              steps = steps, actions = obs.actions, walks = walks }
 end
 
+-- ---------------------------------------------------------------------------
+-- A fault does not have to cost the world it happened in
+-- ---------------------------------------------------------------------------
+--
+-- `Sup:step()` re-raises anything `refusal_of` will not vouch for -- a verdict
+-- is a statement about the world and closes a milestone quietly, a fault is a
+-- defect and must end the run loudly. Ending it loudly used to mean the script
+-- returning, and **when the script returns the server dies**, taking the built
+-- world with it. Run `run-1788895333-40607` settled 2,501 actions over sixteen
+-- minutes and then exited on `bot 1 has 0 coal, needs 2`, with nobody left able
+-- to ask which bot, which chest, or what the ground held.
+--
+-- This is the hook for that. Call it from a driver's fault branch, where the
+-- raise has already unwound: `crates/executor` spawns no detached tasks, so by
+-- the time a `pcall` has caught something there is no action in flight and no
+-- wall-clock deadline still running against the clock we are about to stop.
+-- Holding from inside a batch would freeze the game underneath deadlines that
+-- keep running, and the state would be corrupted when it thawed.
+--
+-- Three things happen, in this order, and the order is the design:
+--
+--  1. **A savepoint, before the pause.** The engine writes a save at the end of
+--     a tick and a paused game never ends one, so this cannot be done later.
+--     With it, losing the held game costs nothing -- `--resume-from <run>:<n>`
+--     brings the world back at leisure -- which is what makes a *short* hold
+--     acceptable. Tonight's fault was sixteen minutes past the only savepoint
+--     the run had.
+--  2. **The hold**, bounded (`rcon.hold`, five minutes by default).
+--  3. **A record entry**, whatever the outcome. A hold that lapsed unnoticed
+--     must not read like a run that finished; `silence is not success`.
+--
+-- Returns a table, always, never `nil`:
+--   `released`  "continue" | "stop" | "timeout" | "unavailable"
+--   `savepoint` the path inside the run directory, or nil
+--   `index`     the savepoint's milestone index, for `--resume-from`, or nil
+--   `held`      true when the game was actually paused
+--
+-- `"unavailable"` is its own answer and is never "stop": there is no game to
+-- pause (an offline plan), or this binary predates `rcon.hold`. Collapsing it
+-- into a verdict would make "we could not hold" indistinguishable from "we held
+-- and nobody came" -- absent is not a value.
+function supervisor.hold_fault(err, opts)
+    opts = opts or {}
+    if type(opts) ~= "table" then
+        error("supervisor.hold_fault: expected a table of options")
+    end
+    local out = { released = "unavailable", savepoint = nil, index = nil, held = false }
+
+    -- The savepoint first, and never fatal: it is what makes losing the hold
+    -- cheap, not a precondition of holding. `pcall` because a driver in a
+    -- fault branch must not fault again.
+    if type(record) == "table" and type(record.savepoint) == "function" then
+        local ok_sp, file, index = pcall(record.savepoint, opts.index or 0)
+        if ok_sp and type(file) == "string" then
+            out.savepoint, out.index = file, index
+        elseif not ok_sp then
+            print_warn("hold: no savepoint at the fault: " .. tostring(file))
+        end
+    end
+
+    if type(rcon) ~= "table" or type(rcon.hold) ~= "function" then
+        print_warn("hold: this run has no game to pause (rcon.hold is absent) -- "
+            .. "the fault ends the run as it always did")
+        return out
+    end
+
+    local ok_hold, held = pcall(rcon.hold, {
+        error = tostring(err),
+        run = opts.run,
+        timeout = opts.timeout,
+        heartbeat = opts.heartbeat,
+    })
+    if not ok_hold or type(held) ~= "table" then
+        print_warn("hold: the game could not be held: " .. tostring(held))
+        return out
+    end
+    out.held = true
+    out.released = held.released
+
+    -- Loud on the way out, exactly as loud as on the way in. A lapsed hold
+    -- reads as "nobody attached", never as a finished run.
+    local how = (held.released == "timeout")
+        and "nobody attached; the hold lapsed and tore itself down"
+        or ("released with '" .. tostring(held.released) .. "'")
+    local why = "held at tick " .. tostring(held.paused_at_tick) .. " for "
+        .. tostring(held.held_seconds) .. "s -- " .. how
+        .. (out.savepoint and (" -- savepoint " .. out.savepoint) or " -- NO savepoint")
+        .. " -- fault: " .. tostring(err)
+    print("HELD: " .. why)
+    if out.index ~= nil then
+        print("   resume this world later:  --resume-from <run-id>:" .. tostring(out.index))
+    end
+    if type(record) == "table" and type(record.milestone_stuck) == "function" then
+        pcall(record.milestone_stuck, opts.index or 0, "held", why, nil)
+    end
+    return out
+end
+
 --- Human-readable summary of everything closed so far.
 function Sup:report()
     local lines = { "supervisor: " .. self.state }

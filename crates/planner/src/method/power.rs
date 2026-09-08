@@ -1614,19 +1614,131 @@ pub fn complete_plant(state: &PlanState, from: &Position, kw: f64) -> Option<Pla
 /// [`complete_plant`] for one pump: the plant its layout describes, with the
 /// standing parts split from the missing ones, or `None` when it cannot be
 /// finished or would not carry `kw`.
+/// What the network a plant at `pump` already feeds is committed to, in kW.
+///
+/// **The number that makes a plant grow.** [`finish`] adds it to the demand
+/// the caller arrived with before sizing, so the layout it checks the ground
+/// against is the one that carries *everything on the wire*, not just the
+/// consumer in front of it.
+///
+/// # The ceiling this closes
+///
+/// Until 2026-09-08 `finish` sized against `kw` alone. Consider a standing
+/// 900 kW plant with 480 kW spoken for and a 450 kW consumer arriving:
+/// tiers 1 and 2 of [`supply_for`] refuse it (420 kW of headroom is not 450),
+/// and this function then asked for a plant carrying 450 — one margined
+/// engine, which already stood. Nothing missing, no plant to finish, and the
+/// tier below sited a **whole second plant** somewhere else.
+///
+/// So a plant grew only when a *single* goal demanded more than one engine
+/// could carry, and no number of consumers added later ever grew one. That is
+/// the flat 900 kW every archived run of this project reports: one boiler and
+/// five steam engines across 78 runs, against a world-record run's 15 boilers
+/// and 31 engines by minute 20.
+///
+/// # Measured at the engine, and why not at the pole
+///
+/// The network is asked about at the footprint of the plant's **own first
+/// engine**, which [`layout`] pins to the pump's tile and facing. Two
+/// alternatives were rejected:
+///
+/// * *a box around the whole plant* — [`crate::state::PlanState`]'s demand
+///   walk sums every component that reaches the area given, so a wide box
+///   would charge a neighbouring network's consumers to this plant and size it
+///   for load it does not carry;
+/// * *the pole* — a plant's pole is sited by [`pole_chain`] and is not a fixed
+///   function of the pump, so there is no pole position to ask about before
+///   the size is known, and the size is what is being computed.
+///
+/// The engine has neither problem: its tile is fixed, it is what the poles are
+/// chained to cover, and a network with no generation is never adopted in the
+/// first place.
+///
+/// **Zero when nothing generates yet**, which is the honest answer for a
+/// half-built plant: an engine that is not standing is on no network, and a
+/// world with no pole over it reads as no network at all. Nothing can be
+/// committed to a plant that has never supplied anything.
+///
+/// # What bounds the growth this unlocks
+///
+/// A plant that grows without limit would be as wrong as one that cannot
+/// grow, and *coverage is not capacity*: a half-grown plant reads as a dead
+/// network, not a slow one. Four bounds hold it, none of them written down as
+/// a layout somebody remembered, and each enforced somewhere that says so by
+/// name:
+///
+/// * **water** — [`BOILERS_PER_PUMP`] boilers of [`MAX_ENGINES_PER_BOILER`]
+///   engines, i.e. 40 engines and 36 MW, from `offshore-pump`'s
+///   `pumping_speed` over `boiler`'s water draw. Past it [`plant_size_for`]
+///   raises [`PlannerError::PowerPlantTooSmall`], which is a fact about the
+///   demand rather than about the map and is therefore not retried from
+///   another anchor.
+/// * **shore frontage** — the boiler chain and its pipes step along the shore
+///   at [`BOILER_PITCH_TILES`] and every part is checked with
+///   `is_area_free_facing`. A shoreline that bends, or ground already taken,
+///   stops the chain: [`finish`] passes the pump over and [`fit`] tries the
+///   next shoreline candidate, ending in
+///   [`PlannerError::PowerPlantNeedsShore`] rather than in a plant that half
+///   fits.
+/// * **pole reach** — [`pole_chain`] must put every engine row inside a
+///   pole's supply area *and* wire those poles into one component at
+///   `small-electric-pole`'s `maximum_wire_distance`. It answers `None` when
+///   it cannot, and the whole candidate is dropped: a generator no pole
+///   reaches is worth nothing, which is why that case refuses separately from
+///   an unpowered consumer — the remedy is a pole, not a plant.
+/// * **coal** — [`coal_charges`] bills [`PLANT_COAL`] per engine a boiler
+///   feeds, so growth in engines *is* growth in fuel and the charge stays
+///   inside the boiler's 50-item fuel slot
+///   (`the_plants_fuel_load_fits_in_the_one_slot_it_goes_into`). It is a
+///   single load a bot carries, not a belted supply: **a plant that starves
+///   is indistinguishable from one that was never built**, and nothing here
+///   detects an empty fuel slot — the residual [`PLANT_COAL`] names.
+///
+/// Solar is not one of these and is deliberately downstream: `solar-panel`
+/// costs steel, which no run in this project has ever made. See
+/// [`solar_bank_for`], and note that a solar array's output depends on the
+/// in-game time of day, so it is the worst possible thing to test geometry
+/// with.
+fn committed_kw(state: &PlanState, pump: &Position, facing: Direction) -> f64 {
+    let Some(parts) = layout(pump, facing, 1, 1) else {
+        return 0.;
+    };
+    parts
+        .iter()
+        .filter(|part| part.name == ENGINE)
+        // Standing, and centred on the layout's own tile -- the same identity
+        // test `finish` uses, for the same reason: an engine one tile off is
+        // not this plant's engine.
+        .filter(|part| {
+            matches!(
+                state.entity_at(&part.position),
+                Some(entity)
+                    if entity.name == ENGINE
+                        && Pos::from(&entity.position) == Pos::from(&part.position)
+            )
+        })
+        .filter_map(|part| state.collision_area_facing(ENGINE, &part.position, part.direction))
+        .map(|area| state.electric_demand_kw(&area, None))
+        // `fold` rather than `sum`: two engines of one plant are one network
+        // and their demands are the same number, not two to be added.
+        .fold(0., f64::max)
+}
+
 fn finish(state: &PlanState, pump: &FactorioEntity, kw: f64) -> Option<Plant> {
     let facing = Direction::from_u8(pump.direction)?;
     if !Direction::orthogonal().contains(&facing) {
         return None;
     }
-    // Sized against the demand, exactly as a fresh plant is. A standing
-    // one-engine plant asked for 1,200 kW is checked against a two-engine
-    // layout, so the second engine's tile is either free -- and the plant is
-    // finished by adding it -- or occupied, and this pump is passed over.
+    // Sized against the demand, exactly as a fresh plant is -- **plus what
+    // this plant's own network is already committed to**, which is the whole
+    // of the growth this function does. A standing one-engine plant asked for
+    // 1,200 kW is checked against a two-engine layout, so the second engine's
+    // tile is either free -- and the plant is finished by adding it -- or
+    // occupied, and this pump is passed over.
     // `engines_for`'s refusal is a `None` here rather than an error: this
     // function's whole contract is "or the next pump along", and
     // `plan_plant_for` raises the named error a moment later.
-    let size = plant_size_for(state, kw).ok()?;
+    let size = plant_size_for(state, kw + committed_kw(state, &pump.position, facing)).ok()?;
     let parts = layout(&pump.position, facing, size.boilers, size.engines)?;
     let mut standing: Vec<PlantPart> = Vec::new();
     let mut missing: Vec<PlantPart> = Vec::new();
@@ -4610,6 +4722,20 @@ mod tests {
     ///
     /// A complete plant with nothing missing is not something to finish, so
     /// the half-built one beside it is.
+    ///
+    /// # The premise had to be built rather than assumed, as of 2026-09-08
+    ///
+    /// "Nothing missing" used to be free here: [`finish`] sized against the
+    /// new consumer alone, so a standing one-engine plant was complete for any
+    /// demand one engine carries. It sizes against the network's whole load
+    /// now ([`committed_kw`]), and this fixture's first plant would **grow**
+    /// instead — which is the point of that change and is asserted by
+    /// `a_standing_plant_grows_an_engine_for_a_load_it_cannot_carry`.
+    ///
+    /// So the first plant is deliberately *prevented* from growing: something
+    /// stands on the tile its second engine would take. That is the case this
+    /// test was always about — a pump whose layout cannot be finished as
+    /// designed is passed over, and the next pump along is the answer.
     #[test]
     fn a_full_network_is_not_finished_but_the_half_built_plant_beside_it_is() {
         let (mut s, first) = state_with_a_standing_plant();
@@ -4623,6 +4749,25 @@ mod tests {
             let entity = entity_for(&s, part);
             s.create_entity(entity);
         }
+        // The tile the first plant's second engine would stand on, taken by
+        // something that is not a steam engine -- a burner, so it adds no
+        // demand of its own and the arithmetic below is unchanged.
+        let pump = &first.parts[0];
+        assert_eq!(pump.name, PUMP, "the layout leads with its pump");
+        let grown = layout(&pump.position, pump.direction, 1, 2).expect("a two-engine layout");
+        let second_engine = grown
+            .iter()
+            .filter(|part| part.name == ENGINE)
+            .nth(1)
+            .expect("two engines")
+            .position
+            .clone();
+        s.create_entity(FactorioEntity {
+            name: "stone-furnace".into(),
+            entity_type: "furnace".into(),
+            position: second_engine,
+            ..Default::default()
+        });
         // A beacon on the first plant's network: 480 of its 900 kW spoken
         // for, leaving 420. The demand below has to fall in the gap between
         // that headroom and one engine's worth *after* `PLANT_HEADROOM` --
@@ -4650,6 +4795,49 @@ mod tests {
             "the half-built plant is finished"
         );
         assert_eq!(names(&finished.parts), vec![ENGINE, POLE]);
+    }
+
+    /// **The ceiling behind every electric ambition in this project.**
+    ///
+    /// A plant that stands, a network already carrying 480 kW of its 900, and
+    /// a new consumer wanting 450 more. Nothing standing has the headroom, so
+    /// the only answers are *grow this plant* or *build another one somewhere
+    /// else* — and until 2026-09-08 it was the second, because [`finish`]
+    /// sized the layout against the **new** consumer alone: 450 kW is one
+    /// margined engine, one engine already stood, so there was nothing
+    /// missing to finish and the tier below sited a whole second plant.
+    ///
+    /// That is why every archived run reads a flat 900 kW generated and never
+    /// more: a plant grew only when a *single* goal demanded more than one
+    /// engine, and no number of later consumers ever added one.
+    #[test]
+    fn a_standing_plant_grows_an_engine_for_a_load_it_cannot_carry() {
+        let (mut s, first) = state_with_a_standing_plant();
+        // 480 of the plant's 900 kW spoken for, exactly as the test above.
+        s.create_entity(FactorioEntity {
+            name: "beacon".into(),
+            entity_type: "beacon".into(),
+            position: Position::new(first.pole.x(), first.pole.y() + 2.5),
+            ..Default::default()
+        });
+        assert!(
+            s.nearest_supply_anchor(&first.pole, PLANT_ADOPT_RADIUS, 450.)
+                .is_none(),
+            "the premise: the standing network cannot carry 450 kW more"
+        );
+        let Supply::Build(grown) = supply_for(&s, &first.pole, 64., 450.).expect("a lake") else {
+            panic!("nothing standing carries 450 kW")
+        };
+        assert_eq!(
+            grown.engine, first.engine,
+            "it is THIS plant that grew, not a second one somewhere else"
+        );
+        assert_eq!(grown.engines.len(), 2, "and it grew by an engine");
+        assert_eq!(
+            names(&grown.parts),
+            vec![ENGINE],
+            "only the engine is billed: everything else already stands"
+        );
     }
 
     /// The bound is wide enough that a plant is never built where one could

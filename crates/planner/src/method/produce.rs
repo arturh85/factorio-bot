@@ -133,9 +133,46 @@ const CELL_FUELLED_TICKS: Ticks = 36_000;
 ///
 /// A bound on work, not a claim about what a map could hold. Siting a cell
 /// walks a patch, so a rate asking for millions of them is a hang rather than a
-/// refusal; this turns it into a refusal. Twelve cells is 180 iron plates a
-/// minute, an order of magnitude past anything the ladder has ever consumed.
-const MAX_CELLS: u32 = 12;
+/// refusal; this turns it into a refusal.
+///
+/// # Why sixty-four, and why twelve was the binding constraint on this project
+///
+/// It was **12** — 180 iron plate/min — on the stated ground that this is "an
+/// order of magnitude past anything the ladder has ever consumed". That premise
+/// was true and the conclusion did not follow: the ladder's rungs are science
+/// packs, so what the ladder consumes measures the *ladder*, not the rate a
+/// map can stand. Nothing in this tree has ever asked a cell goal for more than
+/// **15/min** (`scripts/selffed_run.lua`, one cell), and the constant sized
+/// itself against that.
+///
+/// The number that says what the shape is worth was measured on 2026-09-08
+/// against two world-record Space Age runs, recovered from
+/// `LuaFlowStatistics` (`tools/rate_history_probe.lua`, raw samples under
+/// `docs/superpowers/notes/data/`). Both build **73 burner mining drills
+/// inside the first ten minutes and never another**, with no inserter, no belt
+/// and no electricity, and their iron-plate rate is:
+///
+/// | game minute | any% 6:39:53 | RSNG 3:17:06 |
+/// |---|---:|---:|
+/// | ~5  | 261 /min | 347 /min |
+/// | ~10 | 390 /min | 224 /min |
+/// | ~15 | 839 /min | 918 /min |
+///
+/// At this cell's own 15 plate/min ([`CellSpec::ticks_per_item`], the drill's
+/// 240 ticks) those are **18, 26 and 56 cells**. Sixty-four is the ceiling of
+/// that envelope with margin, and the drill count it implies checks out
+/// independently: 56 iron cells plus the ~16 coal drills their fuel needs
+/// (see [`fuel_for_duration`] — 3.6 coal/min per cell against a coal drill's
+/// 12.75 net) is **72 drills**, against the 73 the references actually stood.
+/// Two quantities derived from different sides agreeing to one drill is why
+/// this bound is 64 rather than a round number somebody liked.
+///
+/// **It is still not a claim about the map.** The patch answers that, by
+/// refusing with [`PlannerError::NoRoomForCell`] once
+/// [`CELL_SEARCH_RADIUS`] holds no further site — a *different* refusal,
+/// naming the ground rather than the bound, which is the whole reason both
+/// exist.
+const MAX_CELLS: u32 = 64;
 
 /// Minutes are what a rate is stated in and ticks are what everything else is
 /// measured in.
@@ -2717,6 +2754,35 @@ mod tests {
     fn a_rate_no_plan_could_build_is_refused_rather_than_attempted() {
         assert!(matches!(
             cells_for(u32::MAX, 240),
+            Err(PlannerError::TooManyCells { .. })
+        ));
+    }
+
+    /// The bound admits the rate two world-record runs actually stood on
+    /// burner cells, and the arithmetic that says so is here rather than only
+    /// in [`MAX_CELLS`]' prose.
+    ///
+    /// Three marks from `docs/superpowers/notes/data/`, at this cell's own
+    /// 15 plate/min: 261, 390 and 839 /min are 18, 26 and 56 cells. The last
+    /// is the one that matters -- a bound of 12 refused it by a factor of
+    /// nearly five, which is why no goal in this tree ever asked for it.
+    ///
+    /// Deliberately expressed as `cells_for(rate, 240)` and not as a literal
+    /// compared to `MAX_CELLS`: an expected value the system could produce by
+    /// accident proves nothing, and 240 ticks is read off the prototypes in
+    /// [`drill_ticks_per_item`] (iron ore's 1 s over a burner drill's 0.25).
+    #[test]
+    fn the_bound_admits_the_rate_the_reference_runs_stood() {
+        for (per_minute, cells) in [(261u32, 18u32), (390, 26), (839, 56)] {
+            assert_eq!(
+                cells_for(per_minute, 240).expect("within MAX_CELLS"),
+                cells,
+                "{per_minute} iron-plate/min is {cells} cells at 15/min each"
+            );
+        }
+        // And the bound is still a bound: one cell past it refuses by name.
+        assert!(matches!(
+            cells_for(15 * (MAX_CELLS + 1), 240),
             Err(PlannerError::TooManyCells { .. })
         ));
     }

@@ -57,19 +57,29 @@ MUTATIONS = [
         CARGO_CORE_LIB,
         "reads_pollution_and_the_four_evolution_terms",
     ),
+    # NOT "remove `#[serde(default)]`": serde's derive already yields `None`
+    # for a missing `Option<T>` field, so that edit is a no-op and the sweep
+    # reported it green. The real mutation is the one the field guards
+    # against -- a missing reading DEFAULTING to a measured zero.
     (
-        "a missing `total` stops being allowed, so absent cannot be told from zero",
+        "a missing `total` defaults to zero, so absent cannot be told from calm",
         SAMPLES,
         '    #[serde(default, skip_serializing_if = "Option::is_none")]\n    pub total: Option<f64>,',
-        '    #[serde(skip_serializing_if = "Option::is_none")]\n    pub total: Option<f64>,',
+        'fn mutant_zero() -> Option<f64> { Some(0.0) }\n'
+        '    #[serde(default = "mutant_zero", skip_serializing_if = "Option::is_none")]\n'
+        '    pub total: Option<f64>,',
         CARGO_CORE_LIB,
         "a_surface_we_failed_to_read_is_not_a_surface_with_no_pollution",
     ),
     (
-        "an archived schema-2 line stops decoding without the new field",
+        "an archived schema-2 line decodes as an empty measurement rather than as absent",
         SAMPLES,
         "        #[serde(default)]\n        pollution: Option<PollutionSample>,",
-        "        pollution: Option<PollutionSample>,",
+        'fn mutant_empty() -> Option<PollutionSample> {\n'
+        '            Some(PollutionSample { surfaces: BTreeMap::new() })\n'
+        '        }\n'
+        '        #[serde(default = "mutant_empty")]\n'
+        '        pollution: Option<PollutionSample>,',
         CARGO_CORE_LIB,
         "reads_a_force_sample_with_no_research_queued",
     ),
@@ -81,11 +91,23 @@ MUTATIONS = [
         CARGO_MOD,
         "pollution_and_the_four_evolution_terms_reach_the_force_sample",
     ),
+    # The name fallback and the dedicated `pcall` are INDEPENDENT defences,
+    # which the first version of this sweep got wrong: removing the fallback
+    # left the force sample intact, because the pcall caught the raise. Each
+    # now has its own mutation and its own test.
     (
-        "the surface-name fallback goes away, so a nameless surface raises again",
+        "the surface-name fallback goes away, so a nameless surface is not keyed at all",
         CONTROL,
         "\t\tif name == nil then name = tostring(key) end",
         "\t\tif false then name = tostring(key) end",
+        CARGO_MOD,
+        "a_surface_with_no_name_is_keyed_by_its_index_rather_than_raising",
+    ),
+    (
+        "the pollution read stops being isolated, so one bad read costs the whole force line",
+        CONTROL,
+        "\tlocal pollution_ok, pollution = pcall(pollution_totals)",
+        "\tlocal pollution_ok, pollution = true, pollution_totals()",
         CARGO_MOD,
         "a_game_without_the_pollution_api_still_writes_the_rest_of_the_force_sample",
     ),

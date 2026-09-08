@@ -553,3 +553,36 @@ fn a_game_without_the_pollution_api_still_writes_the_rest_of_the_force_sample() 
         "no evolution key when there is nothing to read: {force}"
     );
 }
+
+/// **`surfaces[nil] = entry` RAISES**, and the fallback is what stops it.
+///
+/// This is a separate defence from the `pcall` around `pollution_totals`, and
+/// the first version of the falsification sweep conflated the two: removing
+/// the fallback left the force sample intact, because the pcall caught the
+/// raise. That is two independent guarantees, so it is two tests -- the other
+/// one says the force line survives, and this one says the READING survives.
+#[test]
+fn a_surface_with_no_name_is_keyed_by_its_index_rather_than_raising() {
+    let lua = mod_with_bots(1);
+    lua.load(STUB_POLLUTION)
+        .set_name("pollution stub")
+        .exec()
+        .expect("pollution stub");
+    lua.load("_surface.name = nil")
+        .set_name("nameless surface")
+        .exec()
+        .expect("nameless surface");
+    session(&lua, "'run-1'");
+    let force = samples(&lua)
+        .into_iter()
+        .find(|line| line.contains("\"kind\":\"force\""))
+        .expect("a force sample");
+    assert!(
+        force.contains("\"by_pollution\":0.001100"),
+        "the reading must survive a nameless surface, not merely the line: {force}"
+    );
+    assert!(
+        force.contains("\"1\":{"),
+        "and it must be keyed by the index `pairs` handed us: {force}"
+    );
+}

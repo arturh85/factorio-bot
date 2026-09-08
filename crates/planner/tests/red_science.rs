@@ -9,7 +9,8 @@ use factorio_bot_planner::schedule::StepKind;
 use factorio_bot_planner::{BotId, PlanState, mermaid_gantt, schedule};
 use std::sync::Arc;
 
-mod common;
+// `common` is declared once by the suite root; see `tests/suite.rs`.
+use crate::common;
 
 fn world_with_furnaces(bots: &[BotId]) -> PlanState {
     let mut state = PlanState::from_world(Arc::new(fixture_world()), bots);

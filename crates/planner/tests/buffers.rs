@@ -13,7 +13,8 @@
 //! Every test here is about one question: does a `Have` goal that a standing
 //! buffer already covers still send a bot to the ore field?
 
-mod common;
+// `common` is declared once by the suite root; see `tests/suite.rs`.
+use crate::common;
 
 use factorio_bot_core::factorio::world::FactorioSurface;
 use factorio_bot_core::test_utils::fixture_world;

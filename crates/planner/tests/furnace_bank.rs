@@ -22,7 +22,8 @@
 //! `run-1788459085-32452`'s milestone 1 that was one bot standing beside one
 //! furnace.
 
-mod common;
+// `common` is declared once by the suite root; see `tests/suite.rs`.
+use crate::common;
 
 use factorio_bot_core::test_utils::fixture_world;
 use factorio_bot_core::types::{Direction, FactorioEntity, Position};

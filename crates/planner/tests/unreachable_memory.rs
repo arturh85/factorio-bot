@@ -71,7 +71,8 @@ use factorio_bot_planner::{
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-mod common;
+// `common` is declared once by the suite root; see `tests/suite.rs`.
+use crate::common;
 
 /// Bot 3's position for the last 158 000 ticks of `run-1788432181-42528`,
 /// verbatim from `samples.jsonl`. It never changed by a single bit.

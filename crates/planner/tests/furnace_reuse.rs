@@ -33,7 +33,8 @@
 //! `PlanState::machine_queue`, which is written only for a batch whose take
 //! provably drains the furnace and is read only by a smelt of the same item.
 
-mod common;
+// `common` is declared once by the suite root; see `tests/suite.rs`.
+use crate::common;
 
 use factorio_bot_core::test_utils::fixture_world;
 use factorio_bot_core::types::Position;

@@ -3,6 +3,9 @@ name = "factorio-bot-planner"
 version = "0.2.4-dev"
 authors = ["Artur Hallmann <arturh@arturh.de>"]
 edition = "2024"
+# Integration tests are a single `[[test]]` target (`tests/suite.rs`) rather
+# than one auto-discovered binary per file in `tests/`; see that file for why.
+autotests = false
 
 [package.metadata.release]
 tag = false
@@ -25,3 +28,7 @@ serde_json = "1.0"
 # here because `Goal::Built` takes blueprint TEXT, not a `Blueprint` struct.
 base64 = "0.23"
 flate2 = "1.0"
+
+[[test]]
+name = "suite"
+path = "tests/suite.rs"

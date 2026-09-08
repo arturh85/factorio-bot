@@ -69,7 +69,8 @@ use crate::error::PlannerError;
 
 use crate::network::ActionNetwork;
 use crate::state::PlanState;
-use factorio_bot_core::types::{Position, Rect};
+use factorio_bot_core::num_traits::FromPrimitive;
+use factorio_bot_core::types::{Direction, Position, Rect};
 
 /// What the world says about one prototype's relationship to an electric
 /// network.
@@ -238,16 +239,39 @@ const POLE_SEARCH_TILES: f64 = 16.;
 /// counts exactly as much as one this plan places. `pole_would_supply` reads
 /// the pole's own prototype, so a substation's 9 tiles and a small pole's 2.5
 /// are not one constant here.
-fn a_pole_reaches(state: &PlanState, name: &str, pos: &Position) -> bool {
-    let area = state.collision_area(name, pos).unwrap_or_else(|| {
-        // A prototype with no collision box: ask about the tile it stands on
-        // rather than about nothing, the same fallback `method::blueprint`
-        // uses for its pole probe.
-        Rect::new(
-            &Position::new(pos.x() - 0.05, pos.y() - 0.05),
-            &Position::new(pos.x() + 0.05, pos.y() + 0.05),
-        )
-    });
+///
+/// # The box must be the one the entity actually occupies, turned
+///
+/// It asks [`PlanState::collision_area_facing`] at the placed entity's own
+/// `direction`, not [`PlanState::collision_area`], which answers the
+/// north-frame box for every facing. **That difference refused a correct plan
+/// on this guard's first day**: at
+/// `producing:automation-science-pack:30` on the seed-31337 dump,
+/// `method::power`'s `pole_chain` sites each pole against
+/// `collision_area_facing` (through `engine_areas`), and the engine it chose
+/// for is east-facing — box `x[38.15, 42.85] y[-6.75, -4.25]`, which the pole
+/// at `[36.5, -7.5]` supplies from `x[34, 39] y[-10, -5]`. The unturned box is
+/// `x[39.25, 41.75] y[-7.85, -3.15]`, and it misses that supply area by
+/// **0.25 tiles of x**. Siting and auditing were asking two different
+/// questions about the same engine, and only the wider plans put a pole where
+/// the two disagree — which is why 6/min and 12/min passed.
+///
+/// So the box is asked exactly as `pole_chain` asks it. A `direction` byte
+/// outside `0..=15` — which nothing in this planner emits — falls back to the
+/// unturned box rather than to nothing.
+fn a_pole_reaches(state: &PlanState, name: &str, pos: &Position, direction: u8) -> bool {
+    let area = Direction::from_u8(direction)
+        .and_then(|facing| state.collision_area_facing(name, pos, facing))
+        .or_else(|| state.collision_area(name, pos))
+        .unwrap_or_else(|| {
+            // A prototype with no collision box: ask about the tile it stands
+            // on rather than about nothing, the same fallback
+            // `method::blueprint` uses for its pole probe.
+            Rect::new(
+                &Position::new(pos.x() - 0.05, pos.y() - 0.05),
+                &Position::new(pos.x() + 0.05, pos.y() + 0.05),
+            )
+        });
     state
         .entities_within(pos, POLE_SEARCH_TILES)
         .iter()
@@ -304,7 +328,7 @@ pub fn audit(net: &ActionNetwork, state: &PlanState) -> Result<(), PlannerError>
         match PowerNeed::of(state, &entity.name) {
             PowerNeed::Inert => {}
             PowerNeed::Generating { kw } => {
-                if !a_pole_reaches(state, &entity.name, &entity.position) {
+                if !a_pole_reaches(state, &entity.name, &entity.position, entity.direction) {
                     return Err(PlannerError::GeneratorNotWired {
                         prototype: entity.name.clone(),
                         pos: entity.position.to_string(),
@@ -563,5 +587,74 @@ mod powered_tests {
         let mut with_pole = ActionNetwork::new();
         place(&mut with_pole);
         audit(&with_pole, &wired).expect("a pole beside it is the whole remedy");
+    }
+
+    /// **A turned engine is audited on its turned box.** The geometry is
+    /// transcribed from the plan this guard refused on its first day —
+    /// `producing:automation-science-pack:30` on `map-31337-water-and-oil.json`,
+    /// where `method::power` places an **east-facing** `steam-engine` at
+    /// `[40.5, -5.5]` and `pole_chain` sites the pole for it at `[36.5, -7.5]`.
+    ///
+    /// `pole_chain` asks `collision_area_facing` through `engine_areas`; the
+    /// audit asked `collision_area`, which is the north frame at every facing.
+    /// The two boxes differ by 0.25 tiles of x at that pole's supply edge, so
+    /// siting and auditing disagreed about one engine and a correct plan was
+    /// refused.
+    ///
+    /// The second assertion is what makes this a regression test rather than a
+    /// coincidence: **the unturned box is checked to miss**, so the audit can
+    /// only pass by having turned the box.
+    #[test]
+    fn an_east_facing_generator_is_audited_on_its_turned_box() {
+        let mut state = plain_state();
+        let engine = Position::new(40.5, -5.5);
+        let pole = Position::new(36.5, -7.5);
+        state.create_entity(FactorioEntity {
+            name: "small-electric-pole".into(),
+            entity_type: "electric-pole".into(),
+            position: pole.clone(),
+            ..Default::default()
+        });
+
+        let turned = state
+            .collision_area_facing("steam-engine", &engine, Direction::East)
+            .expect("the fixture describes a steam engine");
+        let unturned = state
+            .collision_area("steam-engine", &engine)
+            .expect("the fixture describes a steam engine");
+        assert_ne!(
+            turned, unturned,
+            "a steam engine's box is not square, so east and north differ -- \
+             without that this test proves nothing"
+        );
+        assert!(
+            state.pole_would_supply("small-electric-pole", &pole, &turned),
+            "the pole `pole_chain` chose supplies the engine's turned box"
+        );
+        assert!(
+            !state.pole_would_supply("small-electric-pole", &pole, &unturned),
+            "and does NOT supply the north-frame box -- this is the 0.25 tiles \
+             that refused the 30/min plan"
+        );
+
+        let mut net = ActionNetwork::new();
+        net.add(Action {
+            id: crate::ids::ActionId(1),
+            kind: ActionKind::Place {
+                entity: Box::new(FactorioEntity {
+                    name: "steam-engine".into(),
+                    entity_type: "generator".into(),
+                    position: engine.clone(),
+                    direction: 4, // east, the facing `method::power` gave it
+                    ..Default::default()
+                }),
+            },
+            pre: Vec::new(),
+            eff: Vec::new(),
+            duration: 30,
+            pinned: None,
+            label: "place steam-engine at [40.5, -5.5]".into(),
+        });
+        audit(&net, &state).expect("the pole reaches the engine as it actually stands");
     }
 }

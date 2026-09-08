@@ -47,9 +47,18 @@ describe('idleIntervals', () => {
     it('ignores other bots\' lanes', () => {
         expect(idleIntervals([lane(2, 0, 1000)], 1, scale)).toEqual([{from: 0, to: 1000}]);
     });
+    it('keeps a zero-length span, splitting the gap it sits inside', () => {
+        const gaps = idleIntervals(
+            [lane(1, 100, 200), lane(1, 300, 300, 'insert 1 coal'), lane(1, 500, 600)],
+            1, scale
+        );
+        expect(gaps).toEqual([{from: 0, to: 100}, {from: 200, to: 300}, {from: 300, to: 500}, {from: 600, to: 1000}]);
+    });
     it('reproduces the analysis tool\'s idle figure for bot 1 on the fixture run', () => {
         const run = loadFixtureRun();
-        // `just analyse`: "busy 14998 + idle 6984 = 21982 ticks; idle is 31.8% of span"
-        expect(idleTicks(idleIntervals(run.lanes, 1, {from: run.lo, to: run.hi}))).toBe(6984);
+        // `just analyse`: "busy 14998 + idle 6984 = 21982 ticks; idle is 31.8% of span across 85 gap(s)"
+        const gaps = idleIntervals(run.lanes, 1, {from: run.lo, to: run.hi});
+        expect(gaps.length).toBe(85);
+        expect(idleTicks(gaps)).toBe(6984);
     });
 });

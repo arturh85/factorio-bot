@@ -65,12 +65,22 @@ export interface Interval {
     to: number;
 }
 
-/** The axis minus the union of this bot's lanes. An unterminated lane covers to the end. */
+/**
+ * The axis minus the union of this bot's lanes. An unterminated lane covers to the end.
+ *
+ * Zero-length spans are KEPT, not dropped. `place`/`insert`/`take`/`fuel`
+ * settle in the tick they dispatch, so as intervals they are points; dropping
+ * a point for having no width lets the gap run past the very action the bot
+ * was waiting for and onto whatever it did next -- matching `idle_gaps` in
+ * `tools/run_analysis.py`, whose docstring names the exact misattribution
+ * this caused (`run-1788459085-32452`: "waited 12,246 for `craft 3 pipe`" in
+ * place of "waited 12,244 for `take 50 iron-plate from the cell`").
+ */
 export function idleIntervals(lanes: Lane[], bot: number, scale: Interval): Interval[] {
     const busy = lanes
         .filter((l) => l.bot === bot)
         .map((l) => ({from: Math.max(scale.from, l.from_tick), to: Math.min(scale.to, l.to_tick ?? scale.to)}))
-        .filter((i) => i.to > i.from)
+        .filter((i) => i.to >= i.from)
         .sort((a, b) => a.from - b.from);
     const gaps: Interval[] = [];
     let cursor = scale.from;

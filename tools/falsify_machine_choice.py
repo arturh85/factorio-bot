@@ -50,9 +50,15 @@ MUTATIONS = [
     ("runnable set decides for itself again instead of asking machine_for", MACHINE,
      "            if self.machine_for(category).is_ok() {",
      "            if self.declared[category].len() == 1 {"),
+    ("ignore what the ground supplies (the defect that made this inert)", MACHINE,
+     "    for name in ground {\n        cost.insert(name.as_str(), 1.0);\n    }",
+     "    let _ = ground;"),
+    ("from_state prices without the ground", MACHINE,
+     "            &crate::products::ground_supply(state.base()),",
+     "            &BTreeSet::new(),"),
     ("from_state hands the pricing no recipes", MACHINE,
-     "        MachineTable::from_parts_and_recipes(protos.iter(), recipes.iter())",
-     "        let _ = recipes;\n        MachineTable::from_parts_and_recipes(protos.iter(), std::iter::empty())"),
+     "            recipes.iter(),\n            &crate::products::ground_supply(state.base()),",
+     "            std::iter::empty::<&FactorioRecipe>(),\n            &crate::products::ground_supply(state.base()),"),
 ]
 
 

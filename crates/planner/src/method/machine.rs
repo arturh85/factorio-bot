@@ -1099,15 +1099,30 @@ mod tests {
         use crate::ids::BotId;
         use crate::state::PlanState;
         use factorio_bot_core::factorio::world::FactorioSurface;
+        use factorio_bot_core::test_utils::spawn_ore;
+        use factorio_bot_core::types::{Position, Rect};
         use std::sync::Arc;
 
         let world = FactorioSurface::new();
         world
             .update_entity_prototypes(vanilla())
             .expect("update_entity_prototypes");
-        world
-            .update_recipes(vanilla_recipes())
-            .expect("update_recipes");
+        // The real shape, not the fixture's: `iron-plate` is produced here --
+        // by a crushing arm, as Space Age produces its ore -- so the ONLY base
+        // case is the charted ore under the bots' feet.
+        let mut recipes = vanilla_recipes();
+        recipes.push(recipe("iron-plate", "smelting", &[("iron-ore", 1)], 1));
+        recipes.push(recipe("iron-ore", "crushing", &[("iron-plate", 2)], 1));
+        recipes.push(recipe("copper-plate", "smelting", &[("iron-ore", 1)], 1));
+        recipes.push(recipe("stone", "crushing", &[("iron-ore", 2)], 1));
+        world.update_recipes(recipes).expect("update_recipes");
+        let mut ore = Vec::new();
+        spawn_ore(
+            &mut ore,
+            Rect::new(&Position::new(-4.0, -4.0), &Position::new(-1.0, -1.0)),
+            "iron-ore",
+        );
+        world.entity_graph.add(ore, None).expect("ore is charted");
         let state = PlanState::from_world(Arc::new(world), &[BotId(1)]);
         let table = MachineTable::from_state(&state);
         assert_eq!(

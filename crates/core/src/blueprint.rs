@@ -371,7 +371,7 @@ mod grid_tests {
     #[test]
     fn a_declared_grid_survives_the_decode() {
         let text = encode_for_test(
-            r#"{"blueprint":{"item":"blueprint","version":281479278886912,
+            r#"{"blueprint":{"item":"blueprint","version":562949953421312,
                 "snap-to-grid":{"x":29,"y":11},"absolute-snapping":true,
                 "entities":[{"entity_number":1,"name":"stone-furnace",
                              "position":{"x":0,"y":0}}]}}"#,
@@ -396,7 +396,7 @@ mod grid_tests {
     #[test]
     fn no_grid_is_none_and_not_a_zero_pitch() {
         let text = encode_for_test(
-            r#"{"blueprint":{"item":"blueprint","version":281479278886912,
+            r#"{"blueprint":{"item":"blueprint","version":562949953421312,
                 "entities":[{"entity_number":1,"name":"stone-furnace",
                              "position":{"x":0,"y":0}}]}}"#,
         );
@@ -408,7 +408,7 @@ mod grid_tests {
     #[test]
     fn absolute_snapping_without_a_pitch_is_still_no_grid() {
         let text = encode_for_test(
-            r#"{"blueprint":{"item":"blueprint","version":281479278886912,
+            r#"{"blueprint":{"item":"blueprint","version":562949953421312,
                 "absolute-snapping":true,
                 "entities":[{"entity_number":1,"name":"stone-furnace",
                              "position":{"x":0,"y":0}}]}}"#,
@@ -423,7 +423,7 @@ mod grid_tests {
     #[test]
     fn a_relative_position_is_kept_and_distinguishable_from_absent() {
         let text = encode_for_test(
-            r#"{"blueprint":{"item":"blueprint","version":281479278886912,
+            r#"{"blueprint":{"item":"blueprint","version":562949953421312,
                 "snap-to-grid":{"x":6,"y":11},
                 "position-relative-to-grid":{"x":-2,"y":3},
                 "entities":[{"entity_number":1,"name":"stone-furnace",

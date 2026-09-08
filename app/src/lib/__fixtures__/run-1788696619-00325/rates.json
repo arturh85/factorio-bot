@@ -1,0 +1,693 @@
+{
+ "present": true,
+ "reason": null,
+ "origin_tick": 3242,
+ "end_tick": 25224,
+ "end_minutes": 6.106111111111111,
+ "last_sample_tick": 25200,
+ "baseline": "assumed zero (no sample at or before the origin)",
+ "window_minutes": 2,
+ "items": [
+  "iron-plate",
+  "copper-plate",
+  "iron-gear-wheel",
+  "electronic-circuit",
+  "automation-science-pack",
+  "logistic-science-pack"
+ ],
+ "marks": [
+  {
+   "minute": 5.0,
+   "label": "5:00",
+   "tick": 21242,
+   "is_end": false,
+   "status": "ok",
+   "sample_tick": 21000,
+   "lag_ticks": 242,
+   "items": {
+    "iron-plate": {
+     "cumulative": 94,
+     "made_in_interval": 94,
+     "rate_interval": 18.8,
+     "rate_window": 8.0,
+     "machine_made": 94,
+     "roster_made": 0,
+     "source": "counters",
+     "verdict": "roster-fed",
+     "why": "machines made 94 of the 94 (100%) -- stone-furnacex94 -- and the roster ran 115 feeding action(s), so the machines produced it and the bots carried what went in"
+    },
+    "copper-plate": {
+     "cumulative": 26,
+     "made_in_interval": 26,
+     "rate_interval": 5.2,
+     "rate_window": 0.0,
+     "machine_made": 25,
+     "roster_made": 1,
+     "source": "counters",
+     "verdict": "roster-fed",
+     "why": "machines made 25 of the 26 (96%) -- stone-furnacex25 -- and the roster ran 115 feeding action(s), so the machines produced it and the bots carried what went in"
+    },
+    "iron-gear-wheel": {
+     "cumulative": 32,
+     "made_in_interval": 32,
+     "rate_interval": 6.4,
+     "rate_window": 6.0,
+     "machine_made": 0,
+     "roster_made": 32,
+     "source": "counters",
+     "verdict": "hand-made",
+     "why": "no machine produced any of the 32 made in this interval -- every one of them came out of the roster's own hands (hand crafting and hand mining pass through no machine); the roster ran 115 feeding action(s)"
+    },
+    "electronic-circuit": {
+     "cumulative": 10,
+     "made_in_interval": 10,
+     "rate_interval": 2.0,
+     "rate_window": 5.0,
+     "machine_made": 0,
+     "roster_made": 10,
+     "source": "counters",
+     "verdict": "hand-made",
+     "why": "no machine produced any of the 10 made in this interval -- every one of them came out of the roster's own hands (hand crafting and hand mining pass through no machine); the roster ran 115 feeding action(s)"
+    },
+    "automation-science-pack": {
+     "cumulative": 10,
+     "made_in_interval": 10,
+     "rate_interval": 2.0,
+     "rate_window": 5.0,
+     "machine_made": 0,
+     "roster_made": 10,
+     "source": "counters",
+     "verdict": "hand-made",
+     "why": "no machine produced any of the 10 made in this interval -- every one of them came out of the roster's own hands (hand crafting and hand mining pass through no machine); the roster ran 115 feeding action(s)"
+    },
+    "logistic-science-pack": {
+     "cumulative": 0,
+     "made_in_interval": 0,
+     "rate_interval": 0.0,
+     "rate_window": 0.0,
+     "verdict": "no output",
+     "why": "nothing made in this interval"
+    }
+   },
+   "attribution": {
+    "from_tick": 3242,
+    "from_minute": 0.0,
+    "roster": {
+     "bots": 4,
+     "span_ticks": 18000,
+     "busy_ticks": 30118,
+     "busy_pct": 41.830555555555556,
+     "feed_ticks": 8277,
+     "feed_pct": 11.495833333333334,
+     "actions": 176,
+     "feed_actions": 115,
+     "other_actions": 61,
+     "feed_verbs": {
+      "mine": 34,
+      "craft": 33,
+      "stock": 26,
+      "place": 22,
+      "take": 22,
+      "insert": 18,
+      "fuel": 15,
+      "chop": 5,
+      "research": 1
+     }
+    },
+    "power": {
+     "samples": 60,
+     "generated_kw": 900.0,
+     "consumed_kw": 60.0,
+     "satisfaction": 1.0,
+     "max_generated_kw": 900.0,
+     "max_consumed_kw": 60.0,
+     "any_generation": true,
+     "any_consumption": true
+    },
+    "machines": {
+     "samples": 60,
+     "total": 609,
+     "by_status": {
+      "no_ingredients": 400,
+      "working": 141,
+      "no_fuel": 61,
+      "no_research_in_progress": 4,
+      "full_output": 3
+     },
+     "dominant": "no_ingredients",
+     "starved": 461,
+     "electrical": 0,
+     "working": 141,
+     "working_electric": 0,
+     "working_burner": 109,
+     "working_unknown": 7,
+     "working_electric_names": {},
+     "working_burner_names": {
+      "stone-furnace": 66,
+      "burner-mining-drill": 43
+     },
+     "powered_nonproducers": {
+      "steam-engine": 11,
+      "lab": 6
+     }
+    },
+    "produced": {
+     "available": true,
+     "base_tick": null,
+     "end_tick": 21000,
+     "by_item": {
+      "iron-plate": 94,
+      "copper-plate": 25,
+      "iron-ore": 53
+     },
+     "by_machine": [
+      {
+       "key": "112",
+       "name": "stone-furnace",
+       "type": "furnace",
+       "position": {
+        "x": 25.0,
+        "y": -46.0
+       },
+       "item": null,
+       "produced": 1,
+       "source": "game",
+       "shared": false
+      },
+      {
+       "key": "13",
+       "name": "stone-furnace",
+       "type": "furnace",
+       "position": {
+        "x": -10.0,
+        "y": -21.0
+       },
+       "item": "iron-plate",
+       "produced": 7,
+       "source": "game",
+       "shared": false
+      },
+      {
+       "key": "152",
+       "name": "stone-furnace",
+       "type": "furnace",
+       "position": {
+        "x": -8.0,
+        "y": -23.0
+       },
+       "item": "iron-plate",
+       "produced": 16,
+       "source": "game",
+       "shared": false
+      },
+      {
+       "key": "158",
+       "name": "stone-furnace",
+       "type": "furnace",
+       "position": {
+        "x": -10.0,
+        "y": -19.0
+       },
+       "item": "iron-plate",
+       "produced": 8,
+       "source": "game",
+       "shared": false
+      },
+      {
+       "key": "159",
+       "name": "stone-furnace",
+       "type": "furnace",
+       "position": {
+        "x": -10.0,
+        "y": -17.0
+       },
+       "item": "iron-plate",
+       "produced": 10,
+       "source": "game",
+       "shared": false
+      },
+      {
+       "key": "166",
+       "name": "stone-furnace",
+       "type": "furnace",
+       "position": {
+        "x": 27.0,
+        "y": -46.0
+       },
+       "item": "copper-plate",
+       "produced": 2,
+       "source": "game",
+       "shared": false
+      },
+      {
+       "key": "17",
+       "name": "stone-furnace",
+       "type": "furnace",
+       "position": {
+        "x": 23.0,
+        "y": -50.0
+       },
+       "item": "copper-plate",
+       "produced": 4,
+       "source": "game",
+       "shared": false
+      },
+      {
+       "key": "18",
+       "name": "stone-furnace",
+       "type": "furnace",
+       "position": {
+        "x": 20.0,
+        "y": -53.0
+       },
+       "item": "copper-plate",
+       "produced": 4,
+       "source": "game",
+       "shared": false
+      },
+      {
+       "key": "42",
+       "name": "stone-furnace",
+       "type": "furnace",
+       "position": {
+        "x": -13.0,
+        "y": -12.0
+       },
+       "item": "iron-plate",
+       "produced": 53,
+       "source": "game",
+       "shared": false
+      },
+      {
+       "key": "43",
+       "name": "burner-mining-drill",
+       "type": "mining-drill",
+       "position": {
+        "x": -13.0,
+        "y": -14.0
+       },
+       "item": "iron-ore",
+       "produced": 53,
+       "source": "accumulated",
+       "shared": false
+      },
+      {
+       "key": "72",
+       "name": "stone-furnace",
+       "type": "furnace",
+       "position": {
+        "x": 26.0,
+        "y": -48.0
+       },
+       "item": "copper-plate",
+       "produced": 10,
+       "source": "game",
+       "shared": false
+      },
+      {
+       "key": "77",
+       "name": "stone-furnace",
+       "type": "furnace",
+       "position": {
+        "x": 31.0,
+        "y": -47.0
+       },
+       "item": "copper-plate",
+       "produced": 5,
+       "source": "game",
+       "shared": false
+      }
+     ],
+     "total": 173,
+     "unattributed": 1,
+     "unavailable": {},
+     "no_counter": 0,
+     "shared": [],
+     "ambiguous": [],
+     "by_name": {
+      "iron-plate": {
+       "stone-furnace": 94
+      },
+      "copper-plate": {
+       "stone-furnace": 25
+      },
+      "iron-ore": {
+       "burner-mining-drill": 53
+      }
+     }
+    },
+    "no_generator": false
+   }
+  },
+  {
+   "minute": 10.0,
+   "label": "10:00",
+   "tick": 39242,
+   "is_end": false,
+   "status": "run_ended",
+   "sample_tick": null,
+   "lag_ticks": null,
+   "items": {}
+  },
+  {
+   "minute": 15.0,
+   "label": "15:00",
+   "tick": 57242,
+   "is_end": false,
+   "status": "run_ended",
+   "sample_tick": null,
+   "lag_ticks": null,
+   "items": {}
+  },
+  {
+   "minute": 20.0,
+   "label": "20:00",
+   "tick": 75242,
+   "is_end": false,
+   "status": "run_ended",
+   "sample_tick": null,
+   "lag_ticks": null,
+   "items": {}
+  },
+  {
+   "minute": 25.0,
+   "label": "25:00",
+   "tick": 93242,
+   "is_end": false,
+   "status": "run_ended",
+   "sample_tick": null,
+   "lag_ticks": null,
+   "items": {}
+  },
+  {
+   "minute": 30.0,
+   "label": "30:00",
+   "tick": 111242,
+   "is_end": false,
+   "status": "run_ended",
+   "sample_tick": null,
+   "lag_ticks": null,
+   "items": {}
+  },
+  {
+   "minute": 6.099444444444444,
+   "label": "end 6:06",
+   "tick": 25200,
+   "is_end": true,
+   "status": "ok",
+   "sample_tick": 25200,
+   "lag_ticks": 0,
+   "items": {
+    "iron-plate": {
+     "cumulative": 94,
+     "made_in_interval": 0,
+     "rate_interval": 0.0,
+     "rate_window": 0.0,
+     "verdict": "no output",
+     "why": "nothing made in this interval"
+    },
+    "copper-plate": {
+     "cumulative": 26,
+     "made_in_interval": 0,
+     "rate_interval": 0.0,
+     "rate_window": 0.0,
+     "verdict": "no output",
+     "why": "nothing made in this interval"
+    },
+    "iron-gear-wheel": {
+     "cumulative": 32,
+     "made_in_interval": 0,
+     "rate_interval": 0.0,
+     "rate_window": 0.0,
+     "verdict": "no output",
+     "why": "nothing made in this interval"
+    },
+    "electronic-circuit": {
+     "cumulative": 10,
+     "made_in_interval": 0,
+     "rate_interval": 0.0,
+     "rate_window": 0.0,
+     "verdict": "no output",
+     "why": "nothing made in this interval"
+    },
+    "automation-science-pack": {
+     "cumulative": 10,
+     "made_in_interval": 0,
+     "rate_interval": 0.0,
+     "rate_window": 5.0,
+     "verdict": "no output",
+     "why": "nothing made in this interval"
+    },
+    "logistic-science-pack": {
+     "cumulative": 0,
+     "made_in_interval": 0,
+     "rate_interval": 0.0,
+     "rate_window": 0.0,
+     "verdict": "no output",
+     "why": "nothing made in this interval"
+    }
+   },
+   "attribution": {
+    "from_tick": 21242,
+    "from_minute": 5.0,
+    "roster": {
+     "bots": 4,
+     "span_ticks": 3958,
+     "busy_ticks": 3958,
+     "busy_pct": 25.0,
+     "feed_ticks": 0,
+     "feed_pct": 0.0,
+     "actions": 0,
+     "feed_actions": 0,
+     "other_actions": 0,
+     "feed_verbs": {}
+    },
+    "power": {
+     "samples": 14,
+     "generated_kw": 900.0,
+     "consumed_kw": 60.0,
+     "satisfaction": 1.0,
+     "max_generated_kw": 900.0,
+     "max_consumed_kw": 60.0,
+     "any_generation": true,
+     "any_consumption": true
+    },
+    "machines": {
+     "samples": 14,
+     "total": 210,
+     "by_status": {
+      "no_ingredients": 154,
+      "working": 38,
+      "no_fuel": 18
+     },
+     "dominant": "no_ingredients",
+     "starved": 172,
+     "electrical": 0,
+     "working": 38,
+     "working_electric": 0,
+     "working_burner": 0,
+     "working_unknown": 0,
+     "working_electric_names": {},
+     "working_burner_names": {},
+     "powered_nonproducers": {
+      "steam-engine": 14,
+      "lab": 14
+     }
+    },
+    "produced": {
+     "available": true,
+     "base_tick": 21000,
+     "end_tick": 25200,
+     "by_item": {},
+     "by_machine": [],
+     "total": 0,
+     "unattributed": 0,
+     "unavailable": {},
+     "no_counter": 0,
+     "shared": [],
+     "ambiguous": [],
+     "by_name": {}
+    },
+    "no_generator": false
+   }
+  }
+ ],
+ "plateaus": {
+  "iron-plate": null,
+  "copper-plate": {
+   "at_tick": 10800,
+   "at_minute": 2.0994444444444444,
+   "count": 26,
+   "idle_minutes": 4.0,
+   "roster": {
+    "bots": 4,
+    "span_ticks": 14400,
+    "busy_ticks": 12185,
+    "busy_pct": 21.15451388888889,
+    "feed_ticks": 0,
+    "feed_pct": 0.0,
+    "actions": 40,
+    "feed_actions": 13,
+    "other_actions": 27,
+    "feed_verbs": {
+     "craft": 18,
+     "place": 8,
+     "take": 7,
+     "insert": 4,
+     "fuel": 2,
+     "research": 1
+    }
+   },
+   "power": {
+    "samples": 48,
+    "generated_kw": 900.0,
+    "consumed_kw": 60.0,
+    "satisfaction": 1.0,
+    "max_generated_kw": 900.0,
+    "max_consumed_kw": 60.0,
+    "any_generation": true,
+    "any_consumption": true
+   },
+   "machines": {
+    "samples": 48,
+    "total": 650,
+    "by_status": {
+     "no_ingredients": 498,
+     "working": 115,
+     "no_fuel": 30,
+     "no_research_in_progress": 4,
+     "full_output": 3
+    },
+    "dominant": "no_ingredients",
+    "starved": 528,
+    "electrical": 0,
+    "working": 115,
+    "working_electric": 0,
+    "working_burner": 49,
+    "working_unknown": 3,
+    "working_electric_names": {},
+    "working_burner_names": {
+     "stone-furnace": 27,
+     "burner-mining-drill": 22
+    },
+    "powered_nonproducers": {
+     "steam-engine": 25,
+     "lab": 20
+    }
+   },
+   "produced": {
+    "available": true,
+    "base_tick": 10800,
+    "end_tick": 25200,
+    "by_item": {
+     "iron-plate": 54,
+     "iron-ore": 28
+    },
+    "by_machine": [
+     {
+      "key": "13",
+      "name": "stone-furnace",
+      "type": "furnace",
+      "position": {
+       "x": -10.0,
+       "y": -21.0
+      },
+      "item": "iron-plate",
+      "produced": 4,
+      "source": "game",
+      "shared": false
+     },
+     {
+      "key": "152",
+      "name": "stone-furnace",
+      "type": "furnace",
+      "position": {
+       "x": -8.0,
+       "y": -23.0
+      },
+      "item": "iron-plate",
+      "produced": 11,
+      "source": "game",
+      "shared": false
+     },
+     {
+      "key": "158",
+      "name": "stone-furnace",
+      "type": "furnace",
+      "position": {
+       "x": -10.0,
+       "y": -19.0
+      },
+      "item": "iron-plate",
+      "produced": 4,
+      "source": "game",
+      "shared": false
+     },
+     {
+      "key": "159",
+      "name": "stone-furnace",
+      "type": "furnace",
+      "position": {
+       "x": -10.0,
+       "y": -17.0
+      },
+      "item": "iron-plate",
+      "produced": 6,
+      "source": "game",
+      "shared": false
+     },
+     {
+      "key": "42",
+      "name": "stone-furnace",
+      "type": "furnace",
+      "position": {
+       "x": -13.0,
+       "y": -12.0
+      },
+      "item": "iron-plate",
+      "produced": 29,
+      "source": "game",
+      "shared": false
+     },
+     {
+      "key": "43",
+      "name": "burner-mining-drill",
+      "type": "mining-drill",
+      "position": {
+       "x": -13.0,
+       "y": -14.0
+      },
+      "item": "iron-ore",
+      "produced": 28,
+      "source": "accumulated",
+      "shared": false
+     }
+    ],
+    "total": 82,
+    "unattributed": 0,
+    "unavailable": {},
+    "no_counter": 0,
+    "shared": [],
+    "ambiguous": [],
+    "by_name": {
+     "iron-plate": {
+      "stone-furnace": 54
+     },
+     "iron-ore": {
+      "burner-mining-drill": 28
+     }
+    }
+   },
+   "kind": "the machines kept working, but none made this item",
+   "why": "machines produced 82 item(s) after the plateau and none of them was copper-plate -- the factory is running and this product is not part of what it is making. machines were mostly no_ingredients after the plateau (528 starved readings); the roster ran 13 feeding action(s) after it",
+   "source": "counters"
+  },
+  "iron-gear-wheel": null,
+  "electronic-circuit": null,
+  "automation-science-pack": null,
+  "logistic-science-pack": null
+ },
+ "headline": "rates: iron 19 /min at 5 (roster-fed; no generator until 4:06); red packs 2; green 0 at 5, 0 at end 6:06; run ended 6:06 before mark 10",
+ "first_generation_tick": 18000,
+ "first_generation_minute": 4.099444444444444
+}

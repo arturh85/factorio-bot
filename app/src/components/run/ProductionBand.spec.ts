@@ -38,4 +38,13 @@ describe('ProductionBand', () => {
         expect(w.findAll('rect.verdict')).toHaveLength(0);
         expect(w.text()).toContain('no output in this run');
     });
+    it('says the SAMPLES are missing, not that the items made nothing, when the run has no force samples', () => {
+        // 5 of 21 archived runs answer `/samples` with an empty list. Deriving
+        // "no output in this run" per item from that is a claim about the
+        // factory the record never made.
+        const w = mount(ProductionBand, {props: {scale, cursor: run.lo, samples: [], events: run.events, items: ['iron-plate', 'copper-plate'], lo: run.lo, hi: run.hi}});
+        expect(w.text()).toContain('no production samples in this run');
+        expect(w.text()).not.toContain('no output in this run');
+        expect(w.findAll('rect.verdict')).toHaveLength(0);
+    });
 });

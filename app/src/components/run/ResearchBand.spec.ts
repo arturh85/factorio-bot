@@ -19,4 +19,11 @@ describe('ResearchBand', () => {
         const w = mount(ResearchBand, {props: {scale, cursor: run.lo, samples: none}});
         expect(w.text()).toContain('no research queued in this run');
     });
+    it('says the FORCE SAMPLES are missing, not that nothing was queued, when there are none', () => {
+        // A run whose `/samples` came back empty recorded no research state at
+        // all; saying "no research queued" would be a claim about the run.
+        const w = mount(ResearchBand, {props: {scale, cursor: run.lo, samples: []}});
+        expect(w.text()).toContain('no force samples in this run');
+        expect(w.text()).not.toContain('no research queued in this run');
+    });
 });

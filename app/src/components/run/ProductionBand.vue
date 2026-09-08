@@ -22,6 +22,18 @@ const ROW = 50;
 const height = computed(() => Math.max(ROW, props.items.length * ROW));
 const x = (t: number) => tickX(props.scale, t);
 
+/**
+ * Whether the record has any force samples AT ALL -- the question that comes
+ * before "did this item move".
+ *
+ * `/samples` answering an empty list is ordinary (5 of the 21 archived runs
+ * have no `samples.jsonl`), and every per-item series derived from it is
+ * empty. Reading that as "no output in this run" per item states something
+ * about the factory the record never said; the honest answer names the
+ * missing stream once, for the band.
+ */
+const hasForceSamples = computed(() => props.samples.some((s) => s.kind === 'force'));
+
 interface Row {
     item: string;
     color: string;
@@ -88,6 +100,11 @@ function verdictOpacity(v: Verdict): number { return v === 'factory' ? 0.18 : v 
         <circle cx="2.5" cy="2.5" r="0.9" fill="var(--color-ink-muted)" opacity="0.7"/>
       </pattern>
     </defs>
+    <!-- The record's silence about the samples is said once, for the band:
+         "no output in this run" per item would read as a fact about the
+         factory when it is a fact about `/samples`. -->
+    <text v-if="!hasForceSamples" :x="AXIS_WIDTH / 2" :y="height / 2 + 4" font-size="10" text-anchor="middle" fill="var(--color-ink-muted)">no production samples in this run</text>
+    <template v-else>
     <template v-for="(row, i) in rows" :key="row.item">
       <rect v-for="v in row.verdicts" :key="`${row.item}-${v.from}`" class="verdict" :data-verdict="v.verdict"
             :x="x(v.from)" :y="i * ROW" :width="x(v.to) - x(v.from)" :height="ROW"
@@ -111,6 +128,7 @@ function verdictOpacity(v: Verdict): number { return v === 'factory' ? 0.18 : v 
         <text v-for="v in row.verdicts" :key="`w-${row.item}-${v.from}`" :x="x(v.from) + 4" :y="(i + 1) * ROW - 2" font-size="9"
               :fill="v.verdict === 'roster-fed' ? 'var(--color-verdict-roster)' : 'var(--color-ink-muted)'">{{ v.verdict }}</text>
       </template>
+    </template>
     </template>
     <line :x1="x(cursor)" y1="0" :x2="x(cursor)" :y2="height" stroke="var(--color-verdict-roster)" stroke-width="1.5"/>
   </svg>

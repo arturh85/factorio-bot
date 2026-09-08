@@ -1888,6 +1888,13 @@ end
 --   `savepoint` the path inside the run directory, or nil
 --   `index`     the savepoint's milestone index, for `--resume-from`, or nil
 --   `held`      true when the game was actually paused
+--   `foreign_console_commands`
+--               console commands somebody ELSE issued while it was held, or
+--               `nil` when that could not be measured. **`nil` is not zero**:
+--               zero says nothing foreign was observed, `nil` says nobody
+--               looked. And even zero is not a clean bill -- a person clicking
+--               items into a chest on a graphical client issues no console
+--               command at all.
 --
 -- `"unavailable"` is its own answer and is never "stop": there is no game to
 -- pause (an offline plan), or this binary predates `rcon.hold`. Collapsing it
@@ -1930,14 +1937,49 @@ function supervisor.hold_fault(err, opts)
     end
     out.held = true
     out.released = held.released
+    out.foreign_console_commands = held.foreign_console_commands
+
+    -- **The record entry that says the world was exposed.** A hold is an
+    -- invitation to change the world under a run -- the owner's own words for
+    -- it are "cheat some missing items in" -- and until this call existed a run
+    -- somebody had cheated into was byte-identical in the record to one that
+    -- ran clean. Written whatever the hold ended as: a lapsed hold is still a
+    -- window in which the game was reachable, and `released = "timeout"` is
+    -- what says nobody came.
+    --
+    -- `pcall` for the same reason the savepoint above is: a driver in a fault
+    -- branch must not fault again. A failure here leaves the run recorded as
+    -- unheld-because-unknown rather than as clean, which is the honest
+    -- fallback -- see `crates/core/src/record/exposure.rs`.
+    if type(record) == "table" and type(record.exposure) == "function" then
+        local ok_exp, exp_err = pcall(record.exposure, held, tostring(err))
+        if not ok_exp then
+            print_warn("hold: the exposure could not be recorded, so this run's "
+                .. "honesty about being held is UNKNOWN rather than clean: "
+                .. tostring(exp_err))
+        end
+    end
 
     -- Loud on the way out, exactly as loud as on the way in. A lapsed hold
     -- reads as "nobody attached", never as a finished run.
     local how = (held.released == "timeout")
         and "nobody attached; the hold lapsed and tore itself down"
         or ("released with '" .. tostring(held.released) .. "'")
+    -- Three states, said in three different sentences on purpose. `nil` is
+    -- "nothing could tell", which must not read as either of the other two.
+    local foreign = held.foreign_console_commands
+    local exposure
+    if foreign == nil then
+        exposure = " -- EXPOSED, and whether anything was changed is UNKNOWN"
+    elseif foreign > 0 then
+        exposure = " -- EXPOSED: " .. tostring(foreign)
+            .. " console command(s) were issued by somebody else while it was held"
+    else
+        exposure = " -- exposed, but no foreign console command was observed"
+            .. " (a click on a graphical client would issue none)"
+    end
     local why = "held at tick " .. tostring(held.paused_at_tick) .. " for "
-        .. tostring(held.held_seconds) .. "s -- " .. how
+        .. tostring(held.held_seconds) .. "s -- " .. how .. exposure
         .. (out.savepoint and (" -- savepoint " .. out.savepoint) or " -- NO savepoint")
         .. " -- fault: " .. tostring(err)
     print("HELD: " .. why)

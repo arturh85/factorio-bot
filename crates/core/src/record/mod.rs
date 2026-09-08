@@ -18,6 +18,7 @@ use crate::graph::entity_graph::EntityGraph;
 use crate::types::Position;
 use std::sync::Arc;
 
+pub mod exposure;
 pub mod lanes;
 pub mod map;
 pub mod provenance;
@@ -1784,6 +1785,15 @@ pub const VISION_MEASURE_INTERVAL_TICKS: u64 = 18_000;
 /// Writes a run's event log.
 pub struct RunRecorder {
     dir: PathBuf,
+    /// Every hold this run has performed, and the file they are written to.
+    ///
+    /// Held in memory as well as on disk because a hold *appends*: the run can
+    /// fault, be held, be released with `continue`, replan and fault again,
+    /// and each of those is its own exposure window. Rereading the file to
+    /// append would make this recorder read back its own writes, and it is
+    /// the only writer. See [`exposure`] for why this is not a provenance
+    /// field.
+    exposure: exposure::Exposure,
     run_id: String,
     events: File,
     /// `map.jsonl`: what got built, and whether the game agreed. Written
@@ -1885,9 +1895,10 @@ impl RunRecorder {
         fs::create_dir_all(&dir)?;
         let events = File::create(dir.join("events.jsonl"))?;
         let map = File::create(dir.join("map.jsonl"))?;
-        Ok(Self {
+        let recorder = Self {
             dir,
             run_id,
+            exposure: exposure::Exposure::none_yet(),
             events,
             map,
             start_tick: None,
@@ -1908,7 +1919,56 @@ impl RunRecorder {
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or_default(),
-        })
+        };
+        // Written immediately, empty, and never gated on a hold happening.
+        // That is the whole point: an absent `exposure.json` must go on
+        // meaning "this build never looked", so "this run was not held" has
+        // to be a file on disk rather than the absence of one.
+        //
+        // Not fatal. A run that cannot write it leaves behind exactly the
+        // honest answer -- unknown -- which is what an absent file already
+        // means, so there is nothing to fail for.
+        if let Err(error) = recorder.write_exposure() {
+            crate::tracing::warn!(
+                %error,
+                "could not write exposure.json; whether this run was held will read as \
+                 unknown rather than as not-held"
+            );
+        }
+        Ok(recorder)
+    }
+
+    /// Serialises [`RunRecorder::exposure`] over `exposure.json`.
+    ///
+    /// Rewritten in full on every hold rather than appended to, because it is
+    /// a handful of records and a truncated JSON document is unreadable in a
+    /// way a truncated JSONL line is not. Unlike `provenance.json`, losing
+    /// this to a mid-write kill costs a *weaker* claim, never a wrong one: the
+    /// reader falls back to "not captured".
+    fn write_exposure(&self) -> io::Result<()> {
+        fs::write(
+            self.dir.join(exposure::EXPOSURE_FILE),
+            serde_json::to_vec_pretty(&self.exposure).map_err(io::Error::other)?,
+        )
+    }
+
+    /// Records that this run was **held**: paused mid-run with an invitation
+    /// for a human to attach, and therefore exposed to whatever they did.
+    ///
+    /// Called once per hold, after it ends, because what it records -- how
+    /// long, how it was released, what the game saw -- is only known then.
+    ///
+    /// See [`exposure`] for why being held is not the same as having been
+    /// mutated, and why the two must never be reported as one fact.
+    pub fn record_hold(&mut self, hold: exposure::HoldExposure) -> io::Result<()> {
+        self.exposure.holds.push(hold);
+        self.write_exposure()
+    }
+
+    /// What this run's holds add up to, for a caller that wants to say so in
+    /// its own output without rereading the file.
+    pub fn exposure(&self) -> &exposure::Exposure {
+        &self.exposure
     }
 
     pub fn run_id(&self) -> &str {

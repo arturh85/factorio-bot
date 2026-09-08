@@ -232,6 +232,17 @@ SHORT_ITEM = {
 # is not an error, and a missing or null field is UNKNOWN -- never a match.
 PROVENANCE_FILE = "provenance.json"
 
+# Whether a run was HELD -- paused mid-run with an invitation for a person to
+# attach and, in the owner's own words, "cheat some missing items in".
+# `crates/core/src/record/exposure.rs` writes it; that file's doc carries the
+# reasoning and the limits of the foreign-command count.
+EXPOSURE_FILE = "exposure.json"
+
+# The three answers `exposure.json` can give, kept apart on purpose. An absent
+# file is UNKNOWN and must never be rendered as either of the other two: it is
+# what every run archived before the feature existed looks like.
+NOT_HELD = "not held (run was never paused for a person)"
+
 # Every provenance field `--compare` knows, and what a *difference* in it means
 # when both runs recorded one. The severities are not uniform and the
 # asymmetry is the point:
@@ -284,6 +295,21 @@ PROVENANCE_SEVERITY = {
     #     run archived before the field existed records nothing and must not
     #     be silently declared hostile.
     "peaceful": "refuse",
+    # `held` -- REFUSE, on exactly the ground `resumed_from` is refused on, and
+    #     the record's own instruction. A held run's game was PAUSED with a
+    #     person invited to attach; releasing it with 'continue' replans, and
+    #     `PlanState::from_world` reads the live world, so anything inserted
+    #     during the hold is simply present on the retry. A held run and a
+    #     fresh one are byte-identical in every other field.
+    #
+    #     Note what the value carries and what it does not: being held is an
+    #     OPPORTUNITY to mutate, not proof of one, and the string says which of
+    #     the three states applies. Two runs held under the same conditions
+    #     compare as agreeing here, the same way two runs resumed from the same
+    #     savepoint do -- but see the separate `exposure` guard below, which
+    #     refuses a held run whose mutation could not be ruled out even against
+    #     another held run.
+    "held": "refuse",
 }
 PROVENANCE_FIELDS = tuple(PROVENANCE_SEVERITY)
 
@@ -447,6 +473,11 @@ def read_provenance(run_dir: str, run_started: dict | None) -> dict:
         # Defaulting it to "hostile" would declare every archived run hostile
         # on no evidence -- the conflation the field exists to prevent.
         "peaceful": pick((PROVENANCE_FILE, sidecar.get("peaceful"), _norm_peaceful)),
+        # From its own file, and null-with-meaning ONLY when that file is
+        # present: `holds: []` there is the positive statement "this run was
+        # never held", where no file at all means nobody ever recorded whether
+        # it was. Same shape as `resumed_from` below, same reason.
+        "held": pick((EXPOSURE_FILE, _held_summary(run_dir), text)),
         # Null-with-meaning, but ONLY when the file that defines it is present:
         # `resumed_from: null` there means the run started on a fresh world,
         # where no file at all means nobody ever recorded whether it did.
@@ -473,6 +504,73 @@ def read_provenance(run_dir: str, run_started: dict | None) -> dict:
         (sidecar.get("map") or {}).get("tiles") if isinstance(sidecar.get("map"), dict) else None
     )
     return out
+
+
+def _held_summary(run_dir: str) -> str | None:
+    """One line saying which of the three exposure states a run is in.
+
+    ``None`` when there is no ``exposure.json`` -- unknown, which is what every
+    run archived before the feature looks like and what a recorder that could
+    not write leaves behind. Never confuse it with ``NOT_HELD``.
+    """
+    doc = load_json(os.path.join(run_dir, EXPOSURE_FILE))
+    if not isinstance(doc, dict):
+        return None
+    holds = doc.get("holds")
+    if not isinstance(holds, list):
+        return None
+    if not holds:
+        return NOT_HELD
+    # `None` poisons the total: a readable zero beside an unreadable hold has
+    # not shown the run clean, and summing only the readable half would report
+    # the strongest available claim on partial evidence. Matches
+    # `Exposure::foreign_console_commands` in Rust, deliberately.
+    foreign: int | None = 0
+    for h in holds:
+        n = h.get("foreign_console_commands") if isinstance(h, dict) else None
+        if not isinstance(n, int):
+            foreign = None
+            break
+        foreign += n
+    where = ", ".join(
+        f"tick {h.get('paused_at_tick')} ({h.get('released')})"
+        for h in holds
+        if isinstance(h, dict)
+    )
+    if foreign is None:
+        verdict = "foreign console commands UNKNOWN"
+    elif foreign:
+        # A person releasing a hold issues `hold_release`, which IS a foreign
+        # command -- so a released hold counts at least one by construction and
+        # a bare count would read as worse than it is. Said here rather than
+        # subtracted: nothing can tell which command was the release, and
+        # subtracting a guess would understate a real cheat by one.
+        released_by_hand = any(
+            isinstance(h, dict) and h.get("released") in ("continue", "stop")
+            for h in holds
+        )
+        verdict = f"{foreign} FOREIGN console command(s) observed"
+        if released_by_hand:
+            verdict += " (a hand-released hold counts its own release as one)"
+    else:
+        verdict = "no foreign console command observed"
+    return f"HELD x{len(holds)} [{where}]; {verdict}"
+
+
+def held_is_suspect(prov: dict) -> str | None:
+    """Why a held run cannot be compared even against another held run.
+
+    ``None`` when the run was not held, or was held and no foreign command was
+    observed. A string otherwise -- and note the deliberate asymmetry: a run
+    that was never held is clean here, a run held with an unreadable census is
+    NOT, because "we could not tell" is not evidence of nothing.
+    """
+    value = (prov.get("held") or {}).get("value")
+    if not isinstance(value, str) or not value.startswith("HELD"):
+        return None
+    if "no foreign console command observed" in value:
+        return None
+    return value
 
 
 def load_json(path: str) -> Any | None:
@@ -4639,6 +4737,18 @@ def report(a: dict, out=sys.stdout, top: int = 12) -> None:
     p(f"  started {when}   outcome: {a['outcome']}   {wall_s}")
     p(f"  roster: {a.get('roster')}   ticks {a['tick_lo']} -> {a['tick_hi']} "
       f"= {a['span_ticks']} ({minutes(a['span_ticks'])} game time)")
+    # Said before any number this run produced, not after: whether a person
+    # was let into the world mid-run changes what every figure below means.
+    # Three states, three different sentences -- an absent `exposure.json` is
+    # UNKNOWN and is never rendered as "not held".
+    held = (a.get("provenance", {}).get("held") or {}).get("value")
+    if held is None:
+        p("  exposure: UNKNOWN -- no exposure.json, so nothing recorded whether this "
+          "run was ever held for a person")
+    elif held != NOT_HELD:
+        p(f"  ! EXPOSURE: {held}")
+        p("    a hold invites a person to change the world mid-run; these numbers are "
+          "not a controlled measurement")
     if wall and a["span_ticks"]:
         p(f"  game speed: {a['span_ticks'] / TICKS_PER_SECOND / wall:.2f}x realtime")
     rate = a.get("tick_rate") or {}
@@ -5400,6 +5510,48 @@ def comparability(a: dict, b: dict) -> list[dict]:
         # "different outcome: None vs stuck", which is an artefact of the
         # missing file and not a fact about the runs.
         return guards
+
+    # --- 0. was either world exposed to a person mid-run? ---------------
+    #
+    # Ahead of provenance because it is the strongest refusal here: the other
+    # guards ask whether two runs were produced under the same conditions,
+    # while this one asks whether either run's numbers describe the run at all.
+    # A held run whose foreign-command census came back unreadable, or came
+    # back positive, has an unmeasured human in it -- and two such runs are no
+    # more comparable to each other than to a clean one.
+    #
+    # A hold with a clean census does NOT land here, and that is a deliberate
+    # limit rather than an oversight: the count sees console commands, so a
+    # zero is real evidence and not a proof. The provenance `held` field still
+    # refuses it against a run that was never held.
+    for name, r in (("A", a), ("B", b)):
+        suspect = held_is_suspect(r.get("provenance") or {})
+        if suspect:
+            guards.append(
+                {
+                    "id": "exposure",
+                    "severity": "refuse",
+                    "headline": (
+                        f"run {name} ({r['run_id']}) was HELD mid-run and its world was "
+                        "exposed to a person"
+                    ),
+                    "detail": [
+                        suspect,
+                        "",
+                        "A hold pauses the game and invites somebody to attach with",
+                        "`factorio-bot rcon -s localhost`. Releasing with 'continue' replans,",
+                        "and the planner reads the LIVE world -- so anything inserted during",
+                        "the hold is simply there on the retry. Cheating while developing is",
+                        "fine; comparing the result to anything is not.",
+                        "",
+                        "'UNKNOWN' above means the console census could not be read, NOT that",
+                        "nothing happened. And even a clean census only rules out console",
+                        "commands: a person clicking items into a chest on a graphical client",
+                        "issues none at all.",
+                        "Pass --force if you genuinely mean to compare them anyway.",
+                    ],
+                }
+            )
 
     # --- 1. provenance: same world, same build? -------------------------
     pa = a.get("provenance") or {}

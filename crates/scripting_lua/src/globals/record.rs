@@ -22,6 +22,7 @@ use factorio_bot_core::process::instance_setup::{installed_factorio_version, rea
 use factorio_bot_core::record::map::{
     Divergence, EntitySnapshot, MapKind, MapRecord, Placement, bounds_around, divergence_between,
 };
+use factorio_bot_core::record::exposure::HoldExposure;
 use factorio_bot_core::record::run_mode;
 use factorio_bot_core::record::savepoint;
 use factorio_bot_core::record::video::Resolution;
@@ -1496,6 +1497,74 @@ end
                         None => (None, None),
                     })
                 }
+            })?,
+        )?;
+    }
+
+    map_table.set(
+        "__doc_entry_exposure",
+        String::from(
+            r#"
+--- records that the run was HELD, and therefore exposed to a person
+-- Takes the table `rcon.hold` returned and appends it to `exposure.json`.
+--
+-- **Being held is not the same as having been cheated, and this must not
+-- report it as if it were.** A hold pauses the game and invites somebody to
+-- attach; whether they inserted 50 coal, read one tick, or never came is a
+-- separate question. The record keeps three answers apart: no `exposure.json`
+-- at all means nobody ever looked (a build older than the field), an empty
+-- `holds` list means this run was never held, and an entry with a null
+-- `foreign_console_commands` means it was held and nothing could tell.
+--
+-- Call it after every hold, whatever the hold ended as -- a lapsed hold is
+-- still a window in which the world was reachable, and `released = "timeout"`
+-- is what says nobody came.
+--
+-- `just analyse --compare` treats a held run the way it treats a resumed one:
+-- it refuses to compare it against a run that was not held, for the same
+-- reason -- the two are not measuring the same thing.
+-- @tparam table hold the table `rcon.hold` returned
+-- @string[opt] reason the fault that caused the hold
+-- @raise if no recording is running
+function record.exposure(hold, reason)
+end
+    "#,
+        ),
+    )?;
+    {
+        let slot = slot.clone();
+        map_table.set(
+            "exposure",
+            lua.create_function(move |_lua, (hold, reason): (LuaTable, Option<String>)| {
+                let mut guard = slot.lock();
+                let recorder = guard.as_mut().ok_or_else(|| {
+                    record_error("no recording is running -- call record.start() first")
+                })?;
+                // Every count is read as an `Option`, so a `nil` from
+                // `rcon.hold` -- which is what it answers when the census
+                // could not be taken -- stays a `null` on disk rather than
+                // becoming a zero. That is the whole distinction this file
+                // exists to keep.
+                let hold = HoldExposure {
+                    paused_at_tick: hold.get("paused_at_tick").unwrap_or(0),
+                    held_seconds: hold.get("held_seconds").unwrap_or(0),
+                    released: hold
+                        .get::<Option<String>>("released")?
+                        // Not "stop", and not "timeout": a hold whose verdict
+                        // did not survive the trip is unknown, and naming it
+                        // either would invent a fact about whether anybody
+                        // came.
+                        .unwrap_or_else(|| "unknown".to_string()),
+                    reason,
+                    console_commands_observed: hold.get("console_commands_observed")?,
+                    console_commands_ours: hold.get("console_commands_ours")?,
+                    foreign_console_commands: hold.get("foreign_console_commands")?,
+                    console_command_used: hold.get("console_command_used")?,
+                };
+                recorder.record_hold(hold).map_err(|e| {
+                    record_error(format!("could not write exposure.json: {e}"))
+                })?;
+                Ok(())
             })?,
         )?;
     }

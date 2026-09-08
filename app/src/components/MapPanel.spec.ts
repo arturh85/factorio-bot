@@ -431,4 +431,14 @@ describe('MapPanel', () => {
             expect(wrapper.find('[data-testid="map-legend"]').exists()).toBe(false);
         });
     });
+
+    describe('fills', () => {
+        it('fills a machine with its status colour when a fill is given for its position', () => {
+            const entities: EntitySnapshot[] = [{name: 'stone-furnace', position: {x: 10, y: 12}, direction: 0}];
+            const w = mountPanel({entities, fills: new Map([['10,12', 'no_fuel']])});
+            const rect = w.get(`${MAP} rect[data-entity="stone-furnace"]`);
+            expect(rect.attributes('fill')).toBe('var(--color-status-serious)');
+            expect(rect.find('title').text()).toContain('no_fuel');
+        });
+    });
 });

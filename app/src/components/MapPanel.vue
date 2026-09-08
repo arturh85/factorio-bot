@@ -48,9 +48,10 @@
 import {computed, ref, watch} from 'vue';
 import {Crosshair, Maximize} from '@lucide/vue';
 import {Bounds, EntitySnapshot, MapRecord, Position} from '@/api/types';
-import {BotDot, MapFeature, buildMapFeatures, legendFor} from '@/lib/mapFeatures';
+import {BotDot, EntityFeature, MapFeature, buildMapFeatures, legendFor} from '@/lib/mapFeatures';
 import {CameraFrame, CameraMode, cameraFrame} from '@/lib/mapCamera';
 import {project, projectionFor} from '@/lib/mapProjection';
+import {statusClass} from '@/lib/machineTimeline';
 import MapLegend from '@/components/map/MapLegend.vue';
 
 const props = withDefaults(
@@ -69,9 +70,40 @@ const props = withDefaults(
          * knows. Pass `runsStore.map` to get the attribution.
          */
         records?: MapRecord[];
+        /**
+         * A machine's current status, keyed by `${x},${y}` on the entity's
+         * reported position -- the same key `machineTimeline.ts::positionKey`
+         * builds. When a position has an entry, that entity's marker is
+         * painted with the status colour instead of its hashed entity colour,
+         * and the status name is appended to its tooltip.
+         *
+         * Optional, and defaults to empty: without it every marker keeps its
+         * ordinary entity-type colour, which is what a caller with no status
+         * feed (an offline map view, a test) gets for free.
+         */
+        fills?: Map<string, string | null>;
     }>(),
-    {records: () => []}
+    {records: () => [], fills: () => new Map()}
 );
+
+/**
+ * A marker's paint colour: the status colour when `fills` names this
+ * position's status, else the entity's own hashed colour.
+ *
+ * Looked up by position, not by entity id -- `fills` comes from
+ * `machineStatusAt`, which is keyed the same way, and a marker has no other
+ * stable identity to join on.
+ */
+function fillFor(feature: EntityFeature): string {
+    const status = props.fills.get(`${feature.position.x},${feature.position.y}`);
+    return typeof status === 'string' ? `var(--color-status-${statusClass(status)})` : feature.color;
+}
+
+/** The status at a marker's position, or null when `fills` says nothing about it. */
+function statusFor(feature: EntityFeature): string | null {
+    const status = props.fills.get(`${feature.position.x},${feature.position.y}`);
+    return typeof status === 'string' ? status : null;
+}
 
 /**
  * Fixed logical viewport. The projection preserves the world's own aspect
@@ -360,7 +392,8 @@ const tooltipStyle = computed(() => {
                             :y="marker.position.y - markerSide / 2"
                             :width="markerSide"
                             :height="markerSide"
-                            :fill="marker.color"
+                            :fill="fillFor(marker)"
+                            :data-entity="marker.title"
                             :class="['map-panel__entity', {'is-active': marker.id === activeId}]"
                             :data-testid="`map-feature-${marker.id}`"
                             vector-effect="non-scaling-stroke"
@@ -375,7 +408,7 @@ const tooltipStyle = computed(() => {
                                  NOT the entity's footprint: `EntitySnapshot`
                                  carries no bounding box, so a 2x2 furnace and
                                  a 1x1 inserter are the same square here. -->
-                            <title>{{ marker.title }} — {{ marker.details.join(' · ') }}</title>
+                            <title>{{ marker.title }} — {{ marker.details.join(' · ') }}{{ statusFor(marker) ? ` · ${statusFor(marker)}` : '' }}</title>
                         </rect>
 
                         <circle

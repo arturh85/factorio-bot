@@ -16,7 +16,12 @@ answer in this repo:
 
 Usage: nix develop -c python3 tools/falsify_ambiguity.py
 """
-import os, subprocess, sys, time
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from falsify_sweep import main  # noqa: E402  (after sys.path)
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PRODUCTS = "crates/planner/src/products.rs"
@@ -50,46 +55,4 @@ MUTATIONS = [
 ]
 
 
-def run(cmd):
-    return subprocess.run(cmd, cwd=ROOT, shell=True, capture_output=True, text=True)
-
-
-def main():
-    results = []
-    for label, path, old, new in MUTATIONS:
-        full = os.path.join(ROOT, path)
-        original = open(full).read()
-        n = original.count(old)
-        if n != 1:
-            results.append((label, f"SUBSTITUTION MATCHED {n} TIMES -- not run"))
-            continue
-        try:
-            open(full, "w").write(original.replace(old, new))
-            os.utime(full, (time.time(), time.time()))
-            r = run("cargo test -p factorio-bot-planner --lib products:: 2>&1")
-            out = r.stdout + r.stderr
-            # **A compile failure is told apart by the ABSENCE of a test
-            # run, not by the word "error".** `cargo test` prints
-            # `error: test failed, to rerun ...` on an ordinary red run, and
-            # matching that string reported six live mutations as
-            # uncompilable -- which is exactly the "reads as green" failure
-            # this sweep exists to avoid, arriving through the detector
-            # instead of through the compiler.
-            if "test result:" not in out:
-                verdict = "DID NOT COMPILE -- reads as green, treat as no evidence"
-            elif r.returncode == 0:
-                verdict = "GREEN -- A FINDING: no test objects to this"
-            else:
-                failed = [l.strip() for l in out.splitlines() if l.strip().startswith("test products::") and "FAILED" in l]
-                verdict = "red (%d): %s" % (len(failed), ", ".join(f.split()[1] for f in failed[:4]))
-        finally:
-            open(full, "w").write(original)
-            os.utime(full, (time.time(), time.time()))
-        results.append((label, verdict))
-    print()
-    for label, verdict in results:
-        print(f"  {label}\n      {verdict}")
-    return 0
-
-
-sys.exit(main())
+sys.exit(main(MUTATIONS, "cargo test -p factorio-bot-planner --lib products::", "products::"))

@@ -14,7 +14,12 @@ A GREEN mutation is a FINDING: no test objects to a wrong implementation.
 
 Usage: nix develop -c python3 tools/falsify_machine_choice.py
 """
-import os, subprocess, sys, time
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from falsify_sweep import main  # noqa: E402  (after sys.path)
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MACHINE = "crates/planner/src/method/machine.rs"
@@ -62,49 +67,4 @@ MUTATIONS = [
 ]
 
 
-def run(cmd):
-    return subprocess.run(cmd, cwd=ROOT, shell=True, capture_output=True, text=True)
-
-
-def main():
-    results = []
-    for label, path, old, new in MUTATIONS:
-        full = os.path.join(ROOT, path)
-        original = open(full).read()
-        n = original.count(old)
-        if n != 1:
-            results.append((label, f"SUBSTITUTION MATCHED {n} TIMES -- not run"))
-            continue
-        try:
-            open(full, "w").write(original.replace(old, new))
-            os.utime(full, (time.time(), time.time()))
-            r = run("cargo test -p factorio-bot-planner --lib method::machine 2>&1")
-            out = r.stdout + r.stderr
-            # A compile failure is told apart by the ABSENCE of a test run, not
-            # by the word "error": `cargo test` prints `error: test failed` on
-            # an ordinary red run too.
-            if "test result:" not in out:
-                verdict = "DID NOT COMPILE -- reads as green, treat as no evidence"
-            elif r.returncode == 0:
-                verdict = "GREEN -- A FINDING: no test objects to this"
-            else:
-                failed = [
-                    l.strip()
-                    for l in out.splitlines()
-                    if l.strip().startswith("test method::machine::") and "FAILED" in l
-                ]
-                verdict = "red (%d): %s" % (
-                    len(failed),
-                    ", ".join(f.split()[1].split("::")[-1] for f in failed[:4]),
-                )
-        finally:
-            open(full, "w").write(original)
-            os.utime(full, (time.time(), time.time()))
-        results.append((label, verdict))
-    print()
-    for label, verdict in results:
-        print(f"  {label}\n      {verdict}")
-    return 0
-
-
-sys.exit(main())
+sys.exit(main(MUTATIONS, "cargo test -p factorio-bot-planner --lib method::machine", "method::machine::"))

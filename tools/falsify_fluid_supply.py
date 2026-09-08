@@ -17,14 +17,18 @@ Usage: nix develop -c python3 tools/falsify_fluid_supply.py
 """
 
 import os
-import subprocess
 import sys
-import time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from falsify_sweep import main  # noqa: E402  (after sys.path)
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PRODUCTS = "crates/planner/src/products.rs"
 SUPPLY = "crates/planner/src/method/supply.rs"
 FABRICATE = "crates/planner/src/method/fabricate.rs"
+GATHER = "crates/planner/src/method/gather.rs"
+POWER = "crates/planner/src/method/power.rs"
 
 MUTATIONS = [
     # ---- the chemistry rung -----------------------------------------------
@@ -43,8 +47,51 @@ MUTATIONS = [
     (
         "supply: prefer a plant over the ground",
         SUPPLY,
-        "        if state.has_resource_patches(fluid) && extract::extractor_for(state, fluid).is_ok() {",
-        "        if false && state.has_resource_patches(fluid) && extract::extractor_for(state, fluid).is_ok() {",
+        "        if super::gather::can_gather(state, fluid) {",
+        "        if false && super::gather::can_gather(state, fluid) {",
+    ),
+    # ---- the water rung: a fluid the GROUND yields --------------------------
+    (
+        "gather: forget that a fluid can come from the tiles, not a patch",
+        GATHER,
+        "    ground_yields(state, entity, &Position::default())\n}",
+        "    false && ground_yields(state, entity, &Position::default())\n}",
+    ),
+    (
+        "gather: call every world a source, lake or no lake",
+        GATHER,
+        "fn ground_yields(state: &PlanState, fluid: &str, origin: &Position) -> bool {\n    ground_source(state, fluid, origin).is_some()",
+        "fn ground_yields(state: &PlanState, fluid: &str, origin: &Position) -> bool {\n    let _ = ground_source(state, fluid, origin);\n    true",
+    ),
+    (
+        "gather: face the pump north, whatever side the water is on",
+        GATHER,
+        "    entity.direction = Direction::to_u8(&facing).unwrap_or(0);",
+        "    entity.direction = 0;",
+    ),
+    (
+        "gather: take the first shoreline tile without asking if it is clear",
+        GATHER,
+        "        if state.is_area_free_facing(&pump, &tile, facing) {\n            return Ok((pump, tile, facing));\n        }",
+        "        if true {\n            return Ok((pump, tile, facing));\n        }",
+    ),
+    (
+        "gather: search for water only from the actor, never the world anchor",
+        GATHER,
+        "    if calculate_distance(&anchor, origin) >= f64::EPSILON {\n        anchors.push(anchor);\n    }",
+        "    if false && calculate_distance(&anchor, origin) >= f64::EPSILON {\n        anchors.push(anchor);\n    }",
+    ),
+    (
+        "gather: read the tile by name only, dropping its own declaration",
+        GATHER,
+        "                tile.fluid.yields(fluid)",
+        "                tile.yields_water()",
+    ),
+    (
+        "power: offer only the ring the water tile itself is in",
+        POWER,
+        "    for radius in 0..=SHORE_SEARCH_RADIUS {",
+        "    for radius in 0..=(SHORE_SEARCH_RADIUS - SHORE_SEARCH_RADIUS) {",
     ),
     (
         "supply: ask for one unit instead of the recipe's own amount",
@@ -93,46 +140,4 @@ MUTATIONS = [
 ]
 
 
-def run(cmd):
-    return subprocess.run(cmd, cwd=ROOT, shell=True, capture_output=True, text=True)
-
-
-def main():
-    results = []
-    for label, path, old, new in MUTATIONS:
-        full = os.path.join(ROOT, path)
-        original = open(full).read()
-        n = original.count(old)
-        if n != 1:
-            results.append((label, f"SUBSTITUTION MATCHED {n} TIMES -- not run"))
-            continue
-        try:
-            open(full, "w").write(original.replace(old, new))
-            os.utime(full, (time.time(), time.time()))
-            r = run("cargo test -p factorio-bot-planner --lib 2>&1")
-            out = r.stdout + r.stderr
-            if "test result:" not in out:
-                verdict = "DID NOT COMPILE -- reads as green, treat as no evidence"
-            elif r.returncode == 0:
-                verdict = "GREEN -- A FINDING: no test objects to this"
-            else:
-                failed = [
-                    line.strip()
-                    for line in out.splitlines()
-                    if line.strip().startswith("test ") and "FAILED" in line
-                ]
-                verdict = "red (%d): %s" % (
-                    len(failed),
-                    ", ".join(f.split()[1] for f in failed[:4]),
-                )
-        finally:
-            open(full, "w").write(original)
-            os.utime(full, (time.time(), time.time()))
-        results.append((label, verdict))
-    print()
-    for label, verdict in results:
-        print(f"  {label}\n      {verdict}")
-    return 0
-
-
-sys.exit(main())
+sys.exit(main(MUTATIONS, "cargo test -p factorio-bot-planner --lib", ""))

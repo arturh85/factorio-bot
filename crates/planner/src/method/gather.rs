@@ -383,6 +383,17 @@ fn ground_yields(state: &PlanState, fluid: &str, origin: &Position) -> bool {
 /// the only reading that lets [`can_gather`] decline and leave the fluid to
 /// `Fabricate`.
 fn ground_source(state: &PlanState, fluid: &str, origin: &Position) -> Option<FactorioTile> {
+    // **Water only, and by construction rather than by preference.** The tile
+    // search reused here is [`power::nearest_water`], which filters on
+    // `FactorioTile::yields_water`, so a tile declaring any *other* fluid is
+    // never returned and a general `TileFluid::yields(fluid)` test against
+    // what comes back could not be true. Writing one anyway left a branch no
+    // mutation could falsify, which a sweep found green on 2026-09-08. The
+    // day a second tile-yielded fluid ships, the change belongs in the
+    // search, not in a dead arm here.
+    if fluid != WATER {
+        return None;
+    }
     // A lake with no pump prototype is not a source, so the cheap half is
     // asked first and its answer is thrown away: which pump is
     // `site_ground_pump`'s question.
@@ -392,20 +403,9 @@ fn ground_source(state: &PlanState, fluid: &str, origin: &Position) -> Option<Fa
     if calculate_distance(&anchor, origin) >= f64::EPSILON {
         anchors.push(anchor);
     }
-    anchors.into_iter().find_map(|from| {
-        power::nearest_water(state, &from).filter(|tile| {
-            if fluid == WATER {
-                tile.yields_water()
-            } else {
-                // Not water: only a tile that says so counts. `nearest_water`
-                // looked for water, so this can only answer for a tile that
-                // yields both, which no shipped tile does -- stated rather
-                // than pretended, and it is why this is not called a general
-                // tile-fluid search.
-                tile.fluid.yields(fluid)
-            }
-        })
-    })
+    anchors
+        .into_iter()
+        .find_map(|from| power::nearest_water(state, &from))
 }
 
 /// The one fluid a tile can still be recognised as yielding **by name**.
@@ -1778,6 +1778,63 @@ mod gather_tests {
         assert!(
             placed(&steps, "pipe").is_empty(),
             "and nothing to pipe into one: {steps:?}"
+        );
+    }
+
+    /// **The lake is found from the world anchor when the actor has walked
+    /// away from it**, which is not a wider radius but a second question --
+    /// `power::retry_from_world_anchor`'s, and this is the same fallback.
+    ///
+    /// The control is the point: `nearest_water` asked from the far position
+    /// answers `None`, so without the second anchor the rung would decline on
+    /// a map with a perfectly good lake. That is not hypothetical --
+    /// `map-31337-water-and-oil.json` has its roster 250 tiles out charting
+    /// oil, and `have:sulfur:10` refused there with
+    /// `no water is charted anywhere this plan can see`.
+    #[test]
+    fn the_lake_is_found_from_the_world_anchor_when_the_actor_is_far() {
+        let state = water_state(true);
+        let far = Position::new(600.5, 600.5);
+        assert!(
+            power::nearest_water(&state, &far).is_none(),
+            "control: the fixture lake must be out of read range of {far}, or \
+             this test never exercises the fallback"
+        );
+        assert!(
+            ground_yields(&state, "water", &far),
+            "the world anchor still sees the lake, and a roster that walked \
+             away has not made the map dry"
+        );
+    }
+
+    /// A shoreline tile with something standing on it is passed over, not
+    /// built into.
+    ///
+    /// The decoy is a `wooden-chest`, a name no part of this method places,
+    /// so nothing can read the result as "the pump is already there" -- the
+    /// same construction `method::extract`'s occupied-well test uses.
+    #[test]
+    fn an_occupied_shoreline_tile_is_passed_over_for_the_next_one() {
+        let state = water_state(true);
+        let origin = Position::default();
+        let (_, first, _) =
+            site_ground_pump(&state, "water", &origin).expect("the fixture has a shoreline");
+        let mut blocked = state.fork();
+        blocked.create_entity(FactorioEntity {
+            name: "wooden-chest".into(),
+            entity_type: "container".into(),
+            position: first.clone(),
+            bounding_box: Rect::new(
+                &Position::new(first.x() - 0.4, first.y() - 0.4),
+                &Position::new(first.x() + 0.4, first.y() + 0.4),
+            ),
+            ..Default::default()
+        });
+        let (_, next, _) = site_ground_pump(&blocked, "water", &origin)
+            .expect("one occupied tile does not use up a lake's shore");
+        assert_ne!(
+            next, first,
+            "the pump was sited on the tile the chest is standing on"
         );
     }
 

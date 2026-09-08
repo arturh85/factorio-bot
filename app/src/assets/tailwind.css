@@ -55,7 +55,9 @@
     --color-verdict-roster-soft: #f1dccb;
 
     /* Verb classes for bot lanes: the dataviz reference categorical order,
-     * fixed by class, never cycled. Validated adjacent-pair CVD ΔE >= 8. */
+     * fixed by class, never cycled. Validated adjacent-pair CVD ΔE >= 8.
+     * verb-research has no dark override: the reference categorical palette
+     * keeps this green (#008300) in both theme columns. */
     --color-verb-walk: #2a78d6;
     --color-verb-mine: #eb6834;
     --color-verb-place: #1baf7a;
@@ -64,7 +66,9 @@
     --color-verb-research: #008300;
     --color-verb-other: #4a3aa7;
 
-    /* Bots: fixed by id, the same hue in every band and on the map. */
+    /* Bots: fixed by id, the same hue in every band and on the map.
+     * bot-6 has no dark override for the same reason as verb-research: the
+     * reference palette keeps this green (#008300) in both themes. */
     --color-bot-1: #2a78d6;
     --color-bot-2: #eb6834;
     --color-bot-3: #1baf7a;
@@ -74,7 +78,9 @@
     --color-bot-7: #4a3aa7;
     --color-bot-8: #e34948;
 
-    /* Tracked items: validated 5-slot palette, both modes. */
+    /* Tracked items: the same six tokens in both themes -- this palette was
+     * validated against both light and dark surfaces, so it needs no dark
+     * override. */
     --color-item-iron: #3b78c4;
     --color-item-copper: #d5722b;
     --color-item-circuit: #1f9e78;

@@ -2,14 +2,23 @@
 import {computed} from 'vue';
 import {AXIS_WIDTH, formatGameTime, markTicks, TickScale, tickX, TICKS_PER_MINUTE} from '@/lib/tickScale';
 
-const props = defineProps<{scale: TickScale; cursor: number}>();
+/**
+ * `scale` is the drawn axis (positions); `clock` is the analysis window
+ * (labels and marks). See the header of `@/lib/tickScale`.
+ */
+const props = defineProps<{scale: TickScale; clock: TickScale; cursor: number}>();
 
+// Unlabelled hairlines dividing the DRAWN axis into minutes -- they say
+// nothing about game time, so they come off `scale` and stay there.
 const minutes = computed(() => {
     const out: number[] = [];
     for (let t = props.scale.from + TICKS_PER_MINUTE; t <= props.scale.to; t += TICKS_PER_MINUTE) out.push(t);
     return out;
 });
-const marks = computed(() => markTicks(props.scale));
+// The tool's fixed 5-minute marks, off the analysis clock. A mark outside
+// the drawn axis is dropped rather than clamped onto its edge, where it
+// would name a time that is not there.
+const marks = computed(() => markTicks(props.clock).filter((t) => t >= props.scale.from && t <= props.scale.to));
 const x = (t: number) => tickX(props.scale, t);
 </script>
 
@@ -21,7 +30,7 @@ const x = (t: number) => tickX(props.scale, t);
     <template v-for="t in marks" :key="`k${t}`">
       <line class="mark" :x1="x(t)" y1="8" :x2="x(t)" y2="22" stroke="var(--color-verdict-roster)" stroke-width="1.5"/>
       <text :x="x(t) + 4" y="12" font-size="10" fill="var(--color-verdict-roster)" font-family="ui-monospace, monospace">
-        {{ formatGameTime(scale, t) }} mark
+        {{ formatGameTime(clock, t) }} mark
       </text>
     </template>
     <text :x="AXIS_WIDTH - 2" y="12" font-size="10" text-anchor="end" fill="var(--color-ink-muted)" font-family="ui-monospace, monospace">

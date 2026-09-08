@@ -5,7 +5,11 @@ import {Sample} from '@/api/types';
 import {machineRows, sampleStepTicks, statusClass, statusMatrix} from '@/lib/machineTimeline';
 import {AXIS_WIDTH, formatGameTime, TickScale, tickX} from '@/lib/tickScale';
 
-const props = defineProps<{scale: TickScale; cursor: number; samples: Sample[]; selected?: string | null}>();
+/**
+ * `scale` is the drawn axis (positions); `clock` is the analysis window
+ * (the times in a cell's title). See the header of `@/lib/tickScale`.
+ */
+const props = defineProps<{scale: TickScale; clock: TickScale; cursor: number; samples: Sample[]; selected?: string | null}>();
 const emit = defineEmits<{select: [key: string]}>();
 const ROW = 12;
 const x = (t: number) => tickX(props.scale, t);
@@ -19,7 +23,7 @@ function shortName(name: string): string {
     return name.replace('burner-mining-drill', 'drill').replace('stone-furnace', 'furnace').replace('wooden-chest', 'chest');
 }
 function title(row: {name: string; key: string}, c: {tick: number; status: string | null; produced: number | null; fill: number | null}): string {
-    let t = `${shortName(row.name)} #${row.key} · ${formatGameTime(props.scale, c.tick)} · ${c.status ?? 'no status'}`;
+    let t = `${shortName(row.name)} #${row.key} · ${formatGameTime(props.clock, c.tick)} · ${c.status ?? 'no status'}`;
     if (c.produced !== null) t += ` · produced ${c.produced}`;
     if (c.fill !== null) t += ` · ${c.fill} items`;
     return t;

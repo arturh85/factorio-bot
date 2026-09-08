@@ -14,8 +14,13 @@ import {markAt, rateSeries} from '@/lib/runRates';
 import {AXIS_WIDTH, formatGameTime, markTicks, TickScale, tickX} from '@/lib/tickScale';
 import {itemColor} from '@/lib/itemColor';
 
+/**
+ * `scale` is the drawn axis (positions); `clock` is the analysis window
+ * (labels and marks), which is the same span `lo`/`hi` already carry. See
+ * the header of `@/lib/tickScale`.
+ */
 const props = defineProps<{
-    scale: TickScale; cursor: number; samples: Sample[]; events: Event[]; items: string[]; lo: number; hi: number;
+    scale: TickScale; clock: TickScale; cursor: number; samples: Sample[]; events: Event[]; items: string[]; lo: number; hi: number;
 }>();
 
 const ROW = 50;
@@ -60,14 +65,19 @@ const rows = computed<Row[]>(() => props.items.map((item, i) => {
     const verdicts = attributionIntervals(props.samples, props.events, props.lo, props.hi, item)
         .filter((v) => v.verdict !== 'no output')
         .map(({from, to, verdict, source}) => ({from, to, verdict, source}));
-    const marks = markTicks(props.scale).map((tick) => {
-        const minute = (tick - props.lo) / 3600;
-        const m = markAt(props.samples, props.lo, props.hi, minute, Math.max(0, minute - 5), item);
-        const label = m.status === 'ok' && m.rateWindow !== null
-            ? `${m.rateWindow.toFixed(0)}/min at ${formatGameTime(props.scale, tick)}`
-            : `${m.status.replace('_', ' ')} at ${formatGameTime(props.scale, tick)}`;
-        return {tick, label};
-    });
+    // The tool's marks, off the analysis clock -- 5:00 here must be the same
+    // tick the headline calls 5:00. A mark outside the drawn axis is dropped
+    // rather than clamped onto its edge.
+    const marks = markTicks(props.clock)
+        .filter((tick) => tick >= props.scale.from && tick <= props.scale.to)
+        .map((tick) => {
+            const minute = (tick - props.lo) / 3600;
+            const m = markAt(props.samples, props.lo, props.hi, minute, Math.max(0, minute - 5), item);
+            const label = m.status === 'ok' && m.rateWindow !== null
+                ? `${m.rateWindow.toFixed(0)}/min at ${formatGameTime(props.clock, tick)}`
+                : `${m.status.replace('_', ' ')} at ${formatGameTime(props.clock, tick)}`;
+            return {tick, label};
+        });
     return {item, color: itemColor(item), points, max, peak, verdicts, marks, empty: verdicts.length === 0 && (peak?.perMinute ?? 0) === 0, row: i};
 }));
 

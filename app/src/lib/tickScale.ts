@@ -5,6 +5,16 @@
  * 0..1000 and every band agrees on where a tick is without sharing a DOM
  * width. Clamped: a tick outside the axis lands on its edge, never off the
  * drawing.
+ *
+ * TWO scales reach a band and they are not interchangeable. The DRAWN AXIS
+ * (`store.bounds`) says where a tick sits on screen and may trim a lead-in;
+ * the ANALYSIS CLOCK (`store.window`, from `run_started`) is what every
+ * game-time LABEL and every fixed MARK is measured from, because that is
+ * where `just analyse` measures them. Positioning off one and reading times
+ * off the other is what made the milestone ribbon say 6:03 while the
+ * headline said 6:06 of the same event, and put the "5:00" mark 175 ticks
+ * away from the tool's. So: `tickX(scale, …)` positions, and
+ * `formatGameTime(clock, …)` / `markTicks(clock)` label.
  */
 export interface TickScale {
     from: number;

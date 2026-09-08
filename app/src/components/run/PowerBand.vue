@@ -4,7 +4,11 @@ import {Sample} from '@/api/types';
 import {ForceSample} from '@/lib/runRates';
 import {AXIS_WIDTH, formatGameTime, TickScale, tickX} from '@/lib/tickScale';
 
-const props = defineProps<{scale: TickScale; cursor: number; samples: Sample[]}>();
+/**
+ * `scale` is the drawn axis (positions); `clock` is the analysis window
+ * (labels). See the header of `@/lib/tickScale`.
+ */
+const props = defineProps<{scale: TickScale; clock: TickScale; cursor: number; samples: Sample[]}>();
 const H = 70;
 const x = (t: number) => tickX(props.scale, t);
 
@@ -41,7 +45,7 @@ const gridKw = computed(() => [0, max.value / 2, max.value]);
       <path :d="cons" fill="none" stroke="var(--color-ink-muted)" stroke-width="1.6" stroke-dasharray="4 3"/>
       <template v-if="firstGen">
         <line :x1="x(firstGen.tick)" y1="8" :x2="x(firstGen.tick)" :y2="H - 8" stroke="var(--color-verb-research)" stroke-width="1" stroke-dasharray="2 3"/>
-        <text :x="x(firstGen.tick) - 4" y="16" font-size="10" text-anchor="end" fill="var(--color-ink-muted)">no generator until {{ formatGameTime(scale, firstGen.tick) }}</text>
+        <text :x="x(firstGen.tick) - 4" y="16" font-size="10" text-anchor="end" fill="var(--color-ink-muted)">no generator until {{ formatGameTime(clock, firstGen.tick) }}</text>
         <text :x="x(firstGen.tick) + 5" :y="y(firstGen.power.generated_kw) + 12" font-size="10" font-weight="500" fill="var(--color-verb-research)">generated {{ firstGen.power.generated_kw.toFixed(0) }} kW</text>
       </template>
       <text v-else :x="AXIS_WIDTH - 4" y="16" font-size="10" text-anchor="end" fill="var(--color-ink-muted)">no generation in this run</text>

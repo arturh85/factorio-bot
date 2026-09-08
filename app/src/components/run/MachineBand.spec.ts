@@ -7,9 +7,10 @@ import MachineBand from './MachineBand.vue';
 
 const run = loadFixtureRun();
 const scale = {from: run.lo, to: run.hi};
+const clock = {from: run.lo, to: run.hi};
 
 describe('MachineBand', () => {
-    const w = mount(MachineBand, {props: {scale, cursor: run.lo, samples: run.samples, selected: null}});
+    const w = mount(MachineBand, {props: {scale, clock, cursor: run.lo, samples: run.samples, selected: null}});
     it('has one row per sampled machine and cells coloured by status', () => {
         expect(w.findAll('text.row-label')).toHaveLength(17);
         const statuses = new Set(w.findAll('rect.cell').map((c) => c.attributes('data-status')));
@@ -26,12 +27,17 @@ describe('MachineBand', () => {
         const cell = w.findAll('rect.cell').find((c) => c.attributes('data-status') === 'no_fuel' && c.find('title').text().startsWith('furnace'))!;
         expect(cell.find('title').text()).toMatch(/furnace #\d+ · \d+:\d\d · no_fuel/);
     });
+    it('times a cell on the analysis clock, not on a trimmed axis', () => {
+        const first = w.findAll('rect.cell')[0].find('title').text();
+        const trimmed = mount(MachineBand, {props: {scale: {from: run.lo + 175, to: run.hi}, clock, cursor: run.lo, samples: run.samples, selected: null}});
+        expect(trimmed.findAll('rect.cell')[0].find('title').text()).toBe(first);
+    });
     it('emits the row key when a cell is clicked', async () => {
         await w.findAll('rect.cell')[0].trigger('click');
         expect(w.emitted('select')?.[0]?.[0]).toMatch(/^\d+$/);
     });
     it('says so when there are no machine samples', () => {
-        const v = mount(MachineBand, {props: {scale, cursor: run.lo, samples: run.samples.filter((s) => s.kind !== 'machines'), selected: null}});
+        const v = mount(MachineBand, {props: {scale, clock, cursor: run.lo, samples: run.samples.filter((s) => s.kind !== 'machines'), selected: null}});
         expect(v.text()).toContain('no machine samples in this run');
     });
 });

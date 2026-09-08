@@ -4,7 +4,11 @@ import {Sample} from '@/api/types';
 import {ForceSample} from '@/lib/runRates';
 import {AXIS_WIDTH, formatGameTime, TickScale, tickX} from '@/lib/tickScale';
 
-const props = defineProps<{scale: TickScale; cursor: number; samples: Sample[]}>();
+/**
+ * `scale` is the drawn axis (positions); `clock` is the analysis window
+ * (labels). See the header of `@/lib/tickScale`.
+ */
+const props = defineProps<{scale: TickScale; clock: TickScale; cursor: number; samples: Sample[]}>();
 /**
  * Whether the record carries any force samples at all. A run whose `/samples`
  * came back empty said nothing about research; "no research queued in this
@@ -33,7 +37,7 @@ function area(t: Tech): string {
 }
 function label(t: Tech): string {
     const first = t.points[0], last = t.points[t.points.length - 1];
-    return `${t.name} · started ${formatGameTime(props.scale, first.tick)} · ${Math.round(last.progress * 100)}% at ${formatGameTime(props.scale, last.tick)}`;
+    return `${t.name} · started ${formatGameTime(props.clock, first.tick)} · ${Math.round(last.progress * 100)}% at ${formatGameTime(props.clock, last.tick)}`;
 }
 </script>
 

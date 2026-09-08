@@ -2,13 +2,15 @@
 import {describe, expect, it} from 'vitest';
 import {mount} from '@vue/test-utils';
 import {loadFixtureRun} from '@/lib/fixtureRun';
+import {tickX} from '@/lib/tickScale';
 import ProductionBand from './ProductionBand.vue';
 
 const run = loadFixtureRun();
 const scale = {from: run.lo, to: run.hi};
+const clock = {from: run.lo, to: run.hi};
 
-function mountBand(items = ['iron-plate', 'copper-plate']) {
-    return mount(ProductionBand, {props: {scale, cursor: run.lo, samples: run.samples, events: run.events, items, lo: run.lo, hi: run.hi}});
+function mountBand(items = ['iron-plate', 'copper-plate'], over = {}) {
+    return mount(ProductionBand, {props: {scale, clock, cursor: run.lo, samples: run.samples, events: run.events, items, lo: run.lo, hi: run.hi, ...over}});
 }
 
 describe('ProductionBand', () => {
@@ -41,7 +43,7 @@ describe('ProductionBand', () => {
         expect(measured[0].attributes('stroke-dasharray')).toBeUndefined();
 
         const preCounters = run.samples.filter((s) => s.kind !== 'machines');
-        const w = mount(ProductionBand, {props: {scale, cursor: run.lo, samples: preCounters, events: run.events, items: ['iron-plate'], lo: run.lo, hi: run.hi}});
+        const w = mount(ProductionBand, {props: {scale, clock, cursor: run.lo, samples: preCounters, events: run.events, items: ['iron-plate'], lo: run.lo, hi: run.hi}});
         const inferred = w.findAll('rect.verdict');
         expect(inferred.length).toBeGreaterThan(0);
         expect(inferred.every((r) => r.attributes('data-source') === 'inference')).toBe(true);
@@ -55,6 +57,15 @@ describe('ProductionBand', () => {
         // rate_window at 5:00 for iron-plate is 8.0 /min in rates.json
         expect(w.text()).toContain('8/min at 5:00');
     });
+    it('reads its marks off the analysis CLOCK even when the drawn axis is trimmed', () => {
+        // The axis may start after `run_started` (the lead-in trim); the mark
+        // must still be the tool's 5:00, positioned wherever that tick falls
+        // on the drawn axis.
+        const w = mountBand(['iron-plate'], {scale: {from: run.lo + 175, to: run.hi}});
+        expect(w.text()).toContain('8/min at 5:00');
+        const mark = w.findAll('line[stroke-dasharray="2 3"]')[0];
+        expect(Number(mark.attributes('x1'))).toBeCloseTo(tickX({from: run.lo + 175, to: run.hi}, run.lo + 18000), 5);
+    });
     it('says "no output" for an item nothing made, not 0/min everywhere', () => {
         const w = mountBand(['logistic-science-pack']);
         expect(w.findAll('rect.verdict')).toHaveLength(0);
@@ -64,7 +75,7 @@ describe('ProductionBand', () => {
         // 5 of 21 archived runs answer `/samples` with an empty list. Deriving
         // "no output in this run" per item from that is a claim about the
         // factory the record never made.
-        const w = mount(ProductionBand, {props: {scale, cursor: run.lo, samples: [], events: run.events, items: ['iron-plate', 'copper-plate'], lo: run.lo, hi: run.hi}});
+        const w = mount(ProductionBand, {props: {scale, clock, cursor: run.lo, samples: [], events: run.events, items: ['iron-plate', 'copper-plate'], lo: run.lo, hi: run.hi}});
         expect(w.text()).toContain('no production samples in this run');
         expect(w.text()).not.toContain('no output in this run');
         expect(w.findAll('rect.verdict')).toHaveLength(0);

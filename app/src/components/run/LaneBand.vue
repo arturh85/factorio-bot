@@ -12,7 +12,11 @@ import {idleIntervals, idleTicks, laneSegments, LaneSegment, replanBoundaries} f
 import {laneBots} from '@/lib/runTimeline';
 import {AXIS_WIDTH, formatGameTime, TickScale, tickX} from '@/lib/tickScale';
 
-const props = defineProps<{scale: TickScale; cursor: number; lanes: Lane[]; events: Event[]}>();
+/**
+ * `scale` is the drawn axis (positions and the idle denominator); `clock` is
+ * the analysis window (labels). See the header of `@/lib/tickScale`.
+ */
+const props = defineProps<{scale: TickScale; clock: TickScale; cursor: number; lanes: Lane[]; events: Event[]}>();
 const ROW = 30;
 const x = (t: number) => tickX(props.scale, t);
 const bots = computed(() => laneBots(props.lanes));
@@ -60,7 +64,7 @@ function title(s: LaneSegment): string {
     </rect>
     <template v-for="(t, i) in boundaries" :key="`r${t}`">
       <line class="replan" :x1="x(t)" y1="0" :x2="x(t)" :y2="height" stroke="var(--color-ink)" stroke-width="1" stroke-dasharray="3 3"/>
-      <text :x="x(t) + 4" :y="height - 2" font-size="9" fill="var(--color-ink-muted)">plan {{ i + 1 }} · ids restart here · {{ formatGameTime(scale, t) }}</text>
+      <text :x="x(t) + 4" :y="height - 2" font-size="9" fill="var(--color-ink-muted)">plan {{ i + 1 }} · ids restart here · {{ formatGameTime(clock, t) }}</text>
     </template>
     <line :x1="x(cursor)" y1="0" :x2="x(cursor)" :y2="height" stroke="var(--color-verdict-roster)" stroke-width="1.5"/>
   </svg>

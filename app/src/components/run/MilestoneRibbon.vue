@@ -3,14 +3,19 @@ import {Split} from '@/api/types';
 import {splitAt} from '@/lib/runTimeline';
 import {AXIS_WIDTH, formatGameTime, TickScale, tickX} from '@/lib/tickScale';
 
-const props = defineProps<{scale: TickScale; splits: Split[]; cursor: number}>();
+/**
+ * `scale` is the drawn axis (positions); `clock` is the analysis window
+ * (labels) -- so a milestone's time here is the one the headline states.
+ * See the header of `@/lib/tickScale`.
+ */
+const props = defineProps<{scale: TickScale; clock: TickScale; splits: Split[]; cursor: number}>();
 const pct = (t: number) => `${(tickX(props.scale, t) / AXIS_WIDTH) * 100}%`;
 function style(s: Split) {
     const end = s.ended_tick ?? props.scale.to;
     return {left: pct(s.started_tick), width: `calc(${(tickX(props.scale, end) - tickX(props.scale, s.started_tick)) / AXIS_WIDTH * 100}% - 2px)`};
 }
 function label(s: Split) {
-    const at = s.ended_tick === null ? 'unfinished' : `${s.outcome} at ${formatGameTime(props.scale, s.ended_tick)}`;
+    const at = s.ended_tick === null ? 'unfinished' : `${s.outcome} at ${formatGameTime(props.clock, s.ended_tick)}`;
     const ticks = s.elapsed_ticks === null ? '—' : s.elapsed_ticks.toLocaleString();
     return `m${s.index} · ${s.goal} · ${at} · ${ticks} ticks`;
 }

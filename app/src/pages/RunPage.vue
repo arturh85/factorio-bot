@@ -53,6 +53,18 @@ const scale = computed(() => store.bounds);
 const windowIsFallback = computed(() => store.eventsError === null && store.events.length === 0);
 const win = computed(() => store.window
     ?? (windowIsFallback.value && store.bounds ? {lo: store.bounds.from, hi: store.bounds.to} : null));
+/**
+ * The clock every band LABELS with, as against `scale`, which every band
+ * POSITIONS with.
+ *
+ * The analysis window when there is one, so the ribbon's "satisfied at 6:06"
+ * and the headline's are the same sentence about the same tick, and the
+ * band's "5:00 mark" is `just analyse`'s tick 21,242 rather than the drawn
+ * axis's 21,417. The `{from: 0, to: 0}` fallback is never rendered: every
+ * band lives under `v-if="scale"`, and `win` is only null there when
+ * `store.bounds` is not.
+ */
+const clock = computed(() => (win.value ? {from: win.value.lo, to: win.value.hi} : store.bounds ?? {from: 0, to: 0}));
 const items = computed(() => (win.value ? rateItems(store.samples, win.value.lo, win.value.hi) : []));
 const sentence = computed(() => {
     if (!win.value) return '';
@@ -97,31 +109,31 @@ const LEGEND = [
       <template v-if="scale">
         <div class="grid grid-cols-[10.5rem_1fr] border-b border-divider">
           <div class="border-r border-divider bg-surface px-3 py-2 text-[11px] font-semibold uppercase tracking-wider text-ink-muted">Milestones</div>
-          <MilestoneRibbon :scale="scale" :splits="store.detail.splits" :cursor="store.cursor"/>
+          <MilestoneRibbon :scale="scale" :clock="clock" :splits="store.detail.splits" :cursor="store.cursor"/>
         </div>
         <BandFrame title="Axis" :subtitle="store.leadIn > 0 ? `axis starts ${formatTicks(store.leadIn)} after run start` : 'minutes of game time · 5-min marks'">
-          <TickAxis :scale="scale" :cursor="store.cursor"/>
+          <TickAxis :scale="scale" :clock="clock" :cursor="store.cursor"/>
         </BandFrame>
         <BandFrame title="Items / min" subtitle="trailing 2-min window · background is the attribution verdict per minute">
           <p v-if="store.sampleError" class="px-3 py-2 text-sm text-warn-dark">{{ store.sampleError }}</p>
           <p v-else-if="!win" class="px-3 py-2 text-sm text-warn-dark">{{ store.eventsError }}</p>
-          <ProductionBand v-else :scale="scale" :cursor="store.cursor" :samples="store.samples" :events="store.events" :items="items" :lo="win.lo" :hi="win.hi"/>
+          <ProductionBand v-else :scale="scale" :clock="clock" :cursor="store.cursor" :samples="store.samples" :events="store.events" :items="items" :lo="win.lo" :hi="win.hi"/>
         </BandFrame>
         <BandFrame title="Power" subtitle="kW generated vs consumed · one scale">
           <p v-if="store.sampleError" class="px-3 py-2 text-sm text-warn-dark">{{ store.sampleError }}</p>
-          <PowerBand v-else :scale="scale" :cursor="store.cursor" :samples="store.samples"/>
+          <PowerBand v-else :scale="scale" :clock="clock" :cursor="store.cursor" :samples="store.samples"/>
         </BandFrame>
         <BandFrame title="Research" subtitle="progress of the current technology">
           <p v-if="store.sampleError" class="px-3 py-2 text-sm text-warn-dark">{{ store.sampleError }}</p>
-          <ResearchBand v-else :scale="scale" :cursor="store.cursor" :samples="store.samples"/>
+          <ResearchBand v-else :scale="scale" :clock="clock" :cursor="store.cursor" :samples="store.samples"/>
         </BandFrame>
         <BandFrame title="Bots" subtitle="one row per bot · idle is hatched · feeding acts are ticks · replans are dashed">
           <p v-if="store.lanesError" class="px-3 py-2 text-sm text-warn-dark">{{ store.lanesError }}</p>
-          <LaneBand v-else :scale="scale" :cursor="store.cursor" :lanes="store.lanes" :events="store.events"/>
+          <LaneBand v-else :scale="scale" :clock="clock" :cursor="store.cursor" :lanes="store.lanes" :events="store.events"/>
         </BandFrame>
         <BandFrame title="Machines" subtitle="status of every sampled machine, 5-s cells · grouped by kind, ordered by placement">
           <p v-if="store.sampleError" class="px-3 py-2 text-sm text-warn-dark">{{ store.sampleError }}</p>
-          <MachineBand v-else :scale="scale" :cursor="store.cursor" :samples="store.samples" :selected="store.selectedMachine" @select="store.selectMachine($event)"/>
+          <MachineBand v-else :scale="scale" :clock="clock" :cursor="store.cursor" :samples="store.samples" :selected="store.selectedMachine" @select="store.selectMachine($event)"/>
         </BandFrame>
         <BandFrame title="Record" subtitle="where the record has data · a gap reads as “no record”">
           <p v-if="store.eventsError" class="px-3 py-2 text-sm text-warn-dark">{{ store.eventsError }}</p>

@@ -3708,6 +3708,71 @@ mod tests {
         world
     }
 
+    /// A patch long enough to hold more cells than one search window can see.
+    ///
+    /// Six tiles wide and 120 long, running north from the origin. The width
+    /// is deliberately narrower than `2 * CELL_SEARCH_RADIUS`: a static anchor
+    /// therefore has nowhere to expand *except* along the ribbon, and cannot
+    /// reach the far end, while a walking one can.
+    fn world_with_a_long_ribbon() -> factorio_bot_core::factorio::world::FactorioSurface {
+        use factorio_bot_core::factorio::util::add_to_rect;
+        use factorio_bot_core::types::Rect;
+        let world = fixture_world();
+        let mut ore: Vec<FactorioEntity> = Vec::new();
+        factorio_bot_core::test_utils::spawn_ore(
+            &mut ore,
+            add_to_rect(&Rect::from_wh(6., 120.), &Position::new(0., -70.)),
+            "iron-ore",
+        );
+        for entity in &mut ore {
+            entity.amount = Some(crate::state::DEFAULT_RESOURCE_PER_TILE);
+        }
+        world
+            .update_chunk_entities(ore)
+            .expect("the amounts are delivered");
+        world
+    }
+
+    /// `plan_cells` walks its anchor, so a plan is bounded by the ore and not
+    /// by one search window.
+    ///
+    /// # Why the assertion is a DISTANCE and not a count
+    ///
+    /// A count would pass for the wrong reason. [`CELL_SEARCH_RADIUS`] is 12,
+    /// so a static anchor still sees a 25x25 window and could well pack more
+    /// than a dozen cells into it on a generous fixture -- an expected value
+    /// the system can produce by accident proves nothing. What a static anchor
+    /// **cannot** do at any count is put a drill further from its one anchor
+    /// tile than the radius it searches. That is the property, so that is what
+    /// is asserted.
+    ///
+    /// Measured on the real map before this existed: `producing:iron-plate:195`
+    /// refused `NoRoomForCell` at cell 13 with the seed-31337 iron patch
+    /// nowhere near full, and raising `MAX_CELLS` from 12 to 64 moved that
+    /// ceiling by nothing at all.
+    #[test]
+    fn cells_are_sited_further_out_than_one_search_window_reaches() {
+        let s = PlanState::from_world(Arc::new(world_with_a_long_ribbon()), &[BotId(1)]);
+        let spec = iron();
+        let from = Position::new(0., 0.);
+
+        let anchor = nearest_resource_tile(&s, &spec.ore, &from, 1)
+            .expect("the ribbon is a patch this fixture can find");
+        let cells = plan_cells(&s, &from, &spec, 20, 1).expect("the ribbon holds twenty cells");
+        assert_eq!(cells.len(), 20, "every cell was sited");
+
+        let furthest = cells
+            .iter()
+            .map(|cell| factorio_bot_core::factorio::util::calculate_distance(&cell.drill, &anchor))
+            .fold(0.0_f64, f64::max);
+        assert!(
+            furthest > f64::from(CELL_SEARCH_RADIUS),
+            "a static anchor can never exceed its own search radius, so exceeding it is \
+             the walk: furthest drill is {furthest:.1} tiles from the anchor at {anchor}, \
+             against a radius of {CELL_SEARCH_RADIUS}"
+        );
+    }
+
     /// The live failure, in the model: a drill sited on the thin rim of a
     /// patch runs dry inside the take it was fuelled for. A site now has to
     /// hold what the cell is asked for, and the ring walk finds the nearest

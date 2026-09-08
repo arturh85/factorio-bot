@@ -298,6 +298,45 @@ pub trait Method {
         false
     }
 
+    /// Does this method's decomposition put an item into a hand and then take
+    /// it out of *that* hand again?
+    ///
+    /// The weaker sibling of [`Method::converges`], and the driver opens a
+    /// chain for either. Convergence asks whether **two** produced things must
+    /// meet; this asks whether **one** produced thing must stay where it was
+    /// produced. A one-ingredient hand craft is the case that separates them:
+    /// nothing converges — there is only one ingredient — and yet `mine ore`,
+    /// `insert ore`, `take plate`, `craft pipe` is a sequence passing one
+    /// item from action to action through a single inventory.
+    ///
+    /// # What the absence cost
+    ///
+    /// `pipe` is one iron-plate, so `HandCraft::converges` was `false` and its
+    /// whole subtree went unchained. `run_steps` still sizes and simulates
+    /// every action against `ctx.chain_actor`, so the bill was bot 1's; the
+    /// scheduler, holding no chain, was free to split the sequence, and on
+    /// `gathered:crude-oil` + `producing petroleum-gas` it did: `mine 9
+    /// iron-ore` went to another bot while `insert 9 iron-ore` settled on
+    /// bot 1 — the only bot already holding ore — and spent 15 ore that four
+    /// *owned* chains had been sized against. Chain 451's own `insert 5
+    /// iron-ore` then found bot 1 empty and the plan died with
+    /// `ChainOwnerInfeasible`, blaming a chain whose bill had been correct
+    /// all along. This is the same "sizing against a bot that nothing then
+    /// commits to" defect recorded twice in `expand_goal_body`, one level
+    /// further out: there the chain existed and had no owner, here there was
+    /// no chain at all.
+    ///
+    /// The chain opened here is deliberately **ownerless**. Nothing named a
+    /// bot for a `Holder::Anyone` goal, so who runs the sequence stays the
+    /// scheduler's choice; all that is asserted is that it is *one* bot.
+    ///
+    /// Defaults to `false`. Overriding it costs parallelism — a welded
+    /// subtree cannot be spread — so a method should say yes only where an
+    /// item genuinely has to stay in the hand that made it.
+    fn hands_over(&self, _goal: &Goal, _state: &PlanState) -> bool {
+        false
+    }
+
     /// How many holders can pursue `goal` **at the same time**, if this method
     /// is what would satisfy it? `None` — the default — means this method
     /// names no limit.
@@ -938,7 +977,10 @@ fn expand_goal_body(
     };
     if ctx.chain.is_none() {
         let one_inventory = matches!(stated_holder(goal), Some(Holder::Bot(_) | Holder::Share(_)));
-        if one_inventory || method.converges(goal, &ctx.state) {
+        if one_inventory
+            || method.converges(goal, &ctx.state)
+            || method.hands_over(goal, &ctx.state)
+        {
             let chain = ctx.chains.next();
             ctx.chain = Some(chain);
             if let Some(bot) = owner {
@@ -1855,6 +1897,113 @@ mod tests {
             let a = gain_action(ctx, item, *count);
             Ok(vec![Step::Act(Box::new(a))])
         }
+    }
+
+    /// **The driver opens a chain for a method that only hands over.**
+    ///
+    /// [`Method::hands_over`] is the weaker sibling of [`Method::converges`],
+    /// and this is the clause that acts on it. `Gizmo` converges by default —
+    /// it never overrides it — and states `Holder::Anyone` throughout, so
+    /// `one_inventory` is false and `converges` is false: the chain can only
+    /// come from `hands_over`.
+    ///
+    /// # Written after a falsification caught the first attempt
+    ///
+    /// The first version of this test expanded `have:iron-gear-wheel:1`
+    /// through the real registry and asserted one chain. It passed with the
+    /// `hands_over` clause **deleted from the driver**, because a top-level
+    /// `Holder::Anyone` goal is claimed by `SplitAcrossBots`, which restates
+    /// it as `Holder::Share(bot)` subgoals — so `one_inventory` opened that
+    /// chain and the test never touched the thing it was named for. The real
+    /// defect reached `HandCraft` under `Holder::Anyone` from *inside*
+    /// `Fabricate`, where `SplitAcrossBots::claims` is false. A stub says what
+    /// is meant without depending on which production method happens to claim.
+    #[test]
+    fn the_driver_chains_a_method_that_hands_over_without_converging() {
+        struct Gizmo {
+            hands_over: bool,
+        }
+        impl Method for Gizmo {
+            fn name(&self) -> &'static str {
+                "gizmo"
+            }
+            fn applicable(&self, goal: &Goal, _s: &PlanState) -> bool {
+                matches!(goal, Goal::Have { item, .. } if item == "gizmo")
+            }
+            fn hands_over(&self, _goal: &Goal, _state: &PlanState) -> bool {
+                self.hands_over
+            }
+            fn expand(
+                &self,
+                _goal: &Goal,
+                _ctx: &mut ExpansionCtx,
+            ) -> Result<Vec<Step>, PlannerError> {
+                Ok(vec![Step::Subgoal(Goal::Have {
+                    item: "cog".into(),
+                    count: 5,
+                    whose: Holder::Anyone,
+                    via: None,
+                })])
+            }
+        }
+
+        let chains = |hands_over: bool| {
+            let state = PlanState::from_world(Arc::new(fixture_world()), &[BotId(1), BotId(2)]);
+            let reg = MethodRegistry::new()
+                .with(Box::new(Gizmo { hands_over }))
+                .with(Box::new(Produce));
+            let net = expand(
+                &[Goal::Have {
+                    item: "gizmo".into(),
+                    count: 1,
+                    whose: Holder::Anyone,
+                    via: None,
+                }],
+                &state,
+                &reg,
+                BotId(1),
+            )
+            .expect("expands");
+            let tied: Vec<Option<ChainId>> = net
+                .actions()
+                .filter(|a| a.tied_to_runner())
+                .map(|a| net.chain_of(a.id))
+                .collect();
+            tied
+        };
+
+        // Not accidental: the expansion really emits runner-tied work, so
+        // there is something for a chain to hold. Without this the two arms
+        // below would agree trivially on an empty list.
+        let owned = chains(true);
+        assert!(
+            !owned.is_empty(),
+            "control: the stub must emit at least one runner-tied action"
+        );
+        assert!(
+            owned.iter().all(Option::is_some),
+            "a method that hands over gets its subtree chained, got {owned:?}"
+        );
+        let first = owned[0];
+        assert!(
+            owned.iter().all(|c| *c == first),
+            "and it is one chain, not several, got {owned:?}"
+        );
+
+        // The same stub answering `false` is the control that shows the
+        // assertion above can fail: nothing else in this registry opens a
+        // chain, so the very same actions come back unstamped.
+        let free = chains(false);
+        assert_eq!(
+            free.len(),
+            owned.len(),
+            "control: the two arms must emit the same work"
+        );
+        assert!(
+            free.iter().all(Option::is_none),
+            "a method that neither converges nor hands over leaves its subtree \
+             freely assignable, got {free:?}"
+        );
     }
 
     #[test]

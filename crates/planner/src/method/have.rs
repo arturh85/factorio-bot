@@ -3343,32 +3343,56 @@ impl Method for Chop {
 /// Craft the shortfall by hand, expanding each ingredient as a subgoal.
 pub struct HandCraft;
 
+impl HandCraft {
+    /// How many of this recipe's ingredients still have to be *produced*.
+    ///
+    /// The one computation behind both [`Method::converges`] (two or more must
+    /// meet) and [`Method::hands_over`] (one or more must stay in the hand
+    /// that made it): the second is the first's threshold lowered, and reading
+    /// them off one function is what stops the weaker claim from drifting
+    /// away from the stronger one it contains.
+    fn short_ingredients(&self, goal: &Goal, state: &PlanState) -> usize {
+        let Some(Demand {
+            item, need, whose, ..
+        }) = demand(goal, state)
+        else {
+            return 0;
+        };
+        if need == 0 {
+            return 0;
+        }
+        let Some(recipe) = recipe_for(state, item) else {
+            return 0;
+        };
+        ingredients_of(&recipe)
+            .iter()
+            .filter(|(ingredient, amount)| shortfall(state, ingredient, *amount, whose) > 0)
+            .count()
+    }
+}
+
 impl Method for HandCraft {
     fn name(&self) -> &'static str {
         "hand-craft"
     }
 
     fn converges(&self, goal: &Goal, state: &PlanState) -> bool {
-        let Some(Demand {
-            item, need, whose, ..
-        }) = demand(goal, state)
-        else {
-            return false;
-        };
-        if need == 0 {
-            return false;
-        }
-        let Some(recipe) = recipe_for(state, item) else {
-            return false;
-        };
         // One craft action carries a `HasItem` for every ingredient, so each
         // one that still has to be produced is a separate sub-chain that must
         // land in the same inventory. Two or more of those is a convergence.
-        ingredients_of(&recipe)
-            .iter()
-            .filter(|(ingredient, amount)| shortfall(state, ingredient, *amount, whose) > 0)
-            .count()
-            >= 2
+        self.short_ingredients(goal, state) >= 2
+    }
+
+    /// One short ingredient is already a hand-over: it is produced into some
+    /// inventory and the craft then spends it out of that same inventory.
+    ///
+    /// So this is [`HandCraft::converges`]'s own count with the threshold
+    /// dropped to one, and the two are deliberately the same computation --
+    /// convergence is the strictly stronger claim, and stating it twice from
+    /// one `short_ingredients` is what keeps them from drifting apart. See
+    /// [`Method::hands_over`] for the plan this absence killed.
+    fn hands_over(&self, goal: &Goal, state: &PlanState) -> bool {
+        self.short_ingredients(goal, state) >= 1
     }
 
     fn applicable(&self, goal: &Goal, state: &PlanState) -> bool {
@@ -10215,6 +10239,49 @@ mod tests {
             plates_produced, 1,
             "exactly one plate, not the whole shortfall re-derived"
         );
+    }
+
+    /// **A one-ingredient craft never converges, and still hands over.**
+    ///
+    /// The gap between the two questions, and the gap this crate died in: a
+    /// `pipe` is one iron-plate, so `converges` is honestly `false` and the
+    /// driver opened no chain, while `run_steps` went on sizing every action
+    /// of the subtree against `ctx.chain_actor`. See [`Method::hands_over`]
+    /// for the plan that killed.
+    #[test]
+    fn a_one_ingredient_craft_hands_over_without_converging() {
+        let s = state(&[BotId(1)]);
+        let gear = Goal::Have {
+            item: "iron-gear-wheel".into(),
+            count: 1,
+            whose: Holder::Anyone,
+            via: None,
+        };
+        // Not an accidental pass: there really is a plate to produce, so
+        // there really is something that has to stay in the hand it lands in.
+        assert!(
+            shortfall(&s, "iron-plate", 2, &Holder::Anyone) > 0,
+            "control: the plate must be short, or both answers are trivially no"
+        );
+        assert!(
+            !HandCraft.converges(&gear, &s),
+            "one ingredient cannot converge -- nothing has to meet anything"
+        );
+        assert!(
+            HandCraft.hands_over(&gear, &s),
+            "and yet the plate must be spent by the hand it was smelted into"
+        );
+
+        // With the plates already held nothing is produced, so nothing is
+        // handed over either -- the weaker claim is still a claim.
+        let mut held = state(&[BotId(1)]);
+        held.gain(BotId(1), "iron-plate", 10);
+        assert_eq!(
+            shortfall(&held, "iron-plate", 2, &Holder::Anyone),
+            0,
+            "control: the plate is no longer short"
+        );
+        assert!(!HandCraft.hands_over(&gear, &held));
     }
 
     #[test]

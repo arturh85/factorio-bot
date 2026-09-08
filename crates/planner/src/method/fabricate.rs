@@ -529,6 +529,35 @@ fn plan_fluid_rig(
         });
     };
 
+    // **The machine's *other* port is ground the second run will need.**
+    //
+    // The two runs are routed one after the other against a world where
+    // neither is emitted, and `route_between` pushes its two ends' port tiles
+    // into the result unconditionally -- outside the search, so no obstacle
+    // grid can keep them apart. So the inbound run, routed first and free to
+    // pick any side of the refinery, ran straight over the output port the
+    // outbound run then had to start from: `[134.5, -354.5]` and
+    // `[134.5, -355.5]` in both runs of `gathered:crude-oil` + `producing
+    // petroleum-gas:45` on seed 31337. Two `Place`s on one tile, and `expand`
+    // died on the second's own `AreaFree` -- `precondition pipe fits at
+    // [134.5, -354.5] ... does not hold` -- naming a tile and saying nothing
+    // about the run that had taken it.
+    //
+    // Reserved here rather than inside `route_between` because only this
+    // function knows a *second* run is coming: a lone run to a machine may
+    // use whichever side it likes.
+    let other_port_tiles: Vec<Rect> = if source.is_some() && !products.is_empty() {
+        pipe::fluid_ports(state, machine, &site, Some("output"))?
+            .first()
+            .map(|port| port.tiles())
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|tile| state.collision_area(&pipe, tile))
+            .collect()
+    } else {
+        Vec::new()
+    };
+
     // ---- in ----
     let inbound = match &source {
         Some((fluid, entity)) => {
@@ -554,7 +583,7 @@ fn plan_fluid_rig(
                     port_index: Some(0),
                 },
                 &pipe,
-                &[],
+                &other_port_tiles,
             )?;
             Some(Run {
                 fluid: fluid.clone(),
@@ -587,15 +616,66 @@ fn plan_fluid_rig(
             // The inbound run's tiles are ground already spoken for: it is
             // resolved and not emitted, so nothing on any grid knows about
             // it and a tank sited blindly would stand on it.
-            let taken: Vec<Rect> = inbound
+            let mut taken: Vec<Rect> = inbound
                 .iter()
                 .flat_map(|run| run.tiles.iter())
                 .filter_map(|tile| state.collision_area(&pipe, tile))
                 .collect();
+            // **And the machine's own footprint, for the same reason.** It is
+            // resolved and not emitted either, so `free_area_near_where` reads
+            // the ground under it as clear and hands the buffer the machine's
+            // own site: `place oil-refinery at [137.5, -352.5]` and `place
+            // storage-tank at [137.5, -352.5]` in one plan, on
+            // `gathered:crude-oil` + `producing:petroleum-gas:45`, seed 31337.
+            // Whichever is placed second fails its own `AreaFree`, and the
+            // refusal names a tile rather than the two things that wanted it.
+            taken.push(machine_area.clone());
+            // **A site is only clear if a run can actually reach it.**
+            //
+            // Siting and routing were two searches: `free_area_near_where`
+            // returned the nearest footprint that fitted, and the route was
+            // asked afterwards and could only refuse. Excluding the machine's
+            // own ground (the line above) is what exposed that -- the buffer
+            // moved off the refinery onto the next fitting tile, and the
+            // outbound run then had to cross the inbound one to get there:
+            // `no route to the storage-tank's connection ..., blocked by 4
+            // tile(s)`, on eight of this module's own fixtures at once.
+            // Nothing was wrong with either half; they simply never agreed on
+            // a site.
+            //
+            // So the route is the acceptance test. `free_area_near_where`
+            // walks its rings outward and takes the first site that *fits and
+            // routes*, which is the nearest such site by construction. The
+            // winner is routed twice -- once here, once below -- because
+            // `accept` is `Fn` and cannot hand the route back; that is one
+            // extra search per expansion, against a refusal for a rig that was
+            // buildable two tiles further out.
+            let routes_to = |candidate: &Position, area: Rect| {
+                route_between(
+                    state,
+                    &PipeEnd {
+                        name: machine,
+                        position: &site,
+                        area: machine_area.clone(),
+                        production_type: Some("output"),
+                        port_index: Some(0),
+                    },
+                    &PipeEnd {
+                        name: &tank,
+                        position: candidate,
+                        area,
+                        production_type: None,
+                        port_index: None,
+                    },
+                    &pipe,
+                    &taken,
+                )
+                .is_ok()
+            };
             let clear = |candidate: &Position| {
-                state
-                    .collision_area(&tank, candidate)
-                    .is_some_and(|area| !taken.iter().any(|t| overlaps(&area, t)))
+                state.collision_area(&tank, candidate).is_some_and(|area| {
+                    !taken.iter().any(|t| overlaps(&area, t)) && routes_to(candidate, area.clone())
+                })
             };
             let Some(tank_site) = free_area_near_where(state, &site, &tank, clear) else {
                 return Err(PlannerError::CannotFabricate(Box::new(
@@ -621,7 +701,7 @@ fn plan_fluid_rig(
                 &PipeEnd {
                     name: machine,
                     position: &site,
-                    area: machine_area,
+                    area: machine_area.clone(),
                     production_type: Some("output"),
                     // Likewise the first output box: one fluid product, two
                     // are refused above.
@@ -673,6 +753,26 @@ impl Method for Fabricate {
     }
 
     fn applicable(&self, goal: &Goal, state: &PlanState) -> bool {
+        job_for(goal, state).is_some()
+    }
+
+    /// **The machine, its buffer and every pipe of its rig are placed out of a
+    /// hand this method's own subgoals filled.**
+    ///
+    /// Each is stated as `Goal::Have { whose }` -- the goal's own holder,
+    /// propagated verbatim -- and then placed by a sibling `Step::Act`
+    /// carrying a `HasItem { who: Role }`. They arrive through separate
+    /// subgoals and nothing has to *meet*, so [`Method::converges`] is
+    /// honestly `false`; what is true is the weaker claim
+    /// [`Method::hands_over`] names, and without it the whole rig went
+    /// unchained while its bill was sized against `ctx.chain_actor`.
+    ///
+    /// Measured on `gathered:crude-oil` + `producing:petroleum-gas:45`, seed
+    /// 31337: the refinery's nine unchained `place pipe` actions settled on
+    /// bot 1 and spent the ten pipes bot 1 had crafted for `craft 1
+    /// oil-refinery` -- an action of a chain **owned** by bot 1, sized against
+    /// it, and right about what it needed. The plan died naming that chain.
+    fn hands_over(&self, goal: &Goal, state: &PlanState) -> bool {
         job_for(goal, state).is_some()
     }
 
@@ -1197,6 +1297,81 @@ mod fabricate_fluid_tests {
         sorted.sort_by(|a, b| a.x.total_cmp(&b.x).then(a.y.total_cmp(&b.y)));
         sorted.dedup();
         assert_eq!(sorted.len(), pipes.len(), "no tile is piped twice");
+    }
+
+    /// **The buffer does not stand on the machine it is catching from.**
+    ///
+    /// Both are resolved before either is emitted, so the overlay knows about
+    /// neither and `free_area_near_where` read the ground under the refinery
+    /// as clear: `place oil-refinery at [137.5, -352.5]` and `place
+    /// storage-tank at [137.5, -352.5]`, the same tile, on
+    /// `gathered:crude-oil` + `producing:petroleum-gas:45` (seed 31337).
+    /// Whichever went second failed its own `AreaFree` at expansion, naming a
+    /// tile and not the two things that wanted it.
+    #[test]
+    fn the_buffer_is_not_sited_on_the_machine_it_catches_from() {
+        let state = state_with_tank();
+        let steps = expand(state.fork(), &goal()).expect("the goal expands");
+        let refineries = placed(&steps, "oil-refinery");
+        let tanks = placed(&steps, "storage-tank");
+        // Non-accidental: both really were sited, so there are two footprints
+        // to compare. An expansion that emitted neither would otherwise pass.
+        assert_eq!(refineries.len(), 1, "one refinery is sited, in {steps:?}");
+        assert_eq!(tanks.len(), 1, "one buffer is sited, in {steps:?}");
+        let refinery = state
+            .collision_area("oil-refinery", &refineries[0])
+            .expect("the fixture has a collision box for the refinery");
+        let tank = state
+            .collision_area("storage-tank", &tanks[0])
+            .expect("the fixture has a collision box for the tank");
+        assert!(
+            !overlaps(&refinery, &tank),
+            "the buffer at {} overlaps the refinery at {}",
+            tanks[0],
+            refineries[0]
+        );
+    }
+
+    /// **The rig is one bot's errand, and nothing in it converges.**
+    ///
+    /// The machine, its buffer and every pipe are stated as separate
+    /// `Goal::Have` subgoals and then placed out of a hand, so `converges` is
+    /// honestly `false` while [`Method::hands_over`] is true. Without the
+    /// second, the rig went unchained with its bill sized against
+    /// `ctx.chain_actor`, and nine unowned `place pipe` actions spent the ten
+    /// pipes an *owned* chain had crafted for `craft 1 oil-refinery`.
+    #[test]
+    fn the_fluid_rig_hands_over_without_converging() {
+        let state = state_with_tank();
+        assert!(
+            !Fabricate.converges(&goal(), &state),
+            "each item is its own subgoal: nothing has to meet anything"
+        );
+        assert!(
+            Fabricate.hands_over(&goal(), &state),
+            "and yet every placement spends what this method's own subgoal bought"
+        );
+        // Not accidental: there really is something placed out of a hand.
+        let steps = expand(state.fork(), &goal()).expect("the goal expands");
+        let from_a_hand = steps
+            .iter()
+            .filter(|step| match step {
+                Step::Act(action) => action.pre.iter().any(|c| {
+                    matches!(
+                        c,
+                        Condition::HasItem {
+                            who: Actor::Role,
+                            ..
+                        }
+                    )
+                }),
+                _ => false,
+            })
+            .count();
+        assert!(
+            from_a_hand >= 2,
+            "control: the rig must place at least two things out of a hand, got {from_a_hand}"
+        );
     }
 
     /// The other half of the ruling: **a fluid product needs a sink or the

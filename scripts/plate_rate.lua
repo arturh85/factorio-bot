@@ -36,6 +36,12 @@
 -- production curve and the machine census, not one container. The observation
 -- window below is what makes both legible.
 
+-- `include` returns nothing and defines the global `supervisor`, the same idiom
+-- as `lib.lua` and the `goal` / `world` / `rcon` tables. Omitting it fails at
+-- the first `supervisor.` with "attempt to index a nil value", which is how
+-- this line came to be here.
+include("supervisor.lua")
+
 local PER_MINUTE = 261
 
 -- Long enough to cross the fuel-decay boundary the prediction above names.

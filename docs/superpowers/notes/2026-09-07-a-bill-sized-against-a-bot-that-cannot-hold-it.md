@@ -123,6 +123,59 @@ slower correct run beats a faster crashing one" — paid a second time for the
 same reason. The plan that got the old number was building the rig with four
 pairs of hands and a bill written for one.
 
+## Falsification, and the two experiments that came back green
+
+Seven mutations, each asserted to match **exactly once** before the edit was
+written, each run against the whole planner suite, each restored by file copy
+and then `touch`ed (`cp -p` preserves mtime, so cargo re-runs the *mutated*
+binary against restored source and reports a false red).
+
+| mutation | killed |
+|---|---|
+| `HandCraft::hands_over` `>= 1` -> `>= 2` | `a_one_ingredient_craft_hands_over_without_converging` |
+| driver stops asking `hands_over` | **nothing** -- see below |
+| `Gather::hands_over` -> `false` | `the_wellhead_rig_hands_over_without_converging` |
+| machine footprint not reserved for the buffer | `the_buffer_is_not_sited_on_the_machine_it_catches_from` |
+| `Fabricate::hands_over` -> `false` | `the_fluid_rig_hands_over_without_converging` |
+| the route is not the acceptance test | `the_buffer_is_not_sited_on_the_machine_it_catches_from` |
+| the machine's other port is not reserved | **nothing** -- see below |
+
+**The driver test was an accidental pass, and this is what caught it.**
+`a_one_ingredient_craft_is_expanded_into_a_single_chain` expanded
+`have:iron-gear-wheel:1` through the real registry and asserted one chain. It
+passed with the `hands_over` clause deleted from the driver, because a
+top-level `Holder::Anyone` goal is claimed by **`SplitAcrossBots`**, which
+restates it as `Holder::Share(bot)` subgoals -- so `one_inventory` opened that
+chain and the test never touched the thing it was named for. The real defect
+reached `HandCraft` under `Holder::Anyone` from *inside* `Fabricate`, where
+`SplitAcrossBots::claims` is false. Replaced with a stub-method test that
+cannot be satisfied by anything else, plus the same stub answering `false` as
+the control that shows the assertion can fail; deleting the clause now kills
+exactly that test.
+
+**The other-port reservation has no unit test, and a second test written for
+it was redundant.** The fluid fixture's geometry does not collide, so the
+mutation passes whatever the code does. The disjointness test written to cover
+it turned out to be word-for-word what
+`a_fluid_ingredient_is_met_by_a_pipe_run_from_a_standing_tank` already asserts
+on the same fixture, and was deleted rather than kept.
+
+**So the mutation was run against the CLI repro instead, and it is
+load-bearing.** With `&other_port_tiles` replaced by `&[]` -- one match,
+asserted -- the repro refuses with `pipe fits at [134.5, -354.5] does not hold`,
+the exact tile the two runs had claimed. That is a green *unit* mutation over a
+line whose absence is fatal, which is a statement about the fixture rather than
+about the code: it is covered by the repro and by nothing in the suite. Said
+plainly rather than papered over, and left as it is rather than fitted with a
+fixture built to fail -- a test written to match code that already exists is
+how `method::connect`'s geometry defect survived four reviews.
+
+**One mutation killed a test another mutation had already killed.** Both the
+footprint reservation and the routing acceptance test are load-bearing for
+`the_buffer_is_not_sited_on_the_machine_it_catches_from`, which is honest --
+the second exists because the first exposed the need for it -- but it means the
+routing acceptance has no test of its own either.
+
 ## What was NOT fixed, and is left named
 
 **`route_between` pushes its two ends' port tiles into the result outside the

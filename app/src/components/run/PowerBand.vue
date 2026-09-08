@@ -17,7 +17,9 @@ const firstGen = computed(() => force.value.find((f) => f.power.generated_kw > 0
 const deficits = computed(() => force.value.flatMap((f, k) => {
     const short = Object.values(f.power.networks).some((n) => n.demanded_kw > n.generated_kw);
     if (!short) return [];
-    const prev = k > 0 ? force.value[k - 1].tick : f.tick - 300;
+    // The record does not say when a deficit already present at the first
+    // sample began, so it is drawn as a mark, not a fabricated band.
+    const prev = k > 0 ? force.value[k - 1].tick : f.tick;
     return [{from: prev, to: f.tick}];
 }));
 const gridKw = computed(() => [0, max.value / 2, max.value]);

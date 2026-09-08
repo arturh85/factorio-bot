@@ -2,6 +2,7 @@
 import {describe, expect, it} from 'vitest';
 import {mount} from '@vue/test-utils';
 import {loadFixtureRun} from '@/lib/fixtureRun';
+import {tickX} from '@/lib/tickScale';
 import PowerBand from './PowerBand.vue';
 
 const run = loadFixtureRun();
@@ -21,7 +22,15 @@ describe('PowerBand', () => {
             ...s, power: {...s.power, networks: {0: {sub_ids: [0], generated_kw: 0, consumed_kw: 0, demanded_kw: 60, satisfaction: 0}}}
         }));
         const bad = mount(PowerBand, {props: {scale, cursor: run.lo, samples: starved}});
-        expect(bad.findAll('rect.deficit').length).toBeGreaterThan(0);
+        const rects = bad.findAll('rect.deficit');
+        expect(rects.length).toBeGreaterThan(0);
+        // The first force sample's deficit has no prior sample to date its
+        // start from, so it draws as the minimum-width mark, not a fabricated
+        // 300-tick band.
+        expect(rects[0].attributes('width')).toBe('1');
+        // The fixture's force samples are at 3300, 3600, ... -- the second
+        // rect spans the real interval between those two samples.
+        expect(Number(rects[1].attributes('width'))).toBeCloseTo(tickX(scale, 3600) - tickX(scale, 3300));
     });
     it('says so when there are no force samples', () => {
         const w = mount(PowerBand, {props: {scale, cursor: run.lo, samples: []}});

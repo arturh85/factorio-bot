@@ -3421,7 +3421,11 @@ pub enum EntityType {
     Fish,
 }
 
-#[derive(Debug)]
+// `Clone` and `PartialEq` because `EntityGraph::resource_patches` memoises its
+// answers per graph generation: a hit hands the caller a clone of the stored
+// patch, and the memo's own test compares a cached answer against a recomputed
+// one rather than only timing them.
+#[derive(Debug, Clone, PartialEq)]
 pub struct ResourcePatch {
     pub name: String,
     pub id: u32,

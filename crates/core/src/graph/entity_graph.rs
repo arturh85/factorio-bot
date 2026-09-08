@@ -307,6 +307,34 @@ pub struct EntityGraph {
     /// ground nobody has looked at is absent from this map, and absence here is
     /// never evidence of safety.
     threats: DashMap<String, BTreeMap<Pos, Position>>,
+    /// [`EntityGraph::resource_patches`]'s answers, valid only for the
+    /// `generation` they were computed at.
+    ///
+    /// # Why a cache is safe here and was not obviously so
+    ///
+    /// A flood fill over charted ore is not cheap and the planner asks for one
+    /// constantly: **14,507 fills in a single `gathered:crude-oil` plan**, all
+    /// of them over a resource table nothing in the planner ever writes to --
+    /// `PlanState` overlays a plan's changes and leaves the base graph alone,
+    /// so every fill after the first recomputed a value that could not have
+    /// moved.
+    ///
+    /// The invalidation is [`EntityGraph::generation`], the same counter
+    /// `FlowGraph::ensure_current` reads, and the same discipline: **clear
+    /// before rebuilding**. A cache that inserted into a stale map would keep
+    /// a retired patch for ever, and the whole reason that counter exists is
+    /// that a stale answer looks exactly like a current one.
+    ///
+    /// Misses are cached too, deliberately. A miss is the expensive one to
+    /// repeat in a different way -- it logs the name *and dumps every resource
+    /// the world does have* -- and one crude-oil plan emitted that pair 22
+    /// times per goal for `iron-plate` alone. Caching it means the warning is
+    /// printed once per generation, which is the volume it was always meant to
+    /// have.
+    ///
+    /// Not serialised and not cloned: a loaded or cloned graph starts empty
+    /// and fills itself on demand, which is always correct and never stale.
+    patch_cache: RwLock<PatchCache>,
 }
 
 /// The entity types [`EntityGraph::add`] records as enemy structures.
@@ -421,6 +449,17 @@ fn file_blocked_box(blocked: &mut BlockedQuadTree, minable: bool, rect: QuadTree
     }
 }
 
+/// [`EntityGraph::resource_patches`]'s memo, and the generation it is true at.
+///
+/// One generation for the whole map rather than one per name: the counter is
+/// bumped by any mutation, so a per-name stamp would claim more precision than
+/// the counter can supply.
+#[derive(Debug, Default)]
+struct PatchCache {
+    generation: u64,
+    patches: BTreeMap<String, Vec<ResourcePatch>>,
+}
+
 impl EntityGraph {
     #[allow(clippy::new_without_default)]
     pub fn new(
@@ -441,6 +480,7 @@ impl EntityGraph {
             resources: DashMap::new(),
             minables: DashMap::new(),
             threats: DashMap::new(),
+            patch_cache: RwLock::new(PatchCache::default()),
         }
     }
     /// How many times this graph has been mutated. See [`EntityGraph`]'s
@@ -1377,6 +1417,37 @@ impl EntityGraph {
     }
 
     pub fn resource_patches(&self, resource_name: &str) -> Vec<ResourcePatch> {
+        // Memoised per `generation`; see the `patch_cache` field for why that
+        // is safe and why a miss is cached too. The `Vec` is still cloned out
+        // -- the signature is a `Vec` and `PlanState::resource_patches` sorts
+        // what it gets -- but a clone of a finished answer is not a flood fill
+        // over every charted tile of that ore.
+        let generation = self.generation();
+        {
+            let cache = self.patch_cache.read();
+            if cache.generation == generation
+                && let Some(hit) = cache.patches.get(resource_name)
+            {
+                return hit.clone();
+            }
+        }
+        let patches = self.resource_patches_uncached(resource_name);
+        let mut cache = self.patch_cache.write();
+        // Clear before rebuilding, exactly as `FlowGraph::ensure_current`
+        // does. Inserting into a map stamped at an older generation would
+        // leave every other name's answer standing at a moment that has passed.
+        if cache.generation != generation {
+            cache.patches.clear();
+            cache.generation = generation;
+        }
+        cache
+            .patches
+            .insert(resource_name.to_owned(), patches.clone());
+        patches
+    }
+
+    /// The flood fill itself, run once per name per generation.
+    fn resource_patches_uncached(&self, resource_name: &str) -> Vec<ResourcePatch> {
         let mut patches: Vec<ResourcePatch> = vec![];
         // `BTreeMap`, not `HashMap`, and the ordering is load-bearing twice
         // over. `HashMap`'s `RandomState` is seeded **per process**, so with
@@ -2874,6 +2945,10 @@ impl<'de> Deserialize<'de> for EntityGraph {
                     resource_tree: RwLock::new(resource_tree),
                     minables,
                     threats,
+                    // Empty, like `generation`'s zero above it: a loaded graph
+                    // has never answered a patch query, so there is nothing to
+                    // be stale about.
+                    patch_cache: RwLock::new(PatchCache::default()),
                 })
             }
         }
@@ -2910,6 +2985,12 @@ impl Clone for EntityGraph {
             resource_tree: RwLock::new(self.resource_tree.read().clone()),
             minables: self.minables.clone(),
             threats: self.threats.clone(),
+            // Not copied. The clone would be *correct* -- it carries the
+            // source's generation with it -- but a clone is a fork
+            // (`FactorioSurface::clone` deep-copies on purpose so a plan
+            // world's writes never reach the live model), and an empty memo
+            // that refills itself cannot be wrong about a fork.
+            patch_cache: RwLock::new(PatchCache::default()),
         }
     }
 
@@ -2926,6 +3007,7 @@ impl Clone for EntityGraph {
         self.resource_tree = RwLock::new(source.resource_tree.read().clone());
         self.minables = source.minables.clone();
         self.threats = source.threats.clone();
+        *self.patch_cache.write() = PatchCache::default();
     }
 }
 
@@ -4595,6 +4677,42 @@ mod tests {
             .resource_patches(&EntityName::IronOre.to_string());
         assert_eq!(patches.len(), 1);
         assert_eq!(patches[0].elements.len(), expected_tiles);
+    }
+
+    /// The memo answers from the cache while nothing has changed, and stops
+    /// answering the moment something has.
+    ///
+    /// Counted rather than timed: `plan_work::resource_patches` is bumped by
+    /// the flood fill itself, so "it did not run again" is an assertion and
+    /// not an impression. And the second half is the half that matters --
+    /// a cache that never invalidated would pass the first three asserts
+    /// perfectly, which is exactly the shape of `FlowGraph`'s old defect,
+    /// where a reader got the world as it was at tick 0 with no error.
+    #[test]
+    fn a_patch_query_is_answered_once_per_generation_and_never_across_one() {
+        let world = fixture_world();
+        let graph = &world.entity_graph;
+        let iron = EntityName::IronOre.to_string();
+
+        let (first, filled) = crate::plan_work::measure(|| graph.resource_patches(&iron));
+        assert_eq!(filled.resource_patches, 1, "the first query floods");
+
+        let (again, refilled) = crate::plan_work::measure(|| graph.resource_patches(&iron));
+        assert_eq!(refilled.resource_patches, 0, "the second is a cache hit");
+        assert_eq!(first, again, "and it is the same answer, not merely a fast one");
+
+        // Any mutation bumps the generation, so the memo stops applying. A
+        // furnace is used rather than an ore tile on purpose: the cache must
+        // be keyed on the graph having *changed*, not on the resource table
+        // having changed, because nothing here can know which mutations a
+        // patch depends on.
+        let mut furnace = FactorioEntity::new_stone_furnace(&Position::new(0.5, 0.5), Direction::North);
+        furnace.name = EntityName::StoneFurnace.to_string();
+        graph.add(vec![furnace], None).expect("the furnace lands");
+
+        let (after, refilled) = crate::plan_work::measure(|| graph.resource_patches(&iron));
+        assert_eq!(refilled.resource_patches, 1, "a mutation invalidates the memo");
+        assert_eq!(after, first, "and the ore has not moved, so the answer stands");
     }
 
     #[test]

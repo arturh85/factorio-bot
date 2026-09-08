@@ -2530,3 +2530,89 @@ fn a_surface_that_is_not_a_planet_says_so_rather_than_going_missing() {
     assert_eq!(info.name, "platform-1", "the record was produced");
     assert_eq!(info.index, 7);
 }
+
+// --------------------------------------------------------------------------
+// `fluidbox_index`: which of a machine's fluidboxes a recipe's fluid uses.
+// --------------------------------------------------------------------------
+
+/// **The field the whole sulfur wall turned on, measured on a live server.**
+///
+/// `basic-oil-processing` declares `fluidbox_index = 2` for crude oil, and a
+/// standing `oil-refinery` set to that recipe reports crude on input box 2
+/// while box 1 -- the box a positional rule picks -- carries nothing at all.
+/// If this never crossed the bridge, `method::pipe` would keep piping that
+/// refinery to a dead port: a run that builds 100% correctly and moves
+/// nothing.
+#[test]
+fn an_ingredient_forwards_the_fluidbox_it_names() {
+    let lua = botbridge_types();
+    let ingredient = lua.create_table().expect("table");
+    ingredient.set("name", "crude-oil").expect("set");
+    ingredient.set("type", "fluid").expect("set");
+    ingredient.set("amount", 100).expect("set");
+    ingredient.set("fluidbox_index", 2).expect("set");
+
+    let out = call(&lua, "serialize_ingredient", ingredient);
+    assert_eq!(
+        out.get::<u32>("fluidbox_index").expect("fluidbox_index"),
+        2,
+        "the recipe's own box choice has to reach the planner"
+    );
+
+    let json: serde_json::Value = lua
+        .from_value(Value::Table(out))
+        .expect("the record is plain data");
+    let parsed: factorio_bot_core::types::FactorioIngredient =
+        serde_json::from_value(json.clone()).unwrap_or_else(|err| panic!("{err} in {json}"));
+    assert_eq!(parsed.fluidbox_index, Some(2));
+}
+
+/// **Absent is not a value.** The overwhelming majority of recipes take the
+/// default box and send no `fluidbox_index` at all; so does every dump taken
+/// before 2026-09-08. That has to arrive as `None`, never as `1` and never as
+/// `0` -- the planner's rules branch on exactly this distinction.
+#[test]
+fn an_ingredient_that_names_no_fluidbox_says_nothing_rather_than_one() {
+    let lua = botbridge_types();
+    let ingredient = lua.create_table().expect("table");
+    ingredient.set("name", "water").expect("set");
+    ingredient.set("type", "fluid").expect("set");
+    ingredient.set("amount", 30).expect("set");
+
+    let out = call(&lua, "serialize_ingredient", ingredient);
+    assert!(
+        matches!(
+            out.get::<Value>("fluidbox_index").expect("fluidbox_index"),
+            Value::Nil
+        ),
+        "a recipe taking the default box sends no key"
+    );
+
+    let json: serde_json::Value = lua
+        .from_value(Value::Table(out))
+        .expect("the record is plain data");
+    let parsed: factorio_bot_core::types::FactorioIngredient =
+        serde_json::from_value(json.clone()).unwrap_or_else(|err| panic!("{err} in {json}"));
+    assert_eq!(parsed.fluidbox_index, None, "unknown, never a default");
+}
+
+/// A fluid **product** names its output box the same way -- petroleum-gas is
+/// `fluidbox_index = 3` on `basic-oil-processing`, the refinery's third
+/// output.
+#[test]
+fn a_product_forwards_the_fluidbox_it_names() {
+    let lua = botbridge_types();
+    let product = lua.create_table().expect("table");
+    product.set("name", "petroleum-gas").expect("set");
+    product.set("type", "fluid").expect("set");
+    product.set("amount", 45).expect("set");
+    product.set("fluidbox_index", 3).expect("set");
+
+    let out = call(&lua, "serialize_product", product);
+    let json: serde_json::Value = lua
+        .from_value(Value::Table(out))
+        .expect("the record is plain data");
+    let parsed: factorio_bot_core::types::FactorioProduct =
+        serde_json::from_value(json.clone()).unwrap_or_else(|err| panic!("{err} in {json}"));
+    assert_eq!(parsed.fluidbox_index, Some(3));
+}

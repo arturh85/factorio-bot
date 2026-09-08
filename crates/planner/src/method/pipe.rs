@@ -51,7 +51,9 @@ use factorio_bot_core::factorio::util::calculate_distance;
 use factorio_bot_core::graph::enclosure;
 use factorio_bot_core::graph::route::{RouteError, TileKind, route_belt};
 use factorio_bot_core::num_traits::FromPrimitive;
-use factorio_bot_core::types::{Direction, FactorioEntity, FluidFilter, Position, Rect, TileFluid};
+use factorio_bot_core::types::{
+    Direction, FactorioEntity, FactorioRecipe, FluidFilter, Position, Rect, TileFluid,
+};
 
 use crate::action::{Action, ActionKind, Actor, Condition, Effect};
 use std::collections::BTreeSet;
@@ -185,6 +187,17 @@ pub(crate) struct FluidPort {
     /// are two, and the candidate itself when there is one. This is what a
     /// route starts from or ends at.
     pub junction: Position,
+    /// Which fluidbox of the requested production type this port belongs to,
+    /// counted from 0 in `fluidbox_prototypes` order.
+    ///
+    /// **This is what [`PipeEnd::port_index`] selects on, and it is not the
+    /// same as the port's position in the returned list.** A fluidbox may
+    /// declare several pipe connections -- 21 of the 56 boxes on a live
+    /// 2.1.17 capture do, though no crafting machine among them -- and each
+    /// becomes its own port, so "the second port" and "the second box" part
+    /// company the moment one does. Selecting on the box is the question
+    /// every caller is actually asking.
+    pub box_ordinal: usize,
 }
 
 impl FluidPort {
@@ -236,12 +249,15 @@ pub(crate) fn fluid_ports(
     let span_y = (proto.collision_box.right_bottom.y() + 0.5).floor();
 
     let mut ports: Vec<FluidPort> = Vec::new();
+    let mut box_ordinal = 0usize;
     for fluidbox in boxes {
         if let Some(wanted) = production_type
             && fluidbox.production_type != wanted
         {
             continue;
         }
+        let this_box = box_ordinal;
+        box_ordinal += 1;
         let connections =
             fluidbox.pipe_connections.as_ref().as_ref().ok_or_else(|| {
                 refuse("a fluidbox of its prototype declares no pipe_connections")
@@ -322,8 +338,19 @@ pub(crate) fn fluid_ports(
             let port = FluidPort {
                 candidates: candidates.iter().copied().map(at).collect(),
                 junction: at(junction),
+                box_ordinal: this_box,
             };
-            if !ports.contains(&port) {
+            // Deduplicated on the GROUND it claims, never on `box_ordinal`:
+            // a storage tank names the same two interior corners four times
+            // over, and that was one port before this field existed. Two
+            // *different* boxes that resolve to the same tiles keep the
+            // first, so an ordinal that loses the race simply has no port
+            // and `select` refuses by name rather than handing back a
+            // neighbour's.
+            if !ports
+                .iter()
+                .any(|seen| seen.candidates == port.candidates && seen.junction == port.junction)
+            {
                 ports.push(port);
             }
         }
@@ -575,10 +602,13 @@ pub(crate) fn port_is_placeable(
         })
 }
 
-/// One port by index, or all of them.
+/// Every port of one fluidbox, by that box's ordinal, or all of them.
 fn select(ports: Vec<FluidPort>, index: Option<usize>) -> Vec<FluidPort> {
     match index {
-        Some(index) => ports.into_iter().skip(index).take(1).collect(),
+        Some(index) => ports
+            .into_iter()
+            .filter(|port| port.box_ordinal == index)
+            .collect(),
         None => ports,
     }
 }
@@ -592,6 +622,144 @@ fn is_buffer(state: &PlanState, name: &str) -> bool {
         .entity_prototypes
         .get(name)
         .is_some_and(|proto| proto.entity_type == "storage-tank")
+}
+
+// ---------------------------------------------------------------------------
+// Which fluidbox takes which fluid
+// ---------------------------------------------------------------------------
+
+/// Why a recipe's fluid could not be tied to one of a machine's fluidboxes.
+///
+/// Carried rather than returned as a [`PlannerError`] because the caller
+/// knows the goal and the recipe and this does not; [`crate::method::fabricate`]
+/// turns it into the refusal a reader sees.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct BoxUndecidable {
+    /// The fluid whose box could not be named.
+    pub fluid: String,
+    /// Its 1-based place among the recipe's fluids of that direction.
+    pub ordinal: usize,
+    /// How many fluids of that direction the recipe has.
+    pub fluids: usize,
+    /// How many boxes of that direction the machine declares, or `None` when
+    /// this world has no prototype for the machine at all.
+    pub boxes: Option<usize>,
+}
+
+/// Which fluidbox of `machine`, counted from 0 within `production_type`, each
+/// of `recipe`'s fluids of that direction goes into.
+///
+/// Returns one ordinal per fluid, in recipe order, or the first fluid it
+/// cannot decide.
+///
+/// # Three rules, each measured on a live 2.1.17 server rather than reasoned
+///
+/// This module used to assert, in [`PipeEnd::port_index`]'s own doc, that
+/// *"the game assigns a recipe's fluid ingredients to the machine's input
+/// boxes in order"*. **That is false, and the recipe it was written about is
+/// the counter-example.** Placing each machine on a headless seed-31337
+/// server, setting the recipe, and reading `LuaEntity::get_fluid_filter` back
+/// off the standing entity (2026-09-08):
+///
+/// 1. **An explicit `fluidbox_index` wins, and it is 1-based within the
+///    production type.** `basic-oil-processing` declares `2` for `crude-oil`
+///    and `3` for `petroleum-gas`; the standing `oil-refinery` reports crude
+///    on input box **2** and petroleum on output box **3**, and its *first*
+///    input box, the one a positional rule picks, carries nothing at all.
+/// 2. **Otherwise, when the counts match, positional is exact.** Verified on
+///    all eleven of this mod set's multi-fluid recipes whose machine declares
+///    as many input boxes as the recipe has fluid ingredients -- `sulfur`
+///    (water then petroleum-gas into a `chemical-plant`'s two inputs),
+///    `advanced-oil-processing`, `coal-liquefaction`,
+///    `casting-low-density-structure`, `electromagnetic-science-pack` and the
+///    rest -- in every case the *k*th fluid on the *k*th box.
+/// 3. **Otherwise only the FIRST fluid has an answer, and it is box 0.** When
+///    a machine declares more boxes of a direction than the recipe has fluids,
+///    the game *merges* the surplus rather than leaving it idle, and the merge
+///    is not "extras at the end": a `cryogenic-plant` running `fluoroketone`
+///    (three input boxes, two fluids) merges boxes **1 and 2** for fluorine
+///    and gives ammonia box **3**, so positional would pipe ammonia into the
+///    fluorine box. Fluid #1 landed on box 0 in every case measured, merged or
+///    not, so it is answered; everything after it is refused.
+///
+/// # `None` is "the recipe did not say", and every archived dump reads it
+///
+/// Nothing sent `fluidbox_index` before 2026-09-08, so on a dump taken before
+/// that rule 1 never fires and `basic-oil-processing` falls to rule 3 -- box
+/// 0, which is the box the game leaves empty. That is the pre-existing
+/// behaviour and not a regression this introduces, but a plan made against an
+/// old dump pipes that refinery's crude to a dead port. **Re-dump before
+/// building an oil rig from an archived world.**
+pub(crate) fn fluid_box_ordinals(
+    state: &PlanState,
+    machine: &str,
+    recipe: &FactorioRecipe,
+    production_type: &str,
+) -> Result<Vec<(String, usize)>, BoxUndecidable> {
+    let boxes = box_count(state, machine, production_type);
+    let declared: Vec<(String, Option<u32>)> = if production_type == "output" {
+        recipe
+            .products
+            .iter()
+            .filter(|p| p.product_type == "fluid")
+            .map(|p| (p.name.clone(), p.fluidbox_index))
+            .collect()
+    } else {
+        recipe
+            .ingredients
+            .iter()
+            .flatten()
+            .filter(|i| i.ingredient_type == "fluid")
+            .map(|i| (i.name.clone(), i.fluidbox_index))
+            .collect()
+    };
+    let mut out = Vec::with_capacity(declared.len());
+    for (ordinal, (fluid, declared_index)) in declared.iter().enumerate() {
+        // Rule 1. `0` is not a legal `fluidbox_index` -- the field is 1-based
+        // -- so it is treated as no answer rather than silently becoming box
+        // 0, the `absent is not a value` rule this repo keeps relearning.
+        if let Some(index) = declared_index
+            && *index >= 1
+        {
+            out.push((fluid.clone(), (*index as usize) - 1));
+            continue;
+        }
+        // Rule 2.
+        if boxes == Some(declared.len()) {
+            out.push((fluid.clone(), ordinal));
+            continue;
+        }
+        // Rule 3.
+        if ordinal == 0 {
+            out.push((fluid.clone(), 0));
+            continue;
+        }
+        return Err(BoxUndecidable {
+            fluid: fluid.clone(),
+            ordinal: ordinal + 1,
+            fluids: declared.len(),
+            boxes,
+        });
+    }
+    Ok(out)
+}
+
+/// How many fluidboxes of one production type `machine` declares, or `None`
+/// when this world has no prototype for it or the prototype carries no
+/// fluidboxes.
+fn box_count(state: &PlanState, machine: &str, production_type: &str) -> Option<usize> {
+    Some(
+        state
+            .base()
+            .globals
+            .entity_prototypes
+            .get(machine)?
+            .fluidbox_prototypes
+            .as_ref()?
+            .iter()
+            .filter(|b| b.production_type == production_type)
+            .count(),
+    )
 }
 
 /// The filters on every box of `name` that could supply a fluid, in
@@ -811,19 +979,20 @@ pub(crate) struct PipeEnd<'a> {
     /// storage tank's is `"none"`, since a buffer neither produces nor
     /// consumes.
     pub production_type: Option<&'a str>,
-    /// Which of the selected ports may be joined, by index, or `None` for
-    /// "any of them, nearest first".
+    /// Which fluidbox of the selected direction may be joined, counted from
+    /// 0 in `fluidbox_prototypes` order, or `None` for "any of them, nearest
+    /// first".
     ///
-    /// # Why an index is the derivation and not a guess
+    /// # Do not derive this here -- ask [`fluid_box_ordinals`]
     ///
-    /// An `oil-refinery` declares **two** input boxes and **three** output
-    /// boxes, and `basic-oil-processing` uses one of each. Nothing on our
-    /// wire says which. What the game does is assign a recipe's fluid
-    /// ingredients to the machine's input boxes **in order**, and its fluid
-    /// products to the output boxes in order -- which is why changing a
-    /// refinery's recipe changes which of its pipes are live. So the nth
-    /// fluid of the recipe belongs to the nth box of that direction, and
-    /// [`fluid_ports`] walks `fluidbox_prototypes` in prototype order.
+    /// **This doc used to say the game assigns a recipe's fluid ingredients
+    /// to the input boxes in order, and named `basic-oil-processing` as the
+    /// example. That recipe is the counter-example.** It declares
+    /// `fluidbox_index = 2` for crude oil, and a standing `oil-refinery` set
+    /// to it reports crude on input box 2 with box 1 -- the one this rule
+    /// picked -- carrying nothing at all. Measured live on 2026-09-08; see
+    /// [`fluid_box_ordinals`], which states all three rules and which of them
+    /// an archived dump can still reach.
     ///
     /// Ranking by distance instead would pick whichever box the pipe reaches
     /// first, which builds 100% correctly and moves nothing whenever it
@@ -1496,6 +1665,214 @@ mod pipe_tests {
         assert!(
             is_source(&state, "crude-oil", "boiler"),
             "the boiler has no fluid source offset, so dry ground in front of              it says nothing -- the footprint inference still decides"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Which box takes which fluid
+    // -----------------------------------------------------------------------
+
+    /// A recipe with the named fluid ingredients, each with an optional
+    /// explicit `fluidbox_index`, and no products.
+    fn recipe_taking(fluids: &[(&str, Option<u32>)]) -> FactorioRecipe {
+        FactorioRecipe {
+            name: "probe".into(),
+            valid: true,
+            enabled: true,
+            category: "chemistry".into(),
+            ingredients: Some(
+                fluids
+                    .iter()
+                    .map(
+                        |(name, index)| factorio_bot_core::types::FactorioIngredient {
+                            name: (*name).into(),
+                            ingredient_type: "fluid".into(),
+                            amount: 30,
+                            fluidbox_index: *index,
+                        },
+                    )
+                    .collect(),
+            ),
+            products: vec![],
+            hidden: false,
+            energy: Box::new(
+                factorio_bot_core::num_traits::cast::FromPrimitive::from_f64(1.0).expect("finite"),
+            ),
+            order: "a".into(),
+            group: "g".into(),
+            subgroup: "s".into(),
+        }
+    }
+
+    /// How many input boxes the fixture's `oil-refinery` declares -- asserted
+    /// rather than assumed, because every rule below is stated in terms of it.
+    #[test]
+    fn the_fixture_refinery_declares_two_input_boxes() {
+        let state = state();
+        assert_eq!(
+            box_count(&state, "oil-refinery", "input"),
+            Some(2),
+            "the rules below are about a machine with two input boxes"
+        );
+    }
+
+    /// **Rule 2, and the sulfur case.** Two fluids into a machine declaring
+    /// two input boxes is the *k*th fluid on the *k*th box -- measured on a
+    /// live 2.1.17 server, where a standing `chemical-plant` set to `sulfur`
+    /// reported `water` on box 1 and `petroleum-gas` on box 2.
+    ///
+    /// The order is asserted, not just the set: a resolver that handed back
+    /// `[1, 0]` would satisfy "each box used once" and pipe both fluids to
+    /// the wrong port.
+    #[test]
+    fn matching_counts_put_the_kth_fluid_on_the_kth_box() {
+        let state = state();
+        let assigned = fluid_box_ordinals(
+            &state,
+            "oil-refinery",
+            &recipe_taking(&[("water", None), ("petroleum-gas", None)]),
+            "input",
+        )
+        .expect("two fluids into two boxes is decidable");
+        assert_eq!(
+            assigned,
+            vec![("water".to_string(), 0), ("petroleum-gas".to_string(), 1)]
+        );
+    }
+
+    /// **Rule 1, and the counter-example that killed the positional claim.**
+    /// `basic-oil-processing` declares `fluidbox_index = 2` for crude oil,
+    /// and a live refinery set to it puts crude on input box 2 while box 1 --
+    /// the box positional picks -- carries nothing at all.
+    ///
+    /// The control is the same recipe with the field absent, which is what
+    /// every dump taken before 2026-09-08 reads: it answers 0, the wrong box,
+    /// and that is stated here so the difference the field makes is visible
+    /// rather than assumed.
+    #[test]
+    fn an_explicit_fluidbox_index_outranks_position() {
+        let state = state();
+        let declared = fluid_box_ordinals(
+            &state,
+            "oil-refinery",
+            &recipe_taking(&[("crude-oil", Some(2))]),
+            "input",
+        )
+        .expect("an explicit index is always decidable");
+        assert_eq!(declared, vec![("crude-oil".to_string(), 1)]);
+
+        let silent = fluid_box_ordinals(
+            &state,
+            "oil-refinery",
+            &recipe_taking(&[("crude-oil", None)]),
+            "input",
+        )
+        .expect("one fluid always has an answer");
+        assert_eq!(
+            silent,
+            vec![("crude-oil".to_string(), 0)],
+            "without the field the old, wrong box is what comes back"
+        );
+    }
+
+    /// `fluidbox_index` is 1-based, so `0` is not an index -- it is a sender
+    /// that said nothing usable, and it must not become box 0 by arithmetic.
+    /// The `absent is not a value` rule, in the one place a nonsense value
+    /// could quietly become a plausible one.
+    #[test]
+    fn a_zero_fluidbox_index_is_not_box_zero_by_accident() {
+        let state = state();
+        let assigned = fluid_box_ordinals(
+            &state,
+            "oil-refinery",
+            &recipe_taking(&[("water", None), ("petroleum-gas", Some(0))]),
+            "input",
+        )
+        .expect("the counts still match, so rule 2 answers");
+        assert_eq!(
+            assigned,
+            vec![("water".to_string(), 0), ("petroleum-gas".to_string(), 1)],
+            "a 0 falls through to the positional rule rather than naming box 0"
+        );
+    }
+
+    /// **Rule 3, and the case that still refuses.** A machine declaring more
+    /// input boxes than the recipe has fluids merges the surplus, and the
+    /// merge is not positional: a live `cryogenic-plant` running
+    /// `fluoroketone` (three boxes, two fluids) merged boxes 1 and 2 for
+    /// fluorine and gave ammonia box 3.
+    ///
+    /// So the first fluid is answered -- it landed on box 0 in every case
+    /// measured -- and the second refuses by name. Both halves are asserted,
+    /// because a resolver that refused *everything* under this rule would
+    /// pass a test that only checked the refusal.
+    #[test]
+    fn a_surplus_of_boxes_answers_only_the_first_fluid() {
+        let state = state();
+        let one = fluid_box_ordinals(
+            &state,
+            "oil-refinery",
+            &recipe_taking(&[("crude-oil", None)]),
+            "input",
+        )
+        .expect("one fluid into two boxes is answered");
+        assert_eq!(one, vec![("crude-oil".to_string(), 0)]);
+
+        // Three fluids into two boxes is the other side of "the counts
+        // differ", and the second one has no answer either.
+        let undecidable = fluid_box_ordinals(
+            &state,
+            "oil-refinery",
+            &recipe_taking(&[("water", None), ("steam", None), ("crude-oil", None)]),
+            "input",
+        )
+        .expect_err("three fluids into two boxes is not decidable");
+        assert_eq!(undecidable.fluid, "steam");
+        assert_eq!(undecidable.ordinal, 2);
+        assert_eq!(undecidable.fluids, 3);
+        assert_eq!(undecidable.boxes, Some(2));
+    }
+
+    /// A machine this world has never heard of has no box count, and that is
+    /// `None` rather than zero -- so the first fluid still answers by rule 3
+    /// and the second refuses, saying it does not know the count.
+    #[test]
+    fn an_unknown_machine_reports_an_unknown_box_count() {
+        let state = state();
+        let undecidable = fluid_box_ordinals(
+            &state,
+            "no-such-machine",
+            &recipe_taking(&[("water", None), ("petroleum-gas", None)]),
+            "input",
+        )
+        .expect_err("nothing is known about this machine's boxes");
+        assert_eq!(undecidable.boxes, None, "unknown, never zero");
+        assert_eq!(undecidable.fluid, "petroleum-gas");
+    }
+
+    /// `port_index` selects a *fluidbox*, not a position in the returned
+    /// list, and the two are different the moment one box declares several
+    /// pipe connections. A `storage-tank` is exactly that case in the live
+    /// capture: one box, four connections.
+    #[test]
+    fn every_port_of_a_multi_connection_box_carries_that_boxs_ordinal() {
+        let state = state();
+        let ports = fluid_ports(&state, "storage-tank", &Position::new(24.5, 26.5), None)
+            .expect("a tank has ports");
+        assert!(!ports.is_empty(), "the fixture tank declares ports");
+        assert!(
+            ports.iter().all(|port| port.box_ordinal == 0),
+            "a tank has one fluidbox, so every port belongs to box 0: {ports:?}"
+        );
+        assert!(
+            select(ports.clone(), Some(1)).is_empty(),
+            "there is no second box, so selecting one hands back nothing rather than a \
+             neighbour's port"
+        );
+        assert_eq!(
+            select(ports.clone(), Some(0)).len(),
+            ports.len(),
+            "selecting box 0 keeps every port of that box, not just the first"
         );
     }
 

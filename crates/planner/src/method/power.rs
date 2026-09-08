@@ -314,7 +314,7 @@ use crate::method::{ExpansionCtx, Step};
 use crate::state::PlanState;
 use factorio_bot_core::factorio::util::calculate_distance;
 use factorio_bot_core::num_traits::{FromPrimitive, ToPrimitive};
-use factorio_bot_core::types::{Direction, FactorioEntity, Pos, Position, Rect};
+use factorio_bot_core::types::{Direction, FactorioEntity, FactorioTile, Pos, Position, Rect};
 use std::collections::BTreeSet;
 
 /// The entities the plant is made of.
@@ -1742,6 +1742,65 @@ fn finish(state: &PlanState, pump: &FactorioEntity, kw: f64) -> Option<Plant> {
 /// `EntityGraph::nearest_water_tile` orders first, the shoreline candidates
 /// come out of a ring search in a fixed order, and the four facings are tried
 /// north, east, south, west. Nothing here reads a quad tree's own order.
+/// The nearest charted tile that yields water, narrow scan first.
+///
+/// The two tiers are a **read-cost** bound and nothing else -- see
+/// [`PLANT_WATER_SCAN_RADIUS`] -- so the answer is the same tile a single
+/// wide read would have found. Shared with [`crate::method::gather`], which
+/// stands an offshore pump on the same shoreline this sites a plant on: two
+/// copies of the tier would be two copies of a decision about read cost, and
+/// the second one would go stale.
+pub(crate) fn nearest_water(state: &PlanState, from: &Position) -> Option<FactorioTile> {
+    state
+        .nearest_water_tile(from, PLANT_WATER_SCAN_RADIUS)
+        .or_else(|| state.nearest_water_tile(from, PLANT_WATER_WIDE_SCAN_RADIUS))
+}
+
+/// Every tile within [`SHORE_SEARCH_RADIUS`] of `anchor` a pump could stand
+/// on, with the facing that puts the water in front of it, ring by ring
+/// outwards.
+///
+/// **Candidates only**: whether the ground behind is clear is the caller's
+/// question, and the two callers ask different ones -- [`plan_plant_for`]
+/// needs room for a whole plant, [`crate::method::gather`] for one pump. The
+/// order is the one `plan_plant_for` has always searched in, and it is shared
+/// rather than copied so that a plant and a bare pump cannot come to prefer
+/// different shorelines of the same lake.
+pub(crate) fn shore_candidates(state: &PlanState, anchor: &Pos) -> Vec<(Position, Direction)> {
+    // One bounded read of the terrain rather than one per candidate tile. The
+    // margin is the two tiles a shoreline test reaches beyond its own tile.
+    let reach = f64::from(SHORE_SEARCH_RADIUS) + 2.;
+    let centre = tile_centre(anchor);
+    let bounds = Rect::new(
+        &Position::new(centre.x() - reach, centre.y() - reach),
+        &Position::new(centre.x() + reach, centre.y() + reach),
+    );
+    let water_tiles: BTreeSet<Pos> = state
+        .water_tiles_within(&bounds)
+        .iter()
+        .map(|tile| Pos::from(&tile.position))
+        .collect();
+
+    let mut candidates = Vec::new();
+    for radius in 0..=SHORE_SEARCH_RADIUS {
+        for dy in -radius..=radius {
+            for dx in -radius..=radius {
+                // Only the ring at exactly this radius; inner ones were done.
+                if dx.abs() != radius && dy.abs() != radius {
+                    continue;
+                }
+                let tile = Pos(anchor.0 + dx, anchor.1 + dy);
+                for facing in Direction::orthogonal() {
+                    if shoreline_faces_water(&tile, facing, &water_tiles) {
+                        candidates.push((tile_centre(&tile), facing));
+                    }
+                }
+            }
+        }
+    }
+    candidates
+}
+
 pub fn plan_plant(state: &PlanState, from: &Position) -> Result<Plant, PlannerError> {
     // `engines_for(0.)` is one, so this is exactly the plant this function has
     // always sited. Kept so that every caller and test that does not care
@@ -1778,62 +1837,31 @@ pub fn plan_plant_for(state: &PlanState, from: &Position, kw: f64) -> Result<Pla
     // impossible one. Both tiers order candidates the same way, so a lake at
     // 60 tiles is preferred over one at 100 by the first tier ever seeing it,
     // not by any comparison here.
-    let water = match state.nearest_water_tile(from, PLANT_WATER_SCAN_RADIUS) {
-        Some(near) => near,
-        None => match state.nearest_water_tile(from, PLANT_WATER_WIDE_SCAN_RADIUS) {
-            Some(far) => far,
-            // Only on the refusal path, so the seventeen extra tile-tree
-            // probes cost nothing on a plan that works. They are what makes
-            // the refusal say whether it was *dry* or *blind*: an
-            // ungenerated chunk holds no tiles, so "no water here" and "no
-            // ground here at all" are the same `None` out of
-            // `nearest_water_tile` and only `charting` tells them apart.
-            None => {
-                let charting = state.charting(from, PLANT_WATER_WIDE_SCAN_RADIUS);
-                return Err(PlannerError::PowerPlantNeedsWater {
-                    radius: PLANT_WATER_WIDE_SCAN_RADIUS,
-                    anchor_x: from.x(),
-                    anchor_y: from.y(),
-                    covered_probes: charting.covered,
-                    probes: charting.probes,
-                });
-            }
-        },
+    let water = match nearest_water(state, from) {
+        Some(tile) => tile,
+        // Only on the refusal path, so the seventeen extra tile-tree
+        // probes cost nothing on a plan that works. They are what makes
+        // the refusal say whether it was *dry* or *blind*: an
+        // ungenerated chunk holds no tiles, so "no water here" and "no
+        // ground here at all" are the same `None` out of
+        // `nearest_water_tile` and only `charting` tells them apart.
+        None => {
+            let charting = state.charting(from, PLANT_WATER_WIDE_SCAN_RADIUS);
+            return Err(PlannerError::PowerPlantNeedsWater {
+                radius: PLANT_WATER_WIDE_SCAN_RADIUS,
+                anchor_x: from.x(),
+                anchor_y: from.y(),
+                covered_probes: charting.covered,
+                probes: charting.probes,
+            });
+        }
     };
     let anchor = Pos::from(&water.position);
     let distance = calculate_distance(&tile_centre(&anchor), from);
 
-    // One bounded read of the terrain rather than one per candidate tile. The
-    // margin is the two tiles a shoreline test reaches beyond its own tile.
-    let reach = f64::from(SHORE_SEARCH_RADIUS) + 2.;
-    let centre = tile_centre(&anchor);
-    let bounds = Rect::new(
-        &Position::new(centre.x() - reach, centre.y() - reach),
-        &Position::new(centre.x() + reach, centre.y() + reach),
-    );
-    let water_tiles: BTreeSet<Pos> = state
-        .water_tiles_within(&bounds)
-        .iter()
-        .map(|tile| Pos::from(&tile.position))
-        .collect();
-
-    for radius in 0..=SHORE_SEARCH_RADIUS {
-        for dy in -radius..=radius {
-            for dx in -radius..=radius {
-                // Only the ring at exactly this radius; inner ones were done.
-                if dx.abs() != radius && dy.abs() != radius {
-                    continue;
-                }
-                let tile = Pos(anchor.0 + dx, anchor.1 + dy);
-                for facing in Direction::orthogonal() {
-                    if !shoreline_faces_water(&tile, facing, &water_tiles) {
-                        continue;
-                    }
-                    if let Some(plant) = fit(state, &tile_centre(&tile), facing, size) {
-                        return Ok(plant);
-                    }
-                }
-            }
+    for (tile, facing) in shore_candidates(state, &anchor) {
+        if let Some(plant) = fit(state, &tile, facing, size) {
+            return Ok(plant);
         }
     }
     Err(PlannerError::PowerPlantNeedsShore {

@@ -105,16 +105,19 @@
 //!   tanks; the pumpjack is `method::extract`'s to decide and this module does
 //!   not second-guess it.
 
+use crate::action::Effect;
 use crate::error::PlannerError;
 use crate::goal::{Goal, Holder};
 use crate::method::extract;
+use crate::method::power;
 use crate::method::pipe::{
     PipeEnd, buffer_prototype, pipe_prototype, place_step, plain_entity, route_between,
 };
 use crate::method::{ExpansionCtx, Method, Step};
 use crate::state::PlanState;
 use factorio_bot_core::factorio::util::calculate_distance;
-use factorio_bot_core::types::{Direction, FactorioEntity, Position, Rect};
+use factorio_bot_core::num_traits::ToPrimitive;
+use factorio_bot_core::types::{Direction, FactorioEntity, FactorioTile, Pos, Position, Rect};
 
 /// How far from the wellhead a tile counts as the same **field**.
 ///
@@ -158,7 +161,7 @@ impl Method for Gather {
         let Goal::Gathered { entity, .. } = goal else {
             return false;
         };
-        state.has_resource_patches(entity) && extract::extractor_for(state, entity).is_ok()
+        can_gather(state, entity)
     }
 
     /// **Every placement here spends what this method's own subgoals put in a
@@ -191,6 +194,13 @@ impl Method for Gather {
             });
         };
         let origin = extract::origin_of(ctx);
+        // A fluid the GROUND yields is a different rung and takes it first:
+        // there is no patch to site on and no drill to site, so tier 1 below
+        // would refuse `NotCharted` for a lake the model can see. See
+        // [`pump_steps`].
+        if ground_yields(&ctx.state, entity, &origin) {
+            return pump_steps(ctx, entity, unlocks.as_deref(), &origin);
+        }
         // Tier 1, in full, exactly as `Extract::expand` asks it: reachable
         // from a test or a caller that never consulted `applicable`.
         if let Some(refusal) = extract::world_refusal(&ctx.state, entity, &origin) {
@@ -295,12 +305,263 @@ impl Method for Gather {
         let Goal::Gathered { entity, .. } = goal else {
             return None;
         };
-        Some(extract::refusal_for(
-            &ctx.state,
-            entity,
-            &extract::origin_of(ctx),
-        ))
+        let origin = extract::origin_of(ctx);
+        // The ground branch's own words. `extract::refusal_for` would say
+        // "water is not charted" about a lake this method can see, which is
+        // the shape of refusal this repo has paid for twice.
+        if ground_yields(&ctx.state, entity, &origin) {
+            return Some(
+                site_ground_pump(&ctx.state, entity, &origin)
+                    .err()
+                    .unwrap_or_else(|| PlannerError::NoApplicableMethod {
+                        goal: goal.to_string(),
+                    }),
+            );
+        }
+        Some(extract::refusal_for(&ctx.state, entity, &origin))
     }
+}
+
+// ---------------------------------------------------------------------------
+// A fluid the ground yields: the offshore pump
+// ---------------------------------------------------------------------------
+
+/// Whether this method can stand *anything* up that produces `entity`.
+///
+/// **One predicate, two rungs**, and it is `pub(crate)` because
+/// [`crate::method::supply`] asks the same question before it emits a
+/// `Goal::Gathered` -- it used to ask it as its own copy of the entity half,
+/// so the day this learned about tiles that copy would have gone on saying no
+/// and the goal would have been emitted by nobody. The two halves are
+/// disjoint by construction: a charted resource *patch* and a fluid the
+/// **tiles** yield are different facts about the map, and water is only ever
+/// the second (`ProductIndex::ground_supplies` knew that while `Gather` did
+/// not, which is the gap this closes).
+pub(crate) fn can_gather(state: &PlanState, entity: &str) -> bool {
+    if state.has_resource_patches(entity) && extract::extractor_for(state, entity).is_ok() {
+        return true;
+    }
+    // The origin, not a bot: applicability must not depend on who is asking,
+    // and `method::supply` has no actor to ask from either. `expand` searches
+    // from the chain actor, which is where the walk is actually paid.
+    ground_yields(state, entity, &Position::default())
+}
+
+/// Does the ground within reach of `origin` give `fluid` to a pump standing on
+/// it?
+///
+/// Both halves are asked, because either alone answers a different question:
+/// **a lake with no pump prototype is not a source**, and a pump on a map with
+/// no water is not one either.
+///
+/// The tile test is [`FactorioTile::yields_water`] and deliberately nothing
+/// more general. That function is the authority for water *including its
+/// by-name fallback*, which is load-bearing: every dump written before
+/// `TileFluid::Yields` existed reads `Unknown`, and deleting the fallback made
+/// four baselines refuse while reporting the ground as fully charted -- a
+/// plausible lie about the map. A fluid that is not water has no name to fall
+/// back on, so it is answered by the tile's own declaration and by nothing
+/// else.
+fn ground_yields(state: &PlanState, fluid: &str, origin: &Position) -> bool {
+    ground_source(state, fluid, origin).is_some()
+}
+
+/// The tile a pump would draw `fluid` from, from the actor and then from the
+/// world anchor.
+///
+/// **The second anchor is not a widened radius, it is a second question**, and
+/// it is [`power::retry_from_world_anchor`]'s, taken whole rather than
+/// re-argued: `PLANT_WATER_WIDE_SCAN_RADIUS` is a *read-cost* bound, and a
+/// roster that has walked 250 tiles from spawn to chart an oil field is
+/// exactly the case where the lake it started beside is outside it. That is
+/// not hypothetical -- it is what `map-31337-water-and-oil.json` does, and
+/// with the actor as the only anchor `have:sulfur:10` refused
+/// `no water is charted anywhere this plan can see` about a map with a lake
+/// at spawn.
+///
+/// `None` is genuinely "this world does not give this fluid away", which is
+/// the only reading that lets [`can_gather`] decline and leave the fluid to
+/// `Fabricate`.
+fn ground_source(state: &PlanState, fluid: &str, origin: &Position) -> Option<FactorioTile> {
+    // A lake with no pump prototype is not a source, so the cheap half is
+    // asked first and its answer is thrown away: which pump is
+    // `site_ground_pump`'s question.
+    ground_pump(state)?;
+    let anchor = power::plant_world_anchor();
+    let mut anchors = vec![origin.clone()];
+    if calculate_distance(&anchor, origin) >= f64::EPSILON {
+        anchors.push(anchor);
+    }
+    anchors.into_iter().find_map(|from| {
+        power::nearest_water(state, &from).filter(|tile| {
+            if fluid == WATER {
+                tile.yields_water()
+            } else {
+                // Not water: only a tile that says so counts. `nearest_water`
+                // looked for water, so this can only answer for a tile that
+                // yields both, which no shipped tile does -- stated rather
+                // than pretended, and it is why this is not called a general
+                // tile-fluid search.
+                tile.fluid.yields(fluid)
+            }
+        })
+    })
+}
+
+/// The one fluid a tile can still be recognised as yielding **by name**.
+///
+/// See [`ground_yields`]: the fallback exists for dumps that predate
+/// `LuaTilePrototype::fluid` crossing the bridge, and water is the only fluid
+/// [`FactorioTile::WATER_NAMES`] knows.
+const WATER: &str = "water";
+
+/// The prototype that draws a fluid out of the ground it stands in front of.
+///
+/// **Found by `fluid_source_offset`, never by the name `offshore-pump`.** The
+/// runtime API marks that field `subclasses: ["OffshorePump"]`, so its
+/// presence *is* the discriminator -- the same one
+/// [`crate::method::pipe`]'s `drawn_from_ground` reads back off a standing
+/// entity to attribute it as a source. Asking the same prototype fact on the
+/// way in and on the way out is what makes the two halves agree by
+/// construction: a modded pump answers here and is attributed there, and a
+/// capture with neither refuses in both.
+///
+/// `min` by name for the reason `pipe::prototype_of_type` gives: the
+/// prototype table iterates in hash order, and "the first one found" would
+/// pick a different pump between two runs of the same binary.
+fn ground_pump(state: &PlanState) -> Option<String> {
+    state
+        .base()
+        .globals
+        .entity_prototypes
+        .iter()
+        .filter(|proto| proto.fluid_source_offset.is_some())
+        .map(|proto| proto.name.clone())
+        .min()
+}
+
+/// Where the pump goes: the shoreline [`crate::method::power`] already finds.
+///
+/// **The siting is not this module's**, and that is the whole point of the
+/// rung being small. `power::plan_plant_for` has sited an offshore pump
+/// against water since the planner could see water at all; what it does after
+/// that -- boiler, engines, pipes -- is a plant, and a `Goal::Gathered` wants
+/// only the pump. So the lake lookup and the shoreline enumeration are shared
+/// (`power::nearest_water`, `power::shore_candidates`) and the only thing
+/// asked here is whether one pump fits, which is why a bare pump can never
+/// prefer a different shoreline of the same lake than a plant would.
+///
+/// Refuses as [`PlannerError::NoSiteFound`] rather than
+/// `PowerPlantNeedsWater`/`PowerPlantNeedsShore`: those name a plant this goal
+/// is not building, and a refusal that describes the wrong subject is the
+/// failure mode `occupant_of`'s masked `Occupant::Refused` cost this repo a
+/// day for.
+fn site_ground_pump(
+    state: &PlanState,
+    fluid: &str,
+    origin: &Position,
+) -> Result<(String, Position, Direction), PlannerError> {
+    let Some(pump) = ground_pump(state) else {
+        return Err(PlannerError::NoSiteFound {
+            entities: 1,
+            seed: origin.to_string(),
+            searched: 0,
+            nearest_obstruction: format!(
+                "no prototype in this world draws a fluid from the ground, so nothing can \
+                 gather {fluid}"
+            ),
+        });
+    };
+    let Some(water) = ground_source(state, fluid, origin) else {
+        return Err(PlannerError::NoSiteFound {
+            entities: 1,
+            seed: origin.to_string(),
+            searched: power::PLANT_WATER_WIDE_SCAN_RADIUS as i32,
+            nearest_obstruction: format!("no charted tile within reach yields {fluid}"),
+        });
+    };
+    let anchor = Pos::from(&water.position);
+    let distance = calculate_distance(&water.position, origin);
+    let mut obstruction: Option<String> = None;
+    for (tile, facing) in power::shore_candidates(state, &anchor) {
+        if state.is_site_refused(&pump, &tile) {
+            obstruction
+                .get_or_insert_with(|| "a footprint the game already refused a build at".into());
+            continue;
+        }
+        if state.is_area_free_facing(&pump, &tile, facing) {
+            return Ok((pump, tile, facing));
+        }
+        if let Some(occupant) = state.placement_occupant(&pump, &tile, facing) {
+            obstruction.get_or_insert_with(|| occupant.to_string());
+        }
+    }
+    Err(PlannerError::NoSiteFound {
+        entities: 1,
+        seed: origin.to_string(),
+        searched: distance.ceil() as i32,
+        nearest_obstruction: obstruction.unwrap_or_else(|| {
+            format!(
+                "the nearest {fluid} is {distance:.1} tiles away and no shoreline within reach \
+                 of it has room for a {pump}"
+            )
+        }),
+    })
+}
+
+/// The steps that stand a pump up on the shoreline: its bill, and the
+/// placement.
+///
+/// # Why this is not [`extract::extractor_steps`], and why there is no tank
+///
+/// Three of that function's four jobs do not exist here, and each absence is a
+/// fact about the machine rather than a shortcut:
+///
+/// * **no power.** An `offshore-pump`'s `energy_source` is `type = "void"`,
+///   which is exactly why `state`'s consumer table names neither it nor the
+///   boiler -- so `site_extractor` refuses it as `ExtractionNotModelled`
+///   before it ever reaches the ground, and a `Condition::Powered { kw: 0 }`
+///   would be a true statement about a question nobody asked;
+/// * **no facing.** `extractor_steps` places north, correctly: a drill works
+///   the tile it stands on. A pump draws from the tile *in front of it*, so
+///   its direction is which way the water is, and a pump placed the other way
+///   round is this repo's silent class -- it builds 100% correctly and moves
+///   nothing;
+/// * **no tank.** A pumpjack fills its own output box and stops, which is why
+///   the module doc makes a tank a precondition rather than an optimisation.
+///   A pump is a source with no ceiling, and
+///   [`crate::method::pipe`]'s `sources_of` attributes the *pump itself*
+///   through `drawn_from_ground` -- so a tank here would be a building nobody
+///   asked for standing between a lake and a plant.
+///
+/// `unlocks` rides on the placement for the same reason it does in
+/// `extractor_steps`: it is the action that makes the machine exist, and
+/// `attach_unlock` cannot find it because nothing here gains an item.
+fn pump_steps(
+    ctx: &mut ExpansionCtx,
+    fluid: &str,
+    unlocks: Option<&str>,
+    origin: &Position,
+) -> Result<Vec<Step>, PlannerError> {
+    let (pump, site, facing) = site_ground_pump(&ctx.state, fluid, origin)?;
+
+    // -- nothing refuses past here ---------------------------------------
+    let mut steps = vec![Step::Subgoal(Goal::Have {
+        item: pump.clone(),
+        count: 1,
+        whose: Holder::Share(ctx.chain_actor),
+        via: None,
+    })];
+    let mut entity = plain_entity(&ctx.state, &pump, &site);
+    entity.direction = Direction::to_u8(&facing).unwrap_or(0);
+    let mut step = place_step(ctx, entity, &format!("draw {fluid} from the ground"));
+    if let Some(technology) = unlocks
+        && let Step::Act(action) = &mut step
+    {
+        action.eff.push(Effect::Researched(technology.to_string()));
+    }
+    steps.push(step);
+    Ok(steps)
 }
 
 /// [`extract::site_extractor`], with a locked extractor recipe treated as a
@@ -1392,5 +1653,140 @@ mod gather_tests {
             }
             other => panic!("expected NoExtractor, got {other:?}"),
         }
+    }
+
+    // -- water: a fluid the ground yields ------------------------------------
+
+    /// The shared fixture, with the pump prototype told which tile it draws
+    /// from.
+    ///
+    /// **The `fluid_source_offset` has to be added**, and that absence is
+    /// itself the shipped behaviour: `entity-prototype-fixtures.json`
+    /// predates the field, so on a capture without it [`ground_pump`] finds
+    /// no pump and this whole rung declines, leaving the fluid to
+    /// `Fabricate` exactly as before. `{0, -1}` is vanilla's, the value
+    /// `pipe::drawn_from_ground`'s doc quotes off the live 2.1.17 API.
+    fn water_state(with_water: bool) -> PlanState {
+        let world = if with_water {
+            factorio_bot_core::test_utils::fixture_world()
+        } else {
+            factorio_bot_core::test_utils::fixture_world_without_water()
+        };
+        let mut pump = world
+            .globals
+            .entity_prototypes
+            .get(power::PUMP)
+            .expect("the fixture carries an offshore-pump")
+            .clone();
+        pump.fluid_source_offset = Some(Position::new(0., -1.));
+        world
+            .globals
+            .entity_prototypes
+            .insert(power::PUMP.to_string(), pump);
+        PlanState::from_world(Arc::new(world), &[BotId(1)])
+    }
+
+    fn water_goal() -> Goal {
+        Goal::Gathered {
+            entity: "water".into(),
+            unlocks: None,
+        }
+    }
+
+    /// **The edge itself**: water is not a resource *patch*, so the predicate
+    /// that gates this method has to ask the ground as well.
+    ///
+    /// The control is a world with no lake, on which the answer must be no --
+    /// without it this asserts only that `can_gather` returns true, which a
+    /// function returning `true` would also satisfy. It is the same pair
+    /// `ProductIndex::ground_supplies` is tested with, and the disagreement
+    /// between those two answers is the gap this closes: the index knew the
+    /// lake was there while `Gather` asked `has_resource_patches` and was
+    /// told no.
+    #[test]
+    fn water_is_gatherable_from_the_ground_and_only_where_there_is_some() {
+        assert!(
+            !water_state(true).has_resource_patches("water"),
+            "control: if water ever becomes a charted resource patch this test \
+             is measuring the other half of the predicate"
+        );
+        assert!(
+            can_gather(&water_state(true), "water"),
+            "the ground yields water and this world has a pump, so the rung applies"
+        );
+        assert!(
+            !can_gather(&water_state(false), "water"),
+            "a map with no lake gives no water, or the predicate says yes to \
+             every fluid on every map"
+        );
+    }
+
+    /// **The pump has to face the water, and the oracle is the reader that
+    /// attributes it -- not this method's own arithmetic.**
+    ///
+    /// `pipe::sources_of` decides what supplies a fluid, and for a pump it
+    /// decides by `drawn_from_ground`: it turns `fluid_source_offset` by the
+    /// entity's own `direction` and asks what that tile yields. So a pump
+    /// placed on the right tile facing the wrong way is attributed to
+    /// nothing, which is precisely this repo's silent class -- it builds
+    /// 100% correctly and moves no water. Asserting the position alone would
+    /// pass for a pump facing inland.
+    ///
+    /// It is also the composition claim: `method::supply` emits
+    /// `Goal::Gathered { water }` only because `sources_of` found nothing,
+    /// and `Fabricate` adopts the goal's result only if `sources_of` finds
+    /// this. One reader on both sides.
+    #[test]
+    fn the_pump_this_lays_is_attributed_as_a_water_source() {
+        let state = water_state(true);
+        let origin = Position::default();
+        assert!(
+            pipe_sources(&state, "water", &origin).is_empty(),
+            "control: nothing standing on the fixture supplies water, or this \
+             test cannot tell what the plan added"
+        );
+        let mut ctx = ExpansionCtx::new(state, BotId(1));
+        let steps = Gather
+            .expand(&water_goal(), &mut ctx)
+            .expect("the fixture has a lake and a pump prototype");
+        let pumps = placed(&steps, power::PUMP);
+        assert_eq!(pumps.len(), 1, "one pump, not a plant: {steps:?}");
+        let attributed = pipe_sources(&ctx.state, "water", &origin);
+        assert!(
+            attributed.iter().any(|entity| entity.name == power::PUMP),
+            "the pump at {} is not a water source to the reader that decides \
+             what is: {attributed:?}",
+            pumps[0]
+        );
+    }
+
+    /// No tank and no pipe, and that is a fact about the machine rather than
+    /// an omission -- see [`pump_steps`]. A pumpjack fills its own output box
+    /// and stops; a pump does not, and `sources_of` attributes the pump
+    /// itself.
+    #[test]
+    fn the_water_rung_lays_no_tank_and_no_pipe() {
+        let state = water_state(true);
+        let mut ctx = ExpansionCtx::new(state, BotId(1));
+        let steps = Gather
+            .expand(&water_goal(), &mut ctx)
+            .expect("the fixture has a lake and a pump prototype");
+        assert!(
+            placed(&steps, "storage-tank").is_empty(),
+            "a pump needs no buffer: {steps:?}"
+        );
+        assert!(
+            placed(&steps, "pipe").is_empty(),
+            "and nothing to pipe into one: {steps:?}"
+        );
+    }
+
+    /// Every entity `pipe::sources_of` attributes as supplying `fluid`.
+    fn pipe_sources(
+        state: &PlanState,
+        fluid: &str,
+        from: &Position,
+    ) -> Vec<factorio_bot_core::types::FactorioEntity> {
+        crate::method::pipe::sources_of(state, fluid, from).0
     }
 }

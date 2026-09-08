@@ -94,14 +94,18 @@
 //!
 //! * **It does not build a source for a fluid this world can neither yield
 //!   nor make.** Both tests are asked before anything is claimed: `Gather`'s
-//!   own -- charted patches plus a nameable extractor -- and then
+//!   own [`gather::can_gather`] -- a charted patch with a nameable extractor,
+//!   or ground whose tiles yield the fluid -- and then
 //!   [`ProductIndex::recipe_producing`](crate::products::ProductIndex::recipe_producing),
 //!   the same one `Fabricate` selects with. A fluid neither answers for
 //!   reaches `Fabricate`'s `NoFluidSource` exactly as it does today. `water`
-//!   on an archived dump is precisely that case: it is not a charted
-//!   resource and no recipe makes it, so it is reachable only from a dump
-//!   whose tiles carry `fluid` (see `products::ground_supply`), and
-//!   `have:sulfur:10` still refuses on water there.
+//!   used to be precisely that case -- not a charted resource, and the one
+//!   recipe producing it is `empty-water-barrel` -- and is no longer: since
+//!   2026-09-08 `gather::can_gather` answers for a fluid the **tiles** yield,
+//!   so the first test claims it and stands an offshore pump on the
+//!   shoreline. A dump whose tiles predate `LuaTilePrototype::fluid` still
+//!   answers by name (`FactorioTile::yields_water`); a world with no lake and
+//!   no pump prototype declines as it always did.
 //! * **It does not decide which recipe.** The choice is
 //!   `recipe_producing`'s, so this method and `Fabricate` cannot disagree
 //!   about it -- the same reason `recipe_fabricate_would_run` calls
@@ -121,7 +125,7 @@ use crate::goal::{Goal, Holder};
 use crate::method::machine::MachineTable;
 use crate::method::util::{RecipeGate, recipe_gate};
 use crate::method::{ExpansionCtx, Method, Step};
-use crate::method::{extract, pipe};
+use crate::method::pipe;
 use crate::products::{Categories, ProductIndex};
 use crate::state::PlanState;
 use factorio_bot_core::types::{FactorioRecipe, Position};
@@ -234,15 +238,15 @@ fn makeable(state: &PlanState, fluid: &str, consumer: &FactorioRecipe) -> bool {
     // plant and the plan died two stages later on `no run of poles ...
     // carries power to it`. A rig to unbottle water beside a lake.
     //
-    // The tell is that the two halves disagree about the same fact:
-    // [`ProductIndex::ground_supplies`] knows the ground yields water (it
-    // reads `LuaTilePrototype::fluid`), while `Gather`'s test is
-    // `has_resource_patches`, and water is not a resource entity. Until
-    // `Gather` can stand an offshore pump on tile-yielded water, the honest
-    // answer for water is the refusal it always gave -- `NoFluidSource` --
-    // and **not** a plant. This makes the ground the authority for both
-    // branches, so the day `Gather` learns about tiles, water flows through
-    // the gathering branch with nothing here changed.
+    // The tell was that the two halves disagreed about the same fact:
+    // [`ProductIndex::ground_supplies`] knew the ground yields water (it
+    // reads `LuaTilePrototype::fluid`), while `Gather`'s test was
+    // `has_resource_patches`, and water is not a resource entity. **That is
+    // closed since 2026-09-08**: `gather::can_gather` asks the ground too and
+    // stands an offshore pump on the shoreline, so water now flows through
+    // the gathering branch above -- and this guard did not change by one
+    // character, which is what making the ground the authority for both
+    // branches bought.
     if index.ground_supplies(fluid) {
         return false;
     }
@@ -286,10 +290,15 @@ fn fluid_shortfalls(goal: &Goal, state: &PlanState) -> Vec<FluidPlan> {
         if !pipe::sources_of(state, fluid, &origin).0.is_empty() {
             continue;
         }
-        // `Gather::applicable`'s own two halves first: the ground is the
+        // `Gather::applicable`'s own predicate first: the ground is the
         // cheaper source and the one the owner's topology prefers, so a fluid
-        // this map yields is never made in a plant instead.
-        if state.has_resource_patches(fluid) && extract::extractor_for(state, fluid).is_ok() {
+        // this map yields is never made in a plant instead. **Asked as
+        // `gather::can_gather` and not as a copy of its two halves**, which is
+        // what this was: the copy knew only about charted resource *patches*,
+        // so when `Gather` learned to stand an offshore pump on tile-yielded
+        // water the copy would have gone on declining and nobody would have
+        // emitted the goal.
+        if super::gather::can_gather(state, fluid) {
             missing.push(FluidPlan::Gathered(fluid.to_string()));
         } else if makeable(state, fluid, &recipe) {
             missing.push(FluidPlan::Produced {

@@ -128,6 +128,34 @@ pub fn resume_args(command: Command) -> Command {
     )
 }
 
+/// `--peaceful`, declared once so `lua` and `start` cannot drift apart.
+///
+/// **Three states, and the flag has to be able to say all three.** Bare
+/// `--peaceful` means on, `--peaceful false` means off, and *absent* means
+/// "leave the world as it is" -- which is not the same as off, because a run
+/// resumed from a peaceful savepoint must not be silently flipped hostile by a
+/// caller that never mentioned biters. A plain `SetTrue` flag could express only
+/// two of the three and would have made absence mean hostile, which is the
+/// conflation this whole change exists to avoid.
+pub fn peaceful_arg() -> Arg {
+  Arg::new("peaceful")
+    .long("peaceful")
+    .value_name("BOOL")
+    .num_args(0..=1)
+    .default_missing_value("true")
+    .require_equals(false)
+    .value_parser(value_parser!(bool))
+    .help(
+      "set peaceful mode on every surface (biters remain, they do not attack unprovoked); \
+       omit to leave the world unchanged",
+    )
+}
+
+/// Reads [`peaceful_arg`]. `None` is "not asked for", never `false`.
+pub fn resolve_peaceful(matches: &ArgMatches) -> Option<bool> {
+  matches.get_one::<bool>("peaceful").copied()
+}
+
 /// Resolves `--resume-from`, and when it cannot, says what *is* available.
 ///
 /// A refusal that only says "no such savepoint" leaves the reader to go and

@@ -1,6 +1,6 @@
 use crate::cli::{
-  SETTINGS_PRECEDENCE_HELP, Subcommand, SubcommandCallback, resolve_resume, resume_args,
-  settings_overrides,
+  SETTINGS_PRECEDENCE_HELP, Subcommand, SubcommandCallback, peaceful_arg, resolve_peaceful,
+  resolve_resume, resume_args, settings_overrides,
 };
 use crate::context::Context;
 use crate::settings::load_app_settings_with;
@@ -87,6 +87,7 @@ impl Subcommand for ThisCommand {
           .value_parser(value_parser!(f64))
           .help("run the world at this game.speed"),
       )
+      .arg(peaceful_arg())
       .arg(
         Arg::new("verbose")
           .short('v')
@@ -145,6 +146,7 @@ async fn run(matches: &ArgMatches, context: &mut Context) -> Result<()> {
     map_exchange_string,
     wait_until: FactorioStartCondition::DiscoveryComplete,
     silent: !verbose,
+    peaceful: resolve_peaceful(matches),
     ..FactorioParams::default()
   };
   // Was `.expect("failed to start factorio")`: a missing archive, a mod that

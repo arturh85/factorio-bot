@@ -161,6 +161,44 @@ pub struct Provenance {
     /// to know when a run at speed 10 looks slower per tick than one at 1.
     #[serde(default)]
     pub game_speed: Option<f64>,
+    /// Whether **every surface** had peaceful mode on, as the running game
+    /// answered at run start.
+    ///
+    /// # What it does and does not mean
+    ///
+    /// Peaceful mode does **not** remove biters. Nests, worms and units all
+    /// still generate and still stand on the map; what changes is that they do
+    /// not attack unprovoked. So `true` here does not license "there were no
+    /// enemies", only "nothing attacked this run unless it was attacked
+    /// first". Anyone quoting a run that survived a walk past a nest needs
+    /// this field to know which claim they are making.
+    ///
+    /// # Why it has to exist at all
+    ///
+    /// A peaceful run and a hostile one are byte-identical in every other
+    /// field: the same seed, the same settings, the same commit, the same
+    /// mods, the same map fingerprint. Without this, a run that never lost a
+    /// bot because nothing was hunting it would compare directly against one
+    /// that did, and the difference would be attributed to whatever change was
+    /// under test. That is precisely the failure `CLAUDE.md` records for the
+    /// map-exchange string: a run that looks controlled and is not.
+    ///
+    /// # Observed, not requested
+    ///
+    /// Asked of the game ([`crate::factorio::rcon::FactorioRcon::
+    /// peaceful_mode`]), the same way `map_exchange_string` is, so a run that
+    /// asked for peaceful mode and did not get it records `false` rather than
+    /// the request. The `--peaceful` flag is a request; this is the answer.
+    ///
+    /// **`None` is "not captured" and must never be read as "hostile".** Every
+    /// run archived before this field existed carries no key at all, an RCON
+    /// failure lands here, and so does a server this process did not start.
+    /// A reader that collapses `None` into `false` would silently declare
+    /// every historical run hostile on no evidence -- the exact conflation
+    /// this file already keeps apart for `seed`, `map`, `mods` and
+    /// `map_exchange_string`.
+    #[serde(default)]
+    pub peaceful: Option<bool>,
 }
 
 /// Which commit the code came from, and whether it had been edited.
@@ -386,6 +424,7 @@ mod tests {
             resumed_from: None,
             bot_mode: Some("characters".into()),
             game_speed: Some(5.0),
+            peaceful: Some(true),
         };
         std::fs::write(
             dir.join(PROVENANCE_FILE),
@@ -405,6 +444,73 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         assert_eq!(read_provenance(&dir), None);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An archived run predates `peaceful` entirely, so its JSON has no such
+    /// key. It must read back as **unknown**, and specifically not as
+    /// `Some(false)` -- which would declare 24 archived runs hostile on the
+    /// strength of `#[serde(default)]` and nothing else.
+    #[test]
+    fn a_run_recorded_before_peaceful_existed_reads_as_unknown_not_as_hostile() {
+        let older = serde_json::json!({
+            "schema": 1,
+            "run_id": "run-1-2",
+            "started_unix": 1_788_000_000u64,
+            "started_tick": 4330,
+            "seed": "31337",
+            "map_exchange_string": null,
+            "map": null,
+            "factorio": "2.1.17",
+            "mods": null,
+            "git": null,
+            "profile": "release",
+            "roster_requested": [1, 2, 3, 4],
+            "workspace": null,
+        });
+        let back: Provenance = serde_json::from_value(older).unwrap();
+        assert_eq!(back.peaceful, None, "absent is unknown, never hostile");
+        // And the same reading has to survive the round trip, or a re-written
+        // record would harden the absence into a value.
+        let text = serde_json::to_string(&back).unwrap();
+        let again: Provenance = serde_json::from_str(&text).unwrap();
+        assert_eq!(again.peaceful, None);
+    }
+
+    /// `false` is a real answer and has to survive as one, distinguishable on
+    /// the wire: a run that asked for peaceful mode and did not get it is a
+    /// different fact from a run where nobody could ask. The field is
+    /// present-and-null rather than omitted for the reason this file's header
+    /// gives -- a key that is always there says "we looked".
+    #[test]
+    fn hostile_and_unknown_are_different_values_on_the_wire() {
+        let base = Provenance {
+            schema: Provenance::SCHEMA,
+            run_id: "run-1-2".into(),
+            started_unix: 1,
+            started_tick: 0,
+            seed: None,
+            map_exchange_string: None,
+            map: None,
+            factorio: None,
+            mods: None,
+            git: None,
+            profile: "debug".into(),
+            roster_requested: vec![1],
+            workspace: None,
+            resumed_from: None,
+            bot_mode: None,
+            game_speed: None,
+            peaceful: None,
+        };
+        let unknown = serde_json::to_value(&base).unwrap();
+        let hostile = serde_json::to_value(Provenance {
+            peaceful: Some(false),
+            ..base.clone()
+        })
+        .unwrap();
+        assert_eq!(unknown["peaceful"], serde_json::Value::Null);
+        assert_eq!(hostile["peaceful"], serde_json::Value::Bool(false));
+        assert_ne!(unknown, hostile);
     }
 
     #[test]

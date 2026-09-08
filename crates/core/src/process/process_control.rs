@@ -127,6 +127,18 @@ pub struct FactorioParams {
     pub character_bots: u8,
     /// `game.speed` to set once the roster is up; `1.0` leaves it alone.
     pub game_speed: f64,
+    /// Whether to switch peaceful mode on (or off) on every surface once the
+    /// server is up. `None` leaves whatever the world holds alone.
+    ///
+    /// **Three states, not two, on purpose.** `None` is what every run that
+    /// says nothing gets, and it must not mean `Some(false)`: a run resumed
+    /// from a peaceful savepoint would then be silently flipped hostile by a
+    /// caller that never mentioned biters. `Some(false)` is the explicit
+    /// request to make a world hostile, which is a different act.
+    ///
+    /// Applied at runtime rather than at map generation, and that choice is
+    /// load-bearing -- see [`FactorioInstance::apply_peaceful_mode`].
+    pub peaceful: Option<bool>,
 }
 
 impl Default for FactorioParams {
@@ -145,11 +157,85 @@ impl Default for FactorioParams {
             resume_from: None,
             character_bots: 0,
             game_speed: 1.0,
+            peaceful: None,
         }
     }
 }
 
 impl FactorioInstance {
+    /// Switches peaceful mode on (or off) on every surface of a server this
+    /// process started, and checks that it took.
+    ///
+    /// # Why this is a runtime write and not a map-gen setting
+    ///
+    /// The obvious home is `map-gen-settings.json`, beside the seed, because
+    /// that is where a *map* is described. It was rejected on two grounds, and
+    /// the second is the one that decides it:
+    ///
+    /// 1. **Peaceful mode does not change the map.** The same seed under the
+    ///    same settings generates the same terrain, the same ore and the same
+    ///    nests either way; what changes is whether those nests attack
+    ///    unprovoked. It is a property of the *run*, like `game.speed`, not of
+    ///    the ground -- so it belongs where `game_speed` and `bot_mode` are.
+    /// 2. **`--map-gen-settings` is only ever passed when a map-exchange string
+    ///    was supplied** (see `instance_setup::setup_factorio_instance`), and
+    ///    every run this project has ever measured supplied none, i.e. ran on
+    ///    Factorio's shipped defaults. Writing a settings file just to carry
+    ///    one boolean would put every other map-gen knob into a file this repo
+    ///    maintains by hand, which is exactly the failure `CLAUDE.md` records
+    ///    for the 719-character exchange string that shipped in settings for
+    ///    years: a run that looks default-seeded and is not.
+    ///
+    /// So the seed plus "default settings" plus the game version still
+    /// identifies the map, unchanged, and peaceful mode is recorded separately
+    /// as a fact about the run.
+    ///
+    /// # It reads back
+    ///
+    /// The reply is what the game holds afterwards, not an echo of the request.
+    /// A disagreement is warned about here rather than left for provenance to
+    /// discover, and provenance asks the game again independently.
+    ///
+    /// A `None` request touches nothing at all -- notably it does **not** write
+    /// `false`, so a run resumed from a peaceful savepoint stays peaceful
+    /// rather than being silently flipped by a caller that never mentioned it.
+    async fn apply_peaceful_mode(
+        rcon: &crate::factorio::rcon::FactorioRcon,
+        requested: Option<bool>,
+    ) -> Result<()> {
+        let Some(requested) = requested else {
+            return Ok(());
+        };
+        let observed = rcon.set_peaceful_mode(requested).await?;
+        match observed {
+            Some(observed) if observed == requested => {
+                // Not gated on `silent`, for the reason the bot-mode line above
+                // is not: a run whose hostility differs from the archive must
+                // say so where somebody reading the terminal can see it.
+                info!(
+                    "Using peaceful mode <bright-blue>{}</> on every surface \
+                     (biters still exist; they do not attack unprovoked)",
+                    requested
+                );
+            }
+            Some(observed) => {
+                warn!(
+                    "peaceful mode was set to {} but the game reports {}: this run is NOT \
+                     what was asked for, and provenance will record what the game says",
+                    requested, observed
+                );
+            }
+            None => {
+                warn!(
+                    "peaceful mode was set to {} but the game did not answer: this run will \
+                     record peaceful mode as NOT CAPTURED, which is not the same as hostile",
+                    requested
+                );
+            }
+        }
+        Ok(())
+    }
+
     pub fn new_shared() -> SharedFactorioInstance {
         Arc::new(RwLock::new(None))
     }
@@ -484,6 +570,18 @@ impl FactorioInstance {
             }
 
             arrange_windows(params.client_count).await?;
+            // Before `game.speed`, because a world that is about to run at 10x
+            // should be peaceful for all of it rather than for most of it.
+            // Guarded on `server_host` in a way `game_speed` below is not: this
+            // one mutates the shared world every player on that server is in.
+            if params.server_host.is_none() {
+                Self::apply_peaceful_mode(&rcon, params.peaceful).await?;
+            } else if params.peaceful.is_some() {
+                warn!(
+                    "--peaceful is IGNORED with --connect or --server: this process did not \
+                     start that server and will not change the world somebody else is in"
+                );
+            }
             if params.game_speed != 1.0 {
                 rcon.set_game_speed(params.game_speed).await?;
                 info!(

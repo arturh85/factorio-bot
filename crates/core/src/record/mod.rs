@@ -2450,6 +2450,7 @@ mod tests {
             resumed_from: None,
             bot_mode: None,
             game_speed: None,
+            peaceful: None,
         };
         recorder.record_provenance(&provenance).unwrap();
         drop(recorder);

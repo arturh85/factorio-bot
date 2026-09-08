@@ -21,7 +21,11 @@ const H = computed(() => Math.max(24, rows.value.length * 11 + 8));
       <text x="6" :y="4 + i * 11 + 7" font-size="8.5" fill="var(--color-ink)" style="paint-order: stroke" stroke="var(--color-plot)" stroke-width="2">{{ r.label }} · {{ r.count.toLocaleString() }}</text>
     </template>
     <text :x="AXIS_WIDTH - 4" y="11" font-size="9" text-anchor="end" fill="var(--color-ink-muted)">
-      {{ lag === null ? 'no samples' : `samples lag ${lag.toLocaleString()} ticks` }}<template v-if="missing.length"> · no record: {{ missing.join(', ') }}</template>
+      <!-- lag <= 0: the run's declared end sits at or before the last
+           recorded sample, so the record covers the run to its end rather
+           than trailing behind it -- not a gap to report as a negative tick
+           count. -->
+      {{ lag === null ? 'no samples' : lag <= 0 ? 'samples cover the run to its end' : `samples lag ${lag.toLocaleString()} ticks` }}<template v-if="missing.length"> · no record: {{ missing.join(', ') }}</template>
     </text>
     <line :x1="x(cursor)" y1="0" :x2="x(cursor)" :y2="H" stroke="var(--color-verdict-roster)" stroke-width="1.5"/>
   </svg>

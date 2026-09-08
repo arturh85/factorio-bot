@@ -23,7 +23,12 @@ const PROVENANCE_CHIPS = ['seed', 'mode', 'speed', 'commit', 'profile', 'mods'];
         {{ c }} <i>not captured</i>
       </span>
       <span data-chip="samples" :data-state="lagTicks === null ? 'absent' : 'present'" class="mb-1.5 mr-1.5 rounded border border-divider bg-surface px-2 py-1 font-mono text-xs text-ink-muted">
-        samples <b class="font-medium text-ink">{{ lagTicks === null ? 'not sampled' : `lag ${lagTicks.toLocaleString()} ticks` }}</b>
+        <!-- A negative lag means the run's declared end is EARLIER than the
+             last sample the record holds -- samples covered the run to its
+             end and then some, not a gap. `<= 0`, not `< 0`: zero is the same
+             fact stated exactly, and "lag 0 ticks" would read as a coincidence
+             rather than as coverage. -->
+        samples <b class="font-medium text-ink">{{ lagTicks === null ? 'not sampled' : lagTicks <= 0 ? 'cover to end' : `lag ${lagTicks.toLocaleString()} ticks` }}</b>
       </span>
     </div>
     <p class="basis-full text-sm text-ink-muted"><b class="font-medium text-ink">{{ headline }}</b></p>

@@ -13,7 +13,17 @@
 /* The palette below is the one the app already had: every value is lifted
  * verbatim from the old SCSS layout shell's variables file, so turning it into
  * Tailwind utilities is a change of mechanism, not of appearance. */
-@theme {
+/* `static`, not the bare form: Tailwind v4 otherwise prunes any `--color-*`
+ * entry in this block that its utility-class scanner never sees referenced by
+ * a class name, and the run bands read most of these tokens only via
+ * `var(--color-…)` inside SVG attributes (fill/stroke), which the scanner
+ * does not parse. The bare form silently dropped the LIGHT definition of
+ * several tokens (verb-mine, verb-craft, verb-place, verb-feed, status-warn)
+ * while their dark-mode overrides below survived untouched -- those are
+ * plain CSS custom-property assignments inside `@layer base`, outside this
+ * block, and pruning only ever applies to `@theme` itself. So lane segments
+ * and the no-ingredients heatmap cells rendered solid black in every theme. */
+@theme static {
     /* Surfaces */
     --color-surface: #edf0f5;
     --color-card: #ffffff;

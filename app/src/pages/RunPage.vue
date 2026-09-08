@@ -38,11 +38,30 @@ watch(id, (next) => store.openRun(next));
 onBeforeUnmount(stopTimer);
 
 const scale = computed(() => store.bounds);
-const win = computed(() => store.window ?? (store.bounds ? {lo: store.bounds.from, hi: store.bounds.to} : null));
+/**
+ * The analysis window, or why there is not one.
+ *
+ * `store.window` is null whenever `/events` returned nothing, and that has
+ * two very different causes: the fetch FAILED (`store.eventsError` set,
+ * `store.events` never populated), or the run genuinely recorded no events at
+ * all. Only the second may borrow the drawn axis as a stand-in window --
+ * substituting it for a fetch failure would draw rates and a verdict over a
+ * span `/events` never vouched for, silently. The headline and the Items/min
+ * band both check `win` directly (never `store.eventsError` a second time) so
+ * their `v-else` branches narrow it to non-null for the template compiler.
+ */
+const windowIsFallback = computed(() => store.eventsError === null && store.events.length === 0);
+const win = computed(() => store.window
+    ?? (windowIsFallback.value && store.bounds ? {lo: store.bounds.from, hi: store.bounds.to} : null));
 const items = computed(() => (win.value ? rateItems(store.samples, win.value.lo, win.value.hi) : []));
-const sentence = computed(() => win.value
-    ? headline({samples: store.samples, events: store.events, splits: store.detail?.splits ?? [], lo: win.value.lo, hi: win.value.hi, items: items.value})
-    : 'no events recorded');
+const sentence = computed(() => {
+    if (!win.value) return '';
+    const base = headline({samples: store.samples, events: store.events, splits: store.detail?.splits ?? [], lo: win.value.lo, hi: win.value.hi, items: items.value});
+    // Say so before the sentence, not after: a reader who has already taken
+    // in "iron-plate 8/min at 5:00" should not have to notice a footnote to
+    // learn those marks are not `just analyse`'s.
+    return windowIsFallback.value ? `no events recorded — window taken from the drawn axis · ${base}` : base;
+});
 const lag = computed(() => (win.value ? lagTicks(win.value.hi, store.samples) : null));
 const deltas = computed(() => store.reference === null ? null
     : new Map(compareSplits(store.detail?.splits ?? [], store.reference.splits).map((r) => [r.goal, r])));
@@ -60,13 +79,22 @@ const LEGEND = [
     <p v-if="store.error" class="rounded border border-danger/40 bg-danger/10 px-3 py-2 text-sm text-danger-dark">{{ store.error }}</p>
     <p v-else-if="store.loading && !store.detail" class="text-ink-muted">loading {{ id }}…</p>
     <section v-else-if="store.detail" class="overflow-hidden rounded-card border border-divider bg-card">
-      <RunHeadline :summary="store.detail.summary" :provenance="null" :lag-ticks="lag" :headline="sentence" :roster="store.laneBotIds"/>
+      <!-- The headline sentence needs the analysis window, which needs
+           `/events` -- a genuine fetch failure is named here rather than
+           read as "no events recorded", which is what an empty `sentence`
+           would otherwise say. -->
+      <p v-if="store.eventsError" class="px-3 py-2 text-sm text-warn-dark">{{ store.eventsError }}</p>
+      <RunHeadline v-else :summary="store.detail.summary" :provenance="null" :lag-ticks="lag" :headline="sentence" :roster="store.laneBotIds"/>
       <p class="px-5 py-1 text-xs text-ink-muted">
         {{ formatWhen(startedUnixOf(store.detail.summary)) }} ·
         <router-link :to="`/runs/${id}/analysis`" class="underline">overrun and divergence tables</router-link>
       </p>
 
-      <template v-if="scale && win">
+      <!-- Gated on `scale` alone, not `scale && win`: a run with a drawn axis
+           still has bands to show even when `/events` failed and left `win`
+           null -- only the two bands below that actually need the analysis
+           window (Items/min, and the headline above) say so themselves. -->
+      <template v-if="scale">
         <div class="grid grid-cols-[10.5rem_1fr] border-b border-divider">
           <div class="border-r border-divider bg-surface px-3 py-2 text-[11px] font-semibold uppercase tracking-wider text-ink-muted">Milestones</div>
           <MilestoneRibbon :scale="scale" :splits="store.detail.splits" :cursor="store.cursor"/>
@@ -76,24 +104,28 @@ const LEGEND = [
         </BandFrame>
         <BandFrame title="Items / min" subtitle="trailing 2-min window · background is the attribution verdict per minute">
           <p v-if="store.sampleError" class="px-3 py-2 text-sm text-warn-dark">{{ store.sampleError }}</p>
+          <p v-else-if="!win" class="px-3 py-2 text-sm text-warn-dark">{{ store.eventsError }}</p>
           <ProductionBand v-else :scale="scale" :cursor="store.cursor" :samples="store.samples" :events="store.events" :items="items" :lo="win.lo" :hi="win.hi"/>
         </BandFrame>
         <BandFrame title="Power" subtitle="kW generated vs consumed · one scale">
-          <PowerBand :scale="scale" :cursor="store.cursor" :samples="store.samples"/>
+          <p v-if="store.sampleError" class="px-3 py-2 text-sm text-warn-dark">{{ store.sampleError }}</p>
+          <PowerBand v-else :scale="scale" :cursor="store.cursor" :samples="store.samples"/>
         </BandFrame>
         <BandFrame title="Research" subtitle="progress of the current technology">
-          <ResearchBand :scale="scale" :cursor="store.cursor" :samples="store.samples"/>
+          <p v-if="store.sampleError" class="px-3 py-2 text-sm text-warn-dark">{{ store.sampleError }}</p>
+          <ResearchBand v-else :scale="scale" :cursor="store.cursor" :samples="store.samples"/>
         </BandFrame>
         <BandFrame title="Bots" subtitle="one row per bot · idle is hatched · feeding acts are ticks · replans are dashed">
           <p v-if="store.lanesError" class="px-3 py-2 text-sm text-warn-dark">{{ store.lanesError }}</p>
           <LaneBand v-else :scale="scale" :cursor="store.cursor" :lanes="store.lanes" :events="store.events"/>
         </BandFrame>
         <BandFrame title="Machines" subtitle="status of every sampled machine, 5-s cells · grouped by kind, ordered by placement">
-          <MachineBand :scale="scale" :cursor="store.cursor" :samples="store.samples" :selected="store.selectedMachine" @select="store.selectMachine($event)"/>
+          <p v-if="store.sampleError" class="px-3 py-2 text-sm text-warn-dark">{{ store.sampleError }}</p>
+          <MachineBand v-else :scale="scale" :cursor="store.cursor" :samples="store.samples" :selected="store.selectedMachine" @select="store.selectMachine($event)"/>
         </BandFrame>
         <BandFrame title="Record" subtitle="where the record has data · a gap reads as “no record”">
           <p v-if="store.eventsError" class="px-3 py-2 text-sm text-warn-dark">{{ store.eventsError }}</p>
-          <CoverageBand :scale="scale" :cursor="store.cursor" :events="store.events" :samples="store.samples" :run-end="win.hi"/>
+          <CoverageBand v-else :scale="scale" :cursor="store.cursor" :events="store.events" :samples="store.samples" :run-end="win?.hi ?? scale.to"/>
         </BandFrame>
         <CursorBar :scale="scale" :cursor="store.cursor" :playing="store.playing" :rate="store.rate"
                    @seek="store.seek($event)" @toggle="store.togglePlay()" @rate="store.rate = $event"/>

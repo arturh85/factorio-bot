@@ -1862,6 +1862,17 @@
           "entity_type": {
             "type": "string"
           },
+          "fluid_source_offset": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Position",
+                "description": "Which **tile** this entity draws its fluid from, as an offset from its\nown position in the north frame -- `LuaEntityPrototype`'s\n`fluid_source_offset`, `{0, -1}` for the vanilla `offshore-pump`.\n\n# It is what makes the water rule derivable instead of written out\n\nA Factorio 2.0 offshore pump's output fluidbox has no filter at all\n([`FluidFilter::Any`], measured across all 56 boxes in this mod set on\n2026-09-08); it produces whatever the ground under its source tile\ngives. So *which fluid does this pump make* is answered by pairing\nthis offset with [`TileFluid`] on the tile it lands on, and neither\nhalf alone can say.\n\n# `None` is a fact here, not a gap -- and that is unusual\n\nThe runtime API marks the attribute `subclasses: [\"OffshorePump\"]`, so\nit is absent for every other prototype in the game. **An entity with no\nfluid source offset does not draw from the ground**, which is exactly\nthe discriminator a caller needs to keep this rule off boilers and\npumpjacks without naming either. It is still `None` for a record\nwritten before the field existed, and a caller must not read that as\n\"definitely not a ground-drawing entity\" -- the tile it would point at\nis `TileFluid::Unknown` in such a record too, so the rule declines\nrather than misfiring either way.\n\n`default`, so every archived dump and snapshot still loads."
+              }
+            ]
+          },
           "fluidbox_prototypes": {
             "items": {
               "$ref": "#/components/schemas/FactorioFluidBoxPrototype"
@@ -2234,6 +2245,10 @@
               "array",
               "null"
             ]
+          },
+          "fluid": {
+            "$ref": "#/components/schemas/TileFluid",
+            "description": "Which fluid an offshore pump standing here would draw, from\n`LuaTilePrototype::fluid`. See [`TileFluid`] for why this is a tile\nquestion at all and why it is not an `Option<String>`.\n\n[`TileFluid::Unknown`] is the default, so every archived server log,\nboth world dumps and any older mod deserialise to *\"not captured\"*\nrather than asserting that the whole map is [`TileFluid::Dry`]."
           },
           "name": {
             "type": "string"
@@ -3727,6 +3742,60 @@
           "k"
         ],
         "type": "object"
+      },
+      "TileFluid": {
+        "description": "Which fluid an **offshore pump standing on this tile** would draw from it.\n\n# The question a fluidbox filter turned out not to answer\n\nA Factorio 2.0 offshore pump takes its fluid from the *tile*, not from its\nown prototype: `LuaEntity::get_fluid_source_fluid` is documented as\n*\"Checks what is expected fluid to be produced from the offshore pump's\nsource tile\"*, and its output fluidbox is honestly\n[`FluidFilter::Any`]. So \"what does a pump here produce\" is a question\nabout ground, and this is the field that carries the answer.\n\n**`get_fluid_source_fluid` is not the crossing, and cannot be.** It is a\n*method* on `LuaEntity` with `subclasses: [\"OffshorePump\"]` (checked in\n`workspace/factorio-api-docs/runtime-api.json`, `application_version`\n2.1.17), so it can only be asked of a pump that already stands. A planner\ndeciding *where* to put one has no such entity. The prototype-side answer\nis `LuaTilePrototype::fluid`, an optional `LuaFluidPrototype` described as\n*\"The fluid offshore pump produces on this tile, if any\"* -- the same fact,\navailable with no entity and no runtime call, which is what the mod sends.\n\n# Three answers, and the two that look alike are the point\n\nThe same shape as [`FluidFilter`], for the same reason -- an\n`Option<String>` has two slots for three states:\n\n- [`TileFluid::Yields`] -- *\"a `water` tile gives `water`\"*. Definite.\n- [`TileFluid::Dry`] -- *\"a `grass-1` tile gives nothing\"*. **Also\n  definite, and a completely different fact.** It is what makes a refusal\n  (\"there is no water here\") sayable.\n- [`TileFluid::Unknown`] -- the sender never said: an archived dump, a mod\n  predating this field, a read that raised, or a chunk whose covered tiles\n  the bulk writeout would have had to guess at. Not a fact about the game.\n\n[`Self::yields`] and [`Self::is_dry`] are both *positive* claims and both\nare false for `Unknown`; neither is the negation of the other. A single\n`has_fluid(name) -> bool` could not distinguish its own two meanings, which\nis the defect class this type exists to avoid.\n\n# Why it is not a `bool` called `is_water`\n\n[`FactorioTile::is_water`] tests the name against a hard-coded pair,\n`[\"deepwater\", \"water\"]`, read off a *vanilla* capture. This install runs\nSpace Age, where `ammoniacal-ocean` yields ammonia and Vulcanus' lava\nyields lava, and where none of those names appear in that list. Naming the\nfluid rather than the tile is what makes the rule survive a mod -- the\nsame argument that replaced the hard-coded smelting rate.",
+        "oneOf": [
+          {
+            "description": "The tile prototype names the fluid a pump on it would produce.",
+            "properties": {
+              "fluid": {
+                "type": "string"
+              },
+              "kind": {
+                "enum": [
+                  "yields"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "fluid",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The tile prototype names no fluid: a pump here produces nothing. An\nanswer, not an absence.",
+            "properties": {
+              "kind": {
+                "enum": [
+                  "dry"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Nobody said. The default, so an archived record or an older mod\ndeserialises to *\"not captured\"* rather than to `Dry`.",
+            "properties": {
+              "kind": {
+                "enum": [
+                  "unknown"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "TransportLine": {
         "description": "One of a belt-like entity's transport lines, and what is riding on it.\n\nA belt is not an inventory and modelling it as one loses the thing that\nmakes it a belt: a `transport-belt` has **two** lanes, an\n`underground-belt` four and a `splitter` eight, and which lane an item is\non decides whether a furnace arm can reach it. Two of this project's own\nmeasured failures are lane failures -- an inserter drops on the belt's\n**far** lane while a side-loading belt lands on the **near** one, and\ngetting either backwards puts ore and coal on one lane where they crowd\neach other out while every entity still places 100% correctly.\n\n**Counts, not positions.** `LuaTransportLine` also offers\n`get_detailed_contents()`, which is every item with its position along the\nline; the owner's ruling at scale is *\"the direction and, for a whole\nchain, what types of items are on it\"*, so this carries\n`get_contents()` -- one aggregated count per item kind -- and no item\npositions at all.",

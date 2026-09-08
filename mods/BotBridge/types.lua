@@ -591,6 +591,26 @@ function serialize_entity_prototype(entity)
     -- for a burner drill it genuinely is, because its area is its footprint.
     ok, val = pcall(function() return entity.mining_drill_radius end)
     if ok then record.mining_drill_radius = val end
+    -- `fluid_source_offset`: which TILE an offshore pump draws from, as an
+    -- offset from its own position in the north frame. `{0, -1}` for the
+    -- vanilla `offshore-pump`, i.e. the tile directly ahead of it.
+    --
+    -- **This is the field that makes the water rule derivable rather than
+    -- written out.** A 2.0 pump's output fluidbox carries no filter -- it
+    -- takes whatever the source tile gives -- so "does this pump produce
+    -- water" is answered by pairing this offset with `FactorioTile::fluid`.
+    -- Without it the planner would have to hard-code `{0, -1}` and the set of
+    -- prototypes it applies to, which is the same mod-compatibility defect as
+    -- the copied smelting rate and the hand-written pole supply table.
+    --
+    -- `subclasses = {"OffshorePump"}` on the runtime API, so `pcall` is doing
+    -- real work here: it is nil or absent for every other prototype, and
+    -- **that absence is the discriminator** -- an entity with no fluid source
+    -- offset does not draw from the ground at all.
+    ok, val = pcall(function() return entity.fluid_source_offset end)
+    if ok and val ~= nil then
+        record.fluid_source_offset = {x = val.x or val[1], y = val.y or val[2]}
+    end
     -- BEACON AND POLE GEOMETRY. `FactorioEntityPrototype` carried nothing
     -- electrical at all, which is why `crates/planner/src/method/power.rs`
     -- writes `pole_supply_half_extent` out by hand as a table of vanilla
@@ -1204,6 +1224,26 @@ function serialize_tile(tile)
     record.player_collidable = tile.collides_with('player')
     -- The surface this tile is on, by NAME. See serialize_entity.
     record.surface = tile.surface and tile.surface.name or nil
+    -- WHICH FLUID AN OFFSHORE PUMP HERE WOULD DRAW.
+    --
+    -- `control.lua`'s `tile_fluid` walks visible -> hidden -> double hidden,
+    -- the order `LuaEntity::get_fluid_source_fluid` documents. This path is
+    -- per-tile and low volume (`find_tiles_filtered`), so it always does the
+    -- full walk -- unlike the bulk chunk writeout, which buys the same
+    -- correctness with one `count_tiles_filtered` per chunk.
+    --
+    -- Three states on the wire: `{kind="yields", fluid=...}`, `{kind="dry"}`,
+    -- and -- only if the read raises -- nothing at all, which the Rust side
+    -- defaults to `unknown`. "Gives nothing" is an answer; "we did not look"
+    -- is not, and an `Option<String>` would have merged them.
+    local ok, fluid = pcall(function() return tile_fluid(tile) end)
+    if ok then
+        if fluid then
+            record.fluid = {kind = "yields", fluid = fluid}
+        else
+            record.fluid = {kind = "dry"}
+        end
+    end
     return record
 end
 

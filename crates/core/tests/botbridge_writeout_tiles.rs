@@ -90,6 +90,20 @@ const PRELUDE: &str = r#"
     _tile_names = {}
     function set_tile(x, y, name) _tile_names[x .. "/" .. y] = name end
 
+    -- What is HIDDEN under a tile: landfill laid over a lake keeps pumping
+    -- water, which is why `tile_fluid` walks visible -> hidden -> double
+    -- hidden at all.
+    _hidden_tiles = {}
+    function set_hidden(x, y, name) _hidden_tiles[x .. "/" .. y] = name end
+    _double_hidden_tiles = {}
+    function set_double_hidden(x, y, name)
+        _double_hidden_tiles[x .. "/" .. y] = name
+    end
+
+    -- Every distinct prototype lookup, so a test can assert the fluid is asked
+    -- once per NAME and not once per tile.
+    _tile_proto_lookups = {}
+
     game = {
         tick = 0,
         players = {},
@@ -99,18 +113,50 @@ const PRELUDE: &str = r#"
         take_screenshot = noop,
     }
     storage = { n_clients = 0, p = {} }
-    prototypes = { item = {}, entity = {} }
+    -- `prototypes.tile[name].fluid` is what says which fluid an offshore pump
+    -- on this tile would draw -- the prototype-side answer to a question the
+    -- runtime `get_fluid_source_fluid` can only answer for a pump that already
+    -- stands. Vanilla gives it to `water` and `deepwater` and to nothing else;
+    -- a real Space Age game also gives it to `ammoniacal-ocean` and to lava,
+    -- which is exactly why the mod sends the fluid's NAME rather than a flag.
+    prototypes = {
+        item = {},
+        entity = {},
+        tile = setmetatable({}, { __index = function(_, name)
+            _tile_proto_lookups[#_tile_proto_lookups + 1] = tostring(name)
+            if name == "water" or name == "deepwater" then
+                return { name = name, fluid = { name = "water" } }
+            end
+            return { name = name }
+        end }),
+    }
 
     _surface = {
         -- `ground_header` reads this: since 2026-09-07 a tiles line names the
         -- surface it was read off, so ground can be routed the way entities
         -- already are.
         name = "nauvis",
+        -- One call per chunk, not 1024: `writeout_tiles` only pays for the
+        -- per-tile hidden-tile walk when the area actually holds a covered
+        -- tile.
+        count_tiles_filtered = function(filters)
+            local n = 0
+            if filters.has_hidden_tile then
+                for y = filters.area.left_top.y, filters.area.right_bottom.y - 1 do
+                    for x = filters.area.left_top.x, filters.area.right_bottom.x - 1 do
+                        if _hidden_tiles[x .. "/" .. y] then n = n + 1 end
+                    end
+                end
+            end
+            return n
+        end,
         get_tile = function(x, y)
             local name = _tile_names[x .. "/" .. y] or "grass-1"
             return {
                 name = name,
                 position = { x = x, y = y },
+                hidden_tile = _hidden_tiles[x .. "/" .. y],
+                double_hidden_tile = _double_hidden_tiles[x .. "/" .. y],
                 collides_with = function(layer)
                     _collides_calls[#_collides_calls + 1] =
                         { layer = tostring(layer), name = name }
@@ -214,7 +260,7 @@ fn water_and_deepwater_are_written_out_as_solid() {
 
     assert_eq!(
         tiles_record(&lua),
-        "0,0;2,2;nauvis: water:1,deepwater:1,grass-1:0,grass-1:0",
+        "0,0;2,2;nauvis: water:1:water,deepwater:1:water,grass-1:0:,grass-1:0:",
         "the flag after each tile name is what output_parser.rs turns into \
          FactorioTile::player_collidable, and EntityGraph::add_tiles inserts a \
          blocking box only when it is true. Hardcoding it to 0 -- which every \
@@ -263,7 +309,7 @@ fn walkable_ground_is_still_written_out_as_walkable() {
 
     assert_eq!(
         tiles_record(&lua),
-        "0,0;2,1;nauvis: grass-1:0,sand-1:0",
+        "0,0;2,1;nauvis: grass-1:0:,sand-1:0:",
         "grass and sand collide with nothing; flagging them solid would put a \
          blocking box under every tile of the map"
     );
@@ -302,7 +348,7 @@ fn the_collision_flag_is_asked_once_per_tile_prototype_not_once_per_tile() {
     // And the memoised answer still has to be the right one per name.
     assert_eq!(
         tiles_record(&lua),
-        "0,0;2,2;nauvis: water:1,water:1,grass-1:0,grass-1:0"
+        "0,0;2,2;nauvis: water:1:water,water:1:water,grass-1:0:,grass-1:0:"
     );
 }
 
@@ -390,7 +436,7 @@ fn the_tiles_header_names_the_surface_it_was_read_off() {
 
     assert_eq!(
         tiles_record(&lua),
-        "0,0;1,1;vulcanus: water:1",
+        "0,0;1,1;vulcanus: water:1:water",
         "the third header field is the surface the tiles were read off, which \
          is what output_parser.rs routes on"
     );
@@ -402,8 +448,247 @@ fn the_tiles_header_names_the_surface_it_was_read_off() {
         .expect("writeout_tiles");
     assert_eq!(
         tiles_record(&lua),
-        "0,0;1,1;nauvis: water:1",
+        "0,0;1,1;nauvis: water:1:water",
         "and the default stub still says nauvis -- the two lines differ in the \
          surface and in nothing else"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// A THIRD FIELD: which fluid an offshore pump on this tile would draw
+// ---------------------------------------------------------------------------
+//
+// A Factorio 2.0 offshore pump takes its fluid from the tile, not from its own
+// prototype -- its output fluidbox is unfiltered, measured across all 56 boxes
+// in this mod set. So "what does a pump here produce" is a question about
+// ground, and `LuaTilePrototype::fluid` is the only thing that answers it
+// without a pump already standing.
+
+/// **`grass-1:0:` and `grass-1:0:?` are different facts, and the wire has to
+/// keep them apart.**
+///
+/// This is the whole reason the field is three-valued. An empty third field
+/// says *this tile yields nothing* -- which is what lets a planner refuse "put
+/// a pump here" on a fact. A `?` says *we could not tell*, which must attribute
+/// nothing and refuse nothing. An `Option<String>` on the Rust side, or a
+/// single "absent" form here, would merge them and turn every unreadable tile
+/// into dry land.
+#[test]
+fn a_dry_tile_says_so_and_is_not_the_same_as_an_unreadable_one() {
+    let lua = mod_lua();
+    lua.load(
+        r#"
+        set_tile(0, 0, "water")
+        set_tile(1, 0, "grass-1")
+        writeout_tiles(0, _surface, area(0, 0, 2, 1))
+        "#,
+    )
+    .set_name("writeout_tiles")
+    .exec()
+    .expect("writeout_tiles");
+
+    assert_eq!(
+        tiles_record(&lua),
+        "0,0;2,1;nauvis: water:1:water,grass-1:0:",
+        "water NAMES the fluid it yields -- not a flag, because Space Age's \
+         ammoniacal ocean yields ammonia and Vulcanus' lava yields lava -- and \
+         grass says, definitely, that it yields nothing"
+    );
+}
+
+/// **A lake under landfill still pumps water, and the visible name cannot say
+/// so.**
+///
+/// `LuaEntity::get_fluid_source_fluid` is documented as accounting for "visible
+/// tile, hidden tile and double hidden tile"; `tile_fluid` walks the same three
+/// in the same order. Reading only the visible `landfill` here would report
+/// `dry` -- a confident wrong answer, which is worse than `?`.
+#[test]
+fn a_covered_lake_still_names_the_fluid_underneath_it() {
+    let lua = mod_lua();
+    lua.load(
+        r#"
+        set_tile(0, 0, "landfill")
+        set_hidden(0, 0, "water")
+        set_tile(1, 0, "landfill")
+        set_double_hidden(1, 0, "deepwater")
+        set_tile(2, 0, "landfill")
+        writeout_tiles(0, _surface, area(0, 0, 3, 1))
+        "#,
+    )
+    .set_name("writeout_tiles")
+    .exec()
+    .expect("writeout_tiles");
+
+    assert_eq!(
+        tiles_record(&lua),
+        "0,0;3,1;nauvis: landfill:0:water,landfill:0:water,landfill:0:",
+        "the first tile's hidden water and the second's double-hidden \
+         deepwater both surface; the third is landfill over nothing and is \
+         honestly dry"
+    );
+}
+
+/// **The hidden-tile walk costs ONE call per chunk, not 1024.**
+///
+/// `writeout_tiles` is marked SLOW in its own comment and runs over a 32x32
+/// chunk, so a per-tile `hidden_tile` read would add 1024 crossings of the
+/// mod/engine boundary to the function least able to afford them.
+/// `count_tiles_filtered{has_hidden_tile = true}` answers for the whole area
+/// at once, and on ground the game has only just generated the answer is zero.
+///
+/// Asserted through the prototype-lookup counter rather than by timing: with
+/// no covered tile, the fluid is asked once per distinct tile NAME. The
+/// control is the same map with one hidden tile, where the per-tile walk does
+/// run -- without it this test would pass for a version that never looked at
+/// hidden tiles at all.
+#[test]
+fn the_fluid_is_asked_once_per_tile_prototype_when_nothing_is_covered() {
+    let lua = mod_lua();
+    lua.load(
+        r#"
+        set_tile(0, 0, "water")
+        set_tile(1, 0, "water")
+        set_tile(0, 1, "grass-1")
+        set_tile(1, 1, "grass-1")
+        writeout_tiles(0, _surface, area(0, 0, 2, 2))
+        "#,
+    )
+    .set_name("writeout_tiles")
+    .exec()
+    .expect("writeout_tiles");
+
+    assert_eq!(
+        tile_proto_lookups(&lua),
+        vec!["water".to_string(), "grass-1".to_string()],
+        "four tiles, two prototypes, two crossings"
+    );
+
+    // The control: one covered tile, and the walk runs -- so the memoised
+    // answer is genuinely gated on the chunk-level question and not simply
+    // never reached.
+    let lua = mod_lua();
+    lua.load(
+        r#"
+        set_tile(0, 0, "landfill")
+        set_hidden(0, 0, "water")
+        set_tile(1, 0, "landfill")
+        writeout_tiles(0, _surface, area(0, 0, 2, 1))
+        "#,
+    )
+    .set_name("writeout_tiles")
+    .exec()
+    .expect("writeout_tiles");
+    assert_eq!(
+        tiles_record(&lua),
+        "0,0;2,1;nauvis: landfill:0:water,landfill:0:",
+        "the covered tile's water surfaces only because the chunk-level check \
+         found it"
+    );
+}
+
+/// Every distinct `prototypes.tile[...]` lookup the mod made, in order.
+fn tile_proto_lookups(lua: &Lua) -> Vec<String> {
+    lua.globals()
+        .get::<Vec<String>>("_tile_proto_lookups")
+        .expect("_tile_proto_lookups")
+}
+
+/// End to end across the seam, the way `the_mods_own_tiles_line_makes_water_
+/// block_and_leaves_grass_open` does for the collision flag: the mod's own
+/// stdout line, through the real `OutputParser`, into the real `EntityGraph`,
+/// and out of `fluid_at`.
+///
+/// Neither the mod test nor the parser test alone says the fluid *arrives*.
+/// This is the only assertion in the file that would fail if the wire form and
+/// the parser disagreed about which `:`-separated field the fluid is in.
+#[test]
+fn the_mods_own_tiles_line_makes_water_yield_water_and_grass_yield_nothing() {
+    use factorio_bot_core::graph::entity_graph::EntityGraph;
+    use factorio_bot_core::process::output_parser::OutputParser;
+    use factorio_bot_core::types::{Position, TileFluid};
+
+    let lua = mod_lua();
+    lua.load(
+        r#"
+        set_tile(0, 0, "water")
+        set_tile(1, 0, "grass-1")
+        writeout_tiles(11, _surface, area(0, 0, 2, 1))
+        "#,
+    )
+    .set_name("writeout_tiles")
+    .exec()
+    .expect("writeout_tiles");
+
+    let body = tiles_record(&lua);
+    let mut parser = OutputParser::new();
+    parser
+        .parse(11, "tiles", &body)
+        .expect("the mod's own line parses");
+    let graph: &EntityGraph = &parser.world().entity_graph;
+
+    assert_eq!(
+        graph.fluid_at(&Position::new(0.5, 0.5)),
+        TileFluid::Yields {
+            fluid: "water".to_owned()
+        },
+        "a pump in front of this tile draws water"
+    );
+    assert_eq!(
+        graph.fluid_at(&Position::new(1.5, 0.5)),
+        TileFluid::Dry,
+        "and this one is charted and definitely yields nothing"
+    );
+    assert_eq!(
+        graph.fluid_at(&Position::new(50.5, 50.5)),
+        TileFluid::Unknown,
+        "while ground nobody charted is UNKNOWN and never dry -- reading it as \
+         dry would let a planner refuse a lake it has simply never walked to"
+    );
+}
+
+/// **An older sender's two-field tile is `Unknown`, never `Dry`.**
+///
+/// This is not hypothetical and it is not rare: it is **every archived server
+/// log and both world dumps**, 4,440,064 tile records that were written before
+/// this field existed. Reading them as dry would assert that no map this
+/// project has ever run on has any water on it -- the exact
+/// `absent-is-not-a-value` collapse the three-state type exists to prevent.
+///
+/// The three forms are asserted against one another in a single test on
+/// purpose: a version that merged any two of them would still pass two of the
+/// three assertions on its own.
+#[test]
+fn a_two_field_tile_is_unknown_and_a_question_mark_is_too() {
+    use factorio_bot_core::process::output_parser::OutputParser;
+    use factorio_bot_core::types::{Position, TileFluid};
+
+    let mut parser = OutputParser::new();
+    parser
+        .parse(
+            1,
+            "tiles",
+            // Three tiles in a row: an old sender's two fields, an explicit
+            // "could not tell", and an explicit "yields nothing".
+            "0,0;3,1;nauvis: grass-1:0,grass-1:0:?,grass-1:0:",
+        )
+        .expect("a mixed line parses");
+    let graph = &parser.world().entity_graph;
+
+    assert_eq!(
+        graph.fluid_at(&Position::new(0.5, 0.5)),
+        TileFluid::Unknown,
+        "two fields means the sender did not say"
+    );
+    assert_eq!(
+        graph.fluid_at(&Position::new(1.5, 0.5)),
+        TileFluid::Unknown,
+        "and `?` means the sender looked and could not tell -- the same \
+         inertness, reached differently"
+    );
+    assert_eq!(
+        graph.fluid_at(&Position::new(2.5, 0.5)),
+        TileFluid::Dry,
+        "only an EMPTY third field is the claim that this tile yields nothing"
     );
 }

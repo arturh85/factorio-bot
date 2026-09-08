@@ -8,6 +8,7 @@ use crate::factorio::world::FactorioSurface;
 use crate::graph::entity_graph::EntityGraph;
 use crate::types::{
     Direction, EntityName, FactorioItemPrototype, FactorioRecipe, FactorioTile, Position, Rect,
+    TileFluid,
 };
 use crate::types::{FactorioEntity, FactorioEntityPrototype};
 use miette::Result;
@@ -123,6 +124,11 @@ pub fn spawn_water(tiles: &mut Vec<FactorioTile>, rect: Rect) {
             // A fixture observed nothing, so it asserts nothing about where it
             // is. See `FactorioTile::surface`.
             surface: None,
+            // Water yields water: this fixture stands in for a lake, and a
+            // lake is exactly what an offshore pump draws from.
+            fluid: TileFluid::Yields {
+                fluid: "water".into(),
+            },
         });
     }
 }

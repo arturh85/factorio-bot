@@ -14,7 +14,7 @@ use crate::types::{
     ChunkPosition, FactorioEntity, FactorioEntityPrototype, FactorioForce, FactorioGraphic,
     FactorioItemPrototype, FactorioRecipe, FactorioSurfaceInfo, FactorioTile,
     PlayerChangedDistanceEvent, PlayerChangedMainInventoryEvent, PlayerChangedPositionEvent,
-    PlayerId, Pos, Position, Rect, SurfaceDaylight, SurfaceId,
+    PlayerId, Pos, Position, Rect, SurfaceDaylight, SurfaceId, TileFluid,
 };
 use miette::{IntoDiagnostic, Result, miette};
 
@@ -180,6 +180,27 @@ impl OutputParser {
                                     return None;
                                 }
                             };
+                        // WHICH FLUID A PUMP HERE WOULD DRAW, the third
+                        // `:`-separated field.
+                        //
+                        // Three wire forms, because "gives nothing" and "we
+                        // did not look" are different facts:
+                        //   `water:1:water`  -> Yields
+                        //   `grass-1:0:`     -> Dry, definitely
+                        //   `grass-1:0:?`    -> Unknown
+                        // and a tile with only TWO fields is an older sender,
+                        // which is every archived server log and both world
+                        // dumps. Absent stays `Unknown`; it is never `Dry`.
+                        // Trimmed before matching, for the reason `name` is:
+                        // the body's header ends `": "`, so the first tile of
+                        // every line carries a leading space.
+                        let fluid = match parts.get(2).map(|part| part.trim()) {
+                            None | Some("?") => TileFluid::Unknown,
+                            Some("") => TileFluid::Dry,
+                            Some(name) => TileFluid::Yields {
+                                fluid: name.to_owned(),
+                            },
+                        };
                         let color_name = match name.find('-') {
                             Some(pos) => {
                                 if &name[0..pos] == "red" {
@@ -215,6 +236,7 @@ impl OutputParser {
                             },
                             name,
                             player_collidable,
+                            fluid,
                             position: Position::new(
                                 (chunk_position.x * 32 + (index % 32) as i32) as f64,
                                 (chunk_position.y * 32 + (index / 32) as i32) as f64,

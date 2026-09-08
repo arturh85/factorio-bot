@@ -8,7 +8,7 @@ use crate::record::map::{EntitySnapshot, resource_position_from_pos};
 use crate::types::{
     Direction, EntityName, EntityType, FactorioEntity, FactorioEntityPrototype,
     FactorioFluidBoxConnection, FactorioFluidBoxPrototype, FactorioRecipe, FactorioTile, Pos,
-    Position, Rect, ResourcePatch,
+    Position, Rect, ResourcePatch, TileFluid,
 };
 use dashmap::DashMap;
 use euclid::{Point2D, Rect as EuclidRect, Size2D};
@@ -1065,6 +1065,48 @@ impl EntityGraph {
             .query(query)
             .into_iter()
             .any(|(tile, _rect, _id)| Pos::from(&tile.position) == pos && tile.is_water())
+    }
+
+    /// Which fluid an offshore pump standing on the tile covering `position`
+    /// would draw, as the tile's **prototype** says.
+    ///
+    /// The successor to [`Self::is_water_at`], and not a synonym for it.
+    /// `is_water_at` tests the tile's *name* against a hard-coded pair read
+    /// off a vanilla capture; this install runs Space Age, where
+    /// `ammoniacal-ocean` yields ammonia and Vulcanus' lava yields lava, and
+    /// neither name is in that pair. Asking what the ground gives rather than
+    /// what it is called is what makes the answer survive a mod -- the same
+    /// argument that replaced this repo's hard-coded smelting rate.
+    ///
+    /// # Three answers, and a tile nobody charted is not a dry one
+    ///
+    /// [`TileFluid::Unknown`] is returned both when the tile carries that
+    /// answer and when **there is no tile here at all** -- unexplored ground,
+    /// or a chunk written by a mod predating the field. That collapse is
+    /// deliberate and is the *safe* direction: both genuinely mean "we could
+    /// not tell", and the alternative -- reporting unexplored ground as
+    /// [`TileFluid::Dry`] -- would let a caller refuse a lake it has simply
+    /// never walked to. What must never happen is the other way round, and it
+    /// cannot: a `Dry` here is always a charted tile whose prototype named no
+    /// fluid.
+    ///
+    /// `position` is a point anywhere in the tile, not the tile's corner.
+    #[must_use]
+    pub fn fluid_at(&self, position: &Position) -> TileFluid {
+        let pos = Pos::from(position);
+        // The same quarter-tile narrowing query `is_water_at` uses, for the
+        // same reason: the `Pos` comparison below is what decides.
+        let query: QuadTreeRect = Rect::new(
+            &Position::new(f64::from(pos.0) + 0.25, f64::from(pos.1) + 0.25),
+            &Position::new(f64::from(pos.0) + 0.75, f64::from(pos.1) + 0.75),
+        )
+        .into();
+        self.tile_tree
+            .read()
+            .query(query)
+            .into_iter()
+            .find(|(tile, _rect, _id)| Pos::from(&tile.position) == pos)
+            .map_or(TileFluid::Unknown, |(tile, _rect, _id)| tile.fluid.clone())
     }
 
     /// The water tile nearest `from`, or `None` if there is none within
@@ -4041,6 +4083,9 @@ mod tests {
                     player_collidable: true,
                     color: None,
                     surface: None,
+                    fluid: TileFluid::Yields {
+                        fluid: "water".into(),
+                    },
                 }],
                 None,
             )
@@ -4070,6 +4115,16 @@ mod tests {
             // `FactorioTile::surface`. `EntityGraph` is still keyed by
             // position alone, so nothing here would read it if it did.
             surface: None,
+            // Vanilla's two water tiles yield water and nothing else does.
+            // Derived from the same list `player_collidable` is, so a fixture
+            // cannot claim a dry lake or a wet meadow by typo.
+            fluid: if FactorioTile::WATER_NAMES.contains(&name) {
+                TileFluid::Yields {
+                    fluid: "water".into(),
+                }
+            } else {
+                TileFluid::Dry
+            },
         }
     }
 
@@ -4181,6 +4236,9 @@ mod tests {
                 player_collidable: true,
                 color: None,
                 surface: None,
+                // Collidable and dry: the whole point of this fixture is that
+                // "blocked" and "water" are different questions.
+                fluid: TileFluid::Dry,
             },
         ]);
         assert!(graph.is_water_at(&Position::new(0.5, 0.5)));

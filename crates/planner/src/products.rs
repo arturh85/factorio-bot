@@ -113,7 +113,7 @@ use factorio_bot_core::types::{FactorioRecipe, Position, Rect};
 /// own because the mod puts them in this category too. It does not survive a
 /// mod inventing a second destructive category under another name -- that is a
 /// real limit and there is nothing in the prototype data that would close it.
-const RECYCLING_CATEGORY: &str = "recycling";
+pub(crate) const RECYCLING_CATEGORY: &str = "recycling";
 
 /// How far from the origin [`ProductIndex::from_world`] looks for ground that
 /// yields a fluid.

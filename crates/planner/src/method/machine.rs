@@ -47,13 +47,46 @@
 //! `oil-refinery` reports `[oil-processing, parameters]`. Counting it would
 //! make `parameters` look like a runnable category with one machine.
 //!
-//! # Ambiguity is refused, never resolved
+//! # Ambiguity is answered by a PREFERENCE, and refused when the preference
+//! cannot choose
 //!
-//! Vanilla declares `advanced-crafting` on all three assembling machines and
-//! `crafting-with-fluid` on two. Picking the first by name would be the
-//! silent answer this crate's [`crate::products`] module exists to stop, so
-//! several machines is [`MachineRefusal::Ambiguous`] — the same shape as
-//! [`crate::products::ProductRefusal::Ambiguous`].
+//! This install declares `advanced-crafting` on all three assembling machines
+//! and `crafting-with-fluid` on two (counted from
+//! `workspace/scripts/map-31337-water-and-oil.json`, not recalled). Until
+//! 2026-09-08 several machines was always [`MachineRefusal::Ambiguous`], and
+//! that refusal cascaded: `processing-unit` has exactly one recipe after the
+//! recipe-ambiguity work and it is `crafting-with-fluid`, so the rung read
+//! *"none is in a category this planner runs"* while the game runs it in a
+//! machine anybody can build.
+//!
+//! Picking the first by name would be the silent answer this crate's
+//! [`crate::products`] module exists to stop. What is used instead is the
+//! discriminator the planner already applied by hand: **what does it cost to
+//! obtain the machine**, summed transitively over the recipes the world
+//! carries down to things nothing makes ([`obtain_costs`]). Cheapest wins,
+//! and only a **strict** minimum wins — a tie is still
+//! [`MachineRefusal::Ambiguous`], because two machines that cost the same are
+//! genuinely interchangeable and nothing here has grounds to choose.
+//!
+//! **It is a preference, never a filter**, the shape
+//! [`crate::products::ProductIndex::sole_recipe_producing`] established: with
+//! no recipes to price (every world model built by [`Self::from_parts`], and
+//! any world whose recipe table is empty) the preference finds nothing and the
+//! refusal is byte-identical to the one that stood before. It can only ever
+//! fire where the code already refused.
+//!
+//! # Why cost, and how it is checked
+//!
+//! Cost is not asserted to be the right discriminator — it is the one that
+//! **reproduces the two answers this module already hard-codes**. Priced
+//! against a Space Age dump, `smelting`'s three furnaces come out
+//! stone (5) < steel (>90) < electric, i.e. exactly the
+//! [`crate::method::produce::FURNACE`] the planner brings with it, and
+//! `crafting`'s assemblers lose to hands, which cost nothing. A discriminator
+//! that independently re-derives a hand-picked constant is evidence; the
+//! alternatives are not so checkable — `crafting_speed` picks
+//! `assembling-machine-3`, which cannot be built at t=0, and a mod list is
+//! forbidden here for the reason the owner's standing rule gives.
 //!
 //! # Cost
 //!
@@ -64,7 +97,7 @@
 use crate::method::produce::FURNACE;
 use crate::method::util::{CRAFTING_CATEGORY, SMELTING_CATEGORY};
 use crate::state::PlanState;
-use factorio_bot_core::types::FactorioEntityPrototype;
+use factorio_bot_core::types::{FactorioEntityPrototype, FactorioRecipe};
 use miette::Diagnostic;
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
@@ -170,6 +203,13 @@ pub struct MachineTable {
     by_hand: BTreeSet<String>,
     /// Whether any prototype declared anything at all. See the module doc.
     declares_anything: bool,
+    /// Machine prototype name -> what it costs to obtain one, in thousandths
+    /// of a raw input. Empty when the caller brought no recipes, which is
+    /// what makes the preference inert rather than wrong on such a world.
+    ///
+    /// Fixed point rather than `f64` so this type can stay `Eq`, and so the
+    /// comparison that picks a winner is exact.
+    obtain_cost: BTreeMap<String, u64>,
 }
 
 impl MachineTable {
@@ -181,9 +221,24 @@ impl MachineTable {
     ///
     /// Deterministic: the input may arrive in any order (the world's
     /// prototype table is a `DashMap`), and every list this builds is sorted.
+    /// A table with **no recipes to price**, so the cost preference is inert
+    /// and an ambiguous category refuses exactly as it did before 2026-09-08.
     pub fn from_parts<'a, P>(prototypes: P) -> Self
     where
         P: IntoIterator<Item = &'a FactorioEntityPrototype>,
+    {
+        MachineTable::from_parts_and_recipes(prototypes, std::iter::empty())
+    }
+
+    /// Index prototypes by category **and** price every machine against the
+    /// recipes this world carries.
+    ///
+    /// The recipes are only ever read to break a tie between machines that
+    /// declare the same category; nothing else in this module consults them.
+    pub fn from_parts_and_recipes<'a, 'r, P, R>(prototypes: P, recipes: R) -> Self
+    where
+        P: IntoIterator<Item = &'a FactorioEntityPrototype>,
+        R: IntoIterator<Item = &'r FactorioRecipe>,
     {
         let mut table = MachineTable::default();
         for proto in prototypes {
@@ -212,6 +267,13 @@ impl MachineTable {
             machines.sort();
             machines.dedup();
         }
+        let wanted: BTreeSet<String> = table
+            .declared
+            .values()
+            .filter(|m| m.len() > 1)
+            .flat_map(|m| m.iter().cloned())
+            .collect();
+        table.obtain_cost = obtain_costs(recipes, &wanted);
         table
     }
 
@@ -224,7 +286,14 @@ impl MachineTable {
             .iter()
             .map(|entry| entry.value().clone())
             .collect();
-        MachineTable::from_parts(protos.iter())
+        let recipes: Vec<FactorioRecipe> = state
+            .base()
+            .globals
+            .recipes
+            .iter()
+            .map(|entry| entry.value().clone())
+            .collect();
+        MachineTable::from_parts_and_recipes(protos.iter(), recipes.iter())
     }
 
     /// Does any prototype in this world declare any crafting category?
@@ -256,10 +325,13 @@ impl MachineTable {
                 world_says: self.declares_anything,
             }),
             1 => Ok(Machine::Entity(machines[0].clone())),
-            _ => Err(MachineRefusal::Ambiguous {
-                category: category.to_string(),
-                machines,
-            }),
+            _ => match self.cheapest(&machines) {
+                Some(machine) => Ok(Machine::Entity(machine)),
+                None => Err(MachineRefusal::Ambiguous {
+                    category: category.to_string(),
+                    machines,
+                }),
+            },
         }
     }
 
@@ -275,13 +347,132 @@ impl MachineTable {
         out.insert(CRAFTING_CATEGORY.to_string());
         out.insert(SMELTING_CATEGORY.to_string());
         out.extend(self.by_hand.iter().cloned());
-        for (category, machines) in &self.declared {
-            if machines.len() == 1 {
+        // Asked of `machine_for` rather than re-deciding here: the set a
+        // refusal names and the set a method acts on are one computation, and
+        // the cost preference reaches both or neither.
+        for category in self.declared.keys() {
+            if self.machine_for(category).is_ok() {
                 out.insert(category.clone());
             }
         }
         out.into_iter().collect()
     }
+
+    /// The single cheapest machine to obtain among `machines`, or `None` when
+    /// nothing can be priced or the cheapest is not unique.
+    ///
+    /// `None` is the whole preference-not-filter promise: the caller refuses
+    /// exactly as it did before this existed.
+    fn cheapest(&self, machines: &[String]) -> Option<String> {
+        let mut priced: Vec<(u64, &String)> = machines
+            .iter()
+            .filter_map(|m| self.obtain_cost.get(m).map(|c| (*c, m)))
+            .collect();
+        priced.sort();
+        match priced.as_slice() {
+            [] => None,
+            [(_, only)] => Some((*only).clone()),
+            [(best, winner), (second, _), ..] if best < second => Some((*winner).clone()),
+            _ => None,
+        }
+    }
+}
+
+/// What it costs to obtain one of each named item, in **thousandths of a raw
+/// input**, summed transitively over the recipes this world carries.
+///
+/// A raw input is anything no recipe in this world produces — ore, a fluid out
+/// of the ground, an item a mod hands out. Each counts 1. Everything else
+/// costs the cheapest of its recipes: the ingredients' costs, divided by how
+/// many the recipe yields.
+///
+/// # Why a fixpoint and not recursion
+///
+/// Recipe graphs have cycles (a plate recycles to a plate, a barrel fills and
+/// empties), so a depth-first walk needs a visited set and still answers
+/// "infinite" for a cycle it entered from the wrong side. Relaxing every
+/// recipe until nothing improves has no such order dependence and terminates:
+/// each round either lowers some cost or stops. `RELAX_ROUNDS` bounds it
+/// regardless, and a cost that has not converged by then is simply higher than
+/// the truth — which makes the preference *less* decisive, never wrong.
+///
+/// # Recycling is excluded, for the reason [`crate::products`] excludes it
+///
+/// `X-recycling` turns a thing into its ingredients. Costing through it would
+/// price an item by what it can be destroyed into and could make a machine
+/// look free.
+///
+/// Only `wanted` names are returned: this exists to break ties between
+/// machines, and nothing else reads it.
+fn obtain_costs<'r, R>(recipes: R, wanted: &BTreeSet<String>) -> BTreeMap<String, u64>
+where
+    R: IntoIterator<Item = &'r FactorioRecipe>,
+{
+    /// Enough rounds for any real recipe chain (Space Age's deepest is well
+    /// under 30), and a hard bound on the work.
+    const RELAX_ROUNDS: usize = 64;
+    /// Thousandths, so the comparison is exact and the type stays `Eq`.
+    const SCALE: f64 = 1000.0;
+
+    let useful: Vec<&FactorioRecipe> = recipes
+        .into_iter()
+        .filter(|r| r.category != crate::products::RECYCLING_CATEGORY)
+        .collect();
+    let produced: BTreeSet<&str> = useful
+        .iter()
+        .flat_map(|r| r.products.iter().map(|p| p.name.as_str()))
+        .collect();
+    let mut cost: BTreeMap<&str, f64> = BTreeMap::new();
+    for name in &produced {
+        cost.insert(name, f64::INFINITY);
+    }
+    // Anything nothing produces is raw and costs one. Read off the recipes'
+    // own ingredients rather than from an item table, so a world that carries
+    // recipes and no prototypes still prices.
+    for recipe in &useful {
+        for ingredient in recipe.ingredients.iter().flatten() {
+            if !produced.contains(ingredient.name.as_str()) {
+                cost.insert(&ingredient.name, 1.0);
+            }
+        }
+    }
+    for _ in 0..RELAX_ROUNDS {
+        let mut improved = false;
+        for recipe in &useful {
+            let mut inputs = 0.0;
+            let mut known = true;
+            for ingredient in recipe.ingredients.iter().flatten() {
+                match cost.get(ingredient.name.as_str()) {
+                    Some(c) if c.is_finite() => inputs += f64::from(ingredient.amount) * c,
+                    _ => known = false,
+                }
+            }
+            if !known {
+                continue;
+            }
+            for product in &recipe.products {
+                if product.amount == 0 {
+                    continue;
+                }
+                let each = inputs / f64::from(product.amount);
+                let slot = cost.entry(product.name.as_str()).or_insert(f64::INFINITY);
+                if each < *slot {
+                    *slot = each;
+                    improved = true;
+                }
+            }
+        }
+        if !improved {
+            break;
+        }
+    }
+    wanted
+        .iter()
+        .filter_map(|name| {
+            let c = cost.get(name.as_str()).copied()?;
+            c.is_finite().then(|| (name.clone(), (c * SCALE) as u64))
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -315,6 +506,113 @@ mod tests {
                   "crafting_categories": {cats} }}"#
         ))
         .expect("a prototype in the shape the mod sends")
+    }
+
+    /// A recipe in the wire shape, for the cost table. Same reason `proto`
+    /// deserialises rather than building a literal: the serde attributes
+    /// decide how `ingredients` and `products` are read.
+    fn recipe(
+        name: &str,
+        category: &str,
+        ingredients: &[(&str, u32)],
+        yields: u32,
+    ) -> FactorioRecipe {
+        let ing: Vec<String> = ingredients
+            .iter()
+            .map(|(n, a)| format!(r#"{{"name": "{n}", "amount": {a}}}"#))
+            .collect();
+        factorio_bot_core::serde_json::from_str(&format!(
+            r#"{{ "name": "{name}", "valid": true, "enabled": true,
+                  "category": "{category}", "hidden": false, "energy": 1.0,
+                  "order": "a", "group": "g", "subgroup": "s",
+                  "ingredients": [{}],
+                  "products": [{{"name": "{name}", "amount": {yields}}}] }}"#,
+            ing.join(", ")
+        ))
+        .expect("a recipe in the shape the mod sends")
+    }
+
+    /// The prices behind the two ambiguous categories and the three furnaces,
+    /// transcribed from the game's own recipes (2.1.17 + Space Age).
+    ///
+    /// Not the whole tree: `electronic-circuit` and `steel-plate` are given
+    /// their real ingredients so the transitive sum is a real one rather than
+    /// a flat count, and `iron-plate` / `copper-plate` / `stone` are left
+    /// unproduced so they price as raw — which is what they are to a planner
+    /// that mines and smelts them.
+    fn vanilla_recipes() -> Vec<FactorioRecipe> {
+        vec![
+            recipe("iron-gear-wheel", "crafting", &[("iron-plate", 2)], 1),
+            recipe("copper-cable", "crafting", &[("copper-plate", 1)], 2),
+            recipe(
+                "electronic-circuit",
+                "crafting",
+                &[("iron-plate", 1), ("copper-cable", 3)],
+                1,
+            ),
+            recipe("steel-plate", "smelting", &[("iron-plate", 5)], 1),
+            recipe("stone-furnace", "crafting", &[("stone", 5)], 1),
+            recipe(
+                "steel-furnace",
+                "crafting",
+                &[("steel-plate", 6), ("stone-brick", 10)],
+                1,
+            ),
+            recipe("stone-brick", "smelting", &[("stone", 2)], 1),
+            recipe(
+                "electric-furnace",
+                "crafting",
+                &[
+                    ("steel-plate", 10),
+                    ("advanced-circuit", 5),
+                    ("stone-brick", 10),
+                ],
+                1,
+            ),
+            recipe(
+                "advanced-circuit",
+                "crafting",
+                &[
+                    ("electronic-circuit", 2),
+                    ("plastic-bar", 2),
+                    ("copper-cable", 4),
+                ],
+                1,
+            ),
+            recipe(
+                "assembling-machine-1",
+                "crafting",
+                &[
+                    ("electronic-circuit", 3),
+                    ("iron-gear-wheel", 5),
+                    ("iron-plate", 9),
+                ],
+                1,
+            ),
+            recipe(
+                "assembling-machine-2",
+                "crafting",
+                &[
+                    ("electronic-circuit", 3),
+                    ("iron-gear-wheel", 5),
+                    ("steel-plate", 9),
+                    ("assembling-machine-1", 1),
+                ],
+                1,
+            ),
+            recipe(
+                "assembling-machine-3",
+                "crafting",
+                &[("speed-module", 4), ("assembling-machine-2", 2)],
+                1,
+            ),
+            recipe(
+                "speed-module",
+                "crafting",
+                &[("advanced-circuit", 5), ("electronic-circuit", 5)],
+                1,
+            ),
+        ]
     }
 
     /// Vanilla 2.1.17, transcribed from the game's own data files.
@@ -398,6 +696,10 @@ mod tests {
     /// categories vanilla really does declare on several machines, and names
     /// them all. Without this, "one machine" would be equally explained by a
     /// table that answers one machine for everything.
+    ///
+    /// **This table has no recipes**, so nothing can be priced and the
+    /// preference is inert -- which is the "never a filter" half of the rule,
+    /// asserted rather than described.
     #[test]
     fn a_category_with_several_machines_is_refused_by_name() {
         let table = MachineTable::from_parts(vanilla().iter());
@@ -518,9 +820,10 @@ mod tests {
     }
 
     /// The runnable set is what a refusal names and what a method acts on,
-    /// and it is one computation.
+    /// and it is one computation -- here on a table with **no recipes**, so
+    /// the cost preference is inert and the answer is the pre-2026-09-08 one.
     #[test]
-    fn the_runnable_set_is_the_categories_with_exactly_one_machine() {
+    fn the_runnable_set_is_what_machine_for_answers() {
         let table = MachineTable::from_parts(vanilla().iter());
         assert_eq!(
             table.runnable_categories(),
@@ -542,5 +845,208 @@ mod tests {
             assert!(table.machine_for(category).is_err(), "{category}");
             assert!(!table.runnable_categories().contains(&category.to_string()));
         }
+    }
+    // -----------------------------------------------------------------------
+    // The cost preference (2026-09-08)
+    // -----------------------------------------------------------------------
+
+    /// The headline: the two categories this install declares on several
+    /// machines now name one, and it is the **cheapest to obtain**, not the
+    /// first by name and not the fastest.
+    ///
+    /// `assembling-machine-1` sorts first *and* is cheapest, which alone
+    /// would not tell a cost rule from an alphabetical one -- so
+    /// `crafting-with-fluid` is the discriminating case: its candidates are
+    /// `assembling-machine-2` and `-3`, and cost picks `-2` while
+    /// `crafting_speed` would pick `-3`.
+    #[test]
+    fn an_ambiguous_category_names_the_cheapest_machine() {
+        let table =
+            MachineTable::from_parts_and_recipes(vanilla().iter(), vanilla_recipes().iter());
+        assert_eq!(
+            table.machine_for("advanced-crafting"),
+            Ok(Machine::Entity("assembling-machine-1".into()))
+        );
+        assert_eq!(
+            table.machine_for("crafting-with-fluid"),
+            Ok(Machine::Entity("assembling-machine-2".into()))
+        );
+    }
+
+    /// The validation the module doc claims: priced by the same function, the
+    /// three furnaces come out in the order that re-derives the constant this
+    /// module hard-codes. `smelting` is answered before the table is
+    /// consulted, so this asserts over the costs directly -- if it ever
+    /// disagreed with [`FURNACE`], the discriminator would be the thing to
+    /// doubt.
+    #[test]
+    fn the_cost_rule_independently_re_derives_the_starting_furnace() {
+        let wanted: BTreeSet<String> = ["stone-furnace", "steel-furnace", "electric-furnace"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let costs = obtain_costs(vanilla_recipes().iter(), &wanted);
+        let cheapest = costs
+            .iter()
+            .min_by_key(|(_, c)| **c)
+            .map(|(n, _)| n.clone())
+            .expect("three furnaces priced");
+        assert_eq!(cheapest, FURNACE);
+        assert_eq!(costs.len(), 3, "{costs:?}");
+        assert!(costs["stone-furnace"] < costs["steel-furnace"], "{costs:?}");
+        assert!(
+            costs["steel-furnace"] < costs["electric-furnace"],
+            "{costs:?}"
+        );
+    }
+
+    /// A preference, never a filter: two machines that cost the same are
+    /// genuinely interchangeable, and nothing here has grounds to choose, so
+    /// the refusal is the one that stood before -- naming both.
+    #[test]
+    fn a_tie_is_still_ambiguous() {
+        let protos = [
+            proto("twin-a", "assembling-machine", Some(&["twinning"])),
+            proto("twin-b", "assembling-machine", Some(&["twinning"])),
+        ];
+        let recipes = [
+            recipe("twin-a", "crafting", &[("iron-plate", 4)], 1),
+            recipe("twin-b", "crafting", &[("iron-plate", 2), ("stone", 2)], 1),
+        ];
+        let table = MachineTable::from_parts_and_recipes(protos.iter(), recipes.iter());
+        assert_eq!(
+            table.machine_for("twinning"),
+            Err(MachineRefusal::Ambiguous {
+                category: "twinning".into(),
+                machines: vec!["twin-a".into(), "twin-b".into()],
+            })
+        );
+        assert!(
+            !table
+                .runnable_categories()
+                .contains(&"twinning".to_string())
+        );
+        // The control that keeps the tie from being explained by "no price at
+        // all": both really were priced, and equally.
+        assert_eq!(table.obtain_cost["twin-a"], table.obtain_cost["twin-b"]);
+    }
+
+    /// A machine nothing produces cannot be obtained, so it is not preferred
+    /// -- and one priced candidate beside one unpriceable one is not a tie.
+    #[test]
+    fn an_unbuildable_machine_never_wins_and_does_not_block_the_other() {
+        let protos = [
+            proto("buildable", "assembling-machine", Some(&["odd"])),
+            proto("scenery", "assembling-machine", Some(&["odd"])),
+        ];
+        let recipes = [recipe("buildable", "crafting", &[("iron-plate", 9)], 1)];
+        let table = MachineTable::from_parts_and_recipes(protos.iter(), recipes.iter());
+        assert_eq!(
+            table.machine_for("odd"),
+            Ok(Machine::Entity("buildable".into()))
+        );
+    }
+
+    /// The other half of "never a filter": the same prototypes with the
+    /// recipe table taken away refuse exactly as they did, so a world model
+    /// that carries no recipes plans byte-identically.
+    #[test]
+    fn with_no_recipes_to_price_the_refusal_is_unchanged() {
+        let priced =
+            MachineTable::from_parts_and_recipes(vanilla().iter(), vanilla_recipes().iter());
+        let unpriced = MachineTable::from_parts(vanilla().iter());
+        assert!(priced.machine_for("advanced-crafting").is_ok());
+        assert_eq!(
+            unpriced.machine_for("advanced-crafting"),
+            Err(MachineRefusal::Ambiguous {
+                category: "advanced-crafting".into(),
+                machines: vec![
+                    "assembling-machine-1".into(),
+                    "assembling-machine-2".into(),
+                    "assembling-machine-3".into(),
+                ],
+            })
+        );
+        assert_eq!(
+            unpriced.runnable_categories(),
+            vec![
+                "centrifuging".to_string(),
+                "chemistry".to_string(),
+                "crafting".to_string(),
+                "hand-crafting".to_string(),
+                "oil-processing".to_string(),
+                "smelting".to_string(),
+            ]
+        );
+    }
+
+    /// What the fix is for: the two categories join the runnable set, which
+    /// is what [`crate::products::Categories::planner_runs`] admits, so a
+    /// recipe in one of them stops reading as "no category this planner
+    /// runs".
+    #[test]
+    fn pricing_adds_exactly_the_two_ambiguous_categories_to_the_runnable_set() {
+        let priced =
+            MachineTable::from_parts_and_recipes(vanilla().iter(), vanilla_recipes().iter());
+        assert_eq!(
+            priced.runnable_categories(),
+            vec![
+                "advanced-crafting".to_string(),
+                "centrifuging".to_string(),
+                "chemistry".to_string(),
+                "crafting".to_string(),
+                "crafting-with-fluid".to_string(),
+                "hand-crafting".to_string(),
+                "oil-processing".to_string(),
+                "smelting".to_string(),
+            ]
+        );
+    }
+
+    /// Recycling is not a way to obtain a machine: a recipe that destroys one
+    /// must not make it look free. Without the exclusion `twin-b` would price
+    /// at nothing and win.
+    #[test]
+    fn a_recycling_recipe_cannot_make_a_machine_cheap() {
+        let protos = [
+            proto("twin-a", "assembling-machine", Some(&["twinning"])),
+            proto("twin-b", "assembling-machine", Some(&["twinning"])),
+        ];
+        let recipes = [
+            recipe("twin-a", "crafting", &[("iron-plate", 4)], 1),
+            recipe("twin-b", "crafting", &[("iron-plate", 40)], 1),
+            recipe("twin-b", "recycling", &[("scrap", 1)], 1),
+        ];
+        let table = MachineTable::from_parts_and_recipes(protos.iter(), recipes.iter());
+        assert_eq!(
+            table.machine_for("twinning"),
+            Ok(Machine::Entity("twin-a".into()))
+        );
+    }
+
+    /// A cycle in the recipe graph terminates and prices the way in, not the
+    /// way round: a barrel filled from an emptied barrel must not lower the
+    /// cost of anything.
+    #[test]
+    fn a_cycle_terminates_and_prices_the_way_in() {
+        let wanted: BTreeSet<String> = ["full-barrel", "empty-barrel"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let recipes = [
+            recipe("empty-barrel", "crafting", &[("steel-plate", 1)], 1),
+            recipe("steel-plate", "smelting", &[("iron-plate", 5)], 1),
+            recipe(
+                "full-barrel",
+                "crafting",
+                &[("empty-barrel", 1), ("water", 50)],
+                1,
+            ),
+            // The other half of the cycle, which returns the barrel.
+            recipe("empty-barrel", "crafting", &[("full-barrel", 1)], 1),
+        ];
+        let costs = obtain_costs(recipes.iter(), &wanted);
+        assert_eq!(costs["empty-barrel"], 5_000);
+        assert_eq!(costs["full-barrel"], 55_000);
     }
 }

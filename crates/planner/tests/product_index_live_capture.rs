@@ -327,3 +327,151 @@ fn iron_ore_is_told_to_come_out_of_the_ground() {
         }
     );
 }
+
+/// The categories a full Space Age world's prototypes declare, once
+/// `crafting_categories` crosses the bridge. Hand-listed here rather than read
+/// off a `MachineTable`, because the point of these two tests is what
+/// `ProductIndex` does when chemistry IS runnable, and building a table needs
+/// prototypes this capture is not the carrier for.
+fn space_age_categories() -> Categories {
+    Categories::only([
+        "chemistry",
+        "crafting",
+        "crafting-with-fluid",
+        "crushing",
+        "oil-processing",
+        "organic",
+        "recycling",
+        "smelting",
+    ])
+}
+
+/// The ground a Nauvis map on seed 31337 supplies with no recipe at all.
+fn nauvis_ground() -> [&'static str; 7] {
+    [
+        "iron-ore",
+        "copper-ore",
+        "coal",
+        "stone",
+        "uranium-ore",
+        "crude-oil",
+        "water",
+    ]
+}
+
+/// **Recipe selection is not what blocks the chemistry rung**, and this is the
+/// measurement that says so.
+///
+/// `have:sulfur:10` was reported on 2026-09-08 as declined by `Fabricate` "at
+/// recipe selection, before any fluid reasoning happens". It is not: the only
+/// thing standing between sulfur and a plan is whether a machine in the world
+/// model runs `chemistry`. Admit the category and the index resolves all four
+/// blocked rungs to their base-game recipe, with rules 1-3 doing exactly what
+/// their docs claim -- `sulfur-recycling` excluded by rule 1, `biosulfur` and
+/// `advanced-carbonic-asteroid-crushing` by rule 2 (bioflux and asteroid chunks
+/// are not reachable from Nauvis ground), `basic-oil-processing` picked over
+/// the other four petroleum producers by rule 3.
+///
+/// A world model that predates `crafting_categories` -- which every dump
+/// written before 2026-09-07 is, `workspace/scripts/map.json` included --
+/// declares no machine for chemistry, and the refusal says so in those words.
+/// That is a world-model gap, not a products gap, and this test is where a
+/// future misdiagnosis of it fails.
+#[test]
+fn admitting_chemistry_resolves_sulfur_and_the_whole_battery_chain() {
+    let snapshot = snapshot();
+    let index = index(&snapshot).with_ground_supply(nauvis_ground());
+    let cats = space_age_categories();
+
+    for (product, expected) in [
+        ("sulfur", "sulfur"),
+        ("sulfuric-acid", "sulfuric-acid"),
+        ("battery", "battery"),
+        ("plastic-bar", "plastic-bar"),
+        ("petroleum-gas", "basic-oil-processing"),
+    ] {
+        let chosen = index
+            .sole_recipe_producing(product, &cats)
+            .unwrap_or_else(|e| panic!("{product} should resolve, got: {e}"));
+        assert_eq!(chosen.name, expected, "recipe chosen for {product}");
+    }
+
+    // The premise, so this cannot pass vacuously: sulfur really does have four
+    // producers in the capture, and three of them really are not chemistry.
+    let producers: Vec<&str> = index
+        .recipes_producing("sulfur")
+        .iter()
+        .map(|r| r.name.as_str())
+        .collect();
+    assert_eq!(
+        producers,
+        vec![
+            "advanced-carbonic-asteroid-crushing",
+            "biosulfur",
+            "sulfur",
+            "sulfur-recycling",
+        ]
+    );
+}
+
+/// Rule 2 must not presume the very product it is choosing a recipe for, and
+/// `water` is the case that proves it.
+///
+/// Water's three producers are `ice-melting` (ice), `steam-condensation`
+/// (steam) and `empty-water-barrel` (a `water-barrel`, which `fill-water-barrel`
+/// makes **out of water**). Seed the reachability closure with water and only
+/// the barrel route survives, so rule 2 hands the choice to unbottling water
+/// beside a lake -- and rule 3 never prices anything, because it is only
+/// consulted when more than one candidate is left. Rule 3's doc promise that
+/// barrelling "can never be the strict minimum" is therefore true of rule 3 and
+/// says nothing about this.
+///
+/// The correct answer is that nothing survives, the whole set comes back, and
+/// the caller refuses by name -- which is what this module says everywhere else
+/// about choosing nothing over choosing wrongly.
+#[test]
+fn a_fluid_the_ground_gives_is_not_obtained_by_unbottling_itself() {
+    let snapshot = snapshot();
+    let cats = space_age_categories();
+
+    // The premise: with no ground supply at all rule 2 is disabled, so rule 3
+    // prices the three and picks `ice-melting`. Recorded rather than endorsed
+    // -- it is what this code did before and after the change, and it is what
+    // makes the assertion below a statement about rule 2 and nothing else.
+    let blind = index(&snapshot);
+    assert_eq!(
+        blind
+            .sole_recipe_producing("water", &cats)
+            .expect("rule 3 has an answer on a blind world")
+            .name,
+        "ice-melting"
+    );
+
+    // And with water in the ground supply the answer must not be
+    // `empty-water-barrel`, which is what rule 2 chose before `reachable_here`
+    // began withholding the product it is choosing for: every other producer
+    // was eliminated as unreachable, so the barrel route survived alone and
+    // rule 3 was never consulted.
+    let index = index(&snapshot).with_ground_supply(nauvis_ground());
+    let chosen = index
+        .sole_recipe_producing("water", &cats)
+        .expect("water still resolves");
+    assert_ne!(
+        chosen.name, "empty-water-barrel",
+        "water is not obtained by unbottling water"
+    );
+    assert_eq!(
+        chosen.name, "ice-melting",
+        "rule 3's answer, rule 2 abstaining"
+    );
+
+    // The withholding is scoped: petroleum-gas is not ground-supplied, so its
+    // choice is unchanged and `basic-oil-processing` still wins on rule 3.
+    assert_eq!(
+        index
+            .sole_recipe_producing("petroleum-gas", &cats)
+            .expect("petroleum-gas resolves")
+            .name,
+        "basic-oil-processing"
+    );
+}

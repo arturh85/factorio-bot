@@ -898,8 +898,44 @@ impl ProductIndex {
     /// **Ingredients, not amounts.** This asks whether a thing can be obtained
     /// at all, never whether enough of it can be; costing is the scheduler's
     /// question and a different one.
-    fn reachable_here(&self, categories: &Categories) -> BTreeSet<String> {
+    ///
+    /// # `presuming` is the thing being chosen for, and it is withheld
+    ///
+    /// Rule 2 asks *"which of these recipes could this surface feed"* about a
+    /// product it does not yet have. Seeding the closure with that product
+    /// answers a different question -- *"which could it feed if it already had
+    /// one"* -- and the two differ exactly on the recipes that go **through**
+    /// the product, which are the ones no plan can execute.
+    ///
+    /// Measured, not supposed. Over the live 2.1.17 capture with the full
+    /// Space Age category set and `water` in the ground supply, water's three
+    /// producers are `ice-melting` (wants ice: not reachable here),
+    /// `steam-condensation` (wants steam: likewise) and `empty-water-barrel`
+    /// (wants a `water-barrel`, which `fill-water-barrel` makes **out of
+    /// water**). With water seeded, the barrel route is the sole survivor and
+    /// rule 2 hands the choice to it -- a rig to unbottle water beside a lake,
+    /// which is the same wrong answer `method::supply` records in its own
+    /// comment, arrived at by a different road.
+    ///
+    /// **Rule 3 cannot catch this**, and its doc claiming barrelling "can
+    /// never be the strict minimum" is true only of rule 3: rule 2 runs first
+    /// and had already eliminated every real producer, so rule 3 was handed
+    /// one candidate and never priced anything.
+    ///
+    /// Withholding it restores the safe direction: no candidate is reachable,
+    /// the whole set comes back, and rule 3 -- the preference that was designed
+    /// to reject barrelling and *can* -- decides instead. Rule 2 abstaining is
+    /// exactly the "unknown supply leaves the set alone" behaviour this
+    /// function already promises for a world that charted nothing.
+    ///
+    /// It can only ever fire for a product in [`Self::supply`], since nothing
+    /// else was in the seed to withhold; every plan on a world model that
+    /// declares no crafting categories is untouched, because rule 2 is
+    /// consulted only when more than one candidate is runnable and the
+    /// crafting/smelting map is one-to-one.
+    fn reachable_here(&self, categories: &Categories, presuming: &str) -> BTreeSet<String> {
         let mut reachable = self.supply.clone();
+        reachable.remove(presuming);
         if reachable.is_empty() {
             return reachable;
         }
@@ -988,8 +1024,11 @@ impl ProductIndex {
         &'a self,
         candidates: &[&'a FactorioRecipe],
         categories: &Categories,
+        product: &str,
     ) -> Vec<&'a FactorioRecipe> {
-        let reachable = self.reachable_here(categories);
+        // `product` is withheld from the closure's seed -- see
+        // `reachable_here`'s own doc for the water/barrel case that is.
+        let reachable = self.reachable_here(categories, product);
         let fed: Vec<&FactorioRecipe> = candidates
             .iter()
             .copied()
@@ -1046,6 +1085,15 @@ impl ProductIndex {
     /// unpriceable -- and it cannot be, because the barrel route prices
     /// through `X-barrel`, which prices through `X`. Unpriceable `X` makes
     /// the barrel unpriceable too.
+    ///
+    /// **That argument is about rule 3 and covers only rule 3.** Rule 2 runs
+    /// first and can eliminate every real producer as unreachable, leaving
+    /// barrelling alone -- at which point this function is handed one candidate
+    /// and never prices anything. Measured on `water`, whose real producers
+    /// want ice and steam that Nauvis cannot make, while `water-barrel` is made
+    /// out of water. `reachable_here` withholds the product it is choosing for,
+    /// which is what keeps that from happening; see its doc and
+    /// `a_fluid_the_ground_gives_is_not_obtained_by_unbottling_itself`.
     ///
     /// # It UNDER-prices a multi-output recipe, and that is the wrong
     /// direction
@@ -1177,7 +1225,7 @@ impl ProductIndex {
         // See `reachable_here` for what "can feed" means and for why an
         // unknown supply leaves the set alone.
         let runnable = if runnable.len() > 1 {
-            self.fed_from_the_ground(&runnable, categories)
+            self.fed_from_the_ground(&runnable, categories, product)
         } else {
             runnable
         };
@@ -2324,7 +2372,7 @@ mod unreachable_input_tests {
             "the shallow check's premise: bioflux IS produced by a runnable recipe"
         );
         assert!(
-            !index.reachable_here(&cats()).contains("bioflux"),
+            !index.reachable_here(&cats(), "").contains("bioflux"),
             "and the closure still finds it out of reach"
         );
     }
@@ -2379,7 +2427,7 @@ mod unreachable_input_tests {
         let recipes = sulfur_shaped();
         let index = ProductIndex::from_parts(recipes.iter(), ["sulfur", "gas", "bioflux"]);
         assert!(
-            index.reachable_here(&cats()).is_empty(),
+            index.reachable_here(&cats(), "").is_empty(),
             "no seed, no closure"
         );
         assert!(matches!(
@@ -2465,7 +2513,7 @@ mod unreachable_input_tests {
         ];
         let index = ProductIndex::from_parts(recipes.iter(), ["a-widget", "z-part"])
             .with_ground_supply(["ore"]);
-        let reachable = index.reachable_here(&Categories::only(["crafting"]));
+        let reachable = index.reachable_here(&Categories::only(["crafting"]), "");
         assert!(
             reachable.contains("a-widget"),
             "two links away from the ground, and named out of order: {reachable:?}"
@@ -2483,7 +2531,7 @@ mod unreachable_input_tests {
         ];
         let index = ProductIndex::from_parts(recipes.iter(), ["plate", "armour"])
             .with_ground_supply(["armour"]);
-        let reachable = index.reachable_here(&Categories::only(["crafting", "recycling"]));
+        let reachable = index.reachable_here(&Categories::only(["crafting", "recycling"]), "");
         assert!(
             !reachable.contains("plate"),
             "recycling armour must not count as a way to obtain a plate: {reachable:?}"
@@ -2635,7 +2683,7 @@ mod unreachable_input_tests {
         let index = gas_index(&recipes);
         assert!(
             index
-                .fed_from_the_ground(&index.recipes_producing("gas"), &gas_cats())
+                .fed_from_the_ground(&index.recipes_producing("gas"), &gas_cats(), "gas")
                 .len()
                 > 1,
             "the premise: reachability alone does NOT drop the barrel, because \

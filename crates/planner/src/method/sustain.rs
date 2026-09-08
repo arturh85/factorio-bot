@@ -878,6 +878,40 @@ fn nearest_belt_of(steps: &[Step], at: &Position) -> Option<FactorioEntity> {
     best.map(|(_, entity)| entity)
 }
 
+/// Site exactly one more cell against the world as it stands *now*, and push
+/// its placements onto `steps`.
+///
+/// The whole point is the "now": [`ExpansionCtx::state`] is an overlay that
+/// every `place_one` and every `connect_steps_with` above has already written
+/// into, so a cell sited through this helper routes around the belts its
+/// predecessors laid. `plan_cells` called once for `n` cells cannot do that --
+/// it forks the state before any belt exists.
+///
+/// One cell per call and not `n`, because the belts of cell `k` only exist
+/// after cell `k` has been *belted*, which happens in the caller's loop body
+/// and not here.
+fn site_one_cell(
+    ctx: &mut ExpansionCtx,
+    spec: &CellSpec,
+    from: &Position,
+    steps: &mut Vec<Step>,
+) -> Result<Vec<Cell>, PlannerError> {
+    let fresh = crate::method::produce::plan_cells(
+        &ctx.state,
+        from,
+        spec,
+        1,
+        crate::method::produce::rate_cell_ore(spec),
+    )?;
+    steps.extend(crate::method::produce::cell_steps_fuelled(
+        ctx,
+        spec,
+        &fresh,
+        IGNITION_TICKS,
+    ));
+    Ok(fresh)
+}
+
 impl Method for Sustain {
     fn name(&self) -> &'static str {
         "sustain"
@@ -969,22 +1003,32 @@ impl Method for Sustain {
         // The smelting cells, reusing whatever already stands.
         let mut cells = crate::method::produce::standing_cells(&ctx.state, &spec);
         cells.truncate(needed as usize);
-        let build = needed.saturating_sub(cells.len() as u32);
-        if build > 0 {
-            let fresh = crate::method::produce::plan_cells(
-                &ctx.state,
-                &source.buffer,
-                &spec,
-                build,
-                crate::method::produce::rate_cell_ore(&spec),
-            )?;
-            steps.extend(crate::method::produce::cell_steps_fuelled(
-                ctx,
-                &spec,
-                &fresh,
-                IGNITION_TICKS,
-            ));
-            cells.extend(fresh);
+        // # One cell at a time, and the rest sited AFTER their predecessors'
+        // belts exist
+        //
+        // `plan_cells` sites every cell against a fork holding the previous
+        // cells' **parts** -- a drill and a furnace each -- and nothing else.
+        // The belts are not in that fork because this method has not laid them
+        // yet, so cell 2 was packed as tightly against cell 1 as two drills
+        // allow and then had to fit ~65 belts of coal run through the gap.
+        //
+        // Measured offline against seed 31337, with the two defects above
+        // fixed: cell 2's offtake arm at `[-7.5, -32.5]` refused its coal
+        // branch with `no belt route, blocked by 10 tile(s)`, and every one of
+        // the ten was a belt **cell 1 had just laid**. Siting was blind to the
+        // only thing that was ever going to be in the way.
+        //
+        // So the first cell is sited here, where nothing exists to route
+        // around, and each later one is sited at the bottom of the loop --
+        // against a `ctx.state` that holds every entity its predecessors put
+        // in the overlay, belts included. That ordering also keeps a
+        // single-cell plan byte-identical to what this method produced before,
+        // which is the control that says the change is about the second cell
+        // and not about the first.
+        let mut to_build = needed.saturating_sub(cells.len() as u32);
+        if to_build > 0 {
+            cells.extend(site_one_cell(ctx, &spec, &source.buffer, &mut steps)?);
+            to_build -= 1;
         }
 
         // And the belts.
@@ -1024,7 +1068,42 @@ impl Method for Sustain {
                 }
             })?;
         steps.extend(feed(ctx, &buffer, &coal_drill)?);
-        for cell in &cells {
+        // # Every cell's PLATE chest, not only this one's
+        //
+        // The local-buffer search below takes "the nearest [`BUFFER`] that is
+        // not spoken for", and an offtake sink **is** a [`BUFFER`] — the same
+        // `iron-chest`, one tile off a furnace's face. Excluding only the
+        // cell's own sink is what the first version did, and it is enough for
+        // exactly one cell. With two, **cell 2 adopts cell 1's plate chest as
+        // its coal buffer**: measured offline against seed 31337, cell 2's
+        // furnace at `[-7, -31]` chose `local = [-5.5, -29.5]`, which is
+        // cell 1's `hold the iron-plate the cell makes`.
+        //
+        // Two failures follow from that one adoption, and the *second* is what
+        // the refusal named:
+        //
+        // 1. coal would be belted into the chest the plates come out of, and
+        // 2. `fed_by_machine` reads that chest as already fed — cell 1's
+        //    offtake arm delivers into it — so no coal run is laid at all, the
+        //    tap search over this cell's own (empty) slice of `steps` finds no
+        //    belt, and the arrangement refuses with
+        //    `the cell's coal runs laid no belt to branch the offtake arm's
+        //    own fuel off`.
+        //
+        // That refusal is true and points at the wrong entity: the arm was
+        // fine, the chest three tiles away was not. So the exclusion is
+        // accumulated across cells rather than reset per cell, and it is
+        // seeded with the sinks that already **stand**, which is the replan
+        // half of the same fact.
+        let mut plate_chests: Vec<Position> = cells
+            .iter()
+            .filter_map(|cell| standing_offtake(&ctx.state, &cell.furnace))
+            .map(|offtake| offtake.sink)
+            .collect();
+        let mut index = 0usize;
+        while index < cells.len() {
+            let cell = cells[index].clone();
+            let cell = &cell;
             // # The offtake is sited and placed FIRST, and both halves of that
             // were measured rather than chosen
             //
@@ -1096,6 +1175,14 @@ impl Method for Sustain {
                     planned
                 }
             };
+            // Standing or planned, this cell's sink joins the set the next
+            // cell's coal buffer must not be.
+            if !plate_chests
+                .iter()
+                .any(|sink| Pos::from(sink) == Pos::from(&offtake.sink))
+            {
+                plate_chests.push(offtake.sink.clone());
+            }
 
             // A chest beside the cell, hauled to from the source. Reused when
             // one already stands, for the replan.
@@ -1113,7 +1200,9 @@ impl Method for Sustain {
                 .filter(|e| {
                     e.name == BUFFER
                         && Pos::from(&e.position) != Pos::from(&source.buffer)
-                        && Pos::from(&e.position) != Pos::from(&offtake.sink)
+                        && !plate_chests
+                            .iter()
+                            .any(|sink| Pos::from(sink) == Pos::from(&e.position))
                 })
                 .collect();
             // Nearest first, by an ordering that is total and float-free at
@@ -1150,9 +1239,6 @@ impl Method for Sustain {
                     at
                 }
             };
-            // Where this cell's coal runs start in `steps`, so the branch that
-            // fuels the offtake arm can be hung off one of their belts.
-            let coal_runs_from = steps.len();
             let local_entity =
                 sized(&ctx.state, BUFFER, &local, Direction::North).ok_or_else(|| {
                     PlannerError::SustainNoFuelSource {
@@ -1223,18 +1309,38 @@ impl Method for Sustain {
                     }
                 })?;
             if !fed_by_machine(&ctx.state, &offtake.arm) {
-                let tap =
-                    nearest_belt_of(&steps[coal_runs_from..], &offtake.arm).ok_or_else(|| {
-                        PlannerError::SustainNoOfftake {
-                            item: spec.item.clone(),
-                            machine: ARM.into(),
-                            at: offtake.arm.to_string(),
-                            why:
-                                "the cell's coal runs laid no belt to branch the offtake arm's own \
+                // # Every coal belt this plan knows about, not only this
+                // cell's own slice
+                //
+                // `coal_runs_from` scoped the search to the runs *this* cell
+                // laid, which is right for the first cell and wrong for every
+                // one after it. Cells 2..n share the first cell's coal buffer
+                // -- correctly, that is what stops a second haul from the
+                // source -- so `feed` returns no steps and the slice is
+                // **empty**. Measured offline against seed 31337: with the
+                // plate-chest exclusion above in place, cell 2 chose
+                // `local = [0.5, -31.5]`, cell 1's coal chest, read it as
+                // already fed, laid nothing, and refused with
+                // `the cell's coal runs laid no belt to branch the offtake
+                // arm's own fuel off`. The belts existed; this call could not
+                // see them.
+                //
+                // Widening the *source* set cannot change the ordering the
+                // comment below is about -- the branch is still laid here,
+                // before the drill and furnace runs -- and it only ever adds
+                // candidates to a nearest-wins search. Every belt this method
+                // places carries coal, which is what makes any of them a legal
+                // tap; that caveat is unchanged and is stated below.
+                let tap = nearest_belt_of(&steps, &offtake.arm).ok_or_else(|| {
+                    PlannerError::SustainNoOfftake {
+                        item: spec.item.clone(),
+                        machine: ARM.into(),
+                        at: offtake.arm.to_string(),
+                        why: "the cell's coal runs laid no belt to branch the offtake arm's own \
                               fuel off"
-                                    .into(),
-                        }
-                    })?;
+                            .into(),
+                    }
+                })?;
                 steps.extend(feed(ctx, &tap, &arm_entity)?);
             }
             if let Some(drill) = sized(&ctx.state, DRILL, &cell.drill, cell.facing) {
@@ -1242,6 +1348,14 @@ impl Method for Sustain {
             }
             if let Some(furnace) = sized(&ctx.state, FURNACE, &cell.furnace, Direction::North) {
                 steps.extend(feed(ctx, &local_entity, &furnace)?);
+            }
+            index += 1;
+            // The next cell, sited now that this one's belts stand in the
+            // overlay. See the note above the first cell for why the siting
+            // is staggered rather than done in one call.
+            if index == cells.len() && to_build > 0 {
+                cells.extend(site_one_cell(ctx, &spec, &source.buffer, &mut steps)?);
+                to_build -= 1;
             }
         }
 
@@ -1892,6 +2006,86 @@ mod tests {
 
     /// `Direction`'s half-turn, written out because the type carries no
     /// `opposite()` this crate can call.
+    /// A goal wanting two cells refuses about the GROUND, not about a belt
+    /// that is standing right there.
+    ///
+    /// # The defect, and why the message was the whole of it
+    ///
+    /// A second cell used to refuse with
+    ///
+    /// ```text
+    /// the burner-inserter at [-7.5, -32.5] makes iron-plate and nothing
+    /// within reach can take it away: the cell's coal runs laid no belt to
+    /// branch the offtake arm's own fuel off
+    /// ```
+    ///
+    /// which reads as the fuel-physics ceiling this whole arrangement is
+    /// supposed to have -- *an arm that moves plates cannot fuel itself* -- and
+    /// is not one. Measured offline against seed 31337 by printing what the
+    /// second cell actually chose:
+    ///
+    /// ```text
+    /// furnace=[-5, -27] arm=[-5.5, -28.5] local=[0.5, -31.5]  local_fed=false
+    /// furnace=[-7, -31] arm=[-7.5, -32.5] local=[-5.5, -29.5] local_fed=true
+    /// ```
+    ///
+    /// `[-5.5, -29.5]` is cell 1's **plate** chest -- `hold the iron-plate the
+    /// cell makes`, one tile off its furnace's face and an [`BUFFER`] like any
+    /// other. Cell 2 adopted it as its coal buffer, read it as already fed
+    /// (cell 1's offtake arm delivers into it), laid no coal run at all, and
+    /// then had no belt to tap. Two failures, and the refusal named the
+    /// second.
+    ///
+    /// So this test asserts the *kind* of refusal. Once the exclusion is
+    /// cumulative the second cell shares cell 1's **coal** chest, which is
+    /// correct, and fails where a 1x1 chest has to fail -- on its fourth
+    /// perimeter tile, a fact about ground that
+    /// [`PlannerError::SustainNoRouteForFuel`] carries with the tiles named.
+    /// `SustainNoOfftake` here means the plate chest has been adopted again.
+    /// # What this test does NOT cover, measured rather than assumed
+    ///
+    /// Three defects were fixed together and each was reverted in place, one
+    /// at a time, against this module's tests **and** against seed 31337's
+    /// dump. Only one of the three is caught here:
+    ///
+    /// | reverted | this module | `plan --world workspace/scripts/map.json` |
+    /// |---|---|---|
+    /// | the cumulative plate-chest exclusion | **green** | catches it: the coal buffer becomes `[-5.5, -29.5]`, cell 1's plate chest |
+    /// | the whole-plan tap search | **this test goes red** | catches it |
+    /// | siting each cell after its predecessors' belts | **green** | catches it: back to `no belt route, blocked by 10 tile(s)` |
+    ///
+    /// So two of the three are falsifiable only against the real map. The
+    /// fixture's two patches sit differently enough that cell 2 never reaches
+    /// for cell 1's plate chest there, and a fixture cannot be talked into a
+    /// geometry it does not have. **A green mutation is a finding, not a
+    /// pass**, and the finding is that this module's fixture is not a
+    /// two-cell fixture -- it exercises the first cell thoroughly and the
+    /// second hardly at all. The falsifier for the other two is:
+    ///
+    /// ```text
+    /// factorio-bot plan --world workspace/scripts/map.json \
+    ///     --goal sustain:iron-plate:16:36000 --bots 1,2,3,4
+    /// ```
+    #[test]
+    fn a_second_cell_refuses_about_ground_and_not_about_a_belt_that_stands() {
+        let roster = [BotId(1)];
+        let state = near_state();
+        let two_cells = Goal::Sustain {
+            item: "iron-plate".into(),
+            per_minute: 30,
+            window_ticks: 7200,
+        };
+        let err = expand(&[two_cells], &state, &registry_for(&roster), BotId(1))
+            .expect_err("two burner cells do not fit around one 1x1 coal chest");
+        assert!(
+            matches!(err, PlannerError::SustainNoRouteForFuel { .. }),
+            "the second cell refused with {err:?}; a `SustainNoOfftake` here means it adopted \
+             an earlier cell's plate chest as its coal buffer, found that chest already fed, and \
+             laid no coal run to tap -- the refusal then names the arm and the defect is three \
+             tiles away"
+        );
+    }
+
     fn opposite(d: Direction) -> Direction {
         match d {
             Direction::North => Direction::South,

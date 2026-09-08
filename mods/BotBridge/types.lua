@@ -635,6 +635,50 @@ function serialize_entity_prototype(entity)
     if ok and val ~= nil then
         record.fluid_source_offset = {x = val.x or val[1], y = val.y or val[2]}
     end
+    -- INSERTER REACH. How far this inserter swings, as the two vectors the
+    -- game itself uses: where it takes from and where it puts, both relative
+    -- to its own position in the NORTH frame.
+    --
+    -- `crates/planner/src/state.rs`'s `inserter_reach` writes these out by
+    -- hand -- `1` for every inserter and `2` for `long-handed-inserter` -- and
+    -- says in its own doc that it is "the fifth hand-written table in this
+    -- file". This is the field that deletes it, exactly as
+    -- `get_supply_area_distance()` deleted `pole_supply_half_extent` and
+    -- `get_max_wire_distance()` deleted `pole_wire_reach`.
+    --
+    -- **They are ATTRIBUTES, not methods**, unlike the two poles fields above
+    -- -- checked against this install's `runtime-api.json` rather than
+    -- recalled: `LuaEntityPrototype.inserter_pickup_position` (order 125) and
+    -- `inserter_drop_position` (order 126), both `read_type = "Vector"`,
+    -- both `subclasses = {"Inserter"}`, both optional.
+    --
+    -- **The two are NOT mirror images and a reader must not assume they are.**
+    -- Vanilla is `pickup_position = {0, -1}` against
+    -- `insert_position = {0, 1.2}` (base/prototypes/entity/entities.lua:2385),
+    -- and the long-handed one is `{0, -2}` against `{0, 2.2}`. The 0.2 is real:
+    -- an inserter's hand drops a fifth of a tile PAST the tile centre, so the
+    -- two vectors differ in magnitude while landing on tiles that are
+    -- symmetric about the inserter. Whoever converts these to tile offsets
+    -- must floor into tiles rather than round the numbers, and must do it for
+    -- each vector separately.
+    --
+    -- **`subclasses = {"Inserter"}` makes absence the discriminator**, the
+    -- same shape as `fluid_source_offset` above: a `stone-furnace` has no
+    -- pickup position because a furnace does not reach out and take from the
+    -- chest beside it, and that is a fact about the prototype rather than a
+    -- gap in this collector. What it cannot distinguish on its own is a world
+    -- dumped before this field existed -- every archived dump in
+    -- `workspace/scripts/` -- which is why the Rust side keeps a fallback
+    -- table for vanilla names and documents it as a fallback for old senders
+    -- and never as the definition of reach.
+    ok, val = pcall(function() return entity.inserter_pickup_position end)
+    if ok and val ~= nil then
+        record.inserter_pickup_position = {x = val.x or val[1], y = val.y or val[2]}
+    end
+    ok, val = pcall(function() return entity.inserter_drop_position end)
+    if ok and val ~= nil then
+        record.inserter_drop_position = {x = val.x or val[1], y = val.y or val[2]}
+    end
     -- BEACON AND POLE GEOMETRY. `FactorioEntityPrototype` carried nothing
     -- electrical at all, which is why `crates/planner/src/method/power.rs`
     -- writes `pole_supply_half_extent` out by hand as a table of vanilla

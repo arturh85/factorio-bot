@@ -1952,6 +1952,62 @@ pub struct FactorioEntityPrototype {
     /// `default`, so every archived dump and snapshot still loads.
     #[serde(default)]
     pub fluid_source_offset: Option<Position>,
+    /// Where an inserter of this prototype takes items **from**, as an offset
+    /// from its own position in the north frame -- `LuaEntityPrototype`'s
+    /// `inserter_pickup_position`, `{0, -1}` for the vanilla `inserter` and
+    /// `{0, -2}` for `long-handed-inserter`.
+    ///
+    /// # It is what makes reach derivable instead of written out
+    ///
+    /// `crates/planner/src/state.rs`'s `inserter_reach` is a table of vanilla
+    /// inserter names, and every geometry in the planner that asks "can this
+    /// inserter touch that tile" reads it. A mod that adds an inserter, or
+    /// changes a vanilla one's swing, is invisible to a table -- the same
+    /// mod-compatibility defect that `supply_area_distance` and
+    /// `maximum_wire_distance` were landed to close for poles.
+    ///
+    /// # It is not the mirror of [`Self::inserter_drop_position`]
+    ///
+    /// Vanilla pairs `{0, -1}` with `{0, 1.2}`, and the long-handed one pairs
+    /// `{0, -2}` with `{0, 2.2}`. The extra fifth of a tile is the hand
+    /// releasing past the tile centre, so **the two vectors differ in
+    /// magnitude while landing on tiles that are symmetric about the
+    /// inserter**. A reader wanting tile offsets must floor each vector into
+    /// its own tile rather than negate one to get the other.
+    ///
+    /// # `None` is two different things, and a caller must not merge them
+    ///
+    /// The runtime API marks the attribute `subclasses: ["Inserter"]`, so for
+    /// a `stone-furnace` `None` is a **fact**: a furnace does not reach out
+    /// and take from the chest beside it, and that absence is the
+    /// discriminator that keeps inserter geometry off everything else. But it
+    /// is *also* what every world dumped before 2026-09-08 says about every
+    /// prototype including the inserters, because the mod did not send the
+    /// field. Those two are indistinguishable here, which is why
+    /// `state.rs::inserter_reach` keeps a fallback table of vanilla names --
+    /// **documented there as a fallback for old senders and never as the
+    /// definition of reach.** Deleting it would make every archived dump
+    /// report that a `long-handed-inserter` reaches nowhere, which is a
+    /// plausible lie rather than a diagnosable failure.
+    ///
+    /// `default`, so every archived dump and snapshot still loads.
+    #[serde(default)]
+    pub inserter_pickup_position: Option<Position>,
+    /// Where an inserter of this prototype **puts** what it took, as an offset
+    /// from its own position in the north frame -- `LuaEntityPrototype`'s
+    /// `inserter_drop_position`, `{0, 1.2}` for the vanilla `inserter` and
+    /// `{0, 2.2}` for `long-handed-inserter`.
+    ///
+    /// The other half of [`Self::inserter_pickup_position`]; read that field's
+    /// doc for why the pair is not a mirror, why `None` means two different
+    /// things, and what the fallback is. Named `insert_position` at data stage
+    /// and `inserter_drop_position` on the runtime API -- the same two-names
+    /// trap as `mining_drill_radius`, and grepping the data files for the
+    /// runtime spelling finds nothing.
+    ///
+    /// `default`, so every archived dump and snapshot still loads.
+    #[serde(default)]
+    pub inserter_drop_position: Option<Position>,
     /// A `resource` prototype's category -- `basic-solid`, `basic-fluid`,
     /// `hard-solid` -- named `category` at data stage and `resource_category`
     /// at runtime. This is the discriminator the game itself uses: a character
@@ -3787,6 +3843,8 @@ mod tests {
             max_energy_production: None,
             mining_drill_radius: None,
             fluid_source_offset: None,
+            inserter_pickup_position: None,
+            inserter_drop_position: None,
             solar_panel_performance_at_day: None,
             solar_panel_performance_at_night: None,
             electric_buffer_capacity: None,

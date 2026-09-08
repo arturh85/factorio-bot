@@ -3,6 +3,7 @@
 
 pub mod assemble;
 pub mod blueprint;
+pub mod cellstock;
 pub mod connect;
 pub mod extract;
 pub mod fabricate;

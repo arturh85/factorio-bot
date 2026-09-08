@@ -1549,6 +1549,43 @@ pub fn complete_cells(state: &PlanState, spec: &AssemblySpec) -> Vec<Position> {
     out
 }
 
+/// Where a complete cell for `spec` puts what it makes: the sink each cell's
+/// [`Role::OutputInserter`] delivers into.
+///
+/// **Found the way [`is_drained`] finds it, not by the role table**, and that
+/// asymmetry is deliberate: `is_drained` takes the sink on trust and never
+/// names it, because the claim it answers is "the output has somewhere to go".
+/// This asks the narrower question a *drawer* needs -- where is the container
+/// -- and so it does name one, filtering to [`CHEST`]: a belt or a second
+/// machine is a perfectly good sink for `Goal::Producing` and is not something
+/// [`crate::method::cellstock::DrawFromCell`] can walk up to and empty.
+///
+/// Deduped and in the `(x, y, name)` order `entities_within` already imposes,
+/// so the list is order-independent for the same reason `complete_cells` is.
+pub fn cell_output_chests(state: &PlanState, spec: &AssemblySpec) -> Vec<Position> {
+    let nearby = state.entities_within(&Position::new(0., 0.), CELL_SCAN_RADIUS);
+    let mut out: Vec<Position> = Vec::new();
+    for product in complete_cells(state, spec) {
+        for inserter in nearby
+            .iter()
+            .filter(|inserter| inserter.name == INSERTER)
+            .filter(|inserter| state.delivers_into(&product, &inserter.position))
+        {
+            for sink in nearby.iter().filter(|sink| {
+                sink.name == CHEST
+                    && sink.position != inserter.position
+                    && sink.position != product
+                    && state.delivers_into(&inserter.position, &sink.position)
+            }) {
+                if !out.contains(&sink.position) {
+                    out.push(sink.position.clone());
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Every machine that belongs to a complete cell for `spec`: each product
 /// machine [`complete_cells`] names, and the machine feeding it through its
 /// link inserter -- found the way [`loaded_feeders`] finds it, as the
@@ -2194,6 +2231,53 @@ fn cell_steps(
                 amount,
                 item
             );
+            // What this charge will *become*, recorded on the last input the
+            // product machine needs -- the supply chest, the one branch that
+            // reaches the product machine without going through the
+            // intermediate.
+            //
+            // **This is the cell's ledger, and it is what makes a cell's
+            // output spendable by another goal.** Until now a cell was a
+            // structure and nothing more: `Goal::Producing` is satisfied by
+            // machines standing, no method could ask a standing cell for an
+            // item, and so production plateaued at whatever the plan's bill
+            // had already hand-crafted. `crate::method::cellstock::DrawFromCell`
+            // spends against exactly this and cannot over-draw, because
+            // `Condition::BufferHas` is checked against it.
+            //
+            // `charge_products` and not a rate: a charge is finite and
+            // nothing refills it (see [`CELL_CHARGE_TICKS`]), so this is the
+            // whole of what the cell will make. It is a claim about the
+            // future -- the machines still have to run -- and the wait is
+            // charged to the drawing action's own duration, where the tempo
+            // that decides it lives.
+            let mut eff = vec![Effect::LoseItem {
+                who: Actor::Role,
+                item: item.clone(),
+                count: amount,
+            }];
+            //
+            // **Only for a science pack**, and that limit was bought by a
+            // measured regression rather than chosen: with the ledger written
+            // for every product, `producing:transport-belt:6` went from a
+            // 307-action plan to `4 transport-belt in the buffer at
+            // [33.5, -12.5] does not hold there` -- `Withdraw` spent the belts
+            // the cell had yet to make on building the cell. No machine,
+            // chest, inserter, belt or pole has a pack in its bill, so the
+            // loop is impossible for a pack by construction. See
+            // `crate::method::cellstock::is_science_pack`.
+            if chest_role == Role::SupplyChest
+                && crate::method::cellstock::is_science_pack(&ctx.state, &spec.item)
+                && let Some(sink) = cell.at(Role::OutputChest)
+            {
+                eff.push(Effect::BufferGain {
+                    pos: sink.position.clone(),
+                    entity: CHEST.into(),
+                    slot: InventorySlot::Chest,
+                    item: spec.item.clone(),
+                    count: spec.charge_products(),
+                });
+            }
             build.charges.push((
                 item.clone(),
                 amount,
@@ -2207,11 +2291,7 @@ fn cell_steps(
                         count: amount,
                     },
                     pre,
-                    eff: vec![Effect::LoseItem {
-                        who: Actor::Role,
-                        item,
-                        count: amount,
-                    }],
+                    eff,
                     duration: TRANSFER_TICKS,
                     pinned: None,
                     label,
@@ -2666,7 +2746,6 @@ mod tests {
     use crate::method::have::registry_for;
     use crate::network::ActionNetwork;
     use factorio_bot_core::factorio::world::FactorioSurface;
-    use factorio_bot_core::test_utils::fixture_world;
     use std::sync::Arc;
 
     const PACK: &str = "automation-science-pack";
@@ -2678,7 +2757,14 @@ mod tests {
     /// the capture in `tests/red_science_cell.rs`. They are added `enabled` so
     /// these tests are about the layout rather than about the research ladder.
     fn world() -> FactorioSurface {
-        let world = fixture_world();
+        // `world_with_technologies` rather than `fixture_world`: the force's
+        // technology table is what says an item is a science pack (see
+        // `crate::method::cellstock::is_science_pack`), and a world with no
+        // technologies at all says of every item that it is not one. That
+        // default is the safe direction -- no ledger entry, and the plan a
+        // cell built before this rung would have produced -- but it also
+        // makes a fixture with no force unable to exercise the ledger.
+        let world = crate::test_world::world_with_technologies();
         let green: factorio_bot_core::types::FactorioRecipe =
             factorio_bot_core::serde_json::from_str(
                 r#"{
@@ -3824,6 +3910,152 @@ mod tests {
             fuelled.iter().all(|(_, count)| *count == 2),
             "the charge should be the network's draw split four ways: {fuelled:?}"
         );
+    }
+
+    /// **The ledger is written for a pack and for nothing else**, and the
+    /// asymmetry is the whole of what keeps a cell from paying for itself out
+    /// of its own future output.
+    ///
+    /// `transport-belt` is the case that found it: a belt cell's charge
+    /// promised belts, `Withdraw` spent them on the belt run that fuels the
+    /// cell, and `producing:transport-belt:6` -- 307 actions on `master` --
+    /// refused with `4 transport-belt in the buffer at [33.5, -12.5] does not
+    /// hold there`. A pack cannot close that loop because nothing a cell is
+    /// built from has a pack in its bill.
+    #[test]
+    fn only_a_science_pack_gets_a_ledger_entry_on_the_output_chest() {
+        let state = bare(&[BotId(1)]);
+        assert!(
+            crate::method::cellstock::is_science_pack(&state, PACK),
+            "a technology in the fixture eats {PACK}"
+        );
+        assert!(
+            !crate::method::cellstock::is_science_pack(&state, "transport-belt"),
+            "no lab eats a transport-belt, so its cell writes no ledger entry"
+        );
+    }
+
+    /// **A pack a standing cell can make is DRAWN out of it, not crafted in a
+    /// hand.** The join this whole rung exists for, asserted end to end.
+    ///
+    /// Two goals in one expansion, in order, because that ordering *is* the
+    /// mechanism: `run_steps` expands them against one overlay, so the second
+    /// goal is asked of a world in which the first goal's cell already stands.
+    /// `crate::method::cellstock::DrawFromCell` -- registered ahead of
+    /// `Withdraw` and of `HandCraft` -- then claims it.
+    ///
+    /// The negative half is the load-bearing one: before this, **every** pack
+    /// in this project's history reached a lab as `ActionKind::Craft`, and a
+    /// cell standing beside the bot changed nothing at all, because the
+    /// registry asked `HandCraft` first and it says yes to every crafting
+    /// recipe.
+    #[test]
+    fn a_pack_a_standing_cell_makes_is_drawn_from_it_rather_than_hand_crafted() {
+        let bots = [BotId(1)];
+        let state = powered(&bots);
+        let charge = spec().charge_products();
+        let net = expand(
+            &[
+                Goal::Producing {
+                    item: PACK.into(),
+                    per_minute: 6,
+                },
+                Goal::Have {
+                    item: PACK.into(),
+                    count: charge,
+                    whose: Holder::Share(BotId(1)),
+                    via: None,
+                },
+            ],
+            &state,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .expect("a powered fixture can build a cell and then draw from it");
+        let drawn: u32 = net
+            .actions()
+            .filter_map(|a| match &a.kind {
+                ActionKind::Remove {
+                    entity,
+                    slot: InventorySlot::Chest,
+                    item,
+                    count,
+                    ..
+                } if entity == CHEST && item == PACK => Some(*count),
+                _ => None,
+            })
+            .sum();
+        assert_eq!(
+            drawn, charge,
+            "the whole charge comes out of the cell's output chest"
+        );
+        let crafted: u32 = net
+            .actions()
+            .filter_map(|a| match &a.kind {
+                ActionKind::Craft { item, count } if item == PACK => Some(*count),
+                _ => None,
+            })
+            .sum();
+        assert_eq!(
+            crafted, 0,
+            "nothing is hand-crafted while the cell's own charge covers the goal"
+        );
+    }
+
+    /// **What one charge cannot cover falls back to the hands, and says so.**
+    ///
+    /// The bound is [`CELL_CHARGE_TICKS`]' own: a cell is charged once and
+    /// nothing refills it, so a goal for more than `charge_products` is partly
+    /// machine-made and partly hand-crafted. Asserting the *residual* rather
+    /// than merely "some crafting happens" is what would catch a draw that
+    /// over-spent the ledger -- which would plan a bot walking to an empty
+    /// chest, the one failure this modelling exists to prevent.
+    #[test]
+    fn a_goal_larger_than_one_charge_draws_the_charge_and_crafts_the_rest() {
+        let bots = [BotId(1)];
+        let state = powered(&bots);
+        let charge = spec().charge_products();
+        let want = charge + 3;
+        let net = expand(
+            &[
+                Goal::Producing {
+                    item: PACK.into(),
+                    per_minute: 6,
+                },
+                Goal::Have {
+                    item: PACK.into(),
+                    count: want,
+                    whose: Holder::Share(BotId(1)),
+                    via: None,
+                },
+            ],
+            &state,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .expect("a powered fixture can build a cell and then draw from it");
+        let drawn: u32 = net
+            .actions()
+            .filter_map(|a| match &a.kind {
+                ActionKind::Remove {
+                    entity,
+                    slot: InventorySlot::Chest,
+                    item,
+                    count,
+                    ..
+                } if entity == CHEST && item == PACK => Some(*count),
+                _ => None,
+            })
+            .sum();
+        let crafted: u32 = net
+            .actions()
+            .filter_map(|a| match &a.kind {
+                ActionKind::Craft { item, count } if item == PACK => Some(*count),
+                _ => None,
+            })
+            .sum();
+        assert_eq!(drawn, charge, "a charge is all the cell has");
+        assert_eq!(crafted, want - charge, "the residual is hand work");
     }
 
     /// The arithmetic on its own, including the stack bound a fuel slot is.

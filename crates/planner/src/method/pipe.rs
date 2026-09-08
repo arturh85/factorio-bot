@@ -189,7 +189,7 @@ pub(crate) struct FluidPort {
 
 impl FluidPort {
     /// Every tile this port needs a pipe on, junction last.
-    fn tiles(&self) -> Vec<Position> {
+    pub(crate) fn tiles(&self) -> Vec<Position> {
         let mut tiles = self.candidates.clone();
         if !tiles.iter().any(|tile| tile == &self.junction) {
             tiles.push(self.junction.clone());

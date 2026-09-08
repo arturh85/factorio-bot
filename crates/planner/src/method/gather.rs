@@ -161,6 +161,29 @@ impl Method for Gather {
         state.has_resource_patches(entity) && extract::extractor_for(state, entity).is_ok()
     }
 
+    /// **Every placement here spends what this method's own subgoals put in a
+    /// hand**, so the rig is one bot's errand from the first pole to the last
+    /// pipe.
+    ///
+    /// The extractor, the buffer tank and every pipe of the run are stated as
+    /// `Goal::Have { whose: Holder::Share(ctx.chain_actor) }` -- sized against
+    /// one named bot -- and then placed by a sibling `Step::Act` carrying a
+    /// `HasItem { who: Role }`. Nothing converges: each item arrives through
+    /// its own subgoal, so [`Method::converges`] is honestly `false` and the
+    /// goal opened no chain at all until 2026-09-07. The bill was therefore
+    /// sized against a bot the scheduler was never told about, which is the
+    /// defect [`Method::hands_over`] exists for, and `gathered:crude-oil`
+    /// composed with `producing:petroleum-gas` is where it showed:
+    /// `craft 10 pipe` handed bot 2 ten pipes, the seventeen *unchained*
+    /// `place pipe` actions of the wellhead run were free to settle on bot 2
+    /// as well, and `craft 1 pumpjack` -- owned by bot 2, sized against it,
+    /// and correct -- then found no pipes. The same run reproduced the fluid
+    /// session's own report verbatim one attempt earlier, `has 1
+    /// small-electric-pole`, off the same three poles.
+    fn hands_over(&self, goal: &Goal, _state: &PlanState) -> bool {
+        matches!(goal, Goal::Gathered { .. })
+    }
+
     fn expand(&self, goal: &Goal, ctx: &mut ExpansionCtx) -> Result<Vec<Step>, PlannerError> {
         let Goal::Gathered { entity, unlocks } = goal else {
             return Err(PlannerError::NoApplicableMethod {
@@ -521,7 +544,7 @@ fn boxes_overlap(a: &Rect, b: &Rect) -> bool {
 #[cfg(test)]
 mod gather_tests {
     use super::*;
-    use crate::action::ActionKind;
+    use crate::action::{ActionKind, Actor, Condition};
     use crate::ids::BotId;
     use crate::method::pipe::fluid_ports;
     use crate::method::util::{RecipeGate, recipe_for, recipe_gate};
@@ -555,6 +578,53 @@ mod gather_tests {
             entity: "crude-oil".into(),
             unlocks: None,
         }
+    }
+
+    /// **The rig is one bot's errand, and nothing in it converges.**
+    ///
+    /// Every placement spends an item a `Holder::Share` subgoal put in one
+    /// named hand, but each item arrives through its own subgoal -- so the
+    /// honest answer to `converges` is no, and before [`Method::hands_over`]
+    /// existed the driver opened no chain and the scheduler split the rig
+    /// across the roster. The pair of assertions is the whole point: dropping
+    /// either one leaves a claim that was never in question.
+    #[test]
+    fn the_wellhead_rig_hands_over_without_converging() {
+        let state = oil_state(OPEN);
+        assert!(
+            !Gather.converges(&goal(), &state),
+            "nothing in a rig has to *meet* anything: each item is its own subgoal"
+        );
+        assert!(
+            Gather.hands_over(&goal(), &state),
+            "and yet every placement spends what this method's own subgoal bought"
+        );
+
+        // Not accidental: the rig really does place things out of a hand, so
+        // there really is a hand-over for the chain to hold together.
+        let mut ctx = ExpansionCtx::new(state, BotId(1));
+        let steps = Gather
+            .expand(&goal(), &mut ctx)
+            .expect("the fixture routes");
+        let from_a_hand = steps
+            .iter()
+            .filter(|step| match step {
+                Step::Act(action) => action.pre.iter().any(|c| {
+                    matches!(
+                        c,
+                        Condition::HasItem {
+                            who: Actor::Role,
+                            ..
+                        }
+                    )
+                }),
+                _ => false,
+            })
+            .count();
+        assert!(
+            from_a_hand >= 2,
+            "control: the rig must place at least two things out of a hand, got {from_a_hand}"
+        );
     }
 
     /// Every position a `Place` of `name` names, in emission order.

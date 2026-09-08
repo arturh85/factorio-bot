@@ -256,7 +256,11 @@ class bug in `ReplayScrubber.vue` is fixed in passing by defining the token.
 - **Seam:** Rust snapshot test, TS contract test, `pnpm lint` (vitest does not
   type-check; a stale test helper has already slipped through).
 - **Rust:** `FlowExport` round-trips; `export()` on the fixture graph yields
-  name-sorted rates; the recorder writes `flow.jsonl` at each keyframe.
+  name-sorted rates; the recorder writes `flow.jsonl` at each keyframe. These
+  go in `#[cfg(test)] mod tests` inside the source files, not under
+  `crates/core/tests/`: that directory is being consolidated into
+  `tests/suite/` by the performance workstream (82 files moved by `git mv`,
+  one crate per commit), and a new file there would be renamed underneath us.
 - **Visual:** the coverage gate stays enforced (`pnpm run test:coverage`).
 
 ## 6 · Phasing
@@ -283,4 +287,13 @@ flow panel and the provenance chips.
 - **Peer work in flight.** `WalkSettled.stalls` (`9f55d023`) already changed
   `types.ts`; rebase before touching `app/src/api/`. The planner and core graph
   files the peer listed are not touched by Phases 1–2; Phase 3's
-  `flow_export.rs` is a new file beside `flow_graph.rs`.
+  `flow_export.rs` is a new file beside `flow_graph.rs`, which is under active
+  performance measurement and must not be edited. `entity_graph.rs` is also
+  being changed (patch caching, a `BTreeSet` index, `DashMap` replacement), so
+  `flow_export.rs` rebases past that before relying on any signature there.
+- **Determinism of the export.** `FlowRates` is name-sorted since `152a3ba0`
+  (it was per-process hash order before) and `resource_patches` numbering is
+  stable since `d362475b`. Any display that re-sorts rates by value keeps name
+  as the tiebreak, or the export becomes nondeterministic again. Historical
+  run records predate both fixes: a patch id read from an old keyframe is not
+  comparable across runs.

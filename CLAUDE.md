@@ -71,6 +71,22 @@ and `git stash`: commit with explicit paths (`git commit -m "..." -- <paths>`),
 and note that **an explicit path is still a path to the whole file** — naming a
 file carefully does not separate two writers editing it.
 
+**And `git checkout -- <file>` belongs in that list, which this section learned
+the hard way on 2026-09-08.** A falsification harness restored its mutations
+with `git checkout -- <file>` — the natural reach, and it does not restore *the
+mutation*, it restores **the last committed state**, silently discarding the
+agent's own uncommitted work in all four files it touched. The tell was a build
+error naming a method that had existed minutes earlier
+(`hands_over is not a member of trait Method`), which reads like a compile
+problem rather than a data-loss one. Recovered from the patch scripts, diffstat
+verified identical, and committed *before* re-running.
+
+Two durable rules from it: **a mutation sweep must back up by file copy and
+restore by copy plus `touch`** (`cp -p` preserves mtime, so cargo re-runs the
+*mutated* binary against restored source — a false red), and **commit before a
+sweep, not after**, so the worst case is a lost mutation rather than lost work.
+`git restore` has exactly the same hazard under a different name.
+
 **Every cargo command needs `nix develop -c`.** `pkg-config` and Lua 5.4 come
 from the flake, not from the ambient shell, so a bare `cargo build` dies in
 `mlua-sys`' build script with

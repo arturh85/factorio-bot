@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Falsify every test added by the peaceful-mode change, one mutation at a time.
 
+    python3 tools/falsify/peaceful_mode.py      # 10 mutations, all must go RED
+
 Each entry breaks exactly one thing the implementation promises and names the
 test that must go red. The substitution is asserted to match **exactly once**:
 a mutation that matched zero times, or twice, is not the experiment it claims.
@@ -16,7 +18,8 @@ import shutil
 import subprocess
 import sys
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# <repo>/tools/falsify/<this file>
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 RCON = "crates/core/src/factorio/rcon.rs"
 PROV = "crates/core/src/record/provenance.rs"
 ANAL = "tools/run_analysis.py"

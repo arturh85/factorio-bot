@@ -314,8 +314,16 @@ pub struct WalkObservation {
     pub replied_tick: Option<Ticks>,
     pub error: Option<String>,
     /// How many of this bot's remaining steps were abandoned because this walk
-    /// failed. `None` on every walk that did not halt its bot — including a
-    /// failed walk that was the bot's last step, which abandons nothing.
+    /// failed. `None` on every walk that did not halt its bot, and **on no
+    /// other walk**: a failed walk that was the bot's last step abandons
+    /// nothing and is written `Some(0)`, so `abandoned.is_some()` is exactly
+    /// "this walk halted its bot" and nothing narrower. See
+    /// [`ExecutionLog::halt_walk`], and
+    /// `crate::recover::walk_halted_on_a_stall`, which is the query that
+    /// depends on it. This sentence used to say the opposite about the
+    /// last-step case, while
+    /// `a_walk_that_fails_as_the_last_step_halts_with_nothing_behind_it`
+    /// asserted `Some(0)` two files away.
     ///
     /// **A failed walk stops the bot** (`crate::run::run_bot_signalled` says
     /// why: a walk's effect is a position, and no plan edge carries it), and

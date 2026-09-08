@@ -7,6 +7,7 @@
 //! from acting.
 
 use crate::log::{Attempt, ExecutionLog, Status};
+use factorio_bot_core::factorio::rcon::walk_reports_stalled_leg;
 use factorio_bot_planner::{
     ActionId, ActionKind, ActionNetwork, BotId, Goal, PlanState, Schedule, expand,
     pick_chain_actor, registry_for, schedule,
@@ -287,6 +288,60 @@ fn diverged_from_the_world(net: &ActionNetwork, log: &ExecutionLog) -> bool {
     })
 }
 
+/// Whether some walk halted its bot because a leg stalled.
+///
+/// # A walk halt is invisible to every other escalation here
+///
+/// [`exhausted_tier_one`] reads *actions*, and a walk is not one: it carries no
+/// [`ActionId`], so it is keyed `(bot, step_index)` in the log and never
+/// appears in `net.actions()`. What a halt leaves behind in the action log is
+/// the bot's remaining steps published `Status::Lost` — and `Lost` is
+/// deliberately excluded from the escalation budget, because nobody ever gave
+/// those a verdict (`crate::run::halt` says so in as many words). So before
+/// this check, **a bot that halts on the same walk every round loops in tier 1
+/// forever**: every proposal is a valid schedule, every run halts at the same
+/// tile, nothing ever reaches `Status::Failed` three times, and the caller's
+/// budget runs out with no progress and no escalation. That is what
+/// `run-1788833726-34821` cost: bot 3 stalled on a `tree-01` at tick 7,980 and
+/// took **474 of its 482 steps** with it, 19,000 ticks before any bot died.
+///
+/// # Why the first stall is enough, and why only a stall
+///
+/// A stall does not reach a halt until it has already been retried.
+/// `FactorioRcon::move_player_timed` answers a stalled leg with a **fresh path
+/// from where the character actually stands**, up to `WALK_ATTEMPTS` (3) times,
+/// each one put through the same standability judgement as the first. So a
+/// stall that halts a bot is the fourth failure of the same question, and tier
+/// 1 — which re-walks the same destination with the same bot — would only ask
+/// it a fifth, sixth and seventh time.
+///
+/// That retry is not a straw man: it works, and the archive says what it works
+/// on. Across `workspace/session-logs` it recovered **17 of 18** stalls, and
+/// every one of the 17 was blocked by something that moves or that a fresh
+/// route can go around — 11 by an entity this run had just built
+/// (`stone-furnace` x6, `burner-mining-drill` x4, `pipe`), 6 by another bot's
+/// character. The one it could not recover is the tree. So declining tier 1
+/// here is not a claim that re-pathing is useless; it is the observation that
+/// re-pathing has already been spent by the time this function is asked.
+///
+/// Only a stall. The other reasons a walk fails want the opposite treatment,
+/// and collapsing them is the mistake this project keeps paying for:
+/// `player N has no character` is a death that **heals in 600 ticks**, which is
+/// precisely the transient tier 1 exists for, and 7 of the archive's 24 failed
+/// walks are that. [`walk_reports_stalled_leg`] is BotBridge's own wording,
+/// matched through `crates/core` rather than re-spelled here, so a reword in
+/// `control.lua` fails a test instead of quietly retiring this check.
+///
+/// Declining on the first occurrence rather than on a count is the same
+/// judgement [`refused_by_the_game`] and [`diverged_from_the_world`] already
+/// make: a verdict about the ground is not a circumstance, and re-issuing it
+/// asks the same question of the same world.
+fn walk_halted_on_a_stall(log: &ExecutionLog) -> bool {
+    log.walks().any(|(_bot, _index, walk)| {
+        walk.abandoned.is_some() && walk.error.as_deref().is_some_and(walk_reports_stalled_leg)
+    })
+}
+
 /// `keep`, plus every succeeded action that a kept action depends on.
 ///
 /// Those extra nodes are not work — the schedule never assigns them — they are
@@ -362,9 +417,15 @@ pub fn recover(
     // circumstance: a site the game turned down, and a transfer that found
     // less than the plan believed was there. Re-dispatching either verbatim
     // asks the same question of the same world.
+    // A third refusal, and the one nothing else here can see: a bot whose walk
+    // halted it after the game had already been asked for three fresh paths.
+    // See `walk_halted_on_a_stall` -- a walk carries no `ActionId`, so the
+    // budget above never counts it and tier 1 would re-walk the same tile
+    // until the caller's own budget ran out.
     if !exhausted_tier_one(net, log)
         && !refused_by_the_game(net, log, state)
         && !diverged_from_the_world(net, log)
+        && !walk_halted_on_a_stall(log)
     {
         // Two different networks, on purpose.
         //
@@ -836,6 +897,124 @@ mod tests {
                  not its third: {verdict}"
             );
         }
+    }
+
+    /// The mod's own wording for a stalled leg, as `run-1788833726-34821`
+    /// archived it. Copied verbatim rather than paraphrased: the whole point
+    /// of matching through `walk_reports_stalled_leg` is that the executor and
+    /// `control.lua` agree on a string, and a test that invents its own
+    /// wording proves the agreement it was written to check.
+    const ARCHIVED_STALL: &str = "game rejected the command: Unexpected Response: \
+         ERROR: stuck while walking, leg 2 of 10 made no progress for 61 ticks \
+         from (206.12890625/-189.86328125) to (205.5/-189.5), moved 0.42 tiles \
+         of a 1.06-tile leg that began at (206.234375/-190.265625), blocked at \
+         (205.599/-189.333) by tree 'tree-01' on tile 'grass-4', steering \
+         southwest at 0.150 tiles/tick, walking_state read back walking=true, \
+         then stepped clear to (206.234375/-190.265625)";
+
+    /// A death, which is the walk failure that must **keep** tier 1: the
+    /// character comes back in 600 ticks and the same plan then works.
+    const ARCHIVED_DEATH: &str = "game rejected the command: Unexpected Response: \
+         ERROR: player 4 has no character: died at tick 34873 killed by \
+         small-worm-turret, respawns in 600 ticks";
+
+    /// A halted walk with no verdict text at all -- an older log, or a walk
+    /// whose failure never carried a message. Absent is not a value: it must
+    /// not read as a stall.
+    fn halted_walk(log: &mut ExecutionLog, error: Option<&str>) {
+        log.start_walk(BotId(1), 0, Position::new(9., 9.), 0, 60);
+        if let Some(e) = error {
+            log.fail_walk(BotId(1), 0, e.to_string());
+        }
+        log.halt_walk(BotId(1), 0, 474);
+    }
+
+    /// **The 474 actions.** A bot whose walk stalled it must not be sent to
+    /// walk the same tile again by tier 1 -- and before this check nothing in
+    /// `recover` could see that it had happened at all, because a walk has no
+    /// `ActionId` and its casualties are published `Lost`, which
+    /// `exhausted_tier_one` deliberately ignores.
+    ///
+    /// The control is the load-bearing half: the *identical* network and log,
+    /// differing only in the walk's verdict, must still reschedule. Without it
+    /// this test would pass just as well against a `recover` that had stopped
+    /// rescheduling anything.
+    #[test]
+    fn a_bot_halted_by_a_stalled_walk_escalates_past_tier_one() {
+        let s = state();
+        let tile = ore_tile(&s);
+        let mut id_gen = ActionIdGen::new();
+        let mut net = ActionNetwork::new();
+        let stranded = net.add(mine_at(&mut id_gen, &tile, 2));
+
+        // The control: the same halt, from a death rather than a stall. A
+        // dead character respawns in 600 ticks, so re-running the plan is
+        // exactly right and tier 1 must keep it.
+        let mut healed = ExecutionLog::default();
+        healed.start(stranded, 0);
+        healed.fail(stranded, 10, "player was busy".to_string());
+        halted_walk(&mut healed, Some(ARCHIVED_DEATH));
+        assert!(
+            matches!(
+                recover(&ore_goal(4), &net, &s, &BOTS, &healed),
+                Recovery::Rescheduled { .. }
+            ),
+            "a halt on a death is a transient and stays in tier 1"
+        );
+
+        // The same again with no verdict on the walk at all.
+        let mut silent = ExecutionLog::default();
+        silent.start(stranded, 0);
+        silent.fail(stranded, 10, "player was busy".to_string());
+        halted_walk(&mut silent, None);
+        assert!(
+            matches!(
+                recover(&ore_goal(4), &net, &s, &BOTS, &silent),
+                Recovery::Rescheduled { .. }
+            ),
+            "a halt whose reason nobody recorded is unknown, not a stall"
+        );
+
+        // And the stall itself, differing from the control in one string.
+        let mut stalled = ExecutionLog::default();
+        stalled.start(stranded, 0);
+        stalled.fail(stranded, 10, "player was busy".to_string());
+        halted_walk(&mut stalled, Some(ARCHIVED_STALL));
+        assert!(
+            walk_halted_on_a_stall(&stalled),
+            "premise: the archived wording is recognised as a stall"
+        );
+        assert!(
+            !matches!(
+                recover(&ore_goal(4), &net, &s, &BOTS, &stalled),
+                Recovery::Rescheduled { .. }
+            ),
+            "a stall reaches a halt only after three fresh paths have already \
+             failed; tier 1 would ask a fourth time"
+        );
+    }
+
+    /// A walk that stalled but did **not** halt its bot cannot exist -- every
+    /// failed walk halts -- but a walk that *succeeded* must never be read as
+    /// one, or a run with one recovered stall in it could never use tier 1
+    /// again.
+    #[test]
+    fn a_walk_that_did_not_halt_is_not_a_halt_on_a_stall() {
+        let mut log = ExecutionLog::default();
+        log.start_walk(BotId(1), 0, Position::new(9., 9.), 0, 60);
+        log.fail_walk(BotId(1), 0, ARCHIVED_STALL.to_string());
+        assert!(
+            !walk_halted_on_a_stall(&log),
+            "no halt count, so this walk did not stop its bot"
+        );
+        // `abandoned = Some(0)` is a halt that cost nothing, and it is still a
+        // halt: the bot stopped, on its own last step. See
+        // `WalkObservation::abandoned`.
+        log.halt_walk(BotId(1), 0, 0);
+        assert!(
+            walk_halted_on_a_stall(&log),
+            "halting on the last step is still halting"
+        );
     }
 
     #[test]

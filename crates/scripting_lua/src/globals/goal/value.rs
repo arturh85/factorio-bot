@@ -1652,10 +1652,28 @@ mod tests {
             )
             .eval()
             .expect("script");
-        let converted = goal_from_lua(&g).expect("converts");
-        assert!(
-            matches!(&converted, Goal::All(parts) if parts.len() == 2),
-            "{converted}"
+        // Asserted as an exact `Goal`, not as a shape, because this value has
+        // a counterpart outside the process: it is byte-for-byte the goal
+        // `factorio-bot plan --goal-json '{"All":[{"Gathered":{"entity":
+        // "crude-oil"}},{"Produced":{"item":"petroleum-gas","count":45,
+        // "whose":"Anyone","via":"basic-oil-processing"}}]}'` carries, which
+        // is how the composition was confirmed to reach the planner against a
+        // real world dump. A looser assertion here would let the two drift.
+        assert_eq!(
+            goal_from_lua(&g).expect("converts"),
+            Goal::All(vec![
+                Goal::Gathered {
+                    entity: "crude-oil".into(),
+                    unlocks: None,
+                },
+                Goal::Produced {
+                    item: "petroleum-gas".into(),
+                    count: 45,
+                    whose: Holder::Anyone,
+                    unlocks: None,
+                    via: Some("basic-oil-processing".into()),
+                },
+            ])
         );
     }
 

@@ -62,9 +62,21 @@ print("recording run " .. run_id)
 -- ticks -- the entire window the thing being measured existed in.
 rcon.sampling_start(run_id)
 
+-- `roster` is a FUNCTION, not a table -- `supervisor.new` refuses a table by
+-- name, which is how this comment came to exist. Taken whole from
+-- `factory_stage3.lua`: ask the game who it has, and let the supervisor decide
+-- what to do about a bot that died. Eighteen cells is a lot of walking and this
+-- run is not peaceful, so a death is the expected case rather than the corner.
+local function current_roster()
+  local ok, ids = pcall(function() return rcon.players() end)
+  pcall(function() rcon.inventory_contents_at({}) end)
+  if ok and type(ids) == "table" then return ids end
+  return nil
+end
+
 local sup = supervisor.new(
   supervisor.list { goal.producing("iron-plate", PER_MINUTE) },
-  { bots = bots, stall_limit = 3, max_iterations = 10, roster = bots }
+  { bots = bots, stall_limit = 3, max_iterations = 10, roster = current_roster }
 )
 
 print(string.format("goal: producing:iron-plate:%d", PER_MINUTE))

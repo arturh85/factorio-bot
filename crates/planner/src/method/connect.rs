@@ -1437,6 +1437,43 @@ mod tests {
         }
     }
 
+    /// A route may not spend the sides of the chest it serves. The fixture's
+    /// cheapest route runs down the chest's west side to reach its south
+    /// arm -- the shape the measured haul took on seed 31337, leaving the
+    /// next cell no side to load from. Both west cells must stay empty, and
+    /// the run must still be made: the long way round exists.
+    #[test]
+    fn a_route_keeps_off_the_other_sides_of_the_chest_it_serves() {
+        let (mut ctx, from, to) = crate::test_world::furnace_and_chest_hugged_on_the_way_in();
+        let steps = connect_steps(&mut ctx, &from, &to, &"coal".into())
+            .expect("the long way round is open");
+        let unload = placements(&steps, "inserter");
+        assert_eq!(
+            unload.last().map(|(p, _)| p.clone()),
+            Some(Position::new(12.5, 3.5)),
+            "fixture precondition: the chest is loaded from its south side"
+        );
+        let laid: Vec<Position> = placements(&steps, "transport-belt")
+            .into_iter()
+            .map(|(p, _)| p)
+            .chain(
+                placements(&steps, "underground-belt")
+                    .into_iter()
+                    .map(|(p, _)| p),
+            )
+            .collect();
+        for side in [Position::new(11.5, 2.5), Position::new(10.5, 2.5)] {
+            assert!(
+                !laid.iter().any(|p| *p == side),
+                "the run hugs the chest's west side at {side}: {laid:?}"
+            );
+        }
+        assert!(
+            laid.len() > 10,
+            "the detour is the long way round, not a shorter run through the wall: {laid:?}"
+        );
+    }
+
     /// **The IMPORTANT-2 regression test.** Each end is found by a search
     /// that does not know what the other claimed. In tight geometry the two
     /// can land on the very same tiles, and without the claim-as-you-go grid

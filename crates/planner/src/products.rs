@@ -937,6 +937,31 @@ impl ProductIndex {
     /// correctly be `biosulfur` on Gleba. That is a stronger statement than
     /// the one asked for, and it needed no mod names to make.
     ///
+    /// # Why this is not a fifth [`crate::method::util::RecipeGate`] verdict
+    ///
+    /// It looks like one -- `biosulfur` is a recipe this planner should not
+    /// pick, and `RecipeGate` is where "should not pick" is decided. The gate
+    /// even has the neighbouring verdict: `Unobtainable`, *"disabled and no
+    /// technology unlocks it"*. `biosulfur` has one, so it comes back
+    /// `NeedsResearch` and stays live, and the planner will bill research for
+    /// a recipe whose ingredients nothing on this surface can make. That gap
+    /// is real and worth closing on its own terms.
+    ///
+    /// It could not have closed this one, and the call sites say why rather
+    /// than the bodies. **Every one of the eleven `recipe_gate` callers is
+    /// handed a recipe that has already been chosen** -- by
+    /// `method::util::recipe_for`, which keys on a name, or by
+    /// [`ProductIndex::recipe_producing`], which is this function's caller.
+    /// `method::fabricate::job_for` is the shape of all of them: it selects on
+    /// one line and gates on the next, twelve lines later. A verdict computed
+    /// for a recipe already selected cannot decide between candidates, because
+    /// the refusal that stopped these goals was raised before any of them was
+    /// selected -- and `sole_recipe_producing` has no `PlanState` to ask a gate
+    /// with, by design, so that an index is valid for a whole expansion.
+    ///
+    /// So the two belong at different times, not in one place. This chooses;
+    /// the gate judges what was chosen.
+    ///
     /// # It is a preference and never a filter
     ///
     /// When nothing survives -- an unknown supply, or a product genuinely

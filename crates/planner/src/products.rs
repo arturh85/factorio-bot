@@ -2242,15 +2242,63 @@ mod unreachable_input_tests {
             supply.contains("iron-ore"),
             "a charted patch seeds it: {supply:?}"
         );
+        // **The discriminator, and the fixture can express it**: this world
+        // declares six `entity_type == "resource"` prototypes and spawns four
+        // patches. `uranium-ore` and `crude-oil` are the two it declares and
+        // does not have, so an implementation reading the prototype table
+        // instead of the charted map fails here.
+        //
+        // The assertion was `!supply.contains("calcite")` until a mutation
+        // sweep found it green: no fixture world declares calcite, so both the
+        // right answer and the wrong one satisfied it. It named a real
+        // resource from the live install and tested nothing.
+        let declared: Vec<String> = world
+            .globals
+            .entity_prototypes
+            .iter()
+            .filter(|p| p.value().entity_type == "resource")
+            .map(|p| p.key().clone())
+            .collect();
         assert!(
-            !supply.contains("calcite"),
-            "a resource with no patch here must not: {supply:?}"
+            declared.contains(&"uranium-ore".to_string()),
+            "the premise: this world DECLARES uranium-ore -- {declared:?}"
+        );
+        assert!(
+            !supply.contains("uranium-ore") && !supply.contains("crude-oil"),
+            "a resource declared but never charted must not seed the closure: \
+             {supply:?}"
         );
 
         let dry = factorio_bot_core::test_utils::fixture_world_without_water();
         assert!(
             !ground_supply(&dry).contains("water"),
             "and no lake means no water in the seed"
+        );
+    }
+
+    /// **The fixpoint has to run more than once, and recipe-name order is
+    /// what decides whether one pass would have been enough.** The closure
+    /// walks `by_recipe`, which is sorted by name, so a chain whose steps
+    /// happen to be in dependency order closes on the first pass by luck.
+    /// Here `a-widget` sorts *before* the `z-part` it needs, so pass one
+    /// reaches only `z-part` and pass two is what reaches the widget.
+    ///
+    /// Found by a mutation sweep: replacing the loop with a single pass left
+    /// every other test green, because every other fixture's chain is in
+    /// alphabetical dependency order. The rule this repo keeps relearning --
+    /// a fixture that cannot express the case says nothing about it.
+    #[test]
+    fn the_closure_iterates_until_nothing_new_is_reached() {
+        let recipes = [
+            rn("a-widget", "crafting", &["z-part"], "a-widget"),
+            rn("z-part", "crafting", &["ore"], "z-part"),
+        ];
+        let index = ProductIndex::from_parts(recipes.iter(), ["a-widget", "z-part"])
+            .with_ground_supply(["ore"]);
+        let reachable = index.reachable_here(&Categories::only(["crafting"]));
+        assert!(
+            reachable.contains("a-widget"),
+            "two links away from the ground, and named out of order: {reachable:?}"
         );
     }
 

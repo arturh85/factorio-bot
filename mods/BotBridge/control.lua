@@ -3450,6 +3450,65 @@ function player_collides_with_tile(tile)
 	return cached
 end
 
+-- Which fluid an offshore pump standing on a tile would draw from it, by tile
+-- NAME, or nil when the prototype names none.
+--
+-- **This is a question about ground, not about a machine.** A 2.0 offshore
+-- pump's output fluidbox carries no filter at all -- measured 2026-09-08
+-- across all 56 fluid boxes in this mod set, and the only `only=water` boxes
+-- anywhere are the boiler's and heat-exchanger's *inputs*, which supply
+-- nothing. The runtime call everyone reaches for,
+-- `LuaEntity::get_fluid_source_fluid`, is `subclasses = {"OffshorePump"}`: it
+-- can only be asked of a pump that already stands, which is useless to a
+-- planner deciding where to put one. `LuaTilePrototype::fluid` is the same
+-- fact on the prototype -- "The fluid offshore pump produces on this tile, if
+-- any" -- with no entity and no runtime call needed.
+--
+-- Cached by name for `player_collides_with_tile`'s reason: `writeout_tiles`
+-- runs over a whole 32x32 chunk and is already marked SLOW, so one engine
+-- crossing per distinct tile name is the difference between 1024 lookups and
+-- a handful. Prototypes cannot change at runtime, so the cache never goes
+-- stale, and it is rebuilt from scratch on load because it is not in
+-- `storage`.
+local tile_fluid_by_name = {}
+
+function tile_fluid_of_name(name)
+	local cached = tile_fluid_by_name[name]
+	if cached == nil then
+		local ok, fluid = pcall(function()
+			local proto = prototypes.tile[name]
+			return proto and proto.fluid and proto.fluid.name or false
+		end)
+		cached = (ok and fluid) or false
+		tile_fluid_by_name[name] = cached
+	end
+	if cached == false then return nil end
+	return cached
+end
+
+-- The fluid a tile yields, resolving the way the game itself documents it.
+--
+-- `get_fluid_source_fluid` "accounts for visible tile, hidden tile and double
+-- hidden tile" -- landfill laid over water still pumps water -- so this walks
+-- the same three in the same order and stops at the first that names one.
+-- Only ever the visible tile on a fresh map, but a covered lake is exactly
+-- the case where guessing from the visible name would be confidently wrong.
+function tile_fluid(tile)
+	local fluid = tile_fluid_of_name(tile.name)
+	if fluid ~= nil then return fluid end
+	local ok, hidden = pcall(function() return tile.hidden_tile end)
+	if ok and hidden then
+		fluid = tile_fluid_of_name(hidden)
+		if fluid ~= nil then return fluid end
+	end
+	local ok2, double_hidden = pcall(function() return tile.double_hidden_tile end)
+	if ok2 and double_hidden then
+		fluid = tile_fluid_of_name(double_hidden)
+		if fluid ~= nil then return fluid end
+	end
+	return nil
+end
+
 -- The header the two GROUND writeouts share: `x1,y1;x2,y2;<surface>: `.
 --
 -- Ground is the one thing on the wire that could not say where it was. Every
@@ -3475,15 +3534,51 @@ function ground_header(surface, area)
 	return area.left_top.x..","..area.left_top.y..";"..area.right_bottom.x..","..area.right_bottom.y..";"..surface.name..": "
 end
 
+-- A THIRD field per tile: the fluid an offshore pump here would draw.
+--
+-- `name:collidable` becomes `name:collidable:fluid`, and the third field has
+-- three forms, because "this tile gives nothing" and "we did not look" are
+-- different facts and an empty slot cannot hold both:
+--
+--   `water:1:water`    -- yields water. Definite.
+--   `grass-1:0:`       -- yields nothing. **Definite**, and the fact that
+--                         makes "there is no water here" sayable.
+--   `grass-1:0:?`      -- we could not tell.
+--
+-- A tile with only TWO fields is an older sender, and the Rust parser leaves
+-- it `TileFluid::Unknown` -- which is every archived server log and both world
+-- dumps. Absent is not dry.
+--
+-- **The hidden-tile walk is bought with ONE call per chunk, not 1024.** A
+-- covered lake (landfill over water) still pumps water, so the visible name
+-- alone would be confidently wrong there; but `count_tiles_filtered` with
+-- `has_hidden_tile` answers for the whole area at once, and on ground the game
+-- has only just generated the answer is zero. Only when it is not do the 1024
+-- per-tile `hidden_tile` reads happen, and only for that chunk.
 function writeout_tiles(tick, surface, area) -- SLOW! beastie can do ~2.8 per tick
 	--if my_client_id ~= 1 then return end
 	local header = ground_header(surface, area)
 	local tile = nil
 	local line = {}
+	local ok, covered = pcall(function()
+		return surface.count_tiles_filtered({area = area, has_hidden_tile = true, limit = 1})
+	end)
+	-- Could not ask => could not tell. `?` for the whole chunk rather than a
+	-- map-wide `dry` nobody checked.
+	local resolvable = ok
+	local any_covered = ok and covered > 0
 	for y = area.left_top.y, area.right_bottom.y-1 do
 		for x = area.left_top.x, area.right_bottom.x-1  do
 			tile = surface.get_tile(x,y)
-			table.insert(line, tile.name .. (player_collides_with_tile(tile) and ":1" or ":0"))
+			local fluid
+			if not resolvable then
+				fluid = "?"
+			elseif any_covered then
+				fluid = tile_fluid(tile) or ""
+			else
+				fluid = tile_fluid_of_name(tile.name) or ""
+			end
+			table.insert(line, tile.name .. (player_collides_with_tile(tile) and ":1" or ":0") .. ":" .. fluid)
 		end
 	end
 	writeout(tick, "tiles", header .. table.concat(line, ","))

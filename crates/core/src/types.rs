@@ -1029,6 +1029,93 @@ impl FromStr for Rect {
     }
 }
 
+/// Which fluid an **offshore pump standing on this tile** would draw from it.
+///
+/// # The question a fluidbox filter turned out not to answer
+///
+/// A Factorio 2.0 offshore pump takes its fluid from the *tile*, not from its
+/// own prototype: `LuaEntity::get_fluid_source_fluid` is documented as
+/// *"Checks what is expected fluid to be produced from the offshore pump's
+/// source tile"*, and its output fluidbox is honestly
+/// [`FluidFilter::Any`]. So "what does a pump here produce" is a question
+/// about ground, and this is the field that carries the answer.
+///
+/// **`get_fluid_source_fluid` is not the crossing, and cannot be.** It is a
+/// *method* on `LuaEntity` with `subclasses: ["OffshorePump"]` (checked in
+/// `workspace/factorio-api-docs/runtime-api.json`, `application_version`
+/// 2.1.17), so it can only be asked of a pump that already stands. A planner
+/// deciding *where* to put one has no such entity. The prototype-side answer
+/// is `LuaTilePrototype::fluid`, an optional `LuaFluidPrototype` described as
+/// *"The fluid offshore pump produces on this tile, if any"* -- the same fact,
+/// available with no entity and no runtime call, which is what the mod sends.
+///
+/// # Three answers, and the two that look alike are the point
+///
+/// The same shape as [`FluidFilter`], for the same reason -- an
+/// `Option<String>` has two slots for three states:
+///
+/// - [`TileFluid::Yields`] -- *"a `water` tile gives `water`"*. Definite.
+/// - [`TileFluid::Dry`] -- *"a `grass-1` tile gives nothing"*. **Also
+///   definite, and a completely different fact.** It is what makes a refusal
+///   ("there is no water here") sayable.
+/// - [`TileFluid::Unknown`] -- the sender never said: an archived dump, a mod
+///   predating this field, a read that raised, or a chunk whose covered tiles
+///   the bulk writeout would have had to guess at. Not a fact about the game.
+///
+/// [`Self::yields`] and [`Self::is_dry`] are both *positive* claims and both
+/// are false for `Unknown`; neither is the negation of the other. A single
+/// `has_fluid(name) -> bool` could not distinguish its own two meanings, which
+/// is the defect class this type exists to avoid.
+///
+/// # Why it is not a `bool` called `is_water`
+///
+/// [`FactorioTile::is_water`] tests the name against a hard-coded pair,
+/// `["deepwater", "water"]`, read off a *vanilla* capture. This install runs
+/// Space Age, where `ammoniacal-ocean` yields ammonia and Vulcanus' lava
+/// yields lava, and where none of those names appear in that list. Naming the
+/// fluid rather than the tile is what makes the rule survive a mod -- the
+/// same argument that replaced the hard-coded smelting rate.
+#[derive(
+    Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema, utoipa::ToSchema,
+)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TileFluid {
+    /// The tile prototype names the fluid a pump on it would produce.
+    Yields { fluid: String },
+    /// The tile prototype names no fluid: a pump here produces nothing. An
+    /// answer, not an absence.
+    Dry,
+    /// Nobody said. The default, so an archived record or an older mod
+    /// deserialises to *"not captured"* rather than to `Dry`.
+    #[default]
+    Unknown,
+}
+
+impl TileFluid {
+    /// Does this tile definitely yield `fluid`?
+    #[must_use]
+    pub fn yields(&self, fluid: &str) -> bool {
+        matches!(self, TileFluid::Yields { fluid: f } if f == fluid)
+    }
+
+    /// Does this tile definitely yield **nothing**?
+    ///
+    /// False for [`TileFluid::Unknown`], which knows nothing either way.
+    #[must_use]
+    pub fn is_dry(&self) -> bool {
+        matches!(self, TileFluid::Dry)
+    }
+
+    /// The fluid named, if one is.
+    #[must_use]
+    pub fn named(&self) -> Option<&str> {
+        match self {
+            TileFluid::Yields { fluid } => Some(fluid.as_str()),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct FactorioTile {
@@ -1046,6 +1133,18 @@ pub struct FactorioTile {
     /// is what will let a later reader notice that.
     #[serde(default)]
     pub surface: Option<SurfaceId>,
+    /// Which fluid an offshore pump standing here would draw, from
+    /// `LuaTilePrototype::fluid`. See [`TileFluid`] for why this is a tile
+    /// question at all and why it is not an `Option<String>`.
+    ///
+    /// [`TileFluid::Unknown`] is the default, so every archived server log,
+    /// both world dumps and any older mod deserialise to *"not captured"*
+    /// rather than asserting that the whole map is [`TileFluid::Dry`].
+    #[schemars(
+        description = "Which fluid an offshore pump on this tile would produce, from `LuaTilePrototype::fluid` -- `yields` names it, `dry` means the prototype names none, `unknown` means the sender did not say."
+    )]
+    #[serde(default)]
+    pub fluid: TileFluid,
 }
 
 impl FactorioTile {
@@ -1722,6 +1821,34 @@ pub struct FactorioEntityPrototype {
     /// still loads, with `None` meaning *unknown reach* -- never zero reach.
     #[serde(default)]
     pub mining_drill_radius: Option<f64>,
+    /// Which **tile** this entity draws its fluid from, as an offset from its
+    /// own position in the north frame -- `LuaEntityPrototype`'s
+    /// `fluid_source_offset`, `{0, -1}` for the vanilla `offshore-pump`.
+    ///
+    /// # It is what makes the water rule derivable instead of written out
+    ///
+    /// A Factorio 2.0 offshore pump's output fluidbox has no filter at all
+    /// ([`FluidFilter::Any`], measured across all 56 boxes in this mod set on
+    /// 2026-09-08); it produces whatever the ground under its source tile
+    /// gives. So *which fluid does this pump make* is answered by pairing
+    /// this offset with [`TileFluid`] on the tile it lands on, and neither
+    /// half alone can say.
+    ///
+    /// # `None` is a fact here, not a gap -- and that is unusual
+    ///
+    /// The runtime API marks the attribute `subclasses: ["OffshorePump"]`, so
+    /// it is absent for every other prototype in the game. **An entity with no
+    /// fluid source offset does not draw from the ground**, which is exactly
+    /// the discriminator a caller needs to keep this rule off boilers and
+    /// pumpjacks without naming either. It is still `None` for a record
+    /// written before the field existed, and a caller must not read that as
+    /// "definitely not a ground-drawing entity" -- the tile it would point at
+    /// is `TileFluid::Unknown` in such a record too, so the rule declines
+    /// rather than misfiring either way.
+    ///
+    /// `default`, so every archived dump and snapshot still loads.
+    #[serde(default)]
+    pub fluid_source_offset: Option<Position>,
     /// A `resource` prototype's category -- `basic-solid`, `basic-fluid`,
     /// `hard-solid` -- named `category` at data stage and `resource_category`
     /// at runtime. This is the discriminator the game itself uses: a character
@@ -3470,6 +3597,7 @@ mod tests {
             electric_energy_usage: None,
             max_energy_production: None,
             mining_drill_radius: None,
+            fluid_source_offset: None,
             solar_panel_performance_at_day: None,
             solar_panel_performance_at_night: None,
             electric_buffer_capacity: None,

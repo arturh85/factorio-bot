@@ -8539,6 +8539,8 @@ mod tests {
                 // Fixture terrain; it observed no surface. See
                 // `FactorioTile::surface`.
                 surface: None,
+                // Grass yields nothing, and says so.
+                fluid: factorio_bot_core::types::TileFluid::Dry,
             });
         }
         world

@@ -32,6 +32,9 @@ fn water(x: i32, y: i32) -> FactorioTile {
         // Nothing observed this tile, so it claims no surface. See
         // `FactorioTile::surface`.
         surface: None,
+        fluid: factorio_bot_core::types::TileFluid::Yields {
+            fluid: "water".into(),
+        },
     }
 }
 

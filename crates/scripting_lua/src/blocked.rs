@@ -366,6 +366,13 @@ mod tests {
                     position: Position::new(f64::from(x), f64::from(y)),
                     color: None,
                     surface: None,
+                    fluid: if wet {
+                        factorio_bot_core::types::TileFluid::Yields {
+                            fluid: "water".to_owned(),
+                        }
+                    } else {
+                        factorio_bot_core::types::TileFluid::Dry
+                    },
                 });
             }
         }

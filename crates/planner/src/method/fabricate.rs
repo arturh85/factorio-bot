@@ -273,6 +273,36 @@ pub enum FabricateRefusal {
         buffer: String,
         site: String,
     },
+
+    /// The machine is electric, supply exists, and **no pole run this planner
+    /// will build carries power to where the machine has to stand.**
+    ///
+    /// `method::extract`'s `ExtractionNotModelled` and
+    /// `method::blueprint`'s `BlueprintRefused` say the same thing for their
+    /// own sites; this is the third, and the site is not negotiable here for
+    /// the same reason it is not there: a fluid ingredient puts the machine
+    /// beside its source, so "somewhere else" is a different rig.
+    ///
+    /// **A wall, not a shortfall** — like every other variant here — and
+    /// returned before the machine's `Place` is emitted, so no half-powered
+    /// rig is left in the plan.
+    #[error(
+        "the {machine} running {recipe} at {site} draws {kw:.0} kW, and no run of poles this \
+         planner will build carries power to it"
+    )]
+    #[diagnostic(
+        code(planner::no_power_route),
+        help(
+            "put a generator or a pole run nearer the source the machine is sited beside -- a \
+             refinery on no network sets its recipe and makes nothing"
+        )
+    )]
+    NoPowerRoute {
+        recipe: String,
+        machine: String,
+        kw: f64,
+        site: String,
+    },
 }
 
 /// What this method would do for a goal, or nothing.
@@ -968,6 +998,89 @@ impl Method for Fabricate {
             }));
         }
 
+        // ---- power, before the machine is placed and not after ------------
+        //
+        // **An `oil-refinery` draws 420 kW and this method used to emit none
+        // of it.** No `Condition::Powered`, no call to `ensure_powered`, no
+        // pole: the plan stood the largest consumer this planner has ever
+        // placed on no network at all, and `gathered:crude-oil` +
+        // `produced:petroleum-gas:45:basic-oil-processing` planned 2,296
+        // actions of it (seed 31337, 2026-09-08). A machine on no network
+        // stands there, sets its recipe, draws nothing and makes nothing --
+        // and it reads as built.
+        //
+        // The same call `method::extract` makes for a pumpjack and
+        // `method::blueprint` makes for a block, with the same three answers:
+        // `Err` is supply itself being impossible and says why by name,
+        // `Ok(None)` is "no pole run this planner will build carries power
+        // here", and `Ok(Some(_))` carries the steps, the ids to order the
+        // placement after, and the headroom condition to state on it.
+        //
+        // **It provides GENERATION as well as connection when it has to**:
+        // `supply_anchor` adopts a standing network where one is in reach and
+        // otherwise builds a plant inline (offshore pump, boiler, engine).
+        // What it does *not* do is guess -- a site it cannot reach refuses.
+        //
+        // Whether it is needed at all is asked of `crate::powered::PowerNeed`,
+        // which reads the game's own energy source through the two fields the
+        // mod gates on an electric one. A burner machine and a machine the
+        // world never described are two different answers and neither is
+        // "draws nothing"; an electric machine nobody can price is refused by
+        // `powered::audit` over the finished plan rather than silently
+        // budgeted at zero.
+        let machine_area = ctx.state.collision_area(&machine, &site);
+        let mut powered_pre: Vec<Condition> = Vec::new();
+        let mut power_ids: Vec<crate::ids::ActionId> = Vec::new();
+        if let (crate::powered::PowerNeed::Electric { kw: Some(kw) }, Some(area)) = (
+            crate::powered::PowerNeed::of(&ctx.state, &machine),
+            machine_area,
+        ) {
+            // The ground the rig is about to take: the machine itself, every
+            // pipe of every run, and the buffer. Handed over as occupants so
+            // a pole cannot be sited on a tile this method is about to place
+            // a pipe on -- the same reservation `method::gather` passes
+            // `method::extract` for exactly that failure, where the pipe's own
+            // `AreaFree` fails at execution after the plan was called good.
+            //
+            // It has one consequence worth stating: with more than one
+            // occupant `ensure_powered` states a `BlockPowered`, whose
+            // exclusion is the rig's whole ground rather than the machine's
+            // tile, so a consumer already standing inside that rectangle is
+            // not charged against this machine's draw. The realistic instance
+            // is the pumpjack this rig is piped from, at 90 kW, and it was
+            // itself charged when `method::extract` sized the supply that
+            // answered for it.
+            let mut occupants = vec![plain_entity(&ctx.state, &machine, &site)];
+            for run in rig.inbound.iter().chain(rig.outbound.as_ref()) {
+                for tile in &run.tiles {
+                    occupants.push(plain_entity(&ctx.state, &rig.pipe, tile));
+                }
+            }
+            if let Some((tank, tank_site)) = &rig.buffer {
+                occupants.push(plain_entity(&ctx.state, tank, tank_site));
+            }
+            let powering = crate::method::power::ensure_powered(
+                ctx,
+                &machine,
+                &site,
+                &area,
+                kw,
+                crate::method::extract::SUPPLY_SEARCH_RADIUS,
+                &occupants,
+            )?
+            .ok_or_else(|| {
+                PlannerError::CannotFabricate(Box::new(FabricateRefusal::NoPowerRoute {
+                    recipe: recipe.name.clone(),
+                    machine: machine.clone(),
+                    kw,
+                    site: site.to_string(),
+                }))
+            })?;
+            steps.extend(powering.steps);
+            power_ids = powering.ids;
+            powered_pre.push(powering.powered);
+        }
+
         let entity = FactorioEntity {
             name: machine.clone(),
             entity_type: ctx
@@ -987,24 +1100,32 @@ impl Method for Fabricate {
             kind: ActionKind::Place {
                 entity: Box::new(entity.clone()),
             },
-            pre: vec![
-                Condition::AtPosition {
-                    who: Actor::Role,
-                    pos: site.clone(),
-                    radius: build,
-                    min_radius,
-                },
-                Condition::AreaFree {
-                    pos: site.clone(),
-                    entity: machine.clone(),
-                    direction: 0,
-                },
-                Condition::HasItem {
-                    who: Actor::Role,
-                    item: machine.clone(),
-                    count: 1,
-                },
-            ],
+            pre: {
+                let mut pre = vec![
+                    Condition::AtPosition {
+                        who: Actor::Role,
+                        pos: site.clone(),
+                        radius: build,
+                        min_radius,
+                    },
+                    Condition::AreaFree {
+                        pos: site.clone(),
+                        entity: machine.clone(),
+                        direction: 0,
+                    },
+                    Condition::HasItem {
+                        who: Actor::Role,
+                        item: machine.clone(),
+                        count: 1,
+                    },
+                ];
+                // Coverage is not capacity: the headroom test `ensure_powered`
+                // chose the plant and the pole run for, stated on the
+                // placement so the scheduler re-checks it. Empty for a machine
+                // that needs no network.
+                pre.extend(powered_pre.iter().cloned());
+                pre
+            },
             eff: vec![
                 Effect::LoseItem {
                     who: Actor::Role,
@@ -1022,6 +1143,17 @@ impl Method for Fabricate {
             position: site.clone(),
             ..Default::default()
         });
+        // Nothing satisfies `Condition::Powered`, so `infer_edges` draws no
+        // edge from the plant or the poles to the placement that needs them.
+        // The method holds both ends, so the method states the edges -- the
+        // same close `method::extract` makes.
+        for id in power_ids {
+            steps.push(Step::Link {
+                from: id,
+                to: place_id,
+                lag: 0,
+            });
+        }
 
         // A furnace picks its recipe from what it is fed; every other crafting
         // machine has to be told. Emitted unconditionally rather than gated on
@@ -1299,6 +1431,39 @@ mod fabricate_fluid_tests {
         world
     }
 
+    /// The same world, with the recipe naming **which output fluidbox** the
+    /// petroleum-gas comes out of (1-based, the game's own convention).
+    ///
+    /// The fixture above leaves it unstated, which resolves to ordinal 0 --
+    /// the refinery's westmost output connection. Naming box 3 moves the
+    /// chosen port to the **eastmost** one, and that is the whole difference
+    /// between a rig whose buffer happens to miss the port and one whose
+    /// buffer lands on it. See
+    /// [`a_buffer_may_not_swallow_the_machines_own_output_port`].
+    fn oil_world_with_output_box(index: u32) -> FactorioSurface {
+        let world = oil_world(true);
+        let recipe: FactorioRecipe = serde_json::from_str(&format!(
+            r#"{{
+              "name": "basic-oil-processing", "valid": true, "enabled": true,
+              "category": "oil-processing",
+              "ingredients": [
+                {{ "name": "crude-oil", "ingredient_type": "fluid", "amount": 100 }}
+              ],
+              "products": [
+                {{ "name": "petroleum-gas", "product_type": "fluid", "amount": 45,
+                  "probability": 1.0, "fluidbox_index": {index} }}
+              ],
+              "hidden": false, "energy": 5.0, "order": "a-a",
+              "group": "intermediate-products", "subgroup": "fluid-recipes"
+            }}"#
+        ))
+        .expect("the basic-oil-processing recipe parses");
+        world
+            .update_recipes(vec![recipe])
+            .expect("update_recipes cannot fail for a well-formed recipe");
+        world
+    }
+
     fn state_of(world: FactorioSurface) -> PlanState {
         PlanState::from_world(Arc::new(world), &[BotId(1)])
     }
@@ -1306,7 +1471,12 @@ mod fabricate_fluid_tests {
     /// A world with the crude arriving in a tank at the field, which is the
     /// topology the owner stated: tank -> refinery, the trunk given.
     fn state_with_tank() -> PlanState {
-        let mut state = state_of(oil_world(true));
+        state_with_tank_in(oil_world(true))
+    }
+
+    /// [`state_with_tank`] over any of the worlds above.
+    fn state_with_tank_in(world: FactorioSurface) -> PlanState {
+        let mut state = state_of(world);
         state.create_entity(FactorioEntity {
             name: "storage-tank".into(),
             entity_type: "storage-tank".into(),
@@ -1364,13 +1534,164 @@ mod fabricate_fluid_tests {
             .collect()
     }
 
+    /// Ore everywhere but three holes.
+    fn oil_world_ringed(index: u32) -> FactorioSurface {
+        use factorio_bot_core::types::Direction;
+        let world = oil_world_with_output_box(index);
+        let hole = |x: f64, y: f64| -> bool {
+            (26.0..=30.0).contains(&x) && (29.0..=33.0).contains(&y)
+                || (30.0..=32.0).contains(&x) && (26.0..=28.0).contains(&y)
+                || (33.0..=35.0).contains(&x) && (33.0..=35.0).contains(&y)
+        };
+        let mut blanket = Vec::new();
+        let mut x = 14.0;
+        while x <= 46.0 {
+            let mut y = 10.0;
+            while y <= 44.0 {
+                if !hole(x, y) {
+                    blanket.push(FactorioEntity::new_resource(
+                        &Position::new(x + 0.5, y + 0.5),
+                        Direction::North,
+                        "crude-oil",
+                    ));
+                }
+                y += 1.0;
+            }
+            x += 1.0;
+        }
+        world
+            .update_chunk_entities(blanket)
+            .expect("a chunk of ore");
+        world
+    }
+
     fn message(error: &PlannerError) -> String {
         error.to_string()
     }
 
-    // -----------------------------------------------------------------------
-    // The rung itself
-    // -----------------------------------------------------------------------
+    /// **A buffer may not stand on the machine's own output connection**, and
+    /// this is the fixture that shows it, by going RED when the guard is
+    /// removed.
+    ///
+    /// [`no_pipe_of_the_rig_stands_on_the_machine_or_its_buffer`] pins the
+    /// same invariant and — measured by mutation, and it says so in its own
+    /// doc — could not falsify the guard: its rig is sited where the
+    /// connection happens to miss. This one reproduces the tight ring the
+    /// live plan met on seed 31337, where a `storage-tank` at
+    /// `[145.5, -362.5]` swallowed the refinery's output connection at
+    /// `[145.5, -361.5]`, `route_between` pushed that tile into the run
+    /// anyway — unconditionally, outside its own search, as its doc says —
+    /// and the plan died at SCHEDULE time on the refinery's own `AreaFree`.
+    ///
+    /// # What had to be true before the guard could be reached at all
+    ///
+    /// Three separate rules reject a swallowing candidate, and the plain
+    /// fixture never gets past the first two. Measured while building this,
+    /// each by direct probe rather than by reading the code:
+    ///
+    /// * **`ports_clear`** — the *tank's own* corner connections sit one tile
+    ///   diagonally outside its footprint, so every candidate over the
+    ///   refinery's two western output connections puts one on the refinery
+    ///   and is refused before the third rule is consulted.
+    /// * **`routes_to`** — a machine connection in the *middle* of the tank's
+    ///   edge is walled in by the tank itself: probed at `(30.5, 19.5)` in the
+    ///   plain fixture, `route_between` answers `no route to the
+    ///   storage-tank's connection at [29.5, 17.5], blocked by 4 tile(s)`. So
+    ///   the swallow is only reachable at a **corner** of the buffer, where a
+    ///   neighbouring tile is still open.
+    /// * only then **`taken.extend(other_port_tiles)`**, the guard under test.
+    ///
+    /// So the fixture states three things the plain one leaves unstated, and
+    /// every one is an *input* rather than something read back off the
+    /// geometry — the `a-fixture-cannot-falsify-what-it-derives` trap:
+    ///
+    /// 1. the recipe's own `fluidbox_index`, 1-based and 3, which is the
+    ///    game's way of saying "this product comes out of the third box" and
+    ///    moves the chosen connection to the refinery's **eastmost**;
+    /// 2. ore over the whole neighbourhood with three holes in it, because
+    ///    `free_area_near_where` prefers ore-free ground and will otherwise
+    ///    walk away from a contested ring entirely. The holes are the
+    ///    refinery's own footprint, a 3x3 pocket at its north-east corner,
+    ///    and one further out;
+    /// 3. that pocket, whose only legal tank site — `(31.5, 27.5)` — covers
+    ///    the refinery's eastmost output connection at `(30.5, 28.5)` while
+    ///    keeping all four of its own corner connections clear.
+    ///
+    /// # The mutation, and what each side of it produces
+    ///
+    /// ```text
+    /// guard present:  tank at (34.5, 34.5), the far hole; no pipe on it
+    /// guard removed:  tank at (31.5, 27.5), and `place pipe at [30.5, 28.5]`
+    ///                 -- inside the tank's own footprint, with no ordering
+    ///                 edge between them
+    /// ```
+    #[test]
+    fn a_buffer_may_not_swallow_the_machines_own_output_port() {
+        let state = state_with_tank_in(oil_world_ringed(3));
+        let steps = expand(state.fork(), &goal()).expect("the goal expands");
+        let refineries = placed(&steps, "oil-refinery");
+        let tanks = placed(&steps, "storage-tank");
+        let pipes = placed(&steps, "pipe");
+        assert_eq!(refineries.len(), 1, "one refinery is sited, in {steps:?}");
+        assert_eq!(tanks.len(), 1, "one buffer is sited, in {steps:?}");
+        assert!(!pipes.is_empty(), "the rig lays pipes, in {steps:?}");
+
+        // The connection the recipe named, asked of the same function the rig
+        // asks -- not recomputed from an offset written here, which would be a
+        // second encoding of the machine's shape.
+        let ports = crate::method::pipe::fluid_ports(
+            &state,
+            "oil-refinery",
+            &refineries[0],
+            Some("output"),
+        )
+        .expect("the fixture's refinery declares output fluidboxes");
+        let chosen: Vec<Position> = ports
+            .iter()
+            .filter(|port| port.box_ordinal == 2)
+            .flat_map(FluidPort::tiles)
+            .collect();
+        assert!(
+            !chosen.is_empty(),
+            "the fixture's refinery has a third output box for the recipe to name"
+        );
+
+        let tank_area = state
+            .collision_area("storage-tank", &tanks[0])
+            .expect("the fixture has a collision box for the tank");
+        for tile in &chosen {
+            let port_area = state
+                .collision_area("pipe", tile)
+                .expect("the fixture has a collision box for a pipe");
+            assert!(
+                !overlaps(&tank_area, &port_area),
+                "the buffer at {} stands on the refinery's own output connection at {tile}",
+                tanks[0]
+            );
+        }
+
+        // And the invariant the sibling states, over ground that is genuinely
+        // contested this time: nothing this rig places stands on anything else
+        // it places.
+        let refinery_area = state
+            .collision_area("oil-refinery", &refineries[0])
+            .expect("the fixture has a collision box for the refinery");
+        for pipe in &pipes {
+            let area = state
+                .collision_area("pipe", pipe)
+                .expect("the fixture has a collision box for a pipe");
+            assert!(
+                !overlaps(&area, &tank_area),
+                "a pipe at {pipe} stands on the buffer at {}, in {steps:?}",
+                tanks[0]
+            );
+            assert!(
+                !overlaps(&area, &refinery_area),
+                "a pipe at {pipe} stands on the refinery at {}, in {steps:?}",
+                refineries[0]
+            );
+        }
+    }
 
     /// **The claim of this whole branch**: a fluid ingredient is met by a pipe
     /// run from something standing that can supply it, and the plan builds

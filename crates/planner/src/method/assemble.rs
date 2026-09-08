@@ -4002,6 +4002,75 @@ mod tests {
         );
     }
 
+    /// **The cell's machine time is an EDGE, not a bot standing at the chest.**
+    ///
+    /// The draw used to carry `ticks_per_item * count` in its own `duration`,
+    /// which is an artificial serialisation: the packs appear because the
+    /// machines run, and nothing about that needs a character present. This
+    /// asserts both halves -- the `Remove` costs one transfer, and a
+    /// `Step::Link` from the action that charged the cell carries the whole
+    /// wait as `lag`.
+    ///
+    /// The link is what makes the change worth making rather than a rename:
+    /// the charge is emitted by *this* module and the draw by
+    /// `crate::method::cellstock`, so the id crosses a method boundary through
+    /// `ExpansionCtx::buffer_stock`. Assert the lag lands on a real edge, or a
+    /// `buffer_stock` that silently recorded nothing would read as a plan that
+    /// simply got faster.
+    #[test]
+    fn the_wait_for_a_cell_to_make_a_pack_is_a_lag_edge_and_not_a_bots_time() {
+        let bots = [BotId(1)];
+        let state = powered(&bots);
+        let charge = spec().charge_products();
+        let tempo = spec().ticks_per_item;
+        let net = expand(
+            &[
+                Goal::Producing {
+                    item: PACK.into(),
+                    per_minute: 6,
+                },
+                Goal::Have {
+                    item: PACK.into(),
+                    count: charge,
+                    whose: Holder::Share(BotId(1)),
+                    via: None,
+                },
+            ],
+            &state,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .expect("a powered fixture can build a cell and then draw from it");
+        let draws: Vec<(crate::ids::ActionId, u32, crate::ids::Ticks)> = net
+            .actions()
+            .filter_map(|a| match &a.kind {
+                ActionKind::Remove {
+                    entity,
+                    slot: InventorySlot::Chest,
+                    item,
+                    count,
+                    ..
+                } if entity == CHEST && item == PACK => Some((a.id, *count, a.duration)),
+                _ => None,
+            })
+            .collect();
+        assert!(!draws.is_empty(), "the cell is drawn from at all");
+        for (id, count, duration) in draws {
+            assert!(
+                duration < tempo,
+                "the draw costs a transfer, not the cell's machine time: \
+                 {duration} ticks against a tempo of {tempo}"
+            );
+            let want = tempo.saturating_mul(count);
+            assert!(
+                net.preds(id).iter().any(|(_, lag)| *lag == want),
+                "some predecessor of the draw states the {want}-tick wait for \
+                 {count} packs; preds were {:?}",
+                net.preds(id)
+            );
+        }
+    }
+
     /// **What one charge cannot cover falls back to the hands, and says so.**
     ///
     /// The bound is [`CELL_CHARGE_TICKS`]' own: a cell is charged once and

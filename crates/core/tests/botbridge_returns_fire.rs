@@ -251,6 +251,27 @@ fn the_gate_asks_only_about_units_at_the_bots_own_position() {
         "the radius passed must be the documented DEFEND_RADIUS and not a \
          second copy of the number"
     );
+
+    // The line above is TAUTOLOGICAL ABOUT THE VALUE on its own, and a
+    // falsification sweep proved it: setting `DEFEND_RADIUS = 0` -- which
+    // disables the whole feature, because nothing is ever within zero tiles --
+    // left every test in this file green, since both sides of that comparison
+    // move together. So the number itself is pinned here, against a bound the
+    // gate cannot produce by accident.
+    let radius = q.get::<f64>("radius").expect("radius value");
+    assert_eq!(
+        radius, 12.0,
+        "a radius of 0 disables return fire while every other assertion here \
+         still passes"
+    );
+    assert!(
+        radius > 0.0 && radius <= 15.0,
+        "the gate must reach far enough to see a biter closing -- the live \
+         measurement spawned them 12 tiles out and the ordered bot engaged and \
+         won at full health -- and no further than the pistol's range of 15, \
+         beyond which the bot would hold its fire button at something it \
+         cannot reach. Got {radius}"
+    );
 }
 
 #[test]

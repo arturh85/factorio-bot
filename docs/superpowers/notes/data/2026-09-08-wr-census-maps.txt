@@ -1,0 +1,210 @@
+
+### densest steel-furnace region (115 in cell)  x 92..147  y 60..99
+    60 -iFFi--iFFi-iFFi--iFFi-iFFi--iFFi-iFFi--iFFi-iFFi--iFFi-
+    61 - FFo--oFFo- FFo--oFFo- FFo--oFFo- FFo--oFFo- FFo--oFFo-
+    62 - FF -- FF - FF -- FF - FF -- FF - FF -- FF - FF -- FF -
+    63 -iFFi--iFFi-iFFi--iFFi-iFFi--iFFi-iFFi--iFFi-iFFi--iFFi-
+    64 -iFFi--iFFi-iFFi--iFFi-iFFi--iFFi-iFFi--iFFi-iFFi--iFFi-
+    65 - FF -- FF - FF -- FF - FF -- FF - FF -- FF - FF -- FF -
+    66 - FFo--oFFo- FFo--oFFo- FFo--oFFo- FFo--oFFo- FFo--oFFo-
+    67 -iFFi--iFFi-iFFi--iFFi-iFFi--iFFi-iFFi--iFFi-iFFi--iFFi-
+    68 -iFFi--iFFi-iFFi--iFFi-iFFi--iFFi-iFFi--iFFi-iFFi--iFFi-
+    69 - FF    FF - FF    FF - FF    FF - FF    FF - FF    FF -
+    70 -         -SS       --SS       --SS       --SS       --S
+    71           ----------------------------------------------
+    72 fuu   uuf--fuu   uuf--fuu   uuf--fuu   uuf--fuu   uuf--f
+    73 oFF o FFo--oFF o FFo--oFF o FFo--oFF o FFo--oFF o FFo--o
+    74 iFFi-iFFi--iFFi-iFFi--iFFi-iFFi--iFFi-iFFi--iFFi-iFFi--i
+    75           -iFFi-iFFi--iFFi-iFFi--iFFi-iFFi--iFFi-iFFi--i
+    76           -oFF -oFFo--oFF -oFFo--oFF -oFFo--oFF -oFFo--o
+    77           - FF - FF -- FF - FF -- FF - FF -- FF - FF -- 
+    78           -iFFi-iFFi--iFFi-iFFi--iFFi-iFFi--iFFi-iFFi--i
+    79           -iFFi-iFFi--iFFi-iFFi--iFFi-iFFi--iFFi-iFFi--i
+    80           - FF - FF -- FF - FF -- FF - FF -- FF - FF -- 
+    81           -oFF -oFFo--oFF -oFFo--oFF -oFFo--oFF -oFFo--o
+    82           -iFFi-iFFi--iFFi-iFFi--iFFi-iFFi--iFFi-iFFi--i
+    83           -iFFi-iFFi--iFFi-iFFi--iFFi-iFFi--iFFi-iFFi--i
+    84           - FF - FF -- FF - FF -- FF - FF -- FF - FF -- 
+    85           - FF - FF -- FF - FF -- FF - FF -- FF - FF -- 
+    86           -iFFi-iFFi--iFFi-iFFi--iFFi-iFFi--iFFi-iFFi--i
+    87           -iFFi-iFFi--iFFi-iFFi--iFFi-iFFi--iFFi-iFFi--i
+    88           -oFF -oFFo--oFF -oFFo--oFF -oFFo--oFF -oFFo--o
+    89           - FF - FF -- FF - FF -- FF - FF -- FF - FF -- 
+    90           -iFFi-iFFi--iFFi-iFFi--iFFi-iFFi--iFFi-iFFi--i
+    91  FF   FF  -iFFi-iFFi--iFFi-iFFi--iFFi-iFFi--iFFi-iFFi--i
+    92  FF - FF -- FF - FF -- FF - FF -- FF - FF -- FF - FF -- 
+    93 oFF -oFFo--oFF -oFFo--oFF -oFFo--oFF -oFFo--oFF -oFFo--o
+    94 iFFi-iFFi--iFFi-iFFi--iFFi-iFFi--iFFi-iFFi--iFFi-iFFi--i
+    95 iFFi-iFFi--iFFi-iFFi--iFFi-iFFi--iFFi-iFFi--iFFi-iFFi--i
+    96  FFS- FF    FFS-oFF    FFS- FF    FFS- FF    FFS- FF    
+    97 S--S----------S----------S----------S----------S--------
+    98 S-------------------------------------------------      
+    99       o                                                 
+
+### densest assembling-machine-2 region (47 in cell)  x -148..-93  y 92..131
+    92 -oLccc^   iio   iio   iio   iio   iio   iio  o---- o  oD
+    93 -LLccc+ AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA  ----     D
+    94 -LLccc+ AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA  ----     D
+    95 - Lccc+^AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA  ----     D
+    96 SSoccc^^ LioLi LioLi LioLi LioLi LioLi LioLi  ----^^^^ D
+    97 -------------------------------------------- SS---^^^^ D
+    98 -u---------------S------------S  -----------------     D
+    99 -u---------------S------------S-------------  ----     D
+   100 -   ffo   ffo   ffo   ffo   ffo   ffo   ffo   ----     D
+   101 - AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA  ----     D
+   102 - AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA  ----     D
+   103 - AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA  ----     D
+   104 -   ffo   ffo   ffo   ffo   ffo   ffo   ffo   ----     D
+   105 ------^ AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA  ----     D
+   106 SS    ^^AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA  ----     D
+   107 --   +++AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA  ----^^^^  
+   108 --   ^  LoffoLLoffoLLoffoLLoffoLLoffoLLoffoL  ----^^^^  
+   109 --u--------------------------u====u---------  ----     o
+   110 --     ----------------========-------------- ----      
+   111 -----------------------------------         - ----      
+   112 -    ^   LL    LL    LL    LL    LL         - ----      
+   113 -    ^^ oLL   oLL   oLL   oLL   oLL  @@     - ----      
+   114 -     ^AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA@@     - ----      
+   115 -    @@AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA@@     - ----      
+   116 -    @@AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA@@     - ----      
+   117 -      -------------------------------------- u---^ ^^  
+   118 -      uoLLouu LLouu LLouu LLouu LLou-------------^^^+^ 
+   119 -      i LL ii LL ii LL ii LLii  L            u--- +^^  
+   120 -      333333333333333333333333  CC           ----    o 
+   121 -     ^333333333333333333333333  C            ----      
+   122 -    ^^333333333333333333333333               ----^ ++++
+   123 -    ++++++++++++++++++++++++++               ----+++o +
+   124 -  ccc ^  ---------------------------------- L----     +
+   125 -oLccc^   iio   iio   iio   iio   iio   iio  o----      
+   126 -LLccc+ AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA  ----   ^  
+   127 -LLccc+ AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA  ----  ^+^^
+   128 - Lccc+^AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA  ----  +^ ^
+   129 SSoccc^^ LioLi LioLi LioLi LioLi LioLi LioLi  ----      
+   130 -------------------------------------------- SS---------
+   131 -u---------------S------------S  -----------------------
+
+### densest electric-mining-drill region (115 in cell)  x 92..147  y -4..35
+    -4 DDD-DDDDDD-DDDDDD-DDDDDDuDDDDDDuDDDDDDuDDDDDDuDDD       
+    -3 DDDuDDDDDDuDDDDDDuDDDDDD-DDDDDD-DDDDDD-DDDDDD-DDD       
+    -2 DDDoDDDDDDoDDDDDDoDDDDDD-DDDDDD-DDDDDD-DDDDDD-DDD       
+    -1 DDDuDDDDDDuDDDDDDuDDDDDD-DDDDDD-DDDDDD-DDDDDD-DDD       
+     0 DDD-DDDDDD-DDDDDD-DDDDDDuDDDDDDuDDDDDDuDDDDDDuDDD       
+     1 DDD-DDDDDD-DDDDDD-DDDDDDoDDDDDDoDDDDDDoDDDDDDoDDD       
+     2 DDD-DDDDDD-DDDDDD-DDDDDDuDDDDDDuDDDDDDuDDD   u          
+     3 DDDuDDDDDDuDDDDDDuDDDDDD-DDDDDD-DDDDDD-DDD   -          
+     4 DDDoDDDDDDoDDDDDDoDDDDDD-DDDDDD-DDDDDD-DDD   -          
+     5 DDDuDDDDDDuDDDDDDuDDDDDD-DDDDDD-DDDDDD-DDD   -          
+     6 DDD-DDDDDD-DDDDDD-DDDDDDuDDDDDDuDDDDDDuDDD   u          
+     7 DDD-DDDDDD-DDDDDD-DDDDDDoDDDDDDoDDDDDDoDDD   o          
+     8 DDD-DDDDDD-DDDDDD-DDDDDDuDDDDDDuDDDDDDuDDDDDDuDDD       
+     9 DDD-DDDDDD-DDDDDD-DDDDDD-DDDDDD-DDDDDD-DDDDDD-DDD       
+    10 DDDuDDDDDDuDDDDDDuDDDDDD-DDDDDD-DDDDDD-DDDDDD-DDD       
+    11 DDDoDDDDDDoDDDDDDoDDDDDD-DDDDDD-DDDDDD-DDDDDD-DDD       
+    12 DDDuDDDDDDuDDDDDDuDDDDDD-DDDDDDuDDDDDDuDDDDDDuDDD       
+    13 DDD-DDDDDD-DDDDDD-DDDDDDuDDDDDDoDDDDDDoDDDDDDoDDD       
+    14 DDD-DDDDDD-DDDDDD-DDDDDDoDDDDDDuDDDDDDuDDDDDDu          
+    15 DDD-DDDDDD-DDDDDD-DDDDDDuDDDDDD-DDDDDD-DDDDDD-          
+    16 DDDuDDDDDDuDDDDDDuDDDDDD-DDDDDD-DDDDDD-DDDDDD-          
+    17 DDDoDDDDDDoDDDDDDoDDDDDD-DDDDDD-DDDDDD-DDDDDD-          
+    18 DDDuDDDDDDuDDDDDDuDDDDDD-DDDDDD-DDDDDD-DDDDDD-          
+    19 DDD-DDDDDD-DDDDDD-DDDDDDuDDDDDDuDDDDDDuDDDDDDu          
+    20  -----  -----  ----- DDDoDDDDDDoDDDDDDoDDDDDDo          
+    21  o -  o o -  o o -  oDDDuDDDDDDuDDDDDDuDDDDDDu          
+    22 DDD-DDDDDD-DDDDDD-DDDDDD-DDDDDD-DDDDDD-DDDDDD-          
+    23 DDD-DDDDDD-DDDDDD-DDD ----- DDD-DDDDDD-DDDDDD-          
+    24 DDD-DDDDDD-DDDDDD-DDD o -  oDDD-DDDDDD-DDDDDD-          
+    25 --u-u----u-u----u-u---- -   DDDuDDDDDDuDDDDDDu          
+    26 o  -DDDDDD-DDDDDD-DDD - -   DDDoDDDDDDoDDDDDDo          
+    27    -DDDDDD-DDDDDD-DDD - -DDDDDDuDDDDDDuDDDDDDu          
+    28 o  -DDDDDD-DDDDDD-DDD - -DDDDDD-DDDDDD-DDDDDD-          
+    29 o o-      -DDDDDD- o  - -DDD -----  -----  -----        
+    30    -     o-DDDDDD-o   - -----o -  o o -  o o -  o       
+    31 o  -      -DDDDDD-    - -DDD-  -      -      ---S-S-S-S-
+    32    -      - ----u-u---- -DDD-  -      ----------SSSSSSSS
+    33    -      -   o  -   -- -DDD--u-u----------------SSSSSSS
+    34    -      -      -   -- -      -    --------------SSSSSS
+    35 -- -      -      -   --u-u----u-u------------------SSSSS
+
+### densest boiler region (48 in cell)  x -148..-93  y -100..-61
+  -100 EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE
+   -99 EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE
+   -98 EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE
+   -97 EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE
+   -96 HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH
+   -95 HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH
+   -94   iio   iio   iio   iio   iio   iio   iio   iio   iio   
+   -93   uu    uu    uu    uu    uu    uu    uu    uu    uu    
+   -92 EEE   EEE   EEE   EEE   EEE   EEE   EEE   EEE         EE
+   -91 EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE      EE
+   -90 EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE      EE
+   -89 EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE      EE
+   -88 EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE      EE
+   -87  +oEEE +oEEE +oEEE +oEEE +oEEE +oEEE +oEEE +oEEE +o    +
+   -86 EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE
+   -85 EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE
+   -84 EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE
+   -83 EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE
+   -82 EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE
+   -81 HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH
+   -80 HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH
+   -79   iio   iio   iio   iio   iio   iio   iio   iio   iio   
+   -78   uu    uu    uu    uu    uu    uu    uu    uu    uu    
+   -77 EEE   EEE   EEE   EEE   EEE   EEE   EEE   EEE   EEE   EE
+   -76 EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE
+   -75 EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE
+   -74 EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE
+   -73 EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE
+   -72  +oEEE +oEEE +oEEE +oEEE +oEEE +oEEE +oEEE +oEEE +oEEE +
+   -71 EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE
+   -70 EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE
+   -69 EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE
+   -68 EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE
+   -67 EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE
+   -66 HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH
+   -65 HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH
+   -64   iio   iio   iio   iio   iio   iio   iio   iio   iio   
+   -63   uu    uu    uu    uu    uu    uu    uu    uu    uu    
+   -62 EEE   EEE   EEE   EEE   EEE   EEE   EEE   EEE   EEE   EE
+   -61 EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE
+
+### densest burner-mining-drill region (16 in cell)  x -52..3  y 28..67
+    28 Fi- -DDDDDD-iFFi=oAAA   -  -iFFi-DDDDDD-DDDDDDDDDDDDDDDD
+    29 Fi- -DDDDDD-iFFi=fAAAfCf-- -iFFi-DDDDDD-DDDDDDDDDDDDDDDD
+    30 Fi-o-DDDDDD-oFF =iAAAC   u -oFFo-DDD  o-DDDDDDDDDDDDDDDD
+    31 Fi- -DDDDDD- FF SSAAAfo    - FF -DDDDDD-DDDDDDDDDDDDDDDD
+    32 Fi- -DDDDDD-iFFi==-uiuf    -iFFi-DDDDDD-DDDDDDDDDDDDDDDD
+    33 Fi- -DDDDDD-iFFi=oAAA      -iFFi-DDDDDD-DDDDDDDDDDDDDDDD
+    34 Fi-o-DDDDDD-oFFU=fAAAo     - FF -DDDDDD--uou---uou---uou
+    35 Fi- -------- FFSSfAAAfCf-u -oFFo-DDDDDD-DDDDDDDDDDDDDDDD
+    36 Fi-o DDDDDD-iFFi=oAAA   -- -iFFi-DDDDDD-DDDDDDDDDDDDDDDD
+    37 Fi- -DDDDDD-iFFi=fAAA   -- -iFFi-DDD  o-DDDDDDDDDDDDDDDD
+    38 Fi- -DDDDDD- FF =iAAAfCf-- - FF -DDDDDD-DDDo      o     
+    39 Fi- -DDDDDD-oFF =oAAAfCf-- - FF -DDDDDD-DDDDDD-         
+    40 Fi- -DDDDDD-iFFi=fAAAo  -SS-iFFi-DDDDDD-DDDDDD-         
+    41 Fi-o-DDDDDD-iFFi=iAAA   SSSSiFFi-DDDDDD-DDDDDD-         
+    42 Fi- -DDDDDD- FF =========  -oFFo-DDDDDD-DDDDDD-    DDDDD
+    43 Fi- -DDDDDD- FF ==fAAAfAAAf- FF -DDDDDD-DDDDDD-    DDDDD
+    44 Fi- -DDDDDD-iFFi==oAAAoAAA -iFFi-DDD  o-DDDDDD-    DDDDD
+    45 Fi- -DDDDDD-iFFi==LAAAiAAA -iFFi-DDDDDD-DDDo--- ----uou-
+    46 Fi-o-DDDDDD-oFFo=ULAAAiAAA - FF -DDDDDD-DDD--   -  DDDDD
+    47 Fi- -DDDDDD- FF =f AAAoAAA -oFFo-DDDDDD-DDD-o ---o DDDDD
+    48 Fi- -DDDDDD-iFFi=CfAAAfAAAf-iFFi-DDDDDD-DDD-  -    DDDDD
+    49 Fi- -DDDDDD-iFFi=CfAAAfAAAf-iFFi-DDDDDD-DDD-  -DDDDDDDDD
+    50 Fi- -DDDDDD- FF =foAAAoAAA - FF -DDDDDD-DDD-  -DDDDDDDDD
+    51 Fi-o-DDDDDD-oFFo=ULAAAiAAA - FF -DDD  o-DDD-  -DDDDDDDDD
+    52 Fi- -DDDDDD-iFFi=ULAAAiAAA -iFFi-DDDDDD DDD-  ---uou---u
+    53   - -DDDDDD-iFFo=f AAAoAAA -iFFi-DDDDDD-DDD-   DDDDDDDDD
+    54  --o---uoou- FFi=CfAAAfAAAf-oFFo-DDDDDD-DDD-   DDDDDDDDD
+    55  - dddddddd- FF =CfAAAfAAAf- FF -DDDDDD-DDD-   DDDDDDDDD
+    56  - dddddddd-iFFi=foAAAoAAA -iFFi-DDDDDD-DDD-            
+    57  - dddddddd-iFFi=ULAAAiAAA -iFFi-DDDDDD-DDD-            
+    58  - dddddddd-oFFo=ULAAAiAAA - FF -DDD  o-DDD-            
+    59  - dddddddd- FF =f AAAoAAA -oFFo--------   -            
+    60 o- dddddddd-iFFi=CfAAAfAAAf-iFFi------------            
+    61  - dddddddd-iFFi=CfAAAfAAAf-iFFi-                    ---
+    62  - dddddddd-oFF =foAAAoAAA - FF -                    ff 
+    63  - dddddddd- FFo=ULAAAiAAA - FF -- L C               CCo
+    64  - dddddddd-iFFi==dd111iC  -iFFi-- LoC               ff 
+    65 o- dddddddd-iFFi==dd111dd  -iFFi-- L C     -------------
+    66  - dddddddd- FF ==  111dd  -oFFo--   O     -    --------
+    67  u     dddd-oFF ==--------u-u--u--u---------            

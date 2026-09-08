@@ -171,6 +171,59 @@ pub const INSERTER: &str = "inserter";
 /// chest, and it cannot have it: an unremoved product jams the machine after
 /// four crafts, so the output path outranks a second supply chest for the one
 /// tile they both need.
+///
+/// # It is an artifact of CHESTS, and does not survive a belt-fed layout
+///
+/// Everything above is a correct proof about **this** design and says nothing
+/// about Factorio. It is chest-per-ingredient: `k` ingredients means `k`
+/// chests, `k` inserters, and therefore `k` powered mouths spread **along**
+/// the machine's face -- one per row. A `small-electric-pole` covers five
+/// tile-rows (`supply_area_distance` 2.5, read off the live prototype), the
+/// cell already spends five on feed/link/output/supply, and a sixth is the
+/// wall. That is where the two comes from.
+///
+/// **Belt-feeding stacks the ingredients perpendicular to the face instead**,
+/// and then the row budget stops binding. Derived from
+/// [`crate::state`]'s prototype-fed reach (2026-09-08), counting rows outward
+/// from the machine face:
+///
+/// ```text
+///   row 0  the machine's own edge tile
+///   row 1  inserter row     normal reaches row 2 (1 tile)
+///   row 1  inserter row     long   reaches row 3 (2 tiles)
+///   row 2  inserter row     long   reaches row 4, dropping into row 0
+///   row 2                   normal drops into row 1, NOT the machine
+/// ```
+///
+/// So **one machine face serves three belt rows out of two tile-rows of
+/// inserter space**, and there is no `normal@2` because it cannot reach the
+/// machine. That is an independent derivation of a rule measured over 4,300
+/// machine-serving inserters in the world-record base with zero exceptions,
+/// where `long-handed-inserter` is 20.7 % of all inserters and 0 of 1,172
+/// touch a furnace -- it is purely an assembly tool.
+///
+/// Two consequences worth stating plainly:
+///
+/// - **The consumers are two rows deep whatever `k` is**, so a single small
+///   pole covers them with three rows to spare. The pole was never a bound on
+///   arity; it was a bound on *chests*.
+/// - **`long@1` drops two tiles inward**, which lands inside a 3x3
+///   `assembling-machine-1` (`collision_box` +/-1.199) and would **overshoot a
+///   1x1 or 2x2**. A layout using reach 2 has to check the drop lands in the
+///   footprint; nothing does today.
+///
+/// And the ceiling people expect from Factorio 1.x is **gone**: there is no
+/// `ingredient_count` on any prototype in this install (0 files under
+/// `workspace/data/base/prototypes`, against a `crafting_speed` control that
+/// hits), so an `assembling-machine-1` will run a three-ingredient recipe.
+///
+/// **This constant is therefore right where it stands and must not be raised
+/// on the strength of the paragraph above.** Widening it widens the *chest*
+/// layout, which the pole genuinely refuses. The belt-fed layout is a
+/// different method, sequenced separately, and it needs a lane model that
+/// does not exist -- `graph::route` and [`super::connect`] contain the word
+/// "lane" zero times, so which of a belt's two lines a commodity rides is
+/// unplanned, and getting it wrong places 100 % and moves one plate.
 pub const MAX_FEED: usize = 2;
 
 /// What the cell's inputs sit in.
@@ -4000,6 +4053,75 @@ mod tests {
             crafted, 0,
             "nothing is hand-crafted while the cell's own charge covers the goal"
         );
+    }
+
+    /// **The cell's machine time is an EDGE, not a bot standing at the chest.**
+    ///
+    /// The draw used to carry `ticks_per_item * count` in its own `duration`,
+    /// which is an artificial serialisation: the packs appear because the
+    /// machines run, and nothing about that needs a character present. This
+    /// asserts both halves -- the `Remove` costs one transfer, and a
+    /// `Step::Link` from the action that charged the cell carries the whole
+    /// wait as `lag`.
+    ///
+    /// The link is what makes the change worth making rather than a rename:
+    /// the charge is emitted by *this* module and the draw by
+    /// `crate::method::cellstock`, so the id crosses a method boundary through
+    /// `ExpansionCtx::buffer_stock`. Assert the lag lands on a real edge, or a
+    /// `buffer_stock` that silently recorded nothing would read as a plan that
+    /// simply got faster.
+    #[test]
+    fn the_wait_for_a_cell_to_make_a_pack_is_a_lag_edge_and_not_a_bots_time() {
+        let bots = [BotId(1)];
+        let state = powered(&bots);
+        let charge = spec().charge_products();
+        let tempo = spec().ticks_per_item;
+        let net = expand(
+            &[
+                Goal::Producing {
+                    item: PACK.into(),
+                    per_minute: 6,
+                },
+                Goal::Have {
+                    item: PACK.into(),
+                    count: charge,
+                    whose: Holder::Share(BotId(1)),
+                    via: None,
+                },
+            ],
+            &state,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .expect("a powered fixture can build a cell and then draw from it");
+        let draws: Vec<(crate::ids::ActionId, u32, crate::ids::Ticks)> = net
+            .actions()
+            .filter_map(|a| match &a.kind {
+                ActionKind::Remove {
+                    entity,
+                    slot: InventorySlot::Chest,
+                    item,
+                    count,
+                    ..
+                } if entity == CHEST && item == PACK => Some((a.id, *count, a.duration)),
+                _ => None,
+            })
+            .collect();
+        assert!(!draws.is_empty(), "the cell is drawn from at all");
+        for (id, count, duration) in draws {
+            assert!(
+                duration < tempo,
+                "the draw costs a transfer, not the cell's machine time: \
+                 {duration} ticks against a tempo of {tempo}"
+            );
+            let want = tempo.saturating_mul(count);
+            assert!(
+                net.preds(id).iter().any(|(_, lag)| *lag == want),
+                "some predecessor of the draw states the {want}-tick wait for \
+                 {count} packs; preds were {:?}",
+                net.preds(id)
+            );
+        }
     }
 
     /// **What one charge cannot cover falls back to the hands, and says so.**

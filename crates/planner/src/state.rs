@@ -684,30 +684,181 @@ fn takes_a_recipe(name: &str) -> bool {
 ///
 /// `None` for a half-diagonal direction, because [`Position::turn`] names no
 /// rotation for one and no machine stands on one.
-fn delivery_offset(name: &str, direction: Direction) -> Option<Position> {
+fn delivery_offset(
+    prototypes: &DashMap<String, FactorioEntityPrototype>,
+    name: &str,
+    direction: Direction,
+) -> Option<Position> {
     let north = match name {
         "burner-mining-drill" => (-0.35, -1.3),
         "electric-mining-drill" => (0., -1.85),
         // The far side from the pickup: `+y` is south, and north-facing means
-        // "picks up from the north".
-        name => (0., inserter_reach(name)?),
+        // "picks up from the north". Read off the prototype's *own*
+        // `inserter_drop_position` rather than negating the pickup, because
+        // vanilla pairs `{0, -1}` with `{0, 1.2}` and the two are not mirrors
+        // -- see [`inserter_drop_reach`].
+        name => (0., inserter_drop_reach(prototypes, name)?),
     };
     Position::new(north.0, north.1).turn(direction)
 }
 
-/// How far an inserter reaches, in tiles, on **each** side of itself.
+/// Which whole tile a prototype's inserter vector lands on, as an offset in
+/// tiles from the inserter's own tile.
+///
+/// An inserter stands at a tile *centre*, so a vector `v` from it lands at
+/// `0.5 + v` inside its own tile's frame and the tile that contains it is
+/// `(0.5 + v).floor()`. Vanilla's drop is `1.2`, and `0.5 + 1.2 = 1.7` floors
+/// to tile `1`, the tile immediately south.
+///
+/// # This is NOT "flooring rather than rounding", and saying so was wrong
+///
+/// An earlier version of this doc claimed flooring was load-bearing against
+/// `v.round()` and that a modded `1.6` would separate them.
+/// `tools/falsify_inserter_reach.py` swapped the body for `v.round()` and the
+/// suite stayed **green** -- a finding, and the finding is that the two are
+/// the *same function* over almost the whole domain. Rust's `f64::round` is
+/// half-away-from-zero, so `(0.5 + v).floor()` and `v.round()` agree for every
+/// `v` except a **negative half-integer**: measured over `[-4, 4]` at `0.01`
+/// they differ at exactly `-0.5`, `-1.5`, `-2.5` and `-3.5` and nowhere else.
+/// `1.6` was invented, not checked -- `0.5 + 1.6 = 2.1` floors to `2` and
+/// `1.6` rounds to `2`.
+///
+/// So the choice is real in exactly one place and it is not the one the old
+/// doc named: [`axis_reach`] passes the vector's **sideways** component here,
+/// which *can* be a negative half-integer -- a hand landing on a tile
+/// boundary. There flooring calls it on-axis and rounding calls it off-axis.
+/// The `along` component is oriented positive before it ever arrives, so for
+/// the reach itself the two are indistinguishable and no test can or should
+/// pretend otherwise.
+///
+/// Kept as `floor` because it is the definition -- *which tile contains this
+/// point* -- rather than because it beats an alternative. The general lesson
+/// is the one this repo keeps paying for: **a doc that asserts a distinction
+/// matters must have measured it**, and this one had reasoned about it.
+fn vector_tile_offset(v: f64) -> f64 {
+    (0.5 + v).floor()
+}
+
+/// How far an inserter's **pickup** lands from itself, in tiles, or `None` if
+/// this prototype does not reach out at all.
+///
+/// # It is derived now, and this is the fifth table to stop waiting
+///
+/// `LuaEntityPrototype::inserter_pickup_position` crosses the bridge as
+/// [`FactorioEntityPrototype::inserter_pickup_position`] (2026-09-08). Before
+/// that this was a hand-written list of vanilla inserter names, and its own
+/// doc said so; it is now [`vanilla_inserter_reach`] and is consulted only
+/// when the sender said nothing, exactly as [`pole_wire_reach`] consults
+/// [`vanilla_pole_wire_reach`].
+///
+/// A mod's inserter is now measured rather than missed, which is the owner's
+/// standing rule that a rate or a reach is worked out from prototypes so it
+/// survives mods.
+///
+/// # A vector this model cannot express refuses; a vector that is ABSENT falls
+/// back
+///
+/// The two are deliberately different answers, and merging them is the defect
+/// this crate keeps finding. **Absent** means either "this prototype is not an
+/// inserter" (the runtime API marks the attribute `subclasses: ["Inserter"]`)
+/// or "this world was dumped before 2026-09-08" -- every archived dump in
+/// `workspace/scripts/`, the offline baselines included -- so it falls back to
+/// the vanilla table. **Present but off the `-y` axis, or pointing the wrong
+/// way**, is the game saying something this north-frame scalar cannot carry,
+/// and it answers `None` rather than quietly substituting a table row that
+/// describes a different entity. `None` refuses a plan; a wrong reach builds a
+/// cell that places 100 % and moves nothing.
+fn inserter_reach(
+    prototypes: &DashMap<String, FactorioEntityPrototype>,
+    name: &str,
+) -> Option<f64> {
+    let Some(vector) = prototypes
+        .get(name)
+        .and_then(|prototype| prototype.inserter_pickup_position.clone())
+    else {
+        return vanilla_inserter_reach(name);
+    };
+    axis_reach(-vector.y(), vector.x())
+}
+
+/// How far an inserter's **drop** lands from itself, in tiles.
+///
+/// The other half of [`inserter_reach`], read off
+/// [`FactorioEntityPrototype::inserter_drop_position`] and subject to the same
+/// absent-versus-unexpressible rule.
+///
+/// **It is a separate read on purpose.** Vanilla pairs a pickup of `{0, -1}`
+/// with a drop of `{0, 1.2}` and the long-handed one pairs `{0, -2}` with
+/// `{0, 2.2}`: the extra fifth of a tile is the hand releasing past the tile
+/// centre, so the two vectors differ in *magnitude* while landing on tiles
+/// that are symmetric about the inserter. Both floor to the same whole tile,
+/// which is why deriving each from its own vector reproduces the old
+/// symmetric table exactly on vanilla
+/// (`inserter_geometry_tests::the_derived_reach_matches_the_vanilla_table`)
+/// while leaving a modded asymmetric inserter describable.
+fn inserter_drop_reach(
+    prototypes: &DashMap<String, FactorioEntityPrototype>,
+    name: &str,
+) -> Option<f64> {
+    let Some(vector) = prototypes
+        .get(name)
+        .and_then(|prototype| prototype.inserter_drop_position.clone())
+    else {
+        return vanilla_inserter_reach(name);
+    };
+    axis_reach(vector.y(), vector.x())
+}
+
+/// A reach in tiles from a vector already oriented so that "away from the
+/// inserter" is positive, or `None` if it is not on the axis at all.
+///
+/// Refuses a vector with a sideways component or one that lands on the
+/// inserter's own tile, for the reason [`inserter_reach`] gives: this scalar
+/// plus [`Position::turn`] can only describe a swing along one axis, and
+/// pretending otherwise would put an inserter's hand somewhere the game does
+/// not.
+fn axis_reach(along: f64, across: f64) -> Option<f64> {
+    if vector_tile_offset(across) != 0. {
+        return None;
+    }
+    let tiles = vector_tile_offset(along);
+    (tiles > 0.).then_some(tiles)
+}
+
+/// What [`inserter_reach`] and [`inserter_drop_reach`] answer for a **vanilla
+/// inserter on a world whose sender predates `inserter_pickup_position`**.
 ///
 /// A vanilla inserter swings between the tile in front of it and the tile
-/// behind it; a long-handed one skips a tile on both sides. There is no
-/// prototype field for it that reaches this crate — `FactorioEntityPrototype`
-/// carries none of `pickup_position`, `insert_position` or
-/// `energy_per_movement` — so this is the fifth hand-written table in this
-/// file and it goes in the same follow-up.
+/// behind it; a long-handed one skips a tile on both sides. Read off
+/// `base/prototypes/entity/entities.lua` in this repo's `workspace/data`
+/// (base 2.1.17): `pickup_position = {0, -1}` against
+/// `insert_position = {0, 1.2}` at line 2385, and `{0, -2}` against
+/// `{0, 2.2}` at line 2526.
+///
+/// **This is a fallback for old senders and never the definition of reach.**
+/// It kept its rows for the same reason [`vanilla_pole_supply_half_extent`]
+/// and [`vanilla_consumer_kw`] keep theirs: **every archived world here
+/// predates the field**, `workspace/scripts/map.json` -- the seed-31337 t=0
+/// dump the offline baselines are all measured on -- included. Deleting the
+/// pole fallback with nothing else changed made all four offline goals refuse
+/// to expand at all while reporting `charted ground covers 17 of 17 probes`, a
+/// plausible lie about the map rather than a diagnosable failure; deleting
+/// this one would tell every archived dump that a `long-handed-inserter`
+/// reaches nowhere and that no inserter delivers into anything. The answer to
+/// a missing reach is that the sender should send the vectors, and every world
+/// recorded from 2026-09-08 does, overriding this before it is ever consulted.
+///
+/// It is **symmetric**, which the prototypes are not (see
+/// [`inserter_drop_reach`]) -- the two vanilla vectors floor to the same whole
+/// tile, so one row serves both halves for the names it knows and nothing else
+/// can be recovered from a world that sent nothing.
 ///
 /// `None` for anything that is not an inserter, which is what keeps the pickup
 /// half of [`PlanState::delivers_into`] an *inserter's* claim: a stone furnace
-/// does not reach out and take from the chest beside it.
-fn inserter_reach(name: &str) -> Option<f64> {
+/// does not reach out and take from the chest beside it. Unlike
+/// [`vanilla_consumer_kw`], an unknown name here **under**-credits -- it
+/// delivers into nothing and refuses -- which is the safe direction.
+fn vanilla_inserter_reach(name: &str) -> Option<f64> {
     match name {
         "inserter"
         | "burner-inserter"
@@ -732,8 +883,12 @@ fn inserter_reach(name: &str) -> Option<f64> {
 /// as one rule and not as a case table.
 ///
 /// `None` for anything [`inserter_reach`] does not name.
-fn pickup_offset(name: &str, direction: Direction) -> Option<Position> {
-    Position::new(0., -inserter_reach(name)?).turn(direction)
+fn pickup_offset(
+    prototypes: &DashMap<String, FactorioEntityPrototype>,
+    name: &str,
+    direction: Direction,
+) -> Option<Position> {
+    Position::new(0., -inserter_reach(prototypes, name)?).turn(direction)
 }
 
 /// Above this, a reported `resource_reach_distance` is not a character's.
@@ -3385,7 +3540,11 @@ impl PlanState {
             return Some(drop.clone());
         }
         let facing = Direction::from_u8(entity.direction)?;
-        Some(entity.position.add(&delivery_offset(&entity.name, facing)?))
+        Some(entity.position.add(&delivery_offset(
+            &self.base.globals.entity_prototypes,
+            &entity.name,
+            facing,
+        )?))
     }
 
     /// Does the machine standing at `from` deliver into the machine standing at
@@ -3447,7 +3606,11 @@ impl PlanState {
     /// is not an inserter.
     pub fn pickup_position(&self, entity: &FactorioEntity) -> Option<Position> {
         let facing = Direction::from_u8(entity.direction)?;
-        Some(entity.position.add(&pickup_offset(&entity.name, facing)?))
+        Some(entity.position.add(&pickup_offset(
+            &self.base.globals.entity_prototypes,
+            &entity.name,
+            facing,
+        )?))
     }
 
     /// Is `point` inside one of the tiles `entity` stands on?
@@ -9316,6 +9479,234 @@ mod inserter_geometry_tests {
         assert!(
             !s.delivers_into(&furnace, &drill),
             "and a furnace takes from nothing"
+        );
+    }
+
+    /// A world carrying the game's own vectors, for `name`.
+    ///
+    /// Built by cloning the fixture's prototype and adding the two fields the
+    /// mod began sending on 2026-09-08, which is exactly what a dump taken
+    /// from a live game now looks like. The fixture itself carries neither,
+    /// so every other test in this module is running the **fallback** path --
+    /// that is deliberate and is what
+    /// [`a_world_that_predates_the_field_still_knows_a_long_inserter_reaches_two`]
+    /// pins.
+    fn world_with_inserter_vectors(
+        name: &str,
+        pickup: Option<(f64, f64)>,
+        drop: Option<(f64, f64)>,
+    ) -> PlanState {
+        let world = fixture_world();
+        let mut prototype = world
+            .globals
+            .entity_prototypes
+            .get(name)
+            .expect("the fixture ships this prototype")
+            .clone();
+        prototype.inserter_pickup_position = pickup.map(|(x, y)| Position::new(x, y));
+        prototype.inserter_drop_position = drop.map(|(x, y)| Position::new(x, y));
+        world
+            .globals
+            .entity_prototypes
+            .insert(name.into(), prototype);
+        PlanState::from_world(Arc::new(world), &[BotId(1)])
+    }
+
+    /// **The derivation reproduces the table it replaces, on the game's real
+    /// numbers.**
+    ///
+    /// The vectors are `base/prototypes/entity/entities.lua` verbatim -- `{0,
+    /// -1}` / `{0, 1.2}` at line 2385 and `{0, -2}` / `{0, 2.2}` at 2526 --
+    /// and the expected reaches are the rows
+    /// [`vanilla_inserter_reach`] still carries. This is the check that says
+    /// the bridge changed nothing about vanilla while making a modded
+    /// inserter describable, and specifically that **the asymmetric drop does
+    /// not leak**: 1.2 and 2.2 must floor to 1 and 2, not round to 1 and 2 by
+    /// luck, and not arrive as 1.2 and 2.2.
+    #[test]
+    fn the_derived_reach_matches_the_vanilla_table() {
+        for (name, pickup, drop, expected) in [
+            ("inserter", (0., -1.), (0., 1.2), 1.),
+            ("long-handed-inserter", (0., -2.), (0., 2.2), 2.),
+        ] {
+            let s = world_with_inserter_vectors(name, Some(pickup), Some(drop));
+            let protos = &s.base.globals.entity_prototypes;
+            assert_eq!(
+                inserter_reach(protos, name),
+                Some(expected),
+                "{name}: the pickup vector {pickup:?} is {expected} tiles"
+            );
+            assert_eq!(
+                inserter_drop_reach(protos, name),
+                Some(expected),
+                "{name}: the drop vector {drop:?} floors to {expected} tiles"
+            );
+            assert_eq!(
+                vanilla_inserter_reach(name),
+                Some(expected),
+                "{name}: and the table it replaces said the same"
+            );
+        }
+    }
+
+    /// **The point of the bridge: an inserter no table has ever heard of.**
+    ///
+    /// A three-tile swing is not a vanilla value and appears in no row of
+    /// [`vanilla_inserter_reach`], so a table read cannot produce it by
+    /// accident -- the same argument
+    /// `a_consumers_draw_comes_from_its_own_prototype` makes for 240 kW.
+    /// Renaming the fixture's `filter-inserter` is not available (the table
+    /// knows that name), so this stands the vectors on a prototype the table
+    /// does **not** name and checks that geometry appears where there was
+    /// none.
+    #[test]
+    fn a_modded_inserter_is_measured_rather_than_missed() {
+        let s = world_with_inserter_vectors("stone-furnace", Some((0., -3.)), Some((0., 3.2)));
+        let protos = &s.base.globals.entity_prototypes;
+        assert_eq!(
+            vanilla_inserter_reach("stone-furnace"),
+            None,
+            "the table has never heard of this name -- that is the premise"
+        );
+        assert_eq!(
+            inserter_reach(protos, "stone-furnace"),
+            Some(3.),
+            "and the prototype says three tiles"
+        );
+        assert_eq!(
+            inserter_drop_reach(protos, "stone-furnace"),
+            Some(3.),
+            "3.2 floors into the third tile, not the fourth"
+        );
+    }
+
+    /// **Absent is not a value**, and it is the case every archived dump is in.
+    ///
+    /// `workspace/scripts/map.json` -- the seed-31337 t=0 dump the four
+    /// offline baselines are measured on -- carries none of these fields, and
+    /// neither does the fixture. Without the fallback a
+    /// `long-handed-inserter` on such a world would reach **nowhere**, which
+    /// is a plausible lie rather than a diagnosable failure: it is precisely
+    /// what deleting the pole fallback did, refusing all four baselines while
+    /// reporting `charted ground covers 17 of 17 probes`.
+    #[test]
+    fn a_world_that_predates_the_field_still_knows_a_long_inserter_reaches_two() {
+        let s = state();
+        let protos = &s.base.globals.entity_prototypes;
+        assert!(
+            protos
+                .get("long-handed-inserter")
+                .expect("the fixture ships it")
+                .inserter_pickup_position
+                .is_none(),
+            "the premise: this world's sender never sent the field"
+        );
+        assert_eq!(inserter_reach(protos, "long-handed-inserter"), Some(2.));
+        assert_eq!(inserter_reach(protos, "inserter"), Some(1.));
+        assert_eq!(
+            inserter_reach(protos, "stone-furnace"),
+            None,
+            "and a furnace still does not reach out and take from the chest beside it"
+        );
+    }
+
+    /// A vector the north-frame scalar cannot carry **refuses**; it does not
+    /// fall back.
+    ///
+    /// The fallback exists for a sender that said *nothing*. A sender that
+    /// said something this model cannot express is a different fact, and
+    /// answering it with a table row would describe a different entity --
+    /// which is the failure mode this whole file is organised against, since
+    /// a wrong reach builds a cell that places 100 % and moves nothing.
+    #[test]
+    fn a_vector_this_model_cannot_express_refuses_instead_of_falling_back() {
+        for (label, pickup) in [
+            ("a sideways swing", (-2., 0.)),
+            ("a diagonal swing", (-1., -1.)),
+            ("a pickup on the inserter's own tile", (0., 0.)),
+            ("a pickup on the drop side", (0., 1.)),
+        ] {
+            let s = world_with_inserter_vectors("inserter", Some(pickup), None);
+            let protos = &s.base.globals.entity_prototypes;
+            assert_eq!(
+                inserter_reach(protos, "inserter"),
+                None,
+                "{label}: {pickup:?} has no answer this scalar can give, and the \
+                 vanilla row for `inserter` must not stand in for it"
+            );
+        }
+    }
+
+    /// The two halves are read **separately**, so an asymmetric inserter is
+    /// describable at all.
+    ///
+    /// Nothing vanilla is asymmetric once floored -- which is why the old
+    /// symmetric table was right for a decade of vanilla and would have been
+    /// silently wrong for the first mod that was not. A long pickup with a
+    /// short drop is a legal prototype and now reads as one.
+    #[test]
+    fn a_long_pickup_and_a_short_drop_are_not_forced_to_agree() {
+        let s = world_with_inserter_vectors("inserter", Some((0., -2.)), Some((0., 1.2)));
+        let protos = &s.base.globals.entity_prototypes;
+        assert_eq!(inserter_reach(protos, "inserter"), Some(2.));
+        assert_eq!(inserter_drop_reach(protos, "inserter"), Some(1.));
+    }
+
+    /// **The long inserter reaches over the near belt to the far one**, which
+    /// is the geometric fact the owner's stacked-belt layout rests on.
+    ///
+    /// Two belts stacked north of a machine, the near one at `y - 1` and the
+    /// far one at `y - 2`. A plain `inserter` standing on the machine's
+    /// northern mouth picks up from the near belt and cannot see the far one;
+    /// a `long-handed-inserter` on the *same tile* picks up from the far belt
+    /// and reaches straight over the near one.
+    ///
+    /// Stated on `delivers_into`, the model's own question, rather than on the
+    /// scalar -- so it is the fact a caller would actually get.
+    ///
+    /// **What this does not say.** It is a claim about *reach*, and reach is
+    /// only half of a belt-fed machine: which of a single belt's two **lanes**
+    /// an item rides is a question of drop side and sideloading, which nothing
+    /// in `method::connect` or `graph::route` models at all. Stacked rows and
+    /// lanes compose, and conflating them is how a layout that "should work"
+    /// moves nothing.
+    #[test]
+    fn a_long_inserter_reaches_over_the_near_belt_to_the_far_one() {
+        let mut s = state();
+        // The mouth tile, and the two belt rows stacked north of it.
+        put(&mut s, "transport-belt", 10.5, 7.5, 0);
+        put(&mut s, "transport-belt", 10.5, 8.5, 0);
+        put(&mut s, "inserter", 10.5, 9.5, Direction::North as u8);
+        let far = Position::new(10.5, 7.5);
+        let near = Position::new(10.5, 8.5);
+        let mouth = Position::new(10.5, 9.5);
+
+        assert!(
+            s.delivers_into(&near, &mouth),
+            "a plain inserter takes from the belt beside it"
+        );
+        assert!(
+            !s.delivers_into(&far, &mouth),
+            "and cannot see the row behind that one -- the premise"
+        );
+
+        let mut s = state();
+        put(&mut s, "transport-belt", 10.5, 7.5, 0);
+        put(&mut s, "transport-belt", 10.5, 8.5, 0);
+        put(
+            &mut s,
+            "long-handed-inserter",
+            10.5,
+            9.5,
+            Direction::North as u8,
+        );
+        assert!(
+            s.delivers_into(&far, &mouth),
+            "a long inserter on the same tile reaches the far row"
+        );
+        assert!(
+            !s.delivers_into(&near, &mouth),
+            "and reaches OVER the near one rather than choosing between them"
         );
     }
 }

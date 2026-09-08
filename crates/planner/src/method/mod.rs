@@ -25,6 +25,7 @@ use crate::goal::{Goal, Holder};
 use crate::ids::{ActionId, ActionIdGen, BotId, ChainId, ChainIdGen, ItemId, Ticks};
 use crate::state::{ClaimRunner, PlanState};
 use crate::substance::{FluidRefusal, FluidSource, SubstanceTable};
+use factorio_bot_core::types::Pos;
 use std::cell::OnceCell;
 use std::collections::BTreeMap;
 
@@ -170,6 +171,29 @@ pub struct ExpansionCtx {
     /// producers a consumer draws on -- see `run_steps` for why that edge is
     /// stated rather than left to `ActionNetwork::infer_edges`.
     pub(crate) stock: BTreeMap<(BotId, ItemId), Vec<(ActionId, u32)>>,
+    /// Where each **buffer's** contents came from: for every `(tile, item)`,
+    /// the actions whose [`Effect::BufferGain`] put some of it there, in
+    /// emission order.
+    ///
+    /// The buffer analogue of [`stock`](Self::stock), and it exists for a
+    /// reason `stock` does not have: a buffer outlives the chain that filled
+    /// it, so the producer and the consumer of a buffered item are routinely
+    /// **two different methods' expansions**, and a method reading this is the
+    /// only way the second one can name an `ActionId` the first allocated.
+    ///
+    /// Its one reader is [`cellstock::DrawFromCell`], which needs it to state
+    /// the lag between a cell being charged and its output chest holding
+    /// anything: the machines have to run, and that wait belongs on an edge
+    /// rather than in a bot's `duration`, where it stands the bot at the chest
+    /// doing nothing. `PlanState::machine_queue` carries an `ActionId` across
+    /// the same boundary for a furnace and is the precedent.
+    ///
+    /// Not spent down the way `stock` is. A drawing action is linked to every
+    /// action that has ever filled that `(tile, item)`, which is conservative
+    /// and sound: a draw of `min(need, buffered)` may span several charges,
+    /// and ordering it after one it did not draw from costs an edge that was
+    /// already true.
+    pub(crate) buffer_stock: BTreeMap<(Pos, ItemId), Vec<ActionId>>,
     /// What this world calls each prototype name, built on first ask and then
     /// only read.
     ///
@@ -216,6 +240,7 @@ impl ExpansionCtx {
             top_level: true,
             concurrency: None,
             stock: BTreeMap::new(),
+            buffer_stock: BTreeMap::new(),
             converging: false,
             rehearsing: false,
             depth: 0,
@@ -1405,8 +1430,16 @@ fn run_steps(
                     .collect();
                 let mut spends: Vec<(ItemId, u32)> = Vec::new();
                 let mut gains: Vec<(ItemId, u32)> = Vec::new();
+                // What this action puts into a buffer, so a later method can
+                // link to it -- see `ExpansionCtx::buffer_stock`. Collected
+                // here beside `gains` because `action` is moved into the
+                // network below.
+                let mut buffer_gains: Vec<(Pos, ItemId)> = Vec::new();
                 for effect in &action.eff {
                     match effect {
+                        Effect::BufferGain {
+                            pos, item, count, ..
+                        } if *count > 0 => buffer_gains.push((Pos::from(pos), item.clone())),
                         Effect::LoseItem {
                             who: Actor::Role,
                             item,
@@ -1467,6 +1500,12 @@ fn run_steps(
                             .entry((binding, item))
                             .or_default()
                             .push((id, count));
+                    }
+                }
+                for (pos, item) in buffer_gains {
+                    let sources = ctx.buffer_stock.entry((pos, item)).or_default();
+                    if !sources.contains(&id) {
+                        sources.push(id);
                     }
                 }
             }

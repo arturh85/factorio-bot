@@ -1,0 +1,141 @@
+=== composition ===
+  transport-belt             17761
+  inserter                   3515
+  pipe                       3225
+  small-electric-pole        3162
+  underground-belt           1823
+  electric-mining-drill      1484
+  steel-furnace              1195
+  long-handed-inserter       1172
+  fast-inserter              939
+  steam-engine               895
+  assembling-machine-2       752
+  pipe-to-ground             751
+  fast-transport-belt        668
+  boiler                     461
+  splitter                   208
+  medium-electric-pole       190
+  passive-provider-chest     186
+  chemical-plant             146
+  assembling-machine-3       122
+  requester-chest            117
+  biolab                     80
+  oil-refinery               55
+  iron-chest                 30
+  burner-inserter            30
+  burner-mining-drill        28
+  big-electric-pole          27
+  stone-furnace              26
+  pumpjack                   24
+  fast-splitter              20
+  fast-underground-belt      20
+  bulk-inserter              17
+  centrifuge                 16
+  storage-tank               12
+  offshore-pump              10
+  steel-chest                9
+  storage-chest              6
+  assembling-machine-1       1
+  captive-biter-spawner      1
+
+=== inserter offset rule  (machine | kind | inserter tile offset from face | belt row offset from face) ===
+  furnace                inserter               inserter@1  belt@2    2394
+  assembling-machine-2   long-handed-inserter   inserter@1  belt@3     596
+  boiler                 inserter               inserter@1  belt@2     423
+  assembling-machine-2   inserter               inserter@1  belt@2     414
+  assembling-machine-2   fast-inserter          inserter@1  belt@2     292
+  assembling-machine-2   long-handed-inserter   inserter@2  belt@4     193
+  assembling-machine-3   long-handed-inserter   inserter@1  belt@3     130
+  assembling-machine-3   inserter               inserter@1  belt@2      72
+  chemical-plant         inserter               inserter@1  belt@2      63
+  chemical-plant         long-handed-inserter   inserter@2  belt@4      48
+  boiler                 burner-inserter        inserter@1  belt@2      30
+  chemical-plant         long-handed-inserter   inserter@1  belt@3      28
+  assembling-machine-3   fast-inserter          inserter@1  belt@2      27
+  centrifuge             fast-inserter          inserter@1  belt@2      24
+
+  long-handed share of all inserters: 1172 / 5673 = 20.7%
+  long-handed inserters touching a furnace at either end: 0 of 1172
+
+=== what each inserter class moves, pickup -> drop ===
+  (direction names the side it PICKS UP from -- repo convention, and
+   the sensible pairings below are what confirm it)
+
+  inserter  reach 1  n=3515
+     belt                   -> steel-furnace           1193  33.9%
+     steel-furnace          -> belt                    1149  32.7%
+     belt                   -> boiler                   423  12.0%
+     assembling-machine-2   -> belt                     231   6.6%
+     belt                   -> assembling-machine-2     183   5.2%
+     chemical-plant         -> belt                      63   1.8%
+
+  long-handed-inserter  reach 2  n=1172
+     belt                   -> assembling-machine-2     623  53.2%
+     assembling-machine-2   -> belt                     166  14.2%
+     belt                   -> assembling-machine-3     107   9.1%
+     assembling-machine-2   -> assembling-machine-3      72   6.1%
+     belt                   -> chemical-plant            38   3.2%
+     chemical-plant         -> belt                      38   3.2%
+
+  fast-inserter  reach 1  n=939
+     belt                   -> assembling-machine-2     253  26.9%
+     assembling-machine-2   -> assembling-machine-2     107  11.4%
+     belt                   -> belt                      86   9.2%
+     chest                  -> biolab                    80   8.5%
+     assembling-machine-2   -> chest                     71   7.6%
+     chest                  -> belt                      70   7.5%
+
+  burner-inserter  reach 1  n=30
+     belt                   -> boiler                    30  100.0%
+
+  bulk-inserter  reach 1  n=17
+     belt                   -> centrifuge                12  70.6%
+     centrifuge             -> belt                       4  23.5%
+     belt                   -> chest                      1   5.9%
+
+=== assembling-machine-2: inserters per served face (lane1 = adjacent to face, lane2 = one further out) ===
+  lane1=n     lane2=-        689  46.3%
+  lane1=Ln    lane2=-        244  16.4%
+  lane1=L     lane2=L        153  10.3%
+  lane1=-     lane2=L        121   8.1%
+  lane1=L     lane2=-        107   7.2%
+  lane1=nn    lane2=-         57   3.8%
+  lane1=Ln    lane2=L         36   2.4%
+  lane1=-     lane2=nn        21   1.4%
+
+=== assembling-machine-3: inserters per served face (lane1 = adjacent to face, lane2 = one further out) ===
+  lane1=n     lane2=-         52  25.6%
+  lane1=Ln    lane2=L         44  21.7%
+  lane1=L     lane2=-         39  19.2%
+  lane1=L     lane2=L         26  12.8%
+  lane1=Ln    lane2=-         18   8.9%
+  lane1=nn    lane2=-         15   7.4%
+  lane1=Lnn   lane2=L          4   2.0%
+  lane1=Lnn   lane2=-          1   0.5%
+
+=== packing period: gaps between consecutive same-kind machines ===
+  assembling-machine-2     n=  752   x-gaps {3: 320, 6: 69, 8: 43}   y-gaps {3: 324, 4: 81, 8: 72}
+  assembling-machine-3     n=  122   x-gaps {3: 49, 29: 6, 16: 4}   y-gaps {3: 47, 33: 32, 4: 9}
+  biolab                   n=   80   x-gaps {5: 76}   y-gaps {11: 40}
+  boiler                   n=  461   x-gaps {3: 438, 22: 6, 9: 1}   y-gaps {15: 380}
+  chemical-plant           n=  146   x-gaps {3: 33, 11: 18, 8: 18}   y-gaps {3: 58, 6: 20, 9: 19}
+  electric-mining-drill    n= 1484   x-gaps {3: 883, 4: 323, 14: 30}   y-gaps {3: 914, 4: 333, 5: 10}
+  oil-refinery             n=   55   x-gaps {10: 30, 5: 14}   y-gaps {5: 36}
+  steam-engine             n=  895   x-gaps {3: 462, 6: 350, 12: 14}   y-gaps {6: 233, 5: 203, 9: 183}
+  steel-furnace            n= 1195   x-gaps {2: 434, 5: 292, 6: 220}   y-gaps {2: 668, 5: 234, 6: 210}
+  stone-furnace            n=   26   x-gaps {}   y-gaps {2: 24}
+
+=== drill output target, by ore ===
+  coal         electric-mining-drill  -> belt                     161
+  coal         burner-mining-drill    -> burner-mining-drill      26
+  coal         electric-mining-drill  -> boiler                   7
+  coal         electric-mining-drill  -> empty                    3
+  copper-ore   electric-mining-drill  -> belt                     529
+  iron-ore     electric-mining-drill  -> belt                     550
+  null         electric-mining-drill  -> belt                     85
+  null         electric-mining-drill  -> boiler                   1
+  stone        electric-mining-drill  -> belt                     57
+  stone        burner-mining-drill    -> assembling-machine-1     2
+  uranium-ore  electric-mining-drill  -> belt                     91
+
+=== packing density: 11780 of 20932 machine faces (56%) abut another machine ===

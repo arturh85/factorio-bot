@@ -133,9 +133,46 @@ const CELL_FUELLED_TICKS: Ticks = 36_000;
 ///
 /// A bound on work, not a claim about what a map could hold. Siting a cell
 /// walks a patch, so a rate asking for millions of them is a hang rather than a
-/// refusal; this turns it into a refusal. Twelve cells is 180 iron plates a
-/// minute, an order of magnitude past anything the ladder has ever consumed.
-const MAX_CELLS: u32 = 12;
+/// refusal; this turns it into a refusal.
+///
+/// # Why sixty-four, and why twelve was the binding constraint on this project
+///
+/// It was **12** — 180 iron plate/min — on the stated ground that this is "an
+/// order of magnitude past anything the ladder has ever consumed". That premise
+/// was true and the conclusion did not follow: the ladder's rungs are science
+/// packs, so what the ladder consumes measures the *ladder*, not the rate a
+/// map can stand. Nothing in this tree has ever asked a cell goal for more than
+/// **15/min** (`scripts/selffed_run.lua`, one cell), and the constant sized
+/// itself against that.
+///
+/// The number that says what the shape is worth was measured on 2026-09-08
+/// against two world-record Space Age runs, recovered from
+/// `LuaFlowStatistics` (`tools/rate_history_probe.lua`, raw samples under
+/// `docs/superpowers/notes/data/`). Both build **73 burner mining drills
+/// inside the first ten minutes and never another**, with no inserter, no belt
+/// and no electricity, and their iron-plate rate is:
+///
+/// | game minute | any% 6:39:53 | RSNG 3:17:06 |
+/// |---|---:|---:|
+/// | ~5  | 261 /min | 347 /min |
+/// | ~10 | 390 /min | 224 /min |
+/// | ~15 | 839 /min | 918 /min |
+///
+/// At this cell's own 15 plate/min ([`CellSpec::ticks_per_item`], the drill's
+/// 240 ticks) those are **18, 26 and 56 cells**. Sixty-four is the ceiling of
+/// that envelope with margin, and the drill count it implies checks out
+/// independently: 56 iron cells plus the ~16 coal drills their fuel needs
+/// (see [`fuel_for_duration`] — 3.6 coal/min per cell against a coal drill's
+/// 12.75 net) is **72 drills**, against the 73 the references actually stood.
+/// Two quantities derived from different sides agreeing to one drill is why
+/// this bound is 64 rather than a round number somebody liked.
+///
+/// **It is still not a claim about the map.** The patch answers that, by
+/// refusing with [`PlannerError::NoRoomForCell`] once
+/// [`CELL_SEARCH_RADIUS`] holds no further site — a *different* refusal,
+/// naming the ground rather than the bound, which is the whole reason both
+/// exist.
+const MAX_CELLS: u32 = 64;
 
 /// Minutes are what a rate is stated in and ticks are what everything else is
 /// measured in.
@@ -690,11 +727,31 @@ pub fn plan_cells(
 ) -> Result<Vec<Cell>, PlannerError> {
     let mut trial = state.fork();
     let mut out = Vec::new();
+    // # The anchor WALKS, and that is what decides how big a plan can be
+    //
+    // [`plan_cell`] re-derives its anchor as the resource tile nearest `from`
+    // and then rings out to [`CELL_SEARCH_RADIUS`]. Holding `from` at the
+    // bot's position for every cell therefore searches the *same* 25x25
+    // window `count` times, so a patch fifty tiles across is planned as if it
+    // were twelve: measured on the seed-31337 t=0 dump,
+    // `producing:iron-plate:195` refused `NoRoomForCell` at cell 13 while the
+    // iron patch was nowhere near full, and raising `MAX_CELLS` from 12 to 64
+    // moved that ceiling by exactly nothing.
+    //
+    // So each cell is sited from its predecessor. The first still comes from
+    // the caller's `from`, which is what keeps the one-cell plans every
+    // ladder rung makes bit-identical; each next one anchors on the drill
+    // just placed, and the search walks the patch instead of re-searching one
+    // window. A side effect worth naming because `method::sustain` depends on
+    // it: successive cells come out CONTIGUOUS rather than scattered, which
+    // is the arrangement a fuel belt can serve.
+    let mut anchor = from.clone();
     for _ in 0..count {
-        let cell = plan_cell(&trial, from, spec, want)?;
+        let cell = plan_cell(&trial, &anchor, spec, want)?;
         for entity in parts(&trial, &cell) {
             trial.create_entity(entity);
         }
+        anchor = cell.drill.clone();
         out.push(cell);
     }
     Ok(out)
@@ -2721,6 +2778,35 @@ mod tests {
         ));
     }
 
+    /// The bound admits the rate two world-record runs actually stood on
+    /// burner cells, and the arithmetic that says so is here rather than only
+    /// in [`MAX_CELLS`]' prose.
+    ///
+    /// Three marks from `docs/superpowers/notes/data/`, at this cell's own
+    /// 15 plate/min: 261, 390 and 839 /min are 18, 26 and 56 cells. The last
+    /// is the one that matters -- a bound of 12 refused it by a factor of
+    /// nearly five, which is why no goal in this tree ever asked for it.
+    ///
+    /// Deliberately expressed as `cells_for(rate, 240)` and not as a literal
+    /// compared to `MAX_CELLS`: an expected value the system could produce by
+    /// accident proves nothing, and 240 ticks is read off the prototypes in
+    /// [`drill_ticks_per_item`] (iron ore's 1 s over a burner drill's 0.25).
+    #[test]
+    fn the_bound_admits_the_rate_the_reference_runs_stood() {
+        for (per_minute, cells) in [(261u32, 18u32), (390, 26), (839, 56)] {
+            assert_eq!(
+                cells_for(per_minute, 240).expect("within MAX_CELLS"),
+                cells,
+                "{per_minute} iron-plate/min is {cells} cells at 15/min each"
+            );
+        }
+        // And the bound is still a bound: one cell past it refuses by name.
+        assert!(matches!(
+            cells_for(15 * (MAX_CELLS + 1), 240),
+            Err(PlannerError::TooManyCells { .. })
+        ));
+    }
+
     // ---- geometry ---------------------------------------------------------
 
     #[test]
@@ -3620,6 +3706,71 @@ mod tests {
             .update_chunk_entities(ore)
             .expect("the amounts are delivered");
         world
+    }
+
+    /// A patch long enough to hold more cells than one search window can see.
+    ///
+    /// Six tiles wide and 120 long, running north from the origin. The width
+    /// is deliberately narrower than `2 * CELL_SEARCH_RADIUS`: a static anchor
+    /// therefore has nowhere to expand *except* along the ribbon, and cannot
+    /// reach the far end, while a walking one can.
+    fn world_with_a_long_ribbon() -> factorio_bot_core::factorio::world::FactorioSurface {
+        use factorio_bot_core::factorio::util::add_to_rect;
+        use factorio_bot_core::types::Rect;
+        let world = fixture_world();
+        let mut ore: Vec<FactorioEntity> = Vec::new();
+        factorio_bot_core::test_utils::spawn_ore(
+            &mut ore,
+            add_to_rect(&Rect::from_wh(6., 120.), &Position::new(0., -70.)),
+            "iron-ore",
+        );
+        for entity in &mut ore {
+            entity.amount = Some(crate::state::DEFAULT_RESOURCE_PER_TILE);
+        }
+        world
+            .update_chunk_entities(ore)
+            .expect("the amounts are delivered");
+        world
+    }
+
+    /// `plan_cells` walks its anchor, so a plan is bounded by the ore and not
+    /// by one search window.
+    ///
+    /// # Why the assertion is a DISTANCE and not a count
+    ///
+    /// A count would pass for the wrong reason. [`CELL_SEARCH_RADIUS`] is 12,
+    /// so a static anchor still sees a 25x25 window and could well pack more
+    /// than a dozen cells into it on a generous fixture -- an expected value
+    /// the system can produce by accident proves nothing. What a static anchor
+    /// **cannot** do at any count is put a drill further from its one anchor
+    /// tile than the radius it searches. That is the property, so that is what
+    /// is asserted.
+    ///
+    /// Measured on the real map before this existed: `producing:iron-plate:195`
+    /// refused `NoRoomForCell` at cell 13 with the seed-31337 iron patch
+    /// nowhere near full, and raising `MAX_CELLS` from 12 to 64 moved that
+    /// ceiling by nothing at all.
+    #[test]
+    fn cells_are_sited_further_out_than_one_search_window_reaches() {
+        let s = PlanState::from_world(Arc::new(world_with_a_long_ribbon()), &[BotId(1)]);
+        let spec = iron();
+        let from = Position::new(0., 0.);
+
+        let anchor = nearest_resource_tile(&s, &spec.ore, &from, 1)
+            .expect("the ribbon is a patch this fixture can find");
+        let cells = plan_cells(&s, &from, &spec, 20, 1).expect("the ribbon holds twenty cells");
+        assert_eq!(cells.len(), 20, "every cell was sited");
+
+        let furthest = cells
+            .iter()
+            .map(|cell| factorio_bot_core::factorio::util::calculate_distance(&cell.drill, &anchor))
+            .fold(0.0_f64, f64::max);
+        assert!(
+            furthest > f64::from(CELL_SEARCH_RADIUS),
+            "a static anchor can never exceed its own search radius, so exceeding it is \
+             the walk: furthest drill is {furthest:.1} tiles from the anchor at {anchor}, \
+             against a radius of {CELL_SEARCH_RADIUS}"
+        );
     }
 
     /// The live failure, in the model: a drill sited on the thin rim of a

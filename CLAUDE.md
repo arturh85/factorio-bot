@@ -50,6 +50,72 @@ is not handling* below.
 collapsing them would make an unrecorded run indistinguishable from a base-game
 one, which is the confusion provenance exists to prevent.
 
+## What landed on 2026-09-08, and the trap in each
+
+Six capabilities that did not exist the day before. Each is listed with the
+thing that will bite whoever uses it next.
+
+- **`goal.gathered` / `goal.produced` / `goal.extracted` are sayable from Lua.**
+  Before this, the planner had eight goal kinds and a script could name six, so
+  the oil milestone was unreachable from the only path that can execute it.
+  **A goal kind lives in SEVEN places**, not the three that are obvious:
+  constructor, `goal_from_lua` arm, `render_goal` arm, `KINDS`, a test inside
+  `goal.all`, the `__doc_entry_<kind>` string in `goal/mod.rs`, and the expected
+  set in `the_goal_table_offers_exactly_the_new_surface`. **Only the last two
+  fail loudly**; the first four have no guard between them, which is how
+  `charted` went missing for a day. The list is in `install_goal_constructors`'
+  doc. `unlocks` is exposed and is **a claim, not a grant** — nothing checks the
+  technology name, and a wrong one makes the plan believe a technology is done.
+
+- **`Site::Beside { of, steps }` puts a second block on one map**, resolved
+  before `recover_anchor` for the same reason `Site::Anchored` is. It needs the
+  blueprint's **declared pitch**, which **cannot be derived from the entities**:
+  `MinerLine`'s centres span 4 tiles of x and it declares 7. A block declaring
+  no pitch is refused by name rather than tiled at its extent, because tiling at
+  the extent silently eats whatever the author reserved.
+
+- **`tools/fixture_shape.py` decodes every fixture in `scripts/rcontest.lua` in
+  about a second** — composition, declared pitch, `span` (centre to centre) and
+  `tiles` (tile columns holding an entity centre). **Run it instead of typing a
+  fixture'"'"'s shape.** Three quantities had been competing for one label and two
+  sessions quoted different ones at each other; this file'"'"'s "5 x 21" for
+  `MinerLine` is the `tiles` reading. It deliberately omits power draw — a
+  second copy of `consumer_kw` would reproduce the 624/639 confusion.
+
+- **Water is a question about what the ground yields**, not about a tile name.
+  `FactorioTile::yields_water` answers `Unknown -> is_water()` else
+  `fluid.yields("water")`, so `Dry` outranks the name and `Yields` outranks it
+  the other way. **The by-name fallback is load-bearing and was measured**:
+  delete it and all four baselines refuse with `PowerPlantNeedsWater` while
+  reporting `charted ground covers 17 of 17 probes` — a **plausible lie about
+  the map**, not a diagnosable failure, because every archived dump reads
+  `Unknown`. Documented as a fallback for old senders, never the definition of
+  water: the answer to a missing name is that the sender should declare `fluid`.
+
+- **`Method::hands_over` is the weaker question `converges` was standing in
+  for.** `run_steps` sizes every action against `ctx.chain_actor`, but a chain
+  only *opens* on a stated holder or on `converges` — so a subtree passing items
+  **hand to hand without converging** got a bill in one bot'"'"'s name and no owner,
+  and the scheduler split it. `pipe` is one iron plate, so `HandCraft::converges`
+  was honestly `false`. Both are read off one `short_ingredients` at thresholds
+  2 and 1, so the weaker claim cannot drift from the stronger one containing it.
+
+- **The oil rig plans and the bots die walking to it.** On seed 31337 crude oil
+  is **372.5 tiles** away and a fresh map generates to ±320, so it is outside by
+  52. Charting is cheap — one ring, 8 surveys, 0 failures, 4,159 ticks, and the
+  plan it yields matches the fully-explored offline action count exactly. But
+  the survey reveals **32 enemy structures**, and the first live attempt lost
+  two bots (a small-biter at tick 27,065, a small-worm-turret at 53,619) after
+  246 of 2,295 actions. **Nothing in the planner models a threat.** Whether the
+  answer is threat-aware planning, a forward base, or "oil is not a t=0 target
+  on this seed" is an open owner decision — one run does not separate them.
+
+**One environment note that cost four verification attempts**: a `target/`
+shared by two cargo processes tears incremental objects, and **cargo then
+considers them fresh**, so `mold: error: undefined symbol: anon.<hash>.llvm.<n>`
+survives on an idle box. Contention causes it; stale output perpetuates it.
+`cargo clean -p <crate>` fixes it — but never during another writer'"'"'s build.
+
 ## Build & Development Commands
 
 **Never `git commit --amend` in this checkout, and never `cargo fmt --all`.**

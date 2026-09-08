@@ -1780,7 +1780,27 @@ impl FlowGraph {
                 }
             }
         }
-        map.into_iter().collect()
+        // Sorted by name on the way out, because `map` is a `HashMap` whose
+        // `RandomState` is seeded **per process** — without this the returned
+        // `Vec` order differs between two runs of the same binary on the same
+        // input. Each name's own total is already order-independent (it
+        // accumulates over `input`, a `Vec`), so this orders the collection
+        // and changes no value.
+        //
+        // Nothing depends on it *today*: the planner's only consumer is
+        // `method::sustain::flow_reaches`, which asks `!.is_empty()`, and no
+        // ordering can change a boolean. It is here because that same function
+        // is documented as "the first time a flow-graph number has affected a
+        // planning decision at all", and this project is deliberately moving
+        // planning onto flow rates — so the second consumer is the dangerous
+        // one. `f64` addition is **not associative**, so a caller that sums
+        // these in the order given would get bitwise-different totals run to
+        // run, in a crate that promises determinism and compares floats with
+        // `total_cmp`. Cheaper to order it now than to debug a baseline that
+        // moves for no reason in the diff.
+        let mut out: FlowRates = map.into_iter().collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
     }
 
     fn sum_incoming_edge_weights(&self, position: &Position) -> FlowRates {

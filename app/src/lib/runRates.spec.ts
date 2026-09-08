@@ -31,6 +31,8 @@ describe('rateSeries', () => {
         const s = [force(0, {}), force(3600, {x: 60}), force(7200, {x: 60}), force(10800, {x: 120})];
         const pts = rateSeries(s, 'x', 0, 10800, 7200);
         expect(pts.map((p) => p.tick)).toEqual([0, 3600, 7200, 10800]);
+        // 0: the window has zero width (the sample sits at the origin) -- absent, not zero.
+        expect(pts[0].perMinute).toBeNull();
         // 3600: window clipped to [0,3600] -> 60 over 1 min
         expect(pts[1].perMinute).toBeCloseTo(60);
         // 7200: [0,7200] -> 60 over 2 min

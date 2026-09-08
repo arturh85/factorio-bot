@@ -28,7 +28,8 @@ export const DEFAULT_MARKS = [5, 10, 15, 20, 25, 30];
 
 export interface RatePoint {
     tick: number;
-    perMinute: number;
+    /** `null` when the trailing window has zero width (a sample at `lo` itself) -- absent, not zero. */
+    perMinute: number | null;
 }
 
 export type MarkStatus = 'ok' | 'run_ended' | 'samples_end' | 'no_sample';
@@ -87,7 +88,7 @@ export function rateSeries(
         const winFrom = Math.max(lo, s.tick - windowTicks);
         const winMinutes = (s.tick - winFrom) / TICKS_PER_MINUTE;
         if (winMinutes <= 0) {
-            out.push({tick: s.tick, perMinute: 0});
+            out.push({tick: s.tick, perMinute: null});
             continue;
         }
         const now = madeAt(samples, s.tick, item, lo) ?? 0;
@@ -135,9 +136,15 @@ export function markAt(
     };
 }
 
-/** The default items, then any other item whose final count clears the threshold. */
+/**
+ * The default items, then any other item whose final count clears the threshold.
+ *
+ * `final` is read from the last `force` sample in `samples` regardless of
+ * `hi`, matching Python's `production_rates()` (`final = _made(force[-1])`,
+ * where `force` is unfiltered) -- `hi` bounds the marks, not the item list.
+ */
 export function rateItems(samples: Sample[], lo: number, hi: number, threshold = RATE_ITEM_THRESHOLD): string[] {
-    const force = forceSamples(samples).filter((s) => s.tick <= hi);
+    const force = forceSamples(samples);
     if (force.length === 0) return [...DEFAULT_RATE_ITEMS];
     const final = force[force.length - 1].production.made;
     const base = forceAt(samples, lo)?.production.made ?? {};

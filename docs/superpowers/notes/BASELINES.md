@@ -35,19 +35,34 @@ saying nothing crafts chemistry."*
 
 ## The four standing baselines
 
-Verified 2026-09-09 on `target/release/factorio-bot`, `--bots 1,2,3,4`.
+**A baseline needs a COMMIT as well as a world**, and the omission of one bit me
+within an hour of writing this file. Take before and after on the same binary,
+and record what that binary was built from.
 
-| goal | world | actions / makespan |
-|---|---|---|
-| `researched:automation` | `map.json` | 176 / 21,784 |
-| `producing:automation-science-pack:6` | `map.json` | 316 / 22,457 |
-| `producing:logistic-science-pack:6` | `map.json` | 571 / 54,371 |
-| `gathered:crude-oil` | **`map-31337-explored.json`** | 2,117 / 309,574 |
+| goal | world | actions / makespan | measured at |
+|---|---|---|---|
+| `researched:automation` | `map.json` | 176 / 21,784 | stable across the night |
+| `producing:automation-science-pack:6` | `map.json` | 316 / 22,457 | stable across the night |
+| `producing:logistic-science-pack:6` | `map.json` | 571 / 54,371 | stable since the cell work |
+| `gathered:crude-oil` | **`map-31337-explored.json`** | **2,330 / 354,699** | `c0e51463` |
 
-`gathered:crude-oil` is the one that keeps going wrong. On `map.json` it
-**refuses** — no crude oil is charted there — and on
-`map-31337-explored-with-categories.json` it is **2,449 / 357,372**. Both correct
-for their world. Name the dump beside the number, always.
+### `gathered:crude-oil` is the one that keeps going wrong, twice over
+
+**By world.** It **refuses** on `map.json` (no crude oil charted there) and reads
+**2,449 / 357,372** on `map-31337-explored-with-categories.json`. Both correct for
+their world.
+
+**And by commit.** It read **2,117 / 309,574** earlier on 2026-09-09 — measured on
+a `target/release/factorio-bot` built at 22:04 the previous evening, while master
+had moved through a dozen merges since. An agent building fresh at `c0e51463`
+measured **2,330 / 354,699** and correctly reported that the older figure "does
+not reproduce at HEAD… stale, not something I moved."
+
+So the older number was not wrong when taken; it was quoted past its build. **A
+stale binary is as much a source of a phantom regression as a stale dump**, and it
+is harder to notice because `git log` looks right while `target/` does not.
+
+Check the binary's mtime against `git log -1` before quoting anything from it.
 
 ## Goals that only exist on a categories world
 

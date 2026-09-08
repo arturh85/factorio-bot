@@ -395,7 +395,7 @@ async fn run_bot_signalled<'a>(
                     .await
                     .is_err()
                 {
-                    halt(&mine, i, &mut flight, senders);
+                    halt(&mine, i, bot, log, &mut flight, senders);
                     return;
                 }
             }
@@ -508,12 +508,30 @@ async fn drive<'a, T>(flight: &mut Vec<InFlight<'a>>, fut: impl Future<Output = 
 /// `from` is the first index of the bot's slice that will now never run. Only
 /// a failed walk reaches here — see [`run_bot_signalled`] — and a walk
 /// publishes no verdict of its own, so abandonment starts *at* it.
+///
+/// # It is also the one place that knows how much of the plan just died
+///
+/// Everything from `from` onwards is abandoned here, and until 2026-09-08 that
+/// left no trace at all: the `watch` sends below release the dependents, and a
+/// step that is never dispatched has no attempt for `record.actions` to write.
+/// So the record showed the abandoned steps as `pending`, which is also what a
+/// run that was killed early shows. `run-1788833726-34821` ended
+/// `pending=2041` of 2,295 with nothing anywhere saying why. The count goes on
+/// the walk that caused it — see [`crate::ExecutionLog::halt_walk`].
 fn halt(
     mine: &[&ScheduledStep],
     from: usize,
+    bot: BotId,
+    log: &Mutex<ExecutionLog>,
     flight: &mut Vec<InFlight<'_>>,
     senders: &BTreeMap<ActionId, watch::Sender<Status>>,
 ) {
+    // `from` is the failed walk's own index -- `run_bot_signalled` passes the
+    // loop index, and `run_walk` logged the walk under that same index. The
+    // walk has its own verdict already, so it is not counted as collateral of
+    // itself: what died here is everything *after* it.
+    let abandoned = u32::try_from(mine.len().saturating_sub(from + 1)).unwrap_or(u32::MAX);
+    lock(log).halt_walk(bot, from, abandoned);
     // Whatever is still queued is dropped where it stands, and dropped is
     // `Lost`, not `Failed`: the game may well finish the craft, and nobody in
     // this run will ever hear about it. `await_preds` abandons on either, so
@@ -2571,6 +2589,98 @@ mod tests {
         );
         assert_eq!(w.dispatched_tick, None, "a walk that failed has no ticks");
         assert_eq!(w.replied_tick, None);
+    }
+
+    /// **How much of the plan died with the bot, on the record.**
+    ///
+    /// The test above proves the two later steps never ran. Nothing proved
+    /// how many there were, and that is the number a reader of
+    /// `events.jsonl` actually needs: an abandoned step is never dispatched,
+    /// so it produces no attempt and reads as `pending` -- exactly what a run
+    /// somebody killed early also reads as.
+    ///
+    /// `run-1788833726-34821` is why. It ended `pending=2041` of 2,295 and
+    /// the record could not say that those 2,041 were four halts, nor that
+    /// the largest of them (474 steps) belonged to a bot that never died and
+    /// stalled on a tree 19,000 ticks before the first bot was killed.
+    ///
+    /// Two, not three: the walk itself has its own `Failed` verdict, so it is
+    /// not counted as collateral damage of itself.
+    #[tokio::test]
+    async fn a_walk_failure_records_how_many_steps_it_abandoned() {
+        let mut act = MockAct::new();
+        act.expect_walk()
+            .times(1)
+            .returning(|_, _, _, _| Err(ActuatorError::Rejected("blocked".into()).into()));
+        act.expect_mine().times(0);
+
+        let (net, sched) = walk_then_mine_fixture();
+        let log = run(&act, &sched, &net)
+            .await
+            .expect("the run should have started");
+
+        let w = log.walk(BotId(0), 0).expect("the failed walk is recorded");
+        assert_eq!(
+            w.abandoned,
+            Some(2),
+            "the mine and the craft behind this walk are what the halt cost"
+        );
+    }
+
+    /// **`Some(0)` and `None` are different facts, and the record keeps them
+    /// apart.**
+    ///
+    /// A bot whose *last* step is a walk still halts when that walk fails --
+    /// it just takes nothing with it. Collapsing that into `None` would make
+    /// it indistinguishable from every walk that succeeded, which is the
+    /// absent-is-not-a-value defect this repo has now paid for five times.
+    #[tokio::test]
+    async fn a_walk_that_fails_as_the_last_step_halts_with_nothing_behind_it() {
+        let mut act = MockAct::new();
+        act.expect_walk()
+            .times(2)
+            .returning(|_, _, _, _| Err(ActuatorError::Rejected("blocked".into()).into()));
+
+        let net = ActionNetwork::new();
+        let sched = Schedule {
+            steps: vec![walk_step(BotId(0), 0, 60), walk_step(BotId(1), 0, 60)],
+            makespan: 60,
+        };
+        let log = run(&act, &sched, &net)
+            .await
+            .expect("the run should have started");
+
+        for bot in [BotId(0), BotId(1)] {
+            let w = log.walk(bot, 0).expect("the failed walk is recorded");
+            assert_eq!(w.status, Status::Failed);
+            assert_eq!(
+                w.abandoned,
+                Some(0),
+                "halted on its own last step: it happened, and it cost nothing"
+            );
+        }
+    }
+
+    /// A walk that **succeeds** carries no halt count at all, so a reader
+    /// grouping by `abandoned.is_some()` finds exactly the halts.
+    #[tokio::test]
+    async fn a_successful_walk_is_not_a_halt() {
+        let mut act = MockAct::new();
+        act.expect_walk().returning(|_, _, _, _| Ok(some_ticks()));
+        act.expect_mine().returning(|_, _, _, _| Ok(some_ticks()));
+        act.expect_craft().returning(|_, _, _| Ok(some_ticks()));
+
+        let (net, sched) = walk_then_mine_fixture();
+        let log = run(&act, &sched, &net)
+            .await
+            .expect("the run should have started");
+
+        let w = log.walk(BotId(0), 0).expect("the walk is recorded");
+        assert_eq!(w.status, Status::Success);
+        assert_eq!(
+            w.abandoned, None,
+            "nothing was abandoned, so nothing to say"
+        );
     }
 
     #[tokio::test]

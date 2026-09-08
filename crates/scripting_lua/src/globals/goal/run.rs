@@ -307,6 +307,14 @@ fn build_observation(
         if let Some(error) = &w.error {
             t.set("error", error.clone())?;
         }
+        // Present only on the walk whose failure halted its bot. See
+        // `factorio_bot_executor::WalkObservation::abandoned`: this is the
+        // only place the size of a halt is knowable, and before it existed a
+        // run that lost three of four bots read as `pending=2041` with no
+        // explanation anywhere in `events.jsonl`.
+        if let Some(abandoned) = w.abandoned {
+            t.set("abandoned", abandoned)?;
+        }
         walks.set(i as i64 + 1, t)?;
     }
 

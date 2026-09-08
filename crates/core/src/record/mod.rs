@@ -609,6 +609,31 @@ pub enum EventKind {
         error: Option<String>,
         /// The same failure, classified. `None` on success.
         failure: Option<WalkFailure>,
+        /// How many of this bot's remaining steps were abandoned because this
+        /// walk failed. `None` on every walk that did not halt its bot.
+        ///
+        /// **A failed walk halts the bot** -- deliberately, because a walk's
+        /// effect is a position and no plan edge carries it
+        /// (`factorio_bot_executor::run::run_bot_signalled`). Everything after
+        /// it is dropped without ever being dispatched, so it produces no
+        /// attempt, no `ActionSettled`, and no trace of any kind: the record
+        /// showed those steps as `pending`, which is also exactly what a run
+        /// somebody killed early shows.
+        ///
+        /// `run-1788833726-34821` -- the first run in this project's history
+        /// in which a bot died -- ended `success=246 failed=7 lost=1
+        /// **pending=2041**` of 2,295, and the 2,041 were four halts. The
+        /// largest was **not** a death: bot 3's walk stalled on a `tree-01` at
+        /// tick 7,980 and took **474 steps** with it, 19,000 ticks before any
+        /// bot was killed. Three deaths accounted for the other three halts
+        /// and 1,572 steps. None of that was derivable from the record as it
+        /// stood; it took reconstructing the plan and diffing it against the
+        /// dispatches.
+        ///
+        /// `Some(0)` is written for a bot halted on its own last step and
+        /// means "halted, taking nothing with it" -- a different fact from
+        /// `None`, which means "did not halt".
+        abandoned: Option<u32>,
     },
     /// A bot was moved by `player.teleport` rather than by walking.
     ///

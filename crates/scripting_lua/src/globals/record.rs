@@ -1782,6 +1782,14 @@ end
 -- the mod named positions, the failure carries them -- observed ones, taken at
 -- the instant it gave up.
 --
+-- A failed walk also carries `abandoned` when it **halted its bot** -- the
+-- count of that bot's remaining steps that were dropped without ever being
+-- dispatched. That is the one number the record could not previously express:
+-- an abandoned step produces no attempt, so it reads as `pending`, which is
+-- indistinguishable from a run somebody killed. `run-1788833726-34821` ended
+-- `pending=2041` of 2,295 across four such halts, and the largest of them was
+-- a walk that stalled on a tree, not a bot that died.
+--
 -- Call it once per loop iteration, alongside `record.actions`.
 -- @tparam table walks `observation.walks`
 -- @treturn number how many events were written
@@ -1828,6 +1836,11 @@ end
                     let dispatched: Option<u64> = walk.get("dispatched_tick")?;
                     let replied: Option<u64> = walk.get("replied_tick")?;
                     let error: Option<String> = walk.get("error")?;
+                    // Set only on the walk whose failure halted its bot, and
+                    // then it is the number of that bot's steps that died with
+                    // it. See `EventKind::WalkSettled::abandoned` for the run
+                    // that made the absence of this number expensive.
+                    let abandoned: Option<u32> = walk.get("abandoned")?;
 
                     if let Some(dispatched) = dispatched {
                         recorder
@@ -1884,6 +1897,7 @@ end
                                     elapsed_ticks,
                                     error,
                                     failure,
+                                    abandoned,
                                 },
                             )
                             .map_err(record_error)?;

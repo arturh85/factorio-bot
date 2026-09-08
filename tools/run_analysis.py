@@ -929,6 +929,7 @@ def analyse(
 
     result["vision"] = free_vision(events)
     result["deaths"] = bot_deaths(events)
+    result["halts"] = bot_halts(events)
     result["tick_rate"] = delivered_tick_rate(
         events, (result["provenance"].get("game_speed") or {}).get("value")
     )
@@ -1089,6 +1090,92 @@ def bot_deaths(events: list[dict]) -> dict:
             for e in changes
         ],
         "no_character_failures": no_character,
+    }
+
+
+def bot_halts(events: list[dict]) -> dict:
+    """Where each bot's slice ENDED, and how much of the plan ended with it.
+
+    **A failed walk halts its bot.** That is deliberate --
+    ``run_bot_signalled`` in ``crates/executor`` explains why: a walk's effect
+    is the bot's position, and no plan edge carries a position, so pressing on
+    would dispatch every remaining step from wherever the bot got stuck. What
+    was NOT deliberate is that the stop wrote nothing anywhere. The abandoned
+    steps are never dispatched, so they produce no attempt and no
+    ``action_settled``; the run's own counters call them ``pending``, which is
+    also exactly what a run somebody killed early reports.
+
+    ``run-1788833726-34821`` -- the first run in this project's history in
+    which a bot died -- finished ``success=246 failed=7 lost=1 pending=2041``
+    of 2,295 actions, and nothing in ``events.jsonl`` said where the 2,041
+    went. They went to four halts. **The largest was not a death**: bot 3's
+    walk stalled on a ``tree-01`` at tick 7,980 and took 474 planned actions
+    with it, 19,000 ticks before any bot was killed.
+
+    Two numbers per halt, and they answer different questions:
+
+    - ``abandoned`` is what the executor itself counted, carried on the
+      ``walk_settled`` event since 2026-09-08. It is **steps**, so it includes
+      the bot's later walks. ``None`` on every run archived before that,
+      which is not zero.
+    - ``planned_actions_unsettled`` is derived here from ``plan_created``: how
+      many of the bot's planned actions never reached a settle. It counts
+      **actions** only, since ``plan_created.plan`` holds no walks. It is
+      computable for every archived run, which is the point of deriving it at
+      all -- and it is why the two columns rarely match exactly.
+
+    Only the FIRST failed walk per bot is a halt. A later one cannot be: the
+    bot returned from ``run_bot_signalled`` at the first, so anything after it
+    belongs to a different batch.
+    """
+    plans = [e for e in events if e.get("kind") == "plan_created"]
+    # The last plan is the one whose slices the run was executing when it
+    # stopped. Joining across plans would be the per-plan-id mistake this
+    # tool's own header warns about.
+    plan = (plans[-1].get("plan") or []) if plans else []
+    planned_by_bot: dict[int, list] = {}
+    for step in plan:
+        planned_by_bot.setdefault(step.get("bot"), []).append(step)
+
+    settled_ids = {
+        e.get("id") for e in events if e.get("kind") == "action_settled"
+    }
+
+    rows: list[dict] = []
+    seen: set[int] = set()
+    for e in events:
+        if e.get("kind") != "walk_settled" or e.get("status") != "failed":
+            continue
+        bot = e.get("bot")
+        if bot in seen:
+            continue
+        seen.add(bot)
+        mine = planned_by_bot.get(bot, [])
+        unsettled = sum(1 for s in mine if s.get("id") not in settled_ids)
+        rows.append(
+            {
+                "bot": bot,
+                "tick": e.get("tick"),
+                "step_index": e.get("step_index"),
+                "to": e.get("to"),
+                "abandoned": e.get("abandoned"),
+                "failure_kind": (e.get("failure") or {}).get("kind"),
+                "error": e.get("error"),
+                "planned_actions": len(mine),
+                "planned_actions_unsettled": unsettled,
+            }
+        )
+    rows.sort(key=lambda r: (r["tick"] or 0))
+    # `present` is about the AUTHORITATIVE count, not about the section: the
+    # derived column works on every run, the executor's own count does not.
+    # Reporting them as one number would make an old record look like a run in
+    # which nothing was abandoned.
+    return {
+        "rows": rows,
+        "counted_by_executor": any(r["abandoned"] is not None for r in rows),
+        "total_abandoned": sum(r["abandoned"] or 0 for r in rows),
+        "total_unsettled": sum(r["planned_actions_unsettled"] for r in rows),
+        "plan_actions": len(plan),
     }
 
 
@@ -4454,6 +4541,39 @@ def report(a: dict, out=sys.stdout, top: int = 12) -> None:
             if not d["deaths"]:
                 p("    ... with NO death recorded: a character missing for some other reason")
                 p("        (cutscene, controller switch), or a death the mod did not see.")
+
+    p(hr("  BOT HALTS  (a failed walk stops its bot; this is what it cost)"))
+    h = a.get("halts") or {}
+    rows = h.get("rows") or []
+    if not rows:
+        p("    no bot was halted: not one walk failed. Every bot that stopped early")
+        p("    stopped for some other reason -- look at PLANS and BATCHES.")
+    else:
+        p("    A failed walk ends its bot's slice, by design (a walk's effect is a")
+        p("    position and no plan edge carries one). Everything after it is dropped")
+        p("    WITHOUT BEING DISPATCHED, so it reads as `pending` -- which is also what")
+        p("    a run somebody killed early reads as. These are the halts.")
+        p("")
+        for r in rows:
+            to = r.get("to") or {}
+            where = f"[{to.get('x')}, {to.get('y')}]" if to else "?"
+            p(f"    bot {r['bot']}  HALTED at tick {r['tick']:>7}  walking to {where}"
+              f"  ({r.get('failure_kind') or 'unclassified'})")
+            counted = (f"{r['abandoned']} step(s) abandoned by the executor's own count"
+                       if r.get("abandoned") is not None
+                       else "the executor's own count is ABSENT (build predates it, "
+                            "2026-09-08) -- not zero")
+            p(f"          {counted}")
+            p(f"          {r['planned_actions_unsettled']} of this bot's "
+              f"{r['planned_actions']} planned action(s) never settled")
+            if r.get("error"):
+                p(f"          {str(r['error'])[:150]}")
+        p("")
+        p(f"    {len(rows)} halt(s) account for {h['total_unsettled']} unsettled planned")
+        p(f"    action(s) out of {h['plan_actions']} in the plan.")
+        if not h.get("counted_by_executor"):
+            p("    The step counts above are DERIVED from plan_created, not read off the")
+            p("    record: this build did not carry `abandoned` on walk_settled.")
 
     p(hr("  PLANS  (who the planner gave the work to)"))
     if not a["plans"]:

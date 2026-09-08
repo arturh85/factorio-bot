@@ -7264,13 +7264,52 @@ function on_character_bot_died(event, id)
 	bot.respawn_at = event.tick + CHARACTER_RESPAWN_TICKS
 end
 
+-- The handle for `player_id`, or nil after printing why there is none.
+--
+-- **The order of the two refusals is load-bearing, and it was backwards until
+-- 2026-09-08.** `character_missing_reason` exists precisely so a bot killed by
+-- a worm is not reported as a client that never connected -- and this
+-- function, the entry point most of the mod's verbs go through, asked
+-- `connected` first. For a CHARACTER bot that is the same fact twice:
+-- `CHARACTER_PROXY_OWN.connected` is `entity ~= nil and entity.valid`, and a
+-- dead bot's `entity` is nil, so `connected` goes false the instant the
+-- character dies and the `character` branch below was unreachable in headless
+-- mode.
+--
+-- Measured in `run-1788833726-34821`, the first run in this project's history
+-- in which a bot died -- three did. The two failures that reached the game
+-- through `get_player` were archived as
+--
+--     game rejected the command: Unexpected Response: Error: player 1 not connected
+--     game rejected the command: Unexpected Response: Error: player 2 not connected
+--
+-- which `classify_walk_failure` files as `WalkFailureKind::Other`. Those are
+-- the two walks that ended bot 1's and bot 2's slices, so the last thing the
+-- record says about either bot is "not connected" -- a connect stall, a
+-- completely different diagnosis -- over a bot the game had told us was dead
+-- one statement earlier. The paths that call `no_character_error` directly
+-- (`action_start_*`) got it right in the same run, which is what makes the
+-- disagreement legible at all.
+--
+-- Asking `character` first is safe for a connected client too: Factorio keeps
+-- a disconnected player's character in the world, so `not player.character` is
+-- false for a client that merely left, and it still falls through to the
+-- `connected` branch below. Only a player with **no character** reaches
+-- `no_character_error`, and that is the one case `character_missing_reason`
+-- can explain -- dead and respawning, in a cutscene, or some other controller.
+--
+-- This is the `occupant_of` mistake in another file: a cheap check placed
+-- ahead of the specific one masks it, and the reader goes looking for whatever
+-- the message named.
 function get_player(player_id)
 	if storage.p[player_id] ~= nil then
 		local player = bot_handle(player_id)
-		if player == nil or not player.connected then
+		if player == nil then
 			rcon.print("Error: player " .. tostring(player_id) .. " not connected")
 		elseif not player.character then
 			rcon.print(no_character_error(player_id, player))
+		elseif not player.connected then
+			rcon.print("Error: player " .. tostring(player_id) .. " not connected")
 		else
 			return player
 		end

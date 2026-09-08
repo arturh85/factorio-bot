@@ -837,7 +837,11 @@ const SCHEMAS: Record<string, SchemaContract> = {
             status: {required: true, type: 'string'},
             elapsed_ticks: {required: false, type: 'integer', nullable: true},
             error: {required: false, type: 'string', nullable: true},
-            failure: {required: false, ref: 'WalkFailure', nullable: true}
+            failure: {required: false, ref: 'WalkFailure', nullable: true},
+            // How many steps the bot's halt abandoned. Nullable and not the
+            // same as 0: `null` is "this walk did not halt its bot", 0 is
+            // "it did, and there was nothing behind it".
+            abandoned: {required: false, type: 'integer', nullable: true}
         },
         teleport: {
             bot: {required: true, type: 'integer'},

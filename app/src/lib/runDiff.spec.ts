@@ -388,7 +388,11 @@ describe('walksOf', () => {
         status,
         elapsed_ticks: elapsed,
         error: failure === null ? null : 'ERROR: stuck while walking',
-        failure
+        failure,
+        // These fixtures are about joining a walk to its dispatch, so none of
+        // them halts a bot. `null` is "did not halt", which is a different
+        // fact from `0`.
+        abandoned: null
     });
 
     it('joins a walk to its own dispatch and reports the overrun', () => {

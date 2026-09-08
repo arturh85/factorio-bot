@@ -381,7 +381,14 @@ destroys it unless you copy it aside first. That has already happened once.
 ### Ask the RUNNING game directly -- `rcon -s localhost`
 
 `factorio-bot rcon -s localhost -- '<command>'` attaches to an **already
-running** instance and prints the reply. No MCP server, no schema, no second
+running** instance. **It does NOT print the reply, and this file said it did
+until 2026-09-08** — it cost an agent two probes read as "the command did
+nothing". The capability is there and thrown away: `FactorioRcon::send` returns
+`Result<Option<Vec<String>>>`, and `app/src-tauri/src/cli/rcon.rs:49` calls
+`rcon.send(command).await.unwrap();`, discarding it. So a reply-printing `rcon`
+is a one-line change whenever somebody wants it; until then, read what the
+command *did* rather than what it answered, and note that a console `/c` cannot
+see a mod's `storage` — go through the surface. No MCP server, no schema, no second
 process: it is the fastest loop in this project for any question about live
 game state, which is exactly the class `world.dump` cannot answer (its
 `inventories` is always `[]`).

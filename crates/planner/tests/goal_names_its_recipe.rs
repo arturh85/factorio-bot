@@ -335,17 +335,26 @@ fn naming_the_recipe_moves_the_refusal_to_the_fluid_ingredient() {
     assert!(said.contains("can be shown to supply"), "{said}");
 }
 
-/// The other rung of the same ladder, for the recipe whose wall is a
-/// *different one*. `light-oil-cracking` is chemistry, so the machine is a
-/// chemical-plant, and it takes **two** fluids in -- light oil and water --
-/// which nothing on our wire can assign to the plant's two input fluidboxes.
+/// The other rung of the same ladder: the qualifier chooses which recipe, and
+/// the recipe chooses which **fluid** the plan then cannot supply.
+/// `light-oil-cracking` is chemistry, so the machine is a chemical-plant, and
+/// it takes two fluids in -- water and light oil.
 ///
-/// Its value here is that naming a recipe reaches a **different** wall than
-/// the test above: the qualifier chooses which recipe, and the recipe chooses
-/// which wall. One is "nothing standing supplies crude"; the other is "two
-/// fluids and no way to tell which box takes which".
+/// # This test used to assert a wall that no longer exists
+///
+/// Until 2026-09-08 two fluids in refused outright, because nothing on the
+/// wire said which of the plant's two input fluidboxes took which, and this
+/// test asserted `"2 fluids in"` as a *different* wall from the crude one
+/// above. The game does say -- a standing `chemical-plant` set to `sulfur`
+/// reports `water` on box 1 and `petroleum-gas` on box 2 -- so the recipe now
+/// walks straight past the fluidbox question and lands on the same wall the
+/// one-fluid recipe does, naming its **first** fluid rather than crude oil.
+///
+/// The discriminating assertion is therefore the fluid, not the wall: both
+/// refusals are `NoFluidSource` now, and only the recipe decides which
+/// substance is missing.
 #[test]
-fn naming_a_different_recipe_for_the_same_product_reaches_a_different_wall() {
+fn naming_a_different_recipe_for_the_same_product_names_a_different_fluid() {
     let said = plan_error(
         live_state_with(&BOTS, true, |r| enable(r, "light-oil-cracking")),
         Goal::Produced {
@@ -360,10 +369,17 @@ fn naming_a_different_recipe_for_the_same_product_reaches_a_different_wall() {
         said.contains("light-oil-cracking runs in chemical-plant"),
         "{said}"
     );
-    assert!(said.contains("2 fluids in"), "{said}");
     assert!(
-        !said.contains("can be shown to supply"),
-        "a different wall, not the same one: {said}"
+        said.contains("can be shown to supply water"),
+        "the wall is the missing fluid, and the recipe chose which one: {said}"
+    );
+    assert!(
+        !said.contains("crude-oil"),
+        "the crude rung belongs to the other recipe: {said}"
+    );
+    assert!(
+        !said.contains("cannot be tied to a fluidbox"),
+        "two fluids into two boxes is decided, not refused: {said}"
     );
 }
 

@@ -19,7 +19,14 @@ export const FEEDING_VERBS = ['insert', 'stock', 'charge', 'fuel', 'take', 'mine
 export type Verdict = 'roster-fed' | 'factory' | 'hand-made' | 'mixed' | 'unclear' | 'no output';
 
 export interface MachineProduction {
-    /** False for a run archived before the counters existed; never "made nothing". */
+    /**
+     * False for a run archived before the counters existed; never "made
+     * nothing". Also false for an interval with NO machines at all -- an
+     * empty set carries no evidence a counter was ever read, so it routes
+     * to the inference fallback exactly as a pre-counter archive does
+     * (matches `machine_production`'s `any(...)` over `end_rows.values()`
+     * in `tools/run_analysis.py`, which is vacuously false on an empty dict).
+     */
     available: boolean;
     byItem: Record<string, number>;
     byName: Record<string, Record<string, number>>;
@@ -82,7 +89,7 @@ export function machineProduction(samples: Sample[], lo: number, hi: number): Ma
     const baseRows = baseAt?.machines ?? {};
     const endRows = endAt?.machines ?? {};
     const out: MachineProduction = {
-        available: Object.values(endRows).every((m) => m.produced_source !== null && m.produced_source !== undefined),
+        available: Object.values(endRows).some((m) => m.produced_source !== null && m.produced_source !== undefined),
         byItem: {}, byName: {}, total: 0, unattributed: 0, shared: []
     };
     for (const [key, m] of Object.entries(endRows)) {

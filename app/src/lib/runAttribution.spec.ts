@@ -46,8 +46,15 @@ describe('machineProduction', () => {
 describe('attributeInterval', () => {
     const base = [force(0, {}), force(600, {'iron-plate': 10})];
     it('hand-made when no machine produced any', () => {
-        const s = [...base, machines(0, {}), machines(600, {})];
+        const s = [...base, machines(0, {a: {name: 'stone-furnace', recipe: 'iron-plate', produced: 0, source: 'game'}}),
+            machines(600, {a: {name: 'stone-furnace', recipe: 'iron-plate', produced: 0, source: 'game'}})];
         expect(attributeInterval(s, [], 0, 600, 'iron-plate').verdict).toBe('hand-made');
+    });
+    it('unclear-by-inference when the machine set is empty: no counter evidence at all', () => {
+        const s = [...base, machines(0, {}), machines(600, {})];
+        const a = attributeInterval(s, [], 0, 600, 'iron-plate');
+        expect(a.source).toBe('inference');
+        expect(a.verdict).toBe('unclear');
     });
     it('roster-fed when machines made ≥95% and the roster fed', () => {
         const s = [...base, machines(0, {a: {name: 'stone-furnace', recipe: 'iron-plate', produced: 0, source: 'game'}}),

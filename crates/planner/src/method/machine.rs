@@ -854,11 +854,12 @@ mod tests {
     /// machines now name one, and it is the **cheapest to obtain**, not the
     /// first by name and not the fastest.
     ///
-    /// `assembling-machine-1` sorts first *and* is cheapest, which alone
-    /// would not tell a cost rule from an alphabetical one -- so
-    /// `crafting-with-fluid` is the discriminating case: its candidates are
-    /// `assembling-machine-2` and `-3`, and cost picks `-2` while
-    /// `crafting_speed` would pick `-3`.
+    /// Both answers here also sort first by name, so this pair alone cannot
+    /// tell a cost rule from an alphabetical one -- a sweep mutation proved
+    /// exactly that, and `cost_decides_and_not_the_name` is the case that
+    /// separates them. What this pair does show is that it is not
+    /// `crafting_speed`: that would pick `assembling-machine-3` for both, and
+    /// `-3` cannot be built at t=0.
     #[test]
     fn an_ambiguous_category_names_the_cheapest_machine() {
         let table =
@@ -1074,5 +1075,49 @@ mod tests {
             table.machine_for("crafting-with-fluid"),
             Ok(Machine::Entity("assembling-machine-2".into()))
         );
+    }
+    /// **Cost, not name.** Every candidate in the shipped fixtures happens to
+    /// sort in cost order (`assembling-machine-1` is both first and cheapest),
+    /// so those tests are equally explained by an alphabetical rule -- a
+    /// falsification sweep said so, mutating the sort to compare names and
+    /// finding nothing that objected. Here the cheapest sorts LAST.
+    #[test]
+    fn cost_decides_and_not_the_name() {
+        let protos = [
+            proto("alpha-mill", "assembling-machine", Some(&["milling"])),
+            proto("zeta-mill", "assembling-machine", Some(&["milling"])),
+        ];
+        let recipes = [
+            recipe("alpha-mill", "crafting", &[("iron-plate", 40)], 1),
+            recipe("zeta-mill", "crafting", &[("iron-plate", 4)], 1),
+        ];
+        let table = MachineTable::from_parts_and_recipes(protos.iter(), recipes.iter());
+        assert_eq!(
+            table.machine_for("milling"),
+            Ok(Machine::Entity("zeta-mill".into()))
+        );
+    }
+
+    /// The arithmetic, in thousandths of a raw input, spelled out for three
+    /// items: a recipe that **yields two** costs half as much each, and that
+    /// halving carries all the way up.
+    ///
+    /// Also from the sweep: without this, dropping the division by
+    /// `product.amount` changed every price and no test objected, because the
+    /// *ordering* survived.
+    #[test]
+    fn a_price_counts_the_yield_and_the_ingredient_amounts() {
+        let wanted: BTreeSet<String> =
+            ["copper-cable", "electronic-circuit", "assembling-machine-1"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+        let costs = obtain_costs(vanilla_recipes().iter(), &wanted);
+        // One copper plate makes two cables.
+        assert_eq!(costs["copper-cable"], 500);
+        // One iron plate plus three cables.
+        assert_eq!(costs["electronic-circuit"], 2_500);
+        // 3 circuits + 5 gears (2 iron each) + 9 iron plates.
+        assert_eq!(costs["assembling-machine-1"], 26_500);
     }
 }

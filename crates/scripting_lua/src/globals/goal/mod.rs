@@ -521,6 +521,7 @@ fn refusal_for(err: &PlannerError) -> Option<PlanRefusal> {
         // in the dump, and telling a script "try another item" would hide it.
         | PlannerError::UnpoweredConsumer { .. }
         | PlannerError::UnpricedConsumer { .. }
+        | PlannerError::GeneratorNotWired { .. }
         | PlannerError::UnknownPrototypePlaced { .. } => false,
     };
     verdict.then(|| PlanRefusal {

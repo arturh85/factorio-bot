@@ -1160,6 +1160,31 @@ pub enum PlannerError {
     )]
     UnpricedConsumer { prototype: String, pos: String },
 
+    /// The plan places a **generator that no pole reaches**, so it generates
+    /// into nothing.
+    ///
+    /// The other half of [`Self::UnpoweredConsumer`], and a separate refusal
+    /// because the **remedy is different**: a consumer with no power needs a
+    /// plant *or* a pole run, while a generator needs only the pole. A steam
+    /// engine joined to nobody stands, burns its fuel, reports as built, and
+    /// leaves the network reading exactly as if it were not there — the
+    /// `FurnaceLine` failure with the polarity reversed.
+    #[error(
+        "the {prototype} this plan places at {pos} generates {kw:.0} kW and no pole reaches it          ({label})"
+    )]
+    #[diagnostic(
+        code(planner::generator_not_wired),
+        help(
+            "put a pole within its supply area -- a generator wired to nothing feeds no              network, and coverage is what it is missing, not capacity"
+        )
+    )]
+    GeneratorNotWired {
+        prototype: String,
+        pos: String,
+        kw: f64,
+        label: String,
+    },
+
     /// The plan places a prototype **the world never described**, so nothing
     /// can say whether it needs power, what it draws, or how big it is.
     ///

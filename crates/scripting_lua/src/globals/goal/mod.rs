@@ -711,7 +711,8 @@ pub(crate) fn create_lua_goal_with(
 -- into an action network by the planner, assigned to bots by the scheduler,
 -- and then executed against the running game.
 --
--- Nothing here is a handle. `goal.have`, `goal.researched`, `goal.producing`,
+-- Nothing here is a handle. `goal.have`, `goal.researched`, `goal.produced`,
+-- `goal.producing`, `goal.sustain`, `goal.extracted`, `goal.gathered`,
 -- `goal.built`, `goal.charted` and `goal.all` build **goal values**: ordinary Lua tables you can read (`g.item`,
 -- `g.count`), print and pass around. `goal.plan` turns one into a
 -- **PlanValue**, which carries the schedule it was given and answers questions
@@ -831,6 +832,110 @@ end
 -- @treturn table a goal value
 -- @raise if the item name is empty, or the rate is not an integer >= 1
 function goal.producing(item_name, per_minute)
+end
+"#,
+        ),
+    )?;
+    map_table.set(
+        "__doc_entry_produced",
+        String::from(
+            r#"
+--- builds a goal value: that many of an item come into existence
+--
+-- Pure, like `goal.have`, and deliberately shaped like it -- same item, same
+-- count, same `{ bot = ..., via = ... }` options. What differs is the
+-- question. `goal.have` is satisfied by what a bot **already holds**, so a
+-- roster carrying six labs satisfies `goal.have("lab", 6)` with an empty
+-- plan. `goal.produced` never subtracts an inventory: it asks for the **act**
+-- of making them, which is what a Factorio 2.0 `craft-item` trigger fires on.
+--
+-- **`via` names the RECIPE, not the product and not the machine.** Ask for
+-- `petroleum-gas` on this install and four recipes make it, so the planner
+-- refuses as ambiguous rather than picking one; `{ via =
+-- "basic-oil-processing" }` is how a script chooses. The machine follows from
+-- the recipe's category, which is why naming a machine would not do:
+-- `basic-oil-processing` and `advanced-oil-processing` both run in an
+-- oil refinery. Omitting `via` means what it has always meant -- the planner
+-- picks, and refuses by name when more than one recipe it can run makes the
+-- product. A recipe that does not produce the item is refused by name too,
+-- never quietly replaced.
+--
+-- **`unlocks` is a claim about the game, not a grant.** It names a technology
+-- whose trigger this production fires, so the planner can hang the research
+-- effect on whichever action ends up doing it. Nothing validates it: a wrong
+-- name makes the *plan* believe a technology is finished while the game
+-- disagrees. Omit it unless the trigger is real.
+-- @string item_name name of the item, e.g. "petroleum-gas"
+-- @number count how many are to be made; an integer >= 1
+-- @tparam[opt] table opts `{ bot = <id> }` to require one bot make them,
+--   `{ via = "<recipe>" }` to name the recipe, `{ unlocks = "<technology>" }`
+--   to state the trigger this production fires
+-- @treturn table a goal value
+-- @raise if the item name is empty, the count is not an integer >= 1, or
+--   `via`/`unlocks` is present but not a non-empty string
+function goal.produced(item_name, count, opts)
+end
+"#,
+        ),
+    )?;
+    map_table.set(
+        "__doc_entry_extracted",
+        String::from(
+            r#"
+--- builds a goal value: a machine works a resource a hand cannot
+--
+-- Pure, like `goal.have`. The argument is an **entity** -- the well or patch
+-- in the ground, e.g. `"crude-oil"` -- and not an item, because what comes out
+-- of one is a fluid **no character inventory can hold**. There is no count for
+-- the same reason, and none is accepted.
+--
+-- Satisfied by the machine alone: a pumpjack standing on a well fills its own
+-- output fluidbox and stops, and that is several extractions. Factorio 2.0's
+-- `mine-entity` trigger fires on exactly that, which is why this is the rung
+-- `researched:oil-processing` reaches for. If you need the crude to have
+-- somewhere to go, that is `goal.gathered`, one rung up.
+--
+-- `unlocks` is the same claim it is on `goal.produced`, and just as unchecked.
+-- @string entity_name the resource entity, e.g. "crude-oil"
+-- @tparam[opt] table opts `{ unlocks = "<technology>" }` to state the trigger
+--   this extraction fires
+-- @treturn table a goal value
+-- @raise if the entity name is empty, or `unlocks` is present but not a
+--   non-empty string
+function goal.extracted(entity_name, opts)
+end
+"#,
+        ),
+    )?;
+    map_table.set(
+        "__doc_entry_gathered",
+        String::from(
+            r#"
+--- builds a goal value: a resource is extracted AND has somewhere to go
+--
+-- Pure, like `goal.have`, and one rung above `goal.extracted`: an extractor
+-- stands on a well of `entity_name` **and what it pumps has somewhere to go**
+-- -- a tank sited for the field, with pipe between the two.
+--
+-- The two are kept apart rather than merged because `goal.extracted` is
+-- honestly satisfied by a machine alone, and widening it to demand a tank
+-- would make `goal.researched("oil-processing")` refuse on maps where it
+-- plans end to end today. This one is the precondition for everything above
+-- oil: no character inventory can hold a fluid, so until a tank stands there
+-- is nowhere for crude to *be*.
+--
+-- **It can refuse for want of charting.** A field nobody has looked at is not
+-- a field that is absent -- `goal.plan` says which, and `goal.charted` is how
+-- a script clears the first of those.
+--
+-- `unlocks` is the same claim it is on `goal.produced`, and just as unchecked.
+-- @string entity_name the resource entity, e.g. "crude-oil"
+-- @tparam[opt] table opts `{ unlocks = "<technology>" }` to state the trigger
+--   this extraction fires
+-- @treturn table a goal value
+-- @raise if the entity name is empty, or `unlocks` is present but not a
+--   non-empty string
+function goal.gathered(entity_name, opts)
 end
 "#,
         ),
@@ -2096,7 +2201,8 @@ mod tests {
         lua.load(
             r#"
             local expected = { have=true, researched=true, producing=true,
-                               sustain=true,
+                               produced=true, sustain=true,
+                               extracted=true, gathered=true,
                                built=true, charted=true, all=true, plan=true, run=true,
                                start=true, holds=true, refusal=true }
             local actual = {}
@@ -2216,6 +2322,49 @@ mod tests {
             local ok, err = pcall(goal.run, p)
             assert(not ok, "a spent plan must refuse a second run")
             assert(tostring(err):find("already"), "and say so: " .. tostring(err))
+        "#,
+        )
+        .await;
+    }
+
+    /// **The oil milestone's goal crosses into the planner.**
+    ///
+    /// The fixture world has no crude oil, so this *must* refuse -- and the
+    /// whole point is **which** refusal. A kind wired into the constructor but
+    /// missing from `KINDS`, or missing a `goal_from_lua` arm, refuses with
+    /// `unknown goal kind`, which is a fact about this module dressed up as a
+    /// fact about the world. Anything else means the goal reached the planner
+    /// intact and the planner answered about the map. That distinction is the
+    /// success condition of the whole exercise: the milestone is *"a headless
+    /// run where petroleum appears in the production samples"*, every headless
+    /// run is driven by a Lua script, and until this landed a script could say
+    /// neither half of the goal.
+    #[tokio::test]
+    async fn the_oil_milestone_goal_reaches_the_planner_rather_than_dying_as_an_unknown_kind() {
+        let lua = lua_with_goal(Arc::new(StubActuator::new(Failure::Never)));
+        exec_bounded(
+            &lua,
+            r#"
+            local g = goal.all {
+                goal.gathered("crude-oil"),
+                goal.produced("petroleum-gas", 45, { via = "basic-oil-processing" }),
+            }
+            -- Built and rendered before anything is planned: `tostring` goes
+            -- through `render_goal`, which is a third place a kind has to be
+            -- registered and which nothing else here would exercise.
+            local rendered = tostring(g)
+            assert(rendered:find("crude%-oil"), "renders the entity: " .. rendered)
+            assert(rendered:find("basic%-oil%-processing"), "renders the recipe: " .. rendered)
+
+            local ok, err = pcall(goal.plan, g, { bots = { 1 } })
+            assert(not ok, "this fixture world has no oil, so planning must refuse")
+            local message = tostring(err)
+            assert(not message:find("unknown goal kind"),
+                "the goal died at the Lua boundary instead of reaching the planner: " .. message)
+            -- And it is a refusal the planner classifies, not a raw fault.
+            local classified, refusal = pcall(goal.refusal, err)
+            assert(classified and type(refusal) == "table" and type(refusal.message) == "string",
+                "the planner answered with something goal.refusal cannot classify: " .. message)
         "#,
         )
         .await;

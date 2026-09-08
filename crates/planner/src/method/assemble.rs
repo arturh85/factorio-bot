@@ -1549,6 +1549,43 @@ pub fn complete_cells(state: &PlanState, spec: &AssemblySpec) -> Vec<Position> {
     out
 }
 
+/// Where a complete cell for `spec` puts what it makes: the sink each cell's
+/// [`Role::OutputInserter`] delivers into.
+///
+/// **Found the way [`is_drained`] finds it, not by the role table**, and that
+/// asymmetry is deliberate: `is_drained` takes the sink on trust and never
+/// names it, because the claim it answers is "the output has somewhere to go".
+/// This asks the narrower question a *drawer* needs -- where is the container
+/// -- and so it does name one, filtering to [`CHEST`]: a belt or a second
+/// machine is a perfectly good sink for `Goal::Producing` and is not something
+/// [`crate::method::cellstock::DrawFromCell`] can walk up to and empty.
+///
+/// Deduped and in the `(x, y, name)` order `entities_within` already imposes,
+/// so the list is order-independent for the same reason `complete_cells` is.
+pub fn cell_output_chests(state: &PlanState, spec: &AssemblySpec) -> Vec<Position> {
+    let nearby = state.entities_within(&Position::new(0., 0.), CELL_SCAN_RADIUS);
+    let mut out: Vec<Position> = Vec::new();
+    for product in complete_cells(state, spec) {
+        for inserter in nearby
+            .iter()
+            .filter(|inserter| inserter.name == INSERTER)
+            .filter(|inserter| state.delivers_into(&product, &inserter.position))
+        {
+            for sink in nearby.iter().filter(|sink| {
+                sink.name == CHEST
+                    && sink.position != inserter.position
+                    && sink.position != product
+                    && state.delivers_into(&inserter.position, &sink.position)
+            }) {
+                if !out.contains(&sink.position) {
+                    out.push(sink.position.clone());
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Every machine that belongs to a complete cell for `spec`: each product
 /// machine [`complete_cells`] names, and the machine feeding it through its
 /// link inserter -- found the way [`loaded_feeders`] finds it, as the
@@ -2194,6 +2231,42 @@ fn cell_steps(
                 amount,
                 item
             );
+            // What this charge will *become*, recorded on the last input the
+            // product machine needs -- the supply chest, the one branch that
+            // reaches the product machine without going through the
+            // intermediate.
+            //
+            // **This is the cell's ledger, and it is what makes a cell's
+            // output spendable by another goal.** Until now a cell was a
+            // structure and nothing more: `Goal::Producing` is satisfied by
+            // machines standing, no method could ask a standing cell for an
+            // item, and so production plateaued at whatever the plan's bill
+            // had already hand-crafted. `crate::method::cellstock::DrawFromCell`
+            // spends against exactly this and cannot over-draw, because
+            // `Condition::BufferHas` is checked against it.
+            //
+            // `charge_products` and not a rate: a charge is finite and
+            // nothing refills it (see [`CELL_CHARGE_TICKS`]), so this is the
+            // whole of what the cell will make. It is a claim about the
+            // future -- the machines still have to run -- and the wait is
+            // charged to the drawing action's own duration, where the tempo
+            // that decides it lives.
+            let mut eff = vec![Effect::LoseItem {
+                who: Actor::Role,
+                item: item.clone(),
+                count: amount,
+            }];
+            if chest_role == Role::SupplyChest
+                && let Some(sink) = cell.at(Role::OutputChest)
+            {
+                eff.push(Effect::BufferGain {
+                    pos: sink.position.clone(),
+                    entity: CHEST.into(),
+                    slot: InventorySlot::Chest,
+                    item: spec.item.clone(),
+                    count: spec.charge_products(),
+                });
+            }
             build.charges.push((
                 item.clone(),
                 amount,
@@ -2207,11 +2280,7 @@ fn cell_steps(
                         count: amount,
                     },
                     pre,
-                    eff: vec![Effect::LoseItem {
-                        who: Actor::Role,
-                        item,
-                        count: amount,
-                    }],
+                    eff,
                     duration: TRANSFER_TICKS,
                     pinned: None,
                     label,
@@ -3824,6 +3893,129 @@ mod tests {
             fuelled.iter().all(|(_, count)| *count == 2),
             "the charge should be the network's draw split four ways: {fuelled:?}"
         );
+    }
+
+    /// **A pack a standing cell can make is DRAWN out of it, not crafted in a
+    /// hand.** The join this whole rung exists for, asserted end to end.
+    ///
+    /// Two goals in one expansion, in order, because that ordering *is* the
+    /// mechanism: `run_steps` expands them against one overlay, so the second
+    /// goal is asked of a world in which the first goal's cell already stands.
+    /// `crate::method::cellstock::DrawFromCell` -- registered ahead of
+    /// `Withdraw` and of `HandCraft` -- then claims it.
+    ///
+    /// The negative half is the load-bearing one: before this, **every** pack
+    /// in this project's history reached a lab as `ActionKind::Craft`, and a
+    /// cell standing beside the bot changed nothing at all, because the
+    /// registry asked `HandCraft` first and it says yes to every crafting
+    /// recipe.
+    #[test]
+    fn a_pack_a_standing_cell_makes_is_drawn_from_it_rather_than_hand_crafted() {
+        let bots = [BotId(1)];
+        let state = powered(&bots);
+        let charge = spec().charge_products();
+        let net = expand(
+            &[
+                Goal::Producing {
+                    item: PACK.into(),
+                    per_minute: 6,
+                },
+                Goal::Have {
+                    item: PACK.into(),
+                    count: charge,
+                    whose: Holder::Share(BotId(1)),
+                    via: None,
+                },
+            ],
+            &state,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .expect("a powered fixture can build a cell and then draw from it");
+        let drawn: u32 = net
+            .actions()
+            .filter_map(|a| match &a.kind {
+                ActionKind::Remove {
+                    entity,
+                    slot: InventorySlot::Chest,
+                    item,
+                    count,
+                    ..
+                } if entity == CHEST && item == PACK => Some(*count),
+                _ => None,
+            })
+            .sum();
+        assert_eq!(
+            drawn, charge,
+            "the whole charge comes out of the cell's output chest"
+        );
+        let crafted: u32 = net
+            .actions()
+            .filter_map(|a| match &a.kind {
+                ActionKind::Craft { item, count } if item == PACK => Some(*count),
+                _ => None,
+            })
+            .sum();
+        assert_eq!(
+            crafted, 0,
+            "nothing is hand-crafted while the cell's own charge covers the goal"
+        );
+    }
+
+    /// **What one charge cannot cover falls back to the hands, and says so.**
+    ///
+    /// The bound is [`CELL_CHARGE_TICKS`]' own: a cell is charged once and
+    /// nothing refills it, so a goal for more than `charge_products` is partly
+    /// machine-made and partly hand-crafted. Asserting the *residual* rather
+    /// than merely "some crafting happens" is what would catch a draw that
+    /// over-spent the ledger -- which would plan a bot walking to an empty
+    /// chest, the one failure this modelling exists to prevent.
+    #[test]
+    fn a_goal_larger_than_one_charge_draws_the_charge_and_crafts_the_rest() {
+        let bots = [BotId(1)];
+        let state = powered(&bots);
+        let charge = spec().charge_products();
+        let want = charge + 3;
+        let net = expand(
+            &[
+                Goal::Producing {
+                    item: PACK.into(),
+                    per_minute: 6,
+                },
+                Goal::Have {
+                    item: PACK.into(),
+                    count: want,
+                    whose: Holder::Share(BotId(1)),
+                    via: None,
+                },
+            ],
+            &state,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .expect("a powered fixture can build a cell and then draw from it");
+        let drawn: u32 = net
+            .actions()
+            .filter_map(|a| match &a.kind {
+                ActionKind::Remove {
+                    entity,
+                    slot: InventorySlot::Chest,
+                    item,
+                    count,
+                    ..
+                } if entity == CHEST && item == PACK => Some(*count),
+                _ => None,
+            })
+            .sum();
+        let crafted: u32 = net
+            .actions()
+            .filter_map(|a| match &a.kind {
+                ActionKind::Craft { item, count } if item == PACK => Some(*count),
+                _ => None,
+            })
+            .sum();
+        assert_eq!(drawn, charge, "a charge is all the cell has");
+        assert_eq!(crafted, want - charge, "the residual is hand work");
     }
 
     /// The arithmetic on its own, including the stack bound a fuel slot is.

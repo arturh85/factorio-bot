@@ -4019,6 +4019,84 @@ fn mine_trigger_goal(
     })
 }
 
+/// Which of `tech`'s science packs a machine should make, as the
+/// [`Goal::Producing`] that would make them.
+///
+/// # The predicate, and where its one constant comes from
+///
+/// **Hand-craft the `research_unit_count` of the technology that unlocks the
+/// machine; machine-make the rest.** Owner ruling, 2026-09-08: *"it's fine if
+/// you use hand crafting to speed up early game red science in the first
+/// minute or whatever, but we want auto production of all science packs."*
+/// That first minute is exactly the research that pays for the machine, and
+/// nothing else -- so the boundary is derived from the prototypes
+/// ([`unlocking_technology`] of [`assemble::MACHINE`]) rather than tuned. On
+/// shipped 2.1.17 it reads: `automation` costs ten red packs and unlocks
+/// `assembling-machine-1`, so those ten are hand-crafted; every pack any later
+/// technology asks for is a cell's job.
+///
+/// # Why the test is on the technology's NAME and not on `is_researched`
+///
+/// The obvious form -- "is the machine's technology done?" -- was written and
+/// measured, and it answers `Some(false)` at *both* pack-bill sites, because
+/// `Researched(automation)` is expanded after `Researched(logistic-science-pack)`
+/// rather than before it. So it would refuse a cell for green science, which
+/// is the one case this exists for. The name comparison is the same question
+/// asked where it has an answer: this bill either *is* the bill that buys the
+/// machine, or it is a later one.
+///
+/// **It is also what stops the deadlock.** A cell needs a machine, the machine
+/// needs `automation`, and `automation` needs ten red packs; asking for a cell
+/// to make those ten would be a cycle. Excluding the unlocking technology by
+/// name excludes exactly it.
+///
+/// # The rate is one cell's own
+///
+/// `3600 / ticks_per_item` -- the tempo the cell's own slower machine runs at,
+/// so `BuildAssemblyCell`'s `ceil(per_minute * ticks_per_item / 3600)` comes
+/// back as **one** cell. Deliberately not sized from the bill: a charge is
+/// finite ([`assemble::CELL_CHARGE_TICKS`]) and one cell's charge is 15 red
+/// packs against green's bill of 75, so a bill-sized ask would be five cells,
+/// five assemblers and five gear machines on a plant whose ceiling binds
+/// (see `docs/superpowers/notes/2026-09-06-one-place-that-decides-power.md`).
+/// What one charge cannot cover falls through to `HandCraft` and says so in
+/// the plan. Sizing the *charge* from demand, rather than the cell count from
+/// the charge, is the next rung and is not smuggled in here.
+fn machine_made_packs(
+    state: &PlanState,
+    technology: &str,
+    tech: &factorio_bot_core::types::FactorioTechnology,
+) -> Vec<Goal> {
+    // **`None` here is "nobody could say", not "this is not that
+    // technology".** If no technology in the force's table unlocks the
+    // machine, the boundary this predicate is drawn at does not exist, and
+    // asking for a cell would be asking for a machine nothing can make -- in
+    // the stub worlds every unit test builds, exactly that: 39 of them refused
+    // with `ProductNotMakeable(assembling-machine-1)` when this branch treated
+    // an absent unlocker as a passing comparison. `absent is not a value`,
+    // in the one place where reading it as one is silently catastrophic.
+    let Some(unlocker) =
+        crate::method::util::unlocking_technology(state, crate::method::assemble::MACHINE)
+    else {
+        return Vec::new();
+    };
+    if unlocker == technology {
+        return Vec::new();
+    }
+    let mut goals = Vec::new();
+    for ingredient in &tech.research_unit_ingredients {
+        let Some(spec) = crate::method::assemble::assembly_spec(state, &ingredient.name) else {
+            continue;
+        };
+        let per_minute = (3600 / spec.ticks_per_item.max(1)).max(1);
+        goals.push(Goal::Producing {
+            item: ingredient.name.clone(),
+            per_minute,
+        });
+    }
+    goals
+}
+
 impl Method for Researched {
     fn name(&self) -> &'static str {
         "research"
@@ -4606,6 +4684,20 @@ impl Method for Researched {
             }
         }
 
+        // **Ask for a cell before asking anybody to craft a pack.** Emitted
+        // ahead of every per-bot block below, because that is what makes the
+        // difference: `run_steps` expands these in order, so by the time a
+        // bot's `Goal::Have` for a pack is expanded the cell stands in the
+        // overlay and `method::cellstock::DrawFromCell` -- registered ahead
+        // of `Withdraw` and of `HandCraft` -- claims it. With no cell,
+        // nothing changes.
+        //
+        // See [`machine_made_packs`] for which packs qualify and for the
+        // bootstrap rule that keeps this from deadlocking on its own machine.
+        for goal in machine_made_packs(&ctx.state, name, &tech) {
+            steps.push(Step::Subgoal(goal));
+        }
+
         // The packs, into the labs. This is the step run 30 did not have: it
         // crafted ten automation science packs, carried them, and inserted
         // them nowhere, so `research_progress` stayed at 0.0 for the remaining
@@ -5161,6 +5253,19 @@ const MAX_LABS: u32 = 8;
 pub fn default_registry() -> MethodRegistry {
     MethodRegistry::new()
         .with(Box::new(AlreadySatisfied))
+        // Ahead of `Withdraw`, and therefore ahead of `HandCraft`.
+        // Registration order is the decision site for "machine or hands", and
+        // this is that decision. It declines unless a **complete cell** for
+        // the item is already standing with product in its output chest, so
+        // with no cell built nothing changes.
+        //
+        // Ahead of `Withdraw` specifically because `Withdraw` would otherwise
+        // claim the same goal -- the cell's output chest is a buffer like any
+        // other since `BuildAssemblyCell` started recording its charge there
+        // -- and would take the packs with a plain transfer duration, as
+        // though they were already in the chest. They are not: the machines
+        // have to run first. See `crate::method::cellstock`.
+        .with(Box::new(crate::method::cellstock::DrawFromCell))
         .with(Box::new(Withdraw))
         // Ahead of `Smelt`: both claim any smelting-category `Have`/`Produced`,
         // and `Smelt` names no quantity, so this has to be asked first for its
@@ -6653,6 +6758,19 @@ pub fn registry_for(bots: &[BotId]) -> MethodRegistry {
         // furnace beats a plate in the ground, and the ground may no longer
         // have the ore. Behind `SplitAcrossBots`, so a top-level goal is still
         // scattered first and each share asks this for itself.
+        // Ahead of `Withdraw`, and therefore ahead of `HandCraft`.
+        // Registration order is the decision site for "machine or hands", and
+        // this is that decision. It declines unless a **complete cell** for
+        // the item is already standing with product in its output chest, so
+        // with no cell built nothing changes.
+        //
+        // Ahead of `Withdraw` specifically because `Withdraw` would otherwise
+        // claim the same goal -- the cell's output chest is a buffer like any
+        // other since `BuildAssemblyCell` started recording its charge there
+        // -- and would take the packs with a plain transfer duration, as
+        // though they were already in the chest. They are not: the machines
+        // have to run first. See `crate::method::cellstock`.
+        .with(Box::new(crate::method::cellstock::DrawFromCell))
         .with(Box::new(Withdraw))
         // Ahead of `SharedSmelt` and `Smelt`: both claim any smelting-category
         // `Have`/`Produced` regardless of quantity, so this has to be asked
@@ -6956,6 +7074,41 @@ mod tests {
     /// `count == tech.research_unit_count * amount` passes just as happily
     /// against a method that forgot to multiply at all, because it would be
     /// making the same mistake twice.
+    /// **An absent unlocker is "nobody could say", not "this is not the
+    /// bootstrap technology"** -- and reading it as the second refused 39 of
+    /// this crate's own tests at once, every one of them with
+    /// `ProductNotMakeable(assembling-machine-1)`.
+    ///
+    /// The comparison [`machine_made_packs`] is built on is
+    /// `unlocking_technology(assembling-machine-1) == this technology`. Written
+    /// as an `Option` comparison it is *false* when nothing unlocks the
+    /// machine, so every technology looked like a later one and every pack
+    /// bill asked for a cell built from a machine no recipe in the world can
+    /// make. The shared fixture is exactly such a world, which is why the
+    /// whole suite went red rather than one test.
+    ///
+    /// `absent is not a value`, in the one place where reading it as one is
+    /// silently catastrophic rather than merely wrong.
+    #[test]
+    fn a_world_where_nothing_unlocks_the_machine_asks_for_no_cell() {
+        let s = tech_state(&[BotId(1)]);
+        assert!(
+            crate::method::util::unlocking_technology(&s, crate::method::assemble::MACHINE)
+                .is_none(),
+            "the fixture must be a world with no unlocker, or this test asserts nothing"
+        );
+        for name in ["automation", "logistics", "mixed-research"] {
+            let tech = s
+                .technology(name)
+                .unwrap_or_else(|| panic!("{name} is a fixture technology"));
+            assert_eq!(
+                machine_made_packs(&s, name, &tech),
+                Vec::new(),
+                "{name}: with no unlocker there is no boundary to draw, so no cell"
+            );
+        }
+    }
+
     #[test]
     fn a_research_asks_for_one_unit_bill_times_the_unit_count() {
         let s = tech_state(&[BotId(1)]);

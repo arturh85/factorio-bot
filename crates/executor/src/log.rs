@@ -313,6 +313,31 @@ pub struct WalkObservation {
     /// `None` if the game never said — see the type docs.
     pub replied_tick: Option<Ticks>,
     pub error: Option<String>,
+    /// How many of this bot's remaining steps were abandoned because this walk
+    /// failed. `None` on every walk that did not halt its bot — including a
+    /// failed walk that was the bot's last step, which abandons nothing.
+    ///
+    /// **A failed walk stops the bot** (`crate::run::run_bot_signalled` says
+    /// why: a walk's effect is a position, and no plan edge carries it), and
+    /// until 2026-09-08 that stop wrote *nothing anywhere*. `halt` published
+    /// `Failed`/`Lost` over the `watch` senders so dependents would abandon
+    /// themselves, and the senders are not the record: the abandoned steps
+    /// were never dispatched, so `record.actions` had no attempt to write, and
+    /// the run's own counters reported them as `pending`.
+    ///
+    /// What that cost, measured on `run-1788833726-34821`: the run ended
+    /// `success=246 failed=7 lost=1 **pending=2041**` out of 2,295, and
+    /// nothing in `events.jsonl` said where the 2,041 went. They went to four
+    /// halts, and the largest was not a death — **bot 3 stalled on a tree at
+    /// tick 7,980 and took 474 steps with it**, 19,000 ticks before the first
+    /// bot died. Reading the record without this field, the run looks like one
+    /// that simply ran out of time.
+    ///
+    /// It rides on the walk rather than in a `halts` map of its own so that
+    /// every existing caller of `record.walks` gets it with no new call to
+    /// forget — which is exactly how `record.deaths()` came to be uncalled for
+    /// the one run in this project's history that had deaths in it.
+    pub abandoned: Option<u32>,
 }
 
 /// What a step is doing while it is not dispatching anything.
@@ -897,8 +922,27 @@ impl ExecutionLog {
                 dispatched_tick: None,
                 replied_tick: None,
                 error: None,
+                abandoned: None,
             },
         );
+    }
+
+    /// Records that this walk's failure halted its bot, abandoning `abandoned`
+    /// of the bot's remaining steps.
+    ///
+    /// Called by [`crate::run`]'s `halt` immediately after `fail_walk`, so the
+    /// count lands on the walk that caused it and reaches `events.jsonl`
+    /// through the plumbing `record.walks` already has. See
+    /// [`WalkObservation::abandoned`] for what the absence of this cost.
+    ///
+    /// `abandoned == 0` is written as `Some(0)`, not skipped: a bot halted on
+    /// its own last step really did halt, and "halted, taking nothing with it"
+    /// is a different fact from "did not halt". The same absent-is-not-a-value
+    /// rule the rest of this record keeps.
+    pub fn halt_walk(&mut self, bot: BotId, step_index: usize, abandoned: u32) {
+        if let Some(w) = self.walk_mut(bot, step_index) {
+            w.abandoned = Some(abandoned);
+        }
     }
 
     /// Records the game ticks observed for a walk. The counterpart of

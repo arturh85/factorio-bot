@@ -838,6 +838,15 @@
           {
             "description": "A walk reached a verdict.\n\nEVERY WALK THAT REACHED A VERDICT GETS EXACTLY ONE OF THESE, whether or\nnot the game stamped a tick for it -- the rule\n[`EventKind::ActionSettled`] already states, applied to the other half\nof the schedule. It is stated again rather than assumed because the\naction side reached it the expensive way: the settle used to be written\ninside `if let Some(replied) = replied`, and a lost attempt never has a\nreply tick, so `status: \"lost\"` was structurally unrecordable. This\nvariant was built with that already fixed.\n\n`status` is `\"success\"`, `\"failed\"` or `\"lost\"`, straight from the\nexecutor's `Status`. `failed` and `lost` are different facts and are\nnever collapsed: `failed` is the game refusing the walk, `lost` is the\ngame acknowledging it and never answering -- a bot that may still be\nwalking as far as anyone here knows. `pending` and `running` are not\nverdicts and write nothing.\n\n`elapsed_ticks` is null when the walk was not timed at both ends, which\nis a duration nobody measured rather than a duration of zero, and is\nalso what marks this event's `tick` as the record's high-water mark\nrather than the game's clock (see [`RunRecorder::not_before`]).",
             "properties": {
+              "abandoned": {
+                "description": "How many of this bot's remaining steps were abandoned because this\nwalk failed. `None` on every walk that did not halt its bot.\n\n**A failed walk halts the bot** -- deliberately, because a walk's\neffect is a position and no plan edge carries it\n(`factorio_bot_executor::run::run_bot_signalled`). Everything after\nit is dropped without ever being dispatched, so it produces no\nattempt, no `ActionSettled`, and no trace of any kind: the record\nshowed those steps as `pending`, which is also exactly what a run\nsomebody killed early shows.\n\n`run-1788833726-34821` -- the first run in this project's history\nin which a bot died -- ended `success=246 failed=7 lost=1\n**pending=2041**` of 2,295, and the 2,041 were four halts. The\nlargest was **not** a death: bot 3's walk stalled on a `tree-01` at\ntick 7,980 and took **474 steps** with it, 19,000 ticks before any\nbot was killed. Three deaths accounted for the other three halts\nand 1,572 steps. None of that was derivable from the record as it\nstood; it took reconstructing the plan and diffing it against the\ndispatches.\n\n`Some(0)` is written for a bot halted on its own last step and\nmeans \"halted, taking nothing with it\" -- a different fact from\n`None`, which means \"did not halt\".",
+                "format": "int32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
               "bot": {
                 "format": "int32",
                 "minimum": 0,

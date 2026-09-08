@@ -589,11 +589,68 @@ pub fn free_area_near(state: &PlanState, from: &Position, entity: &str) -> Optio
 /// Nothing else in the planner asks this. `produce::fit` sites a cell's
 /// furnace at a fixed offset from its drill and may put it on ore, which is
 /// deliberate: the rim of a patch is its thin edge.
+///
+/// # A threat is PREFERRED AWAY FROM, not refused — the opposite of ore
+///
+/// The rings are walked twice: once skipping every candidate inside a charted
+/// enemy structure's standoff ([`PlanState::threat_covering`]), and then, only
+/// if that found nothing at all, again without that skip. So a site with any
+/// unthreatened alternative within [`FREE_TILE_SEARCH_RADIUS`] moves out of
+/// the worm's reach, and a site with none answers exactly what it answered
+/// before this existed.
+///
+/// **The two-pass shape is the one the ore paragraph above says was measured
+/// and rejected, and it is right here for the reason it was wrong there.**
+/// Falling back onto ore consumes the patch a later goal needs — unrecoverable.
+/// Falling back into a worm's reach is *today's behaviour*: it loses nothing
+/// that was not already lost, whereas refusing outright would delete a plan
+/// that exists. This repo's own rule, from the target-side guard that landed
+/// the day before: a refusal where a plan used to exist is a defect, not
+/// caution.
+///
+/// **Why placement gets a guard at all, when the walk to it does not.**
+/// Measured 2026-09-08 against a live `small-worm-turret`
+/// (`scripts/threat_pass_probe.sh`): a character *standing* 24 tiles away lost
+/// 153 of 250 health in 300 ticks, while one *walking past* at the same 24
+/// tiles lost nothing — it was inside the 25-tile attack range for only ~47
+/// ticks, less than the worm takes to rear up and fire. A building does not
+/// walk on. It is the standing exposure that this guard is sized for, and it
+/// is the one this function decides.
+///
+/// # Cost
+///
+/// One extra [`PlanState::threat_covering`] per candidate that has already
+/// passed every other test — normally the first one, because the search
+/// returns on it. The second pass runs only when the first found nothing,
+/// which on a world with no charted threat is never. See the note in
+/// `docs/superpowers/notes/2026-09-08-a-threat-is-not-only-at-the-target.md`
+/// for the measured planning cost of that.
 pub fn free_area_near_where(
     state: &PlanState,
     from: &Position,
     entity: &str,
     accept: impl Fn(&Position) -> bool,
+) -> Option<Position> {
+    // Pass 1 avoids charted threats; pass 2 is the pre-guard search verbatim.
+    // Written as a loop over the flag rather than two ring walks so the ring
+    // ORDER stays written once -- the property this function's own doc opens
+    // by promising, and the one a second copy would silently break.
+    for avoid_threats in [true, false] {
+        if let Some(found) = free_area_ring_walk(state, from, entity, &accept, avoid_threats) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// One walk of [`free_area_near_where`]'s rings. See its doc; `avoid_threats`
+/// selects the first pass from the second.
+fn free_area_ring_walk(
+    state: &PlanState,
+    from: &Position,
+    entity: &str,
+    accept: &impl Fn(&Position) -> bool,
+    avoid_threats: bool,
 ) -> Option<Position> {
     let (offset_x, offset_y) = tile_alignment(state, entity);
     let base_x = from.x.floor() as i32;
@@ -616,6 +673,12 @@ pub fn free_area_near_where(
                     .collision_area(entity, &candidate)
                     .is_some_and(|area| state.covers_any_resource(&area))
                 {
+                    continue;
+                }
+                // Last, because it is the only test here that is linear in
+                // the threat table: everything cheaper has already had its
+                // chance to reject this candidate.
+                if avoid_threats && threatened_tile(state, &candidate) {
                     continue;
                 }
                 return Some(candidate);
@@ -1516,6 +1579,107 @@ mod tests {
         assert!(
             resource_seats(&guarded, "iron-ore", 4) > 0,
             "and they still seat miners"
+        );
+    }
+
+    /// `fixture_world()` with a `small-worm-turret` standing at `at`.
+    ///
+    /// Built from a stone furnace and renamed, the way
+    /// `a_worm_clipping_the_iron_field_moves_selection_past_its_reach` does:
+    /// `update_chunk_entities` is the only door into `EntityGraph::threats`
+    /// and it decides by `entity_type`, so the shape of the entity it is
+    /// handed does not matter and the name and type do.
+    fn state_with_worm(at: Position) -> PlanState {
+        let world = fixture_world();
+        let mut worm = FactorioEntity::new_stone_furnace(&at, Direction::North);
+        worm.name = "small-worm-turret".to_owned();
+        worm.entity_type = "turret".to_owned();
+        world
+            .update_chunk_entities(vec![worm])
+            .expect("a fixture world accepts an enemy structure");
+        PlanState::from_world(Arc::new(world), &[BotId(1)])
+    }
+
+    /// A **building** is sited out of a worm's reach when there is anywhere
+    /// else to put it -- the placement half of the owner's "threats for all
+    /// actions", and the half the 2026-09-08 probe says matters most: a
+    /// character standing 24 tiles from a live small worm lost 153 of 250
+    /// health in 300 ticks, while one walking past at the same distance lost
+    /// nothing.
+    ///
+    /// The geometry is the same trick the ore test above needs, for the same
+    /// reason. `free_area_near_where` reaches 12 rings and a small worm reaches
+    /// 25, so a worm covering the origin covers most of the search window: it
+    /// is parked 20 tiles west, where the origin is inside the standoff and
+    /// the eastern rings are outside it. Both halves are asserted as
+    /// preconditions, because a worm that missed the origin or swallowed the
+    /// whole window would make this test pass without the guard existing.
+    #[test]
+    fn a_furnace_is_sited_out_of_a_worms_reach_when_the_rings_offer_one() {
+        let origin = Position::new(0., 0.);
+        let unguarded = state();
+        let before =
+            free_area_near(&unguarded, &origin, "stone-furnace").expect("open ground at spawn");
+
+        let guarded = state_with_worm(Position::new(-20.5, 0.5));
+        assert!(
+            guarded.threat_covering(&before).is_some(),
+            "fixture precondition: the worm must cover the site the unguarded search picked \
+             ({before})"
+        );
+
+        let after = free_area_near(&guarded, &origin, "stone-furnace")
+            .expect("ground beyond the worm's reach is inside the search radius");
+        assert_ne!(
+            after, before,
+            "a building must not be sited inside a charted worm's attack range"
+        );
+        assert!(
+            guarded.threat_covering(&after).is_none(),
+            "and the site it moved to must itself be outside every standoff, got {after}"
+        );
+    }
+
+    /// **And it falls back rather than refusing.** This is the whole
+    /// difference between the threat guard here and the ore guard beside it:
+    /// running out of unthreatened ground is recoverable -- the building
+    /// stands where it always did -- and deleting a plan that exists is not.
+    ///
+    /// The worm sits 10 tiles west, near enough that all 625 candidates in all
+    /// 12 rings are inside its 25-tile reach -- the furthest corner is 24.4
+    /// tiles from it -- and far enough that its own collision box stands on
+    /// none of them. **That second condition is not decoration**: a first
+    /// version parked the worm on the origin and the test failed with the site
+    /// moving to (-1, -1), because the worm's own footprint made (0, 0)
+    /// unbuildable. The guard was not involved at all, and a fixture that
+    /// blocks the ground it is measuring cannot tell the two apart.
+    #[test]
+    fn a_worm_over_the_whole_search_window_still_yields_the_unguarded_site() {
+        let origin = Position::new(0., 0.);
+        let before = free_area_near(&state(), &origin, "stone-furnace").expect("open ground");
+
+        let guarded = state_with_worm(Position::new(-9.5, 0.5));
+        assert!(
+            guarded.is_area_free("stone-furnace", &before),
+            "fixture precondition: the worm must not stand on the site the unguarded search \
+             picked ({before}), or this measures its footprint and not the guard"
+        );
+        let corner = Position::new(
+            origin.x + FREE_TILE_SEARCH_RADIUS as f64,
+            origin.y + FREE_TILE_SEARCH_RADIUS as f64,
+        );
+        assert!(
+            guarded.threat_covering(&corner).is_some(),
+            "fixture precondition: the worm must cover even the furthest ring ({corner}), or the \
+             first pass would succeed and this would not be testing the fallback"
+        );
+
+        let after = free_area_near(&guarded, &origin, "stone-furnace")
+            .expect("a threat must not delete a site that exists");
+        assert_eq!(
+            after, before,
+            "with no safe candidate anywhere, the search must answer exactly what it answered \
+             before the guard existed"
         );
     }
 

@@ -436,6 +436,62 @@ fn overlay_boxes(ctx: &ExpansionCtx, area: &Rect) -> Vec<Rect> {
         .collect()
 }
 
+/// Which cells of this window a charted enemy structure's standoff covers, or
+/// `None` when no threat reaches the window at all.
+///
+/// **`None` is the zero-cost answer and it is the usual one.** Every map this
+/// project plans on today has its early build sites far from anything charted,
+/// so this returns `None` after one [`crate::state::PlanState::threat_covering`]-shaped
+/// query and [`connect_steps_with`] never builds a second grid or runs a second
+/// search. That is what keeps the guard off the planning-cost budget on the
+/// four baselines.
+///
+/// # Why the threat list is taken once and not per cell
+///
+/// `EntityGraph::threats_from` clones and *sorts* the whole threat table on
+/// every call, so asking it per cell would be `GRID * GRID` sorts -- 2,304 of
+/// them for one belt. It is asked once, about the window's centre, for
+/// everything that could possibly reach the window; the per-cell test is then
+/// a distance against that short list. This is the shape this repo has already
+/// paid for once, when a per-candidate threat lookup doubled the oil goal's
+/// planning wall time.
+///
+/// The radius asked for is the window's circumradius plus the widest standoff
+/// any threat here claims, so a nest sitting outside the window whose reach
+/// extends into it is still counted -- the failure mode being guarded against
+/// is precisely a threat you cannot see from the tile you are standing on.
+fn threatened_cells(ctx: &ExpansionCtx, origin: (f64, f64)) -> Option<Vec<bool>> {
+    let centre = enclosure::cell_to_position(origin, (GRID / 2, GRID / 2));
+    let reaching: Vec<(Position, f64)> = ctx
+        .state
+        .base()
+        .entity_graph
+        .threats_from(&centre)
+        .into_iter()
+        .filter_map(|(name, at, distance)| {
+            let standoff = ctx.state.threat_standoff(&name).tiles;
+            // Half the window's diagonal: nothing inside the square is further
+            // from its centre than this, so a threat further away than
+            // `standoff + that` cannot cover a single cell of it.
+            let circumradius = (GRID as f64 / 2.).hypot(GRID as f64 / 2.);
+            (distance <= standoff + circumradius).then_some((at, standoff))
+        })
+        .collect();
+    if reaching.is_empty() {
+        return None;
+    }
+    let mut cells = vec![false; GRID * GRID];
+    for y in 0..GRID {
+        for x in 0..GRID {
+            let at = enclosure::cell_to_position(origin, (x, y));
+            cells[enclosure::cell_index(x, y)] = reaching.iter().any(|(threat, standoff)| {
+                factorio_bot_core::factorio::util::calculate_distance(&at, threat) < *standoff
+            });
+        }
+    }
+    Some(cells)
+}
+
 /// One `Place` action, with the preconditions and effects every other method
 /// in this crate emits for one -- see `method::power`'s plant parts, which
 /// this deliberately mirrors field for field.
@@ -615,15 +671,40 @@ pub fn connect_steps_with(
     // project's defining failure. A route that would need to go underground
     // must refuse instead, which passing `None` here guarantees: `route_belt`
     // never attempts an underground move without a `max_underground`.
-    let route =
-        route_belt(&blocked, origin, source.belt, sink.belt, None).map_err(
-            |error| match error {
-                RouteError::NoPath { blocked } => ConnectRefusal::NoRoute { blocked },
-                RouteError::SpanTooLong { needed, max } => {
-                    ConnectRefusal::SpanTooLong { needed, max }
+    //
+    // THREATS: a belt is a standing structure, so the route prefers to keep
+    // out of a charted enemy structure's reach -- but never at the price of
+    // the route itself. `threatened_cells` is OR-ed onto a *copy* of the grid
+    // and tried first; a refusal there falls through to the plain grid, which
+    // is the search this function has always run. So the guard can move a
+    // belt and can never delete one, the same prefer-then-fall-back shape
+    // `method::util::free_area_near_where` uses for siting, and for the same
+    // measured reason (a standing thing cannot walk out of range).
+    //
+    // The endpoints are deliberately NOT part of it: they are fixed by the
+    // machines, and blocking them would refuse every route on the first
+    // attempt and make the whole pass a wasted search.
+    let route = threatened_cells(ctx, origin)
+        .map(|threatened| {
+            let mut avoiding = blocked.clone();
+            for (cell, is_threatened) in threatened.iter().enumerate() {
+                if *is_threatened {
+                    avoiding[cell] = true;
                 }
-            },
-        )?;
+            }
+            avoiding[enclosure::cell_index(source.belt.0, source.belt.1)] = false;
+            avoiding[enclosure::cell_index(sink.belt.0, sink.belt.1)] = false;
+            avoiding
+        })
+        .and_then(|avoiding| route_belt(&avoiding, origin, source.belt, sink.belt, None).ok())
+        .map_or_else(
+            || route_belt(&blocked, origin, source.belt, sink.belt, None),
+            Ok,
+        )
+        .map_err(|error| match error {
+            RouteError::NoPath { blocked } => ConnectRefusal::NoRoute { blocked },
+            RouteError::SpanTooLong { needed, max } => ConnectRefusal::SpanTooLong { needed, max },
+        })?;
 
     let source_anchor_pos = enclosure::cell_to_position(origin, source.anchor);
     let sink_anchor_pos = enclosure::cell_to_position(origin, sink.anchor);
@@ -1016,6 +1097,137 @@ mod tests {
         assert!(
             belts.len() > 8,
             "and the detour costs it at least one extra tile: {belts:?}"
+        );
+    }
+
+    /// The tile the straight belt runs through, between the two machines of
+    /// `furnace_and_lab_on_open_ground`. `a_tree_off_the_tile_centre_still_
+    /// blocks_a_belt` above asserts the detour against the same cell, from an
+    /// obstacle instead of a threat, so the two guards are measured against
+    /// one geometry.
+    const ON_THE_STRAIGHT_ROUTE: Position = Position { x: 9.5, y: 2.5 };
+
+    /// `furnace_and_lab_on_open_ground` plus one enemy structure whose
+    /// standoff is `reach` tiles.
+    ///
+    /// **The reach is stated by a PROTOTYPE, not by the worm table**, which is
+    /// the only way to get a small one: `PlanState::threat_standoff` reads
+    /// `FactorioEntityPrototype::attack_range` first and falls back to
+    /// `WORM_ATTACK_RANGE`'s 25 tiles, and a 25-tile disc swallows a 48-tile
+    /// window's endpoints along with everything else -- there would be no
+    /// detour to find. A small reach is also the honest shape of the question
+    /// this tests: whether the router *prefers* clear ground, not whether it
+    /// can escape a whole nest.
+    ///
+    /// The threat stands two tiles off the belt row rather than on it, so its
+    /// own collision box blocks nothing and the only thing that can move the
+    /// route is the standoff. That distinction cost this session one failing
+    /// test on the siting side, where a worm parked on the origin made the
+    /// ground unbuildable and the guard was never involved.
+    fn furnace_and_lab_with_a_threat(reach: f64) -> (ExpansionCtx, FactorioEntity, FactorioEntity) {
+        use factorio_bot_core::test_utils::fixture_world;
+        use std::sync::Arc;
+
+        let world = fixture_world();
+        let mut prototype = world
+            .globals
+            .entity_prototypes
+            .get("stone-furnace")
+            .expect("the fixture ships a stone-furnace prototype")
+            .clone();
+        prototype.attack_range = Some(reach);
+        world
+            .globals
+            .entity_prototypes
+            .insert("small-worm-turret".into(), prototype);
+
+        let furnace = FactorioEntity::new_stone_furnace(&Position::new(5.0, 5.0), Direction::North);
+        let lab_position = Position::new(12.5, 5.5);
+        let mut lab = FactorioEntity::new_stone_furnace(&lab_position, Direction::North);
+        lab.name = "lab".to_owned();
+        lab.entity_type = "lab".to_owned();
+        lab.bounding_box = factorio_bot_core::factorio::util::rect_floor_ceil(
+            &factorio_bot_core::factorio::util::add_to_rect(
+                &Rect::new(
+                    &Position::new(-1.199_218_75, -1.199_218_75),
+                    &Position::new(1.199_218_75, 1.199_218_75),
+                ),
+                &lab_position,
+            ),
+        );
+        let mut worm = FactorioEntity::new_stone_furnace(
+            &Position::new(ON_THE_STRAIGHT_ROUTE.x, ON_THE_STRAIGHT_ROUTE.y - 2.),
+            Direction::North,
+        );
+        worm.name = "small-worm-turret".to_owned();
+        worm.entity_type = "turret".to_owned();
+
+        world
+            .update_chunk_entities(vec![furnace.clone(), lab.clone(), worm])
+            .expect("a fixture world accepts these entities");
+        let ctx = ExpansionCtx::new(
+            crate::state::PlanState::from_world(Arc::new(world), &[]),
+            BotId(1),
+        );
+        (ctx, furnace, lab)
+    }
+
+    /// A belt is a **standing** structure, so the route prefers to keep out of
+    /// a charted enemy structure's reach.
+    ///
+    /// That preference is worth having because standing exposure is what a
+    /// worm punishes: measured live on 2026-09-08
+    /// (`scripts/threat_pass_probe.sh`), a character *standing* 24 tiles from
+    /// a `small-worm-turret` lost 153 of 250 health in 300 ticks while one
+    /// *walking past* at the same distance lost none.
+    #[test]
+    fn a_belt_route_prefers_ground_outside_a_threats_standoff() {
+        let (mut ctx, from, to) = furnace_and_lab_with_a_threat(2.5);
+        assert!(
+            ctx.state.threat_covering(&ON_THE_STRAIGHT_ROUTE).is_some(),
+            "fixture precondition: the threat must cover the straight route's own tile"
+        );
+        let steps = connect_steps(&mut ctx, &from, &to, &"iron-plate".into())
+            .expect("a small standoff is routed around, not refused");
+        let belts = placements(&steps, "transport-belt");
+        assert!(
+            !belts.iter().any(|(pos, _)| pos == &ON_THE_STRAIGHT_ROUTE),
+            "the belt must not run through the threatened tile: {belts:?}"
+        );
+        for (pos, _) in &belts {
+            assert!(
+                ctx.state.threat_covering(pos).is_none(),
+                "and no belt tile at all may sit inside the standoff: {pos}"
+            );
+        }
+    }
+
+    /// **And the preference never costs a route.** With a standoff wide enough
+    /// to cover the whole search window there is no clear path, and the answer
+    /// must be the belt run this function laid before the guard existed --
+    /// not a refusal. A refusal where a plan used to exist is a defect, not
+    /// caution; the same fallback shape `method::util::free_area_near_where`
+    /// uses for siting.
+    #[test]
+    fn a_threat_over_the_whole_window_still_yields_the_unguarded_route() {
+        let (mut ctx, from, to) = furnace_and_lab_with_a_threat(200.);
+        assert!(
+            ctx.state
+                .threat_covering(&Position::new(5.0, 5.0))
+                .is_some(),
+            "fixture precondition: the standoff must cover even the source machine, or the first \
+             pass would succeed and this would not be testing the fallback"
+        );
+        let guarded = connect_steps(&mut ctx, &from, &to, &"iron-plate".into())
+            .expect("a threat must not delete a route that exists");
+
+        let (mut plain, from, to) = crate::test_world::furnace_and_lab_on_open_ground();
+        let unguarded = connect_steps(&mut plain, &from, &to, &"iron-plate".into())
+            .expect("the control routes on open ground");
+        assert_eq!(
+            placements(&guarded, "transport-belt"),
+            placements(&unguarded, "transport-belt"),
+            "with nowhere clear to go, the route must be exactly the one laid before the guard"
         );
     }
 

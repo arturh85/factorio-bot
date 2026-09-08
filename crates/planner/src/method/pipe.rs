@@ -52,7 +52,7 @@ use factorio_bot_core::graph::enclosure;
 use factorio_bot_core::graph::route::{RouteError, TileKind, route_belt};
 use factorio_bot_core::num_traits::FromPrimitive;
 use factorio_bot_core::types::{
-    Direction, FactorioEntity, FactorioRecipe, FluidFilter, Position, Rect, TileFluid,
+    Direction, FactorioEntity, FactorioRecipe, FluidFilter, Pos, Position, Rect, TileFluid,
 };
 
 use crate::action::{Action, ActionKind, Actor, Condition, Effect};
@@ -525,13 +525,23 @@ pub(crate) fn fluidbox_entities(
 /// those -- see [`attributable_to`]. **Steam had no rule at all before**, for
 /// precisely water's reason, and has one now.
 ///
-/// # What it still cannot do
+/// # What a tank holds: still not read, now sometimes DERIVED
 ///
 /// **Nothing here reads what a tank contains**, because nothing in the model
 /// does. Rule 3 attributes a tank by *where it stands*, which is an inference
 /// from the map and not an observation of the fluid. The prototype filter
 /// does not help there: a `storage-tank`'s box is
 /// [`FluidFilter::Any`] -- correctly, since a tank will hold anything.
+///
+/// Since 2026-09-08 there is one more inference between the recipe rule and
+/// the two field rules, and it applies to buffers only: **[`traced`] follows
+/// the pipes this plan has laid** from the buffer's own connections to the
+/// machine output ports on the same network, and lets
+/// [`fluid_box_ordinals`] name the fluid. That is what makes a buffer the
+/// plan *just built* -- standing nowhere near any charted patch, because
+/// heavy-oil, light-oil and petroleum-gas have none -- a source of the fluid
+/// the machine feeding it makes. It is still an inference from connectivity,
+/// not a reading of contents, and it says so in four ways rather than one.
 ///
 pub(crate) fn sources_of(
     state: &PlanState,
@@ -873,6 +883,27 @@ fn attributable_to(
     {
         return true;
     }
+    // **What this plan's own pipes say the buffer is joined to.** A tank has
+    // no recipe and an unfiltered box, and heavy-oil, light-oil and
+    // petroleum-gas are not charted resources, so for a buffer this plan just
+    // built there is no other evidence at all -- and rule 3 below would
+    // attribute it to whatever patch it happens to stand near, which for a
+    // refinery's outputs is the crude field it is not holding.
+    //
+    // Only a buffer is traced: everything else has already been answered by
+    // its filter, the ground or its recipe, and the BFS is not free.
+    //
+    // **Both directions on one fact.** A network whose only producer makes
+    // heavy-oil definitely does not supply light-oil, so `Carries` refuses as
+    // well as attributes -- the shape `drawn_from_ground` established. The
+    // three "could not say" answers fall through, inert, to exactly the rules
+    // that ran before this existed.
+    if is_buffer(state, &entity.name) {
+        match traced(state, entity) {
+            Traced::Carries(carried) => return carried == fluid,
+            Traced::Ambiguous(_) | Traced::Unnamed | Traced::Unconnected | Traced::Unreadable => {}
+        }
+    }
     if field.is_empty() {
         return false;
     }
@@ -955,6 +986,259 @@ fn drawn_from_ground(state: &PlanState, entity: &FactorioEntity) -> Option<TileF
         entity.position.y() + turned.y(),
     );
     Some(state.base().entity_graph.fluid_at(&tile))
+}
+
+// ---------------------------------------------------------------------------
+// What a buffer is joined to
+// ---------------------------------------------------------------------------
+
+/// What the pipes standing between a buffer and the machines around it say the
+/// buffer holds.
+///
+/// **Four answers, and only one of them is a claim about a fluid.** The other
+/// three are the different ways this can fail to know, kept apart because
+/// collapsing them would be the `absent is not a value` defect this repository
+/// keeps paying for: *"nothing is joined to it"*, *"something is joined to it
+/// and nobody said what that machine makes"* and *"two different fluids reach
+/// it"* have different remedies and none of them means *"it holds nothing"*.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Traced {
+    /// Every machine output port on this network names the same fluid. The
+    /// only answer [`attributable_to`] acts on, in both directions.
+    Carries(String),
+    /// The network reaches output ports naming more than one fluid, or one
+    /// named fluid beside a port nothing could name. Inert.
+    Ambiguous(BTreeSet<String>),
+    /// The network reaches a machine output port, and nothing names its fluid:
+    /// the machine carries no recipe (a pumpjack never does), this world has
+    /// no such recipe, or [`fluid_box_ordinals`] refuses that box. Inert.
+    Unnamed,
+    /// No machine output port is on this network at all -- a buffer standing
+    /// alone, or one joined only to consumers. Inert.
+    Unconnected,
+    /// The trace could not start: this world declares no pipe connection for
+    /// the buffer's own prototype, so there is no tile to begin from. A
+    /// different absence again, and inert.
+    Unreadable,
+}
+
+/// How far past the traced network to look for the machines that feed it: half
+/// an `oil-refinery` (2.4) plus a tile, so a machine whose *port* is on the
+/// network is found by its *centre*.
+///
+/// The search is bounded by the network's own extent, not by a guessed radius:
+/// a network of three pipes looks three tiles out.
+const TRACE_MARGIN: f64 = 4.0;
+
+/// Every tile a BFS over standing pipe reaches from `buffer`'s own pipe
+/// connections, and how many were visited.
+///
+/// A tile is on the network when a `pipe`-typed entity stands on it, and the
+/// search steps to the four orthogonal neighbours of such a tile. `buffer`'s
+/// own connection tiles seed it whether or not they hold a pipe, so a machine
+/// joined flush against the buffer -- port tile to port tile, no pipe between
+/// -- is reached; nothing steps *through* an empty tile, because a pipe run
+/// with a gap in it carries nothing.
+///
+/// **Reads the overlay and the standing world together**, through
+/// [`PlanState::entity_at`], because the whole point is to see what *this
+/// plan* has laid: the buffer being asked about does not exist in
+/// `base().entity_graph` at all.
+///
+/// **Deliberately does not traverse `pipe-to-ground`.** An underground pair is
+/// two entities whose halves this crate cannot tell apart -- the same fact
+/// that makes [`route_between`] refuse to lay one -- so a network crossing one
+/// stops here and the buffer reads [`Traced::Unconnected`] rather than being
+/// attributed on a guess.
+fn pipe_network(state: &PlanState, buffer: &FactorioEntity) -> Option<BTreeSet<Pos>> {
+    let ports = fluid_ports(state, &buffer.name, &buffer.position, None).ok()?;
+    let mut network: BTreeSet<Pos> = BTreeSet::new();
+    let mut seen: BTreeSet<Pos> = BTreeSet::new();
+    let mut frontier: Vec<Position> = ports.iter().flat_map(|port| port.tiles()).collect();
+    // Seeds count as network whether or not a pipe stands on them: they are
+    // the buffer's own connections.
+    for tile in &frontier {
+        network.insert(Pos::from(tile));
+    }
+    while let Some(tile) = frontier.pop() {
+        if !seen.insert(Pos::from(&tile)) {
+            continue;
+        }
+        if !state
+            .entity_at(&tile)
+            .is_some_and(|standing| standing.entity_type == "pipe")
+        {
+            continue;
+        }
+        network.insert(Pos::from(&tile));
+        for (dx, dy) in [(1., 0.), (-1., 0.), (0., 1.), (0., -1.)] {
+            frontier.push(Position::new(tile.x() + dx, tile.y() + dy));
+        }
+    }
+    Some(network)
+}
+
+/// Which fluid `entity` puts into the fluidbox `ordinal` of its output
+/// direction, or `None` when nothing in the model says.
+///
+/// Three separate absences, all of them `None` and all of them meaning *"not
+/// said"* rather than *"nothing"*: the entity carries no recipe, this world
+/// has no recipe of that name, or [`fluid_box_ordinals`] cannot decide which
+/// box a product goes in. The caller turns them into [`Traced::Unnamed`].
+fn output_fluid_on_box(
+    state: &PlanState,
+    entity: &FactorioEntity,
+    ordinal: usize,
+) -> Option<String> {
+    let name = entity.recipe.as_ref()?;
+    let recipe = state
+        .base()
+        .globals
+        .recipes
+        .get(name.as_str())
+        .map(|entry| entry.value().clone())?;
+    let ordinals = fluid_box_ordinals(state, &entity.name, &recipe, "output").ok()?;
+    ordinals
+        .into_iter()
+        .find(|(_, box_ordinal)| *box_ordinal == ordinal)
+        .map(|(fluid, _)| fluid)
+}
+
+/// What the plan's own pipes say a buffer holds: [`pipe_network`] followed
+/// out to every machine output port on it, with [`fluid_box_ordinals`] naming
+/// the fluid of each.
+///
+/// # Why this is derived and not recorded
+///
+/// The alternative was an annotation on [`PlanState`] saying what each buffer
+/// was built to catch. The owner ruled for derivation (2026-09-08) for three
+/// reasons, and the third is the one that decides it: **a second mechanism for
+/// "what does this hold" is what this repository regrets**. Two
+/// self-consistent mechanisms that disagree is its recurring scar, and no
+/// fixture catches it, because each is built from the same assumption. The
+/// pipes are already on the ground; asking them is one source of truth, and it
+/// is the same shape as [`sources_of`]'s other rules -- an inference from the
+/// world rather than a note kept beside it.
+///
+/// # What it answers that nothing else could
+///
+/// A `storage-tank`'s box is [`FluidFilter::Any`] -- correctly, a tank holds
+/// anything -- it carries no recipe, and heavy-oil, light-oil and
+/// petroleum-gas are not charted resources, so all four of `sources_of`'s
+/// other tests are silent on the tank this plan just filled. Every plan log
+/// on an oil map prints `no resource patch found for 'light-oil'` for exactly
+/// that reason. **Connectivity is the only evidence there is**, and this is
+/// it.
+///
+/// # The multi-output machine is where it earns its keep
+///
+/// An `oil-refinery` running `advanced-oil-processing` throws off three
+/// fluids, and its three output ports sit **two tiles apart on one edge**. So
+/// a network that reaches two of them is genuinely ambiguous -- and in the
+/// game a pipe touching two output boxes of one machine jams it outright.
+/// [`Traced::Ambiguous`] is that, said rather than guessed: the buffer is not
+/// attributed, and nothing is silently piped to the wrong port.
+pub(crate) fn traced(state: &PlanState, buffer: &FactorioEntity) -> Traced {
+    let Some(network) = pipe_network(state, buffer) else {
+        return Traced::Unreadable;
+    };
+    // Bounded by what the trace actually reached, plus enough to find the
+    // centre of a machine whose port is on it.
+    let radius = network
+        .iter()
+        .map(|tile| {
+            calculate_distance(
+                &Position::new(f64::from(tile.0) + 0.5, f64::from(tile.1) + 0.5),
+                &buffer.position,
+            )
+        })
+        .fold(0.0_f64, f64::max)
+        + TRACE_MARGIN;
+    let mut fluids: BTreeSet<String> = BTreeSet::new();
+    let mut reached = false;
+    let mut unnamed = false;
+    for entity in state.entities_within(&buffer.position, radius) {
+        if entity.position == buffer.position {
+            continue;
+        }
+        let Ok(ports) = fluid_ports(state, &entity.name, &entity.position, Some("output")) else {
+            continue;
+        };
+        for port in ports {
+            if !port
+                .tiles()
+                .iter()
+                .any(|tile| network.contains(&Pos::from(tile)))
+            {
+                continue;
+            }
+            reached = true;
+            match output_fluid_on_box(state, &entity, port.box_ordinal) {
+                Some(fluid) => {
+                    fluids.insert(fluid);
+                }
+                None => unnamed = true,
+            }
+        }
+    }
+    if !reached {
+        return Traced::Unconnected;
+    }
+    match (fluids.len(), unnamed) {
+        (0, _) => Traced::Unnamed,
+        (1, false) => Traced::Carries(
+            fluids
+                .into_iter()
+                .next()
+                .expect("a set of one has an element"),
+        ),
+        _ => Traced::Ambiguous(fluids),
+    }
+}
+
+/// Which of `source`'s fluidboxes carries `fluid`, as the two [`PipeEnd`]
+/// fields that select it.
+///
+/// `(Some("output"), Some(k))` when the source is a machine whose recipe puts
+/// `fluid` in output box `k`; `(None, None)` -- every box, nearest first --
+/// for anything that does not say, which is a buffer (whose boxes are
+/// interchangeable, correctly) and a pumpjack (which carries no recipe).
+///
+/// # The ambiguity this closes
+///
+/// A consumer piped off a multi-box machine used to route with
+/// `production_type: None, port_index: None`, and [`select`] with `None`
+/// returns **every** port of every box -- inputs included. That is harmless
+/// while the source has one box carrying fluid, and wrong the moment three do:
+/// an `oil-refinery`'s three output ports are two tiles apart on one edge, so
+/// a run leaving box 2 can lay pipe across box 1's port, and **in the game two
+/// boxes sharing one pipe segment means the refinery outputs nothing at all
+/// and jams**. The same silent class as an inserter facing the wrong way: it
+/// builds 100% correctly and moves nothing.
+pub(crate) fn supplying_end(
+    state: &PlanState,
+    source: &FactorioEntity,
+    fluid: &str,
+) -> (Option<&'static str>, Option<usize>) {
+    let Some(name) = source.recipe.as_ref() else {
+        return (None, None);
+    };
+    let Some(recipe) = state
+        .base()
+        .globals
+        .recipes
+        .get(name.as_str())
+        .map(|entry| entry.value().clone())
+    else {
+        return (None, None);
+    };
+    let Ok(ordinals) = fluid_box_ordinals(state, &source.name, &recipe, "output") else {
+        return (None, None);
+    };
+    match ordinals.into_iter().find(|(name, _)| name == fluid) {
+        Some((_, ordinal)) => (Some("output"), Some(ordinal)),
+        None => (None, None),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2060,6 +2344,424 @@ mod pipe_tests {
                 "pipe"
             ),
             "open ground is placeable, so the assertion above is about the tank"
+        );
+    }
+}
+
+/// [`traced`], against the prototypes of a real game rather than a fixture.
+///
+/// # Why these tests do not use the fixture world's shapes
+///
+/// **A test built only from a fixture cannot falsify this.** The fixture
+/// capture (`crates/core/tests/entity-prototype-fixtures.json`) is a 1.x
+/// world, and this module's own doc records that the two captures disagree
+/// about what a `pipe_connections` position *means* -- so a trace validated on
+/// it would be a trace validated against geometry the shipped game does not
+/// have. Worse, the specific thing this edge exists for is **crowding**: an
+/// `oil-refinery`'s three output ports sit two tiles apart on one edge, and a
+/// fixture cannot express a crowd it does not contain.
+///
+/// So the three prototypes and the recipe come out of
+/// `crates/core/tests/live-2.1.17-world-snapshot.json`, a byte-for-byte RCON
+/// reply from a real Factorio 2.1.17 server checked in by an earlier task.
+/// **Nobody on this branch wrote it and it could not have been written to
+/// agree with this code** -- the argument `tests/substance_live_capture.rs`
+/// makes for itself.
+///
+/// The pipes are laid by [`route_between`], never by hand: the tiles a run
+/// occupies are not the tiles its search chose (both ends' port tiles are
+/// pushed in unconditionally, outside the search), so a hand-written run would
+/// be testing a layout the planner does not build.
+#[cfg(test)]
+mod trace_tests {
+    use super::*;
+    use crate::ids::BotId;
+    use crate::test_world::{OilFixture, PumpjackRecipe, world_with_oil};
+    use factorio_bot_core::factorio::snapshot::WorldSnapshot;
+    use factorio_bot_core::serde_json;
+    use std::sync::Arc;
+
+    const LIVE: &str = include_str!("../../../core/tests/live-2.1.17-world-snapshot.json");
+
+    /// The oil fixture, with the live game's `oil-refinery`, `storage-tank`
+    /// and `pipe` prototypes and its `advanced-oil-processing` recipe put over
+    /// the top.
+    fn live_state() -> PlanState {
+        let capture: WorldSnapshot =
+            serde_json::from_str(LIVE).expect("the checked-in capture parses");
+        let state = PlanState::from_world(
+            Arc::new(world_with_oil(OilFixture {
+                wells: true,
+                categories: true,
+                pumpjack: PumpjackRecipe::LockedBy { researched: true },
+                prerequisite: false,
+            })),
+            &[BotId(1)],
+        );
+        for name in ["oil-refinery", "storage-tank", "pipe", "pumpjack"] {
+            let proto = capture
+                .entity_prototypes
+                .iter()
+                .find(|proto| proto.name == name)
+                .unwrap_or_else(|| panic!("the live capture has a {name} prototype"))
+                .clone();
+            state
+                .base()
+                .globals
+                .entity_prototypes
+                .insert(name.to_string(), proto);
+        }
+        let recipe = capture
+            .recipes
+            .iter()
+            .find(|recipe| recipe.name == "advanced-oil-processing")
+            .expect("the live capture has advanced-oil-processing")
+            .clone();
+        state
+            .base()
+            .globals
+            .recipes
+            .insert(recipe.name.clone(), recipe);
+        state
+    }
+
+    /// The premise every assertion below rests on: the live refinery really
+    /// does declare three output boxes whose ports crowd one edge, and the
+    /// recipe really does declare three fluid products. Without this the tests
+    /// could pass vacuously against a capture that had stopped carrying
+    /// fluidboxes.
+    #[test]
+    fn the_capture_really_does_crowd_three_outputs_onto_one_edge() {
+        let state = live_state();
+        assert_eq!(
+            box_count(&state, "oil-refinery", "output"),
+            Some(3),
+            "the live oil-refinery declares three output fluidboxes"
+        );
+        let ports = fluid_ports(
+            &state,
+            "oil-refinery",
+            &Position::new(0.5, 0.5),
+            Some("output"),
+        )
+        .expect("the live refinery has output ports");
+        let mut junctions: Vec<(usize, Position)> = ports
+            .iter()
+            .map(|port| (port.box_ordinal, port.junction.clone()))
+            .collect();
+        junctions.sort_by_key(|entry| entry.0);
+        assert_eq!(junctions.len(), 3, "one port per output box: {junctions:?}");
+        // Box 0's second candidate and box 1's only candidate are two tiles
+        // apart on the same row -- the crowd this edge exists to survive.
+        let row: Vec<Position> = ports
+            .iter()
+            .flat_map(|port| port.candidates.clone())
+            .filter(|tile| tile.y() == -2.5)
+            .collect();
+        assert!(
+            row.len() >= 2,
+            "several output candidates share one row: {row:?}"
+        );
+    }
+
+    /// Lay a real pipe run and hand back its tiles.
+    fn lay(state: &mut PlanState, from: PipeEnd<'_>, to: PipeEnd<'_>) -> Vec<Position> {
+        let tiles = route_between(state, &from, &to, "pipe", &[]).expect("a route on open ground");
+        let pipes: Vec<FactorioEntity> = tiles
+            .iter()
+            .map(|tile| plain_entity(state, "pipe", tile))
+            .collect();
+        for pipe in pipes {
+            state.create_entity(pipe);
+        }
+        tiles
+    }
+
+    fn machine(state: &mut PlanState, name: &str, at: &Position, recipe: Option<&str>) {
+        let mut entity = plain_entity(state, name, at);
+        entity.recipe = recipe.map(str::to_string);
+        state.create_entity(entity);
+    }
+
+    /// A refinery running `advanced-oil-processing`, its heavy-oil output box
+    /// piped to a tank, both of them a long way from any charted patch.
+    ///
+    /// Returns the state and the tank.
+    fn refinery_piped_to_tank(recipe: Option<&str>, box_ordinal: usize) -> (PlanState, Position) {
+        let mut state = live_state();
+        let refinery = Position::new(0.5, -6.5);
+        let tank = Position::new(-6.5, -9.5);
+        machine(&mut state, "oil-refinery", &refinery, recipe);
+        machine(&mut state, "storage-tank", &tank, None);
+        let refinery_area = state
+            .collision_area("oil-refinery", &refinery)
+            .expect("a refinery footprint");
+        let tank_area = state
+            .collision_area("storage-tank", &tank)
+            .expect("a tank footprint");
+        lay(
+            &mut state,
+            PipeEnd {
+                name: "oil-refinery",
+                position: &refinery,
+                area: refinery_area,
+                production_type: Some("output"),
+                port_index: Some(box_ordinal),
+            },
+            PipeEnd {
+                name: "storage-tank",
+                position: &tank,
+                area: tank_area,
+                production_type: None,
+                port_index: None,
+            },
+        );
+        (state, tank)
+    }
+
+    fn tank_entity(state: &PlanState, at: &Position) -> FactorioEntity {
+        state.entity_at(at).expect("the tank stands")
+    }
+
+    /// **One named producer beside one that nothing names is still not an
+    /// answer.** The tank is joined to a refinery's heavy-oil box *and* to a
+    /// pumpjack, which carries no recipe -- so the network could be delivering
+    /// either, and `Ambiguous` is what that is. Taking the one fluid that
+    /// happened to be nameable would be the "a mechanism inferred from the one
+    /// quantity you were measuring" mistake, in a function whose whole job is
+    /// to say which fluid arrives.
+    #[test]
+    fn a_named_producer_beside_an_unnamed_one_is_still_ambiguous() {
+        let (mut state, tank) = refinery_piped_to_tank(Some("advanced-oil-processing"), 0);
+        let pumpjack = Position::new(-6.5, -15.5);
+        machine(&mut state, "pumpjack", &pumpjack, None);
+        let pumpjack_area = state
+            .collision_area("pumpjack", &pumpjack)
+            .expect("a pumpjack footprint");
+        let tank_area = state
+            .collision_area("storage-tank", &tank)
+            .expect("a tank footprint");
+        lay(
+            &mut state,
+            PipeEnd {
+                name: "pumpjack",
+                position: &pumpjack,
+                area: pumpjack_area,
+                production_type: Some("output"),
+                port_index: None,
+            },
+            PipeEnd {
+                name: "storage-tank",
+                position: &tank,
+                area: tank_area,
+                production_type: None,
+                port_index: None,
+            },
+        );
+        let traced = traced(&state, &tank_entity(&state, &tank));
+        assert!(
+            matches!(&traced, Traced::Ambiguous(fluids)
+                if fluids.len() == 1 && fluids.contains("heavy-oil")),
+            "one named fluid plus a producer nothing names is ambiguous, not that \
+             fluid: {traced:?}"
+        );
+        assert!(
+            !attributes(&state, "heavy-oil", "storage-tank"),
+            "so the buffer is not attributed to the nameable one"
+        );
+    }
+
+    fn attributes(state: &PlanState, fluid: &str, name: &str) -> bool {
+        sources_of(state, fluid, &Position::new(0., 0.))
+            .0
+            .iter()
+            .any(|entity| entity.name == name)
+    }
+
+    /// **The edge this task exists for.** A tank the plan just built, joined
+    /// by the plan's own pipes to a refinery's heavy-oil box, is a heavy-oil
+    /// source -- and nothing else here could have said so: heavy-oil is not a
+    /// charted resource, a tank carries no recipe, and a tank's box is
+    /// `FluidFilter::Any`.
+    #[test]
+    fn a_tank_piped_to_an_output_box_supplies_that_boxs_fluid() {
+        let (state, tank) = refinery_piped_to_tank(Some("advanced-oil-processing"), 0);
+        assert_eq!(
+            traced(&state, &tank_entity(&state, &tank)),
+            Traced::Carries("heavy-oil".to_string()),
+            "the run leaves output box 0, and the recipe's first fluid product is heavy-oil"
+        );
+        assert!(
+            attributes(&state, "heavy-oil", "storage-tank"),
+            "the buffer supplies the fluid the box it is joined to makes"
+        );
+    }
+
+    /// The other half of the same fact, and the reason the trace refuses as
+    /// well as attributing: the refinery makes light-oil too, out of a
+    /// *different* box, and this tank is not joined to it.
+    ///
+    /// The refinery itself is still a light-oil source by the recipe rule --
+    /// asserted, because without it this test would pass for a version that
+    /// had simply stopped attributing anything.
+    #[test]
+    fn a_tank_is_refused_for_the_fluids_of_the_boxes_it_is_not_joined_to() {
+        let (state, _tank) = refinery_piped_to_tank(Some("advanced-oil-processing"), 0);
+        assert!(
+            !attributes(&state, "light-oil", "storage-tank"),
+            "a tank on a heavy-oil network does not supply light-oil"
+        );
+        assert!(
+            attributes(&state, "light-oil", "oil-refinery"),
+            "the refinery does, by the recipe rule -- the control"
+        );
+    }
+
+    /// **Absent is not a value, one.** A tank joined to nothing is
+    /// `Unconnected`, which is inert: the rules that ran before this existed
+    /// still decide, so a tank standing on a charted field is still attributed
+    /// by rule 3. That control is the whole regression risk of this edge --
+    /// `method::gather` stands a tank at a wellhead and nothing pipes it until
+    /// the pumpjack is placed.
+    #[test]
+    fn a_tank_joined_to_nothing_is_unconnected_and_the_field_rule_still_answers() {
+        let mut state = live_state();
+        // The oil fixture's wells run along y = 20.5 from x = 20.5.
+        let at_the_field = Position::new(24.5, 24.5);
+        machine(&mut state, "storage-tank", &at_the_field, None);
+        assert_eq!(
+            traced(&state, &tank_entity(&state, &at_the_field)),
+            Traced::Unconnected,
+            "no pipe and no machine port on its own connections"
+        );
+        assert!(
+            attributes(&state, "crude-oil", "storage-tank"),
+            "rule 3 still attributes a buffer at the field -- the trace is inert here"
+        );
+
+        let far = Position::new(-30.5, -60.5);
+        let mut state = live_state();
+        machine(&mut state, "storage-tank", &far, None);
+        assert_eq!(
+            traced(&state, &tank_entity(&state, &far)),
+            Traced::Unconnected
+        );
+        assert!(
+            !attributes(&state, "crude-oil", "storage-tank"),
+            "and a tank far from any field is still not a crude source"
+        );
+    }
+
+    /// **Absent is not a value, two.** A tank joined to a machine that carries
+    /// no recipe is `Unnamed`, not "holds nothing" and not `Unconnected`: the
+    /// difference is that something *is* on the network and nobody said what
+    /// it makes. A pumpjack is the live case -- it never carries a recipe --
+    /// and the answer must stay inert so `method::gather`'s wellhead tank goes
+    /// on being attributed by the field rule.
+    #[test]
+    fn a_tank_joined_to_a_machine_with_no_recipe_is_unnamed() {
+        let (state, tank) = refinery_piped_to_tank(None, 0);
+        assert_eq!(
+            traced(&state, &tank_entity(&state, &tank)),
+            Traced::Unnamed,
+            "an output port is on the network and nothing names its fluid"
+        );
+        assert!(
+            !attributes(&state, "heavy-oil", "storage-tank"),
+            "inert, so the field rules decide -- and there is no heavy-oil field"
+        );
+    }
+
+    /// **Absent is not a value, three.** A run that touches two of one
+    /// machine's output ports cannot say which fluid the tank gets, and says
+    /// so. In the game that layout is worse than ambiguous -- two boxes
+    /// sharing one pipe segment jams the refinery outright -- so the one thing
+    /// this must not do is pick one.
+    ///
+    /// Built by laying the box-0 run and then the box-1 run into the same
+    /// state, which is exactly the shape a second output run takes.
+    #[test]
+    fn a_network_touching_two_output_boxes_is_ambiguous() {
+        let (mut state, tank) = refinery_piped_to_tank(Some("advanced-oil-processing"), 0);
+        let refinery = Position::new(0.5, -6.5);
+        let refinery_area = state
+            .collision_area("oil-refinery", &refinery)
+            .expect("a refinery footprint");
+        let tank_area = state
+            .collision_area("storage-tank", &tank)
+            .expect("a tank footprint");
+        lay(
+            &mut state,
+            PipeEnd {
+                name: "oil-refinery",
+                position: &refinery,
+                area: refinery_area,
+                production_type: Some("output"),
+                port_index: Some(1),
+            },
+            PipeEnd {
+                name: "storage-tank",
+                position: &tank,
+                area: tank_area,
+                production_type: None,
+                port_index: None,
+            },
+        );
+        let traced = traced(&state, &tank_entity(&state, &tank));
+        assert!(
+            matches!(&traced, Traced::Ambiguous(fluids)
+                if fluids.contains("heavy-oil") && fluids.contains("light-oil")),
+            "two output boxes on one network name two fluids: {traced:?}"
+        );
+        assert!(
+            !attributes(&state, "heavy-oil", "storage-tank"),
+            "ambiguous attributes nothing, in either direction"
+        );
+        assert!(
+            !attributes(&state, "light-oil", "storage-tank"),
+            "including the fluid of the box that was added second"
+        );
+    }
+
+    /// [`supplying_end`] names the box a recipe puts a fluid in, and says
+    /// nothing for a source that does not declare one.
+    ///
+    /// The `(None, None)` half is what keeps every existing plan on its
+    /// current path: a tank's boxes are interchangeable and a pumpjack carries
+    /// no recipe, so both keep the "every box, nearest first" behaviour they
+    /// have always had.
+    #[test]
+    fn supplying_end_names_the_box_and_stays_silent_otherwise() {
+        let mut state = live_state();
+        let refinery = Position::new(0.5, -6.5);
+        machine(
+            &mut state,
+            "oil-refinery",
+            &refinery,
+            Some("advanced-oil-processing"),
+        );
+        let entity = state.entity_at(&refinery).expect("the refinery stands");
+        assert_eq!(
+            supplying_end(&state, &entity, "petroleum-gas"),
+            (Some("output"), Some(2)),
+            "the third fluid product of a three-box machine is on box 2"
+        );
+        assert_eq!(
+            supplying_end(&state, &entity, "heavy-oil"),
+            (Some("output"), Some(0))
+        );
+        assert_eq!(
+            supplying_end(&state, &entity, "water"),
+            (None, None),
+            "water is an ingredient, not a product: no output box carries it"
+        );
+
+        let tank = Position::new(-6.5, -9.5);
+        machine(&mut state, "storage-tank", &tank, None);
+        assert_eq!(
+            supplying_end(&state, &tank_entity(&state, &tank), "heavy-oil"),
+            (None, None),
+            "a buffer's boxes are interchangeable, and it declares no recipe"
         );
     }
 }

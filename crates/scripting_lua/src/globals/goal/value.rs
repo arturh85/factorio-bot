@@ -1,8 +1,9 @@
 //! `goal.*` values: Lua tables that describe a `Goal` without holding a
 //! handle into the interpreter or the running game.
 //!
-//! Every constructor (`goal.have`, `goal.researched`, `goal.producing`,
-//! `goal.sustain`, `goal.built`, `goal.all`) validates
+//! Every constructor (`goal.have`, `goal.researched`, `goal.produced`,
+//! `goal.producing`, `goal.sustain`, `goal.extracted`, `goal.gathered`,
+//! `goal.built`, `goal.charted`, `goal.all`) validates
 //! eagerly, so a mistake raises on the line that made it. [`goal_from_lua`]
 //! validates again on the way back to a planner `Goal`, because a Lua table
 //! is open: nothing stops a script from hand-building one that skips what a
@@ -15,15 +16,35 @@ use factorio_bot_core::mlua::prelude::*;
 use factorio_bot_core::types::Position;
 use factorio_bot_planner::{BotId, Goal, Holder, Site};
 
-/// Installs `have`, `researched`, `producing`, `built` and `all` on `table`.
+/// Installs `have`, `researched`, `produced`, `producing`, `sustain`,
+/// `extracted`, `gathered`, `built`, `charted` and `all` on `table`.
 ///
-/// All five share one metatable -- built once here and cloned (cheaply: a
-/// Lua table is refcounted) onto every value the five functions return -- so
-/// `tostring(g)` renders the same way regardless of which of them built `g`.
+/// They all share one metatable -- built once here and cloned (cheaply: a
+/// Lua table is refcounted) onto every value they return -- so `tostring(g)`
+/// renders the same way regardless of which of them built `g`.
 ///
-/// Called by `create_lua_goal_with`: these five *are* `goal.have`,
-/// `goal.researched`, `goal.producing`, `goal.built` and `goal.all` as a
-/// script sees them.
+/// Called by `create_lua_goal_with`: these *are* `goal.have`,
+/// `goal.researched`, `goal.produced`, ... as a script sees them.
+///
+/// # A kind lives in more than one place here
+///
+/// Adding a goal kind is five edits in this file and two outside it, and
+/// missing any one of them fails in exactly one place rather than everywhere
+/// -- see [`KINDS`] for the incident that established this. The list, so the
+/// next person adding a kind does not have to reconstruct it:
+///
+///   1. the constructor, here;
+///   2. [`goal_from_lua`]'s arm, which is the only path to a planner `Goal`;
+///   3. [`render_goal`]'s arm, which is `__tostring`;
+///   4. [`KINDS`], which only `goal.all` consults;
+///   5. a test that composes it **inside `goal.all`**, because 4 is the one
+///      thing 1-3 cannot fail on;
+///   6. a `__doc_entry_<kind>` string in `goal/mod.rs` --
+///      `lua_docs::tests::the_goal_doc_entries_are_exactly_the_goal_surface`
+///      fails without it, from both directions;
+///   7. the expected set in `goal/mod.rs`'s
+///      `the_goal_table_offers_exactly_the_new_surface`, which is a set
+///      comparison and so fails on an *extra* function too.
 pub(crate) fn install_goal_constructors(lua: &Lua, table: &LuaTable) -> LuaResult<()> {
     let metatable = lua.create_table()?;
     metatable.set(
@@ -93,6 +114,96 @@ pub(crate) fn install_goal_constructors(lua: &Lua, table: &LuaTable) -> LuaResul
             t.set("kind", "producing")?;
             t.set("item", item)?;
             t.set("per_minute", per_minute)?;
+            t.set_metatable(Some(mt.clone()))?;
+            Ok(t)
+        })?,
+    )?;
+
+    // `produced` is `have`'s sibling and deliberately shaped like it: same
+    // item, same count, same `{ bot = , via = }` options. What differs is the
+    // *question* -- `have` subtracts what a bot already holds, `produced`
+    // never does, because a bot carrying six labs has not crafted one and a
+    // Factorio 2.0 `craft-item` trigger fires on the act. The extra option is
+    // `unlocks`; see [`require_unlocks`] for why it is a claim and not a
+    // grant.
+    let mt = metatable.clone();
+    table.set(
+        "produced",
+        lua.create_function(
+            move |lua, (item, count, opts): (LuaValue, LuaValue, Option<LuaTable>)| {
+                let item = require_item(item)?;
+                let count = require_count(count)?;
+                let (bot, via, unlocks) = match &opts {
+                    Some(opts) => (
+                        require_bot(opts.get("bot")?)?,
+                        require_via(opts.get("via")?)?,
+                        require_unlocks(opts.get("unlocks")?)?,
+                    ),
+                    None => (None, None, None),
+                };
+                let t = lua.create_table()?;
+                t.set("kind", "produced")?;
+                t.set("item", item)?;
+                t.set("count", count)?;
+                if let Some(bot) = bot {
+                    t.set("bot", bot)?;
+                }
+                // Absent is not a value, exactly as in `have`: a goal built
+                // without `via` carries no `via` key, which `goal_from_lua`
+                // reads as "the caller did not choose".
+                if let Some(via) = via {
+                    t.set("via", via)?;
+                }
+                if let Some(unlocks) = unlocks {
+                    t.set("unlocks", unlocks)?;
+                }
+                t.set_metatable(Some(mt.clone()))?;
+                Ok(t)
+            },
+        )?,
+    )?;
+
+    // `extracted` and `gathered` take an ENTITY, not an item -- `crude-oil`
+    // here names the well in the ground. What comes out of one is a fluid,
+    // and no character inventory can hold a fluid, so there is no count to
+    // ask for and none is accepted. The two are one rung apart: `extracted`
+    // is a machine working the well, `gathered` is that plus somewhere for
+    // what it pumps to go. See `Goal::Extracted` / `Goal::Gathered`.
+    let mt = metatable.clone();
+    table.set(
+        "extracted",
+        lua.create_function(move |lua, (entity, opts): (LuaValue, Option<LuaTable>)| {
+            let entity = require_entity(entity)?;
+            let unlocks = match &opts {
+                Some(opts) => require_unlocks(opts.get("unlocks")?)?,
+                None => None,
+            };
+            let t = lua.create_table()?;
+            t.set("kind", "extracted")?;
+            t.set("entity", entity)?;
+            if let Some(unlocks) = unlocks {
+                t.set("unlocks", unlocks)?;
+            }
+            t.set_metatable(Some(mt.clone()))?;
+            Ok(t)
+        })?,
+    )?;
+
+    let mt = metatable.clone();
+    table.set(
+        "gathered",
+        lua.create_function(move |lua, (entity, opts): (LuaValue, Option<LuaTable>)| {
+            let entity = require_entity(entity)?;
+            let unlocks = match &opts {
+                Some(opts) => require_unlocks(opts.get("unlocks")?)?,
+                None => None,
+            };
+            let t = lua.create_table()?;
+            t.set("kind", "gathered")?;
+            t.set("entity", entity)?;
+            if let Some(unlocks) = unlocks {
+                t.set("unlocks", unlocks)?;
+            }
             t.set_metatable(Some(mt.clone()))?;
             Ok(t)
         })?,
@@ -246,9 +357,27 @@ pub(crate) fn goal_from_lua(value: &LuaTable) -> LuaResult<Goal> {
         "researched" => Ok(Goal::Researched(require_technology(
             value.get("technology")?,
         )?)),
+        "produced" => Ok(Goal::Produced {
+            item: require_item(value.get("item")?)?,
+            count: require_count(value.get("count")?)?,
+            whose: match require_bot(value.get("bot")?)? {
+                Some(bot) => Holder::Bot(BotId(bot)),
+                None => Holder::Anyone,
+            },
+            unlocks: require_unlocks(value.get("unlocks")?)?,
+            via: require_via(value.get("via")?)?,
+        }),
         "producing" => Ok(Goal::Producing {
             item: require_item(value.get("item")?)?,
             per_minute: require_count(value.get("per_minute")?)?,
+        }),
+        "extracted" => Ok(Goal::Extracted {
+            entity: require_entity(value.get("entity")?)?,
+            unlocks: require_unlocks(value.get("unlocks")?)?,
+        }),
+        "gathered" => Ok(Goal::Gathered {
+            entity: require_entity(value.get("entity")?)?,
+            unlocks: require_unlocks(value.get("unlocks")?)?,
         }),
         // A hand-built table with no `window_ticks` is refused here exactly as
         // the constructor refuses a missing third argument: a standing goal
@@ -300,11 +429,41 @@ fn render_goal(t: &LuaTable) -> LuaResult<String> {
             "researched {}",
             require_technology(t.get("technology")?)?
         )),
+        // Rendered exactly as `Goal::Display` renders it -- see
+        // `the_new_kinds_render_the_way_the_planner_renders_them`. The two
+        // arms above predate that rule and are deliberately left alone;
+        // nothing new should add a third dialect.
+        "produced" => {
+            let item = require_item(t.get("item")?)?;
+            let count = require_count(t.get("count")?)?;
+            let head = match require_unlocks(t.get("unlocks")?)? {
+                Some(tech) => format!("produce {count} {item} to unlock {tech}"),
+                None => format!("produce {count} {item}"),
+            };
+            match require_via(t.get("via")?)? {
+                Some(recipe) => Ok(format!("{head} via {recipe}")),
+                None => Ok(head),
+            }
+        }
         "producing" => Ok(format!(
             "producing {} {}/min",
             require_count(t.get("per_minute")?)?,
             require_item(t.get("item")?)?
         )),
+        "extracted" => {
+            let entity = require_entity(t.get("entity")?)?;
+            Ok(match require_unlocks(t.get("unlocks")?)? {
+                Some(tech) => format!("extract from {entity} to unlock {tech}"),
+                None => format!("extract from {entity}"),
+            })
+        }
+        "gathered" => {
+            let entity = require_entity(t.get("entity")?)?;
+            Ok(match require_unlocks(t.get("unlocks")?)? {
+                Some(tech) => format!("gather {entity} into a tank to unlock {tech}"),
+                None => format!("gather {entity} into a tank"),
+            })
+        }
         // Rendered exactly as `Goal::Display` renders it, unlike the two arms
         // above -- see `sustain_render_goal_agrees_with_the_planner_goals_own_display`.
         "sustain" => Ok(format!(
@@ -362,24 +521,24 @@ fn require_kind(t: &LuaTable) -> LuaResult<String> {
 /// consulted to decide whether a `kind` is one of them, which is why an
 /// unknown one is a shape error rather than a semantic one.
 ///
-/// **`charted` is missing from this list and that is a pre-existing defect**,
-/// found while adding `sustain` and left alone rather than fixed quietly:
-/// `goal.charted` is a constructor, `goal_from_lua` and `render_goal` both
-/// have an arm for it, and only `goal.all` consults `KINDS` -- so a charted
-/// goal works everywhere except inside a bundle, where it is rejected as an
-/// unknown kind. Fixing it is a one-word change that belongs to whoever owns
-/// exploration, with a test of its own.
-// Every kind the table parser below accepts, and nothing else. `charted` was
-// missing from 2026-09-06 until the `sustain` work noticed it: the parser and
-// the renderer both handled it, so `goal.charted(...)` worked everywhere
-// EXCEPT inside `goal.all`, where `require_known_kind` rejected it as unknown.
-// A kind added to the parser and not to this list fails in exactly one place,
-// which is the hardest kind of gap to find.
+/// **`charted` was missing from this list and it is not any more** -- the
+/// paragraph that stood here calling it "a pre-existing defect ... left alone"
+/// described the state before `charted` was added, and outlived it. The
+/// incident itself is worth keeping: the parser and the renderer both handled
+/// `charted`, so `goal.charted(...)` worked everywhere EXCEPT inside
+/// `goal.all`, where [`require_known_kind`] rejected it as unknown. **A kind
+/// added to the parser and not to this list fails in exactly one place, which
+/// is the hardest kind of gap to find** -- so every kind here has a test that
+/// composes it *inside* `goal.all`, which is the only construct that reads
+/// this list.
 const KINDS: &[&str] = &[
     "have",
     "researched",
+    "produced",
     "producing",
     "sustain",
+    "extracted",
+    "gathered",
     "built",
     "charted",
     "all",
@@ -462,6 +621,56 @@ fn require_via(value: LuaValue) -> LuaResult<Option<String>> {
         }
         other => Err(goal_error(format!(
             "goal via must be a recipe name string, got a {}",
+            other.type_name()
+        ))),
+    }
+}
+
+/// The **entity** `goal.extracted` / `goal.gathered` name: a resource in the
+/// ground, like `crude-oil`.
+///
+/// Kept separate from [`require_item`] even though both are non-empty strings,
+/// for the reason `RecipeName` is kept separate from `ItemId` in the planner:
+/// an entity name and an item name coincide often enough to be believed and
+/// differ exactly where it matters -- `crude-oil` is a well nothing can hold,
+/// not a stack.
+fn require_entity(value: LuaValue) -> LuaResult<String> {
+    require_nonempty_string(value, "entity")
+}
+
+/// The optional `unlocks`: a technology this production or extraction fires
+/// the trigger for.
+///
+/// # It is a claim about the game, not a grant
+///
+/// The name rides on the goal so the resulting `Effect::Researched` can land
+/// on whichever action ends up doing the deed -- craft, smelt or mine -- which
+/// only the producing method knows. Nothing here checks that the technology
+/// exists, or that the act named actually triggers it: a wrong name makes the
+/// **plan** believe a technology is finished, and the game will disagree. Say
+/// it only where the trigger is real (`docs/superpowers/notes/
+/// 2026-09-05-research-triggers.md` enumerates all 32), and omit it otherwise
+/// -- omitting it is the shape every existing goal has.
+///
+/// Absent is not a value, as with [`require_via`]: a missing key and an
+/// explicit `nil` both mean *the caller did not name one*, and an empty string
+/// is refused rather than passed on as `Some("")`.
+fn require_unlocks(value: LuaValue) -> LuaResult<Option<String>> {
+    match value {
+        LuaValue::Nil => Ok(None),
+        LuaValue::String(s) => {
+            let s = s.to_string_lossy();
+            if s.is_empty() {
+                Err(goal_error(
+                    "goal unlocks must be a non-empty technology name; omit it entirely when the \
+                     goal triggers no research",
+                ))
+            } else {
+                Ok(Some(s))
+            }
+        }
+        other => Err(goal_error(format!(
+            "goal unlocks must be a technology name string, got a {}",
             other.type_name()
         ))),
     }
@@ -1244,6 +1453,228 @@ mod tests {
         )
         .exec()
         .expect("script");
+    }
+
+    /// `goal.produced` is not `goal.have`: it never subtracts what a bot
+    /// already holds, and it carries the recipe the owner ruled the goal
+    /// should name.
+    #[test]
+    fn produced_names_its_recipe_and_converts() {
+        let lua = lua_with_goal();
+        let t: LuaTable = lua
+            .load(r#"return goal.produced("petroleum-gas", 45, { via = "basic-oil-processing" })"#)
+            .eval()
+            .expect("script");
+        assert_eq!(
+            goal_from_lua(&t).expect("converts"),
+            Goal::Produced {
+                item: "petroleum-gas".into(),
+                count: 45,
+                whose: Holder::Anyone,
+                unlocks: None,
+                via: Some("basic-oil-processing".into()),
+            }
+        );
+    }
+
+    /// Absence is not a value: no options at all is the shape every goal had
+    /// before `via`/`unlocks` existed, and it must convert to `None` for both
+    /// rather than to an empty choice.
+    #[test]
+    fn produced_without_options_chooses_nothing() {
+        let lua = lua_with_goal();
+        let t: LuaTable = lua
+            .load(r#"return goal.produced("iron-plate", 5)"#)
+            .eval()
+            .expect("script");
+        assert_eq!(
+            goal_from_lua(&t).expect("converts"),
+            Goal::Produced {
+                item: "iron-plate".into(),
+                count: 5,
+                whose: Holder::Anyone,
+                unlocks: None,
+                via: None,
+            }
+        );
+    }
+
+    #[test]
+    fn produced_targets_a_named_bot_and_an_unlock() {
+        let lua = lua_with_goal();
+        let t: LuaTable = lua
+            .load(r#"return goal.produced("lab", 1, { bot = 2, unlocks = "automation-science-pack" })"#)
+            .eval()
+            .expect("script");
+        assert_eq!(
+            goal_from_lua(&t).expect("converts"),
+            Goal::Produced {
+                item: "lab".into(),
+                count: 1,
+                whose: Holder::Bot(BotId(2)),
+                unlocks: Some("automation-science-pack".into()),
+                via: None,
+            }
+        );
+    }
+
+    /// An `unlocks` a caller *meant* to name and left empty is a mistake, and
+    /// `Some("")` would reach the planner as a technology that does not exist.
+    #[test]
+    fn an_empty_unlocks_is_refused_on_the_line_that_wrote_it() {
+        let lua = lua_with_goal();
+        let err = lua
+            .load(r#"return goal.gathered("crude-oil", { unlocks = "" })"#)
+            .eval::<LuaTable>()
+            .expect_err("empty unlocks")
+            .to_string();
+        assert!(err.contains("unlocks"), "{err}");
+    }
+
+    /// The two oil rungs take an **entity**, and neither takes a count: what
+    /// comes out of a well is a fluid no inventory can hold.
+    #[test]
+    fn gathered_and_extracted_carry_an_entity() {
+        let lua = lua_with_goal();
+        let gathered: LuaTable = lua
+            .load(r#"return goal.gathered("crude-oil")"#)
+            .eval()
+            .expect("script");
+        assert_eq!(
+            goal_from_lua(&gathered).expect("converts"),
+            Goal::Gathered {
+                entity: "crude-oil".into(),
+                unlocks: None,
+            }
+        );
+        let extracted: LuaTable = lua
+            .load(r#"return goal.extracted("crude-oil", { unlocks = "oil-processing" })"#)
+            .eval()
+            .expect("script");
+        assert_eq!(
+            goal_from_lua(&extracted).expect("converts"),
+            Goal::Extracted {
+                entity: "crude-oil".into(),
+                unlocks: Some("oil-processing".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn an_empty_entity_name_is_refused() {
+        let lua = lua_with_goal();
+        let err = lua
+            .load(r#"return goal.extracted("")"#)
+            .eval::<LuaTable>()
+            .expect_err("empty entity")
+            .to_string();
+        assert!(err.contains("entity"), "{err}");
+    }
+
+    /// `__tostring` and `Goal::Display` must agree for every kind added since
+    /// the rule was written -- `have` and `producing` predate it and are
+    /// deliberately not covered.
+    #[test]
+    fn the_new_kinds_render_the_way_the_planner_renders_them() {
+        let lua = lua_with_goal();
+        for src in [
+            r#"return goal.produced("petroleum-gas", 45, { via = "basic-oil-processing" })"#,
+            r#"return goal.produced("lab", 1, { unlocks = "automation-science-pack" })"#,
+            r#"return goal.gathered("crude-oil")"#,
+            r#"return goal.extracted("crude-oil", { unlocks = "oil-processing" })"#,
+        ] {
+            let t: LuaTable = lua.load(src).eval().expect("script");
+            assert_eq!(
+                render_goal(&t).expect("render_goal"),
+                goal_from_lua(&t).expect("goal_from_lua").to_string(),
+                "{src}"
+            );
+        }
+    }
+
+    /// **The seam that broke last time.** `goal.all` is the only construct
+    /// that consults `KINDS`, so a kind wired into the constructor, the parser
+    /// and the renderer but not into that list works standalone and fails
+    /// here and nowhere else. One case per new kind, and the bundle is
+    /// converted rather than only built, so the parser's own `all` arm is
+    /// crossed too.
+    #[test]
+    fn every_new_kind_composes_inside_goal_all() {
+        let lua = lua_with_goal();
+        let bundle: LuaTable = lua
+            .load(
+                r#"
+                return goal.all {
+                    goal.gathered("crude-oil"),
+                    goal.extracted("crude-oil"),
+                    goal.produced("petroleum-gas", 45, { via = "basic-oil-processing" }),
+                }
+            "#,
+            )
+            .eval()
+            .expect("script");
+        assert_eq!(
+            goal_from_lua(&bundle).expect("converts"),
+            Goal::All(vec![
+                Goal::Gathered {
+                    entity: "crude-oil".into(),
+                    unlocks: None,
+                },
+                Goal::Extracted {
+                    entity: "crude-oil".into(),
+                    unlocks: None,
+                },
+                Goal::Produced {
+                    item: "petroleum-gas".into(),
+                    count: 45,
+                    whose: Holder::Anyone,
+                    unlocks: None,
+                    via: Some("basic-oil-processing".into()),
+                },
+            ])
+        );
+    }
+
+    /// The oil milestone's own composition, as `scripts/oil_milestone.lua`
+    /// states it. A goal a script cannot say is a milestone that cannot be
+    /// reached from the only path that can satisfy it.
+    #[test]
+    fn the_oil_milestone_goal_is_expressible_from_lua() {
+        let lua = lua_with_goal();
+        let g: LuaTable = lua
+            .load(
+                r#"
+                return goal.all {
+                    goal.gathered("crude-oil"),
+                    goal.produced("petroleum-gas", 45, { via = "basic-oil-processing" }),
+                }
+            "#,
+            )
+            .eval()
+            .expect("script");
+        // Asserted as an exact `Goal`, not as a shape, because this value has
+        // a counterpart outside the process: it is byte-for-byte the goal
+        // `factorio-bot plan --goal-json '{"All":[{"Gathered":{"entity":
+        // "crude-oil"}},{"Produced":{"item":"petroleum-gas","count":45,
+        // "whose":"Anyone","via":"basic-oil-processing"}}]}'` carries, which
+        // is how the composition was confirmed to reach the planner against a
+        // real world dump. A looser assertion here would let the two drift.
+        assert_eq!(
+            goal_from_lua(&g).expect("converts"),
+            Goal::All(vec![
+                Goal::Gathered {
+                    entity: "crude-oil".into(),
+                    unlocks: None,
+                },
+                Goal::Produced {
+                    item: "petroleum-gas".into(),
+                    count: 45,
+                    whose: Holder::Anyone,
+                    unlocks: None,
+                    via: Some("basic-oil-processing".into()),
+                },
+            ])
+        );
     }
 
     #[test]

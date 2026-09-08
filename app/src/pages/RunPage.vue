@@ -1,0 +1,146 @@
+<!-- app/src/pages/RunPage.vue -->
+<script setup lang="ts">
+/**
+ * One run, read on one clock. Every band is a lane on the same tick axis and
+ * the cursor is the only control. The analysis window (`store.window`, from
+ * `run_started`) feeds rates and verdicts; the drawn axis (`store.bounds`)
+ * feeds positions. They differ by the lead-in and both are shown.
+ */
+import {computed, onBeforeUnmount, onMounted, watch} from 'vue';
+import {useRoute} from 'vue-router';
+import {useRunsStore} from '@/store/runsStore';
+import {compareSplits, formatTicks, formatWhen, startedUnixOf} from '@/lib/runTimeline';
+import {rateItems} from '@/lib/runRates';
+import {headline} from '@/lib/runHeadline';
+import {lagTicks} from '@/lib/runCoverage';
+import BandFrame from '@/components/run/BandFrame.vue';
+import TickAxis from '@/components/run/TickAxis.vue';
+import ProductionBand from '@/components/run/ProductionBand.vue';
+import PowerBand from '@/components/run/PowerBand.vue';
+import ResearchBand from '@/components/run/ResearchBand.vue';
+import LaneBand from '@/components/run/LaneBand.vue';
+import MachineBand from '@/components/run/MachineBand.vue';
+import CoverageBand from '@/components/run/CoverageBand.vue';
+import CursorBar from '@/components/run/CursorBar.vue';
+import RunHeadline from '@/components/run/RunHeadline.vue';
+import MilestoneRibbon from '@/components/run/MilestoneRibbon.vue';
+import RunSidePanel from '@/components/run/RunSidePanel.vue';
+
+const route = useRoute();
+const store = useRunsStore();
+const id = computed(() => String(route.params.id));
+
+let timer: number | null = null;
+function stopTimer() { if (timer !== null) { window.clearInterval(timer); timer = null; } }
+watch(() => store.playing, (playing) => { stopTimer(); if (playing) timer = window.setInterval(() => store.advance(), 100); });
+onMounted(() => { store.loadRuns(); store.openRun(id.value); });
+watch(id, (next) => store.openRun(next));
+onBeforeUnmount(stopTimer);
+
+const scale = computed(() => store.bounds);
+const win = computed(() => store.window ?? (store.bounds ? {lo: store.bounds.from, hi: store.bounds.to} : null));
+const items = computed(() => (win.value ? rateItems(store.samples, win.value.lo, win.value.hi) : []));
+const sentence = computed(() => win.value
+    ? headline({samples: store.samples, events: store.events, splits: store.detail?.splits ?? [], lo: win.value.lo, hi: win.value.hi, items: items.value})
+    : 'no events recorded');
+const lag = computed(() => (win.value ? lagTicks(win.value.hi, store.samples) : null));
+const deltas = computed(() => store.reference === null ? null
+    : new Map(compareSplits(store.detail?.splits ?? [], store.reference.splits).map((r) => [r.goal, r])));
+const otherRuns = computed(() => store.runs.filter((r) => r.run_id !== id.value));
+
+const LEGEND = [
+    ['walk', 'verb-walk'], ['mine / chop', 'verb-mine'], ['craft', 'verb-craft'], ['place', 'verb-place'],
+    ['feed (insert · stock · take · fuel)', 'verb-feed'], ['research', 'verb-research'],
+    ['working', 'status-good'], ['no ingredients', 'status-warn'], ['no fuel', 'status-serious'], ['no power', 'status-critical'], ['normal / other', 'status-neutral']
+] as const;
+</script>
+
+<template>
+  <div class="mx-auto max-w-[1400px]">
+    <p v-if="store.error" class="rounded border border-danger/40 bg-danger/10 px-3 py-2 text-sm text-danger-dark">{{ store.error }}</p>
+    <p v-else-if="store.loading && !store.detail" class="text-ink-muted">loading {{ id }}…</p>
+    <section v-else-if="store.detail" class="overflow-hidden rounded-card border border-divider bg-card">
+      <RunHeadline :summary="store.detail.summary" :provenance="null" :lag-ticks="lag" :headline="sentence" :roster="store.laneBotIds"/>
+      <p class="px-5 py-1 text-xs text-ink-muted">
+        {{ formatWhen(startedUnixOf(store.detail.summary)) }} ·
+        <router-link :to="`/runs/${id}/analysis`" class="underline">overrun and divergence tables</router-link>
+      </p>
+
+      <template v-if="scale && win">
+        <div class="grid grid-cols-[10.5rem_1fr] border-b border-divider">
+          <div class="border-r border-divider bg-surface px-3 py-2 text-[11px] font-semibold uppercase tracking-wider text-ink-muted">Milestones</div>
+          <MilestoneRibbon :scale="scale" :splits="store.detail.splits" :cursor="store.cursor"/>
+        </div>
+        <BandFrame title="Axis" :subtitle="store.leadIn > 0 ? `axis starts ${formatTicks(store.leadIn)} after run start` : 'minutes of game time · 5-min marks'">
+          <TickAxis :scale="scale" :cursor="store.cursor"/>
+        </BandFrame>
+        <BandFrame title="Items / min" subtitle="trailing 2-min window · background is the attribution verdict per minute">
+          <p v-if="store.sampleError" class="px-3 py-2 text-sm text-warn-dark">{{ store.sampleError }}</p>
+          <ProductionBand v-else :scale="scale" :cursor="store.cursor" :samples="store.samples" :events="store.events" :items="items" :lo="win.lo" :hi="win.hi"/>
+        </BandFrame>
+        <BandFrame title="Power" subtitle="kW generated vs consumed · one scale">
+          <PowerBand :scale="scale" :cursor="store.cursor" :samples="store.samples"/>
+        </BandFrame>
+        <BandFrame title="Research" subtitle="progress of the current technology">
+          <ResearchBand :scale="scale" :cursor="store.cursor" :samples="store.samples"/>
+        </BandFrame>
+        <BandFrame title="Bots" subtitle="one row per bot · idle is hatched · feeding acts are ticks · replans are dashed">
+          <p v-if="store.lanesError" class="px-3 py-2 text-sm text-warn-dark">{{ store.lanesError }}</p>
+          <LaneBand v-else :scale="scale" :cursor="store.cursor" :lanes="store.lanes" :events="store.events"/>
+        </BandFrame>
+        <BandFrame title="Machines" subtitle="status of every sampled machine, 5-s cells · grouped by kind, ordered by placement">
+          <MachineBand :scale="scale" :cursor="store.cursor" :samples="store.samples" :selected="store.selectedMachine" @select="store.selectMachine($event)"/>
+        </BandFrame>
+        <BandFrame title="Record" subtitle="where the record has data · a gap reads as “no record”">
+          <p v-if="store.eventsError" class="px-3 py-2 text-sm text-warn-dark">{{ store.eventsError }}</p>
+          <CoverageBand :scale="scale" :cursor="store.cursor" :events="store.events" :samples="store.samples" :run-end="win.hi"/>
+        </BandFrame>
+        <CursorBar :scale="scale" :cursor="store.cursor" :playing="store.playing" :rate="store.rate"
+                   @seek="store.seek($event)" @toggle="store.togglePlay()" @rate="store.rate = $event"/>
+        <div class="flex flex-wrap gap-x-4 gap-y-1.5 border-t border-divider px-5 py-2 text-xs text-ink-muted">
+          <span v-for="[label, token] in LEGEND" :key="label" class="inline-flex items-center gap-1.5">
+            <i class="inline-block h-2 w-3 rounded-sm" :style="{background: `var(--color-${token})`}"/>{{ label }}
+          </span>
+          <span class="inline-flex items-center gap-1.5">
+            <i class="inline-block h-2 w-3 rounded-sm" style="background: repeating-linear-gradient(135deg, var(--color-ink-muted) 0 1px, transparent 1px 4px)"/>idle — no dispatched action
+          </span>
+        </div>
+      </template>
+      <p v-else class="px-5 py-4 text-sm text-ink-muted">this run recorded nothing to place on an axis</p>
+
+      <RunSidePanel :run-id="id" :cursor="store.cursor"
+                    :video="store.video" :video-ticks="store.videoTicks" :video-error="store.videoError"
+                    :entities="store.entities" :bots="store.mapBots" :trail="store.trail" :records="store.map" :bounds="store.mapBounds"
+                    :map-error="store.mapError" :fills="store.machineFills"
+                    @seek="store.seek($event)" @pause="store.playing && store.togglePlay()"/>
+
+      <div class="border-t border-divider px-5 py-4">
+        <label v-if="otherRuns.length > 0" class="text-sm text-ink-muted">
+          compare with
+          <select class="ml-1 rounded border border-divider bg-card px-1 py-0.5 text-sm" :value="store.reference?.summary.run_id ?? ''"
+                  @change="store.setReference(($event.target as HTMLSelectElement).value || null)">
+            <option value="">— none —</option>
+            <option v-for="r in otherRuns" :key="r.run_id" :value="r.run_id">{{ r.run_id }}</option>
+          </select>
+        </label>
+        <table class="mt-3 w-full text-sm">
+          <thead><tr class="text-left text-xs uppercase tracking-wider text-ink-muted"><th class="py-1">#</th><th>milestone</th><th>at</th><th>took</th><th v-if="deltas">vs ref</th><th></th></tr></thead>
+          <tbody>
+            <tr v-for="s in store.detail.splits" :key="`${s.index}-${s.started_tick}`" class="border-t border-divider">
+              <td class="py-1">{{ s.index }}</td><td>{{ s.goal }}</td>
+              <td class="font-mono tabular-nums">{{ s.started_tick }}</td>
+              <td class="font-mono tabular-nums">{{ formatTicks(s.elapsed_ticks) }}</td>
+              <td v-if="deltas" class="font-mono tabular-nums">
+                <span v-if="deltas.get(s.goal)?.delta != null" :class="(deltas.get(s.goal)!.delta as number) < 0 ? 'text-success-dark' : 'text-danger-dark'">
+                  {{ (deltas.get(s.goal)!.delta as number) > 0 ? '+' : '' }}{{ formatTicks(deltas.get(s.goal)!.delta) }}
+                </span>
+                <span v-else>—</span>
+              </td>
+              <td :class="s.outcome === 'stuck' || s.outcome === 'stuck_silent' ? 'text-danger-dark' : s.outcome === 'unfinished' ? 'text-ink-muted' : ''">{{ s.outcome }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+</template>

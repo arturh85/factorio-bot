@@ -5,12 +5,13 @@ import router from './router';
 const paths = () => router.getRoutes().map(route => route.path).sort();
 
 describe('router', () => {
-    it('exposes exactly the seven routes the menu links to, plus the analysis view reached from a run', () => {
+    it('exposes exactly the seven routes the menu links to, plus the run and analysis views reached from a run', () => {
         expect(paths()).toEqual([
             '/',
             '/map',
             '/rcon',
             '/runs',
+            '/runs/:id',
             '/runs/:id/analysis',
             '/script',
             '/settings',

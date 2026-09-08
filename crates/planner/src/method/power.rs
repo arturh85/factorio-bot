@@ -3434,11 +3434,70 @@ mod tests {
     use super::*;
     use crate::ids::BotId;
     use crate::method::util::free_area_near;
-    use factorio_bot_core::test_utils::fixture_world;
+    use factorio_bot_core::test_utils::{fixture_world, fixture_world_without_water};
+    use factorio_bot_core::types::{FactorioTile, TileFluid};
     use std::sync::Arc;
 
     fn state() -> PlanState {
         PlanState::from_world(Arc::new(fixture_world()), &[BotId(1)])
+    }
+
+    /// The shared fixture's lake in the same place, under a name
+    /// [`FactorioTile::WATER_NAMES`] has never heard of, declaring the fluid
+    /// it yields.
+    fn state_with_a_lake_the_name_pair_does_not_know() -> PlanState {
+        let world = fixture_world_without_water();
+        let mut tiles = vec![];
+        for x in 38..42 {
+            for y in 38..42 {
+                tiles.push(FactorioTile {
+                    position: Position::new(f64::from(x), f64::from(y)),
+                    name: "wetland-green-slime".into(),
+                    player_collidable: true,
+                    color: None,
+                    surface: None,
+                    fluid: TileFluid::Yields {
+                        fluid: "water".into(),
+                    },
+                });
+            }
+        }
+        world
+            .update_chunk_tiles(tiles)
+            .expect("adding tiles must not fail");
+        PlanState::from_world(Arc::new(world), &[BotId(1)])
+    }
+
+    /// **Both halves of siting must read the ground, not only the first.**
+    ///
+    /// `plan_plant` asks `nearest_water_tile` which lake, and then
+    /// `water_tiles_within` where that lake's *shore* is. Every other fixture
+    /// in this crate names its lake `water` and declares that it yields
+    /// water, so name and fluid agree and no test can tell the two predicates
+    /// apart: on 2026-09-08 a mutation reverting `PlanState::water_tiles_within`
+    /// alone to the vanilla name pair passed the entire workspace suite,
+    /// 3,064 tests, green.
+    ///
+    /// What that mutation would do live is worse than a refusal that says so:
+    /// the lake is found by fluid and its shore is not found by name, so the
+    /// plant refuses with `PowerPlantNeedsShore` -- geometry blamed for a
+    /// naming problem, on a map with a perfectly good shoreline.
+    #[test]
+    fn a_lake_the_name_pair_does_not_know_still_has_a_shore() {
+        let s = state_with_a_lake_the_name_pair_does_not_know();
+        let plant = plan_plant(&s, &Position::new(0., 0.))
+            .expect("a lake whose prototype yields water has a shore like any other");
+        let pump = plant
+            .parts
+            .iter()
+            .find(|p| p.name == PUMP)
+            .expect("a plant has a pump");
+        assert!(
+            calculate_distance(&pump.position, &Position::new(40., 40.))
+                <= 2. + f64::from(SHORE_SEARCH_RADIUS),
+            "the pump landed at {}, which is not on the fixture's lake",
+            pump.position
+        );
     }
 
     /// The plant's fuel load fits in the one slot it goes into.

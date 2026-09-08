@@ -1176,6 +1176,59 @@ impl FactorioTile {
     pub fn is_water(&self) -> bool {
         Self::WATER_NAMES.contains(&self.name.as_str())
     }
+
+    /// The fluid an offshore pump wants, by the name the game gives it.
+    ///
+    /// Written once rather than at each call site, so that the one string a
+    /// steam plant depends on is greppable.
+    pub const WATER_FLUID: &'static str = "water";
+
+    /// Whether an offshore pump standing here would draw **water** --
+    /// trusting the ground when it can answer, and the name when it cannot.
+    ///
+    /// This is the predicate every water search in this workspace uses
+    /// ([`EntityGraph::is_water_at`](crate::graph::entity_graph::EntityGraph::is_water_at),
+    /// [`EntityGraph::nearest_water_tile`](crate::graph::entity_graph::EntityGraph::nearest_water_tile),
+    /// `PlanState::water_tiles_within`), and it is deliberately **not** a
+    /// straight `fluid.yields("water")`.
+    ///
+    /// # The two branches, and why neither may be dropped
+    ///
+    /// * **`Yields` or `Dry` -- the ground answered, so believe it.** A
+    ///   charted tile whose prototype names `water` is water whatever it is
+    ///   called, which is the whole point: this install runs Space Age, where
+    ///   `ammoniacal-ocean` yields ammonia and Vulcanus' lava yields lava, and
+    ///   none of those names is in [`Self::WATER_NAMES`]. A charted tile whose
+    ///   prototype names *nothing* -- or names something else -- is **not**
+    ///   water even if it is called `water`, because `Dry` is a fact and not
+    ///   an absence.
+    /// * **`Unknown` -- nobody said, so fall back to the name.** Every
+    ///   archived world dump and every archived server log predates
+    ///   [`TileFluid`] (4,440,064 tile records), so `fluid_at` answers
+    ///   `Unknown` for all of them. Measured 2026-09-08: with this branch
+    ///   removed, all three `map.json` baselines refuse with
+    ///   `PowerPlantNeedsWater` instead of siting a plant -- the fallback is
+    ///   what keeps a dump from before the field plannable, not a wart.
+    ///   Unexplored ground answers `Unknown` too and falls the same way, which
+    ///   is the safe direction: a name is a guess, `Dry` would be a refusal.
+    ///
+    /// So [`TileFluid::Unknown`] stays **inert** -- it neither adds water nor
+    /// removes any -- exactly as it was designed to be.
+    ///
+    /// # [`Self::WATER_NAMES`] is now a fallback, not the definition
+    ///
+    /// It answers only for senders that never filled `fluid` in. On a live
+    /// world the pair is never consulted, so a modded water tile under any
+    /// name is found without it being extended -- and *that*, rather than the
+    /// list being wrong, is the reason not to grow it. It cannot be deleted
+    /// while any archived dump is still planned against.
+    #[must_use]
+    pub fn yields_water(&self) -> bool {
+        match self.fluid {
+            TileFluid::Unknown => self.is_water(),
+            _ => self.fluid.yields(Self::WATER_FLUID),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -3573,6 +3626,58 @@ impl IntoLua for FactorioEntity {
 mod tests {
     use super::*;
     use crate::factorio::util::{move_pos, move_position};
+
+    fn tile(name: &str, fluid: TileFluid) -> FactorioTile {
+        FactorioTile {
+            name: name.into(),
+            player_collidable: true,
+            position: Position::new(0., 0.),
+            color: None,
+            surface: None,
+            fluid,
+        }
+    }
+
+    /// The whole truth table of the widening, in one place: the ground when it
+    /// answers, the name when it does not, and never the other way round.
+    #[test]
+    fn yields_water_trusts_the_ground_and_falls_back_to_the_name() {
+        let water = || TileFluid::Yields {
+            fluid: "water".into(),
+        };
+        let ammonia = || TileFluid::Yields {
+            fluid: "ammonia".into(),
+        };
+
+        // The ground answered: believe it, whatever the tile is called.
+        assert!(tile("water", water()).yields_water());
+        assert!(
+            tile("wetland-green-slime", water()).yields_water(),
+            "a modded water tile is found without extending WATER_NAMES --              which is the entire point of asking the prototype"
+        );
+        assert!(
+            !tile("water", TileFluid::Dry).yields_water(),
+            "`Dry` is a fact and outranks the name"
+        );
+        assert!(
+            !tile("deepwater", ammonia()).yields_water(),
+            "Space Age's ammoniacal ocean is not what a boiler wants"
+        );
+        assert!(!tile("grass-1", TileFluid::Dry).yields_water());
+
+        // The ground did not answer: every archived dump, and unexplored
+        // ground. Fall back to the vanilla pair rather than refuse.
+        assert!(tile("water", TileFluid::Unknown).yields_water());
+        assert!(tile("deepwater", TileFluid::Unknown).yields_water());
+        assert!(!tile("grass-1", TileFluid::Unknown).yields_water());
+
+        // And `Unknown` is INERT: it neither adds water the name denies nor
+        // removes water the name allows.
+        assert_eq!(
+            tile("wetland-green-slime", TileFluid::Unknown).yields_water(),
+            tile("wetland-green-slime", TileFluid::Unknown).is_water(),
+        );
+    }
 
     fn resource_prototype(name: &str, product: &str) -> FactorioEntityPrototype {
         FactorioEntityPrototype {

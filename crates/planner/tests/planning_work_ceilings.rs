@@ -98,14 +98,25 @@ fn the_three_map_json_baselines_stay_within_their_work_ceilings() {
         return;
     };
 
-    // Measured on b5f44da3, four bots, `workspace/scripts/map.json`:
+    // Measured on f2530be6, four bots, `workspace/scripts/map.json`, after the
+    // four 2026-09-08 remedies (patch memo, `any_resource_at` union index,
+    // incremental cycle check, scheduler adjacency and fork elision):
     //
-    //   goal                                actions  goals  patches  threats    preds  forks
-    //   researched:automation                   176    260      479   20,964   18,176  2,619
-    //   producing:automation-science-pack:6     316    430      935   22,008   59,834  9,438
-    //   producing:logistic-science-pack:6       441  1,321    2,587   46,551  297,049 41,687
+    //   goal                                actions  goals  patches  threats  preds   forks
+    //   researched:automation                   176    260        4   20,964    352   1,926
+    //   producing:automation-science-pack:6     316    430        4   22,008    632   6,830
+    //   producing:logistic-science-pack:6       441  1,321        4   46,551  2,002  30,378
     //
-    // Ceilings are twice each of those.
+    // Ceilings are twice each of those, except `resource_patches`, whose
+    // ceiling is 16 rather than 8: the memo means the count is now the number
+    // of *distinct resource names a plan asks about*, a small integer that a
+    // legitimate change (a goal reaching one more ore) moves by one, and a
+    // doubling rule on a number that small is a tripwire rather than a guard.
+    //
+    // On b5f44da3, before those remedies, the same three goals read
+    // 479/935/2,587 patches and 18,176/59,834/297,049 preds. The ceilings were
+    // twice *those*, and are tightened here for the reason the file's own doc
+    // gives: a ceiling that survives its own remedy is not measuring anything.
     let cases: Vec<(&str, Goal, usize, WorkCounts)> = vec![
         (
             "researched:automation",
@@ -113,10 +124,10 @@ fn the_three_map_json_baselines_stay_within_their_work_ceilings() {
             176,
             WorkCounts {
                 goals_expanded: 520,
-                resource_patches: 958,
+                resource_patches: 16,
                 threat_queries: 41_928,
-                preds: 36_352,
-                forks: 5_238,
+                preds: 704,
+                forks: 3_852,
             },
         ),
         (
@@ -128,10 +139,10 @@ fn the_three_map_json_baselines_stay_within_their_work_ceilings() {
             316,
             WorkCounts {
                 goals_expanded: 860,
-                resource_patches: 1_870,
+                resource_patches: 16,
                 threat_queries: 44_016,
-                preds: 119_668,
-                forks: 18_876,
+                preds: 1_264,
+                forks: 13_660,
             },
         ),
         (
@@ -143,10 +154,10 @@ fn the_three_map_json_baselines_stay_within_their_work_ceilings() {
             441,
             WorkCounts {
                 goals_expanded: 2_642,
-                resource_patches: 5_174,
+                resource_patches: 16,
                 threat_queries: 93_102,
-                preds: 594_098,
-                forks: 83_374,
+                preds: 4_004,
+                forks: 60_756,
             },
         ),
     ];

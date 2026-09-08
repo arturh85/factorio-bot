@@ -841,6 +841,69 @@ impl ProductIndex {
             .unwrap_or_default()
     }
 
+    /// Every recipe that lists `ingredient` among its **inputs**, in
+    /// recipe-name order. Empty when nothing does.
+    ///
+    /// The mirror of [`Self::recipes_producing`], and deliberately not indexed:
+    /// there is no `by_ingredient` map because the only caller
+    /// ([`crate::method::dispose`]) asks at most once per fluid co-product of
+    /// one rig, and a second index would be a second thing to keep true. The
+    /// scan is over `by_recipe`, whose iteration order is a `BTreeMap`'s and
+    /// therefore already the name order this crate's determinism contract
+    /// wants.
+    ///
+    /// **Consumes, not nets** — the same caveat [`Self::recipes_producing`]
+    /// carries from the other side. `coal-liquefaction` consumes 25 heavy-oil
+    /// and produces 90, and it appears here.
+    pub fn recipes_consuming(&self, ingredient: &str) -> Vec<&FactorioRecipe> {
+        self.by_recipe
+            .values()
+            .filter(|recipe| {
+                recipe
+                    .ingredients
+                    .iter()
+                    .flatten()
+                    .any(|i| i.name == ingredient)
+            })
+            .collect()
+    }
+
+    /// What it costs to obtain everything in `recipe`'s bill **except**
+    /// `ignoring`, in the thousandths [`crate::method::machine::obtain_costs`]
+    /// works in, or `None` when any of it cannot be priced.
+    ///
+    /// The same metric [`Self::cheapest_to_obtain`] ranks by, exposed rather
+    /// than reproduced, so a caller comparing two recipes by "which opens the
+    /// smaller new bill" cannot disagree with the planner's own notion of
+    /// cost. `ignoring` is the fluid the caller already has too much of: it is
+    /// free by assumption, and charging for it would rank a recipe by the
+    /// surplus it is there to remove.
+    ///
+    /// **`None` is *not priceable*, never zero.** A recipe with an empty bill
+    /// beyond `ignoring` costs `Some(0)`; one whose ingredient nothing can
+    /// make costs `None`, and a caller must not order the two together.
+    pub fn bill_cost_excluding(&self, recipe: &FactorioRecipe, ignoring: &str) -> Option<u64> {
+        let wanted: BTreeSet<String> = recipe
+            .ingredients
+            .iter()
+            .flatten()
+            .filter(|i| i.name != ignoring)
+            .map(|i| i.name.clone())
+            .collect();
+        let cost =
+            crate::method::machine::obtain_costs(self.by_recipe.values(), &wanted, &self.supply);
+        let mut total: u64 = 0;
+        for ingredient in recipe.ingredients.iter().flatten() {
+            if ingredient.name == ignoring {
+                continue;
+            }
+            total = total.saturating_add(
+                u64::from(ingredient.amount).saturating_mul(*cost.get(&ingredient.name)?),
+            );
+        }
+        Some(total)
+    }
+
     /// Whether any recipe at all produces it.
     pub fn produces(&self, product: &str) -> bool {
         self.by_product.contains_key(product)

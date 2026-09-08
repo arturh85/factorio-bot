@@ -417,6 +417,17 @@ fn several_fluid_products_each_get_their_own_sink_and_their_own_pipe() {
     let mut state = live_state_with(&BOTS, true, |r| {
         enable(r, "advanced-oil-processing");
         drop_fluid_ingredients(r, "advanced-oil-processing");
+        // **The co-products need somewhere to go, and this fixture has no
+        // technology table**, so every recipe it does not enable is
+        // `RecipeGate::Unobtainable` -- a recipe no research can ever reach.
+        // Enabling the two terminal consumers is what a game that has
+        // researched `oil-processing` looks like; without them the rig is
+        // refused as `NoDisposal`, correctly, and this test would be asserting
+        // geometry it never reaches.
+        //
+        // The petroleum-gas is what the goal asks for and needs none.
+        enable(r, "solid-fuel-from-heavy-oil");
+        enable(r, "solid-fuel-from-light-oil");
     });
     // The rig's parts are put in a hand rather than crafted: this test is
     // about the *geometry* of three sinks, and a `storage-tank`'s own bill
@@ -457,6 +468,47 @@ fn several_fluid_products_each_get_their_own_sink_and_their_own_pipe() {
             "a pipe run carries {fluid}: {labels:?}"
         );
     }
+
+    // **And a chemical plant per co-product, chosen off the LIVE recipe
+    // table.** This is the part no hand-written fixture could establish: the
+    // candidates here are the game's own -- heavy-oil is also consumed by
+    // `coal-liquefaction`, `lubricant`, `heavy-oil-cracking` and
+    // `heavy-oil-barrel`, and light-oil by `light-oil-cracking`,
+    // `rocket-fuel`, `superconductor` and `light-oil-barrel` -- and the
+    // terminal-consumer rule has to pick the two `solid-fuel-from-*` out of
+    // that set. The cracking recipes are not merely outranked, they are not
+    // candidates: a fluid product would need placing in turn.
+    for recipe in ["solid-fuel-from-heavy-oil", "solid-fuel-from-light-oil"] {
+        assert!(
+            labels
+                .iter()
+                .any(|l| l == &format!("set chemical-plant to {recipe}")),
+            "the {recipe} disposal plant is stood up and told what to run: {labels:?}"
+        );
+    }
+    // **And it is fed from that co-product's own buffer, not from thin air.**
+    // The tank is placed by the refinery's rig moments earlier and adopted by
+    // the plant's, which is the whole reason `pipe::sources_of` had to learn
+    // to attribute a buffer this plan built.
+    for fluid in ["heavy-oil", "light-oil"] {
+        assert!(
+            labels.iter().any(|l| l.contains("place pipe")
+                && l.contains(&format!("carry {fluid} between the chemical-plant"))),
+            "the {fluid} plant is piped from the buffer that caught it: {labels:?}"
+        );
+    }
+    assert!(
+        !labels.iter().any(|l| l.contains("cracking")),
+        "cracking is fluid-to-fluid and is never disposal: {labels:?}"
+    );
+    // The petroleum-gas is what the goal asked for; it lands in its buffer and
+    // gets no consumer.
+    assert!(
+        !labels
+            .iter()
+            .any(|l| l.contains("solid-fuel-from-petroleum-gas")),
+        "the asked-for product is not disposed of: {labels:?}"
+    );
 }
 
 /// The rung the whole ladder is aimed at. `produced:petroleum-gas` does not

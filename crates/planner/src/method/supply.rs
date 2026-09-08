@@ -567,6 +567,54 @@ mod tests {
         assert!(!SupplyFluid.applicable(&petroleum(), &state));
     }
 
+    /// **A recipe may not be asked to feed itself.**
+    ///
+    /// Found by a mutation, not by reading: deleting `recipe.name !=
+    /// consumer.name` from [`makeable`] left the whole suite green, which is a
+    /// finding about the tests rather than about the guard.
+    ///
+    /// `coal-liquefaction` is the real shape -- it takes heavy-oil in and puts
+    /// heavy-oil out -- so a goal for heavy oil that `Fabricate` would run
+    /// through it wants heavy oil in order to make heavy oil. Without the
+    /// guard this rung emits `produced:heavy-oil` for a goal that *is*
+    /// `produced:heavy-oil`, and only `MAX_EXPANSION_DEPTH` stops it.
+    #[test]
+    fn a_recipe_is_not_asked_to_feed_itself() {
+        let world = refinery_world(true);
+        let looped: FactorioRecipe = serde_json::from_str(
+            r#"{
+              "name": "coal-liquefaction", "valid": true, "enabled": true,
+              "category": "oil-processing",
+              "ingredients": [
+                { "name": "heavy-oil", "ingredient_type": "fluid", "amount": 25 }
+              ],
+              "products": [
+                { "name": "heavy-oil", "product_type": "fluid", "amount": 90,
+                  "probability": 1.0 }
+              ],
+              "hidden": false, "energy": 5.0, "order": "a", "group": "fluids",
+              "subgroup": "fluid-recipes"
+            }"#,
+        )
+        .expect("the coal-liquefaction recipe parses");
+        world
+            .update_recipes(vec![looped])
+            .expect("update_recipes cannot fail for a well-formed recipe");
+        let state = PlanState::from_world(Arc::new(world), &BOTS);
+        let goal = Goal::Produced {
+            item: "heavy-oil".into(),
+            count: 90,
+            whose: Holder::Anyone,
+            unlocks: None,
+            via: Some("coal-liquefaction".into()),
+        };
+        assert!(
+            fluid_shortfalls(&goal, &state).is_empty(),
+            "the only recipe producing heavy-oil is the one being run, so \
+             deriving a goal for it would re-issue this very goal"
+        );
+    }
+
     /// **The guard that stops a fluid the ground gives being bottled.**
     ///
     /// This is the first thing the chemistry rung got wrong, live: on the
@@ -654,9 +702,7 @@ mod tests {
         };
         let derived = fluid_shortfalls(&goal, &state);
         assert!(
-            derived
-                .iter()
-                .all(|plan| plan.fluid() != "water"),
+            derived.iter().all(|plan| plan.fluid() != "water"),
             "the lake supplies water, so nothing here may bottle it: {derived:?}"
         );
         assert!(

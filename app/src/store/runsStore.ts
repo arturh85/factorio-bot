@@ -1,6 +1,7 @@
 import {defineStore} from 'pinia';
 import {
     getRun,
+    getRunEvents,
     getRunLanes,
     getRunMap,
     getRunSamples,
@@ -13,6 +14,7 @@ import {
     BotSample,
     Bounds,
     EntitySnapshot,
+    Event,
     Lane,
     MapRecord,
     Position,
@@ -22,9 +24,10 @@ import {
     VideoManifest,
     VideoTicksResponse
 } from '@/api/types';
-import {leadInTicks, tickBounds} from '@/lib/runTimeline';
+import {laneBots, leadInTicks, tickBounds} from '@/lib/runTimeline';
 import {botSampleAt, forceSampleAt, inventoryOf, productionSeries, trackedItems, trailsAt} from '@/lib/runSamples';
 import {boundsAt, entitiesAt} from '@/lib/runMap';
+import {machineStatusAt} from '@/lib/machineTimeline';
 
 /** The `force`-kind half of `Sample`, narrowed for `forceState`. */
 type ForceSample = Extract<Sample, {kind: 'force'}>;
@@ -124,7 +127,12 @@ export const useRunsStore = defineStore('runs', {
         lanesError: null as string | null,
         sampleError: null as string | null,
         mapError: null as string | null,
-        videoError: null as string | null
+        videoError: null as string | null,
+        /** The run's raw event log. */
+        events: [] as Event[],
+        eventsError: null as string | null,
+        /** The machine the map panel's inspector reports on, keyed `"x,y"`. */
+        selectedMachine: null as string | null
     }),
 
     getters: {
@@ -204,6 +212,28 @@ export const useRunsStore = defineStore('runs', {
          */
         trail(): Record<number, Position[]> {
             return trailsAt(this.samples, this.cursor);
+        },
+        /**
+         * The ANALYSIS window: `run_started` to `run_finished` (or the last
+         * event). Distinct from `bounds`, the drawn axis, which trims a
+         * lead-in. Rates and verdicts are measured from `run_started`, as
+         * `just analyse` measures them; `null` when the run has no events.
+         */
+        window(): {lo: number; hi: number} | null {
+            if (this.events.length === 0) return null;
+            const started = this.events.find((e) => e.kind === 'run_started');
+            const finished = this.events.find((e) => e.kind === 'run_finished');
+            const lo = started?.tick ?? Math.min(...this.events.map((e) => e.tick));
+            const hi = finished?.tick ?? Math.max(...this.events.map((e) => e.tick));
+            return {lo, hi};
+        },
+        /** Machine status by "x,y" at the cursor -- the map's fill lookup. */
+        machineFills(): Map<string, string | null> {
+            return machineStatusAt(this.samples, this.cursor);
+        },
+        /** Every bot the lanes ever mention, ascending. */
+        laneBotIds(): number[] {
+            return laneBots(this.lanes);
         }
     },
 
@@ -248,6 +278,8 @@ export const useRunsStore = defineStore('runs', {
             this.sampleError = null;
             this.mapError = null;
             this.videoError = null;
+            this.eventsError = null;
+            this.selectedMachine = null;
             try {
                 this.detail = await getRun(id);
 
@@ -256,13 +288,15 @@ export const useRunsStore = defineStore('runs', {
                     samplesResult,
                     mapResult,
                     videoResult,
-                    videoTicksResult
+                    videoTicksResult,
+                    eventsResult
                 ] = await Promise.allSettled([
                     getRunLanes(id),
                     getRunSamples(id),
                     getRunMap(id),
                     getRunVideo(id),
-                    getRunVideoTicks(id)
+                    getRunVideoTicks(id),
+                    getRunEvents(id)
                 ]);
 
                 if (lanesResult.status === 'fulfilled') {
@@ -288,6 +322,13 @@ export const useRunsStore = defineStore('runs', {
                 } else {
                     this.map = [];
                     this.mapError = enrichmentUnavailable('entity map', '/map', mapResult.reason);
+                }
+
+                if (eventsResult.status === 'fulfilled') {
+                    this.events = eventsResult.value.events;
+                } else {
+                    this.events = [];
+                    this.eventsError = enrichmentUnavailable('events', '/events', eventsResult.reason);
                 }
 
                 // Both halves of the recording, or neither: a manifest without
@@ -322,6 +363,7 @@ export const useRunsStore = defineStore('runs', {
                 this.lanes = [];
                 this.samples = [];
                 this.map = [];
+                this.events = [];
             } finally {
                 this.loading = false;
             }
@@ -348,6 +390,11 @@ export const useRunsStore = defineStore('runs', {
         /** Points the inventory panel at another bot. */
         selectBot(bot: number | null) {
             this.bot = bot;
+        },
+
+        /** Points the map inspector at another machine, keyed `"x,y"`. */
+        selectMachine(key: string | null) {
+            this.selectedMachine = key;
         },
 
         /** Moves the cursor, clamped to the axis. */

@@ -6134,7 +6134,244 @@ impl PlanState {
                     .any(|position| !self.removed.contains(&Pos::from(position)))
             })
     }
+
+    // ------------------------------------------------------------- threats
+
+    /// How far a bot must stay from a charted enemy structure named `name`,
+    /// and where that number came from.
+    ///
+    /// See [`ThreatStandoff`] and [`StandoffSource`] for what each answer
+    /// means. The order is: the prototype's own `attack_range`, then the named
+    /// fallback below, then -- for a name in `threats` this function has never
+    /// heard of -- the widest standoff it knows.
+    ///
+    /// **It never answers "no standoff".** Every position in
+    /// `EntityGraph::threats` is an enemy structure; the only open question is
+    /// how far its influence reaches, and "I cannot say" is not the same fact
+    /// as "zero". That distinction is the one this repo keeps paying for, and
+    /// making it unrepresentable here is cheaper than remembering it at every
+    /// call site.
+    pub fn threat_standoff(&self, name: &str) -> ThreatStandoff {
+        if let Some(range) = self
+            .base
+            .globals
+            .entity_prototypes
+            .get(name)
+            .and_then(|p| p.attack_range)
+            && range > 0.
+        {
+            return ThreatStandoff {
+                tiles: range,
+                source: StandoffSource::Prototype,
+            };
+        }
+        if let Some((_, tiles)) = WORM_ATTACK_RANGE.iter().find(|(n, _)| *n == name) {
+            return ThreatStandoff {
+                tiles: *tiles,
+                source: StandoffSource::NamedFallback,
+            };
+        }
+        if name.ends_with("-spawner") {
+            return ThreatStandoff {
+                tiles: SPAWNER_CALL_FOR_HELP_RADIUS,
+                source: StandoffSource::NamedFallback,
+            };
+        }
+        ThreatStandoff {
+            tiles: WIDEST_KNOWN_STANDOFF,
+            source: StandoffSource::UnknownKind,
+        }
+    }
+
+    /// The charted threat whose standoff covers `at`, nearest first, or `None`
+    /// when the model holds none that reaches it.
+    ///
+    /// # `None` means "none charted that reaches here", never "safe"
+    ///
+    /// Inherited straight from [`EntityGraph::threats_from`]: the model holds
+    /// what it has been shown, and a map nobody has explored holds no threats
+    /// at all. A caller must not read `None` as a *guarantee*; it is the
+    /// absence of a known reason to refuse, which is exactly as much as
+    /// anything in this planner can say about ground it has not seen.
+    ///
+    /// [`EntityGraph::threats_from`]:
+    ///     factorio_bot_core::graph::entity_graph::EntityGraph::threats_from
+    pub fn threat_covering(&self, at: &Position) -> Option<ThreatAt> {
+        // `threats_from` is already sorted nearest-first and ties are broken
+        // on position and name, so the first covering threat is a fact about
+        // the data rather than about a hash seed.
+        self.base
+            .entity_graph
+            .threats_from(at)
+            .into_iter()
+            .find_map(|(name, position, distance)| {
+                let standoff = self.threat_standoff(&name);
+                (distance < standoff.tiles).then_some(ThreatAt {
+                    name,
+                    at: position,
+                    distance,
+                    standoff,
+                })
+            })
+    }
+
+    /// [`PlanState::minable_sources`] split into the entities no charted
+    /// threat reaches and the ones that are inside something's standoff.
+    ///
+    /// The **prefer, then refuse** shape: a caller takes the safe list and
+    /// only looks at the threatened one to say *why* it has nothing left. Both
+    /// halves keep `minable_sources`' order, so the caller's own distance sort
+    /// still decides which safe entity is nearest.
+    ///
+    /// Threat-filtering here rather than inside `minable_sources` is
+    /// deliberate: the unfiltered question still has honest callers (a census,
+    /// a report), and a refusal that cannot name what it avoided is the kind
+    /// of silent failure this file exists to prevent.
+    #[allow(clippy::type_complexity)]
+    pub fn minable_sources_by_safety(
+        &self,
+        item: &str,
+    ) -> (
+        Vec<(String, Position, u32)>,
+        Vec<(String, Position, u32, ThreatAt)>,
+    ) {
+        let mut safe = Vec::new();
+        let mut threatened = Vec::new();
+        for (name, position, yields) in self.minable_sources(item) {
+            match self.threat_covering(&position) {
+                Some(threat) => threatened.push((name, position, yields, threat)),
+                None => safe.push((name, position, yields)),
+            }
+        }
+        (safe, threatened)
+    }
 }
+
+/// A charted enemy structure that reaches a position a plan was considering.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ThreatAt {
+    /// The prototype name, e.g. `small-worm-turret`.
+    pub name: String,
+    /// Where the threat itself stands.
+    pub at: Position,
+    /// Euclidean tiles from the position asked about to the threat.
+    pub distance: f64,
+    /// The radius that made this a hit, and where that radius came from.
+    pub standoff: ThreatStandoff,
+}
+
+/// How far a threat's influence reaches, and on whose authority.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ThreatStandoff {
+    pub tiles: f64,
+    pub source: StandoffSource,
+}
+
+/// Which of [`PlanState::threat_standoff`]'s three answers was taken.
+///
+/// Carried rather than discarded so that a refusal can say *"25 tiles (named
+/// fallback -- the mod sends no attack range)"* instead of asserting a number
+/// as though the game had said it. Two of these three are guesses, and a
+/// reader is entitled to know which.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StandoffSource {
+    /// `FactorioEntityPrototype::attack_range`, i.e. the game's own number.
+    /// **Nothing produces this yet** -- see that field's doc for the gap.
+    Prototype,
+    /// [`WORM_ATTACK_RANGE`] or [`SPAWNER_CALL_FOR_HELP_RADIUS`], matched on
+    /// the prototype name. This is what answers every call today.
+    NamedFallback,
+    /// A name in `threats` that is neither a known worm nor a `*-spawner`.
+    /// Answered with [`WIDEST_KNOWN_STANDOFF`], because erring towards
+    /// avoiding an unknown enemy structure costs a longer walk and erring the
+    /// other way costs a bot.
+    UnknownKind,
+}
+
+impl std::fmt::Display for ThreatStandoff {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let source = match self.source {
+            StandoffSource::Prototype => "from the prototype",
+            StandoffSource::NamedFallback => "named fallback; the mod sends no attack range",
+            StandoffSource::UnknownKind => "unrecognised enemy structure, widest standoff assumed",
+        };
+        write!(f, "{:.0} tiles ({source})", self.tiles)
+    }
+}
+
+/// Worm attack ranges in tiles, by prototype name.
+///
+/// **Read off the installed game's own data**, not invented and not copied
+/// from a wiki: `workspace/data/base/prototypes/entity/enemy-constants.lua`
+/// lines 134-137 of Factorio 2.1.17 Space Age, where
+/// `range_worm_small = 25`, `_medium = 30`, `_big = 38`, `_behemoth = 48`, and
+/// `turrets.lua` passes each straight into the worm's `attack_parameters`.
+///
+/// # Why this is a fallback and not the definition
+///
+/// A hard-coded rate is a mod-compatibility defect (the owner's standing rule,
+/// and the reason `smelting_output` derives from prototypes). These numbers
+/// are right for the six mods this project loads and wrong for any mod that
+/// retunes a worm or adds a seventh kind. The correct source is
+/// [`FactorioEntityPrototype::attack_range`], which
+/// [`PlanState::threat_standoff`] reads **first** -- but
+/// `mods/BotBridge/types.lua` sends no attack parameter, so on every dump and
+/// every live capture to date that field is `None` and this table answers
+/// **100% of calls**. It is load-bearing in exactly the way the by-name water
+/// fallback is, and is documented the same way rather than quietly relied on.
+///
+/// Closing the gap is a mod change: send `attack_parameters.range` alongside
+/// `collision_box`. Until then the honest description of this planner's threat
+/// model is *"vanilla worm ranges, assumed"*.
+///
+/// # `prepare_range` is deliberately NOT added
+///
+/// The same file gives each worm a `prepare_range` (small: +8, so a small worm
+/// *stands up* at 33 tiles), and a wider standoff could be argued from it. It
+/// is left out because a worm that has noticed a bot at 30 tiles still cannot
+/// hit it: the lethal radius is the attack range, and inflating the avoided
+/// area by a third on an argument nobody has measured would cost walks for a
+/// safety margin this session cannot demonstrate. Stated here so the next
+/// reader knows it was considered rather than missed.
+pub const WORM_ATTACK_RANGE: &[(&str, f64)] = &[
+    ("small-worm-turret", 25.),
+    ("medium-worm-turret", 30.),
+    ("big-worm-turret", 38.),
+    ("behemoth-worm-turret", 48.),
+];
+
+/// The standoff for a `*-spawner`, in tiles.
+///
+/// **A spawner is a different kind of risk from a worm and is modelled
+/// differently on purpose.** A worm is a static gun with a range: stand
+/// outside it and that worm cannot touch you. A spawner shoots nothing at all
+/// -- its `attack_range` would be zero if the bridge carried one, which is
+/// exactly the reading that would send a bot to mine a rock in the middle of a
+/// nest. What a spawner does is *produce roamers*, and a roamer's reach is not
+/// a radius at all; it is wherever the unit walks.
+///
+/// So this is not an attack range and is not pretending to be one. It is the
+/// spawner's own `call_for_help_radius`, `50`, from
+/// `workspace/data/base/prototypes/entity/enemies.lua` -- the game's own
+/// statement of how far this nest's units answer a disturbance, which is the
+/// closest thing the data files offer to "how near is too near". The same
+/// number [`crate::method::scout::THREAT_STANDOFF`] already uses, arrived at
+/// there as a deliberately generous guess; that it turns out to equal the
+/// game's own constant is a coincidence worth naming rather than a
+/// derivation, and the two are kept as separate constants because they answer
+/// different questions and could legitimately diverge.
+///
+/// **It does not bound the risk and cannot.** A roamer that has wandered 166
+/// tiles from its nest -- which is how one bot died -- is outside any radius
+/// this could name. Routing buys nothing against that case; the standing
+/// return-fire order does. This constant addresses only the part that *is*
+/// positional: do not choose a target next to a nest.
+pub const SPAWNER_CALL_FOR_HELP_RADIUS: f64 = 50.;
+
+/// What [`StandoffSource::UnknownKind`] assumes: the widest standoff in the
+/// two tables above, so an unrecognised enemy structure is avoided at least as
+/// widely as every recognised one.
+pub const WIDEST_KNOWN_STANDOFF: f64 = SPAWNER_CALL_FOR_HELP_RADIUS;
 
 /// How many points [`PlanState::charting`] probes: the origin and the compass
 /// at two ranges.
@@ -9235,5 +9472,130 @@ mod occupant_naming_tests {
             .expect("the ground is not clear");
         assert_eq!(occupant, Occupant::Terrain { minable: true });
         assert_eq!(occupant.to_string(), "occupied by a tree or rock");
+    }
+
+    // ------------------------------------------------- threats and standoff
+
+    /// A world holding one enemy structure of `name` at `at`, plus the fixture
+    /// prototypes, so `threat_standoff` has a prototype table to consult.
+    fn world_with_threat(name: &str, entity_type: &str, at: Position) -> PlanState {
+        let world = factorio_bot_core::factorio::world::FactorioSurface::new();
+        world
+            .update_entity_prototypes(
+                factorio_bot_core::test_utils::fixture_entity_prototypes()
+                    .iter()
+                    .map(|v| v.clone())
+                    .collect(),
+            )
+            .expect("the fixture prototypes load");
+        let mut entity = FactorioEntity::new_stone_furnace(&at, Direction::North);
+        entity.name = name.to_owned();
+        entity.entity_type = entity_type.to_owned();
+        world
+            .update_chunk_entities(vec![entity])
+            .expect("entities are accepted");
+        PlanState::from_world(Arc::new(world), &[BotId(1)])
+    }
+
+    /// The number this whole feature turns on, and the assertion is written
+    /// against the **game data file** rather than against the constant: 25 is
+    /// `range_worm_small` from `enemy-constants.lua`, and a test comparing
+    /// `WORM_ATTACK_RANGE[0].1` to itself would pass no matter what the table
+    /// said. See the note in `what-a-green-suite-proves`.
+    #[test]
+    fn a_small_worms_standoff_is_the_twenty_five_tiles_the_game_data_states() {
+        let state = world_with_threat("small-worm-turret", "turret", Position::new(0., 0.));
+        let standoff = state.threat_standoff("small-worm-turret");
+        assert_eq!(
+            standoff.tiles, 25.,
+            "`range_worm_small` is 25 in enemy-constants.lua"
+        );
+        assert_eq!(
+            standoff.source,
+            StandoffSource::NamedFallback,
+            "nothing sends an attack range yet, so this must be the fallback and must SAY so"
+        );
+        assert!(
+            standoff.to_string().contains("named fallback"),
+            "a refusal must not quote an assumption as though the game said it, got {standoff}"
+        );
+    }
+
+    /// The seam: when the mod grows a sender, the prototype must win over the
+    /// table without any other change. Nothing produces this today, so the
+    /// test injects it -- which is exactly what a seam is for.
+    #[test]
+    fn a_prototype_attack_range_outranks_the_named_fallback() {
+        let world = factorio_bot_core::factorio::world::FactorioSurface::new();
+        let mut protos: Vec<FactorioEntityPrototype> =
+            factorio_bot_core::test_utils::fixture_entity_prototypes()
+                .iter()
+                .map(|v| v.clone())
+                .collect();
+        let mut worm = protos[0].clone();
+        worm.name = "small-worm-turret".to_owned();
+        worm.entity_type = "turret".to_owned();
+        worm.attack_range = Some(9.);
+        protos.push(worm);
+        world
+            .update_entity_prototypes(protos)
+            .expect("the prototypes load");
+        let state = PlanState::from_world(Arc::new(world), &[BotId(1)]);
+        let standoff = state.threat_standoff("small-worm-turret");
+        assert_eq!(
+            standoff.tiles, 9.,
+            "the game's own number must beat the hard-coded table"
+        );
+        assert_eq!(standoff.source, StandoffSource::Prototype);
+    }
+
+    /// `absent-is-not-a-value`, in the one place it would cost a bot: an
+    /// enemy structure whose name this planner has never heard of must not
+    /// read as harmless.
+    #[test]
+    fn an_unrecognised_enemy_structure_is_avoided_widely_rather_than_ignored() {
+        let state = world_with_threat("mystery-horror", "turret", Position::new(0., 0.));
+        let standoff = state.threat_standoff("mystery-horror");
+        assert!(
+            standoff.tiles >= WORM_ATTACK_RANGE.iter().map(|(_, r)| *r).fold(0., f64::max),
+            "an unknown enemy must be avoided at least as widely as every known one, got              {standoff}"
+        );
+        assert_eq!(standoff.source, StandoffSource::UnknownKind);
+    }
+
+    /// A spawner and a worm are different kinds of risk, and the code must not
+    /// quietly treat them as one. A spawner shoots nothing -- its *attack*
+    /// range is zero -- so if this ever collapsed onto attack range, a bot
+    /// would be sent to mine inside a nest.
+    #[test]
+    fn a_spawner_is_not_given_a_worms_reach_and_is_never_given_zero() {
+        let state = world_with_threat("biter-spawner", "unit-spawner", Position::new(0., 0.));
+        let spawner = state.threat_standoff("biter-spawner");
+        let worm = state.threat_standoff("small-worm-turret");
+        assert!(
+            spawner.tiles > 0.,
+            "a spawner shoots nothing, and reading that as `no standoff` is the defect"
+        );
+        assert_ne!(
+            spawner.tiles, worm.tiles,
+            "the two are modelled from different quantities and must not be one number"
+        );
+        assert_eq!(spawner.tiles, SPAWNER_CALL_FOR_HELP_RADIUS);
+    }
+
+    /// The boundary, from both sides, so a test cannot pass on an
+    /// always-true or always-false `threat_covering`.
+    #[test]
+    fn a_position_is_covered_inside_the_standoff_and_free_outside_it() {
+        let state = world_with_threat("small-worm-turret", "turret", Position::new(0., 0.));
+        let inside = state
+            .threat_covering(&Position::new(20., 0.))
+            .expect("20 tiles is inside a small worm's 25");
+        assert_eq!(inside.name, "small-worm-turret");
+        assert!((inside.distance - 20.).abs() < 1e-6);
+        assert!(
+            state.threat_covering(&Position::new(30., 0.)).is_none(),
+            "30 tiles is outside a small worm's reach and must not be refused"
+        );
     }
 }

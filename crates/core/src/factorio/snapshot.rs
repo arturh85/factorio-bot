@@ -257,6 +257,7 @@ mod tests {
             solar_panel_performance_at_day: None,
             solar_panel_performance_at_night: None,
             electric_buffer_capacity: None,
+            attack_range: None,
             pumping_speed: None,
         }
     }
@@ -482,6 +483,7 @@ mod tests {
             solar_panel_performance_at_day: None,
             solar_panel_performance_at_night: None,
             electric_buffer_capacity: None,
+            attack_range: None,
             pumping_speed: None,
         });
         assert!(
@@ -538,6 +540,7 @@ mod tests {
             solar_panel_performance_at_day: None,
             solar_panel_performance_at_night: None,
             electric_buffer_capacity: None,
+            attack_range: None,
             pumping_speed: None,
         });
         snapshot.item_prototypes.push(FactorioItemPrototype {

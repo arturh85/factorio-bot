@@ -3138,7 +3138,20 @@ pub struct Chop;
 /// many-fragment demand paying for the rock is what makes the later
 /// fragments free; judged one at a time, none of them ever pays.
 fn chop_beats_mining(state: &PlanState, item: &ItemId, need: u32, whose: &Holder) -> bool {
-    let sources = state.minable_sources(item);
+    // The **safe** sources, not every standing one. A rock inside a worm's
+    // reach is not supply this method can spend, so counting it here would let
+    // chopping win the goal on the strength of entities `Chop::expand` is
+    // about to pass over -- and `expand` would then refuse a goal `Mine` could
+    // have satisfied off ore nobody is guarding.
+    //
+    // This is also what keeps the refusal in the right place. `applicable`
+    // still asks the *unfiltered* `has_minable_source`, so when there is no
+    // ore at all -- wood, which is the item this method exists for -- Chop
+    // still claims the goal and `expand` refuses by naming the threat. When
+    // ore does exist, a zero safe supply drops out through `supply < need`
+    // below and `Mine` gets its turn. The two questions want different
+    // answers, and this is the one that means "can chopping actually pay".
+    let (sources, _threatened) = state.minable_sources_by_safety(item);
     let mut supply: u32 = 0;
     // The worst ticks-per-item deal among the standing sources, as
     // `(ticks for one swing, what that swing yields of `item`)`. Replaced only
@@ -3231,7 +3244,52 @@ impl Method for Chop {
         // `nearest_resource_tile` breaks them: the answer must depend only on
         // the standing entities and the origin, never on the order they were
         // discovered in.
-        let mut sources = ctx.state.minable_sources(&item);
+        // **Prefer, then refuse.** Every standing source a charted enemy
+        // structure reaches is passed over while a safe one exists, and only
+        // when passing them all over leaves nothing does this refuse -- naming
+        // the threat, its distance, and whether that radius is the game's
+        // number or an assumed one.
+        //
+        // This is the site that killed a bot. `run` on seed 31337 sent bot 1
+        // to chop a rock with three `small-worm-turret`s at 20.4, 20.7 and
+        // 20.7 tiles; a worm reaches 25, and all three were already in the
+        // dump this method read. Nothing here consulted `threats`, so the sort
+        // below picked that rock on distance alone and the plan was, by its
+        // own lights, correct.
+        //
+        // The filter runs **before** the distance sort rather than as a skip
+        // inside the emit loop, so `steps.is_empty()` keeps meaning "no source
+        // at all" and cannot quietly absorb a threat refusal into a
+        // `NoApplicableMethod` -- which would report the map as barren when it
+        // is merely dangerous, the exact substitution `absent-is-not-a-value`
+        // names.
+        let (mut sources, threatened) = ctx.state.minable_sources_by_safety(&item);
+        if sources.is_empty()
+            && let Some((entity, candidate, _, threat)) = threatened
+                .iter()
+                .min_by(|a, b| {
+                    factorio_bot_core::factorio::util::calculate_distance(&from, &a.1)
+                        .total_cmp(&factorio_bot_core::factorio::util::calculate_distance(
+                            &from, &b.1,
+                        ))
+                        .then(a.1.x.total_cmp(&b.1.x))
+                        .then(a.1.y.total_cmp(&b.1.y))
+                })
+                .cloned()
+        {
+            return Err(PlannerError::TargetInsideThreat(Box::new(
+                crate::error::TargetInsideThreatDetail {
+                    item: item.clone(),
+                    entity,
+                    candidate,
+                    threat: threat.name,
+                    threat_at: threat.at,
+                    distance: threat.distance,
+                    standoff: threat.standoff,
+                    passed_over: threatened.len(),
+                },
+            )));
+        }
         sources.sort_by(|a, b| {
             factorio_bot_core::factorio::util::calculate_distance(&from, &a.1)
                 .total_cmp(&factorio_bot_core::factorio::util::calculate_distance(
@@ -14777,6 +14835,165 @@ mod tests {
         );
 
         schedule(&net, &s, &bots).expect("and it schedules");
+    }
+    // ------------------------------------------------------------- threats
+
+    /// `wooded_state`, plus one enemy structure. `tree-01` is the only tree
+    /// the fixture prototypes give a `mine_result`, so these are the trees
+    /// `Chop` can actually read a bill off.
+    fn wooded_state_with_threat(
+        bots: &[BotId],
+        trees: &[Position],
+        threat: (&str, &str, Position),
+    ) -> PlanState {
+        let world = crate::test_world::with_trees(fixture_world(), trees);
+        let (name, entity_type, at) = threat;
+        let mut entity =
+            FactorioEntity::new_stone_furnace(&at, factorio_bot_core::types::Direction::North);
+        entity.name = name.to_owned();
+        entity.entity_type = entity_type.to_owned();
+        world
+            .update_chunk_entities(vec![entity])
+            .expect("a fixture world accepts an enemy structure");
+        PlanState::from_world(Arc::new(world), bots)
+    }
+
+    /// **Prefer.** Two trees stand; the nearer one is inside a worm's reach.
+    /// The plan must walk past it to the far one.
+    ///
+    /// The near tree is asserted to be genuinely nearer first, so this cannot
+    /// pass by accident on a world where the "safe" tree was the natural pick
+    /// anyway -- without the threat reader the sort is by distance alone and
+    /// the near tree wins.
+    #[test]
+    fn a_tree_inside_a_worms_reach_is_passed_over_while_a_safe_one_stands() {
+        let bots = [BotId(1)];
+        let threatened = Position::new(12., 0.);
+        let safe = Position::new(60., 0.);
+        let state = wooded_state_with_threat(
+            &bots,
+            &[threatened.clone(), safe.clone()],
+            ("small-worm-turret", "turret", Position::new(10., 0.)),
+        );
+        let from = state
+            .bot(BotId(1))
+            .expect("bot 1 is in the roster")
+            .position
+            .clone();
+        assert!(
+            calculate_distance(&from, &threatened) < calculate_distance(&from, &safe),
+            "fixture precondition: without the threat reader the threatened tree wins on distance"
+        );
+        assert!(
+            state.threat_covering(&threatened).is_some() && state.threat_covering(&safe).is_none(),
+            "fixture precondition: exactly one of the two trees is covered"
+        );
+
+        let steps = expand_with(
+            &registry_for(&bots),
+            &Goal::Have {
+                item: "wood".into(),
+                count: 4,
+                whose: Holder::Share(BotId(1)),
+                via: None,
+            },
+            &state,
+        );
+        let chopped: Vec<Position> = chops(&steps).into_iter().map(|(_, pos, _)| pos).collect();
+        assert_eq!(
+            chopped,
+            vec![safe],
+            "the plan must chop the far safe tree, never the near threatened one; got {chopped:?}"
+        );
+    }
+
+    /// **Then refuse.** The only tree on the map is inside a worm's reach, and
+    /// wood has no ore patch to fall back on, so there is nothing safe left.
+    ///
+    /// The refusal must NAME the threat and its distance rather than come out
+    /// as `NoApplicableMethod`, which would report a map with a tree on it as
+    /// having no route to wood -- true of the plan, and a lie about the world.
+    #[test]
+    fn a_wood_goal_whose_only_tree_is_inside_a_worm_refuses_and_names_the_worm() {
+        let bots = [BotId(1)];
+        let tree = Position::new(12., 0.);
+        let state = wooded_state_with_threat(
+            &bots,
+            std::slice::from_ref(&tree),
+            ("small-worm-turret", "turret", Position::new(10., 0.)),
+        );
+        assert!(
+            !state.minable_sources("wood").is_empty(),
+            "fixture precondition: a tree the planner can read a bill off does stand here"
+        );
+
+        let mut ctx = ExpansionCtx::new(state.fork(), BotId(1));
+        let err = Chop
+            .expand(
+                &Goal::Have {
+                    item: "wood".into(),
+                    count: 4,
+                    whose: Holder::Share(BotId(1)),
+                    via: None,
+                },
+                &mut ctx,
+            )
+            .expect_err("every candidate is inside the worm's reach");
+        match &err {
+            PlannerError::TargetInsideThreat(detail) => {
+                let crate::error::TargetInsideThreatDetail {
+                    threat,
+                    distance,
+                    standoff,
+                    passed_over,
+                    candidate,
+                    ..
+                } = detail.as_ref();
+                assert_eq!(threat, "small-worm-turret");
+                assert_eq!(candidate, &tree);
+                assert!(
+                    (*distance - 2.).abs() < 1e-6,
+                    "the tree stands 2 tiles from the worm, got {distance}"
+                );
+                assert_eq!(standoff.tiles, 25.);
+                assert_eq!(*passed_over, 1);
+            }
+            other => panic!("expected TargetInsideThreat naming the worm, got {other:?}"),
+        }
+        assert!(
+            err.to_string().contains("small-worm-turret"),
+            "the message a reader sees must name the threat: {err}"
+        );
+    }
+
+    /// The threat filter must not silently become a `NoApplicableMethod`, and
+    /// it must not fire on a clean map. The same fixture with the worm moved
+    /// far away plans the chop it always did.
+    #[test]
+    fn the_same_tree_is_chopped_when_the_worm_is_out_of_range() {
+        let bots = [BotId(1)];
+        let tree = Position::new(12., 0.);
+        let state = wooded_state_with_threat(
+            &bots,
+            std::slice::from_ref(&tree),
+            ("small-worm-turret", "turret", Position::new(500., 500.)),
+        );
+        let steps = expand_with(
+            &registry_for(&bots),
+            &Goal::Have {
+                item: "wood".into(),
+                count: 4,
+                whose: Holder::Share(BotId(1)),
+                via: None,
+            },
+            &state,
+        );
+        let chopped: Vec<Position> = chops(&steps).into_iter().map(|(_, pos, _)| pos).collect();
+        assert_eq!(
+            chopped,
+            vec![tree],
+            "a worm 700 tiles away must change nothing; got {chopped:?}"
+        );
     }
 }
 

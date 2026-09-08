@@ -155,6 +155,17 @@ where
         inventory.insert("iron-plate".to_string(), 200u32);
         inventory.insert("sulfur".to_string(), 200u32);
         inventory.insert("coal".to_string(), 200u32);
+        // And the parts of a power plant, for the same reason: a
+        // `chemical-plant` draws 210 kW, so since 2026-09-08 `method::fabricate`
+        // asks `method::power::ensure_powered` for it and the plan builds a
+        // plant when no network stands. Without these the goal refuses with
+        // `have 1 offshore-pump`, which is a true statement about this fixture
+        // and says nothing about the recipe these tests are about.
+        inventory.insert("offshore-pump".to_string(), 4u32);
+        inventory.insert("boiler".to_string(), 4u32);
+        inventory.insert("steam-engine".to_string(), 4u32);
+        inventory.insert("small-electric-pole".to_string(), 200u32);
+        inventory.insert("pipe".to_string(), 200u32);
         world.globals.players.insert(
             bot.0,
             FactorioPlayer {

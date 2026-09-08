@@ -512,7 +512,16 @@ fn refusal_for(err: &PlannerError) -> Option<PlanRefusal> {
         | PlannerError::UnknownTechnology { .. }
         | PlannerError::NoMachineForRecipe { .. }
         | PlannerError::TooManyCells { .. }
-        | PlannerError::BlueprintRefused { .. } => false,
+        | PlannerError::BlueprintRefused { .. }
+        // The three power-invariant refusals (`crate::powered::audit`) are
+        // **not** verdicts a script can act on: they say a method emitted a
+        // machine nothing powers, an electric consumer nobody can price, or a
+        // prototype this world never described. Nothing the caller asks for
+        // differently moves any of them -- each is a defect in the planner or
+        // in the dump, and telling a script "try another item" would hide it.
+        | PlannerError::UnpoweredConsumer { .. }
+        | PlannerError::UnpricedConsumer { .. }
+        | PlannerError::UnknownPrototypePlaced { .. } => false,
     };
     verdict.then(|| PlanRefusal {
         // Every variant carries a `#[diagnostic(code(...))]` today. The

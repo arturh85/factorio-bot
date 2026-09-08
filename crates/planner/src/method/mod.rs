@@ -13,6 +13,7 @@ pub mod pipe;
 pub mod power;
 pub mod produce;
 pub mod scout;
+pub mod supply;
 pub mod sustain;
 pub mod util;
 
@@ -642,6 +643,15 @@ pub fn expand(
     }
     net.infer_edges();
     net.validate()?;
+    // **The one place that asks whether the plan powers what it builds.**
+    //
+    // Deliberately here rather than in each method: the methods that forget
+    // are by definition the ones that would not ask. It runs over the finished
+    // network because a method may state its power on a different action from
+    // the placement -- `method::blueprint` states one `BlockPowered` for a
+    // whole block -- and against `ctx.state`, which is the world the plan was
+    // made in and therefore the one that knows the prototypes.
+    crate::powered::audit(&net, &ctx.state)?;
     Ok(net)
 }
 

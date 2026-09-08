@@ -1105,6 +1105,83 @@ pub enum PlannerError {
         provenance: String,
     },
 
+    /// **A plan stands an electric machine that nothing powers.**
+    ///
+    /// Raised by [`crate::powered::audit`] over the finished network, not by
+    /// the method that emitted the placement — deliberately, because the
+    /// methods that forget are by definition the ones that would not raise it.
+    /// Power was opt-in per method and nothing checked; five methods stated a
+    /// `Condition::Powered` and five did not, and both of this project's
+    /// unpowered-factory incidents (`FurnaceLine`'s 13 poles and no generator,
+    /// `method::fabricate`'s 420 kW `oil-refinery`) came out of that silence.
+    ///
+    /// **Coverage is not capacity, and this is the coverage half.** It says
+    /// nobody even *claimed* the machine is powered. The capacity half is
+    /// `Condition::Powered`'s own headroom arithmetic, which the claim is
+    /// checked by when it exists.
+    #[error(
+        "the {prototype} this plan places at {pos} draws {kw:.0} kW and nothing in the plan \
+         powers it ({label})"
+    )]
+    #[diagnostic(
+        code(planner::unpowered_consumer),
+        help(
+            "the method that emitted this placement must call \
+             `method::power::ensure_powered` and put the `Condition::Powered` it hands back on \
+             the placement -- a machine on no network stands there drawing nothing and reads \
+             as built"
+        )
+    )]
+    UnpoweredConsumer {
+        prototype: String,
+        pos: String,
+        kw: f64,
+        label: String,
+    },
+
+    /// The plan places an **electric consumer nobody can price**, so no plant
+    /// can be sized for it and no headroom test can be stated about it.
+    ///
+    /// *Absent is not a value*: the world says this prototype has an electric
+    /// energy source, and `state.rs`'s `consumer_kw` has no figure for it.
+    /// Charging it zero is the direction that table's own doc calls unsafe —
+    /// headroom that is not there — and it is how three `small-lamp`s were
+    /// budgeted at nothing.
+    #[error(
+        "the {prototype} this plan places at {pos} is electric and nothing knows what it draws"
+    )]
+    #[diagnostic(
+        code(planner::unpriced_consumer),
+        help(
+            "send its `energy_usage` over the bridge, or give it a row in \
+             `state.rs`'s `vanilla_consumer_kw` -- a consumer priced at nothing is headroom \
+             that does not exist"
+        )
+    )]
+    UnpricedConsumer { prototype: String, pos: String },
+
+    /// The plan places a prototype **the world never described**, so nothing
+    /// can say whether it needs power, what it draws, or how big it is.
+    ///
+    /// The third answer of three. A prototype-less name is "I have never heard
+    /// of this", which is not "it needs no power" — and treating the two alike
+    /// is the defect class this whole check exists to close.
+    #[error(
+        "the plan places a {prototype} at {pos} and this world has no prototype for it ({label})"
+    )]
+    #[diagnostic(
+        code(planner::unknown_prototype_placed),
+        help(
+            "dump a world that describes it, or place something the world knows -- nothing \
+             here can say whether it needs power"
+        )
+    )]
+    UnknownPrototypePlaced {
+        prototype: String,
+        pos: String,
+        label: String,
+    },
+
     /// A caller-supplied anchor sits on the wrong grid for this block, so the
     /// game would silently move every entity in it.
     ///

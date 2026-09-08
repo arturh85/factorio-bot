@@ -5,6 +5,7 @@ pub mod goal;
 pub mod ids;
 pub mod method;
 pub mod network;
+pub mod powered;
 pub mod products;
 pub mod rates;
 pub mod render;

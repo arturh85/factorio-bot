@@ -596,7 +596,65 @@ fn plan_fluid_rig(
             )
         })
     };
-    let Some(site) = free_area_near_where(state, &anchor, machine, ports_fit) else {
+    // **A machine's site is only clear if every inbound run can reach it** --
+    // the buffer's own acceptance test (see `routes_to` below), applied one
+    // level up to the machine that buffer hangs off.
+    //
+    // It was missing here, and the asymmetry showed the day a *second* fluid
+    // machine was sited beside a first: `have:plastic-bar:10` on the
+    // seed-31337 water-and-oil dump stood a pumpjack, a refinery running
+    // `basic-oil-processing` and its output tank, then sited the
+    // `chemical-plant` at `[139.5, -359.5]` and refused with `no pipe route
+    // from the oil-refinery at [143.5, -358.5] ... the tile at [140.5,
+    // -361.5] cannot hold a pipe`. Nothing was wrong with either half.
+    // `port_is_placeable` asks whether **any** tile of the chosen box is
+    // free; `route_between` then has to start from a **particular** one. So
+    // siting could accept a footprint routing could not use, which is the
+    // same "two searches that never agree on a site" the buffer paid for.
+    //
+    // The route is therefore the acceptance test here too, and the ring
+    // search takes the first site that fits *and* routes -- the nearest such
+    // site by construction.
+    //
+    // **Necessary, not sufficient, and deliberately so.** It routes against
+    // bare ground (`&[]`) because the tiles a *later* run will want are not
+    // known until a site is chosen -- `other_port_tiles` is derived from the
+    // site. A multi-source machine can therefore still refuse below, on the
+    // second run, exactly as it does today; what this removes is the case
+    // where a perfectly routable site two rings further out was never tried.
+    let routes_from_every_source = |candidate: &Position| {
+        let Some(area) = state.collision_area(machine, candidate) else {
+            return false;
+        };
+        sources.iter().all(|(fluid, entity)| {
+            let source_area = state
+                .collision_area(&entity.name, &entity.position)
+                .unwrap_or_else(|| entity.bounding_box.clone());
+            route_between(
+                state,
+                &PipeEnd {
+                    name: &entity.name,
+                    position: &entity.position,
+                    area: source_area,
+                    production_type: None,
+                    port_index: None,
+                },
+                &PipeEnd {
+                    name: machine,
+                    position: candidate,
+                    area: area.clone(),
+                    production_type: Some("input"),
+                    port_index: Some(box_of(fluid, &input_ordinals)),
+                },
+                &pipe,
+                &[],
+            )
+            .is_ok()
+        })
+    };
+    let site_is_usable =
+        |candidate: &Position| ports_fit(candidate) && routes_from_every_source(candidate);
+    let Some(site) = free_area_near_where(state, &anchor, machine, site_is_usable) else {
         return Err(PlannerError::NoApplicableMethod {
             goal: goal.to_string(),
         });

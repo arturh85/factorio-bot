@@ -854,6 +854,21 @@ impl ProductIndex {
     /// A recipe by its own name — the lookup `method::util::recipe_for`
     /// performs, made available honestly, under a name that says what it keys
     /// on.
+    /// Does this surface supply `name` with **no recipe at all** -- a charted
+    /// resource, or a fluid its ground yields?
+    ///
+    /// [`Self::supply`]'s answer, exposed because a caller deciding whether to
+    /// *manufacture* something needs it and must not re-derive it: recomputing
+    /// [`ground_supply`] scans every tile in the fluid radius, and a second
+    /// copy of the rule would be a second thing to keep true.
+    ///
+    /// **Empty means unknown**, as everywhere else here, so this answers
+    /// `false` on a world that charted nothing -- the same safe direction the
+    /// field's own doc takes.
+    pub fn ground_supplies(&self, name: &str) -> bool {
+        self.supply.contains(name)
+    }
+
     pub fn recipe(&self, recipe_name: &str) -> Option<&FactorioRecipe> {
         self.by_recipe.get(recipe_name)
     }
@@ -992,6 +1007,116 @@ impl ProductIndex {
         }
     }
 
+    /// The one candidate whose inputs are strictly cheapest to obtain, or the
+    /// whole set unchanged.
+    ///
+    /// # The same metric as machines, not a second one that agrees with it
+    ///
+    /// [`crate::method::machine::obtain_costs`] is called, not reproduced:
+    /// a transitive fixpoint in thousandths of a raw input, recycling
+    /// excluded, seeded from [`Self::supply`] -- the same charted ground rule
+    /// 2 reads. Priced by that function, smelting comes out stone 5 < steel
+    /// 50 < electric 120, re-deriving the machine table's hard-coded order,
+    /// which is the validation it arrived with.
+    ///
+    /// # A preference, never a filter
+    ///
+    /// Only a **strict** minimum wins. A tie hands the set back and the caller
+    /// refuses as [`ProductRefusal::Ambiguous`] exactly as it did before this
+    /// existed, and a candidate whose ingredients cannot be priced is simply
+    /// not preferred rather than eliminated. That is the property that makes
+    /// this unable to turn an answerable goal into an unanswerable one -- and
+    /// it is why it is consulted only when rules 1 and 2 left a choice.
+    ///
+    /// # Barrelling, and why the metric rejects it by construction
+    ///
+    /// `empty-petroleum-gas-barrel` is one of petroleum-gas' five producers,
+    /// and the owner asked whether obtain cost ranks it below real
+    /// production. It does, and **not by luck**: emptying a barrel costs one
+    /// `X-barrel`, which costs one `barrel` plus 50 `X`, so the price of `X`
+    /// by that route is *always* `cost(X) + cost(barrel)/50` -- the fixpoint's
+    /// own answer for `X` plus a strictly positive constant. Since
+    /// `cost(X)` is the minimum over the real producers and is achieved by
+    /// one of them, barrelling can never be the strict minimum. Measured on
+    /// the seed-31337 explored dump: `basic-oil-processing` 2.222,
+    /// `advanced-oil-processing` 2.273, `empty-petroleum-gas-barrel` 2.322,
+    /// `light-oil-cracking` 4.917.
+    ///
+    /// The one way barrelling could win is if every real producer were
+    /// unpriceable -- and it cannot be, because the barrel route prices
+    /// through `X-barrel`, which prices through `X`. Unpriceable `X` makes
+    /// the barrel unpriceable too.
+    ///
+    /// # It UNDER-prices a multi-output recipe, and that is the wrong
+    /// direction
+    ///
+    /// `obtain_costs` charges a recipe's whole bill to each of its products,
+    /// so `advanced-oil-processing`'s heavy and light oil are free and its
+    /// petroleum looks cheap -- while a refinery running it *stalls* unless
+    /// something cracks the other two away. On the seed-31337 dump it still
+    /// loses (2.727 to `basic-oil-processing`'s 2.222) only because it also
+    /// drinks 50 water; take the water out of the bill and it wins. See
+    /// `the_metric_charges_a_whole_bill_to_each_co_product`, which pins that.
+    ///
+    /// Not patched here. The consequence is contained by
+    /// `FabricateRefusal::ManyFluidProducts`, a wall returned before any step
+    /// is emitted, so the bad pick refuses by name rather than building a rig
+    /// that plans green and moves nothing; and splitting a bill across
+    /// co-products is a decision with no obviously right answer rather than a
+    /// bug with a fix.
+    ///
+    /// Deterministic: ties in cost are broken by recipe name for the *sort*
+    /// only, and a tie in cost still refuses.
+    fn cheapest_to_obtain<'a>(
+        &'a self,
+        candidates: &[&'a FactorioRecipe],
+        product: &str,
+    ) -> Vec<&'a FactorioRecipe> {
+        /// Thousandths again on top of `obtain_costs`' own thousandths, so
+        /// dividing by a recipe's yield keeps six digits rather than three.
+        /// Integer throughout, so the comparison is exact and reproducible.
+        const YIELD_SCALE: u128 = 1000;
+
+        let wanted: BTreeSet<String> = candidates
+            .iter()
+            .flat_map(|r| r.ingredients.iter().flatten().map(|i| i.name.clone()))
+            .collect();
+        let cost =
+            crate::method::machine::obtain_costs(self.by_recipe.values(), &wanted, &self.supply);
+        let mut priced: Vec<(u128, &str, &'a FactorioRecipe)> = Vec::new();
+        for recipe in candidates {
+            let Some(amount) = recipe
+                .products
+                .iter()
+                .find(|p| p.name == product)
+                .map(|p| u128::from(p.amount))
+                .filter(|a| *a > 0)
+            else {
+                continue;
+            };
+            let mut inputs: u128 = 0;
+            let mut known = true;
+            for ingredient in recipe.ingredients.iter().flatten() {
+                match cost.get(&ingredient.name) {
+                    Some(c) => inputs += u128::from(ingredient.amount) * u128::from(*c),
+                    None => {
+                        known = false;
+                        break;
+                    }
+                }
+            }
+            if known {
+                priced.push((inputs * YIELD_SCALE / amount, recipe.name.as_str(), recipe));
+            }
+        }
+        priced.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
+        match priced.as_slice() {
+            [(_, _, only)] => vec![*only],
+            [(best, _, winner), (second, ..), ..] if best < second => vec![*winner],
+            _ => candidates.to_vec(),
+        }
+    }
+
     /// The one recipe in an admitted category that produces `product`, or a
     /// refusal naming which of the three walls was hit.
     ///
@@ -1053,6 +1178,19 @@ impl ProductIndex {
         // unknown supply leaves the set alone.
         let runnable = if runnable.len() > 1 {
             self.fed_from_the_ground(&runnable, categories)
+        } else {
+            runnable
+        };
+        // **Rule 3: prefer the recipe whose inputs are cheapest to obtain.**
+        //
+        // The same metric, the same function and the same
+        // preference-not-filter shape [`crate::method::machine`] uses to pick
+        // between machines. Consulted only when rules 1 and 2 have left more
+        // than one candidate, so it fires exactly where the old code refused
+        // as [`ProductRefusal::Ambiguous`] and cannot move a plan that had an
+        // answer.
+        let runnable = if runnable.len() > 1 {
+            self.cheapest_to_obtain(&runnable, product)
         } else {
             runnable
         };
@@ -1503,19 +1641,26 @@ mod product_index_tests {
         }
     }
 
-    /// Naming one of two ambiguous recipes answers the ambiguity rather than
-    /// restating it. `iron-gear-wheel` is made by a `crafting` recipe and a
-    /// `metallurgy` one, so with both categories admitted the unqualified
-    /// question has no answer and the qualified one does.
+    /// Naming a recipe **overrides the planner's own choice**, which is a
+    /// stronger claim than the one this test used to make.
+    ///
+    /// It asserted that the unqualified question had *no answer* for
+    /// `iron-gear-wheel`. Rule 3 gave it one: 2 iron-plate against 10
+    /// molten-iron is not a tie, and cost picks the `crafting` recipe -- the
+    /// same answer rule 2 reaches on any charted Nauvis map, and the reason
+    /// rule 3 exists. So the property worth pinning is that `via` still wins
+    /// over a preference the planner is now able to express.
     #[test]
-    fn naming_a_recipe_resolves_an_ambiguity_the_planner_cannot() {
+    fn naming_a_recipe_overrides_the_planners_own_choice() {
         let i = index();
         let machines = MachineTable::default();
         let both = Categories::only(["crafting", "metallurgy"]);
-        assert!(matches!(
-            i.sole_recipe_producing("iron-gear-wheel", &both),
-            Err(ProductRefusal::Ambiguous { .. })
-        ));
+        assert_eq!(
+            i.sole_recipe_producing("iron-gear-wheel", &both)
+                .map(|r| r.name.as_str()),
+            Ok("iron-gear-wheel"),
+            "unqualified, cost separates the pair and picks the cheaper bill"
+        );
         assert_eq!(
             i.recipe_producing(
                 "iron-gear-wheel",
@@ -1666,13 +1811,38 @@ mod product_index_tests {
         assert!(text.contains("no character inventory can hold"), "{text}");
     }
 
+    /// **Tier 3 still refuses -- on a genuine tie, which is the only case
+    /// rule 3 hands back.**
+    ///
+    /// This used `index()`'s gear pair until 2026-09-08, where the bills are
+    /// 2 iron-plate against 10 molten-iron; obtain cost separates those and
+    /// now picks the crafting recipe. So the refusal is demonstrated where it
+    /// still belongs: the same pair with the same bill, which no cost can
+    /// order. The message and the candidate list are unchanged, because
+    /// nothing about the refusal itself moved.
     #[test]
-    fn tier_three_refuses_to_choose_between_two_runnable_recipes() {
-        let i = index();
+    fn tier_three_refuses_to_choose_between_two_recipes_of_equal_cost() {
+        let tied = parse(
+            r#"{
+              "name": "casting-iron-gear-wheel", "valid": true, "enabled": false,
+              "hidden": false, "energy": 1, "category": "metallurgy",
+              "order": "b[casting]-a[iron-gear-wheel]",
+              "ingredients": [
+                { "name": "iron-plate", "ingredient_type": "item", "amount": 2 }
+              ],
+              "products": [
+                { "name": "iron-gear-wheel", "product_type": "item", "amount": 1,
+                  "independent_probability": 1, "shared_probability": { "min": 0, "max": 1 } }
+              ],
+              "group": "intermediate-products", "subgroup": "intermediate-product"
+            }"#,
+        );
+        let recipes = [iron_gear(), tied];
+        let i = ProductIndex::from_parts(recipes.iter(), ["iron-gear-wheel"]);
         let both = Categories::only(["crafting", "metallurgy"]);
         let err = i
             .sole_recipe_producing("iron-gear-wheel", &both)
-            .expect_err("two admitted recipes make it");
+            .expect_err("two admitted recipes make it, and they cost the same");
         let ProductRefusal::Ambiguous { candidates, .. } = &err else {
             panic!("expected tier 3, got {err:?}");
         };
@@ -2317,6 +2487,239 @@ mod unreachable_input_tests {
         assert!(
             !reachable.contains("plate"),
             "recycling armour must not count as a way to obtain a plate: {reachable:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Rule 3: cheapest to obtain
+    // -----------------------------------------------------------------------
+
+    /// `rn` with amounts, which is the whole subject here: barrelling is
+    /// cheap-looking precisely because one barrel carries fifty of the fluid,
+    /// and a fixture that priced every amount at 1 could not express it.
+    ///
+    /// `ingredients` are `(name, amount)`; so is `product`.
+    fn ra(
+        name: &str,
+        category: &str,
+        ingredients: &[(&str, u32)],
+        products: &[(&str, u32)],
+    ) -> FactorioRecipe {
+        let ing = ingredients
+            .iter()
+            .map(|(i, n)| format!(r#"{{"name":"{i}","ingredient_type":"item","amount":{n}}}"#))
+            .collect::<Vec<_>>()
+            .join(",");
+        let prod = products
+            .iter()
+            .map(|(p, n)| {
+                format!(
+                    r#"{{"name":"{p}","product_type":"item","amount":{n},
+                         "independent_probability":1,
+                         "shared_probability":{{"min":0,"max":1}}}}"#
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        recipe(&format!(
+            r#"{{"name":"{name}","valid":true,"enabled":true,"hidden":false,"energy":1,
+                 "order":"a","category":"{category}","group":"g","subgroup":"s",
+                 "ingredients":[{ing}],"products":[{prod}]}}"#
+        ))
+    }
+
+    /// Petroleum-gas' producers in miniature, with the real amounts: two
+    /// refinery recipes off charted crude, and the barrel pair that makes
+    /// `empty-gas-barrel` a candidate the ground-reachability rule **cannot**
+    /// drop -- filling a barrel is reachable the moment the gas is, so the
+    /// cycle closes and rule 2 keeps it.
+    fn gas_shaped() -> Vec<FactorioRecipe> {
+        vec![
+            ra("basic", "oil", &[("crude", 100)], &[("gas", 45)]),
+            // The real bill, water included, because the water is what
+            // decides this -- see
+            // `the_metric_charges_a_whole_bill_to_each_co_product`.
+            ra(
+                "advanced",
+                "oil",
+                &[("crude", 100), ("water", 50)],
+                &[("gas", 55), ("heavy", 25)],
+            ),
+            ra("barrel", "crafting", &[("plate", 1)], &[("barrel", 1)]),
+            ra(
+                "fill-gas-barrel",
+                "crafting",
+                &[("barrel", 1), ("gas", 50)],
+                &[("gas-barrel", 1)],
+            ),
+            ra(
+                "empty-gas-barrel",
+                "crafting",
+                &[("gas-barrel", 1)],
+                &[("barrel", 1), ("gas", 50)],
+            ),
+        ]
+    }
+
+    fn gas_cats() -> Categories {
+        Categories::only(["oil", "crafting"])
+    }
+
+    fn gas_index(recipes: &[FactorioRecipe]) -> ProductIndex {
+        ProductIndex::from_parts(recipes.iter(), ["gas", "barrel", "gas-barrel", "heavy"])
+            .with_ground_supply(["crude", "plate", "water"])
+    }
+
+    /// **A finding about the metric, recorded as a test because it decides a
+    /// real choice.**
+    ///
+    /// [`obtain_costs`](crate::method::machine::obtain_costs) charges a
+    /// recipe's **whole** bill to every one of its products independently --
+    /// `each = inputs / product.amount`, with no split across co-products. So
+    /// a multi-output recipe is systematically **under-priced**: its
+    /// co-products are free.
+    ///
+    /// That is exactly backwards for the case that matters here.
+    /// `advanced-oil-processing` makes three fluids at once and a refinery
+    /// running it stalls unless the other two are cracked away, so it is the
+    /// recipe a `via` preference should be *least* eager to pick -- and the
+    /// metric makes it look cheap. It loses on the real seed-31337 dump only
+    /// because it also drinks 50 water: 150 raw units over 55 gas (2.727)
+    /// against `basic-oil-processing`'s 100 over 45 (2.222). **Delete the
+    /// water and it wins**, which is what this asserts.
+    ///
+    /// Left as-is rather than patched, for two reasons. The metric is the
+    /// owner's ruling and is validated where it was validated (machines:
+    /// stone 5 < steel 50 < electric 120); and the consequence is contained,
+    /// because `FabricateRefusal::ManyFluidProducts` is a wall reached before
+    /// any step is emitted -- a multi-output pick refuses by name rather than
+    /// building a rig that backs up. Splitting a bill across co-products has
+    /// no obviously right answer (by amount? by value? both are circular) and
+    /// is a decision, not a fix.
+    #[test]
+    fn the_metric_charges_a_whole_bill_to_each_co_product() {
+        let recipes: Vec<FactorioRecipe> = gas_shaped()
+            .into_iter()
+            .map(|r| {
+                if r.name == "advanced" {
+                    ra(
+                        "advanced",
+                        "oil",
+                        &[("crude", 100)],
+                        &[("gas", 55), ("heavy", 25)],
+                    )
+                } else {
+                    r
+                }
+            })
+            .collect();
+        let index = gas_index(&recipes);
+        assert_eq!(
+            index
+                .sole_recipe_producing("gas", &gas_cats())
+                .map(|r| r.name.as_str()),
+            Ok("advanced"),
+            "100 crude over 55 gas beats 100 over 45 -- because the 25 heavy \
+             oil that comes with it is charged nothing at all"
+        );
+    }
+
+    /// **The owner's question, answered on the fixture rather than asserted.**
+    /// Three runnable recipes produce `gas` and rule 2 drops none of them, so
+    /// before rule 3 this was `Ambiguous` and the whole chemistry ladder
+    /// dead-ended. Cost picks `basic`: 100 crude over 45 gas, against
+    /// `advanced`'s 100 over 55 and the barrel's `cost(gas) + cost(barrel)/50`.
+    #[test]
+    fn obtain_cost_ranks_barrelling_below_real_production() {
+        let recipes = gas_shaped();
+        let index = gas_index(&recipes);
+        assert!(
+            index
+                .fed_from_the_ground(&index.recipes_producing("gas"), &gas_cats())
+                .len()
+                > 1,
+            "the premise: reachability alone does NOT drop the barrel, because \
+             filling one is reachable as soon as the gas is"
+        );
+        assert_eq!(
+            index
+                .sole_recipe_producing("gas", &gas_cats())
+                .map(|r| r.name.as_str()),
+            Ok("basic")
+        );
+    }
+
+    /// **And it loses to the *worse* real recipe too, which is the claim that
+    /// matters.** With `basic` gone, `advanced` is the only real producer and
+    /// is strictly more expensive than `basic` was -- yet the barrel still
+    /// does not win, because emptying one costs exactly `cost(gas)` plus the
+    /// barrel, and `cost(gas)` is by construction the best any real recipe
+    /// achieves. Without this test, the result above would be consistent with
+    /// barrelling winning the moment production got expensive.
+    #[test]
+    fn barrelling_loses_to_the_expensive_real_recipe_as_well() {
+        let recipes: Vec<FactorioRecipe> = gas_shaped()
+            .into_iter()
+            .filter(|r| r.name != "basic")
+            .collect();
+        let index = gas_index(&recipes);
+        assert_eq!(
+            index
+                .sole_recipe_producing("gas", &gas_cats())
+                .map(|r| r.name.as_str()),
+            Ok("advanced")
+        );
+    }
+
+    /// **A preference, never a filter: a tie still refuses.** Two recipes with
+    /// the same bill and the same yield cost the same, and rule 3 hands the
+    /// set back rather than breaking the tie alphabetically -- which is
+    /// exactly the accident the last mutation sweep caught elsewhere, where a
+    /// rule passed because every cheapest candidate also sorted first.
+    #[test]
+    fn a_tie_in_obtain_cost_still_refuses_by_name() {
+        let recipes = [
+            ra("alpha", "oil", &[("crude", 100)], &[("gas", 45)]),
+            ra("omega", "oil", &[("crude", 100)], &[("gas", 45)]),
+        ];
+        let index = ProductIndex::from_parts(recipes.iter(), ["gas"]).with_ground_supply(["crude"]);
+        assert!(matches!(
+            index.sole_recipe_producing("gas", &gas_cats()),
+            Err(ProductRefusal::Ambiguous { .. })
+        ));
+    }
+
+    /// **An unpriceable candidate is not preferred, and does not veto.**
+    ///
+    /// Asked of the private helper directly, because rule 2 drops an
+    /// unreachable candidate one line earlier and rule 3 would never see it --
+    /// so the property has to be tested where it lives.
+    ///
+    /// Building the case took a correction worth recording: an ingredient
+    /// *nothing produces* is not unpriceable, it is **raw and costs 1**, which
+    /// is `obtain_costs`' documented base case and would have made the
+    /// mystery recipe the winner for the right reason. The only genuinely
+    /// unpriceable thing is one reachable solely through a **cycle** -- here
+    /// `loopy` and `loopy2` make each other and nothing else makes either --
+    /// which is exactly the shape the fixpoint exists to survive.
+    #[test]
+    fn an_unpriceable_candidate_is_simply_not_preferred() {
+        let recipes = [
+            ra("basic", "oil", &[("crude", 100)], &[("gas", 45)]),
+            ra("looped", "oil", &[("loopy", 1)], &[("gas", 45)]),
+            ra("make-loopy", "crafting", &[("loopy2", 1)], &[("loopy", 1)]),
+            ra("make-loopy2", "crafting", &[("loopy", 1)], &[("loopy2", 1)]),
+        ];
+        let index = ProductIndex::from_parts(recipes.iter(), ["gas", "loopy", "loopy2"])
+            .with_ground_supply(["crude"]);
+        let candidates: Vec<&FactorioRecipe> = index.recipes_producing("gas");
+        assert_eq!(candidates.len(), 2, "both are candidates: {candidates:?}");
+        let chosen = index.cheapest_to_obtain(&candidates, "gas");
+        assert_eq!(chosen.len(), 1, "one strict winner: {chosen:?}");
+        assert_eq!(
+            chosen[0].name, "basic",
+            "the priceable one wins; the cyclic one is not preferred, and \
+             crucially does not make the pair refuse"
         );
     }
 }

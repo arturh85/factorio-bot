@@ -433,7 +433,7 @@ impl MachineTable {
 ///
 /// Only `wanted` names are returned: this exists to break ties between
 /// machines, and nothing else reads it.
-fn obtain_costs<'r, R>(
+pub(crate) fn obtain_costs<'r, R>(
     recipes: R,
     wanted: &BTreeSet<String>,
     ground: &BTreeSet<String>,

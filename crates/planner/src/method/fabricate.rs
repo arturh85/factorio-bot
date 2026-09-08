@@ -41,14 +41,36 @@
 //!   wrong for feeding an input;
 //! * **gives a fluid product a sink or refuses by name**, because a machine
 //!   whose output has nowhere to go stalls. One fluid out is sited and piped
-//!   into a buffer; several -- `advanced-oil-processing` -- is the
-//!   multi-output rule the owner has ruled on separately.
+//!   into a buffer, and so is each of several -- `advanced-oil-processing`
+//!   makes three, and each gets its own buffer and its own pipe run off its
+//!   own output box.
+//!
+//! # Two fluids out of one machine may not share a pipe
+//!
+//! A pipe segment in Factorio holds **one** fluid. An `oil-refinery`'s three
+//! output boxes sit two tiles apart on one edge -- derived, not remembered:
+//! its `pipe_connections` are at x offsets -2, 0 and +2 of a footprint whose
+//! half-width rounds to 2, so the port tiles of boxes 0, 1 and 2 are three
+//! tiles in a row. A run leaving one of them that crosses another's port
+//! **merges two boxes into one segment**, and a refinery that cannot put
+//! heavy-oil anywhere stops producing light-oil and petroleum-gas as well.
+//!
+//! So every run of this rig is routed against every *other* box's port tiles
+//! as obstacles, and the result is then **checked** rather than trusted:
+//! `route_between` pushes its own two ends' port tiles in unconditionally,
+//! outside its search, so no obstacle grid can be relied on alone. See
+//! [`FabricateRefusal::FluidOutputsWouldShareAPipe`].
+//!
+//! **This is an unguarded invariant made guarded, not an observed defect.**
+//! With one fluid out there is nothing to mix, and the neighbouring boxes a
+//! run crosses today are empty; the hazard becomes real exactly when a second
+//! product arrives.
 //!
 //! Every refusal is a wall rather than a shortfall, and each names the next
 //! missing thing: [`FabricateRefusal::NoFluidSource`],
 //! [`FabricateRefusal::ManyFluidIngredients`],
-//! [`FabricateRefusal::ManyFluidProducts`], [`FabricateRefusal::SinkTooSmall`]
-//! and [`FabricateRefusal::NoSinkSite`].
+//! [`FabricateRefusal::FluidOutputsWouldShareAPipe`],
+//! [`FabricateRefusal::SinkTooSmall`] and [`FabricateRefusal::NoSinkSite`].
 //!
 //! # What connectivity cannot check, stated because it is load-bearing
 //!
@@ -201,47 +223,77 @@ pub enum FabricateRefusal {
         boxes: Option<usize>,
     },
 
-    /// More than one fluid comes **out**, and each needs its own sink.
+    /// Two of the machine's output boxes would end up on **one pipe
+    /// segment**, which in Factorio can hold only one fluid.
     ///
-    /// The owner's ruling is that a machine whose output has nowhere to go
-    /// **stalls**, so a plan must give every fluid product a sink or refuse
-    /// loudly. One output is handled -- a buffer is sited and piped. Three,
-    /// which is `advanced-oil-processing`, is a separate piece of work the
-    /// owner has already ruled on and is deliberately not invented here.
+    /// # Why this is checked and not merely routed around
+    ///
+    /// Every run of the rig is routed with the other boxes' port tiles marked
+    /// as obstacles, so the search will not cross them. That is not
+    /// sufficient: [`crate::method::pipe::route_between`] pushes **its own two
+    /// ends' port tiles into the result unconditionally, outside the search**
+    /// -- its own doc says so -- so a tile no obstacle grid was ever consulted
+    /// about can still land in the run. This variant is the check that closes
+    /// that gap, and it names the tile two boxes both wanted.
+    ///
+    /// # It is a jam, not a slowdown
+    ///
+    /// A refinery that cannot put its heavy-oil anywhere stops producing
+    /// **all three** of its fluids, so mixing two boxes does not cost a
+    /// fraction of the output -- it costs the machine. And it does it
+    /// silently: every entity places 100% correctly.
     #[error(
-        "{recipe} runs in {machine} (category {category}) and produces {} fluids -- {} -- each \
-         of which needs somewhere to go or the {machine} stalls with a full output. One fluid \
-         out is sited and piped into a buffer; several is the multi-output rule, which is a \
-         separate decision",
-        fluids.len(),
-        fluids.join(", ")
+        "{recipe} runs in {machine} at {site} and its {first} and {second} runs would both use \
+         the tile at {tile}, joining two of the {machine}'s output fluidboxes into one pipe \
+         segment -- and a pipe segment holds one fluid, so the {machine} would jam and produce \
+         none of its {} products",
+        products
     )]
     #[diagnostic(
-        code(planner::many_fluid_products),
+        code(planner::fluid_outputs_would_share_a_pipe),
         help(
-            "see docs/superpowers/notes/2026-09-07-decisions-waiting-for-the-owner.md -- \
-             advanced-oil-processing's three outputs are the case this names"
+            "the machine's output connections are only a tile or two apart, so this is a siting \
+             problem: give the rig more clear ground on the machine's output side"
         )
     )]
-    ManyFluidProducts {
+    FluidOutputsWouldShareAPipe {
         recipe: String,
-        category: String,
         machine: String,
-        /// In recipe order, which is the game's own order.
-        fluids: Vec<String>,
+        site: String,
+        first: String,
+        second: String,
+        tile: String,
+        products: usize,
     },
 
-    /// The buffer this world offers cannot hold what the goal asked for.
+    /// The buffer this world offers cannot hold what this **goal** will put
+    /// in it.
     ///
-    /// **Derived from the prototype's own `volume`, never from a table of
-    /// vanilla capacities.** `volume` is `None` on a capture taken before the
-    /// mod sent it, and `None` is *"the sender did not say"* rather than
-    /// zero -- so this refuses only when the world positively states a
-    /// capacity that is too small. Erring towards permitting is deliberate:
-    /// refusing on silence would break every archived dump.
+    /// # The arithmetic is over the whole goal, not over one craft
+    ///
+    /// Until 2026-09-08 this compared one craft's output against the buffer,
+    /// which is the wrong quantity by a factor of however many crafts the goal
+    /// needs: a goal wanting 200 of a product the recipe makes 45 of at a time
+    /// runs the machine five times, and it is the *total* that has to land
+    /// somewhere. `runs` is finite for every goal that reaches this method --
+    /// [`crate::method::have::demand`] answers only for
+    /// [`Goal::Have`](crate::goal::Goal::Have) and
+    /// [`Goal::Produced`](crate::goal::Goal::Produced), both of which carry a
+    /// count -- so the product is always a number and never an unbounded rate.
+    ///
+    /// # `volume` is three-valued and absent is neither of the others
+    ///
+    /// See [`BufferCapacity`]. `map.json` -- the dump all four offline
+    /// baselines are measured on -- carries `volume: None` for **every**
+    /// fluidbox of every prototype, so reading absence as zero would refuse
+    /// every buffer on it and move every baseline. Reading it as infinite
+    /// would silence this guard on every archived dump. It is therefore
+    /// carried as its own answer and **named in the message**, so a run on an
+    /// old capture says it could not check rather than quietly passing.
     #[error(
-        "{recipe} makes {amount} {fluid} and the only buffer this world has is a {buffer}, \
-         which holds {volume}: the {machine} would fill it and stall"
+        "{recipe} makes {per_craft} {fluid} per craft and this goal runs the {machine} {runs} \
+         time(s), so {total} {fluid} has to land somewhere; the only buffer this world has is a \
+         {buffer}, which holds {volume}: the {machine} would fill it and stall"
     )]
     #[diagnostic(
         code(planner::sink_too_small),
@@ -251,7 +303,9 @@ pub enum FabricateRefusal {
         recipe: String,
         machine: String,
         fluid: String,
-        amount: u32,
+        per_craft: u32,
+        runs: u32,
+        total: u64,
         buffer: String,
         volume: f64,
     },
@@ -399,9 +453,17 @@ struct FluidRig {
     /// the ordinals that say which box each joins come from
     /// [`pipe::fluid_box_ordinals`].
     inbound: Vec<Run>,
-    outbound: Option<Run>,
-    /// The buffer to obtain and place, when a fluid product needed one.
-    buffer: Option<(String, Position)>,
+    /// One run per fluid **product**, each off its own output fluidbox.
+    ///
+    /// A `Vec` and not an `Option` since 2026-09-08: `advanced-oil-processing`
+    /// makes three, and a machine whose second and third products have nowhere
+    /// to go jams and then makes none of the first either. The runs are
+    /// resolved one after another against the ground the previous ones took
+    /// *and* against every other output box's port tiles -- see the module doc.
+    outbound: Vec<Run>,
+    /// The buffers to obtain and place, one per fluid product, in recipe
+    /// order and index-aligned with `outbound`.
+    buffers: Vec<(String, Position)>,
 }
 
 /// Every fluid product of `recipe`, in the game's own order, with its amount.
@@ -414,23 +476,59 @@ fn fluid_products(ctx: &ExpansionCtx, recipe: &FactorioRecipe) -> Vec<(String, u
         .collect()
 }
 
-/// The declared capacity of `name`'s fluidboxes, or `None` when the world did
-/// not say.
+/// What this world says a buffer prototype can hold -- **three answers, and
+/// absent is not either of the others.**
 ///
-/// The maximum over the prototype's boxes rather than the sum: a buffer's
-/// capacity is one box's, and summing would invent headroom out of a machine
-/// that happens to declare several.
-fn buffer_volume(state: &PlanState, name: &str) -> Option<f64> {
-    state
+/// This repo's recurring defect class is a lookup that cannot answer returning
+/// the same thing as one answering zero, and `volume` is exactly that shape:
+/// measured 2026-09-08, `map.json` and `map-31337-explored.json` carry
+/// `volume: None` on every fluidbox of every prototype, while
+/// `map-31337-water-and-oil.json` carries `storage-tank` 25,000 and the
+/// `oil-refinery`'s three **output** boxes at 100 each. Both are current
+/// captures of the same mod set; the field simply arrived between them.
+///
+/// So a caller must be able to tell the three apart, and the *message* must be
+/// able to say which it got.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum BufferCapacity {
+    /// At least one fluidbox declares a volume. The maximum over the boxes
+    /// rather than the sum: a buffer's capacity is one box's, and summing
+    /// would invent headroom out of a machine that happens to declare several.
+    Declared(f64),
+    /// The prototype has fluidboxes and **not one of them declares a volume**
+    /// -- *"this capture predates the field"*, not *"it holds nothing"*.
+    ///
+    /// Errs towards **permitting**, which is the unsafe direction, and that is
+    /// stated rather than hidden: the same choice `consumer_kw` makes for a
+    /// prototype it has never heard of, for the same reason -- refusing on
+    /// silence would break every archived dump, and a false refusal is a
+    /// plausible lie about the world rather than a diagnosable failure.
+    NotReported,
+    /// The prototype is unknown to this world, or carries no fluidboxes at
+    /// all. A thing with no fluidbox is not a buffer and cannot be piped
+    /// into; this is a different fact from a buffer of unknown size, and
+    /// collapsing the two would let a rig be planned against something that
+    /// can never hold a fluid.
+    NoFluidbox,
+}
+
+/// The declared capacity of `name`'s fluidboxes. See [`BufferCapacity`].
+fn buffer_capacity(state: &PlanState, name: &str) -> BufferCapacity {
+    let Some(boxes) = state
         .base()
         .globals
         .entity_prototypes
-        .get(name)?
-        .fluidbox_prototypes
-        .as_ref()?
+        .get(name)
+        .and_then(|proto| proto.fluidbox_prototypes.clone())
+        .filter(|boxes| !boxes.is_empty())
+    else {
+        return BufferCapacity::NoFluidbox;
+    };
+    boxes
         .iter()
         .filter_map(|b| b.volume)
         .max_by(|a, b| a.total_cmp(b))
+        .map_or(BufferCapacity::NotReported, BufferCapacity::Declared)
 }
 
 /// Site the machine, resolve both pipe runs, and refuse before any of it is
@@ -459,6 +557,7 @@ fn plan_fluid_rig(
     machine: &str,
     bill_fluids: &[(String, u32)],
     origin: &Position,
+    runs: u32,
 ) -> Result<FluidRig, PlannerError> {
     let state = &ctx.state;
     // **Which box takes which fluid, before anything is sited.** A refusal
@@ -485,16 +584,6 @@ fn plan_fluid_rig(
             .map_or(0, |(_, ordinal)| *ordinal)
     };
     let products = fluid_products(ctx, recipe);
-    if products.len() > 1 {
-        return Err(PlannerError::CannotFabricate(Box::new(
-            FabricateRefusal::ManyFluidProducts {
-                recipe: recipe.name.clone(),
-                category: recipe.category.clone(),
-                machine: machine.to_string(),
-                fluids: products.into_iter().map(|(f, _)| f).collect(),
-            },
-        )));
-    }
 
     // Nothing fluid at all: the machine is sited where every other method
     // sites one, beside the bot that owns the chain, and this is the whole of
@@ -509,8 +598,8 @@ fn plan_fluid_rig(
             site,
             pipe: String::new(),
             inbound: Vec::new(),
-            outbound: None,
-            buffer: None,
+            outbound: Vec::new(),
+            buffers: Vec::new(),
         });
     }
 
@@ -572,9 +661,14 @@ fn plan_fluid_rig(
         .iter()
         .map(|(fluid, _)| box_of(fluid, &input_ordinals))
         .collect();
-    let out_box = products
-        .first()
-        .map(|(fluid, _)| box_of(fluid, &output_ordinals));
+    // **Every product's box, not just the first.** A site chosen on one
+    // output port and refused on another is the same "two searches that never
+    // agree on a site" the inbound runs already paid for, one product further
+    // out -- and with three products there are three chances to hit it.
+    let out_boxes: Vec<usize> = products
+        .iter()
+        .map(|(fluid, _)| box_of(fluid, &output_ordinals))
+        .collect();
     let ports_fit = |candidate: &Position| {
         in_boxes.iter().all(|ordinal| {
             pipe::port_is_placeable(
@@ -585,13 +679,13 @@ fn plan_fluid_rig(
                 Some(*ordinal),
                 &pipe,
             )
-        }) && out_box.is_none_or(|ordinal| {
+        }) && out_boxes.iter().all(|ordinal| {
             pipe::port_is_placeable(
                 state,
                 machine,
                 candidate,
                 Some("output"),
-                Some(ordinal),
+                Some(*ordinal),
                 &pipe,
             )
         })
@@ -684,17 +778,48 @@ fn plan_fluid_rig(
     // Reserved here rather than inside `route_between` because only this
     // function knows a *second* run is coming: a lone run to a machine may
     // use whichever side it likes.
-    let mut other_port_tiles: Vec<Rect> =
-        if let Some(ordinal) = out_box.filter(|_| !sources.is_empty()) {
-            pipe::fluid_ports(state, machine, &site, Some("output"))?
-                .into_iter()
-                .filter(|port| port.box_ordinal == ordinal)
-                .flat_map(|port| port.tiles())
-                .filter_map(|tile| state.collision_area(&pipe, &tile))
-                .collect()
-        } else {
-            Vec::new()
-        };
+    //
+    // **With more than one product this stops being an ordering nicety and
+    // becomes the jam guard.** The three runs off an `oil-refinery` leave
+    // from port tiles three in a row, so each one has to keep off the other
+    // two -- see the module doc, and `FluidOutputsWouldShareAPipe` for the
+    // check that follows, because reserving ground is necessary and not
+    // sufficient.
+    let port_tiles = |direction: &'static str,
+                      wanted: &[usize]|
+     -> Result<Vec<(usize, Position, Rect)>, PlannerError> {
+        Ok(pipe::fluid_ports(state, machine, &site, Some(direction))?
+            .into_iter()
+            .filter(|port| wanted.contains(&port.box_ordinal))
+            .flat_map(|port| {
+                let ordinal = port.box_ordinal;
+                port.tiles().into_iter().map(move |tile| (ordinal, tile))
+            })
+            .filter_map(|(ordinal, tile)| {
+                state
+                    .collision_area(&pipe, &tile)
+                    .map(|area| (ordinal, tile, area))
+            })
+            .collect())
+    };
+    // Every output port of every product, kept whole so each outbound run
+    // below can exclude the *others* by ordinal.
+    let output_port_tiles: Vec<(usize, Position, Rect)> = if products.is_empty() {
+        Vec::new()
+    } else {
+        port_tiles("output", &out_boxes)?
+    };
+    // The inbound runs keep off all of them: an inbound run is free to pick
+    // any side of the machine, and whichever output port it crosses is one
+    // this rig is about to stand a pipe on.
+    let mut other_port_tiles: Vec<Rect> = if sources.is_empty() {
+        Vec::new()
+    } else {
+        output_port_tiles
+            .iter()
+            .map(|(_, _, area)| area.clone())
+            .collect()
+    };
 
     // ---- in ----
     //
@@ -740,195 +865,279 @@ fn plan_fluid_rig(
     }
 
     // ---- out ----
-    let mut buffer = None;
-    let outbound = match products.first() {
-        Some((fluid, amount)) => {
-            let tank = buffer_prototype(state, fluid, machine)?;
-            if let Some(volume) = buffer_volume(state, &tank)
-                && volume < f64::from(*amount)
-            {
+    //
+    // **One buffer and one run per fluid product, resolved in order and each
+    // against everything the previous ones took.**
+    //
+    // The single-product version of this loop is unchanged in every detail
+    // below -- the buffer's own port tiles, the machine's footprint, the
+    // route-as-acceptance-test. What is new is that `taken` now also carries
+    // the *other* products' output port tiles and the runs and tanks already
+    // resolved, so three runs off one refinery cannot converge on one tile.
+    let mut buffers: Vec<(String, Position)> = Vec::with_capacity(products.len());
+    let mut outbound: Vec<Run> = Vec::with_capacity(products.len());
+    for (fluid, per_craft) in &products {
+        let tank = buffer_prototype(state, fluid, machine)?;
+        let ordinal = box_of(fluid, &output_ordinals);
+        // **The whole goal's output, not one craft's.** `runs` is finite for
+        // every goal that reaches this method (see `SinkTooSmall`'s doc), so
+        // this is a number rather than a rate; `u64` because the product of
+        // two `u32`s is not a `u32`.
+        let total = u64::from(*per_craft) * u64::from(runs);
+        match buffer_capacity(state, &tank) {
+            BufferCapacity::Declared(volume) if volume < total as f64 => {
                 return Err(PlannerError::CannotFabricate(Box::new(
                     FabricateRefusal::SinkTooSmall {
                         recipe: recipe.name.clone(),
                         machine: machine.to_string(),
                         fluid: fluid.clone(),
-                        amount: *amount,
+                        per_craft: *per_craft,
+                        runs,
+                        total,
                         buffer: tank.clone(),
                         volume,
                     },
                 )));
             }
-            // The inbound run's tiles are ground already spoken for: it is
-            // resolved and not emitted, so nothing on any grid knows about
-            // it and a tank sited blindly would stand on it.
-            let mut taken: Vec<Rect> = inbound
-                .iter()
-                .flat_map(|run| run.tiles.iter())
-                .filter_map(|tile| state.collision_area(&pipe, tile))
-                .collect();
-            // **And the machine's own footprint, for the same reason.** It is
-            // resolved and not emitted either, so `free_area_near_where` reads
-            // the ground under it as clear and hands the buffer the machine's
-            // own site: `place oil-refinery at [137.5, -352.5]` and `place
-            // storage-tank at [137.5, -352.5]` in one plan, on
-            // `gathered:crude-oil` + `producing:petroleum-gas:45`, seed 31337.
-            // Whichever is placed second fails its own `AreaFree`, and the
-            // refusal names a tile rather than the two things that wanted it.
-            taken.push(machine_area.clone());
-            // **And the machine's OUTPUT PORT tiles, which this very run is
-            // about to stand pipes on.** They were computed above and handed
-            // to the inbound route as ground to keep off; the buffer search
-            // needs the same fact for the same reason, and until 2026-09-08
-            // it never got it. A tank at `[145.5, -362.5]` swallowed the
-            // refinery's own output connection at `[145.5, -361.5]`, the
-            // outbound run pushed that tile in unconditionally (see
-            // `route_between`), and the plan died at schedule time on the
-            // *tank's* `AreaFree` -- `storage-tank fits at [145.5, -362.5]
-            // -- occupied by pipe`.
-            taken.extend(other_port_tiles.iter().cloned());
-            // **A site is only clear if a run can actually reach it.**
-            //
-            // Siting and routing were two searches: `free_area_near_where`
-            // returned the nearest footprint that fitted, and the route was
-            // asked afterwards and could only refuse. Excluding the machine's
-            // own ground (the line above) is what exposed that -- the buffer
-            // moved off the refinery onto the next fitting tile, and the
-            // outbound run then had to cross the inbound one to get there:
-            // `no route to the storage-tank's connection ..., blocked by 4
-            // tile(s)`, on eight of this module's own fixtures at once.
-            // Nothing was wrong with either half; they simply never agreed on
-            // a site.
-            //
-            // So the route is the acceptance test. `free_area_near_where`
-            // walks its rings outward and takes the first site that *fits and
-            // routes*, which is the nearest such site by construction. The
-            // winner is routed twice -- once here, once below -- because
-            // `accept` is `Fn` and cannot hand the route back; that is one
-            // extra search per expansion, against a refusal for a rig that was
-            // buildable two tiles further out.
-            let routes_to = |candidate: &Position, area: Rect| {
-                route_between(
-                    state,
-                    &PipeEnd {
-                        name: machine,
-                        position: &site,
-                        area: machine_area.clone(),
-                        production_type: Some("output"),
-                        port_index: out_box,
-                    },
-                    &PipeEnd {
-                        name: &tank,
-                        position: candidate,
-                        area,
-                        production_type: None,
-                        port_index: None,
-                    },
-                    &pipe,
-                    &taken,
-                )
-                .is_ok()
-            };
-            // **A buffer's own PORT TILES are ground it needs, and they are
-            // not inside its footprint.**
-            //
-            // A `storage-tank`'s pipe connections sit at its corners, one
-            // tile diagonally *out*, so a tank cleared of the machine by its
-            // footprint alone still reaches under it: on
-            // `gathered:crude-oil` + `produced:petroleum-gas:45:
-            // basic-oil-processing`, seed 31337, the ring search took the
-            // first ring whose 2.59-wide box clears a 4.4-wide `oil-refinery`
-            // -- and **every candidate on that ring** has a connection tile
-            // on the refinery's own bottom row (`[141.5, -360.5]` ...
-            // `[145.5, -360.5]` for a refinery at `[143.5, -358.5]`).
-            //
-            // `route_between` then pushes both ends' port tiles into the run
-            // *unconditionally, outside the search* -- its own doc says so --
-            // and checks them with `is_area_free`, which cannot see a machine
-            // that is not emitted yet. So the run laid a pipe on the
-            // refinery's footprint, nothing ordered the two placements, and
-            // the plan died at SCHEDULE time on the refinery's own
-            // `AreaFree`: `oil-refinery fits at [143.5, -358.5] ... does not
-            // hold there`, which named a tile and blamed a chain owner for a
-            // fact about the ground.
-            //
-            // This is the mirror of `pipe::port_is_placeable`, which asks
-            // whether the *machine's* port survives the *source*. Nobody
-            // asked the reverse until an oil field with a charted shoreline
-            // put a refinery four tiles from its buffer.
-            let ports_clear = |candidate: &Position| {
-                let Ok(ports) = pipe::fluid_ports(state, &tank, candidate, None) else {
-                    return false;
-                };
-                ports.iter().flat_map(FluidPort::tiles).all(|tile| {
-                    state
-                        .collision_area(&pipe, &tile)
-                        .is_some_and(|area| !taken.iter().any(|t| overlaps(&area, t)))
-                })
-            };
-            let clear = |candidate: &Position| {
-                state.collision_area(&tank, candidate).is_some_and(|area| {
-                    !taken.iter().any(|t| overlaps(&area, t))
-                        && ports_clear(candidate)
-                        && routes_to(candidate, area.clone())
-                })
-            };
-            let Some(tank_site) = free_area_near_where(state, &site, &tank, clear) else {
-                return Err(PlannerError::CannotFabricate(Box::new(
-                    FabricateRefusal::NoSinkSite {
-                        recipe: recipe.name.clone(),
-                        machine: machine.to_string(),
-                        fluid: fluid.clone(),
-                        buffer: tank.clone(),
-                        site: site.to_string(),
-                    },
-                )));
-            };
-            let Some(tank_area) = state.collision_area(&tank, &tank_site) else {
+            // The world states a capacity and it is enough.
+            BufferCapacity::Declared(_) => {}
+            // **This capture predates `volume`.** Permit, which is the unsafe
+            // direction, and say so where a reader will see it rather than
+            // here -- the buffer's own placement label carries it.
+            BufferCapacity::NotReported => {}
+            // Not a buffer at all. `buffer_prototype` chose it, so this is a
+            // statement about the world rather than about the choice, and it
+            // is the one case where silence must not permit: a pipe into a
+            // thing with no fluidbox is a pipe into nothing.
+            BufferCapacity::NoFluidbox => {
                 return Err(PlannerError::FluidPortUnknown {
                     prototype: tank.clone(),
-                    why: "the world has no collision box for it, so its footprint cannot be \
-                          reserved"
+                    why: "this world gives it no fluidbox_prototypes at all, so nothing can be \
+                          piped into it and it cannot be the sink for a fluid product"
                         .to_string(),
                 });
-            };
-            let tiles = route_between(
+            }
+        }
+
+        // The inbound runs' tiles are ground already spoken for: they are
+        // resolved and not emitted, so nothing on any grid knows about them
+        // and a tank sited blindly would stand on one.
+        let mut taken: Vec<Rect> = inbound
+            .iter()
+            .flat_map(|run| run.tiles.iter())
+            .filter_map(|tile| state.collision_area(&pipe, tile))
+            .collect();
+        // **And the machine's own footprint, for the same reason.** It is
+        // resolved and not emitted either, so `free_area_near_where` reads
+        // the ground under it as clear and hands the buffer the machine's
+        // own site: `place oil-refinery at [137.5, -352.5]` and `place
+        // storage-tank at [137.5, -352.5]` in one plan, on
+        // `gathered:crude-oil` + `producing:petroleum-gas:45`, seed 31337.
+        // Whichever is placed second fails its own `AreaFree`, and the
+        // refusal names a tile rather than the two things that wanted it.
+        taken.push(machine_area.clone());
+        // **And every OTHER output box's port tiles.** This is the jam guard
+        // of the module doc: a run leaving box 1 that crosses box 0's port
+        // joins two boxes into one pipe segment, a segment holds one fluid,
+        // and the machine then produces none of its three products. Its own
+        // box is deliberately not excluded -- that is where this run starts.
+        taken.extend(
+            output_port_tiles
+                .iter()
+                .filter(|(other, _, _)| *other != ordinal)
+                .map(|(_, _, area)| area.clone()),
+        );
+        // **And the input ports, and everything the earlier products took.**
+        // `other_port_tiles` accumulated the inbound runs' own tiles above.
+        taken.extend(other_port_tiles.iter().cloned());
+        for run in &outbound {
+            taken.extend(
+                run.tiles
+                    .iter()
+                    .filter_map(|tile| state.collision_area(&pipe, tile)),
+            );
+        }
+        for (earlier, position) in &buffers {
+            if let Some(area) = state.collision_area(earlier, position) {
+                taken.push(area);
+            }
+        }
+        // **A site is only clear if a run can actually reach it.**
+        //
+        // Siting and routing were two searches: `free_area_near_where`
+        // returned the nearest footprint that fitted, and the route was
+        // asked afterwards and could only refuse. Excluding the machine's
+        // own ground (the line above) is what exposed that -- the buffer
+        // moved off the refinery onto the next fitting tile, and the
+        // outbound run then had to cross the inbound one to get there:
+        // `no route to the storage-tank's connection ..., blocked by 4
+        // tile(s)`, on eight of this module's own fixtures at once.
+        // Nothing was wrong with either half; they simply never agreed on
+        // a site.
+        //
+        // So the route is the acceptance test. `free_area_near_where`
+        // walks its rings outward and takes the first site that *fits and
+        // routes*, which is the nearest such site by construction. The
+        // winner is routed twice -- once here, once below -- because
+        // `accept` is `Fn` and cannot hand the route back; that is one
+        // extra search per expansion, against a refusal for a rig that was
+        // buildable two tiles further out.
+        let routes_to = |candidate: &Position, area: Rect| {
+            route_between(
                 state,
                 &PipeEnd {
                     name: machine,
                     position: &site,
                     area: machine_area.clone(),
                     production_type: Some("output"),
-                    // The box the recipe's own `fluidbox_index` names, or the
-                    // first when it names none. One fluid product; two are
-                    // refused above.
-                    port_index: out_box,
+                    port_index: Some(ordinal),
                 },
                 &PipeEnd {
                     name: &tank,
-                    position: &tank_site,
-                    area: tank_area,
+                    position: candidate,
+                    area,
                     production_type: None,
                     port_index: None,
                 },
                 &pipe,
                 &taken,
-            )?;
-            buffer = Some((tank.clone(), tank_site));
-            Some(Run {
-                fluid: fluid.clone(),
-                other: tank,
-                tiles,
+            )
+            .is_ok()
+        };
+        // **A buffer's own PORT TILES are ground it needs, and they are
+        // not inside its footprint.**
+        //
+        // A `storage-tank`'s pipe connections sit at its corners, one
+        // tile diagonally *out*, so a tank cleared of the machine by its
+        // footprint alone still reaches under it: on
+        // `gathered:crude-oil` + `produced:petroleum-gas:45:
+        // basic-oil-processing`, seed 31337, the ring search took the
+        // first ring whose 2.59-wide box clears a 4.4-wide `oil-refinery`
+        // -- and **every candidate on that ring** has a connection tile
+        // on the refinery's own bottom row (`[141.5, -360.5]` ...
+        // `[145.5, -360.5]` for a refinery at `[143.5, -358.5]`).
+        //
+        // `route_between` then pushes both ends' port tiles into the run
+        // *unconditionally, outside the search* -- its own doc says so --
+        // and checks them with `is_area_free`, which cannot see a machine
+        // that is not emitted yet. So the run laid a pipe on the
+        // refinery's footprint, nothing ordered the two placements, and
+        // the plan died at SCHEDULE time on the refinery's own
+        // `AreaFree`: `oil-refinery fits at [143.5, -358.5] ... does not
+        // hold there`, which named a tile and blamed a chain owner for a
+        // fact about the ground.
+        //
+        // This is the mirror of `pipe::port_is_placeable`, which asks
+        // whether the *machine's* port survives the *source*. Nobody
+        // asked the reverse until an oil field with a charted shoreline
+        // put a refinery four tiles from its buffer.
+        let ports_clear = |candidate: &Position| {
+            let Ok(ports) = pipe::fluid_ports(state, &tank, candidate, None) else {
+                return false;
+            };
+            ports.iter().flat_map(FluidPort::tiles).all(|tile| {
+                state
+                    .collision_area(&pipe, &tile)
+                    .is_some_and(|area| !taken.iter().any(|t| overlaps(&area, t)))
             })
+        };
+        let clear = |candidate: &Position| {
+            state.collision_area(&tank, candidate).is_some_and(|area| {
+                !taken.iter().any(|t| overlaps(&area, t))
+                    && ports_clear(candidate)
+                    && routes_to(candidate, area.clone())
+            })
+        };
+        let Some(tank_site) = free_area_near_where(state, &site, &tank, clear) else {
+            return Err(PlannerError::CannotFabricate(Box::new(
+                FabricateRefusal::NoSinkSite {
+                    recipe: recipe.name.clone(),
+                    machine: machine.to_string(),
+                    fluid: fluid.clone(),
+                    buffer: tank.clone(),
+                    site: site.to_string(),
+                },
+            )));
+        };
+        let Some(tank_area) = state.collision_area(&tank, &tank_site) else {
+            return Err(PlannerError::FluidPortUnknown {
+                prototype: tank.clone(),
+                why: "the world has no collision box for it, so its footprint cannot be \
+                      reserved"
+                    .to_string(),
+            });
+        };
+        let tiles = route_between(
+            state,
+            &PipeEnd {
+                name: machine,
+                position: &site,
+                area: machine_area.clone(),
+                production_type: Some("output"),
+                // The box the recipe's own `fluidbox_index` names, or the
+                // one its position in the recipe implies. Never `None`:
+                // `select(ports, None)` returns *every* port, and on a
+                // three-output refinery that is a run to whichever box the
+                // pathfinder reaches first.
+                port_index: Some(ordinal),
+            },
+            &PipeEnd {
+                name: &tank,
+                position: &tank_site,
+                area: tank_area,
+                production_type: None,
+                port_index: None,
+            },
+            &pipe,
+            &taken,
+        )?;
+
+        // **Reserving the ground was necessary and is not sufficient.**
+        //
+        // `route_between` pushes both ends' port tiles into the result
+        // *unconditionally, outside its own search*, so `taken` cannot
+        // stop a foreign port tile arriving in the run. Nothing before
+        // this line has actually established the thing the module doc
+        // promises, and a refinery whose boxes share a segment jams
+        // silently. So the run is inspected.
+        if let Some((other, tile, _)) = output_port_tiles
+            .iter()
+            .find(|(other, tile, _)| *other != ordinal && tiles.contains(tile))
+        {
+            let name_of = |wanted: usize| {
+                products
+                    .iter()
+                    .zip(&out_boxes)
+                    .find(|(_, o)| **o == wanted)
+                    .map_or_else(|| format!("box {wanted}"), |((f, _), _)| f.clone())
+            };
+            return Err(PlannerError::CannotFabricate(Box::new(
+                FabricateRefusal::FluidOutputsWouldShareAPipe {
+                    recipe: recipe.name.clone(),
+                    machine: machine.to_string(),
+                    site: site.to_string(),
+                    first: fluid.clone(),
+                    second: name_of(*other),
+                    tile: tile.to_string(),
+                    products: products.len(),
+                },
+            )));
         }
-        None => None,
-    };
+
+        buffers.push((tank.clone(), tank_site));
+        outbound.push(Run {
+            fluid: fluid.clone(),
+            other: tank,
+            tiles,
+        });
+    }
 
     Ok(FluidRig {
         site,
         pipe,
         inbound,
         outbound,
-        buffer,
+        buffers,
     })
 }
 
@@ -1001,16 +1210,22 @@ impl Method for Fabricate {
             .bot(ctx.chain_actor)
             .map(|b| b.position.clone())
             .unwrap_or_default();
+        // **How many times the machine runs, computed before the rig and not
+        // after.** It used to be derived below, among the emission; the sink
+        // test needs it, because what has to fit in a buffer is the whole
+        // goal's output and not one craft's. Moving it up changes no value --
+        // it reads only `recipe`, `item` and `need`, all of which are already
+        // settled here.
+        let per_craft = output_per_craft(&recipe, item);
+        let runs = need.div_ceil(per_craft);
         // Both fluid ends, and the machine's site with them: a fluid
         // ingredient moves the machine next to the thing that supplies it.
         // Every refusal in here is returned before a step is emitted.
-        let rig = plan_fluid_rig(ctx, goal, &recipe, &machine, &bill.fluids, &from)?;
+        let rig = plan_fluid_rig(ctx, goal, &recipe, &machine, &bill.fluids, &from, runs)?;
         let site = rig.site.clone();
 
         // ---- nothing below refuses; from here it is all emission ----
 
-        let per_craft = output_per_craft(&recipe, item);
-        let runs = need.div_ceil(per_craft);
         // The machine's own speed against the recipe's own energy. Named
         // `smelting_ticks` for its first caller and generic in what it does:
         // it reads `crafting_speed` for whichever entity is acting.
@@ -1109,12 +1324,12 @@ impl Method for Fabricate {
             // itself charged when `method::extract` sized the supply that
             // answered for it.
             let mut occupants = vec![plain_entity(&ctx.state, &machine, &site)];
-            for run in rig.inbound.iter().chain(rig.outbound.as_ref()) {
+            for run in rig.inbound.iter().chain(rig.outbound.iter()) {
                 for tile in &run.tiles {
                     occupants.push(plain_entity(&ctx.state, &rig.pipe, tile));
                 }
             }
-            if let Some((tank, tank_site)) = &rig.buffer {
+            for (tank, tank_site) in &rig.buffers {
                 occupants.push(plain_entity(&ctx.state, tank, tank_site));
             }
             let powering = crate::method::power::ensure_powered(
@@ -1301,7 +1516,7 @@ impl Method for Fabricate {
         // route was searched around the machine's own footprint and the
         // `AreaFree` on every placement is the executor's check.
         let mut last_pipe: Option<usize> = None;
-        for run in rig.inbound.iter().chain(rig.outbound.as_ref()) {
+        for run in rig.inbound.iter().chain(rig.outbound.iter()) {
             let count = u32::try_from(run.tiles.len()).unwrap_or(u32::MAX);
             steps.push(Step::Subgoal(Goal::Have {
                 item: rig.pipe.clone(),
@@ -1322,7 +1537,11 @@ impl Method for Fabricate {
                 last_pipe = Some(steps.len() - 1);
             }
         }
-        if let Some((tank, tank_site)) = &rig.buffer {
+        // One buffer per fluid product, index-aligned with `rig.outbound` so
+        // the label can name the fluid it catches. With three of them a plan
+        // reader needs to know which tank is which, and "catch what the
+        // oil-refinery makes" three times over says nothing.
+        for ((tank, tank_site), run) in rig.buffers.iter().zip(rig.outbound.iter()) {
             steps.push(Step::Subgoal(Goal::Have {
                 item: tank.clone(),
                 count: 1,
@@ -1330,10 +1549,27 @@ impl Method for Fabricate {
                 via: None,
             }));
             let entity = plain_entity(&ctx.state, tank, tank_site);
+            // **The label says when the capacity could not be checked.** A
+            // capture that predates `volume` permits the buffer (see
+            // `BufferCapacity::NotReported`), and erring towards permitting is
+            // only honest if a reader can see that it happened.
+            let unchecked = matches!(
+                buffer_capacity(&ctx.state, tank),
+                BufferCapacity::NotReported
+            );
             steps.push(place_step(
                 ctx,
                 entity,
-                &format!("catch what the {machine} at {site} makes"),
+                &format!(
+                    "catch the {} the {machine} at {site} makes{}",
+                    run.fluid,
+                    if unchecked {
+                        " (this capture reports no fluidbox volume, so its capacity was not \
+                         checked)"
+                    } else {
+                        ""
+                    }
+                ),
             ));
         }
 

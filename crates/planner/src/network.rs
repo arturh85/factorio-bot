@@ -213,16 +213,46 @@ impl ActionNetwork {
     /// nothing, and `ResourceAvailable` has no producing effect at all: ore in
     /// the ground is not made by an action.
     ///
-    /// Cost is O(n² · (V+E)): every candidate edge runs a full `validate()`,
-    /// which rebuilds the graph and topologically sorts it. The second pass
-    /// doubles the pair scan and not the `validate()` count — a pair is only
-    /// linked in the pass its own scope names, and the `validate()` is what
-    /// dominates. Networks here are
-    /// expected in the hundreds of actions at most, and inference runs once at
-    /// planning time, not per tick. If that stops holding, replace the
-    /// validate-and-rollback with a DFS reachability check from `to` to `from`
-    /// before pushing the edge.
+    /// # Cost, and the check that used to dominate it
+    ///
+    /// The pair scan is O(n²) and unavoidable in this form. What was avoidable
+    /// was the cycle check: every *accepted* candidate ran a full
+    /// `validate()`, which rebuilt the whole `DiGraph` from scratch and
+    /// topologically sorted it, making the accepted-edge term O(n²·(V+E)).
+    /// That was ~5% of a 441-action plan and ~9% of a 2,117-action one, and
+    /// growing — this method's own doc had said for months that the remedy was
+    /// "a DFS reachability check from `to` to `from` before pushing the edge",
+    /// which is what it now does.
+    ///
+    /// The equivalence is exact rather than approximate, and rests on one
+    /// precondition: **the network is acyclic when inference starts**, checked
+    /// once below. Given that, pushing `producer -> consumer` closes a cycle
+    /// if and only if `producer` is already reachable from `consumer`, so one
+    /// short-circuiting DFS over an incrementally maintained successor map
+    /// answers exactly what the toposort answered. A network that arrives
+    /// cyclic returns immediately: the old loop would have linked and popped
+    /// every single candidate, inferring nothing, so returning is the same
+    /// outcome said out loud.
+    ///
+    /// Nothing about determinism changes. Reachability is a *boolean* about
+    /// the graph, not a choice among candidates — the DFS visits in whatever
+    /// order it likes and cannot answer differently for it — and the pair scan
+    /// still runs in ascending `(pass, consumer, producer)` order, which is
+    /// what decides which edge a cycle costs.
     pub fn infer_edges(&mut self) {
+        if self.validate().is_err() {
+            return;
+        }
+        // Endpoints outside `actions` are skipped for the same reason
+        // `as_graph` skips them: a toposort never saw them, so reachability
+        // must not either, or an edge could be refused because of a path
+        // through an action this network does not have.
+        let mut succ: BTreeMap<ActionId, BTreeSet<ActionId>> = BTreeMap::new();
+        for edge in &self.edges {
+            if self.actions.contains_key(&edge.from) && self.actions.contains_key(&edge.to) {
+                succ.entry(edge.from).or_default().insert(edge.to);
+            }
+        }
         let ids: Vec<ActionId> = self.actions.keys().copied().collect();
         // World-scoped pairings first, then the rest. See this method's doc
         // for why the order decides which edge a cycle costs.
@@ -280,17 +310,19 @@ impl ActionNetwork {
                     {
                         continue;
                     }
-                    if self
-                        .edges
-                        .iter()
-                        .any(|e| e.from == *producer && e.to == *consumer)
+                    if succ
+                        .get(producer)
+                        .is_some_and(|onward| onward.contains(consumer))
                     {
                         continue;
                     }
-                    self.link(*producer, *consumer, 0);
-                    if self.validate().is_err() {
-                        self.edges.pop();
+                    // The whole of the old validate-and-rollback, in the form
+                    // the doc above always said it should take.
+                    if reaches(&succ, *consumer, *producer) {
+                        continue;
                     }
+                    self.link(*producer, *consumer, 0);
+                    succ.entry(*producer).or_default().insert(*consumer);
                 }
             }
         }
@@ -387,6 +419,46 @@ impl ActionNetwork {
             Err(cycle) => Err(PlannerError::CyclicNetwork(graph[cycle.node_id()])),
         }
     }
+}
+
+/// Is `to` reachable from `from` along `succ`?
+///
+/// A depth-first walk that stops the moment it arrives, with an explicit stack
+/// rather than recursion: a 2,117-action network is well within a stack frame
+/// budget today, but the depth of this walk is the depth of a *plan*, and a
+/// planner that overflowed the stack on a big goal would report a crash where
+/// it means "this plan is deep".
+///
+/// Ordered collections throughout, though nothing here depends on the order:
+/// the answer is a boolean about the graph, and every path either exists or
+/// does not whatever sequence the walk takes.
+fn reaches(
+    succ: &BTreeMap<ActionId, BTreeSet<ActionId>>,
+    from: ActionId,
+    to: ActionId,
+) -> bool {
+    if from == to {
+        return true;
+    }
+    let mut seen: BTreeSet<ActionId> = BTreeSet::new();
+    let mut stack: Vec<ActionId> = vec![from];
+    while let Some(node) = stack.pop() {
+        if !seen.insert(node) {
+            continue;
+        }
+        let Some(onward) = succ.get(&node) else {
+            continue;
+        };
+        for next in onward {
+            if *next == to {
+                return true;
+            }
+            if !seen.contains(next) {
+                stack.push(*next);
+            }
+        }
+    }
+    false
 }
 
 #[cfg(test)]

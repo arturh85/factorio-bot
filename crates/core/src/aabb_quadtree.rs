@@ -185,8 +185,19 @@ impl<T, S, A: Array<Item = (ItemId, Rect<S>)>> QuadTree<T, S, A> {
         }
     }
 
-    /// Returns an ItemId for the first element that was
-    /// inserted into the tree.
+    /// Returns the `ItemId` of an **arbitrary** element, or `None` when the
+    /// tree is empty.
+    ///
+    /// This said "the first element that was inserted into the tree" until
+    /// 2026-09-08, and that was never true: `elements` is an `FxHashMap`,
+    /// which keeps no insertion order, so the element returned is whichever
+    /// one hashing happens to put first. It has **no callers** — a reader who
+    /// believed the old sentence would have got a silently arbitrary answer,
+    /// which is why the doc is corrected rather than the function deleted.
+    ///
+    /// Note the contrast with [`Self::query`], which sorts by `ItemId` before
+    /// returning: there the order escapes to callers and is therefore defined,
+    /// while here `FxHashMap` is a deliberate and correct choice for storage.
     pub fn first(&self) -> Option<ItemId> {
         self.elements.iter().next().map(|(id, _)| *id)
     }

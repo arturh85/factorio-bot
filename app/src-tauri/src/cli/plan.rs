@@ -373,7 +373,13 @@ fn plan_from_dump(
   // `plan_best`, not `expand` + `schedule`: the drain policy is settled by
   // reading finished schedules, so the CLI has to make the same choice a run
   // makes or the offline loop stops predicting it.
-  let (net, scheduled) = plan_best(&goals, &state, &registry_for(&bots), chain_actor, &bots)
+  // Counted, not timed: see `factorio_bot_core::plan_work` for why a wall
+  // clock cannot be the regression guard on a box whose load ranged from 1 to
+  // 80 in one day.
+  let (planned, work) = factorio_bot_core::plan_work::measure(|| {
+    plan_best(&goals, &state, &registry_for(&bots), chain_actor, &bots)
+  });
+  let (net, scheduled) = planned
     // "did not PLAN", not "did not expand". `plan_best` covers expansion
     // *and* scheduling, and the two fail for different reasons -- a
     // `ChainOwnerInfeasible` is raised in `schedule.rs`, never in `expand`.
@@ -388,7 +394,7 @@ fn plan_from_dump(
     Vec::new()
   };
   Ok((
-    PlanReport::of(&net, &scheduled, &bots, &state),
+    PlanReport::of(&net, &scheduled, &bots, &state).with_work(work),
     notes,
     listing,
   ))

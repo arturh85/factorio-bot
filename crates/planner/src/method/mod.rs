@@ -623,6 +623,7 @@ pub fn expand(
     // The cost is one extra expansion. Scheduling, which is where a plan's
     // time goes, is not repeated.
     let forecast = {
+        factorio_bot_core::plan_work::count(|c| c.forks += 1);
         let mut rehearsal = ExpansionCtx::new(state.fork(), chain_actor);
         rehearsal.rehearsing = true;
         let mut scratch = ActionNetwork::new();
@@ -634,6 +635,7 @@ pub fn expand(
             Err(_) => BTreeMap::new(),
         }
     };
+    factorio_bot_core::plan_work::count(|c| c.forks += 1);
     let mut forecast_state = state.fork();
     forecast_state.set_gathering_forecast(forecast);
     let mut ctx = ExpansionCtx::new(forecast_state, chain_actor);
@@ -683,6 +685,7 @@ fn expand_goal(
     net: &mut ActionNetwork,
     registry: &MethodRegistry,
 ) -> Result<(), PlannerError> {
+    factorio_bot_core::plan_work::count(|c| c.goals_expanded += 1);
     if ctx.depth >= MAX_EXPANSION_DEPTH {
         return Err(PlannerError::ExpansionTooDeep {
             goal: goal.to_string(),

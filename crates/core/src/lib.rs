@@ -53,6 +53,7 @@ pub mod factorio;
 pub mod graph;
 pub mod paths;
 pub mod plan;
+pub mod plan_work;
 pub mod process;
 pub mod record;
 pub mod scripts;

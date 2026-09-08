@@ -549,6 +549,7 @@ pub fn schedule(
     let remaining = critical_path(net)?;
     let durations: BTreeMap<ActionId, Ticks> = net.actions().map(|a| (a.id, a.duration)).collect();
 
+    factorio_bot_core::plan_work::count(|c| c.forks += 1);
     let mut sim = state.fork();
     let mut free_at: BTreeMap<BotId, Ticks> = bots.iter().map(|b| (*b, 0)).collect();
     let mut finished: BTreeMap<ActionId, Ticks> = BTreeMap::new();
@@ -843,6 +844,7 @@ pub fn schedule(
                     // tested against a fork with the bot already moved. Forking is
                     // an overlay clone — cheap enough to do per candidate, which is
                     // what the shared `Arc` base is for.
+                    factorio_bot_core::plan_work::count(|c| c.forks += 1);
                     let mut trial = sim.fork();
                     if travel > 0 {
                         // The exact target is deliberately dropped *here* and

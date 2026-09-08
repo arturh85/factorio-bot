@@ -30,6 +30,7 @@ use crate::network::ActionNetwork;
 use crate::rates::RateDisclosure;
 use crate::schedule::{Schedule, StepKind};
 use crate::state::PlanState;
+use factorio_bot_core::plan_work::WorkCounts;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -92,6 +93,26 @@ pub struct PlanReport {
     /// records written before the check existed.
     #[serde(default)]
     pub rates: RateDisclosure,
+    /// What the plan **cost to make**, counted rather than timed.
+    ///
+    /// Zero unless a caller wrapped planning in
+    /// [`factorio_bot_core::plan_work::measure`] and handed the result to
+    /// [`PlanReport::with_work`] -- `PlanReport::of` cannot fill it in, because
+    /// by the time it runs the work is over and the thread's counters are
+    /// cumulative rather than per-plan.
+    ///
+    /// It is here, beside `actions` and `makespan`, because those two are
+    /// baselined and this is not: `CLAUDE.md` carried "~4 seconds" for offline
+    /// planning while the real figure had become 319, and a number in prose has
+    /// no invalidation. See [`factorio_bot_core::plan_work`].
+    ///
+    /// `#[serde(default)]` so reports written before this existed still load,
+    /// reading as all-zero -- which is "not measured", the same reading
+    /// `provenance.mods: None` has, and deliberately not distinguished from a
+    /// plan that genuinely did nothing, because a plan that does nothing still
+    /// expands at least one goal.
+    #[serde(default)]
+    pub work: WorkCounts,
 }
 
 impl PlanReport {
@@ -162,7 +183,15 @@ impl PlanReport {
             planned_ticks,
             utilisation_percent,
             rates: RateDisclosure::of(net, schedule, state),
+            work: WorkCounts::default(),
         }
+    }
+
+    /// This report with `work` filled in from a measurement around planning.
+    #[must_use]
+    pub fn with_work(mut self, work: WorkCounts) -> PlanReport {
+        self.work = work;
+        self
     }
 
     /// The report as lines a person reads, one per line, no trailing newline.
@@ -187,6 +216,9 @@ impl PlanReport {
             None => out.push("utilisation    n/a (nothing to do)".to_string()),
         }
         out.extend(self.rates.lines());
+        if self.work != WorkCounts::default() {
+            out.extend(self.work.lines());
+        }
         out.push("bot   steps  acts  walks  planned  idle".to_string());
         for bot in &self.bots {
             out.push(format!(

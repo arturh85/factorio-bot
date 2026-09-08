@@ -100,6 +100,7 @@ impl ActionNetwork {
 
     /// Predecessors of `id` with their lags, ascending by predecessor id.
     pub fn preds(&self, id: ActionId) -> Vec<(ActionId, Ticks)> {
+        factorio_bot_core::plan_work::count(|c| c.preds += 1);
         let mut out: Vec<(ActionId, Ticks)> = self
             .edges
             .iter()

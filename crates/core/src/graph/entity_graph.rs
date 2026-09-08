@@ -22,7 +22,7 @@ use petgraph::visit::{Bfs, EdgeRef};
 use serde::de::{MapAccess, Visitor};
 use serde::ser::{SerializeMap, SerializeStruct};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::ops::Deref;
 use std::str::FromStr;
@@ -697,6 +697,7 @@ impl EntityGraph {
     /// Callers deciding whether somewhere is safe to walk to must treat an
     /// empty result as *unknown*; see the `threats` field's own docs.
     pub fn threats_from(&self, from: &Position) -> Vec<(String, Position, f64)> {
+        crate::plan_work::count(|c| c.threat_queries += 1);
         let mut out: Vec<(String, Position, f64)> = self
             .threats
             .iter()
@@ -1409,6 +1410,7 @@ impl EntityGraph {
             );
             return vec![];
         }
+        crate::plan_work::count(|c| c.resource_patches += 1);
         for point in resource.unwrap().keys() {
             positions_by_id.insert(point.clone(), None);
         }
@@ -3053,6 +3055,7 @@ fn overlaps_bounds(bounds: &Rect, rect: &QuadTreeRect) -> bool {
 #[cfg(test)]
 mod tests {
     use crate::factorio::util::rect_fields;
+    use std::collections::HashMap;
     use crate::num_traits::ToPrimitive;
     use crate::test_utils::{
         entity_graph_from, fixture_entity_prototypes, fixture_recipes, fixture_world, spawn_ore,

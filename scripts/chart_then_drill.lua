@@ -243,7 +243,17 @@ local function dispatch(n, plan)
   local complete = obs.done and (obs.failed or 0) == 0 and (obs.lost or 0) == 0
     and (obs.pending or 0) == 0
   if complete then
-    record.milestone_satisfied(n, n, "plan_complete")
+    -- `"plan_complete"` is what this line wants to say and `SatisfiedReason`
+    -- cannot say it: the enum has exactly `already_satisfied` and
+    -- `plan_empty`, so **every driver script in this tree records a plan that
+    -- ran to completion as `plan_empty`** (`furnace_run.lua`,
+    -- `block_run.lua`, `starter_run.lua`, `moving_block_live.lua`). That is
+    -- the convention and it is followed here rather than diverged from, but
+    -- it is a lie in the record: the most common way a milestone is reached
+    -- is indistinguishable from the planner having found nothing to do.
+    -- `oil_milestone.lua` passes `"plan_complete"` on this same path and
+    -- would raise the moment it ever got there.
+    record.milestone_satisfied(n, n, "plan_empty")
   else
     record.milestone_stuck(n, obs.done and "stuck" or "exhausted", obs.first_error, nil)
   end
@@ -397,7 +407,12 @@ if not plan then
   return
 end
 
-record.milestone_satisfied(1, 1, "charted")
+-- See the note beside the other `milestone_satisfied` call: the enum has two
+-- reasons and neither is "a plan ran". `already_satisfied` is honest when no
+-- ring was walked -- the ground was already looked at -- and `plan_empty` is
+-- the tree's convention for the case where one was.
+record.milestone_satisfied(1, math.max(rings_walked, 1),
+  rings_walked == 0 and "already_satisfied" or "plan_empty")
 print("MILESTONE 1: the ground the milestone needs has been looked at.")
 
 -- ---------------------------------------------------------------------------

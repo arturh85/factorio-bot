@@ -562,9 +562,8 @@ pub fn schedule(
     // fewer times.
     let preds: BTreeMap<ActionId, Vec<(ActionId, Ticks)>> =
         net.actions().map(|a| (a.id, net.preds(a.id))).collect();
-    let preds_of = |id: ActionId| -> &[(ActionId, Ticks)] {
-        preds.get(&id).map_or(&[][..], Vec::as_slice)
-    };
+    let preds_of =
+        |id: ActionId| -> &[(ActionId, Ticks)] { preds.get(&id).map_or(&[][..], Vec::as_slice) };
 
     factorio_bot_core::plan_work::count(|c| c.forks += 1);
     let mut sim = state.fork();

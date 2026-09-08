@@ -3202,11 +3202,11 @@ fn overlaps_bounds(bounds: &Rect, rect: &QuadTreeRect) -> bool {
 #[cfg(test)]
 mod tests {
     use crate::factorio::util::rect_fields;
-    use std::collections::HashMap;
     use crate::num_traits::ToPrimitive;
     use crate::test_utils::{
         entity_graph_from, fixture_entity_prototypes, fixture_recipes, fixture_world, spawn_ore,
     };
+    use std::collections::HashMap;
 
     use super::*;
 
@@ -4764,20 +4764,30 @@ mod tests {
 
         let (again, refilled) = crate::plan_work::measure(|| graph.resource_patches(&iron));
         assert_eq!(refilled.resource_patches, 0, "the second is a cache hit");
-        assert_eq!(first, again, "and it is the same answer, not merely a fast one");
+        assert_eq!(
+            first, again,
+            "and it is the same answer, not merely a fast one"
+        );
 
         // Any mutation bumps the generation, so the memo stops applying. A
         // furnace is used rather than an ore tile on purpose: the cache must
         // be keyed on the graph having *changed*, not on the resource table
         // having changed, because nothing here can know which mutations a
         // patch depends on.
-        let mut furnace = FactorioEntity::new_stone_furnace(&Position::new(0.5, 0.5), Direction::North);
+        let mut furnace =
+            FactorioEntity::new_stone_furnace(&Position::new(0.5, 0.5), Direction::North);
         furnace.name = EntityName::StoneFurnace.to_string();
         graph.add(vec![furnace], None).expect("the furnace lands");
 
         let (after, refilled) = crate::plan_work::measure(|| graph.resource_patches(&iron));
-        assert_eq!(refilled.resource_patches, 1, "a mutation invalidates the memo");
-        assert_eq!(after, first, "and the ore has not moved, so the answer stands");
+        assert_eq!(
+            refilled.resource_patches, 1,
+            "a mutation invalidates the memo"
+        );
+        assert_eq!(
+            after, first,
+            "and the ore has not moved, so the answer stands"
+        );
     }
 
     /// The union index answers for every ore, and stops answering when the
@@ -4811,7 +4821,10 @@ mod tests {
             !graph.any_resource_at(&iron_tile),
             "a retired tile is not ore, and a stale index would still say it is"
         );
-        assert!(graph.any_resource_at(&copper_tile), "the copper is untouched");
+        assert!(
+            graph.any_resource_at(&copper_tile),
+            "the copper is untouched"
+        );
     }
 
     #[test]

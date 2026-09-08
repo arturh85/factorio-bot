@@ -42,8 +42,8 @@
 //! times. Regenerate the dump with
 //! `factorio-bot lua dump_31337.lua --headless --bots 4 --seed 31337 --new`.
 
-use factorio_bot_core::plan_work::{WorkCounts, measure};
 use factorio_bot_core::factorio::world::FactorioSurface;
+use factorio_bot_core::plan_work::{WorkCounts, measure};
 use factorio_bot_planner::{BotId, Goal, PlanState, pick_chain_actor, plan_best, registry_for};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -178,13 +178,21 @@ fn the_three_map_json_baselines_stay_within_their_work_ceilings() {
                 over.push(format!("{name}: {label} {got} exceeds the ceiling {cap}"));
             }
         };
-        check("goals expanded", work.goals_expanded, ceiling.goals_expanded);
+        check(
+            "goals expanded",
+            work.goals_expanded,
+            ceiling.goals_expanded,
+        );
         check(
             "resource patches",
             work.resource_patches,
             ceiling.resource_patches,
         );
-        check("threat queries", work.threat_queries, ceiling.threat_queries);
+        check(
+            "threat queries",
+            work.threat_queries,
+            ceiling.threat_queries,
+        );
         check("preds scans", work.preds, ceiling.preds);
         check("state forks", work.forks, ceiling.forks);
         eprintln!("{name}: {}", work.lines().join(" | "));

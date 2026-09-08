@@ -87,7 +87,9 @@ impl WorkCounts {
     pub fn since(self, earlier: WorkCounts) -> WorkCounts {
         WorkCounts {
             goals_expanded: self.goals_expanded.saturating_sub(earlier.goals_expanded),
-            resource_patches: self.resource_patches.saturating_sub(earlier.resource_patches),
+            resource_patches: self
+                .resource_patches
+                .saturating_sub(earlier.resource_patches),
             threat_queries: self.threat_queries.saturating_sub(earlier.threat_queries),
             preds: self.preds.saturating_sub(earlier.preds),
             forks: self.forks.saturating_sub(earlier.forks),

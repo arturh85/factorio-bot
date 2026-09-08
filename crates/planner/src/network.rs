@@ -432,11 +432,7 @@ impl ActionNetwork {
 /// Ordered collections throughout, though nothing here depends on the order:
 /// the answer is a boolean about the graph, and every path either exists or
 /// does not whatever sequence the walk takes.
-fn reaches(
-    succ: &BTreeMap<ActionId, BTreeSet<ActionId>>,
-    from: ActionId,
-    to: ActionId,
-) -> bool {
+fn reaches(succ: &BTreeMap<ActionId, BTreeSet<ActionId>>, from: ActionId, to: ActionId) -> bool {
     if from == to {
         return true;
     }

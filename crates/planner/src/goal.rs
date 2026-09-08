@@ -154,6 +154,44 @@ pub enum Site {
     /// different claims, and collapsing them would either make every stale
     /// caller anchor authoritative or leave persistence impossible.
     Anchored(Position),
+    /// **One pitch along from a block already placed.** The other half of
+    /// anchor persistence: `Anchored` says *which* anchor a block has, and this
+    /// says where the NEXT one goes.
+    ///
+    /// `of` is the anchor of the block to sit beside — normally one a caller
+    /// recorded from an earlier plan — and `steps` counts whole pitches along
+    /// each axis, so `(1, 0)` is "immediately east of it, one block along".
+    ///
+    /// # Why the blueprint's own pitch and not its bounding box
+    ///
+    /// The pitch is `snap-to-grid`, the author's statement of the period at
+    /// which the design tiles, and **it cannot be derived from the entities**.
+    /// `MinerLine` spans 5 tiles of x and declares a pitch of 7: the two extra
+    /// tiles are room the author deliberately left beside the block, which a
+    /// bounding box cannot see because nothing was drawn there. Tiling by the
+    /// extent would pack the blocks 5 apart and consume that space.
+    ///
+    /// So a block with no declared pitch cannot answer this question and is
+    /// refused by name rather than tiled at its extent, which would silently
+    /// discard whatever the author was reserving.
+    ///
+    /// # Why it outranks recovery, like [`Site::Anchored`]
+    ///
+    /// It is the answer to "this is a NEW block, put it *there*", which is the
+    /// question that had no expression at all. Consulting standing geometry
+    /// first would defeat it exactly as it defeats `Site::At`: on a map where
+    /// `FurnaceLine` stands, `ElectricSmelter` matches 21 of its 28 entities
+    /// inside it, so recovery hands the second block the first block's anchor.
+    ///
+    /// It stays replan-stable without recovery because it is a pure function
+    /// of `of`, `steps` and the blueprint's own declared pitch — none of which
+    /// move while a run is going.
+    Beside {
+        /// The anchor of the block to sit beside.
+        of: Position,
+        /// Whole pitches along x and y. `(1, 0)` is one block east.
+        steps: (i32, i32),
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -463,6 +501,12 @@ impl std::fmt::Display for Goal {
                     Site::Near(p) => format!("near {p}"),
                     Site::Anywhere => "anywhere".to_string(),
                     Site::Anchored(p) => format!("at its recorded anchor {p}"),
+                    Site::Beside { of, steps } => {
+                        format!(
+                            "{} pitch(es) from the block at {of}",
+                            format_args!("({}, {})", steps.0, steps.1)
+                        )
+                    }
                 };
                 write!(f, "build {}-byte block {}", blueprint.len(), where_)
             }

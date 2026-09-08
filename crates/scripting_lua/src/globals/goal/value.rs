@@ -149,6 +149,14 @@ pub(crate) fn install_goal_constructors(lua: &Lua, table: &LuaTable) -> LuaResul
                         near.set("y", pos.y())?;
                         t.set("near", near)?;
                     }
+                    Site::Beside { of, steps } => {
+                        let beside = lua.create_table()?;
+                        beside.set("x", of.x())?;
+                        beside.set("y", of.y())?;
+                        beside.set("dx", steps.0)?;
+                        beside.set("dy", steps.1)?;
+                        t.set("beside", beside)?;
+                    }
                     Site::Anchored(pos) => {
                         let anchored = lua.create_table()?;
                         anchored.set("x", pos.x())?;
@@ -312,6 +320,10 @@ fn render_goal(t: &LuaTable) -> LuaResult<String> {
                 Site::Near(pos) => format!("near {pos}"),
                 Site::Anywhere => "anywhere".to_string(),
                 Site::Anchored(pos) => format!("at its recorded anchor {pos}"),
+                Site::Beside { of, steps } => format!(
+                    "({}, {}) pitch(es) from the block at {of}",
+                    steps.0, steps.1
+                ),
             };
             Ok(format!("build {}-byte block {}", blueprint.len(), where_))
         }
@@ -524,18 +536,40 @@ fn site_from_table(t: &LuaTable) -> LuaResult<Site> {
     // merging them would either make every stale caller anchor override the
     // ground, or leave persistence inexpressible.
     let has_anchored = !matches!(t.get("anchored")?, LuaValue::Nil);
+    // `beside` is "a NEW block, one pitch along from that one" -- the question
+    // that had no expression until 2026-09-08. Exclusive with the rest for the
+    // same reason they are exclusive with each other: they are four different
+    // claims about where the block goes.
+    let has_beside = !matches!(t.get("beside")?, LuaValue::Nil);
 
     // Counted rather than matched as a tuple. The 2x2 match this replaces was
     // exhaustive over two flags; a third makes eight cases of which six are the
     // same error, and writing them out invites exactly the (false, false)
     // fall-through its own comment warns about -- a malformed request answered
     // with a different, valid goal.
-    let named = usize::from(has_anchor) + usize::from(has_near) + usize::from(has_anchored);
+    let named = usize::from(has_anchor)
+        + usize::from(has_near)
+        + usize::from(has_anchored)
+        + usize::from(has_beside);
     if named > 1 {
         return Err(goal_error(
-            "goal.built: an anchor (x/y), a near hint (near) and a recorded \
-             anchor (anchored) are mutually exclusive",
+            "goal.built: an anchor (x/y), a near hint (near), a recorded anchor \
+             (anchored) and a neighbour (beside) are mutually exclusive",
         ));
+    }
+    if has_beside {
+        let b = require_table_field(t.get("beside")?, "beside")?;
+        return Ok(Site::Beside {
+            of: Position::new(
+                require_coordinate(b.get("x")?, "x")?,
+                require_coordinate(b.get("y")?, "y")?,
+            ),
+            // Whole pitches, so these are counts and not coordinates.
+            steps: (
+                require_coordinate(b.get("dx")?, "dx")? as i32,
+                require_coordinate(b.get("dy")?, "dy")? as i32,
+            ),
+        });
     }
     if has_anchored {
         let a = require_table_field(t.get("anchored")?, "anchored")?;

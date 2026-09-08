@@ -1362,6 +1362,30 @@ fn resolve_site(
     if let Site::Anchored(p) = site {
         return Ok((p.clone(), AnchorSource::Recorded));
     }
+    // `Beside` short-circuits for the same reason and in the same place: it is
+    // the answer to "this is a NEW block, put it there", and consulting
+    // standing geometry first would hand it the neighbouring block's anchor.
+    if let Site::Beside { of, steps } = site {
+        let grid = bp
+            .grid
+            .as_ref()
+            .ok_or_else(|| PlannerError::BlueprintRefused {
+                reason: format!(
+                    "cannot place this block beside the one at {of}: it declares no \
+                 snap-to-grid, so nothing here knows the period at which it tiles. \
+                 Its bounding box is not that period -- MinerLine spans 5 tiles \
+                 of x and declares a pitch of 7, and the difference is room the \
+                 author left on purpose"
+                ),
+            })?;
+        return Ok((
+            Position::new(
+                of.x() + grid.pitch.x() * f64::from(steps.0),
+                of.y() + grid.pitch.y() * f64::from(steps.1),
+            ),
+            AnchorSource::Recorded,
+        ));
+    }
     if let Some(recovered) = recover_anchor(state, bp) {
         return Ok((recovered, AnchorSource::Recovered));
     }
@@ -1370,6 +1394,9 @@ fn resolve_site(
         // Unreachable: handled above, before recovery. Stated rather than
         // wildcarded so a new `Site` variant still fails to compile here.
         Site::Anchored(p) => Ok((p.clone(), AnchorSource::Recorded)),
+        // Unreachable: handled above, before recovery. Stated rather than
+        // wildcarded so a new `Site` variant still fails to compile here.
+        Site::Beside { of, .. } => Ok((of.clone(), AnchorSource::Recorded)),
         Site::Near(p) => Ok((
             search_site(state, bp, p, SEARCH_RADIUS)?,
             AnchorSource::Search,
@@ -2108,6 +2135,81 @@ mod tests {
     /// choose somewhere new. This is the failure `Goal::Built` exists to make
     /// unreachable: a block half-built at site A restarting at site B, with
     /// no error and a production curve that still rises.
+    /// **And it survives the first block actually standing**, which is the
+    /// case that defeated `Site::At`.
+    ///
+    /// With entities of the block on the ground, `recover_anchor` will happily
+    /// hand back an anchor derived from them. `Beside` is resolved before
+    /// recovery is consulted, for the same reason `Anchored` is.
+    #[test]
+    fn beside_is_not_overruled_by_the_block_it_sits_beside() {
+        let mut s = test_state();
+        // Four furnaces of a block, standing, spaced as the blueprint has them.
+        for i in 0..4 {
+            s.create_entity(stone_furnace_at(3.0 * f64::from(i), 0.0));
+        }
+        let bp = Blueprint {
+            entities: vec![
+                at_named(0.0, 0.0, "stone-furnace"),
+                at_named(3.0, 0.0, "stone-furnace"),
+            ],
+            version: 0,
+            grid: Some(factorio_bot_core::blueprint::BlueprintGrid {
+                pitch: Position::new(10.0, 10.0),
+                absolute: true,
+                relative_position: None,
+            }),
+        };
+
+        // Recovery would answer with the standing block's own anchor.
+        assert!(
+            recover_anchor(&s, &bp).is_some(),
+            "premise: the standing entities DO imply an anchor, so this test is \
+             about which answer wins rather than about there being one"
+        );
+
+        let (at, source) = resolve_and_guard(
+            &s,
+            &bp,
+            &Site::Beside {
+                of: Position::new(0.0, 0.0),
+                steps: (1, 0),
+            },
+        )
+        .expect("resolves");
+        assert_eq!(Pos::from(&at), Pos::from(&Position::new(10.0, 0.0)));
+        assert_eq!(source, AnchorSource::Recorded);
+    }
+
+    /// A block that declares no pitch is refused BY NAME rather than tiled at
+    /// its extent, because tiling at the extent would silently consume
+    /// whatever space the author was reserving beside it.
+    #[test]
+    fn a_block_with_no_declared_pitch_cannot_say_where_the_next_one_goes() {
+        let s = test_state();
+        let bp = Blueprint {
+            entities: vec![at_named(0.0, 0.0, "stone-furnace")],
+            version: 0,
+            grid: None,
+        };
+        let err = resolve_and_guard(
+            &s,
+            &bp,
+            &Site::Beside {
+                of: Position::new(0.0, 0.0),
+                steps: (1, 0),
+            },
+        )
+        .expect_err("no pitch, no answer");
+        let PlannerError::BlueprintRefused { reason } = &err else {
+            panic!("expected BlueprintRefused, got {err:?}");
+        };
+        assert!(
+            reason.contains("snap-to-grid"),
+            "the refusal must name the missing field: {reason}"
+        );
+    }
+
     #[test]
     fn a_partly_built_block_recovers_its_own_anchor_and_does_not_move() {
         let bp = Blueprint {
@@ -4907,6 +5009,68 @@ mod block_demand_tests {
                 "{name}: a well-formed blueprint wants a whole-tile anchor"
             );
         }
+    }
+
+    /// **Two blocks on one map, at the author's declared pitch.** The thing
+    /// that has never worked.
+    ///
+    /// `Goal::Built` re-derived its anchor and recovery outranked every
+    /// caller-supplied site, so a second block on an occupied map had its
+    /// anchor read off the FIRST block's geometry —
+    /// `ElectricSmelter` matches 21 of its 28 entities inside a standing
+    /// `FurnaceLine`. One block per fresh map was all that worked, and the
+    /// electric-smelter milestone was blocked on it.
+    ///
+    /// **The pitch is a PERIOD, not a bounding box, and this test turns on the
+    /// difference.** `MinerLine`'s entities span 5 tiles of x; it declares a
+    /// pitch of 7. Those two extra tiles are room the author left beside the
+    /// block on purpose — the owner's standing "leave room for beacons"
+    /// instruction, already written into the blueprint. Tiling at the extent
+    /// would pack the blocks 5 apart and eat it, and a test that passed with
+    /// either number would not have tested this.
+    #[test]
+    fn a_second_block_sits_one_declared_pitch_away_not_one_bounding_box() {
+        let s = state();
+        let bp = fixture("MinerLine");
+
+        // The premise, measured from the fixture rather than asserted: the
+        // declared period and the drawn extent are different numbers.
+        let grid = bp.grid.clone().expect("MinerLine declares a grid");
+        let span = {
+            let xs: Vec<f64> = bp.entities.iter().map(|e| e.offset.x()).collect();
+            xs.iter().cloned().fold(f64::MIN, f64::max)
+                - xs.iter().cloned().fold(f64::MAX, f64::min)
+        };
+        assert_eq!(grid.pitch.x(), 7.0, "the declared period");
+        assert_eq!(span, 4.0, "the drawn extent of its entity centres");
+        assert_ne!(
+            grid.pitch.x(),
+            span,
+            "if these ever coincide this test proves nothing"
+        );
+
+        let first = Position::new(0.0, 0.0);
+        let (second, source) = resolve_and_guard(
+            &s,
+            &bp,
+            &Site::Beside {
+                of: first.clone(),
+                steps: (1, 0),
+            },
+        )
+        .expect("a block that declares a pitch can say where the next one goes");
+
+        assert_eq!(
+            Pos::from(&second),
+            Pos::from(&Position::new(7.0, 0.0)),
+            "one PITCH east (7), not one extent (5) and not one bounding box"
+        );
+        assert_eq!(
+            source,
+            AnchorSource::Recorded,
+            "a caller saying 'a new block, there' is a recorded fact, not a \
+             hint the ground may overrule"
+        );
     }
 
     /// **The saturating smelting module reads as a coherent block: it

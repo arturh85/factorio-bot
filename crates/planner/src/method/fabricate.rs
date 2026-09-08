@@ -311,9 +311,9 @@ pub enum FabricateRefusal {
 /// cannot disagree about which recipe and which machine — the failure mode
 /// where a method claims a goal and then refuses it for a different reason
 /// than the one it was selected on.
-struct Job {
-    recipe: FactorioRecipe,
-    machine: String,
+pub(crate) struct Job {
+    pub(crate) recipe: FactorioRecipe,
+    pub(crate) machine: String,
 }
 
 /// The cheap half of the test, run before a [`ProductIndex`] is built.
@@ -327,7 +327,7 @@ fn cannot_possibly_apply(state: &PlanState, item: &str) -> bool {
         .is_some_and(|r| r.category == CRAFTING_CATEGORY || r.category == SMELTING_CATEGORY)
 }
 
-fn job_for(goal: &Goal, state: &PlanState) -> Option<Job> {
+pub(crate) fn job_for(goal: &Goal, state: &PlanState) -> Option<Job> {
     let Demand {
         item, need, via, ..
     } = demand(goal, state)?;

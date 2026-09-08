@@ -77,15 +77,11 @@
 
 use crate::error::PlannerError;
 use crate::goal::Goal;
-use crate::method::have::demand;
-use crate::method::util::{CRAFTING_CATEGORY, SMELTING_CATEGORY, recipe_for};
 use crate::method::{ExpansionCtx, Method, Step};
 use crate::method::{extract, pipe};
-use crate::products::{Categories, ProductIndex};
 use crate::state::PlanState;
 use factorio_bot_core::types::{FactorioRecipe, Position};
 
-use super::machine::{Machine, MachineTable};
 
 /// The fluid ingredient type, as the game declares it on a recipe.
 ///
@@ -102,49 +98,21 @@ const FLUID_TYPE: &str = "fluid";
 
 /// The recipe `Fabricate` would run for this goal, chosen the way it chooses.
 ///
-/// # This mirrors `fabricate::job_for` and cannot call it
+/// # It asks `Fabricate`, rather than reproducing its reasoning
 ///
-/// `job_for` is private to `method::fabricate` and that file is not this
-/// one's to change. The mirror is confined to this function and gated by
-/// [`Method::applicable`]'s first test, which asks `Fabricate` itself; so if
-/// the two ever disagree about *which* recipe, this one finds no missing
-/// fluid, declines, and the goal reaches `Fabricate` unchanged. The failure
-/// mode of drift is therefore "today's behaviour", not a wrong plan.
+/// This was a ~30-line mirror of `fabricate::job_for` while that function was
+/// private, with the drift documented as tolerable because a disagreement
+/// would make this method decline and leave the goal to `Fabricate` unchanged.
+/// The mirror is gone: `job_for` is `pub(crate)` and this calls it, so the two
+/// **cannot** disagree about which recipe.
 ///
-/// **The right shape is for `fabricate::job_for` to be `pub(crate)`** and for
-/// this to call it. That is a two-line visibility change in a file another
-/// agent owns.
+/// Removing it also closed a real gap rather than merely deduplicating. The
+/// mirror never applied `recipe_gate`, so it would answer for a recipe
+/// `Fabricate` rejects as [`RecipeGate::Unobtainable`](crate::method::util::RecipeGate)
+/// — a recipe no technology can ever unlock. This method would then have
+/// emitted a `Goal::Gathered` to feed a recipe that can never run.
 fn recipe_fabricate_would_run(goal: &Goal, state: &PlanState) -> Option<FactorioRecipe> {
-    let demand = demand(goal, state)?;
-    if demand.need == 0 {
-        return None;
-    }
-    if demand.via.is_none()
-        && recipe_for(state, demand.item)
-            .is_some_and(|r| r.category == CRAFTING_CATEGORY || r.category == SMELTING_CATEGORY)
-    {
-        return None;
-    }
-    let machines = MachineTable::from_state(state);
-    let index = ProductIndex::from_state(state);
-    let recipe = index
-        .recipe_producing(
-            demand.item,
-            &Categories::planner_runs(&machines),
-            demand.via,
-            &machines,
-        )
-        .ok()?;
-    if recipe.category == CRAFTING_CATEGORY || recipe.category == SMELTING_CATEGORY {
-        return None;
-    }
-    if !matches!(
-        machines.machine_for(&recipe.category),
-        Ok(Machine::Entity(_))
-    ) {
-        return None;
-    }
-    Some(recipe.clone())
+    super::fabricate::job_for(goal, state).map(|job| job.recipe)
 }
 
 /// The fluids this goal's recipe wants that nothing standing supplies and

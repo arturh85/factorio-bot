@@ -43,14 +43,31 @@
 //! the JSON is rebuilt from the model, so anything the model failed to keep
 //! shows up as a difference.
 //!
-//! The two share one parse: `decode` is `decode_document` plus the placement
-//! policy, so the allowlist can never drift from what is actually read.
+//! [`decode_item`] answers the third question, *"what is this string at all"*.
+//! A blueprint string may hold a blueprint, a **blueprint book** (which
+//! contains books), a deconstruction planner or an upgrade planner, and
+//! `decode_item` returns whichever it found. It is a third function rather than
+//! a relaxed `decode_document` because **a book is not a blueprint**: it has no
+//! single anchor and no single footprint, so it can never be a `decode` answer,
+//! and a `decode_document` that sometimes returned a book would make its own
+//! return type a lie about which question was asked. Both single-blueprint
+//! paths therefore keep refusing a book -- but **by name** now, where they used
+//! to answer `NoBlueprint`, which is true of a book and tells the reader
+//! nothing.
+//!
+//! All three share one parse: `decode` is `decode_document` plus the placement
+//! policy, and `decode_document` is one branch of `decode_item`, so the
+//! allowlist can never drift from what is actually read.
 //!
 //! The motivating file is `crates/core/tests/blueprints/the_rook_3_1.txt`, a
 //! Space Age space platform of **7,179 entities and 12,568
 //! `space-platform-foundation` tiles** -- the owner's stated win condition. For
 //! a platform the tiles *are* the ship, so a decoder that refuses tiles cannot
-//! read the one blueprint this project is aimed at.
+//! read the one blueprint this project is aimed at. Its book,
+//! `the_rook_book.txt`, is the owner's file as shipped: five variants of that
+//! platform in a book **two levels deep**, which is how 2.x designs are
+//! actually shared and which nothing here could open at all until
+//! `decode_item`.
 
 use crate::types::{Direction, Position, blueprint_direction};
 use base64::Engine;
@@ -224,6 +241,128 @@ pub struct BlueprintDocument {
     pub extras: serde_json::Map<String, Value>,
 }
 
+/// Which of Factorio's four blueprint-library items a string carries.
+///
+/// The envelope names exactly one of these, and the name is also the key it
+/// sits under -- `{"blueprint_book": {...}}`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ItemKind {
+    Blueprint,
+    Book,
+    DeconstructionPlanner,
+    UpgradePlanner,
+}
+
+impl ItemKind {
+    /// The envelope key this kind sits under, which is also the name every
+    /// refusal about it carries.
+    pub fn key(self) -> &'static str {
+        match self {
+            ItemKind::Blueprint => "blueprint",
+            ItemKind::Book => "blueprint_book",
+            ItemKind::DeconstructionPlanner => "deconstruction_planner",
+            ItemKind::UpgradePlanner => "upgrade_planner",
+        }
+    }
+}
+
+/// A deconstruction or upgrade planner, kept whole and interpreted not at all.
+///
+/// Both are *filters over a selection*, not layouts: there is nothing to place
+/// and no geometry to model, so modelling their `settings` would be inventing
+/// structure for a consumer that does not exist. Keeping the body verbatim
+/// costs nothing, round-trips exactly, and -- crucially -- means a book that
+/// happens to contain one is still readable. Before this they came back as
+/// `NoBlueprint`, which said the string was not a blueprint and left the reader
+/// to guess whether it was corrupt.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BlueprintPlanner {
+    pub kind: ItemKind,
+    /// The planner's whole body, verbatim.
+    pub body: serde_json::Map<String, Value>,
+}
+
+/// One entry in a book: the item, plus the `index` its **envelope** carries.
+///
+/// The index lives on the envelope beside the item (`{"blueprint": {...},
+/// "index": 1}`), not inside the blueprint body, and it is the slot the entry
+/// occupies in the book's grid -- which is not the same as its position in the
+/// array once a book has gaps. `None` means the envelope did not say.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BookEntry {
+    pub index: Option<u64>,
+    pub item: BlueprintItem,
+}
+
+/// A blueprint book, which **contains books**.
+///
+/// That is not hypothetical: the owner's own
+/// `crates/core/tests/blueprints/the_rook_book.txt` is two levels deep -- a
+/// book of three entries whose third entry is a book of three more. See
+/// [`MAX_BOOK_DEPTH`] for why the recursion is bounded by name rather than by
+/// the stack.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BlueprintBook {
+    pub entries: Vec<BookEntry>,
+    /// Which entry the book opens on. **`None` is not `Some(0)`**: a book that
+    /// never recorded an active entry and one that opens on its first are
+    /// different facts, and collapsing them is the conflation this module
+    /// already refuses for `snap-to-grid` and for `wires`.
+    pub active_index: Option<u64>,
+    /// Every other body key -- `item`, `label`, `icons`, `version`, and
+    /// anything a future Factorio adds -- verbatim.
+    pub extras: serde_json::Map<String, Value>,
+}
+
+/// What a blueprint string turned out to hold: **one of these four**.
+///
+/// This is the third entry point promised by the module doc's split, and it
+/// exists rather than being folded into [`decode_document`] because a book is
+/// not a blueprint. `decode_document` answers "what does this *blueprint* say"
+/// and must keep refusing a book by name; overloading it to sometimes return a
+/// book would make its return type a lie about which question was asked. And a
+/// book can never be a [`decode`] answer at all -- there is no single anchor
+/// and no single footprint to stand it on.
+#[derive(Debug, Clone, PartialEq)]
+pub enum BlueprintItem {
+    Blueprint(BlueprintDocument),
+    Book(BlueprintBook),
+    Planner(BlueprintPlanner),
+}
+
+impl BlueprintItem {
+    pub fn kind(&self) -> ItemKind {
+        match self {
+            BlueprintItem::Blueprint(_) => ItemKind::Blueprint,
+            BlueprintItem::Book(_) => ItemKind::Book,
+            BlueprintItem::Planner(p) => p.kind,
+        }
+    }
+
+    /// Every blueprint in here, in book order, however deep it is nested.
+    ///
+    /// The flattening a caller almost always wants, provided once so nobody
+    /// writes their own recursion over `entries` and quietly stops at the
+    /// first level -- which is exactly what a book of books punishes.
+    pub fn blueprints(&self) -> Vec<&BlueprintDocument> {
+        let mut out = Vec::new();
+        self.collect_blueprints(&mut out);
+        out
+    }
+
+    fn collect_blueprints<'a>(&'a self, out: &mut Vec<&'a BlueprintDocument>) {
+        match self {
+            BlueprintItem::Blueprint(doc) => out.push(doc),
+            BlueprintItem::Book(book) => {
+                for entry in &book.entries {
+                    entry.item.collect_blueprints(out);
+                }
+            }
+            BlueprintItem::Planner(_) => {}
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BlueprintError {
     NotBase64,
@@ -243,7 +382,33 @@ pub enum BlueprintError {
     /// all until the allocator gives up. Carries the cap, not the actual
     /// size -- the actual size is precisely what must never be materialised.
     TooLarge(u64),
+    /// A book nests deeper than [`MAX_BOOK_DEPTH`].
+    ///
+    /// The sibling of [`BlueprintError::TooLarge`], and for the same reason:
+    /// the string reaching this module is attacker-shaped, `POST
+    /// /api/v1/scripts/execute` is unauthenticated, and a book of books is a
+    /// recursive decode with no natural floor. A crafted string nesting a few
+    /// thousand deep would otherwise overflow the stack -- an abort, with no
+    /// error anywhere and nothing said about the cause. Carries the cap, like
+    /// `TooLarge`, because the actual depth is what must never be walked.
+    TooDeep(usize),
 }
+
+/// How many books may be nested before a decode refuses.
+///
+/// The owner's own file is **two** levels deep (a book whose third entry is a
+/// book), so this is not a hypothetical shape and the bound is not there to
+/// forbid it. 16 leaves an order of magnitude of headroom over anything a
+/// person organises by hand while keeping the recursion's stack use trivially
+/// bounded.
+///
+/// **Chosen and named rather than inherited.** `serde_json` already caps its
+/// own parse nesting, so a crafted string fails there first today -- but that
+/// is a limit belonging to another crate's parser, applying to JSON depth
+/// rather than to book depth, and relying on it would be relying on a number
+/// nobody here decided. This module's own recursion gets this module's own
+/// bound.
+pub const MAX_BOOK_DEPTH: usize = 16;
 
 /// The most a blueprint is allowed to inflate to.
 ///
@@ -361,6 +526,15 @@ pub fn encode(entities: &[BlueprintEntity]) -> String {
 /// `Some(vec![])` writes `"wires":[]` -- because a wire list is a claim about
 /// circuit intent and its emptiness is worth preserving distinctly.
 pub fn encode_document(doc: &BlueprintDocument) -> String {
+    let mut envelope = serde_json::Map::new();
+    envelope.insert("blueprint".to_owned(), Value::Object(document_json(doc)));
+    compress(&Value::Object(envelope).to_string())
+}
+
+/// The body object of one blueprint, rebuilt from the model. Shared by
+/// [`encode_document`] and by the book encoder, so a blueprint inside a book
+/// and a blueprint on its own cannot be written two different ways.
+fn document_json(doc: &BlueprintDocument) -> serde_json::Map<String, Value> {
     let mut body = doc.extras.clone();
     if let Some(v) = doc.version {
         body.insert("version".to_owned(), Value::from(v));
@@ -417,9 +591,7 @@ pub fn encode_document(doc: &BlueprintDocument) -> String {
             .collect();
         body.insert("wires".to_owned(), Value::Array(wires));
     }
-    let mut envelope = serde_json::Map::new();
-    envelope.insert("blueprint".to_owned(), Value::Object(body));
-    compress(&Value::Object(envelope).to_string())
+    body
 }
 
 /// A blueprint position as Factorio writes one.
@@ -460,10 +632,10 @@ fn compress(json: &str) -> String {
     )
 }
 
-/// Unwrap a blueprint string down to the body object, with the inflation cap
-/// applied. Shared by [`decode`] and [`decode_document`] so the two can never
-/// disagree about what a blueprint string even is.
-fn body_of(text: &str) -> Result<serde_json::Map<String, Value>, BlueprintError> {
+/// Unwrap a blueprint string to its envelope object, with the inflation cap
+/// applied. Shared by every entry point here, so none of them can disagree
+/// about what a blueprint string even is.
+fn envelope_of(text: &str) -> Result<serde_json::Map<String, Value>, BlueprintError> {
     // The leading byte is the format version, not part of the payload.
     let payload = text.strip_prefix('0').unwrap_or(text);
     let raw = base64::engine::general_purpose::STANDARD
@@ -485,15 +657,182 @@ fn body_of(text: &str) -> Result<serde_json::Map<String, Value>, BlueprintError>
             return Err(BlueprintError::TooLarge(MAX_DECOMPRESSED_BYTES));
         }
     }
-    let envelope: Value = serde_json::from_slice(&json).map_err(|_| BlueprintError::NotJson)?;
-    let body_value = envelope
-        .get("blueprint")
-        .cloned()
-        .ok_or(BlueprintError::NoBlueprint)?;
-    match body_value {
+    match serde_json::from_slice(&json).map_err(|_| BlueprintError::NotJson)? {
         Value::Object(map) => Ok(map),
         _ => Err(BlueprintError::NoBlueprint),
     }
+}
+
+/// The single blueprint an envelope holds, or a refusal that **names what the
+/// string actually is**.
+///
+/// A book, a deconstruction planner and an upgrade planner all used to come
+/// back as `NoBlueprint` -- "there is no blueprint here" -- which is true and
+/// useless: the string is a perfectly good Factorio export and the reader is
+/// left guessing whether it is corrupt. Naming it is this repo's standing rule
+/// (`BlockDrillUnfed`, `SurfaceGlobalsNotShared`), and for a book the name is
+/// also the remedy: [`decode_item`] reads it.
+fn body_of(text: &str) -> Result<serde_json::Map<String, Value>, BlueprintError> {
+    let envelope = envelope_of(text)?;
+    match kind_of(&envelope)? {
+        (ItemKind::Blueprint, body) => match body {
+            Value::Object(map) => Ok(map.clone()),
+            _ => Err(BlueprintError::NoBlueprint),
+        },
+        (other, _) => Err(BlueprintError::Unsupported(other.key().to_owned())),
+    }
+}
+
+/// The keys an envelope may carry: exactly one item, plus the `index` a book
+/// entry's envelope wears. Anything else is refused by name rather than
+/// dropped -- an envelope is two or three keys, so there is nowhere sensible
+/// to keep an unknown one and no consumer that could use it.
+const ALLOWED_ENVELOPE_KEYS: &[&str] = &[
+    "blueprint",
+    "blueprint_book",
+    "deconstruction_planner",
+    "upgrade_planner",
+    "index",
+];
+
+/// Which item an envelope holds, and its body.
+///
+/// Refuses an envelope holding two items by name: `{"blueprint": .., "blueprint_book": ..}`
+/// is not something Factorio writes, and picking one would be choosing which
+/// half to drop.
+fn kind_of(
+    envelope: &serde_json::Map<String, Value>,
+) -> Result<(ItemKind, &Value), BlueprintError> {
+    let mut found: Option<(ItemKind, &Value)> = None;
+    for (key, value) in envelope {
+        if !ALLOWED_ENVELOPE_KEYS.contains(&key.as_str()) {
+            return Err(BlueprintError::Unsupported(key.clone()));
+        }
+        let kind = match key.as_str() {
+            "blueprint" => ItemKind::Blueprint,
+            "blueprint_book" => ItemKind::Book,
+            "deconstruction_planner" => ItemKind::DeconstructionPlanner,
+            "upgrade_planner" => ItemKind::UpgradePlanner,
+            _ => continue,
+        };
+        if let Some((already, _)) = found {
+            return Err(BlueprintError::Unsupported(format!(
+                "{} beside {}",
+                kind.key(),
+                already.key()
+            )));
+        }
+        found = Some((kind, value));
+    }
+    found.ok_or(BlueprintError::NoBlueprint)
+}
+
+/// Read a blueprint string WHOLE, whatever it turns out to be: a blueprint, a
+/// book of them (nested, to [`MAX_BOOK_DEPTH`]), or a planner kept verbatim.
+///
+/// This is the "one of these N" entry point. [`decode_document`] stays the
+/// single-blueprint question and [`decode`] stays the placement question; both
+/// now refuse a book *by name* rather than with the old, useless
+/// `NoBlueprint`.
+pub fn decode_item(text: &str) -> Result<BlueprintItem, BlueprintError> {
+    let envelope = envelope_of(text)?;
+    Ok(item_of(&envelope, 0)?.item)
+}
+
+/// One envelope -- the item under its kind key, plus the `index` beside it.
+fn item_of(
+    envelope: &serde_json::Map<String, Value>,
+    depth: usize,
+) -> Result<BookEntry, BlueprintError> {
+    if depth > MAX_BOOK_DEPTH {
+        return Err(BlueprintError::TooDeep(MAX_BOOK_DEPTH));
+    }
+    let index = match envelope.get("index") {
+        None => None,
+        Some(v) => Some(v.as_u64().ok_or(BlueprintError::NotJson)?),
+    };
+    let (kind, body_value) = kind_of(envelope)?;
+    let body = body_value
+        .as_object()
+        .ok_or(BlueprintError::NoBlueprint)?
+        .clone();
+    let item = match kind {
+        ItemKind::Blueprint => BlueprintItem::Blueprint(document_of(body)?),
+        ItemKind::DeconstructionPlanner | ItemKind::UpgradePlanner => {
+            BlueprintItem::Planner(BlueprintPlanner { kind, body })
+        }
+        ItemKind::Book => {
+            let mut entries = Vec::new();
+            let mut extras = serde_json::Map::new();
+            for (key, value) in body {
+                match key.as_str() {
+                    "blueprints" => {
+                        let arr = value
+                            .as_array()
+                            .ok_or_else(|| BlueprintError::Unsupported("blueprints".into()))?;
+                        entries.reserve(arr.len());
+                        for child in arr {
+                            let child = child.as_object().ok_or_else(|| {
+                                BlueprintError::Unsupported("book entry is not an object".into())
+                            })?;
+                            entries.push(item_of(child, depth + 1)?);
+                        }
+                    }
+                    _ => {
+                        extras.insert(key, value);
+                    }
+                }
+            }
+            // `active_index` is taken out of `extras` rather than left in it,
+            // because absent-versus-`Some(0)` is a distinction the encoder has
+            // to make deliberately; see `BlueprintBook::active_index`.
+            let active_index = match extras.remove("active_index") {
+                None => None,
+                Some(v) => Some(v.as_u64().ok_or(BlueprintError::NotJson)?),
+            };
+            BlueprintItem::Book(BlueprintBook {
+                entries,
+                active_index,
+                extras,
+            })
+        }
+    };
+    Ok(BookEntry { index, item })
+}
+
+/// The inverse of [`decode_item`].
+///
+/// Recurses the same way, so a nested book comes back nested. Same standard as
+/// [`encode_document`]: written FROM THE MODEL, so anything the reader dropped
+/// is missing here.
+pub fn encode_item(item: &BlueprintItem) -> String {
+    compress(&item_json(item, None).to_string())
+}
+
+fn item_json(item: &BlueprintItem, index: Option<u64>) -> Value {
+    let body = match item {
+        BlueprintItem::Blueprint(doc) => Value::Object(document_json(doc)),
+        BlueprintItem::Planner(p) => Value::Object(p.body.clone()),
+        BlueprintItem::Book(book) => {
+            let mut body = book.extras.clone();
+            if let Some(active) = book.active_index {
+                body.insert("active_index".to_owned(), Value::from(active));
+            }
+            let entries: Vec<Value> = book
+                .entries
+                .iter()
+                .map(|e| item_json(&e.item, e.index))
+                .collect();
+            body.insert("blueprints".to_owned(), Value::Array(entries));
+            Value::Object(body)
+        }
+    };
+    let mut envelope = serde_json::Map::new();
+    envelope.insert(item.kind().key().to_owned(), body);
+    if let Some(index) = index {
+        envelope.insert("index".to_owned(), Value::from(index));
+    }
+    Value::Object(envelope)
 }
 
 /// A `{"x":..,"y":..}` object, and nothing else.
@@ -525,7 +864,13 @@ fn position_of(v: &Value) -> Result<Position, BlueprintError> {
 /// row that is not four numbers, a tile carrying a key beyond name and place).
 /// Everything it does not model, it keeps.
 pub fn decode_document(text: &str) -> Result<BlueprintDocument, BlueprintError> {
-    let body = body_of(text)?;
+    document_of(body_of(text)?)
+}
+
+/// The body object of one blueprint, read into the model. Shared by
+/// [`decode_document`] and by the book reader, so a blueprint inside a book is
+/// read exactly as one on its own.
+fn document_of(body: serde_json::Map<String, Value>) -> Result<BlueprintDocument, BlueprintError> {
     let mut modelled = serde_json::Map::new();
     let mut extras = serde_json::Map::new();
     for (key, value) in body {
@@ -1020,6 +1365,149 @@ mod document_tests {
             decode_document(&encode_document(&doc)).expect("reads"),
             doc,
             "a round trip is a fixed point"
+        );
+    }
+}
+
+#[cfg(test)]
+mod item_tests {
+    use super::{
+        BlueprintError, BlueprintItem, ItemKind, decode, decode_document, decode_item, encode_item,
+    };
+
+    fn wrap(json: &str) -> String {
+        super::compress(json)
+    }
+
+    fn json_of(text: &str) -> serde_json::Value {
+        use std::io::Read;
+        let raw = base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            text.strip_prefix('0').expect("a version byte"),
+        )
+        .expect("base64");
+        let mut json = String::new();
+        flate2::read::ZlibDecoder::new(&raw[..])
+            .read_to_string(&mut json)
+            .expect("zlib");
+        serde_json::from_str(&json).expect("json")
+    }
+
+    /// **A planner is named, not mistaken for corruption.**
+    ///
+    /// A deconstruction or upgrade planner is a perfectly good Factorio export
+    /// that happens to hold no layout. It used to come back as `NoBlueprint` --
+    /// literally true, and indistinguishable from a truncated string. Now the
+    /// refusal names it, and `decode_item` reads it whole: both are filters
+    /// over a selection, so there is nothing to model and everything to keep.
+    #[test]
+    fn a_planner_is_refused_by_name_and_read_verbatim() {
+        for (key, kind) in [
+            ("deconstruction_planner", ItemKind::DeconstructionPlanner),
+            ("upgrade_planner", ItemKind::UpgradePlanner),
+        ] {
+            let text = wrap(&format!(
+                r#"{{"{key}":{{"item":"{}","settings":{{"trees_and_rocks_only":true}},"version":562949953421312}}}}"#,
+                key.replace('_', "-")
+            ));
+            assert_eq!(
+                decode(&text).unwrap_err(),
+                BlueprintError::Unsupported(key.to_owned()),
+                "the placement path has nothing to place"
+            );
+            assert_eq!(
+                decode_document(&text).unwrap_err(),
+                BlueprintError::Unsupported(key.to_owned()),
+                "and it is not a blueprint either"
+            );
+            let item = decode_item(&text).expect("but it is readable");
+            assert_eq!(item.kind(), kind);
+            let BlueprintItem::Planner(p) = &item else {
+                panic!("a planner");
+            };
+            assert!(p.body.contains_key("settings"), "kept whole");
+            assert!(item.blueprints().is_empty(), "and holds no blueprint");
+            assert_eq!(json_of(&encode_item(&item)), json_of(&text), "round trips");
+        }
+    }
+
+    /// **`active_index` absent is not `active_index: 0`.** A book that never
+    /// recorded which entry it opens on and one that opens on its first are
+    /// different facts, and the encoder must keep them apart rather than
+    /// normalising one into the other.
+    #[test]
+    fn an_absent_active_index_is_not_a_zero_one() {
+        let zero = decode_item(&wrap(
+            r#"{"blueprint_book":{"item":"blueprint-book","active_index":0,"blueprints":[]}}"#,
+        ))
+        .expect("reads");
+        let absent = decode_item(&wrap(
+            r#"{"blueprint_book":{"item":"blueprint-book","blueprints":[]}}"#,
+        ))
+        .expect("reads");
+        let (BlueprintItem::Book(zero), BlueprintItem::Book(absent)) = (&zero, &absent) else {
+            panic!("both are books");
+        };
+        assert_eq!(zero.active_index, Some(0));
+        assert_eq!(absent.active_index, None);
+        assert_ne!(zero, absent);
+        assert_ne!(
+            encode_item(&BlueprintItem::Book(zero.clone())),
+            encode_item(&BlueprintItem::Book(absent.clone())),
+            "and the encoder does not collapse them"
+        );
+    }
+
+    /// An entry's `index` is likewise absent-or-stated, and it lives on the
+    /// entry's envelope rather than in the blueprint body -- so a book with
+    /// gaps keeps its slots.
+    #[test]
+    fn an_entry_index_is_absent_or_stated_and_rides_on_the_envelope() {
+        let item = decode_item(&wrap(
+            r#"{"blueprint_book":{"item":"blueprint-book","blueprints":[
+                {"blueprint":{"item":"blueprint","version":562949953421312},"index":3},
+                {"blueprint":{"item":"blueprint","version":562949953421312}}]}}"#,
+        ))
+        .expect("reads");
+        let BlueprintItem::Book(book) = &item else {
+            panic!("a book");
+        };
+        assert_eq!(book.entries[0].index, Some(3));
+        assert_eq!(book.entries[1].index, None);
+    }
+
+    /// An envelope holding two items would force a choice about which half to
+    /// drop, so it is refused naming both.
+    #[test]
+    fn an_envelope_holding_two_items_is_refused_naming_both() {
+        let err = decode_item(&wrap(
+            r#"{"blueprint":{"item":"blueprint"},"blueprint_book":{"item":"blueprint-book","blueprints":[]}}"#,
+        ))
+        .unwrap_err();
+        assert_eq!(
+            err,
+            BlueprintError::Unsupported("blueprint_book beside blueprint".into())
+        );
+    }
+
+    /// An unknown envelope key is refused by name. An envelope is two or three
+    /// keys with nowhere to keep a stranger, so this is the one level where
+    /// refusing beats keeping.
+    #[test]
+    fn an_unknown_envelope_key_is_refused_by_name() {
+        assert_eq!(
+            decode_item(&wrap(r#"{"blueprint":{"item":"blueprint"},"sneaky":1}"#)).unwrap_err(),
+            BlueprintError::Unsupported("sneaky".into())
+        );
+    }
+
+    /// An envelope naming no item at all is still `NoBlueprint`: nothing was
+    /// recognised, so there is no name to report.
+    #[test]
+    fn an_envelope_naming_nothing_is_still_no_blueprint() {
+        assert_eq!(
+            decode_item(&wrap(r#"{}"#)).unwrap_err(),
+            BlueprintError::NoBlueprint
         );
     }
 }

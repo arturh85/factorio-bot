@@ -341,6 +341,9 @@ mod tests {
                 elapsed_ticks: None,
                 error: None,
                 failure: None,
+                // Lanes are about where a bot was, not about what a halt
+                // cost, so no fixture here halts a bot.
+                abandoned: None,
             },
         )
     }

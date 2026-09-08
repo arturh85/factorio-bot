@@ -1238,6 +1238,22 @@ export type EventKind =
           error: string | null;
           /** The same failure, classified. `null` on success. */
           failure: WalkFailure | null;
+          /**
+           * How many of this bot's remaining steps were abandoned because
+           * this walk failed. `null` on every walk that did not halt its bot.
+           *
+           * A failed walk halts its bot deliberately -- a walk's effect is a
+           * position and no plan edge carries one -- and everything after it
+           * is dropped without ever being dispatched, so it produces no
+           * `action_settled` and reads as `pending`. That is also exactly
+           * what a run somebody killed early reads as, which is why this
+           * number exists: `run-1788833726-34821` ended `pending=2041` of
+           * 2,295 across four halts and nothing said so.
+           *
+           * `0` means "halted, taking nothing with it" -- a bot whose last
+           * step was the failed walk. That is a different fact from `null`.
+           */
+          abandoned: number | null;
       }
     | {
           /**

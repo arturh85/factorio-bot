@@ -1116,6 +1116,22 @@ end
                             None
                         }
                     };
+                    // Asked of the game for the same reason the two above are:
+                    // whether biters attack is a fact about the world that was
+                    // loaded, not about the flag somebody typed, and a run that
+                    // asked for peaceful mode and did not get it has to be
+                    // distinguishable from one that did.
+                    let peaceful = match rcon.as_ref().peaceful_mode().await {
+                        Ok(peaceful) => peaceful,
+                        Err(error) => {
+                            factorio_bot_core::tracing::warn!(
+                                %error,
+                                "could not read peaceful mode; this run will record it as NOT \
+                                 CAPTURED, which a reader must not treat as hostile"
+                            );
+                            None
+                        }
+                    };
                     let factorio = installed_factorio_version(&workspace.join("data"));
                     // The working tree of the process's own directory. See
                     // `GitProvenance`: this is where the code is *now*, which
@@ -1188,6 +1204,10 @@ end
                         // start. See `crates/core/src/record/run_mode.rs`.
                         bot_mode: run_mode.as_ref().map(|m| m.bot_mode.as_str().to_string()),
                         game_speed: run_mode.as_ref().map(|m| m.game_speed),
+                        // Straight from the game a few lines up. `None` here is
+                        // "we could not ask", never "hostile"; see the field's
+                        // own doc for why the two must not collapse.
+                        peaceful,
                     };
                     // Never fatal. A run that cannot write its provenance is
                     // still a run worth recording, and the reader's rule is

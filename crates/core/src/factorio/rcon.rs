@@ -2988,6 +2988,76 @@ pub fn parse_platform_reply(lines: &[String]) -> Option<Result<String, String>> 
 /// The prefix [`ACTIVE_MODS_QUERY`]'s reply carries, so one parser reads it.
 pub const MODS_STAMP_PREFIX: &str = "§mods§";
 
+/// The prefix [`PEACEFUL_MODE_QUERY`] and [`set_peaceful_mode_command`] both
+/// stamp their reply with, so one parser reads either.
+pub const PEACEFUL_STAMP_PREFIX: &str = "§peaceful§";
+
+/// Whether **every** surface in the running game has `peaceful_mode` on.
+///
+/// **Vanilla, deliberately, for the same reason [`ACTIVE_MODS_QUERY`] is.**
+/// `LuaSurface.peaceful_mode` is a read/write boolean on 2.1.17 (checked in
+/// `runtime-api.json`), so no BotBridge function is needed and none is used --
+/// which also means this answers on a server whose bridge mod failed to load,
+/// the case where "was this run peaceful" is least knowable by other means.
+///
+/// **The question is over all surfaces, not over Nauvis.** Peaceful mode is a
+/// per-surface property, so "this run was peaceful" is only true if nothing
+/// anywhere would attack unprovoked. `false` therefore means *at least one*
+/// surface is hostile, which is the claim a reader needs, and it is the
+/// conservative direction: a run reported peaceful is peaceful everywhere.
+///
+/// A game with no surfaces at all answers `none`, which
+/// [`parse_peaceful_mode`] turns into `None` -- not captured. That cannot
+/// happen in a loaded game and is here so the parser has no branch that
+/// invents a boolean.
+///
+/// **Peaceful mode does not remove biters, and this query does not claim it
+/// does.** Nests, worms and units all still exist and still appear in
+/// `find_entities_filtered`; what changes is that they do not attack
+/// unprovoked. See [`crate::record::provenance::Provenance::peaceful`].
+pub const PEACEFUL_MODE_QUERY: &str = "/silent-command local all=true local any=false for _,s in pairs(game.surfaces) do any=true if not s.peaceful_mode then all=false end end rcon.print(\"§peaceful§\"..(any and tostring(all) or \"none\"))";
+
+/// The command that switches peaceful mode on or off on **every** surface, and
+/// then reports what the game holds afterwards on the same channel
+/// [`PEACEFUL_MODE_QUERY`] uses.
+///
+/// It reads back rather than reporting success because a write that silently
+/// did not take is exactly the failure this project keeps paying for: the
+/// caller gets the game's own answer, not an echo of what it asked for.
+///
+/// **Only surfaces that exist when it runs.** A surface created later -- a
+/// space platform -- is generated hostile, and nothing re-applies this. That is
+/// why provenance asks again at run start instead of trusting this reply.
+pub fn set_peaceful_mode_command(peaceful: bool) -> String {
+    format!(
+        "/silent-command for _,s in pairs(game.surfaces) do s.peaceful_mode={peaceful} end \
+         local all=true local any=false for _,s in pairs(game.surfaces) do any=true \
+         if not s.peaceful_mode then all=false end end \
+         rcon.print(\"{PEACEFUL_STAMP_PREFIX}\"..(any and tostring(all) or \"none\"))"
+    )
+}
+
+/// Read the reply of [`PEACEFUL_MODE_QUERY`] or [`set_peaceful_mode_command`].
+///
+/// `None` when no line carried the stamp -- the game did not answer, answered
+/// something else, or answered `none`. **`None` is "not captured" and is never
+/// to be read as "hostile"**: a build that could not ask and a game that said
+/// no are different facts, and this project has conflated an absent answer
+/// with a false one in five other places already.
+pub fn parse_peaceful_mode(lines: &[String]) -> Option<bool> {
+    let body = lines
+        .iter()
+        .find_map(|line| line.split_once(PEACEFUL_STAMP_PREFIX).map(|(_, rest)| rest))?
+        .trim();
+    match body {
+        "true" => Some(true),
+        "false" => Some(false),
+        // `none`, and anything else the game might print: unknown. Never a
+        // default, and specifically never `false`.
+        _ => None,
+    }
+}
+
 /// Every mod the RUNNING GAME loaded, as `name=version` pairs, comma separated
 /// and sorted.
 ///
@@ -5527,6 +5597,24 @@ impl FactorioRcon {
     pub async fn active_mods(&self) -> Result<Option<std::collections::BTreeMap<String, String>>> {
         let lines = self.send(ACTIVE_MODS_QUERY).await?;
         Ok(lines.as_deref().and_then(parse_active_mods))
+    }
+
+    /// Whether every surface has peaceful mode on. See [`PEACEFUL_MODE_QUERY`].
+    ///
+    /// `Ok(None)` is **not captured**, never "hostile".
+    pub async fn peaceful_mode(&self) -> Result<Option<bool>> {
+        let lines = self.send(PEACEFUL_MODE_QUERY).await?;
+        Ok(lines.as_deref().and_then(parse_peaceful_mode))
+    }
+
+    /// Sets peaceful mode on every surface and answers with what the game holds
+    /// **afterwards**, which is not necessarily what was asked for.
+    ///
+    /// The caller must compare the two: a write that did not take is the
+    /// failure worth reporting, and returning the request back would hide it.
+    pub async fn set_peaceful_mode(&self, peaceful: bool) -> Result<Option<bool>> {
+        let lines = self.send(&set_peaceful_mode_command(peaceful)).await?;
+        Ok(lines.as_deref().and_then(parse_peaceful_mode))
     }
 
     pub async fn map_exchange_string(&self) -> Result<String> {
@@ -10899,5 +10987,98 @@ mod platform_reply_tests {
         ]))
         .expect("the stamp is found on a later line");
         assert_eq!(ok, Ok("platform-1".to_string()));
+    }
+}
+
+#[cfg(test)]
+mod peaceful_mode_tests {
+    use super::{PEACEFUL_STAMP_PREFIX, parse_peaceful_mode, set_peaceful_mode_command};
+
+    fn lines(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn a_stamped_boolean_is_read_as_that_boolean() {
+        assert_eq!(
+            parse_peaceful_mode(&lines(&[&format!("{PEACEFUL_STAMP_PREFIX}true")])),
+            Some(true)
+        );
+        assert_eq!(
+            parse_peaceful_mode(&lines(&[&format!("{PEACEFUL_STAMP_PREFIX}false")])),
+            Some(false)
+        );
+    }
+
+    /// **The distinction the whole field exists for.** Every one of these is a
+    /// game that did not answer, and reporting any of them as `false` would
+    /// declare a run hostile on no evidence -- which is exactly what a reader
+    /// comparing it against a peaceful run would then act on.
+    #[test]
+    fn an_unanswered_query_is_none_and_never_false() {
+        for reply in [
+            vec![],
+            lines(&[""]),
+            lines(&["Error: attempt to index a nil value"]),
+            // A game with no surfaces: a real reply, and still not a boolean.
+            lines(&[&format!("{PEACEFUL_STAMP_PREFIX}none")]),
+            // The stamp missing entirely, with a plausible body beside it --
+            // an older build, or a different command's output.
+            lines(&["true"]),
+            lines(&["false"]),
+        ] {
+            assert_eq!(
+                parse_peaceful_mode(&reply),
+                None,
+                "not captured, not hostile: {reply:?}"
+            );
+        }
+    }
+
+    /// The stamp may arrive after other console output, the way the mods and
+    /// map-exchange replies do.
+    #[test]
+    fn the_stamp_is_found_on_a_later_line() {
+        assert_eq!(
+            parse_peaceful_mode(&lines(&[
+                "Warning: using commands will disable achievements",
+                &format!("  {PEACEFUL_STAMP_PREFIX}true  "),
+            ])),
+            Some(true)
+        );
+    }
+
+    /// The setter writes the value it was given and then asks the game, rather
+    /// than echoing the request -- a write that did not take has to be visible.
+    #[test]
+    fn the_setter_writes_the_request_and_then_reads_the_game_back() {
+        for requested in [true, false] {
+            let command = set_peaceful_mode_command(requested);
+            assert!(
+                command.contains(&format!("s.peaceful_mode={requested}")),
+                "{command}"
+            );
+            // Every surface, not Nauvis: peaceful mode is per surface, and a
+            // run is only peaceful if nothing anywhere hunts.
+            assert!(command.contains("pairs(game.surfaces)"), "{command}");
+            // The reply is derived from a second traversal of the surfaces,
+            // so it reports the world and not the argument.
+            assert!(
+                command.contains("if not s.peaceful_mode then all=false end"),
+                "{command}"
+            );
+            assert!(command.contains(PEACEFUL_STAMP_PREFIX), "{command}");
+            // `/silent-command`, like every other provenance query here: the
+            // reply must not land in a player's console.
+            assert!(command.starts_with("/silent-command "), "{command}");
+        }
+    }
+
+    /// The two commands answer on one channel, so one parser reads either and
+    /// they cannot drift into two spellings of the same stamp.
+    #[test]
+    fn the_setter_and_the_query_share_one_stamp() {
+        assert!(super::PEACEFUL_MODE_QUERY.contains(PEACEFUL_STAMP_PREFIX));
+        assert!(set_peaceful_mode_command(true).contains(PEACEFUL_STAMP_PREFIX));
     }
 }

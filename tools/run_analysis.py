@@ -272,6 +272,18 @@ PROVENANCE_SEVERITY = {
     #     delivers fewer ticks per second than it planned for.
     "bot_mode": "flag",
     "game_speed": "flag",
+    # `peaceful` -- REFUSE, on the same ground as `resumed_from`. A peaceful
+    #     run and a hostile one are byte-identical in every other field: same
+    #     seed, same settings, same commit, same mods, same fingerprint. What
+    #     differs is whether anything hunted the bots, and this project has
+    #     already lost two bots and stalled an oil run to biters -- so a
+    #     difference here is a difference in what the run *was*, and any delta
+    #     between the two would be attributed to whatever change was under
+    #     test. Note the asymmetry the loader preserves: UNKNOWN against a
+    #     value is unknown, never a refusal and never a match, because every
+    #     run archived before the field existed records nothing and must not
+    #     be silently declared hostile.
+    "peaceful": "refuse",
 }
 PROVENANCE_FIELDS = tuple(PROVENANCE_SEVERITY)
 
@@ -353,6 +365,25 @@ def _norm_map(raw: Any) -> str | None:
     return str(raw) if raw is not None else None
 
 
+def _norm_peaceful(raw: Any) -> str | None:
+    """`peaceful` as a word a reader can act on, or None for unknown.
+
+    `True`/`False` are the only values the writer produces; anything else is
+    not understood and reads as unknown rather than being coerced. In
+    particular `None` never becomes "hostile" -- see `PROVENANCE_SEVERITY`.
+
+    "biters present, not hunting" is the honest expansion of `peaceful`:
+    peaceful mode does not remove nests, worms or units from the map, it stops
+    them attacking unprovoked. A reader who takes it as "no enemies" is making
+    a claim the field does not support.
+    """
+    if raw is True:
+        return "peaceful (biters present, not hunting)"
+    if raw is False:
+        return "hostile"
+    return None
+
+
 def read_provenance(run_dir: str, run_started: dict | None) -> dict:
     """What world and what build produced this run, merged from both writers.
 
@@ -409,6 +440,13 @@ def read_provenance(run_dir: str, run_started: dict | None) -> dict:
         "workspace": pick((PROVENANCE_FILE, sidecar.get("workspace"), text)),
         "bot_mode": pick((PROVENANCE_FILE, sidecar.get("bot_mode"), text)),
         "game_speed": pick((PROVENANCE_FILE, sidecar.get("game_speed"), text)),
+        # Deliberately NOT given a `resumed_from`-style default when the file
+        # is present. `resumed_from: null` is a positive statement ("fresh
+        # world") because the writer always sets it; `peaceful: null` is a
+        # failed read or a build that predates the field, which is UNKNOWN.
+        # Defaulting it to "hostile" would declare every archived run hostile
+        # on no evidence -- the conflation the field exists to prevent.
+        "peaceful": pick((PROVENANCE_FILE, sidecar.get("peaceful"), _norm_peaceful)),
         # Null-with-meaning, but ONLY when the file that defines it is present:
         # `resumed_from: null` there means the run started on a fresh world,
         # where no file at all means nobody ever recorded whether it did.

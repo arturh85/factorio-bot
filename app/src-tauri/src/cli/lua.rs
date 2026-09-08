@@ -1,6 +1,6 @@
 use crate::cli::{
-  SETTINGS_PRECEDENCE_HELP, Subcommand, SubcommandCallback, resolve_resume, resume_args,
-  settings_overrides,
+  SETTINGS_PRECEDENCE_HELP, Subcommand, SubcommandCallback, peaceful_arg, resolve_peaceful,
+  resolve_resume, resume_args, settings_overrides,
 };
 use crate::context::Context;
 use crate::scripting::run_script_file;
@@ -212,6 +212,7 @@ impl Subcommand for ThisCommand {
         .action(ArgAction::SetTrue)
         .help("recreate level by deleting server map if exists"),
     )
+    .arg(peaceful_arg())
   }
 
   fn build_callback(&self) -> SubcommandCallback {
@@ -529,6 +530,7 @@ fn start_params(
     map_exchange_string,
     wait_until: FactorioStartCondition::DiscoveryComplete,
     silent: !verbose,
+    peaceful: resolve_peaceful(matches),
     ..FactorioParams::default()
   })
 }

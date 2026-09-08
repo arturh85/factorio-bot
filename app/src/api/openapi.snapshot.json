@@ -3774,7 +3774,7 @@
             ]
           },
           "at_spawn": {
-            "description": "`LuaSurface.get_pollution(position)` at the player force's spawn.\n\nThat call is a **chunk** reading, so it needs a position, and spawn is\nthe one position that means the same thing on every run of this\nproject: the roster starts there and the first blocks are built around\nit. A grid of probes was rejected -- it costs O(chunks) per beat and\nanswers a question nobody has asked.",
+            "description": "`LuaSurface.get_pollution(position)` at the player force's spawn.\n\nThat call is a **chunk** reading, so it needs a position, and spawn is\nthe one position that means the same thing on every run of this\nproject: the roster starts there and the first blocks are built around\nit. A grid of probes was rejected -- it costs O(chunks) per beat and\nanswers a question nobody has asked.\n\n**It read exactly `0.0` in 375 of 375 samples on both arms of the first\nlive measurement, and that is a real reading, not a broken accessor.**\nA uniformly constant field is the tell for a plumbing failure, so it was\nchecked against a running game rather than believed:\n`surface.pollute({0,0}, 50)` then `get_pollution({0,0})` answers `50`.\n*Why* the spawn chunk held none while the surface held up to 41 is\n**not established** -- the build sitting in a neighbouring chunk with\nabsorption eating the spread is a hypothesis, not a measurement. See\n`docs/superpowers/notes/2026-09-08-what-our-own-pollution-provokes.md`.",
             "format": "double",
             "type": [
               "number",

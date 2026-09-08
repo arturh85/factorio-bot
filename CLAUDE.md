@@ -1683,6 +1683,29 @@ entry over a log line:
   uncommitted work in a file you need, committing yours ships theirs under your
   message. Land one, then the other -- or hand over a patch. Two agents have
   had to stop for this.
+- **AN EXPERIMENT WHOSE APPARATUS LIVES ONLY IN A WORKTREE DIES WITH IT.**
+  Removing merged worktrees is correct disk hygiene and this file recommends
+  it — but on 2026-09-08 it destroyed the reproducibility of three published
+  results at once. The `ElectricOreToPlate` block is cited in four notes and a
+  `power.rs` doc comment; `git log --all -S ElectricOreToPlate -- '"'"'*.lua'"'"'` is
+  **empty**. Its blueprint string and its loading script only ever existed
+  inline in an ad-hoc script in a worktree that was later removed, so the block
+  cannot now be decoded, re-run, or fixed by anybody, and the numbers taken from
+  it cannot be re-derived.
+
+  Worse, the numbers were **wrong in a way nobody could check**: the note records
+  `chests loaded by hand: iron-ore x96, coal x50 (each of two)` — both
+  commodities into both chests — which is precisely the mixed-lane control
+  measured on 2026-09-06 and written up thirty lines above in this file (coal
+  drains, ore never moves, one plate). It was read as a fixture defect for a day.
+
+  **So: commit the apparatus, or copy it aside before `git worktree remove`.**
+  A blueprint string, the script that loaded it, and the loading *order* are
+  part of the result, not scaffolding around it. A worktree's `scratch/` is
+  gitignored on purpose — that is a reason to lift what matters out of it, not a
+  reason to let it go. Cheap rule: if a note quotes a number, the thing that
+  produced the number must be reachable from `master`.
+
 - **Develop in a throwaway worktree** (`git worktree add .worktrees/x HEAD` --
   inside the repo, not `/tmp`) when a live run holds
   `target/debug/factorio-bot`.

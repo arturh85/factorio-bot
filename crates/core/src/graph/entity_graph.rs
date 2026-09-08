@@ -1048,6 +1048,14 @@ impl EntityGraph {
     /// uses on those very boxes.
     ///
     /// `position` is a point anywhere in the tile, not the tile's corner.
+    ///
+    /// # It asks the ground first and the name second
+    ///
+    /// The test is [`FactorioTile::yields_water`], not the bare name pair:
+    /// a charted tile is judged by the fluid its prototype names, and only a
+    /// tile whose sender never filled `fluid` in falls back to
+    /// [`FactorioTile::WATER_NAMES`]. See [`Self::fluid_at`] for the three
+    /// answers and `yields_water` for why the fallback may not be dropped.
     #[must_use]
     pub fn is_water_at(&self, position: &Position) -> bool {
         let pos = Pos::from(position);
@@ -1064,7 +1072,7 @@ impl EntityGraph {
             .read()
             .query(query)
             .into_iter()
-            .any(|(tile, _rect, _id)| Pos::from(&tile.position) == pos && tile.is_water())
+            .any(|(tile, _rect, _id)| Pos::from(&tile.position) == pos && tile.yields_water())
     }
 
     /// Which fluid an offshore pump standing on the tile covering `position`
@@ -1137,8 +1145,13 @@ impl EntityGraph {
     ///   corner position, unchanged, so this is the only place the half tile
     ///   appears. Getting the same half-tile wrong for resources made mining
     ///   fail on every ore on every map.
-    /// * **Both water names.** `deepwater` outnumbers `water` four to one in
-    ///   the archived stdout; see [`FactorioTile::WATER_NAMES`].
+    /// * **Water is what the ground yields, not what it is called.** The
+    ///   filter is [`FactorioTile::yields_water`]: a charted tile is judged by
+    ///   `LuaTilePrototype::fluid`, and the vanilla name pair
+    ///   ([`FactorioTile::WATER_NAMES`], where `deepwater` outnumbers `water`
+    ///   four to one in the archived stdout) is consulted only for a tile
+    ///   whose sender never said. Every archived dump is such a sender, which
+    ///   is why the fallback exists at all.
     ///
     /// # Determinism
     ///
@@ -1162,7 +1175,7 @@ impl EntityGraph {
         let mut candidates: Vec<(f64, FactorioTile)> = self
             .tiles_within(&bounds)
             .into_iter()
-            .filter(FactorioTile::is_water)
+            .filter(FactorioTile::yields_water)
             .filter_map(|tile| {
                 let centre = Position::new(tile.position.x() + 0.5, tile.position.y() + 0.5);
                 let distance = calculate_distance(&centre, from);
@@ -4288,6 +4301,114 @@ mod tests {
             .expect("a lake made only of deepwater is still a lake");
         assert_eq!(found.name, "deepwater");
         assert_eq!(found.position, Position::new(10., 0.));
+    }
+
+    /// A tile exactly as an ARCHIVED dump carries one: two fields and no
+    /// `fluid`, so [`TileFluid::Unknown`] by `Default`. Every world dump and
+    /// every server log this project has ever written is this shape.
+    fn undeclared(x: f64, y: f64, name: &str) -> FactorioTile {
+        FactorioTile {
+            position: Position::new(x, y),
+            player_collidable: FactorioTile::WATER_NAMES.contains(&name),
+            name: name.into(),
+            color: None,
+            surface: None,
+            fluid: TileFluid::Unknown,
+        }
+    }
+
+    /// The fallback, and what it is worth. A dump written before
+    /// `LuaTilePrototype::fluid` crossed the bridge says nothing about fluid
+    /// at all, so a search that asked only `yields("water")` would find no
+    /// water on any archived map and refuse every steam plant. Measured
+    /// 2026-09-08: dropping this branch makes all three `map.json` baselines
+    /// refuse with `PowerPlantNeedsWater`.
+    #[test]
+    fn a_tile_that_never_declared_a_fluid_is_still_water_by_name() {
+        let graph = graph_with_terrain(vec![
+            undeclared(3., 0., "water"),
+            undeclared(0., 5., "deepwater"),
+        ]);
+        assert!(
+            graph.is_water_at(&Position::new(3.5, 0.5)),
+            "an archived `water` tile is water"
+        );
+        assert_eq!(
+            graph
+                .nearest_water_tile(&Position::new(0.5, 0.5), 30.)
+                .expect("an archived lake is still a lake")
+                .position,
+            Position::new(3., 0.),
+        );
+    }
+
+    /// The point of asking the ground. This install runs Space Age, and the
+    /// vanilla name pair is a *fallback*, not the definition -- a tile whose
+    /// prototype names `water` is water whatever it is called, and nobody has
+    /// to extend a list for it.
+    #[test]
+    fn a_tile_named_nothing_like_water_that_yields_water_is_water() {
+        let graph = graph_with_terrain(vec![FactorioTile {
+            position: Position::new(4., 0.),
+            name: "wetland-green-slime".into(),
+            player_collidable: true,
+            color: None,
+            surface: None,
+            fluid: TileFluid::Yields {
+                fluid: "water".into(),
+            },
+        }]);
+        assert!(graph.is_water_at(&Position::new(4.5, 0.5)));
+        assert_eq!(
+            graph
+                .nearest_water_tile(&Position::new(0.5, 0.5), 30.)
+                .expect("the ground said water, so it is water")
+                .name,
+            "wetland-green-slime",
+        );
+    }
+
+    /// The other direction, and the one a name list can never get right: a
+    /// tile the ground says yields something else, or nothing. `Dry` is a
+    /// fact, so it OVERRIDES the name -- only [`TileFluid::Unknown`] falls
+    /// back. Both of these are named in the vanilla pair and neither is water.
+    #[test]
+    fn the_ground_overrules_the_name_in_both_directions() {
+        let graph = graph_with_terrain(vec![
+            FactorioTile {
+                position: Position::new(1., 0.),
+                name: "water".into(),
+                player_collidable: true,
+                color: None,
+                surface: None,
+                // A modded `water` that a pump draws nothing from.
+                fluid: TileFluid::Dry,
+            },
+            FactorioTile {
+                position: Position::new(2., 0.),
+                name: "deepwater".into(),
+                player_collidable: true,
+                color: None,
+                surface: None,
+                fluid: TileFluid::Yields {
+                    fluid: "ammonia".into(),
+                },
+            },
+        ]);
+        assert!(
+            !graph.is_water_at(&Position::new(1.5, 0.5)),
+            "charted and dry, whatever it is called"
+        );
+        assert!(
+            !graph.is_water_at(&Position::new(2.5, 0.5)),
+            "charted and ammoniacal -- a boiler wants water, not ammonia"
+        );
+        assert!(
+            graph
+                .nearest_water_tile(&Position::new(0.5, 0.5), 30.)
+                .is_none(),
+            "and neither is offered to a plant search"
+        );
     }
 
     /// Nearest by Euclidean distance to the tile's *centre*, with the tile's

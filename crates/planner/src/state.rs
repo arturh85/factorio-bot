@@ -3481,7 +3481,7 @@ impl PlanState {
             .entity_graph
             .tiles_within(bounds)
             .into_iter()
-            .filter(FactorioTile::is_water)
+            .filter(FactorioTile::yields_water)
             .collect()
     }
 
@@ -3625,9 +3625,11 @@ impl PlanState {
     /// entity, a character or a refused footprint standing on a lake still
     /// blocks, whatever the pump's mask says about tiles.
     ///
-    /// The water is identified by name through `EntityGraph::is_water_at`, not
-    /// by the blocking box's own payload, which carries a bare `is_minable`
-    /// flag and no name at all. A box's centre is the tile it came from — a
+    /// The water is identified through `EntityGraph::is_water_at` -- by the
+    /// fluid the tile's prototype yields, falling back to the vanilla name
+    /// pair only for a sender that never said -- and not by the blocking
+    /// box's own payload, which carries a bare `is_minable` flag and no name
+    /// at all. A box's centre is the tile it came from — a
     /// tile's blocking box is exactly that tile's 1x1 square — which is the
     /// same key the `removed` lookup one line above already uses on the very
     /// same rectangle.

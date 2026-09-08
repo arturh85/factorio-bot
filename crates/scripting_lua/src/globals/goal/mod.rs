@@ -1071,11 +1071,42 @@ end
 -- that refusal; somebody has to go and look. This is how a script asks for
 -- that, and the refusal's own message names the frontier to aim at.
 --
--- Planning it emits one `survey` step per blind probe: seventeen points are
--- checked -- the centre, then the eight compass directions at half the radius
--- and at the full radius -- and a bot is walked to each one the model has no
--- ground for. Charting is the *engine's* response to a character standing
--- somewhere new, so a survey asks the game for nothing beyond the walk.
+-- Planning it emits one `survey` step per lattice cell the model has no
+-- ground for, and a bot is walked to each. Charting is the *engine's*
+-- response to a character standing somewhere new, so a survey asks the game
+-- for nothing beyond the walk (and the chunk generation that makes the walk
+-- possible at all -- a bot cannot path into ungenerated ground, so the
+-- executor asks for exactly the reveal a standing character gets, counted
+-- into the run record as `ground_generated` rather than left implicit).
+--
+-- **The lattice is what decides what a radius buys, and it is coarse.**
+-- `method::scout::REVEAL_PITCH` is **256 tiles**, measured on a live server:
+-- a lone character makes the engine generate a 9x9 block of chunks centred on
+-- it, i.e. +/-4 chunks = +/-128 tiles, so points 256 apart tile the plane.
+-- `survey_plan` walks Chebyshev rings 0..`floor(radius / 256)` of that
+-- lattice: ring 0 is the centre alone, ring `k` is the 8k points at Chebyshev
+-- distance `k`. So
+--
+--   * any radius **below 256 plans the centre cell and nothing else** -- and
+--     on a fresh map the centre is already charted, so it plans *nothing* and
+--     is indistinguishable from a disc that was fully explored;
+--   * 384 is rings 0-1: nine points, the outer eight at (+/-256, +/-256) and
+--     the cardinals between, each buying +/-128 around itself, so the ground
+--     looked at reaches 384 tiles out;
+--   * 640 is rings 0-2, 896 is rings 0-3, and so on.
+--
+-- This is **not** the seventeen-probe compass pattern a `not_charted` refusal
+-- reports ("charted ground covers 17 of 17 probes within 256 tiles"). That is
+-- `PlanState::charting`, which *measures* where the model runs out; this is
+-- `method::scout::survey_plan`, which decides where to walk. An earlier
+-- version of this doc described the first as if it were the second, which
+-- would have a script size a radius against a pattern the planner does not
+-- use.
+--
+-- A cell is also skipped when a charted enemy structure is within
+-- `THREAT_STANDOFF` of it, and a disc whose every unlooked-at cell is refused
+-- that way **raises** rather than planning nothing -- being boxed in by nests
+-- and being finished are different situations and must not look alike.
 --
 -- **A disc that is already charted plans nothing**, so a supervisor loop can
 -- re-issue this every round without paying for it twice, and `goal.holds`

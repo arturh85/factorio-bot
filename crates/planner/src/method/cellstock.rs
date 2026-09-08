@@ -77,6 +77,48 @@ use factorio_bot_core::types::Position;
 /// Ticks one chest-to-hand transfer costs, as everywhere else in the crate.
 const TRANSFER_TICKS: Ticks = 10;
 
+/// Is `item` something a lab eats -- named by *some* technology's
+/// `research_unit_ingredients`?
+///
+/// # This is a scope limit bought by a measured regression, not a preference
+///
+/// Without it this method claims **any** `Goal::Have` for an item a cell can
+/// make, and `producing:transport-belt:6` -- a plan of 307 actions on
+/// `master` -- became a refusal:
+///
+/// ```text
+/// bot 1 owns chain ChainId(22) because its bill was sized against it, but
+/// 4 transport-belt in the buffer at [33.5, -12.5] does not hold there
+/// ```
+///
+/// The belts a belt cell *will* make were drawn to pay for building the belt
+/// cell. The chest's ledger correctly refused -- loudly, at schedule time,
+/// which is the right failure -- but the plan was gone.
+///
+/// A science pack cannot close that loop: **no machine, chest, inserter, belt
+/// or pole has a science pack in its bill**, so a pack drawn from a cell can
+/// never be spent on building one. The class is derived from the world's own
+/// technology table rather than named, so a mod that adds a pack gets the
+/// same treatment and a mod that renames one does not break this.
+///
+/// It is a *bound on what has been shown to work*, not a claim that nothing
+/// else should ever be drawn from a cell. Widening it means answering "is this
+/// goal inside the cell's own construction", which this rung does not.
+///
+/// **The same question gates the ledger itself**, in
+/// `crate::method::assemble`: gating only this method left the regression in
+/// place, because `Withdraw` reads the very same buffer and claimed the belts
+/// first. A ledger entry nothing may safely spend should not be written.
+pub(crate) fn is_science_pack(state: &PlanState, item: &str) -> bool {
+    state.technology_names().into_iter().any(|name| {
+        state.technology(&name).is_some_and(|tech| {
+            tech.research_unit_ingredients
+                .iter()
+                .any(|ingredient| ingredient.name == item)
+        })
+    })
+}
+
 /// What this method can draw for `goal`, if anything: the spec of the cell
 /// that makes the item, and the chests holding some of it.
 ///
@@ -92,6 +134,9 @@ fn drawable(goal: &Goal, state: &PlanState) -> Option<(AssemblySpec, Vec<(Positi
     // honour: the cell runs the recipe it was built with, and nothing here
     // can re-recipe a standing machine.
     if want.via.is_some() {
+        return None;
+    }
+    if !is_science_pack(state, want.item) {
         return None;
     }
     let spec = assembly_spec(state, want.item)?;

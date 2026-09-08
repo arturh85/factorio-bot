@@ -2256,7 +2256,18 @@ fn cell_steps(
                 item: item.clone(),
                 count: amount,
             }];
+            //
+            // **Only for a science pack**, and that limit was bought by a
+            // measured regression rather than chosen: with the ledger written
+            // for every product, `producing:transport-belt:6` went from a
+            // 307-action plan to `4 transport-belt in the buffer at
+            // [33.5, -12.5] does not hold there` -- `Withdraw` spent the belts
+            // the cell had yet to make on building the cell. No machine,
+            // chest, inserter, belt or pole has a pack in its bill, so the
+            // loop is impossible for a pack by construction. See
+            // `crate::method::cellstock::is_science_pack`.
             if chest_role == Role::SupplyChest
+                && crate::method::cellstock::is_science_pack(&ctx.state, &spec.item)
                 && let Some(sink) = cell.at(Role::OutputChest)
             {
                 eff.push(Effect::BufferGain {
@@ -2735,7 +2746,6 @@ mod tests {
     use crate::method::have::registry_for;
     use crate::network::ActionNetwork;
     use factorio_bot_core::factorio::world::FactorioSurface;
-    use factorio_bot_core::test_utils::fixture_world;
     use std::sync::Arc;
 
     const PACK: &str = "automation-science-pack";
@@ -2747,7 +2757,14 @@ mod tests {
     /// the capture in `tests/red_science_cell.rs`. They are added `enabled` so
     /// these tests are about the layout rather than about the research ladder.
     fn world() -> FactorioSurface {
-        let world = fixture_world();
+        // `world_with_technologies` rather than `fixture_world`: the force's
+        // technology table is what says an item is a science pack (see
+        // `crate::method::cellstock::is_science_pack`), and a world with no
+        // technologies at all says of every item that it is not one. That
+        // default is the safe direction -- no ledger entry, and the plan a
+        // cell built before this rung would have produced -- but it also
+        // makes a fixture with no force unable to exercise the ledger.
+        let world = crate::test_world::world_with_technologies();
         let green: factorio_bot_core::types::FactorioRecipe =
             factorio_bot_core::serde_json::from_str(
                 r#"{
@@ -3892,6 +3909,29 @@ mod tests {
         assert!(
             fuelled.iter().all(|(_, count)| *count == 2),
             "the charge should be the network's draw split four ways: {fuelled:?}"
+        );
+    }
+
+    /// **The ledger is written for a pack and for nothing else**, and the
+    /// asymmetry is the whole of what keeps a cell from paying for itself out
+    /// of its own future output.
+    ///
+    /// `transport-belt` is the case that found it: a belt cell's charge
+    /// promised belts, `Withdraw` spent them on the belt run that fuels the
+    /// cell, and `producing:transport-belt:6` -- 307 actions on `master` --
+    /// refused with `4 transport-belt in the buffer at [33.5, -12.5] does not
+    /// hold there`. A pack cannot close that loop because nothing a cell is
+    /// built from has a pack in its bill.
+    #[test]
+    fn only_a_science_pack_gets_a_ledger_entry_on_the_output_chest() {
+        let state = bare(&[BotId(1)]);
+        assert!(
+            crate::method::cellstock::is_science_pack(&state, PACK),
+            "a technology in the fixture eats {PACK}"
+        );
+        assert!(
+            !crate::method::cellstock::is_science_pack(&state, "transport-belt"),
+            "no lab eats a transport-belt, so its cell writes no ledger entry"
         );
     }
 

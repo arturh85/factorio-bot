@@ -1088,6 +1088,10 @@ def analyse(
         present=samples.present,
         activity=activity,
     )
+    # The capacity axis beside the rate axis: how many machines stood, and how
+    # many were working, at the same marks. Additive to `machines`, which is
+    # an interval production reading and answers a different question.
+    result["machine_census"] = machine_census(samples.rows, lo, hi, marks, samples.present)
     result["pollution"] = pollution_marks(samples.rows, lo, hi, marks, samples.present)
     result["headline"] = combined_headline(result)
 
@@ -3504,6 +3508,154 @@ def machine_statuses(samples: list[dict], lo: int, hi: int) -> dict:
     }
 
 
+def machine_census(
+    samples: list[dict],
+    lo: int,
+    hi: int,
+    marks: tuple[float, ...] = DEFAULT_MARKS,
+    present: bool = True,
+) -> dict:
+    """How many machines of each kind STOOD, and how many were WORKING, per mark.
+
+    The capacity axis beside :func:`production_rates`' output axis. A rising
+    production curve cannot separate "the factory grew" from "the bots worked
+    harder" -- ``production.made`` counts what a *machine* made, and a stone
+    furnace a bot hand-loaded is a machine. A count of furnaces, drills and
+    assemblers over the same marks is what makes the rate readable.
+
+    **A count and a working count are different facts** and both are printed:
+    "12 furnaces" and "12 furnaces, 2 working" say opposite things about a
+    smelter line. ``entity.status`` supplies the second and a run archived
+    before that field landed (2026-09-07) has none -- reported as
+    ``status_unknown``, never as "not working".
+
+    Each mark is a **snapshot**, not an interval: the last ``machines`` sample
+    at or before ``lo + minute * 3600``. Machine counts are a standing quantity
+    (how many exist right now), unlike production, which is a flow.
+
+    Three honesty rules, each an instance of *absent is not a value*:
+
+    * A mark with no machines sample carries a ``status`` -- ``run_ended`` /
+      ``samples_end`` / ``no_sample`` -- and no counts at all. "No machines
+      recorded" and "no machines existed" are different facts.
+    * ``truncated`` on the sample is the number of machines the mod SAW and did
+      not write (``MACHINE_SAMPLE_LIMIT``). Non-zero makes every count on that
+      mark a **floor**, flagged as ``is_floor``; a sample that does not carry
+      the field at all leaves ``is_floor`` ``None``, which is unknown.
+    * The mod samples exactly ``MACHINE_TYPES``: assembling-machine, furnace,
+      mining-drill, lab, boiler, generator and the two container types. A
+      chemical plant, refinery or silo is **not sampled**, so its absence here
+      is not evidence that none was built.
+    """
+    out: dict[str, Any] = {
+        "present": False,
+        "reason": None,
+        "origin_tick": lo,
+        "end_tick": hi,
+        "last_sample_tick": None,
+        "kinds": [],
+        "marks": [],
+    }
+    if not present:
+        out["reason"] = "no samples.jsonl archived -- no machine census"
+        return out
+    rows = sorted(
+        (s for s in samples if s.get("kind") == "machines" and isinstance(s.get("tick"), int)),
+        key=lambda s: s["tick"],
+    )
+    if not rows:
+        out["reason"] = "no machine census (samples.jsonl has no machines rows)"
+        return out
+    out["present"] = True
+    last_tick = rows[-1]["tick"]
+    out["last_sample_tick"] = last_tick
+
+    def at(tick: int) -> dict | None:
+        latest = None
+        for s in rows:
+            if s["tick"] <= tick:
+                latest = s
+            else:
+                break
+        return latest
+
+    seen_kinds: set[str] = set()
+
+    def measure(minute: float, t: int, label: str, is_end: bool) -> dict:
+        entry: dict[str, Any] = {
+            "minute": minute,
+            "label": label,
+            "tick": t,
+            "is_end": is_end,
+            "status": "ok",
+            "sample_tick": None,
+            "lag_ticks": None,
+            "truncated": None,
+            "is_floor": None,
+            "total": None,
+            "total_working": None,
+            "kinds": {},
+        }
+        s = at(t)
+        if t > hi:
+            entry["status"] = "run_ended"
+            return entry
+        if t > last_tick:
+            entry["status"] = "samples_end"
+            return entry
+        if s is None:
+            entry["status"] = "no_sample"
+            return entry
+        entry["sample_tick"] = s["tick"]
+        entry["lag_ticks"] = t - s["tick"]
+        trunc = s.get("truncated")
+        entry["truncated"] = trunc
+        entry["is_floor"] = None if trunc is None else bool(trunc)
+        kinds: dict[str, dict] = {}
+        for m in (s.get("machines") or {}).values():
+            kind = m.get("type") or "unknown"
+            seen_kinds.add(kind)
+            k = kinds.setdefault(
+                kind,
+                {"count": 0, "working": 0, "status_unknown": 0, "producer": kind in PRODUCER_TYPES,
+                 "names": collections.Counter()},
+            )
+            k["count"] += 1
+            k["names"][m.get("name") or "?"] += 1
+            status = m.get("status")
+            if status is None:
+                # The field did not exist before 2026-09-07. Unknown, and
+                # deliberately not folded into "not working".
+                k["status_unknown"] += 1
+            elif status == "working":
+                k["working"] += 1
+        for k in kinds.values():
+            k["names"] = dict(k["names"].most_common())
+        entry["kinds"] = kinds
+        entry["total"] = sum(k["count"] for k in kinds.values())
+        entry["total_working"] = sum(k["working"] for k in kinds.values())
+        return entry
+
+    for minute in marks:
+        out["marks"].append(
+            measure(minute, lo + int(round(minute * TICKS_PER_MINUTE)), mark_label(minute), False)
+        )
+
+    # The run's end as one more column, on the same rule `production_rates`
+    # uses: a block built in the last minute is invisible at every configured
+    # mark otherwise.
+    end_t = min(hi, last_tick)
+    near = any(m["status"] == "ok" and abs(m["tick"] - end_t) <= 300 for m in out["marks"])
+    if end_t > lo and not near:
+        out["marks"].append(
+            measure((end_t - lo) / TICKS_PER_MINUTE, end_t, f"end {mmss(end_t - lo)}", True)
+        )
+
+    order = {k: i for i, k in enumerate(PRODUCER_TYPES)}
+    out["kinds"] = sorted(seen_kinds, key=lambda k: (order.get(k, len(order)), k))
+    return out
+
+
 def classify_plateau(
     activity: dict | None,
     power: dict,
@@ -4427,6 +4579,58 @@ def report_rates(r: dict, p, headline: str | None = None) -> None:
         p(f"    no item plateaued for >= {PLATEAU_MINUTES} min before the end")
 
 
+def report_machine_census(r: dict, p) -> None:
+    """The capacity table, printed directly under the production table.
+
+    The juxtaposition is the point: output above, the machines that could have
+    made it below, on the same marks.
+    """
+    p(hr("  MACHINES AT FIXED MARKS  (how many stood, and how many were working)"))
+    if not r.get("present"):
+        p(f"    {r.get('reason') or 'not computed'}")
+        return
+    reached = [m for m in r["marks"] if m["status"] == "ok"]
+    missed = [m for m in r["marks"] if m["status"] != "ok"]
+    if reached:
+        p("    cell = machines standing / of those, `working` -- a snapshot from the last machines")
+        p("    sample at or before the mark. `?` for working means the sample carried no status")
+        p("    (runs before 2026-09-07): unknown, NOT `not working`.")
+        p(f"    {'kind':<24}" + "".join(f"{m['label']:>14}" for m in reached))
+        for kind in r["kinds"]:
+            cells = []
+            for m in reached:
+                k = m["kinds"].get(kind)
+                if k is None:
+                    cells.append(f"{'-':>14}")
+                    continue
+                w = "?" if k["status_unknown"] == k["count"] else str(k["working"])
+                cells.append(f"{k['count']:>7} /{w:>5}")
+            p(f"    {kind[:24]:<24}" + "".join(cells))
+        p(f"    {'TOTAL':<24}"
+          + "".join(f"{m['total']:>7} /{m['total_working']:>5}" for m in reached))
+        floors = [m for m in reached if m["is_floor"]]
+        if floors:
+            p("    FLOOR, not a count: the mod saw more machines than it wrote at "
+              + ", ".join(f"{m['label'].strip()} (+{m['truncated']} unwritten)" for m in floors))
+        unknown_trunc = [m for m in reached if m["is_floor"] is None]
+        if unknown_trunc:
+            p("    (the sample carried no `truncated` field at "
+              + ", ".join(m["label"].strip() for m in unknown_trunc)
+              + " -- whether it is complete is unknown)")
+        p("    the mod samples assembling-machine/furnace/mining-drill/lab/boiler/generator and")
+        p("    chests only; a chemical plant or refinery is not sampled, so its absence here is")
+        p("    not evidence that none was built")
+    for m in missed:
+        if m["status"] == "run_ended":
+            p(f"    {m['label']:>7}: UNKNOWN -- run ended at {mmss(r['end_tick'] - r['origin_tick'])}")
+        elif m["status"] == "samples_end":
+            p(f"    {m['label']:>7}: UNKNOWN -- machine samples end at "
+              f"{mmss(r['last_sample_tick'] - r['origin_tick'])} (the run ran to "
+              f"{mmss(r['end_tick'] - r['origin_tick'])})")
+        else:
+            p(f"    {m['label']:>7}: UNKNOWN -- no machine sample at or before this mark")
+
+
 def rates_markdown(analyses: list[dict], items: tuple[str, ...] | list[str], what: str = "cumulative") -> str:
     """The plan record's table: one row per mark, one column per run.
 
@@ -4857,6 +5061,11 @@ def report(a: dict, out=sys.stdout, top: int = 12) -> None:
     # judged by what it makes per minute at fixed marks, and the milestone
     # tick is the second number.
     report_rates(a.get("rates") or {"present": False, "reason": "not computed"}, p, a.get("headline"))
+    # Capacity directly under output: "12 furnaces, 2 working" is what makes
+    # the rate above interpretable.
+    report_machine_census(
+        a.get("machine_census") or {"present": False, "reason": "not computed"}, p
+    )
     report_sustain(a.get("sustain") or [], p)
 
     # A peer of the table above, not demoted: a producing/rate goal is judged

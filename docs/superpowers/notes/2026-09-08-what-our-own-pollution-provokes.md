@@ -190,6 +190,21 @@ across profiles):
 | `producing:logistic-science-pack:6` | `map.json` | 441 / 47,478 |
 | `gathered:crude-oil` | `map-31337-explored.json` | 2,117 / 314,345 |
 
+## Where the records are
+
+Both run records were copied out of their throwaway instances and live at
+
+```
+workspace/runs/run-1788868243-53028   hostile
+workspace/runs/run-1788868547-23141   peaceful
+```
+
+The two 4.9 GB Factorio instances behind them were removed (the box was at
+92%); the 4.5 MB records are what the numbers above come from, and
+`just analyse` reads them unchanged. The apparatus is
+`scripts/pollution_watch.lua`, on `master` — an experiment whose apparatus
+lives only in a worktree dies with it.
+
 ## Incidental: `map_exchange_string` is live-confirmed
 
 `CLAUDE.md` records that the field had never been written non-null by any run.

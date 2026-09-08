@@ -2250,6 +2250,36 @@ pub struct FactorioEntityPrototype {
     /// world written before this field existed.
     #[serde(default)]
     pub electric_buffer_capacity: Option<f64>,
+
+    /// How far this entity's attack reaches, in tiles -- the `range` of its
+    /// `attack_parameters`.
+    ///
+    /// The field a planner needs to answer *"is standing here inside a worm's
+    /// reach"*, and **nothing fills it yet**: `mods/BotBridge/types.lua` reads
+    /// no attack parameter of any kind, so on every dump written to date, and
+    /// on every live capture until the mod grows a sender, this is `None` for
+    /// `small-worm-turret` exactly as it is for `stone-furnace`.
+    ///
+    /// It exists anyway, and is read first, so that the seam is a *seam*
+    /// rather than a rewrite: the day the mod sends a range,
+    /// [`crate::graph::entity_graph::EntityGraph`]'s consumers pick it up with
+    /// no further change, and the named fallback that currently answers every
+    /// call stops being load-bearing. Until then the fallback is documented
+    /// where it lives (`crates/planner/src/state.rs`, `threat_standoff`) with
+    /// the data-file line each of its numbers came from.
+    ///
+    /// # `None` is *unknown reach*, never *no reach*
+    ///
+    /// The distinction this repo keeps paying for. A caller deciding whether
+    /// somewhere is safe to send a bot must not read the absence of a range as
+    /// a harmless entity -- a `small-worm-turret` with no range on its
+    /// prototype is still a worm. `threat_standoff` therefore never returns
+    /// "no standoff" for an unrecognised name; it returns the widest standoff
+    /// it knows and says the answer was a guess.
+    ///
+    /// `default`, so every dump written before this field existed still loads.
+    #[serde(default)]
+    pub attack_range: Option<f64>,
 }
 
 /// Ticks in a Factorio second at nominal speed, which is what turns the
@@ -3706,6 +3736,7 @@ mod tests {
             solar_panel_performance_at_day: None,
             solar_panel_performance_at_night: None,
             electric_buffer_capacity: None,
+            attack_range: None,
             pumping_speed: None,
         }
     }

@@ -1804,6 +1804,14 @@
       },
       "FactorioEntityPrototype": {
         "properties": {
+          "attack_range": {
+            "description": "How far this entity's attack reaches, in tiles -- the `range` of its\n`attack_parameters`.\n\nThe field a planner needs to answer *\"is standing here inside a worm's\nreach\"*, and **nothing fills it yet**: `mods/BotBridge/types.lua` reads\nno attack parameter of any kind, so on every dump written to date, and\non every live capture until the mod grows a sender, this is `None` for\n`small-worm-turret` exactly as it is for `stone-furnace`.\n\nIt exists anyway, and is read first, so that the seam is a *seam*\nrather than a rewrite: the day the mod sends a range,\n[`crate::graph::entity_graph::EntityGraph`]'s consumers pick it up with\nno further change, and the named fallback that currently answers every\ncall stops being load-bearing. Until then the fallback is documented\nwhere it lives (`crates/planner/src/state.rs`, `threat_standoff`) with\nthe data-file line each of its numbers came from.\n\n# `None` is *unknown reach*, never *no reach*\n\nThe distinction this repo keeps paying for. A caller deciding whether\nsomewhere is safe to send a bot must not read the absence of a range as\na harmless entity -- a `small-worm-turret` with no range on its\nprototype is still a worm. `threat_standoff` therefore never returns\n\"no standoff\" for an unrecognised name; it returns the widest standoff\nit knows and says the answer was a guess.\n\n`default`, so every dump written before this field existed still loads.",
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
           "beacon_profile": {
             "description": "The beacon's `profile`: an extra multiplier applied to what a receiver\ngets, **indexed by how many beacons reach that receiver**. Factorio 2.0\nadded it, and it is the reason beacon effect is not a single scalar:\nthe second beacon on a machine is worth a different amount from the\nfirst.\n\nKept under a name that says what it profiles. `LuaEntityPrototype`\ncalls it `profile`, which on a struct describing every prototype in the\ngame says nothing; the mod emits `beacon_profile` to match, and\n`a_serialised_beacon_prototype_carries_its_geometry` pins the pairing,\nbecause serde drops an unrecognised key in silence and this repo has\npaid for that twice.",
             "items": {

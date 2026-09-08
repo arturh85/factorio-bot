@@ -439,6 +439,15 @@ impl std::error::Error for PlanRefusal {}
 ///   `Site::At` promises "this exact anchor, or refuse", and because a
 ///   `Site::Anchored` value that needs moving means something upstream is
 ///   already wrong.
+/// - [`TargetInsideThreat`](PlannerError::TargetInsideThreat) -- a verdict
+///   about **the map**, and the only one that is about being shot at. Every
+///   standing entity that yields the item sits inside a charted enemy
+///   structure's standoff, so the planner passed all of them over rather than
+///   send a bot somewhere it has already lost two. A script acts on it by
+///   choosing a different item, chartering further ground, or clearing the
+///   nest -- never by asking again, since nothing about the plan will move it.
+///   It is a `true` verdict for the same reason `NotCharted` is: it says
+///   something about the world that a caller can go and change.
 /// - [`CannotFabricate`](PlannerError::CannotFabricate) -- a verdict about
 ///   **the recipe**, and the successor to the category refusal
 ///   `ProductNotMakeable` used to give for everything an oil refinery or a
@@ -468,6 +477,7 @@ fn refusal_for(err: &PlannerError) -> Option<PlanRefusal> {
         | PlannerError::NoRoomForCellNearPower { .. }
         | PlannerError::NotHandMinable { .. }
         | PlannerError::NotCharted { .. }
+        | PlannerError::TargetInsideThreat(_)
         | PlannerError::UndescribedResearchTrigger { .. }
         | PlannerError::NoExtractor { .. }
         | PlannerError::ExtractorLocked { .. }

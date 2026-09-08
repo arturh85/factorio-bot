@@ -257,6 +257,32 @@ pub fn mine_bill(state: &PlanState, entity: &str) -> BTreeMap<String, u32> {
 /// [`PlanState::mining_tile_separation`] for why a commitment also excludes
 /// the tiles *around* it — a bot mining one tile stands on the ones next to
 /// it, and a tile a bot is standing on cannot be mined by anybody else.
+/// Is `tile` inside a charted enemy structure's standoff?
+///
+/// The one place the four resource selectors below ask, so they cannot drift
+/// apart -- and they must not, because `resource_supply_at_least` and
+/// `resource_tiles_for` have a test asserting they agree about what is
+/// available, and `resource_seats` sizes the split that
+/// `resource_tiles_for` then has to fill. A filter applied in three of the
+/// four would promise a split more seats than the ground safely holds, and the
+/// fourth would refuse it -- the same disagreement the claim ledger exists to
+/// prevent, arriving through a new door.
+///
+/// **Passed over, never refused, and that asymmetry is deliberate.** Ore comes
+/// in fields of thousands of tiles; on the map this was measured against 15.3%
+/// of charted `iron-ore` sits inside a nest's standoff and every other
+/// resource is at 0%, so skipping the threatened ones costs a longer walk and
+/// never a plan. A rock is the opposite -- a handful of discrete entities, any
+/// of which may be the only one -- which is why `Chop` carries a named
+/// refusal and this does not.
+///
+/// See [`crate::state::PlanState::threat_covering`] for what a `false` here
+/// does and does not establish: it is the absence of a *charted* reason to
+/// avoid the tile, not a guarantee about ground nobody has looked at.
+fn threatened_tile(state: &PlanState, tile: &Position) -> bool {
+    state.threat_covering(tile).is_some()
+}
+
 pub fn nearest_resource_tile(
     state: &PlanState,
     item: &str,
@@ -267,6 +293,12 @@ pub fn nearest_resource_tile(
     for patch in state.resource_patches(item) {
         for tile in patch.elements {
             if state.resource_unclaimed(&tile, item) < need {
+                continue;
+            }
+            // Passed over, not refused: ore fields are thousands of tiles and
+            // a threatened one always has a safe neighbour on our maps. See
+            // `threatened_tile` for why all four selectors ask this.
+            if threatened_tile(state, &tile) {
                 continue;
             }
             let distance = calculate_distance(from, &tile);
@@ -326,6 +358,9 @@ pub fn resource_tiles_for(
         for tile in patch.elements {
             let available = state.resource_unclaimed(&tile, item);
             if available == 0 {
+                continue;
+            }
+            if threatened_tile(state, &tile) {
                 continue;
             }
             candidates.push((calculate_distance(from, &tile), tile, available));
@@ -418,6 +453,9 @@ pub fn resource_supply_at_least(state: &PlanState, item: &str, need: u32) -> boo
     }
     for patch in state.resource_patches(item) {
         for tile in patch.elements {
+            if threatened_tile(state, &tile) {
+                continue;
+            }
             total = total.saturating_add(state.resource_unclaimed(&tile, item));
             if total >= need {
                 return true;
@@ -482,6 +520,9 @@ pub fn resource_seats(state: &PlanState, item: &str, cap: u32) -> u32 {
         // own tiles as free seats and promise a split more participants than
         // the ground can hold at once. See `PlanState::is_resource_crowded_for`.
         if state.resource_unclaimed_for(&tile, item, None) == 0 {
+            continue;
+        }
+        if threatened_tile(state, &tile) {
             continue;
         }
         if seats
@@ -1388,6 +1429,93 @@ mod tests {
         assert_eq!(
             recipe_for(&s, "automation-science-pack").unwrap().category,
             "crafting"
+        );
+    }
+
+    /// A worm whose reach **clips** the iron field must push tile selection
+    /// onto the tiles beyond it -- and the four selectors must agree about
+    /// that, because `resource_seats` sizes a split `resource_tiles_for` then
+    /// has to fill, and a seat counted here but refused there is exactly the
+    /// disagreement the claim ledger exists to prevent.
+    ///
+    /// **The geometry is chosen so the guard has something to refuse AND
+    /// something to fall back to, and both are asserted as preconditions.**
+    /// `test_utils::fixture_world` holds one 11x11 iron field, x -44.5..-34.5
+    /// and y 35.5..45.5, whose diagonal is about 14 tiles. A small worm
+    /// reaches 25, so a worm standing *in* the field covers all 121 tiles and
+    /// there is no safe tile at all. The worm is therefore parked 20 tiles off
+    /// the near corner along the field's own diagonal, where the 25-tile
+    /// boundary cuts through the middle of the patch.
+    ///
+    /// Two earlier versions of this test failed for that reason and the
+    /// failure is the finding: **on a patch smaller than a worm's reach there
+    /// is no safe tile**, and ore then falls through to `NoApplicableMethod`
+    /// rather than to a refusal naming the worm -- unlike `Chop`, which does
+    /// name it. That asymmetry is deliberate for the maps measured here (0% of
+    /// coal, copper, stone, uranium and crude oil charted on seed 31337 is
+    /// threatened, and 15.3% of iron) and is written down rather than fixed.
+    #[test]
+    fn a_worm_clipping_the_iron_field_moves_selection_past_its_reach() {
+        let origin = Position::new(0., 0.);
+        let unguarded = state();
+        let first = nearest_resource_tile(&unguarded, "iron-ore", &origin, 1)
+            .expect("the fixture has iron ore");
+
+        let world = fixture_world();
+        let mut worm = factorio_bot_core::types::FactorioEntity::new_stone_furnace(
+            &Position::new(-20.5, 21.5),
+            Direction::North,
+        );
+        worm.name = "small-worm-turret".to_owned();
+        worm.entity_type = "turret".to_owned();
+        world
+            .update_chunk_entities(vec![worm])
+            .expect("a fixture world accepts an enemy structure");
+        let guarded = PlanState::from_world(Arc::new(world), &[BotId(1)]);
+
+        let tiles: Vec<Position> = guarded
+            .resource_patches("iron-ore")
+            .into_iter()
+            .flat_map(|patch| patch.elements)
+            .collect();
+        let covered = tiles
+            .iter()
+            .filter(|t| guarded.threat_covering(t).is_some())
+            .count();
+        assert!(
+            covered > 0 && covered < tiles.len(),
+            "fixture precondition: the worm must clip the field, not miss it and not swallow it              -- {covered} of {} tiles covered",
+            tiles.len()
+        );
+        assert!(
+            guarded.threat_covering(&first).is_some(),
+            "fixture precondition: the worm covers the tile the unguarded code picked ({first})"
+        );
+
+        let picked = nearest_resource_tile(&guarded, "iron-ore", &origin, 1)
+            .expect("tiles beyond the worm's reach remain");
+        assert_ne!(
+            picked, first,
+            "selection must move off a tile inside a worm's reach"
+        );
+        assert!(
+            guarded.threat_covering(&picked).is_none(),
+            "and the tile it moved to must itself be outside every standoff, got {picked}"
+        );
+
+        for (tile, _take) in resource_tiles_for(&guarded, "iron-ore", &origin, 20) {
+            assert!(
+                guarded.threat_covering(&tile).is_none(),
+                "resource_tiles_for handed out a threatened tile: {tile}"
+            );
+        }
+        assert!(
+            resource_supply_at_least(&guarded, "iron-ore", 20),
+            "the far tiles still supply; the guard must not empty the map"
+        );
+        assert!(
+            resource_seats(&guarded, "iron-ore", 4) > 0,
+            "and they still seat miners"
         );
     }
 

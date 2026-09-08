@@ -1,6 +1,6 @@
 use crate::ids::{ActionId, BotId, ChainId, ItemId};
 use crate::state::ChartingSummary;
-use factorio_bot_core::types::HandMiningObstacle;
+use factorio_bot_core::types::{HandMiningObstacle, Position};
 use miette::Diagnostic;
 use thiserror::Error;
 
@@ -198,6 +198,31 @@ pub enum PlannerError {
         /// PlannerError>` in the crate would otherwise grow to carry it.
         charting: Box<ChartingSummary>,
     },
+
+    /// Every candidate for a gathering target stands inside a charted enemy
+    /// structure's standoff, so there is nowhere safe left to send a bot.
+    ///
+    /// **The refusal half of "prefer, then refuse".** While one safe target
+    /// exists the planner simply passes the threatened ones over and nothing
+    /// is said; this fires only when passing them all over leaves nothing, and
+    /// it names the nearest threat, how far it was from the target that was
+    /// given up, and whether that radius is the game's number or an assumed
+    /// one -- because a refusal quoting an assumption as a fact is worse than
+    /// no refusal at all.
+    ///
+    /// It exists because the alternative is what the tree did before: send the
+    /// bot, and lose it. On seed 31337 two bots died this way at ticks 34,873
+    /// and 53,619, the second while chopping a rock with three
+    /// `small-worm-turret`s at ~20 tiles -- all three already in the dump the
+    /// planner had read.
+    ///
+    /// Boxed for `clippy::result_large_err`, exactly as `NotCharted` is and
+    /// for the same reason: the payload carries two positions, three strings
+    /// and a standoff, and every `Result<_, PlannerError>` in the crate would
+    /// otherwise grow to carry it.
+    #[error("{0}")]
+    #[diagnostic(code(planner::target_inside_threat))]
+    TargetInsideThreat(Box<TargetInsideThreatDetail>),
 
     /// A goal several bots could have shared, in a world with nowhere for even
     /// one of them to work on it.
@@ -1329,4 +1354,48 @@ pub enum PlannerError {
     /// `Result<_, PlannerError>` in the crate would have paid for a refusal
     /// almost nothing returns.
     CannotFabricate(#[from] Box<crate::method::fabricate::FabricateRefusal>),
+}
+
+/// The payload of [`PlannerError::TargetInsideThreat`].
+///
+/// A struct rather than variant fields so the variant can be boxed; the
+/// `Display` here is the refusal's whole message, and it names the standoff's
+/// **provenance** along with its size -- `25 tiles (named fallback; the mod
+/// sends no attack range)` rather than a bare `25`, because a refusal that
+/// quotes an assumption as though the game had said it is worse than no
+/// refusal at all.
+#[derive(Debug)]
+pub struct TargetInsideThreatDetail {
+    pub item: ItemId,
+    /// The prototype the plan wanted to gather from, e.g. `huge-rock`.
+    pub entity: String,
+    /// The target that was given up -- the nearest of the threatened ones.
+    pub candidate: Position,
+    /// The enemy structure covering it.
+    pub threat: String,
+    pub threat_at: Position,
+    pub distance: f64,
+    /// Rendered with its provenance; see [`crate::state::ThreatStandoff`].
+    pub standoff: crate::state::ThreatStandoff,
+    /// How many candidates were passed over. `0` is impossible -- this
+    /// refusal is only reachable with at least one.
+    pub passed_over: usize,
+}
+
+impl std::fmt::Display for TargetInsideThreatDetail {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "every {} that yields {} is inside an enemy's reach ({} passed over); the nearest \
+             candidate at {} is {:.1} tiles from a {} at {}, whose standoff is {}",
+            self.entity,
+            self.item,
+            self.passed_over,
+            self.candidate,
+            self.distance,
+            self.threat,
+            self.threat_at,
+            self.standoff,
+        )
+    }
 }

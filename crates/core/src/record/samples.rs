@@ -29,6 +29,16 @@ use crate::types::Position;
 /// data exists for, and a run that quietly recorded no machine state at all
 /// would look exactly like a run whose machines were all fine.
 ///
+/// # 2 -> 3 (2026-09-08)
+///
+/// Added [`SampleKind::Force::pollution`]: per-surface pollution and the enemy
+/// force's evolution decomposed by cause. Bumped rather than added silently
+/// **because the failure mode is a uniformly absent field**, which is
+/// indistinguishable from "the game does not report this" -- exactly the trap
+/// `entity.status` fell into on 2026-09-07 against a stale binary. With the
+/// bump, a mod that predates the field is refused by name on the live path
+/// instead of quietly recording nothing.
+///
 /// The two read paths treat a mismatch differently, and deliberately:
 ///
 /// * [`ingest_samples_incremental`] reads what the *currently loaded* mod just
@@ -40,7 +50,7 @@ use crate::types::Position;
 ///   new fields are `#[serde(default)]`), so it accepts anything up to this
 ///   value. Refusing old archives would have destroyed the ability to analyse
 ///   past runs to buy nothing.
-pub const SAMPLE_SCHEMA: u32 = 2;
+pub const SAMPLE_SCHEMA: u32 = 3;
 
 /// One line of `samples.jsonl`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
@@ -86,6 +96,16 @@ pub enum SampleKind {
         techs_unlocked: u32,
         production: ProductionSample,
         power: PowerSample,
+        /// Pollution and enemy evolution, per surface.
+        ///
+        /// `None` for every line written before schema 3 -- which is every
+        /// archived run this project has -- and that must stay
+        /// distinguishable from a game that has no pollution and no evolved
+        /// biters. Both are quiet worlds; only one of them was measured.
+        /// `tools/run_analysis.py` withholds judgement on `None` rather than
+        /// rendering zero.
+        #[serde(default)]
+        pollution: Option<PollutionSample>,
     },
     /// Per-machine state, on the same 300-tick beat as [`SampleKind::Force`]
     /// and written from the same handler, so a machine's `network` can be
@@ -188,6 +208,110 @@ pub struct PowerSample {
     /// force owns no electric poles". Both are honestly "no networks known".
     #[serde(default)]
     pub networks: BTreeMap<String, NetworkPower>,
+}
+
+/// Pollution and enemy evolution at one tick, per surface.
+///
+/// # Why this is recorded at all
+///
+/// The owner's standing concern is that *"as soon as we have radar or more
+/// than 2 steam engines the biters will start to evolve and send out biters to
+/// attack the base"*. Nothing in this project could evaluate that: `pollution`
+/// and `evolution` appeared nowhere in the mod, the planner or the executor,
+/// and the world dump carries only the `player` force -- the enemy force was
+/// not in the model at all. This is the observation, and deliberately only the
+/// observation: no pollution-aware planning, no attack predictor, no defence
+/// trigger, because nobody has yet established that the numbers move on the
+/// timescales this project runs at. A flat curve over a thirty-minute run is a
+/// complete and useful answer.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct PollutionSample {
+    /// Keyed by surface name, e.g. `nauvis`.
+    ///
+    /// A map rather than a list for the same reason [`PowerSample::networks`]
+    /// is one, and because pollution is only comparable *within* a surface:
+    /// under Space Age each surface has its own pollutant (Nauvis emits
+    /// pollution, Gleba emits spores), so summing them would add two different
+    /// quantities.
+    pub surfaces: BTreeMap<String, SurfacePollution>,
+}
+
+/// One surface's pollution, and the evolution of the enemies on it.
+///
+/// **Every field is optional and every absence means "not read", never
+/// "zero".** The mod writes each key only after a successful `pcall`, so a
+/// surface whose reading raised produces no key at all rather than a `0.0`
+/// that would read as a measured calm.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct SurfacePollution {
+    /// `LuaSurface.pollutant_type`'s prototype name -- `pollution` on Nauvis,
+    /// `spores` on Gleba, and `None` on a surface with no pollutant at all
+    /// (a space platform). Without it the numbers below are unlabelled: two
+    /// surfaces' "pollution" are not the same substance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pollutant: Option<String>,
+    /// `LuaSurface.get_total_pollution()`: the whole surface, cheap and
+    /// comparable across runs. The denominator every other reading here is
+    /// judged against.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total: Option<f64>,
+    /// `LuaSurface.get_pollution(position)` at the player force's spawn.
+    ///
+    /// That call is a **chunk** reading, so it needs a position, and spawn is
+    /// the one position that means the same thing on every run of this
+    /// project: the roster starts there and the first blocks are built around
+    /// it. A grid of probes was rejected -- it costs O(chunks) per beat and
+    /// answers a question nobody has asked.
+    ///
+    /// **It read exactly `0.0` in 375 of 375 samples on both arms of the first
+    /// live measurement, and that is a real reading, not a broken accessor.**
+    /// A uniformly constant field is the tell for a plumbing failure, so it was
+    /// checked against a running game rather than believed:
+    /// `surface.pollute({0,0}, 50)` then `get_pollution({0,0})` answers `50`.
+    /// *Why* the spawn chunk held none while the surface held up to 41 is
+    /// **not established** -- the build sitting in a neighbouring chunk with
+    /// absorption eating the spread is a hypothesis, not a measurement. See
+    /// `docs/superpowers/notes/2026-09-08-what-our-own-pollution-provokes.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at_spawn: Option<f64>,
+    /// `game.get_pollution_statistics(surface).input_counts`: cumulative
+    /// pollution emitted, keyed by the prototype that emitted it. This is the
+    /// half that can say *which machine* -- the "is it the steam engines or
+    /// the radar" question, answered rather than argued.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub produced: Option<BTreeMap<String, f64>>,
+    /// The same statistics' `output_counts`: cumulative pollution absorbed,
+    /// keyed by absorber (trees, tiles, spawners eating it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub absorbed: Option<BTreeMap<String, f64>>,
+    /// The `enemy` force's evolution on this surface, or `None` when there is
+    /// no enemy force or the read raised.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evolution: Option<EvolutionSample>,
+}
+
+/// Enemy evolution **and its three causes**.
+///
+/// The decomposition is the entire reason this is worth recording.
+/// [`Self::factor`] alone cannot distinguish "our factory did this" from "this
+/// would have happened anyway"; with the three terms beside it, a rise is
+/// attributable. `by_pollution` is what our own production provoked, `by_time`
+/// is what the clock did, `by_killing_spawners` is what our combat did.
+///
+/// The three do not simply sum to [`Self::factor`] -- Factorio combines them
+/// through a saturating formula -- so do not treat them as a partition. They
+/// are the game's own accounting of each cause's contribution, read straight
+/// off `LuaForce`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct EvolutionSample {
+    /// `get_evolution_factor(surface)`, 0.0 to 1.0.
+    pub factor: f64,
+    /// `get_evolution_factor_by_pollution(surface)`.
+    pub by_pollution: f64,
+    /// `get_evolution_factor_by_time(surface)`.
+    pub by_time: f64,
+    /// `get_evolution_factor_by_killing_spawners(surface)`.
+    pub by_killing_spawners: f64,
 }
 
 /// One electric network's own generation and demand.
@@ -720,16 +844,82 @@ mod tests {
             techs_unlocked,
             production,
             power,
+            pollution,
         } = &read.samples[0].kind
         else {
             panic!("expected a force sample");
         };
         // Present-and-null: we looked, and nothing was researching.
         assert!(research.is_none());
+        // A schema-2 archive predates the pollution reading entirely. It must
+        // decode to `None` -- *not captured* -- and never to a zeroed
+        // `PollutionSample`, which would assert a calm world nobody measured.
+        assert!(pollution.is_none());
         assert_eq!(*techs_unlocked, 7);
         assert_eq!(production.made["iron-plate"], 120);
         assert!(production.consumed.is_empty());
         assert_eq!(power.satisfaction, 1.0);
+    }
+
+    /// The whole point of the pollution reading is that a *cause* can be
+    /// separated from a *number*, so the decode must carry all four evolution
+    /// terms and the surface they belong to.
+    #[test]
+    fn reads_pollution_and_the_four_evolution_terms() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write(
+            tmp.path(),
+            &[
+                r#"{"kind":"force","schema":3,"tick":61500,"run":"r1","research":null,"techs_unlocked":7,"production":{"made":{},"consumed":{}},"power":{"generated_kw":0.0,"consumed_kw":0.0,"satisfaction":1.0},"pollution":{"surfaces":{"nauvis":{"pollutant":"pollution","total":412.5,"at_spawn":33.25,"produced":{"steam-engine":300.0,"radar":112.5},"absorbed":{"tree-01":80.0},"evolution":{"factor":0.0042,"by_pollution":0.0011,"by_time":0.0031,"by_killing_spawners":0.0}}}}}"#,
+            ],
+        );
+        let read = read_samples(&path).unwrap();
+        let SampleKind::Force { pollution, .. } = &read.samples[0].kind else {
+            panic!("expected a force sample");
+        };
+        let nauvis = &pollution.as_ref().unwrap().surfaces["nauvis"];
+        // The pollutant is named, because "pollution" and Gleba's "spores"
+        // are different substances behind one number.
+        assert_eq!(nauvis.pollutant.as_deref(), Some("pollution"));
+        assert_eq!(nauvis.total, Some(412.5));
+        assert_eq!(nauvis.at_spawn, Some(33.25));
+        // Attribution by emitter: this is what turns "the biters got worse"
+        // into "the steam engines did 300 of it and the radar 112.5".
+        assert_eq!(nauvis.produced.as_ref().unwrap()["steam-engine"], 300.0);
+        assert_eq!(nauvis.produced.as_ref().unwrap()["radar"], 112.5);
+        assert_eq!(nauvis.absorbed.as_ref().unwrap()["tree-01"], 80.0);
+        let evolution = nauvis.evolution.as_ref().unwrap();
+        assert_eq!(evolution.factor, 0.0042);
+        assert_eq!(evolution.by_pollution, 0.0011);
+        assert_eq!(evolution.by_time, 0.0031);
+        assert_eq!(evolution.by_killing_spawners, 0.0);
+    }
+
+    /// `absent-is-not-a-value`, at the level the mod actually fails at: a
+    /// reading that raised writes no key, and that must not arrive as a
+    /// measured zero. A surface we could not read and a surface with no
+    /// pollution are different facts.
+    #[test]
+    fn a_surface_we_failed_to_read_is_not_a_surface_with_no_pollution() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write(
+            tmp.path(),
+            &[
+                r#"{"kind":"force","schema":3,"tick":300,"run":"r1","research":null,"techs_unlocked":0,"production":{"made":{},"consumed":{}},"power":{"generated_kw":0.0,"consumed_kw":0.0,"satisfaction":1.0},"pollution":{"surfaces":{"unread":{},"calm":{"total":0.0,"evolution":{"factor":0.0,"by_pollution":0.0,"by_time":0.0,"by_killing_spawners":0.0}}}}}"#,
+            ],
+        );
+        let read = read_samples(&path).unwrap();
+        let SampleKind::Force { pollution, .. } = &read.samples[0].kind else {
+            panic!("expected a force sample");
+        };
+        let surfaces = &pollution.as_ref().unwrap().surfaces;
+        assert_eq!(surfaces["unread"].total, None);
+        assert!(surfaces["unread"].evolution.is_none());
+        assert_eq!(surfaces["calm"].total, Some(0.0));
+        assert_eq!(surfaces["calm"].evolution.as_ref().unwrap().factor, 0.0);
+        // The two must not be equal. If they ever are, something has
+        // defaulted an absence into a zero.
+        assert_ne!(surfaces["unread"], surfaces["calm"]);
     }
 
     #[test]
@@ -937,8 +1127,8 @@ mod tests {
         write(
             &out,
             &[
-                r#"{"kind":"bots","schema":2,"tick":100,"run":null,"bots":[]}"#,
-                r#"{"kind":"bots","schema":2,"tick":61500,"run":null,"bots":[]}"#,
+                r#"{"kind":"bots","schema":3,"tick":100,"run":null,"bots":[]}"#,
+                r#"{"kind":"bots","schema":3,"tick":61500,"run":null,"bots":[]}"#,
             ],
         );
         let run_dir = tmp.path().join("run");
@@ -965,7 +1155,7 @@ mod tests {
         std::fs::create_dir_all(&out).unwrap();
         write(
             &out,
-            &[r#"{"kind":"bots","schema":2,"tick":61500,"run":"STALE-RUN","bots":[]}"#],
+            &[r#"{"kind":"bots","schema":3,"tick":61500,"run":"STALE-RUN","bots":[]}"#],
         );
         let run_dir = tmp.path().join("run");
         std::fs::create_dir_all(&run_dir).unwrap();
@@ -989,7 +1179,7 @@ mod tests {
         std::fs::create_dir_all(&out).unwrap();
         write(
             &out,
-            &[r#"{"kind":"bots","schema":2,"tick":100,"run":"ours","bots":[]}"#],
+            &[r#"{"kind":"bots","schema":3,"tick":100,"run":"ours","bots":[]}"#],
         );
         let run_dir = tmp.path().join("run");
         std::fs::create_dir_all(&run_dir).unwrap();
@@ -1013,8 +1203,8 @@ mod tests {
         write(
             &out,
             &[
-                r#"{"kind":"bots","schema":2,"tick":100,"run":"ours","bots":[{"id":1,"position":{"x":-3.5,"y":4.5},"inventory":{},"crafting_queue":0,"mining":null},{"id":2,"position":{"x":30.5,"y":40.5},"inventory":{},"crafting_queue":0,"mining":null}]}"#,
-                r#"{"kind":"force","schema":2,"tick":100,"run":"ours","research":null,"techs_unlocked":1,"production":{"made":{},"consumed":{}},"power":{"generated_kw":0.0,"consumed_kw":0.0,"satisfaction":1.0}}"#,
+                r#"{"kind":"bots","schema":3,"tick":100,"run":"ours","bots":[{"id":1,"position":{"x":-3.5,"y":4.5},"inventory":{},"crafting_queue":0,"mining":null},{"id":2,"position":{"x":30.5,"y":40.5},"inventory":{},"crafting_queue":0,"mining":null}]}"#,
+                r#"{"kind":"force","schema":3,"tick":100,"run":"ours","research":null,"techs_unlocked":1,"production":{"made":{},"consumed":{}},"power":{"generated_kw":0.0,"consumed_kw":0.0,"satisfaction":1.0}}"#,
             ],
         );
         let run_dir = tmp.path().join("run");
@@ -1051,7 +1241,7 @@ mod tests {
         write(
             &out,
             &[
-                r#"{"kind":"force","schema":2,"tick":100,"run":"ours","research":null,"techs_unlocked":1,"production":{"made":{},"consumed":{}},"power":{"generated_kw":0.0,"consumed_kw":0.0,"satisfaction":1.0}}"#,
+                r#"{"kind":"force","schema":3,"tick":100,"run":"ours","research":null,"techs_unlocked":1,"production":{"made":{},"consumed":{}},"power":{"generated_kw":0.0,"consumed_kw":0.0,"satisfaction":1.0}}"#,
             ],
         );
         let run_dir = tmp.path().join("run");
@@ -1075,8 +1265,8 @@ mod tests {
         write(
             &out,
             &[
-                r#"{"kind":"bots","schema":2,"tick":100,"run":"STALE-RUN","bots":[{"id":1,"position":{"x":300.5,"y":400.5},"inventory":{},"crafting_queue":0,"mining":null}]}"#,
-                r#"{"kind":"bots","schema":2,"tick":101,"run":"ours","bots":[{"id":1,"position":{"x":3.5,"y":4.5},"inventory":{},"crafting_queue":0,"mining":null}]}"#,
+                r#"{"kind":"bots","schema":3,"tick":100,"run":"STALE-RUN","bots":[{"id":1,"position":{"x":300.5,"y":400.5},"inventory":{},"crafting_queue":0,"mining":null}]}"#,
+                r#"{"kind":"bots","schema":3,"tick":101,"run":"ours","bots":[{"id":1,"position":{"x":3.5,"y":4.5},"inventory":{},"crafting_queue":0,"mining":null}]}"#,
             ],
         );
         let run_dir = tmp.path().join("run");
@@ -1105,7 +1295,7 @@ mod tests {
         std::fs::create_dir_all(&out).unwrap();
         write(
             &out,
-            &[r#"{"kind":"bots","schema":2,"tick":100,"run":"ours","bots":[]}"#],
+            &[r#"{"kind":"bots","schema":3,"tick":100,"run":"ours","bots":[]}"#],
         );
         let run_dir = tmp.path().join("run");
         std::fs::create_dir_all(&run_dir).unwrap();
@@ -1132,7 +1322,7 @@ mod tests {
         std::fs::create_dir_all(&out).unwrap();
         let path = write(
             &out,
-            &[r#"{"kind":"bots","schema":2,"tick":100,"run":"ours","bots":[]}"#],
+            &[r#"{"kind":"bots","schema":3,"tick":100,"run":"ours","bots":[]}"#],
         );
         let run_dir = tmp.path().join("run");
         std::fs::create_dir_all(&run_dir).unwrap();
@@ -1147,7 +1337,7 @@ mod tests {
             .unwrap();
         writeln!(
             f,
-            r#"{{"kind":"bots","schema":2,"tick":200,"run":"ours","bots":[]}}"#
+            r#"{{"kind":"bots","schema":3,"tick":200,"run":"ours","bots":[]}}"#
         )
         .unwrap();
         drop(f);
@@ -1194,7 +1384,7 @@ mod tests {
         // No trailing newline: this line is "in progress".
         std::fs::write(
             &path,
-            r#"{"kind":"bots","schema":2,"tick":100,"run":"ours","bots":[]}"#,
+            r#"{"kind":"bots","schema":3,"tick":100,"run":"ours","bots":[]}"#,
         )
         .unwrap();
         let run_dir = tmp.path().join("run");

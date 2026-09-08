@@ -2955,7 +2955,7 @@ mod finish_tests {
         fs::create_dir_all(&out).unwrap();
         fs::write(
             out.join("samples.jsonl"),
-            "{\"kind\":\"bots\",\"schema\":2,\"tick\":850,\"bots\":[]}\n",
+            "{\"kind\":\"bots\",\"schema\":3,\"tick\":850,\"bots\":[]}\n",
         )
         .unwrap();
 
@@ -3035,7 +3035,7 @@ mod finish_tests {
         fs::create_dir_all(&out).unwrap();
         fs::write(
             out.join("samples.jsonl"),
-            "{\"kind\":\"bots\",\"schema\":2,\"tick\":100,\"run\":\"r5\",\"bots\":[]}\n",
+            "{\"kind\":\"bots\",\"schema\":3,\"tick\":100,\"run\":\"r5\",\"bots\":[]}\n",
         )
         .unwrap();
 
@@ -3082,7 +3082,7 @@ mod finish_tests {
         let source = out.join("samples.jsonl");
         fs::write(
             &source,
-            "{\"kind\":\"bots\",\"schema\":2,\"tick\":100,\"run\":\"r6\",\"bots\":[]}\n",
+            "{\"kind\":\"bots\",\"schema\":3,\"tick\":100,\"run\":\"r6\",\"bots\":[]}\n",
         )
         .unwrap();
 
@@ -3108,7 +3108,7 @@ mod finish_tests {
             let mut f = fs::OpenOptions::new().append(true).open(&source).unwrap();
             writeln!(
                 f,
-                "{{\"kind\":\"bots\",\"schema\":2,\"tick\":200,\"run\":\"r6\",\"bots\":[]}}"
+                "{{\"kind\":\"bots\",\"schema\":3,\"tick\":200,\"run\":\"r6\",\"bots\":[]}}"
             )
             .unwrap();
         }
@@ -3140,7 +3140,7 @@ mod finish_tests {
             .unwrap();
         writeln!(
             f,
-            "{{\"kind\":\"bots\",\"schema\":2,\"tick\":{tick},\"run\":\"{run}\",\"bots\":[]}}"
+            "{{\"kind\":\"bots\",\"schema\":3,\"tick\":{tick},\"run\":\"{run}\",\"bots\":[]}}"
         )
         .unwrap();
     }
@@ -3437,7 +3437,7 @@ mod vision_tests {
             .unwrap();
         writeln!(
             file,
-            r#"{{"kind":"bots","schema":2,"tick":{tick},"run":"{run}","bots":[{{"id":1,"position":{{"x":{x},"y":{y}}},"inventory":{{}},"crafting_queue":0,"mining":null}}]}}"#
+            r#"{{"kind":"bots","schema":3,"tick":{tick},"run":"{run}","bots":[{{"id":1,"position":{{"x":{x},"y":{y}}},"inventory":{{}},"crafting_queue":0,"mining":null}}]}}"#
         )
         .unwrap();
         workspace

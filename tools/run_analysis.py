@@ -990,6 +990,7 @@ def analyse(
         present=samples.present,
         activity=activity,
     )
+    result["pollution"] = pollution_marks(samples.rows, lo, hi, marks, samples.present)
     result["headline"] = combined_headline(result)
 
     result["windows"] = [score_window(w, events, joined, placed.rows) for w in windows]
@@ -3456,6 +3457,227 @@ def _classify_plateau_inferred(activity: dict | None, power: dict, machines: dic
     return {"kind": "unclear", "why": "machines kept working and the roster kept feeding, yet the count stopped"}
 
 
+def render_pollution(r: dict | None, p) -> None:
+    """Print the pollution / evolution section, or say plainly why it is empty.
+
+    **Withholding judgement is the point of the three branches.** A run that
+    never sampled pollution and a run that sampled a calm world must not print
+    the same thing -- the whole reason the field is `Option` in Rust is undone
+    if the report renders `None` as `0.0`. So a missing reading is `?` and a
+    run with no readings at all gets a paragraph saying it never looked.
+    """
+    if not r:
+        return
+    p(hr("  POLLUTION AND ENEMY EVOLUTION"))
+    if r["status"] == "no-samples":
+        p(f"    {r['reason']}")
+        return
+    if r["status"] == "not-captured":
+        p(f"    NOT CAPTURED: {r['reason']}")
+        return
+    p("    Evolution is decomposed by CAUSE, which is the point: `by_pollution` is what")
+    p("    our own factory provoked, `by_time` is what the clock did anyway, and")
+    p("    `by_killing_spawners` is what our combat did. `?` means the mod could not read")
+    p("    that value -- it does NOT mean zero.")
+
+    def num(v, fmt):
+        return "?" if v is None else format(v, fmt)
+
+    for name in r["surfaces"]:
+        p(f"\n    surface {name}")
+        p(f"      {'at':>8}  {'total':>10} {'at_spawn':>9}  "
+          f"{'evo':>8} {'by_poll':>8} {'by_time':>8} {'by_kill':>8}")
+        for m in r["marks"]:
+            label = mark_label(m["minute"])
+            if m["status"] != "ok":
+                p(f"      {label:>8}  {m['status']}")
+                continue
+            row = m["surfaces"].get(name)
+            if row is None:
+                p(f"      {label:>8}  surface not in this sample")
+                continue
+            e = row.get("evolution") or {}
+            p(f"      {label:>8}  {num(row.get('total'), '10.1f')} "
+              f"{num(row.get('at_spawn'), '9.1f')}  "
+              f"{num(e.get('factor'), '8.5f')} "
+              f"{num(e.get('by_pollution'), '8.5f')} "
+              f"{num(e.get('by_time'), '8.5f')} "
+              f"{num(e.get('by_killing_spawners'), '8.5f')}"
+              + ("" if row.get("pollutant") else "   (pollutant unnamed)"))
+        last = [m for m in r["marks"] if m["status"] == "ok"]
+        if last:
+            emitters = (last[-1]["surfaces"].get(name) or {}).get("top_emitters") or []
+            if emitters:
+                p("      cumulative emitters at the last mark: "
+                  + ", ".join(f"{k}={v:.0f}" for k, v in emitters))
+            else:
+                p("      no emitter breakdown recorded at the last mark")
+    if r.get("verdict"):
+        p(f"\n    {r['verdict']}")
+
+
+def pollution_marks(
+    samples: list[dict],
+    lo: int,
+    hi: int,
+    marks: tuple[float, ...],
+    present: bool,
+) -> dict:
+    """Pollution and enemy evolution at fixed game-time marks.
+
+    # The question this answers
+
+    The owner's standing concern is that *"as soon as we have radar or more
+    than 2 steam engines the biters will start to evolve and send out biters to
+    attack the base"*. Nothing in this project could evaluate it: pollution and
+    evolution were not sampled, and the enemy force was not in the model at
+    all. This reads what the mod now records (`SampleKind::Force::pollution`,
+    sample schema 3) at the same marks as the rate table, so the two can be
+    read side by side: what we produced, and what it provoked.
+
+    # ABSENT IS NOT ZERO, and this function's main job is saying so
+
+    Three different silences must not render alike, because acting on them
+    differs:
+
+    * ``status: "no-samples"``  -- the run archived no samples at all.
+    * ``status: "not-captured"`` -- there are force samples, and **not one of
+      them carries a `pollution` key**. Every run archived before 2026-09-08 is
+      this, and it means *we never looked*, never "the world was calm". Do not
+      let a reader infer a flat curve from it.
+    * ``status: "ok"``          -- captured, and the numbers are the numbers.
+
+    A per-surface reading is optional at every level for the same reason (the
+    mod writes a key only after a successful read), so a `None` here is
+    rendered as ``?`` and never as ``0``.
+
+    Marks are **game time from `run_started`**, exactly like the rate table, so
+    a headless run at any `--game-speed` and a 1x client run are comparable.
+    Nothing here is bounded by a poll count or a wall clock.
+    """
+    out: dict = {
+        "status": "no-samples",
+        "reason": None,
+        "surfaces": [],
+        "marks": [],
+        "verdict": None,
+    }
+    if not present:
+        out["reason"] = "no samples.jsonl archived"
+        return out
+    force = sorted(
+        (s for s in samples if s.get("kind") == "force" and isinstance(s.get("tick"), int)),
+        key=lambda s: s["tick"],
+    )
+    if not force:
+        out["status"] = "no-samples"
+        out["reason"] = "samples.jsonl has no force rows"
+        return out
+    # A key that is present but null still counts as "the producer knew to
+    # ask", which is why this tests for the key rather than for truthiness.
+    carrying = [s for s in force if isinstance(s.get("pollution"), dict)]
+    if not carrying:
+        out["status"] = "not-captured"
+        schemas = sorted({s.get("schema") for s in force if s.get("schema") is not None})
+        out["reason"] = (
+            f"none of this run's {len(force)} force samples carries a `pollution` key "
+            f"(schema {schemas or '?'}); the mod never recorded it. "
+            "That is 'we never looked', NOT 'nothing polluted and nothing evolved'."
+        )
+        return out
+    out["status"] = "ok"
+
+    names: list[str] = []
+    for s in carrying:
+        for name in (s["pollution"].get("surfaces") or {}):
+            if name not in names:
+                names.append(name)
+    out["surfaces"] = names
+
+    def at(tick: int) -> dict | None:
+        latest = None
+        for s in carrying:
+            if s["tick"] <= tick:
+                latest = s
+            else:
+                break
+        return latest
+
+    last_tick = carrying[-1]["tick"]
+    columns = list(marks)
+    end_min = (min(hi, last_tick) - lo) / TICKS_PER_MINUTE
+    if end_min > 0 and not any(abs(m - end_min) < 0.25 for m in columns):
+        columns.append(end_min)
+
+    for minute in columns:
+        t = lo + int(round(minute * TICKS_PER_MINUTE))
+        entry: dict = {"minute": minute, "tick": t, "surfaces": {}}
+        if t > last_tick:
+            entry["status"] = "beyond-samples"
+            out["marks"].append(entry)
+            continue
+        sample = at(t)
+        if sample is None:
+            entry["status"] = "before-samples"
+            out["marks"].append(entry)
+            continue
+        entry["status"] = "ok"
+        entry["sample_tick"] = sample["tick"]
+        for name in names:
+            row = (sample["pollution"].get("surfaces") or {}).get(name)
+            if row is None:
+                entry["surfaces"][name] = None
+                continue
+            evolution = row.get("evolution")
+            produced = row.get("produced")
+            entry["surfaces"][name] = {
+                "pollutant": row.get("pollutant"),
+                "total": row.get("total"),
+                "at_spawn": row.get("at_spawn"),
+                # The top emitters, which is the whole "was it the steam
+                # engines or the radar" question. Cumulative, like the
+                # production statistics beside them.
+                "top_emitters": sorted(
+                    (produced or {}).items(), key=lambda kv: -kv[1]
+                )[:6],
+                "evolution": None if evolution is None else {
+                    "factor": evolution.get("factor"),
+                    "by_pollution": evolution.get("by_pollution"),
+                    "by_time": evolution.get("by_time"),
+                    "by_killing_spawners": evolution.get("by_killing_spawners"),
+                },
+            }
+        out["marks"].append(entry)
+
+    # The verdict is deliberately about MOVEMENT, not about a threshold: this
+    # tool has no business saying an evolution factor is dangerous, and nobody
+    # has established what "dangerous" is on our timescales. It says whether
+    # the number moved over the run, and by which cause.
+    ok = [m for m in out["marks"] if m["status"] == "ok"]
+    if ok and names:
+        first, last = ok[0], ok[-1]
+        parts = []
+        for name in names:
+            a, b = first["surfaces"].get(name), last["surfaces"].get(name)
+            if not a or not b or not a.get("evolution") or not b.get("evolution"):
+                continue
+            d_factor = (b["evolution"]["factor"] or 0.0) - (a["evolution"]["factor"] or 0.0)
+            d_poll = (b["evolution"]["by_pollution"] or 0.0) - (
+                a["evolution"]["by_pollution"] or 0.0
+            )
+            d_time = (b["evolution"]["by_time"] or 0.0) - (a["evolution"]["by_time"] or 0.0)
+            if d_factor <= 0.0:
+                parts.append(f"{name}: evolution did not move")
+            else:
+                cause = "pollution" if d_poll > d_time else "time"
+                parts.append(
+                    f"{name}: evolution +{d_factor:.4f} over the run, "
+                    f"mostly by {cause} (pollution +{d_poll:.4f}, time +{d_time:.4f})"
+                )
+        out["verdict"] = "; ".join(parts) or None
+    return out
+
+
 def production_rates(
     samples: list[dict],
     lo: int,
@@ -4782,6 +5004,8 @@ def report(a: dict, out=sys.stdout, top: int = 12) -> None:
             if made:
                 items = ", ".join(f"{k}={v}" for k, v in list(made.items())[:18])
                 p(f"        made in window: {items}")
+
+    render_pollution(a.get("pollution"), p)
 
     mach = a.get("machines")
     if mach and mach.get("absent"):

@@ -462,3 +462,160 @@ fn a_run_id_that_is_not_a_string_is_refused_before_anything_is_written() {
         written(&lua)
     );
 }
+
+/// Teaches the stub game the pollution and evolution API, exactly as
+/// `runtime-api.json` declares it for 2.1.17: `pollutant_type` is an
+/// **attribute** and the rest are **methods**, and every evolution getter
+/// takes the surface. Getting that split wrong is indistinguishable from "the
+/// game does not have this" at runtime, which is why the shapes are pinned
+/// here rather than trusted.
+const STUB_POLLUTION: &str = r#"
+    _surface.name = "nauvis"
+    _surface.pollutant_type = { valid = true, name = "pollution" }
+    _surface.get_total_pollution = function() return 412.5 end
+    _surface.get_pollution = function(_) return 33.25 end
+    _force.get_spawn_position = function(_) return { x = 0, y = 0 } end
+    game.get_pollution_statistics = function(_)
+        return {
+            input_counts = { ["steam-engine"] = 300.0, ["radar"] = 112.5 },
+            output_counts = { ["tree-01"] = 80.0 },
+        }
+    end
+    game.forces.enemy = {
+        name = "enemy",
+        valid = true,
+        get_evolution_factor = function(_) return 0.0042 end,
+        get_evolution_factor_by_pollution = function(_) return 0.0011 end,
+        get_evolution_factor_by_time = function(_) return 0.0031 end,
+        get_evolution_factor_by_killing_spawners = function(_) return 0.0 end,
+    }
+"#;
+
+/// **The mod half of the pollution measurement, asserted against the mod's own
+/// source.** A live run is still the only proof that a field crosses the whole
+/// bridge -- that is the gap that let `entity.status` read `nil` for every
+/// furnace -- but this pins the half a live run cannot isolate: that the mod
+/// asks the right calls and puts the four evolution terms on the wire.
+#[test]
+fn pollution_and_the_four_evolution_terms_reach_the_force_sample() {
+    let lua = mod_with_bots(1);
+    lua.load(STUB_POLLUTION)
+        .set_name("pollution stub")
+        .exec()
+        .expect("pollution stub");
+    session(&lua, "'run-1'");
+    let force = samples(&lua)
+        .into_iter()
+        .find(|line| line.contains("\"kind\":\"force\""))
+        .expect("a force sample");
+    for needle in [
+        "\"pollutant\":\"pollution\"",
+        "\"total\":412.500000",
+        "\"at_spawn\":33.250000",
+        "\"steam-engine\":300",
+        "\"radar\":112.500000",
+        "\"tree-01\":80",
+        "\"by_pollution\":0.001100",
+        "\"by_time\":0.003100",
+        "\"by_killing_spawners\":0",
+    ] {
+        assert!(
+            force.contains(needle),
+            "the force sample must carry {needle}; got {force}"
+        );
+    }
+}
+
+/// **Absent is not zero, at the point it is decided.** A Factorio without the
+/// pollution API -- or any raise inside the reader -- must leave the key off
+/// the line entirely, and must not cost the rest of the force sample. The
+/// alternative shape, a defaulted `0.0`, would make a run that never looked
+/// indistinguishable from a run that measured a calm world.
+///
+/// This is not hypothetical: the first version of `pollution_totals` raised on
+/// a surface with no `name` and took research, production and power down with
+/// it, and the only symptom was a force sample that was not there.
+#[test]
+fn a_game_without_the_pollution_api_still_writes_the_rest_of_the_force_sample() {
+    // `mod_with_bots` deliberately does NOT load `STUB_POLLUTION`.
+    let lua = mod_with_bots(1);
+    session(&lua, "'run-1'");
+    let force = samples(&lua)
+        .into_iter()
+        .find(|line| line.contains("\"kind\":\"force\""))
+        .expect("the force sample must survive a failed pollution read");
+    assert!(
+        force.contains("\"production\"") && force.contains("\"power\""),
+        "production and power must still be there: {force}"
+    );
+    assert!(
+        !force.contains("\"evolution\""),
+        "no evolution key when there is nothing to read: {force}"
+    );
+}
+
+/// **`surfaces[nil] = entry` RAISES**, and the fallback is what stops it.
+///
+/// This is a separate defence from the `pcall` around `pollution_totals`, and
+/// the first version of the falsification sweep conflated the two: removing
+/// the fallback left the force sample intact, because the pcall caught the
+/// raise. That is two independent guarantees, so it is two tests -- the other
+/// one says the force line survives, and this one says the READING survives.
+#[test]
+fn a_surface_with_no_name_is_keyed_by_its_index_rather_than_raising() {
+    let lua = mod_with_bots(1);
+    lua.load(STUB_POLLUTION)
+        .set_name("pollution stub")
+        .exec()
+        .expect("pollution stub");
+    lua.load("_surface.name = nil")
+        .set_name("nameless surface")
+        .exec()
+        .expect("nameless surface");
+    session(&lua, "'run-1'");
+    let force = samples(&lua)
+        .into_iter()
+        .find(|line| line.contains("\"kind\":\"force\""))
+        .expect("a force sample");
+    assert!(
+        force.contains("\"by_pollution\":0.001100"),
+        "the reading must survive a nameless surface, not merely the line: {force}"
+    );
+    assert!(
+        force.contains("\"1\":{"),
+        "and it must be keyed by the index `pairs` handed us: {force}"
+    );
+}
+
+/// **A raise inside the pollution reader must not cost the force line.**
+///
+/// Every individual read is `pcall`ed, so this needs a raise the inner guards
+/// cannot catch: a surface whose `name` is NaN, which makes `surfaces[name]`
+/// raise "table index is NaN". The outer `pcall` around `pollution_totals` is
+/// the only thing between that and a run with no research, production or
+/// power sample at all -- and no symptom but a missing line.
+///
+/// This is not hypothetical. The first version of this code raised on a
+/// surface with no `name`, was caught by `sample_force`'s own pcall, and the
+/// only evidence was that the force sample was not there.
+#[test]
+fn a_pollution_reader_that_raises_does_not_cost_the_force_sample() {
+    let lua = mod_with_bots(1);
+    lua.load(STUB_POLLUTION)
+        .set_name("pollution stub")
+        .exec()
+        .expect("pollution stub");
+    lua.load("_surface.name = 0/0")
+        .set_name("nan-named surface")
+        .exec()
+        .expect("nan-named surface");
+    session(&lua, "'run-1'");
+    let force = samples(&lua)
+        .into_iter()
+        .find(|line| line.contains("\"kind\":\"force\""))
+        .expect("the force sample must survive a raise inside the pollution reader");
+    assert!(
+        force.contains("\"production\"") && force.contains("\"power\""),
+        "production and power must still be there: {force}"
+    );
+}

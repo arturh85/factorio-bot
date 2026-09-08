@@ -456,6 +456,63 @@ export interface PowerSample {
     networks: Record<string, NetworkPower>;
 }
 
+/**
+ * Pollution and enemy evolution at one tick, per surface.
+ *
+ * Recorded so that "does our own production provoke attacks?" is a number
+ * rather than folklore. It is an observation only: nothing plans around it.
+ */
+export interface PollutionSample {
+    /**
+     * Keyed by surface name. A map, not a list, and per-surface rather than
+     * summed, because each surface has its own pollutant -- Nauvis emits
+     * pollution and Gleba emits spores, so a sum would add two different
+     * substances.
+     */
+    surfaces: Record<string, SurfacePollution>;
+}
+
+/**
+ * One surface's pollution and the evolution of the enemies on it.
+ *
+ * **Every field is optional and every absence means "not read", never
+ * "zero".** The mod writes a key only after a successful read.
+ */
+export interface SurfacePollution {
+    /** The pollutant's prototype name -- `pollution`, `spores`, or none. */
+    pollutant?: string | null;
+    /** Whole-surface total: cheap, and comparable across runs. */
+    total?: number | null;
+    /**
+     * A chunk reading at the player force's spawn. Spawn is the one position
+     * that means the same thing on every run of this project.
+     */
+    at_spawn?: number | null;
+    /**
+     * Cumulative pollution emitted, keyed by the prototype that emitted it --
+     * the half that answers "was it the steam engines or the radar".
+     */
+    produced?: Record<string, number> | null;
+    /** Cumulative pollution absorbed, keyed by absorber. */
+    absorbed?: Record<string, number> | null;
+    evolution?: EvolutionSample | null;
+}
+
+/**
+ * Enemy evolution and its three causes.
+ *
+ * The decomposition is the point: `factor` alone cannot separate "our factory
+ * did this" from "this would have happened anyway". The three terms do **not**
+ * sum to `factor` -- Factorio combines them through a saturating formula -- so
+ * they are contributions, not a partition.
+ */
+export interface EvolutionSample {
+    factor: number;
+    by_pollution: number;
+    by_time: number;
+    by_killing_spawners: number;
+}
+
 /** One electric network's own generation and demand. */
 export interface NetworkPower {
     /**
@@ -599,6 +656,14 @@ export type SampleKind =
           techs_unlocked: number;
           production: ProductionSample;
           power: PowerSample;
+          /**
+           * Pollution and enemy evolution, per surface.
+           *
+           * `null` for every line written before sample schema 3 -- which is
+           * every archived run -- and that is *not captured*, never "the
+           * world was calm". A reader must render the two differently.
+           */
+          pollution: PollutionSample | null;
       }
     /**
      * Per-machine state, on the same 300-tick beat as `force` and written from

@@ -1605,6 +1605,38 @@
         ],
         "type": "object"
       },
+      "EvolutionSample": {
+        "description": "Enemy evolution **and its three causes**.\n\nThe decomposition is the entire reason this is worth recording.\n[`Self::factor`] alone cannot distinguish \"our factory did this\" from \"this\nwould have happened anyway\"; with the three terms beside it, a rise is\nattributable. `by_pollution` is what our own production provoked, `by_time`\nis what the clock did, `by_killing_spawners` is what our combat did.\n\nThe three do not simply sum to [`Self::factor`] -- Factorio combines them\nthrough a saturating formula -- so do not treat them as a partition. They\nare the game's own accounting of each cause's contribution, read straight\noff `LuaForce`.",
+        "properties": {
+          "by_killing_spawners": {
+            "description": "`get_evolution_factor_by_killing_spawners(surface)`.",
+            "format": "double",
+            "type": "number"
+          },
+          "by_pollution": {
+            "description": "`get_evolution_factor_by_pollution(surface)`.",
+            "format": "double",
+            "type": "number"
+          },
+          "by_time": {
+            "description": "`get_evolution_factor_by_time(surface)`.",
+            "format": "double",
+            "type": "number"
+          },
+          "factor": {
+            "description": "`get_evolution_factor(surface)`, 0.0 to 1.0.",
+            "format": "double",
+            "type": "number"
+          }
+        },
+        "required": [
+          "factor",
+          "by_pollution",
+          "by_time",
+          "by_killing_spawners"
+        ],
+        "type": "object"
+      },
       "ExecuteAccepted": {
         "description": "The `202` body: the job to poll or stream from.",
         "properties": {
@@ -3096,6 +3128,25 @@
         ],
         "type": "object"
       },
+      "PollutionSample": {
+        "description": "Pollution and enemy evolution at one tick, per surface.\n\n# Why this is recorded at all\n\nThe owner's standing concern is that *\"as soon as we have radar or more\nthan 2 steam engines the biters will start to evolve and send out biters to\nattack the base\"*. Nothing in this project could evaluate that: `pollution`\nand `evolution` appeared nowhere in the mod, the planner or the executor,\nand the world dump carries only the `player` force -- the enemy force was\nnot in the model at all. This is the observation, and deliberately only the\nobservation: no pollution-aware planning, no attack predictor, no defence\ntrigger, because nobody has yet established that the numbers move on the\ntimescales this project runs at. A flat curve over a thirty-minute run is a\ncomplete and useful answer.",
+        "properties": {
+          "surfaces": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/SurfacePollution"
+            },
+            "description": "Keyed by surface name, e.g. `nauvis`.\n\nA map rather than a list for the same reason [`PowerSample::networks`]\nis one, and because pollution is only comparable *within* a surface:\nunder Space Age each surface has its own pollutant (Nauvis emits\npollution, Gleba emits spores), so summing them would add two different\nquantities.",
+            "propertyNames": {
+              "type": "string"
+            },
+            "type": "object"
+          }
+        },
+        "required": [
+          "surfaces"
+        ],
+        "type": "object"
+      },
       "Position": {
         "properties": {
           "x": {
@@ -3505,6 +3556,17 @@
                 ],
                 "type": "string"
               },
+              "pollution": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/PollutionSample",
+                    "description": "Pollution and enemy evolution, per surface.\n\n`None` for every line written before schema 3 -- which is every\narchived run this project has -- and that must stay\ndistinguishable from a game that has no pollution and no evolved\nbiters. Both are quiet worlds; only one of them was measured.\n`tools/run_analysis.py` withholds judgement on `None` rather than\nrendering zero."
+                  }
+                ]
+              },
               "power": {
                 "$ref": "#/components/schemas/PowerSample"
               },
@@ -3693,6 +3755,74 @@
       "SurfaceId": {
         "description": "Which surface something is on, identified by **name**.\n\nSpace Age is enabled in this workspace, so five planets and any number of\norbital platforms are one rocket away. Every run measured here so far has\nbeen a Space Age run that happened never to leave Nauvis, and the only\nthing that kept it that way is one `if` in `on_chunk_generated`\n(`mods/BotBridge/control.lua`) that drops a chunk from any other surface.\nSee `docs/superpowers/notes/2026-09-06-surfaces-survey.md`.\n\n**The name, not the index**, verified against\n`workspace/factorio-api-docs/runtime-api.json` (`application_version`\n2.1.17): `LuaSurface.name` is *\"unique among surfaces\"*, while\n`LuaSurface.index` *\"is assigned when a surface is created, and remains so\nuntil it is deleted. **Indexes of deleted surfaces can be reused.**\"* An\nindex is therefore an identity only within one save and only until a\ndeletion; a record somebody reads next year needs the name.\n\n**This does not go on [`Position`], deliberately.** A coordinate is only\never comparable within one surface, which `Position { x, y }` already says\ncorrectly; putting a surface on it would force `p1 - p2`, `Sub`,\n`manhattan_distance` and `PartialEq` to answer \"what is the distance\nbetween two planets?\", whose honest answer -- undefined -- cannot be\nreturned as an `f64`. The surface belongs on the **container**, which is\nrung one's successor, not on the value.",
         "type": "string"
+      },
+      "SurfacePollution": {
+        "description": "One surface's pollution, and the evolution of the enemies on it.\n\n**Every field is optional and every absence means \"not read\", never\n\"zero\".** The mod writes each key only after a successful `pcall`, so a\nsurface whose reading raised produces no key at all rather than a `0.0`\nthat would read as a measured calm.",
+        "properties": {
+          "absorbed": {
+            "additionalProperties": {
+              "format": "double",
+              "type": "number"
+            },
+            "description": "The same statistics' `output_counts`: cumulative pollution absorbed,\nkeyed by absorber (trees, tiles, spawners eating it).",
+            "propertyNames": {
+              "type": "string"
+            },
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "at_spawn": {
+            "description": "`LuaSurface.get_pollution(position)` at the player force's spawn.\n\nThat call is a **chunk** reading, so it needs a position, and spawn is\nthe one position that means the same thing on every run of this\nproject: the roster starts there and the first blocks are built around\nit. A grid of probes was rejected -- it costs O(chunks) per beat and\nanswers a question nobody has asked.",
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "evolution": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/EvolutionSample",
+                "description": "The `enemy` force's evolution on this surface, or `None` when there is\nno enemy force or the read raised."
+              }
+            ]
+          },
+          "pollutant": {
+            "description": "`LuaSurface.pollutant_type`'s prototype name -- `pollution` on Nauvis,\n`spores` on Gleba, and `None` on a surface with no pollutant at all\n(a space platform). Without it the numbers below are unlabelled: two\nsurfaces' \"pollution\" are not the same substance.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "produced": {
+            "additionalProperties": {
+              "format": "double",
+              "type": "number"
+            },
+            "description": "`game.get_pollution_statistics(surface).input_counts`: cumulative\npollution emitted, keyed by the prototype that emitted it. This is the\nhalf that can say *which machine* -- the \"is it the steam engines or\nthe radar\" question, answered rather than argued.",
+            "propertyNames": {
+              "type": "string"
+            },
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "total": {
+            "description": "`LuaSurface.get_total_pollution()`: the whole surface, cheap and\ncomparable across runs. The denominator every other reading here is\njudged against.",
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
       },
       "TickKind": {
         "description": "What one `ticks.jsonl` line is.\n\nShort keys (`t`, `w`, `k`) because there are thousands of these lines and\nthis file's only job is to be a table.",

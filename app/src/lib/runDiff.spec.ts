@@ -348,6 +348,8 @@ describe('inventoryAtFailure', () => {
             research: null,
             techs_unlocked: 0,
             production: {made: {}, consumed: {}},
+            // Schema 1: nothing recorded pollution then, and `null` says so.
+            pollution: null,
             power: {generated_kw: 0, consumed_kw: 0, satisfaction: 1, networks: {}}
         };
         const rows = inventoryAtFailure([failedSettle(0, 1, 50)], [force]);

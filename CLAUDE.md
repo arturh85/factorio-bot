@@ -110,6 +110,15 @@ thing that will bite whoever uses it next.
   answer is threat-aware planning, a forward base, or "oil is not a t=0 target
   on this seed" is an open owner decision — one run does not separate them.
 
+**`runtime-api.json` does NOT carry defines VALUES — only `name` and `order`.**
+Reading a number out of it gives you a **sort key**. I quoted
+`character_guns = 5, character_ammo = 6, character_armor = 7` and
+`turret_ammo = 33` from it; measured against the running game the values are
+**3, 4, 5 and 1**. Ask the game, or read the mod's own `inventory_type_name`
+table, and never read an integer out of the API dump. This is the sibling of
+the attribute-versus-method check: the file describes the *shape* of the API,
+not its constants.
+
 **One environment note that cost four verification attempts**: a `target/`
 shared by two cargo processes tears incremental objects, and **cargo then
 considers them fresh**, so `mold: error: undefined symbol: anon.<hash>.llvm.<n>`
@@ -381,14 +390,16 @@ destroys it unless you copy it aside first. That has already happened once.
 ### Ask the RUNNING game directly -- `rcon -s localhost`
 
 `factorio-bot rcon -s localhost -- '<command>'` attaches to an **already
-running** instance. **It does NOT print the reply, and this file said it did
-until 2026-09-08** — it cost an agent two probes read as "the command did
-nothing". The capability is there and thrown away: `FactorioRcon::send` returns
-`Result<Option<Vec<String>>>`, and `app/src-tauri/src/cli/rcon.rs:49` calls
-`rcon.send(command).await.unwrap();`, discarding it. So a reply-printing `rcon`
-is a one-line change whenever somebody wants it; until then, read what the
-command *did* rather than what it answered, and note that a console `/c` cannot
-see a mod's `storage` — go through the surface. No MCP server, no schema, no second
+running** instance. **The reply reaches you on STDERR, not stdout, and this
+paragraph took three attempts to state correctly.** What is true: the client
+logs the body at INFO as `rcon ⮞ <body>` (`crates/core/src/factorio/rcon.rs:148`),
+so the answer *is* readable; `FactorioRcon::send` also returns it as
+`Result<Option<Vec<String>>>`, and `app/src-tauri/src/cli/rcon.rs:49` discards
+that with `rcon.send(command).await.unwrap();`. So the reply is visible in the
+log and absent from stdout — which is why one agent read two probes as "the
+command did nothing" and why printing it is a one-line change if anyone wants
+it on stdout. Note also that a console `/c` cannot see a mod's `storage` — go
+through the surface. No MCP server, no schema, no second
 process: it is the fastest loop in this project for any question about live
 game state, which is exactly the class `world.dump` cannot answer (its
 `inventories` is always `[]`).

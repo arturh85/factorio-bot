@@ -64,6 +64,32 @@ async fn api_not_found() -> axum::response::Response {
 /// past a real 10 seconds.
 pub const SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(10);
 
+/// The API server could not take the address it was asked for.
+///
+/// `into_diagnostic()` on the raw `io::Error` used to be enough, and it was
+/// not: what reached the operator was a bare `Address already in use (os
+/// error 98)` naming neither the address nor what was being started — the
+/// anonymous-errno shape this project refuses everywhere else, where a
+/// refusal names the tile, the drill and the remedy. It names the address
+/// now.
+///
+/// The `io::Error` is kept as a typed `#[source]` rather than folded into
+/// the message, so a caller can ask *which* bind failure this was —
+/// `ErrorKind::AddrInUse` (someone else holds the port) against every other
+/// way a bind can fail — instead of matching on an OS message, which is
+/// neither stable nor locale-independent. `tests/bind.rs` relies on exactly
+/// that distinction, and there is no other honest way to make it: a report
+/// built by `into_diagnostic` erases the concrete type, so
+/// `downcast_ref::<std::io::Error>()` on it returns `None` (measured).
+#[derive(Debug, thiserror::Error, miette::Diagnostic)]
+#[error("could not bind the API server to {addr}")]
+pub struct BindFailed {
+    /// The address that could not be bound.
+    pub addr: SocketAddr,
+    #[source]
+    pub source: std::io::Error,
+}
+
 pub async fn start_with_shutdown(
     settings: SharedAppSettings,
     settings_path: PathBuf,
@@ -100,7 +126,7 @@ pub async fn start_with_state(
     let app = build_router(state, web_root.as_deref());
     let listener = tokio::net::TcpListener::bind(bind)
         .await
-        .into_diagnostic()?;
+        .map_err(|source| miette::Report::new(BindFailed { addr: bind, source }))?;
     tracing::info!("listening on http://{bind}");
 
     // `with_graceful_shutdown` waits for every in-flight request to finish

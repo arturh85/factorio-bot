@@ -335,11 +335,45 @@ pub enum FabricateRefusal {
     /// running `advanced-oil-processing` needs **five** ports to fit at once,
     /// two in and three out, against one in and one out for
     /// `basic-oil-processing` in the same machine.
+    /// # And the sources, because with more than one the counts cannot
+    /// distinguish the two things that go wrong
+    ///
+    /// The counts above say *how* each candidate failed. They cannot say
+    /// **why every candidate was doomed**, and with two fluid inputs there is
+    /// a case where every one of them is: the search walks
+    /// [`crate::method::util::FREE_TILE_SEARCH_RADIUS`] tiles of rings around
+    /// the **first** source, and a machine must reach *all* of them, so a
+    /// second source further away than that radius cannot be reached from any
+    /// candidate the search will ever try. No amount of clearer ground, and no
+    /// better pathfinder, moves it: it is a fact about where the two sources
+    /// stand.
+    ///
+    /// Measured 2026-09-08 on the seed-31337 water-and-oil dump,
+    /// `have:sulfur:10` -- `sulfur` wants water **and** petroleum-gas, the
+    /// water is at spawn and the petroleum comes out of a refinery at the
+    /// crude field, and the two are hundreds of tiles apart. 234 candidates
+    /// read `routes_failed`, which invited a routing fix for something
+    /// routing cannot reach. So `sources` names each one with its distance
+    /// from the anchor and `out_of_reach` counts those beyond the rings: a
+    /// non-zero `out_of_reach` means **this is a fluid-trunk problem, not a
+    /// pathfinding one**, and the remedy is a long-distance run or a
+    /// differently sited source, not a better search.
     #[error(
         "{recipe} runs in {machine}, which needs {inputs} input and {outputs} output fluid \
          port(s) all clear at once, and none of the {considered} footprint(s) around {anchor} \
          can hold it: {ports_failed} had a port that could not take a pipe and {routes_failed} \
-         had every port clear but no pipe route back to the source"
+         had every port clear but no pipe route back to the source. Its fluid supplies are {}{}",
+        sources.join("; "),
+        if *out_of_reach == 0 {
+            String::new()
+        } else {
+            format!(
+                " -- {out_of_reach} of them further from the anchor than the {search_radius}-tile \
+                 search, so NO site this search can reach touches all {inputs} at once and no \
+                 pipe route exists to be found: this is a long-distance fluid problem, not a \
+                 pathfinding one"
+            )
+        }
     )]
     #[diagnostic(
         code(planner::no_machine_site),
@@ -357,6 +391,16 @@ pub enum FabricateRefusal {
         considered: usize,
         ports_failed: usize,
         routes_failed: usize,
+        /// One entry per fluid ingredient: the fluid, what supplies it, where
+        /// it stands, and how far that is from `anchor`.
+        sources: Vec<String>,
+        /// How many of them are further from `anchor` than `search_radius`.
+        /// **Non-zero means no candidate could ever have worked**, whatever
+        /// the two counts above say.
+        out_of_reach: usize,
+        /// [`crate::method::util::FREE_TILE_SEARCH_RADIUS`], quoted so the
+        /// distances above are readable against something.
+        search_radius: i32,
     },
 
     /// The buffer this world offers cannot hold what this **goal** will put
@@ -464,6 +508,60 @@ pub enum FabricateRefusal {
         machine: String,
         kw: f64,
         site: String,
+    },
+
+    /// A fluid **co-product** -- one this goal did not ask for -- has a buffer
+    /// and no consumer, and this world offers no terminal consumer to stand.
+    ///
+    /// # Why a buffer is not enough, and why this refuses rather than proceeds
+    ///
+    /// A buffer holds what this goal's crafts put in it and then the machine
+    /// stalls, and a stalled `oil-refinery` produces **none** of its three
+    /// fluids -- not merely the one that had nowhere to go. So a plan that
+    /// stands the refinery up with heavy-oil going into a tank and nothing
+    /// else places 100% correctly and makes nothing, which is this repo's
+    /// signature failure. Letting it through would be worse than the refusal.
+    ///
+    /// A *terminal* consumer is a recipe taking the fluid whose products are
+    /// all items -- see [`crate::method::dispose`] for why that is the whole
+    /// termination argument. This variant is what a world with none of them
+    /// says; it is a wall, returned before a step is emitted.
+    #[error(
+        "{recipe} runs in {machine} and makes {per_craft} {fluid} per craft as a co-product \
+         this goal did not ask for; a buffer holds {total} of it and then the {machine} jams and \
+         makes none of its other products either. Nothing this planner can run consumes {fluid} \
+         into items only{}",
+        if considered.is_empty() {
+            ", so there is nowhere for it to go".to_string()
+        } else {
+            format!(
+                " (considered and rejected: {} -- each makes a fluid of its own, which would \
+                 need placing in turn)",
+                considered.join(", ")
+            )
+        }
+    )]
+    #[diagnostic(
+        code(planner::no_disposal),
+        help(
+            "research or unlock a recipe that turns this fluid into an item -- \
+             solid-fuel-from-<fluid> is the usual one -- or ask for a recipe with fewer fluid \
+             products"
+        )
+    )]
+    NoDisposal {
+        recipe: String,
+        machine: String,
+        fluid: String,
+        per_craft: u32,
+        total: u64,
+        /// Recipes that consume the fluid and were **not** chosen, in the
+        /// order [`crate::method::dispose::ranked_consumers`] would have
+        /// ranked them had they been terminal. Named because "nothing
+        /// consumes it" and "everything that consumes it makes another fluid"
+        /// have different remedies, and a bare refusal cannot be told apart
+        /// from a world with no chemistry at all.
+        considered: Vec<String>,
     },
 }
 
@@ -637,6 +735,131 @@ fn buffer_capacity(state: &PlanState, name: &str) -> BufferCapacity {
         .filter_map(|b| b.volume)
         .max_by(|a, b| a.total_cmp(b))
         .map_or(BufferCapacity::NotReported, BufferCapacity::Declared)
+}
+
+/// Each fluid supply with its distance from the anchor, and how many of them
+/// the ring search can never reach.
+///
+/// # Why a count of unreachable sources is worth its own function
+///
+/// [`FabricateRefusal::NoMachineSite`] reports how each *candidate* failed,
+/// and with two fluid inputs that cannot say the thing that matters: the rings
+/// are [`crate::method::util::FREE_TILE_SEARCH_RADIUS`] around the **first**
+/// source, so a second one further away than that is unreachable from every
+/// candidate the search will ever try, and all of them read as route failures.
+/// On the seed-31337 water-and-oil dump that is 234 of 348 for
+/// `have:sulfur:10` -- a number that invites a pathfinding fix for a
+/// petroleum-gas tank **369 tiles** from the water.
+///
+/// Distances are **Euclidean**, spelled out because [`Position`] carries only
+/// `manhattan_distance`: the rings are a square of side `2 * radius`, so a
+/// straight line is the honest comparison and Manhattan would overstate every
+/// diagonal.
+///
+/// A source exactly at the radius is *in* reach; only strictly beyond it
+/// counts, which is the same boundary the ring walk itself uses
+/// (`0..=FREE_TILE_SEARCH_RADIUS`).
+fn describe_sources(
+    anchor: &Position,
+    sources: &[(String, FactorioEntity)],
+) -> (Vec<String>, usize) {
+    let radius = f64::from(crate::method::util::FREE_TILE_SEARCH_RADIUS);
+    let mut out_of_reach = 0usize;
+    let lines = sources
+        .iter()
+        .map(|(fluid, entity)| {
+            let away = (entity.position.x() - anchor.x()).hypot(entity.position.y() - anchor.y());
+            if away > radius {
+                out_of_reach += 1;
+            }
+            format!(
+                "{fluid} from the {} at {} ({away:.1} tiles from the anchor)",
+                entity.name, entity.position
+            )
+        })
+        .collect();
+    (lines, out_of_reach)
+}
+
+/// One fluid co-product and the subgoal that consumes it.
+struct Disposed {
+    fluid: String,
+    goal: Goal,
+}
+
+/// Every fluid product of `recipe` **this goal did not ask for**, with the
+/// terminal consumer that will eat it -- resolved before a step is emitted,
+/// and refusing by name when a world offers none.
+///
+/// # A co-product is a product that is not the item
+///
+/// The comparison is against the goal's own item and nothing cleverer. A goal
+/// asking for light-oil out of `advanced-oil-processing` gets its light-oil in
+/// a buffer, which is what "produced" means for a fluid, and heavy-oil and
+/// petroleum-gas are the two co-products. A goal asking for an *item* out of a
+/// recipe with fluid products has co-products for all of them.
+///
+/// # The buffer stays; this is added to it, not instead of it
+///
+/// The tank is what the disposal plant is piped *from*: `pipe::sources_of`
+/// attributes a buffer this plan built (2026-09-08), so the emitted
+/// `Goal::Produced` reaches [`Fabricate`] again, which sites a chemical plant
+/// beside that tank and pipes it. Removing the buffer would leave the plant
+/// nothing to adopt -- a source is adopted and never built, which is the
+/// asymmetry [`plan_fluid_rig`] documents.
+fn plan_disposal(
+    ctx: &ExpansionCtx,
+    recipe: &FactorioRecipe,
+    machine: &str,
+    item: &str,
+    runs: u32,
+    whose: &Holder,
+) -> Result<Vec<Disposed>, PlannerError> {
+    let mut disposed = Vec::new();
+    for (fluid, per_craft) in fluid_products(ctx, recipe) {
+        if fluid == item {
+            continue;
+        }
+        let total = u64::from(per_craft) * u64::from(runs);
+        if total == 0 {
+            continue;
+        }
+        let Some(disposal) = pipe_away(&ctx.state, &fluid, whose) else {
+            let index = ProductIndex::from_state(&ctx.state);
+            let considered: Vec<String> = index
+                .recipes_consuming(&fluid)
+                .into_iter()
+                .map(|r| r.name.clone())
+                .collect();
+            return Err(PlannerError::CannotFabricate(Box::new(
+                FabricateRefusal::NoDisposal {
+                    recipe: recipe.name.clone(),
+                    machine: machine.to_string(),
+                    fluid: fluid.clone(),
+                    per_craft,
+                    total,
+                    considered,
+                },
+            )));
+        };
+        disposed.push(Disposed {
+            fluid,
+            goal: disposal.goal(total, whose),
+        });
+    }
+    Ok(disposed)
+}
+
+/// [`crate::method::dispose::choose`], named at the call site for what it
+/// does here. A thin alias so the module boundary reads in one direction:
+/// `dispose` knows nothing about rigs, and this file knows nothing about
+/// ranking.
+fn pipe_away(
+    state: &PlanState,
+    fluid: &str,
+    whose: &Holder,
+) -> Option<crate::method::dispose::Disposal> {
+    crate::method::dispose::choose(state, fluid, whose)
 }
 
 /// Site the machine, resolve both pipe runs, and refuse before any of it is
@@ -892,6 +1115,14 @@ fn plan_fluid_rig(
         });
         let (considered, ports_failed, routes_failed) =
             (considered.get(), ports_failed.get(), routes_failed.get());
+        // **Where the sources actually stand, which the counts cannot say.**
+        // The rings are `FREE_TILE_SEARCH_RADIUS` around the FIRST source, so
+        // a second one beyond that radius is unreachable from every candidate
+        // the search will ever try -- and every one of those reads as a route
+        // failure, which invites a routing fix for a problem routing cannot
+        // reach. Distances are Euclidean and to the anchor, the one point
+        // every candidate is near.
+        let (source_lines, out_of_reach) = describe_sources(&anchor, &sources);
         return Err(PlannerError::CannotFabricate(Box::new(
             FabricateRefusal::NoMachineSite {
                 recipe: recipe.name.clone(),
@@ -902,6 +1133,9 @@ fn plan_fluid_rig(
                 considered,
                 ports_failed,
                 routes_failed,
+                sources: source_lines,
+                out_of_reach,
+                search_radius: crate::method::util::FREE_TILE_SEARCH_RADIUS,
             },
         )));
     };
@@ -1508,6 +1742,12 @@ impl Method for Fabricate {
         // Every refusal in here is returned before a step is emitted.
         let rig = plan_fluid_rig(ctx, goal, &recipe, &machine, &bill.fluids, &from, runs)?;
         let site = rig.site.clone();
+        // **Where every co-product goes, decided before anything is emitted.**
+        // A buffer alone is a bounded sink and a full buffer jams the machine
+        // -- which stops *every* product, not only the one that overflowed --
+        // so a world with no terminal consumer for a co-product refuses here
+        // as `NoDisposal` rather than standing a rig that makes nothing.
+        let disposals = plan_disposal(ctx, &recipe, &machine, item, runs, whose)?;
 
         // ---- nothing below refuses; from here it is all emission ----
 
@@ -1856,6 +2096,24 @@ impl Method for Fabricate {
                     }
                 ),
             ));
+        }
+
+        // ---- and what becomes of the co-products ---------------------------
+        //
+        // **Emitted after the buffers, and that order is load-bearing.**
+        // `run_steps` walks a method's steps in order and expands each
+        // subgoal against the same `ctx.state`, so the tank placed above is
+        // already in the overlay when this subgoal is expanded -- which is
+        // exactly what lets `pipe::sources_of` attribute it and site the
+        // disposal plant beside it. Emitted before this loop, the plant would
+        // find no source and refuse as `NoFluidSource` for a tank the same
+        // method was about to place.
+        for Disposed { fluid, goal: sub } in disposals {
+            debug_assert!(
+                rig.outbound.iter().any(|run| run.fluid == fluid),
+                "a co-product's buffer is placed above, and the disposal subgoal is piped from it"
+            );
+            steps.push(Step::Subgoal(sub));
         }
 
         // A fluid product is not taken: no inventory holds one, and the
@@ -2978,7 +3236,59 @@ mod fabricate_fluid_tests {
 
     /// The rig above, as a `Result`, so the refusal path can be asserted too.
     fn three_output_rig() -> Result<Vec<Step>, PlannerError> {
+        three_output_rig_with_disposal(true)
+    }
+
+    /// The three-output rig, with or without the terminal consumers its two
+    /// co-products need.
+    ///
+    /// `disposal = false` is a world where nothing turns heavy-oil or
+    /// petroleum-gas into an item -- the case
+    /// [`FabricateRefusal::NoDisposal`] names, and the control that keeps this
+    /// fixture from proving the guard by never reaching it.
+    fn three_output_rig_with_disposal(disposal: bool) -> Result<Vec<Step>, PlannerError> {
         let world = oil_world(true);
+        if disposal {
+            // A `chemical-plant` that says it crafts `chemistry`, transcribed
+            // from 2.1.17 the same way the refinery above is: without it the
+            // category is not one this planner runs and disposal declines for
+            // a reason that has nothing to do with the recipes.
+            let plant: factorio_bot_core::types::FactorioEntityPrototype = serde_json::from_str(
+                r#"{ "name": "chemical-plant", "entity_type": "assembling-machine",
+                         "collision_mask": [],
+                         "collision_box": { "left_top": {"x": -1.4, "y": -1.4},
+                                            "right_bottom": {"x": 1.4, "y": 1.4} },
+                         "crafting_speed": 1.0,
+                         "crafting_categories": ["chemistry"] }"#,
+            )
+            .expect("a prototype in the shape the mod sends");
+            world
+                .globals
+                .entity_prototypes
+                .insert("chemical-plant".to_string(), plant);
+            let consumers: Vec<FactorioRecipe> = ["heavy-oil", "petroleum-gas"]
+                .into_iter()
+                .map(|fluid| {
+                    serde_json::from_str(&format!(
+                        r#"{{
+                          "name": "solid-fuel-from-{fluid}", "valid": true, "enabled": true,
+                          "category": "chemistry",
+                          "ingredients": [
+                            {{ "name": "{fluid}", "ingredient_type": "fluid", "amount": 20 }}
+                          ],
+                          "products": [
+                            {{ "name": "solid-fuel", "product_type": "item", "amount": 1,
+                               "probability": 1.0 }}
+                          ],
+                          "hidden": false, "energy": 1.0, "order": "a-c",
+                          "group": "g", "subgroup": "s"
+                        }}"#
+                    ))
+                    .expect("the disposal recipe parses")
+                })
+                .collect();
+            world.update_recipes(consumers).expect("recipes update");
+        }
         let recipe: FactorioRecipe = serde_json::from_str(
             r#"{
               "name": "advanced-oil-processing", "valid": true, "enabled": true,
@@ -3016,6 +3326,219 @@ mod fabricate_fluid_tests {
                 via: Some("advanced-oil-processing".into()),
             },
         )
+    }
+
+    /// **A second fluid source beyond the search radius is named as such, and
+    /// the refusal says the remedy is not a better pathfinder.**
+    ///
+    /// This is the whole of what `routes_failed` could not say. Measured
+    /// 2026-09-08 on the seed-31337 water-and-oil dump: `have:sulfur:10`,
+    /// `researched:rocket-silo` and `have:space-platform-starter-pack:1` all
+    /// refuse here with 234-284 candidates reading `no pipe route back to the
+    /// source`, and the cause in every one is a petroleum-gas tank **360-369
+    /// tiles** from the water the search is anchored on. A routing fix cannot
+    /// reach it; a long-distance run or a differently sited source can.
+    #[test]
+    fn a_source_beyond_the_search_radius_is_named_as_a_distance_not_a_route() {
+        let far = FactorioEntity {
+            name: "storage-tank".into(),
+            position: Position::new(147.5, -363.5),
+            ..Default::default()
+        };
+        let near = FactorioEntity {
+            name: "offshore-pump".into(),
+            position: Position::new(46.5, -8.5),
+            ..Default::default()
+        };
+        let anchor = near.position.clone();
+        let (lines, out_of_reach) = describe_sources(
+            &anchor,
+            &[
+                ("water".to_string(), near),
+                ("petroleum-gas".to_string(), far),
+            ],
+        );
+        assert_eq!(
+            out_of_reach, 1,
+            "the water is under the anchor and the petroleum is 369 tiles away: {lines:?}"
+        );
+        assert!(
+            lines[0].contains("water from the offshore-pump") && lines[0].contains("0.0 tiles"),
+            "{lines:?}"
+        );
+        assert!(
+            lines[1].contains("petroleum-gas from the storage-tank")
+                && lines[1].contains("369.1 tiles"),
+            "the distance is Euclidean, not Manhattan (which would read 456.0): {lines:?}"
+        );
+    }
+
+    /// The boundary, because "further than the radius" is where an off-by-one
+    /// would silently turn a reachable source into a diagnosis and back.
+    #[test]
+    fn a_source_exactly_at_the_search_radius_is_still_in_reach() {
+        let radius = f64::from(crate::method::util::FREE_TILE_SEARCH_RADIUS);
+        let anchor = Position::new(0.0, 0.0);
+        let at = |dx: f64| {
+            (
+                "water".to_string(),
+                FactorioEntity {
+                    name: "storage-tank".into(),
+                    position: Position::new(dx, 0.0),
+                    ..Default::default()
+                },
+            )
+        };
+        assert_eq!(describe_sources(&anchor, &[at(radius)]).1, 0);
+        assert_eq!(describe_sources(&anchor, &[at(radius + 0.5)]).1, 1);
+    }
+
+    /// **Every co-product gets a consumer, and the one the goal asked for does
+    /// not.** The light-oil is the product; heavy-oil and petroleum-gas are
+    /// surplus, and each is disposed of through the terminal recipe that eats
+    /// it.
+    #[test]
+    fn each_co_product_gets_a_terminal_consumer_and_the_asked_for_one_does_not() {
+        let steps = three_output_rig().expect("three products are three sinks");
+        let disposed: Vec<(String, u32)> = steps
+            .iter()
+            .filter_map(|step| match step {
+                Step::Subgoal(Goal::Produced {
+                    count,
+                    via: Some(via),
+                    ..
+                }) => Some((via.clone(), *count)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            disposed,
+            vec![
+                // 25 heavy-oil at 20 per craft is two crafts, rounded up so
+                // the twenty-fifth has somewhere to go.
+                ("solid-fuel-from-heavy-oil".to_string(), 2),
+                // 55 petroleum-gas at 20 is three.
+                ("solid-fuel-from-petroleum-gas".to_string(), 3),
+            ],
+            "one disposal per co-product, in recipe order, and none for the light-oil this \
+             goal asked for: {steps:?}"
+        );
+    }
+
+    /// **The guard survives a world with nowhere to put a co-product.** The
+    /// point of the rung is not to let a refinery be built regardless: a
+    /// co-product with only a buffer fills it and jams the machine, which
+    /// stops every product. Without the terminal consumers the rig refuses by
+    /// name, before a step is emitted.
+    #[test]
+    fn a_co_product_with_no_terminal_consumer_refuses_rather_than_building() {
+        let refusal = three_output_rig_with_disposal(false)
+            .expect_err("a co-product with nowhere to go is a wall");
+        let said = refusal.to_string();
+        assert!(
+            said.contains("heavy-oil") && said.contains("jams"),
+            "the refusal names the fluid and what happens to the machine: {said}"
+        );
+        assert!(
+            matches!(
+                refusal,
+                PlannerError::CannotFabricate(ref boxed)
+                    if matches!(**boxed, FabricateRefusal::NoDisposal { .. })
+            ),
+            "and it is the disposal wall rather than some later failure: {refusal:?}"
+        );
+    }
+
+    /// **A fluid-to-fluid recipe is never the disposal**, even when it is the
+    /// only thing in the world that consumes the co-product. Cracking is the
+    /// ratio instrument and a separate rung; choosing it here would put the
+    /// recursion the terminal rule forbids straight back in.
+    #[test]
+    fn cracking_is_not_offered_as_disposal_and_the_rig_refuses_instead() {
+        let world = oil_world(true);
+        let plant: factorio_bot_core::types::FactorioEntityPrototype = serde_json::from_str(
+            r#"{ "name": "chemical-plant", "entity_type": "assembling-machine",
+                 "collision_mask": [],
+                 "collision_box": { "left_top": {"x": -1.4, "y": -1.4},
+                                    "right_bottom": {"x": 1.4, "y": 1.4} },
+                 "crafting_speed": 1.0, "crafting_categories": ["chemistry"] }"#,
+        )
+        .expect("a prototype in the shape the mod sends");
+        world
+            .globals
+            .entity_prototypes
+            .insert("chemical-plant".to_string(), plant);
+        // Heavy-oil's only consumer makes a fluid; petroleum-gas has a real
+        // terminal one, so the refusal below can only be about the cracking.
+        let recipes: Vec<FactorioRecipe> = vec![
+            serde_json::from_str(
+                r#"{"name":"heavy-oil-cracking","valid":true,"enabled":true,
+                   "category":"chemistry",
+                   "ingredients":[{"name":"heavy-oil","ingredient_type":"fluid","amount":40}],
+                   "products":[{"name":"light-oil","product_type":"fluid","amount":30,
+                                "probability":1.0}],
+                   "hidden":false,"energy":2.0,"order":"a","group":"g","subgroup":"s"}"#,
+            )
+            .expect("the cracking recipe parses"),
+            serde_json::from_str(
+                r#"{"name":"solid-fuel-from-petroleum-gas","valid":true,"enabled":true,
+                   "category":"chemistry",
+                   "ingredients":[{"name":"petroleum-gas","ingredient_type":"fluid","amount":20}],
+                   "products":[{"name":"solid-fuel","product_type":"item","amount":1,
+                                "probability":1.0}],
+                   "hidden":false,"energy":1.0,"order":"a","group":"g","subgroup":"s"}"#,
+            )
+            .expect("the disposal recipe parses"),
+            serde_json::from_str(
+                r#"{
+                  "name": "advanced-oil-processing", "valid": true, "enabled": true,
+                  "category": "oil-processing",
+                  "ingredients": [
+                    { "name": "crude-oil", "ingredient_type": "fluid", "amount": 100 }
+                  ],
+                  "products": [
+                    { "name": "heavy-oil", "product_type": "fluid", "amount": 25,
+                      "probability": 1.0 },
+                    { "name": "light-oil", "product_type": "fluid", "amount": 45,
+                      "probability": 1.0 },
+                    { "name": "petroleum-gas", "product_type": "fluid", "amount": 55,
+                      "probability": 1.0 }
+                  ],
+                  "hidden": false, "energy": 5.0, "order": "a-b", "group": "g", "subgroup": "s"
+                }"#,
+            )
+            .expect("the three-output recipe parses"),
+        ];
+        world.update_recipes(recipes).expect("recipes update");
+        let mut state = state_of(world);
+        state.create_entity(FactorioEntity {
+            name: "storage-tank".into(),
+            entity_type: "storage-tank".into(),
+            position: Position::new(24.5, 12.5),
+            direction: 0,
+            ..Default::default()
+        });
+        stock(&mut state);
+        let refusal = expand(
+            state,
+            &Goal::Produced {
+                item: "light-oil".into(),
+                count: 45,
+                whose: Holder::Bot(BotId(1)),
+                unlocks: None,
+                via: Some("advanced-oil-processing".into()),
+            },
+        )
+        .expect_err("heavy-oil's only consumer makes another fluid");
+        let said = refusal.to_string();
+        assert!(
+            said.contains("heavy-oil") && said.contains("heavy-oil-cracking"),
+            "the refusal names the fluid and the recipe it rejected: {said}"
+        );
+        assert!(
+            said.contains("makes a fluid of its own"),
+            "and says why the candidate was rejected: {said}"
+        );
     }
 
     /// **Every port keeps a lane, and without one the runs wall each other

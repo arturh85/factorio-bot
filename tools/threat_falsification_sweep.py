@@ -17,7 +17,7 @@ import subprocess
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-BACKUP = os.path.join(ROOT, ".sweep", "backup")
+BACKUP = os.path.join(ROOT, "target", "threat-sweep-backup")
 
 STATE = "crates/planner/src/state.rs"
 HAVE = "crates/planner/src/method/have.rs"
@@ -110,6 +110,16 @@ MUTATIONS = [
 ]
 
 
+def snapshot():
+    """Back up by COPY. Callers must have a clean tree: this is the only
+    record of pre-mutation state, deliberately -- `git checkout` restores the
+    last COMMIT, silently discarding uncommitted work, which cost this repo
+    four files on 2026-09-08."""
+    os.makedirs(BACKUP, exist_ok=True)
+    for f in (STATE, HAVE, UTIL):
+        shutil.copyfile(os.path.join(ROOT, f), os.path.join(BACKUP, f.replace("/", "_")))
+
+
 def restore():
     for f in (STATE, HAVE, UTIL):
         dst = os.path.join(ROOT, f)
@@ -139,7 +149,7 @@ def run_tests(names):
 
 
 def main():
-    restore()
+    snapshot()
     all_names = sorted({n for m in MUTATIONS for n in m[4]})
 
     base, compiled = run_tests(all_names)

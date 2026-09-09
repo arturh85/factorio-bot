@@ -359,14 +359,12 @@ pub async fn entity_prototypes(
     tag = "Query",
     responses(
         (status = 200, body = FlowExport),
-        (status = 503, body = crate::error::ErrorResponse),
+        (status = 400, body = crate::error::ErrorResponse),
     )
 )]
 pub async fn flow(State(state): State<AppState>) -> ApiResult<FlowExport> {
     let instance = state.instance.read().await;
-    let instance = instance
-        .as_ref()
-        .ok_or_else(|| ErrorResponse::not_running("not started"))?;
+    let instance = instance.as_ref().ok_or_else(ErrorResponse::not_started)?;
     let world = require_surface(instance)?;
     let tick = instance.rcon.last_tick().unwrap_or(0);
     Ok(Json(world.flow_graph.export(tick)))

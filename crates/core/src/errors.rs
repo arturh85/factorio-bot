@@ -120,9 +120,14 @@ pub struct RconPlayerNotFound {
 pub struct RconPlayerBlockesPlacement {}
 
 #[derive(Error, Debug, Diagnostic)]
-#[error("player blocks placement in all directions")]
+#[error("player blocks placement in all directions ({searched})")]
 #[diagnostic(code(factorio::workspace::not_found), help("read logs"))]
-pub struct RconPlayerBlockesAllPlacement {}
+pub struct RconPlayerBlockesAllPlacement {
+    /// Which searches for a spot to step to came up empty. The leading
+    /// sentence is what `classify_failure` (`crates/scripting_lua`) matches
+    /// as `FailureKind::Blocked` and must stay intact.
+    pub searched: String,
+}
 
 #[derive(Error, Debug, Diagnostic)]
 #[error("Unexpected Empty Response")]

@@ -1,4 +1,4 @@
-import {CheckCircle2, CircleHelp, Loader2, XCircle} from '@lucide/vue';
+import {Ban, CheckCircle2, CircleHelp, Loader2, XCircle} from '@lucide/vue';
 import {ReplayStatus} from '@/api/replay';
 
 /**
@@ -39,6 +39,15 @@ export const STATUS_VISUAL: Record<ReplayStatus, {icon: typeof CheckCircle2 | nu
             'bg-[repeating-linear-gradient(45deg,color-mix(in_srgb,var(--color-warn)_40%,transparent)_0px,' +
             'color-mix(in_srgb,var(--color-warn)_40%,transparent)_3px,transparent_3px,transparent_7px)]',
         label: 'lost -- this run will never learn the outcome'
+    },
+    Abandoned: {
+        icon: Ban,
+        // Muted and solid-bordered: a decision the run made, not a verdict
+        // the game gave (so not danger-red) and not an unknown (so not the
+        // amber hatching). It has to be visible at all, because until
+        // 2026-09-09 these rows drew nothing and read as never reached.
+        classes: 'border border-ink-muted bg-ink-muted/15 text-ink-muted',
+        label: 'abandoned -- never dispatched because something it needed did not succeed'
     }
 };
 

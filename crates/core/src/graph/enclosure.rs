@@ -382,7 +382,7 @@ pub fn blocks_character(prototypes: &DashMap<String, FactorioEntityPrototype>, n
 /// there can be asked which layers it collides with. The two trees file the
 /// same `bounding_box` for an entity they both hold, which is what
 /// [`drop_walkable`] matches on.
-fn walkable_boxes_within(graph: &EntityGraph, window: &Rect) -> Vec<Rect> {
+pub fn walkable_boxes_within(graph: &EntityGraph, window: &Rect) -> Vec<Rect> {
     let prototypes = graph.entity_prototypes();
     let radius = (window.width() / 2.).hypot(window.height() / 2.) + MAX_ENTITY_HALF_SPAN;
     graph

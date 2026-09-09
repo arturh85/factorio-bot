@@ -2028,6 +2028,42 @@ entry over a log line:
   three-tile corridor is not credible as a fact about the map** and points at
   the executor's enclosure *window* rather than at the ground — the same window
   `26498dee` resized for a different reason. Open.
+- **`player blocks placement in all directions` was the MOD refusing a belt
+  the GAME had accepted, and it cost `run-1788914717-24351` its objective.**
+  Bot 1 laid 154 belts, then stood on the tile of the 155th. The game said
+  yes -- a belt's collision layers (`water_tile, floor, transport_belt, object,
+  meltable`) and a character's (`is_object, player, train`) are disjoint, and
+  `create_entity` builds a belt under a character and leaves it standing;
+  measured live 2026-09-09 -- but `rcon_place_entity`'s post-check scanned the
+  raw box for *any* character and answered the actor sentinel anyway. The
+  RCON layer then looked for a spot with an **empty two-tile disc five tiles
+  out**, which no tile inside a belt run has, and failed the action. 48 of 878
+  steps were abandoned behind the two refusals, both `assembling-machine-1`s
+  among them, and **the record said nothing**: abandoned steps wrote no
+  attempt and read as `pending`, the same as a killed run, so the supervisor
+  called the milestone satisfied. `pre_place.rs` had known belts do not
+  collide since it was written; the mod's four character arms never asked.
+
+  Now: every character arm in the mod (actor sentinel, bystander transient,
+  post-check, push-out, and the pre-check's `character` flag) is gated on
+  `prototype_collides_with_character`, read off the two masks' layer names;
+  the actor sentinel carries the landing the game's own
+  `find_non_colliding_position` ladder offers (` landing=x,y`) and
+  `place_entity_timed` walks there before falling back to the compass; a
+  walk ending on a belt is no longer refused as unstandable
+  (`standing_verdict` subtracts walkable boxes, the enclosure fill's own
+  rule); and an abandoned step is `Status::Abandoned` -- its own
+  `action_settled` naming the predecessor, `obs.abandoned`, and
+  `batch_progress.abandoned` while the batch is still running.
+
+  Two shapes worth keeping. **The message named the actor because the actor
+  arm was checked first, not because the actor was the cause** -- the same
+  masking as `Occupant::Terrain` over `Occupant::Refused` above; the fix
+  began by asking the live game whether a belt goes under a character, which
+  took one `rcon -s localhost` and settled a question two layers of code
+  disagreed about. And **"nothing was dispatched, so nothing is written" is
+  the silence-is-not-success defect in its purest form**: the executor knew
+  exactly why 48 steps died and recorded none of it.
 - **Both SEARCHING forms of `goal.built` still ignore characters when CHOOSING
   the anchor, which is deliberate and now safe.** Siting treats a character as non-blocking on purpose — a
   bot can walk away, so it should not veto a site — and only the explicit-anchor

@@ -264,6 +264,15 @@ pub enum EventKind {
         /// Kept apart from `failed` here for the same reason
         /// [`EventKind::ActionSettled`] keeps them apart.
         lost: u32,
+        /// Actions the run decided not to dispatch because a predecessor did
+        /// not succeed, or the bot's walk halted it. **Not** in `dispatched`
+        /// or `settled`: the game never saw them. This is the count that says
+        /// a batch is being truncated while it is still running -- 48 of 878
+        /// in `run-1788914717-24351`, which nothing reported until the batch
+        /// was over and the number had become `pending`. `0` on lines
+        /// written before the field existed.
+        #[serde(default)]
+        abandoned: u32,
         /// Walks dispatched and walks settled, counted separately because a
         /// walk has no `ActionId` and appears in none of the counts above.
         ///
@@ -1395,6 +1404,14 @@ pub enum FailureKind {
     MissingItem,
     Unreachable,
     Blocked,
+    /// Never dispatched: a predecessor did not succeed, or the bot's own walk
+    /// halted it. The executor's verdict, not the game's -- the game never saw
+    /// the action. `ActionFailure.detail` names the cause, e.g. `predecessor
+    /// 535 failed`. Before this kind existed such actions read as `pending`
+    /// and wrote no settle at all, which is how `run-1788914717-24351` dropped
+    /// 48 actions behind two refused belts with nothing in the record saying
+    /// so.
+    Abandoned,
     /// Some of what was asked for moved, and the rest did not.
     ///
     /// Split out of [`FailureKind::Rejected`] because the two leave the world

@@ -577,6 +577,40 @@ const CAN_PLACE_REFUSAL: &str = "can_place_entity said 'no'";
 /// happens, never a site fenced off for a reason nobody gave.
 const FOOTPRINT_CHARACTER_REFUSAL: &str = "a character is standing in the footprint";
 
+/// The mod's answer when the **acting** character itself stands in the box the
+/// game refused. Matched as a prefix, not by equality: since 2026-09-09 the
+/// mod appends where the actor could stand instead (see [`actor_landing`]),
+/// and an older mod that appends nothing still matches.
+const PLAYER_BLOCKS_PLACEMENT: &str = "§player_blocks_placement§";
+
+/// How close the actor's step-aside walk must land to the spot the mod
+/// offered. The spot came from the game's own `find_non_colliding_position`,
+/// so it is known to hold a character; the same tolerance `pre_place`'s
+/// `STEP_ASIDE_RADIUS` uses, for the same reason.
+const ACTOR_LANDING_RADIUS: f64 = 0.5;
+
+/// The spot the mod offered after [`PLAYER_BLOCKS_PLACEMENT`], read off the
+/// rest of the line: ` landing=<x>,<y>`. `None` for a bare sentinel (an older
+/// mod, or one whose ladder found no standable spot within 32 tiles of any
+/// exit) and for anything that does not parse, which is then treated exactly
+/// like a bare sentinel rather than as a position.
+///
+/// The spot is what `placement_step_aside_landing` (`mods/BotBridge/control.lua`)
+/// gives a *bystander* -- nearest exit first, widening -- and the actor got
+/// nothing like it until `run-1788914717-24351`: the RCON layer's own search
+/// walked eight compass points five tiles out and accepted one only with an
+/// empty two-tile disc around it, which no tile inside a belt run has.
+fn actor_landing(rest: &str) -> Option<Position> {
+    let spec = rest.trim().strip_prefix("landing=")?;
+    let (x, y) = spec.split_once(',')?;
+    let x: f64 = x.trim().parse().ok()?;
+    let y: f64 = y.trim().parse().ok()?;
+    if !x.is_finite() || !y.is_finite() {
+        return None;
+    }
+    Some(Position::new(x, y))
+}
+
 /// How many times [`FactorioRcon::place_entity_timed`] issues a placement whose
 /// footprint a character is standing in, counting the first.
 ///
@@ -1313,11 +1347,22 @@ fn standing_verdict(world: &FactorioSurface, at: &Position) -> StandingVerdict {
             footprint.right_bottom.y() + BLOCKER_PROBE_MARGIN,
         ),
     );
+    // `blocked_tree` files every entity's box, belts included, and a
+    // character walks over a belt. Until 2026-09-09 a walk ending on a belt
+    // this same run had just built was refused here as `inside
+    // transport-belt at ...`, re-asked at a radius of 0.5, and walked anyway
+    // -- dozens of times per belt-laying run (`run-1788914717-24351`), each
+    // one an extra path request and a walk forced onto the exact tile. The
+    // subtraction is the enclosure fill's own (`drop_walkable`), so the two
+    // cannot disagree about what a character can stand on.
+    let walkable = crate::graph::enclosure::walkable_boxes_within(&world.entity_graph, &probe);
+    let blockers = crate::graph::enclosure::drop_walkable(
+        world.entity_graph.blocking_boxes_within(&probe),
+        &walkable,
+    );
     // The quad tree admits boxes that merely come close (its doc comment says
     // so), so every candidate is re-tested exactly before it may refuse.
-    match world
-        .entity_graph
-        .blocking_boxes_within(&probe)
+    match blockers
         .into_iter()
         .find(|blocker| boxes_overlap(blocker, &footprint))
     {
@@ -5436,25 +5481,42 @@ impl FactorioRcon {
                     attempts.ticks(tick),
                 ));
             }
-            if &line[..] == "§player_blocks_placement§" {
-                // The eight compass points. This was `0..8u8` on the
-                // Factorio 1.x scale, where those were all eight
-                // directions; on the 2.x scale `0..8` is only half a
-                // circle, so it has to be named rather than counted.
-                for test_direction in Direction::compass() {
-                    let Some(test_position) = move_position(&player_position, test_direction, 5.0)
-                    else {
-                        continue;
-                    };
-                    if self
-                        .is_area_empty(&AreaFilter::PositionRadius((
-                            test_position.clone(),
-                            Some(2.0),
-                        )))
-                        .await
-                        .map_err(|e| ActionFailure::refused(e, refused_at))?
+            if let Some(rest) = line.strip_prefix(PLAYER_BLOCKS_PLACEMENT) {
+                // Where the actor stands instead, in order of preference:
+                // the spot the mod's own ladder offered (see `actor_landing`),
+                // else -- only when it offered none -- the eight compass
+                // points five tiles out, each accepted only with an empty
+                // two-tile disc around it. The compass search is the older
+                // answer and finds nothing inside a built-up block; it is
+                // kept as the fallback for a mod that offers nothing.
+                //
+                // The compass was `0..8u8` on the Factorio 1.x scale, where
+                // those were all eight directions; on the 2.x scale `0..8`
+                // is only half a circle, so it has to be named rather than
+                // counted.
+                let offered = actor_landing(rest);
+                let candidates: Vec<(Position, f64, bool)> = match &offered {
+                    Some(landing) => vec![(landing.clone(), ACTOR_LANDING_RADIUS, false)],
+                    None => Direction::compass()
+                        .into_iter()
+                        .filter_map(|direction| move_position(&player_position, direction, 5.0))
+                        .map(|spot| (spot, 1.0, true))
+                        .collect(),
+                };
+                for (test_position, radius, needs_empty_disc) in candidates {
+                    if needs_empty_disc
+                        && !self
+                            .is_area_empty(&AreaFilter::PositionRadius((
+                                test_position.clone(),
+                                Some(2.0),
+                            )))
+                            .await
+                            .map_err(|e| ActionFailure::refused(e, refused_at))?
                     {
-                        self.move_player(world, player_id, &test_position, Some(1.0))
+                        continue;
+                    }
+                    {
+                        self.move_player(world, player_id, &test_position, Some(radius))
                             .await
                             .map_err(|e| ActionFailure::refused(e, refused_at))?;
                         let (lines, tick) = self
@@ -5489,7 +5551,7 @@ impl FactorioRcon {
                                         .map_err(|e| ActionFailure::refused(e, refused_at))?,
                                     attempts.ticks(tick),
                                 ))
-                            } else if &line[..] == "§player_blocks_placement§" {
+                            } else if line.starts_with(PLAYER_BLOCKS_PLACEMENT) {
                                 Err(ActionFailure::refused(
                                     RconPlayerBlockesPlacement {}.into(),
                                     refused_at,
@@ -5541,8 +5603,21 @@ impl FactorioRcon {
                         };
                     }
                 }
+                // Every spot tried has returned above, and an offered landing
+                // is always tried, so reaching here means the mod offered
+                // none AND the compass found no empty disc. Both searches are
+                // named, because a reader deciding whether the ground is
+                // really that full needs to know how hard it was looked at:
+                // the ladder reaches 32 tiles from every exit, the compass
+                // only an empty disc five tiles out.
                 return Err(ActionFailure::refused(
-                    RconPlayerBlockesAllPlacement {}.into(),
+                    RconPlayerBlockesAllPlacement {
+                        searched: "the mod offered no landing within 32 tiles of any exit of \
+                                   the footprint, and no compass point 5 tiles out has an \
+                                   empty 2-tile disc"
+                            .to_string(),
+                    }
+                    .into(),
                     refused_at,
                 ));
             }
@@ -8227,6 +8302,177 @@ mod transfer_guarantee_tests {
         }
     }
 
+    /// [`stub_place_at`] with prototypes that carry a collision mask, the way
+    /// the live game's do: a belt whose layers a character does not share,
+    /// and a furnace whose layers do include `player`. The acting player
+    /// stands dead centre of the tile it is about to build on, and
+    /// `find_non_colliding_position` -- present only when `landing` is given
+    /// -- answers with that spot for any question.
+    fn stub_place_masked(can_place: bool, landing: Option<(f64, f64)>) -> String {
+        let find = match landing {
+            Some((x, y)) => format!(
+                "find_non_colliding_position = function(name, target, radius, precision) \
+                 return {{ x = {x}, y = {y} }} end,"
+            ),
+            None => String::new(),
+        };
+        format!(
+            r#"
+            local function auto()
+                local t = {{}}
+                setmetatable(t, {{ __index = function(tbl, k)
+                    local v = auto(); rawset(tbl, k, v); return v
+                end }})
+                return t
+            end
+            defines = auto()
+            local function noop() end
+            local function nooptable()
+                return setmetatable({{}}, {{ __index = function() return noop end }})
+            end
+            script = nooptable()
+            remote = nooptable()
+            commands = nooptable()
+            helpers = nooptable()
+            require = function() return {{}} end
+            print = noop
+
+            _rcon_lines = {{}}
+            rcon = {{ print = function(s) _rcon_lines[#_rcon_lines + 1] = tostring(s) end }}
+
+            local character = {{ type = "character", name = "character",
+                position = {{ x = 38.5, y = 16.5 }},
+                prototype = {{ collision_mask = {{ layers = {{ is_object = true, player = true, train = true }} }} }} }}
+            local surface = {{
+                can_place_entity = function(args) return {can_place} end,
+                create_entity = function(args) return nil end,
+                find_entity = function(name, pos) return nil end,
+                find_entities_filtered = function(args) return {{ character }} end,
+                get_tile = function(x, y) return {{ valid = true, name = "grass-1" }} end,
+                {find}
+            }}
+            local player = {{
+                character = character,
+                name = "bot1",
+                position = {{ x = 38.5, y = 16.5 }},
+                force = "player",
+                surface = surface,
+                get_item_count = function(name) return 1 end,
+                remove_item = function(items) return items.count end,
+            }}
+            local box = {{ left_top = {{ x = -0.4, y = -0.4 }}, right_bottom = {{ x = 0.4, y = 0.4 }} }}
+            prototypes = {{ item = {{
+                ["transport-belt"] = {{ place_result = {{
+                    name = "transport-belt",
+                    collision_box = box,
+                    collision_mask = {{ layers = {{ water_tile = true, floor = true, transport_belt = true, object = true, meltable = true }} }},
+                }} }},
+                ["stone-furnace"] = {{ place_result = {{
+                    name = "stone-furnace",
+                    collision_box = {{ left_top = {{ x = -0.9, y = -0.9 }}, right_bottom = {{ x = 0.9, y = 0.9 }} }},
+                    collision_mask = {{ layers = {{ is_object = true, water_tile = true, item = true, object = true, player = true, meltable = true }} }},
+                }} }},
+            }} }}
+            game = {{
+                tick = {tick},
+                players = {{ player }},
+                forces = {{ player = {{ print = noop }} }},
+            }}
+        "#,
+            can_place = if can_place { "true" } else { "false" },
+            find = find,
+            tick = STUB_TICK,
+        )
+    }
+
+    const PLACE_BELT_UNDER_SELF: &str =
+        r#"rcon_place_entity(1, "transport-belt", {38.5, 16.5}, 12)"#;
+    const PLACE_FURNACE_UNDER_SELF: &str =
+        r#"rcon_place_entity(1, "stone-furnace", {38.5, 16.5}, 0)"#;
+
+    /// **The refusal that ended `run-1788914717-24351`.** The game said yes
+    /// to a belt under the acting character -- measured live, a belt's mask
+    /// and a character's are disjoint -- and the mod's own post-check said
+    /// no anyway, with the actor sentinel. Now the placement goes through to
+    /// `create_entity`: the stub's returns nil, so the reply is *that*
+    /// complaint, which is the proof that no character arm fired.
+    #[test]
+    fn a_belt_is_built_under_the_acting_character() {
+        let printed = run_handler(stub_place_masked(true, None), PLACE_BELT_UNDER_SELF);
+        let body = reply_body(&printed);
+        assert!(
+            !body.contains(PLAYER_BLOCKS_PLACEMENT) && !body.contains(FOOTPRINT_CHARACTER_REFUSAL),
+            "a character cannot block a belt, so neither character arm may answer; got {body:?}"
+        );
+        assert!(
+            body.contains("create_entity returned nil"),
+            "the placement must have reached create_entity; got {body:?}"
+        );
+    }
+
+    /// The other half of the same defect: when the ground refuses a belt
+    /// with the actor on the tile, the reply must name the ground, because
+    /// the actor is not why. Before this the actor arm won and hid the
+    /// scan, so nothing anywhere said what was really on the tile.
+    #[test]
+    fn a_belt_the_ground_refuses_names_the_ground_not_the_actor() {
+        let printed = run_handler(stub_place_masked(false, None), PLACE_BELT_UNDER_SELF);
+        let body = reply_body(&printed);
+        assert!(
+            body.contains(CAN_PLACE_REFUSAL),
+            "the ground's verdict must reach the reply; got {body:?}"
+        );
+        assert!(
+            !body.contains(PLAYER_BLOCKS_PLACEMENT),
+            "the actor sentinel must not mask the ground; got {body:?}"
+        );
+    }
+
+    /// A furnace does collide with a character, so the sentinel still
+    /// answers -- and now carries where the actor can stand instead, read
+    /// back through `actor_landing` exactly as `place_entity_timed` does.
+    #[test]
+    fn a_furnace_under_the_acting_character_answers_the_sentinel_with_a_landing() {
+        let printed = run_handler(
+            stub_place_masked(false, Some((41.5, 16.5))),
+            PLACE_FURNACE_UNDER_SELF,
+        );
+        let body = reply_body(&printed);
+        let (lines, _) = take_tick_stamp(split_reply(&body, true));
+        let lines = lines.expect("a refusal line");
+        let rest = lines[0]
+            .strip_prefix(PLAYER_BLOCKS_PLACEMENT)
+            .unwrap_or_else(|| panic!("expected the actor sentinel, got {lines:?}"));
+        assert_eq!(
+            actor_landing(rest),
+            Some(Position::new(41.5, 16.5)),
+            "the landing the game offered must ride on the sentinel; line {:?}",
+            lines[0]
+        );
+        // And without `find_non_colliding_position` the sentinel is bare,
+        // which `actor_landing` reads as "nothing offered".
+        let printed = run_handler(stub_place_masked(false, None), PLACE_FURNACE_UNDER_SELF);
+        let body = reply_body(&printed);
+        let (lines, _) = take_tick_stamp(split_reply(&body, true));
+        let lines = lines.expect("a refusal line");
+        assert_eq!(lines[0], PLAYER_BLOCKS_PLACEMENT);
+        assert_eq!(actor_landing(""), None);
+    }
+
+    #[test]
+    fn actor_landing_reads_only_a_well_formed_spot() {
+        assert_eq!(
+            actor_landing(" landing=12.5,-3.25"),
+            Some(Position::new(12.5, -3.25))
+        );
+        assert_eq!(actor_landing(""), None);
+        assert_eq!(actor_landing(" landing="), None);
+        assert_eq!(actor_landing(" landing=1"), None);
+        assert_eq!(actor_landing(" landing=a,b"), None);
+        assert_eq!(actor_landing(" landing=nan,1"), None);
+        assert_eq!(actor_landing(" stuck"), None);
+    }
+
     /// **The seam the retry hangs on.** `place_entity_timed` decides whether to
     /// ask again by matching [`FOOTPRINT_CHARACTER_REFUSAL`] against the line
     /// the mod prints, so the two have to be pinned together: a wording change
@@ -9481,8 +9727,10 @@ mod transfer_guarantee_tests {
             rcon_action_start_mining(42, 1, "iron-ore", {x = -40.5, y = -48.5}, 1)
             "#,
         );
-        let all = printed.join("
-");
+        let all = printed.join(
+            "
+",
+        );
         assert!(
             !all.contains("without saying why"),
             "the mining branch must name its reason; got {all}"
@@ -9514,8 +9762,10 @@ mod transfer_guarantee_tests {
             rcon_action_start_mining(43, 1, nil, nil, 1)
             "#,
         );
-        let all = printed.join("
-");
+        let all = printed.join(
+            "
+",
+        );
         assert!(
             !all.contains("without saying why") && all.contains("fail 43 "),
             "got {all}"

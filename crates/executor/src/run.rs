@@ -25,7 +25,14 @@ use tokio::sync::watch;
 
 enum PredOutcome {
     Ready,
-    Abandoned,
+    /// A predecessor did not succeed, so this action must not run. Carries
+    /// which one and how it ended, because that is the whole of what the log
+    /// can say about an action the game never saw -- see
+    /// [`Status::Abandoned`].
+    Abandoned {
+        pred: ActionId,
+        status: Status,
+    },
 }
 
 /// Why a run refused to start.
@@ -543,7 +550,16 @@ fn halt(
     }
     let dropped: BTreeSet<ActionId> = flight.iter().map(|queued| queued.action).collect();
     flight.clear();
-    abandon_rest(&mine[from.min(mine.len())..], senders, &dropped);
+    abandon_rest(
+        &mine[from.min(mine.len())..],
+        senders,
+        &dropped,
+        log,
+        &format!(
+            "abandoned: bot {} halted after its walk at step {from} failed",
+            bot.0
+        ),
+    );
 }
 
 /// One `Walk` step.
@@ -649,15 +665,26 @@ async fn run_action(
     let Some(action) = act_id(step) else {
         return;
     };
-    if let PredOutcome::Abandoned = await_preds(act, bot, net, action, log, receivers).await {
-        // Nothing was dispatched, so nothing is written to the log -- but the
-        // signal has to carry a verdict, because the bot no longer stops here
-        // and nobody else will ever publish one for this action. Without it a
-        // dependent of *this* step waits forever on a `Pending` that has no
-        // writer left. `abandon_rest` used to do this for the whole slice at
-        // once; abandoning one action at a time is the same propagation, one
-        // hop per step.
-        publish(senders, action, Status::Failed);
+    if let PredOutcome::Abandoned { pred, status } =
+        await_preds(act, bot, net, action, log, receivers).await
+    {
+        // Nothing was dispatched, and until 2026-09-09 nothing was written to
+        // the log either, so the action read as `Pending` for the rest of the
+        // run -- indistinguishable from work a killed run never reached. It
+        // is written now, naming the predecessor, so the record can say why
+        // 48 steps of `run-1788914717-24351` never ran (see
+        // `Status::Abandoned`). The signal has to carry a verdict too,
+        // because the bot no longer stops here and nobody else will ever
+        // publish one for this action; without it a dependent of *this* step
+        // waits forever on a `Pending` that has no writer left. `abandon_rest`
+        // used to do this for the whole slice at once; abandoning one action
+        // at a time is the same propagation, one hop per step.
+        // The predecessor is named by id only: its own `action_dispatched`
+        // line in the same plan carries the label, and ids are per-plan, so
+        // the join is exact within the batch that wrote both.
+        let why = format!("abandoned: predecessor {} {}", pred.0, status_word(status));
+        lock(log).abandon(action, step.start, why);
+        publish(senders, action, Status::Abandoned);
         return;
     }
     lock(log).start(action, step.start);
@@ -812,13 +839,32 @@ fn abandon_rest(
     rest: &[&ScheduledStep],
     senders: &BTreeMap<ActionId, watch::Sender<Status>>,
     except: &BTreeSet<ActionId>,
+    log: &Mutex<ExecutionLog>,
+    why: &str,
 ) {
     for step in rest {
         if let StepKind::Act { action, .. } = &step.what
             && !except.contains(action)
         {
-            publish(senders, *action, Status::Failed);
+            // Written before it is published, so a waiter that sees the
+            // verdict finds the attempt already there -- the same order the
+            // settle path keeps. See `Status::Abandoned`.
+            lock(log).abandon(*action, step.start, why.to_string());
+            publish(senders, *action, Status::Abandoned);
         }
+    }
+}
+
+/// The word an abandonment names its predecessor's verdict by, in the
+/// record's own spelling (`status_name`, `crates/scripting_lua`).
+fn status_word(status: Status) -> &'static str {
+    match status {
+        Status::Pending => "pending",
+        Status::Running => "running",
+        Status::Success => "succeeded",
+        Status::Failed => "failed",
+        Status::Lost => "was lost",
+        Status::Abandoned => "was abandoned",
     }
 }
 
@@ -872,7 +918,9 @@ async fn await_preds(
                 // dispatching what depends on it: `Lost` is not `Failed`, but
                 // it is just as much a reason not to proceed, because the
                 // precondition this action needs is unvouched for either way.
-                Status::Failed | Status::Lost => return PredOutcome::Abandoned,
+                Status::Failed | Status::Lost | Status::Abandoned => {
+                    return PredOutcome::Abandoned { pred, status };
+                }
                 Status::Pending | Status::Running => {}
             }
             if blocked.is_none() {
@@ -884,7 +932,12 @@ async fn await_preds(
                 ));
             }
             if rx.changed().await.is_err() {
-                return PredOutcome::Abandoned;
+                // The writer is gone without a verdict: nobody will ever
+                // vouch for this predecessor, which is what `Lost` means.
+                return PredOutcome::Abandoned {
+                    pred,
+                    status: Status::Lost,
+                };
             }
         }
         // Left before the next predecessor is considered, so one key never
@@ -2522,9 +2575,21 @@ mod tests {
             .expect("the run should have started");
 
         assert_eq!(log.failed(), vec![mine_action_id()]);
+        // Abandoned, not attempted -- and since 2026-09-09 the log says so
+        // itself, naming the predecessor, instead of leaving the step
+        // `Pending` as if the run had never reached it.
+        let craft = log
+            .attempt(craft_action_id())
+            .expect("an abandoned step carries an attempt saying why");
+        assert_eq!(craft.status, Status::Abandoned);
+        assert_eq!(craft.number, 0, "nothing was attempted");
+        assert_eq!(
+            craft.error.as_deref(),
+            Some(format!("abandoned: predecessor {} failed", mine_action_id().0).as_str())
+        );
         assert_eq!(
             log.status(craft_action_id()),
-            Status::Pending,
+            Status::Abandoned,
             "abandoned, not attempted: nothing was dispatched, so the log has \
              nothing to record. `expect_craft().times(0)` above is what says \
              it did not run; the verdict lives on the signal, and \
@@ -2552,7 +2617,13 @@ mod tests {
             .expect("the run should have started");
 
         assert_eq!(log.status(mine_action_id()), Status::Lost);
-        assert_eq!(log.status(craft_action_id()), Status::Pending);
+        assert_eq!(log.status(craft_action_id()), Status::Abandoned);
+        assert_eq!(
+            log.attempt(craft_action_id())
+                .and_then(|a| a.error.as_deref()),
+            Some(format!("abandoned: predecessor {} was lost", mine_action_id().0).as_str()),
+            "a lost predecessor is named as lost, not as failed"
+        );
     }
 
     /// **The deadlock this change could have introduced, asserted against.**
@@ -2765,9 +2836,18 @@ mod tests {
         // point of recording walks at all. The claim this test makes is about
         // the *action*, and that is what it now says.
         assert_eq!(log.failed(), vec![]);
-        assert!(log.attempt(mine_action_id()).is_none());
-        assert!(log.attempt(craft_action_id()).is_none());
-        assert_eq!(log.status(mine_action_id()), Status::Pending);
+        // Since 2026-09-09 the halt writes an attempt for each step it
+        // drops, so the record can say why they never ran; `number == 0`
+        // is what still says nothing was attempted.
+        for id in [mine_action_id(), craft_action_id()] {
+            let a = log
+                .attempt(id)
+                .expect("a halted bot's steps are logged as abandoned");
+            assert_eq!(a.status, Status::Abandoned);
+            assert_eq!(a.number, 0, "nothing was attempted");
+            assert!(a.dispatched_tick.is_none() && a.replied_tick.is_none());
+        }
+        assert_eq!(log.status(mine_action_id()), Status::Abandoned);
 
         // And the walk that stopped the bot left the only record of why.
         let w = log.walk(BotId(0), 0).expect("the failed walk is recorded");
@@ -3088,7 +3168,7 @@ mod tests {
             .expect("the run should have started");
 
         assert_eq!(log.failed(), vec![first_action_id()]);
-        assert_eq!(log.status(second_action_id()), Status::Pending);
+        assert_eq!(log.status(second_action_id()), Status::Abandoned);
         assert_eq!(
             act.mine_starts(),
             vec!["iron-ore".to_string()],
@@ -3125,8 +3205,14 @@ mod tests {
             .expect("the run should have started");
 
         assert_eq!(log.failed(), vec![ActionId(0)]);
-        assert_eq!(log.status(ActionId(1)), Status::Pending);
-        assert_eq!(log.status(ActionId(2)), Status::Pending);
+        assert_eq!(log.status(ActionId(1)), Status::Abandoned);
+        assert_eq!(log.status(ActionId(2)), Status::Abandoned);
+        // Each hop names the hop before it, not the original failure: the
+        // chain is reconstructible from the record, one join per hop.
+        assert_eq!(
+            log.attempt(ActionId(2)).and_then(|a| a.error.as_deref()),
+            Some("abandoned: predecessor 1 was abandoned")
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -3140,11 +3226,28 @@ mod tests {
             .await
             .expect("the run should have started");
 
-        // Bot 0 never reached its action, so nothing is logged for it — but
-        // bot 1 must still be released rather than waiting on a signal that
-        // will never come.
-        assert_eq!(log.status(first_action_id()), Status::Pending);
-        assert_eq!(log.status(second_action_id()), Status::Pending);
+        // Bot 0 never reached its action: it is logged as abandoned by the
+        // halt, not attempted -- and bot 1 must still be released rather
+        // than waiting on a signal that will never come, and is abandoned in
+        // turn, naming bot 0's action.
+        assert_eq!(log.status(first_action_id()), Status::Abandoned);
+        assert_eq!(
+            log.attempt(first_action_id())
+                .and_then(|a| a.error.as_deref()),
+            Some("abandoned: bot 0 halted after its walk at step 0 failed")
+        );
+        assert_eq!(log.status(second_action_id()), Status::Abandoned);
+        assert_eq!(
+            log.attempt(second_action_id())
+                .and_then(|a| a.error.as_deref()),
+            Some(
+                format!(
+                    "abandoned: predecessor {} was abandoned",
+                    first_action_id().0
+                )
+                .as_str()
+            )
+        );
         assert!(act.mine_starts().is_empty());
     }
 
@@ -3192,7 +3295,7 @@ mod tests {
             .await
             .expect("the run should have started");
 
-        assert_eq!(log.status(second_action_id()), Status::Pending);
+        assert_eq!(log.status(second_action_id()), Status::Abandoned);
         assert!(act.mine_starts().is_empty());
     }
 

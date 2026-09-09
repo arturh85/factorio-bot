@@ -125,6 +125,7 @@ mod tests {
                 __run_calls = __run_calls + 1
                 local o = __run_obs[__run_calls] or {}
                 local obs = { failed = o.failed or 0, lost = o.lost or 0,
+                         abandoned = o.abandoned or 0,
                          walks_failed = o.walks_failed or 0,
                          walks_lost = o.walks_lost or 0,
                          pending = o.pending or 0, success = o.success or 0,
@@ -2998,9 +2999,7 @@ mod tests {
     /// Charting is expensive and `not_charted` is the only refusal it treats.
     #[test]
     fn a_refusal_charting_cannot_clear_walks_nobody_anywhere() {
-        let lua = chart_harness(
-            "__want = 5000 __target_code = \"planner::not_hand_minable\"",
-        );
+        let lua = chart_harness("__want = 5000 __target_code = \"planner::not_hand_minable\"");
         drive_chart(&lua, SPEC);
         let g = lua.globals();
         assert_eq!(g.get::<i64>("__rings").unwrap(), 0);

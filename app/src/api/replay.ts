@@ -63,8 +63,13 @@ export type Evidence =
  * never learn the outcome, `Failed` means a verdict arrived and it was bad.
  * Collapsing the two in a view is the exact mistake `replay.rs`'s tests exist
  * to catch on the Rust side -- do not repeat it here.
+ *
+ * `Abandoned` is a third thing again: never dispatched, because a
+ * predecessor did not succeed or the bot's walk halted it. The game never saw
+ * the row, so it has no ticks -- like `Pending` -- but unlike `Pending` the
+ * run did reach it and decided against it, and the row's error names why.
  */
-export type ReplayStatus = 'Pending' | 'Running' | 'Success' | 'Failed' | 'Lost';
+export type ReplayStatus = 'Pending' | 'Running' | 'Success' | 'Failed' | 'Lost' | 'Abandoned';
 
 /** One scheduled step, paired with whatever the run learned about it. */
 export interface ReplayStep {
@@ -184,7 +189,7 @@ function asOneOf<T extends string>(value: unknown, options: readonly T[], path: 
     return value as T;
 }
 
-const STATUSES = ['Pending', 'Running', 'Success', 'Failed', 'Lost'] as const;
+const STATUSES = ['Pending', 'Running', 'Success', 'Failed', 'Lost', 'Abandoned'] as const;
 
 function parseEvidence(value: unknown, path: string): Evidence {
     const obj = asObject(value, path);

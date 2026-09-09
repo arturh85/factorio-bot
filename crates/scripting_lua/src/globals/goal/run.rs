@@ -80,6 +80,7 @@ fn status_name(status: Status) -> &'static str {
         Status::Success => "success",
         Status::Failed => "failed",
         Status::Lost => "lost",
+        Status::Abandoned => "abandoned",
     }
 }
 
@@ -163,6 +164,13 @@ fn build_observation(
     // that has stopped would keep reporting bots at work — and folding it into
     // `failed` would report a verdict nobody ever gave.
     let mut lost = 0u32;
+    // Never dispatched because a predecessor did not succeed, or because the
+    // bot's own walk halted it. Counted apart from both `failed` (the game's
+    // verdicts) and `pending` (never reached at all): until 2026-09-09 these
+    // read as `pending`, which is also what a killed run shows, and a batch
+    // that dropped 48 of 878 actions behind two refused belts reported
+    // nothing about them anywhere. See `Status::Abandoned`.
+    let mut abandoned = 0u32;
     let mut failures: Vec<FailureRecord> = Vec::new();
     // Why the *lowest-id* lost action was lost, for `first_error`.
     //
@@ -185,6 +193,7 @@ fn build_observation(
             Status::Success => success += 1,
             Status::Failed => failed += 1,
             Status::Lost => lost += 1,
+            Status::Abandoned => abandoned += 1,
         }
 
         let attempt = log.attempt(id);
@@ -363,6 +372,7 @@ fn build_observation(
     obs.set("success", success)?;
     obs.set("failed", failed)?;
     obs.set("lost", lost)?;
+    obs.set("abandoned", abandoned)?;
     // Counted separately from `failed` rather than folded into it: `failed` is
     // a count of *actions*, every other field beside it is about actions, and
     // a caller that has been reading it as one must not silently start getting
@@ -587,6 +597,7 @@ struct BatchSnapshot {
     settled: u32,
     failed: u32,
     lost: u32,
+    abandoned: u32,
     walks_dispatched: u32,
     walks_settled: u32,
     bots_in_flight: Vec<u32>,
@@ -703,6 +714,7 @@ impl BatchSnapshot {
             settled: 0,
             failed: 0,
             lost: 0,
+            abandoned: 0,
             walks_dispatched: 0,
             walks_settled: 0,
             bots_in_flight: Vec::new(),
@@ -714,6 +726,12 @@ impl BatchSnapshot {
             snap.total = snap.total.saturating_add(1);
             let status = log.status(action.id);
             if status == Status::Pending {
+                continue;
+            }
+            if status == Status::Abandoned {
+                // Never dispatched and never will be; counted on its own
+                // line so a batch being truncated shows it *while running*.
+                snap.abandoned = snap.abandoned.saturating_add(1);
                 continue;
             }
             snap.dispatched = snap.dispatched.saturating_add(1);
@@ -737,7 +755,8 @@ impl BatchSnapshot {
                     snap.lost = snap.lost.saturating_add(1);
                 }
                 Status::Success => snap.settled = snap.settled.saturating_add(1),
-                Status::Pending => {}
+                // Both skipped above.
+                Status::Pending | Status::Abandoned => {}
             }
         }
         snap.bots_in_flight = in_flight.into_iter().collect();
@@ -886,6 +905,7 @@ async fn beat_batch_progress(
             settled: snap.settled,
             failed: snap.failed,
             lost: snap.lost,
+            abandoned: snap.abandoned,
             walks_dispatched: snap.walks_dispatched,
             walks_settled: snap.walks_settled,
             since_last_dispatch_ms,
@@ -1949,16 +1969,17 @@ mod tests {
     // or waiting on a timer, so the clock only jumps when nothing can make
     // progress.
     #[tokio::test(start_paused = true)]
-    async fn a_run_that_abandons_work_is_done_while_actions_are_still_pending() {
+    async fn a_run_that_abandons_work_is_done_and_says_what_it_abandoned() {
         // The test for the central design decision: `done` is a flag set when
         // the run's task returns, and it CANNOT be derived from the counts.
         //
-        // When a bot's action fails, `executor/run.rs`'s `abandon_rest`
-        // releases the waiters on the watch channel and writes nothing to the
-        // log, so the rest of that bot's slice is never dispatched and stays
-        // `Pending` forever. A finished run therefore legitimately reports
-        // pending work, and `pending == 0 && running == 0` would call it
-        // unfinished for good.
+        // When a bot's action fails, `executor/run.rs` releases the waiters
+        // on the watch channel and the steps that depended on it are never
+        // dispatched. Until 2026-09-09 they stayed `Pending` forever, and a
+        // finished run legitimately reported pending work; now they are
+        // `abandoned`, a count of their own, and `pending` is only what the
+        // run never reached. Either way `pending == 0 && running == 0` is not
+        // what "finished" means -- a killed run has pending work too.
         let (net, sched) = science_plan();
         let total = net.len() as u32;
         let (run, _join) = spawn_bare(
@@ -1979,17 +2000,30 @@ mod tests {
         .await
         .expect("the run finished");
         let (pending, running, success, failed, done) = counts(&obs);
+        let abandoned: u32 = obs.get("abandoned").expect("abandoned");
         assert!(done, "the run's task has returned, so it is done");
         assert_eq!(failed, 1, "one action was refused");
         assert!(
-            pending > 0,
-            "the failing bot's remaining slice was abandoned undispatched, so it must \
-             still count as pending -- this is the case that makes `done` a flag \
-             rather than `pending == 0`"
+            abandoned > 0,
+            "what depended on the refused action was abandoned undispatched, and \
+             the observation must say so on its own line -- not as `pending`, \
+             which is what a killed run shows"
         );
+        // Each abandoned action reads as one, with the cause in its error.
+        let actions: LuaTable = obs.get("actions").expect("actions");
+        let mut seen = 0;
+        for pair in actions.pairs::<u32, LuaTable>() {
+            let (_, t) = pair.expect("action row");
+            if t.get::<String>("status").expect("status") == "abandoned" {
+                seen += 1;
+                let error: String = t.get("error").expect("an abandoned action names its cause");
+                assert!(error.starts_with("abandoned: "), "{error}");
+            }
+        }
+        assert_eq!(seen, abandoned);
         assert!(success > 0, "the other bots carried on");
         assert_eq!(
-            pending + running + success + failed,
+            pending + running + success + failed + abandoned,
             total,
             "the counts must partition the plan's actions"
         );
@@ -2420,8 +2454,9 @@ mod tests {
             "the refused action must be on the document: {statuses:?}"
         );
         assert!(
-            statuses.contains(&"Pending".to_owned()),
-            "the abandoned tail must be on it too, as never-dispatched: {statuses:?}"
+            statuses.contains(&"Abandoned".to_owned()),
+            "the abandoned tail must be on it too, as abandoned -- not as `Pending`, \
+             which is what a run that never reached them would show: {statuses:?}"
         );
         assert!(
             statuses.contains(&"Success".to_owned()),
@@ -2446,16 +2481,24 @@ mod tests {
 
         // The never-dispatched rows: no measurement, but a full plan. This is
         // the collapse the document exists to prevent -- an unobserved step
-        // rendered at the origin looks like a step that ran instantly.
+        // rendered at the origin looks like a step that ran instantly. They
+        // read `Abandoned`, not `Pending`: the run reached them and decided
+        // against them, and each row says why.
         let abandoned: Vec<&Value> = steps
             .iter()
-            .filter(|s| s["status"] == json!("Pending"))
+            .filter(|s| s["status"] == json!("Abandoned"))
             .collect();
         assert!(!abandoned.is_empty());
         for row in abandoned {
             assert_eq!(row["observed_start_tick"], Value::Null, "{row}");
             assert_eq!(row["observed_end_tick"], Value::Null, "{row}");
             assert_eq!(row["attempt_number"], Value::Null, "{row}");
+            assert!(
+                row["error"]
+                    .as_str()
+                    .is_some_and(|e| e.starts_with("abandoned: ")),
+                "an abandoned row names its cause: {row}"
+            );
             assert!(
                 row["planned_end_tick"].as_u64().expect("a planned end") > 0,
                 "a never-run step still knows where the plan put it: {row}"

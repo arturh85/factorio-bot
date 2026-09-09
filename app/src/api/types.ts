@@ -934,6 +934,12 @@ export type FailureKind =
     | 'missing_item'
     | 'unreachable'
     | 'blocked'
+    /**
+     * Never dispatched: a predecessor did not succeed, or the bot's own walk
+     * halted it. The executor's verdict, not the game's. `detail` names the
+     * cause, e.g. `predecessor 535 failed`.
+     */
+    | 'abandoned'
     | 'partial_transfer'
     | 'rejected'
     | 'timeout'
@@ -1186,6 +1192,11 @@ export type EventKind =
            *  kept apart from `failed` for the same reason `action_settled`
            *  keeps them apart. */
           lost: number;
+          /** Actions the run decided not to dispatch because a predecessor
+           *  did not succeed or the bot's walk halted it. Not in `dispatched`
+           *  or `settled`: the game never saw them. This is the count that
+           *  shows a batch being truncated while it is still running. */
+          abandoned: number;
           /** Walks are counted separately because a walk has no action id and
            *  appears in none of the counts above. Without them a batch whose
            *  every bot is walking reports `in_flight: 0` and reads as four

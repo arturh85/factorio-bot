@@ -107,6 +107,28 @@ pub enum Status {
     /// docs: this is a statement about what the run knows, not about the
     /// action.
     Lost,
+    /// Never dispatched, **because something it needed did not succeed**: a
+    /// predecessor failed or was lost, or the bot's own walk failed and took
+    /// the rest of its slice with it. The verdict is about the plan's
+    /// dependency graph, not about the game, which never saw the action.
+    ///
+    /// Distinct from [`Status::Pending`] on purpose. Until 2026-09-09 an
+    /// abandoned action wrote nothing to the log and so read as `Pending` --
+    /// the same word a run that was killed early shows -- and
+    /// `run-1788914717-24351` ended with **48 of 878 actions never
+    /// dispatched, both assemblers among them, and not one line in
+    /// `events.jsonl` saying why**: two belts had been refused and everything
+    /// downstream of them was dropped in silence. The supervisor read the
+    /// batch as satisfied. An abandoned action now carries an attempt whose
+    /// `error` names the predecessor it was waiting on, reaches the record as
+    /// an `action_settled` of its own, and is counted apart from `failed`
+    /// (the game's verdicts) and `pending` (never reached at all).
+    ///
+    /// Distinct from [`Status::Failed`] too: `recover`'s tier-one budget
+    /// counts failed *attempts*, and an abandoned action was never attempted.
+    /// Its [`Attempt::number`] is therefore `0`, and a later run that picks
+    /// it up starts at attempt 1 exactly as if it had been pending.
+    Abandoned,
 }
 
 /// One execution attempt of one action — always the **latest** one.
@@ -809,6 +831,36 @@ impl ExecutionLog {
         a.error = Some(error);
     }
 
+    /// Records that `id` was never dispatched because `why` -- a predecessor
+    /// that did not succeed, or the bot's own halted walk. The writer for
+    /// [`Status::Abandoned`]; see that variant for why it exists.
+    ///
+    /// `tick` is the schedule's planned start, the only tick an action the
+    /// game never saw can carry. Written as both ends of the planned span so
+    /// the attempt reads as finished (`has_finished`), which is what stops a
+    /// stray reply from ever overwriting the verdict. `number` is 0: nothing
+    /// was attempted, and `attempts()` must say so for `recover`'s budget.
+    /// A finished attempt is never overwritten, for the reasons `succeed()`
+    /// gives.
+    pub fn abandon(&mut self, id: ActionId, tick: Ticks, why: String) {
+        if self.has_finished(id) {
+            return;
+        }
+        let a = self.attempts.entry(id).or_insert_with(|| Attempt {
+            status: Status::Abandoned,
+            number: 0,
+            planned_start_tick: tick,
+            planned_end_tick: None,
+            dispatched_tick: None,
+            replied_tick: None,
+            error: None,
+            placed: None,
+        });
+        a.status = Status::Abandoned;
+        a.planned_end_tick = Some(tick);
+        a.error = Some(why);
+    }
+
     /// Records that this run will not learn `id`'s outcome.
     ///
     /// The writer for [`Status::Lost`]. `why` explains **why the outcome is
@@ -1150,6 +1202,33 @@ mod tests {
     fn an_unrecorded_action_is_pending() {
         let log = ExecutionLog::default();
         assert_eq!(log.status(id(1)), Status::Pending);
+    }
+
+    /// An abandoned action is a verdict with no attempt behind it: it
+    /// finishes (so a stray reply cannot overwrite it), counts zero
+    /// attempts (so no retry budget reads it as tried), is not `failed()`
+    /// (that is the game's verdicts), and a later run starting it counts
+    /// that as attempt 1, exactly as for a pending action.
+    #[test]
+    fn an_abandoned_action_is_a_verdict_without_an_attempt() {
+        let mut log = ExecutionLog::default();
+        log.abandon(id(1), 500, "abandoned: predecessor 7 failed".into());
+        assert_eq!(log.status(id(1)), Status::Abandoned);
+        assert_eq!(log.attempts(id(1)), 0);
+        assert_eq!(log.failed(), vec![]);
+        let a = log.attempt(id(1)).expect("recorded");
+        assert_eq!(a.error.as_deref(), Some("abandoned: predecessor 7 failed"));
+        assert_eq!((a.planned_start_tick, a.planned_end_tick), (500, Some(500)));
+        assert!(a.dispatched_tick.is_none() && a.replied_tick.is_none());
+
+        // Finished: a late `fail` or `succeed` does not rewrite the verdict.
+        log.fail(id(1), 600, "late".into());
+        assert_eq!(log.status(id(1)), Status::Abandoned);
+
+        // And a retry starts from scratch.
+        log.start(id(1), 700);
+        assert_eq!(log.status(id(1)), Status::Running);
+        assert_eq!(log.attempts(id(1)), 1);
     }
 
     #[test]

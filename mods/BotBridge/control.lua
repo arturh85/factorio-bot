@@ -4617,7 +4617,13 @@ function rcon_place_entity(player_id, item_name, entity_position, direction, und
 		-- `PlacementVerdict::is_durable_refusal`. Two call sites, one concept:
 		-- any character, not just the acting one, is a transient. A third path
 		-- asking this question must draw it the same way.
-		if not report_character_in_footprint(surface, footprint, bb, pos, player, item_name) then
+		-- Both character arms are asked only of an entity a character can
+		-- block. For a belt the game's `no` was never about a character --
+		-- it builds belts under them -- so blaming the actor here would hide
+		-- the ground's real verdict behind a step-aside that cannot help. See
+		-- `prototype_collides_with_character`.
+		local character_can_block = prototype_collides_with_character(entproto, player.character)
+		if not (character_can_block and report_character_in_footprint(surface, footprint, bb, pos, player, item_name)) then
 			-- The ground's verdict, and what was ON the ground when it was
 			-- given. The bare sentence is what `note_placement_refusal`
 			-- (crates/core/src/factorio/rcon.rs) matches and must stay
@@ -4674,10 +4680,17 @@ function rcon_place_entity(player_id, item_name, entity_position, direction, und
 	-- the expanded one: the expanded box reaches half a tile past what the
 	-- game judged, and an actor standing there with the game saying yes is a
 	-- placement that has always succeeded and must go on succeeding.
+	--
+	-- **And only for an entity a character can block.** This block is what
+	-- refused the belts of `run-1788914717-24351`: `can_place_entity` had
+	-- said yes, the actor stood on the tile, and the scan below found a
+	-- character in a box the game does not collide characters with. See
+	-- `prototype_collides_with_character`.
 	do
 		local pos = {x = entity_position[1], y = entity_position[2]}
 		local footprint = collision_box_facing(entproto.collision_box, direction)
-		if character_in_footprint(surface, footprint, pos) then
+		if prototype_collides_with_character(entproto, player.character)
+			and character_in_footprint(surface, footprint, pos) then
 			local bb = add_to_bounding_box(expand_rect_floor_ceil(footprint), pos)
 			report_character_in_footprint(surface, footprint, bb, pos, player, item_name)
 			stamp_tick()
@@ -4734,15 +4747,81 @@ function rcon_place_entity(player_id, item_name, entity_position, direction, und
 	stamp_tick()
 end
 
+-- Whether the game would refuse to build `entproto` where a character stands.
+--
+-- **A character is only a blocker for an entity that collides with it, and
+-- most of what a bot builds in bulk does not.** A transport belt's collision
+-- mask is `{water_tile, floor, transport_belt, object, meltable}` and a
+-- character's is `{is_object, player, train}` (both read off this install's
+-- prototype dump); the sets are disjoint, so the game builds a belt under a
+-- character's feet and leaves the character standing on it -- measured live
+-- on 2026-09-09: `can_place_entity` said yes with a character dead centre of
+-- the tile, and `create_entity` built it without moving anyone. Every arm in
+-- this file that blames a character for a placement -- the actor sentinel,
+-- the bystander transient, the post-check before `create_entity`, the
+-- push-out after it -- was written for furnaces and drills and asked its
+-- question of every prototype alike. So `run-1788914717-24351` placed 154
+-- belts, then refused the 155th because the acting bot stood on its tile:
+-- the game had said YES, the post-check below said no anyway, the RCON layer
+-- walked the actor round eight compass points looking for a two-tile disc
+-- with nothing in it (there is none inside a belt run) and failed the action
+-- as `player blocks placement in all directions`, abandoning the 48 steps
+-- behind it, both assemblers included.
+--
+-- Answered from the two masks' layer names, never from a list of prototype
+-- names, so a modded belt or a modded character is judged by what it
+-- collides with. A prototype whose mask cannot be read is assumed to collide
+-- -- the answer every caller gave before this existed -- because "cannot
+-- tell" must not silently turn a real blocker into a non-blocker.
+function prototype_collides_with_character(entproto, character)
+	local mask = entproto ~= nil and entproto.collision_mask or nil
+	local layers = mask ~= nil and mask.layers or nil
+	if type(layers) ~= "table" then return true end
+	local clayers = nil
+	if character ~= nil and character.prototype ~= nil and character.prototype.collision_mask ~= nil then
+		clayers = character.prototype.collision_mask.layers
+	end
+	if type(clayers) ~= "table" then
+		-- No character prototype to read (a stub, or a character whose
+		-- prototype is unreadable): the one layer every character has.
+		clayers = { player = true }
+	end
+	for layer, on in pairs(clayers) do
+		if on and layers[layer] then return true end
+	end
+	return false
+end
+
 -- The two character arms of a placement refusal, in the order
 -- `rcon_place_entity` documents: the acting player in the expanded box gets
 -- the `§player_blocks_placement§` sentinel, any other character in the raw
 -- box gets the transient wording and, when idle, a walk out. Prints the
 -- reply and answers true when a character was the cause; false when the
 -- caller has to report the ground.
+--
+-- The actor's sentinel carries where the actor could stand instead, when the
+-- game offers a spot: `§player_blocks_placement§ landing=<x>,<y>`, from the
+-- same `placement_step_aside_landing` ladder a bystander gets -- nearest
+-- exit first, widening to 32 tiles. The RCON layer (`place_entity_timed`,
+-- crates/core/src/factorio/rcon.rs) walks the actor there and re-issues;
+-- before this it had only its own compass search, which demands an empty
+-- two-tile disc five tiles away and so finds nothing inside any block. A
+-- bare sentinel means the ladder found nothing either.
 function report_character_in_footprint(surface, footprint, bb, pos, player, item_name)
 	if position_in_rect(player.position, bb) then
-		rcon.print("§player_blocks_placement§")
+		local landing = nil
+		-- The presence tests are for the stub games the Rust-side tests
+		-- load this file against; a real `LuaSurface` always has the
+		-- function and a real character always has a position.
+		if player.character ~= nil and player.character.position ~= nil
+			and type(surface.find_non_colliding_position) == "function" then
+			landing = placement_step_aside_landing(surface, add_to_bounding_box(footprint, pos), player.character)
+		end
+		if landing ~= nil then
+			rcon.print("§player_blocks_placement§ landing=" .. tostring(landing.x) .. "," .. tostring(landing.y))
+		else
+			rcon.print("§player_blocks_placement§")
+		end
 		return true
 	elseif character_in_footprint(surface, footprint, pos) then
 		-- Ask whoever it is to move, so the next attempt has a chance of
@@ -4794,7 +4873,12 @@ function push_characters_out_of(surface, entity)
 	local bb = entity.bounding_box
 	if bb == nil then return pushed end
 	for _, character in pairs(surface.find_entities_filtered{ area = bb, type = "character" }) do
-		if character.valid ~= false and character ~= entity then
+		-- A character standing on a belt just built under it is exactly
+		-- where the game leaves a player in the same spot: overlapped by
+		-- nothing that collides with it, and not to be moved. See
+		-- `prototype_collides_with_character`.
+		if character.valid ~= false and character ~= entity
+			and prototype_collides_with_character(entity.prototype, character) then
 			local from = { x = character.position.x, y = character.position.y }
 			local landing = surface.find_non_colliding_position(
 				"character", from, PLACEMENT_PUSH_OUT_RADIUS, PLACEMENT_PUSH_OUT_PRECISION)
@@ -5229,7 +5313,12 @@ function rcon_can_place_entities(sites)
 				-- direction, exactly as `placement_check_args` asked.
 				local scan = scan_footprint(surface,
 					collision_box_facing(entproto.collision_box, site.direction), pos)
+				-- A character counts as the transient only for an entity it
+				-- can block; a bot on a belt tile the game refused for a
+				-- tree is not why the game refused. See
+				-- `prototype_collides_with_character`.
 				rec.character = scan.character
+					and prototype_collides_with_character(entproto, player.character)
 				-- Omitted rather than sent empty: `helpers.table_to_json`
 				-- renders an empty Lua table as `{}`, which is an object, and
 				-- the Rust side reads this field as a list.

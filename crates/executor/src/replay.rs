@@ -295,7 +295,11 @@ impl Replay {
                         observed_start_tick: attempt.and_then(|a| a.dispatched_tick),
                         observed_end_tick: attempt.and_then(|a| a.replied_tick),
                         status: attempt.map_or(Status::Pending, |a| a.status),
-                        attempt_number: attempt.map(|a| a.number),
+                        // An abandoned attempt has `number == 0` -- nothing was
+                        // attempted -- and reads here exactly as a never-
+                        // dispatched row does: absent. The status carries the
+                        // difference.
+                        attempt_number: attempt.map(|a| a.number).filter(|n| *n > 0),
                         evidence: Evidence::Measured,
                         error: attempt.and_then(|a| a.error.clone()),
                     }

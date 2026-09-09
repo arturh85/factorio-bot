@@ -1401,15 +1401,23 @@ end
 -- Exactly `goal.start(plan):wait()`.
 -- @tparam PlanValue plan a plan returned by `goal.plan`
 -- @treturn table an observation: `{ done, pending, running, success, failed,
---   lost, walks_failed, walks_lost, first_error, actions, walks, failures,
---   recover }` -- see `RunValue`'s own `:wait()` for the shape.
+--   lost, abandoned, walks_failed, walks_lost, first_error, actions, walks,
+--   failures, recover }` -- see `RunValue`'s own `:wait()` for the shape.
 --
 --   `walks_failed` counts walks the game refused and `walks_lost` counts walks
 --   that never answered. A walk has no action id, so neither is in any of the
 --   counts above; when one does not succeed the rest of that bot's slice is
 --   abandoned, so a run whose walking went wrong reports `failed = 0` with
---   everything `pending`. `first_error` falls back to the first such walk's
+--   the rest `abandoned`. `first_error` falls back to the first such walk's
 --   error when no action failed, so such a run is never silent.
+--
+--   `abandoned` counts actions never dispatched because something they
+--   needed did not succeed -- a failed or lost predecessor, or the bot's own
+--   halted walk. Each carries `status == "abandoned"` and an `error` naming
+--   the cause (`abandoned: predecessor 535 failed`). It is neither `failed`
+--   (the game gave no verdict) nor `pending` (the run did reach it, and
+--   decided not to run it). A batch with `failed > 0` and `abandoned > 0` is
+--   a truncated batch, whatever `done` says.
 --
 --   `lost` counts what was dispatched and never accounted for: the game
 --   answered with no readable outcome, or the run ended still waiting. Those

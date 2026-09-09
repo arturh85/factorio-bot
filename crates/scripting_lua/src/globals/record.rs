@@ -19,10 +19,10 @@ use factorio_bot_core::mlua::prelude::*;
 use factorio_bot_core::paris::{info, warn};
 use factorio_bot_core::parking_lot::Mutex;
 use factorio_bot_core::process::instance_setup::{installed_factorio_version, read_map_gen_seed};
+use factorio_bot_core::record::exposure::HoldExposure;
 use factorio_bot_core::record::map::{
     Divergence, EntitySnapshot, MapKind, MapRecord, Placement, bounds_around, divergence_between,
 };
-use factorio_bot_core::record::exposure::HoldExposure;
 use factorio_bot_core::record::run_mode;
 use factorio_bot_core::record::savepoint;
 use factorio_bot_core::record::video::Resolution;
@@ -345,6 +345,13 @@ fn classify_failure(error: &str) -> ActionFailure {
     }
     let kind = if error.contains("no action result received in time") {
         FailureKind::Timeout
+    } else if error.starts_with(ABANDONED_WORDING) {
+        // The executor's own verdict, never the game's: `ExecutionLog::abandon`
+        // (`crates/executor`) writes `abandoned: predecessor <id> failed`
+        // or `abandoned: bot <n> halted after its walk at step <k> failed`,
+        // and the clause after the prefix is the whole diagnosis, so it is
+        // the detail.
+        FailureKind::Abandoned
     } else if error.contains(NO_CHARACTER_WORDING) {
         // Ahead of `Rejected`, which its outer wrapper (`game rejected the
         // command: Unexpected Response: Error: player 2 has no character:
@@ -391,10 +398,20 @@ fn classify_failure(error: &str) -> ActionFailure {
     let detail = match kind {
         FailureKind::MissingItem => error.split('\'').nth(1).map(str::to_string),
         FailureKind::NoCharacter => no_character_detail(error),
+        FailureKind::Abandoned => error
+            .strip_prefix(ABANDONED_WORDING)
+            .map(str::trim)
+            .filter(|rest| !rest.is_empty())
+            .map(str::to_string),
         _ => None,
     };
     ActionFailure { kind, detail }
 }
+
+/// The prefix `ExecutionLog::abandon` (`crates/executor/src/log.rs`) puts on
+/// every abandonment verdict. Matched as a prefix rather than a substring so
+/// a game reply that happens to contain the word cannot be misfiled.
+const ABANDONED_WORDING: &str = "abandoned:";
 
 /// The substring every character-less refusal from the mod carries, on both
 /// of its roads: the reply-body `Error: player <n> has no character: <why>`
@@ -1561,9 +1578,9 @@ end
                     foreign_console_commands: hold.get("foreign_console_commands")?,
                     console_command_used: hold.get("console_command_used")?,
                 };
-                recorder.record_hold(hold).map_err(|e| {
-                    record_error(format!("could not write exposure.json: {e}"))
-                })?;
+                recorder
+                    .record_hold(hold)
+                    .map_err(|e| record_error(format!("could not write exposure.json: {e}")))?;
                 Ok(())
             })?,
         )?;
@@ -1859,7 +1876,14 @@ end
                     // nothing: an action the run never finished has no outcome
                     // to report, and inventing one is the failure mode this
                     // gate has to avoid now that it no longer waits for a tick.
-                    if matches!(status.as_str(), "success" | "failed" | "lost") {
+                    //
+                    // `abandoned` is a verdict too -- the plan's, not the
+                    // game's: a predecessor did not succeed, so this action
+                    // was never dispatched. It gets a settle line naming that
+                    // predecessor, because 48 such actions once left a run's
+                    // record with nothing at all to say about why both its
+                    // assemblers were never placed (`run-1788914717-24351`).
+                    if matches!(status.as_str(), "success" | "failed" | "lost" | "abandoned") {
                         // `None` only on a genuine success: a settle this
                         // codebase does not spell `"success"` is a failure of
                         // some kind, even one the classifier cannot name yet,
@@ -1962,11 +1986,14 @@ end
 --
 -- A failed walk also carries `abandoned` when it **halted its bot** -- the
 -- count of that bot's remaining steps that were dropped without ever being
--- dispatched. That is the one number the record could not previously express:
--- an abandoned step produces no attempt, so it reads as `pending`, which is
+-- dispatched. That was the one number the record could not previously express:
+-- an abandoned step used to produce no attempt and read as `pending`, which is
 -- indistinguishable from a run somebody killed. `run-1788833726-34821` ended
 -- `pending=2041` of 2,295 across four such halts, and the largest of them was
--- a walk that stalled on a tree, not a bot that died.
+-- a walk that stalled on a tree, not a bot that died. Since 2026-09-09 each
+-- abandoned step also settles on its own as `status = "abandoned"` through
+-- `record.actions`, naming the cause; the count here is kept because it is
+-- the walk's own reading of the same event.
 --
 -- Call it once per loop iteration, alongside `record.actions`.
 -- @tparam table walks `observation.walks`
@@ -3373,6 +3400,26 @@ mod tests {
                 kind: FailureKind::Timeout,
                 detail: None,
             })
+        );
+    }
+
+    /// The executor's own verdict for a step it never dispatched, in the
+    /// wording `ExecutionLog::abandon` writes. Classified by prefix so a
+    /// game reply containing the word cannot land here, and the clause after
+    /// the prefix -- the whole diagnosis -- is the detail.
+    #[test]
+    fn an_abandoned_action_is_classified_with_its_cause_as_the_detail() {
+        assert_eq!(
+            recorded_failure("abandoned", r#""abandoned: predecessor 535 failed""#),
+            Some(ActionFailure {
+                kind: FailureKind::Abandoned,
+                detail: Some("predecessor 535 failed".into()),
+            })
+        );
+        assert_eq!(
+            classify_failure("game rejected the command: abandoned: nonsense").kind,
+            FailureKind::Rejected,
+            "only the executor's prefix form is an abandonment"
         );
     }
 

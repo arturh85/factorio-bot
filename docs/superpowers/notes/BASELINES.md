@@ -142,6 +142,18 @@ reads standing entities.** `--resume-from <run>[:<milestone>]` remains the
 check of record for what no offline plan carries -- chest contents, the
 executor's own behaviour, the mod's refusals.
 
+### Re-measured 2026-09-09 on `7665ffde` plus the belt tap, unchanged to the tick
+
+The seven `map.json` rows above were taken before and after
+`connect::tap_standing_run` landed (a boxed-in source is tapped with a
+splitter spliced into the run it already has -- see
+`2026-09-09-a-boxed-in-source-is-tapped.md`), same binary, and **none moved**:
+the tap is a fallback that only runs where the plain search refused. The
+number that did move is replan-shaped and belongs beside them: the replan of
+`run-1788946451-86723` at tick 64,053 went from **refuses** to **341 /
+37,185**, pinned by `crates/planner/tests/replan_taps_the_run.rs` on the
+checked-in fixture.
+
 ## Goals that only exist on a categories world
 
 `have:sulfur:10`, `have:battery:1`, `have:plastic-bar:10`,

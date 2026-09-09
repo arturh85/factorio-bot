@@ -633,7 +633,7 @@ fn feed(
     let fuel: ItemId = FUEL.into();
     connect_steps_reserving(ctx, buffer, machine, &fuel, ARM, reserved).map_err(|refusal| {
         let why = match &refusal {
-            ConnectRefusal::NoRoute { blocked } => {
+            ConnectRefusal::NoRoute { blocked } | ConnectRefusal::TapRefused { blocked, .. } => {
                 let kept: Vec<String> = blocked
                     .iter()
                     .filter(|tile| reserved.iter().any(|r| Pos::from(r) == Pos::from(*tile)))

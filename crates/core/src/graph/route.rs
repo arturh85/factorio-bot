@@ -274,6 +274,71 @@ pub fn route_belt_with_tunnels(
     to: (usize, usize),
     max_underground_distance: Option<u8>,
 ) -> Result<Route, RouteError> {
+    route_with(
+        blocked,
+        tunnels,
+        origin,
+        from,
+        to,
+        max_underground_distance,
+        None,
+    )
+}
+
+/// [`route_belt_with_tunnels`], with the first tile's facing FIXED.
+///
+/// The route's first tile is `from`, and it faces `launch`: the only move
+/// offered out of `from` is the step (or the jump) in that direction, so a
+/// turn on the first tile is never searched, never repaired round, and never
+/// returned. Everything after the first tile is the ordinary search.
+///
+/// # Who needs this
+///
+/// A caller whose `from` is the OUTPUT of something that emits in a fixed
+/// direction -- a splitter's second output, in `method::connect`'s belt tap.
+/// A splitter pushes items straight ahead onto whatever stands on its output
+/// tile; a belt there facing sideways is side-loaded, which takes one lane
+/// and is the same "places perfectly and moves nothing" shape the underground
+/// exit's straight-tile rule exists for (see [`route_belt`]'s doc). The
+/// plain search seeds all four facings at `from` at cost zero and takes
+/// whichever turn is cheapest, so it cannot promise the first tile continues
+/// the emitter's direction; this one can, by construction rather than by
+/// checking afterwards and refusing a route that was otherwise fine.
+///
+/// `from == to` is answered with the one tile facing `launch`.
+pub fn route_belt_launching(
+    blocked: &[bool],
+    tunnels: &[u8],
+    origin: (f64, f64),
+    from: (usize, usize),
+    to: (usize, usize),
+    max_underground_distance: Option<u8>,
+    launch: Direction,
+) -> Result<Route, RouteError> {
+    route_with(
+        blocked,
+        tunnels,
+        origin,
+        from,
+        to,
+        max_underground_distance,
+        Some(launch),
+    )
+}
+
+/// The one search behind [`route_belt_with_tunnels`] and
+/// [`route_belt_launching`]: `launch` is `None` for the free start every
+/// route had before the launching form existed, and the fixed first facing
+/// otherwise.
+fn route_with(
+    blocked: &[bool],
+    tunnels: &[u8],
+    origin: (f64, f64),
+    from: (usize, usize),
+    to: (usize, usize),
+    max_underground_distance: Option<u8>,
+    launch: Option<Direction>,
+) -> Result<Route, RouteError> {
     debug_assert_eq!(tunnels.len(), GRID * GRID, "one tunnel byte per cell");
     // Empty on the first round, so a route that never meets itself -- every
     // route this function returned before repairs existed -- is the first
@@ -289,6 +354,7 @@ pub fn route_belt_with_tunnels(
             to,
             max_underground_distance,
             &forbidden,
+            launch,
         );
         reached = frontier;
         let Some(route) = found else {
@@ -392,6 +458,7 @@ fn doubling_moves(route: &Route, origin: (f64, f64), hits: &[(usize, usize)]) ->
 /// One A* pass over `blocked`: the cheapest route in the state space, which
 /// may meet itself -- [`route_belt_with_tunnels`] checks -- or `None`, and
 /// beside it every cell the search visited, for the refusal's honest naming.
+#[allow(clippy::too_many_arguments)]
 fn search_once(
     blocked: &[bool],
     tunnels: &[u8],
@@ -400,6 +467,7 @@ fn search_once(
     to: (usize, usize),
     max_underground_distance: Option<u8>,
     forbidden: &[Move],
+    launch: Option<Direction>,
 ) -> (Option<Route>, Vec<bool>) {
     let max_underground = max_underground_distance;
     let mut best: Vec<u32> = vec![u32::MAX; GRID * GRID * 8];
@@ -409,7 +477,13 @@ fn search_once(
     // if it never reaches `to`.
     let mut reached: Vec<bool> = vec![false; GRID * GRID];
 
+    // A launched route arrives at `from` already facing its way, so only
+    // that facing is seeded; the free start seeds all four at cost zero, as
+    // it always has.
     for (dir, _) in DIRECTIONS {
+        if launch.is_some_and(|launch| launch != dir) {
+            continue;
+        }
         let slot = state_index(from, dir, false);
         best[slot] = 0;
         heap.push(Node {
@@ -435,6 +509,14 @@ fn search_once(
             // A move a repair round forbade: neither the step nor the jump
             // out of this cell in this direction is offered.
             if forbidden.iter().any(|(c, d)| *c == node.cell && *d == dir) {
+                continue;
+            }
+            // A launched route leaves `from` in its launch direction and no
+            // other: the first tile's facing is the emitter's, by
+            // construction. (A route that wanders back onto `from` is a
+            // self-crossing, repaired above like any other; the rule holding
+            // there too costs nothing.)
+            if node.cell == from && launch.is_some_and(|launch| launch != dir) {
                 continue;
             }
             // The normal move and the underground move are independent

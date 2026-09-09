@@ -58,6 +58,8 @@ mod replan_haul;
 mod replan_on_standing_world;
 #[path = "replan_sealed_supply.rs"]
 mod replan_sealed_supply;
+#[path = "replan_taps_the_run.rs"]
+mod replan_taps_the_run;
 #[path = "planning_work_ceilings.rs"]
 mod planning_work_ceilings;
 #[path = "product_index_live_capture.rs"]

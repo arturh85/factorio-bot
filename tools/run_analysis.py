@@ -888,7 +888,17 @@ def join_actions(events: list[dict]) -> tuple[list[dict], dict[str, int]]:
     epoch = 0
     pending: dict[tuple[int, int], dict] = {}
     joined: list[dict] = []
-    stats = {"orphan_settles": 0, "never_settled": 0, "derived_duration": 0, "null_duration": 0}
+    # `abandoned_settles` is kept apart from `orphan_settles` on purpose. An
+    # abandoned step settles having never been dispatched -- that is what the
+    # status MEANS (`attempt` 0, "predecessor N failed" / "bot N halted") -- so
+    # it is a correct record, not a broken join. Counting the two together
+    # reported `48 settle(s) with no dispatch` for `run-1788920460-08860`, whose
+    # 48 abandoned steps were the whole point of the run's record: before
+    # `Status::Abandoned` existed those steps wrote NOTHING and the plan simply
+    # appeared to stop. Flagging them as an anomaly would teach the next reader
+    # to discount exactly the signal that says a batch truncated.
+    stats = {"orphan_settles": 0, "abandoned_settles": 0,
+             "never_settled": 0, "derived_duration": 0, "null_duration": 0}
     for e in events:
         kind = e.get("kind")
         if kind == "plan_created":
@@ -898,7 +908,10 @@ def join_actions(events: list[dict]) -> tuple[list[dict], dict[str, int]]:
         elif kind == "action_settled":
             disp = pending.pop((epoch, e.get("id")), None)
             if disp is None:
-                stats["orphan_settles"] += 1
+                if e.get("status") == "abandoned":
+                    stats["abandoned_settles"] += 1
+                else:
+                    stats["orphan_settles"] += 1
                 joined.append(
                     {
                         "tick": e["tick"],
@@ -4990,6 +5003,13 @@ def report(a: dict, out=sys.stdout, top: int = 12) -> None:
           f"{j['never_settled']} dispatch(es) that never settled, "
           f"{j['null_duration']} settle(s) with no recorded duration "
           f"({j['derived_duration']} recovered from tick difference)")
+    if j.get("abandoned_settles"):
+        p(f"  ABANDONED: {j['abandoned_settles']} step(s) were never dispatched "
+          f"because a predecessor failed or their bot halted -- THE BATCH "
+          f"TRUNCATED. This is not a join fault: an abandoned step settles "
+          f"without a dispatch by design. Whatever the plan meant to do after "
+          f"them did not happen, so read any goal reported satisfied with "
+          f"suspicion.")
 
     for row in a.get("savepoints") or []:
         if row["error"]:

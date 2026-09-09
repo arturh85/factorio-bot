@@ -14360,7 +14360,9 @@ mod tests {
         // is that nothing handed the bill on -- had `Chop` yielded it,
         // `Stockpile` sits between `Chop` and `Mine` and would have claimed it.
         assert_ne!(
-            registry.find(&small, &state, SUBGOAL_SITE).map(Method::name),
+            registry
+                .find(&small, &state, SUBGOAL_SITE)
+                .map(Method::name),
             Some("stockpile"),
             "control: a bill inside the roster's arms is not dealt out"
         );

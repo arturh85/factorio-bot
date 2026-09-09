@@ -3319,6 +3319,22 @@ impl FactorioEntity {
             ..Default::default()
         }
     }
+    /// A 3x3 crafting machine. Named `assembling-machine-1` -- the tier this
+    /// project's t=0 plans reach first -- rather than `EntityName`, which has
+    /// no assembling-machine variant at all: every other entry in that enum
+    /// is either a raw resource or something a stage-1 plan hand-places, and
+    /// an assembler was never one of them until this constructor needed a
+    /// name.
+    pub fn new_assembling_machine(position: &Position, direction: Direction) -> FactorioEntity {
+        FactorioEntity {
+            name: "assembling-machine-1".to_string(),
+            entity_type: EntityType::AssemblingMachine.to_string(),
+            position: position.clone(),
+            bounding_box: add_to_rect_turned(&Rect::from_wh(3., 3.), position, direction),
+            direction: direction.to_u8().unwrap(),
+            ..Default::default()
+        }
+    }
     pub fn new_resource(position: &Position, direction: Direction, name: &str) -> FactorioEntity {
         FactorioEntity {
             name: name.into(),

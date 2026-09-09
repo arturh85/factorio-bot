@@ -1,6 +1,7 @@
 use crate::aabb_quadtree::{ItemId, QuadTree};
 use crate::factorio::util::{add_to_rect, format_dotgraph};
 use crate::graph::entity_graph::{EntityGraph, EntityNode, QuadTreeRect};
+use crate::graph::flow_export::{FlowExport, FlowExportEdge, FlowExportNode, FlowExportRate};
 use crate::num_traits::FromPrimitive;
 use crate::types::{
     Direction, EntityName, EntityType, FactorioEntity, FactorioEntityPrototype, FactorioRecipe,
@@ -14,7 +15,7 @@ use parking_lot::{RwLock, RwLockReadGuard};
 use petgraph::dot::{Config, Dot};
 use petgraph::graph::NodeIndex;
 use petgraph::stable_graph::StableGraph;
-use petgraph::visit::{Bfs, Control, DfsEvent, EdgeRef, depth_first_search};
+use petgraph::visit::{Bfs, Control, DfsEvent, EdgeRef, IntoEdgeReferences, depth_first_search};
 use std::collections::{BTreeMap, HashMap};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -2036,6 +2037,76 @@ impl FlowGraph {
         let condensed = self.condense();
         format_dotgraph(Dot::with_config(&condensed, &[Config::GraphContentOnly]).to_string())
     }
+}
+
+impl FlowGraph {
+    /// A point-in-time snapshot of this graph, in the wire format
+    /// `flow.jsonl` and `/api/v1/runs/{id}/flow`/`/api/v1/game/flow`
+    /// publish.
+    ///
+    /// `tick` is stamped by the caller rather than read here: this method
+    /// has no RCON connection of its own, and the two existing callers (the
+    /// recorder's keyframe writers, `crates/server`'s live `/game/flow`
+    /// handler) each already have a tick from their own source (the
+    /// recorder's `not_before`, the live instance's `rcon.last_tick()`) and
+    /// must not disagree with it by asking a third place.
+    ///
+    /// Calls [`Self::inner_graph`], which calls [`Self::ensure_current`], so
+    /// the export always reflects the entity graph's current generation --
+    /// the same freshness guarantee every other public reader on this type
+    /// has.
+    ///
+    /// Rates are read in the order `inner_graph()` yields them -- name-sorted
+    /// since `152a3ba0` -- and never re-sorted here. See the Global
+    /// Constraints in the Run Anatomy Phase 3 plan for why that matters.
+    pub fn export(&self, tick: u64) -> FlowExport {
+        let graph = self.inner_graph();
+        let mut nodes = Vec::with_capacity(graph.node_count());
+        for index in graph.node_indices() {
+            let node = graph
+                .node_weight(index)
+                .expect("node_indices only yields indices with a weight");
+            let recipe = node
+                .entity_id
+                .and_then(|id| self.entity_graph.entity_by_id(id))
+                .and_then(|entity| entity.recipe);
+            nodes.push(FlowExportNode {
+                id: index.index() as u32,
+                position: node.position.clone(),
+                name: node.entity_name.clone(),
+                kind: node.entity_type.to_string(),
+                recipe,
+                miner_ore: node.miner_ore.clone(),
+            });
+        }
+        let mut edges = Vec::with_capacity(graph.edge_count());
+        for edge in graph.edge_references() {
+            let lanes = match edge.weight() {
+                FlowEdge::Single(rates) => vec![export_rates(rates)],
+                FlowEdge::Double(left, right) => {
+                    vec![export_rates(left), export_rates(right)]
+                }
+            };
+            edges.push(FlowExportEdge {
+                from: edge.source().index() as u32,
+                to: edge.target().index() as u32,
+                lanes,
+            });
+        }
+        FlowExport { tick, nodes, edges }
+    }
+}
+
+/// One [`FlowRates`] vector, converted to the wire format's named-field
+/// entries in the same order.
+fn export_rates(rates: &FlowRates) -> Vec<FlowExportRate> {
+    rates
+        .iter()
+        .map(|(item, per_second)| FlowExportRate {
+            item: item.clone(),
+            per_second: *per_second,
+        })
+        .collect()
 }
 
 #[derive(Clone)]
@@ -5053,5 +5124,115 @@ mod tests {
                 listed.join(" ")
             );
         }
+    }
+
+    #[cfg(test)]
+    fn export_lanes_for_test(edge: &FlowEdge) -> Vec<Vec<FlowExportRate>> {
+        match edge {
+            FlowEdge::Single(v) => vec![super::export_rates(v)],
+            FlowEdge::Double(l, r) => vec![super::export_rates(l), super::export_rates(r)],
+        }
+    }
+
+    #[test]
+    fn export_carries_every_node_and_edge_with_a_stable_kind_and_position() {
+        let entity_graph = drill_and_two_belts();
+        let flow_graph = FlowGraph::new(entity_graph);
+        let export = flow_graph.export(12345);
+
+        assert_eq!(export.tick, 12345);
+        assert_eq!(export.nodes.len(), 3, "the drill and two belts");
+        let drill = export
+            .nodes
+            .iter()
+            .find(|n| n.kind == "mining-drill")
+            .expect("the drill is a node");
+        assert_eq!(drill.position, Position::new(0.5, -1.5));
+        assert_eq!(drill.miner_ore.as_deref(), Some("iron-ore"));
+        assert_eq!(drill.recipe, None, "a drill has no recipe, a furnace does");
+
+        assert_eq!(export.edges.len(), 2, "drill->belt, belt->belt");
+        for edge in &export.edges {
+            assert!(
+                export.nodes.iter().any(|n| n.id == edge.from),
+                "every edge names a node id that exists in this same export"
+            );
+            assert!(export.nodes.iter().any(|n| n.id == edge.to));
+        }
+    }
+
+    /// A standalone assembler with no producer feeding it is never a flow
+    /// node at all -- `FlowGraph::update` only walks the entity graph from an
+    /// `OffshorePump` or an ore-fed `MiningDrill` root (see the DFS in
+    /// `update`), so an entity nothing reaches is never turned into a
+    /// [`FlowNode`] and therefore never appears in [`FlowGraphInner`], no
+    /// matter what `export` does with what it is handed. This fixture reuses
+    /// the drill -> belt -> inserter -> assembler chain
+    /// `the_bill_a_machine_is_charged_comes_off_the_machine` already proves
+    /// reaches the assembler, so the recipe lookup this test targets is
+    /// actually exercised on a node that exists.
+    #[test]
+    fn export_reads_a_machines_recipe_off_the_entity_graph_by_position() {
+        let assembler_position = Position::new(0.5, 3.5);
+        let entity_graph = Arc::new(
+            entity_graph_from(vec![
+                FactorioEntity::new_resource(
+                    &Position::new(0.5, -1.5),
+                    Direction::South,
+                    &EntityName::IronOre.to_string(),
+                ),
+                FactorioEntity::new_electric_mining_drill(
+                    &Position::new(0.5, -1.5),
+                    Direction::South,
+                ),
+                FactorioEntity::new_transport_belt(&Position::new(0.5, 0.5), Direction::South),
+                FactorioEntity::new_inserter(&Position::new(0.5, 1.5), Direction::North),
+                FactorioEntity::new_assembling_machine(&assembler_position, Direction::South),
+            ])
+            .unwrap(),
+        );
+        assert!(
+            entity_graph.set_recipe(&assembler_position, "electronic-circuit"),
+            "the assembler must be at the position this test sets the recipe on"
+        );
+        let flow_graph = FlowGraph::new(entity_graph);
+        let export = flow_graph.export(0);
+
+        let machine = export
+            .nodes
+            .iter()
+            .find(|n| n.kind == "assembling-machine")
+            .expect("the assembler is a node, reached by the walk through the drill and belt");
+        assert_eq!(machine.recipe.as_deref(), Some("electronic-circuit"));
+    }
+
+    #[test]
+    fn export_preserves_the_name_sorted_rate_order_the_graph_already_yields() {
+        let entity_graph = drill_and_two_belts();
+        let flow_graph = FlowGraph::new(entity_graph);
+        let export = flow_graph.export(0);
+
+        for edge in &export.edges {
+            for lane in &edge.lanes {
+                let names: Vec<&str> = lane.iter().map(|r| r.item.as_str()).collect();
+                let mut sorted = names.clone();
+                sorted.sort_unstable();
+                assert_eq!(
+                    names, sorted,
+                    "export must not re-sort what inner_graph() already yields name-sorted"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_double_edge_exports_as_two_lanes_a_single_edge_as_one() {
+        let single = FlowEdge::Single(vec![("iron-ore".to_string(), 0.5)]);
+        let double = FlowEdge::Double(
+            vec![("iron-ore".to_string(), 0.3)],
+            vec![("copper-ore".to_string(), 0.2)],
+        );
+        assert_eq!(export_lanes_for_test(&single).len(), 1);
+        assert_eq!(export_lanes_for_test(&double).len(), 2);
     }
 }

@@ -5295,7 +5295,7 @@
             },
             "description": ""
           },
-          "503": {
+          "400": {
             "content": {
               "application/json": {
                 "schema": {

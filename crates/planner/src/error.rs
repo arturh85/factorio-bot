@@ -1408,6 +1408,45 @@ pub enum PlannerError {
         why: String,
     },
 
+    /// An assembly cell eats a **smelted** ingredient by belt, and no standing
+    /// stage-1 cell delivers enough of it.
+    ///
+    /// **This is the owner's "no chests" made a refusal.** A cell used to be
+    /// charged with `CELL_CHARGE_TICKS` of every ingredient by hand and
+    /// stopped dead when the charge ran out -- 15 packs, 9:48 into every run.
+    /// Since 2026-09-09 a smelted ingredient (one `produce::cell_spec` can
+    /// make from ore) has no chest in the cell at all: it arrives on a belt
+    /// out of a standing stage-1 cell's plate chest, and a cell asked for
+    /// with no such source is refused by name rather than planned as a cell
+    /// that dies. The remedy is composition -- `goal.all{ goal.sustain(
+    /// <ingredient>, <rate>, <window>), goal.producing(<item>, <rate>) }`
+    /// -- which `Goal::All`'s in-order expansion puts in the overlay before
+    /// this cell is sited from it.
+    ///
+    /// `standing` names what *was* found: nothing, or sources whose rate the
+    /// cells already asked for have spoken for. A source is one furnace with
+    /// an offtake arm into a container, and one furnace is `3600 /
+    /// smelting_ticks` plates a minute; a second cell wants a second source.
+    #[error(
+        "a cell making {item} eats {per_minute} {ingredient}/min by belt and no standing cell \
+         delivers it: {standing}"
+    )]
+    #[diagnostic(
+        code(planner::assembly_no_standing_source),
+        help(
+            "a smelted ingredient is belted straight into the machine from a stage-1 cell's plate \
+             chest, and nothing here charges a chest by hand any more; compose the goal with a \
+             `sustain` of that ingredient at that rate (`goal.all{{ goal.sustain(\"{ingredient}\", \
+             {per_minute}, window), goal.producing(\"{item}\", ...) }}`)"
+        )
+    )]
+    AssemblyNoStandingSource {
+        item: ItemId,
+        ingredient: ItemId,
+        per_minute: u32,
+        standing: String,
+    },
+
     /// The cell stands and nothing can take its product away.
     ///
     /// **Measured, in `run-1788679826-02267`.** A belted burner cell ran for

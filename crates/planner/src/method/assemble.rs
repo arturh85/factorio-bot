@@ -23,20 +23,32 @@
 //! # The shape, and what it is general over
 //!
 //! ```text
-//!            feed chest  -> inserter ->
-//!                                       [intermediate] -> inserter -> [product] <- inserter <- supply chest
-//!           [feed chest  -> inserter ->]                                  |
-//!                                                                         v
-//!                                                        output chest <- inserter
+//!   iron-plate belt  -> inserter -> [intermediate] -> inserter -> [product] <- inserter <- copper-plate belt
+//!  (from a standing                                                  |               (from a standing
+//!   stage-1 cell)                                                    v                stage-1 cell)
+//!                                                   output chest <- inserter
 //! ```
 //!
 //! Red science is one copper plate and one iron gear wheel. The gear is
-//! *craftable*, so the cell builds a machine for it; the copper plate is
-//! **smelted**, so no assembling machine makes one and it arrives in a chest.
+//! *craftable*, so the cell builds a machine for it; the plates are
+//! **smelted**, so no assembling machine makes one -- and since 2026-09-09
+//! **a smelted ingredient arrives on a belt, straight into the machine that
+//! eats it, from a standing stage-1 cell** ([`AssemblySpec::belted`],
+//! [`Mouth`], [`belted_link_steps`]). There is no chest in the line: owner,
+//! *"inside a factory every chest would be a huge bottleneck because the
+//! slow inserters at the beginning are way slower than a belt"*. A cell
+//! asked for with no such source is refused by name
+//! ([`crate::error::PlannerError::AssemblyNoStandingSource`]); the script
+//! composes `goal.all{ sustain(iron), sustain(copper), producing(red) }`.
 //! That is the rule [`assembly_spec`] applies, and it is stated over the
 //! world's recipes rather than over the name `automation-science-pack`: a
 //! two-ingredient crafting recipe, exactly one of whose ingredients has a
 //! crafting recipe of its own with at most [`MAX_FEED`] ingredients.
+//!
+//! **A chest stands only where nothing here can belt** -- green's gears and
+//! inserters, which are crafted rather than smelted -- and those are still
+//! charged by hand, exactly as below. That is the phase-2 gap the design
+//! note names (`docs/superpowers/notes/2026-09-09-no-chests-in-the-line.md`).
 //!
 //! # One machine deep, and how wide
 //!
@@ -99,29 +111,24 @@
 //! cannot see it either.
 //!
 //! And one more, stated plainly because the goal's name invites the opposite
-//! reading: **the feed chests are filled by hand.** A cell is charged with
-//! [`CELL_CHARGE_TICKS`] worth of ingredients when it is built and, for those,
-//! nothing refills them.
-//!
-//! **The supply chest is the exception since 2026-09-09**, and it is the one
-//! that matters: it holds the *smelted* ingredient, which is the only one a
-//! stage-1 cell can make. When a [`crate::method::produce`] cell for that item
-//! is already standing, this method belts its product into the supply chest
-//! and states the wire that runs the load arm --- see [`supply_link_steps`].
-//! The charge stays, demoted to an ignition charge, because a belt that has to
-//! fill delivers nothing for its first several hundred ticks.
+//! reading: **what chests remain are filled by hand.** A chest-fed ingredient
+//! is charged with [`CELL_CHARGE_TICKS`] worth when the cell is built and
+//! nothing refills it. A belted one has no charge at all -- not even an
+//! ignition charge, which is measured before it is added back (see
+//! [`belted_link_steps`]) -- and the cell is bounded by its sources' ore
+//! instead ([`SupplyHorizon`]).
 //!
 //! What that does **not** do is make a cell autonomous on its own: the goal
-//! has to have been asked in a world where such a cell stands, which today
-//! means composing it (`goal.all{sustain(<smelted>, ...), producing(...)}`).
-//! A cell asked for in isolation is still charge-fed, exactly as before, and
-//! the feed chests are hand-filled either way.
+//! has to have been asked in a world where the sources stand, which today
+//! means composing it (`goal.all{sustain(<plate>, ...), producing(...)}`), and
+//! `Researched` asks for a cell only where they do
+//! (`crate::method::have::machine_made_packs`).
 
 use crate::action::{Action, ActionKind, Actor, Condition, Effect, InventorySlot};
 use crate::error::PlannerError;
 use crate::goal::{Goal, Holder};
 use crate::ids::{ActionId, BotId, ItemId, Ticks};
-use crate::method::connect::connect_steps_with;
+use crate::method::connect::connect_steps_reserving;
 use crate::method::have::{COAL_BURN_TICKS, fuel_visits};
 use crate::method::have::{
     HANDOVER_WALK_TICKS, PLACE_TICKS, TRANSFER_TICKS, participants_that_can_work,
@@ -446,16 +453,136 @@ pub struct AssemblySpec {
     /// end to end, so it cannot land on a different side of a ceiling on a
     /// different run.
     pub ticks_per_item: Ticks,
+    /// The ingredients that arrive on a **belt**, straight into the machine
+    /// that eats them, rather than in a chest a bot fills.
+    ///
+    /// **Every smelted one** -- every ingredient a stage-1 cell
+    /// ([`crate::method::produce::cell_spec`]) can make out of ore -- and it
+    /// is decided from the world's recipes, never from what happens to be
+    /// standing, so the layout of a cell for an item is one layout on every
+    /// plan and every replan. Red science is the case: its copper plate and
+    /// the iron plate behind its gears are both here, so a red cell has
+    /// **no chest but the output one**. Green's gears and inserters are
+    /// crafted, not smelted, and nothing in this method makes them, so they
+    /// stay in hand-filled chests -- see [`Role::FeedChest`].
+    ///
+    /// What a belted ingredient costs the plan is a standing source: a cell
+    /// asked for with none is refused by name
+    /// ([`PlannerError::AssemblyNoStandingSource`]) rather than planned as a
+    /// cell that dies when a hand charge runs out.
+    pub belted: BTreeSet<ItemId>,
+}
+
+/// One ingredient a cell takes on a belt: what it is, which machine eats it,
+/// and how much one product of the cell costs in it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BeltedInput {
+    pub item: ItemId,
+    /// [`Role::Intermediate`] or [`Role::Product`].
+    pub into: Role,
+    /// Which mouth of the machine it enters by: the feed row for an
+    /// intermediate's ingredient (its index in that recipe), `None` for the
+    /// product machine's own supplied ingredient.
+    pub feed_row: Option<u8>,
+    /// Units of the item per product of the cell, rounded up at the run
+    /// boundary the same way [`AssemblySpec::intermediate_runs`] rounds.
+    pub per_product: u32,
 }
 
 impl AssemblySpec {
-    /// How many products one charge is sized for.
+    /// How many products one hand charge is sized for.
+    ///
+    /// **Only a chest-fed ingredient is charged**, and it is what bounds a
+    /// cell that still has one: green's gears and inserters. A cell whose
+    /// every input is belted has no charge and is bounded by its sources
+    /// instead -- see [`SupplyHorizon`].
     ///
     /// At least one: a cell charged for nothing at all would place perfectly
     /// and be dead before it started, which is the failure this whole stage is
     /// against.
     pub fn charge_products(&self) -> u32 {
         (CELL_CHARGE_TICKS / self.ticks_per_item.max(1)).max(1)
+    }
+
+    /// Does `item` arrive on a belt?
+    pub fn is_belted(&self, item: &str) -> bool {
+        self.belted.contains(item)
+    }
+
+    /// Every ingredient that arrives on a belt, in the order its mouth stands
+    /// in: the intermediate's rows first, the product machine's last.
+    pub fn belted_inputs(&self) -> Vec<BeltedInput> {
+        let mut out = Vec::new();
+        if let Some(made) = self.intermediate.as_ref() {
+            for (index, (item, amount)) in made.ingredients.iter().enumerate() {
+                if !self.is_belted(item) {
+                    continue;
+                }
+                #[allow(clippy::cast_possible_truncation)]
+                let feed_row = index as u8;
+                out.push(BeltedInput {
+                    item: item.clone(),
+                    into: Role::Intermediate,
+                    feed_row: Some(feed_row),
+                    per_product: amount
+                        .saturating_mul(made.per_product)
+                        .div_ceil(made.per_run.max(1)),
+                });
+            }
+        }
+        if self.is_belted(&self.supplied.0) {
+            out.push(BeltedInput {
+                item: self.supplied.0.clone(),
+                into: Role::Product,
+                feed_row: None,
+                per_product: self.supplied.1,
+            });
+        }
+        out
+    }
+
+    /// What one cell eats of a belted input, per minute, when it makes
+    /// `cell_per_minute` products a minute.
+    ///
+    /// **The goal's rate, not the cell's tempo.** A belt cell can make 120
+    /// belts a minute and a stone furnace makes 15 plates; sized at the
+    /// tempo, `producing:transport-belt:6` would ask a source for eight
+    /// furnaces' worth of iron to make six belts. The cell runs at what its
+    /// belt delivers, and what was asked for is the rate the source has to
+    /// cover -- [`SupplyHorizon`]'s ticks are still counted at the tempo,
+    /// which is the honest lower bound on the wait and is stated as one in
+    /// `cellstock`.
+    pub fn demand_per_minute(&self, input: &BeltedInput, cell_per_minute: u32) -> u32 {
+        input.per_product.saturating_mul(cell_per_minute)
+    }
+
+    /// One cell's own tempo, in products a minute: what `Researched` asks a
+    /// cell for, and the most a cell can ever be asked for.
+    pub fn tempo_per_minute(&self) -> u32 {
+        (3600 / self.ticks_per_item.max(1)).max(1)
+    }
+
+    /// The intermediate's ingredients that arrive in a chest, with the feed
+    /// row (their index in the recipe) each one's chest stands on.
+    pub fn chest_fed_feeds(&self) -> Vec<(u8, ItemId)> {
+        let Some(made) = self.intermediate.as_ref() else {
+            return Vec::new();
+        };
+        made.ingredients
+            .iter()
+            .enumerate()
+            .filter(|(_, (item, _))| !self.is_belted(item))
+            .map(|(index, (item, _))| {
+                #[allow(clippy::cast_possible_truncation)]
+                let index = index as u8;
+                (index, item.clone())
+            })
+            .collect()
+    }
+
+    /// Does the product machine's own supplied ingredient arrive in a chest?
+    pub fn has_supply_chest(&self) -> bool {
+        !self.is_belted(&self.supplied.0)
     }
 
     /// How many runs of the intermediate's recipe one charge is sized for.
@@ -473,12 +600,11 @@ impl AssemblySpec {
         wanted.div_ceil(intermediate.per_run.max(1))
     }
 
-    /// How many feed chests a cell for this spec has — one per ingredient of
-    /// the intermediate's recipe, and **zero** when there is no intermediate.
+    /// How many feed chests a cell for this spec has — one per **chest-fed**
+    /// ingredient of the intermediate's recipe, and **zero** when there is no
+    /// intermediate or every ingredient is belted.
     pub fn feeds(&self) -> usize {
-        self.intermediate
-            .as_ref()
-            .map_or(0, |made| made.ingredients.len())
+        self.chest_fed_feeds().len()
     }
 
     /// Does this cell's product machine take a recipe?
@@ -494,27 +620,55 @@ impl AssemblySpec {
         self.recipe.category == CRAFTING_CATEGORY
     }
 
-    /// What goes in each feed chest for one charge, in chest order.
+    /// What goes in each feed chest for one charge, as `(feed row, item,
+    /// count)` in chest order.
     ///
-    /// Integer end to end, one entry per ingredient of the intermediate's
-    /// recipe, in that recipe's order -- which is the order
-    /// [`Role::FeedChest`]'s indices are assigned in.
-    pub fn feed_charges(&self) -> Vec<(ItemId, u32)> {
+    /// Integer end to end, one entry per **chest-fed** ingredient of the
+    /// intermediate's recipe, in that recipe's order -- which is the order
+    /// [`Role::FeedChest`]'s indices are assigned in. A belted ingredient
+    /// has no chest and no charge.
+    pub fn feed_charges(&self) -> Vec<(u8, ItemId, u32)> {
         let runs = self.intermediate_runs();
         let Some(intermediate) = self.intermediate.as_ref() else {
             return Vec::new();
         };
-        intermediate
-            .ingredients
-            .iter()
-            .map(|(item, amount)| (item.clone(), runs.saturating_mul(*amount)))
+        self.chest_fed_feeds()
+            .into_iter()
+            .map(|(index, item)| {
+                let amount = intermediate
+                    .ingredients
+                    .get(usize::from(index))
+                    .map_or(0, |(_, amount)| *amount);
+                (index, item, runs.saturating_mul(amount))
+            })
             .collect()
     }
 
-    /// How much goes in the supply chest for one charge.
+    /// How much goes in the supply chest for one charge -- **zero** when the
+    /// supplied ingredient is belted, because then there is no chest.
     pub fn supply_charge(&self) -> u32 {
+        if !self.has_supply_chest() {
+            return 0;
+        }
         self.charge_products().saturating_mul(self.supplied.1)
     }
+}
+
+/// Which of a recipe's ingredients a cell takes on a belt: the smelted ones.
+///
+/// Asked of [`crate::method::produce::cell_spec`] rather than of a name, so
+/// the rule is "a stage-1 cell can make it from ore" and nothing else --
+/// `iron-plate` and `copper-plate` in vanilla, and whatever a mod adds an ore
+/// and a smelting recipe for.
+fn belted_among<'a>(
+    state: &PlanState,
+    ingredients: impl IntoIterator<Item = &'a ItemId>,
+) -> BTreeSet<ItemId> {
+    ingredients
+        .into_iter()
+        .filter(|item| cell_spec(state, item).is_some())
+        .cloned()
+        .collect()
 }
 
 /// Can a stage-2 cell make `item`, and out of what?
@@ -594,6 +748,14 @@ pub fn assembly_spec(state: &PlanState, item: &str) -> Option<AssemblySpec> {
     if ticks_per_item == 0 {
         return None;
     }
+    let belted = belted_among(
+        state,
+        intermediate
+            .ingredients
+            .iter()
+            .map(|(item, _)| item)
+            .chain(std::iter::once(&supplied.0)),
+    );
     Some(AssemblySpec {
         item: item.to_string(),
         product_offset: product_offset(state, MACHINE),
@@ -602,6 +764,7 @@ pub fn assembly_spec(state: &PlanState, item: &str) -> Option<AssemblySpec> {
         supplied,
         intermediate: Some(intermediate),
         ticks_per_item,
+        belted,
     })
 }
 
@@ -676,6 +839,7 @@ fn furnace_spec(state: &PlanState, item: &str, recipe: FactorioRecipe) -> Option
     if ticks_per_item == 0 {
         return None;
     }
+    let belted = belted_among(state, std::iter::once(input));
     Some(AssemblySpec {
         item: item.to_string(),
         product_offset: product_offset(state, FURNACE),
@@ -684,6 +848,7 @@ fn furnace_spec(state: &PlanState, item: &str, recipe: FactorioRecipe) -> Option
         supplied: (input.clone(), *amount),
         intermediate: None,
         ticks_per_item,
+        belted,
     })
 }
 
@@ -858,8 +1023,8 @@ pub struct CellPart {
 /// rather than the old sequence renumbered. The plan still moves — it has two
 /// more buildings in it and a longer bill — but the diff is an addition rather
 /// than a permutation.
-fn layout_table(feeds: usize, product_offset: (f64, f64)) -> Vec<(Role, (f64, f64), Direction)> {
-    let feeds = feeds.min(MAX_FEED);
+fn layout_table(spec: &AssemblySpec) -> Vec<(Role, (f64, f64), Direction)> {
+    let product_offset = spec.product_offset;
     // **The intermediate half is present only when there is one to build.**
     // A one-machine cell (a furnace: see `furnace_spec`) has no feed chest,
     // no feed inserter, no intermediate machine and no link inserter -- its
@@ -867,7 +1032,7 @@ fn layout_table(feeds: usize, product_offset: (f64, f64)) -> Vec<(Role, (f64, f6
     // chest, which is this same body with one half left out rather than a
     // second layout. The ground the intermediate would have stood on is
     // simply left clear.
-    let mut out = if feeds == 0 {
+    let mut out = if spec.intermediate.is_none() {
         vec![(Role::Product, product_offset, Direction::North)]
     } else {
         vec![
@@ -875,19 +1040,31 @@ fn layout_table(feeds: usize, product_offset: (f64, f64)) -> Vec<(Role, (f64, f6
             (Role::Product, product_offset, Direction::North),
         ]
     };
-    for (index, y) in FEED_ROWS.iter().take(feeds).enumerate() {
-        #[allow(clippy::cast_possible_truncation)]
-        out.push((Role::FeedChest(index as u8), (-3., *y), Direction::North));
+    // **A chest stands only where an ingredient is not belted.** A belted
+    // ingredient's row holds nothing of the layout's: its arm and the belt
+    // tile beyond it are a [`Mouth`], placed by `method::connect` when the
+    // run from its source is laid, and kept clear by [`fit`] until then.
+    let feeds: Vec<(u8, f64)> = spec
+        .chest_fed_feeds()
+        .into_iter()
+        .filter_map(|(index, _)| FEED_ROWS.get(usize::from(index)).map(|y| (index, *y)))
+        .collect();
+    let supply_chest = spec.has_supply_chest();
+    for (index, y) in &feeds {
+        out.push((Role::FeedChest(*index), (-3., *y), Direction::North));
     }
-    out.push((Role::SupplyChest, (-3., 4.), Direction::North));
-    for (index, y) in FEED_ROWS.iter().take(feeds).enumerate() {
-        #[allow(clippy::cast_possible_truncation)]
-        out.push((Role::FeedInserter(index as u8), (-2., *y), Direction::West));
+    if supply_chest {
+        out.push((Role::SupplyChest, (-3., SUPPLY_ROW), Direction::North));
     }
-    if feeds > 0 {
+    for (index, y) in &feeds {
+        out.push((Role::FeedInserter(*index), (-2., *y), Direction::West));
+    }
+    if spec.intermediate.is_some() {
         out.push((Role::LinkInserter, (0., 2.), Direction::North));
     }
-    out.push((Role::SupplyInserter, (-2., 4.), Direction::West));
+    if supply_chest {
+        out.push((Role::SupplyInserter, (-2., SUPPLY_ROW), Direction::West));
+    }
     out.push((Role::OutputChest, OUTPUT_CHEST_OFFSET, Direction::North));
     out.push((
         Role::OutputInserter,
@@ -916,6 +1093,59 @@ const OUTPUT_CHEST_OFFSET: (f64, f64) = (-3., 3.);
 /// `y = -0.5 ..= 4.5`, so an inserter there would stand unpowered — see
 /// [`MAX_FEED`].
 const FEED_ROWS: [f64; MAX_FEED] = [0., 1.];
+
+/// The row the product machine's supplied ingredient enters on, in the north
+/// frame: the machine's southernmost west-face tile, one row below the
+/// output path at [`OUTPUT_INSERTER_OFFSET`].
+const SUPPLY_ROW: f64 = 4.;
+
+/// The column an ingredient's arm stands in, and the column the belt it
+/// picks from ends in: immediately west of the machines, and one further.
+const MOUTH_ARM_COLUMN: f64 = -2.;
+const MOUTH_BELT_COLUMN: f64 = -3.;
+
+/// Where a belted ingredient enters the cell: the tile its unload arm will
+/// stand on and the tile the belt it picks from will end on, one row of the
+/// machine's west face.
+///
+/// **Not a part.** Nothing in [`layout_table`] stands here; the arm and the
+/// belt are placed by `method::connect` when the run from the ingredient's
+/// source is laid (see [`belted_link_steps`]), and this is the reservation
+/// that keeps the run's own end free of the cell's other parts, of the
+/// cell's other runs, and of anything else this plan puts down. The rows are
+/// the same rows a chest would have stood on, so the pole at [`POLE_OFFSET`]
+/// lights every arm exactly as it lit every chest inserter --
+/// `tests::the_pole_lights_the_output_mouth_but_no_third_feed_row` is the
+/// proof, unchanged.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Mouth {
+    /// What arrives here.
+    pub item: ItemId,
+    /// The machine the arm drops into.
+    pub into: Role,
+    pub arm: Position,
+    pub belt: Position,
+}
+
+/// The mouths of a cell at `origin` facing `facing`, in [`BeltedInput`]
+/// order.
+fn mouths(origin: &Position, facing: Direction, spec: &AssemblySpec) -> Option<Vec<Mouth>> {
+    let mut out = Vec::new();
+    for input in spec.belted_inputs() {
+        let row = match input.feed_row {
+            Some(index) => *FEED_ROWS.get(usize::from(index))?,
+            None => SUPPLY_ROW,
+        };
+        let at = |x: f64| Some(origin.add(&Position::new(x, row).turn(facing)?));
+        out.push(Mouth {
+            item: input.item,
+            into: input.into,
+            arm: at(MOUTH_ARM_COLUMN)?,
+            belt: at(MOUTH_BELT_COLUMN)?,
+        });
+    }
+    Some(out)
+}
 
 /// Where the cell puts a pole of its **own**, when it has to bring one.
 ///
@@ -959,7 +1189,23 @@ const POLE_OFFSET: (f64, f64) = (-1., 2.);
 /// bot standing next to it, so where that bot stands is part of the layout and
 /// is asserted (`tests::every_lane_tile_admits_a_character`) rather than
 /// hoped for.
-const LANE: [(f64, f64); 5] = [(-4., 0.), (-4., 1.), (-4., 2.), (-4., 3.), (-4., 4.)];
+const LANE_COLUMN: f64 = -4.;
+
+/// The rows of [`LANE_COLUMN`] a bot needs for this cell: one behind every
+/// chest it fills by hand, and the output chest's. A belted row has no chest
+/// and no bot ever stands behind it; that ground is the belt's.
+fn lane_rows(spec: &AssemblySpec) -> Vec<f64> {
+    let mut rows: Vec<f64> = spec
+        .chest_fed_feeds()
+        .into_iter()
+        .filter_map(|(index, _)| FEED_ROWS.get(usize::from(index)).copied())
+        .collect();
+    rows.push(OUTPUT_CHEST_OFFSET.1);
+    if spec.has_supply_chest() {
+        rows.push(SUPPLY_ROW);
+    }
+    rows
+}
 
 /// The ground east of the machine column, left clear so a beacon can be
 /// added later without tearing the cell down.
@@ -1057,6 +1303,8 @@ pub struct Cell {
     pub standing: Vec<Role>,
     /// Every tile a bot must be able to stand on to charge this cell.
     pub lane: Vec<Position>,
+    /// Where each belted ingredient's run ends -- see [`Mouth`].
+    pub mouths: Vec<Mouth>,
     /// Bystanders `fit` found would be sealed into a pocket by this cell's
     /// own footprint, and where each must walk first. Empty in the ordinary
     /// case -- see [`crate::enclosure::check`].
@@ -1155,7 +1403,7 @@ fn layout(
         return None;
     }
     let pole = with_pole.then_some((Role::Pole, POLE_OFFSET, Direction::North));
-    layout_table(feeds, spec.product_offset)
+    layout_table(spec)
         .into_iter()
         .chain(pole)
         .map(|(role, offset, direction)| {
@@ -1170,9 +1418,10 @@ fn layout(
 }
 
 /// The lane tiles of a cell at `origin` facing `facing`.
-fn lane(origin: &Position, facing: Direction) -> Option<Vec<Position>> {
-    LANE.iter()
-        .map(|offset| Some(origin.add(&Position::new(offset.0, offset.1).turn(facing)?)))
+fn lane(origin: &Position, facing: Direction, spec: &AssemblySpec) -> Option<Vec<Position>> {
+    lane_rows(spec)
+        .into_iter()
+        .map(|row| Some(origin.add(&Position::new(LANE_COLUMN, row).turn(facing)?)))
         .collect()
 }
 
@@ -1210,9 +1459,18 @@ fn entity_for(state: &PlanState, part: &CellPart) -> FactorioEntity {
 fn links(cell: &Cell) -> Option<Vec<(Position, Position)>> {
     let p = |role: Role| cell.at(role).map(|part| part.position.clone());
     let mut out = Vec::new();
-    for index in 0..cell.feeds() {
-        #[allow(clippy::cast_possible_truncation)]
-        let index = index as u8;
+    // Only the chests that stand: a belted row has no chest and no arm of
+    // the layout's, and its link is checked by `method::connect` when it is
+    // laid rather than by this table.
+    let feed_indices: Vec<u8> = cell
+        .parts
+        .iter()
+        .filter_map(|part| match part.role {
+            Role::FeedChest(index) => Some(index),
+            _ => None,
+        })
+        .collect();
+    for index in feed_indices {
         out.push((p(Role::FeedChest(index))?, p(Role::FeedInserter(index))?));
         out.push((p(Role::FeedInserter(index))?, p(Role::Intermediate)?));
     }
@@ -1224,8 +1482,10 @@ fn links(cell: &Cell) -> Option<Vec<(Position, Position)>> {
         out.push((intermediate, p(Role::LinkInserter)?));
         out.push((p(Role::LinkInserter)?, p(Role::Product)?));
     }
-    out.push((p(Role::SupplyChest)?, p(Role::SupplyInserter)?));
-    out.push((p(Role::SupplyInserter)?, p(Role::Product)?));
+    if let Some(supply) = p(Role::SupplyChest) {
+        out.push((supply, p(Role::SupplyInserter)?));
+        out.push((p(Role::SupplyInserter)?, p(Role::Product)?));
+    }
     // Out of the machine, not into it: the last link of the cell and the only
     // one that runs the other way. `delivers_into` answers it through its
     // *pull* disjunct — the inserter's pickup tile is one the machine covers —
@@ -1285,7 +1545,8 @@ fn fit(
     spec: &AssemblySpec,
 ) -> Option<Cell> {
     let parts = layout(origin, facing, with_pole, spec)?;
-    let lane = lane(origin, facing)?;
+    let lane = lane(origin, facing, spec)?;
+    let mouths = mouths(origin, facing, spec)?;
     for part in &parts {
         if !state.is_area_free_facing(part.name, &part.position, part.direction) {
             return None;
@@ -1293,6 +1554,13 @@ fn fit(
     }
     for tile in &lane {
         if !state.is_position_free(tile) {
+            return None;
+        }
+    }
+    // A mouth's two tiles are the cell's ground as much as a chest's would
+    // have been: the arm stands on one and the run ends on the other.
+    for mouth in &mouths {
+        if !state.is_position_free(&mouth.arm) || !state.is_position_free(&mouth.belt) {
             return None;
         }
     }
@@ -1313,6 +1581,7 @@ fn fit(
         parts,
         standing: Vec::new(),
         lane,
+        mouths,
         evacuate: Vec::new(),
     };
     works(state, cell, spec)
@@ -1360,13 +1629,88 @@ fn works(state: &PlanState, mut cell: Cell, spec: &AssemblySpec) -> Option<Cell>
     if !supply_chest_is_reachable(&trial, &cell) {
         return None;
     }
+    if !mouths_are_reachable(&trial, &cell) {
+        return None;
+    }
     Some(cell)
+}
+
+/// Can a belt be laid INTO every mouth of this cell from open ground?
+///
+/// [`supply_chest_is_reachable`]'s question, asked of the one side a belted
+/// ingredient has: the mouth's arm tile must be free on the trial and its
+/// belt tile must reach the window's edge on the surface with the arm
+/// standing -- or the run already stands there, which is the replan's case
+/// and is proven by the belt (see [`mouth_is_linked`]).
+fn mouths_are_reachable(trial: &PlanState, cell: &Cell) -> bool {
+    cell.mouths.iter().all(|mouth| {
+        mouth_is_linked(trial, cell, mouth) || door_is_open(trial, &mouth.arm, &mouth.belt)
+    })
+}
+
+/// Is a run already standing at this mouth: an arm on its tile that picks
+/// up from something and drops into the machine the mouth serves?
+///
+/// The discriminator is direction, exactly as in [`already_filled_by_machine`]:
+/// the cell's own output arm stands one row up and picks up FROM the
+/// machine, so it is not an answer here; only an arm whose drop lands in the
+/// machine is. What makes this idempotent across a replan.
+fn mouth_is_linked(state: &PlanState, cell: &Cell, mouth: &Mouth) -> bool {
+    let Some(machine) = cell.at(mouth.into) else {
+        return false;
+    };
+    state.entity_at(&mouth.arm).is_some_and(|arm| {
+        Pos::from(&arm.position) == Pos::from(&mouth.arm)
+            && state.pickup_position(&arm).is_some()
+            && state.delivers_into(&arm.position, &machine.position)
+    })
+}
+
+/// Can a run end at `belt` with its unload arm on `arm`?
+///
+/// One side of a chest, or one mouth of a machine: the arm's tile free, and
+/// the belt's tile either already the tail of a standing run or free and
+/// reaching the window's edge on the surface with the arm standing. See
+/// [`supply_chest_is_reachable`] for the run that paid for each clause.
+fn door_is_open(trial: &PlanState, arm: &Position, belt: &Position) -> bool {
+    if !trial.is_area_free(INSERTER, arm) {
+        return false;
+    }
+    // A belt standing at the door with the arm's tile free is the run that
+    // reached it, wanting its arm -- `connect::standing_run` -- but only a
+    // belt whose flow ENDS here. A belt passing the chest on its way
+    // elsewhere (a coal run, on `run-1788941729-70024` at `[29.5,-30.5]`)
+    // reaches nothing.
+    if belt_ends_at(trial, belt) {
+        return true;
+    }
+    if !trial.is_area_free("transport-belt", belt) {
+        return false;
+    }
+    // With the arm STANDING: the belt tile's way out must not be the tile
+    // the arm will occupy. In `run-1788936524-99544` the belt tile was the
+    // one-tile gap between the engine and the boiler, and its only free
+    // neighbour was the arm's tile.
+    let Some(area) = trial.collision_area_facing(INSERTER, arm, Direction::North) else {
+        return false;
+    };
+    let mut with_arm = trial.fork();
+    with_arm.create_entity(FactorioEntity {
+        name: INSERTER.into(),
+        entity_type: "inserter".into(),
+        position: arm.clone(),
+        direction: 0,
+        bounding_box: area,
+        ..Default::default()
+    });
+    let ctx = crate::method::ExpansionCtx::new(with_arm, crate::ids::BotId(0));
+    crate::method::connect::belt_reaches_open_ground(&ctx, belt)
 }
 
 /// Can a belt be laid INTO this cell's supply chest from open ground?
 ///
 /// The supply chest is the one part of a cell that some other method's run
-/// has to reach -- `supply_link_steps` lays a belt into it from a cell that
+/// has to reach -- a link lays a belt into it from a cell that
 /// makes its ingredient -- and every other check here is about the cell's
 /// own ground. Measured in `run-1788936524-99544` (seed 31337, replan at
 /// tick 62,222): the science cell was sited on the shore beside the standing
@@ -1409,38 +1753,7 @@ fn supply_chest_is_reachable(trial: &PlanState, cell: &Cell) -> bool {
         .any(|(dx, dy)| {
             let arm = Position::new(chest.position.x() + dx, chest.position.y() + dy);
             let belt = Position::new(chest.position.x() + 2. * dx, chest.position.y() + 2. * dy);
-            if !trial.is_area_free(INSERTER, &arm) {
-                return false;
-            }
-            // A belt standing at the door with the arm's tile free is the
-            // run that reached it, wanting its arm -- `connect::standing_run`
-            // -- but only a belt whose flow ENDS here. A belt passing the
-            // chest on its way elsewhere (a coal run, on
-            // `run-1788941729-70024` at `[29.5,-30.5]`) reaches nothing.
-            if belt_ends_at(trial, &belt) {
-                return true;
-            }
-            if !trial.is_area_free("transport-belt", &belt) {
-                return false;
-            }
-            // With the arm STANDING: the belt tile's way out must not be
-            // the tile the arm will occupy. In `run-1788936524-99544` the
-            // belt tile was the one-tile gap between the engine and the
-            // boiler, and its only free neighbour was the arm's tile.
-            let Some(area) = trial.collision_area_facing(INSERTER, &arm, Direction::North) else {
-                return false;
-            };
-            let mut with_arm = trial.fork();
-            with_arm.create_entity(FactorioEntity {
-                name: INSERTER.into(),
-                entity_type: "inserter".into(),
-                position: arm,
-                direction: 0,
-                bounding_box: area,
-                ..Default::default()
-            });
-            let ctx = crate::method::ExpansionCtx::new(with_arm, crate::ids::BotId(0));
-            crate::method::connect::belt_reaches_open_ground(&ctx, &belt)
+            door_is_open(trial, &arm, &belt)
         })
 }
 
@@ -1578,7 +1891,7 @@ fn fit_partial(
     spec: &AssemblySpec,
     exclude: &BTreeSet<Pos>,
 ) -> Option<Cell> {
-    let table = layout_table(spec.feeds(), spec.product_offset);
+    let table = layout_table(spec);
     let mut best: Option<(usize, Cell)> = None;
     for facing in Direction::orthogonal() {
         for &role in roles {
@@ -1607,7 +1920,10 @@ fn fit_partial(
                 let Some(parts) = layout(&origin, facing, with_pole, spec) else {
                     continue;
                 };
-                let Some(lane) = lane(&origin, facing) else {
+                let Some(lane) = lane(&origin, facing, spec) else {
+                    continue;
+                };
+                let Some(mouths) = mouths(&origin, facing, spec) else {
                     continue;
                 };
                 if parts.iter().any(|part| {
@@ -1658,8 +1974,21 @@ fn fit_partial(
                     parts,
                     standing,
                     lane,
+                    mouths,
                     evacuate: Vec::new(),
                 };
+                // A mouth holds the run that reached it, or nothing at all.
+                // An arm there that drops somewhere other than this layout's
+                // machine, or a belt passing through, is another arrangement
+                // and this layout is not the cell.
+                if !cell.mouths.iter().all(|mouth| {
+                    mouth_is_linked(state, &cell, mouth)
+                        || (state.is_position_free(&mouth.arm)
+                            && (state.is_position_free(&mouth.belt)
+                                || belt_ends_at(state, &mouth.belt)))
+                }) {
+                    continue;
+                }
                 if let Some(cell) = works(state, cell, spec) {
                     best = Some((count, cell));
                 }
@@ -1737,7 +2066,7 @@ pub fn complete_cell(
     // The roles a standing entity of each name can be: the machine roles
     // for the machine, the chest roles for a chest, and so on. Read off the
     // layout rather than listed, so a part added to the layout is a seed.
-    let table = layout_table(spec.feeds(), spec.product_offset);
+    let table = layout_table(spec);
     let roles_of = |name: &str| -> Vec<Role> {
         table
             .iter()
@@ -1791,23 +2120,30 @@ fn cell_demand_kw(state: &PlanState, spec: &AssemblySpec) -> f64 {
     machine_count * machines + count * inserters
 }
 
-/// How many inserters a cell for `spec` has: one per feed chest, one link, one
-/// supply, one output.
+/// How many inserters a cell for `spec` draws through: one per feed chest,
+/// one link, one supply arm if the supply is a chest, one output -- and two
+/// per belted ingredient, the load arm at its source and the unload arm at
+/// its mouth.
+///
+/// The load arm stands on a stage-1 cell that has no network of its own, so
+/// its draw lands wherever `ensure_powered` runs a wire from; counting it
+/// here sizes the anchor for the worst case, which is that wire coming off
+/// the cell's own plant.
 fn inserter_count(spec: &AssemblySpec) -> u32 {
-    // One per feed chest, the link, the supply and the output -- and a cell
-    // with no intermediate has neither feed chests nor a link, so two.
     let link = u32::from(spec.intermediate.is_some());
-    u32::try_from(spec.feeds()).unwrap_or(1) + link + 2
+    let supply = u32::from(spec.has_supply_chest());
+    let belted = u32::try_from(spec.belted_inputs().len()).unwrap_or(0);
+    u32::try_from(spec.feeds()).unwrap_or(1) + link + supply + 1 + belted.saturating_mul(2)
 }
 
-/// How many chests a cell for `spec` has: one per feed chest, one supply, one
-/// output.
+/// How many chests a cell for `spec` has: one per feed chest, one supply if
+/// the supply is a chest, one output.
 ///
 /// Only a test asks now: [`bill`] counts chests off the cell's own missing
 /// parts, so this is the number a cell sited on clear ground has to place.
 #[cfg(test)]
 fn chest_count(spec: &AssemblySpec) -> u32 {
-    u32::try_from(spec.feeds()).unwrap_or(1) + 2
+    u32::try_from(spec.feeds()).unwrap_or(1) + u32::from(spec.has_supply_chest()) + 1
 }
 
 /// Find somewhere powered to put one cell, or say why not.
@@ -1826,6 +2162,49 @@ pub fn plan_cell(
     state: &PlanState,
     anchor: &Position,
     spec: &AssemblySpec,
+) -> Result<Cell, PlannerError> {
+    plan_cell_near(state, anchor, spec, &[])
+}
+
+/// How far, on either axis, a cell's origin may stand from a source it is
+/// belted from: one `connect` window's half-side, less room for the run to
+/// enter the window's edge and turn.
+///
+/// A run is planned in one window centred on its SOURCE, and the sink has to
+/// be inside it; a cell sited without this bound was put 29 tiles from its
+/// iron chest and refused "further apart than one search window reaches"
+/// while ground 20 tiles nearer stood empty (seed 31337, 2026-09-09).
+const SOURCE_REACH: f64 = crate::enclosure::SEARCH_RADIUS - 4.;
+
+/// [`plan_cell`], preferring a candidate within [`SOURCE_REACH`] of each of
+/// `sources` -- the chests the cell's belted inputs come from -- and taking
+/// the plain search only when no such site fits. Empty means unconstrained,
+/// which is `plan_cell`.
+///
+/// Prefer-then-fall-back rather than a hard bound: the bound is a
+/// conservative reading of the window, and a site just outside it can still
+/// route (`sustain:iron-plate:30` composed with red found one 29 tiles from
+/// its iron chest that linked). The run's own refusal, not this filter, is
+/// what says a site is out of reach.
+pub fn plan_cell_near(
+    state: &PlanState,
+    anchor: &Position,
+    spec: &AssemblySpec,
+    sources: &[Position],
+) -> Result<Cell, PlannerError> {
+    if !sources.is_empty()
+        && let Ok(cell) = plan_cell_bounded(state, anchor, spec, sources)
+    {
+        return Ok(cell);
+    }
+    plan_cell_bounded(state, anchor, spec, &[])
+}
+
+fn plan_cell_bounded(
+    state: &PlanState,
+    anchor: &Position,
+    spec: &AssemblySpec,
+    sources: &[Position],
 ) -> Result<Cell, PlannerError> {
     let base = Pos::from(anchor);
     // The cheap pass first, and the whole ring search is repeated rather than
@@ -1851,6 +2230,12 @@ pub fn plan_cell(
                             f64::from(base.0 + dx) + offset_x,
                             f64::from(base.1 + dy) + offset_y,
                         );
+                        if sources.iter().any(|source| {
+                            (source.x() - candidate.x()).abs() > SOURCE_REACH
+                                || (source.y() - candidate.y()).abs() > SOURCE_REACH
+                        }) {
+                            continue;
+                        }
                         if let Some(cell) = fit(state, &candidate, facing, with_pole, spec) {
                             return Ok(cell);
                         }
@@ -1885,6 +2270,18 @@ pub fn plan_cells(
     spec: &AssemblySpec,
     count: u32,
 ) -> Result<Vec<Cell>, PlannerError> {
+    plan_cells_near(state, anchor, spec, count, &[])
+}
+
+/// [`plan_cells`], with the `i`th cell kept within [`SOURCE_REACH`] of the
+/// chests in `sources[i]` -- see [`plan_cell_near`].
+pub fn plan_cells_near(
+    state: &PlanState,
+    anchor: &Position,
+    spec: &AssemblySpec,
+    count: u32,
+    sources: &[Vec<Position>],
+) -> Result<Vec<Cell>, PlannerError> {
     let mut trial = state.fork();
     let mut out = Vec::new();
     // **Both** machines of every cell already spoken for, not just the
@@ -1895,10 +2292,13 @@ pub fn plan_cells(
     // plan three machines long for a factory that needs four. Measured on
     // `workspace/scripts/map.json` the moment this tier existed.
     let mut exclude: BTreeSet<Pos> = cell_machines(state, spec).iter().map(Pos::from).collect();
-    for _ in 0..count {
+    for index in 0..count {
+        let near: &[Position] = sources
+            .get(usize::try_from(index).unwrap_or(usize::MAX))
+            .map_or(&[], Vec::as_slice);
         let cell = match complete_cell(&trial, anchor, spec, &exclude) {
             Some(cell) => cell,
-            None => plan_cell(&trial, anchor, spec)?,
+            None => plan_cell_near(&trial, anchor, spec, near)?,
         };
         reserve_in(&mut trial, &cell, spec)?;
         for role in [Role::Intermediate, Role::Product] {
@@ -2253,13 +2653,16 @@ fn bill(spec: &AssemblySpec, cells: &[Cell], coal: u32) -> Vec<(ItemId, u32)> {
         }
     }
     let poles = cells.iter().filter(|cell| cell.brings_pole()).count() as u32;
-    for (item, amount) in spec.feed_charges() {
+    for (_, item, amount) in spec.feed_charges() {
         out.push((item, amount.saturating_mul(count)));
     }
-    out.push((
-        spec.supplied.0.clone(),
-        spec.supply_charge().saturating_mul(count),
-    ));
+    // Nothing for a belted supply: the plates come down a belt, and a bill
+    // that still asked for them would have a bot smelt a charge nobody
+    // pours anywhere.
+    let supply_charge = spec.supply_charge();
+    if supply_charge > 0 {
+        out.push((spec.supplied.0.clone(), supply_charge.saturating_mul(count)));
+    }
     // Only the cells that could not adopt supply that already stands. A pole
     // in a bill nobody places is one of four wood, spent for nothing.
     if poles > 0 {
@@ -2293,12 +2696,12 @@ fn bill(spec: &AssemblySpec, cells: &[Cell], coal: u32) -> Vec<(ItemId, u32)> {
 /// the cap here is a `min` rather than a split into visits: a boiler burns
 /// this charge over `CELL_CHARGE_TICKS` and a cell that outlives its coal is
 /// [`CELL_CHARGE_TICKS`]' own residual, not this function's.
-fn boiler_coal(state: &PlanState, demand_kw: f64) -> u32 {
+fn boiler_coal(state: &PlanState, demand_kw: f64, ticks: Ticks) -> u32 {
     let cap = state
         .slot_capacity(InventorySlot::Fuel, "coal")
         .unwrap_or(COAL_STACK);
     let kw = demand_kw.max(0.).ceil().to_u64().unwrap_or(0);
-    let kj = kw.saturating_mul(u64::from(CELL_CHARGE_TICKS)) / 60;
+    let kj = kw.saturating_mul(u64::from(ticks)) / 60;
     let coal = kj.div_ceil(COAL_KJ);
     u32::try_from(coal).unwrap_or(cap).min(cap)
 }
@@ -2375,29 +2778,45 @@ fn place_step(ctx: &mut ExpansionCtx, part: &CellPart) -> Step {
     // `player_blocks_placement`.
     let min_radius = ctx.state.placement_clearance(&name).unwrap_or(0.0);
     let id = ctx.ids.next();
+    let mut pre = vec![
+        Condition::AtPosition {
+            who: Actor::Role,
+            pos: position.clone(),
+            radius: build,
+            min_radius,
+        },
+        Condition::AreaFree {
+            pos: position.clone(),
+            entity: name.clone(),
+            direction: entity.direction,
+        },
+        Condition::HasItem {
+            who: Actor::Role,
+            item: name.clone(),
+            count: 1,
+        },
+    ];
+    // **An electric part claims its power on its own placement.** The claim
+    // used to ride on the chest charges, the last actions of a cell; a cell
+    // with no chest has no charge, so each consumer states it here, with the
+    // draw read off the same ledger `electric_demand_kw` bills
+    // (`consumer_draw_kw`). `PlanState::powering_entities` turns the claim
+    // into `EntityAt` edges from the pole and the generators that satisfy
+    // it, so a part placed before the cell's own pole waits for the pole.
+    // `crate::powered::audit` reads exactly this.
+    if let Some(kw) = ctx.state.consumer_draw_kw(&name) {
+        pre.push(Condition::Powered {
+            pos: position.clone(),
+            entity: name.clone(),
+            kw,
+        });
+    }
     let step = Step::Act(Box::new(Action {
         id,
         kind: ActionKind::Place {
             entity: Box::new(entity.clone()),
         },
-        pre: vec![
-            Condition::AtPosition {
-                who: Actor::Role,
-                pos: position.clone(),
-                radius: build,
-                min_radius,
-            },
-            Condition::AreaFree {
-                pos: position.clone(),
-                entity: name.clone(),
-                direction: entity.direction,
-            },
-            Condition::HasItem {
-                who: Actor::Role,
-                item: name.clone(),
-                count: 1,
-            },
-        ],
+        pre,
         eff: vec![
             Effect::LoseItem {
                 who: Actor::Role,
@@ -2448,17 +2867,33 @@ fn cell_steps(
     coal: u32,
     boilers: &[Position],
     roster: &[BotId],
+    feeds: &[CellFeed<'_>],
 ) -> Result<(Vec<Step>, Vec<ActionId>), PlannerError> {
     let mut steps: Vec<Step> = Vec::new();
-    // What one burner product machine burns over a charge, and zero for an
-    // electric one. Billed with the boiler's coal so that a single
+    // What one burner product machine burns over the horizon, and zero for
+    // an electric one. Billed with the boiler's coal so that a single
     // `Goal::Have` covers both -- two separate `Have`s for the same item in
     // the same hands are satisfied by the same items, which is the merge
     // `bill` exists to do.
-    let furnace_coal = furnace_charge_coal(&ctx.state, spec);
-    let coal_bill = coal.saturating_add(
-        furnace_coal.saturating_mul(u32::try_from(cells.len()).unwrap_or(u32::MAX)),
-    );
+    let horizon_ticks = feeds
+        .iter()
+        .map(|feed| feed.horizon.ticks(spec))
+        .min()
+        .unwrap_or(CELL_CHARGE_TICKS);
+    let furnace_coal = furnace_charge_coal(&ctx.state, spec, horizon_ticks);
+    // The tile in front of every run laid so far, closed to every later run:
+    // a belt whose last tile faces a foreign belt pours its plates onto it.
+    // See `belted_link_steps`.
+    let mut laid_forward: Vec<Position> = Vec::new();
+    // `coal` is per boiler and every boiler of the chain gets it, so the
+    // bill is the chain's worth. It used to be one boiler's, which the
+    // four-boiler fixture only survived because a bot happened to hold
+    // nine coal against a bill of two.
+    let coal_bill = coal
+        .saturating_mul(u32::try_from(boilers.len()).unwrap_or(u32::MAX))
+        .saturating_add(
+            furnace_coal.saturating_mul(u32::try_from(cells.len()).unwrap_or(u32::MAX)),
+        );
     // The actions that cannot run before the network exists: the ones carrying
     // a `Condition::Powered`, which no effect satisfies and which therefore
     // orders nothing by itself.
@@ -2496,8 +2931,14 @@ fn cell_steps(
     // roster can deal them out by item (see the end of this function). A
     // roster of one emits them in the order it always did.
     let mut builds: Vec<CellBuild> = Vec::with_capacity(cells.len());
-    for cell in cells {
+    for (index, cell) in cells.iter().enumerate() {
         let mut build = CellBuild::default();
+        let horizon = feeds
+            .get(index)
+            .map(|feed| feed.horizon)
+            .unwrap_or(SupplyHorizon {
+                products: spec.charge_products(),
+            });
         // Every bystander `fit` found would be sealed in by this cell walks
         // clear before any of the cell's own parts go down -- see
         // `crate::enclosure::check`.
@@ -2521,6 +2962,11 @@ fn cell_steps(
             let step = place_step(ctx, part);
             if let Step::Act(action) = &step {
                 part_ids.push(action.id);
+                // Carries a `Condition::Powered` -- see `place_step` -- so
+                // the plant has to stand before it.
+                if ctx.state.consumer_draw_kw(part.name).is_some() {
+                    needs_power.push(action.id);
+                }
             }
             build.places.push((part.name.to_string(), step));
         }
@@ -2538,6 +2984,20 @@ fn cell_steps(
             builds.push(build);
             continue;
         };
+
+        // THE BELTED INPUTS, laid now that the machines stand in the overlay
+        // (`place_step` reserves each site as it is emitted), so that the
+        // recipe step below can name their arms. A mouth a run already
+        // reaches is left alone -- the replan's case.
+        let laid = match feeds.get(index).map(|feed| feed.supply) {
+            Some(supply) => {
+                let (run, laid) = belted_link_steps(ctx, spec, cell, supply, &mut laid_forward)?;
+                build.supply = run;
+                laid
+            }
+            None => Vec::new(),
+        };
+
         let entity_at = |role: Role| -> Option<Condition> {
             cell.at(role).map(|part| Condition::EntityAt {
                 pos: part.position.clone(),
@@ -2620,6 +3080,39 @@ fn cell_steps(
                 },
             ];
             pre.extend(gate.iter().cloned());
+            // **The product machine's recipe is set last, and it asserts the
+            // whole cell.** Every part by name, every link of the chain, and
+            // every belted arm with the link it makes into its machine --
+            // the structural claims that used to ride on the chest charges,
+            // on the one action every cell has. `EntityAt` is world-scoped,
+            // so `ActionNetwork::infer_edges` draws the edge from each
+            // placement, and by the time this runs the cell is standing;
+            // `Feeds` is re-checked by the scheduler exactly as `fit`
+            // checked it with `delivers_into`.
+            if role == Role::Product {
+                for other in &cell.parts {
+                    pre.push(Condition::EntityAt {
+                        pos: other.position.clone(),
+                        name: other.name.into(),
+                    });
+                }
+                for (from, to) in &chain {
+                    pre.push(Condition::Feeds {
+                        from: from.clone(),
+                        to: to.clone(),
+                    });
+                }
+                for link in &laid {
+                    pre.push(Condition::EntityAt {
+                        pos: link.unload_arm.clone(),
+                        name: INSERTER.into(),
+                    });
+                    pre.push(Condition::Feeds {
+                        from: link.unload_arm.clone(),
+                        to: link.into.clone(),
+                    });
+                }
+            }
             let id = ctx.ids.next();
             build.recipes.push(Step::Act(Box::new(Action {
                 id,
@@ -2650,9 +3143,7 @@ fn cell_steps(
         // asserts the two-link one. Both name the product machine and its
         // recipe, because both are claims about it.
         let mut branches: Vec<(Role, ItemId, u32, Vec<Role>)> = Vec::new();
-        for (index, (item, amount)) in spec.feed_charges().into_iter().enumerate() {
-            #[allow(clippy::cast_possible_truncation)]
-            let index = index as u8;
+        for (index, item, amount) in spec.feed_charges() {
             branches.push((
                 Role::FeedChest(index),
                 item,
@@ -2667,17 +3158,19 @@ fn cell_steps(
                 ],
             ));
         }
-        branches.push((
-            Role::SupplyChest,
-            spec.supplied.0.clone(),
-            spec.supply_charge(),
-            vec![
-                Role::SupplyInserter,
-                Role::Product,
-                Role::OutputInserter,
-                Role::OutputChest,
-            ],
-        ));
+        if spec.has_supply_chest() {
+            branches.push((
+                Role::SupplyChest,
+                spec.supplied.0.clone(),
+                spec.supply_charge(),
+                vec![
+                    Role::SupplyInserter,
+                    Role::Product,
+                    Role::OutputInserter,
+                    Role::OutputChest,
+                ],
+            ));
+        }
         for (chest_role, item, amount, branch) in branches {
             let Some(chest) = cell.at(chest_role) else {
                 continue;
@@ -2726,55 +3219,11 @@ fn cell_steps(
                 amount,
                 item
             );
-            // What this charge will *become*, recorded on the last input the
-            // product machine needs -- the supply chest, the one branch that
-            // reaches the product machine without going through the
-            // intermediate.
-            //
-            // **This is the cell's ledger, and it is what makes a cell's
-            // output spendable by another goal.** Until now a cell was a
-            // structure and nothing more: `Goal::Producing` is satisfied by
-            // machines standing, no method could ask a standing cell for an
-            // item, and so production plateaued at whatever the plan's bill
-            // had already hand-crafted. `crate::method::cellstock::DrawFromCell`
-            // spends against exactly this and cannot over-draw, because
-            // `Condition::BufferHas` is checked against it.
-            //
-            // `charge_products` and not a rate: a charge is finite and
-            // nothing refills it (see [`CELL_CHARGE_TICKS`]), so this is the
-            // whole of what the cell will make. It is a claim about the
-            // future -- the machines still have to run -- and the wait is
-            // charged to the drawing action's own duration, where the tempo
-            // that decides it lives.
-            let mut eff = vec![Effect::LoseItem {
+            let eff = vec![Effect::LoseItem {
                 who: Actor::Role,
                 item: item.clone(),
                 count: amount,
             }];
-            //
-            // **Only when spending the output cannot pay for the cell**, which
-            // is asked of the recipe graph rather than of a name. The limit was
-            // bought by a measured regression: with the ledger written for
-            // every product, `producing:transport-belt:6` went from a
-            // 307-action plan to `4 transport-belt in the buffer at
-            // [33.5, -12.5] does not hold there` -- `Withdraw` spent the belts
-            // the cell had yet to make on building the cell, because
-            // `method::sustain` belts its fuel. A `transport-belt` is in its
-            // own cell's bill and a `steel-plate` is not, and
-            // `crate::method::cellstock::output_is_spendable` is what tells
-            // them apart.
-            if chest_role == Role::SupplyChest
-                && crate::method::cellstock::output_is_spendable(&ctx.state, spec)
-                && let Some(sink) = cell.at(Role::OutputChest)
-            {
-                eff.push(Effect::BufferGain {
-                    pos: sink.position.clone(),
-                    entity: CHEST.into(),
-                    slot: InventorySlot::Chest,
-                    item: spec.item.clone(),
-                    count: spec.charge_products(),
-                });
-            }
             build.charges.push((
                 item.clone(),
                 amount,
@@ -2794,6 +3243,55 @@ fn cell_steps(
                     label,
                 }),
             ));
+        }
+
+        // THE CELL'S LEDGER, on the last action that completes it.
+        //
+        // **This is what makes a cell's output spendable by another goal.**
+        // Until it existed a cell was a structure and nothing more:
+        // `Goal::Producing` is satisfied by machines standing, no method
+        // could ask a standing cell for an item, and so production plateaued
+        // at whatever the plan's bill had already hand-crafted.
+        // `crate::method::cellstock::DrawFromCell` spends against exactly
+        // this and cannot over-draw, because `Condition::BufferHas` is
+        // checked against it.
+        //
+        // The count is the [`SupplyHorizon`]: what the standing sources will
+        // deliver, over a hand charge where a chest remains -- not
+        // `charge_products` unconditionally, which was one charge and
+        // fifteen packs for ever. It is a claim about the future -- the
+        // machines still have to run -- and the wait is on the drawing
+        // action's edge, where the tempo that decides it lives.
+        //
+        // **Only when spending the output cannot pay for the cell**, which
+        // is asked of the recipe graph rather than of a name. The limit was
+        // bought by a measured regression: with the ledger written for
+        // every product, `producing:transport-belt:6` went from a
+        // 307-action plan to `4 transport-belt in the buffer at
+        // [33.5, -12.5] does not hold there` -- `Withdraw` spent the belts
+        // the cell had yet to make on building the cell, because
+        // `method::sustain` belts its fuel. A `transport-belt` is in its
+        // own cell's bill and a `steel-plate` is not, and
+        // `crate::method::cellstock::output_is_spendable` is what tells
+        // them apart.
+        //
+        // It rides on the product machine's `SetRecipe` when there is one
+        // (the last thing a crafting cell does, and the action that asserts
+        // the whole cell), else on the last arm of the last run laid, else
+        // on the last part placed -- a furnace cell with its run already
+        // standing. A cell with nothing to place and nothing to set has no
+        // ledger to write; `build == 0` never reaches here.
+        if crate::method::cellstock::output_is_spendable(&ctx.state, spec)
+            && let Some(sink) = cell.at(Role::OutputChest)
+            && let Some(carrier) = ledger_carrier(&mut build, cell)
+        {
+            carrier.eff.push(Effect::BufferGain {
+                pos: sink.position.clone(),
+                entity: CHEST.into(),
+                slot: InventorySlot::Chest,
+                item: spec.item.clone(),
+                count: horizon.products,
+            });
         }
         builds.push(build);
     }
@@ -2817,6 +3315,7 @@ fn cell_steps(
             steps.extend(build.evacuations);
             steps.extend(build.places.into_iter().map(|(_, step)| step));
             steps.extend(build.links);
+            steps.extend(build.supply);
             steps.extend(build.recipes);
             for (_, _, action) in build.charges {
                 needs_power.push(action.id);
@@ -2838,6 +3337,7 @@ fn cell_steps(
         }
         let mut bundles: BTreeMap<ItemId, Bundle> = BTreeMap::new();
         let mut links: Vec<Step> = Vec::new();
+        let mut supply: Vec<Step> = Vec::new();
         let mut recipes: Vec<Step> = Vec::new();
         for build in builds {
             steps.extend(build.evacuations);
@@ -2852,6 +3352,7 @@ fn cell_steps(
                 bundle.charges.push(*action);
             }
             links.extend(build.links);
+            supply.extend(build.supply);
             recipes.extend(build.recipes);
         }
         for (item, bundle, bot) in deal_bundles(&ctx.state, bundles, &builders) {
@@ -2888,6 +3389,10 @@ fn cell_steps(
                 steps: block,
             });
         }
+        // The runs stay on the chain actor, as the supply link always was:
+        // a run is one bot's job (`connect` bands it across the roster
+        // itself when it is long enough to be worth a second walk).
+        steps.extend(supply);
         steps.extend(links);
         steps.extend(recipes);
     }
@@ -3001,8 +3506,8 @@ fn cell_steps(
     Ok((steps, needs_power))
 }
 
-/// How much coal one cell's product machine burns over a whole charge, and
-/// zero when it burns none.
+/// How much coal one cell's product machine burns over `ticks`, and zero
+/// when it burns none.
 ///
 /// **A burner is a machine the network does not power.** That is the test —
 /// `consumer_draw_kw` answering `None` for a machine this crate is about to
@@ -3010,11 +3515,26 @@ fn cell_steps(
 /// machine is something else is priced by the same rule. `fuel_for_duration`
 /// and [`COAL_BURN_TICKS`] are `produce`'s, so a furnace in a stage-2 cell
 /// and a furnace in a stage-1 cell are fuelled off one arithmetic.
-fn furnace_charge_coal(state: &PlanState, spec: &AssemblySpec) -> u32 {
+///
+/// Capped at one fuel slot, as [`boiler_coal`] is: a belted furnace cell's
+/// horizon is its source's ore, which is far more than a slot burns, and a
+/// hand can fill a slot once. What a longer horizon needs is the coal belted
+/// in, which is `method::sustain`'s shape and not a bigger hand charge.
+fn furnace_charge_coal(state: &PlanState, spec: &AssemblySpec, ticks: Ticks) -> u32 {
     if state.consumer_draw_kw(spec.machine).is_some() {
         return 0;
     }
-    fuel_for_duration(CELL_CHARGE_TICKS, COAL_BURN_TICKS)
+    let cap = state
+        .slot_capacity(InventorySlot::Fuel, "coal")
+        .unwrap_or(COAL_STACK);
+    fuel_for_duration(ticks, COAL_BURN_TICKS).min(cap)
+}
+
+/// What feeds one cell: its belted inputs' sources, and how much they will
+/// deliver.
+struct CellFeed<'a> {
+    supply: &'a CellSupply,
+    horizon: SupplyHorizon,
 }
 
 /// One cell's steps, built before any is emitted -- see `cell_steps`.
@@ -3025,9 +3545,45 @@ struct CellBuild {
     places: Vec<(ItemId, Step)>,
     /// Evacuation-before-placement edges.
     links: Vec<Step>,
+    /// The belt runs into the cell's mouths, arms and wires included.
+    supply: Vec<Step>,
     recipes: Vec<Step>,
     /// Each chest charge, with the item and count the charger has to hold.
     charges: Vec<(ItemId, u32, Box<Action>)>,
+}
+
+/// The action a cell's ledger rides on -- see the ledger note in
+/// [`cell_steps`] for the order of preference.
+fn ledger_carrier<'a>(build: &'a mut CellBuild, cell: &Cell) -> Option<&'a mut Action> {
+    let product = cell.at(Role::Product).map(|part| part.position.clone());
+    let is_product_recipe = |step: &Step| {
+        matches!(step, Step::Act(action)
+            if matches!(&action.kind, ActionKind::SetRecipe { pos, .. }
+                if product.as_ref().is_some_and(|at| Pos::from(pos) == Pos::from(at))))
+    };
+    let is_arm_place = |step: &Step| {
+        matches!(step, Step::Act(action)
+            if matches!(&action.kind, ActionKind::Place { entity } if entity.name == INSERTER))
+    };
+    let pick =
+        |steps: &'a mut Vec<Step>, wanted: &dyn Fn(&Step) -> bool| -> Option<&'a mut Action> {
+            let index = steps.iter().rposition(wanted)?;
+            match steps.get_mut(index)? {
+                Step::Act(action) => Some(action.as_mut()),
+                _ => None,
+            }
+        };
+    if build.recipes.iter().any(is_product_recipe) {
+        return pick(&mut build.recipes, &is_product_recipe);
+    }
+    if build.supply.iter().any(is_arm_place) {
+        return pick(&mut build.supply, &is_arm_place);
+    }
+    let last = build.places.len().checked_sub(1)?;
+    match &mut build.places.get_mut(last)?.1 {
+        Step::Act(action) => Some(action.as_mut()),
+        _ => None,
+    }
 }
 
 /// Everything a cell needs of one item: the placements of it and the charges
@@ -3177,18 +3733,34 @@ const OFFTAKE_RADIUS: f64 = 3.0;
 /// Deterministic: `standing_cells` is in a fixed order and
 /// `entities_within` is sorted by `(x, y)`, so the first answer is the same
 /// answer on every run.
+#[derive(Clone, Debug, PartialEq)]
 pub struct SupplySource {
     /// The container the cell drops the item into. The **preferred** end of
     /// the run and the one siting is measured from.
     pub buffer: Position,
     /// The furnace that fills it -- the fallback end, and the reason the
     /// fallback exists is measured rather than hypothetical. See
-    /// [`supply_link_steps`].
+    /// [`belted_link_steps`].
     pub furnace: Position,
+    /// What this one furnace makes a minute, at the cell's own tempo
+    /// (`3600 / ticks_per_item`, 18 for a stone furnace on a plate).
+    pub per_minute: u32,
+    /// Plates left in the ore under the cell's drill, at the amounts the
+    /// world last reported -- [`crate::method::produce::cell_yield`] times
+    /// the recipe's yield per ore. The **ledger** a belted cell is bounded
+    /// by: when this is dug out the source stops, and so does the cell.
+    pub yield_left: u32,
 }
 
-fn standing_supply_source(state: &PlanState, item: &str) -> Option<SupplySource> {
-    let spec = cell_spec(state, item)?;
+/// Every standing stage-1 cell that drops `item` into a container, in the
+/// fixed order `standing_cells` gives them.
+pub(crate) fn standing_supply_sources(state: &PlanState, item: &str) -> Vec<SupplySource> {
+    let Some(spec) = cell_spec(state, item) else {
+        return Vec::new();
+    };
+    let per_minute = u32::try_from(3600 / u64::from(spec.ticks_per_item.max(1))).unwrap_or(0);
+    let per_ore = output_per_craft(&spec.recipe, &spec.item).max(1);
+    let mut out = Vec::new();
     for cell in crate::method::produce::standing_cells(state, &spec) {
         for arm in state.entities_within(&cell.furnace, OFFTAKE_RADIUS) {
             if state.pickup_position(&arm).is_none() {
@@ -3209,13 +3781,163 @@ fn standing_supply_source(state: &PlanState, item: &str) -> Option<SupplySource>
             if !state.delivers_into(&arm.position, &sink.position) {
                 continue;
             }
-            return Some(SupplySource {
+            let ore =
+                crate::method::produce::cell_yield(state, &cell.drill, cell.facing, &spec.ore);
+            out.push(SupplySource {
                 buffer: sink.position,
-                furnace: cell.furnace,
+                furnace: cell.furnace.clone(),
+                per_minute,
+                yield_left: ore.saturating_mul(per_ore),
             });
+            break;
         }
     }
-    None
+    out
+}
+
+/// One cell's belted inputs, each with the source it is belted from, in
+/// [`AssemblySpec::belted_inputs`] order -- which is also the order of the
+/// cell's [`Mouth`]s.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CellSupply {
+    pub inputs: Vec<(BeltedInput, SupplySource)>,
+}
+
+/// A source for every belted input of every one of `count` cells, or the
+/// refusal that names the input nothing delivers.
+///
+/// # The rate is the ledger, and it is spent as it is assigned
+///
+/// A source is one furnace: [`SupplySource::per_minute`] of its plate. Each
+/// cell's demand for an input ([`AssemblySpec::demand_per_minute`]) is taken
+/// out of the first source with that much left, in the fixed order the
+/// sources come in, so two cells asking for more than one furnace makes are
+/// belted from two furnaces -- and a third, with every source spoken for,
+/// is refused by name rather than belted from a chest that cannot keep up.
+/// Deterministic: the sources are in `standing_cells` order and the walk is
+/// first-fit.
+///
+/// **No fallback to a hand charge.** A belted input with no source is the
+/// owner's "no chests" refused rather than worked around; the message says
+/// what to compose.
+pub(crate) fn assign_sources(
+    state: &PlanState,
+    spec: &AssemblySpec,
+    count: u32,
+    cell_per_minute: u32,
+) -> Result<Vec<CellSupply>, PlannerError> {
+    let inputs = spec.belted_inputs();
+    // Every source of every belted item, with the rate still unspoken for.
+    let mut pool: BTreeMap<ItemId, Vec<(SupplySource, u32)>> = BTreeMap::new();
+    for input in &inputs {
+        pool.entry(input.item.clone()).or_insert_with(|| {
+            standing_supply_sources(state, &input.item)
+                .into_iter()
+                .map(|source| {
+                    let left = source.per_minute;
+                    (source, left)
+                })
+                .collect()
+        });
+    }
+    let mut out = Vec::with_capacity(usize::try_from(count).unwrap_or(0));
+    for _ in 0..count {
+        let mut assigned = Vec::with_capacity(inputs.len());
+        for input in &inputs {
+            let demand = spec.demand_per_minute(input, cell_per_minute);
+            let sources = pool.entry(input.item.clone()).or_default();
+            let Some((source, left)) = sources.iter_mut().find(|(_, left)| *left >= demand) else {
+                let standing = if sources.is_empty() {
+                    "no stage-1 cell drops it into a container anywhere".to_string()
+                } else {
+                    sources
+                        .iter()
+                        .map(|(source, left)| {
+                            format!(
+                                "the chest at {} makes {}/min with {}/min not yet spoken for",
+                                source.buffer, source.per_minute, left
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                };
+                return Err(PlannerError::AssemblyNoStandingSource {
+                    item: spec.item.clone(),
+                    ingredient: input.item.clone(),
+                    per_minute: demand,
+                    standing,
+                });
+            };
+            *left = left.saturating_sub(demand);
+            assigned.push((input.clone(), source.clone()));
+        }
+        out.push(CellSupply { inputs: assigned });
+    }
+    Ok(out)
+}
+
+/// Does every belted input of a cell for `item` have a standing source for
+/// one cell's worth?
+///
+/// The question `crate::method::have::Researched` asks before it emits a
+/// `Goal::Producing` for a pack: a cell that would refuse for want of a
+/// source is not asked for, and the packs are hand-crafted as they were
+/// before cells existed. `false` for an item no cell makes.
+pub fn sources_stand_for(state: &PlanState, item: &str) -> bool {
+    let Some(spec) = assembly_spec(state, item) else {
+        return false;
+    };
+    assign_sources(state, &spec, 1, spec.tempo_per_minute()).is_ok()
+}
+
+/// How much a cell will make before something it depends on runs out.
+///
+/// **This is what replaced `CELL_CHARGE_TICKS` for a belted cell.** A hand
+/// charge was a duration standing in for a supply -- 9,000 ticks of
+/// ingredients, fifteen packs, then nothing. A belted cell's supply is its
+/// sources, and what bounds a source is the ore under its drill
+/// ([`SupplySource::yield_left`]): the products are the fewest any input's
+/// plates will make (`yield_left / per_product`), and the ticks are that many
+/// of the cell's own cycles. Where a chest remains (green's gears and
+/// inserters) the hand charge still bounds the cell, and the horizon is the
+/// smaller of the two -- a belt cannot outrun a chest nobody refills.
+///
+/// Three things are sized off it, and all three used to read the constant:
+/// the ledger `cellstock` draws against (`Effect::BufferGain`), the boiler
+/// top-up ([`fuel_for`]) and a burner product machine's coal
+/// ([`furnace_charge_coal`]) -- the last two capped at one fuel slot, which
+/// is all a hand can fill.
+///
+/// At least one product: an ore reading of zero under a standing drill is an
+/// exhausted patch, and a cell sized for nothing would be built and never
+/// fuelled; one is the honest floor, not a guess at the patch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SupplyHorizon {
+    pub products: u32,
+}
+
+impl SupplyHorizon {
+    /// The cell's cycles for its products.
+    pub fn ticks(self, spec: &AssemblySpec) -> Ticks {
+        self.products.saturating_mul(spec.ticks_per_item)
+    }
+}
+
+fn horizon_for(spec: &AssemblySpec, supply: &CellSupply) -> SupplyHorizon {
+    let belted = supply
+        .inputs
+        .iter()
+        .map(|(input, source)| source.yield_left / input.per_product.max(1))
+        .min();
+    let charged = spec.feeds() > 0 || spec.has_supply_chest();
+    let products = match (belted, charged) {
+        (Some(belted), true) => belted.min(spec.charge_products()),
+        (Some(belted), false) => belted,
+        (None, _) => spec.charge_products(),
+    };
+    SupplyHorizon {
+        products: products.max(1),
+    }
 }
 
 /// Is `name` a container, by the prototype rather than by the entity?
@@ -3247,101 +3969,308 @@ fn already_filled_by_machine(state: &PlanState, at: &Position) -> bool {
         .any(|arm| state.pickup_position(&arm).is_some() && state.delivers_into(&arm.position, at))
 }
 
-/// Belt runs from a standing stage-1 cell's product container to each new
-/// cell's supply chest.
+/// Every [`INSERTER`] a belt run places, in emission order -- the load arm
+/// first and the unload arm last, whichever bot lays the belts between.
+fn inserters_placed(run: &[Step]) -> Vec<FactorioEntity> {
+    let mut out = Vec::new();
+    for step in run {
+        match step {
+            Step::Act(action) => {
+                if let ActionKind::Place { entity } = &action.kind
+                    && entity.name == INSERTER
+                {
+                    out.push((**entity).clone());
+                }
+            }
+            Step::Owned { steps, .. } => out.extend(inserters_placed(steps)),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Every belt-shaped thing a run places, by tile.
+fn belts_placed(run: &[Step]) -> BTreeSet<Pos> {
+    let mut out = BTreeSet::new();
+    for step in run {
+        match step {
+            Step::Act(action) => {
+                if let ActionKind::Place { entity } = &action.kind
+                    && is_belt(&entity.name)
+                {
+                    out.insert(Pos::from(&entity.position));
+                }
+            }
+            Step::Owned { steps, .. } => out.extend(belts_placed(steps)),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Does an entity of this name carry items along the ground?
+fn is_belt(name: &str) -> bool {
+    name.ends_with("transport-belt")
+        || name.ends_with("underground-belt")
+        || name.ends_with("splitter")
+}
+
+/// The tile a belt at `at` pours into, read off the belt standing there.
+fn belt_forward(state: &PlanState, at: &Position) -> Option<(FactorioEntity, Position)> {
+    let belt = state
+        .entity_at(at)
+        .filter(|e| is_belt(&e.name) && Pos::from(&e.position) == Pos::from(at))?;
+    let facing = Direction::from_u8(belt.direction)?;
+    let step = Position::new(0., -1.).turn(facing)?;
+    let forward = at.add(&step);
+    Some((belt, forward))
+}
+
+/// One run laid into a mouth.
+struct LaidLink {
+    /// The unload arm at the mouth.
+    unload_arm: Position,
+    /// The machine it drops into.
+    into: Position,
+}
+
+/// The tiles one ring outside a part's footprint.
+fn ring_around(state: &PlanState, name: &str, at: &Position) -> Vec<Position> {
+    let Some(area) = state.collision_area(name, at) else {
+        return Vec::new();
+    };
+    const SLACK: f64 = 1. / 512.;
+    #[allow(clippy::cast_possible_truncation)]
+    let (x0, x1, y0, y1) = (
+        (area.left_top.x() + SLACK).floor() as i32,
+        (area.right_bottom.x() - SLACK).floor() as i32,
+        (area.left_top.y() + SLACK).floor() as i32,
+        (area.right_bottom.y() - SLACK).floor() as i32,
+    );
+    let mut out = Vec::new();
+    for y in (y0 - 1)..=(y1 + 1) {
+        for x in (x0 - 1)..=(x1 + 1) {
+            if x < x0 || x > x1 || y < y0 || y > y1 {
+                out.push(Position::new(f64::from(x) + 0.5, f64::from(y) + 0.5));
+            }
+        }
+    }
+    out
+}
+
+/// Is this run's end its own, and nobody else's?
+///
+/// # The side-load risk, checked rather than assumed
+///
+/// A belt faces the way its items leave, and `route_belt` gives a run's last
+/// tile the direction it arrived with -- so a run ending beside another
+/// run's tile can face straight into it, and the plates ride off the end
+/// onto the other belt instead of stopping under the arm. Nothing in
+/// `graph::route` or `method::connect` models a run's last tile against a
+/// foreign belt (neither contains the word "side-load" outside the
+/// underground-entry rule), so it is checked here, at the one caller that
+/// lays two runs into one machine column, and in both directions:
+///
+/// * **out**: the tile the last belt pours into holds no belt. The tile is
+///   then closed to every later run of this cell (`laid_forward`), so a
+///   later route cannot lay a belt in front of an earlier run's end;
+/// * **in**: no standing belt outside this run faces into any tile of it.
+///
+/// Either is refused by name. Both hold on the fixture in
+/// `tests::two_runs_into_one_cell_do_not_pour_into_each_other`, which lays
+/// iron and copper into a red cell and reads every terminal off the overlay.
+///
+/// Returns the tile the run pours into, for the reservation.
+fn run_end_is_isolated(
+    state: &PlanState,
+    run: &[Step],
+    unload: &FactorioEntity,
+    from: &FactorioEntity,
+    item: &str,
+) -> Result<Position, String> {
+    let terminal = state
+        .pickup_position(unload)
+        .ok_or_else(|| format!("the unload arm at {} has no pickup tile", unload.position))?;
+    let (last, forward) = belt_forward(state, &terminal)
+        .ok_or_else(|| format!("no belt stands at {terminal}, where the unload arm picks up"))?;
+    if let Some(next) = state
+        .entity_at(&forward)
+        .filter(|e| is_belt(&e.name) && Pos::from(&e.position) == Pos::from(&forward))
+    {
+        return Err(format!(
+            "the run's last {} at {terminal} faces a {} at {forward}: {item} would ride off the \
+             end onto it instead of stopping under the arm",
+            last.name, next.name
+        ));
+    }
+    let own = belts_placed(run);
+    for tile in &own {
+        let at = Position::new(f64::from(tile.0) + 0.5, f64::from(tile.1) + 0.5);
+        for (dx, dy) in [(0., -1.), (1., 0.), (0., 1.), (-1., 0.)] {
+            let neighbour = Position::new(at.x() + dx, at.y() + dy);
+            if own.contains(&Pos::from(&neighbour)) {
+                continue;
+            }
+            if let Some((foreign, pours_into)) = belt_forward(state, &neighbour)
+                && Pos::from(&pours_into) == *tile
+                // What the belt carries decides, not that it stands: a chain
+                // nothing loads carries nothing and cannot pour anything
+                // (a fragment of the first plan's run, on a replan whose
+                // bands were cut), and a chain loaded off THIS run's source
+                // carries this run's own item. Only a chain loaded from
+                // somewhere else is a side-load.
+                && chain_loader(state, &neighbour)
+                    .is_some_and(|loader| !state.delivers_into(&from.position, &loader.position))
+            {
+                return Err(format!(
+                    "a standing {} at {neighbour} faces into this run at {at}: whatever it \
+                     carries would side-load onto the {item}",
+                    foreign.name
+                ));
+            }
+        }
+    }
+    Ok(forward)
+}
+
+/// What loads the belt chain ending at `tail`: the first arm found, walking
+/// the chain backwards tile by tile through belts that pour into one
+/// another, whose drop lands on a tile of it -- or `None` for a chain
+/// nothing loads.
+///
+/// A chain is followed only while each tile has exactly one feeder, so a
+/// junction stops it (and answers `None`, which the caller reads as inert:
+/// a chain this walk cannot attribute is not refused on a guess). Bounded at
+/// one `connect` window's worth of tiles.
+fn chain_loader(state: &PlanState, tail: &Position) -> Option<FactorioEntity> {
+    let mut at = tail.clone();
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let bound = crate::enclosure::SEARCH_RADIUS as usize * 4;
+    for _ in 0..bound {
+        if let Some(loader) = state.entities_within(&at, 1.5).into_iter().find(|arm| {
+            state.pickup_position(arm).is_some()
+                && state
+                    .delivery_position(arm)
+                    .is_some_and(|drop| Pos::from(&drop) == Pos::from(&at))
+        }) {
+            return Some(loader);
+        }
+        let feeders: Vec<Position> = [(0., -1.), (1., 0.), (0., 1.), (-1., 0.)]
+            .into_iter()
+            .map(|(dx, dy)| Position::new(at.x() + dx, at.y() + dy))
+            .filter(|n| {
+                belt_forward(state, n).is_some_and(|(_, into)| Pos::from(&into) == Pos::from(&at))
+            })
+            .collect();
+        let [only] = feeders.as_slice() else {
+            return None;
+        };
+        at = only.clone();
+    }
+    None
+}
+
+/// Belt runs from each belted input's source straight into the machine that
+/// eats it.
 ///
 /// # The shape, and why this one
 ///
-/// **Container to container**, not furnace to chest and not machine to
-/// machine, and the geometry decides it rather than taste:
+/// **Container to machine**, and the geometry decides it rather than taste:
 ///
-/// * a stage-1 cell's furnace has a *two-by-two* perimeter of eight tiles and
-///   already spends four of them -- the drill's drop tile, the coal arm, the
-///   offtake arm, and the belt that fuels the offtake arm -- so taking two
-///   more for a load arm and its belt is the tightest end available, and the
-///   furnace's output slot is also the thing whose backing up
-///   `SustainNoOfftake` exists to prevent. The container is downstream of
-///   that, so a run out of it cannot throttle the furnace;
-/// * the container is a **buffer**, and a buffer is the whole reason the two
-///   ends may run at different rates. A furnace makes one plate every 192
-///   ticks and an assembling machine eats them in bursts; wire them mouth to
-///   mouth and the belt is the only slack there is;
-/// * and it is 1x1 at both ends, so [`crate::method::connect`]'s perimeter
-///   search has a four-tile budget it can state, which is exactly the budget
-///   `container_sides` reserves.
+/// * the source end is a stage-1 cell's plate chest, because that cell's
+///   furnace has a *two-by-two* perimeter of eight tiles and already spends
+///   four of them, and because the chest is a **buffer** -- the whole reason
+///   the two ends may run at different rates. The furnace is the fallback
+///   end, and the reason the fallback exists is measured: after `sustain`
+///   began keeping the chest an exit, the run out of it once needed an
+///   underground pair the force could not craft, while the furnace end
+///   routed on the surface. Each end is routed on a fork first and the one
+///   needing fewer undergrounds is taken, the chest first on a tie;
+/// * the sink end is the machine's own mouth -- see [`Mouth`]. A 3x3 has
+///   twelve perimeter tiles and `connect` would take the first free one
+///   (north, east, south, west), which for the intermediate machine is a
+///   tile the cell's pole does not light and for the product machine is
+///   the beacon flank. So every tile of the cell that is not this mouth is
+///   handed to `connect_steps_reserving` as closed: the ring round both
+///   machines, the beacon flank, the lane, every other mouth, and the tile
+///   in front of every run already laid. The run then ends on exactly the
+///   pair the layout kept for it, and the pole lights the arm.
 ///
-/// The run itself is `connect_steps_with`, unchanged: an arm on the source
-/// chest picking up from it, a belt, an arm on the supply chest dropping into
-/// it. The [`INSERTER`] is the electric one for the same reason the rest of
+/// The [`INSERTER`] is the electric one for the same reason the rest of
 /// this cell's arms are -- the cell stands on a network by construction, and
 /// a burner arm here would need a coal supply of its own that nothing feeds.
+/// **Every arm on a run needs a wire**, and the load arm is the one that
+/// does not have one already: it stands on a stage-1 cell that is entirely
+/// burner, sixteen tiles from the assembly cell's pole on seed 31337. The
+/// wire is run to it by the one function that does that, and `Ok(None)` --
+/// supply exists and no run of poles reaches -- is a refusal here and not a
+/// silent omission: an unpowered inserter places 100%, passes every geometry
+/// check, and moves nothing.
 ///
 /// # What it does NOT do
 ///
-/// It does not remove the hand charge. A belt that has to fill is a belt that
-/// delivers nothing for its first several hundred ticks, and a machine whose
-/// input is empty when the plan's last action settles reads as a dead cell to
-/// every witness this crate has. The charge is now an **ignition** charge, the
-/// same role [`crate::method::sustain`]'s one coal per burner plays, and the
-/// continuity claim rests on the belt.
-/// Where every [`INSERTER`] a belt run places stands, in emission order.
-fn inserters_placed(run: &[Step]) -> Vec<Position> {
-    run.iter()
-        .filter_map(|step| match step {
-            Step::Act(action) => match &action.kind {
-                crate::action::ActionKind::Place { entity } if entity.name == INSERTER => {
-                    Some(entity.position.clone())
-                }
-                _ => None,
-            },
-            _ => None,
-        })
-        .collect()
-}
-
-fn supply_link_steps(
+/// It lays no ignition charge. A belt that has to fill delivers nothing for
+/// its first several hundred ticks, and a witness whose window is shorter
+/// than a run's fill time will read a dead cell; a 30-tile yellow belt fills
+/// in about 1,000 ticks against the 2,400-tick witness, so the charge is not
+/// kept on speculation. Measure before adding one back.
+fn belted_link_steps(
     ctx: &mut ExpansionCtx,
-    spec: &AssemblySpec,
-    cells: &[Cell],
-    source: &SupplySource,
-) -> Result<Vec<Step>, PlannerError> {
+    _spec: &AssemblySpec,
+    cell: &Cell,
+    supply: &CellSupply,
+    laid_forward: &mut Vec<Position>,
+) -> Result<(Vec<Step>, Vec<LaidLink>), PlannerError> {
     let mut steps = Vec::new();
-    for cell in cells {
-        let Some(part) = cell.at(Role::SupplyChest) else {
-            continue;
-        };
-        if already_filled_by_machine(&ctx.state, &part.position) {
+    let mut laid = Vec::new();
+    // What this cell keeps for itself, closed to every run: the ring round
+    // both machines, the beacon flank, the lane, and every mouth -- each run
+    // then opens exactly its own.
+    let mut kept: Vec<Position> = Vec::new();
+    for role in [Role::Intermediate, Role::Product] {
+        if let Some(part) = cell.at(role) {
+            kept.extend(ring_around(&ctx.state, part.name, &part.position));
+        }
+    }
+    kept.extend(beacon_flank(&ctx.state, &cell.origin, cell.facing).unwrap_or_default());
+    kept.extend(cell.lane.iter().cloned());
+    for mouth in &cell.mouths {
+        kept.push(mouth.arm.clone());
+        kept.push(mouth.belt.clone());
+    }
+
+    for (mouth, (input, source)) in cell.mouths.iter().zip(&supply.inputs) {
+        if mouth_is_linked(&ctx.state, cell, mouth) {
             continue;
         }
-        let Some(sink) = ctx.state.entity_at(&part.position) else {
+        let Some(machine) = cell.at(mouth.into) else {
             continue;
         };
-        // `connect_steps_with` returns every refusal **before** it emits an
-        // action or adds an entity to the overlay -- that is the promise
-        // `ConnectRefusal` makes and the reason a refused end can simply be
-        // followed by the next one here.
+        let Some(sink) = ctx.state.entity_at(&machine.position) else {
+            continue;
+        };
+        let reserved: Vec<Position> = kept
+            .iter()
+            .filter(|tile| {
+                Pos::from(*tile) != Pos::from(&mouth.arm)
+                    && Pos::from(*tile) != Pos::from(&mouth.belt)
+            })
+            .cloned()
+            .chain(laid_forward.iter().cloned())
+            .collect();
+        let item = &input.item;
         let mut why: Vec<String> = Vec::new();
         let mut linked = false;
-        // # The end whose run stays on the SURFACE goes first
-        //
-        // The plate chest is tried before the furnace, and the first end
-        // that routes wins -- which, measured offline on seed 31337 after
-        // `method::sustain` began keeping the chest an exit, was a run that
-        // left the chest under two of the cell's own coal belts with an
-        // underground pair. A pair needs `logistics`, which needs the red
-        // packs this very cell is being built to make: the plan researched
-        // logistics off a hand charge and finished the link 14,000 ticks
-        // after the packs, at 972 actions against 881 with the link laid on
-        // the surface from the furnace. So each end is first routed on a
-        // fork and the ends are taken in order of how many undergrounds
-        // their run needs, the chest first on a tie; a refused end sorts
-        // last and is still tried for its message.
+        // The end whose run stays on the surface goes first; a refused end
+        // sorts last and is still tried for its message.
         let mut ends: Vec<(&Position, usize)> = [&source.buffer, &source.furnace]
             .into_iter()
             .map(|at| {
                 let cost = ctx.state.entity_at(at).map_or(usize::MAX, |from| {
                     let mut trial = ExpansionCtx::new(ctx.state.fork(), ctx.chain_actor);
-                    match connect_steps_with(&mut trial, &from, &sink, &spec.supplied.0, INSERTER) {
+                    match connect_steps_reserving(
+                        &mut trial, &from, &sink, item, INSERTER, &reserved,
+                    ) {
                         Ok(run) => run
                             .iter()
                             .filter(|step| {
@@ -3361,37 +4290,35 @@ fn supply_link_steps(
             let Some(from) = ctx.state.entity_at(at) else {
                 continue;
             };
-            match connect_steps_with(ctx, &from, &sink, &spec.supplied.0, INSERTER) {
+            match connect_steps_reserving(ctx, &from, &sink, item, INSERTER, &reserved) {
                 Ok(run) => {
-                    // EVERY ARM ON THIS RUN NEEDS A WIRE, and the load arm is
-                    // the one that does not have one already.
-                    //
-                    // The unload arm stands beside the supply chest, inside
-                    // the cell's own supply area, so `ensure_powered`'s
-                    // headroom test holds and it emits nothing. The **load**
-                    // arm stands on a stage-1 cell that is entirely burner --
-                    // no pole, no network, deliberately (see
-                    // `method::sustain`) -- and it is sixteen tiles from the
-                    // assembly cell's pole on seed 31337. `INSERTER` there is
-                    // not a choice: the belt carries plates, and a
-                    // `burner-inserter` that is not standing in the coal it
-                    // is moving has no fuel source at all -- it burns its
-                    // hand charge and stops, which is this project's
-                    // "a burner block works exactly where coal flows THROUGH
-                    // it" written out one arm at a time.
-                    //
-                    // So the wire is run to it, by the one function that
-                    // does that. `Ok(None)` -- supply exists and no run of
-                    // poles reaches -- is a refusal here and not a silent
-                    // omission, for the same reason the route itself is:
-                    // an unpowered inserter places 100%, passes every
-                    // geometry check, and moves nothing.
+                    // `connect_steps_reserving` has already added this run's
+                    // belts and arms to the plan overlay -- that is what
+                    // makes the next run route around this one -- so every
+                    // refusal from here on ends the expansion (which restores
+                    // the context) rather than falling through to the next
+                    // end with entities no step places.
+                    let arms = inserters_placed(&run);
+                    let Some(unload) = arms.last() else {
+                        return Err(PlannerError::AssemblyNoRouteForSupply {
+                            item: item.clone(),
+                            from: at.to_string(),
+                            to: machine.position.to_string(),
+                            why: "the run placed no unload arm".to_string(),
+                        });
+                    };
+                    let forward = run_end_is_isolated(&ctx.state, &run, unload, &from, item)
+                        .map_err(|why| PlannerError::AssemblyNoRouteForSupply {
+                            item: item.clone(),
+                            from: at.to_string(),
+                            to: machine.position.to_string(),
+                            why,
+                        })?;
                     let mut powered = Vec::new();
                     let mut claims: Vec<(Position, Condition)> = Vec::new();
-                    let mut unreachable: Option<String> = None;
-                    for at in inserters_placed(&run) {
+                    for arm in &arms {
                         let (Some(area), Some(kw)) = (
-                            ctx.state.collision_area(INSERTER, &at),
+                            ctx.state.collision_area(INSERTER, &arm.position),
                             ctx.state.consumer_draw_kw(INSERTER),
                         ) else {
                             continue;
@@ -3399,7 +4326,7 @@ fn supply_link_steps(
                         match crate::method::power::ensure_powered(
                             ctx,
                             INSERTER,
-                            &at,
+                            &arm.position,
                             &area,
                             kw,
                             ANCHOR_SEARCH_RADIUS,
@@ -3407,59 +4334,34 @@ fn supply_link_steps(
                         )? {
                             Some(powering) => {
                                 powered.extend(powering.steps);
-                                claims.push((at.clone(), powering.powered));
+                                claims.push((arm.position.clone(), powering.powered));
                             }
                             None => {
-                                unreachable = Some(format!(
-                                    "the load arm at {at} draws {kw:.0} kW and no run of poles \
-                                     this planner will build carries supply to it"
-                                ));
-                                break;
+                                return Err(PlannerError::AssemblyNoRouteForSupply {
+                                    item: item.clone(),
+                                    from: at.to_string(),
+                                    to: machine.position.to_string(),
+                                    why: format!(
+                                        "the arm at {} draws {kw:.0} kW and no run of poles \
+                                         this planner will build carries supply to it",
+                                        arm.position
+                                    ),
+                                });
                             }
                         }
                     }
-                    // NOT a fall-through to the next end. `connect_steps_with`
-                    // has already added this run's belts and arms to the plan
-                    // overlay -- that is what makes a second connection in one
-                    // expansion route around the first -- so abandoning it here
-                    // would leave the state holding entities no step places.
-                    // The route stands; it is the wire that does not.
-                    if let Some(reason) = unreachable {
-                        return Err(PlannerError::AssemblyNoRouteForSupply {
-                            item: spec.supplied.0.clone(),
-                            from: at.to_string(),
-                            to: part.position.to_string(),
-                            why: reason,
-                        });
-                    }
-                    // THE CLAIM RIDES ON THE PLACEMENT, and it has to: the
-                    // audit (`crate::powered::audit`) asks the finished
-                    // network whether some action states a
+                    // THE CLAIM RIDES ON THE PLACEMENT: `crate::powered::audit`
+                    // asks the finished network whether some action states a
                     // `Condition::Powered` about each electric consumer's
-                    // tile, and `connect_steps_with` states `AtPosition`,
-                    // `AreaFree` and `HasItem` and nothing else -- it had
-                    // never placed an electric thing before. Without this the
-                    // plan refuses `UnpoweredConsumer` naming the load arm
-                    // even with the poles standing in it, which is the audit
-                    // working correctly on a method that had not yet spoken.
+                    // tile, and `connect` states `AtPosition`, `AreaFree` and
+                    // `HasItem` and nothing else.
                     let mut run = run;
-                    for step in &mut run {
-                        let Step::Act(action) = step else {
-                            continue;
-                        };
-                        let ActionKind::Place { entity } = &action.kind else {
-                            continue;
-                        };
-                        if entity.name != INSERTER {
-                            continue;
-                        }
-                        if let Some((_, claim)) = claims
-                            .iter()
-                            .find(|(at, _)| Pos::from(at) == Pos::from(&entity.position))
-                        {
-                            action.pre.push(claim.clone());
-                        }
-                    }
+                    attach_claims(&mut run, &claims);
+                    laid_forward.push(forward);
+                    laid.push(LaidLink {
+                        unload_arm: unload.position.clone(),
+                        into: machine.position.clone(),
+                    });
                     steps.extend(powered);
                     steps.extend(run);
                     linked = true;
@@ -3470,14 +4372,56 @@ fn supply_link_steps(
         }
         if !linked {
             return Err(PlannerError::AssemblyNoRouteForSupply {
-                item: spec.supplied.0.clone(),
+                item: item.clone(),
                 from: source.buffer.to_string(),
-                to: part.position.to_string(),
+                to: machine.position.to_string(),
                 why: why.join("; "),
             });
         }
     }
-    Ok(steps)
+    Ok((steps, laid))
+}
+
+/// Every [`POLE`] placed in `steps`, bands and all.
+fn collect_poles(steps: &[Step], out: &mut Vec<Position>) {
+    for step in steps {
+        match step {
+            Step::Act(action) => {
+                if let ActionKind::Place { entity } = &action.kind
+                    && entity.name == POLE
+                {
+                    out.push(entity.position.clone());
+                }
+            }
+            Step::Owned { steps, .. } => collect_poles(steps, out),
+            _ => {}
+        }
+    }
+}
+
+/// Put each arm's `Powered` claim on its own `Place`, wherever in the run
+/// (flat or banded) that placement is.
+fn attach_claims(run: &mut [Step], claims: &[(Position, Condition)]) {
+    for step in run {
+        match step {
+            Step::Act(action) => {
+                let ActionKind::Place { entity } = &action.kind else {
+                    continue;
+                };
+                if entity.name != INSERTER {
+                    continue;
+                }
+                if let Some((_, claim)) = claims
+                    .iter()
+                    .find(|(at, _)| Pos::from(at) == Pos::from(&entity.position))
+                {
+                    action.pre.push(claim.clone());
+                }
+            }
+            Step::Owned { steps, .. } => attach_claims(steps, claims),
+            _ => {}
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3555,8 +4499,15 @@ impl Method for BuildAssemblyCell {
             return Ok(Vec::new());
         }
 
-        // WHERE THE CELL IS SITED FROM, and the one thing the supply link
-        // changes about the rest of this method.
+        // THE SOURCES, before anything is sited: every belted input of every
+        // cell to build has to be delivered by a standing stage-1 cell with
+        // rate to spare, or the goal is refused by name here and nothing is
+        // placed. See `assign_sources`.
+        // Each cell to build carries its share of the rate asked for.
+        let cell_per_minute = per_minute.div_ceil(needed.max(1));
+        let supplies = assign_sources(&ctx.state, &spec, build, cell_per_minute)?;
+
+        // WHERE THE CELL IS SITED FROM.
         //
         // A cell is sited from an anchor, and the anchor search starts from
         // here. Started from the bot, a cell lands wherever the roster
@@ -3566,17 +4517,25 @@ impl Method for BuildAssemblyCell {
         // would make the link refuse for a reason that is about the roster's
         // position rather than about the ground.
         //
-        // So when such a source stands, it is what the siting starts from.
-        // Nothing else about the search changes: `supply_anchor` still
-        // adopts an existing network in preference to building a plant, and
-        // still refuses by name when there is no room. In a world with no
-        // stage-1 cell for the supplied item -- which is every baseline --
-        // `supply_source` is `None` and this is the bot's position exactly as
-        // before, so no plan that does not have a source to link to moves.
-        let supply_source = standing_supply_source(&ctx.state, &spec.supplied.0);
-        let from = supply_source
-            .as_ref()
-            .map(|source| source.buffer.clone())
+        // So the siting starts from the sources: the **centroid** of the
+        // first cell's source chests, because a run is planned in a window
+        // centred on its source and a red cell has two -- iron and copper,
+        // on seed 31337 some forty tiles apart -- so a cell sited beside one
+        // of them is outside the other's window. Nothing else about the
+        // search changes: `supply_anchor` still adopts an existing network
+        // in preference to building a plant, and still refuses by name when
+        // there is no room. A cell with no belted input (none in vanilla)
+        // is sited from the bot, exactly as before.
+        let from = supplies
+            .first()
+            .filter(|supply| !supply.inputs.is_empty())
+            .map(|supply| {
+                let n = supply.inputs.len().to_f64().unwrap_or(1.);
+                let (x, y) = supply.inputs.iter().fold((0., 0.), |(x, y), (_, source)| {
+                    (x + source.buffer.x(), y + source.buffer.y())
+                });
+                Position::new((x / n).floor() + 0.5, (y / n).floor() + 0.5)
+            })
             .or_else(|| ctx.state.bot(ctx.chain_actor).map(|b| b.position.clone()))
             .unwrap_or_default();
         // Somewhere with the capacity *left* to run a whole cell -- a network
@@ -3599,21 +4558,136 @@ impl Method for BuildAssemblyCell {
         // *from* the anchor, so the anchor is an input to siting rather than
         // somewhere a run has to reach. `supply_anchor` is the half both share.
         let want_kw = cell_demand_kw(&ctx.state, &spec) * f64::from(build);
-        let (anchor, plant_steps_taken, power_links) =
+        let (anchor, mut plant_steps_taken, mut power_links) =
             supply_anchor(ctx, &from, ANCHOR_SEARCH_RADIUS, want_kw)?;
-        let cells = plan_cells(&ctx.state, &anchor, &spec, build)?;
-        let (coal, boilers) = fuel_for(&ctx.state, &anchor, &cells, &spec);
+        // THE POWER COMES TO THE SOURCES, not the cell to the power.
+        //
+        // A cell is sited within `CELL_SEARCH_RADIUS` of its anchor, and a
+        // run into it is planned in one `enclosure::window` centred on its
+        // source -- so every source chest has to be within the window's
+        // half-side, less the siting ring, of the anchor, or the run refuses
+        // "further apart than one search window reaches". The plant stands
+        // at the shore and the ore does not: on seed 31337 the iron chest is
+        // 41 tiles from where the plant's pole put the cell (measured
+        // 2026-09-09, `a cell already makes iron-plate at [-5.5,-29.5] and
+        // nothing can carry it to ... [35.5,-27.5]`). So when the anchor is
+        // too far from any source, a wire of poles is run from the network
+        // to the sources' centroid -- `ensure_powered`, the same function
+        // that wires each run's load arm -- and the cell is sited off the
+        // last pole of that wire. A plan whose anchor already sits among
+        // its sources runs no wire and is byte-identical.
+        //
+        // **A cell already standing keeps its anchor.** Its site is fixed,
+        // so no wire is run for it: `complete_cell` looks round the anchor,
+        // and moving the anchor to the sources would walk past the parts
+        // the replan is there to finish.
+        let recovered = complete_cell(
+            &ctx.state,
+            &anchor,
+            &spec,
+            &cell_machines(&ctx.state, &spec)
+                .iter()
+                .map(Pos::from)
+                .collect(),
+        )
+        .is_some();
+        let anchor = if !recovered
+            && supplies.first().is_some_and(|supply| {
+                supply.inputs.iter().any(|(_, source)| {
+                    let reach = crate::enclosure::SEARCH_RADIUS - f64::from(CELL_SEARCH_RADIUS);
+                    (source.buffer.x() - anchor.x()).abs() > reach
+                        || (source.buffer.y() - anchor.y()).abs() > reach
+                })
+            }) {
+            // Never AT a chest: a wire aimed at the one source of a
+            // one-input cell put its poles on the chest's three free sides
+            // and the run out of it refused with all four named. The
+            // target is stepped away from any chest it would land beside,
+            // towards the network the wire comes from.
+            let mut target = from.clone();
+            for (_, source) in supplies.iter().flat_map(|supply| supply.inputs.iter()) {
+                let chest = &source.buffer;
+                if (target.x() - chest.x()).abs() < 4. && (target.y() - chest.y()).abs() < 4. {
+                    let (dx, dy) = (anchor.x() - chest.x(), anchor.y() - chest.y());
+                    let step = if dx.abs() >= dy.abs() {
+                        Position::new(6. * dx.signum(), 0.)
+                    } else {
+                        Position::new(0., 6. * dy.signum())
+                    };
+                    target = chest.add(&step);
+                }
+            }
+            let from = target;
+            let Some(area) = ctx.state.collision_area(spec.machine, &from) else {
+                return Err(PlannerError::NoRoomForCellNearPower {
+                    item: spec.item.clone(),
+                    radius: CELL_SEARCH_RADIUS,
+                });
+            };
+            match crate::method::power::ensure_powered(
+                ctx,
+                spec.machine,
+                &from,
+                &area,
+                want_kw,
+                ANCHOR_SEARCH_RADIUS,
+                &[],
+            )? {
+                Some(powering) => {
+                    // The wire's last pole: the one nearest the sources'
+                    // centroid, which is what the cell is then sited off.
+                    let mut poles: Vec<Position> = Vec::new();
+                    collect_poles(&powering.steps, &mut poles);
+                    let last = poles.into_iter().min_by(|a, b| {
+                        calculate_distance(a, &from)
+                            .total_cmp(&calculate_distance(b, &from))
+                            .then(a.x.total_cmp(&b.x))
+                            .then(a.y.total_cmp(&b.y))
+                    });
+                    plant_steps_taken.extend(powering.steps);
+                    power_links.extend(powering.ids);
+                    last.unwrap_or(anchor)
+                }
+                None => {
+                    return Err(PlannerError::NoRoomForCellNearPower {
+                        item: spec.item.clone(),
+                        radius: CELL_SEARCH_RADIUS,
+                    });
+                }
+            }
+        } else {
+            anchor
+        };
+        let near: Vec<Vec<Position>> = supplies
+            .iter()
+            .map(|supply| {
+                supply
+                    .inputs
+                    .iter()
+                    .map(|(_, source)| source.buffer.clone())
+                    .collect()
+            })
+            .collect();
+        let cells = plan_cells_near(&ctx.state, &anchor, &spec, build, &near)?;
+        // How long the cells run on what their sources will deliver -- the
+        // horizon every hand-fed quantity is sized off. See `SupplyHorizon`.
+        let feeds: Vec<CellFeed<'_>> = supplies
+            .iter()
+            .map(|supply| CellFeed {
+                supply,
+                horizon: horizon_for(&spec, supply),
+            })
+            .collect();
+        let horizon_ticks = feeds
+            .iter()
+            .map(|feed| feed.horizon.ticks(&spec))
+            .min()
+            .unwrap_or(CELL_CHARGE_TICKS);
+        let (coal, boilers) = fuel_for(&ctx.state, &anchor, &cells, &spec, horizon_ticks);
         let roster = self.roster(ctx.chain_actor);
-        let (built, needs_power) = cell_steps(ctx, &spec, &cells, coal, &boilers, &roster)?;
+        let (built, needs_power) = cell_steps(ctx, &spec, &cells, coal, &boilers, &roster, &feeds)?;
         let mut steps = plant_steps_taken;
         steps.extend(built);
-        // The supply link, after the cells stand: `connect_steps_with` reads
-        // the supply chest out of `ctx.state`, and `cell_steps` is what puts
-        // it there.
-        if let Some(source) = &supply_source {
-            let link = supply_link_steps(ctx, &spec, &cells, source)?;
-            steps.extend(link);
-        }
         // Every id, not just the generator's: an engine with no steam produces
         // nothing and a boiler with no water makes no steam, so the cell waits
         // for the whole plant. `plant_steps` returns them all for exactly this
@@ -3631,18 +4705,20 @@ impl Method for BuildAssemblyCell {
     }
 }
 
-/// How much coal the cells' own network needs for one charge, and where it
+/// How much coal the cells' own network needs over `ticks`, and where it
 /// goes.
 ///
 /// The demand is read off a fork with every cell standing, so it is the whole
 /// network's draw — the cells, and whatever else was already on it — rather
 /// than the cells' own. A boiler fuelled for the cells alone would run the lab
-/// beside them dry.
+/// beside them dry. `ticks` is the [`SupplyHorizon`]; the answer is capped at
+/// one fuel slot whatever the horizon, which is all a hand can fill.
 fn fuel_for(
     state: &PlanState,
     anchor: &Position,
     cells: &[Cell],
     spec: &AssemblySpec,
+    ticks: Ticks,
 ) -> (u32, Vec<Position>) {
     let mut trial = state.fork();
     for cell in cells {
@@ -3668,7 +4744,7 @@ fn fuel_for(
     // truncate the difference rather than report it. With one boiler this is
     // the identical arithmetic to the single-boiler version.
     let share = demand / boilers.len() as f64;
-    (boiler_coal(state, share), boilers)
+    (boiler_coal(state, share, ticks), boilers)
 }
 
 #[cfg(test)]
@@ -3781,6 +4857,102 @@ mod tests {
         PlanState::from_world(Arc::new(world()), bots)
     }
 
+    /// Ore per tile under every source drill in [`world_with_sources`].
+    ///
+    /// A number the tests can do arithmetic on: a burner drill covers four
+    /// tiles, so one source holds `4 * SOURCE_ORE_PER_TILE` ore and, at one
+    /// plate an ore, that many plates. The horizon tests derive their
+    /// expectations from it rather than quoting a figure.
+    const SOURCE_ORE_PER_TILE: u32 = 100;
+
+    /// Where the two sources of the standard powered fixture stand: their
+    /// drills, north-facing, on a tile boundary as a 2x2 is. Chosen so that
+    /// both plate chests are inside one `connect` window of a cell sited off
+    /// the plant's pole at `(10.5, 10.5)`, and the chests' centroid --
+    /// which is where the cell is sited from -- is nearer that pole than
+    /// anything else.
+    const IRON_DRILL: (f64, f64) = (22., 2.);
+    const COPPER_DRILL: (f64, f64) = (22., 24.);
+
+    /// The shared world plus a **standing stage-1 cell for each plate**, each
+    /// dropping its plates into a chest -- what a belted assembly cell is
+    /// sourced from.
+    ///
+    /// Per source, in the base world (ore lives in the entity graph, and a
+    /// replan sees a source through the same door): a 4x4 patch of the ore
+    /// at `SOURCE_ORE_PER_TILE` a tile, a burner drill on it facing north,
+    /// the stone furnace it drops into two tiles north
+    /// (`produce::FURNACE_OFFSET`), a burner arm on the furnace's east face
+    /// carrying the plates out, and the iron chest it drops them into. Built
+    /// by hand rather than by `produce::plan_cell`, so what stands is exactly
+    /// what the test says; every predicate the method reads it with --
+    /// `standing_cells`, `delivers_into`, `is_container`, `cell_yield` --
+    /// is the real one, and `a_world_with_no_standing_cell_offers_no_supply_source`
+    /// is the control that the plain world offers nothing.
+    fn world_with_sources(iron: (f64, f64), copper: (f64, f64)) -> FactorioSurface {
+        world_with_sources_holding(iron, copper, SOURCE_ORE_PER_TILE)
+    }
+
+    /// [`world_with_sources`] with `per_tile` ore under each drill.
+    fn world_with_sources_holding(
+        iron: (f64, f64),
+        copper: (f64, f64),
+        per_tile: u32,
+    ) -> FactorioSurface {
+        use factorio_bot_core::factorio::util::add_to_rect;
+        use factorio_bot_core::types::{FactorioEntity as E, Rect};
+        let world = world();
+        let mut entities = Vec::new();
+        for (ore, (dx, dy)) in [("iron-ore", iron), ("copper-ore", copper)] {
+            let drill = Position::new(dx, dy);
+            let mut patch = Vec::new();
+            factorio_bot_core::test_utils::spawn_ore(
+                &mut patch,
+                add_to_rect(&Rect::from_wh(4., 4.), &drill),
+                ore,
+            );
+            for tile in &mut patch {
+                tile.amount = Some(per_tile);
+            }
+            entities.extend(patch);
+            entities.push(E::new_burner_mining_drill(&drill, Direction::North));
+            entities.push(E::new_stone_furnace(
+                &Position::new(dx, dy - 2.),
+                Direction::North,
+            ));
+            // Picks up from the furnace to its west, drops into the chest to
+            // its east: `direction` names the side an arm picks up from.
+            entities.push(E::new_named_inserter(
+                "burner-inserter".into(),
+                &Position::new(dx + 1.5, dy - 2.5),
+                Direction::West,
+            ));
+            entities.push(crate::test_world::iron_chest(&Position::new(
+                dx + 2.5,
+                dy - 2.5,
+            )));
+        }
+        world
+            .update_chunk_entities(entities)
+            .expect("a fixture world accepts two stage-1 cells");
+        world
+    }
+
+    fn bare_with_sources(bots: &[BotId]) -> PlanState {
+        PlanState::from_world(Arc::new(world_with_sources(IRON_DRILL, COPPER_DRILL)), bots)
+    }
+
+    /// The plates one source will make before its ore is dug out.
+    fn source_plates() -> u32 {
+        4 * SOURCE_ORE_PER_TILE
+    }
+
+    /// What one red cell on the standard sources is sized for: the fewer of
+    /// `iron / 2` and `copper / 1`, both sources being equal.
+    fn red_horizon() -> u32 {
+        source_plates() / 2
+    }
+
     /// A state with a plant standing in the overlay, and one wood per bot.
     ///
     /// The pole and the engine are where `crate::test_world::with_steam_power`
@@ -3790,6 +4962,26 @@ mod tests {
     /// represents.
     fn powered(bots: &[BotId]) -> PlanState {
         let mut state = bare(bots);
+        stand_plant(&mut state, bots);
+        state
+    }
+
+    /// [`powered`] on [`world_with_sources`]: a plant, and a standing source
+    /// for each of red science's plates. What `plan` and every test that
+    /// expands a red goal run on.
+    fn powered_with_sources(bots: &[BotId]) -> PlanState {
+        let mut state = bare_with_sources(bots);
+        stand_plant(&mut state, bots);
+        // The load arm at each source chest is some fifteen tiles from the
+        // plant's pole and gets a wire of its own, and the fixture has no
+        // tree a bot could reach for the poles' wood.
+        for bot in bots {
+            state.gain(*bot, "wood", 8);
+        }
+        state
+    }
+
+    fn stand_plant(state: &mut PlanState, bots: &[BotId]) {
         for bot in bots {
             state.gain(*bot, "wood", 1);
         }
@@ -3812,7 +5004,6 @@ mod tests {
                 ..Default::default()
             });
         }
-        state
     }
 
     fn spec() -> AssemblySpec {
@@ -3829,6 +5020,10 @@ mod tests {
         let mut spec = spec();
         let made = spec.intermediate.as_mut().expect("red science has one");
         made.ingredients = vec![("iron-plate".to_string(), 1); feeds];
+        // **Every ingredient in a chest**: these are the geometry tests of
+        // the chest layout, which green science still uses, and red's own
+        // spec has no chest but the output one since its plates are belted.
+        spec.belted.clear();
         spec
     }
 
@@ -3848,6 +5043,12 @@ mod tests {
             let entity = entity_for(state, part);
             state.create_entity(entity);
         }
+        // And the runs into its mouths, as `connect` would leave them: an arm
+        // on the arm tile picking up from a belt on the belt tile. A cell is
+        // not whole without them -- `loaded_feeders` counts them.
+        for entity in mouth_entities(&cell) {
+            state.create_entity(entity);
+        }
         state
             .set_recipe(
                 &cell.at(Role::Intermediate).unwrap().position,
@@ -3860,9 +5061,27 @@ mod tests {
         cell
     }
 
+    /// The end of a run into each of the cell's mouths: the unload arm
+    /// facing the belt tile (west, in the north frame -- an arm's direction
+    /// is the side it picks up from) and one belt tile pouring towards it.
+    fn mouth_entities(cell: &Cell) -> Vec<FactorioEntity> {
+        let mut out = Vec::new();
+        for mouth in &cell.mouths {
+            let arm = compose(Direction::West, cell.facing).expect("a cardinal facing");
+            let belt = compose(Direction::East, cell.facing).expect("a cardinal facing");
+            out.push(FactorioEntity::new_named_inserter(
+                INSERTER.into(),
+                &mouth.arm,
+                arm,
+            ));
+            out.push(FactorioEntity::new_transport_belt(&mouth.belt, belt));
+        }
+        out
+    }
+
     fn plan(per_minute: u32) -> Result<ActionNetwork, PlannerError> {
         let bots = [BotId(1)];
-        let state = powered(&bots);
+        let state = powered_with_sources(&bots);
         expand(
             &[Goal::Producing {
                 item: PACK.into(),
@@ -4048,17 +5267,29 @@ mod tests {
         assert_eq!(cells_for(6, green.ticks_per_item).unwrap(), 2);
 
         // The charge, integer end to end: twelve packs, twelve inserters by
-        // hand, and six runs of a belt recipe that yields two.
+        // hand, and six runs of a belt recipe that yields two -- whose iron
+        // is BELTED (a stage-1 cell smelts it) and whose gears are not.
+        // So the gear chest is on feed row 1, and row 0 is a mouth.
         assert_eq!(green.charge_products(), 12);
         assert_eq!(green.intermediate_runs(), 6);
+        assert!(green.is_belted("iron-plate"));
+        assert!(!green.is_belted("iron-gear-wheel"));
+        assert!(!green.is_belted("inserter"));
         assert_eq!(
             green.feed_charges(),
-            vec![
-                ("iron-plate".to_string(), 6),
-                ("iron-gear-wheel".to_string(), 6)
-            ]
+            vec![(1, "iron-gear-wheel".to_string(), 6)]
         );
         assert_eq!(green.supply_charge(), 12);
+        let belted: Vec<(String, Role, Option<u8>, u32)> = green
+            .belted_inputs()
+            .into_iter()
+            .map(|input| (input.item, input.into, input.feed_row, input.per_product))
+            .collect();
+        assert_eq!(
+            belted,
+            vec![("iron-plate".to_string(), Role::Intermediate, Some(0), 1)],
+            "one iron plate a pack: a belt recipe makes two from one plate and one gear"
+        );
     }
 
     /// Widening the feed side added rivals for the intermediate and changed no
@@ -4141,11 +5372,35 @@ mod tests {
     /// The charge, integer end to end and rounded at the run boundary.
     #[test]
     fn the_charge_is_integer_arithmetic_from_the_recipe() {
-        let spec = spec();
+        // Red's real spec has no chest to charge: both plates are belted.
+        let belted = spec();
+        assert_eq!(
+            belted.feed_charges(),
+            Vec::new(),
+            "the iron comes down a belt"
+        );
+        assert_eq!(belted.supply_charge(), 0, "and so does the copper");
+        let demands: Vec<(String, u32)> = belted
+            .belted_inputs()
+            .iter()
+            .map(|input| (input.item.clone(), belted.demand_per_minute(input, 6)))
+            .collect();
+        assert_eq!(
+            demands,
+            vec![
+                ("iron-plate".to_string(), 12),
+                ("copper-plate".to_string(), 6)
+            ],
+            "six packs a minute is two iron plates and one copper plate each"
+        );
+        // The arithmetic of a charge, on the same spec with its chests back.
+        let spec = spec_feeds(1);
+        let mut spec = spec;
+        spec.intermediate.as_mut().unwrap().ingredients = vec![("iron-plate".to_string(), 2)];
         assert_eq!(spec.charge_products(), 15, "9000 ticks / 600 a pack");
         assert_eq!(
             spec.feed_charges(),
-            vec![("iron-plate".to_string(), 30)],
+            vec![(0, "iron-plate".to_string(), 30)],
             "fifteen gears at two iron plates each, in one chest"
         );
         assert_eq!(spec.supply_charge(), 15, "one copper plate a pack");
@@ -4154,15 +5409,20 @@ mod tests {
         // product machine is the bottleneck: three cables a circuit at 60
         // ticks per two-cable run is 90 ticks, against the circuit's own 60.
         let s = bare(&[BotId(1)]);
-        let circuit = assembly_spec(&s, "electronic-circuit").unwrap();
+        let mut circuit = assembly_spec(&s, "electronic-circuit").unwrap();
         assert_eq!(
             circuit.ticks_per_item, 90,
             "the cable machine is the slower half"
         );
         assert_eq!(circuit.charge_products(), 100, "9000 ticks / 90 a circuit");
+        assert!(
+            circuit.is_belted("copper-plate"),
+            "copper is smelted, so belted"
+        );
+        circuit.belted.clear();
         assert_eq!(
             circuit.feed_charges(),
-            vec![("copper-plate".to_string(), 150)],
+            vec![(0, "copper-plate".to_string(), 150)],
             "300 cables is 150 runs, and a run eats one copper plate"
         );
     }
@@ -4185,10 +5445,11 @@ mod tests {
         spec.intermediate.as_mut().unwrap().per_product = 1;
         spec.intermediate.as_mut().unwrap().per_run = 2;
         spec.intermediate.as_mut().unwrap().ingredients = vec![("iron-plate".to_string(), 3)];
+        spec.belted.clear();
         assert_eq!(spec.charge_products(), 9);
         assert_eq!(
             spec.feed_charges(),
-            vec![("iron-plate".to_string(), 15)],
+            vec![(0, "iron-plate".to_string(), 15)],
             "five runs of three plates, not four"
         );
     }
@@ -4275,7 +5536,8 @@ mod tests {
                     facing,
                     parts: layout(&origin, facing, true, &spec_feeds(feeds)).unwrap(),
                     standing: Vec::new(),
-                    lane: lane(&origin, facing).unwrap(),
+                    lane: lane(&origin, facing, &spec_feeds(feeds)).unwrap(),
+                    mouths: Vec::new(),
                     evacuate: Vec::new(),
                 };
                 let mut trial = s.fork();
@@ -4330,7 +5592,8 @@ mod tests {
                 facing: Direction::North,
                 parts,
                 standing: Vec::new(),
-                lane: lane(&origin, Direction::North).unwrap(),
+                lane: lane(&origin, Direction::North, &spec_feeds(MAX_FEED)).unwrap(),
+                mouths: Vec::new(),
                 evacuate: Vec::new(),
             };
             let turned = cell.at(role).unwrap();
@@ -4371,8 +5634,12 @@ mod tests {
         {
             let origin = Position::new(10.5, 10.5);
             let parts = layout(&origin, facing, true, &spec_feeds(feeds)).unwrap();
-            let lane = lane(&origin, facing).unwrap();
-            assert_eq!(lane.len(), 5);
+            let lane = lane(&origin, facing, &spec_feeds(feeds)).unwrap();
+            assert_eq!(
+                lane.len(),
+                feeds + 2,
+                "one tile behind every feed chest, the supply chest's and the output chest's"
+            );
             for tile in &lane {
                 for part in &parts {
                     let box_ = s
@@ -4398,7 +5665,12 @@ mod tests {
             &spec_feeds(MAX_FEED),
         )
         .unwrap();
-        let lane = lane(&Position::new(10.5, 10.5), Direction::North).unwrap();
+        let lane = lane(
+            &Position::new(10.5, 10.5),
+            Direction::North,
+            &spec_feeds(MAX_FEED),
+        )
+        .unwrap();
         let chests = (0..MAX_FEED)
             .map(|index| {
                 #[allow(clippy::cast_possible_truncation)]
@@ -4417,18 +5689,26 @@ mod tests {
         }
     }
 
-    /// A pole and a steam engine on one network, with **clear ground around
-    /// the pole** for a cell to be sited in.
-    ///
-    /// The generator is seven tiles south, on a second pole wired to the first
+    /// Sources for a plant at `(30.5, 32.5)` with clear ground round its pole:
+    /// their chests either side of it, centroid beside the pole.
+    const IRON_DRILL_BY_THE_ROOM: (f64, f64) = (22., 22.);
+    const COPPER_DRILL_BY_THE_ROOM: (f64, f64) = (40., 22.);
+
+    /// A pole and a steam engine on one network, with clear ground around the
+    /// pole for a cell to be sited in, on a world with a source for each plate.
+    /// The generator is seven tiles south on a second pole wired to the first
     /// (a small pole reaches 7.5), which is what leaves the first pole's own
-    /// supply area empty. That is not contrivance: it is the difference
-    /// between a plant whose engine sits in the ground a cell wants and one
-    /// whose does not, and `powered()` above is the first case.
-    fn powered_with_room(bots: &[BotId]) -> PlanState {
-        let mut state = bare(bots);
+    /// supply area empty.
+    fn powered_with_room_and_sources(bots: &[BotId]) -> PlanState {
+        let mut state = PlanState::from_world(
+            Arc::new(world_with_sources(
+                IRON_DRILL_BY_THE_ROOM,
+                COPPER_DRILL_BY_THE_ROOM,
+            )),
+            bots,
+        );
         for bot in bots {
-            state.gain(*bot, "wood", 1);
+            state.gain(*bot, "wood", 8);
         }
         for (name, entity_type, position) in [
             (POLE, "electric-pole", Position::new(30.5, 32.5)),
@@ -4457,14 +5737,19 @@ mod tests {
     #[test]
     fn a_cell_inside_an_existing_supply_area_brings_no_pole_of_its_own() {
         let bots = [BotId(1)];
-        let state = powered_with_room(&bots);
+        let state = powered_with_room_and_sources(&bots);
         let cell = plan_cell(&state, &Position::new(30.5, 32.5), &spec())
             .expect("there is room beside that pole");
         assert!(
             !cell.brings_pole(),
             "an existing pole covers this cell; bringing another spends a wood to duplicate it"
         );
-        assert_eq!(cell.parts.len(), 9, "the ten-building cell minus the pole");
+        assert_eq!(
+            cell.parts.len(),
+            5,
+            "two machines, the link, the output arm and the output chest -- no chest for a \
+             belted plate, and no pole"
+        );
 
         // ...and it is genuinely powered, so this is adoption rather than the
         // check being skipped.
@@ -4495,18 +5780,28 @@ mod tests {
             BotId(1),
         )
         .expect("a cell that needs no pole plans");
-        // Nothing about a pole anywhere in the plan -- not a placement and not
-        // a craft. Asserting only on placements would pass against a bill that
-        // still asks for one and simply never puts it down, which spends the
-        // wood just the same.
-        let mentions: Vec<&str> = net
+        // No pole of the CELL's anywhere in the plan. The runs from the
+        // sources bring poles of their own for their load arms (the source
+        // is a burner cell with no network), and those stand off the cell's
+        // ground -- so what is asserted is that no pole lands inside the
+        // cell's own layout, where its own pole would have gone.
+        let own_pole = cell.origin.add(
+            &Position::new(POLE_OFFSET.0, POLE_OFFSET.1)
+                .turn(cell.facing)
+                .unwrap(),
+        );
+        let placed_poles: Vec<Position> = net
             .actions()
-            .filter(|a| a.label.contains(POLE))
-            .map(|a| a.label.as_str())
+            .filter_map(|a| match &a.kind {
+                ActionKind::Place { entity } if entity.name == POLE => {
+                    Some(entity.position.clone())
+                }
+                _ => None,
+            })
             .collect();
         assert!(
-            mentions.is_empty(),
-            "no pole is placed and none is crafted, so no wood is spent: {mentions:?}"
+            !placed_poles.contains(&own_pole),
+            "the cell placed the pole it did not need at {own_pole}: {placed_poles:?}"
         );
     }
 
@@ -4522,7 +5817,11 @@ mod tests {
         let cell = plan_cell(&powered(&[BotId(1)]), &Position::new(10.5, 10.5), &spec())
             .expect("the fixture has room for a cell that carries its own pole");
         assert!(cell.brings_pole());
-        assert_eq!(cell.parts.len(), 10);
+        assert_eq!(
+            cell.parts.len(),
+            6,
+            "the five parts of a red cell and its pole"
+        );
     }
 
     /// One pole, and it reaches every consumer in the cell.
@@ -4631,7 +5930,7 @@ mod tests {
             }
             // The lane still services the output chest, so a bot can empty it
             // on the same visit it refills the feed chests.
-            let lane = lane(&origin, facing).unwrap();
+            let lane = lane(&origin, facing, &spec_feeds(MAX_FEED)).unwrap();
             assert!(
                 lane.contains(&at((-4., 3.))),
                 "no lane tile beside the output chest at {facing:?}"
@@ -4743,62 +6042,127 @@ mod tests {
     /// *coverage is not capacity* with the two halves swapped.
     #[test]
     fn every_powered_condition_states_the_draw_the_ledger_charges() {
-        let s = powered(&[BotId(1)]);
+        let s = powered_with_sources(&[BotId(1)]);
         let net = plan(6).expect("a powered fixture can build a cell");
-        let mut seen = 0;
+        // **Every electric placement carries its own claim, exactly one, at
+        // the ledger's figure.** The claims used to ride on the chest
+        // charges; a red cell has none, so each consumer speaks for itself
+        // on its `Place` -- see `place_step`.
+        let mut electric_placements = 0;
         for action in net.actions() {
-            for condition in &action.pre {
-                if let Condition::Powered { entity, kw, .. } = condition {
-                    assert_eq!(
-                        Some(*kw),
-                        s.consumer_draw_kw(entity),
-                        "{entity} is claimed at {kw} kW and billed at something else"
-                    );
-                    seen += 1;
-                }
-            }
+            let ActionKind::Place { entity } = &action.kind else {
+                continue;
+            };
+            let Some(billed) = s.consumer_draw_kw(&entity.name) else {
+                continue;
+            };
+            electric_placements += 1;
+            let claims: Vec<f64> = action
+                .pre
+                .iter()
+                .filter_map(|condition| match condition {
+                    Condition::Powered { pos, kw, .. } if pos == &entity.position => Some(*kw),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                claims,
+                vec![billed],
+                "{} at {} claims {claims:?} kW and is billed {billed}",
+                entity.name,
+                entity.position
+            );
         }
         assert_eq!(
-            seen, 8,
-            "the feed branch states five consumers and the supply branch three -- both              tails now run through the output inserter"
+            electric_placements,
+            2 + 2 + 4,
+            "two machines, the link and output arms, and a load and an unload arm per run"
         );
     }
 
     // ---- what the plan says -----------------------------------------------
 
-    /// Both machines get a recipe, and the charge inserts assert the whole
-    /// chain that stands behind them.
+    /// Both machines get a recipe, nothing is charged by hand, and the
+    /// product machine's `SetRecipe` asserts the whole chain that stands
+    /// behind it -- the cell's own links and both belted arms.
     #[test]
-    fn the_charge_inserts_assert_the_whole_chain() {
+    fn the_product_recipe_asserts_the_whole_chain_and_nothing_is_charged() {
         let net = plan(6).expect("a powered fixture can build a cell");
-        let charge: Vec<&Action> = net
+        let charges = net
             .actions()
             .filter(|a| matches!(&a.kind, ActionKind::Insert { entity, .. } if entity == CHEST))
+            .count();
+        assert_eq!(charges, 0, "a red cell has no chest a bot fills");
+        let product: Vec<&Action> = net
+            .actions()
+            .filter(|a| matches!(&a.kind, ActionKind::SetRecipe { recipe, .. } if recipe == PACK))
             .collect();
-        assert_eq!(charge.len(), 2, "one insert per chest");
-        let feeds: usize = charge
+        assert_eq!(product.len(), 1, "one product machine, set once");
+        let feeds: Vec<(Position, Position)> = product[0]
+            .pre
             .iter()
-            .flat_map(|a| a.pre.iter())
-            .filter(|c| matches!(c, Condition::Feeds { .. }))
-            .count();
+            .filter_map(|c| match c {
+                Condition::Feeds { from, to } => Some((from.clone(), to.clone())),
+                _ => None,
+            })
+            .collect();
         assert_eq!(
-            feeds, 10,
-            "six links on the feed branch and four on the supply branch -- each branch              is the whole path an item takes, and both end at the output chest"
+            feeds.len(),
+            4 + 2,
+            "the machine-to-machine link, the output pair, and one link per belted arm: {feeds:?}"
         );
-        let recipes: usize = charge
-            .iter()
-            .flat_map(|a| a.pre.iter())
-            .filter(|c| matches!(c, Condition::RecipeSet { .. }))
-            .count();
+        // And the arms the runs placed to unload into the machines are each
+        // named by it, dropping into the machine the mouth serves.
+        let machines: Vec<Position> = net
+            .actions()
+            .filter_map(|a| match &a.kind {
+                ActionKind::Place { entity } if entity.name == MACHINE => {
+                    Some(entity.position.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        let mut built = powered_with_sources(&[BotId(1)]);
+        for action in net.actions() {
+            if let ActionKind::Place { entity } = &action.kind {
+                built.create_entity((**entity).clone());
+            }
+        }
+        let unloads: Vec<(Position, Position)> = net
+            .actions()
+            .filter_map(|a| match &a.kind {
+                ActionKind::Place { entity } if entity.name == INSERTER => machines
+                    .iter()
+                    .find(|machine| built.delivers_into(&entity.position, machine))
+                    .map(|machine| (entity.position.clone(), machine.clone())),
+                _ => None,
+            })
+            .collect();
         assert_eq!(
-            recipes, 3,
-            "both machines on the feed branch, the product on both"
+            unloads.len(),
+            2 + 1,
+            "two unload arms and the link arm drop into a machine"
         );
+        for (arm, machine) in &unloads {
+            assert!(
+                feeds.contains(&(arm.clone(), machine.clone())),
+                "the recipe does not name the link {arm} -> {machine}: {feeds:?}"
+            );
+        }
     }
 
-    /// The boiler that runs the cell is topped up, and by how much.
+    /// The boiler that runs the cell is topped up, and by how much: the
+    /// network's draw over the cell's HORIZON, capped at the one slot a hand
+    /// can fill.
+    ///
+    /// The horizon on the standard sources is `red_horizon()` packs -- two
+    /// hundred, at 600 ticks each -- which is 120,000 ticks of ~200 kW, or
+    /// some 95 coal against a slot of 50. Under the old 9,000-tick charge
+    /// this read 8; what replaced the constant is the source's ore, and
+    /// `the_ledger_is_the_sources_ore_and_not_a_constant` is where the
+    /// arithmetic is pinned against a second fixture.
     #[test]
-    fn the_plants_boiler_is_topped_up_for_the_charge() {
+    fn the_plants_boiler_is_topped_up_for_the_horizon() {
         let net = plan(6).expect("a powered fixture can build a cell");
         let coal: Vec<u32> = net
             .actions()
@@ -4812,11 +6176,20 @@ mod tests {
                 _ => None,
             })
             .collect();
-        // 189 kW for 9000 ticks is 28.35 MJ, and coal is 4 MJ.
         assert_eq!(
             coal,
-            vec![8],
-            "one top-up, sized from the network's own draw"
+            vec![COAL_STACK],
+            "one top-up, and the horizon outruns the slot"
+        );
+        let s = bare(&[BotId(1)]);
+        let horizon = SupplyHorizon {
+            products: red_horizon(),
+        }
+        .ticks(&spec());
+        assert!(
+            boiler_coal(&s, 189., horizon) == COAL_STACK
+                && boiler_coal(&s, 189., CELL_CHARGE_TICKS) == 8,
+            "the same draw over the old charge would have been 8"
         );
     }
 
@@ -4836,7 +6209,7 @@ mod tests {
     #[test]
     fn every_boiler_of_a_chain_is_topped_up_and_the_charge_is_split() {
         let bots = [BotId(1)];
-        let mut state = powered(&bots);
+        let mut state = powered_with_sources(&bots);
         // Three more boilers alongside the fixture's one, on the real pitch.
         let pitch = crate::method::power::BOILER_PITCH_TILES;
         let entity_type = state
@@ -4898,10 +6271,12 @@ mod tests {
                 "the boiler at {boiler} is never topped up"
             );
         }
-        // Split, not repeated: one boiler took 8 coal for the whole 189 kW,
-        // so a quarter of that draw is 2 apiece rather than 8 apiece.
+        // Split, not repeated: one boiler takes a whole slot for the horizon
+        // (`the_plants_boiler_is_topped_up_for_the_horizon`), so a quarter of
+        // that draw is under a slot apiece rather than a slot apiece.
+        let each = fuelled[0].1;
         assert!(
-            fuelled.iter().all(|(_, count)| *count == 2),
+            fuelled.iter().all(|(_, count)| *count == each) && 0 < each && each < COAL_STACK,
             "the charge should be the network's draw split four ways: {fuelled:?}"
         );
     }
@@ -5061,8 +6436,8 @@ mod tests {
     #[test]
     fn a_pack_a_standing_cell_makes_is_drawn_from_it_rather_than_hand_crafted() {
         let bots = [BotId(1)];
-        let state = powered(&bots);
-        let charge = spec().charge_products();
+        let state = powered_with_sources(&bots);
+        let charge = red_horizon();
         let net = expand(
             &[
                 Goal::Producing {
@@ -5129,8 +6504,8 @@ mod tests {
     #[test]
     fn the_wait_for_a_cell_to_make_a_pack_is_a_lag_edge_and_not_a_bots_time() {
         let bots = [BotId(1)];
-        let state = powered(&bots);
-        let charge = spec().charge_products();
+        let state = powered_with_sources(&bots);
+        let charge = red_horizon();
         let tempo = spec().ticks_per_item;
         let net = expand(
             &[
@@ -5180,19 +6555,19 @@ mod tests {
         }
     }
 
-    /// **What one charge cannot cover falls back to the hands, and says so.**
+    /// **What the sources cannot cover falls back to the hands, and says so.**
     ///
-    /// The bound is [`CELL_CHARGE_TICKS`]' own: a cell is charged once and
-    /// nothing refills it, so a goal for more than `charge_products` is partly
-    /// machine-made and partly hand-crafted. Asserting the *residual* rather
-    /// than merely "some crafting happens" is what would catch a draw that
-    /// over-spent the ledger -- which would plan a bot walking to an empty
-    /// chest, the one failure this modelling exists to prevent.
+    /// The bound is the [`SupplyHorizon`]: the sources' ore, and a cell
+    /// makes no more than its sources deliver. A goal for more than that is
+    /// partly machine-made and partly hand-crafted. Asserting the *residual*
+    /// rather than merely "some crafting happens" is what would catch a draw
+    /// that over-spent the ledger -- which would plan a bot walking to an
+    /// empty chest, the one failure this modelling exists to prevent.
     #[test]
-    fn a_goal_larger_than_one_charge_draws_the_charge_and_crafts_the_rest() {
+    fn a_goal_larger_than_the_horizon_draws_the_horizon_and_crafts_the_rest() {
         let bots = [BotId(1)];
-        let state = powered(&bots);
-        let charge = spec().charge_products();
+        let state = powered_with_sources(&bots);
+        let charge = red_horizon();
         let want = charge + 3;
         let net = expand(
             &[
@@ -5240,11 +6615,11 @@ mod tests {
     #[test]
     fn the_coal_bill_is_bounded_by_the_one_slot_it_goes_in() {
         let s = bare(&[BotId(1)]);
-        assert_eq!(boiler_coal(&s, 0.), 0);
-        assert_eq!(boiler_coal(&s, 189.), 8);
-        assert_eq!(boiler_coal(&s, 900.), 34);
+        assert_eq!(boiler_coal(&s, 0., CELL_CHARGE_TICKS), 0);
+        assert_eq!(boiler_coal(&s, 189., CELL_CHARGE_TICKS), 8);
+        assert_eq!(boiler_coal(&s, 900., CELL_CHARGE_TICKS), 34);
         assert_eq!(
-            boiler_coal(&s, 100_000.),
+            boiler_coal(&s, 100_000., CELL_CHARGE_TICKS),
             COAL_STACK,
             "a boiler's fuel inventory is one slot; the 51st coal goes nowhere"
         );
@@ -5254,8 +6629,8 @@ mod tests {
     #[test]
     fn a_world_whose_power_this_planner_did_not_build_asks_for_no_coal() {
         let bots = [BotId(1)];
-        let mut state = bare(&bots);
-        state.gain(BotId(1), "wood", 1);
+        let mut state = bare_with_sources(&bots);
+        state.gain(BotId(1), "wood", 8);
         for (name, entity_type, position) in [
             (POLE, "electric-pole", Position::new(10.5, 10.5)),
             ("steam-engine", "generator", Position::new(12.5, 10.5)),
@@ -5339,16 +6714,32 @@ mod tests {
     }
 
     /// One inserter per ingredient, and each of them fed by something.
+    ///
+    /// The product machine's two feeders are the link arm and the copper
+    /// mouth's unload arm; the arm needs the belt under its pickup, and a
+    /// belt is what `loaded_feeders` accepts as a source (any entity that
+    /// is not a recipe-less machine).
     #[test]
     fn a_product_machine_short_of_a_feeder_does_not_count() {
-        for missing in [Role::SupplyInserter, Role::SupplyChest, Role::LinkInserter] {
-            let mut s = powered(&[BotId(1)]);
-            let cell = stand_a_cell(&mut s);
+        let mut s = powered(&[BotId(1)]);
+        let cell = stand_a_cell(&mut s);
+        let copper = cell
+            .mouths
+            .iter()
+            .find(|mouth| mouth.into == Role::Product)
+            .expect("the product machine has a mouth");
+        let link = cell.at(Role::LinkInserter).unwrap().position.clone();
+        for (what, at) in [
+            ("unload arm", copper.arm.clone()),
+            ("belt under the arm", copper.belt.clone()),
+            ("link inserter", link),
+        ] {
+            let mut s = s.fork();
             assert!(holds_assembling(&s, PACK, 6), "the whole cell holds first");
-            s.remove_entity(&cell.at(missing).unwrap().position);
+            s.remove_entity(&at);
             assert!(
                 !holds_assembling(&s, PACK, 6),
-                "a cell with no {missing:?} is fed by fewer things than the recipe has \
+                "a cell with no {what} is fed by fewer things than the recipe has \
                  ingredients, and makes nothing"
             );
         }
@@ -5453,6 +6844,7 @@ mod tests {
         let observed = |with_recipes: bool| {
             observed_world(
                 &planned,
+                &cell,
                 &cell.parts,
                 if with_recipes { &recipes } else { &[] },
                 &bots,
@@ -5495,12 +6887,15 @@ mod tests {
     /// cell through the overlay, which a replan never has.
     fn observed_world(
         planned: &PlanState,
+        cell: &Cell,
         parts: &[CellPart],
         recipes: &[(Position, String)],
         bots: &[BotId],
     ) -> PlanState {
         let mut standing: Vec<FactorioEntity> =
             parts.iter().map(|part| entity_for(planned, part)).collect();
+        // The runs' ends, as the game would report them.
+        standing.extend(mouth_entities(cell));
         for (name, position) in [
             (POLE, Position::new(10.5, 10.5)),
             ("steam-engine", Position::new(12.5, 10.5)),
@@ -5571,7 +6966,7 @@ mod tests {
 
         assert!(
             holds_assembling(
-                &observed_world(&planned, &cell.parts, &recipes, &bots),
+                &observed_world(&planned, &cell, &cell.parts, &recipes, &bots),
                 PACK,
                 6
             ),
@@ -5588,7 +6983,11 @@ mod tests {
                 .collect();
             assert_eq!(jammed.len(), cell.parts.len() - 1);
             assert!(
-                !holds_assembling(&observed_world(&planned, &jammed, &recipes, &bots), PACK, 6),
+                !holds_assembling(
+                    &observed_world(&planned, &cell, &jammed, &recipes, &bots),
+                    PACK,
+                    6
+                ),
                 "a cell the world reports with no {missing:?} halts on full_output after \
                  four crafts; a replan must build one that does not"
             );
@@ -5617,18 +7016,22 @@ mod tests {
         assert_eq!(
             spec.intermediate.as_ref().unwrap().ingredients.len(),
             2,
-            "two feed chests"
+            "two ingredients: one belted, one in a chest"
         );
 
         let mut planned = powered(&bots);
         let cell = stand_a_cell_for(&mut planned, &spec);
-        assert_eq!(cell.feeds(), 2);
+        assert_eq!(
+            cell.feeds(),
+            1,
+            "the belt machine's iron is belted; only its gears are in a chest"
+        );
         let recipes = cell_recipes(&cell, &spec);
 
         // One cell is five packs a minute, which is what `cells_for` says.
         assert!(
             holds_assembling(
-                &observed_world(&planned, &cell.parts, &recipes, &bots),
+                &observed_world(&planned, &cell, &cell.parts, &recipes, &bots),
                 GREEN,
                 5
             ),
@@ -5646,7 +7049,7 @@ mod tests {
         assert_eq!(starved.len(), cell.parts.len() - 1);
         assert!(
             !holds_assembling(
-                &observed_world(&planned, &starved, &recipes, &bots),
+                &observed_world(&planned, &cell, &starved, &recipes, &bots),
                 GREEN,
                 5
             ),
@@ -5655,11 +7058,13 @@ mod tests {
         );
     }
 
-    /// The plan a green goal produces, at the shape rather than the tile.
+    /// The plan a green goal produces, at the shape rather than the tile:
+    /// the iron is belted from the standing source and the gears and the
+    /// inserters -- which nothing here makes -- still arrive in chests.
     #[test]
-    fn a_green_plan_builds_two_cells_and_charges_three_chests_each() {
+    fn a_green_plan_belts_the_iron_and_charges_two_chests() {
         let bots = [BotId(1)];
-        let state = powered_with_room(&bots);
+        let state = powered_with_sources(&bots);
         let net = expand(
             &[Goal::Producing {
                 item: GREEN.into(),
@@ -5669,7 +7074,7 @@ mod tests {
             &registry_for(&bots),
             BotId(1),
         )
-        .expect("green science plans");
+        .expect("green science plans beside an iron source");
 
         let placed: Vec<&str> = net
             .actions()
@@ -5682,17 +7087,21 @@ mod tests {
         assert_eq!(count(MACHINE), 2, "an intermediate and a product machine");
         assert_eq!(
             count(CHEST),
-            4,
-            "two feed chests, one supply chest and one output chest"
+            3,
+            "the gear chest, the inserter chest and the output chest -- no iron chest"
         );
         assert_eq!(
             count(INSERTER),
-            5,
-            "two feed, one link, one supply, one output"
+            4 + 2,
+            "gear feed, link, supply and output, plus the iron run's load and unload arms"
+        );
+        assert!(
+            count("transport-belt") > 0,
+            "the iron comes down a belt from the standing source"
         );
 
-        // Three charges -- one per *input* chest. The output chest is charged
-        // with nothing, because the cell fills it.
+        // Two charges -- one per chest a bot fills. The output chest is
+        // charged with nothing, because the cell fills it.
         let charges: Vec<(String, u32)> = net
             .actions()
             .filter_map(|action| match &action.kind {
@@ -5708,7 +7117,6 @@ mod tests {
         assert_eq!(
             charges,
             vec![
-                ("iron-plate".to_string(), 6),
                 ("iron-gear-wheel".to_string(), 6),
                 ("inserter".to_string(), 12),
             ],
@@ -5756,7 +7164,7 @@ mod tests {
     #[test]
     fn a_cell_whose_machines_stand_is_finished_around_them() {
         let bots = [BotId(1)];
-        let mut s = powered(&bots);
+        let mut s = powered_with_sources(&bots);
         let cell = plan_cell(&s, &Position::new(10.5, 10.5), &spec()).expect("room");
         for role in [Role::Intermediate, Role::Product] {
             let part = cell.at(role).expect("a cell has two machines");
@@ -5787,9 +7195,13 @@ mod tests {
         assert_eq!(
             placed(&net, INSERTER).len(),
             inserter_count(&spec()) as usize,
-            "every inserter of the cell is placed"
+            "every inserter of the cell is placed, the runs' arms included"
         );
-        assert_eq!(placed(&net, CHEST).len(), chest_count(&spec()) as usize);
+        assert_eq!(
+            placed(&net, CHEST).len(),
+            chest_count(&spec()) as usize,
+            "the output chest, and nothing else"
+        );
         let recipes: Vec<Position> = net
             .actions()
             .filter_map(|a| match &a.kind {
@@ -5823,7 +7235,7 @@ mod tests {
     #[test]
     fn a_cell_whose_chests_and_arms_stand_is_finished_around_them() {
         let bots = [BotId(1)];
-        let mut s = powered(&bots);
+        let mut s = powered_with_sources(&bots);
         let cell = plan_cell(&s, &Position::new(10.5, 10.5), &spec()).expect("room");
         for part in cell
             .parts
@@ -5833,6 +7245,12 @@ mod tests {
             let entity = entity_for(&s, part);
             s.create_entity(entity);
         }
+        let own_arms: Vec<Position> = cell
+            .parts
+            .iter()
+            .filter(|part| part.name == INSERTER)
+            .map(|part| part.position.clone())
+            .collect();
         let net = expand(
             &[Goal::Producing {
                 item: PACK.into(),
@@ -5862,11 +7280,12 @@ mod tests {
             Vec::<Position>::new(),
             "every chest stands and is not placed again"
         );
-        assert_eq!(
-            placed(&net, INSERTER),
-            Vec::<Position>::new(),
-            "every arm stands and is not placed again"
-        );
+        for arm in &own_arms {
+            assert!(
+                !placed(&net, INSERTER).contains(arm),
+                "the cell's own arm at {arm} stands and is not placed again"
+            );
+        }
     }
 
     /// A lone chest is not a cell. One chest of a cell standing and nothing
@@ -5876,11 +7295,11 @@ mod tests {
     #[test]
     fn a_lone_chest_does_not_seed_a_cell() {
         let bots = [BotId(1)];
-        let mut s = powered(&bots);
+        let mut s = powered_with_sources(&bots);
         let cell = plan_cell(&s, &Position::new(10.5, 10.5), &spec()).expect("room");
         let chest = cell
-            .at(Role::SupplyChest)
-            .expect("a cell has a supply chest");
+            .at(Role::OutputChest)
+            .expect("a cell has an output chest");
         let entity = entity_for(&s, chest);
         s.create_entity(entity);
         let net = expand(
@@ -5935,13 +7354,23 @@ mod tests {
         );
         // 16 s at a stone furnace's crafting speed of 1.
         assert_eq!(steel.ticks_per_item, 960);
-        assert_eq!(
-            steel.charge_products(),
-            9,
-            "9,000 ticks of charge at 960 each"
-        );
+        // Its iron is smelted, so it is belted: no supply chest, no charge.
+        assert!(steel.is_belted("iron-plate"));
+        assert!(!steel.has_supply_chest());
         assert_eq!(
             steel.supply_charge(),
+            0,
+            "nothing to charge a belted plate into"
+        );
+        let mut charged = steel.clone();
+        charged.belted.clear();
+        assert_eq!(
+            charged.charge_products(),
+            9,
+            "9,000 ticks of charge at 960 each, were the iron in a chest"
+        );
+        assert_eq!(
+            charged.supply_charge(),
             45,
             "nine plates of steel is 45 of iron"
         );
@@ -5978,7 +7407,11 @@ mod tests {
     /// `Condition::Feeds` is checked with.
     #[test]
     fn the_furnace_meets_both_of_its_inserters_at_every_facing() {
-        let spec = assembly_spec(&bare(&[BotId(1)]), STEEL).unwrap();
+        // With its iron in a chest: steel's plates are belted since
+        // 2026-09-09, so the real spec has no supply arm of the layout's.
+        // The 2x2's geometry against the chest layout is what is pinned.
+        let mut spec = assembly_spec(&bare(&[BotId(1)]), STEEL).unwrap();
+        spec.belted.clear();
         for facing in Direction::orthogonal() {
             let origin = Position::new(10.5, 10.5);
             let s = bare(&[BotId(1)]);
@@ -6006,13 +7439,14 @@ mod tests {
                 trial.create_entity(entity_for(&s, part));
             }
             let s = trial;
-            let lane = lane(&origin, facing).unwrap();
+            let lane = lane(&origin, facing, &spec).unwrap();
             let cell = Cell {
                 origin,
                 facing,
                 parts,
                 standing: Vec::new(),
                 lane,
+                mouths: Vec::new(),
                 evacuate: Vec::new(),
             };
             for (from, to) in links(&cell).expect("a one-machine cell has links") {
@@ -6035,7 +7469,7 @@ mod tests {
     #[test]
     fn a_furnace_cell_sets_no_recipe_and_gets_its_own_coal() {
         let bots = vec![BotId(1)];
-        let s = powered(&bots);
+        let s = powered_with_sources(&bots);
         let spec = assembly_spec(&s, STEEL).unwrap();
         let net = expand(
             &[Goal::Producing {
@@ -6059,15 +7493,27 @@ mod tests {
         );
         assert_eq!(
             placed(&net, INSERTER).len(),
-            2,
-            "supply and output, no link"
+            1 + 2,
+            "the output arm, and the iron run's load and unload arms; no link, no supply arm"
         );
-        assert_eq!(placed(&net, CHEST).len(), 2, "supply and output, no feed");
-        // The plan also stands `Smelt`'s hand-fed furnaces for the iron
-        // plates the charge is made of, so the cell's own furnace is found by
-        // what it is charged with rather than by being the only one: a
-        // full-charge coal load is this method's and nothing else's.
-        let charge = fuel_for_duration(CELL_CHARGE_TICKS, COAL_BURN_TICKS);
+        assert_eq!(
+            placed(&net, CHEST).len(),
+            1,
+            "the output chest; no supply, no feed"
+        );
+        // The furnace's coal is sized off the horizon -- eighty steel at 960
+        // ticks off four hundred iron plates, five a plate -- and capped at
+        // the one slot a hand fills. Found by its count rather than by being
+        // the only furnace: the plan may stand hand-fed furnaces of its own.
+        let horizon = SupplyHorizon {
+            products: source_plates() / spec.supplied.1,
+        }
+        .ticks(&spec);
+        let charge = furnace_charge_coal(&s, &spec, horizon);
+        assert!(
+            charge > fuel_for_duration(CELL_CHARGE_TICKS, COAL_BURN_TICKS),
+            "the horizon is longer than the old charge: {charge}"
+        );
         let fuelled: Vec<Position> = net
             .actions()
             .filter_map(|a| match &a.kind {
@@ -6084,21 +7530,31 @@ mod tests {
         assert_eq!(
             fuelled.len(),
             1,
-            "exactly one furnace is fuelled for a whole charge"
+            "exactly one furnace is fuelled for the horizon"
         );
         assert!(
             placed(&net, FURNACE).contains(&fuelled[0]),
             "and it is one this plan placed"
         );
         assert!(
-            net.actions().any(|a| matches!(
+            !net.actions().any(|a| matches!(
                 &a.kind,
-                ActionKind::Insert { item, count, .. }
-                    if item == "iron-plate" && *count == spec.supply_charge()
+                ActionKind::Insert { item, .. } if item == "iron-plate"
             )),
-            "and its supply chest is charged with the plates it smelts"
+            "no iron plate is poured anywhere by hand: it comes down the belt"
+        );
+        assert!(
+            !placed(&net, "transport-belt").is_empty(),
+            "the run from the iron source"
         );
     }
+
+    /// Sources for the tests that build the plant on the fixture's lake at
+    /// `(40, 40)`: either side of it, so the chests' centroid is at the
+    /// water and a cell sited off the plant's pole is inside both runs'
+    /// windows.
+    const IRON_DRILL_BY_THE_LAKE: (f64, f64) = (30., 26.);
+    const COPPER_DRILL_BY_THE_LAKE: (f64, f64) = (50., 26.);
 
     /// A world that already holds a whole plant and a lab gets a cell beside
     /// them and none of them again.
@@ -6106,8 +7562,14 @@ mod tests {
     fn a_standing_plant_and_lab_are_built_neither_again() {
         use crate::method::power::{BOILER, ENGINE, PUMP};
         let bots = [BotId(1)];
-        let mut s = bare(&bots);
-        s.gain(BotId(1), "wood", 1);
+        let mut s = PlanState::from_world(
+            Arc::new(world_with_sources(
+                IRON_DRILL_BY_THE_LAKE,
+                COPPER_DRILL_BY_THE_LAKE,
+            )),
+            &bots,
+        );
+        s.gain(BotId(1), "wood", 8);
         let plant = crate::method::power::plan_plant(&s, &Position::new(40., 40.))
             .expect("the fixture has a lake");
         for part in &plant.parts {
@@ -6161,8 +7623,14 @@ mod tests {
     fn a_half_built_plant_is_finished_for_the_cell() {
         use crate::method::power::{BOILER, ENGINE, PIPE, POLE as PLANT_POLE, PUMP};
         let bots = [BotId(1)];
-        let mut s = bare(&bots);
-        s.gain(BotId(1), "wood", 2);
+        let mut s = PlanState::from_world(
+            Arc::new(world_with_sources(
+                IRON_DRILL_BY_THE_LAKE,
+                COPPER_DRILL_BY_THE_LAKE,
+            )),
+            &bots,
+        );
+        s.gain(BotId(1), "wood", 8);
         let plant = crate::method::power::plan_plant(&s, &Position::new(40., 40.))
             .expect("the fixture has a lake");
         for part in plant
@@ -6268,35 +7736,355 @@ mod tests {
             "red science's smelted ingredient"
         );
         assert!(
-            standing_supply_source(&state, &spec.supplied.0).is_none(),
+            standing_supply_sources(&state, &spec.supplied.0).is_empty(),
             "no drill, no furnace, no offtake -- nothing to link to"
         );
     }
 
-    /// **Direction is the discriminator, and it has to be.** A cell's own
-    /// `SupplyInserter` stands beside the supply chest and *picks up* from it;
-    /// the link's unload arm stands beside it and *drops into* it. Read the
+    /// **Direction is the discriminator, and it has to be.** A run's unload
+    /// arm stands on the mouth's arm tile and *drops into* the machine; an
+    /// arm on the same tile turned round would *pick up* from it. Read the
     /// wrong way round, a freshly-planned cell would look already-fed and the
-    /// link would never be laid -- the silent half of the failure this whole
+    /// run would never be laid -- the silent half of the failure this whole
     /// change exists to end.
     #[test]
-    fn a_cells_own_supply_arm_does_not_count_as_something_filling_the_chest() {
+    fn a_mouth_is_linked_only_by_an_arm_that_drops_into_the_machine() {
         let bots = [BotId(1)];
-        let mut state = powered_with_room(&bots);
+        let mut state = powered(&bots);
         let spec = assembly_spec(&state, PACK).expect("red science is a cell shape");
-        let cell = plan_cell(&state, &Position::new(10.5, 10.5), &spec)
-            .or_else(|_| plan_cell(&state, &Position::new(20.5, 20.5), &spec))
-            .expect("a cell fits somewhere on the fixture");
+        let cell = plan_cell(&state, &Position::new(10.5, 10.5), &spec).expect("room");
         for part in &cell.parts {
             let entity = entity_for(&state, part);
             state.create_entity(entity);
         }
-        let chest = cell
-            .at(Role::SupplyChest)
-            .expect("every cell has a supply chest");
-        assert!(
-            !already_filled_by_machine(&state, &chest.position),
-            "the cell's own supply inserter takes OUT of this chest, so nothing fills it"
+        assert_eq!(
+            cell.mouths.len(),
+            2,
+            "iron into the gear machine, copper into the pack one"
         );
+        for mouth in &cell.mouths {
+            assert!(
+                !mouth_is_linked(&state, &cell, mouth),
+                "nothing stands at {}: the mouth is open",
+                mouth.arm
+            );
+        }
+        let mut linked = state.fork();
+        for entity in mouth_entities(&cell) {
+            linked.create_entity(entity);
+        }
+        for mouth in &cell.mouths {
+            assert!(
+                mouth_is_linked(&linked, &cell, mouth),
+                "an arm at {} dropping into the machine is the run, standing",
+                mouth.arm
+            );
+        }
+        let mut turned = state.fork();
+        for mut entity in mouth_entities(&cell) {
+            if entity.name == INSERTER {
+                entity = FactorioEntity::new_named_inserter(
+                    INSERTER.into(),
+                    &entity.position,
+                    compose(Direction::East, cell.facing).unwrap(),
+                );
+            }
+            turned.create_entity(entity);
+        }
+        for mouth in &cell.mouths {
+            assert!(
+                !mouth_is_linked(&turned, &cell, mouth),
+                "an arm at {} picking up FROM the machine is not a run into it",
+                mouth.arm
+            );
+        }
+    }
+
+    // ---- no chests in the line --------------------------------------------
+
+    /// **A red cell has no chest but the output one.** Both of its plates
+    /// are smelted, so both are belted: the layout stands two machines, the
+    /// link, the output pair and (when it brings one) a pole, and keeps a
+    /// mouth on the west face of each machine for the run that feeds it.
+    #[test]
+    fn a_red_cell_has_no_chest_but_the_output_one() {
+        let spec = spec();
+        assert_eq!(
+            spec.belted,
+            ["copper-plate", "iron-plate"]
+                .into_iter()
+                .map(String::from)
+                .collect::<BTreeSet<_>>()
+        );
+        let roles: BTreeSet<Role> = layout_table(&spec).into_iter().map(|(r, _, _)| r).collect();
+        assert_eq!(
+            roles,
+            [
+                Role::Intermediate,
+                Role::Product,
+                Role::LinkInserter,
+                Role::OutputChest,
+                Role::OutputInserter,
+            ]
+            .into_iter()
+            .collect()
+        );
+        let origin = Position::new(10.5, 10.5);
+        let mouths = mouths(&origin, Direction::North, &spec).unwrap();
+        let at = |x: f64, y: f64| origin.add(&Position::new(x, y));
+        assert_eq!(
+            mouths
+                .iter()
+                .map(|m| (m.item.as_str(), m.into, m.arm.clone(), m.belt.clone()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("iron-plate", Role::Intermediate, at(-2., 0.), at(-3., 0.)),
+                ("copper-plate", Role::Product, at(-2., 4.), at(-3., 4.)),
+            ],
+            "the rows a chest used to stand on, so the pole lights the arms as it lit the chests"
+        );
+        assert_eq!(
+            lane(&origin, Direction::North, &spec).unwrap(),
+            vec![at(-4., 3.)],
+            "a bot stands behind the output chest and nowhere else"
+        );
+    }
+
+    /// **A cell asked for with no standing source is refused by name**, and
+    /// the refusal names the ingredient and the rate, not the ground.
+    #[test]
+    fn a_cell_with_no_standing_source_is_refused_by_name() {
+        let bots = [BotId(1)];
+        let state = powered(&bots);
+        let refusal = expand(
+            &[Goal::Producing {
+                item: PACK.into(),
+                per_minute: 6,
+            }],
+            &state,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .expect_err("no source stands, so no cell can be belted");
+        match refusal {
+            PlannerError::AssemblyNoStandingSource {
+                item,
+                ingredient,
+                per_minute,
+                ..
+            } => {
+                assert_eq!(item, PACK);
+                assert_eq!(
+                    ingredient, "iron-plate",
+                    "the first belted input, in mouth order"
+                );
+                assert_eq!(per_minute, 12, "two plates a pack at six a minute");
+            }
+            other => panic!("refused for the wrong reason: {other}"),
+        }
+        // And the same goal plans the moment the sources stand: the refusal
+        // is about the sources and nothing else.
+        expand(
+            &[Goal::Producing {
+                item: PACK.into(),
+                per_minute: 6,
+            }],
+            &powered_with_sources(&bots),
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .expect("with both sources standing the cell plans");
+    }
+
+    /// **A source's rate is spent as it is assigned, and a cell it cannot
+    /// carry is refused rather than belted from a chest that cannot keep
+    /// up.** One furnace makes eighteen plates a minute; two red cells eat
+    /// twenty-four of iron.
+    #[test]
+    fn a_source_with_no_rate_left_is_not_belted_twice() {
+        let state = bare_with_sources(&[BotId(1)]);
+        let spec = spec();
+        let one =
+            assign_sources(&state, &spec, 1, 6).expect("one cell has a source for each plate");
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0].inputs.len(), 2);
+        let refusal = assign_sources(&state, &spec, 2, 6).expect_err("two cells want 24 iron/min");
+        match refusal {
+            PlannerError::AssemblyNoStandingSource {
+                ingredient,
+                per_minute,
+                standing,
+                ..
+            } => {
+                assert_eq!(ingredient, "iron-plate");
+                assert_eq!(per_minute, 12);
+                assert!(
+                    standing.contains("not yet spoken for"),
+                    "the refusal says what the one source had left: {standing}"
+                );
+            }
+            other => panic!("refused for the wrong reason: {other}"),
+        }
+    }
+
+    /// **The ledger is the sources' ore, not a constant.** Halve the ore
+    /// under the source drills and the `BufferGain` the cell writes halves
+    /// with it; under `CELL_CHARGE_TICKS` it read fifteen whatever stood.
+    #[test]
+    fn the_ledger_is_the_sources_ore_and_not_a_constant() {
+        let bots = [BotId(1)];
+        let ledger = |state: &PlanState| -> u32 {
+            let net = expand(
+                &[Goal::Producing {
+                    item: PACK.into(),
+                    per_minute: 6,
+                }],
+                state,
+                &registry_for(&bots),
+                BotId(1),
+            )
+            .expect("a powered fixture with sources builds a cell");
+            net.actions()
+                .flat_map(|a| a.eff.iter())
+                .filter_map(|effect| match effect {
+                    Effect::BufferGain { item, count, .. } if item == PACK => Some(*count),
+                    _ => None,
+                })
+                .sum()
+        };
+        let full = ledger(&powered_with_sources(&bots));
+        assert_eq!(
+            full,
+            red_horizon(),
+            "the fewer of iron/2 and copper/1 over four hundred plates each"
+        );
+
+        let mut halved = PlanState::from_world(
+            Arc::new(world_with_sources_holding(
+                IRON_DRILL,
+                COPPER_DRILL,
+                SOURCE_ORE_PER_TILE / 2,
+            )),
+            &bots,
+        );
+        stand_plant(&mut halved, &bots);
+        halved.gain(BotId(1), "wood", 8);
+        assert_eq!(
+            ledger(&halved),
+            red_horizon() / 2,
+            "half the ore is half the packs"
+        );
+    }
+
+    /// **The side-load risk, pinned.** Two runs end on one machine column,
+    /// four rows apart, and `route_belt` gives each run's last tile the
+    /// direction it arrived with. If either last tile faced a tile the
+    /// other run stood on, plates would ride off the end onto the wrong
+    /// belt; if either run's tile were faced by a foreign belt, that belt
+    /// would side-load onto it. Both are read off the built world here,
+    /// for every belt the plan lays, and both arms are checked to stand on
+    /// their mouths and be lit by the cell's own pole.
+    #[test]
+    fn two_runs_into_one_cell_do_not_pour_into_each_other() {
+        let bots = [BotId(1)];
+        let state = powered_with_sources(&bots);
+        let net = plan(6).expect("a powered fixture with sources builds a cell");
+        let mut built = state.fork();
+        let mut belts: Vec<Position> = Vec::new();
+        let mut arms: Vec<FactorioEntity> = Vec::new();
+        for action in net.actions() {
+            if let ActionKind::Place { entity } = &action.kind {
+                built.create_entity((**entity).clone());
+                if is_belt(&entity.name) {
+                    belts.push(entity.position.clone());
+                }
+                if entity.name == INSERTER {
+                    arms.push((**entity).clone());
+                }
+            }
+        }
+        assert!(
+            belts.len() >= 2,
+            "two runs were laid: {} belts",
+            belts.len()
+        );
+        // Every belt pours into a belt of its own run, an arm's tile, or
+        // nothing -- never a belt that then leads somewhere else. A run's
+        // tiles are found by following the chain from each mouth backwards
+        // is more than this needs: it is enough that NO belt's forward tile
+        // is a belt facing away from it that is not simply the next tile of
+        // a straight chain -- i.e. every belt faced by another belt is faced
+        // from exactly one side, its rear.
+        let machine_positions: Vec<Position> = net
+            .actions()
+            .filter_map(|a| match &a.kind {
+                ActionKind::Place { entity } if entity.name == MACHINE => {
+                    Some(entity.position.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(machine_positions.len(), 2);
+        let mut fed_from: BTreeMap<Pos, Vec<Pos>> = BTreeMap::new();
+        for at in &belts {
+            let (_, forward) = belt_forward(&built, at).expect("a placed belt stands");
+            if let Some(next) = built
+                .entity_at(&forward)
+                .filter(|e| is_belt(&e.name) && Pos::from(&e.position) == Pos::from(&forward))
+            {
+                fed_from
+                    .entry(Pos::from(&next.position))
+                    .or_default()
+                    .push(Pos::from(at));
+            }
+        }
+        // One feeder per belt. A single perpendicular feeder is a CURVE --
+        // the game turns the belt and both lanes carry -- and only a second
+        // feeder makes a side-load. Two runs pouring into one tile, or a
+        // run's end pouring onto the other run, both read as two feeders.
+        for (tile, feeders) in &fed_from {
+            assert_eq!(
+                feeders.len(),
+                1,
+                "the belt at {tile:?} is fed from {feeders:?}: a side-load"
+            );
+        }
+        // Each unload arm -- an arm picking up from a belt and dropping into
+        // a machine of the cell; the link arm picks from a machine -- stands
+        // on a mouth, and the belt it picks from pours into nothing but the
+        // arm's own tile or thin air.
+        let unloads: Vec<&FactorioEntity> = arms
+            .iter()
+            .filter(|arm| {
+                built
+                    .pickup_position(arm)
+                    .and_then(|at| built.entity_at(&at))
+                    .is_some_and(|under| is_belt(&under.name))
+                    && machine_positions
+                        .iter()
+                        .any(|machine| built.delivers_into(&arm.position, machine))
+            })
+            .collect();
+        assert_eq!(
+            unloads.len(),
+            2,
+            "one unload arm per belted plate: {unloads:?}"
+        );
+        for arm in unloads {
+            let terminal = built
+                .pickup_position(arm)
+                .expect("an arm picks up from somewhere");
+            let (_, forward) = belt_forward(&built, &terminal).expect("a belt under the arm");
+            assert!(
+                built.entity_at(&forward).is_none_or(|e| !is_belt(&e.name)),
+                "the run's last belt at {terminal} pours onto a belt at {forward}"
+            );
+            let area = built.collision_area(INSERTER, &arm.position).unwrap();
+            assert!(
+                built.electric_supply_kw(&area) > 0.,
+                "the unload arm at {} stands outside every pole's reach",
+                arm.position
+            );
+        }
     }
 }

@@ -41,14 +41,54 @@ and record what that binary was built from.
 
 | goal | world | actions / makespan | measured at |
 |---|---|---|---|
-| `researched:automation` | `map.json` | 176 / 21,784 | stable across the night |
-| `producing:automation-science-pack:6` | `map.json` | 316 / 22,457 | stable across the night |
-| `producing:logistic-science-pack:6` | `map.json` | 559 / 52,298 | `112e0fdf` |
-| `producing:iron-plate:261` | `map.json` | 194 / 33,645 | `71f9227c` |
-| `producing:transport-belt:6` | `map.json` | 319 / 119,396 | `71f9227c` |
-| `sustain:iron-plate:30:36000` | `map.json` | 1,272 / 63,905 | `6eb0fa7b` (was 1,234 / 64,564 at `112e0fdf`) |
-| `sustain:copper-plate:15:36000` | `map.json` | 479 / 20,904 | `112e0fdf`, re-confirmed at `6eb0fa7b` |
-| `gathered:crude-oil` | **`map-31337-explored.json`** | **2,352 / 322,738** | `c385c409` (was 2,330 / 354,699 at `c0e51463`) |
+| `researched:automation` | `map.json` | 176 / 21,784 | stable across the night, unchanged by no-chests |
+| `producing:automation-science-pack:6` | `map.json` | **REFUSES** (`assembly_no_standing_source`) | no-chests, 2026-09-09; was 316 / 22,457 |
+| `all{sustain:iron-plate:12, sustain:copper-plate:6, producing:automation-science-pack:6}` | `map.json` | **1,559 / 96,221** | no-chests, 2026-09-09 -- the number that replaces the row above |
+| `all{sustain:iron-plate:30, sustain:copper-plate:15, producing:automation-science-pack:6}` | `map.json` | 1,997 / 95,899 | no-chests, 2026-09-09; **refused in `sustain` before it** |
+| `producing:logistic-science-pack:6` | `map.json` | **REFUSES** (`assembly_no_standing_source`, its iron is belted) | no-chests, 2026-09-09; was 559 / 52,298 |
+| `all{sustain:iron-plate:30, sustain:copper-plate:15, producing:logistic-science-pack:6}` | `map.json` | REFUSES (`no room ... within 12 tiles`) | no-chests, 2026-09-09 -- green is phase 2, see below |
+| `producing:iron-plate:261` | `map.json` | 194 / 33,645 | `71f9227c`, unchanged by no-chests |
+| `producing:transport-belt:6` | `map.json` | **REFUSES** (`assembly_no_standing_source`) | no-chests, 2026-09-09; was 319 / 119,396 |
+| `all{sustain:iron-plate:30, producing:transport-belt:6}` | `map.json` | **1,501 / 73,252** | no-chests, 2026-09-09 |
+| `sustain:iron-plate:30:36000` | `map.json` | **1,016 / 46,456** | no-chests, 2026-09-09 (was 1,272 / 63,905 at `6eb0fa7b`) -- see below |
+| `sustain:copper-plate:15:36000` | `map.json` | **500 / 21,069** | no-chests, 2026-09-09 (was 479 / 20,904) -- see below |
+| `gathered:crude-oil` | **`map-31337-explored.json`** | **2,216 / 319,933** | no-chests, 2026-09-09 (was 2,352 / 322,738 at `c385c409`) -- see below |
+
+### No chests in the line (2026-09-09): four rows refuse, and that is the point
+
+A science cell has no chest but the output one any more: every smelted
+ingredient (`produce::cell_spec` can make it from ore -- iron and copper
+plate) is belted straight into the machine that eats it from a standing
+stage-1 cell's plate chest, and a `producing` goal with no such source is
+refused by name (`PlannerError::AssemblyNoStandingSource`) rather than planned
+as a cell that stops when a hand charge runs out. So `producing:automation-
+science-pack:6`, `producing:logistic-science-pack:6` and
+`producing:transport-belt:6` refuse on a t=0 dump, and the number to report
+is the composed bundle -- `continuous_supply.lua`'s goal, with both sustains
+at the cell's own demand. Design: `2026-09-09-no-chests-in-the-line.md`;
+result: `2026-09-09-no-chests-landed.md`.
+
+Three rows moved for reasons that are not the cell:
+
+- **`sustain:iron-plate:30` 1,272 -> 1,016 and `gathered:crude-oil` 2,352 ->
+  2,216**: `Researched` no longer asks for a science cell whose sources do not
+  stand (`have::machine_made_packs` is gated on
+  `assemble::sources_stand_for`), so the red packs a research inside those
+  plans needs are hand-crafted as they were before cells existed, instead of a
+  whole chest-fed cell being built for them. `researched:automation` never
+  built one (it is the unlocker) and is byte-identical.
+- **`sustain:copper-plate:15` 479 -> 500, and part of the iron move**: the
+  offtake arm's fuel branch now taps the standing belt under an unload arm
+  the expansion placed as well as the belts it laid (`sustain::nearest_belt_of`).
+  That is what lets a SECOND sustain in one plan branch off the first's coal
+  haul -- every two-sustain bundle refused with `laid no belt to branch the
+  offtake arm's own fuel off` before, in both orders -- and it also moves the
+  tap point of a lone sustain.
+
+**Green is not a phase-1 result.** Its gears and inserters still arrive in
+hand-filled chests (nothing here makes them), its iron is belted, and on
+`map.json` the composed bundle finds no room in the siting ring. That is the
+gear cell the design note names as phase 2, not a regression to chase here.
 
 ### `sustain:iron-plate` moved at `6eb0fa7b`, and it is a fix, not drift
 

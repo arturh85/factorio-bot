@@ -40,6 +40,8 @@ use factorio_bot_planner::method::power::{BOILER, ENGINE, PIPE, POLE, PUMP, plan
 use factorio_bot_planner::{ActionKind, ActionNetwork, BotId, PlanState, expand, registry_for};
 use std::sync::Arc;
 
+use super::common;
+
 const PACK: &str = "automation-science-pack";
 const MACHINE: &str = "assembling-machine-1";
 
@@ -75,13 +77,25 @@ fn world() -> factorio_bot_core::factorio::world::FactorioSurface {
     world
 }
 
-fn bare(bots: &[BotId]) -> PlanState {
-    let mut state = PlanState::from_world(Arc::new(world()), bots);
+/// [`world`] with a standing stage-1 cell for each plate, at `iron` and
+/// `copper`, and the wood for the poles that wire their load arms. Since
+/// 2026-09-09 a red cell is belted from such cells and refuses by name
+/// without them (`common::with_sources`).
+fn bare(bots: &[BotId], iron: (f64, f64), copper: (f64, f64)) -> PlanState {
+    let world = world();
+    common::with_sources(&world, &[("iron-ore", iron), ("copper-ore", copper)]);
+    let mut state = PlanState::from_world(Arc::new(world), bots);
     for bot in bots {
-        state.gain(*bot, "wood", 2);
+        state.gain(*bot, "wood", 8);
     }
     state
 }
+
+/// Sources either side of the fixture's lake at `(40, 40)`, for the tests
+/// that build the plant there.
+const BY_THE_LAKE: ((f64, f64), (f64, f64)) = ((30., 26.), (50., 26.));
+/// Sources beside the plant the other tests stand at `(10.5, 10.5)`.
+const BY_THE_PLANT: ((f64, f64), (f64, f64)) = ((22., 2.), (22., 24.));
 
 /// An entity of `name` at `position`, typed off the prototype the way the
 /// planner's own placements are.
@@ -136,7 +150,7 @@ fn red_cell(state: &PlanState, bots: &[BotId]) -> ActionNetwork {
 #[test]
 fn a_half_built_plant_is_finished_rather_than_replaced() {
     let bots = [BotId(1)];
-    let mut s = bare(&bots);
+    let mut s = bare(&bots, BY_THE_LAKE.0, BY_THE_LAKE.1);
     let plant = plan_plant(&s, &Position::new(40., 40.)).expect("the fixture has a lake");
     for part in plant
         .parts
@@ -172,7 +186,7 @@ fn a_half_built_plant_is_finished_rather_than_replaced() {
 #[test]
 fn a_cell_whose_machines_stand_is_finished_around_them() {
     let bots = [BotId(1)];
-    let mut s = bare(&bots);
+    let mut s = bare(&bots, BY_THE_PLANT.0, BY_THE_PLANT.1);
     for (name, position) in [
         (POLE, Position::new(10.5, 10.5)),
         (ENGINE, Position::new(12.5, 10.5)),
@@ -215,7 +229,7 @@ fn a_cell_whose_machines_stand_is_finished_around_them() {
 #[test]
 fn a_crafting_machine_with_no_recipe_draws_nothing_from_the_ledger() {
     let bots = [BotId(1)];
-    let mut s = bare(&bots);
+    let mut s = bare(&bots, BY_THE_PLANT.0, BY_THE_PLANT.1);
     for (name, position) in [
         (POLE, Position::new(10.5, 10.5)),
         (ENGINE, Position::new(12.5, 10.5)),

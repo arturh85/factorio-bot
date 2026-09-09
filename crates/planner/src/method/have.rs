@@ -4189,6 +4189,17 @@ fn machine_made_packs(
         let Some(spec) = crate::method::assemble::assembly_spec(state, &ingredient.name) else {
             continue;
         };
+        // **A cell is asked for only where its sources stand.** Since
+        // 2026-09-09 a cell takes every smelted ingredient on a belt from a
+        // standing stage-1 cell and refuses by name without one
+        // (`PlannerError::AssemblyNoStandingSource`); a research asked for
+        // alone would then refuse on a cell it never needed. So the packs
+        // are hand-crafted, as they were before cells existed, unless the
+        // goal was composed with the `sustain`s that feed one -- which is
+        // exactly what makes the cell a factory rather than a charge.
+        if !crate::method::assemble::sources_stand_for(state, &ingredient.name) {
+            continue;
+        }
         let per_minute = (3600 / spec.ticks_per_item.max(1)).max(1);
         goals.push(Goal::Producing {
             item: ingredient.name.clone(),

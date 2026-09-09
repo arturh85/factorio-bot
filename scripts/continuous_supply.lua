@@ -10,36 +10,51 @@
 --     not one machine produced a single item after the plateau -- their own
 --     lifetime counters, not an inference
 --
--- The cell was draining a chest a bot had filled. `CELL_CHARGE_TICKS` is 9,000
--- ticks and nothing refilled it. So that verdict says "a machine ran
+-- The cell was draining a chest a bot had filled. `CELL_CHARGE_TICKS` was
+-- 9,000 ticks and nothing refilled it. So that verdict says "a machine ran
 -- unattended for two and a half minutes", which is automation in the narrowest
 -- sense and not a factory.
 --
--- `3dadc04e` belts a standing stage-1 cell into the assembly cell's supply
--- chest, with an electric load arm -- electric because the belt carries plates
--- and a burner inserter there would have no fuel source at all. The hand
--- charge survives, demoted to an ignition charge, because a belt delivers
--- nothing while it is still filling.
+-- `3dadc04e` belted a standing stage-1 cell into the assembly cell's supply
+-- chest and kept the hand charge as ignition; the cleanest run of the night
+-- (`run-1788954737-06011`) still plateaued at 15 packs, because the IRON side
+-- of the cell was still a chest a bot filled once.
+--
+-- # No chests in the line (2026-09-09)
+--
+-- Owner: *"have no chests ... inside a factory every chest would be a huge
+-- bottleneck because the slow inserters at the beginning are way slower than
+-- a belt."* Since then a red cell has no chest but the output one: both of
+-- its plates are belted straight into the machine that eats them, from a
+-- standing stage-1 cell each, and a `producing` goal with no such source is
+-- REFUSED BY NAME (`assembly_no_standing_source`) rather than planned as a
+-- cell that dies. So this script composes BOTH sustains ahead of the cell:
+-- `goal.all` expands in order, and the cell is sited from the two plate
+-- chests it is belted from. The rates are the cell's own demand -- two iron
+-- plates and one copper plate a pack, six packs a minute.
 --
 -- # What would settle it
 --
 -- **`factory` across an interval with zero feeding dispatches, and NO PLATEAU
 -- after minute ~10** -- where the charge-fed cell died. The window is 45,000
 -- ticks so total game time passes 25 minutes: the 9:48 cell expired at about
--- two charges, so anything shorter cannot distinguish "the belt works" from
--- "the ignition charge was bigger this time".
+-- two charges, so anything shorter cannot distinguish "the belts work" from
+-- "the charge was bigger this time". There is no charge now, so a plateau at
+-- fifteen would be a defect in the belts, not in a constant.
 --
 -- Two readings that mean different things, and the record can tell them apart:
--- a plateau with `no_ingredients` on the assembling machine means the belt is
--- not delivering; a plateau with the supply chest FULL means the cell is
--- output-bound instead, which is a different bug.
+-- a plateau with `no_ingredients` on the assembling machine means a belt is
+-- not delivering (read which mouth's arm is idle); a plateau with the output
+-- chest FULL means the cell is output-bound instead, which is a different bug.
 --
 -- # Judged on rate and census, not makespan
 --
--- Priced offline at 878 actions / 46,554 ticks with 33 belts and both arms
--- named in the step list. One risk stated in advance: the load arm sits 16
--- tiles out on a four-pole run and poles cost wood, so a wood shortfall
--- refuses BY NAME (`Have 1 wood`) rather than silently.
+-- Price it offline first: `factorio-bot plan --world workspace/scripts/map.json
+-- --goal sustain:iron-plate:12:36000 --goal sustain:copper-plate:6:36000
+-- --goal producing:automation-science-pack:6 --bots 1,2,3,4`. One risk stated
+-- in advance: each run's load arm sits at a burner cell with no network and
+-- gets a wire of its own, and poles cost wood, so a wood shortfall refuses BY
+-- NAME (`Have 1 wood`) rather than silently.
 
 include("supervisor.lua")
 
@@ -75,13 +90,18 @@ local function current_roster()
   return nil
 end
 
+-- Both plates, in the order the cell's mouths take them. The sustains go
+-- first because `goal.all` expands in order and the cell refuses without a
+-- standing source for each.
 local sup = supervisor.new(
-  supervisor.list { goal.all { goal.sustain("copper-plate", 15, 36000),
+  supervisor.list { goal.all { goal.sustain("iron-plate", 2 * PER_MINUTE, 36000),
+                               goal.sustain("copper-plate", PER_MINUTE, 36000),
                                goal.producing("automation-science-pack", PER_MINUTE) } },
   { bots = bots, stall_limit = 3, max_iterations = 10, roster = current_roster }
 )
 
-print(string.format("goal: sustain copper-plate + producing:automation-science-pack:%d", PER_MINUTE))
+print(string.format("goal: sustain iron-plate %d + sustain copper-plate %d + producing:automation-science-pack:%d",
+  2 * PER_MINUTE, PER_MINUTE, PER_MINUTE))
 
 -- **The supervisor does not record; the driver does.** `sup:step()` returns a
 -- transition and the record plumbing hangs off it -- `record.actions`,

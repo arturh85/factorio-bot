@@ -136,6 +136,7 @@ fn chopped(net: &ActionNetwork) -> Vec<(Position, String)> {
 /// way that belt faced -- and no second arm on the plate chest, because
 /// there is no tile for one.
 #[test]
+#[ignore = "a world of the CHEST layout: since 2026-09-09 a red cell has no supply chest and is belted from a standing iron AND copper source, so this run's standing world -- a copper sustain and a half-built chest cell -- is one no plan produces any more; re-fixture from a run of the belted layout with `plan --standing-from-run <run> --save-standing`"]
 fn the_replan_of_run_1788946451_86723_taps_the_standing_run() {
     let snapshot = fixture();
     let Some((state, bots)) = standing_world(&snapshot) else {

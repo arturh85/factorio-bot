@@ -140,6 +140,7 @@ fn replan(state: &PlanState, bots: &[BotId]) -> ActionNetwork {
 /// where plan 1 meant them, no chest and no belt is placed, and the link
 /// that stands is left alone.
 #[test]
+#[ignore = "a world of the CHEST layout: since 2026-09-09 a red cell has no supply chest and is belted from a standing iron AND copper source, so this run's standing world -- a copper sustain and a half-built chest cell -- is one no plan produces any more; re-fixture from a run of the belted layout with `plan --standing-from-run <run> --save-standing`"]
 fn the_replan_of_run_1788941729_70024_finishes_its_half_built_cell() {
     let Some((state, bots)) = standing_world(fixture()) else {
         return;
@@ -171,6 +172,7 @@ fn the_replan_of_run_1788941729_70024_finishes_its_half_built_cell() {
 /// belts standing. The replan places exactly the two arms back on their
 /// tiles and lays no belt.
 #[test]
+#[ignore = "a world of the CHEST layout: since 2026-09-09 a red cell has no supply chest and is belted from a standing iron AND copper source, so this run's standing world -- a copper sustain and a half-built chest cell -- is one no plan produces any more; re-fixture from a run of the belted layout with `plan --standing-from-run <run> --save-standing`"]
 fn a_link_missing_only_its_arms_is_finished_with_two_arms() {
     let mut snapshot = fixture();
     let before = snapshot.entities.len();

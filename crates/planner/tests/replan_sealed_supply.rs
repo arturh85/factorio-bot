@@ -261,6 +261,7 @@ fn fixture_before_the_link() -> StandingSnapshot {
 /// of. On the binary before this test's fix, the same derived world planned
 /// the arm at `[29.5, -47.5]` again.
 #[test]
+#[ignore = "a world of the CHEST layout: since 2026-09-09 a red cell has no supply chest and is belted from a standing iron AND copper source, so this run's standing world -- a copper sustain and a half-built chest cell -- is one no plan produces any more; re-fixture from a run of the belted layout with `plan --standing-from-run <run> --save-standing`"]
 fn the_link_of_run_1788936524_99544_leaves_by_the_kept_exit() {
     let Some(base) = dump() else {
         return;
@@ -313,6 +314,7 @@ fn the_link_of_run_1788936524_99544_leaves_by_the_kept_exit() {
 /// second link, no pair and no `logistics` (128 / 21,237). The plate
 /// chest's way out is still asserted above, of `connect` directly.
 #[test]
+#[ignore = "a world of the CHEST layout: since 2026-09-09 a red cell has no supply chest and is belted from a standing iron AND copper source, so this run's standing world -- a copper sustain and a half-built chest cell -- is one no plan produces any more; re-fixture from a run of the belted layout with `plan --standing-from-run <run> --save-standing`"]
 fn the_replan_of_run_1788936524_99544_plans() {
     let Some((state, bots)) = standing_world() else {
         return;

@@ -140,7 +140,7 @@ const BOTS: [BotId; 4] = [BotId(1), BotId(2), BotId(3), BotId(4)];
 /// and it is open: `docs/superpowers/notes/2026-09-09-no-chests-landed.md`.
 const CUTS: [(u32, u32); 3] = [(1, 2), (3, 4), (1, 1)];
 
-fn plan(state: &PlanState, goal: &Goal) -> Result<(ActionNetwork, Schedule), PlannerError> {
+fn plan(state: &PlanState, goal: &Goal) -> Result<(ActionNetwork, Schedule, factorio_bot_planner::memory::ReplanMemory), PlannerError> {
     let chain_actor = pick_chain_actor(state, &BOTS).expect("four bots");
     plan_best(
         std::slice::from_ref(goal),
@@ -159,7 +159,7 @@ fn the_science_cell_plans_again_from_the_world_it_built() {
     let goal = continuous_supply();
 
     let first = PlanState::from_world(world, &BOTS);
-    let (net, scheduled) = plan(&first, &goal)
+    let (net, scheduled, _memory) = plan(&first, &goal)
         .expect("the science cell plans from t=0 -- that is the baseline every session takes");
     eprintln!(
         "first plan: {} actions, makespan {}",
@@ -193,7 +193,7 @@ fn the_science_cell_plans_again_from_the_world_it_built() {
         // defect `a69ae64c` fixed.
         let second = PlanState::from_world(standing_world, &BOTS);
         match plan(&second, &goal) {
-            Ok((net, scheduled)) => eprintln!(
+            Ok((net, scheduled, _replan_mem)) => eprintln!(
                 "cut {num}/{den} at tick {cut}, {standing:?}: replanned {} actions, makespan {}",
                 net.len(),
                 scheduled.makespan
@@ -294,7 +294,7 @@ fn a_failed_take_leaves_the_plate_chest_a_way_out() {
     };
     let goal = continuous_supply();
     let first = PlanState::from_world(world, &BOTS);
-    let (net, scheduled) = plan(&first, &goal).expect("the science cell plans from t=0");
+    let (net, scheduled, _memory) = plan(&first, &goal).expect("the science cell plans from t=0");
     // The first take of copper plates the science tail makes. It was `take N
     // copper-plate from the cell` -- the cell's own furnace -- until
     // `produce::cell_ledger` stopped offering a furnace an arm empties to a
@@ -352,7 +352,7 @@ fn a_failed_take_leaves_the_plate_chest_a_way_out() {
     }
 
     match plan(&second, &goal) {
-        Ok((net, scheduled)) => eprintln!(
+        Ok((net, scheduled, _replan_mem)) => eprintln!(
             "after a failed take, {standing:?}: replanned {} actions, makespan {}",
             net.len(),
             scheduled.makespan

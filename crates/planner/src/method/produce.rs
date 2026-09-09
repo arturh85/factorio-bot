@@ -4342,8 +4342,7 @@ mod tests {
             let net = expand(&goals, &under, &registry, actor).expect("it expands");
             schedule(&net, &under, &bots).expect("it schedules")
         };
-        let (_, best) =
-            crate::plan_best(&goals, &s, &registry, actor, &bots).expect("a policy plans");
+        let (_net, best, _memory) = crate::plan_best(&goals, &s, &registry, actor, &bots).expect("a policy plans");
         assert!(
             best.makespan <= conservative.makespan,
             "plan_best returned {} against the conservative {}",
@@ -4488,7 +4487,7 @@ mod tests {
             }];
             let label = format!("{standing} cells standing, {per_minute}/min");
 
-            let (net, plan) = crate::plan_best(&goals, &s, &registry, actor, &roster)
+            let (net, plan, _memory) = crate::plan_best(&goals, &s, &registry, actor, &roster)
                 .unwrap_or_else(|err| panic!("{label} plans: {err}"));
             let (want_net, want_plan) = exhaustive(&goals, &s, &registry, actor, &roster)
                 .unwrap_or_else(|| panic!("{label} plans under some policy"));

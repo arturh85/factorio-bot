@@ -2257,16 +2257,64 @@ const PARTIAL_CELL_SCAN_RADIUS: f64 = CELL_SEARCH_RADIUS as f64 + 6.;
 /// only with a second part beside it (see [`fit_partial`]'s `least`). The
 /// order is what keeps every plan with a machine standing byte-identical to
 /// the plan made before parts other than machines could seed a cell.
+///
+/// If `memory` is provided, the [`CellIntent`] list is consulted before the
+/// geometry scan: a matching anchor and item supplies the facing and a
+/// pre-filtered standing-parts list so the cell is recovered by intent rather
+/// than by scanning every entity in the neighbourhood. The memory is
+/// advisory — every claim is verified against the world before use.
 pub fn complete_cell(
     state: &PlanState,
     anchor: &Position,
     spec: &AssemblySpec,
     sink: Sink,
     exclude: &BTreeSet<Pos>,
+    memory: Option<&crate::memory::ReplanMemory>,
 ) -> Option<Cell> {
-    // The roles a standing entity of each name can be: the machine roles
-    // for the machine, the chest roles for a chest, and so on. Read off the
-    // layout rather than listed, so a part added to the layout is a seed.
+    // Check memory before the geometry scan: if we have a CellIntent whose
+    // anchor and item match, use the known facing and parts list as seeds.
+    if let Some(memory) = memory {
+        if let Some(cell_intent) = memory
+            .cells
+            .iter()
+            .find(|ci| ci.anchor == *anchor && ci.item == spec.item)
+        {
+            for &with_pole in &[false, true] {
+                let parts = layout(anchor, cell_intent.facing, with_pole, spec, sink)?;
+                let lane = lane(anchor, cell_intent.facing, spec, sink)?;
+                let mouths = mouths(anchor, cell_intent.facing, spec)?;
+                // The machines of a cell already claimed are excluded.
+                if parts
+                    .iter()
+                    .any(|part| matches!(part.role, Role::Intermediate | Role::Product)
+                        && exclude.contains(&Pos::from(&part.position)))
+                {
+                    continue;
+                }
+                // Check every part position: standing parts are accepted,
+                // missing parts must have free ground.
+                if let Some(standing) = standing_parts(state, &parts, spec) {
+                    if !standing.is_empty() {
+                        let cell = Cell {
+                            origin: anchor.clone(),
+                            facing: cell_intent.facing,
+                            parts,
+                            standing,
+                            lane,
+                            mouths,
+                            sink,
+                            evacuate: Vec::new(),
+                        };
+                        if let Some(cell) = works(state, cell, spec) {
+                            return Some(cell);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Original geometry scan — unchanged.
     let table = layout_table(spec, sink);
     let roles_of = |name: &str| -> Vec<Role> {
         table
@@ -2374,8 +2422,9 @@ pub fn plan_cell(
     state: &PlanState,
     anchor: &Position,
     spec: &AssemblySpec,
+    memory: Option<&crate::memory::ReplanMemory>,
 ) -> Result<Cell, PlannerError> {
-    plan_cell_near(state, anchor, spec, default_sink(state, spec), &[])
+    plan_cell_near(state, anchor, spec, default_sink(state, spec), &[], memory)
 }
 
 /// How far, on either axis, a cell's origin may stand from a source it is
@@ -2404,7 +2453,9 @@ pub fn plan_cell_near(
     spec: &AssemblySpec,
     sink: Sink,
     sources: &[Position],
+    memory: Option<&crate::memory::ReplanMemory>,
 ) -> Result<Cell, PlannerError> {
+    let _ = memory;
     if !sources.is_empty()
         && let Ok(cell) = plan_cell_bounded(state, anchor, spec, sink, sources)
     {
@@ -2483,8 +2534,9 @@ pub fn plan_cells(
     anchor: &Position,
     spec: &AssemblySpec,
     count: u32,
+    memory: Option<&crate::memory::ReplanMemory>,
 ) -> Result<Vec<Cell>, PlannerError> {
-    plan_cells_near(state, anchor, spec, default_sink(state, spec), count, &[])
+    plan_cells_near(state, anchor, spec, default_sink(state, spec), count, &[], memory)
 }
 
 /// [`plan_cells`], with the `i`th cell kept within [`SOURCE_REACH`] of the
@@ -2496,6 +2548,7 @@ pub fn plan_cells_near(
     sink: Sink,
     count: u32,
     sources: &[Vec<Position>],
+    memory: Option<&crate::memory::ReplanMemory>,
 ) -> Result<Vec<Cell>, PlannerError> {
     let mut trial = state.fork();
     let mut out = Vec::new();
@@ -2511,9 +2564,9 @@ pub fn plan_cells_near(
         let near: &[Position] = sources
             .get(usize::try_from(index).unwrap_or(usize::MAX))
             .map_or(&[], Vec::as_slice);
-        let cell = match complete_cell(&trial, anchor, spec, sink, &exclude) {
+        let cell = match complete_cell(&trial, anchor, spec, sink, &exclude, memory) {
             Some(cell) => cell,
-            None => plan_cell_near(&trial, anchor, spec, sink, near)?,
+            None => plan_cell_near(&trial, anchor, spec, sink, near, memory)?,
         };
         reserve_in(&mut trial, &cell, spec)?;
         for role in [Role::Intermediate, Role::Product] {
@@ -2582,13 +2635,14 @@ const CELL_SCAN_RADIUS: f64 = 512.0;
 /// Order-independent by construction: it counts, and it dedupes by tile
 /// through the `(x, y, name)` order `entities_within` already imposes.
 pub fn cells_standing(state: &PlanState, spec: &AssemblySpec) -> u32 {
-    u32::try_from(complete_cells(state, spec).len()).unwrap_or(u32::MAX)
+    u32::try_from(complete_cells(state, spec, None).len()).unwrap_or(u32::MAX)
 }
 
 /// The product machines of every complete cell for `spec` -- the positions
 /// behind [`cells_standing`]'s count, so that [`plan_cells`] can keep a whole
 /// cell out of [`complete_cell`]'s candidates. Same five clauses, same order.
-pub fn complete_cells(state: &PlanState, spec: &AssemblySpec) -> Vec<Position> {
+pub fn complete_cells(state: &PlanState, spec: &AssemblySpec, memory: Option<&crate::memory::ReplanMemory>) -> Vec<Position> {
+    let _ = memory;
     let ingredients = ingredients_of(&spec.recipe).len();
     let mut out = Vec::new();
     let nearby = state.entities_within(&Position::new(0., 0.), CELL_SCAN_RADIUS);
@@ -2651,7 +2705,7 @@ pub fn complete_cells(state: &PlanState, spec: &AssemblySpec) -> Vec<Position> {
 pub fn cell_output_chests(state: &PlanState, spec: &AssemblySpec) -> Vec<Position> {
     let nearby = state.entities_within(&Position::new(0., 0.), CELL_SCAN_RADIUS);
     let mut out: Vec<Position> = Vec::new();
-    for product in complete_cells(state, spec) {
+    for product in complete_cells(state, spec, None) {
         for inserter in nearby
             .iter()
             .filter(|inserter| inserter.name == INSERTER)
@@ -2679,7 +2733,7 @@ pub fn cell_output_chests(state: &PlanState, spec: &AssemblySpec) -> Vec<Positio
 pub fn cell_machines(state: &PlanState, spec: &AssemblySpec) -> Vec<Position> {
     let nearby = state.entities_within(&Position::new(0., 0.), CELL_SCAN_RADIUS);
     let mut out = Vec::new();
-    for product in complete_cells(state, spec) {
+    for product in complete_cells(state, spec, None) {
         for inserter in nearby
             .iter()
             .filter(|inserter| inserter.name == INSERTER)
@@ -4893,6 +4947,7 @@ pub fn build_cells(
                 .iter()
                 .map(Pos::from)
                 .collect(),
+            None,
         )
         .is_some();
         let anchor = if !recovered
@@ -4972,7 +5027,7 @@ pub fn build_cells(
                     .collect()
             })
             .collect();
-        let cells = plan_cells_near(&ctx.state, &anchor, &spec, sink, build, &near)?;
+        let cells = plan_cells_near(&ctx.state, &anchor, &spec, sink, build, &near, None)?;
         // How long the cells run on what their sources will deliver -- the
         // horizon every hand-fed quantity is sized off. See `SupplyHorizon`.
         let feeds: Vec<CellFeed<'_>> = supplies
@@ -5038,7 +5093,7 @@ pub fn build_cells(
 pub fn standing_lab_sinks(state: &PlanState, spec: &AssemblySpec) -> Vec<Position> {
     let nearby = state.entities_within(&Position::new(0., 0.), CELL_SCAN_RADIUS);
     let mut out: Vec<Position> = Vec::new();
-    for product in complete_cells(state, spec) {
+    for product in complete_cells(state, spec, None) {
         let mut from = product;
         // A lab hands on to at most one lab (one south face); bounded so a
         // ring of labs -- which the game would allow -- cannot loop this.
@@ -5404,7 +5459,7 @@ mod tests {
     }
 
     fn stand_a_cell_at(state: &mut PlanState, anchor: &Position, spec: &AssemblySpec) -> Cell {
-        let cell = plan_cell(state, anchor, spec).expect("the fixture has room beside its plant");
+        let cell = plan_cell(state, anchor, spec, None).expect("the fixture has room beside its plant");
         for part in &cell.parts {
             let entity = entity_for(state, part);
             state.create_entity(entity);
@@ -6143,7 +6198,7 @@ mod tests {
     fn a_cell_inside_an_existing_supply_area_brings_no_pole_of_its_own() {
         let bots = [BotId(1)];
         let state = powered_with_room_and_sources(&bots);
-        let cell = plan_cell(&state, &Position::new(30.5, 32.5), &spec())
+        let cell = plan_cell(&state, &Position::new(30.5, 32.5), &spec(), None)
             .expect("there is room beside that pole");
         assert!(
             !cell.brings_pole(),
@@ -6220,7 +6275,7 @@ mod tests {
     /// a pole at all.
     #[test]
     fn a_cell_no_existing_pole_reaches_brings_one() {
-        let cell = plan_cell(&powered(&[BotId(1)]), &Position::new(10.5, 10.5), &spec())
+        let cell = plan_cell(&powered(&[BotId(1)]), &Position::new(10.5, 10.5), &spec(), None)
             .expect("the fixture has room for a cell that carries its own pole");
         assert!(cell.brings_pole());
         assert_eq!(
@@ -6404,7 +6459,7 @@ mod tests {
         let mut island = powered(&bots);
         with_a_big_load(&mut island, false);
         assert!(
-            plan_cell(&island, &Position::new(10.5, 10.5), &spec()).is_ok(),
+            plan_cell(&island, &Position::new(10.5, 10.5), &spec(), None).is_ok(),
             "750 kW on a network the plant does not reach spends none of its budget"
         );
 
@@ -6412,7 +6467,7 @@ mod tests {
         with_a_big_load(&mut committed, true);
         assert!(
             matches!(
-                plan_cell(&committed, &Position::new(10.5, 10.5), &spec()),
+                plan_cell(&committed, &Position::new(10.5, 10.5), &spec(), None),
                 Err(PlannerError::NoRoomForCellNearPower { .. })
             ),
             "the same 750 kW, wired to the plant, leaves 150 of the engine's 900 and a \
@@ -7141,7 +7196,7 @@ mod tests {
     fn a_cell_whose_product_machine_has_no_recipe_does_not_hold() {
         let mut s = powered(&[BotId(1)]);
         let spec = spec();
-        let cell = plan_cell(&s, &Position::new(10.5, 10.5), &spec).unwrap();
+        let cell = plan_cell(&s, &Position::new(10.5, 10.5), &spec, None).unwrap();
         for part in &cell.parts {
             let entity = entity_for(&s, part);
             s.create_entity(entity);
@@ -7609,7 +7664,7 @@ mod tests {
     fn a_cell_whose_machines_stand_is_finished_around_them() {
         let bots = [BotId(1)];
         let mut s = powered_with_sources(&bots);
-        let cell = plan_cell(&s, &Position::new(10.5, 10.5), &spec()).expect("room");
+        let cell = plan_cell(&s, &Position::new(10.5, 10.5), &spec(), None).expect("room");
         for role in [Role::Intermediate, Role::Product] {
             let part = cell.at(role).expect("a cell has two machines");
             let entity = entity_for(&s, part);
@@ -7681,7 +7736,7 @@ mod tests {
     fn a_cell_whose_chests_and_arms_stand_is_finished_around_them() {
         let bots = [BotId(1)];
         let mut s = powered_with_sources(&bots);
-        let cell = plan_cell(&s, &Position::new(10.5, 10.5), &spec()).expect("room");
+        let cell = plan_cell(&s, &Position::new(10.5, 10.5), &spec(), None).expect("room");
         for part in cell
             .parts
             .iter()
@@ -7742,7 +7797,7 @@ mod tests {
     fn a_lone_chest_does_not_seed_a_cell() {
         let bots = [BotId(1)];
         let mut s = powered_with_sources(&bots);
-        let cell = plan_cell(&s, &Position::new(10.5, 10.5), &spec()).expect("room");
+        let cell = plan_cell(&s, &Position::new(10.5, 10.5), &spec(), None).expect("room");
         let chest = cell.at(Role::Lab(0)).expect("a cell has a lab");
         let entity = entity_for(&s, chest);
         s.create_entity(entity);
@@ -8133,8 +8188,8 @@ mod tests {
     /// The same state plans the same cell, down to the tile and the facing.
     #[test]
     fn the_same_state_sites_the_same_cell_twice() {
-        let a = plan_cell(&powered(&[BotId(1)]), &Position::new(10.5, 10.5), &spec()).unwrap();
-        let b = plan_cell(&powered(&[BotId(1)]), &Position::new(10.5, 10.5), &spec()).unwrap();
+        let a = plan_cell(&powered(&[BotId(1)]), &Position::new(10.5, 10.5), &spec(), None).unwrap();
+        let b = plan_cell(&powered(&[BotId(1)]), &Position::new(10.5, 10.5), &spec(), None).unwrap();
         assert_eq!(a, b);
     }
 
@@ -8147,6 +8202,7 @@ mod tests {
             &Position::new(10.5, 10.5),
             &spec(),
             2,
+            None,
         )
         .expect("the fixture has room for two");
         assert_eq!(cells.len(), 2);
@@ -8211,7 +8267,7 @@ mod tests {
         let bots = [BotId(1)];
         let mut state = powered(&bots);
         let spec = assembly_spec(&state, PACK).expect("red science is a cell shape");
-        let cell = plan_cell(&state, &Position::new(10.5, 10.5), &spec).expect("room");
+        let cell = plan_cell(&state, &Position::new(10.5, 10.5), &spec, None).expect("room");
         for part in &cell.parts {
             let entity = entity_for(&state, part);
             state.create_entity(entity);

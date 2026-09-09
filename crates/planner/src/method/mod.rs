@@ -18,6 +18,7 @@ pub mod produce;
 pub mod scout;
 pub mod supply;
 pub mod sustain;
+pub mod infrastructure;
 pub mod util;
 
 use crate::action::{Action, Actor, Condition, Effect};
@@ -695,6 +696,10 @@ pub fn expand(
         let mut rehearsal = ExpansionCtx::new(state.fork(), chain_actor);
         rehearsal.rehearsing = true;
         let mut scratch = ActionNetwork::new();
+        // Phase 0: build infrastructure before any goal expansion
+        if let Ok(infra_steps) = infrastructure::ensure_infrastructure(goals, &mut rehearsal) {
+            let _ = run_steps(infra_steps, &mut rehearsal, &mut scratch, registry, &mut Vec::new());
+        }
         let rehearsed = goals
             .iter()
             .try_for_each(|goal| expand_goal(goal, &mut rehearsal, &mut scratch, registry));
@@ -708,6 +713,12 @@ pub fn expand(
     forecast_state.set_gathering_forecast(forecast);
     let mut ctx = ExpansionCtx::new(forecast_state, chain_actor);
     let mut net = ActionNetwork::new();
+    // Phase 0: build infrastructure before any goal expansion
+    {
+        let infra_steps = infrastructure::ensure_infrastructure(goals, &mut ctx)?;
+        let mut promised = Vec::new();
+        run_steps(infra_steps, &mut ctx, &mut net, registry, &mut promised)?;
+    }
     for goal in goals {
         expand_goal(goal, &mut ctx, &mut net, registry)?;
     }

@@ -551,7 +551,7 @@ fn plan_from_dump(
     let (planned, work) = factorio_bot_core::plan_work::measure(|| {
       plan_best(&goals, &state, &registry_for(&bots), chain_actor, &bots)
     });
-    let (net, scheduled) = match planned {
+    let (net, scheduled, _memory) = match planned {
       Ok(plan) => plan,
       // The driver's own reading of this code (`goal/mod.rs` in
       // `scripting_lua`): the whole arrangement stands and there is nothing

@@ -688,7 +688,7 @@ fn plan_row(
   let outcome = plan_best(&[goal], &state, &registry_for(&bots), chain_actor, &bots);
   let plan_ms = t.elapsed().as_secs_f64() * 1000.;
   Ok(match outcome {
-    Ok((net, scheduled)) => {
+    Ok((net, scheduled, _memory)) => {
       let report = PlanReport::of(&net, &scheduled, &bots, &state);
       PlanRow {
         actions: Some(report.actions),

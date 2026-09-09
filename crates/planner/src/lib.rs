@@ -15,6 +15,7 @@ pub mod score;
 pub mod search;
 pub mod standing;
 pub mod state;
+pub mod memory;
 pub mod substance;
 
 /// Test-only worlds. Not part of the crate's API: research needs a world with
@@ -112,7 +113,7 @@ pub fn plan_best(
     registry: &MethodRegistry,
     chain_actor: BotId,
     roster: &[BotId],
-) -> Result<(ActionNetwork, Schedule), PlannerError> {
+) -> Result<(ActionNetwork, Schedule, memory::ReplanMemory), PlannerError> {
     let mut best: Option<(ActionNetwork, Schedule)> = None;
     let mut first_error: Option<PlannerError> = None;
     for policy in DrainPolicy::ALL {
@@ -150,7 +151,10 @@ pub fn plan_best(
         }
     }
     match (best, first_error) {
-        (Some(found), _) => Ok(found),
+        (Some((net, plan)), _) => {
+            let memory = memory::capture_intent(state, &net, &plan, 0);
+            Ok((net.clone(), plan.clone(), memory))
+        }
         (None, Some(err)) => Err(err),
         (None, None) => unreachable!("the policy list is not empty"),
     }

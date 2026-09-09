@@ -1147,7 +1147,7 @@ async fn plan_rounds(
         // choice the offline `plan` CLI makes or the two stop agreeing.
         let chain_actor = pick_chain_actor(&state, roster)
             .ok_or_else(|| goal_error("no bots in this run; goals need at least one"))?;
-        let (net, scheduled) = plan_best(
+        let (net, scheduled, _memory) = plan_best(
             std::slice::from_ref(goal),
             &state,
             &registry_for(roster),

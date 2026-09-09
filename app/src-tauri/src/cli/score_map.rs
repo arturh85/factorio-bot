@@ -327,7 +327,7 @@ fn plan_for(
   bots: &[factorio_bot_planner::BotId],
 ) -> std::result::Result<PlanReport, String> {
   let actor = pick_chain_actor(state, bots).ok_or_else(|| "no bots to plan for".to_owned())?;
-  let (net, scheduled) = plan_best(
+  let (net, scheduled, _memory) = plan_best(
     std::slice::from_ref(goal),
     state,
     &registry_for(bots),

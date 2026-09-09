@@ -195,7 +195,7 @@ fn a_cell_whose_machines_stand_is_finished_around_them() {
         s.create_entity(entity(&s, name, position, Direction::North));
     }
     let spec = assembly_spec(&s, PACK).expect("red science is a cell");
-    let cell = plan_cell(&s, &Position::new(10.5, 10.5), &spec).expect("room beside the plant");
+    let cell = plan_cell(&s, &Position::new(10.5, 10.5), &spec, None).expect("room beside the plant");
     let mut machines: Vec<Position> = Vec::new();
     for role in [Role::Intermediate, Role::Product] {
         let part = cell.at(role).expect("a cell has two machines");

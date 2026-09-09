@@ -82,7 +82,7 @@ fn work_for(world: Arc<FactorioSurface>, goal: Goal) -> (usize, WorkCounts) {
             &bots,
         )
     });
-    let (net, _schedule) = planned.expect("the baseline goal plans");
+    let (net, _schedule, _memory) = planned.expect("the baseline goal plans");
     (net.len(), work)
 }
 

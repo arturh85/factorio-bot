@@ -904,6 +904,18 @@ fn standing_offtake(state: &PlanState, at: &Position) -> Option<Offtake> {
     found
 }
 
+/// Is something already taking the product out of the machine at `at`?
+///
+/// [`standing_offtake`]'s answer as a yes or no, for `produce::cell_ledger`:
+/// a furnace an arm empties is not a furnace a hand can draw from, because
+/// the result slot the hand would read is emptied within ticks of every
+/// craft. The arm counts whether it stands from an earlier plan or was placed
+/// by this expansion -- `entities_within` reads the overlay -- so a fragment
+/// expanded after `sustain` has planned its offtake sees it.
+pub(crate) fn has_offtake(state: &PlanState, at: &Position) -> bool {
+    standing_offtake(state, at).is_some()
+}
+
 /// Has the arm at `at` a side its own coal can be belted in through?
 ///
 /// **Measured, by the first thing this rung tried.** Siting the offtake on the
@@ -3041,6 +3053,81 @@ mod tests {
                  an offtake, and reading it as one is this project's defining failure"
             );
         }
+    }
+
+    /// **A furnace an arm empties is not a furnace a hand can draw from.**
+    ///
+    /// `run-1788949638-11792`: the copper cell's furnace at `[27,-46]` had
+    /// `sustain`'s offtake arm on it, and `produce`'s `take N copper-plate
+    /// from the cell` -- a `Remove` from that furnace's result slot -- was
+    /// dispatched there eleven times across five plans and removed zero every
+    /// time, 1,800 ticks each, while the furnace made 120 plates and the arm
+    /// carried every one of them away. `craft 2 assembling-machine-1` was
+    /// abandoned behind it in every plan.
+    ///
+    /// The world here is the replan's: `world_after` applies the sustain
+    /// plan's placements to a fresh surface, the way the supervisor's next
+    /// round meets them -- not a fork, which would carry the first
+    /// expansion's resource claims and hide the cell from the ledger for a
+    /// different reason. On that world the cell stands, the offtake stands,
+    /// and a `Have` for the cell's own item must not be served out of that
+    /// furnace's slot.
+    #[test]
+    fn a_furnace_with_an_offtake_is_not_a_hands_source() {
+        use crate::action::{ActionKind, InventorySlot};
+        let roster = [BotId(1)];
+        let state = near_state();
+        let net = expand(&[goal()], &state, &registry_for(&roster), BotId(1))
+            .expect("iron and coal are within one belt window of each other");
+        let (surface, _) =
+            crate::standing::world_after(&state, &net, |_| true).expect("a topological order");
+        let standing = PlanState::from_world(surface, &roster);
+
+        let spec = cell_spec(&standing, "iron-plate").expect("a stone furnace smelts iron");
+        let cells = crate::method::produce::standing_cells(&standing, &spec);
+        assert!(
+            !cells.is_empty(),
+            "no cell stands, so this test measures nothing"
+        );
+        let emptied: Vec<Position> = cells
+            .iter()
+            .filter(|cell| has_offtake(&standing, &cell.furnace))
+            .map(|cell| cell.furnace.clone())
+            .collect();
+        assert_eq!(
+            emptied.len(),
+            cells.len(),
+            "every standing cell's furnace has an arm on it: {emptied:?} of {cells:?}"
+        );
+
+        let have = Goal::Have {
+            item: "iron-plate".into(),
+            count: 10,
+            whose: Holder::Share(BotId(1)),
+            via: None,
+        };
+        let plan = expand(&[have], &standing, &registry_for(&roster), BotId(1))
+            .expect("ten plates are makeable some other way on this world");
+        let from_emptied: Vec<String> = plan
+            .actions()
+            .filter(|a| {
+                matches!(
+                    &a.kind,
+                    ActionKind::Remove { pos, slot: InventorySlot::FurnaceResult, .. }
+                        if emptied.iter().any(|f| Pos::from(f) == Pos::from(pos))
+                )
+            })
+            .map(|a| a.label.clone())
+            .collect();
+        assert!(
+            from_emptied.is_empty(),
+            "the plan draws from a furnace whose arm keeps its slot empty: {from_emptied:?}"
+        );
+        assert!(
+            plan.actions().any(|a| a.label.starts_with("insert")
+                || a.label.starts_with("place burner-mining-drill")),
+            "the plates are made some other way -- a hand smelt or a cell of the plan's own"
+        );
     }
 
     /// **An arm carrying plates can never fuel itself, so the offtake is

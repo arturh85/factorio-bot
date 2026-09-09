@@ -147,7 +147,15 @@ fn the_replan_of_run_1788946451_86723_taps_the_standing_run() {
 
     let splitters = placed(&net, "splitter");
     assert_eq!(splitters.len(), 1, "exactly one splitter: {splitters:?}");
-    let chops = chopped(&net);
+    // Belts only: the same plan may chop a rock for a hand-smelt furnace's
+    // stone (it does since `produce::cell_ledger` stopped offering a furnace
+    // an arm empties to a hand -- the copper the tail needs is hand-smelted
+    // now rather than read out of a slot the offtake keeps at zero), and a
+    // rock coming up says nothing about the tap.
+    let chops: Vec<(Position, String)> = chopped(&net)
+        .into_iter()
+        .filter(|(_, name)| name == "transport-belt")
+        .collect();
     assert_eq!(chops.len(), 1, "exactly one belt comes up: {chops:?}");
     let (belt_at, belt_name) = &chops[0];
     assert_eq!(belt_name, "transport-belt");

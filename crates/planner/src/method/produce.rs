@@ -1987,9 +1987,36 @@ struct LiveCell {
 /// `room` is what is left under the drill, so a cell whose ore this plan has
 /// already spoken for is not offered again -- that is the exhaustion the live
 /// run hit (`take 64 ... removed 40`), moved from the game into the model.
+///
+/// # Not a furnace something else is already emptying
+///
+/// A hand draws from the furnace's **result slot** ([`take_steps`]), and that
+/// slot is empty by construction once an arm picks from it: `sustain` puts a
+/// `burner-inserter` on the cell's furnace to carry its plates into a chest
+/// (`standing_offtake`), and from the tick that arm has fuel every plate is
+/// lifted out within a few ticks of being made. `run-1788949638-11792` paid
+/// for this eleven times in one run: the furnace at `[27,-46]` smelted 120
+/// plates between ticks 43,500 and 83,700 with its output reading `{}` at
+/// every sample, its arm carried all of them into the chest at
+/// `[29.5,-46.5]` and on down a belt into the science cell's supply chest --
+/// 133 there by the end, nothing taking them -- while `take 1/3/4/15
+/// copper-plate from the cell` was dispatched at that furnace eleven times
+/// across five plans and came back `removed 0` every time, 1,800 ticks each.
+/// `craft 2 assembling-machine-1` and everything behind it were abandoned in
+/// every plan, and the run never built a machine. The furnace was live, the
+/// cell was working, and the take was reading a slot the cell's own arm keeps
+/// empty. So a furnace with an offtake is not a hand's source, whether the
+/// arm is standing from an earlier plan or placed by this one's expansion
+/// (the overlay is consulted, so `sustain`'s arm is seen the moment it is
+/// planned), and the fragment is served the way a fragment with no live cell
+/// is: another cell, or a hand smelt. What the arm carries away is `sustain`'s
+/// to route, not a hand's to race.
 fn cell_ledger(state: &PlanState, spec: &CellSpec) -> Vec<LiveCell> {
     let mut out: Vec<LiveCell> = Vec::new();
     for (drill, facing, furnace) in drill_fed_pairs(state, spec) {
+        if crate::method::sustain::has_offtake(state, &furnace) {
+            continue;
+        }
         let Some(area) = state.collision_area_facing(DRILL, &drill.position, facing) else {
             continue;
         };

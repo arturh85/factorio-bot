@@ -279,17 +279,25 @@ fn a_failed_take_leaves_the_plate_chest_a_way_out() {
     let goal = continuous_supply();
     let first = PlanState::from_world(world, &BOTS);
     let (net, scheduled) = plan(&first, &goal).expect("the science cell plans from t=0");
+    // The first take of copper plates the science tail makes. It was `take N
+    // copper-plate from the cell` -- the cell's own furnace -- until
+    // `produce::cell_ledger` stopped offering a furnace an arm empties to a
+    // hand (`run-1788949638-11792`: eleven such takes, `removed 0` every
+    // time, the arm had the plates); the tail's copper is now hand-smelted,
+    // `take N copper-plate from the furnace at [..]`. Either way the take
+    // that fails is the first copper take, and what stands after its cone is
+    // abandoned is the cell and every coal run -- the live shape.
     let failed = scheduled
         .steps
         .iter()
         .find_map(|step| match &step.what {
-            StepKind::Act { action, label } if label.contains("copper-plate from the cell") => {
+            StepKind::Act { action, label } if label.contains("copper-plate from the") => {
                 Some(*action)
             }
             _ => None,
         })
         .expect(
-            "the plan takes copper plates out of the cell -- if it no longer does, the \
+            "the plan takes copper plates out of a furnace -- if it no longer does, the \
                  live shape this test reproduces has changed and the label needs updating",
         );
     let done = survivors_of_failure(&net, failed);
@@ -304,9 +312,20 @@ fn a_failed_take_leaves_the_plate_chest_a_way_out() {
         "a copper cell stands with a chest its arm fills, or this test measures nothing"
     );
     for chest in &chests {
+        // A way out is a free side, or a side already spent on the way out:
+        // an arm standing there whose pickup is this chest. The failed take
+        // used to be the cell's own, and its cone took the supply link with
+        // it; now it is a late hand-smelt take, the link survives, and the
+        // chest's kept exit holds the link's own arm -- which is the exit
+        // being used, not the exit being lost.
         let open = neighbours(chest)
             .iter()
-            .filter(|tile| second.is_area_free("transport-belt", tile))
+            .filter(|tile| {
+                second.is_area_free("transport-belt", tile)
+                    || second
+                        .entity_at(tile)
+                        .is_some_and(|arm| second.delivers_into(chest, &arm.position))
+            })
             .count();
         assert!(
             open > 0,

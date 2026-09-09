@@ -107,6 +107,15 @@ fn the_three_map_json_baselines_stay_within_their_work_ceilings() {
     //   producing:automation-science-pack:6     316    430        4   22,008    632   6,830
     //   producing:logistic-science-pack:6       441  1,321        4   46,551  2,002  30,378
     //
+    // **Green moved 441 -> 571 and this file did not notice for a day**, because
+    // the test returns early wherever `workspace/scripts/map.json` is absent --
+    // which is every worktree, since a worktree has no `workspace/`. Three
+    // agents reported "the planner suite is green" in a run where this test
+    // never executed. `absent()` says "This is not a pass" and that is exactly
+    // right; nobody read it. The 571 is the canonical BASELINES.md figure and
+    // was measured on both sides of the `yields_at` change, so it is the cell
+    // work that moved it, not the method-ordering fix. Re-measured below.
+    //
     // Ceilings are twice each of those, except `resource_patches`, whose
     // ceiling is 16 rather than 8: the memo means the count is now the number
     // of *distinct resource names a plan asks about*, a small integer that a
@@ -151,7 +160,7 @@ fn the_three_map_json_baselines_stay_within_their_work_ceilings() {
                 item: "logistic-science-pack".to_owned(),
                 per_minute: 6,
             },
-            441,
+            571,
             WorkCounts {
                 goals_expanded: 2_642,
                 resource_patches: 16,

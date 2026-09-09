@@ -34,7 +34,7 @@ import {botSampleAt, forceSampleAt, inventoryOf, productionSeries, trackedItems,
 import {boundsAt, entitiesAt} from '@/lib/runMap';
 import {machineStatusAt} from '@/lib/machineTimeline';
 import {lagTicks} from '@/lib/runCoverage';
-import {parseReplay, Replay} from '@/api/replay';
+import {parseReplay, Replay, ReplayStatus} from '@/api/replay';
 
 /** The `force`-kind half of `Sample`, narrowed for `forceState`. */
 type ForceSample = Extract<Sample, {kind: 'force'}>;
@@ -292,7 +292,7 @@ export const useRunsStore = defineStore('runs', {
         replayCounts(): {steps: number; abandoned: number; lost: number; failed: number; pending: number; believed: number} | null {
             if (this.replay === null) return null;
             const steps = this.replay.steps;
-            const count = (status: string) => steps.filter((step) => step.status === status).length;
+            const count = (status: ReplayStatus) => steps.filter((step) => step.status === status).length;
             return {
                 steps: steps.length,
                 abandoned: count('Abandoned'),
@@ -308,8 +308,11 @@ export const useRunsStore = defineStore('runs', {
          * The manifest's own `samples_lag_ticks` outranks a client-side
          * derivation when the server carries one -- it was computed against
          * the run's actual end, where `lagTicks` only has the analysis
-         * window's `hi` to work from. Falls back to `lagTicks` for a summary
-         * from a server that predates the field.
+         * window's `hi` to work from. Falls back to `lagTicks` whenever the
+         * manifest field is null, which is true of two different runs: a
+         * summary from a server that predates the field, and an unfinished
+         * run on a current one (the field is only ever computed against a
+         * finished run's end).
          */
         sampleLag(): number | null {
             const fromManifest = this.detail?.summary.samples_lag_ticks;

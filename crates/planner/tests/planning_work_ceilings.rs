@@ -158,7 +158,7 @@ fn the_three_map_json_baselines_stay_within_their_work_ceilings() {
     // gives: a ceiling that survives its own remedy is not measuring anything.
     // **Re-keyed 2026-09-09, when the science cell lost its chests.** A red
     // cell is belted from a standing stage-1 cell for each plate and REFUSES
-    // by name without one (`assembly_no_standing_source`), so a lone
+    // by name without one (`AssemblyNoStandingSource`), so a lone
     // `producing:automation-science-pack:6` is no longer a plan; the number
     // that matters is the composed bundle `continuous_supply.lua` runs --
     // both sustains at the cell's own demand, then the cell. Green needs a

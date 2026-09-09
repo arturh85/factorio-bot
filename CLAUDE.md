@@ -722,6 +722,18 @@ BotBridge Mod (Factorio mod for RPC)
     and so is a replan recognising its own half-built link: the live replan
     refused the furnace end because the link's first belt at `[27.5,-43.5]`
     stood while its arm did not.
+    **CLOSED 2026-09-09, and the link was the symptom** (`docs/superpowers/
+    notes/2026-09-09-a-replan-finishes-what-it-began.md`): nothing tracks
+    who placed a belt, and a replan recognised a science cell only by a
+    standing MACHINE — the last part to stand, since both need `automation`
+    and every arm a circuit off the same take. So a cut batch left chests,
+    arms, poles and the whole link standing, `complete_cell` saw no cell,
+    sited a fresh one, and its supply chest needed a second link out of a
+    plate chest with no side left. Now a cell is recovered from any two of
+    its parts on their tiles, and `connect::standing_run` finishes a belt
+    chain that already joins the two doors with its two arms. Run 70024's
+    replan: refused → 91 actions. Reproduce any replan refusal offline
+    before naming the router.
     **AMENDED 2026-09-09 (`docs/superpowers/notes/2026-09-09-the-ring-was-the-other-end.md`):
     that sealing was measured on `a69ae64c`'s layout and the layout has
     moved. On the current one the kept exit opens north-east and a 2-span

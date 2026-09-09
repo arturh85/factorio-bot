@@ -1384,16 +1384,43 @@ fn works(state: &PlanState, mut cell: Cell, spec: &AssemblySpec) -> Option<Cell>
 /// so a side the cell's own inserter takes is not counted. On clean ground
 /// every side qualifies and the search is unchanged; the four canonical
 /// baselines and the science bundle are byte-identical with this in place.
+///
+/// # A chest a belt already reaches is reachable
+///
+/// Asked of a cell being FINISHED rather than sited, the question can
+/// already be answered by the ground: a link that stands whole fills the
+/// chest by machine (`already_filled_by_machine`), and one that lost its
+/// arms to an abandoned batch has a standing belt on one side's belt tile
+/// with the arm's tile free. Both are "a belt can reach this chest", proven
+/// by the belt. Without this, `fit_partial` on `run-1788941729-70024`'s
+/// world rejected the true layout of the half-built cell -- its supply
+/// chest's free sides all opened onto the coal run -- and recovered a
+/// mirror of it with the feed chest as supply, which then asked for a
+/// second link out of a plate chest with no side left.
 fn supply_chest_is_reachable(trial: &PlanState, cell: &Cell) -> bool {
     let Some(chest) = cell.at(Role::SupplyChest) else {
         return true;
     };
+    if already_filled_by_machine(trial, &chest.position) {
+        return true;
+    }
     [(0., -1.), (1., 0.), (0., 1.), (-1., 0.)]
         .into_iter()
         .any(|(dx, dy)| {
             let arm = Position::new(chest.position.x() + dx, chest.position.y() + dy);
             let belt = Position::new(chest.position.x() + 2. * dx, chest.position.y() + 2. * dy);
-            if !trial.is_area_free(INSERTER, &arm) || !trial.is_area_free("transport-belt", &belt) {
+            if !trial.is_area_free(INSERTER, &arm) {
+                return false;
+            }
+            // A belt standing at the door with the arm's tile free is the
+            // run that reached it, wanting its arm -- `connect::standing_run`
+            // -- but only a belt whose flow ENDS here. A belt passing the
+            // chest on its way elsewhere (a coal run, on
+            // `run-1788941729-70024` at `[29.5,-30.5]`) reaches nothing.
+            if belt_ends_at(trial, &belt) {
+                return true;
+            }
+            if !trial.is_area_free("transport-belt", &belt) {
                 return false;
             }
             // With the arm STANDING: the belt tile's way out must not be
@@ -1415,6 +1442,28 @@ fn supply_chest_is_reachable(trial: &PlanState, cell: &Cell) -> bool {
             let ctx = crate::method::ExpansionCtx::new(with_arm, crate::ids::BotId(0));
             crate::method::connect::belt_reaches_open_ground(&ctx, &belt)
         })
+}
+
+/// Does a `transport-belt` stand centred on `at` with no belt on the tile it
+/// flows into -- the tail of a chain, where an unload arm would pick up?
+fn belt_ends_at(state: &PlanState, at: &Position) -> bool {
+    use factorio_bot_core::num_traits::FromPrimitive;
+    let Some(belt) = state
+        .entity_at(at)
+        .filter(|e| e.name == "transport-belt" && Pos::from(&e.position) == Pos::from(at))
+    else {
+        return false;
+    };
+    let Some(facing) = Direction::from_u8(belt.direction) else {
+        return false;
+    };
+    let Some(step) = Position::new(0., -1.).turn(facing) else {
+        return false;
+    };
+    let next = at.add(&step);
+    !state
+        .entity_at(&next)
+        .is_some_and(|e| e.name == "transport-belt" && Pos::from(&e.position) == Pos::from(&next))
 }
 
 /// Put `cell` into `state` the way the plan will: its missing parts created,
@@ -1497,33 +1546,64 @@ fn recipe_for_role(spec: &AssemblySpec, role: Role) -> Option<&str> {
 /// two machines four tiles apart are the two machines of one cell at exactly
 /// one facing, and the other fifteen layouts each claim one of them and
 /// would build the rest of a different cell around it.
+///
+/// # And since 2026-09-09, around any standing PART, not only a machine
+///
+/// `seed` is whatever stands; `roles` are the roles of this layout that
+/// stand under its name, and the seed is taken as each of them in turn. A
+/// machine's roles are the two machine roles, as before. A chest's are the
+/// feed, supply and output chests; an inserter's the four arms; a pole's the
+/// cell's own pole (only the with-pole layouts, since only they have one).
+/// `least` is how many parts must stand for a layout to count -- **one for a
+/// machine, two for anything else**, so a lone chest anywhere in the world
+/// is never the seed of a cell, while two parts on the exact tiles one
+/// layout puts them on are that layout with its machines not yet placed.
+///
+/// Why it is needed: the machines are the LAST parts of a cell to stand.
+/// Both need `automation` researched before they can be crafted, and every
+/// electric arm needs a circuit off the copper the cell's own supply take
+/// fetches, so a batch cut short upstream of either leaves the chests, some
+/// arms, the poles and the whole supply link standing and no machine at all
+/// -- `run-1788941729-70024` at tick 53,546: three chests, four inserters,
+/// four poles, a lab and a complete belt link into the supply chest, and the
+/// replan sited a fresh cell beside all of it, then refused because the
+/// fresh cell's supply chest needed a second link out of a plate chest with
+/// no side left. Recovering the cell from its chests finishes it instead,
+/// and `already_filled_by_machine` then finds the standing link.
 fn fit_partial(
     state: &PlanState,
-    machine: &FactorioEntity,
+    seed: &FactorioEntity,
+    roles: &[Role],
+    least: usize,
     spec: &AssemblySpec,
     exclude: &BTreeSet<Pos>,
 ) -> Option<Cell> {
     let table = layout_table(spec.feeds(), spec.product_offset);
     let mut best: Option<(usize, Cell)> = None;
-    // A one-machine cell has only the product to recover a layout around.
-    let roles: &[Role] = if spec.intermediate.is_some() {
-        &[Role::Intermediate, Role::Product]
-    } else {
-        &[Role::Product]
-    };
     for facing in Direction::orthogonal() {
         for &role in roles {
-            let Some((_, offset, _)) = table.iter().find(|(r, _, _)| *r == role) else {
-                continue;
+            let offset = if role == Role::Pole {
+                POLE_OFFSET
+            } else {
+                let Some((_, offset, _)) = table.iter().find(|(r, _, _)| *r == role) else {
+                    continue;
+                };
+                *offset
             };
             let Some(turned) = Position::new(offset.0, offset.1).turn(facing) else {
                 continue;
             };
             let origin = Position::new(
-                machine.position.x() - turned.x(),
-                machine.position.y() - turned.y(),
+                seed.position.x() - turned.x(),
+                seed.position.y() - turned.y(),
             );
-            for with_pole in [false, true] {
+            // A pole seed is only a part of the layouts that have a pole.
+            let pole_choices: &[bool] = if role == Role::Pole {
+                &[true]
+            } else {
+                &[false, true]
+            };
+            for &with_pole in pole_choices {
                 let Some(parts) = layout(&origin, facing, with_pole, spec) else {
                     continue;
                 };
@@ -1542,10 +1622,33 @@ fn fit_partial(
                 if standing.is_empty() {
                     continue;
                 }
-                if lane.iter().any(|tile| !state.is_position_free(tile)) {
+                // The lane must be free -- except behind a supply chest a
+                // machine already fills: a bot never charges that chest by
+                // hand, and the tile behind it is where the link's unload
+                // arm stands (`run-1788941729-70024`, arm at `[31.5,-31.5]`
+                // behind the supply chest at `[31.5,-30.5]`).
+                let supply = parts
+                    .iter()
+                    .find(|part| part.role == Role::SupplyChest)
+                    .map(|part| part.position.clone());
+                let fills_supply = |tile: &Position| {
+                    supply.as_ref().is_some_and(|chest| {
+                        state.entity_at(tile).is_some_and(|arm| {
+                            state.pickup_position(&arm).is_some()
+                                && state.delivers_into(&arm.position, chest)
+                        })
+                    })
+                };
+                if lane
+                    .iter()
+                    .any(|tile| !state.is_position_free(tile) && !fills_supply(tile))
+                {
                     continue;
                 }
                 let count = standing.len();
+                if count < least {
+                    continue;
+                }
                 if best.as_ref().is_some_and(|(most, _)| *most >= count) {
                     continue;
                 }
@@ -1619,27 +1722,53 @@ const PARTIAL_CELL_SCAN_RADIUS: f64 = CELL_SEARCH_RADIUS as f64 + 6.;
 /// [`cell_machines`]) and of every cell this plan has just chosen, so a cell
 /// is neither finished twice, nor "finished" when it needs nothing, nor built
 /// through a machine some other cell is using.
+///
+/// **Machines first, then every other part**, each nearest first: a
+/// standing machine is a cell on its own evidence, and a chest or an arm is
+/// only with a second part beside it (see [`fit_partial`]'s `least`). The
+/// order is what keeps every plan with a machine standing byte-identical to
+/// the plan made before parts other than machines could seed a cell.
 pub fn complete_cell(
     state: &PlanState,
     anchor: &Position,
     spec: &AssemblySpec,
     exclude: &BTreeSet<Pos>,
 ) -> Option<Cell> {
-    let mut machines: Vec<(f64, FactorioEntity)> = state
+    // The roles a standing entity of each name can be: the machine roles
+    // for the machine, the chest roles for a chest, and so on. Read off the
+    // layout rather than listed, so a part added to the layout is a seed.
+    let table = layout_table(spec.feeds(), spec.product_offset);
+    let roles_of = |name: &str| -> Vec<Role> {
+        table
+            .iter()
+            .map(|(role, _, _)| *role)
+            .chain([Role::Pole])
+            .filter(|role| role.name(spec.machine) == name)
+            .collect()
+    };
+    let mut seeds: Vec<(bool, f64, FactorioEntity)> = state
         .entities_within(anchor, PARTIAL_CELL_SCAN_RADIUS)
         .into_iter()
-        .filter(|entity| entity.name == spec.machine)
+        .filter(|entity| !roles_of(&entity.name).is_empty())
         .filter(|entity| !exclude.contains(&Pos::from(&entity.position)))
-        .map(|entity| (calculate_distance(&entity.position, anchor), entity))
+        .map(|entity| {
+            (
+                entity.name != spec.machine,
+                calculate_distance(&entity.position, anchor),
+                entity,
+            )
+        })
         .collect();
-    machines.sort_by(|a, b| {
-        a.0.total_cmp(&b.0)
-            .then(a.1.position.x.total_cmp(&b.1.position.x))
-            .then(a.1.position.y.total_cmp(&b.1.position.y))
+    seeds.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then(a.1.total_cmp(&b.1))
+            .then(a.2.position.x.total_cmp(&b.2.position.x))
+            .then(a.2.position.y.total_cmp(&b.2.position.y))
     });
-    machines
-        .into_iter()
-        .find_map(|(_, machine)| fit_partial(state, &machine, spec, exclude))
+    seeds.into_iter().find_map(|(other, _, seed)| {
+        let least = if other { 2 } else { 1 };
+        fit_partial(state, &seed, &roles_of(&seed.name), least, spec, exclude)
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -5682,6 +5811,94 @@ mod tests {
             recipes_sorted, machines,
             "both standing machines get their recipe"
         );
+    }
+
+    /// **`run-1788941729-70024`, tick 53,546.** The batch was cut upstream
+    /// of `research automation`, so both machines were abandoned while every
+    /// chest and arm of the cell stood. A cell whose chests and arms stand
+    /// is finished around them: the machines go where the cell meant them,
+    /// and nothing standing is placed again. Before this, only a standing
+    /// MACHINE could seed a cell, and the replan sited a fresh one beside
+    /// the parts.
+    #[test]
+    fn a_cell_whose_chests_and_arms_stand_is_finished_around_them() {
+        let bots = [BotId(1)];
+        let mut s = powered(&bots);
+        let cell = plan_cell(&s, &Position::new(10.5, 10.5), &spec()).expect("room");
+        for part in cell
+            .parts
+            .iter()
+            .filter(|part| !matches!(part.role, Role::Intermediate | Role::Product | Role::Pole))
+        {
+            let entity = entity_for(&s, part);
+            s.create_entity(entity);
+        }
+        let net = expand(
+            &[Goal::Producing {
+                item: PACK.into(),
+                per_minute: 6,
+            }],
+            &s,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .expect("chests and arms are a cell to finish");
+        let sort = |v: &mut Vec<Position>| {
+            v.sort_by(|a, b| a.x.total_cmp(&b.x).then(a.y.total_cmp(&b.y)));
+        };
+        let mut machines: Vec<Position> = [Role::Intermediate, Role::Product]
+            .iter()
+            .map(|role| cell.at(*role).unwrap().position.clone())
+            .collect();
+        sort(&mut machines);
+        let mut placed_machines = placed(&net, MACHINE);
+        sort(&mut placed_machines);
+        assert_eq!(
+            placed_machines, machines,
+            "the machines go where the cell meant them: finished, not re-sited"
+        );
+        assert_eq!(
+            placed(&net, CHEST),
+            Vec::<Position>::new(),
+            "every chest stands and is not placed again"
+        );
+        assert_eq!(
+            placed(&net, INSERTER),
+            Vec::<Position>::new(),
+            "every arm stands and is not placed again"
+        );
+    }
+
+    /// A lone chest is not a cell. One chest of a cell standing and nothing
+    /// else beside it: the plan sites a whole cell and places every chest of
+    /// it, rather than growing a cell round whatever chest it finds. Two
+    /// parts on their tiles are the threshold (`fit_partial`'s `least`).
+    #[test]
+    fn a_lone_chest_does_not_seed_a_cell() {
+        let bots = [BotId(1)];
+        let mut s = powered(&bots);
+        let cell = plan_cell(&s, &Position::new(10.5, 10.5), &spec()).expect("room");
+        let chest = cell
+            .at(Role::SupplyChest)
+            .expect("a cell has a supply chest");
+        let entity = entity_for(&s, chest);
+        s.create_entity(entity);
+        let net = expand(
+            &[Goal::Producing {
+                item: PACK.into(),
+                per_minute: 6,
+            }],
+            &s,
+            &registry_for(&bots),
+            BotId(1),
+        )
+        .expect("a lone chest does not stop a cell being sited");
+        assert_eq!(
+            placed(&net, CHEST).len(),
+            chest_count(&spec()) as usize,
+            "a whole cell's chests are placed; the lone chest seeded nothing"
+        );
+        assert_eq!(placed(&net, MACHINE).len(), 2);
     }
 
     // ---- the one-machine (furnace) cell -----------------------------------

@@ -13,7 +13,7 @@ use factorio_bot_core::graph::enclosure::GRID;
 use factorio_bot_core::graph::route::{
     Route, RouteError, TileKind, route_belt_with_tunnels, tunnel_axis, tunnel_cells,
 };
-use factorio_bot_core::types::{Direction, FactorioEntity, Position, Rect};
+use factorio_bot_core::types::{Direction, FactorioEntity, Pos, Position, Rect};
 use std::collections::BTreeMap;
 
 /// The belt this module lays, and the item whose bill it states.
@@ -423,6 +423,168 @@ fn first_free_perimeter(
         .into_iter()
         .map(|cell| enclosure::cell_to_position(origin, cell))
         .collect())
+}
+
+/// A belt run that already stands between `from` and `to`, wanting only its
+/// two arms -- the shape a replan meets after a batch was cut short.
+///
+/// # Why this exists
+///
+/// Every electric `inserter` of a link needs a circuit, and the circuit's
+/// copper comes off the same cell's supply take; when that take fails, the
+/// executor abandons its whole dependency cone and **every arm of the link
+/// with it, while every belt stands** (`plan --replan 1 --fail "copper-plate
+/// from the cell"` on seed 31337: 25 belts standing from the plate chest's
+/// kept exit to the supply chest's door, and no arm at either end). To the
+/// replan those belts were obstacles: the exit's belt tile was "taken", the
+/// chest reported its next side as the one it had left, and a second,
+/// duplicate run was laid from there -- or refused when no side was left.
+///
+/// # What counts as this run
+///
+/// Nothing here tracks who laid a belt; a belt is a belt. The criterion is
+/// geometric and about BOTH ends: on some perimeter side of `from` the
+/// arm's tile is free and the belt's tile holds a standing `transport-belt`;
+/// following that belt's direction tile by tile through standing belts ends
+/// on a tile that is the belt cell of a perimeter side of `to` whose arm
+/// tile is free. A chain that leaves the door and goes anywhere else -- a
+/// coal run passing the chest, a run to some other machine -- ends somewhere
+/// that is not `to`'s door and is not matched. A chain with an underground
+/// pair in it is followed only to the pair: pairing the halves is
+/// `route_belt`'s business, and the surface search then runs as before.
+///
+/// The kept exit (`PlanState::reserve_ground`) needs no special case: the
+/// belt standing on the exit's belt tile is exactly what this looks for.
+///
+/// Returns the two ends in `first_free_perimeter`'s own shape so the arms
+/// are placed with the same facings a fresh run would give them.
+fn standing_run(
+    state: &PlanState,
+    inserter: &str,
+    origin: (f64, f64),
+    from_footprint: &Footprint,
+    to_footprint: &Footprint,
+) -> Option<(Endpoint, Endpoint)> {
+    use factorio_bot_core::num_traits::FromPrimitive;
+    let belt_at = |cell: (usize, usize)| -> Option<FactorioEntity> {
+        let at = enclosure::cell_to_position(origin, cell);
+        state
+            .entity_at(&at)
+            .filter(|entity| entity.name == BELT && Pos::from(&entity.position) == Pos::from(&at))
+    };
+    let arm_free = |cell: (usize, usize)| -> bool {
+        state.is_area_free(inserter, &enclosure::cell_to_position(origin, cell))
+    };
+    let doors_of = |footprint: &Footprint| -> Vec<Endpoint> {
+        perimeter(footprint)
+            .into_iter()
+            .filter_map(|((x, y), (dx, dy))| {
+                Some(Endpoint {
+                    anchor: in_grid(x - dx, y - dy)?,
+                    inserter: in_grid(x, y)?,
+                    belt: in_grid(x + dx, y + dy)?,
+                })
+            })
+            .collect()
+    };
+    let sinks = doors_of(to_footprint);
+    for source in doors_of(from_footprint) {
+        if !arm_free(source.inserter) {
+            continue;
+        }
+        let Some(head) = belt_at(source.belt) else {
+            continue;
+        };
+        // Follow the chain downstream. Bounded by the window: a cell is
+        // visited once, and a step off the grid ends the chain.
+        let mut visited = vec![false; GRID * GRID];
+        let mut at = source.belt;
+        let mut belt = head;
+        loop {
+            visited[enclosure::cell_index(at.0, at.1)] = true;
+            let Some(facing) = Direction::from_u8(belt.direction) else {
+                break;
+            };
+            let Some(step) = Position::new(0., -1.).turn(facing) else {
+                break;
+            };
+            let Some(next) = in_grid(
+                at.0 as i64 + step.x().round() as i64,
+                at.1 as i64 + step.y().round() as i64,
+            ) else {
+                break;
+            };
+            if visited[enclosure::cell_index(next.0, next.1)] {
+                break;
+            }
+            let Some(next_belt) = belt_at(next) else {
+                break;
+            };
+            at = next;
+            belt = next_belt;
+        }
+        let tail = at;
+        if let Some(sink) = sinks
+            .iter()
+            .find(|sink| sink.belt == tail && arm_free(sink.inserter))
+        {
+            return Some((source, *sink));
+        }
+    }
+    None
+}
+
+/// The steps that finish a [`standing_run`]: the bill for two arms and the
+/// two `Place`s, with the facings a fresh run would give them. No belt, no
+/// band, no underground.
+#[allow(clippy::too_many_arguments)]
+fn arms_only(
+    ctx: &mut ExpansionCtx,
+    from: &FactorioEntity,
+    to: &FactorioEntity,
+    item: &ItemId,
+    inserter: &str,
+    origin: (f64, f64),
+    source: Endpoint,
+    sink: Endpoint,
+) -> Result<Vec<Step>, ConnectRefusal> {
+    let source_anchor_pos = enclosure::cell_to_position(origin, source.anchor);
+    let sink_anchor_pos = enclosure::cell_to_position(origin, sink.anchor);
+    let belt_start_pos = enclosure::cell_to_position(origin, source.belt);
+    let belt_end_pos = enclosure::cell_to_position(origin, sink.belt);
+    let src_inserter_pos = enclosure::cell_to_position(origin, source.inserter);
+    let dst_inserter_pos = enclosure::cell_to_position(origin, sink.inserter);
+    let load_facing =
+        inserter_facing(&source_anchor_pos, &belt_start_pos).ok_or(ConnectRefusal::NotCardinal)?;
+    let unload_facing =
+        inserter_facing(&belt_end_pos, &sink_anchor_pos).ok_or(ConnectRefusal::NotCardinal)?;
+    let build = ctx
+        .state
+        .bot(ctx.chain_actor)
+        .map(|b| b.build_distance)
+        .unwrap_or(10.0);
+    let mut steps = Vec::with_capacity(3);
+    steps.push(Step::Subgoal(Goal::Have {
+        item: inserter.into(),
+        count: 2,
+        whose: Holder::Share(ctx.chain_actor),
+        via: None,
+    }));
+    let load =
+        FactorioEntity::new_named_inserter(inserter.to_string(), &src_inserter_pos, load_facing);
+    let note = format!(
+        "load {item} out of {} (the belt to {} stands)",
+        from.name, to.name
+    );
+    steps.push(place_step(ctx, load, build, &note));
+    let unload =
+        FactorioEntity::new_named_inserter(inserter.to_string(), &dst_inserter_pos, unload_facing);
+    let note = format!(
+        "unload {item} into {} (the belt from {} stands)",
+        to.name, from.name
+    );
+    steps.push(place_step(ctx, unload, build, &note));
+    Ok(steps)
 }
 
 /// Every collision box the *plan* has added inside `area`, so a second
@@ -1117,6 +1279,17 @@ pub fn connect_steps_reserving(
     let to_footprint = footprint_of(origin, to).ok_or_else(|| ConnectRefusal::NoRoute {
         blocked: vec![to.position.clone()],
     })?;
+
+    // A RUN THAT ALREADY STANDS, MISSING ONLY ITS ARMS, IS FINISHED, NOT
+    // ROUTED AROUND. See `standing_run`: a belt chain leaving `from`'s door
+    // and ending at `to`'s door is this run, whoever laid it, and the
+    // replan places the two arms and nothing else.
+    if let Some((source, sink)) =
+        standing_run(&ctx.state, inserter, origin, &from_footprint, &to_footprint)
+    {
+        return arms_only(ctx, from, to, item, inserter, origin, source, sink);
+    }
+
     claim_footprint(&mut blocked, &from_footprint);
     claim_footprint(&mut blocked, &to_footprint);
     let own_perimeter = |cell: (usize, usize)| {
@@ -2327,6 +2500,66 @@ mod tests {
                 .all(|(at, facing)| at.y() == 3.5 && *facing == dir(Direction::East)),
             "one straight row, running east: {belts:?}"
         );
+    }
+
+    /// A run whose belts stand and whose arms do not -- the shape an
+    /// abandoned batch leaves, every arm needing a circuit and every belt
+    /// only iron -- is finished with its two arms on the tiles a fresh run
+    /// would give them, and no belt is laid. Before `standing_run` the
+    /// belts were obstacles, and the chest's next side got a second run.
+    #[test]
+    fn a_standing_run_missing_its_arms_is_finished_with_two_arms() {
+        use factorio_bot_core::num_traits::FromPrimitive;
+        let item: ItemId = "iron-plate".into();
+        let (mut plain, source, sink) = crate::test_world::two_chests_on_open_ground();
+        let fresh = connect_steps_with(&mut plain, &source, &sink, &item, INSERTER)
+            .expect("the control: two chests on open ground");
+        let (mut ctx, source, sink) = crate::test_world::two_chests_on_open_ground();
+        for (at, facing) in placements(&fresh, BELT) {
+            let facing = Direction::from_u8(facing).expect("a belt has a facing");
+            ctx.state
+                .create_entity(FactorioEntity::new_transport_belt(&at, facing));
+        }
+        let steps = connect_steps_with(&mut ctx, &source, &sink, &item, INSERTER)
+            .expect("the standing belts are this run, not an obstacle");
+        assert_eq!(
+            placements(&steps, INSERTER),
+            placements(&fresh, INSERTER),
+            "exactly the two arms, on the tiles the fresh run gave them"
+        );
+        assert_eq!(
+            placements(&steps, BELT),
+            Vec::new(),
+            "no belt is laid: they all stand"
+        );
+    }
+
+    /// A chain that leaves the source's door and stops short of the sink's
+    /// is NOT this run. The belts are obstacles as they always were, and the
+    /// run is routed round them -- it lays belts -- or refuses; it is never
+    /// answered with two arms and nothing between them.
+    #[test]
+    fn a_chain_that_ends_short_of_the_sink_is_not_taken_as_the_run() {
+        use factorio_bot_core::num_traits::FromPrimitive;
+        let item: ItemId = "iron-plate".into();
+        let (mut plain, source, sink) = crate::test_world::two_chests_on_open_ground();
+        let fresh = connect_steps_with(&mut plain, &source, &sink, &item, INSERTER)
+            .expect("the control: two chests on open ground");
+        let belts = placements(&fresh, BELT);
+        assert!(belts.len() > 3, "fixture precondition: a run worth cutting");
+        let (mut ctx, source, sink) = crate::test_world::two_chests_on_open_ground();
+        for (at, facing) in &belts[..belts.len() - 2] {
+            let facing = Direction::from_u8(*facing).expect("a belt has a facing");
+            ctx.state
+                .create_entity(FactorioEntity::new_transport_belt(at, facing));
+        }
+        if let Ok(steps) = connect_steps_with(&mut ctx, &source, &sink, &item, INSERTER) {
+            assert!(
+                !placements(&steps, BELT).is_empty(),
+                "a chain two tiles short of the sink's door was taken as the whole run: {:?}",
+                placements(&steps, INSERTER)
+            );
+        }
     }
 
     /// A tile the caller has reserved is closed to the route -- no belt, no

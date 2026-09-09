@@ -302,9 +302,16 @@ fn the_link_of_run_1788936524_99544_leaves_by_the_kept_exit() {
 
 /// The whole replan plans. Before `supply_chest_is_reachable` the science
 /// cell was sited with its supply chest in the engine/boiler gap and the
-/// bundle refused on the link to it; now the cell is sited where a belt can
-/// reach its chest, and the link is laid -- with the pair, and the
-/// `logistics` the pair needs, in the plan.
+/// bundle refused on the link to it; then the cell was sited where a belt
+/// can reach its chest, and the link was laid with a pair and the
+/// `logistics` the pair needs (416 actions / 34,806 ticks).
+///
+/// **Since `complete_cell` recovers a cell from its chests and arms**, the
+/// replan finishes the half-built cell plan 1 began -- its three chests,
+/// four arms and the whole link stood at tick 62,222; only its machines
+/// were in the abandoned cone -- rather than siting a second one, so no
+/// second link, no pair and no `logistics` (128 / 21,237). The plate
+/// chest's way out is still asserted above, of `connect` directly.
 #[test]
 fn the_replan_of_run_1788936524_99544_plans() {
     let Some((state, bots)) = standing_world() else {
@@ -333,8 +340,20 @@ fn the_replan_of_run_1788936524_99544_plans() {
             .any(|chest| (chest.x() - 42.5).abs() < 0.1 && (chest.y() + 26.5).abs() < 0.1),
         "a chest is back in the engine/boiler gap at [42.5, -26.5]"
     );
+    let mut machines = placed("assembling-machine-1");
+    machines.sort_by(|a, b| a.x.total_cmp(&b.x).then(a.y.total_cmp(&b.y)));
+    assert_eq!(
+        machines,
+        vec![Position::new(31.5, -27.5), Position::new(35.5, -27.5)],
+        "the machines go where plan 1 meant them: the half-built cell is finished, not re-sited"
+    );
     assert!(
-        !placed("underground-belt").is_empty(),
-        "the link out of the plate chest crosses the first plan's own belt with a pair"
+        placed("underground-belt").is_empty(),
+        "the link stands whole into the finished cell's supply chest; nothing tunnels"
+    );
+    assert!(
+        !net.actions()
+            .any(|a| a.label.contains("research logistics")),
+        "and no pair means no logistics off a hand charge"
     );
 }

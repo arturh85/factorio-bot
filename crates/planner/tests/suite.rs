@@ -50,6 +50,8 @@ mod oil_category_gate;
 mod ore_underfoot;
 #[path = "placement_occupancy.rs"]
 mod placement_occupancy;
+#[path = "replan_finishes_its_cell.rs"]
+mod replan_finishes_its_cell;
 #[path = "replan_haul.rs"]
 mod replan_haul;
 #[path = "replan_on_standing_world.rs"]

@@ -916,6 +916,70 @@ fn room_to_fuel(state: &PlanState, at: &Position, taken: &[Position]) -> bool {
         })
 }
 
+/// Is a standing cell one this arrangement can feed -- or has fed already?
+///
+/// `produce::standing_cells` counts every burner drill on the ore that
+/// delivers into a furnace, whoever built it and however it is fed. Right for
+/// `produce`, which visits by hand; this method feeds by belt, and a haul
+/// reaches one `connect_steps` window ([`enclosure_reach`]) from the chest it
+/// leaves. So a standing cell is this arrangement's only while something a
+/// haul can leave stands within that reach of it: the source's chest, a
+/// [`BUFFER`] already fed by machine with a side to spare (not a plate
+/// chest), or an accepted predecessor -- whose own chest, once hauled to,
+/// is what a chain's next link leaves from, the way cell 2 leaves cell 1's
+/// at t=0. A cell whose two burners are both fed already needs no haul and
+/// is kept whatever stands around it.
+///
+/// **Measured, not reasoned** (`run-1788926478-07032` at tick 56,168, replayed
+/// offline with `--standing-from-run`): four hand-fed iron cells `produce`
+/// had built stood at x = -24..-12, 40 tiles from the coal source at
+/// `[16.5, -26.5]`. Adopted, the first one's chest was sited at
+/// `[-29.5, -7.5]`, the haul search found no chest within reach, fell back
+/// to the source regardless, and refused *"further apart than one search
+/// window reaches"* -- every new cell on that world, before the offtake arm
+/// was ever reached. And nothing nearer could have been built: the nearest
+/// coal tile to those cells is 41 tiles off, so a second source would have
+/// been as far as the first. Not adopted, the plan sites its own cells
+/// beside the fuel, exactly as it does at t=0.
+///
+/// A **siting** predicate and not a routing one, measured from the furnace
+/// where the run is measured from the chest `belt_cell` sites within
+/// [`LOCAL_BUFFER_RADIUS`] of it. A cell at the rim can pass here and still
+/// refuse in `belt_cell` by name, which is the same answer as before this
+/// check existed; what changes is that a cell **no** haul could reach no
+/// longer displaces one the plan can build.
+fn within_haul_reach(
+    state: &PlanState,
+    source: &FuelSource,
+    cell: &Cell,
+    accepted: &[Cell],
+    plate_chests: &[Position],
+) -> bool {
+    if fed_by_machine(state, &cell.drill) && fed_by_machine(state, &cell.furnace) {
+        return true;
+    }
+    let reach = enclosure_reach();
+    let within =
+        |at: &Position| (at.x() - cell.furnace.x()).hypot(at.y() - cell.furnace.y()) <= reach;
+    if within(&source.buffer) {
+        return true;
+    }
+    if accepted.iter().any(|earlier| within(&earlier.furnace)) {
+        return true;
+    }
+    state
+        .entities_within(&cell.furnace, reach)
+        .into_iter()
+        .any(|e| {
+            e.name == BUFFER
+                && !plate_chests
+                    .iter()
+                    .any(|sink| Pos::from(sink) == Pos::from(&e.position))
+                && fed_by_machine(state, &e.position)
+                && room_to_fuel(state, &e.position, &[])
+        })
+}
+
 /// Site an arm on the machine's perimeter with a container on the tile beyond
 /// it.
 ///
@@ -1827,8 +1891,22 @@ impl Method for Sustain {
             }
         }
 
-        // The smelting cells, reusing whatever already stands.
-        let mut cells = crate::method::produce::standing_cells(&ctx.state, &spec);
+        // The smelting cells, reusing whatever already stands -- of the
+        // cells a haul from this arrangement can reach. See
+        // [`within_haul_reach`] for the run that adopted four hand-fed
+        // cells 40 tiles from the coal and refused on the first of them.
+        let standing = crate::method::produce::standing_cells(&ctx.state, &spec);
+        let standing_sinks: Vec<Position> = standing
+            .iter()
+            .filter_map(|cell| standing_offtake(&ctx.state, &cell.furnace))
+            .map(|offtake| offtake.sink)
+            .collect();
+        let mut cells: Vec<Cell> = Vec::with_capacity(standing.len());
+        for cell in standing {
+            if within_haul_reach(&ctx.state, &source, &cell, &cells, &standing_sinks) {
+                cells.push(cell);
+            }
+        }
         cells.truncate(needed as usize);
         // # The ground this expansion has spoken for, before a single run
         //
@@ -2663,6 +2741,164 @@ mod tests {
         assert!(
             msg.contains(FUEL),
             "and it has to name what could not be carried: {msg}"
+        );
+    }
+
+    /// [`world_with_coal_beside_the_iron`] plus a second 8x8 iron patch at
+    /// `at`, so that a cell can stand on iron that is not beside the coal.
+    fn world_with_a_second_iron_patch(at: &Position) -> FactorioSurface {
+        let world = world_with_coal_beside_the_iron();
+        let mut entities = Vec::new();
+        spawn_ore(
+            &mut entities,
+            add_to_rect(&Rect::from_wh(8., 8.), at),
+            &spec_for_iron().ore,
+        );
+        world.update_chunk_entities(entities).unwrap();
+        world
+    }
+
+    fn spec_for_iron() -> CellSpec {
+        cell_spec(&near_state(), "iron-plate").expect("the fixture smelts iron")
+    }
+
+    /// Put a hand-fed cell -- a burner drill on the iron nearest `near`,
+    /// dropping into a stone furnace, and nothing else -- into `world`
+    /// itself, the way an earlier `produce` plan's build reaches a replan:
+    /// as map facts, not as an overlay.
+    fn stand_a_hand_fed_cell(world: &FactorioSurface, near: &Position) -> Cell {
+        let s = PlanState::from_world(Arc::new(world.clone()), &[BotId(1)]);
+        let spec = spec_for_iron();
+        let cell = crate::method::produce::plan_cell(
+            &s,
+            near,
+            &spec,
+            crate::method::produce::rate_cell_ore(&spec),
+        )
+        .expect("the patch takes a cell");
+        for mut entity in crate::method::produce::parts(&s, &cell) {
+            let facing = Direction::from_u8(entity.direction).expect("a cardinal");
+            entity.bounding_box = s
+                .collision_area_facing(&entity.name, &entity.position, facing)
+                .expect("the fixture has both prototypes");
+            world
+                .on_some_entity_created(entity)
+                .expect("the machine stands");
+        }
+        cell
+    }
+
+    fn placements(net: &crate::network::ActionNetwork) -> Vec<FactorioEntity> {
+        net.actions()
+            .filter_map(|a| match &a.kind {
+                crate::action::ActionKind::Place { entity } => Some((**entity).clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn distance(a: &Position, b: &Position) -> f64 {
+        (a.x() - b.x()).hypot(a.y() - b.y())
+    }
+
+    /// **A standing cell no haul can reach is not this arrangement's.**
+    ///
+    /// The shape of `run-1788926478-07032` at tick 56,168: hand-fed cells an
+    /// earlier plan built stand on ore 40 tiles from the coal, further than
+    /// one belt window reaches. Adopting them put the first cell's chest out
+    /// of every haul's reach, the haul fell back to the source regardless,
+    /// and the plan refused *"further apart than one search window reaches"*
+    /// -- on a world where the same plan from an empty map succeeds.
+    ///
+    /// Here the far patch is 72 tiles from the coal. The plan must leave the
+    /// cell there alone and build its own beside the fuel, as it does when
+    /// nothing stands. Restoring the unconditional adoption turns this red
+    /// with that exact refusal.
+    #[test]
+    fn a_standing_cell_no_haul_can_reach_is_not_adopted() {
+        let roster = [BotId(1)];
+        let far = Position::new(-40., 90.);
+        let world = world_with_a_second_iron_patch(&far);
+        let stranded = stand_a_hand_fed_cell(&world, &far);
+        let state = PlanState::from_world(Arc::new(world), &roster);
+        let spec = spec_for_iron();
+        // The fixture is what it claims: one cell stands, and it is further
+        // from the coal than a haul reaches.
+        let standing = crate::method::produce::standing_cells(&state, &spec);
+        assert_eq!(standing, vec![stranded.clone()], "the stranded cell stands");
+        let coal = Position::new(-40., 18.);
+        assert!(
+            distance(&stranded.furnace, &coal) > 2. * enclosure_reach(),
+            "the fixture's cell has to be out of reach: {:.1} tiles from the coal",
+            distance(&stranded.furnace, &coal)
+        );
+
+        let net = expand(&[goal()], &state, &registry_for(&roster), BotId(1))
+            .expect("a cell of its own beside the fuel plans, as it does on an empty map");
+        let placed = placements(&net);
+        let beside_stranded: Vec<String> = placed
+            .iter()
+            .filter(|e| distance(&e.position, &stranded.furnace) < 2. * LOCAL_BUFFER_RADIUS)
+            .map(|e| format!("{} at {}", e.name, e.position))
+            .collect();
+        assert!(
+            beside_stranded.is_empty(),
+            "nothing is built beside a cell no haul reaches: {beside_stranded:?}"
+        );
+        // And a cell of its own, BELTED -- an arm at a placed furnace, which
+        // a hand-smelt furnace from a materials subgoal never gets.
+        assert!(
+            belted_furnaces(&placed)
+                .iter()
+                .any(|f| distance(f, &Position::new(-40., 40.)) < 12.),
+            "the plan builds and belts its own cell on the iron beside the coal: {:?}",
+            belted_furnaces(&placed)
+        );
+    }
+
+    /// The furnaces among `placed` with an arm of `placed` beside them.
+    fn belted_furnaces(placed: &[FactorioEntity]) -> Vec<Position> {
+        placed
+            .iter()
+            .filter(|f| f.name == FURNACE)
+            .filter(|f| {
+                placed
+                    .iter()
+                    .any(|a| a.name == ARM && distance(&a.position, &f.position) < 3.)
+            })
+            .map(|f| f.position.clone())
+            .collect()
+    }
+
+    /// The control for the test above: a hand-fed cell **within** reach is
+    /// still adopted and belted rather than duplicated. A reach check that
+    /// was too strict would pass the far case and fail this one.
+    #[test]
+    fn a_standing_cell_a_haul_can_reach_is_adopted() {
+        let roster = [BotId(1)];
+        let world = world_with_coal_beside_the_iron();
+        let adopted = stand_a_hand_fed_cell(&world, &Position::new(-40., 40.));
+        let state = PlanState::from_world(Arc::new(world), &roster);
+        assert!(
+            !fed_by_machine(&state, &adopted.furnace) && !fed_by_machine(&state, &adopted.drill),
+            "the fixture's cell is hand-fed, so adoption has to come from reach"
+        );
+        let net = expand(&[goal()], &state, &registry_for(&roster), BotId(1))
+            .expect("a cell beside the coal is belted");
+        let placed = placements(&net);
+        assert!(
+            placed
+                .iter()
+                .any(|e| e.name == ARM && distance(&e.position, &adopted.furnace) < 3.),
+            "the standing furnace gets an arm of its own"
+        );
+        // No second belted cell: a furnace the plan places gets no arm. (A
+        // placed furnace on its own is allowed -- a materials subgoal may
+        // hand-smelt the plates the belts cost.)
+        assert!(
+            belted_furnaces(&placed).is_empty(),
+            "the standing cell is adopted, not duplicated: {:?}",
+            belted_furnaces(&placed)
         );
     }
 

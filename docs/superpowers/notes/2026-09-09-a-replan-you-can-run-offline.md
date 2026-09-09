@@ -173,6 +173,24 @@ window reaches"*. A new cell planned beside a standing base is fed from the
 standing coal buffer 46 tiles away rather than from a source of its own.
 Replan-shaped, on master, reproducible in three seconds, not fixed here.
 
+**Closed the same day, and the buffer was never the choice -- the CELLS
+were.** `sustain` adopts every standing cell `produce::standing_cells`
+reports, and that run's record holds four hand-fed iron cells `produce` built
+at x = -24..-12, 40 tiles from the coal. The haul search
+(`belt_cell`'s `hauls_from`) is bounded to one window round the cell's chest,
+found nothing, and its fallback was the source *unconditionally* -- so the
+refusal named a 46-tile haul that no search had chosen. A fresh source would
+not have helped either: the nearest coal tile to those cells is 41 tiles off.
+Now a standing cell is adopted only while something a haul can leave stands
+within one window of it (`within_haul_reach`), a cell already fed by machine
+excepted; the stranded cells stay hand-fed and the plan builds its own two
+beside the fuel, the t=0 shape. Same world, same binary: `sustain:iron-plate:
+30:36000` **397 actions / 15,543 ticks** where it refused, with the electric
+offtake leg firing on a record-driven world for the first time (2 `inserter`
+arms, 8 poles); `sustain:copper-plate:15:36000` unchanged at 172 / 26,698;
+all seven t=0 baselines unchanged. The unconditional adoption restored by
+mutation reproduces the refusal in the unit test and on the run's world.
+
 ## Should a fixture be checked in
 
 Yes, when a test or a note relies on it: `workspace/runs/` is not in the

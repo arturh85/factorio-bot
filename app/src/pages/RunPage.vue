@@ -129,7 +129,8 @@ const LEGEND = [
       <p v-if="store.eventsError" class="px-3 py-2 text-sm text-warn-dark">{{ store.eventsError }}</p>
       <RunHeadline v-else :summary="store.detail.summary" :provenance="store.provenance" :provenance-error="store.provenanceError"
                    :lag-ticks="store.sampleLag" :headline="sentence" :roster="store.laneBotIds"
-                   :replay-counts="store.replayCounts" :savepoints="store.savepoints"/>
+                   :replay-counts="store.replayCounts" :replay-error="store.replayError"
+                   :savepoints="store.savepoints" :savepoints-error="store.savepointsError"/>
       <p class="px-5 py-1 text-xs text-ink-muted">
         {{ formatWhen(startedUnixOf(store.detail.summary)) }} ·
         <router-link :to="`/runs/${id}/analysis`" class="underline">overrun and divergence tables</router-link>

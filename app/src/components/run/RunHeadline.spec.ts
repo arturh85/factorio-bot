@@ -5,7 +5,7 @@ import RunHeadline from './RunHeadline.vue';
 
 const summary = {run_id: 'run-1', finished: true, started_unix: 1, finished_unix: 2, outcome: 'done', elapsed_ticks: 10, events: 1, splits: 1, samples: 5, map: 1, samples_lag_ticks: 0};
 const provenance = {schema: 1, run_id: 'run-1', started_unix: 1, started_tick: 0, seed: '31337', map_exchange_string: null, map: {digest: 'c161fa3f437221d0', tiles: {}}, factorio: '2.1.17', mods: {base: '2.1.17', BotBridge: '0.0.1'}, git: {commit: '492e513a261bde8f4c433ecdd4e749918f9a6160', dirty: true, source: 'working-tree-at-run-start'}, profile: 'release', roster_requested: [1, 2, 3, 4], workspace: null, resumed_from: null, bot_mode: 'clients', game_speed: 1, peaceful: null};
-const base = {summary, lagTicks: 0, headline: 'rates: …', roster: [1, 2, 3, 4], savepoints: [], replayCounts: null};
+const base = {summary, lagTicks: 0, headline: 'rates: …', roster: [1, 2, 3, 4], savepoints: [], replayCounts: null, replayError: null, savepointsError: null};
 
 describe('RunHeadline', () => {
     it('fills the chips from provenance and marks a dirty commit', () => {
@@ -39,6 +39,21 @@ describe('RunHeadline', () => {
         expect(plan.text()).toContain('48 abandoned');
         expect(plan.text()).not.toContain('0 lost');
         expect(plan.attributes('data-state')).toBe('truncated');
+    });
+    it('draws a failed replay fetch where the plan chip would be', () => {
+        // The provenance chip has said why since the run page landed; the
+        // replay's failure was swallowed, so a server without /replay looked
+        // identical to a run that planned nothing.
+        const w = mount(RunHeadline, {props: {...base, provenance, provenanceError: null, replayError: 'replay unavailable — this server does not provide /replay'}});
+        const plan = w.get('[data-chip="plan"]');
+        expect(plan.attributes('data-state')).toBe('absent');
+        expect(plan.text()).toContain('/replay');
+    });
+    it('draws a failed savepoints fetch where the resume chips would be', () => {
+        const w = mount(RunHeadline, {props: {...base, provenance, provenanceError: null, savepointsError: 'savepoints unavailable — this server does not provide /savepoints'}});
+        const resume = w.get('[data-chip="resume"]');
+        expect(resume.attributes('data-state')).toBe('absent');
+        expect(resume.text()).toContain('/savepoints');
     });
     it('offers one resume command per savepoint', () => {
         const w = mount(RunHeadline, {props: {...base, provenance, provenanceError: null, savepoints: [{schema: 1, run_id: 'run-1', milestone_index: 1, tick: 300, created_unix: 1, bytes: 10, file: 'milestone-1.zip', mods: null}]}});

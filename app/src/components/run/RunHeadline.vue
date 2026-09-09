@@ -12,7 +12,9 @@ const props = defineProps<{
     summary: RunSummary; provenance: Provenance | null; provenanceError: string | null;
     lagTicks: number | null; headline: string; roster: number[];
     replayCounts: {steps: number; abandoned: number; lost: number; failed: number; pending: number; believed: number} | null;
+    replayError: string | null;
     savepoints: Savepoint[];
+    savepointsError: string | null;
 }>();
 
 interface Chip { key: string; value: string | null; title?: string }
@@ -80,10 +82,23 @@ const plan = computed(() => {
             :class="plan.truncated ? 'border-warn/60 bg-warn/10 text-warn-dark' : 'border-divider bg-surface text-ink-muted'">
         last plan <b class="font-medium" :class="plan.truncated ? 'text-warn-dark' : 'text-ink'">{{ plan.text }}</b>
       </span>
+      <!-- A fetch that failed is drawn, exactly as the provenance chip is: no
+           counts AND a reason is a different fact from no counts, and only the
+           chip can tell the reader which one this run is. -->
+      <span v-else-if="replayError" data-chip="plan" data-state="absent"
+            class="mb-1.5 mr-1.5 rounded border border-dashed border-warn/60 px-2 py-1 font-mono text-xs text-warn-dark">
+        last plan <i>{{ replayError }}</i>
+      </span>
       <span v-for="s in savepoints" :key="s.milestone_index" data-chip="resume" data-state="present"
             class="mb-1.5 mr-1.5 rounded border border-divider bg-surface px-2 py-1 font-mono text-xs text-ink-muted"
             :title="`milestone ${s.milestone_index} at tick ${s.tick}, ${(s.bytes / 1048576).toFixed(1)} MB`">
         resume <code class="select-all text-ink">--resume-from {{ s.run_id }}:{{ s.milestone_index }}</code>
+      </span>
+      <!-- Empty savepoints is the ordinary case and draws nothing; empty
+           BECAUSE the fetch failed is not, and says so. -->
+      <span v-if="savepoints.length === 0 && savepointsError" data-chip="resume" data-state="absent"
+            class="mb-1.5 mr-1.5 rounded border border-dashed border-warn/60 px-2 py-1 font-mono text-xs text-warn-dark">
+        resume <i>{{ savepointsError }}</i>
       </span>
     </div>
     <p class="basis-full text-sm text-ink-muted"><b class="font-medium text-ink">{{ headline }}</b></p>

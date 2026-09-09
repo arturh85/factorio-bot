@@ -118,6 +118,20 @@ describe('RunPage', () => {
     });
 
 
+    it('hands a failed replay fetch to the headline, which draws it', async () => {
+        // The page is the only place that can be wrong about this: the store
+        // records `replayError` and the headline can render it, and neither
+        // half is any use if the page never passes it across.
+        const w = await mountPage();
+        const store = useRunsStore();
+        store.replay = null;
+        store.replayError = 'replay unavailable — this server does not provide /replay';
+        await flushPromises();
+        const plan = w.get('[data-chip="plan"]');
+        expect(plan.attributes('data-state')).toBe('absent');
+        expect(plan.text()).toContain('/replay');
+    });
+
     it('reads the headline and the milestone ribbon off ONE clock', async () => {
         const w = await mountPage();
         const store = useRunsStore();

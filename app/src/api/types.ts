@@ -318,9 +318,18 @@ export interface RunSummary {
     elapsed_ticks: number | null;
     events: number | null;
     splits: number | null;
-    /** Archived sample lines. `null` for an unfinished run; `0` for a finished run with no samples file. */
+    /**
+     * Archived sample lines. `null` for an unfinished run; `0` for a finished
+     * run with no samples file.
+     *
+     * **`0` carries a third meaning**: `Manifest.samples` is
+     * `#[serde(default)]`, so a manifest written before the field existed
+     * parses as `0` too. So `0` is "no samples file OR a pre-field manifest",
+     * and only `null` is unambiguous. Do not read `0` as "this run captured
+     * nothing" for an old run.
+     */
     samples: number | null;
-    /** Lines in `map.jsonl`, same convention as `samples`. */
+    /** Lines in `map.jsonl`, same convention as `samples` -- including the `0`. */
     map: number | null;
     /**
      * Ticks of the run's span the samples do NOT cover. `null` when the run

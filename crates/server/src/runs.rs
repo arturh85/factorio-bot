@@ -49,6 +49,13 @@ pub struct RunSummary {
     pub elapsed_ticks: Option<u64>,
     pub events: Option<usize>,
     pub splits: Option<usize>,
+    // `Some(0)` has a THIRD meaning the published description below does not
+    // name, and the description is left byte-identical because it is in
+    // `openapi.snapshot.json` and nothing on the wire changed:
+    // `Manifest::samples` is `#[serde(default)]`, so a manifest written before
+    // that field existed parses as `0` as well. `Some(0)` therefore reads "no
+    // samples file OR a pre-field manifest", and only `None` is unambiguous.
+    // Same for `map`, which carries `#[serde(default)]` for the same reason.
     /// Archived sample lines. `None` for an unfinished run; `Some(0)` for a
     /// finished run with no samples file.
     pub samples: Option<usize>,

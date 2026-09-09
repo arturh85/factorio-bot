@@ -683,6 +683,14 @@ const SCHEMAS: Record<string, SchemaContract> = {
         mods: {required: false, type: 'object', nullable: true},
         git: {required: false, ref: 'GitProvenance', nullable: true},
         profile: {required: true, type: 'string'},
+        // `type: 'array'` and not `arrayOf`, checked rather than assumed:
+        // `arrayOf` reads its expectation through `schemaName(property.items)`,
+        // which resolves a `$ref` (or a nullable `oneOf` around one) and
+        // nothing else. An array of a PRIMITIVE publishes `items: {type:
+        // 'integer'}` with no `$ref` at all, so the helper's vocabulary has no
+        // `arrayOf` for it and the element type is unpinned here. Widening
+        // `arrayOf` to primitives would be a real improvement; it is not one
+        // this table can make on its own.
         roster_requested: {required: true, type: 'array'},
         workspace: {required: false, type: 'string', nullable: true},
         resumed_from: {required: false, type: 'string', nullable: true},
@@ -708,6 +716,8 @@ const SCHEMAS: Record<string, SchemaContract> = {
     RunSavepointsResponse: objectContract<RunSavepointsResponse>({
         savepoints: {required: true, arrayOf: 'Savepoint'},
         skipped: {required: true, type: 'integer'},
+        // An array of `u32`, so `type: 'array'` for the same reason
+        // `Provenance.roster_requested` is -- see the note there.
         missing_zip: {required: true, type: 'array'}
     }),
     Split: objectContract<Split>({

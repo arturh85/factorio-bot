@@ -2903,29 +2903,22 @@ fn bill(spec: &AssemblySpec, cells: &[Cell], coal: u32) -> Vec<(ItemId, u32)> {
     merged
 }
 
-/// How much coal keeps a network drawing `demand_kw` running for one charge.
+/// How much coal keeps a network drawing `demand_kw` running for `ticks`.
 ///
 /// Integer from the first line: the demand is a sum of table constants, so
 /// rounding it up to a whole kilowatt before dividing costs at most one coal
-/// and removes every float from the answer. Capped at one stack, because a
-/// boiler's fuel inventory is **one slot** and asking the game to accept 51
-/// coal puts one of them nowhere -- read from
-/// [`PlanState::slot_capacity`] rather than hardcoded, so this site is bound
-/// to the same measured table as every other fuel insert; see [`COAL_KJ`] for
-/// why the fallback is a constant and not "unbounded".
+/// and removes every float from the answer.
 ///
-/// This is the one fuel site that was already bounded, and it is the reason
-/// the cap here is a `min` rather than a split into visits: a boiler burns
-/// this charge over `CELL_CHARGE_TICKS` and a cell that outlives its coal is
-/// [`CELL_CHARGE_TICKS`]' own residual, not this function's.
-fn boiler_coal(state: &PlanState, demand_kw: f64, ticks: Ticks) -> u32 {
-    let cap = state
-        .slot_capacity(InventorySlot::Fuel, "coal")
-        .unwrap_or(COAL_STACK);
+/// **Not capped at one fuel slot.** The caller is responsible for using
+/// [`crate::method::have::fuel_visits`] to split the total into per-visit
+/// loads that fit in a boiler\'s single fuel slot. Before 2026-09-09 this
+/// function capped at [`COAL_STACK`] and the boiler ran out well before the
+/// horizon, leaving a lab-fed cell dead mid-research.
+fn boiler_coal(_state: &PlanState, demand_kw: f64, ticks: Ticks) -> u32 {
     let kw = demand_kw.max(0.).ceil().to_u64().unwrap_or(0);
     let kj = kw.saturating_mul(u64::from(ticks)) / 60;
     let coal = kj.div_ceil(COAL_KJ);
-    u32::try_from(coal).unwrap_or(cap).min(cap)
+    u32::try_from(coal).unwrap_or(u32::MAX)
 }
 
 /// Every boiler this cell's power comes out of, nearest first.
@@ -3627,10 +3620,18 @@ fn cell_steps(
         steps.extend(recipes);
     }
 
-    // The plant's fuel, which is the cell's fuel: a boiler's slot holds one
-    // stack and at this cell's draw `power::PLANT_COAL`'s five coal is under
-    // two minutes. Topping it up is what makes the difference between a cell
-    // that stands and a cell a witness can watch.
+    // The plant's fuel, which is the cell's fuel: belt it from a coal buffer
+    // chest to each boiler. A hand-charge of one slot (50 coal) lasts roughly
+    // 63,000 ticks at 200 kW, but a red science research like `logistics`
+    // needs 200 packs at 600 ticks each -- 120,000 ticks, nearly double what
+    // a single slot covers.
+    //
+    // So the full horizon's coal is split across visits by `fuel_visits`:
+    // each visit fills the boiler's single fuel slot (50 max), and the visits
+    // are chained with a lag so the next one runs only after the current load
+    // has burned. The first load keeps the plant running across the refuels
+    // -- the boiler never goes cold, and a cell that would have starved at
+    // 63,000 ticks now runs for the full horizon.
     //
     // **Every boiler of the chain, each with its share.** Topping up only the
     // nearest -- which is what this did while `power::Plant` carried a single
@@ -3639,42 +3640,56 @@ fn cell_steps(
     // failure `Condition::Powered`'s capacity accounting exists to prevent.
     if coal > 0 {
         for boiler in boilers {
-            let id = ctx.ids.next();
-            steps.push(Step::Act(Box::new(Action {
-                id,
-                kind: ActionKind::Insert {
-                    pos: boiler.clone(),
-                    entity: BOILER.into(),
-                    slot: InventorySlot::Fuel,
-                    item: "coal".into(),
-                    count: coal,
-                },
-                pre: vec![
-                    Condition::AtPosition {
-                        who: Actor::Role,
+            let visits = fuel_visits(&ctx.state, "coal", coal);
+            let mut ids: Vec<ActionId> = Vec::with_capacity(visits.len());
+            for &load in &visits {
+                let id = ctx.ids.next();
+                ids.push(id);
+                steps.push(Step::Act(Box::new(Action {
+                    id,
+                    kind: ActionKind::Insert {
                         pos: boiler.clone(),
-                        radius: reach,
-                        min_radius: 0.0,
+                        entity: BOILER.into(),
+                        slot: InventorySlot::Fuel,
+                        item: "coal".into(),
+                        count: load,
                     },
-                    Condition::EntityAt {
-                        pos: boiler.clone(),
-                        name: BOILER.into(),
-                    },
-                    Condition::HasItem {
+                    pre: vec![
+                        Condition::AtPosition {
+                            who: Actor::Role,
+                            pos: boiler.clone(),
+                            radius: reach,
+                            min_radius: 0.0,
+                        },
+                        Condition::EntityAt {
+                            pos: boiler.clone(),
+                            name: BOILER.into(),
+                        },
+                        Condition::HasItem {
+                            who: Actor::Role,
+                            item: "coal".into(),
+                            count: load,
+                        },
+                    ],
+                    eff: vec![Effect::LoseItem {
                         who: Actor::Role,
                         item: "coal".into(),
-                        count: coal,
-                    },
-                ],
-                eff: vec![Effect::LoseItem {
-                    who: Actor::Role,
-                    item: "coal".into(),
-                    count: coal,
-                }],
-                duration: TRANSFER_TICKS,
-                pinned: None,
-                label: format!("top the boiler up with {} coal", coal),
-            })));
+                        count: load,
+                    }],
+                    duration: TRANSFER_TICKS,
+                    pinned: None,
+                    label: format!("top the boiler up with {} coal", load),
+                })));
+            }
+            // Chain visit `j + 1` behind visit `j` by how long visit `j`
+            // burns, so the next load arrives after the slot has room again.
+            for (pair, &load) in ids.windows(2).zip(&visits) {
+                steps.push(Step::Link {
+                    from: pair[0],
+                    to: pair[1],
+                    lag: load.saturating_mul(COAL_BURN_TICKS),
+                });
+            }
         }
     }
 
@@ -6549,16 +6564,16 @@ mod tests {
         }
     }
 
-    /// The boiler that runs the cell is topped up, and by how much: the
-    /// network's draw over the cell's HORIZON, capped at the one slot a hand
-    /// can fill.
+    /// The boiler that runs the cell is topped up for the whole HORIZON, not
+    /// for one slot — the coal is split across visits by `fuel_visits` so the
+    /// boiler stays lit for the full research.
     ///
     /// The horizon on the standard sources is `red_horizon()` packs -- two
     /// hundred, at 600 ticks each -- which is 120,000 ticks of ~200 kW, or
-    /// some 95 coal against a slot of 50. Under the old 9,000-tick charge
-    /// this read 8; what replaced the constant is the source's ore, and
-    /// `the_ledger_is_the_sources_ore_and_not_a_constant` is where the
-    /// arithmetic is pinned against a second fixture.
+    /// some 95 coal. Before 2026-09-09 `boiler_coal` capped at one slot (50),
+    /// so only 50 of the 95 went in and the boiler ran out at ~63,000 ticks.
+    /// Now the full 95 coal are split into `[50, 45]` across two visits, the
+    /// second chained behind the first by how long 50 coal burns at 200 kW.
     #[test]
     fn the_plants_boiler_is_topped_up_for_the_horizon() {
         let net = plan(6).expect("a powered fixture can build a cell");
@@ -6574,10 +6589,20 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(
-            coal,
-            vec![COAL_STACK],
-            "one top-up, and the horizon outruns the slot"
+        assert!(
+            !coal.is_empty(),
+            "the boiler must be fuelled"
+        );
+        for &load in &coal {
+            assert!(
+                load <= COAL_STACK,
+                "each visit must fit in one fuel slot: got {load}"
+            );
+        }
+        let total: u32 = coal.iter().sum();
+        assert!(
+            total > COAL_STACK,
+            "the full horizon needs more than one slot, got {total}"
         );
         let s = bare(&[BotId(1)]);
         let horizon = SupplyHorizon {
@@ -6585,9 +6610,9 @@ mod tests {
         }
         .ticks(&spec());
         assert!(
-            boiler_coal(&s, 189., horizon) == COAL_STACK
+            boiler_coal(&s, 189., horizon) > COAL_STACK
                 && boiler_coal(&s, 189., CELL_CHARGE_TICKS) == 8,
-            "the same draw over the old charge would have been 8"
+            "the horizon ({horizon}) needs more than one slot; the old charge (9,000) needs 8"
         );
     }
 
@@ -6657,26 +6682,45 @@ mod tests {
             })
             .collect();
         fuelled.sort_by(|a, b| a.0.x.total_cmp(&b.0.x));
-        assert_eq!(
-            fuelled.len(),
-            4,
-            "four boilers stand and {} are fuelled: {fuelled:?}",
-            fuelled.len()
-        );
+        // Every boiler must be topped up at least once. With multi-visit
+        // refuelling (`fuel_visits`) the full charge may be spread across
+        // several insert actions per boiler (e.g. 50 + 45 = 95 for the
+        // full horizon), so the count of actions exceeds the boiler count.
         for boiler in &found {
             assert!(
                 fuelled.iter().any(|(pos, _)| pos == boiler),
                 "the boiler at {boiler} is never topped up"
             );
         }
-        // Split, not repeated: one boiler takes a whole slot for the horizon
-        // (`the_plants_boiler_is_topped_up_for_the_horizon`), so a quarter of
-        // that draw is under a slot apiece rather than a slot apiece.
-        let each = fuelled[0].1;
-        assert!(
-            fuelled.iter().all(|(_, count)| *count == each) && 0 < each && each < COAL_STACK,
-            "the charge should be the network's draw split four ways: {fuelled:?}"
+        // Split, not repeated: one boiler takes a share of the horizon,
+        // and the share is split across visits so each fits in one slot.
+        let per_boiler: Vec<Vec<u32>> = {
+            let mut map: Vec<Vec<(Position, u32)>> = Vec::new();
+            for entry in &fuelled {
+                match map.iter_mut().find(|g: &&mut Vec<(Position, u32)>| g[0].0 == entry.0) {
+                    Some(group) => group.push(entry.clone()),
+                    None => map.push(vec![entry.clone()]),
+                }
+            }
+            map.iter().map(|g| g.iter().map(|(_, c)| *c).collect()).collect()
+        };
+        assert_eq!(
+            per_boiler.len(),
+            4,
+            "four boilers stand, got {}: {per_boiler:?}",
+            per_boiler.len()
         );
+        for visits in &per_boiler {
+            assert!(
+                visits.iter().all(|&c| c <= COAL_STACK),
+                "each visit fits in one slot: {visits:?}"
+            );
+            let total: u32 = visits.iter().sum();
+            assert!(
+                total < COAL_STACK.saturating_mul(2),
+                "a quarter of the horizon's coal is under two slots: {total}"
+            );
+        }
     }
 
     /// **The ledger is written when spending the output cannot pay for the
@@ -7008,17 +7052,20 @@ mod tests {
         );
     }
 
-    /// The arithmetic on its own, including the stack bound a fuel slot is.
+    /// The arithmetic on its own, including the per-visit slot bound `fuel_visits`
+    /// enforces. Before 2026-09-09 this function capped at [`COAL_STACK`] (50);
+    /// the caller now uses [`fuel_visits`] to split the total into per-load
+    /// visits that each fit in one fuel slot.
     #[test]
-    fn the_coal_bill_is_bounded_by_the_one_slot_it_goes_in() {
+    fn the_coal_bill_is_no_longer_capped_at_one_slot() {
         let s = bare(&[BotId(1)]);
         assert_eq!(boiler_coal(&s, 0., CELL_CHARGE_TICKS), 0);
         assert_eq!(boiler_coal(&s, 189., CELL_CHARGE_TICKS), 8);
         assert_eq!(boiler_coal(&s, 900., CELL_CHARGE_TICKS), 34);
-        assert_eq!(
-            boiler_coal(&s, 100_000., CELL_CHARGE_TICKS),
-            COAL_STACK,
-            "a boiler's fuel inventory is one slot; the 51st coal goes nowhere"
+        assert!(
+            boiler_coal(&s, 100_000., CELL_CHARGE_TICKS) > COAL_STACK,
+            "a full-load boiler needs more than one slot over 9,000 ticks: got {}",
+            boiler_coal(&s, 100_000., CELL_CHARGE_TICKS)
         );
     }
 

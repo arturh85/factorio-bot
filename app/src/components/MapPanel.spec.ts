@@ -431,4 +431,37 @@ describe('MapPanel', () => {
             expect(wrapper.find('[data-testid="map-legend"]').exists()).toBe(false);
         });
     });
+
+    describe('fills', () => {
+        it('fills a machine with its status colour when a fill is given for its position', () => {
+            const entities: EntitySnapshot[] = [{name: 'stone-furnace', position: {x: 10, y: 12}, direction: 0}];
+            const w = mountPanel({entities, fills: new Map([['10,12', 'no_fuel']])});
+            const rect = w.get(`${MAP} rect[data-entity="stone-furnace"]`);
+            expect(rect.attributes('fill')).toBe('var(--color-status-serious)');
+            expect(rect.find('title').text()).toContain('no_fuel');
+        });
+    });
+
+    describe('highlight', () => {
+        it('outlines the entity at the highlighted position key, and only that one', () => {
+            // The machine band's selection has to land somewhere a reader can
+            // see it; the position key is the only identity the two share.
+            const entities: EntitySnapshot[] = [
+                {name: 'stone-furnace', position: {x: 10, y: 12}, direction: 0},
+                {name: 'stone-furnace', position: {x: 14, y: 12}, direction: 0}
+            ];
+            const w = mountPanel({entities, highlight: '10,12'});
+            const marked = w.findAll(`${MAP} rect[data-highlighted="true"]`);
+            expect(marked).toHaveLength(1);
+            expect(marked[0].attributes('stroke')).toBe('var(--color-verdict-roster)');
+            expect(marked[0].attributes('stroke-width')).toBe('2');
+            expect(marked[0].attributes('vector-effect')).toBe('non-scaling-stroke');
+        });
+
+        it('marks nothing when nothing is selected', () => {
+            const entities: EntitySnapshot[] = [{name: 'stone-furnace', position: {x: 10, y: 12}, direction: 0}];
+            expect(mountPanel({entities, highlight: null}).findAll(`${MAP} rect[data-highlighted="true"]`)).toHaveLength(0);
+            expect(mountPanel({entities}).findAll(`${MAP} rect[data-highlighted="true"]`)).toHaveLength(0);
+        });
+    });
 });

@@ -13,7 +13,17 @@
 /* The palette below is the one the app already had: every value is lifted
  * verbatim from the old SCSS layout shell's variables file, so turning it into
  * Tailwind utilities is a change of mechanism, not of appearance. */
-@theme {
+/* `static`, not the bare form: Tailwind v4 otherwise prunes any `--color-*`
+ * entry in this block that its utility-class scanner never sees referenced by
+ * a class name, and the run bands read most of these tokens only via
+ * `var(--color-…)` inside SVG attributes (fill/stroke), which the scanner
+ * does not parse. The bare form silently dropped the LIGHT definition of
+ * several tokens (verb-mine, verb-craft, verb-place, verb-feed, status-warn)
+ * while their dark-mode overrides below survived untouched -- those are
+ * plain CSS custom-property assignments inside `@layer base`, outside this
+ * block, and pruning only ever applies to `@theme` itself. So lane segments
+ * and the no-ingredients heatmap cells rendered solid black in every theme. */
+@theme static {
     /* Surfaces */
     --color-surface: #edf0f5;
     --color-card: #ffffff;
@@ -36,6 +46,57 @@
     --color-danger: #ef6262;
     --color-danger-dark: #d84a4a;
     --color-warn: #f9c851;
+    --color-warn-dark: #b8860b;
+
+    /* Chart surfaces */
+    --color-plot: #fcfcfb;
+    --color-plot-grid: #e3e6ea;
+
+    /* Reserved status set: machine status and lane failures. Always drawn with
+     * a text label; never reused as a series colour. */
+    --color-status-good: #1d8a4b;
+    --color-status-warn: #c98500;
+    --color-status-serious: #c85a1e;
+    --color-status-critical: #c8322f;
+    --color-status-neutral: #9aa1a9;
+
+    /* Attribution verdict accent (roster-fed hatch); factory uses status-good. */
+    --color-verdict-roster: #b8642a;
+    --color-verdict-roster-soft: #f1dccb;
+
+    /* Verb classes for bot lanes: the dataviz reference categorical order,
+     * fixed by class, never cycled. Validated adjacent-pair CVD ΔE >= 8.
+     * verb-research has no dark override: the reference categorical palette
+     * keeps this green (#008300) in both theme columns. */
+    --color-verb-walk: #2a78d6;
+    --color-verb-mine: #eb6834;
+    --color-verb-place: #1baf7a;
+    --color-verb-feed: #eda100;
+    --color-verb-craft: #e87ba4;
+    --color-verb-research: #008300;
+    --color-verb-other: #4a3aa7;
+
+    /* Bots: fixed by id, the same hue in every band and on the map.
+     * bot-6 has no dark override for the same reason as verb-research: the
+     * reference palette keeps this green (#008300) in both themes. */
+    --color-bot-1: #2a78d6;
+    --color-bot-2: #eb6834;
+    --color-bot-3: #1baf7a;
+    --color-bot-4: #e87ba4;
+    --color-bot-5: #eda100;
+    --color-bot-6: #008300;
+    --color-bot-7: #4a3aa7;
+    --color-bot-8: #e34948;
+
+    /* Tracked items: the same six tokens in both themes -- this palette was
+     * validated against both light and dark surfaces, so it needs no dark
+     * override. */
+    --color-item-iron: #3b78c4;
+    --color-item-copper: #d5722b;
+    --color-item-circuit: #1f9e78;
+    --color-item-gear: #8a6fd6;
+    --color-item-red: #d94a63;
+    --color-item-green: #1baf7a;
 
     /* Sidebar */
     --color-sidebar: #47555e;
@@ -49,6 +110,80 @@
     --radius-card: 3px;
     --spacing-sidebar: 250px;
     --spacing-topbar: 50px;
+}
+
+/* Dark theme. Three viewer states: an explicit `data-theme` stamp wins both
+ * ways; the un-stamped document follows the OS. Only tokens change here --
+ * every component is written against tokens, never against a literal. */
+@layer base {
+    @media (prefers-color-scheme: dark) {
+        :root:not([data-theme="light"]) {
+            color-scheme: dark;
+            --color-surface: #14171b;
+            --color-card: #1c2026;
+            --color-divider: #343a42;
+            --color-ink: #e7e9ec;
+            --color-ink-muted: #b4bac2;
+            --color-link: #62b0f6;
+            --color-focus: #4a8fd6;
+            --color-warn-dark: #d99a1a;
+            --color-plot: #1a1e23;
+            --color-plot-grid: #2c323a;
+            --color-status-good: #3fae6c;
+            --color-status-warn: #d99a1a;
+            --color-status-serious: #df7a3e;
+            --color-status-critical: #e0524f;
+            --color-status-neutral: #6f7780;
+            --color-verdict-roster: #d98a4c;
+            --color-verdict-roster-soft: #3d2a1c;
+            --color-verb-walk: #3987e5;
+            --color-verb-mine: #d95926;
+            --color-verb-place: #199e70;
+            --color-verb-feed: #c98500;
+            --color-verb-craft: #d55181;
+            --color-verb-other: #9085e9;
+            --color-bot-1: #3987e5;
+            --color-bot-2: #d95926;
+            --color-bot-3: #199e70;
+            --color-bot-4: #d55181;
+            --color-bot-5: #c98500;
+            --color-bot-7: #9085e9;
+            --color-bot-8: #e66767;
+        }
+    }
+    :root[data-theme="dark"] {
+        color-scheme: dark;
+        --color-surface: #14171b;
+        --color-card: #1c2026;
+        --color-divider: #343a42;
+        --color-ink: #e7e9ec;
+        --color-ink-muted: #b4bac2;
+        --color-link: #62b0f6;
+        --color-focus: #4a8fd6;
+        --color-warn-dark: #d99a1a;
+        --color-plot: #1a1e23;
+        --color-plot-grid: #2c323a;
+        --color-status-good: #3fae6c;
+        --color-status-warn: #d99a1a;
+        --color-status-serious: #df7a3e;
+        --color-status-critical: #e0524f;
+        --color-status-neutral: #6f7780;
+        --color-verdict-roster: #d98a4c;
+        --color-verdict-roster-soft: #3d2a1c;
+        --color-verb-walk: #3987e5;
+        --color-verb-mine: #d95926;
+        --color-verb-place: #199e70;
+        --color-verb-feed: #c98500;
+        --color-verb-craft: #d55181;
+        --color-verb-other: #9085e9;
+        --color-bot-1: #3987e5;
+        --color-bot-2: #d95926;
+        --color-bot-3: #199e70;
+        --color-bot-4: #d55181;
+        --color-bot-5: #c98500;
+        --color-bot-7: #9085e9;
+        --color-bot-8: #e66767;
+    }
 }
 
 /* The three element defaults the app genuinely relies on. Everything else is a

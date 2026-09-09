@@ -3,6 +3,7 @@ import {computed} from 'vue';
 import {Menu} from '@lucide/vue';
 import {useAppStore} from '@/store/appStore';
 import ProcessControl from '@/components/ProcessControl.vue';
+import ThemeToggle from '@/components/ThemeToggle.vue';
 
 defineProps<{sidebarOpen: boolean}>();
 
@@ -25,9 +26,10 @@ const settings = computed(() => appStore.getSettings);
       <Menu class="size-6"/>
     </button>
 
-    <div v-if="settings" class="ml-auto flex items-center gap-3">
-      <span class="hidden sm:inline">Factorio with <strong>{{ settings.factorio.client_count }} Clients</strong></span>
-      <ProcessControl/>
+    <div class="ml-auto flex items-center gap-3">
+      <span v-if="settings" class="hidden sm:inline">Factorio with <strong>{{ settings.factorio.client_count }} Clients</strong></span>
+      <ProcessControl v-if="settings"/>
+      <ThemeToggle/>
     </div>
   </header>
 </template>

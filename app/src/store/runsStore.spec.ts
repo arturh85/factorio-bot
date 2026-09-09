@@ -3,7 +3,7 @@ import {createPinia, setActivePinia} from 'pinia';
 import {useRunsStore} from './runsStore';
 import * as client from '@/api/client';
 import {ApiError} from '@/api/http';
-import {EntitySnapshot, Lane, MapRecord, RunDetail, RunSummary, Sample, Split} from '@/api/types';
+import {EntitySnapshot, Event, Lane, MapRecord, RunDetail, RunSummary, Sample, Split} from '@/api/types';
 import {CLEAN_MANIFEST, CLEAN_TICKS, NO_TICKS, NO_VIDEO_MANIFEST} from '@/api/video.fixtures';
 
 vi.mock('@/api/client');
@@ -67,6 +67,8 @@ beforeEach(() => {
     vi.mocked(client.getRunVideo).mockResolvedValue(NO_VIDEO_MANIFEST);
     vi.mocked(client.getRunVideoTicks).mockReset();
     vi.mocked(client.getRunVideoTicks).mockResolvedValue(NO_TICKS);
+    vi.mocked(client.getRunEvents).mockReset();
+    vi.mocked(client.getRunEvents).mockResolvedValue({events: [], skipped: 0});
 });
 
 describe('loadRuns', () => {
@@ -565,5 +567,61 @@ describe('the video enrichment', () => {
         await store.openRun('run-1');
         expect(store.bounds).toEqual({from: 59400, to: 60246});
         expect(store.leadIn).toBe(25);
+    });
+});
+
+describe('events enrichment', () => {
+    beforeEach(() => {
+        setActivePinia(createPinia());
+        vi.mocked(client.getRun).mockResolvedValue({summary: summary('run-1'), splits: []} as RunDetail);
+        vi.mocked(client.getRunLanes).mockResolvedValue({lanes: []});
+        vi.mocked(client.getRunSamples).mockResolvedValue({samples: [], skipped: 0});
+        vi.mocked(client.getRunMap).mockResolvedValue({map: [], skipped: 0});
+        vi.mocked(client.getRunVideo).mockResolvedValue(NO_VIDEO_MANIFEST);
+        vi.mocked(client.getRunVideoTicks).mockResolvedValue(NO_TICKS);
+    });
+    it('derives the analysis window from run_started and run_finished', async () => {
+        vi.mocked(client.getRunEvents).mockResolvedValue({events: [
+            {kind: 'run_started', tick: 3242, run_id: 'run-1', bots: [1], seed: null, factorio: null, git: null},
+            {kind: 'run_finished', tick: 25224, outcome: 'done', elapsed_ticks: 21982}
+        ] as Event[], skipped: 0});
+        const store = useRunsStore();
+        await store.openRun('run-1');
+        expect(store.window).toEqual({lo: 3242, hi: 25224});
+        expect(store.eventsError).toBeNull();
+    });
+    it('falls back to the last event when the run never finished, and to null with no events', async () => {
+        vi.mocked(client.getRunEvents).mockResolvedValue({events: [
+            {kind: 'run_started', tick: 10, run_id: 'run-1', bots: [1], seed: null, factorio: null, git: null},
+            {kind: 'plan_created', tick: 50, milestone_index: 1, steps: 0, makespan: 0, bots: null, plan: []}
+        ] as Event[], skipped: 0});
+        const store = useRunsStore();
+        await store.openRun('run-1');
+        expect(store.window).toEqual({lo: 10, hi: 50});
+        vi.mocked(client.getRunEvents).mockResolvedValue({events: [], skipped: 0});
+        await store.openRun('run-1');
+        expect(store.window).toBeNull();
+    });
+    it('records an events failure without failing the run', async () => {
+        vi.mocked(client.getRunEvents).mockRejectedValue(new ApiError(404, 'not_found', null, ''));
+        const store = useRunsStore();
+        await store.openRun('run-1');
+        expect(store.detail).not.toBeNull();
+        expect(store.eventsError).toContain('/events');
+        // No answer is not "none skipped": the count belongs to a reply that
+        // never came.
+        expect(store.eventsSkipped).toBe(0);
+    });
+    it('keeps the count of unreadable event lines instead of dropping it', async () => {
+        // The coverage band's job is to say what the record does NOT have,
+        // and a line nobody could parse -- the torn last line of a killed run
+        // -- is exactly that. The store had the number and threw it away.
+        vi.mocked(client.getRunEvents).mockResolvedValue({events: [], skipped: 3});
+        const store = useRunsStore();
+        await store.openRun('run-1');
+        expect(store.eventsSkipped).toBe(3);
+        vi.mocked(client.getRunEvents).mockResolvedValue({events: [], skipped: 0});
+        await store.openRun('run-1');
+        expect(store.eventsSkipped).toBe(0);
     });
 });

@@ -1,6 +1,7 @@
 import {defineStore} from 'pinia';
 import {
     getRun,
+    getRunEvents,
     getRunLanes,
     getRunMap,
     getRunSamples,
@@ -13,6 +14,7 @@ import {
     BotSample,
     Bounds,
     EntitySnapshot,
+    Event,
     Lane,
     MapRecord,
     Position,
@@ -22,9 +24,10 @@ import {
     VideoManifest,
     VideoTicksResponse
 } from '@/api/types';
-import {leadInTicks, tickBounds} from '@/lib/runTimeline';
+import {laneBots, leadInTicks, tickBounds} from '@/lib/runTimeline';
 import {botSampleAt, forceSampleAt, inventoryOf, productionSeries, trackedItems, trailsAt} from '@/lib/runSamples';
 import {boundsAt, entitiesAt} from '@/lib/runMap';
+import {machineStatusAt} from '@/lib/machineTimeline';
 
 /** The `force`-kind half of `Sample`, narrowed for `forceState`. */
 type ForceSample = Extract<Sample, {kind: 'force'}>;
@@ -124,7 +127,31 @@ export const useRunsStore = defineStore('runs', {
         lanesError: null as string | null,
         sampleError: null as string | null,
         mapError: null as string | null,
-        videoError: null as string | null
+        videoError: null as string | null,
+        /** The run's raw event log. */
+        events: [] as Event[],
+        /**
+         * Event lines `/events` could not parse -- in practice the torn last
+         * line of a killed run.
+         *
+         * Kept rather than dropped: the coverage band's whole job is to say
+         * what the record does not have, and a line nobody could read is
+         * exactly that. Reading it as 0 when the server reported it would be
+         * the same substitution this store's error fields exist to avoid.
+         */
+        eventsSkipped: 0,
+        eventsError: null as string | null,
+        /**
+         * The machine the Machines band has selected, keyed by the
+         * MACHINES-SAMPLE key -- the entity's `unit_number` as a string, e.g.
+         * `"13"`, which is what `machineRows` and `statusMatrix` key on.
+         *
+         * NOT a `"x,y"` position key, which this comment claimed while the
+         * value never was one. The map joins on position, so a reader that
+         * wants to show this selection there translates through
+         * `machineRows`; `RunPage` does exactly that.
+         */
+        selectedMachine: null as string | null
     }),
 
     getters: {
@@ -204,6 +231,28 @@ export const useRunsStore = defineStore('runs', {
          */
         trail(): Record<number, Position[]> {
             return trailsAt(this.samples, this.cursor);
+        },
+        /**
+         * The ANALYSIS window: `run_started` to `run_finished` (or the last
+         * event). Distinct from `bounds`, the drawn axis, which trims a
+         * lead-in. Rates and verdicts are measured from `run_started`, as
+         * `just analyse` measures them; `null` when the run has no events.
+         */
+        window(): {lo: number; hi: number} | null {
+            if (this.events.length === 0) return null;
+            const started = this.events.find((e) => e.kind === 'run_started');
+            const finished = this.events.find((e) => e.kind === 'run_finished');
+            const lo = started?.tick ?? Math.min(...this.events.map((e) => e.tick));
+            const hi = finished?.tick ?? Math.max(...this.events.map((e) => e.tick));
+            return {lo, hi};
+        },
+        /** Machine status by "x,y" at the cursor -- the map's fill lookup. */
+        machineFills(): Map<string, string | null> {
+            return machineStatusAt(this.samples, this.cursor);
+        },
+        /** Every bot the lanes ever mention, ascending. */
+        laneBotIds(): number[] {
+            return laneBots(this.lanes);
         }
     },
 
@@ -248,6 +297,9 @@ export const useRunsStore = defineStore('runs', {
             this.sampleError = null;
             this.mapError = null;
             this.videoError = null;
+            this.eventsError = null;
+            this.eventsSkipped = 0;
+            this.selectedMachine = null;
             try {
                 this.detail = await getRun(id);
 
@@ -256,13 +308,15 @@ export const useRunsStore = defineStore('runs', {
                     samplesResult,
                     mapResult,
                     videoResult,
-                    videoTicksResult
+                    videoTicksResult,
+                    eventsResult
                 ] = await Promise.allSettled([
                     getRunLanes(id),
                     getRunSamples(id),
                     getRunMap(id),
                     getRunVideo(id),
-                    getRunVideoTicks(id)
+                    getRunVideoTicks(id),
+                    getRunEvents(id)
                 ]);
 
                 if (lanesResult.status === 'fulfilled') {
@@ -288,6 +342,15 @@ export const useRunsStore = defineStore('runs', {
                 } else {
                     this.map = [];
                     this.mapError = enrichmentUnavailable('entity map', '/map', mapResult.reason);
+                }
+
+                if (eventsResult.status === 'fulfilled') {
+                    this.events = eventsResult.value.events;
+                    this.eventsSkipped = eventsResult.value.skipped;
+                } else {
+                    this.events = [];
+                    this.eventsSkipped = 0;
+                    this.eventsError = enrichmentUnavailable('events', '/events', eventsResult.reason);
                 }
 
                 // Both halves of the recording, or neither: a manifest without
@@ -322,6 +385,8 @@ export const useRunsStore = defineStore('runs', {
                 this.lanes = [];
                 this.samples = [];
                 this.map = [];
+                this.events = [];
+                this.eventsSkipped = 0;
             } finally {
                 this.loading = false;
             }
@@ -348,6 +413,11 @@ export const useRunsStore = defineStore('runs', {
         /** Points the inventory panel at another bot. */
         selectBot(bot: number | null) {
             this.bot = bot;
+        },
+
+        /** Points the viewer at another machine, keyed by its machines-sample key. */
+        selectMachine(key: string | null) {
+            this.selectedMachine = key;
         },
 
         /** Moves the cursor, clamped to the axis. */

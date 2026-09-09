@@ -169,10 +169,14 @@ pub(crate) fn cell_output_loop(state: &PlanState, spec: &AssemblySpec) -> Option
     // than imported because they are function-local constants over there.
     //
     // **Nothing holds the two lists together, and this comment used to claim
-    // something did.** It cited a test `a_belt_cell_loops_on_the_fuel_run`
-    // which exists nowhere — `doclint`'s `cited_names_resolve` caught it, and
-    // a citation to a guard that does not exist is worse than no citation,
-    // because it stops the next reader looking.
+    // something did.** It named a test about a belt cell looping on the fuel
+    // run — a test that exists nowhere. `doclint`'s `cited_names_resolve`
+    // caught it, and a citation to a guard that does not exist is worse than
+    // no citation, because it stops the next reader looking.
+    //
+    // (The dead name is deliberately not written in backticks here: the lint
+    // reads any backticked identifier as a citation, so quoting it to explain
+    // it re-creates the failure. That is the lint working correctly.)
     //
     // What actually holds it today is an **offline measurement**:
     // `producing:transport-belt:6` planning at 307 actions rather than

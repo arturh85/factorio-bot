@@ -17,6 +17,7 @@ use axum::Json;
 use axum::extract::{Path, Query, Request, State};
 use axum::response::Response;
 use factorio_bot_core::record::map::{MapRecord, read_map};
+use factorio_bot_core::record::provenance::{Provenance, read_provenance};
 use factorio_bot_core::record::video::{
     TICKS_FILE, VIDEO_DIR, VideoManifest, clock::read_tick_samples, read_video_dir,
 };
@@ -251,6 +252,33 @@ pub async fn get_run(
     Ok(Json(RunDetail { summary, splits }))
 }
 
+/// What a run was launched with -- the fields that decide whether two runs
+/// may be compared at all.
+///
+/// A 404, not an empty object, when `provenance.json` is missing: the file is
+/// written at run *start* since 2026-09-06, so its absence means an older run
+/// and the client must show "not captured", never a default.
+#[utoipa::path(
+    get,
+    path = "/api/v1/runs/{id}/provenance",
+    tag = "Runs",
+    params(("id" = String, Path, description = "the run id")),
+    responses(
+        (status = 200, body = Provenance),
+        (status = 400, body = crate::error::ErrorResponse),
+        (status = 404, body = crate::error::ErrorResponse),
+    )
+)]
+pub async fn get_run_provenance(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Provenance>, ErrorResponse> {
+    let dir = run_dir(&runs_root(&state).await?, &id)?;
+    read_provenance(&dir)
+        .map(Json)
+        .ok_or_else(|| ErrorResponse::not_found(format!("run {id} recorded no provenance")))
+}
+
 /// A run's event log.
 #[utoipa::path(
     get,
@@ -469,6 +497,7 @@ pub fn router() -> utoipa_axum::router::OpenApiRouter<AppState> {
     utoipa_axum::router::OpenApiRouter::new()
         .routes(routes!(list_runs))
         .routes(routes!(get_run))
+        .routes(routes!(get_run_provenance))
         .routes(routes!(get_run_events))
         .routes(routes!(get_run_lanes))
         .routes(routes!(get_run_samples))

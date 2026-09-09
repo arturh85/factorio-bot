@@ -70,7 +70,7 @@ pub enum ResourceDepletion {
 
 /// What [`EntityGraph::resource_fingerprint`] found: an identity for the map,
 /// and the human-readable counts behind it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ResourceFingerprint {
     /// FNV-1a over every charted resource tile, sorted by name and position.
     /// Equal digests mean the same map; unequal digests mean **unknown**, since

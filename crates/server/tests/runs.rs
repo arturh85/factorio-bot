@@ -337,3 +337,40 @@ async fn a_run_id_escaping_the_runs_directory_is_refused() {
         );
     }
 }
+
+const PROVENANCE: &str = r#"{"schema":1,"run_id":"alpha","started_unix":1000,"started_tick":3242,
+  "seed":"31337","map_exchange_string":null,"map":{"digest":"c161fa3f437221d0","tiles":{"iron-ore":940}},
+  "factorio":"2.1.17","mods":{"base":"2.1.17","BotBridge":"0.0.1"},
+  "git":{"commit":"492e513a261bde8f4c433ecdd4e749918f9a6160","dirty":false,"source":"working-tree-at-run-start"},
+  "profile":"release","roster_requested":[1,2,3,4],"workspace":"/w","resumed_from":null,
+  "bot_mode":"clients","game_speed":1.0,"peaceful":null}"#;
+
+#[tokio::test]
+async fn provenance_is_served_verbatim() {
+    let ws = workspace("prov");
+    seed_run(&ws, "alpha", MILESTONES, Some(MANIFEST), None);
+    std::fs::write(ws.join("runs/alpha/provenance.json"), PROVENANCE).unwrap();
+    let (status, body) = get_json(state_with_workspace(&ws), "/api/v1/runs/alpha/provenance").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["seed"], "31337");
+    assert_eq!(body["git"]["dirty"], false);
+    assert_eq!(body["mods"]["BotBridge"], "0.0.1");
+    assert_eq!(body["map"]["tiles"]["iron-ore"], 940);
+    // Present-and-null survives the round trip: `None` is an answer.
+    assert!(body.get("map_exchange_string").is_some());
+    assert!(body["map_exchange_string"].is_null());
+}
+
+#[tokio::test]
+async fn a_run_without_provenance_is_a_404_not_an_empty_object() {
+    let ws = workspace("noprov");
+    seed_run(&ws, "alpha", MILESTONES, Some(MANIFEST), None);
+    let (status, body) = get_json(state_with_workspace(&ws), "/api/v1/runs/alpha/provenance").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(
+        body["message"]
+            .as_str()
+            .unwrap()
+            .contains("recorded no provenance")
+    );
+}

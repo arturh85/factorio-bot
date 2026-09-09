@@ -100,6 +100,30 @@ HEADLESS_SPEED := "10"
 headless SCRIPT *ARGS:
     cargo run --no-default-features --features cli,lua -- lua {{SCRIPT}} --headless --bots 4 --game-speed {{HEADLESS_SPEED}} {{ARGS}}
 
+# The replan check: plan the science cell offline, apply what it built to the
+# world, and plan it AGAIN from the standing world -- no Factorio, seconds.
+#
+# Every baseline this project takes is an offline plan from the t=0 dump, and
+# a t=0 dump has no factory in it. On 2026-09-09 a fix moved all eight
+# baselines correctly and refused in the live run with the exact blocker it
+# had been written to remove: "a cell ALREADY MAKES copper-plate", a sentence
+# only a replan can say. Run this beside the baselines for any change that
+# reads standing entities -- siting, routing, reservations, recovery.
+#
+# `--all` because the script plans `goal.all{sustain, producing}` as ONE
+# bundle, and a bundle holds one conjunct's "already standing" refusal back
+# while the other expands; two sequential --goals would refuse on the replan
+# for a reason the run never sees. `--done-by <tick>` cuts the first plan the
+# way a truncated batch would (the live replans followed a failed take, not a
+# finished plan); without it the whole plan is applied. `--fail <label>` is
+# the live shape -- that action fails and its dependency cone is abandoned --
+# and the one that reproduces run-1788923927-04849's refusal with a69ae64c
+# reverted. `--standing-from-run <run> --at-tick <T>` instead starts from
+# what a finished run's record says stood. The same checks run as
+# `crates/planner/tests/replan_on_standing_world.rs` and `replan_haul.rs`.
+replan-check *ARGS:
+    cargo run --no-default-features --features cli,lua -- plan --world workspace/scripts/map.json --bots 1,2,3,4 --all --replan 1 --goal sustain:copper-plate:15:36000 --goal producing:automation-science-pack:6 {{ARGS}}
+
 # Fast iteration: connect to already-running Factorio (start with 'just factorio' first)
 lua-connect SCRIPT *ARGS:
     cargo run --no-default-features --features cli,lua -- lua --connect {{SCRIPT}} {{ARGS}}

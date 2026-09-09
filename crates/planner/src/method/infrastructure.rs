@@ -41,6 +41,12 @@ pub fn ensure_infrastructure(
     goals: &[Goal],
     ctx: &mut ExpansionCtx,
 ) -> Result<Vec<Step>, PlannerError> {
+    // Skip Phase 0 if any Sustain or Producing goal exists: those methods
+    // already handle their own drill+furnace placement and Phase 0 pairs
+    // would conflict with belt routing.
+    if has_infrastructure_goal(goals) {
+        return Ok(Vec::new());
+    }
     let demand = aggregate_plate_demand(goals);
     if demand.is_empty() {
         return Ok(Vec::new());
@@ -102,6 +108,23 @@ pub fn ensure_infrastructure(
     }
 
     Ok(all_steps)
+}
+
+/// Does the goal tree contain any Sustain or Producing goal?
+/// Phase 0 is skipped when these exist, as they manage their own cells.
+fn has_infrastructure_goal(goals: &[Goal]) -> bool {
+    for goal in goals {
+        match goal {
+            Goal::Sustain { .. } | Goal::Producing { .. } => return true,
+            Goal::All(inner) => {
+                if has_infrastructure_goal(inner) {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 /// Collect total plate-like demand from a goal tree.

@@ -53,10 +53,18 @@ export function replanBoundaries(events: Event[]): number[] {
  * plan that raised has no `plan_created` and still cost time"
  * (`EventKind::PlanningTimed`'s own doc). So a `planning_timed` with no
  * `plan_created` before the next `planning_timed`, or before the end of the
- * log, is a replan that was attempted and refused -- real Space Age record:
- * `run-1788923927-04849` has two `planning_timed` (452, 48017) and one
- * `plan_created` (452), the second attempt refusing right after 48 abandoned
- * steps.
+ * log, is a planning attempt the record shows no plan for -- real Space Age
+ * record: `run-1788923927-04849` has two `planning_timed` (452, 48017) and one
+ * `plan_created` (452), the second attempt writing nothing after it and 48
+ * abandoned steps before it.
+ *
+ * **That is all it says, and the marker says no more.** Nothing here separates
+ * a planner that refused from a record that simply ended -- a run killed
+ * between its `planning_timed` and its `plan_created` looks identical, and 9 of
+ * this project's 24 archived runs end on a plan line with nothing after it. The
+ * marker is therefore drawn as `no plan recorded after planning`; calling it a
+ * refusal names a cause the record does not carry, and the refusal itself is
+ * reported separately by whoever *does* know it (the milestone's stuck reason).
  */
 export function refusedReplans(events: Event[]): number[] {
     const timed = events.filter((e) => e.kind === 'planning_timed').map((e) => e.tick).sort((a, b) => a - b);

@@ -83,9 +83,12 @@ function title(s: LaneSegment): string {
       <line class="replan" :x1="x(t)" y1="0" :x2="x(t)" :y2="height" stroke="var(--color-ink)" stroke-width="1" stroke-dasharray="3 3"/>
       <text :x="x(t) + 4" :y="height - 2" font-size="9" fill="var(--color-ink-muted)">plan {{ i + 1 }} · ids restart here · {{ formatGameTime(clock, t) }}</text>
     </template>
+    <!-- "no plan recorded after planning", not "replan refused": the record
+         shows a planning attempt and no plan after it, which is a refusal OR a
+         record that ended there, and nothing here distinguishes them. -->
     <template v-for="t in refused" :key="`rr${t}`">
-      <line class="replan-refused" :x1="x(t)" y1="0" :x2="x(t)" :y2="height" stroke="var(--color-status-critical)" stroke-width="1.5" stroke-dasharray="4 2"/>
-      <text :x="x(t) + 4" :y="14" font-size="9" fill="var(--color-status-critical)">replan refused · {{ formatGameTime(clock, t) }}</text>
+      <line class="planning-unanswered" :x1="x(t)" y1="0" :x2="x(t)" :y2="height" stroke="var(--color-status-critical)" stroke-width="1.5" stroke-dasharray="4 2"/>
+      <text :x="x(t) + 4" :y="14" font-size="9" fill="var(--color-status-critical)">no plan recorded after planning · {{ formatGameTime(clock, t) }}</text>
     </template>
     <line :x1="x(cursor)" y1="0" :x2="x(cursor)" :y2="height" stroke="var(--color-verdict-roster)" stroke-width="1.5"/>
   </svg>

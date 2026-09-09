@@ -57,15 +57,20 @@ describe('LaneBand', () => {
         const w = mount(LaneBand, {props: {scale: trimmed, clock: {from: run.lo, to: run.hi}, cursor: run.lo, lanes: run.lanes, events: run.events}});
         expect(w.text()).toContain('idle 32%'); // 6984 / 21982, the tool's figure
     });
-    it('draws a refused replan as a critical dashed line across every row', () => {
+    it('draws a planning attempt no plan answered as a critical dashed line across every row', () => {
         const events: Event[] = [
             {kind: 'planning_timed', tick: 452, planning_ms: 1, paused: true, reason: null, tick_before: 452, tick_after: 452} as Event,
             {kind: 'plan_created', tick: 452, milestone_index: 1, steps: 1, makespan: 1, bots: [1], plan: []} as Event,
             {kind: 'planning_timed', tick: 48017, planning_ms: 1, paused: true, reason: null, tick_before: 48017, tick_after: 48017} as Event
         ];
         const w = mount(LaneBand, {props: {scale, clock, cursor: run.lo, lanes: run.lanes, events}});
-        const lines = w.findAll('line.replan-refused');
+        const lines = w.findAll('line.planning-unanswered');
         expect(lines).toHaveLength(1);
-        expect(w.text()).toContain('replan refused');
+        // Not "replan refused": a `planning_timed` with no `plan_created`
+        // after it is a refusal OR a record that ended there (a killed run),
+        // and the record cannot tell the two apart. The label says only what
+        // it sees.
+        expect(w.text()).toContain('no plan recorded after planning');
+        expect(w.text()).not.toContain('refused');
     });
 });

@@ -13,7 +13,10 @@
 //! ├── supply     a drill on coal dropping into a buffer, and a belt run
 //! │              from that buffer to every burner the cells contain --
 //! │              including the coal drill's own fuel slot
-//! ├── power      nothing: every machine here is a burner, deliberately
+//! ├── power      nothing at t=0: every machine here is a burner, deliberately.
+//! │              Once `electronics` is done AND a network stands, the one arm
+//! │              that carries no coal -- the offtake -- is electric and a
+//! │              pole run is laid to it; see `ELECTRIC_ARM` and `offtake_arm`
 //! └── source     not modelled; see "What is still missing"
 //! ```
 //!
@@ -45,6 +48,13 @@
 //! a coal belt need no supply of their own. That is a claim about the game and
 //! nothing in this crate can check it; it is measured in the live run.
 //!
+//! Its converse is what the offtake arm lives with: it carries plates, which
+//! do not burn, so it has no fuel source at all. At t=0 the answer is a coal
+//! branch to it; with a network standing the answer is the electric arm,
+//! which is the way out CLAUDE.md names ("it is why the electric `inserter`
+//! matters"). `run-1788926478-07032` measured the cost of having only the
+//! first answer: seven plates, then 25,000 ticks of nothing.
+//!
 //! # The arrangement, and why the buffer chest is in it
 //!
 //! A burner mining drill has no inventory an inserter can reach into — it
@@ -72,13 +82,17 @@
 //!   outlasts it — which is exactly the arithmetic the ten-minute default
 //!   charge failed.
 
+use crate::action::Condition;
 use crate::error::PlannerError;
 use crate::goal::{Goal, Holder};
-use crate::ids::{ItemId, Ticks};
+use crate::ids::{ActionId, ItemId, Ticks};
 use crate::method::connect::{ConnectRefusal, connect_steps_reserving};
+use crate::method::extract::SUPPLY_SEARCH_RADIUS;
+use crate::method::power::{PLANT_ADOPT_RADIUS, ensure_powered};
 use crate::method::produce::{Cell, CellSpec, DRILL, FURNACE, cell_spec, cells_for};
-use crate::method::util::nearest_resource_tile;
+use crate::method::util::{RecipeGate, nearest_resource_tile, recipe_for, recipe_gate};
 use crate::method::{ExpansionCtx, Method, Step};
+use crate::powered::PowerNeed;
 use crate::state::PlanState;
 use factorio_bot_core::num_traits::{FromPrimitive, ToPrimitive};
 use factorio_bot_core::types::{Direction, FactorioEntity, Pos, Position};
@@ -87,11 +101,37 @@ use factorio_bot_core::types::{Direction, FactorioEntity, Pos, Position};
 /// a stone furnace and a burner mining drill, and both burn this.
 const FUEL: &str = "coal";
 
-/// The inserter every arm in this arrangement is.
+/// The inserter every arm on a COAL run is, and the one every other arm falls
+/// back to.
 ///
 /// See the module header: the electric one is not craftable at t=0 and there
-/// is no power to run it with either.
+/// is no power to run it with either. An arm that carries coal refuels itself
+/// out of its own cargo and stays this whatever the force has researched; an
+/// arm that carries none is the one [`offtake_arm`] decides about.
 const ARM: &str = "burner-inserter";
+
+/// The inserter an arm that carries no fuel becomes once electricity is
+/// there to run it.
+///
+/// # Why this exists: the offtake starved, live, for 25,000 ticks
+///
+/// `run-1788926478-07032` (seed 31337, four bots) built the copper cell's
+/// offtake at tick 17,476 as a [`ARM`], and its plate chest read 1, 2, 3, 5,
+/// 6, **7** across the next 2,000 ticks and then 7 for the next 25,000 while
+/// the furnace's own output slot filled to 12 and it went `no_ingredients`.
+/// The arm had burned the charge it was placed with; its coal branch was laid
+/// 14,000 ticks after it and coal reached it near tick 44,400, after which
+/// the chest climbed to 114 without a bot in the loop. Every one of those
+/// numbers is in the run's `samples.jsonl`.
+///
+/// The rule was already written down -- *a burner block works exactly where
+/// coal flows through it* -- and the branch is the belted answer to it. This
+/// is the electric answer, taken only when it is cheaper than the branch:
+/// the recipe is open (never researched for this), a network with headroom
+/// already stands, and a pole run reaches the arm. Then the arm needs no
+/// coal at all, the branch is not laid, and the cell's coal buffer keeps the
+/// perimeter side the branch would have cost.
+const ELECTRIC_ARM: &str = "inserter";
 
 /// What the coal drill drops into, and what every belt run starts from.
 ///
@@ -501,6 +541,25 @@ fn place_one(
     facing: Direction,
     note: &str,
 ) -> Option<Step> {
+    place_with(ctx, name, at, facing, note, Vec::new()).map(|(step, _)| step)
+}
+
+/// [`place_one`] with extra preconditions on the placement and its id handed
+/// back, for a caller that has to state an ordering edge to it.
+///
+/// The one caller with both needs is the electric offtake: its
+/// [`Condition::Powered`] is the headroom claim the plan-wide audit looks for,
+/// and nothing satisfies that condition, so the edges from the poles that make
+/// it true have to be stated by the method that holds both ends -- exactly as
+/// `method::extract` does for an extractor.
+fn place_with(
+    ctx: &mut ExpansionCtx,
+    name: &str,
+    at: &Position,
+    facing: Direction,
+    note: &str,
+    extra_pre: Vec<Condition>,
+) -> Option<(Step, ActionId)> {
     let entity = sized(&ctx.state, name, at, facing)?;
     let build = ctx
         .state
@@ -508,29 +567,32 @@ fn place_one(
         .map(|b| b.build_distance)
         .unwrap_or(10.0);
     let min_radius = ctx.state.placement_clearance(name).unwrap_or(0.0);
+    let id = ctx.ids.next();
+    let mut pre = vec![
+        crate::action::Condition::AtPosition {
+            who: crate::action::Actor::Role,
+            pos: at.clone(),
+            radius: build,
+            min_radius,
+        },
+        crate::action::Condition::AreaFree {
+            pos: at.clone(),
+            entity: name.into(),
+            direction: entity.direction,
+        },
+        crate::action::Condition::HasItem {
+            who: crate::action::Actor::Role,
+            item: name.into(),
+            count: 1,
+        },
+    ];
+    pre.extend(extra_pre);
     let step = Step::Act(Box::new(crate::action::Action {
-        id: ctx.ids.next(),
+        id,
         kind: crate::action::ActionKind::Place {
             entity: Box::new(entity.clone()),
         },
-        pre: vec![
-            crate::action::Condition::AtPosition {
-                who: crate::action::Actor::Role,
-                pos: at.clone(),
-                radius: build,
-                min_radius,
-            },
-            crate::action::Condition::AreaFree {
-                pos: at.clone(),
-                entity: name.into(),
-                direction: entity.direction,
-            },
-            crate::action::Condition::HasItem {
-                who: crate::action::Actor::Role,
-                item: name.into(),
-                count: 1,
-            },
-        ],
+        pre,
         eff: vec![
             crate::action::Effect::LoseItem {
                 who: crate::action::Actor::Role,
@@ -544,7 +606,7 @@ fn place_one(
         label: format!("place {name} at {at} -- {note}"),
     }));
     ctx.state.create_entity(entity);
-    Some(step)
+    Some((step, id))
 }
 
 /// Belt `FUEL` from the buffer into one burner, unless something already
@@ -616,6 +678,10 @@ fn feed(
 struct Offtake {
     /// The arm that lifts the product out of the machine.
     arm: Position,
+    /// Which inserter it is -- [`ARM`] or [`ELECTRIC_ARM`], decided by
+    /// [`offtake_arm`] for a planned one and read off the entity for a
+    /// standing one.
+    arm_name: String,
     /// Its facing — which names the side it PICKS UP from, i.e. the machine.
     facing: Direction,
     /// The container it drops into.
@@ -648,6 +714,24 @@ struct Offtake {
     /// they have, and a rule that could not tell the two apart closed to the
     /// third coal run the side it needed -- twice, five tests red each time.
     exit: Vec<Position>,
+}
+
+impl Offtake {
+    /// Does this arm need coal belted into it?
+    ///
+    /// Asked of the arm's own energy source through [`PowerNeed::of`], the
+    /// same predicate the plan-wide power audit uses, rather than of its
+    /// name: an electric arm draws from the network and a coal run to it
+    /// would feed nothing. `Inert` and `Unknown` both answer yes -- a burner
+    /// needs coal, and an arm the world cannot classify is belted rather than
+    /// left to starve, which is the direction that costs a belt instead of
+    /// a cell.
+    fn wants_coal(&self, state: &PlanState) -> bool {
+        !matches!(
+            PowerNeed::of(state, &self.arm_name),
+            PowerNeed::Electric { .. }
+        )
+    }
 }
 
 /// Every side of the 1x1 chest at `sink` that could be kept free for the
@@ -768,6 +852,7 @@ fn standing_offtake(state: &PlanState, at: &Position) -> Option<Offtake> {
                 .unwrap_or_default();
             found = Some(Offtake {
                 arm: arm.position.clone(),
+                arm_name: arm.name.clone(),
                 facing,
                 sink: sink.position.clone(),
                 exit,
@@ -933,6 +1018,11 @@ fn plan_offtake(
             }
             return Ok(Offtake {
                 arm,
+                // Sited as a burner -- both inserters are 1x1 and collide
+                // alike, so the geometry is the same either way. Which one
+                // it becomes is `offtake_arm`'s decision, made by the caller
+                // once the site is known.
+                arm_name: ARM.into(),
                 facing: arm_facing,
                 sink,
                 exit,
@@ -944,6 +1034,192 @@ fn plan_offtake(
         rejected.len(),
         rejected.join("; ")
     ))
+}
+
+/// Does `cargo` burn, by the world's own item table?
+///
+/// The property the burner arrangement rests on is about the **cargo**, not
+/// the arm: a burner inserter refuels itself out of what it carries only when
+/// what it carries is fuel. Read off `fuel_value`, which is what the game
+/// itself consults, rather than off a list of names -- a modded fuel is
+/// still a fuel here.
+///
+/// `None` when the world carries no prototype for the item, which is a
+/// different answer from "does not burn" and is kept that way; see
+/// [`offtake_arm`] for what it does with it.
+fn self_fuelling(state: &PlanState, cargo: &str) -> Option<bool> {
+    state
+        .base()
+        .globals
+        .item_prototypes
+        .get(cargo)
+        .map(|item| item.fuel_value > 0)
+}
+
+/// Which inserter lifts `cargo` out of the machine at `site`.
+///
+/// # The decision, in the order it is made
+///
+/// 1. **The cargo burns** -- a [`ARM`], and no question about electricity is
+///    asked. It refuels itself, which is cheaper than any wire and is what
+///    every arm on a coal run here already relies on. The rule is about what
+///    passes through the arm's hands, so this is decided by
+///    [`self_fuelling`] and not by which run the arm is on.
+/// 2. **[`ELECTRIC_ARM`]'s recipe is not open** -- a [`ARM`]. `Open` means
+///    the world's own `enabled` flag or a technology the force finished
+///    *before this plan*; a technology this plan could research is not
+///    counted, because a `Sustain` goal must not start researching
+///    `electronics` to take plates out of a furnace. At t=0 on seed 31337
+///    the recipe is disabled, so every t=0 plan is exactly what it was.
+/// 3. **No network with headroom stands** within [`SUPPLY_SEARCH_RADIUS`] or
+///    the adoption radius -- a [`ARM`]. Available means *standing*: this
+///    method will not build a plant to run one 13 kW arm. A plant, once
+///    some other goal has built it, is adopted by the next cell planned.
+/// 4. **No pole run reaches the site**, asked of a fork -- a [`ARM`], and the
+///    reason is the one this repo keeps: an electric arm no pole reaches
+///    places 100% correctly and moves nothing, which is worse than one that
+///    starves slowly, because the starving one has a coal branch coming.
+/// 5. Otherwise the electric arm.
+///
+/// # Why this only DECIDES, and [`power_offtake`] lays the poles
+///
+/// The decision has to be made before the cell's belts are laid, because it
+/// is what tells [`belt_cell`] not to branch coal to the arm. But the poles
+/// must go down **after** them: laid first, the run's last pole stood beside
+/// the plate chest and the furnace's own coal run had to tunnel under the
+/// drill's to get past it -- measured on this module's fixture, where the
+/// tunnel then refused on a recipe the fixture does not carry. A belt run is
+/// contiguous and boxed in by everything already standing; a pole stands on
+/// any free tile within reach. So the constrained thing is routed first and
+/// the free thing steps around it, which is the order `method::assemble`
+/// already uses for its supply link. The trial here is discarded with its
+/// fork; the real run is [`power_offtake`]'s.
+///
+/// A cargo the world has no item prototype for is treated as not burning.
+/// That is the safe direction, not a guess: the electric arm is correct
+/// whatever it carries, and only keeping a *burner* depends on the cargo.
+fn offtake_arm(
+    ctx: &ExpansionCtx,
+    cargo: &str,
+    site: &Position,
+    facing: Direction,
+) -> Result<&'static str, PlannerError> {
+    if self_fuelling(&ctx.state, cargo) == Some(true) {
+        return Ok(ARM);
+    }
+    let Some(recipe) = recipe_for(&ctx.state, ELECTRIC_ARM) else {
+        return Ok(ARM);
+    };
+    if recipe_gate(&ctx.state, &recipe) != RecipeGate::Open {
+        return Ok(ARM);
+    }
+    // `None` is "not something this planner may put on a network", by
+    // `consumer_draw_kw`'s own doc, and is read that way.
+    let Some(kw) = ctx.state.consumer_draw_kw(ELECTRIC_ARM) else {
+        return Ok(ARM);
+    };
+    let Some(arm) = sized(&ctx.state, ELECTRIC_ARM, site, facing) else {
+        return Ok(ARM);
+    };
+    let standing = [SUPPLY_SEARCH_RADIUS, PLANT_ADOPT_RADIUS]
+        .into_iter()
+        .any(|radius| ctx.state.nearest_supply_anchor(site, radius, kw).is_some());
+    if !standing {
+        return Ok(ARM);
+    }
+    let area = arm.bounding_box.clone();
+    let mut trial = ExpansionCtx::new(ctx.state.fork(), ctx.chain_actor);
+    match ensure_powered(
+        &mut trial,
+        ELECTRIC_ARM,
+        site,
+        &area,
+        kw,
+        SUPPLY_SEARCH_RADIUS,
+        &[arm],
+    )? {
+        Some(_) => Ok(ELECTRIC_ARM),
+        None => Ok(ARM),
+    }
+}
+
+/// Run the poles to a planned electric offtake, once the cell's belts stand,
+/// and put the power claim on its placement.
+///
+/// `placement` is where the arm's `Place` sits in `steps` and its id: the
+/// [`Condition::Powered`] the plan-wide audit looks for goes on that action,
+/// and every pole's id is linked ahead of it because nothing satisfies the
+/// condition and `infer_edges` draws no edge on its own -- exactly as
+/// `method::extract` does for an extractor.
+///
+/// The arm is already in the overlay, so no occupant is passed;
+/// `Condition::Powered` excludes the consumer standing at its own tile.
+///
+/// # `None` is a refusal here, by name
+///
+/// [`offtake_arm`] asked the same question of a fork before any belt was
+/// laid and was answered yes; the belts have since taken ground. A pole
+/// stands on any free tile within reach, so a run that fitted before them
+/// almost always fits around them -- but "almost" is not a plan, and an
+/// electric arm with no wire places correctly and moves nothing. So the
+/// case is refused with the arm and the reason named, rather than emitted
+/// and discovered live.
+fn power_offtake(
+    ctx: &mut ExpansionCtx,
+    steps: &mut [Step],
+    placement: (usize, ActionId),
+    offtake: &Offtake,
+    cargo: &str,
+) -> Result<Vec<Step>, PlannerError> {
+    let refuse = |why: String| PlannerError::SustainNoOfftake {
+        item: cargo.into(),
+        machine: ELECTRIC_ARM.into(),
+        at: offtake.arm.to_string(),
+        why,
+    };
+    let kw = ctx
+        .state
+        .consumer_draw_kw(ELECTRIC_ARM)
+        .ok_or_else(|| refuse(format!("{ELECTRIC_ARM} has no draw this planner can price")))?;
+    let area = ctx
+        .state
+        .collision_area_facing(ELECTRIC_ARM, &offtake.arm, offtake.facing)
+        .ok_or_else(|| refuse(format!("{ELECTRIC_ARM} is not a prototype in this world")))?;
+    let powering = ensure_powered(
+        ctx,
+        ELECTRIC_ARM,
+        &offtake.arm,
+        &area,
+        kw,
+        SUPPLY_SEARCH_RADIUS,
+        &[],
+    )?
+    .ok_or_else(|| {
+        refuse(format!(
+            "a network stands within {SUPPLY_SEARCH_RADIUS} tiles, but once the cell's belts \
+             are laid no run of poles this planner will build reaches the arm"
+        ))
+    })?;
+    let (index, place_id) = placement;
+    match steps.get_mut(index) {
+        Some(Step::Act(action)) if action.id == place_id => {
+            action.pre.push(powering.powered);
+        }
+        _ => {
+            return Err(refuse(
+                "the arm's placement is not where this method put it, so the power claim has \
+                 nowhere to go"
+                    .into(),
+            ));
+        }
+    }
+    let mut out = powering.steps;
+    out.extend(powering.ids.into_iter().map(|from| Step::Link {
+        from,
+        to: place_id,
+        lag: 0,
+    }));
+    Ok(out)
 }
 
 /// What the world's flow graph says is arriving at each standing cell's
@@ -1268,15 +1544,17 @@ fn belt_cell(
     // sides, and the two cell runs route around what this leaves. The
     // fixture accepts either order; the real map accepts only this one,
     // which is the direction that decides.
-    let arm_entity = sized(&ctx.state, ARM, &offtake.arm, offtake.facing).ok_or_else(|| {
-        PlannerError::SustainNoOfftake {
+    let arm_entity = sized(&ctx.state, &offtake.arm_name, &offtake.arm, offtake.facing)
+        .ok_or_else(|| PlannerError::SustainNoOfftake {
             item: spec.item.clone(),
-            machine: ARM.into(),
+            machine: offtake.arm_name.clone(),
             at: offtake.arm.to_string(),
-            why: format!("{ARM} is not a prototype in this world"),
-        }
-    })?;
-    if !fed_by_machine(&ctx.state, &offtake.arm) {
+            why: format!("{} is not a prototype in this world", offtake.arm_name),
+        })?;
+    // An electric arm wants no coal, and a branch to it would feed nothing:
+    // see `ELECTRIC_ARM`. Standing or planned, the arm's own energy source
+    // decides, not the name this method would have chosen.
+    if offtake.wants_coal(&ctx.state) && !fed_by_machine(&ctx.state, &offtake.arm) {
         // # Every coal belt this plan knows about, not only this
         // cell's own slice
         //
@@ -1703,6 +1981,9 @@ impl Method for Sustain {
             // away, so the output slot filled and the machine throttled itself.
             // The arrangement sustained a *window*, not a rate.
             let was_standing = standing.is_some();
+            // The electric offtake's placement, when one was planned: index
+            // into `steps` and id, for `power_offtake` once the belts stand.
+            let mut to_power: Option<(usize, ActionId)> = None;
             let offtake = match standing {
                 Some(existing) => existing,
                 None => {
@@ -1714,8 +1995,14 @@ impl Method for Sustain {
                                 at: cell.furnace.to_string(),
                                 why,
                             })?;
+                    // Burner or electric: decided by what the arm carries
+                    // and whether a network already stands to run it. See
+                    // `offtake_arm`. An electric arm's poles are run AFTER
+                    // the cell's belts, by `power_offtake` below, which is
+                    // why its placement is remembered here.
+                    let arm_name = offtake_arm(ctx, &spec.item, &planned.arm, planned.facing)?;
                     steps.push(Step::Subgoal(Goal::Have {
-                        item: ARM.into(),
+                        item: arm_name.into(),
                         count: 1,
                         whose: Holder::Share(ctx.chain_actor),
                         via: None,
@@ -1727,7 +2014,17 @@ impl Method for Sustain {
                         via: None,
                     }));
                     let note = format!("take {} out of the {FURNACE}", spec.item);
-                    if let Some(step) = place_one(ctx, ARM, &planned.arm, planned.facing, &note) {
+                    if let Some((step, place_id)) = place_with(
+                        ctx,
+                        arm_name,
+                        &planned.arm,
+                        planned.facing,
+                        &note,
+                        Vec::new(),
+                    ) {
+                        if arm_name == ELECTRIC_ARM {
+                            to_power = Some((steps.len(), place_id));
+                        }
                         steps.push(step);
                     }
                     let note = format!("hold the {} the cell makes", spec.item);
@@ -1736,7 +2033,10 @@ impl Method for Sustain {
                     {
                         steps.push(step);
                     }
-                    planned
+                    Offtake {
+                        arm_name: arm_name.into(),
+                        ..planned
+                    }
                 }
             };
             // Standing or planned, this cell's sink joins the set the next
@@ -1796,6 +2096,12 @@ impl Method for Sustain {
                 &plate_chests,
                 &reserved,
             )?;
+            // The wire to an electric offtake, now that every belt of the
+            // cell stands and the poles can step around them.
+            if let Some(placement) = to_power {
+                let wired = power_offtake(ctx, &mut steps, placement, &offtake, &spec.item)?;
+                steps.extend(wired);
+            }
             index += 1;
             // The next cell, sited now that this one's belts stand in the
             // overlay. See the note above the first cell for why the siting
@@ -2048,7 +2354,22 @@ mod tests {
     #[test]
     fn every_arm_is_a_burner_inserter() {
         let roster = [BotId(1)];
-        let net = expand(&[goal()], &near_state(), &registry_for(&roster), BotId(1))
+        let state = near_state();
+        // The premise, stated so the test says which leg of `offtake_arm` it
+        // proves: the shared fixture enables EVERY recipe, `inserter`
+        // included, so what keeps the offtake a burner here is that no
+        // network stands -- not the t=0 recipe gate, which
+        // `a_standing_network_does_not_make_the_offtake_electric_at_t0`
+        // owns.
+        let recipe = recipe_for(&state, ELECTRIC_ARM).expect("the fixture ships the recipe");
+        assert_eq!(recipe_gate(&state, &recipe), RecipeGate::Open);
+        assert!(
+            state
+                .nearest_supply_anchor(&Position::new(-40., 30.), PLANT_ADOPT_RADIUS, 1.)
+                .is_none(),
+            "the fixture has no standing network, or this test proves the wrong leg"
+        );
+        let net = expand(&[goal()], &state, &registry_for(&roster), BotId(1))
             .expect("iron and coal are within one belt window of each other");
         let placed: Vec<String> = net
             .actions()
@@ -2069,7 +2390,7 @@ mod tests {
         // substitution is a broken experiment" trap, found by running it.
         assert!(
             arms.iter().all(|n| n.as_str() == "burner-inserter"),
-            "an `inserter` is not craftable at t=0 and needs power this stage has none of: {arms:?}"
+            "an `inserter` needs a network to run it and none stands here: {arms:?}"
         );
         assert!(
             placed.iter().any(|n| n == "transport-belt"),
@@ -2742,6 +3063,289 @@ mod tests {
              an earlier cell's plate chest as its coal buffer, found that chest already fed, and \
              laid no coal run to tap -- the refusal then names the arm and the defect is three \
              tiles away"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // The electric offtake.
+    //
+    // `run-1788926478-07032`: the copper cell's burner offtake moved seven
+    // plates and then nothing for 25,000 ticks, until its coal branch --
+    // laid 14,000 ticks after the arm -- finally carried coal to it. See
+    // `ELECTRIC_ARM`.
+    // -----------------------------------------------------------------
+
+    /// [`near_state`] with a network standing within pole reach of where
+    /// the cell goes: a pole and a steam engine, the same two entities
+    /// `test_world::with_steam_power` uses to power a lab, twenty-odd
+    /// tiles east of the coal patch. `nearest_supply_anchor` credits the
+    /// engine 900 kW and finds the pole; nothing else about the fixture
+    /// changes.
+    fn powered_near_state() -> PlanState {
+        let mut state = near_state();
+        // Poles are wood and copper cable, and no method in this crate can
+        // obtain wood (see `BUFFER`): a roster starts with one each in the
+        // game, and here the bot is handed enough for the run, so what the
+        // tests on this state measure is the arm and not the pole bill.
+        state.gain(BotId(1), "wood", 20);
+        for (name, position) in [
+            (crate::method::power::POLE, Position::new(-20.5, 29.5)),
+            ("steam-engine", Position::new(-18.5, 29.5)),
+        ] {
+            state.create_entity(FactorioEntity {
+                name: name.into(),
+                position,
+                ..Default::default()
+            });
+        }
+        assert!(
+            state
+                .nearest_supply_anchor(&Position::new(-40., 30.), SUPPLY_SEARCH_RADIUS, 13.)
+                .is_some(),
+            "the fixture's network has to be adoptable from the cell, or every test on it \
+             proves the burner leg by accident"
+        );
+        state
+    }
+
+    /// [`world_with_coal_beside_the_iron`] with the electric arm's recipe
+    /// disabled and nothing unlocking it -- seed 31337's t=0, where the
+    /// shared fixture's every-recipe-enabled default is the wrong world.
+    fn world_with_the_electric_arm_locked() -> FactorioSurface {
+        let world = world_with_coal_beside_the_iron();
+        let mut locked = world
+            .globals
+            .recipes
+            .get(ELECTRIC_ARM)
+            .expect("the shared fixture ships the recipe")
+            .clone();
+        assert!(
+            locked.enabled,
+            "already disabled; this fixture would assert nothing"
+        );
+        locked.enabled = false;
+        world.globals.recipes.insert(ELECTRIC_ARM.into(), locked);
+        world
+    }
+
+    /// The offtake action in `net`, by the position `standing_offtake`
+    /// reports off the built world.
+    fn offtake_placement<'a>(
+        net: &'a crate::network::ActionNetwork,
+        at: &Position,
+    ) -> &'a crate::action::Action {
+        net.actions()
+            .find(|action| match &action.kind {
+                crate::action::ActionKind::Place { entity } => {
+                    Pos::from(&entity.position) == Pos::from(at)
+                }
+                _ => false,
+            })
+            .expect("the offtake arm is placed by some action")
+    }
+
+    /// How many placed arms deliver into `at`.
+    fn arms_delivering_into(
+        net: &crate::network::ActionNetwork,
+        built: &PlanState,
+        at: &Position,
+    ) -> usize {
+        net.actions()
+            .filter(|action| match &action.kind {
+                crate::action::ActionKind::Place { entity } => {
+                    entity.name.ends_with("inserter")
+                        && Pos::from(&entity.position) != Pos::from(at)
+                        && built
+                            .delivery_position(entity)
+                            .is_some_and(|drop| Pos::from(&drop) == Pos::from(at))
+                }
+                _ => false,
+            })
+            .count()
+    }
+
+    /// **The rung.** With the recipe open and a network standing, the arm
+    /// that carries plates is the electric one: it claims its power on the
+    /// placement, poles are run to it, and no coal branch is laid to it --
+    /// while every arm on a coal run stays the burner it was.
+    #[test]
+    fn the_offtake_is_electric_when_a_network_stands_and_the_recipe_is_open() {
+        let roster = [BotId(1)];
+        let state = powered_near_state();
+        let net = expand(&[goal()], &state, &registry_for(&roster), BotId(1))
+            .expect("the plan passes the power audit, or the claim is missing");
+        let (built, _) = built_world(&net, &state);
+        let spec = cell_spec(&built, "iron-plate").expect("a stone furnace smelts iron");
+        let cells = crate::method::produce::standing_cells(&built, &spec);
+        let cell = cells.first().expect("a cell stands");
+        let offtake = standing_offtake(&built, &cell.furnace).expect("the furnace has an offtake");
+
+        // The LITERAL, for the reason `every_arm_is_a_burner_inserter` gives.
+        assert_eq!(
+            offtake.arm_name, "inserter",
+            "the arm carrying plates should be electric here"
+        );
+        let placement = offtake_placement(&net, &offtake.arm);
+        assert!(
+            placement
+                .pre
+                .iter()
+                .any(|c| matches!(c, Condition::Powered { pos, entity, .. }
+                    if Pos::from(pos) == Pos::from(&offtake.arm) && entity.as_str() == "inserter")),
+            "the placement carries no `Condition::Powered`, so nothing states that the arm \
+             is powered and the audit could only have passed by accident: {:?}",
+            placement.pre
+        );
+        let poles = net
+            .actions()
+            .filter(|a| {
+                matches!(&a.kind, crate::action::ActionKind::Place { entity }
+                if entity.name == crate::method::power::POLE)
+            })
+            .count();
+        assert!(
+            poles > 0,
+            "the network is twenty tiles from the cell; an arm with no pole run to it is \
+             placed correctly and moves nothing"
+        );
+        // And the arm waits for every pole: nothing satisfies
+        // `Condition::Powered`, so the edges have to be stated.
+        let pole_ids: Vec<ActionId> = net
+            .actions()
+            .filter(|a| {
+                matches!(&a.kind, crate::action::ActionKind::Place { entity }
+                if entity.name == crate::method::power::POLE)
+            })
+            .map(|a| a.id)
+            .collect();
+        for pole in pole_ids {
+            assert!(
+                net.preds(placement.id)
+                    .iter()
+                    .any(|(from, _)| *from == pole),
+                "the arm's placement {:?} is not ordered after pole {pole:?}",
+                placement.id
+            );
+        }
+        assert_eq!(
+            arms_delivering_into(&net, &built, &offtake.arm),
+            0,
+            "a coal branch was laid to an arm that draws from the network; it feeds nothing \
+             and costs the coal chest a side"
+        );
+        // Every OTHER arm carries coal and stays a burner.
+        let others: Vec<String> = net
+            .actions()
+            .filter_map(|a| match &a.kind {
+                crate::action::ActionKind::Place { entity }
+                    if entity.name.ends_with("inserter")
+                        && Pos::from(&entity.position) != Pos::from(&offtake.arm) =>
+                {
+                    Some(entity.name.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(!others.is_empty(), "the coal runs place arms of their own");
+        assert!(
+            others.iter().all(|n| n == "burner-inserter"),
+            "an arm on a coal run refuels itself and has no business on the network: {others:?}"
+        );
+    }
+
+    /// The t=0 rule. The same standing network, the recipe disabled and
+    /// nothing unlocking it: the offtake is a burner and is belted its coal,
+    /// exactly as before this rung existed. A `Sustain` goal never researches
+    /// `electronics` to take plates out of a furnace.
+    #[test]
+    fn a_standing_network_does_not_make_the_offtake_electric_at_t0() {
+        let roster = [BotId(1)];
+        let mut state =
+            PlanState::from_world(Arc::new(world_with_the_electric_arm_locked()), &[BotId(1)]);
+        state.gain(BotId(1), "wood", 20);
+        for (name, position) in [
+            (crate::method::power::POLE, Position::new(-20.5, 29.5)),
+            ("steam-engine", Position::new(-18.5, 29.5)),
+        ] {
+            state.create_entity(FactorioEntity {
+                name: name.into(),
+                position,
+                ..Default::default()
+            });
+        }
+        let recipe = recipe_for(&state, ELECTRIC_ARM).expect("present, just off");
+        assert_eq!(
+            recipe_gate(&state, &recipe),
+            RecipeGate::Unobtainable,
+            "the premise: nothing in this world turns the recipe on"
+        );
+        let net = expand(&[goal()], &state, &registry_for(&roster), BotId(1))
+            .expect("the burner arrangement plans as it always did");
+        let (built, _) = built_world(&net, &state);
+        let spec = cell_spec(&built, "iron-plate").expect("a stone furnace smelts iron");
+        let cells = crate::method::produce::standing_cells(&built, &spec);
+        let cell = cells.first().expect("a cell stands");
+        let offtake = standing_offtake(&built, &cell.furnace).expect("the furnace has an offtake");
+        assert_eq!(offtake.arm_name, "burner-inserter");
+        assert!(
+            fed_by_machine(&built, &offtake.arm),
+            "a burner offtake with no coal branch is the arm that starved for 25,000 ticks"
+        );
+        assert!(
+            !net.actions().any(
+                |a| matches!(&a.kind, crate::action::ActionKind::Place { entity }
+                if entity.name == "inserter")
+            ),
+            "no electric arm anywhere in a t=0 plan"
+        );
+    }
+
+    /// The rule is about the CARGO. On the powered state, an arm that would
+    /// carry coal stays a burner -- it refuels itself -- and one that would
+    /// carry plates goes electric with its power in hand.
+    #[test]
+    fn an_arm_carrying_fuel_stays_a_burner_whatever_stands() {
+        let state = powered_near_state();
+        // Open ground a few tiles from the network's pole, so the only thing
+        // deciding the answer is the cargo.
+        let site = Position::new(-26.5, 29.5);
+        assert!(state.is_area_free(ARM, &site));
+
+        let ctx = ExpansionCtx::new(state.fork(), BotId(1));
+        let arm = offtake_arm(&ctx, FUEL, &site, Direction::West).expect("nothing to refuse");
+        assert_eq!(
+            arm, "burner-inserter",
+            "coal through its hands is its own fuel"
+        );
+        assert_eq!(
+            ctx.state.entities_within(&site, 3.).len(),
+            0,
+            "and the decision leaves nothing behind in the state"
+        );
+
+        let arm =
+            offtake_arm(&ctx, "iron-plate", &site, Direction::West).expect("nothing to refuse");
+        assert_eq!(arm, "inserter", "a plate is not fuel, and a network stands");
+        assert_eq!(
+            ctx.state.entities_within(&site, 3.).len(),
+            0,
+            "the trial's poles stay on its fork: laying them is `power_offtake`'s job"
+        );
+    }
+
+    /// `self_fuelling` reads the world's `fuel_value`, and says when it has
+    /// nothing to read.
+    #[test]
+    fn whether_a_cargo_burns_is_read_off_the_item_table() {
+        let state = near_state();
+        assert_eq!(self_fuelling(&state, "coal"), Some(true));
+        assert_eq!(self_fuelling(&state, "wood"), Some(true));
+        assert_eq!(self_fuelling(&state, "iron-plate"), Some(false));
+        assert_eq!(self_fuelling(&state, "copper-plate"), Some(false));
+        assert_eq!(
+            self_fuelling(&state, "no-such-item"),
+            None,
+            "absent is not a value: an item the world never described is not \"does not burn\""
         );
     }
 

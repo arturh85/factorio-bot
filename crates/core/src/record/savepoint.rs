@@ -166,7 +166,7 @@ pub enum SavepointError {
 /// detects drift; it is not a cryptographic commitment and must not be
 /// described as one. Nothing here is defending against an adversary -- the
 /// question is only "is this the same mod I ran last week".
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ModFingerprint {
     /// `version` out of the mod's `info.json`, when it could be read.
     pub version: Option<String>,
@@ -338,7 +338,7 @@ fn describe(fp: &ModFingerprint) -> String {
 /// [`ModFingerprint`] is the exception, and it is here because provenance does
 /// not carry it and it is the one fact that decides whether this file can be
 /// safely loaded at all.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct Savepoint {
     pub schema: u32,
     /// The run that produced it. Also the name of the directory two levels up,

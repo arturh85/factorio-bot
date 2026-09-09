@@ -478,3 +478,33 @@ async fn the_map_can_be_sliced_by_tick() {
         .collect();
     assert_eq!(ticks, vec![500]);
 }
+
+#[tokio::test]
+async fn savepoints_are_listed_in_milestone_order_and_absent_is_empty() {
+    let ws = workspace("savepoints");
+    seed_run(&ws, "alpha", MILESTONES, Some(MANIFEST), None);
+    let (status, body) = get_json(state_with_workspace(&ws), "/api/v1/runs/alpha/savepoints").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["savepoints"].as_array().unwrap().len(), 0);
+    let dir = ws.join("runs/alpha/savepoints");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("milestone-2.json"),
+        r#"{"schema":1,"run_id":"alpha","milestone_index":2,"tick":900,"created_unix":1050,"bytes":10,"file":"milestone-2.zip","mods":null}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("milestone-1.json"),
+        r#"{"schema":1,"run_id":"alpha","milestone_index":1,"tick":300,"created_unix":1020,"bytes":10,"file":"milestone-1.zip","mods":{"version":"0.0.1","digest":"f3200cfb","files":6}}"#,
+    )
+    .unwrap();
+    let (_, body) = get_json(state_with_workspace(&ws), "/api/v1/runs/alpha/savepoints").await;
+    let idx: Vec<u64> = body["savepoints"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["milestone_index"].as_u64().unwrap())
+        .collect();
+    assert_eq!(idx, vec![1, 2]);
+    assert_eq!(body["savepoints"][0]["mods"]["digest"], "f3200cfb");
+}

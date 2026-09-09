@@ -135,6 +135,7 @@ const OPERATIONS_WITH_A_PATH_PARAMETER: &[(&str, &str)] = &[
     ("get", "/api/v1/jobs/{id}/events"),
     ("get", "/api/v1/runs/{id}"),
     ("get", "/api/v1/runs/{id}/provenance"),
+    ("get", "/api/v1/runs/{id}/savepoints"),
     ("get", "/api/v1/runs/{id}/events"),
     ("get", "/api/v1/runs/{id}/lanes"),
     ("get", "/api/v1/runs/{id}/samples"),
@@ -150,6 +151,7 @@ const OPERATIONS_WITH_A_PATH_PARAMETER: &[(&str, &str)] = &[
 const OPERATIONS_WITH_A_PATH_PARAMETER: &[(&str, &str)] = &[
     ("get", "/api/v1/runs/{id}"),
     ("get", "/api/v1/runs/{id}/provenance"),
+    ("get", "/api/v1/runs/{id}/savepoints"),
     ("get", "/api/v1/runs/{id}/events"),
     ("get", "/api/v1/runs/{id}/lanes"),
     ("get", "/api/v1/runs/{id}/samples"),

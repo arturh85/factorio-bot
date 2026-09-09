@@ -18,6 +18,7 @@ use axum::extract::{Path, Query, Request, State};
 use axum::response::Response;
 use factorio_bot_core::record::map::{MapRecord, read_map};
 use factorio_bot_core::record::provenance::{Provenance, read_provenance};
+use factorio_bot_core::record::savepoint::{SAVEPOINTS_DIR, Savepoint};
 use factorio_bot_core::record::video::{
     TICKS_FILE, VIDEO_DIR, VideoManifest, clock::read_tick_samples, read_video_dir,
 };
@@ -332,6 +333,46 @@ pub async fn get_run_provenance(
         .ok_or_else(|| ErrorResponse::not_found(format!("run {id} recorded no provenance")))
 }
 
+/// `GET /api/v1/runs/{id}/savepoints` response.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct RunSavepointsResponse {
+    /// Ascending by milestone index. Each names its `.zip` relative to the
+    /// run's `savepoints/` directory; `--resume-from <run>:<index>` is the
+    /// command that uses one.
+    pub savepoints: Vec<Savepoint>,
+}
+
+/// The milestone savepoints a run wrote.
+#[utoipa::path(
+    get,
+    path = "/api/v1/runs/{id}/savepoints",
+    tag = "Runs",
+    params(("id" = String, Path, description = "the run id")),
+    responses(
+        (status = 200, body = RunSavepointsResponse),
+        (status = 400, body = crate::error::ErrorResponse),
+        (status = 404, body = crate::error::ErrorResponse),
+    )
+)]
+pub async fn get_run_savepoints(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<RunSavepointsResponse>, ErrorResponse> {
+    let dir = run_dir(&runs_root(&state).await?, &id)?.join(SAVEPOINTS_DIR);
+    let mut savepoints: Vec<Savepoint> = std::fs::read_dir(&dir)
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
+                .filter_map(|e| std::fs::read(e.path()).ok())
+                .filter_map(|bytes| serde_json::from_slice::<Savepoint>(&bytes).ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    savepoints.sort_by_key(|s| s.milestone_index);
+    Ok(Json(RunSavepointsResponse { savepoints }))
+}
+
 /// A run's event log.
 #[utoipa::path(
     get,
@@ -568,6 +609,7 @@ pub fn router() -> utoipa_axum::router::OpenApiRouter<AppState> {
         .routes(routes!(list_runs))
         .routes(routes!(get_run))
         .routes(routes!(get_run_provenance))
+        .routes(routes!(get_run_savepoints))
         .routes(routes!(get_run_events))
         .routes(routes!(get_run_lanes))
         .routes(routes!(get_run_samples))

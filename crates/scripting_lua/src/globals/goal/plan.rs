@@ -27,7 +27,7 @@ use factorio_bot_core::blueprint::UndergroundHalf;
 use factorio_bot_core::factorio::rcon::PlacementQuery;
 use factorio_bot_core::factorio::world::FactorioSurface;
 use factorio_bot_core::mlua::prelude::*;
-use factorio_bot_core::types::Position;
+use factorio_bot_core::types::{Position, SurfaceId};
 use factorio_bot_executor::{ExecutionLog, Recovery};
 use factorio_bot_planner::ids::{ActionId, BotId};
 use factorio_bot_planner::method::have::registry_for;
@@ -87,6 +87,9 @@ const KNOWN_PREDICATE_KEYS: &[&str] = &[
 /// recovery re-plans for exactly the roster the plan it recovers was made for.
 pub(crate) struct PlanOrigin {
     pub(crate) goal: Goal,
+    /// The surface the plan was made on, when the run named one -- so a
+    /// recovery re-plans on the same surface, not on an unnamed one.
+    pub(crate) surface: Option<SurfaceId>,
     pub(crate) world: Arc<FactorioSurface>,
     pub(crate) roster: Vec<BotId>,
 }
@@ -424,9 +427,11 @@ pub(super) fn resolve_roster(
 /// `expand_goal`'s own doc comment explains why the two cannot safely use
 /// different ones. `world` and `default_roster` are captured by the closure,
 /// exactly as every other `goal.*` binding in `mod.rs` captures them.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn install_goal_plan(
     lua: &Lua,
     table: &LuaTable,
+    surface: Option<SurfaceId>,
     world: Arc<FactorioSurface>,
     default_roster: Vec<BotId>,
     checker: Option<PlacementChecker>,
@@ -436,6 +441,7 @@ pub(crate) fn install_goal_plan(
     table.set(
         "plan",
         lua.create_async_function(move |lua, (g, opts): (LuaTable, Option<LuaTable>)| {
+            let surface = surface.clone();
             let world = world.clone();
             let default_roster = default_roster.clone();
             let checker = checker.clone();
@@ -452,6 +458,7 @@ pub(crate) fn install_goal_plan(
                     .map(|live| live.clone());
                 let (net, scheduled, made_at) = plan_verified(
                     &goal,
+                    surface.as_ref(),
                     &world,
                     &roster,
                     checker.as_ref(),
@@ -471,6 +478,7 @@ pub(crate) fn install_goal_plan(
                     Arc::new(scheduled),
                     Arc::new(PlanOrigin {
                         goal,
+                        surface,
                         world: world.clone(),
                         roster,
                     }),
@@ -953,8 +961,10 @@ async fn narrate_buffer_refresh(refresher: Option<&BufferRefresher>) {
 /// staleness in `docs/superpowers/notes/2026-09-02-placement-precheck.md`; in
 /// short, the check narrows the window between "the site was chosen" and "the
 /// build is attempted", and does not close it.
+#[allow(clippy::too_many_arguments)]
 async fn plan_verified(
     goal: &Goal,
+    surface: Option<&SurfaceId>,
     world: &Arc<FactorioSurface>,
     roster: &[BotId],
     checker: Option<&PlacementChecker>,
@@ -980,7 +990,7 @@ async fn plan_verified(
     // later tick, and a paused game has no later tick. Everything the rounds
     // below ask (`can_place_entity`) is answered in the call itself.
     let running = PlanningClock::stop(clock).await;
-    let planned = plan_rounds(goal, world, roster, checker).await;
+    let planned = plan_rounds(goal, surface, world, roster, checker).await;
     // Restarted on every exit path, a refusal included: a planner error must
     // never leave the game frozen behind it.
     let timing = running.restart(clock).await;
@@ -1114,6 +1124,7 @@ impl PlanningClock {
 /// split out so the clock around them has one entry and one exit.
 async fn plan_rounds(
     goal: &Goal,
+    surface: Option<&SurfaceId>,
     world: &Arc<FactorioSurface>,
     roster: &[BotId],
     checker: Option<&PlacementChecker>,
@@ -1121,8 +1132,9 @@ async fn plan_rounds(
     for round in 0..=MAX_RESITE_ROUNDS {
         // Rebuilt every round, deliberately: this is the read that picks up
         // the refusals the previous round's query wrote.
-        let state = PlanState::from_world(world.clone(), roster);
+        let state = super::plan_state_on(surface, world.clone(), roster);
         refuse_unknown_bots(&state)?;
+        super::refuse_bots_elsewhere(&state)?;
         // First round only: the re-siting rounds below re-expand against the
         // same standing machines, and saying it three times would be noise.
         if round == 0 {

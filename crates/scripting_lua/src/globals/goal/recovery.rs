@@ -27,10 +27,12 @@
 //! to reach for.
 
 use super::plan::{PlanOrigin, PlanValue};
-use super::{goal_error, refuse_unknown_bots};
+use super::{goal_error, refuse_bots_elsewhere, refuse_unknown_bots};
 use factorio_bot_core::mlua::prelude::*;
 use factorio_bot_executor::{ExecutionLog, recover};
-use factorio_bot_planner::{ActionNetwork, PlanState};
+use factorio_bot_planner::ActionNetwork;
+#[cfg(test)]
+use factorio_bot_planner::PlanState;
 use std::sync::Arc;
 
 /// Installs `recover` on one observation table.
@@ -91,12 +93,17 @@ fn propose(
              re-plan (internal error, not a script bug)",
         ));
     };
-    let state = PlanState::from_world(origin.world.clone(), &origin.roster);
+    let state = super::plan_state_on(
+        origin.surface.as_ref(),
+        origin.world.clone(),
+        &origin.roster,
+    );
     // The same refusal `goal.plan` makes, for the same reason: a bot that has
     // left since the plan was made would otherwise be planned for with a
     // fabricated inventory and guessed reach distances. Tier 2 really does
     // expand against this state, so the hazard is the same one.
     refuse_unknown_bots(&state)?;
+    refuse_bots_elsewhere(&state)?;
     let decision = recover(&origin.goal, net, &state, &origin.roster, log);
     Ok(PlanValue::from_recovery(
         decision,
@@ -135,6 +142,7 @@ mod tests {
     fn origin(goal: Goal) -> Arc<PlanOrigin> {
         Arc::new(PlanOrigin {
             goal,
+            surface: None,
             world: seeded_world_for(&[1, 2]),
             roster: BOTS.to_vec(),
         })

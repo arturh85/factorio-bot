@@ -435,11 +435,18 @@ async fn run(matches: &ArgMatches, _context: &mut Context) -> Result<()> {
     let script_result = match resolve_surface(&instance_state, &surface_name) {
       Ok(world) => {
         info!("Factorio started, running script...");
+        // `.on_surface`: `resolve_surface` picked `world` out of the
+        // instance's world under this name, and an `Arc<FactorioSurface>`
+        // does not carry it. Until 2026-09-09 the name was dropped right
+        // here, which is why nothing downstream -- `goal.plan`, `PlanState`
+        // -- could say what surface it was planning on.
+        let surface = SurfaceId::from(surface_name.as_str());
         let mut planner = if attached_server {
           Planner::attached(world.clone(), Some(instance_state.rcon.clone()))
         } else {
           Planner::new(world.clone(), Some(instance_state.rcon.clone()))
-        };
+        }
+        .on_surface(surface);
         if clients == 0 && !headless {
           // The one mode entitled to bots the game does not have. `--clients 0`
           // starts no Factorio client at all, so the world has no players and

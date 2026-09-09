@@ -11,7 +11,7 @@ use factorio_bot_core::factorio::world::{FactorioSurface, WalkRefusal};
 use factorio_bot_core::num_traits::FromPrimitive;
 use factorio_bot_core::types::{
     Direction, FactorioEntity, FactorioEntityPrototype, FactorioTechnology, FactorioTile,
-    HandMiningObstacle, PlayerId, Pos, Position, Rect, ResourcePatch,
+    HandMiningObstacle, PlayerId, Pos, Position, Rect, ResourcePatch, SurfaceId,
     VANILLA_CHARACTER_RESOURCE_CATEGORIES,
 };
 use serde::{Deserialize, Serialize};
@@ -1564,6 +1564,39 @@ pub struct PlanState {
     /// against invented reach distances, which `crates/scripting_lua` (out of
     /// this crate's scope) is where that refusal belongs.
     unknown_bots: BTreeSet<BotId>,
+    /// The surface this plan is on, when the caller said.
+    ///
+    /// `None` is **the caller never said**, and it is not Nauvis. It is the
+    /// same seam `FactorioWorld::only_surface` is, one layer down: every
+    /// `PlanState` built before 2026-09-09 was built from an
+    /// `Arc<FactorioSurface>`, which does not know its own name (the name is
+    /// the key of `FactorioWorld::surfaces` and nothing else), so the surface
+    /// the lua CLI resolved from `--surface` was dropped at `Planner::new`
+    /// and could never reach here. [`PlanState::on_surface`] is the
+    /// constructor that carries it; [`PlanState::from_world`] is the one that
+    /// does not, kept for the ~320 fixtures that never named one.
+    ///
+    /// What it decides today is small and exact: which players in the
+    /// game-global `players` map are *here*. See [`Self::bots_elsewhere`] and
+    /// the `characters` field. Nothing positional consults it -- every
+    /// `Pos`-keyed overlay is correct within one surface and this plan is on
+    /// exactly one.
+    surface: Option<SurfaceId>,
+    /// Roster bots whose player stands on a surface other than [`Self::surface`].
+    ///
+    /// Only ever non-empty when both sides are stated: the plan named a
+    /// surface and the mod reported the player's (`FactorioPlayer::surface`,
+    /// carried since 2026-09-06 and read by nobody in this crate until now).
+    /// A player whose surface is `None` is *not* elsewhere -- the mod did not
+    /// say -- and is planned for exactly as before.
+    ///
+    /// The bot keeps its `BotState` row so nothing that indexes `bots` by
+    /// roster id panics; what changes is that the caller can refuse to give
+    /// it steps. `crates/scripting_lua`'s `goal.plan` does, the way it refuses
+    /// [`Self::unknown_bots`]: planning for a bot on another planet is the
+    /// 2026-09-06 survey's "five-tick walk to the wrong planet", dispatched,
+    /// settled and recorded as a success.
+    bots_elsewhere: BTreeMap<BotId, SurfaceId>,
     /// Entities added by the plan, keyed by tile.
     added: BTreeMap<Pos, FactorioEntity>,
     /// Positions whose base-world entity the plan has removed.
@@ -2235,18 +2268,57 @@ pub struct PlanState {
 }
 
 impl PlanState {
+    /// A plan on a surface the caller did not name.
+    ///
+    /// The porting seam -- see the `surface` field. Every fixture in this
+    /// crate builds through here and is correct in doing so: a fixture
+    /// surface has no name. A production caller that *knows* the surface
+    /// should say so through [`PlanState::on_surface`].
     pub fn from_world(base: Arc<FactorioSurface>, bots: &[BotId]) -> PlanState {
+        Self::build(None, base, bots)
+    }
+
+    /// A plan on a named surface.
+    ///
+    /// `base` must be that surface's model; nothing here can check it,
+    /// because a `FactorioSurface` does not carry its name. The caller that
+    /// took `base` out of a `FactorioWorld` under `surface` is the one that
+    /// knows, and this is where it says.
+    pub fn on_surface(surface: SurfaceId, base: Arc<FactorioSurface>, bots: &[BotId]) -> PlanState {
+        Self::build(Some(surface), base, bots)
+    }
+
+    fn build(surface: Option<SurfaceId>, base: Arc<FactorioSurface>, bots: &[BotId]) -> PlanState {
         let mut map = BTreeMap::new();
         let mut unknown_bots = BTreeSet::new();
+        let mut bots_elsewhere = BTreeMap::new();
+        // "Is this player on the plan's surface?" with three answers folded
+        // into one boolean on purpose: stated-and-different is the only
+        // `false`. Unstated on either side is "cannot tell", and a player we
+        // cannot place is kept, exactly as every plan before this field kept
+        // every player.
+        let is_here = |player_surface: &Option<SurfaceId>| -> bool {
+            match (&surface, player_surface) {
+                (Some(here), Some(there)) => here == there,
+                _ => true,
+            }
+        };
         for id in bots {
             let state = match base.globals.players.get(&id.0) {
-                Some(player) => BotState {
-                    position: player.position.clone(),
-                    inventory: player.main_inventory.clone(),
-                    build_distance: player.build_distance as f64,
-                    reach_distance: player.reach_distance as f64,
-                    resource_reach_distance: player.resource_reach_distance,
-                },
+                Some(player) => {
+                    if let Some(there) = &player.surface
+                        && !is_here(&player.surface)
+                    {
+                        bots_elsewhere.insert(*id, there.clone());
+                    }
+                    BotState {
+                        position: player.position.clone(),
+                        inventory: player.main_inventory.clone(),
+                        build_distance: player.build_distance as f64,
+                        reach_distance: player.reach_distance as f64,
+                        resource_reach_distance: player.resource_reach_distance,
+                    }
+                }
                 None => {
                     unknown_bots.insert(*id);
                     BotState::default()
@@ -2298,6 +2370,13 @@ impl PlanState {
             .globals
             .players
             .iter()
+            // A character on another surface shadows nothing here. `players`
+            // is game-global (see `GameGlobals`), so without this a bot
+            // parked at (10, 10) on a platform would block tile (10, 10) on
+            // Nauvis -- the aliasing the 2026-09-06 survey predicted for
+            // every `Pos`-keyed map, reaching the planner through the one
+            // map that is not keyed by `Pos`.
+            .filter(|player| is_here(&player.value().surface))
             .map(|player| {
                 let p = &player.value().position;
                 (
@@ -2475,6 +2554,8 @@ impl PlanState {
             reserved_by_anyone: Default::default(),
             max_prototype_half_diagonal,
             mining_tile_separation,
+            surface,
+            bots_elsewhere,
             characters,
             refused,
             buffers,
@@ -2681,6 +2762,19 @@ impl PlanState {
     /// detectable flag rather than a hard error.
     pub fn unknown_bots(&self) -> &BTreeSet<BotId> {
         &self.unknown_bots
+    }
+
+    /// The surface this plan is on, when the caller said. `None` is "not
+    /// stated", never Nauvis -- see the field.
+    pub fn surface(&self) -> Option<&SurfaceId> {
+        self.surface.as_ref()
+    }
+
+    /// Roster bots the world places on a surface other than this plan's,
+    /// with the surface each is on. Empty unless both the plan and the
+    /// player state a surface and they differ -- see the field.
+    pub fn bots_elsewhere(&self) -> &BTreeMap<BotId, SurfaceId> {
+        &self.bots_elsewhere
     }
 
     /// Technology `name` as the acting force defines it.
@@ -8763,6 +8857,90 @@ mod tests {
 
         // The fallback is recorded: bot 2 got invented data, bot 1 did not.
         assert_eq!(s.unknown_bots(), &BTreeSet::from([BotId(2)]));
+    }
+
+    // ---- which surface the plan is on, and who is here ----------------------
+
+    /// A world with two roster bots: bot 1 where the mod said `here`, bot 2
+    /// where it said `there`, and bot 3 whose surface the mod never reported.
+    fn world_with_bots_on(here: &str, there: &str) -> Arc<FactorioSurface> {
+        use factorio_bot_core::types::FactorioPlayer;
+        let world = fixture_world();
+        for (id, surface, x) in [
+            (1u8, Some(SurfaceId::from(here)), 10.5),
+            (2u8, Some(SurfaceId::from(there)), 20.5),
+            (3u8, None, 30.5),
+        ] {
+            world.globals.players.insert(
+                id,
+                FactorioPlayer {
+                    player_id: id,
+                    position: Position::new(x, 0.5),
+                    surface,
+                    ..Default::default()
+                },
+            );
+        }
+        Arc::new(world)
+    }
+
+    const ROSTER: [BotId; 3] = [BotId(1), BotId(2), BotId(3)];
+
+    /// The plan names its surface: a roster bot the mod places elsewhere is
+    /// recorded by name and its character shadows no ground here, while a bot
+    /// whose surface the mod never reported is kept -- unknown is not
+    /// elsewhere.
+    #[test]
+    fn a_named_surface_tells_a_bot_elsewhere_from_one_here() {
+        let world = world_with_bots_on("nauvis", "platform-1");
+        let s = PlanState::on_surface(SurfaceId::nauvis(), world, &ROSTER);
+
+        assert_eq!(s.surface(), Some(&SurfaceId::nauvis()));
+        assert_eq!(
+            s.bots_elsewhere().iter().collect::<Vec<_>>(),
+            vec![(&BotId(2), &SurfaceId::from("platform-1"))],
+            "bot 2 is on the platform; bot 3 said nothing and is not elsewhere"
+        );
+        // Every roster bot keeps a row, elsewhere or not, so nothing that
+        // indexes by roster id panics.
+        assert!(s.bot(BotId(2)).is_some());
+        // And the platform character does not block Nauvis ground at its
+        // coordinates, while the other two still do.
+        let near = |x: f64| s.characters_near(&Position::new(x, 0.5), 1.0).len();
+        assert_eq!(near(10.5), 1, "bot 1 is here");
+        assert_eq!(near(20.5), 0, "bot 2's box is on another surface");
+        assert_eq!(
+            near(30.5),
+            1,
+            "bot 3 is kept: the mod did not say where it is"
+        );
+        assert!(s.unknown_bots().is_empty(), "elsewhere is not unknown");
+    }
+
+    /// The plan names its surface and every player is on it: nothing filtered,
+    /// nothing elsewhere. This is every run so far.
+    #[test]
+    fn a_named_surface_with_everyone_on_it_changes_nothing() {
+        let world = world_with_bots_on("nauvis", "nauvis");
+        let s = PlanState::on_surface(SurfaceId::nauvis(), world, &ROSTER);
+        assert!(s.bots_elsewhere().is_empty());
+        assert_eq!(s.characters_near(&Position::new(20.5, 0.5), 1.0).len(), 1);
+    }
+
+    /// The plan did not name a surface: it cannot tell anyone apart, so it
+    /// keeps everyone -- what `from_world` always did -- and says so with
+    /// `None` rather than by pretending to be Nauvis.
+    #[test]
+    fn an_unnamed_surface_keeps_every_player_and_says_it_is_unnamed() {
+        let world = world_with_bots_on("nauvis", "platform-1");
+        let s = PlanState::from_world(world, &ROSTER);
+        assert_eq!(s.surface(), None);
+        assert!(s.bots_elsewhere().is_empty());
+        assert_eq!(
+            s.characters_near(&Position::new(20.5, 0.5), 1.0).len(),
+            1,
+            "unstated on the plan's side is not a licence to drop the platform bot"
+        );
     }
 
     #[test]

@@ -141,6 +141,9 @@ pub async fn run_lua(
     // with itself. See 01948bec.
     let real_world = planner.real_world.clone();
     let rcon = planner.rcon.clone();
+    // Which surface `real_world` is, when whoever built the planner said. The
+    // surface itself cannot tell; see `Planner::surface`.
+    let surface = planner.surface.clone();
 
     let thread_stdout = stdout.clone();
     let thread_stderr = stderr.clone();
@@ -197,6 +200,7 @@ pub async fn run_lua(
                     rcon.clone(),
                     all_bots.clone(),
                     server,
+                    surface.clone(),
                 )?;
                 // Cloned before `create_lua_globals` consumes them: recording
                 // needs the same roster and the same scripts root.

@@ -463,6 +463,17 @@ pub enum WaitKind {
     /// be the cause of a long silence -- which is exactly why it is worth
     /// being able to rule out.
     Research { tech: String },
+    /// A `Remove` that found less than it asked for is standing at the source
+    /// waiting for the rest to arrive -- see `run::take_in_pieces`.
+    ///
+    /// Bounded by `PARTIAL_TAKE_STALL_TICKS` and `PARTIAL_TAKE_BUDGET_TICKS`
+    /// in game ticks, so a long one here says the source is *slow*, not that
+    /// the run is stuck: `moved` of `asked` are already in the bot's hands.
+    Restock {
+        item: String,
+        asked: u32,
+        moved: u32,
+    },
     /// **Dispatched, and the game has not answered.**
     ///
     /// # A `reply` older than six minutes is a finding in itself
@@ -499,6 +510,7 @@ impl WaitKind {
             WaitKind::BackgroundConflict { .. } => "background_conflict",
             WaitKind::LagDeadline { .. } => "lag_deadline",
             WaitKind::Research { .. } => "research",
+            WaitKind::Restock { .. } => "restock",
             WaitKind::Reply => "reply",
             WaitKind::Walk { .. } => "walk",
         }

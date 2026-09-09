@@ -280,6 +280,14 @@ fn refused_by_the_game(net: &ActionNetwork, log: &ExecutionLog, state: &PlanStat
 /// (`crate::divergence`). Only `Failed` attempts count. A `Success` carrying a
 /// full-destination note is retired by `unfinished` before this is asked, and
 /// a `Lost` one has no verdict to read.
+///
+/// **Since 2026-09-09 a short `Remove` reaches here far less often**, because
+/// `run::take_in_pieces` stands at the source and takes the rest as it
+/// arrives, and only fails -- with the same sentence, the cumulative count,
+/// and a reason -- once nothing has arrived for `PARTIAL_TAKE_STALL_TICKS` or
+/// the total budget is spent. What does reach here is therefore a source that
+/// genuinely stopped, which is exactly the verdict about the world this
+/// function was written to decline tier 1 for.
 fn diverged_from_the_world(net: &ActionNetwork, log: &ExecutionLog) -> bool {
     net.actions().any(|action| {
         log.attempt(action.id)

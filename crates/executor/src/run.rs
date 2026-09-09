@@ -10,9 +10,10 @@ use crate::log::{ExecutionLog, Status, WaitKey, WaitKind};
 use crate::occupancy::{Occupancy, inventory_footprint, occupancy, shares_inventory};
 use factorio_bot_core::petgraph::algo::toposort;
 use factorio_bot_core::petgraph::graph::{DiGraph, NodeIndex};
+use factorio_bot_core::types::Position;
 use factorio_bot_planner::{
-    ActionId, ActionKind, ActionNetwork, BotId, Condition, ItemId, Schedule, ScheduledStep,
-    StepKind, Ticks,
+    ActionId, ActionKind, ActionNetwork, BotId, Condition, InventorySlot, ItemId, Schedule,
+    ScheduledStep, StepKind, Ticks,
 };
 use futures::future::join_all;
 use std::collections::{BTreeMap, BTreeSet};
@@ -706,10 +707,10 @@ async fn run_action(
     // settled action can never be listed as still awaiting its reply.
     let dispatched = {
         let _awaiting_reply = WaitGuard::enter(log, WaitKey::Action(action), bot, WaitKind::Reply);
-        perform(act, bot, &a.kind, a.duration).await
+        perform(act, bot, &a.kind, a.duration, Some((log, action))).await
     };
     match dispatched {
-        Ok(ticks) => {
+        Ok(Performed { ticks, note }) => {
             // Observation first, then the plan-side outcome: both writes are
             // under the same guard as far as any reader is concerned, and
             // `succeed` is what marks the attempt finished, after which
@@ -741,6 +742,11 @@ async fn run_action(
                 // share a row.
                 if let Some(full) = act.take_destination_full(bot) {
                     log.record_note(action, full.to_string());
+                }
+                // A take that had to wait for its source: the same kind of
+                // qualification, from the other side of the transfer.
+                if let Some(note) = note {
+                    log.record_note(action, note);
                 }
             }
             publish(senders, action, Status::Success);
@@ -1289,9 +1295,276 @@ fn ticks_to_wall_clock(ticks: Ticks, speed: f64) -> std::time::Duration {
     std::time::Duration::from_secs_f64(f64::from(ticks) / (60.0 * speed))
 }
 
-/// Dispatches one action and hands back the game ticks the actuator observed
-/// for it.
+/// What a dispatch came back with: the ticks the game stamped, and a
+/// qualification on the success when there is one (see [`Attempt::error`]'s
+/// third writer -- today a take that had to wait for its source to refill).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Performed {
+    ticks: ActionTicks,
+    note: Option<String>,
+}
+
+impl Performed {
+    fn plain(ticks: ActionTicks) -> Self {
+        Performed { ticks, note: None }
+    }
+}
+
+/// How often a short take asks its source again, in game ticks.
+///
+/// Five seconds of game time. A t=0 machine makes an item every 192 ticks
+/// (stone furnace, iron or copper) to 240 (burner drill), so a source that
+/// is producing shows a new item on nearly every poll, and one that is not
+/// costs one RCON round trip per five seconds while [`PARTIAL_TAKE_STALL_TICKS`]
+/// runs out.
+const PARTIAL_TAKE_POLL_TICKS: Ticks = 300;
+
+/// How long a short take waits for **nothing** to arrive before giving up.
+///
+/// Thirty seconds of game time -- seven or more cycles of the slowest t=0
+/// machine, so a source that is producing at all cannot be mistaken for one
+/// that has stopped. The failure it produces names this number and says the
+/// source is not producing, which is a fact about the world and the reason
+/// the plan is replanned rather than rescheduled (`recover::diverged_from_the_world`).
+const PARTIAL_TAKE_STALL_TICKS: Ticks = 1_800;
+
+/// The most game time a short take may spend waiting in total, however
+/// steadily the rest is arriving.
+///
+/// Five minutes. A source producing one item per 240 ticks refills a 64-item
+/// shortfall in 15,360 ticks, so the budget covers the largest take the
+/// planner emits (`slot_capacity`, a stack) from a cell that is producing;
+/// anything slower than that is not the cell the plan modelled, and a bot
+/// standing at it for longer is time the rest of the plan needed. The
+/// trigger: `run-1788923927-04849`, `take 10 copper-plate from the cell`,
+/// which found 3, failed, and took 48 downstream steps -- both
+/// `assembling-machine-1` placements among them -- down with it while the
+/// cell went on making a plate every 240 ticks.
+const PARTIAL_TAKE_BUDGET_TICKS: Ticks = 18_000;
+
+/// Dispatches one action and hands back what the actuator observed for it.
+///
+/// One kind is not a single dispatch: a `Remove` that found less than it
+/// asked for waits for the rest -- see [`take_in_pieces`]. `waits` is the
+/// log and id to report that wait against, when the caller has them; a test
+/// driving `perform` directly passes `None` and forgoes the report.
 async fn perform<A: Actuator + ?Sized>(
+    act: &A,
+    bot: BotId,
+    kind: &ActionKind,
+    expected_ticks: u32,
+    waits: Option<(&Mutex<ExecutionLog>, ActionId)>,
+) -> Result<Performed, ActuatorFailure> {
+    match kind {
+        ActionKind::Remove {
+            pos,
+            entity,
+            slot,
+            item,
+            count,
+        } => take_in_pieces(act, bot, entity, pos, *slot, item, *count, waits).await,
+        _ => dispatch_once(act, bot, kind, expected_ticks)
+            .await
+            .map(Performed::plain),
+    }
+}
+
+/// The short-source verdict a `Remove` reply carries, if that is what it is.
+///
+/// `Some` only when the reply is the mod's `tried to remove N ITEM but removed
+/// M` for *this* item and *this* count -- the M are in the bot's inventory and
+/// the source is short by the difference. Anything else (a different wording,
+/// a different item, a count the mod did not echo back, no verdict at all) is
+/// `None`, and the caller hands the failure on untouched.
+fn short_source(f: &ActuatorFailure, item: &str, asked: u32) -> Option<u32> {
+    let ActuatorError::Rejected(message) = &f.error else {
+        return None;
+    };
+    let d = crate::divergence::divergence(message)?;
+    if d.item != item || d.asked != u64::from(asked) || d.moved >= d.asked {
+        return None;
+    }
+    u32::try_from(d.moved).ok()
+}
+
+/// Re-stamps the kind of the wait `perform` is already reported under, when
+/// there is a log to report to. The entry is keyed by action, so this
+/// overwrites in place and the `WaitGuard` around `perform` still removes it.
+fn restamp_wait(waits: Option<(&Mutex<ExecutionLog>, ActionId)>, bot: BotId, kind: WaitKind) {
+    if let Some((log, action)) = waits {
+        lock(log).enter_wait(WaitKey::Action(action), bot, kind);
+    }
+}
+
+/// A `Remove`, finished in pieces when the source is short.
+///
+/// # A partial transfer is a fact, not a verdict
+///
+/// The mod's remove handler moves what the source holds and complains about
+/// the rest: `tried to remove 10 copper-plate but removed 3`. The 3 are in the
+/// bot's inventory. Until 2026-09-09 that reply was a failure like any other,
+/// and a failure abandons every step downstream of it -- 48 steps in
+/// `run-1788920460-08860`, 237 in `run-1788923927-04849`, both
+/// `assembling-machine-1` placements and the `set_recipe` among them. **Every
+/// measured run of the science cell died here**, and in every one the source
+/// was a cell that was producing: the furnace made a plate every 240 ticks,
+/// and its result slot was short because a sustain arm had been carrying the
+/// plates into a chest beside it (`method::sustain`'s offtake) until that arm
+/// ran out of fuel. The plan's lag was correct for the cell's rate; the world
+/// had put the plates somewhere else.
+///
+/// So: take what is there, then stand at the source and take the rest as it
+/// arrives. Each further ask is for the *remainder only*, sized from the
+/// mod's own echo of what moved, so nothing is ever taken twice -- the
+/// re-issue-the-identical-take mistake `recover::diverged_from_the_world`
+/// documents cannot happen from here.
+///
+/// # Bounded twice, in game ticks
+///
+/// A source that is not producing must fail, and say so. Nothing arriving for
+/// [`PARTIAL_TAKE_STALL_TICKS`] ends the wait; so does
+/// [`PARTIAL_TAKE_BUDGET_TICKS`] in total, however steadily items trickle in.
+/// Both are measured on the game's clock when the actuator has one
+/// ([`Actuator::game_tick`]), for the reason [`wait_out_lag`] gives: a wall
+/// clock is short by exactly the fraction the server is behind, and says
+/// nothing about it. Without a clock the polls are counted as if the clock
+/// kept up, which is the same estimate that wait makes.
+///
+/// # What the failure says
+///
+/// The verdict keeps the mod's own sentence, with the *cumulative* count, so
+/// every reader of that wording -- the record's `partial_transfer` classifier,
+/// `divergence` in `recover`, the supervisor's refusal to reschedule -- reads
+/// it exactly as before, and then says how long it waited and that nothing
+/// more came. A different verdict mid-wait (the source entity gone, the game
+/// not answering) is handed on untouched: it is not a shortfall and this
+/// function has nothing to add to it.
+#[allow(clippy::too_many_arguments)]
+async fn take_in_pieces<A: Actuator + ?Sized>(
+    act: &A,
+    bot: BotId,
+    entity: &str,
+    at: &Position,
+    slot: InventorySlot,
+    item: &str,
+    count: u32,
+    waits: Option<(&Mutex<ExecutionLog>, ActionId)>,
+) -> Result<Performed, ActuatorFailure> {
+    let first = match act.remove(bot, entity, at.clone(), slot, item, count).await {
+        Ok(ticks) => return Ok(Performed::plain(ticks)),
+        Err(f) => f,
+    };
+    let Some(mut moved) = short_source(&first, item, count) else {
+        return Err(first);
+    };
+    let found = moved;
+    let dispatched = first.ticks.dispatched;
+    let mut replied = first.ticks.replied;
+    let mut pieces: u32 = if moved > 0 { 1 } else { 0 };
+
+    let speed = act.game_speed().await.unwrap_or(1.0);
+    // The clock, if there is one. `waited` and `idle` are then read off it;
+    // without one they advance by the poll interval, the estimate the sleep
+    // was sized from.
+    let clock = act.game_tick().await.ok().flatten();
+    let mut waited: Ticks = 0;
+    let mut idle: Ticks = 0;
+    let mut last_read = clock;
+    let mut last_progress = clock;
+    loop {
+        restamp_wait(
+            waits,
+            bot,
+            WaitKind::Restock {
+                item: item.to_string(),
+                asked: count,
+                moved,
+            },
+        );
+        tokio::time::sleep(ticks_to_wall_clock(PARTIAL_TAKE_POLL_TICKS, speed)).await;
+        restamp_wait(waits, bot, WaitKind::Reply);
+        let remaining = count.saturating_sub(moved);
+        let now = if clock.is_some() {
+            act.game_tick().await.ok().flatten()
+        } else {
+            None
+        };
+        match act
+            .remove(bot, entity, at.clone(), slot, item, remaining)
+            .await
+        {
+            Ok(ticks) => {
+                pieces += 1;
+                let replied = ticks.replied.or(replied);
+                let over = match (dispatched.or(clock), replied) {
+                    (Some(start), Some(end)) => end.saturating_sub(start),
+                    _ => waited.saturating_add(PARTIAL_TAKE_POLL_TICKS).into(),
+                };
+                return Ok(Performed {
+                    ticks: ActionTicks::new(dispatched, replied),
+                    note: Some(format!(
+                        "took {count} {item} in {pieces} pieces over {over} ticks: the \
+                         source held {found} when first asked and the rest arrived"
+                    )),
+                });
+            }
+            Err(g) => {
+                let Some(more) = short_source(&g, item, remaining) else {
+                    return Err(g);
+                };
+                replied = g.ticks.replied.or(replied);
+                if more > 0 {
+                    pieces += 1;
+                    moved = moved.saturating_add(more);
+                    last_progress = now;
+                }
+                // Progress on the game's clock where there is one, on the
+                // poll count where there is not.
+                match (now, last_read) {
+                    (Some(n), Some(prev)) => {
+                        let step = u32::try_from(n.saturating_sub(prev)).unwrap_or(Ticks::MAX);
+                        waited = waited.saturating_add(step);
+                        idle = match last_progress {
+                            Some(p) => u32::try_from(n.saturating_sub(p)).unwrap_or(Ticks::MAX),
+                            None => idle.saturating_add(step),
+                        };
+                        last_read = now;
+                    }
+                    _ => {
+                        waited = waited.saturating_add(PARTIAL_TAKE_POLL_TICKS);
+                        idle = if more > 0 {
+                            0
+                        } else {
+                            idle.saturating_add(PARTIAL_TAKE_POLL_TICKS)
+                        };
+                    }
+                }
+                if idle >= PARTIAL_TAKE_STALL_TICKS || waited >= PARTIAL_TAKE_BUDGET_TICKS {
+                    let why = if idle >= PARTIAL_TAKE_STALL_TICKS {
+                        format!(
+                            "nothing more arrived in the last {idle} ticks -- the source is \
+                             not producing"
+                        )
+                    } else {
+                        format!(
+                            "the rest is arriving too slowly to wait for -- \
+                             {PARTIAL_TAKE_BUDGET_TICKS} ticks is the budget"
+                        )
+                    };
+                    return Err(ActuatorError::Rejected(format!(
+                        "Unexpected Response: [\"tried to remove {count} {item} but removed \
+                         {moved}\"] in {pieces} pieces over {waited} ticks; {why}"
+                    ))
+                    .at(ActionTicks::new(dispatched, replied)));
+                }
+            }
+        }
+    }
+}
+
+/// Dispatches one action once and hands back the game ticks the actuator
+/// observed for it.
+async fn dispatch_once<A: Actuator + ?Sized>(
     act: &A,
     bot: BotId,
     kind: &ActionKind,
@@ -1507,7 +1780,7 @@ mod tests {
             entity: Box::new(entity),
         };
 
-        perform(&act, BotId(1), &kind, 0)
+        perform(&act, BotId(1), &kind, 0, None)
             .await
             .expect("the mock actuator accepted the placement");
     }
@@ -1532,7 +1805,7 @@ mod tests {
             entity: Box::new(entity),
         };
 
-        perform(&act, BotId(1), &kind, 0)
+        perform(&act, BotId(1), &kind, 0, None)
             .await
             .expect("the mock actuator accepted the placement");
     }
@@ -3098,7 +3371,7 @@ mod tests {
             item: "iron-ore".into(),
             count: 4,
         };
-        perform(&act, BotId(0), &kind, 0).await.unwrap();
+        perform(&act, BotId(0), &kind, 0, None).await.unwrap();
     }
 
     /// The dispatch arm's whole contract: the machine's **name**, its
@@ -3130,7 +3403,7 @@ mod tests {
             entity: "assembling-machine-1".into(),
             recipe: "automation-science-pack".into(),
         };
-        perform(&act, BotId(0), &kind, 0).await.unwrap();
+        perform(&act, BotId(0), &kind, 0, None).await.unwrap();
     }
 
     // ------------------------------------------------------- cross-bot waits
@@ -4820,5 +5093,300 @@ mod tests {
         within_deadline(running)
             .await
             .expect("the run should have started");
+    }
+
+    // ------------------------------------------------------ takes in pieces
+
+    /// A source that holds `stock` of an item and makes `refill` more between
+    /// asks. `remove` moves what it can and answers the mod's
+    /// own short-source sentence for the rest, which is the reply
+    /// `run-1788923927-04849` got: `tried to remove 10 copper-plate but
+    /// removed 3`. `refill` more arrive between one ask and the next. With
+    /// `clock` the tick advances `tick_step` per read; without it the
+    /// actuator has no clock and the wait counts polls.
+    struct ShortSource {
+        stock: Mutex<u32>,
+        refill: u32,
+        asked: Mutex<Vec<u32>>,
+        clock: bool,
+        tick: Mutex<u64>,
+        tick_step: u64,
+    }
+
+    impl ShortSource {
+        fn new(stock: u32, refill: u32, clock: bool) -> Self {
+            ShortSource {
+                stock: Mutex::new(stock),
+                refill,
+                asked: Mutex::new(Vec::new()),
+                clock,
+                tick: Mutex::new(1_000),
+                tick_step: PARTIAL_TAKE_POLL_TICKS.into(),
+            }
+        }
+        fn asked(&self) -> Vec<u32> {
+            self.asked.lock().unwrap().clone()
+        }
+        fn now(&self) -> Option<u64> {
+            self.clock.then(|| *self.tick.lock().unwrap())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Actuator for ShortSource {
+        async fn walk(
+            &self,
+            _: BotId,
+            _: Position,
+            _: f64,
+            _: f64,
+        ) -> Result<ActionTicks, ActuatorFailure> {
+            unreachable!()
+        }
+        async fn mine(
+            &self,
+            _: BotId,
+            _: &str,
+            _: Position,
+            _: u32,
+        ) -> Result<ActionTicks, ActuatorFailure> {
+            unreachable!()
+        }
+        async fn craft(&self, _: BotId, _: &str, _: u32) -> Result<ActionTicks, ActuatorFailure> {
+            unreachable!()
+        }
+        async fn place(
+            &self,
+            _: BotId,
+            _: &str,
+            _: Position,
+            _: u8,
+            _: Option<factorio_bot_core::blueprint::UndergroundHalf>,
+        ) -> Result<ActionTicks, ActuatorFailure> {
+            unreachable!()
+        }
+        async fn insert(
+            &self,
+            _: BotId,
+            _: &str,
+            _: Position,
+            _: InventorySlot,
+            _: &str,
+            _: u32,
+        ) -> Result<ActionTicks, ActuatorFailure> {
+            unreachable!()
+        }
+        async fn remove(
+            &self,
+            _: BotId,
+            _: &str,
+            _: Position,
+            _: InventorySlot,
+            item: &str,
+            count: u32,
+        ) -> Result<ActionTicks, ActuatorFailure> {
+            let mut stock = self.stock.lock().unwrap();
+            {
+                let mut asked = self.asked.lock().unwrap();
+                // What the source made between this ask and the last one.
+                if !asked.is_empty() {
+                    *stock += self.refill;
+                }
+                asked.push(count);
+            }
+            let moved = count.min(*stock);
+            *stock -= moved;
+            let ticks = ActionTicks::at(self.now());
+            if moved == count {
+                Ok(ticks)
+            } else {
+                Err(ActuatorError::Rejected(format!(
+                    "Unexpected Response: [\"tried to remove {count} {item} but removed {moved}\"]"
+                ))
+                .at(ticks))
+            }
+        }
+        async fn research(&self, _: &str, _: u32) -> Result<ActionTicks, ActuatorFailure> {
+            unreachable!()
+        }
+        async fn create_platform(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+        ) -> Result<ActionTicks, ActuatorFailure> {
+            unreachable!()
+        }
+        async fn set_recipe(
+            &self,
+            _: BotId,
+            _: &str,
+            _: Position,
+            _: &str,
+        ) -> Result<ActionTicks, ActuatorFailure> {
+            unreachable!()
+        }
+        async fn game_tick(&self) -> Result<Option<u64>, ActuatorError> {
+            // A read of the clock is a poll, and the clock moves.
+            *self.tick.lock().unwrap() += self.tick_step;
+            Ok(self.now())
+        }
+    }
+
+    fn take_from_the_cell(count: u32) -> ActionKind {
+        ActionKind::Remove {
+            pos: Position::new(27.0, -46.0),
+            entity: "stone-furnace".into(),
+            slot: InventorySlot::FurnaceResult,
+            item: "copper-plate".into(),
+            count,
+        }
+    }
+
+    /// The run that motivated this, replayed: the cell holds 3 of the 10
+    /// asked and makes about one per poll. The take succeeds, in pieces,
+    /// and every later ask is for the remainder only -- never the original
+    /// ten, which is the re-issue `recover::diverged_from_the_world` refuses.
+    #[tokio::test(start_paused = true)]
+    async fn a_short_take_waits_for_the_rest_and_asks_only_for_the_remainder() {
+        let act = ShortSource::new(3, 2, true);
+        let done = perform(&act, BotId(2), &take_from_the_cell(10), 10, None)
+            .await
+            .expect("the rest arrived, so the take is a success");
+        let asked = act.asked();
+        assert_eq!(asked[0], 10);
+        assert!(
+            asked[1..].iter().all(|n| *n < 10),
+            "every later ask is for what is still owed, not the original count: {asked:?}"
+        );
+        // Ten left the source in total: what it held, plus what arrived
+        // between asks while the bot stood there, less what is still in it.
+        let arrived = 2 * (asked.len() as u32 - 1);
+        assert_eq!(3 + arrived - *act.stock.lock().unwrap(), 10);
+        let note = done.note.expect("a take finished in pieces says so");
+        assert!(note.contains("took 10 copper-plate in"), "{note}");
+        assert!(note.contains("held 3 when first asked"), "{note}");
+        // The attempt spans the first dispatch and the last reply.
+        assert_eq!(done.ticks.dispatched, Some(1_000));
+        assert!(done.ticks.replied > Some(1_000), "{:?}", done.ticks);
+    }
+
+    /// The same shape with no game clock: the wait counts polls, and the
+    /// take still completes.
+    #[tokio::test(start_paused = true)]
+    async fn a_short_take_completes_without_a_game_clock() {
+        let act = ShortSource::new(3, 4, false);
+        let done = perform(&act, BotId(2), &take_from_the_cell(10), 10, None)
+            .await
+            .expect("the rest arrived");
+        assert_eq!(act.asked(), vec![10, 7, 3]);
+        assert!(done.note.is_some());
+    }
+
+    /// A source that stops is a fact about the world, and the failure says
+    /// so: it keeps the mod's sentence with the cumulative count -- so the
+    /// record classifies it `partial_transfer` and `recover` declines to
+    /// reschedule it, exactly as before -- and adds how long nothing came.
+    #[tokio::test(start_paused = true)]
+    async fn a_source_that_stops_producing_fails_as_a_partial_transfer_naming_the_stall() {
+        let act = ShortSource::new(3, 0, true);
+        let failure = perform(&act, BotId(2), &take_from_the_cell(10), 10, None)
+            .await
+            .expect_err("nothing more ever arrived");
+        let text = failure.to_string();
+        let d = crate::divergence::divergence(&text).expect("still reads as a divergence");
+        assert_eq!((d.item.as_str(), d.asked, d.moved), ("copper-plate", 10, 3));
+        assert!(text.contains("not producing"), "{text}");
+        assert!(
+            text.contains(&format!("last {PARTIAL_TAKE_STALL_TICKS} ticks")),
+            "{text}"
+        );
+        // Bounded: one ask, then a poll per interval until the stall budget.
+        let polls = PARTIAL_TAKE_STALL_TICKS / PARTIAL_TAKE_POLL_TICKS;
+        assert_eq!(act.asked().len() as u32, 1 + polls);
+        assert!(matches!(failure.error, ActuatorError::Rejected(_)));
+    }
+
+    /// A trickle that never stops but never finishes is bounded too, by the
+    /// total budget rather than the stall: one item per poll against a
+    /// shortfall the budget cannot cover.
+    #[tokio::test(start_paused = true)]
+    async fn a_trickle_too_slow_for_the_budget_fails_naming_the_budget() {
+        let act = ShortSource::new(0, 1, true);
+        let failure = perform(&act, BotId(2), &take_from_the_cell(200), 10, None)
+            .await
+            .expect_err("200 at one per poll outlasts the budget");
+        let text = failure.to_string();
+        let d = crate::divergence::divergence(&text).expect("still reads as a divergence");
+        assert_eq!(d.asked, 200);
+        let polls = PARTIAL_TAKE_BUDGET_TICKS / PARTIAL_TAKE_POLL_TICKS;
+        assert_eq!(d.moved, u64::from(polls), "one item arrived per poll");
+        assert!(text.contains("budget"), "{text}");
+    }
+
+    /// Only a short source is waited for. Any other verdict -- here the
+    /// source entity not being there at all -- is the failure it always was.
+    #[tokio::test(start_paused = true)]
+    async fn a_take_refused_for_another_reason_is_not_retried() {
+        let mut act = MockAct::new();
+        act.expect_remove()
+            .times(1)
+            .returning(|_, _, _, _, _, _| Err(ActuatorError::Rejected("no entity".into()).into()));
+        let failure = perform(&act, BotId(2), &take_from_the_cell(10), 10, None)
+            .await
+            .expect_err("refused");
+        assert!(failure.to_string().contains("no entity"));
+    }
+
+    /// End to end through `run`: a take that finishes in pieces is a
+    /// `Success` in the log, carries its note, and -- the whole point --
+    /// releases the step that depends on it instead of abandoning it.
+    #[tokio::test(start_paused = true)]
+    async fn a_take_finished_in_pieces_does_not_abandon_what_depends_on_it() {
+        let act = ShortSource::new(3, 4, true);
+        let take = ActionId(0);
+        let after = ActionId(1);
+        let mut net = ActionNetwork::new();
+        net.add(Action {
+            id: take,
+            kind: take_from_the_cell(10),
+            pre: vec![],
+            eff: vec![],
+            duration: 10,
+            pinned: None,
+            label: "take 10 copper-plate from the cell".into(),
+        });
+        net.add(Action {
+            id: after,
+            kind: take_from_the_cell(1),
+            pre: vec![],
+            eff: vec![],
+            duration: 10,
+            pinned: None,
+            label: "take 1 copper-plate from the cell".into(),
+        });
+        net.link(take, after, 0);
+        let sched = Schedule {
+            steps: vec![
+                act_step(take, BotId(2), 0, 10),
+                act_step(after, BotId(2), 10, 20),
+            ],
+            makespan: 20,
+        };
+        let log = run(&act, &sched, &net)
+            .await
+            .expect("the run should have started");
+        assert_eq!(log.status(take), Status::Success);
+        assert_eq!(log.status(after), Status::Success, "nothing was abandoned");
+        let attempt = log.attempt(take).expect("attempted");
+        assert!(
+            attempt
+                .error
+                .as_deref()
+                .is_some_and(|n| n.starts_with("took 10 copper-plate in")),
+            "{:?}",
+            attempt.error
+        );
+        assert_eq!(attempt.number, 1, "one attempt, however many pieces");
     }
 }

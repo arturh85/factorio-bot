@@ -730,10 +730,20 @@ BotBridge Mod (Factorio mod for RPC)
     has no standing cell for a hand furnace to land beside. A regression
     for anything replan-shaped must start from a world with the cell
     standing (`built_world` in the sustain tests, or `--resume-from`).
-    The trigger of that replan is a third defect, unowned: action 643 *take
-    10 copper-plate from the cell* failed with `removed 3` — the plan drew
-    on the cell's chest at the planned tick, before the cell had made ten —
-    and 48 steps were abandoned behind it, the science cell among them.
+    The trigger of that replan was a third defect, and it is the one that
+    killed the science cell in **every** measured run: action 643 *take 10
+    copper-plate from the cell* failed with `removed 3`, and 48 steps were
+    abandoned behind it (237 in the newest run), the science cell among
+    them. **Read off `samples.jsonl`, the plan's lag was right and the
+    plates were somewhere else**: the furnace at `[27,-46]` had made 10 by
+    tick 20,311, exactly the cell's 240-tick rate from its fuelling at
+    17,409 — but `sustain`'s offtake arm (`burner-inserter` at
+    `[28.5,-46.5]`, *take copper-plate out of the stone-furnace*) had
+    carried the first 7 into its chest at `[29.5,-46.5]` and then stopped,
+    a burner arm touching only plates with no fuel source (see the burner
+    note under Known Issues). `produce`'s take reads the furnace's result
+    slot, which held the 3 made since. So a rate-sized lag could not have
+    fixed it; a take that finishes in pieces does — see the executor entry.
     It **refuses before placing anything**: every `ConnectRefusal` variant is
     returned before an action is emitted or a single entity lands in the
     plan overlay, because a half-built belt run is worse than none — items
@@ -899,6 +909,26 @@ BotBridge Mod (Factorio mod for RPC)
   completion signals (`tokio::sync::watch`, not polling), lag edges modelling
   machine time, pre-flight wait-graph cycle rejection, and recovery tiers in
   `recover.rs`. Issues only legitimate player actions — no `cheat_*` calls.
+
+  **A short take is finished in pieces, not failed** (`run::take_in_pieces`,
+  2026-09-09). The mod's `tried to remove 10 copper-plate but removed 3` is a
+  fact — the 3 are in the bot's hands — and until then it was a verdict that
+  abandoned every dependent step: 48 in `run-1788920460-08860`, 237 in
+  `run-1788923927-04849`, both `assembling-machine-1` placements and the
+  `set_recipe` among them, in every measured run of the science cell, while
+  the source went on making a plate every 240 ticks. Now the bot stands at
+  the source and asks for **the remainder only** every 300 ticks of game
+  time, succeeds with a note (`took 10 copper-plate in 3 pieces over 1,700
+  ticks ...`, in `action_settled.error` like the destination-full note), and
+  is reported as `WaitKind::Restock` while it waits. Bounded twice, in game
+  ticks: nothing arriving for 1,800 ticks fails as *the source is not
+  producing*; 18,000 ticks in total fails as *too slow for the budget*. The
+  failure keeps the mod's sentence with the cumulative count, so the record
+  still classifies it `partial_transfer` and `recover` still refuses to
+  reschedule it — nothing downstream of that wording had to change. A stub
+  actuator (`ShortSource`) covers both bounds and the no-clock path; **no
+  offline plan can exercise this** — it lives in dispatch, so the proof is a
+  run from a standing world (`--resume-from` the run above).
 
 - **crates/scripting_lua**: Lua 5.4 bindings exposing host functions for task queuing, graph queries, and RCON commands
   - `sandbox.rs` - the restricted interpreter every user script runs in

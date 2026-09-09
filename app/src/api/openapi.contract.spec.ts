@@ -62,9 +62,11 @@ import type {
     ExecuteRequest,
     ExistsResponse,
     FailureKind,
+    GitProvenance,
     InstanceStatus,
     Job,
     JobStatus,
+    ModFingerprint,
     RunDetail,
     Lane,
     MapKind,
@@ -79,11 +81,15 @@ import type {
     PollutionSample,
     PowerSample,
     ProductionSample,
+    Provenance,
     ResearchSample,
+    ResourceFingerprint,
+    Savepoint,
     SurfacePollution,
     RunLanesResponse,
     RunMapResponse,
     RunSamplesResponse,
+    RunSavepointsResponse,
     RunSummary,
     RunsResponse,
     Sample,
@@ -213,6 +219,7 @@ const OPERATIONS: readonly OperationContract[] = [
         method: 'get',
         caller: 'getRunSamples',
         pathParams: ['id'],
+        query: [['from', false], ['to', false], ['kind', false]],
         response: {status: '200', schema: 'RunSamplesResponse'}
     },
     {
@@ -220,7 +227,32 @@ const OPERATIONS: readonly OperationContract[] = [
         method: 'get',
         caller: 'getRunMap',
         pathParams: ['id'],
+        query: [['from', false], ['to', false]],
         response: {status: '200', schema: 'RunMapResponse'}
+    },
+    {
+        path: '/api/v1/runs/{id}/provenance',
+        method: 'get',
+        caller: 'getRunProvenance',
+        pathParams: ['id'],
+        response: {status: '200', schema: 'Provenance'}
+    },
+    {
+        path: '/api/v1/runs/{id}/replay',
+        method: 'get',
+        caller: 'getRunReplay',
+        pathParams: ['id'],
+        // No schema published for this body -- it is whatever the executor
+        // serialised. `schemaName` on a bare `{}` returns `undefined`, which
+        // is what an absent `schema` here compares against.
+        response: {status: '200'}
+    },
+    {
+        path: '/api/v1/runs/{id}/savepoints',
+        method: 'get',
+        caller: 'getRunSavepoints',
+        pathParams: ['id'],
+        response: {status: '200', schema: 'RunSavepointsResponse'}
     },
     {
         path: '/api/v1/settings',
@@ -617,11 +649,66 @@ const SCHEMAS: Record<string, SchemaContract> = {
         outcome: {required: false, type: 'string', nullable: true},
         elapsed_ticks: {required: false, type: 'integer', nullable: true},
         events: {required: false, type: 'integer', nullable: true},
-        splits: {required: false, type: 'integer', nullable: true}
+        splits: {required: false, type: 'integer', nullable: true},
+        samples: {required: false, type: 'integer', nullable: true},
+        map: {required: false, type: 'integer', nullable: true},
+        samples_lag_ticks: {required: false, type: 'integer', nullable: true}
     }),
     RunDetail: objectContract<RunDetail>({
         summary: {required: true, ref: 'RunSummary'},
         splits: {required: true, arrayOf: 'Split'}
+    }),
+    ResourceFingerprint: objectContract<ResourceFingerprint>({
+        digest: {required: true, type: 'string'},
+        tiles: {required: true, type: 'object'}
+    }),
+    GitProvenance: objectContract<GitProvenance>({
+        commit: {required: true, type: 'string'},
+        dirty: {required: true, type: 'boolean'},
+        source: {required: true, type: 'string'}
+    }),
+    // `seed` and the rest are `Option` fields utoipa does not list as
+    // `required` even though the server always serialises them (see
+    // `RunSummary` above for the same pattern) -- `required: false` here
+    // matches the snapshot's `required` array, not the field's semantics.
+    Provenance: objectContract<Provenance>({
+        schema: {required: true, type: 'integer'},
+        run_id: {required: true, type: 'string'},
+        started_unix: {required: true, type: 'integer'},
+        started_tick: {required: true, type: 'integer'},
+        seed: {required: false, type: 'string', nullable: true},
+        map_exchange_string: {required: false, type: 'string', nullable: true},
+        map: {required: false, ref: 'ResourceFingerprint', nullable: true},
+        factorio: {required: false, type: 'string', nullable: true},
+        mods: {required: false, type: 'object', nullable: true},
+        git: {required: false, ref: 'GitProvenance', nullable: true},
+        profile: {required: true, type: 'string'},
+        roster_requested: {required: true, type: 'array'},
+        workspace: {required: false, type: 'string', nullable: true},
+        resumed_from: {required: false, type: 'string', nullable: true},
+        bot_mode: {required: false, type: 'string', nullable: true},
+        game_speed: {required: false, type: 'number', nullable: true},
+        peaceful: {required: false, type: 'boolean', nullable: true}
+    }),
+    ModFingerprint: objectContract<ModFingerprint>({
+        version: {required: false, type: 'string', nullable: true},
+        digest: {required: true, type: 'string'},
+        files: {required: true, type: 'integer'}
+    }),
+    Savepoint: objectContract<Savepoint>({
+        schema: {required: true, type: 'integer'},
+        run_id: {required: true, type: 'string'},
+        milestone_index: {required: true, type: 'integer'},
+        tick: {required: true, type: 'integer'},
+        created_unix: {required: true, type: 'integer'},
+        bytes: {required: true, type: 'integer'},
+        file: {required: true, type: 'string'},
+        mods: {required: false, ref: 'ModFingerprint', nullable: true}
+    }),
+    RunSavepointsResponse: objectContract<RunSavepointsResponse>({
+        savepoints: {required: true, arrayOf: 'Savepoint'},
+        skipped: {required: true, type: 'integer'},
+        missing_zip: {required: true, type: 'array'}
     }),
     Split: objectContract<Split>({
         index: {required: true, type: 'integer'},

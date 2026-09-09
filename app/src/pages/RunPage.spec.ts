@@ -33,7 +33,8 @@ const RUN_ID = 'run-1788696619-00325';
 const DETAIL: RunDetail = {
     summary: {
         run_id: RUN_ID, finished: true, started_unix: 1788696619, finished_unix: 1788697000,
-        outcome: 'satisfied', elapsed_ticks: 21982, events: run.events.length, splits: 1
+        outcome: 'satisfied', elapsed_ticks: 21982, events: run.events.length, splits: 1,
+        samples: null, map: null, samples_lag_ticks: null
     },
     splits: [{index: 1, goal: 'research automation', started_tick: 3242, ended_tick: 25216, outcome: 'satisfied', elapsed_ticks: 21974}]
 };

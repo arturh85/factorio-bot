@@ -23,10 +23,12 @@ import {
     ExistsResponse,
     InstanceStatus,
     Job,
+    Provenance,
     RunDetail,
     RunLanesResponse,
     RunMapResponse,
     RunSamplesResponse,
+    RunSavepointsResponse,
     RunsResponse,
     ScriptContent,
     StartAccepted,
@@ -155,23 +157,59 @@ export function getRunLanes(id: string): Promise<RunLanesResponse> {
 }
 
 /**
- * A run's archived world-state samples.
+ * A run's archived world-state samples, optionally narrowed to a tick range
+ * or one `kind` of sample.
  *
  * Empty for a run recorded before sampling existed, or one the mod never
  * captured samples for -- not an error.
  */
-export function getRunSamples(id: string): Promise<RunSamplesResponse> {
-    return request<RunSamplesResponse>(`/api/v1/runs/${encodeURIComponent(id)}/samples`);
+export function getRunSamples(
+    id: string,
+    opts?: {from?: number; to?: number; kind?: 'bots' | 'force' | 'machines'}
+): Promise<RunSamplesResponse> {
+    return request<RunSamplesResponse>(`/api/v1/runs/${encodeURIComponent(id)}/samples`, {
+        query: {from: opts?.from, to: opts?.to, kind: opts?.kind}
+    });
 }
 
 /**
- * A run's entity map: what got built, and whether the game agreed.
+ * A run's entity map: what got built, and whether the game agreed. Optionally
+ * narrowed to a tick range.
  *
  * Empty for a run recorded before this feature existed, or one that placed
  * nothing -- not an error.
  */
-export function getRunMap(id: string): Promise<RunMapResponse> {
-    return request<RunMapResponse>(`/api/v1/runs/${encodeURIComponent(id)}/map`);
+export function getRunMap(id: string, opts?: {from?: number; to?: number}): Promise<RunMapResponse> {
+    return request<RunMapResponse>(`/api/v1/runs/${encodeURIComponent(id)}/map`, {
+        query: {from: opts?.from, to: opts?.to}
+    });
+}
+
+/**
+ * What a run was launched with -- the fields that decide whether two runs may
+ * be compared at all.
+ *
+ * A 404, not an empty object, when `provenance.json` is missing: the file is
+ * written at run *start*, so its absence means an older run.
+ */
+export function getRunProvenance(id: string): Promise<Provenance> {
+    return request<Provenance>(`/api/v1/runs/${encodeURIComponent(id)}/provenance`);
+}
+
+/**
+ * The executor's replay -- planned against observed per step, with evidence.
+ *
+ * The server publishes no schema for this body (it is whatever the executor
+ * serialised), so the caller narrows it with `parseReplay` rather than
+ * trusting a type here.
+ */
+export function getRunReplay(id: string): Promise<unknown> {
+    return request<unknown>(`/api/v1/runs/${encodeURIComponent(id)}/replay`);
+}
+
+/** The milestone savepoints a run wrote. */
+export function getRunSavepoints(id: string): Promise<RunSavepointsResponse> {
+    return request<RunSavepointsResponse>(`/api/v1/runs/${encodeURIComponent(id)}/savepoints`);
 }
 
 /**

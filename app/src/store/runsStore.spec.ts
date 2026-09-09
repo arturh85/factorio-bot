@@ -17,6 +17,9 @@ const summary = (id: string, over: Partial<RunSummary> = {}): RunSummary => ({
     elapsed_ticks: 871,
     events: 6,
     splits: 2,
+    samples: null,
+    map: null,
+    samples_lag_ticks: null,
     ...over
 });
 

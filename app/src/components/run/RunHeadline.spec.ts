@@ -6,7 +6,10 @@ import RunHeadline from './RunHeadline.vue';
 describe('RunHeadline', () => {
     it('renders the sentence and marks every provenance chip absent until the route exists', () => {
         const w = mount(RunHeadline, {props: {
-            summary: {run_id: 'run-1', finished: true, started_unix: 1, finished_unix: 2, outcome: 'done', elapsed_ticks: 10, events: 1, splits: 1},
+            summary: {
+                run_id: 'run-1', finished: true, started_unix: 1, finished_unix: 2, outcome: 'done',
+                elapsed_ticks: 10, events: 1, splits: 1, samples: null, map: null, samples_lag_ticks: null
+            },
             provenance: null, lagTicks: 24, headline: 'rates: …', roster: [1, 2, 3, 4]
         }});
         expect(w.text()).toContain('rates: …');
@@ -18,7 +21,10 @@ describe('RunHeadline', () => {
 
     it('reads "cover to end", not a negative tick count, when the samples outlast the run', () => {
         const w = mount(RunHeadline, {props: {
-            summary: {run_id: 'run-1', finished: true, started_unix: 1, finished_unix: 2, outcome: 'done', elapsed_ticks: 10, events: 1, splits: 1},
+            summary: {
+                run_id: 'run-1', finished: true, started_unix: 1, finished_unix: 2, outcome: 'done',
+                elapsed_ticks: 10, events: 1, splits: 1, samples: null, map: null, samples_lag_ticks: null
+            },
             provenance: null, lagTicks: -36, headline: 'rates: …', roster: [1, 2, 3, 4]
         }});
         expect(w.get('[data-chip="samples"]').text()).toContain('cover to end');

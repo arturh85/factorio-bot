@@ -183,6 +183,123 @@ fn the_plate_chest_of_run_1788936524_99544_has_a_way_out() {
     );
 }
 
+/// The run's world BEFORE its first plan laid the supply link: the tick-62,222
+/// keyframe with every entity the record places from tick 56,300 on removed.
+///
+/// `map.jsonl` holds no keyframe between 410 and 62,222, so the world at the
+/// moment the link was about to be laid cannot be read off the record
+/// directly. It can be derived: `events.jsonl` dispatches exactly 35
+/// placements from tick 56,300 to the keyframe -- the link's four poles
+/// (ids 533-536), its two arms (502, 532) and its 29 belts (503-531), every
+/// one labelled `copper-plate` or standing on the wire to it -- and nothing
+/// else. Taking those out of the keyframe is the world at tick 56,299, with
+/// the plate cell, its coal runs and the hand-smelt furnace at `[33, -47]`
+/// standing and the plate chest's kept east exit open. (The bots' positions
+/// and inventories are the 62,220 sample's; nothing here asks about them.)
+fn fixture_before_the_link() -> StandingSnapshot {
+    let link: &[(&str, f64, f64)] = &[
+        ("inserter", 29.5, -47.5),
+        ("inserter", 31.5, -31.5),
+        ("small-electric-pole", 30.5, -47.5),
+        ("small-electric-pole", 30.5, -32.5),
+        ("small-electric-pole", 31.5, -40.5),
+        ("small-electric-pole", 31.5, -34.5),
+        ("transport-belt", 29.5, -48.5),
+        ("transport-belt", 30.5, -48.5),
+        ("transport-belt", 31.5, -48.5),
+        ("transport-belt", 32.5, -48.5),
+        ("transport-belt", 33.5, -48.5),
+        ("transport-belt", 34.5, -48.5),
+        ("transport-belt", 35.5, -48.5),
+        ("transport-belt", 36.5, -48.5),
+        ("transport-belt", 36.5, -47.5),
+        ("transport-belt", 36.5, -46.5),
+        ("transport-belt", 36.5, -45.5),
+        ("transport-belt", 36.5, -44.5),
+        ("transport-belt", 36.5, -43.5),
+        ("transport-belt", 36.5, -42.5),
+        ("transport-belt", 36.5, -41.5),
+        ("transport-belt", 36.5, -40.5),
+        ("transport-belt", 36.5, -39.5),
+        ("transport-belt", 36.5, -38.5),
+        ("transport-belt", 36.5, -37.5),
+        ("transport-belt", 36.5, -36.5),
+        ("transport-belt", 36.5, -35.5),
+        ("transport-belt", 36.5, -34.5),
+        ("transport-belt", 36.5, -33.5),
+        ("transport-belt", 36.5, -32.5),
+        ("transport-belt", 35.5, -32.5),
+        ("transport-belt", 34.5, -32.5),
+        ("transport-belt", 33.5, -32.5),
+        ("transport-belt", 32.5, -32.5),
+        ("transport-belt", 31.5, -32.5),
+    ];
+    let mut fixture = fixture();
+    let before = fixture.entities.len();
+    fixture.entities.retain(|entity| {
+        !link.iter().any(|(name, x, y)| {
+            entity.name == *name
+                && (entity.position.x() - x).abs() < 0.1
+                && (entity.position.y() - y).abs() < 0.1
+        })
+    });
+    assert_eq!(
+        before - fixture.entities.len(),
+        link.len(),
+        "every entity of the link stands in the keyframe, or this derives a different world"
+    );
+    fixture
+}
+
+/// Laid against the world before the link stood, the link leaves the plate
+/// chest by the exit KEPT for it -- the east arm at `[30.5, -46.5]` -- and
+/// not by the north side at `[29.5, -47.5]`, which is where the run's first
+/// plan put it (`place inserter at [29.5, -47.5] -- load copper-plate out of
+/// iron-chest`, tick 60,611) with the kept exit standing open one tile away.
+/// The link's own belt along `y = -48.5` and its pole at `[30.5, -47.5]` are
+/// what then sealed that exit into the pocket the replan had to tunnel out
+/// of. On the binary before this test's fix, the same derived world planned
+/// the arm at `[29.5, -47.5]` again.
+#[test]
+fn the_link_of_run_1788936524_99544_leaves_by_the_kept_exit() {
+    let Some(base) = dump() else {
+        return;
+    };
+    let fixture = fixture_before_the_link();
+    let (world, standing) = world_with(&base, &fixture);
+    assert_eq!(
+        standing.placed,
+        fixture.entities.len(),
+        "every entity of the derived world stands: {standing:?}"
+    );
+    let bots: Vec<BotId> = fixture.bots.iter().map(|b| BotId(b.id)).collect();
+    let state = PlanState::from_world(world, &bots);
+    let chain_actor = pick_chain_actor(&state, &bots).expect("the roster has a chain actor");
+    let net = expand(&[goal()], &state, &registry_for(&bots), chain_actor)
+        .unwrap_or_else(|err| panic!("the plan against the world before the link refuses: {err}"));
+    let arms: Vec<Position> = net
+        .actions()
+        .filter_map(|action| match &action.kind {
+            ActionKind::Place { entity } if entity.name == "inserter" => {
+                Some(entity.position.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    let at = |x: f64, y: f64| {
+        arms.iter()
+            .any(|arm| (arm.x() - x).abs() < 0.1 && (arm.y() - y).abs() < 0.1)
+    };
+    assert!(
+        at(30.5, -46.5),
+        "the link's load arm stands on the plate chest's kept east exit: {arms:?}"
+    );
+    assert!(
+        !at(29.5, -47.5),
+        "and not on the chest's north side, where the run's first plan put it: {arms:?}"
+    );
+}
+
 /// The whole replan plans. Before `supply_chest_is_reachable` the science
 /// cell was sited with its supply chest in the engine/boiler gap and the
 /// bundle refused on the link to it; now the cell is sited where a belt can

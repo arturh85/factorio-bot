@@ -103,7 +103,7 @@ pub(crate) fn with_trees(world: FactorioSurface, positions: &[Position]) -> Fact
 }
 
 /// A `stone-wall` footprint at its real collision box (`0.578125` tiles).
-fn stone_wall(position: &Position) -> FactorioEntity {
+pub(crate) fn stone_wall(position: &Position) -> FactorioEntity {
     FactorioEntity {
         name: "stone-wall".into(),
         entity_type: "wall".into(),
@@ -235,7 +235,7 @@ pub(crate) fn furnace_and_lab_behind_a_wide_wall() -> (ExpansionCtx, FactorioEnt
 
 /// An `iron-chest` at its real collision box (`0.703125` tiles), a 1x1 on a
 /// tile centre.
-fn iron_chest(position: &Position) -> FactorioEntity {
+pub(crate) fn iron_chest(position: &Position) -> FactorioEntity {
     FactorioEntity {
         name: "iron-chest".into(),
         entity_type: "container".into(),

@@ -3,15 +3,18 @@
 use crate::action::{Action, ActionKind, Actor, Condition, Effect};
 use crate::enclosure;
 use crate::goal::{Goal, Holder};
-use crate::ids::ItemId;
-use crate::method::have::PLACE_TICKS;
+use crate::ids::{BotId, ItemId, Ticks};
+use crate::method::have::{HANDOVER_WALK_TICKS, PLACE_TICKS, participants_that_can_work};
+use crate::method::produce::{CRAFT_TICKS_MAX_DEPTH, craft_ticks};
 use crate::method::{ExpansionCtx, Step};
+use crate::state::PlanState;
 use factorio_bot_core::blueprint::UndergroundHalf;
 use factorio_bot_core::graph::enclosure::GRID;
 use factorio_bot_core::graph::route::{
     RouteError, TileKind, route_belt_with_tunnels, tunnel_axis, tunnel_cells,
 };
 use factorio_bot_core::types::{Direction, FactorioEntity, Position, Rect};
+use std::collections::BTreeMap;
 
 /// The belt this module lays, and the item whose bill it states.
 const BELT: &str = "transport-belt";
@@ -680,6 +683,155 @@ fn tunnel_grid(
     (tunnels, reserved)
 }
 
+// ---------------------------------------------------------------------------
+// Banding a belt run across the roster
+// ---------------------------------------------------------------------------
+
+/// Cut a route into at most `bots` **contiguous** bands, in path order.
+///
+/// **Why this exists.** `run-1788920460-08860` planned 217 placements and bot
+/// 1 made 200 of them, 156 of those one `transport-belt` run laid end to end
+/// while three bots stood idle: fleet utilisation 25.1%, `steps/bot {1: 520,
+/// 2: 136, 3: 119, 4: 106}`. Gathering divided four ways (mine 23/50/50/42);
+/// construction did not divide at all (place 200/9/5/3). The capability to
+/// split a build existed twice -- `method::blueprint::bands` and
+/// `method::assemble`'s `deal_bundles` -- and this run used neither. See
+/// `docs/superpowers/notes/2026-09-09-a-belt-run-is-one-bots-job.md`.
+///
+/// **A route is a line, and a band of it is a contiguous slice.** This is
+/// `method::blueprint::bands`' shape -- a band is a *region*, so a bot never
+/// crosses another's band -- with the axis question already answered: a
+/// route's tiles are ordered by the path, and the path is the only axis a
+/// belt run has. Banding by index stride instead (tile 0 to bot 1, tile 1 to
+/// bot 2, ...) would interleave four bots along one corridor, which is
+/// exactly the defect `bands` recorded on `MinerLine` and fixed on
+/// 2026-09-05. Every tile lands in exactly one band and the bands abut, so
+/// no boundary tile has two owners -- the belt-run cousin of the
+/// self-crossing repair in `route_belt_with_tunnels` (`71f9227c`), which is
+/// finished before this function ever sees the tiles.
+///
+/// **A band must be worth its walk.** Priced in the currency `deal_bundles`
+/// prices a bundle in: a placement is [`PLACE_TICKS`] and the trip to it is
+/// [`HANDOVER_WALK_TICKS`], so a stretch shorter than
+/// `HANDOVER_WALK_TICKS / PLACE_TICKS` belts (ten, today) costs more to walk
+/// to than to lay, and is not cut off. A nine-belt run is one band on any
+/// roster; a 156-belt run is four bands on four bots. Without this rule a
+/// six-belt run over four bots would send three bots walking to lay one or
+/// two belts each, which is the contention this project has measured (eight
+/// bots: a shorter plan and a longer run) with nothing bought for it.
+///
+/// **The remainder is spread, not dumped**, as in `bands`: 42 tiles over 4
+/// bots is 11/11/10/10, the first `n % count` bands taking one extra.
+///
+/// **A cut never separates an underground pair.** `route_belt` emits the
+/// entry and its exit as adjacent tiles (`tiles[i - 1]` / `tiles[i]`); a
+/// boundary that would fall between them moves one tile on, so one bot lays
+/// both halves and the tunnel is either standing or absent, never half
+/// there with two bots each waiting on the other's inventory. The shift is
+/// absorbed by the last band.
+///
+/// Deterministic: a function of the kinds and the count alone.
+pub fn route_bands(kinds: &[TileKind], bots: usize) -> Vec<std::ops::Range<usize>> {
+    let n = kinds.len();
+    if n == 0 || bots == 0 {
+        return Vec::new();
+    }
+    let worth_walking = usize::try_from(
+        Ticks::try_from(n)
+            .unwrap_or(Ticks::MAX)
+            .saturating_mul(PLACE_TICKS)
+            / HANDOVER_WALK_TICKS,
+    )
+    .unwrap_or(usize::MAX);
+    let count = bots.min(worth_walking).max(1);
+    let base = n / count;
+    let remainder = n % count;
+    let mut out = Vec::with_capacity(count);
+    let mut start = 0;
+    for band in 0..count {
+        let size = base + usize::from(band < remainder);
+        let mut end = (start + size).min(n);
+        if end > 0 && end < n && kinds[end - 1] == TileKind::UndergroundEntry {
+            end += 1;
+        }
+        if band + 1 == count {
+            end = n;
+        }
+        if end > start {
+            out.push(start..end);
+        }
+        start = end;
+    }
+    debug_assert_eq!(
+        out.iter().map(|b| b.len()).sum::<usize>(),
+        n,
+        "every tile lands in exactly one band"
+    );
+    out
+}
+
+/// The bot that lays each band, one per entry of `bands`.
+///
+/// `deal_bundles`' rule, applied to bands instead of bundles: **heaviest
+/// band first, each to whoever is lightest at that moment**, where a bot's
+/// load is [`PlanState::planned_ticks`] -- what this expansion has already
+/// committed it to -- plus every band it is dealt here. A band's price is
+/// its belts from raw (`produce::craft_ticks`, the same from-raw pricing
+/// `deal_bundles` measured its way to), its placements, and one
+/// [`HANDOVER_WALK_TICKS`] for the trip. The tie-break is the lower
+/// `BotId`, so the deal is a function of its inputs alone.
+///
+/// Not round-robin: a bot already carrying a cell's charge or a long mining
+/// claim is lighter on paper only if nothing is counted, and
+/// `planned_ticks` counts it. The taker (`ctx.chain_actor`) is a candidate
+/// like anyone else, exactly as in `deal_bundles`.
+fn deal_route_bands(
+    state: &PlanState,
+    kinds: &[TileKind],
+    bands: &[std::ops::Range<usize>],
+    builders: &[BotId],
+) -> Vec<BotId> {
+    let mut loads: BTreeMap<BotId, Ticks> = builders
+        .iter()
+        .map(|bot| (*bot, state.planned_ticks(*bot)))
+        .collect();
+    let price = |band: &std::ops::Range<usize>| -> Ticks {
+        let tiles = &kinds[band.clone()];
+        let undergrounds = u32::try_from(tiles.iter().filter(|k| **k != TileKind::Belt).count())
+            .unwrap_or(u32::MAX);
+        let belts = u32::try_from(tiles.len())
+            .unwrap_or(u32::MAX)
+            .saturating_sub(undergrounds);
+        craft_ticks(state, BELT, belts, CRAFT_TICKS_MAX_DEPTH)
+            .saturating_add(craft_ticks(
+                state,
+                UNDERGROUND,
+                undergrounds,
+                CRAFT_TICKS_MAX_DEPTH,
+            ))
+            .saturating_add(
+                PLACE_TICKS.saturating_mul(Ticks::try_from(tiles.len()).unwrap_or(Ticks::MAX)),
+            )
+            .saturating_add(HANDOVER_WALK_TICKS)
+    };
+    let mut order: Vec<(Ticks, usize)> = bands.iter().map(price).zip(0..).collect();
+    // Heaviest first; equal prices in band order, so the deal is stable.
+    order.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    let mut owners = vec![BotId(0); bands.len()];
+    for (price, band) in order {
+        let bot = loads
+            .iter()
+            .map(|(bot, load)| (*load, *bot))
+            .min()
+            .map(|(_, bot)| bot)
+            .expect("builders is non-empty");
+        let load = loads.entry(bot).or_default();
+        *load = load.saturating_add(price);
+        owners[band] = bot;
+    }
+    owners
+}
+
 /// One `Place` action, with the preconditions and effects every other method
 /// in this crate emits for one -- see `method::power`'s plant parts, which
 /// this deliberately mirrors field for field.
@@ -1086,22 +1238,39 @@ pub fn connect_steps_reserving(
         .map(|b| b.build_distance)
         .unwrap_or(10.0);
 
+    // THE RUN IS CUT INTO BANDS, one contiguous stretch per bot that takes
+    // one, and each band is bound to its bot with `Step::Owned` exactly as
+    // `method::blueprint` binds a block's bands. A run of one band -- a
+    // one-bot roster, or a stretch too short to be worth a second walk --
+    // is emitted flat under the chain actor, byte for byte the plan this
+    // function made before bands existed. See `route_bands`.
+    let kinds: Vec<TileKind> = route.tiles.iter().map(|t| t.kind).collect();
+    let builders = participants_that_can_work(&ctx.state, ctx.state.bot_ids());
+    let bands = route_bands(&kinds, builders.len().max(1));
+    let owners: Vec<BotId> = if bands.len() > 1 {
+        deal_route_bands(&ctx.state, &kinds, &bands, &builders)
+    } else {
+        vec![ctx.chain_actor; bands.len()]
+    };
+
     let mut steps = Vec::with_capacity(route.tiles.len() + 5);
-    if belts > 0 {
-        steps.push(Step::Subgoal(Goal::Have {
-            item: BELT.into(),
-            count: belts,
-            whose: Holder::Share(ctx.chain_actor),
-            via: None,
-        }));
-    }
-    if undergrounds > 0 {
-        steps.push(Step::Subgoal(Goal::Have {
-            item: UNDERGROUND.into(),
-            count: undergrounds,
-            whose: Holder::Share(ctx.chain_actor),
-            via: None,
-        }));
+    if bands.len() <= 1 {
+        if belts > 0 {
+            steps.push(Step::Subgoal(Goal::Have {
+                item: BELT.into(),
+                count: belts,
+                whose: Holder::Share(ctx.chain_actor),
+                via: None,
+            }));
+        }
+        if undergrounds > 0 {
+            steps.push(Step::Subgoal(Goal::Have {
+                item: UNDERGROUND.into(),
+                count: undergrounds,
+                whose: Holder::Share(ctx.chain_actor),
+                via: None,
+            }));
+        }
     }
     steps.push(Step::Subgoal(Goal::Have {
         item: inserter.into(),
@@ -1115,9 +1284,10 @@ pub fn connect_steps_reserving(
     let note = format!("load {item} out of {}", from.name);
     steps.push(place_step(ctx, load, build, &note));
 
-    let note = format!("carry {item} from {} to {}", from.name, to.name);
-    for tile in &route.tiles {
-        let entity = match underground_half_for_tile_kind(tile.kind) {
+    let tile_entity =
+        |tile: &factorio_bot_core::graph::route::RouteTile| match underground_half_for_tile_kind(
+            tile.kind,
+        ) {
             None => FactorioEntity::new_transport_belt(&tile.position, tile.direction),
             // Both halves carry the tunnel's direction; `route_belt` keeps
             // the exit's step straight, so `tile.direction` is that for both.
@@ -1125,7 +1295,60 @@ pub fn connect_steps_reserving(
                 FactorioEntity::new_underground_belt(&tile.position, tile.direction, half)
             }
         };
-        steps.push(place_step(ctx, entity, build, &note));
+    if bands.len() <= 1 {
+        let note = format!("carry {item} from {} to {}", from.name, to.name);
+        for tile in &route.tiles {
+            steps.push(place_step(ctx, tile_entity(tile), build, &note));
+        }
+    } else {
+        for (band, (range, bot)) in bands.iter().zip(&owners).enumerate() {
+            let tiles = &route.tiles[range.clone()];
+            let band_undergrounds =
+                u32::try_from(tiles.iter().filter(|t| t.kind != TileKind::Belt).count())
+                    .unwrap_or(u32::MAX);
+            let band_belts = u32::try_from(tiles.len())
+                .unwrap_or(u32::MAX)
+                .saturating_sub(band_undergrounds);
+            let build = ctx
+                .state
+                .bot(*bot)
+                .map(|b| b.build_distance)
+                .unwrap_or(10.0);
+            // The band's own bill, stated for its own bot, so the shortfall
+            // machinery sends THAT bot for its belts rather than the chain
+            // actor for everyone's -- the same shape `blueprint.rs` gives a
+            // block band.
+            let mut block = Vec::with_capacity(tiles.len() + 2);
+            if band_belts > 0 {
+                block.push(Step::Subgoal(Goal::Have {
+                    item: BELT.into(),
+                    count: band_belts,
+                    whose: Holder::Share(*bot),
+                    via: None,
+                }));
+            }
+            if band_undergrounds > 0 {
+                block.push(Step::Subgoal(Goal::Have {
+                    item: UNDERGROUND.into(),
+                    count: band_undergrounds,
+                    whose: Holder::Share(*bot),
+                    via: None,
+                }));
+            }
+            let note = format!(
+                "carry {item} from {} to {} (belt band {band} of {})",
+                from.name,
+                to.name,
+                bands.len()
+            );
+            for tile in tiles {
+                block.push(place_step(ctx, tile_entity(tile), build, &note));
+            }
+            steps.push(Step::Owned {
+                whose: Holder::Share(*bot),
+                steps: block,
+            });
+        }
     }
 
     let unload =
@@ -1149,19 +1372,174 @@ mod tests {
             .expect("every cardinal direction is representable")
     }
 
+    /// Walks into `Step::Owned`, so a run cut into bands reads the same as
+    /// one laid flat: the bands abut, so this is the route in path order.
     fn placements(steps: &[Step], name: &str) -> Vec<(Position, u8)> {
+        let mut out = Vec::new();
+        for step in steps {
+            match step {
+                Step::Act(action) => {
+                    if let ActionKind::Place { entity } = &action.kind
+                        && entity.name == name
+                    {
+                        out.push((entity.position.clone(), entity.direction));
+                    }
+                }
+                Step::Owned { steps, .. } => out.extend(placements(steps, name)),
+                _ => {}
+            }
+        }
+        out
+    }
+
+    /// Each band of a run: its owner and its belts, in emission order.
+    fn bands_of(steps: &[Step]) -> Vec<(BotId, Vec<(Position, u8)>)> {
         steps
             .iter()
             .filter_map(|step| match step {
-                Step::Act(action) => match &action.kind {
-                    ActionKind::Place { entity } if entity.name == name => {
-                        Some((entity.position.clone(), entity.direction))
-                    }
-                    _ => None,
-                },
+                Step::Owned {
+                    whose: Holder::Share(bot) | Holder::Bot(bot),
+                    steps,
+                } => Some((*bot, placements(steps, BELT))),
                 _ => None,
             })
             .collect()
+    }
+
+    fn belts(n: usize) -> Vec<TileKind> {
+        vec![TileKind::Belt; n]
+    }
+
+    /// 42 tiles over four bots is 11/11/10/10 -- contiguous, abutting,
+    /// remainder spread. A stride split (tile i to bot i % 4) fails here
+    /// on contiguity, and `div_ceil` chunking (11/11/11/9) on the sizes.
+    #[test]
+    fn route_bands_are_contiguous_and_spread_the_remainder() {
+        assert_eq!(
+            route_bands(&belts(42), 4),
+            vec![0..11, 11..22, 22..32, 32..42]
+        );
+        assert_eq!(route_bands(&belts(42), 4), route_bands(&belts(42), 4));
+    }
+
+    /// A band shorter than `HANDOVER_WALK_TICKS / PLACE_TICKS` belts costs
+    /// more to walk to than to lay, so a short run is one band on any
+    /// roster and a medium one fewer bands than bots. The 156-belt run that
+    /// motivated this is four bands on four bots.
+    #[test]
+    fn a_band_must_be_worth_its_walk() {
+        let min = usize::try_from(HANDOVER_WALK_TICKS / PLACE_TICKS).unwrap();
+        assert_eq!(route_bands(&belts(min - 1), 4), vec![0..min - 1]);
+        assert_eq!(route_bands(&belts(2 * min), 4), vec![0..min, min..2 * min]);
+        assert_eq!(route_bands(&belts(156), 4).len(), 4);
+        assert_eq!(route_bands(&belts(156), 1).len(), 1);
+        assert!(route_bands(&belts(0), 4).is_empty());
+    }
+
+    /// `route_belt` emits an entry and its exit as adjacent tiles. A cut
+    /// that would fall between them moves on by one, so one bot lays both
+    /// halves; the last band absorbs the shift.
+    #[test]
+    fn a_cut_never_separates_an_underground_pair() {
+        let mut kinds = belts(40);
+        kinds[9] = TileKind::UndergroundEntry;
+        kinds[10] = TileKind::UndergroundExit;
+        let bands = route_bands(&kinds, 4);
+        assert_eq!(
+            bands[0],
+            0..11,
+            "the first cut would have split the pair at 10"
+        );
+        assert_eq!(bands.iter().map(|b| b.len()).sum::<usize>(), 40);
+        for pair in bands.windows(2) {
+            assert_eq!(pair[0].end, pair[1].start, "bands abut: {bands:?}");
+        }
+        for band in &bands {
+            assert!(
+                band.end == 40 || kinds[band.end - 1] != TileKind::UndergroundEntry,
+                "band {band:?} ends on an entry whose exit belongs to the next bot"
+            );
+        }
+    }
+
+    /// `deal_bundles`' rule: heaviest first, each to whoever is lightest at
+    /// that moment. Three bands of 4/3/3 over two idle bots go 1, 2, 2 --
+    /// the third to bot 2, who is carrying three belts against bot 1's
+    /// four. Round-robin would hand it to bot 1.
+    #[test]
+    fn bands_are_dealt_heaviest_first_to_the_lightest_bot() {
+        let ctx = crate::test_world::connect_ctx_with_roster(vec![], &[BotId(1), BotId(2)]);
+        let kinds = belts(10);
+        let bands = vec![0..4, 4..7, 7..10];
+        assert_eq!(
+            deal_route_bands(&ctx.state, &kinds, &bands, &[BotId(1), BotId(2)]),
+            vec![BotId(1), BotId(2), BotId(2)]
+        );
+    }
+
+    /// The fixture's 2x2 furnace and a 3x3 lab twenty tiles apart: a run
+    /// long enough for two bands on four bots. Each band is a `Step::Owned`
+    /// naming a different bot, and laid end to end the bands are exactly
+    /// the route a one-bot roster lays flat -- every tile in one band,
+    /// bands abutting along the path, no bot inside another's stretch.
+    #[test]
+    fn a_long_run_is_laid_by_several_bots_in_contiguous_bands() {
+        let furnace = FactorioEntity::new_stone_furnace(&Position::new(5.0, 5.0), Direction::North);
+        let lab = crate::test_world::lab(&Position::new(25.5, 5.5));
+        let roster = [BotId(1), BotId(2), BotId(3), BotId(4)];
+        let mut banded =
+            crate::test_world::connect_ctx_with_roster(vec![furnace.clone(), lab.clone()], &roster);
+        let mut solo = crate::test_world::connect_ctx_with_roster(
+            vec![furnace.clone(), lab.clone()],
+            &[BotId(1)],
+        );
+        let item: ItemId = "iron-plate".into();
+        let steps = connect_steps(&mut banded, &furnace, &lab, &item).expect("open ground");
+        let flat = connect_steps(&mut solo, &furnace, &lab, &item).expect("open ground");
+
+        assert!(
+            !flat.iter().any(|s| matches!(s, Step::Owned { .. })),
+            "a one-bot roster lays the run flat, as before bands existed"
+        );
+        let route = placements(&flat, BELT);
+        let min = usize::try_from(HANDOVER_WALK_TICKS / PLACE_TICKS).unwrap();
+        assert!(
+            route.len() >= 2 * min,
+            "the fixture route is {} tiles",
+            route.len()
+        );
+
+        let bands = bands_of(&steps);
+        assert!(
+            bands.len() >= 2,
+            "a {}-tile run over four bots splits: {bands:?}",
+            route.len()
+        );
+        let owners: std::collections::BTreeSet<BotId> = bands.iter().map(|(b, _)| *b).collect();
+        assert_eq!(
+            owners.len(),
+            bands.len(),
+            "each band has its own bot: {bands:?}"
+        );
+        let joined: Vec<(Position, u8)> = bands.iter().flat_map(|(_, b)| b.clone()).collect();
+        assert_eq!(
+            joined, route,
+            "the bands laid end to end are the flat route, in path order"
+        );
+        for (_, band) in &bands {
+            assert!(
+                band.len() >= min,
+                "no band is shorter than a walk is worth: {bands:?}"
+            );
+        }
+        // No belt escapes the bands onto the chain actor's own list.
+        let loose: Vec<_> = steps
+            .iter()
+            .filter(|s| matches!(s, Step::Act(a) if matches!(&a.kind, ActionKind::Place { entity } if entity.name == BELT)))
+            .collect();
+        assert!(loose.is_empty(), "every belt is in a band");
+        // The inserters at each end are still the chain actor's.
+        assert_eq!(placements(&steps, INSERTER).len(), 2);
     }
 
     /// **The whole reason this function exists.** An inserter's `direction`

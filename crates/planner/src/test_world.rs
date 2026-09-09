@@ -121,7 +121,7 @@ fn stone_wall(position: &Position) -> FactorioEntity {
 /// *centre*, so a legal `lab` position is a half-integer. There is no
 /// `FactorioEntity::new_lab`, so it is written out here; the box is the
 /// game's, not a round number chosen to make a test pass.
-fn lab(position: &Position) -> FactorioEntity {
+pub(crate) fn lab(position: &Position) -> FactorioEntity {
     FactorioEntity {
         name: "lab".into(),
         entity_type: "lab".into(),
@@ -141,11 +141,21 @@ fn lab(position: &Position) -> FactorioEntity {
 /// plan overlay, so a machine placed through the overlay would be invisible to
 /// the very check these fixtures exist to exercise.
 fn connect_ctx(entities: Vec<FactorioEntity>) -> ExpansionCtx {
+    connect_ctx_with_roster(entities, &[])
+}
+
+/// [`connect_ctx`] with a stated roster. An empty roster is what every
+/// fixture above uses, and it keeps `connect_steps` on its one-band path;
+/// a roster of several bots is what lets a long run split into bands.
+pub(crate) fn connect_ctx_with_roster(
+    entities: Vec<FactorioEntity>,
+    bots: &[BotId],
+) -> ExpansionCtx {
     let world = fixture_world();
     world
         .update_chunk_entities(entities)
         .expect("a fixture world accepts these entities");
-    ExpansionCtx::new(PlanState::from_world(Arc::new(world), &[]), BotId(1))
+    ExpansionCtx::new(PlanState::from_world(Arc::new(world), bots), BotId(1))
 }
 
 /// **Two real Factorio machine shapes at legal Factorio positions**, which is

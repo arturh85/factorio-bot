@@ -50,7 +50,18 @@ vi.mock('@/api/client', () => ({
     getRunMap: async () => ({map: [], skipped: 0}),
     getRunVideo: async () => { throw new Error('this run recorded no video'); },
     getRunVideoTicks: async () => { throw new Error('this run recorded no video'); },
-    getRunEvents: async () => ({events: run.events, skipped: 0})
+    getRunEvents: async () => ({events: run.events, skipped: 0}),
+    // Phase 2 enrichments this page does not render yet -- resolved rather
+    // than left undefined, so `openRun`'s `Promise.allSettled` array can be
+    // built at all. None of this file's assertions touch them.
+    getRunProvenance: async () => ({
+        schema: 1, run_id: RUN_ID, started_unix: 1788696619, started_tick: 0,
+        seed: null, map_exchange_string: null, map: null, factorio: null, mods: null,
+        git: null, profile: 'release', roster_requested: [], workspace: null,
+        resumed_from: null, bot_mode: null, game_speed: null, peaceful: null
+    }),
+    getRunReplay: async () => ({planned_makespan: 0, refused: null, unmatched_walks: [], steps: []}),
+    getRunSavepoints: async () => ({savepoints: [], skipped: 0, missing_zip: []})
 }));
 
 async function mountPage() {

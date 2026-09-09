@@ -72,6 +72,12 @@ beforeEach(() => {
     vi.mocked(client.getRunVideoTicks).mockResolvedValue(NO_TICKS);
     vi.mocked(client.getRunEvents).mockReset();
     vi.mocked(client.getRunEvents).mockResolvedValue({events: [], skipped: 0});
+    vi.mocked(client.getRunProvenance).mockReset();
+    vi.mocked(client.getRunProvenance).mockRejectedValue(new ApiError(404, 'not_found', null, ''));
+    vi.mocked(client.getRunReplay).mockReset();
+    vi.mocked(client.getRunReplay).mockRejectedValue(new ApiError(404, 'not_found', null, ''));
+    vi.mocked(client.getRunSavepoints).mockReset();
+    vi.mocked(client.getRunSavepoints).mockRejectedValue(new ApiError(404, 'not_found', null, ''));
 });
 
 describe('loadRuns', () => {
@@ -626,5 +632,84 @@ describe('events enrichment', () => {
         vi.mocked(client.getRunEvents).mockResolvedValue({events: [], skipped: 0});
         await store.openRun('run-1');
         expect(store.eventsSkipped).toBe(0);
+    });
+});
+
+describe('phase 2 enrichments', () => {
+    it('a 404 on provenance is "not captured", not an error for the run', async () => {
+        vi.mocked(client.getRun).mockResolvedValue(DETAIL);
+        const store = useRunsStore();
+        await store.openRun('run-1');
+        expect(store.detail).not.toBeNull();
+        expect(store.provenance).toBeNull();
+        expect(store.provenanceError).toContain('/provenance');
+    });
+
+    it('keeps a served provenance and the replay counts', async () => {
+        vi.mocked(client.getRun).mockResolvedValue(DETAIL);
+        vi.mocked(client.getRunProvenance).mockResolvedValue({
+            schema: 1,
+            run_id: 'run-1',
+            started_unix: 1,
+            started_tick: 0,
+            seed: '31337',
+            map_exchange_string: null,
+            map: null,
+            factorio: '2.1.17',
+            mods: {base: '2.1.17'},
+            git: {commit: 'abc', dirty: false, source: 'working-tree-at-run-start'},
+            profile: 'release',
+            roster_requested: [1, 2],
+            workspace: null,
+            resumed_from: null,
+            bot_mode: 'clients',
+            game_speed: 1,
+            peaceful: null
+        });
+        vi.mocked(client.getRunReplay).mockResolvedValue({
+            planned_makespan: 10,
+            refused: null,
+            unmatched_walks: [],
+            steps: [
+                {
+                    index: 0, bot: 1, bot_step_index: 0,
+                    what: {kind: 'act', action: 1, label: 'craft 1 pipe'},
+                    planned_start_tick: 0, planned_end_tick: 5,
+                    observed_start_tick: 0, observed_end_tick: 6,
+                    status: 'Success', attempt_number: 1,
+                    evidence: {kind: 'measured'}, error: null
+                },
+                {
+                    index: 1, bot: 1, bot_step_index: 1,
+                    what: {kind: 'walk', to: {x: 1, y: 2}},
+                    planned_start_tick: 5, planned_end_tick: 9,
+                    observed_start_tick: 6, observed_end_tick: 9,
+                    status: 'Success', attempt_number: 1,
+                    evidence: {kind: 'believed', why: 'ticks measured, arrival not'}, error: null
+                },
+                {
+                    index: 2, bot: 1, bot_step_index: 2,
+                    what: {kind: 'act', action: 2, label: 'place x'},
+                    planned_start_tick: 9, planned_end_tick: 10,
+                    observed_start_tick: null, observed_end_tick: null,
+                    status: 'Abandoned', attempt_number: 0,
+                    evidence: {kind: 'measured'}, error: 'abandoned: predecessor 1 failed'
+                }
+            ]
+        });
+        const store = useRunsStore();
+        await store.openRun('run-1');
+        expect(store.provenance?.seed).toBe('31337');
+        expect(store.replayCounts).toEqual({steps: 3, abandoned: 1, lost: 0, failed: 0, pending: 0, believed: 1});
+    });
+
+    it('prefers the manifest lag over the derived one', async () => {
+        vi.mocked(client.getRun).mockResolvedValue({
+            summary: summary('run-1', {samples: 10, map: 2, samples_lag_ticks: 42}),
+            splits: []
+        } as RunDetail);
+        const store = useRunsStore();
+        await store.openRun('run-1');
+        expect(store.sampleLag).toBe(42);
     });
 });

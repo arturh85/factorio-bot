@@ -47,6 +47,14 @@ pub struct RunSummary {
     pub elapsed_ticks: Option<u64>,
     pub events: Option<usize>,
     pub splits: Option<usize>,
+    /// Archived sample lines. `None` for an unfinished run; `Some(0)` for a
+    /// finished run with no samples file.
+    pub samples: Option<usize>,
+    /// Lines in `map.jsonl`, same convention.
+    pub map: Option<usize>,
+    /// Ticks of the run's span the samples do NOT cover (see `Manifest`).
+    /// `None` when the run has no samples at all or never finished.
+    pub samples_lag_ticks: Option<u64>,
 }
 
 impl RunSummary {
@@ -60,6 +68,9 @@ impl RunSummary {
             elapsed_ticks: None,
             events: None,
             splits: None,
+            samples: None,
+            map: None,
+            samples_lag_ticks: None,
         }
     }
 
@@ -73,6 +84,9 @@ impl RunSummary {
             elapsed_ticks: manifest.elapsed_ticks,
             events: Some(manifest.events),
             splits: Some(manifest.splits),
+            samples: Some(manifest.samples),
+            map: Some(manifest.map),
+            samples_lag_ticks: manifest.samples_lag_ticks,
         }
     }
 }

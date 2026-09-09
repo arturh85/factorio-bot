@@ -374,3 +374,39 @@ async fn a_run_without_provenance_is_a_404_not_an_empty_object() {
             .contains("recorded no provenance")
     );
 }
+
+const MANIFEST_WITH_COVERAGE: &str = r#"{"run_id":"alpha","started_unix":1000,"finished_unix":1100,
+  "outcome":"done","elapsed_ticks":400,"events":3,"splits":1,"samples":2674,"map":24,"samples_lag_ticks":0}"#;
+
+#[tokio::test]
+async fn a_summary_carries_the_manifest_coverage_counts() {
+    let ws = workspace("coverage");
+    seed_run(&ws, "alpha", MILESTONES, Some(MANIFEST_WITH_COVERAGE), None);
+    let (status, body) = get_json(state_with_workspace(&ws), "/api/v1/runs/alpha").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["summary"]["samples"], 2674);
+    assert_eq!(body["summary"]["map"], 24);
+    assert_eq!(body["summary"]["samples_lag_ticks"], 0);
+}
+
+#[tokio::test]
+async fn an_old_manifest_reports_lag_as_null_and_counts_as_zero() {
+    // `samples`/`map` are `#[serde(default)]` on Manifest (0 = no such file),
+    // `samples_lag_ticks` is Option (None = no samples). The summary must keep
+    // that distinction rather than flatten it.
+    let ws = workspace("oldmanifest");
+    seed_run(&ws, "alpha", MILESTONES, Some(MANIFEST), None);
+    let (_, body) = get_json(state_with_workspace(&ws), "/api/v1/runs/alpha").await;
+    assert_eq!(body["summary"]["samples"], 0);
+    assert!(body["summary"]["samples_lag_ticks"].is_null());
+}
+
+#[tokio::test]
+async fn an_unfinished_run_has_null_coverage() {
+    let ws = workspace("unfinished-cov");
+    seed_run(&ws, "beta", MILESTONES, None, None);
+    let (_, body) = get_json(state_with_workspace(&ws), "/api/v1/runs/beta").await;
+    assert!(body["summary"]["samples"].is_null());
+    assert!(body["summary"]["map"].is_null());
+    assert!(body["summary"]["samples_lag_ticks"].is_null());
+}

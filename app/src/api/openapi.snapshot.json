@@ -3670,6 +3670,14 @@
               "null"
             ]
           },
+          "map": {
+            "description": "Lines in `map.jsonl`, same convention.",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "outcome": {
             "type": [
               "string",
@@ -3678,6 +3686,23 @@
           },
           "run_id": {
             "type": "string"
+          },
+          "samples": {
+            "description": "Archived sample lines. `None` for an unfinished run; `Some(0)` for a\nfinished run with no samples file.",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "samples_lag_ticks": {
+            "description": "Ticks of the run's span the samples do NOT cover (see `Manifest`).\n`None` when the run has no samples at all or never finished.",
+            "format": "int64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "splits": {
             "minimum": 0,

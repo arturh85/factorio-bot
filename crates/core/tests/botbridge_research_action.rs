@@ -351,35 +351,83 @@ fn a_refused_research_leaves_nothing_waiting() {
     );
 }
 
-/// **The reason that actually fired in rung 7, and the one the message never
-/// mentioned.**
+/// **A research already under way is joined, not refused.**
 ///
-/// `add_research` returned false because the technology was *already the
-/// current research*. The refusal enumerated researched / enabled / trigger /
-/// prerequisites -- all four of which read fine -- so every retry reported a
-/// reason list that excluded the true one and pointed the reader away from the
-/// answer. A diagnostic that is confidently incomplete is worse than one that
-/// says "unknown".
+/// This is the state every *retry* of a research action finds: the first
+/// dispatch queued the technology, the executor stopped listening at its
+/// deadline, and the technology is still current research. `add_research`
+/// answers false for it. Until 2026-09-09 that was a refusal -- rung 7's
+/// retries were answered with a reason list that did not even name it, and
+/// `run-1788964673-32436` replanned `research logistics` six times in one
+/// second against `current_research=logistics in_queue=true` before the
+/// milestone was declared stuck with the research sitting at 15%. Now the
+/// dispatch is accepted exactly as the first one was, the id stays
+/// registered, and `on_research_finished` settles it.
 #[test]
-fn a_refusal_names_the_research_already_under_way() {
+fn a_research_already_under_way_is_joined_not_refused() {
     let lua = run(
         &stub_game_researching(&["automation"], false, Some("automation")),
+        &format!("{START_AUTOMATION}\n{}", finish("automation")),
+    );
+    assert_eq!(
+        rcon_lines(&lua),
+        vec![format!("§tick§{START_TICK}")],
+        "the dispatch is accepted with a tick stamp, the same reply the first \
+         dispatch of this technology got"
+    );
+    assert_eq!(
+        completions(&lua),
+        vec![format!("§{FINISH_TICK}§action_completed§ok 42")],
+        "and the action settles when the research it joined finishes"
+    );
+}
+
+/// The queue is the whole test of "under way": a technology that is merely
+/// queued behind the current one is joined too, since `add_research` refuses
+/// it for the same reason and the same completion is coming.
+#[test]
+fn a_research_queued_behind_another_is_joined_too() {
+    let stub = stub_game_researching(&["automation", "logistics"], false, Some("logistics"))
+        + r#"
+        local force = game.forces.player
+        force.research_queue[#force.research_queue + 1] = force.technologies["automation"]
+        "#;
+    let lua = run(
+        &stub,
+        &format!("{START_AUTOMATION}\n{}", finish("automation")),
+    );
+    assert_eq!(rcon_lines(&lua), vec![format!("§tick§{START_TICK}")]);
+    assert_eq!(
+        completions(&lua),
+        vec![format!("§{FINISH_TICK}§action_completed§ok 42")]
+    );
+}
+
+/// **A refusal still names what IS under way, when it is something else.**
+///
+/// Rung 7's retries were answered with researched / enabled / trigger /
+/// prerequisites -- all four reading fine -- and never the state that caused
+/// the refusal. The queued case is joined now, so the message can only ever
+/// report a *different* technology here; it must still do so, because a
+/// diagnostic that is confidently incomplete is worse than one that says
+/// "unknown".
+#[test]
+fn a_refusal_names_the_research_under_way_when_it_is_a_different_one() {
+    let lua = run(
+        &stub_game_researching(&["automation", "logistics"], false, Some("logistics")),
         START_AUTOMATION,
     );
     let reply = rcon_lines(&lua);
     assert_eq!(reply.len(), 1, "one refusal line, got {reply:?}");
     assert!(
-        reply[0].contains("current_research=automation"),
-        "the refusal has to name the state that caused it. Rung 7 retried \
-         against a list of four reasons none of which were true, because the \
-         one that was is not in the list. Got {:?}",
+        reply[0].contains("current_research=logistics") && reply[0].contains("in_queue=false"),
+        "the refusal names what the force is researching instead. Got {:?}",
         reply[0]
     );
-    assert!(
-        reply[0].contains("in_queue=true"),
-        "and whether it is already queued, which is the same refusal one \
-         position later. Got {:?}",
-        reply[0]
+    assert_eq!(
+        completions(&lua),
+        Vec::<String>::new(),
+        "a refused action registers nothing"
     );
 }
 

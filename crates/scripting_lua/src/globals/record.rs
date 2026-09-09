@@ -768,6 +768,36 @@ impl LiveRecord {
         true
     }
 
+    /// Writes `kind` at a tick the caller has just read off the game itself.
+    ///
+    /// [`LiveRecord::record`] stamps with `FactorioRcon::last_tick`, which is
+    /// the tick of the last *command sent* -- and a durative wait sends
+    /// nothing. `research_timed` polls an in-memory table every 50 ms for up
+    /// to sixteen minutes without a single round trip, so every heartbeat
+    /// written through `record` during that wait carried the dispatch tick.
+    /// `run-1788964673-32436`: thirty-one `batch_progress` beats stamped
+    /// `93673` while `elapsed_ms` ran 180 s to 1110 s, the mod's own samples
+    /// covered the window at full rate, and the analyser read the frozen
+    /// stamp as *0 tps for 990 s* and *84 of 600 tps starved*. The game was
+    /// at 599 tps the whole time. Use this from anything that asked the game
+    /// what time it is (`Actuator::game_tick`) and wants the answer on the
+    /// record's axis. Still never earlier than something already written.
+    pub fn record_at(&self, tick: u64, kind: EventKind) -> bool {
+        let mut guard = self.slot.lock();
+        let Some(recorder) = guard.as_mut() else {
+            return false;
+        };
+        let tick = recorder.not_before(tick);
+        if let Err(err) = recorder.record(tick, kind) {
+            factorio_bot_core::tracing::error!(
+                error = %err,
+                "failed to write a live event to the run record"
+            );
+            return false;
+        }
+        true
+    }
+
     /// Writes the run's replay document beside its events, overwriting an
     /// earlier one: a script that runs several `goal.run`s keeps the last,
     /// which is the one whose batch closed the run. Returns whether it was

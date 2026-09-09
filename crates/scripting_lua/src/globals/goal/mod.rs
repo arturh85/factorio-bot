@@ -1863,6 +1863,16 @@ mod tests {
 
     #[async_trait]
     impl Actuator for StubActuator {
+        /// The stub's clock, read without advancing it -- what a real
+        /// actuator's RCON round trip answers. `None` without a clock, which
+        /// is the trait's default and the path every clockless test takes.
+        async fn game_tick(&self) -> Result<Option<u64>, ActuatorError> {
+            Ok(self
+                .clock
+                .as_ref()
+                .map(|clock| clock.load(Ordering::SeqCst)))
+        }
+
         async fn create_platform(
             &self,
             _: &str,

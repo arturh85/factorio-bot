@@ -5970,6 +5970,37 @@ function start_research(technology_name, action_id)
 		table.insert(waiting[technology_name], action_id)
 	end
 	if not force.add_research(technology_name) then
+		local tech = force.technologies[technology_name]
+		-- **A research already under way is joined, not refused.**
+		-- `add_research` answers false for a technology that is the force's
+		-- current research or sits in its queue, and that is the state every
+		-- retry of a research action finds: the first dispatch queued it, the
+		-- executor stopped listening at its deadline, and the technology is
+		-- still being researched. Refusing here made that a dead end --
+		-- `run-1788964673-32436` replanned `research logistics` six times in
+		-- one wall-clock second, each dispatch answered
+		-- `current_research=logistics in_queue=true`, and the milestone was
+		-- declared stuck with the research sitting in the queue at 15%.
+		-- The action stays registered and settles on `on_research_finished`
+		-- exactly as the first one would have; the reply is the tick stamp,
+		-- the same "the game took this" the first dispatch got. `researched`
+		-- is excluded on purpose: a finished technology is never in the
+		-- queue, and if it ever were, nothing would come to settle this.
+		local under_way = false
+		if not tech.researched then
+			if force.current_research ~= nil and force.current_research.name == technology_name then
+				under_way = true
+			end
+			for _, queued in pairs(force.research_queue) do
+				if queued.name == technology_name then
+					under_way = true
+				end
+			end
+		end
+		if under_way then
+			stamp_tick()
+			return
+		end
 		if action_id ~= nil then
 			-- Nothing is waiting on a refusal: leaving the id registered would
 			-- let somebody else's research settle this action as a success,
@@ -5990,8 +6021,8 @@ function start_research(technology_name, action_id)
 		--
 		-- `current_research` and `research_queue` are reported for every
 		-- refusal, including when there is none, so a reader can tell "nothing
-		-- is being researched" from "this build does not report it".
-		local tech = force.technologies[technology_name]
+		-- is being researched" from "this build does not report it". Since the
+		-- join above, the technology they name is never this one.
 		local unmet = {}
 		for name, prereq in pairs(tech.prerequisites) do
 			if not prereq.researched then

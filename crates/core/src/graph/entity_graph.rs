@@ -1800,6 +1800,11 @@ impl EntityGraph {
                     | (_, EntityType::ElectricPole)
                     | (_, EntityType::Generator)
                     | (_, EntityType::SolarPanel)
+                    // Admitted 2026-09-09 so a standing silo is nameable --
+                    // see `EntityType::RocketSilo`'s own comment for why an
+                    // invisible one turns a refusal about the map into a
+                    // refusal about this list.
+                    | (_, EntityType::RocketSilo)
                     | ("rock-big", _)
                     | ("rock-huge", _) => {
                         if let Some(entity_id) = self.entity_at(&entity.position) {

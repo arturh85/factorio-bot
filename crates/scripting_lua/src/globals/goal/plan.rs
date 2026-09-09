@@ -1280,6 +1280,7 @@ fn slot_name(slot: InventorySlot) -> &'static str {
         InventorySlot::AssemblerInput => "assembler_input",
         InventorySlot::AssemblerOutput => "assembler_output",
         InventorySlot::LabInput => "lab_input",
+        InventorySlot::RocketSiloRocket => "rocket_silo_rocket",
     }
 }
 
@@ -1340,6 +1341,19 @@ fn step_to_lua(lua: &Lua, net: &ActionNetwork, step: &ScheduledStep) -> LuaResul
                 .collect();
             t.set("deps", deps)?;
             match &act.kind {
+                // No `pos`: the call is force-level, so there is no tile to
+                // report and a script must not be handed one. What it carries
+                // instead is the three names the game is asked for.
+                ActionKind::CreatePlatform {
+                    name,
+                    planet,
+                    starter_pack,
+                } => {
+                    t.set("kind", "create-platform")?;
+                    t.set("name", name.clone())?;
+                    t.set("planet", planet.clone())?;
+                    t.set("starter_pack", starter_pack.clone())?;
+                }
                 ActionKind::Mine { pos, item, count } => {
                     t.set("kind", "mine")?;
                     t.set("pos", position_to_lua(lua, pos)?)?;

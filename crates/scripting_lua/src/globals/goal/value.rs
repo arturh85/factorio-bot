@@ -209,6 +209,53 @@ pub(crate) fn install_goal_constructors(lua: &Lua, table: &LuaTable) -> LuaResul
         })?,
     )?;
 
+    // `goal.orbiting(planet, opts)` -- both arguments optional. A platform is
+    // the `create-space-platform` research trigger, so this is the third
+    // trigger act sayable from Lua, beside `extracted` and `gathered`.
+    //
+    // **The planet and the pack default, and the defaults are stated once**
+    // (`method::orbit::FIRST_PLANET` / `STARTER_PACK`), not spelled again
+    // here: the first platform does not move, so it is Nauvis orbit, and the
+    // shipped starter pack is the only item that makes one.
+    let mt = metatable.clone();
+    table.set(
+        "orbiting",
+        lua.create_function(move |lua, (planet, opts): (Option<LuaValue>, Option<LuaTable>)| {
+            // `Option<LuaValue>` rather than `LuaValue`, and `doc_guard`
+            // insists: `@tparam[opt]` on a closure taking a required value is
+            // a documented default the binding does not have. Both forms of
+            // absence -- no argument and an explicit `nil` -- take the default.
+            let planet = match planet {
+                None | Some(LuaValue::Nil) => {
+                    factorio_bot_planner::method::orbit::FIRST_PLANET.to_string()
+                }
+                Some(other) => require_entity(other)?,
+            };
+            let starter_pack = match &opts {
+                Some(opts) => match opts.get::<LuaValue>("starter_pack")? {
+                    LuaValue::Nil => {
+                        factorio_bot_planner::method::orbit::STARTER_PACK.to_string()
+                    }
+                    other => require_item(other)?,
+                },
+                None => factorio_bot_planner::method::orbit::STARTER_PACK.to_string(),
+            };
+            let unlocks = match &opts {
+                Some(opts) => require_unlocks(opts.get("unlocks")?)?,
+                None => None,
+            };
+            let t = lua.create_table()?;
+            t.set("kind", "orbiting")?;
+            t.set("planet", planet)?;
+            t.set("starter_pack", starter_pack)?;
+            if let Some(unlocks) = unlocks {
+                t.set("unlocks", unlocks)?;
+            }
+            t.set_metatable(Some(mt.clone()))?;
+            Ok(t)
+        })?,
+    )?;
+
     let mt = metatable.clone();
     table.set(
         "sustain",
@@ -379,6 +426,16 @@ pub(crate) fn goal_from_lua(value: &LuaTable) -> LuaResult<Goal> {
             entity: require_entity(value.get("entity")?)?,
             unlocks: require_unlocks(value.get("unlocks")?)?,
         }),
+        // A hand-built table with no `planet` or `starter_pack` is refused
+        // rather than defaulted, unlike the constructor above: a table reaching
+        // here was either built by that constructor -- which always sets both
+        // -- or written by hand, and guessing what a hand-written one meant to
+        // orbit is the class of answer `sustain` refuses below.
+        "orbiting" => Ok(Goal::Orbiting {
+            planet: require_entity(value.get("planet")?)?,
+            starter_pack: require_item(value.get("starter_pack")?)?,
+            unlocks: require_unlocks(value.get("unlocks")?)?,
+        }),
         // A hand-built table with no `window_ticks` is refused here exactly as
         // the constructor refuses a missing third argument: a standing goal
         // with no window is `Goal::Producing`, which is capacity and not
@@ -464,6 +521,16 @@ fn render_goal(t: &LuaTable) -> LuaResult<String> {
                 None => format!("gather {entity} into a tank"),
             })
         }
+        "orbiting" => {
+            let planet = require_entity(t.get("planet")?)?;
+            let starter_pack = require_item(t.get("starter_pack")?)?;
+            Ok(match require_unlocks(t.get("unlocks")?)? {
+                Some(tech) => format!(
+                    "put a platform in orbit of {planet} with a {starter_pack} to unlock {tech}"
+                ),
+                None => format!("put a platform in orbit of {planet} with a {starter_pack}"),
+            })
+        }
         // Rendered exactly as `Goal::Display` renders it, unlike the two arms
         // above -- see `sustain_render_goal_agrees_with_the_planner_goals_own_display`.
         "sustain" => Ok(format!(
@@ -539,6 +606,7 @@ const KINDS: &[&str] = &[
     "sustain",
     "extracted",
     "gathered",
+    "orbiting",
     "built",
     "charted",
     "all",
@@ -1582,6 +1650,8 @@ mod tests {
             r#"return goal.produced("lab", 1, { unlocks = "automation-science-pack" })"#,
             r#"return goal.gathered("crude-oil")"#,
             r#"return goal.extracted("crude-oil", { unlocks = "oil-processing" })"#,
+            r#"return goal.orbiting()"#,
+            r#"return goal.orbiting("nauvis", { unlocks = "space-platform" })"#,
         ] {
             let t: LuaTable = lua.load(src).eval().expect("script");
             assert_eq!(
@@ -1590,6 +1660,26 @@ mod tests {
                 "{src}"
             );
         }
+    }
+
+    /// `goal.orbiting()` with no arguments at all names the first platform:
+    /// Nauvis orbit and the shipped starter pack.
+    ///
+    /// The defaults are asserted against `method::orbit`'s constants rather
+    /// than against string literals, so a change to either moves both together
+    /// instead of leaving this test agreeing with a stale copy.
+    #[test]
+    fn orbiting_defaults_to_the_first_platform() {
+        let lua = lua_with_goal();
+        let t: LuaTable = lua.load(r#"return goal.orbiting()"#).eval().expect("script");
+        assert_eq!(
+            goal_from_lua(&t).expect("converts"),
+            Goal::Orbiting {
+                planet: factorio_bot_planner::method::orbit::FIRST_PLANET.into(),
+                starter_pack: factorio_bot_planner::method::orbit::STARTER_PACK.into(),
+                unlocks: None,
+            }
+        );
     }
 
     /// **The seam that broke last time.** `goal.all` is the only construct
@@ -1607,6 +1697,7 @@ mod tests {
                 return goal.all {
                     goal.gathered("crude-oil"),
                     goal.extracted("crude-oil"),
+                    goal.orbiting(),
                     goal.produced("petroleum-gas", 45, { via = "basic-oil-processing" }),
                 }
             "#,
@@ -1622,6 +1713,11 @@ mod tests {
                 },
                 Goal::Extracted {
                     entity: "crude-oil".into(),
+                    unlocks: None,
+                },
+                Goal::Orbiting {
+                    planet: "nauvis".into(),
+                    starter_pack: "space-platform-starter-pack".into(),
                     unlocks: None,
                 },
                 Goal::Produced {

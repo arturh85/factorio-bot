@@ -1102,12 +1102,15 @@ pub fn research_ingredients(tech: &FactorioTechnology) -> Vec<(String, u32)> {
 
 /// What a `research_trigger` technology asks of the plan, as a goal shape.
 ///
-/// Two of the eight trigger kinds are planned, and they are planned
+/// Three of the eight trigger kinds are planned, and they are planned
 /// differently: a `craft-item` is satisfied by *producing* the item, which
 /// any of the producing methods can do and hang the unlock on; a
 /// `mine-entity` is satisfied by mining a *named entity*, which is a hand's
 /// work when the character can dig it and a machine's when it cannot --
 /// `oil-processing` names `crude-oil`, and a character cannot mine a well.
+/// a `create-space-platform` is satisfied by a rocket silo, a starter pack
+/// and one force-level call, which is [`crate::method::orbit`]'s whole
+/// subject.
 /// The choice between those is [`crate::method::have::Researched`]'s, made
 /// against the world; this only says what the trigger wants.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1117,6 +1120,15 @@ pub enum TriggerRequirement {
     /// `count` of any one of `entities` must be mined, by whatever can mine
     /// it. Never empty: an empty list refuses in [`trigger_requirement`].
     Mine { entities: Vec<String>, count: u32 },
+    /// A space platform must be created, which needs a rocket silo, a starter
+    /// pack and one force-level call. See [`crate::method::orbit`].
+    ///
+    /// The third planned kind, added 2026-09-09. Unlike the other two it
+    /// carries nothing from the trigger: `ResearchTrigger::CreateSpacePlatform`
+    /// is a bare variant with no fields at all, so the planet and the pack are
+    /// this planner's choice rather than the game's statement, and they are
+    /// named where the goal is built rather than invented here.
+    CreatePlatform,
 }
 
 /// What a `research_trigger` technology actually costs, as the work its
@@ -1134,12 +1146,14 @@ pub enum TriggerRequirement {
 /// receiving a makespan that is quietly too small. Three are told apart:
 ///
 /// * [`PlannerError::UnsupportedResearchTrigger`] -- a kind with no goal
-///   (`craft-fluid`, `build-entity`, orbit, spawner, platform, scripted, or
-///   one this build has never heard of), named with the act it wants. The
-///   three shipped ones (`space-science-pack`, `biter-egg-handling`,
-///   `space-platform`) all want an act no action in this project performs;
-///   the mod's `build-entity` emulation is honest only because a bot has
-///   actually placed the entity, and no bot can place an asteroid collector;
+///   (`craft-fluid`, `build-entity`, orbit, spawner, scripted, or one this
+///   build has never heard of), named with the act it wants. **`space-platform`
+///   left this list on 2026-09-09**, when `ActionKind::CreatePlatform` gave the
+///   planner an action that performs its act; the two that remain
+///   (`space-science-pack`, `biter-egg-handling`) still want acts nothing here
+///   does -- the mod's `build-entity` emulation is honest only because a bot
+///   has actually placed the entity, and no bot can place an asteroid
+///   collector;
 /// * [`PlannerError::UndescribedResearchTrigger`] -- a `mine-entity` with no
 ///   entity named, which is what every dump written before 2026-09-05 holds,
 ///   because the mod sent the bare type. A new dump fixes it; nothing in the
@@ -1196,6 +1210,10 @@ pub fn trigger_requirement(
                 count: (*count).max(1),
             }))
         }
+        // Planned since 2026-09-09, and the trigger the game states most
+        // sparely: it names no entity, no item and no count, because there is
+        // exactly one act that satisfies it.
+        ResearchTrigger::CreateSpacePlatform => Ok(Some(TriggerRequirement::CreatePlatform)),
         other => Err(PlannerError::UnsupportedResearchTrigger {
             technology: tech.name.clone(),
             trigger: other.kind().to_string(),

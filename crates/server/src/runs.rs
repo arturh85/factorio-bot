@@ -406,6 +406,35 @@ pub async fn get_run_savepoints(
     }))
 }
 
+/// The executor's replay -- planned against observed per step, with evidence.
+///
+/// Written by the run at its end since Phase 2 of Run Anatomy; a run archived
+/// before that, or one that never ran a plan, has none, and that is a 404
+/// rather than an empty document: an empty replay would read as a run that
+/// planned nothing.
+#[utoipa::path(
+    get,
+    path = "/api/v1/runs/{id}/replay",
+    tag = "Runs",
+    params(("id" = String, Path, description = "the run id")),
+    responses(
+        (status = 200, body = serde_json::Value, description = "the replay document, as the executor serialised it"),
+        (status = 400, body = crate::error::ErrorResponse),
+        (status = 404, body = crate::error::ErrorResponse),
+    )
+)]
+pub async fn get_run_replay(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ErrorResponse> {
+    let dir = run_dir(&runs_root(&state).await?, &id)?;
+    let bytes = std::fs::read(dir.join(factorio_bot_core::record::REPLAY_FILE))
+        .map_err(|_| ErrorResponse::not_found(format!("run {id} has no replay")))?;
+    serde_json::from_slice(&bytes)
+        .map(Json)
+        .map_err(|err| ErrorResponse::internal(format!("replay.json is not valid JSON: {err}")))
+}
+
 /// A run's event log.
 #[utoipa::path(
     get,
@@ -643,6 +672,7 @@ pub fn router() -> utoipa_axum::router::OpenApiRouter<AppState> {
         .routes(routes!(get_run))
         .routes(routes!(get_run_provenance))
         .routes(routes!(get_run_savepoints))
+        .routes(routes!(get_run_replay))
         .routes(routes!(get_run_events))
         .routes(routes!(get_run_lanes))
         .routes(routes!(get_run_samples))

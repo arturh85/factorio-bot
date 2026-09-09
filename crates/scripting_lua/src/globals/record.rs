@@ -767,6 +767,23 @@ impl LiveRecord {
         }
         true
     }
+
+    /// Writes the run's replay document beside its events, overwriting an
+    /// earlier one: a script that runs several `goal.run`s keeps the last,
+    /// which is the one whose batch closed the run. Returns whether it was
+    /// written -- `false` means no recording is running.
+    pub fn write_replay(&self, json: &str) -> bool {
+        let guard = self.slot.lock();
+        let Some(recorder) = guard.as_ref() else {
+            return false;
+        };
+        let path = recorder.dir().join(factorio_bot_core::record::REPLAY_FILE);
+        if let Err(err) = std::fs::write(&path, json) {
+            factorio_bot_core::tracing::error!(error = %err, path = %path.display(), "the replay could not be written");
+            return false;
+        }
+        true
+    }
 }
 
 /// Records an event at a tick the caller observed itself -- still never

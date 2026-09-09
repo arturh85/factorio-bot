@@ -6146,6 +6146,57 @@
         ]
       }
     },
+    "/api/v1/runs/{id}/replay": {
+      "get": {
+        "description": "Written by the run at its end since Phase 2 of Run Anatomy; a run archived\nbefore that, or one that never ran a plan, has none, and that is a 404\nrather than an empty document: an empty replay would read as a run that\nplanned nothing.",
+        "operationId": "get_run_replay",
+        "parameters": [
+          {
+            "description": "the run id",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "the replay document, as the executor serialised it"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "summary": "The executor's replay -- planned against observed per step, with evidence.",
+        "tags": [
+          "Runs"
+        ]
+      }
+    },
     "/api/v1/runs/{id}/samples": {
       "get": {
         "operationId": "get_run_samples",

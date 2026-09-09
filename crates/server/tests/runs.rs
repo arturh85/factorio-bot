@@ -375,6 +375,22 @@ async fn a_run_without_provenance_is_a_404_not_an_empty_object() {
     );
 }
 
+#[tokio::test]
+async fn a_persisted_replay_is_served_and_its_absence_is_a_404() {
+    let ws = workspace("replay");
+    seed_run(&ws, "alpha", MILESTONES, Some(MANIFEST), None);
+    let (status, _) = get_json(state_with_workspace(&ws), "/api/v1/runs/alpha/replay").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    std::fs::write(
+        ws.join("runs/alpha/replay.json"),
+        r#"{"planned_makespan":100,"refused":null,"steps":[],"unmatched_walks":[]}"#,
+    )
+    .unwrap();
+    let (status, body) = get_json(state_with_workspace(&ws), "/api/v1/runs/alpha/replay").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["planned_makespan"], 100);
+}
+
 const MANIFEST_WITH_COVERAGE: &str = r#"{"run_id":"alpha","started_unix":1000,"finished_unix":1100,
   "outcome":"done","elapsed_ticks":400,"events":3,"splits":1,"samples":2674,"map":24,"samples_lag_ticks":0}"#;
 

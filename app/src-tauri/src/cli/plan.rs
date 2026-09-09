@@ -38,7 +38,12 @@ use factorio_bot_core::serde_json;
 use factorio_bot_core::types::Position;
 use factorio_bot_planner::goal::{Goal, Holder};
 use factorio_bot_planner::method::have::registry_for;
-use factorio_bot_planner::{BotId, PlanReport, PlanState, pick_chain_actor, plan_best};
+use factorio_bot_planner::standing::{Standing, world_after};
+use factorio_bot_planner::{
+  ActionId, BotId, PlanReport, PlanState, PlannerError, StepKind, Ticks, pick_chain_actor,
+  plan_best,
+};
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -77,6 +82,20 @@ at, which is what makes replanning from that milestone mean anything.
 --bots defaults to the players present in the dump. Pass it explicitly to plan
 the same map for a different roster -- that comparison is exactly what this
 command is for, and it is free.
+
+--replan N plans, then applies what the plan BUILT to the world -- placements,
+recipes, choppings and mined ore, as map facts on a fresh surface, the way the
+mod's writeout would have -- and plans the same goals again against it, N
+times. A t=0 dump has no factory in it, so without this every offline plan
+meets clean ground and the replan path (\"a cell ALREADY MAKES copper-plate\")
+is never reached; a fix on that path was green on all eight baselines and
+refused in the live run on 2026-09-09. A replan that refuses is this command
+failing, with the round named. --done-by <tick> counts only the steps a
+schedule finishes by that tick as executed, which is what a truncated batch
+leaves behind. --dump-standing <path> writes the last standing world as a
+dump, so `plan --world` and `score-map` can be pointed at it directly.
+Inventories, positions, chest contents and research are NOT carried between
+rounds; see `factorio_bot_planner::standing` for why that is a stated limit.
 
 No Factorio, no RCON, no workspace and no settings file are involved.";
 
@@ -133,6 +152,35 @@ impl Subcommand for ThisCommand {
           .long("steps")
           .action(ArgAction::SetTrue)
           .help("also list every scheduled step, per bot, with its start and end tick"),
+      )
+      .arg(
+        Arg::new("all")
+          .long("all")
+          .action(ArgAction::SetTrue)
+          .help("plan the goals as ONE bundle (a script's goal.all{...}) rather than in sequence"),
+      )
+      .arg(
+        Arg::new("replan")
+          .long("replan")
+          .value_name("rounds")
+          .value_parser(value_parser!(u32))
+          .help("after planning, apply what was built to the world and plan again, this many times"),
+      )
+      .arg(
+        Arg::new("done-by")
+          .long("done-by")
+          .value_name("tick")
+          .value_parser(value_parser!(u32))
+          .requires("replan")
+          .help("with --replan: only steps a schedule finishes by this tick count as built"),
+      )
+      .arg(
+        Arg::new("dump-standing")
+          .long("dump-standing")
+          .value_name("path")
+          .value_parser(value_parser!(PathBuf))
+          .requires("replan")
+          .help("with --replan: write the last standing world as a dump to this path"),
       )
   }
 
@@ -321,19 +369,57 @@ pub(crate) fn load_world(world_path: &std::path::Path) -> Result<Arc<FactorioSur
   Ok(Arc::new(world))
 }
 
-/// Reads the dump, plans, and returns the report plus the lines to print
-/// ahead of it.
+/// How many times to replan, and what counts as built between rounds.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Replan {
+  /// Rounds *after* the first plan. Zero is the plain command.
+  pub rounds: u32,
+  /// Only steps a schedule finishes by this tick are applied to the world
+  /// before the next round; `None` applies the whole plan.
+  pub done_by: Option<Ticks>,
+  /// Where to write the last standing world, if anywhere.
+  pub dump_standing: Option<PathBuf>,
+}
+
+/// One planning round's outcome, kept so a replan can be reported beside the
+/// plan it followed.
+pub(crate) struct Round {
+  /// `None` when the round found the whole arrangement standing and emitted
+  /// nothing -- `PlannerError::SustainSupplyNotStanding`, which the driver
+  /// reads as a satisfied milestone and this command reads the same way.
+  /// Only a replan can end here; the first round on a t=0 dump has
+  /// everything left to build.
+  pub report: Option<PlanReport>,
+  /// What the previous round left standing on the world this one planned
+  /// against; `None` for the first round, which meets the dump as it is.
+  pub standing: Option<Standing>,
+  pub listing: Vec<String>,
+}
+
+/// Reads the dump, plans, and returns every round's report plus the lines to
+/// print ahead of them.
 ///
 /// Split out of [`run`] so it is testable without a `Context` — everything
 /// this command does is a pure function of a file and some arguments, and a
 /// test that had to build a `Context` would be testing the CLI harness.
+///
+/// With `replan.rounds > 0` the plan is applied to the world through
+/// [`factorio_bot_planner::standing::world_after`] and the goals are planned
+/// again on a **fresh** state over that world -- the supervisor's own shape
+/// (`plan_rounds` rebuilds its state from the live world every round), and
+/// the only offline path that reaches the replan-only refusals. A round that
+/// refuses is an error naming the round, because a goal that plans from t=0
+/// and refuses from its own standing world is the failure this flag exists
+/// to make visible.
 fn plan_from_dump(
   world_path: &std::path::Path,
   specs: &[String],
   goal_json: &[String],
   roster: Option<&str>,
   steps: bool,
-) -> Result<(PlanReport, Vec<String>, Vec<String>)> {
+  bundle: bool,
+  replan: &Replan,
+) -> Result<(Vec<Round>, Vec<String>)> {
   let world = load_world(world_path)?;
 
   let mut goals: Vec<Goal> = Vec::new();
@@ -347,6 +433,13 @@ fn plan_from_dump(
     return Err(miette!(
       "nothing to plan: pass at least one --goal or --goal-json"
     ));
+  }
+  // `goal.all { a, b }` is not `a; b`: a bundle holds one conjunct's
+  // "already standing" refusal back while the others expand, and a sequence
+  // ends at it. A replan of a script's bundle has to be planned as the
+  // bundle or the second round refuses on the first conjunct that stands.
+  if bundle {
+    goals = vec![Goal::All(goals)];
   }
 
   let bots = if let Some(raw) = roster {
@@ -362,57 +455,134 @@ fn plan_from_dump(
     found
   };
 
-  let state = PlanState::from_world(world, &bots);
-  // Not an error. A dump can legitimately be planned for a roster it has no
-  // players for -- comparing one map's plan across roster sizes is exactly
-  // what this command is for -- but a bot the world knows nothing about is
-  // seeded with an empty inventory and guessed reach distances, and a report
-  // that did not say so would read as a measurement of the roster rather than
-  // of four defaults.
   let mut notes = Vec::new();
-  let unknown: Vec<String> = state
-    .unknown_bots()
-    .iter()
-    .map(|bot| bot.0.to_string())
-    .collect();
-  if !unknown.is_empty() {
-    notes.push(format!(
-      "note: the dump has no player for bot(s) {} -- they are planned with an \
-       empty inventory and default reach",
-      unknown.join(", ")
-    ));
+  let mut rounds = Vec::new();
+  let mut world = world;
+  let mut standing: Option<Standing> = None;
+  for round in 0..=replan.rounds {
+    let state = PlanState::from_world(world.clone(), &bots);
+    // Not an error. A dump can legitimately be planned for a roster it has
+    // no players for -- comparing one map's plan across roster sizes is
+    // exactly what this command is for -- but a bot the world knows nothing
+    // about is seeded with an empty inventory and guessed reach distances,
+    // and a report that did not say so would read as a measurement of the
+    // roster rather than of four defaults.
+    if round == 0 {
+      let unknown: Vec<String> = state
+        .unknown_bots()
+        .iter()
+        .map(|bot| bot.0.to_string())
+        .collect();
+      if !unknown.is_empty() {
+        notes.push(format!(
+          "note: the dump has no player for bot(s) {} -- they are planned with an \
+           empty inventory and default reach",
+          unknown.join(", ")
+        ));
+      }
+    }
+
+    let chain_actor = pick_chain_actor(&state, &bots)
+      .ok_or_else(|| miette!("no bots to plan for; a roster needs at least one"))?;
+    // `plan_best`, not `expand` + `schedule`: the drain policy is settled by
+    // reading finished schedules, so the CLI has to make the same choice a
+    // run makes or the offline loop stops predicting it.
+    // Counted, not timed: see `factorio_bot_core::plan_work` for why a wall
+    // clock cannot be the regression guard on a box whose load ranged from 1
+    // to 80 in one day.
+    let (planned, work) = factorio_bot_core::plan_work::measure(|| {
+      plan_best(&goals, &state, &registry_for(&bots), chain_actor, &bots)
+    });
+    let (net, scheduled) = match planned {
+      Ok(plan) => plan,
+      // The driver's own reading of this code (`goal/mod.rs` in
+      // `scripting_lua`): the whole arrangement stands and there is nothing
+      // left to build, so the milestone is satisfied. On a replan that is the
+      // expected end of a plan applied in full, not a refusal -- and it can
+      // only happen on a replan, because a t=0 dump has everything to build.
+      Err(PlannerError::SustainSupplyNotStanding { .. }) if round > 0 => {
+        notes.push(format!(
+          "replan {round}: the whole arrangement stands and nothing is left to build, which \
+           the driver reads as a satisfied milestone"
+        ));
+        rounds.push(Round {
+          report: None,
+          standing: standing.take(),
+          listing: Vec::new(),
+        });
+        break;
+      }
+      // "did not PLAN", not "did not expand". `plan_best` covers expansion
+      // *and* scheduling, and the two fail for different reasons -- a
+      // `ChainOwnerInfeasible` is raised in `schedule.rs`, never in `expand`.
+      // The old wording sent a session into `expand()` looking for a
+      // scheduling failure, the same way `occupant_of` once reported
+      // `Terrain` for a refusal that was `Refused`.
+      Err(err) if round == 0 => return Err(miette!("the goal did not plan: {err}")),
+      Err(err) => {
+        return Err(miette!(
+          "the goal planned from the dump but REFUSED on replan {round} of {}, against \
+           the world its own previous plan left standing ({}): {err}",
+          replan.rounds,
+          describe_standing(standing.as_ref())
+        ));
+      }
+    };
+
+    let listing = if steps {
+      step_lines(&scheduled, &bots)
+    } else {
+      Vec::new()
+    };
+    rounds.push(Round {
+      report: Some(PlanReport::of(&net, &scheduled, &bots, &state).with_work(work)),
+      standing: standing.take(),
+      listing,
+    });
+
+    if round == replan.rounds {
+      break;
+    }
+    // What this round built, as the world the next one meets. `done_by`
+    // reads the SCHEDULE, not the network: a step's end tick is the only
+    // place "finished by tick T" is defined.
+    let done: BTreeSet<ActionId> = scheduled
+      .steps
+      .iter()
+      .filter(|step| replan.done_by.is_none_or(|tick| step.end <= tick))
+      .filter_map(|step| match &step.what {
+        StepKind::Act { action, .. } => Some(*action),
+        StepKind::Walk { .. } => None,
+      })
+      .collect();
+    let (next, built) = world_after(&state, &net, |id| done.contains(&id))
+      .map_err(|err| miette!("could not apply plan {round} to the world: {err}"))?;
+    standing = Some(built);
+    world = next;
   }
 
-  let chain_actor = pick_chain_actor(&state, &bots)
-    .ok_or_else(|| miette!("no bots to plan for; a roster needs at least one"))?;
-  // `plan_best`, not `expand` + `schedule`: the drain policy is settled by
-  // reading finished schedules, so the CLI has to make the same choice a run
-  // makes or the offline loop stops predicting it.
-  // Counted, not timed: see `factorio_bot_core::plan_work` for why a wall
-  // clock cannot be the regression guard on a box whose load ranged from 1 to
-  // 80 in one day.
-  let (planned, work) = factorio_bot_core::plan_work::measure(|| {
-    plan_best(&goals, &state, &registry_for(&bots), chain_actor, &bots)
-  });
-  let (net, scheduled) = planned
-    // "did not PLAN", not "did not expand". `plan_best` covers expansion
-    // *and* scheduling, and the two fail for different reasons -- a
-    // `ChainOwnerInfeasible` is raised in `schedule.rs`, never in `expand`.
-    // The old wording sent a session into `expand()` looking for a
-    // scheduling failure, the same way `occupant_of` once reported `Terrain`
-    // for a refusal that was `Refused`.
-    .map_err(|err| miette!("the goal did not plan: {err}"))?;
+  if let Some(path) = &replan.dump_standing {
+    world
+      .dump_to(path)
+      .map_err(|err| miette!("could not write the standing world to {}: {err}", path.display()))?;
+    notes.push(format!(
+      "wrote the standing world after {} round(s) to {}",
+      replan.rounds,
+      path.display()
+    ));
+  }
+  Ok((rounds, notes))
+}
 
-  let listing = if steps {
-    step_lines(&scheduled, &bots)
-  } else {
-    Vec::new()
-  };
-  Ok((
-    PlanReport::of(&net, &scheduled, &bots, &state).with_work(work),
-    notes,
-    listing,
-  ))
+/// One line saying what a replan met, for the refusal and the round header.
+fn describe_standing(standing: Option<&Standing>) -> String {
+  match standing {
+    Some(s) => format!(
+      "{} placed, {} recipe(s) set, {} chopped, {} ore tile(s) mined, {} action(s) not modelled",
+      s.placed, s.recipes_set, s.chopped, s.mined, s.unapplied
+    ),
+    None => "the dump as it is".to_string(),
+  }
 }
 
 /// Every scheduled step, per bot, with the gap that precedes it.
@@ -464,28 +634,49 @@ fn run(args: &ArgMatches, _context: &mut Context) -> Result<()> {
     .unwrap_or_default();
   let roster = args.get_one::<String>("bots").map(String::as_str);
 
-  let (report, notes, listing) = plan_from_dump(
+  let replan = Replan {
+    rounds: args.get_one::<u32>("replan").copied().unwrap_or(0),
+    done_by: args.get_one::<u32>("done-by").copied(),
+    dump_standing: args.get_one::<PathBuf>("dump-standing").cloned(),
+  };
+
+  let (rounds, notes) = plan_from_dump(
     world_path,
     &specs,
     &goal_json,
     roster,
     args.get_flag("steps"),
+    args.get_flag("all"),
+    &replan,
   )?;
 
   for note in &notes {
     eprintln!("{note}");
   }
-  for line in &listing {
-    println!("{line}");
-  }
-  if args.get_flag("json") {
-    println!(
-      "{}",
-      serde_json::to_string_pretty(&report).into_diagnostic()?
-    );
-  } else {
-    for line in report.lines() {
+  let several = rounds.len() > 1;
+  for (index, round) in rounds.iter().enumerate() {
+    if several {
+      println!(
+        "=== plan {index}: against {} ===",
+        describe_standing(round.standing.as_ref())
+      );
+    }
+    for line in &round.listing {
       println!("{line}");
+    }
+    let Some(report) = &round.report else {
+      println!("(nothing left to build: the whole arrangement stands)");
+      continue;
+    };
+    if args.get_flag("json") {
+      println!(
+        "{}",
+        serde_json::to_string_pretty(report).into_diagnostic()?
+      );
+    } else {
+      for line in report.lines() {
+        println!("{line}");
+      }
     }
   }
   Ok(())
@@ -502,6 +693,124 @@ pub fn build() -> Box<dyn Subcommand> {
 mod tests {
   use super::*;
   use factorio_bot_core::test_utils::fixture_world;
+
+  /// The plain, one-round command, which is what every test below that is
+  /// not about replanning asks for. Shadows the outer function on purpose: a
+  /// local item wins over the glob import, and the tests read as they did.
+  fn plan_from_dump(
+    world_path: &std::path::Path,
+    specs: &[String],
+    goal_json: &[String],
+    roster: Option<&str>,
+    steps: bool,
+  ) -> Result<(PlanReport, Vec<String>, Vec<String>)> {
+    let (mut rounds, notes) = super::plan_from_dump(
+      world_path,
+      specs,
+      goal_json,
+      roster,
+      steps,
+      false,
+      &Replan::default(),
+    )?;
+    let round = rounds.remove(0);
+    let report = round.report.expect("a first round always has a plan");
+    Ok((report, notes, round.listing))
+  }
+
+  /// `--replan 1`: the second round meets what the first one built, as map
+  /// facts, and says so.
+  #[test]
+  fn a_replan_meets_what_the_first_plan_built() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dumped_world(&dir);
+    let goal = ["have:iron-plate:5".to_string()];
+    let (rounds, _) = super::plan_from_dump(
+      &path,
+      &goal,
+      &[],
+      Some("1"),
+      false,
+      false,
+      &Replan {
+        rounds: 1,
+        done_by: None,
+        dump_standing: None,
+      },
+    )
+    .expect("plans twice");
+    assert_eq!(rounds.len(), 2);
+    assert!(rounds[0].standing.is_none(), "the first round meets the dump");
+    let standing = rounds[1]
+      .standing
+      .as_ref()
+      .expect("the second round reports what it met");
+    assert!(
+      standing.placed > 0,
+      "a five-plate plan on the fixture builds a furnace, so the replan must meet one: {standing:?}"
+    );
+  }
+
+  /// `--done-by 0`: nothing finishes by tick zero, so the replan meets the
+  /// dump unchanged -- and the report says zero placed rather than nothing.
+  #[test]
+  fn done_by_zero_leaves_nothing_standing() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dumped_world(&dir);
+    let goal = ["have:iron-plate:5".to_string()];
+    let (rounds, _) = super::plan_from_dump(
+      &path,
+      &goal,
+      &[],
+      Some("1"),
+      false,
+      false,
+      &Replan {
+        rounds: 1,
+        done_by: Some(0),
+        dump_standing: None,
+      },
+    )
+    .expect("plans twice");
+    let standing = rounds[1].standing.as_ref().unwrap();
+    assert_eq!(standing.placed, 0, "{standing:?}");
+    assert_eq!(
+      rounds[0].report.as_ref().map(|r| r.actions),
+      rounds[1].report.as_ref().map(|r| r.actions),
+      "with nothing built the replan is the same plan"
+    );
+  }
+
+  /// `--dump-standing` writes a world `plan --world` can read back, with the
+  /// first plan's furnace in it.
+  #[test]
+  fn the_standing_world_can_be_dumped_and_planned_against() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dumped_world(&dir);
+    let standing_path = dir.path().join("standing.json");
+    let goal = ["have:iron-plate:5".to_string()];
+    let (_, notes) = super::plan_from_dump(
+      &path,
+      &goal,
+      &[],
+      Some("1"),
+      false,
+      false,
+      &Replan {
+        rounds: 1,
+        done_by: None,
+        dump_standing: Some(standing_path.clone()),
+      },
+    )
+    .expect("plans twice");
+    assert!(notes.iter().any(|n| n.contains("wrote the standing world")), "{notes:?}");
+    let standing = load_world(&standing_path).expect("the standing dump reads back");
+    let state = PlanState::from_world(standing, &[BotId(1)]);
+    assert!(
+      !state.entities_named("stone-furnace").is_empty(),
+      "the furnace the first plan placed stands in the dumped world"
+    );
+  }
 
   /// Writes a fixture world where a dump would be, and hands back the path.
   fn dumped_world(dir: &tempfile::TempDir) -> PathBuf {

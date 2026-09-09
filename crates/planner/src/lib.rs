@@ -13,6 +13,7 @@ pub mod report;
 pub mod schedule;
 pub mod score;
 pub mod search;
+pub mod standing;
 pub mod state;
 pub mod substance;
 

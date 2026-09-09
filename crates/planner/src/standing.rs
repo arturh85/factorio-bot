@@ -1,0 +1,312 @@
+//! The world a plan leaves standing, so the *next* plan can be made against it.
+//!
+//! # Why this exists
+//!
+//! Every baseline this project takes is `plan --world <t=0 dump>`, and a t=0
+//! dump has no factory in it. A live run does not stay at t=0: the supervisor
+//! plans, executes, and **replans** whenever a batch truncates, and the second
+//! expansion meets a world where the first plan's work already stands as map
+//! facts. On 2026-09-09 `9f549b1c` moved all eight baselines correctly, was
+//! reviewed and merged, and refused in the live run with the byte-identical
+//! blocker it had been written to remove -- *"a cell ALREADY MAKES
+//! copper-plate"*, a sentence only a replan can say. Offline there was no
+//! cell, so the fixed path was never reached and the fix looked perfect.
+//!
+//! This module is the offline half of that path. Given a plan and the state it
+//! was made against, [`world_after`] returns a **new surface** with the plan's
+//! placements, recipes and choppings applied as ordinary map facts -- the same
+//! `on_some_entity_created` the mod's writeout reaches -- so that a fresh
+//! [`PlanState::from_world`] over it is what the supervisor's next round would
+//! build (`plan_rounds` in `crates/scripting_lua` rebuilds its state from the
+//! live world every round). No Factorio, no RCON, seconds.
+//!
+//! # A fresh state, not a fork -- and that is the whole point
+//!
+//! The sustain tests have a `built_world` helper that forks the *plan state*
+//! and creates the placed entities in its overlay. That is right for asking
+//! "what did this expansion build" and wrong for a replan: a fork carries
+//! every reservation, claim and queue the first expansion made, so a promise
+//! one method kept privately (the reserved exit that `a69ae64c` turned into
+//! state) would survive into the second plan and mask exactly the defect the
+//! replan check exists to find. The live replan starts from the world and
+//! nothing else, so this does too.
+//!
+//! # What it applies, and what it does not
+//!
+//! Applied, in the network's topological order:
+//! - [`ActionKind::Place`] -- the entity is created on the surface, with its
+//!   collision box filled from the prototype when the action carried none,
+//!   exactly as `PlanState::create_entity` fills it for the overlay;
+//! - [`ActionKind::SetRecipe`] -- the recipe is set on the standing machine;
+//! - [`ActionKind::Chop`] -- the tree or rock is deleted;
+//! - [`ActionKind::Mine`] -- the resource tile is debited, so a replan sees
+//!   what a mined patch has left.
+//!
+//! **Not applied, on purpose, and each is a stated limit rather than an
+//! oversight**: bot inventories and positions (`GainItem`/`LoseItem`, walks),
+//! chest contents (`BufferGain`/`BufferLose`), and research. A replan after a
+//! *lost* batch is exactly a replan whose inventory the plan cannot vouch for,
+//! and the planner already treats an unread buffer as unknown. The subject of
+//! this module is **what stands on the ground**, because that is what every
+//! siting, routing and recovery method reads and what no t=0 dump can carry.
+//! A caller that needs the rest has `--resume-from` and a live game.
+//!
+//! **A whole plan applied is "the batch ran to completion".** The live
+//! replans of 2026-09-09 followed *partial* batches -- 80 abandoned steps
+//! behind one failed take -- so [`world_after`] takes a predicate saying which
+//! actions count as done, and the CLI's `--done-by <tick>` cuts a schedule at
+//! a tick the way a truncated batch would.
+
+use crate::action::ActionKind;
+use crate::ids::ActionId;
+use crate::network::ActionNetwork;
+use crate::state::PlanState;
+use factorio_bot_core::factorio::world::FactorioSurface;
+use factorio_bot_core::miette::Result;
+use factorio_bot_core::num_traits::FromPrimitive;
+use factorio_bot_core::types::Direction;
+use std::sync::Arc;
+
+/// What [`world_after`] put on the surface, so a caller can say whether the
+/// standing world it is about to replan against actually has anything in it.
+///
+/// A replan check whose first plan placed nothing measures nothing; the
+/// counts are how the check refuses to be green by accident.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Standing {
+    /// Entities created on the surface.
+    pub placed: usize,
+    /// Recipes set on standing machines.
+    pub recipes_set: usize,
+    /// Trees and rocks deleted.
+    pub chopped: usize,
+    /// Resource tiles debited.
+    pub mined: usize,
+    /// Actions the predicate said were done but this module does not apply
+    /// (crafts, inserts, walks, research...). Reported, not hidden: a reader
+    /// deciding whether the standing world is faithful enough needs the
+    /// number.
+    pub unapplied: usize,
+}
+
+/// The surface `net` leaves behind, as a new, independent world.
+///
+/// `done` says which actions count as executed; pass `|_| true` for the whole
+/// plan. The returned surface is a deep clone of `state.base()` with the done
+/// actions' physical effects applied through the same entry points the mod's
+/// writeout uses, so `PlanState::from_world(world_after(..), bots)` is the
+/// state a supervisor round would build after that batch settled.
+///
+/// Errors only when the network has no topological order, which `plan_best`
+/// already refuses before handing a network back.
+pub fn world_after(
+    state: &PlanState,
+    net: &ActionNetwork,
+    done: impl Fn(ActionId) -> bool,
+) -> Result<(Arc<FactorioSurface>, Standing), crate::error::PlannerError> {
+    let surface: FactorioSurface = (**state.base()).clone();
+    let mut standing = Standing::default();
+    for id in net.topo_order()? {
+        if !done(id) {
+            continue;
+        }
+        let Some(action) = net.action(id) else {
+            continue;
+        };
+        match &action.kind {
+            ActionKind::Place { entity } => {
+                let mut entity = (**entity).clone();
+                if (entity.bounding_box.width() == 0. || entity.bounding_box.height() == 0.)
+                    && let Some(area) = Direction::from_u8(entity.direction).and_then(|facing| {
+                        state.collision_area_facing(&entity.name, &entity.position, facing)
+                    })
+                {
+                    entity.bounding_box = area;
+                }
+                if surface.on_some_entity_created(entity).is_ok() {
+                    standing.placed += 1;
+                }
+            }
+            ActionKind::SetRecipe { pos, recipe, .. } => {
+                if surface.entity_graph.set_recipe(pos, recipe) {
+                    standing.recipes_set += 1;
+                }
+            }
+            ActionKind::Chop { pos, .. } => {
+                // The standing entity, read off the surface being built rather
+                // than off `state`: an earlier action in this same order may
+                // already have removed or replaced it.
+                let standing_entity = surface
+                    .entity_graph
+                    .entity_at(pos)
+                    .and_then(|id| surface.entity_graph.entity_by_id(id));
+                if let Some(entity) = standing_entity
+                    && surface.on_some_entity_deleted(entity).is_ok()
+                {
+                    standing.chopped += 1;
+                }
+            }
+            ActionKind::Mine { pos, item, count } => {
+                surface.entity_graph.resource_mined(item, pos, *count);
+                standing.mined += 1;
+            }
+            _ => standing.unapplied += 1,
+        }
+    }
+    Ok((Arc::new(surface), standing))
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use crate::action::Action;
+    use crate::ids::BotId;
+
+    fn action(net: &mut ActionNetwork, kind: ActionKind) -> ActionId {
+        let id = ActionId(u32::try_from(net.len()).unwrap() + 1);
+        net.add(Action {
+            id,
+            kind,
+            pre: Vec::new(),
+            eff: Vec::new(),
+            duration: 0,
+            pinned: None,
+            label: String::new(),
+        })
+    }
+    use factorio_bot_core::test_utils::fixture_world;
+    use factorio_bot_core::types::{FactorioEntity, Position};
+
+    fn state() -> PlanState {
+        PlanState::from_world(Arc::new(fixture_world()), &[BotId(1)])
+    }
+
+    fn place(net: &mut ActionNetwork, entity: FactorioEntity) -> ActionId {
+        action(
+            net,
+            ActionKind::Place {
+                entity: Box::new(entity),
+            },
+        )
+    }
+
+    /// The one property the module exists for: a placement is a MAP FACT on
+    /// the returned surface, visible to a state built fresh from it.
+    #[test]
+    fn a_placement_stands_on_the_new_surface_as_a_map_fact() {
+        let state = state();
+        let at = Position::new(10.5, 10.5);
+        assert!(
+            state.entity_at(&at).is_none(),
+            "the fixture has nothing at {at} to start with"
+        );
+        let mut net = ActionNetwork::new();
+        place(
+            &mut net,
+            FactorioEntity::new_stone_furnace(&at, Direction::North),
+        );
+
+        let (world, standing) = world_after(&state, &net, |_| true).expect("a one-action network");
+        assert_eq!(standing.placed, 1);
+
+        let fresh = PlanState::from_world(world, &[BotId(1)]);
+        let found = fresh.entity_at(&at).expect("the furnace stands on the new surface");
+        assert_eq!(found.name, "stone-furnace");
+        assert!(
+            found.bounding_box.width() > 0.,
+            "the box is filled from the prototype, not left at zero: {:?}",
+            found.bounding_box
+        );
+    }
+
+    /// And the state the plan was made against is untouched -- the returned
+    /// world is a clone, not a mutation of the base behind `state`.
+    #[test]
+    fn the_original_world_is_not_mutated() {
+        let state = state();
+        let at = Position::new(10.5, 10.5);
+        let mut net = ActionNetwork::new();
+        place(
+            &mut net,
+            FactorioEntity::new_stone_furnace(&at, Direction::North),
+        );
+        let _ = world_after(&state, &net, |_| true).unwrap();
+        assert!(
+            state.entity_at(&at).is_none(),
+            "the base surface behind the first plan must stay as it was"
+        );
+    }
+
+    /// `done` is honoured: an action it refuses is not applied and is not
+    /// counted anywhere, because a step that never ran left nothing behind.
+    #[test]
+    fn an_action_not_yet_done_leaves_nothing_standing() {
+        let state = state();
+        let first = Position::new(10.5, 10.5);
+        let second = Position::new(12.5, 12.5);
+        assert!(
+            state.entity_at(&first).is_none() && state.entity_at(&second).is_none(),
+            "the fixture must have nothing on either tile, or this test measures the fixture"
+        );
+        let mut net = ActionNetwork::new();
+        let a = place(
+            &mut net,
+            FactorioEntity::new_stone_furnace(&first, Direction::North),
+        );
+        let _b = place(
+            &mut net,
+            FactorioEntity::new_stone_furnace(&second, Direction::North),
+        );
+        let (world, standing) = world_after(&state, &net, |id| id == a).unwrap();
+        assert_eq!(standing.placed, 1);
+        assert_eq!(standing.unapplied, 0);
+        let fresh = PlanState::from_world(world, &[BotId(1)]);
+        assert!(fresh.entity_at(&first).is_some());
+        assert!(fresh.entity_at(&second).is_none());
+    }
+
+    /// A recipe set by the plan is on the machine the next plan reads.
+    #[test]
+    fn a_recipe_set_by_the_plan_is_on_the_standing_machine() {
+        let state = state();
+        let at = Position::new(10.5, 10.5);
+        let mut net = ActionNetwork::new();
+        let mut machine = FactorioEntity::new_stone_furnace(&at, Direction::North);
+        machine.name = "assembling-machine-1".to_string();
+        let placed = place(&mut net, machine);
+        let set = action(
+            &mut net,
+            ActionKind::SetRecipe {
+                pos: at.clone(),
+                entity: "assembling-machine-1".to_string(),
+                recipe: "iron-gear-wheel".to_string(),
+            },
+        );
+        net.link(placed, set, 0);
+        let (world, standing) = world_after(&state, &net, |_| true).unwrap();
+        assert_eq!(standing.recipes_set, 1, "{standing:?}");
+        let fresh = PlanState::from_world(world, &[BotId(1)]);
+        assert_eq!(
+            fresh.entity_at(&at).unwrap().recipe.as_deref(),
+            Some("iron-gear-wheel")
+        );
+    }
+
+    /// Actions this module does not model are counted, not silently dropped.
+    #[test]
+    fn what_is_not_applied_is_counted() {
+        let state = state();
+        let mut net = ActionNetwork::new();
+        action(
+            &mut net,
+            ActionKind::Craft {
+                item: "iron-gear-wheel".to_string(),
+                count: 1,
+            },
+        );
+        let (_, standing) = world_after(&state, &net, |_| true).unwrap();
+        assert_eq!(standing.unapplied, 1);
+        assert_eq!(standing.placed, 0);
+    }
+}

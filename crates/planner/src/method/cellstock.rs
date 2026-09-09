@@ -166,9 +166,25 @@ pub(crate) fn cell_output_loop(state: &PlanState, spec: &AssemblySpec) -> Option
         crate::method::power::ENGINE.to_string(),
     ];
     // What `method::sustain` lays to keep a burner cell fed. Named here rather
-    // than imported because they are function-local constants over there; the
-    // test `a_belt_cell_loops_on_the_fuel_run` is what holds the two lists
-    // together, by failing if a belt cell ever becomes drawable.
+    // than imported because they are function-local constants over there.
+    //
+    // **Nothing holds the two lists together, and this comment used to claim
+    // something did.** It cited a test `a_belt_cell_loops_on_the_fuel_run`
+    // which exists nowhere — `doclint`'s `cited_names_resolve` caught it, and
+    // a citation to a guard that does not exist is worse than no citation,
+    // because it stops the next reader looking.
+    //
+    // What actually holds it today is an **offline measurement**:
+    // `producing:transport-belt:6` planning at 307 actions rather than
+    // refusing, which is only true while a belt stays undrawable. That is a
+    // real check and it is not a test — nothing runs it in CI, and if
+    // `sustain` or `power` ever lays a prototype absent from this seed the
+    // loop check **silently under-refuses**.
+    //
+    // The honest fix is to derive the seed from `sustain`/`power` rather than
+    // restate it, which needs those constants to stop being function-local.
+    // Until then this is a list, and it is the one place this otherwise
+    // derived check still is one.
     seed.extend(
         ["transport-belt", "burner-inserter", "coal"]
             .iter()

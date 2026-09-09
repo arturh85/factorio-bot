@@ -682,6 +682,36 @@ BotBridge Mod (Factorio mod for RPC)
     route may not hug the chest it serves (its other sides, two tiles deep,
     are closed to that route). Read the tiles a refusal names before naming
     the mechanism — adjacent-to-the-source is a perimeter, not an obstacle.
+    **And a BYSTANDER chest's perimeter is the caller's budget, not
+    `connect`'s** (2026-09-09, `run-1788920460-08860`): the plate chest of a
+    `sustain` cell had three of its four sides spent by the cell's own coal
+    branch *passing* it, and the assembly method's supply link then refused
+    with all four neighbours named — zero science, 48 steps abandoned. A
+    rule in `connect` keeping one side of every bystander chest was tried
+    twice and reverted twice, because the cell's *coal* chests legitimately
+    spend every side they have and the router cannot tell the two apart. So
+    `sustain` declares the exit (`Offtake::exit`) and lays every run with
+    it closed (`connect_steps_reserving`); and **which** side to keep is
+    decided by laying the rest of the cell on forks (`choose_exit`), because
+    the straight-line exit walled the branch into a loop on the fixture and
+    cost the furnace's run a tunnel the force cannot craft. Ask the future,
+    do not guess it. **And a kept side is not a way out**: on seed 31337
+    every exit the trial kept came back SEALED (`belt_reaches_open_ground`)
+    — the cell's four coal runs draw a closed ring round the whole cell,
+    double belt walls at x=25.5/34.5 and y=-51.5 — so the chest keeps its
+    side and a run out of it would still tunnel. Two things were tried and
+    withdrawn, with the numbers: a corridor of up to 8 tiles (sealed at
+    every length), and reserving a BFS escape path to the window edge per
+    run (every trial then refused — the wall cut the furnace's own coal
+    run). What ships instead: `supply_link_steps` routes both ends on forks
+    first and takes the one whose run needs fewer undergrounds, so the link
+    is laid on the surface from the furnace (bundle 885 actions / 52,891
+    ticks) rather than from the chest under two belts (972 / 62,972, with
+    `logistics` researched off a hand charge just to craft the pair). The
+    ring itself — a haul that loops the cell it serves — is the open item,
+    and so is a replan recognising its own half-built link: the live replan
+    refused the furnace end because the link's first belt at `[27.5,-43.5]`
+    stood while its arm did not.
     It **refuses before placing anything**: every `ConnectRefusal` variant is
     returned before an action is emitted or a single entity lands in the
     plan overlay, because a half-built belt run is worse than none — items

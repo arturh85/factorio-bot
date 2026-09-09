@@ -3136,7 +3136,42 @@ fn supply_link_steps(
         // followed by the next one here.
         let mut why: Vec<String> = Vec::new();
         let mut linked = false;
-        for at in [&source.buffer, &source.furnace] {
+        // # The end whose run stays on the SURFACE goes first
+        //
+        // The plate chest is tried before the furnace, and the first end
+        // that routes wins -- which, measured offline on seed 31337 after
+        // `method::sustain` began keeping the chest an exit, was a run that
+        // left the chest under two of the cell's own coal belts with an
+        // underground pair. A pair needs `logistics`, which needs the red
+        // packs this very cell is being built to make: the plan researched
+        // logistics off a hand charge and finished the link 14,000 ticks
+        // after the packs, at 972 actions against 881 with the link laid on
+        // the surface from the furnace. So each end is first routed on a
+        // fork and the ends are taken in order of how many undergrounds
+        // their run needs, the chest first on a tie; a refused end sorts
+        // last and is still tried for its message.
+        let mut ends: Vec<(&Position, usize)> = [&source.buffer, &source.furnace]
+            .into_iter()
+            .map(|at| {
+                let cost = ctx.state.entity_at(at).map_or(usize::MAX, |from| {
+                    let mut trial = ExpansionCtx::new(ctx.state.fork(), ctx.chain_actor);
+                    match connect_steps_with(&mut trial, &from, &sink, &spec.supplied.0, INSERTER) {
+                        Ok(run) => run
+                            .iter()
+                            .filter(|step| {
+                                matches!(step, Step::Act(action)
+                                    if matches!(&action.kind, ActionKind::Place { entity }
+                                        if entity.name == "underground-belt"))
+                            })
+                            .count(),
+                        Err(_) => usize::MAX,
+                    }
+                });
+                (at, cost)
+            })
+            .collect();
+        ends.sort_by_key(|(_, cost)| *cost);
+        for (at, _) in ends {
             let Some(from) = ctx.state.entity_at(at) else {
                 continue;
             };

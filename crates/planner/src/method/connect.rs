@@ -18,7 +18,7 @@ const BELT: &str = "transport-belt";
 /// The underground pair that carries [`BELT`] beneath an obstacle. Paired
 /// with `BELT` by hand because the prototype does not name its partner: the
 /// day this module lays a faster belt, this is the second name to change.
-const UNDERGROUND: &str = "underground-belt";
+pub(crate) const UNDERGROUND: &str = "underground-belt";
 /// The inserter at each end when a caller does not name one.
 ///
 /// **Not craftable at stage 1**, which is the whole reason
@@ -439,6 +439,35 @@ fn overlay_boxes(ctx: &ExpansionCtx, area: &Rect) -> Vec<Rect> {
         .collect()
 }
 
+/// Would a belt standing on `at` have a surface way out of the window
+/// around it -- to the window's own edge, over free ground, on the same
+/// placement grid [`connect_steps_reserving`] routes on?
+///
+/// `false` when `at` is itself occupied, off every grid, or sealed into a
+/// pocket by what stands (base world and this plan's overlay alike). A
+/// caller keeping a tile free for a run it cannot lay yet asks this, because
+/// a free tile inside a ring of belts is kept for nothing: the run would have
+/// to tunnel out, and a tunnel is a recipe the force may not have.
+pub(crate) fn belt_reaches_open_ground(ctx: &ExpansionCtx, at: &Position) -> bool {
+    let (area, origin) = enclosure::window(at);
+    let blocked = enclosure::rasterize(
+        ctx.state
+            .base()
+            .entity_graph
+            .blocking_boxes_within(&area)
+            .into_iter()
+            .chain(overlay_boxes(ctx, &area)),
+        origin,
+        (PLACEMENT_HALF_BOX, PLACEMENT_HALF_BOX),
+    );
+    let Some(cell) = cell_of(origin, at) else {
+        return false;
+    };
+    let index = enclosure::cell_index(cell.0, cell.1);
+    let reach = factorio_bot_core::graph::enclosure::reachable_from_boundary(&blocked);
+    !blocked[index] && reach[index]
+}
+
 /// Which cells of this window a charted enemy structure's standoff covers, or
 /// `None` when no threat reaches the window at all.
 ///
@@ -807,6 +836,51 @@ pub fn connect_steps_with(
     item: &ItemId,
     inserter: &str,
 ) -> Result<Vec<Step>, ConnectRefusal> {
+    connect_steps_reserving(ctx, from, to, item, inserter, &[])
+}
+
+/// [`connect_steps_with`], with tiles the caller has spoken for closed to
+/// this route.
+///
+/// `reserved` names tile centres this run may not stand on -- not for an
+/// inserter, not for a belt, not for a tunnel's mouth. They are marked on
+/// the obstacle grid before either end is chosen, so a perimeter pair is
+/// never picked on one of them and the route search never crosses one; a
+/// run that cannot be made without them refuses exactly as it would for an
+/// occupied tile, with the reserved tiles among the ones named, and places
+/// nothing. A reserved tile outside this run's window costs nothing.
+///
+/// # Why the reservation is the CALLER's, and not a rule of this module
+///
+/// The four coal runs of a `method::sustain` cell leave from a 1x1 chest
+/// with four sides, and between them they spend every side that chest has;
+/// the run that would have failed for want of a fourth side is refused
+/// before it is laid. That is the perimeter budget this module already
+/// states. **A bystander chest -- one that is neither end of the run -- has
+/// its sides spent the same way, by routes that merely pass it**, and this
+/// module cannot know whether that matters: a coal chest whose every side a
+/// later run of the same expansion is going to claim must stay open to
+/// them, while a *plate* chest whose one exit a later *method* is going to
+/// need must keep it. The two are the same prototype on the same grid.
+///
+/// A rule in here that kept one side of every bystander chest was tried
+/// twice and reverted twice: it closed to the third coal run the side the
+/// third coal run needed, and five `method::sustain` tests went red both
+/// times. The information that separates the two chests is which runs are
+/// still to come, and only the caller that is going to lay them has it. So
+/// the budget is declared by the method that knows the future and enforced
+/// here, rather than guessed here and argued with there.
+///
+/// `method::sustain` uses this for the product chest of every cell -- see
+/// its `Offtake::exit`.
+pub fn connect_steps_reserving(
+    ctx: &mut ExpansionCtx,
+    from: &FactorioEntity,
+    to: &FactorioEntity,
+    item: &ItemId,
+    inserter: &str,
+    reserved: &[Position],
+) -> Result<Vec<Step>, ConnectRefusal> {
     let (area, origin) = enclosure::window(&from.position);
     // `mut`: the two machine footprints and the six tiles derived below (an
     // anchor, an inserter and a belt cell at each end) all claim their cells
@@ -821,6 +895,15 @@ pub fn connect_steps_with(
         origin,
         (PLACEMENT_HALF_BOX, PLACEMENT_HALF_BOX),
     );
+
+    // THE CALLER'S RESERVATIONS, before either end is chosen: a reserved
+    // tile is an obstacle to this route and nothing else, so it goes on the
+    // grid with the rest of the obstacles and every search below sees it.
+    for at in reserved {
+        if let Some(cell) = cell_of(origin, at) {
+            blocked[enclosure::cell_index(cell.0, cell.1)] = true;
+        }
+    }
 
     let from_footprint = footprint_of(origin, from).ok_or_else(|| ConnectRefusal::NoRoute {
         blocked: vec![from.position.clone()],
@@ -1748,6 +1831,92 @@ mod tests {
                 .iter()
                 .all(|(at, facing)| at.y() == 3.5 && *facing == dir(Direction::East)),
             "one straight row, running east: {belts:?}"
+        );
+    }
+
+    /// A tile the caller has reserved is closed to the route -- no belt, no
+    /// arm -- and the run is still made round it. Then the sink's every
+    /// side is reserved, and the run is refused **before anything lands in
+    /// the overlay**, naming the reserved tiles among the blockers: the
+    /// budget a caller declares is enforced with the same promise every
+    /// other refusal here makes.
+    #[test]
+    fn a_reserved_tile_is_kept_off_and_a_reserved_perimeter_refuses_before_placing() {
+        let (mut plain, source, sink) = crate::test_world::two_chests_on_open_ground();
+        let straight =
+            connect_steps_with(&mut plain, &source, &sink, &"iron-plate".into(), INSERTER)
+                .expect("the control: two chests on open ground");
+        let kept = Position::new(8.5, 3.5);
+        assert!(
+            placements(&straight, BELT)
+                .iter()
+                .any(|(at, _)| *at == kept),
+            "fixture precondition: the straight run crosses {kept}: {:?}",
+            placements(&straight, BELT)
+        );
+
+        let (mut ctx, source, sink) = crate::test_world::two_chests_on_open_ground();
+        let steps = connect_steps_reserving(
+            &mut ctx,
+            &source,
+            &sink,
+            &"iron-plate".into(),
+            INSERTER,
+            std::slice::from_ref(&kept),
+        )
+        .expect("one reserved tile on open ground is a detour, not a wall");
+        let laid: Vec<Position> = placements(&steps, BELT)
+            .into_iter()
+            .chain(placements(&steps, INSERTER))
+            .chain(placements(&steps, UNDERGROUND))
+            .map(|(at, _)| at)
+            .collect();
+        assert!(
+            !laid.contains(&kept),
+            "the run stands on the reserved tile {kept}: {laid:?}"
+        );
+        assert!(
+            laid.len() > straight.len() - 2,
+            "and it went round rather than through: {} placements against {} straight",
+            laid.len(),
+            placements(&straight, BELT).len() + 2
+        );
+
+        // Every side of the sink, arm tile and belt tile alike.
+        let (mut boxed, source, sink) = crate::test_world::two_chests_on_open_ground();
+        let before = boxed.state.entities_within(&sink.position, 30.).len();
+        let mut perimeter = Vec::new();
+        for (dx, dy) in [(0., -1.), (1., 0.), (0., 1.), (-1., 0.)] {
+            for reach in [1., 2.] {
+                perimeter.push(Position::new(
+                    sink.position.x() + dx * reach,
+                    sink.position.y() + dy * reach,
+                ));
+            }
+        }
+        let refusal = connect_steps_reserving(
+            &mut boxed,
+            &source,
+            &sink,
+            &"iron-plate".into(),
+            INSERTER,
+            &perimeter,
+        )
+        .expect_err("a chest with every side reserved has no end to load into");
+        match &refusal {
+            ConnectRefusal::NoRoute { blocked } => {
+                assert!(
+                    blocked.iter().any(|tile| perimeter.contains(tile)),
+                    "the refusal names a reserved tile, so the reader knows it is a \
+                     budget and not an obstacle: {blocked:?}"
+                );
+            }
+            other => panic!("refused for the wrong reason: {other}"),
+        }
+        assert_eq!(
+            boxed.state.entities_within(&sink.position, 30.).len(),
+            before,
+            "a refusal must leave the overlay exactly as it found it"
         );
     }
 }

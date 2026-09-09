@@ -75,7 +75,7 @@
 use crate::error::PlannerError;
 use crate::goal::{Goal, Holder};
 use crate::ids::{ItemId, Ticks};
-use crate::method::connect::{ConnectRefusal, connect_steps_with};
+use crate::method::connect::{ConnectRefusal, connect_steps_reserving};
 use crate::method::produce::{Cell, CellSpec, DRILL, FURNACE, cell_spec, cells_for};
 use crate::method::util::nearest_resource_tile;
 use crate::method::{ExpansionCtx, Method, Step};
@@ -192,8 +192,11 @@ const LOCAL_BUFFER_RADIUS: f64 = crate::method::util::FREE_TILE_SEARCH_RADIUS as
 ///
 /// It is still a *siting* heuristic and not a reservation: nothing stops a
 /// later route from taking a side, which is why the number had to be measured
-/// rather than reasoned. A real fix reserves the perimeter in
-/// `method::connect`, and is not this rung.
+/// rather than reasoned. The reservation that does exist is the *plate*
+/// chest's exit ([`Offtake::exit`]), declared by this method and enforced by
+/// `method::connect`; a coal chest's sides are still first come, first
+/// served, because every run that wants one is this method's own and is
+/// ordered here.
 ///
 /// It is a **siting** predicate and not a routing one: passing it does not
 /// promise a route exists, only that the chest is not walled in before one is
@@ -543,26 +546,48 @@ fn place_one(
 /// A refusal is turned into [`PlannerError::SustainNoRouteForFuel`] carrying
 /// the primitive's own sentence, because "no belt route, blocked by 3 tiles:
 /// ..." says more about the map than any wording this method could invent.
+///
+/// `reserved` is the ground this expansion has spoken for and no coal run
+/// may take -- every cell's product exit, see [`Offtake::exit`]. A refusal
+/// that names a reserved tile says so, because "blocked by 4 tiles" with
+/// two of them open grass would otherwise send the next reader looking for
+/// an obstacle that is not there.
 fn feed(
     ctx: &mut ExpansionCtx,
     buffer: &FactorioEntity,
     machine: &FactorioEntity,
+    reserved: &[Position],
 ) -> Result<Vec<Step>, PlannerError> {
     if fed_by_machine(&ctx.state, &machine.position) {
         return Ok(Vec::new());
     }
     let fuel: ItemId = FUEL.into();
-    connect_steps_with(ctx, buffer, machine, &fuel, ARM).map_err(|refusal| {
+    connect_steps_reserving(ctx, buffer, machine, &fuel, ARM, reserved).map_err(|refusal| {
+        let why = match &refusal {
+            ConnectRefusal::NoRoute { blocked } => {
+                let kept: Vec<String> = blocked
+                    .iter()
+                    .filter(|tile| reserved.iter().any(|r| Pos::from(r) == Pos::from(*tile)))
+                    .map(ToString::to_string)
+                    .collect();
+                if kept.is_empty() {
+                    refusal.to_string()
+                } else {
+                    format!(
+                        "{refusal} ({} of those kept free as a cell's product exit: {})",
+                        kept.len(),
+                        kept.join(" ")
+                    )
+                }
+            }
+            ConnectRefusal::SpanTooLong { .. } | ConnectRefusal::NotCardinal => refusal.to_string(),
+        };
         PlannerError::SustainNoRouteForFuel {
             fuel: FUEL.into(),
             machine: machine.name.clone(),
             from: buffer.position.to_string(),
             to: machine.position.to_string(),
-            why: match &refusal {
-                ConnectRefusal::NoRoute { .. }
-                | ConnectRefusal::SpanTooLong { .. }
-                | ConnectRefusal::NotCardinal => refusal.to_string(),
-            },
+            why,
         }
     })
 }
@@ -588,6 +613,81 @@ struct Offtake {
     facing: Direction,
     /// The container it drops into.
     sink: Position,
+    /// The side of `sink` kept free for whatever carries the product on --
+    /// the tile an arm would stand on and the tile beyond it for its belt --
+    /// or empty when the chest already stands with no side left.
+    ///
+    /// # The chest's fourth side is spoken for before the coal runs are laid
+    ///
+    /// Measured in `run-1788920460-08860` (seed 31337, honest): the cell
+    /// made copper-plate at 15/min with the roster idle, and the science
+    /// half of the same bundle refused with
+    /// `nothing can carry it to the supply chest ... blocked by 4 tile(s)`,
+    /// the four being exactly this chest's four neighbours. One is the arm;
+    /// the other three were spent by this method's own coal runs *passing*
+    /// the chest on their way to the drill, the furnace and the arm. Every
+    /// one of those runs was routed correctly against the grid it was given,
+    /// and the grid had no way to say that this chest, alone among the
+    /// cell's three, has a run still to come that is not this method's.
+    ///
+    /// So the exit is chosen with the offtake -- a candidate site whose
+    /// chest would have no exit is rejected by name, the same way one whose
+    /// arm could not be belted its coal is -- and every coal run of the
+    /// expansion is laid with these two tiles closed to it
+    /// ([`crate::method::connect::connect_steps_reserving`]). The runs
+    /// detour; the exit stays open; the assembly method's supply link finds
+    /// it. **The reservation is declared here and not inferred in `connect`**
+    /// because the coal chests of the same cell legitimately spend every side
+    /// they have, and a rule that could not tell the two apart closed to the
+    /// third coal run the side it needed -- twice, five tests red each time.
+    exit: Vec<Position>,
+}
+
+/// Every side of the 1x1 chest at `sink` that could be kept free for the
+/// product's way out -- each as the tile an arm would stand on and the tile
+/// beyond it for its belt -- in preference order.
+///
+/// Opposite the arm first -- the product flows machine, arm, chest, onward,
+/// and a straight line is the shape a later run is most likely to want --
+/// then the remaining sides North, East, South, West, so the same layout
+/// always yields the same list. A side counts when both tiles take a belt
+/// and neither is in `taken` (the arrangement about to be placed, which
+/// `is_area_free` cannot see yet). Empty when no side qualifies. Which candidate is *kept* is
+/// [`choose_exit`]'s decision, made with the cell's runs in view.
+fn product_exits(
+    state: &PlanState,
+    sink: &Position,
+    arm: &Position,
+    taken: &[Position],
+) -> Vec<Vec<Position>> {
+    const BELT: &str = "transport-belt";
+    let away = (sink.x() - arm.x(), sink.y() - arm.y());
+    let spoken_for = |p: &Position| taken.iter().any(|t| Pos::from(t) == Pos::from(p));
+    let mut sides = vec![away];
+    sides.extend(
+        [(0., -1.), (1., 0.), (0., 1.), (-1., 0.)]
+            .into_iter()
+            .filter(|side| *side != away && *side != (-away.0, -away.1)),
+    );
+    sides
+        .into_iter()
+        .filter_map(|(dx, dy)| {
+            let neighbour = Position::new(sink.x() + dx, sink.y() + dy);
+            let beyond = Position::new(sink.x() + 2. * dx, sink.y() + 2. * dy);
+            if spoken_for(&neighbour) || spoken_for(&beyond) {
+                return None;
+            }
+            if !state.is_area_free(BELT, &neighbour) || !state.is_area_free(BELT, &beyond) {
+                return None;
+            }
+            // Ore is NOT excluded, deliberately: the exit is ground for an
+            // arm and a belt, and `connect` lays belts over ore wherever the
+            // route goes -- on seed 31337 the cell's own coal runs cross the
+            // copper patch. Excluding it here struck the only exit that was
+            // open, and left the sealed one.
+            Some(vec![neighbour, beyond])
+        })
+        .collect()
 }
 
 /// The tile centres a machine standing at `at` facing `facing` covers.
@@ -652,10 +752,18 @@ fn standing_offtake(state: &PlanState, at: &Position) -> Option<Offtake> {
         // `entities_within` is sorted by (x, y), so "the first" is a fixed
         // answer rather than an artefact of iteration order.
         if found.is_none() {
+            // A standing chest keeps whatever exit it still has; one with
+            // no side left is reported with none, because nothing here can
+            // free one and a replan must not refuse the cell over it.
+            let exit = product_exits(state, &sink.position, &arm.position, &[])
+                .into_iter()
+                .next()
+                .unwrap_or_default();
             found = Some(Offtake {
                 arm: arm.position.clone(),
                 facing,
                 sink: sink.position.clone(),
+                exit,
             });
         }
     }
@@ -783,6 +891,17 @@ fn plan_offtake(
                 note("no side left to belt the arm its coal");
                 continue;
             }
+            // And the chest needs a way OUT, chosen now and kept free from
+            // every coal run this expansion lays -- see `Offtake::exit`.
+            let mut taken_by_arm = taken.clone();
+            taken_by_arm.push(arm.clone());
+            let Some(exit) = product_exits(state, &sink, &arm, &taken_by_arm)
+                .into_iter()
+                .next()
+            else {
+                note("no side left on the container to carry the product away");
+                continue;
+            };
             let Some(arm_facing) = crate::method::connect::inserter_facing(anchor, &sink) else {
                 note("not cardinal");
                 continue;
@@ -809,6 +928,7 @@ fn plan_offtake(
                 arm,
                 facing: arm_facing,
                 sink,
+                exit,
             });
         }
     }
@@ -913,14 +1033,29 @@ fn nearest_belt_of(steps: &[Step], at: &Position) -> Option<FactorioEntity> {
 /// One cell per call and not `n`, because the belts of cell `k` only exist
 /// after cell `k` has been *belted*, which happens in the caller's loop body
 /// and not here.
+///
+/// `reserved` is the ground earlier cells' product exits hold
+/// ([`Offtake::exit`]). The siting is asked of a **fork with a belt standing
+/// on each of those tiles**, because `plan_cells` reads the state and
+/// nothing else, and a cell packed onto another cell's exit would spend it
+/// as surely as a coal run would. The real `ctx.state` gets the cell's
+/// parts and no placeholder.
 fn site_one_cell(
     ctx: &mut ExpansionCtx,
     spec: &CellSpec,
     from: &Position,
     steps: &mut Vec<Step>,
+    reserved: &[Position],
 ) -> Result<Vec<Cell>, PlannerError> {
+    const BELT: &str = "transport-belt";
+    let mut siting = ctx.state.fork();
+    for tile in reserved {
+        if let Some(placeholder) = sized(&siting, BELT, tile, Direction::North) {
+            siting.create_entity(placeholder);
+        }
+    }
     let fresh = crate::method::produce::plan_cells(
-        &ctx.state,
+        &siting,
         from,
         spec,
         1,
@@ -933,6 +1068,396 @@ fn site_one_cell(
         IGNITION_TICKS,
     ));
     Ok(fresh)
+}
+
+/// Belt one cell: its coal chest (sited or reused), the haul into it, the
+/// branch that fuels the offtake arm, and the two burners' runs in whichever
+/// order both can be laid on the surface. Pushes the steps onto `steps` and
+/// the entities into `ctx.state`, or refuses by name having placed only what
+/// stood before the refusing run -- every `feed` keeps `connect`'s promise.
+///
+/// A function rather than the loop body it was, because [`Sustain::expand`]
+/// runs it on **forks** to choose the offtake's exit -- see [`choose_exit`].
+#[allow(clippy::too_many_arguments)]
+fn belt_cell(
+    ctx: &mut ExpansionCtx,
+    steps: &mut Vec<Step>,
+    spec: &CellSpec,
+    cell: &Cell,
+    offtake: &Offtake,
+    source: &FuelSource,
+    buffer: &FactorioEntity,
+    plate_chests: &[Position],
+    reserved: &[Position],
+) -> Result<(), PlannerError> {
+    // A chest beside the cell, hauled to from the source. Reused when
+    // one already stands, for the replan.
+    // The nearest chest that is not the SOURCE's own. Excluding it by
+    // name is load-bearing and not defensive: on a map whose two
+    // patches are close -- which is the only kind this arrangement
+    // works on -- the source buffer falls inside this radius, and
+    // without the exclusion the haul is planned from that chest to
+    // itself and refuses with `from` and `to` the same position.
+    // Found by the planner's own tests once the radius was widened.
+    //
+    // # And not a chest with no side left
+    //
+    // Measured 2026-09-09 on seed 31337 at `sustain:iron-plate:30`:
+    // the nearest chest to cell 2 was cell 1's own local buffer at
+    // `[0.5, -31.5]`, all four sides spent -- its unload arm north,
+    // its two arms west and south, and the incoming haul's own belt
+    // hugging it east -- and the run to cell 2's drill refused with
+    // those four tiles named. That refusal was read for a night as a
+    // wall an underground pair would cross; it is a chest with no
+    // perimeter, one entity along from the shape `room_to_route`
+    // guards a *new* chest against. So a standing chest is a
+    // candidate only while a side of it still takes an arm and a
+    // belt -- `room_to_fuel`'s question -- **unless this cell's two
+    // burners are already fed**, when no run will leave the chest at
+    // all and a replan must keep reusing it rather than add a chest
+    // beside a finished cell.
+    //
+    // **One side per run, not "a side."** Measured next, same seed,
+    // same goal: cell 1's chest had exactly one side left, passed
+    // the any-side test, was taken as cell 2's chest, and cell 2's
+    // drill run took that side -- so its furnace run refused on the
+    // same four tiles one call later. A cell brings as many runs as
+    // it has unfed burners, and the chest must have that many sides.
+    let runs_needed = u32::from(!fed_by_machine(&ctx.state, &cell.drill))
+        + u32::from(!fed_by_machine(&ctx.state, &cell.furnace));
+    let mut candidates: Vec<FactorioEntity> = ctx
+        .state
+        .entities_within(&cell.furnace, LOCAL_BUFFER_RADIUS)
+        .into_iter()
+        .filter(|e| {
+            e.name == BUFFER
+                && Pos::from(&e.position) != Pos::from(&source.buffer)
+                && !plate_chests
+                    .iter()
+                    .any(|sink| Pos::from(sink) == Pos::from(&e.position))
+                && free_sides(&ctx.state, &e.position) >= runs_needed
+        })
+        .collect();
+    // Nearest first, by an ordering that is total and float-free at
+    // the comparison -- `entities_within` sorts by (x, y), which is
+    // deterministic but is not "closest to the cell".
+    candidates.sort_by(|a, b| {
+        let d = |e: &FactorioEntity| {
+            (e.position.x() - cell.furnace.x()).hypot(e.position.y() - cell.furnace.y())
+        };
+        d(a).total_cmp(&d(b))
+    });
+    let local = match candidates.into_iter().next() {
+        Some(existing) => existing.position,
+        None => {
+            let at = crate::method::util::free_area_near_where(
+                &ctx.state,
+                &cell.furnace,
+                BUFFER,
+                |at| room_to_route(&ctx.state, at),
+            )
+            .ok_or_else(|| PlannerError::SustainNoFuelSource {
+                fuel: FUEL.into(),
+                radius: FUEL_SEARCH_RADIUS,
+            })?;
+            steps.push(Step::Subgoal(Goal::Have {
+                item: BUFFER.into(),
+                count: 1,
+                whose: Holder::Share(ctx.chain_actor),
+                via: None,
+            }));
+            if let Some(step) = place_buffer(ctx, &at) {
+                steps.push(step);
+            }
+            at
+        }
+    };
+    let local_entity = sized(&ctx.state, BUFFER, &local, Direction::North).ok_or_else(|| {
+        PlannerError::SustainNoFuelSource {
+            fuel: FUEL.into(),
+            radius: FUEL_SEARCH_RADIUS,
+        }
+    })?;
+    if !fed_by_machine(&ctx.state, &local) {
+        // # Hauled from the nearest coal chest with a side to spare
+        //
+        // Not always from the source. `connect_steps` searches one
+        // window of `2 * SEARCH_RADIUS` tiles centred on the haul's
+        // origin, and on seed 31337 the second cell's chest sits 31
+        // tiles from the source (measured 2026-09-09: `[16.5, -26.5]`
+        // to `[-14.5, -38.5]`, refused as "further apart than one
+        // search window reaches"); the source also has, by its own
+        // budget above, one side for hauls. So the haul leaves the
+        // nearest [`BUFFER`] that carries coal -- the source or an
+        // earlier cell's chest, whichever is closest -- and still has
+        // a side an arm and a belt fit on. The source is what a
+        // single-cell plan finds, so that plan is unchanged; a chain
+        // is what a second cell finds. Nothing here bounds the
+        // chain's throughput: one arm's worth of coal into a chest
+        // feeds many burners, and the rate is measured live.
+        let mut hauls_from: Vec<FactorioEntity> = ctx
+            .state
+            .entities_within(&local, enclosure_reach())
+            .into_iter()
+            .filter(|e| {
+                e.name == BUFFER
+                    && Pos::from(&e.position) != Pos::from(&local)
+                    && !plate_chests
+                        .iter()
+                        .any(|sink| Pos::from(sink) == Pos::from(&e.position))
+                    && (Pos::from(&e.position) == Pos::from(&source.buffer)
+                        || fed_by_machine(&ctx.state, &e.position))
+                    && room_to_fuel(&ctx.state, &e.position, &[])
+            })
+            .collect();
+        hauls_from.sort_by(|a, b| {
+            let d =
+                |e: &FactorioEntity| (e.position.x() - local.x()).hypot(e.position.y() - local.y());
+            d(a).total_cmp(&d(b))
+        });
+        let origin = hauls_from
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| buffer.clone());
+        steps.extend(feed(ctx, &origin, &local_entity, reserved)?);
+    }
+    // # And the offtake arm needs coal, which it cannot get for itself
+    //
+    // The property the rest of this arrangement rests on -- **a burner
+    // inserter takes its own fuel out of the coal it is moving** -- is
+    // a property of the *cargo*, not of the arm. Every other arm here
+    // is on a coal run and so refuels itself; this one moves iron
+    // plates and can never take a plate as fuel. Left with only an
+    // ignition charge it would stop as soon as that coal burned
+    // through, and the cell would go quietly back to filling its
+    // output slot -- the failure this whole block exists to remove,
+    // returning by the back door.
+    //
+    // It needs no ignition charge, because **an arm being filled does
+    // not have to swing to receive**: `run-1788679826-02267` placed
+    // eight arms with no charge at all and they all started.
+    //
+    // ## Why the coal is branched off a BELT and not run from the chest
+    //
+    // Measured, offline, against seed 31337 and against the crate's own
+    // fixture. A fourth run leaving the cell's coal buffer is what this
+    // first tried, and **a 1x1 chest cannot carry four**: it has four
+    // perimeter tiles, each run claims one plus the cell beyond it, and
+    // the belts of the earlier runs curl around the rest. Three runs
+    // (haul in, drill, furnace) is the proven budget -- the fourth
+    // refused at the *furnace*, with the chest's own four neighbours
+    // named, so the cost fell on the run that matters most.
+    //
+    // A branch off a belt costs no chest perimeter at all. An inserter
+    // takes items off a belt exactly as it takes them out of a chest,
+    // and the arm doing it is on coal, so it self-fuels like every
+    // other arm here.
+    //
+    // **Every belt this method places carries coal**, which is what
+    // makes "the nearest belt" a safe source. That is a property of
+    // this method and not of the map: a belt somebody else built inside
+    // the cell would be picked up by the same search, and nothing here
+    // could tell.
+    //
+    // ## And the branch is laid HERE, before the drill and furnace runs
+    //
+    // Measured both ways against seed 31337's dump, which is the only
+    // reason this sits between the haul and the two cell runs rather
+    // than at the end where it reads better. Laid last, the arm's
+    // remaining sides have been taken by the drill's and the furnace's
+    // belts and the branch refuses -- on the real map, with the tap belt
+    // diagonal to the arm and all four of its neighbours named. Laid
+    // here, only the haul's belts exist, the arm still has two open
+    // sides, and the two cell runs route around what this leaves. The
+    // fixture accepts either order; the real map accepts only this one,
+    // which is the direction that decides.
+    let arm_entity = sized(&ctx.state, ARM, &offtake.arm, offtake.facing).ok_or_else(|| {
+        PlannerError::SustainNoOfftake {
+            item: spec.item.clone(),
+            machine: ARM.into(),
+            at: offtake.arm.to_string(),
+            why: format!("{ARM} is not a prototype in this world"),
+        }
+    })?;
+    if !fed_by_machine(&ctx.state, &offtake.arm) {
+        // # Every coal belt this plan knows about, not only this
+        // cell's own slice
+        //
+        // `coal_runs_from` scoped the search to the runs *this* cell
+        // laid, which is right for the first cell and wrong for every
+        // one after it. Cells 2..n share the first cell's coal buffer
+        // -- correctly, that is what stops a second haul from the
+        // source -- so `feed` returns no steps and the slice is
+        // **empty**. Measured offline against seed 31337: with the
+        // plate-chest exclusion above in place, cell 2 chose
+        // `local = [0.5, -31.5]`, cell 1's coal chest, read it as
+        // already fed, laid nothing, and refused with
+        // `the cell's coal runs laid no belt to branch the offtake
+        // arm's own fuel off`. The belts existed; this call could not
+        // see them.
+        //
+        // Widening the *source* set cannot change the ordering the
+        // comment below is about -- the branch is still laid here,
+        // before the drill and furnace runs -- and it only ever adds
+        // candidates to a nearest-wins search. Every belt this method
+        // places carries coal, which is what makes any of them a legal
+        // tap; that caveat is unchanged and is stated below.
+        let tap =
+            nearest_belt_of(steps, &offtake.arm).ok_or_else(|| PlannerError::SustainNoOfftake {
+                item: spec.item.clone(),
+                machine: ARM.into(),
+                at: offtake.arm.to_string(),
+                why: "the cell's coal runs laid no belt to branch the offtake arm's own \
+                      fuel off"
+                    .into(),
+            })?;
+        steps.extend(feed(ctx, &tap, &arm_entity, reserved)?);
+    }
+    // # The two burners, in whichever order both can be fed
+    //
+    // They share a boundary and box each other in with the offtake
+    // arm and their own runs, and the first run's ROUTE can spend
+    // the second machine's last open side on its way past -- which
+    // no count taken before either run is laid can see. Measured
+    // 2026-09-09 (seed 31337, `sustain:iron-plate:30`): drill first
+    // laid the second cell's drill run down its furnace's last side
+    // and the furnace's run refused with all eight perimeter tiles
+    // named; furnace first did the same to the drill in this
+    // module's own fixture. So the drill-first order every earlier
+    // plan was made in is tried on a fork, and only when it refuses
+    // is the other order taken for real. A plan that fed both before
+    // is byte-identical; one that refused gets the order that fits.
+    // The fork's action ids are discarded with it.
+    let drill = sized(&ctx.state, DRILL, &cell.drill, cell.facing);
+    let furnace = sized(&ctx.state, FURNACE, &cell.furnace, Direction::North);
+    //
+    // **And a tunnel counts against an order, not merely a refusal.**
+    // With the product exit reserved ([`Offtake::exit`]) the ground
+    // round a cell is tighter than it was, and on this module's own
+    // fixture the drill-first order "fits" by sending the furnace's
+    // run under two belt rows -- a pair the force cannot craft at
+    // t=0, so the plan then refuses on `underground-belt` three
+    // frames up with no word about the cell. Furnace first lays both
+    // runs on the surface. So both orders are tried on forks and
+    // the one with fewer tunnels is taken, drill first on a tie,
+    // which keeps every plan that never tunnelled byte-identical.
+    let cost_of = |order: [&Option<FactorioEntity>; 2]| -> Option<usize> {
+        let mut trial = ExpansionCtx::new(ctx.state.fork(), ctx.chain_actor);
+        let mut tunnels = 0usize;
+        for machine in order.into_iter().flatten() {
+            tunnels += tunnels_in(&feed(&mut trial, &local_entity, machine, reserved).ok()?);
+        }
+        Some(tunnels)
+    };
+    let drill_first = cost_of([&drill, &furnace]);
+    let order = match drill_first {
+        Some(0) => [&drill, &furnace],
+        _ => match (drill_first, cost_of([&furnace, &drill])) {
+            (Some(a), Some(b)) if b < a => [&furnace, &drill],
+            (Some(_), _) => [&drill, &furnace],
+            (None, _) => [&furnace, &drill],
+        },
+    };
+    for machine in order.into_iter().flatten() {
+        steps.extend(feed(ctx, &local_entity, machine, reserved)?);
+    }
+    Ok(())
+}
+
+/// More than any count of tunnels a cell could lay: the cost of an exit
+/// that is sealed in, so it sorts after every exit that is not.
+const GRID_CELLS: usize =
+    factorio_bot_core::graph::enclosure::GRID * factorio_bot_core::graph::enclosure::GRID;
+
+/// How many underground halves `steps` places.
+fn tunnels_in(steps: &[Step]) -> usize {
+    steps
+        .iter()
+        .filter(|step| {
+            matches!(step, Step::Act(action)
+                if matches!(&action.kind, crate::action::ActionKind::Place { entity }
+                    if entity.name == crate::method::connect::UNDERGROUND))
+        })
+        .count()
+}
+
+/// Which of the offtake's candidate exits to keep, decided by laying the
+/// rest of the cell on a fork with each one reserved and taking the first
+/// that lets every coal run stay on the surface.
+///
+/// # The exit is chosen with the runs that come next in view
+///
+/// A reservation is a wall to the runs it is kept from, and where it stands
+/// decides where they bend. The straight-line exit -- opposite the arm -- is
+/// the right default and was wrong on this module's own fixture: it sat in
+/// the corridor the branch to the offtake arm wanted, the branch looped round
+/// three sides of the cell instead, and the furnace's run then had nowhere
+/// left but under two belt rows, with a pair the force cannot craft at t=0.
+/// No count taken before the runs are laid can see that. So the candidates
+/// are tried in preference order on forks -- the same trial [`belt_cell`]
+/// itself runs for the two burners' order -- and the plan is made with the
+/// first exit under which no run tunnels; failing that, the exit under which
+/// the fewest do; failing that, empty, and the caller falls back to the first
+/// candidate so the real run refuses by name.
+///
+/// This is the "ordering answer" to the perimeter budget: the budget is
+/// settled across the whole expansion by *trying the expansion*, rather than
+/// by a rule about chests that cannot know which run is still to come.
+#[allow(clippy::too_many_arguments)]
+fn choose_exit(
+    ctx: &ExpansionCtx,
+    steps: &[Step],
+    spec: &CellSpec,
+    cell: &Cell,
+    offtake: &Offtake,
+    source: &FuelSource,
+    buffer: &FactorioEntity,
+    plate_chests: &[Position],
+    reserved: &[Position],
+    candidates: Vec<Vec<Position>>,
+) -> Vec<Position> {
+    let mut best: Option<(usize, Vec<Position>)> = None;
+    for exit in candidates {
+        let mut kept: Vec<Position> = reserved.to_vec();
+        kept.extend(exit.iter().cloned());
+        let mut trial = ExpansionCtx::new(ctx.state.fork(), ctx.chain_actor);
+        let mut laid = steps.to_vec();
+        let trial_offtake = Offtake {
+            exit: exit.clone(),
+            ..offtake.clone()
+        };
+        if belt_cell(
+            &mut trial,
+            &mut laid,
+            spec,
+            cell,
+            &trial_offtake,
+            source,
+            buffer,
+            plate_chests,
+            &kept,
+        )
+        .is_err()
+        {
+            continue;
+        }
+        // An exit the cell's own belts have ringed is kept for nothing: the
+        // run out would tunnel, on a recipe the force may not have. Measured
+        // on seed 31337 -- the east exit stayed free and the supply link
+        // crossed the furnace's coal row with a pair, which put `logistics`
+        // and 9,000 research ticks into a plan for six red packs.
+        let sealed = exit
+            .last()
+            .is_some_and(|belt| !crate::method::connect::belt_reaches_open_ground(&trial, belt));
+        let cost = tunnels_in(&laid[steps.len()..]) + if sealed { GRID_CELLS } else { 0 };
+        if cost == 0 {
+            return exit;
+        }
+        if best.as_ref().is_none_or(|(c, _)| cost < *c) {
+            best = Some((cost, exit));
+        }
+    }
+    best.map(|(_, exit)| exit).unwrap_or_default()
 }
 
 impl Method for Sustain {
@@ -1026,6 +1551,19 @@ impl Method for Sustain {
         // The smelting cells, reusing whatever already stands.
         let mut cells = crate::method::produce::standing_cells(&ctx.state, &spec);
         cells.truncate(needed as usize);
+        // # The ground this expansion has spoken for, before a single run
+        //
+        // Every cell's product exit ([`Offtake::exit`]): standing cells'
+        // first, then each planned cell's as its offtake is sited. Handed to
+        // every siting and every `feed` from here on, and seeded before the
+        // first of either for the same reason the plate-chest exclusion
+        // below is accumulated across cells -- a run, or a cell, that does
+        // not know about a chest's exit will stand on it.
+        let mut reserved: Vec<Position> = cells
+            .iter()
+            .filter_map(|cell| standing_offtake(&ctx.state, &cell.furnace))
+            .flat_map(|offtake| offtake.exit)
+            .collect();
         // # One cell at a time, and the rest sited AFTER their predecessors'
         // belts exist
         //
@@ -1050,7 +1588,13 @@ impl Method for Sustain {
         // and not about the first.
         let mut to_build = needed.saturating_sub(cells.len() as u32);
         if to_build > 0 {
-            cells.extend(site_one_cell(ctx, &spec, &source.buffer, &mut steps)?);
+            cells.extend(site_one_cell(
+                ctx,
+                &spec,
+                &source.buffer,
+                &mut steps,
+                &reserved,
+            )?);
             to_build -= 1;
         }
 
@@ -1090,7 +1634,7 @@ impl Method for Sustain {
                     radius: FUEL_SEARCH_RADIUS,
                 }
             })?;
-        steps.extend(feed(ctx, &buffer, &coal_drill)?);
+        steps.extend(feed(ctx, &buffer, &coal_drill, &reserved)?);
         // # Every cell's PLATE chest, not only this one's
         //
         // The local-buffer search below takes "the nearest [`BUFFER`] that is
@@ -1162,6 +1706,7 @@ impl Method for Sustain {
             // while coal and ore held flat at ~16/min. Nothing took the plates
             // away, so the output slot filled and the machine throttled itself.
             // The arrangement sustained a *window*, not a rate.
+            let was_standing = standing.is_some();
             let offtake = match standing {
                 Some(existing) => existing,
                 None => {
@@ -1207,275 +1752,61 @@ impl Method for Sustain {
                 plate_chests.push(offtake.sink.clone());
             }
 
-            // A chest beside the cell, hauled to from the source. Reused when
-            // one already stands, for the replan.
-            // The nearest chest that is not the SOURCE's own. Excluding it by
-            // name is load-bearing and not defensive: on a map whose two
-            // patches are close -- which is the only kind this arrangement
-            // works on -- the source buffer falls inside this radius, and
-            // without the exclusion the haul is planned from that chest to
-            // itself and refuses with `from` and `to` the same position.
-            // Found by the planner's own tests once the radius was widened.
-            //
-            // # And not a chest with no side left
-            //
-            // Measured 2026-09-09 on seed 31337 at `sustain:iron-plate:30`:
-            // the nearest chest to cell 2 was cell 1's own local buffer at
-            // `[0.5, -31.5]`, all four sides spent -- its unload arm north,
-            // its two arms west and south, and the incoming haul's own belt
-            // hugging it east -- and the run to cell 2's drill refused with
-            // those four tiles named. That refusal was read for a night as a
-            // wall an underground pair would cross; it is a chest with no
-            // perimeter, one entity along from the shape `room_to_route`
-            // guards a *new* chest against. So a standing chest is a
-            // candidate only while a side of it still takes an arm and a
-            // belt -- `room_to_fuel`'s question -- **unless this cell's two
-            // burners are already fed**, when no run will leave the chest at
-            // all and a replan must keep reusing it rather than add a chest
-            // beside a finished cell.
-            //
-            // **One side per run, not "a side."** Measured next, same seed,
-            // same goal: cell 1's chest had exactly one side left, passed
-            // the any-side test, was taken as cell 2's chest, and cell 2's
-            // drill run took that side -- so its furnace run refused on the
-            // same four tiles one call later. A cell brings as many runs as
-            // it has unfed burners, and the chest must have that many sides.
-            let runs_needed = u32::from(!fed_by_machine(&ctx.state, &cell.drill))
-                + u32::from(!fed_by_machine(&ctx.state, &cell.furnace));
-            let mut candidates: Vec<FactorioEntity> = ctx
-                .state
-                .entities_within(&cell.furnace, LOCAL_BUFFER_RADIUS)
-                .into_iter()
-                .filter(|e| {
-                    e.name == BUFFER
-                        && Pos::from(&e.position) != Pos::from(&source.buffer)
-                        && !plate_chests
-                            .iter()
-                            .any(|sink| Pos::from(sink) == Pos::from(&e.position))
-                        && free_sides(&ctx.state, &e.position) >= runs_needed
-                })
-                .collect();
-            // Nearest first, by an ordering that is total and float-free at
-            // the comparison -- `entities_within` sorts by (x, y), which is
-            // deterministic but is not "closest to the cell".
-            candidates.sort_by(|a, b| {
-                let d = |e: &FactorioEntity| {
-                    (e.position.x() - cell.furnace.x()).hypot(e.position.y() - cell.furnace.y())
-                };
-                d(a).total_cmp(&d(b))
-            });
-            let local = match candidates.into_iter().next() {
-                Some(existing) => existing.position,
-                None => {
-                    let at = crate::method::util::free_area_near_where(
-                        &ctx.state,
-                        &cell.furnace,
-                        BUFFER,
-                        |at| room_to_route(&ctx.state, at),
-                    )
-                    .ok_or_else(|| PlannerError::SustainNoFuelSource {
-                        fuel: FUEL.into(),
-                        radius: FUEL_SEARCH_RADIUS,
-                    })?;
-                    steps.push(Step::Subgoal(Goal::Have {
-                        item: BUFFER.into(),
-                        count: 1,
-                        whose: Holder::Share(ctx.chain_actor),
-                        via: None,
-                    }));
-                    if let Some(step) = place_buffer(ctx, &at) {
-                        steps.push(step);
-                    }
-                    at
-                }
-            };
-            let local_entity =
-                sized(&ctx.state, BUFFER, &local, Direction::North).ok_or_else(|| {
-                    PlannerError::SustainNoFuelSource {
-                        fuel: FUEL.into(),
-                        radius: FUEL_SEARCH_RADIUS,
-                    }
-                })?;
-            if !fed_by_machine(&ctx.state, &local) {
-                // # Hauled from the nearest coal chest with a side to spare
-                //
-                // Not always from the source. `connect_steps` searches one
-                // window of `2 * SEARCH_RADIUS` tiles centred on the haul's
-                // origin, and on seed 31337 the second cell's chest sits 31
-                // tiles from the source (measured 2026-09-09: `[16.5, -26.5]`
-                // to `[-14.5, -38.5]`, refused as "further apart than one
-                // search window reaches"); the source also has, by its own
-                // budget above, one side for hauls. So the haul leaves the
-                // nearest [`BUFFER`] that carries coal -- the source or an
-                // earlier cell's chest, whichever is closest -- and still has
-                // a side an arm and a belt fit on. The source is what a
-                // single-cell plan finds, so that plan is unchanged; a chain
-                // is what a second cell finds. Nothing here bounds the
-                // chain's throughput: one arm's worth of coal into a chest
-                // feeds many burners, and the rate is measured live.
-                let mut hauls_from: Vec<FactorioEntity> = ctx
-                    .state
-                    .entities_within(&local, enclosure_reach())
-                    .into_iter()
-                    .filter(|e| {
-                        e.name == BUFFER
-                            && Pos::from(&e.position) != Pos::from(&local)
-                            && !plate_chests
-                                .iter()
-                                .any(|sink| Pos::from(sink) == Pos::from(&e.position))
-                            && (Pos::from(&e.position) == Pos::from(&source.buffer)
-                                || fed_by_machine(&ctx.state, &e.position))
-                            && room_to_fuel(&ctx.state, &e.position, &[])
-                    })
-                    .collect();
-                hauls_from.sort_by(|a, b| {
-                    let d = |e: &FactorioEntity| {
-                        (e.position.x() - local.x()).hypot(e.position.y() - local.y())
-                    };
-                    d(a).total_cmp(&d(b))
-                });
-                let origin = hauls_from
-                    .into_iter()
-                    .next()
-                    .unwrap_or_else(|| buffer.clone());
-                steps.extend(feed(ctx, &origin, &local_entity)?);
-            }
-            // # And the offtake arm needs coal, which it cannot get for itself
-            //
-            // The property the rest of this arrangement rests on -- **a burner
-            // inserter takes its own fuel out of the coal it is moving** -- is
-            // a property of the *cargo*, not of the arm. Every other arm here
-            // is on a coal run and so refuels itself; this one moves iron
-            // plates and can never take a plate as fuel. Left with only an
-            // ignition charge it would stop as soon as that coal burned
-            // through, and the cell would go quietly back to filling its
-            // output slot -- the failure this whole block exists to remove,
-            // returning by the back door.
-            //
-            // It needs no ignition charge, because **an arm being filled does
-            // not have to swing to receive**: `run-1788679826-02267` placed
-            // eight arms with no charge at all and they all started.
-            //
-            // ## Why the coal is branched off a BELT and not run from the chest
-            //
-            // Measured, offline, against seed 31337 and against the crate's own
-            // fixture. A fourth run leaving the cell's coal buffer is what this
-            // first tried, and **a 1x1 chest cannot carry four**: it has four
-            // perimeter tiles, each run claims one plus the cell beyond it, and
-            // the belts of the earlier runs curl around the rest. Three runs
-            // (haul in, drill, furnace) is the proven budget -- the fourth
-            // refused at the *furnace*, with the chest's own four neighbours
-            // named, so the cost fell on the run that matters most.
-            //
-            // A branch off a belt costs no chest perimeter at all. An inserter
-            // takes items off a belt exactly as it takes them out of a chest,
-            // and the arm doing it is on coal, so it self-fuels like every
-            // other arm here.
-            //
-            // **Every belt this method places carries coal**, which is what
-            // makes "the nearest belt" a safe source. That is a property of
-            // this method and not of the map: a belt somebody else built inside
-            // the cell would be picked up by the same search, and nothing here
-            // could tell.
-            //
-            // ## And the branch is laid HERE, before the drill and furnace runs
-            //
-            // Measured both ways against seed 31337's dump, which is the only
-            // reason this sits between the haul and the two cell runs rather
-            // than at the end where it reads better. Laid last, the arm's
-            // remaining sides have been taken by the drill's and the furnace's
-            // belts and the branch refuses -- on the real map, with the tap belt
-            // diagonal to the arm and all four of its neighbours named. Laid
-            // here, only the haul's belts exist, the arm still has two open
-            // sides, and the two cell runs route around what this leaves. The
-            // fixture accepts either order; the real map accepts only this one,
-            // which is the direction that decides.
-            let arm_entity =
-                sized(&ctx.state, ARM, &offtake.arm, offtake.facing).ok_or_else(|| {
-                    PlannerError::SustainNoOfftake {
-                        item: spec.item.clone(),
-                        machine: ARM.into(),
-                        at: offtake.arm.to_string(),
-                        why: format!("{ARM} is not a prototype in this world"),
-                    }
-                })?;
-            if !fed_by_machine(&ctx.state, &offtake.arm) {
-                // # Every coal belt this plan knows about, not only this
-                // cell's own slice
-                //
-                // `coal_runs_from` scoped the search to the runs *this* cell
-                // laid, which is right for the first cell and wrong for every
-                // one after it. Cells 2..n share the first cell's coal buffer
-                // -- correctly, that is what stops a second haul from the
-                // source -- so `feed` returns no steps and the slice is
-                // **empty**. Measured offline against seed 31337: with the
-                // plate-chest exclusion above in place, cell 2 chose
-                // `local = [0.5, -31.5]`, cell 1's coal chest, read it as
-                // already fed, laid nothing, and refused with
-                // `the cell's coal runs laid no belt to branch the offtake
-                // arm's own fuel off`. The belts existed; this call could not
-                // see them.
-                //
-                // Widening the *source* set cannot change the ordering the
-                // comment below is about -- the branch is still laid here,
-                // before the drill and furnace runs -- and it only ever adds
-                // candidates to a nearest-wins search. Every belt this method
-                // places carries coal, which is what makes any of them a legal
-                // tap; that caveat is unchanged and is stated below.
-                let tap = nearest_belt_of(&steps, &offtake.arm).ok_or_else(|| {
-                    PlannerError::SustainNoOfftake {
-                        item: spec.item.clone(),
-                        machine: ARM.into(),
-                        at: offtake.arm.to_string(),
-                        why: "the cell's coal runs laid no belt to branch the offtake arm's own \
-                              fuel off"
-                            .into(),
-                    }
-                })?;
-                steps.extend(feed(ctx, &tap, &arm_entity)?);
-            }
-            // # The two burners, in whichever order both can be fed
-            //
-            // They share a boundary and box each other in with the offtake
-            // arm and their own runs, and the first run's ROUTE can spend
-            // the second machine's last open side on its way past -- which
-            // no count taken before either run is laid can see. Measured
-            // 2026-09-09 (seed 31337, `sustain:iron-plate:30`): drill first
-            // laid the second cell's drill run down its furnace's last side
-            // and the furnace's run refused with all eight perimeter tiles
-            // named; furnace first did the same to the drill in this
-            // module's own fixture. So the drill-first order every earlier
-            // plan was made in is tried on a fork, and only when it refuses
-            // is the other order taken for real. A plan that fed both before
-            // is byte-identical; one that refused gets the order that fits.
-            // The fork's action ids are discarded with it.
-            let drill = sized(&ctx.state, DRILL, &cell.drill, cell.facing);
-            let furnace = sized(&ctx.state, FURNACE, &cell.furnace, Direction::North);
-            let drill_first_fits = {
-                let mut trial = ExpansionCtx::new(ctx.state.fork(), ctx.chain_actor);
-                let mut fits = true;
-                for machine in [&drill, &furnace].into_iter().flatten() {
-                    if feed(&mut trial, &local_entity, machine).is_err() {
-                        fits = false;
-                        break;
-                    }
-                }
-                fits
-            };
-            let order = if drill_first_fits {
-                [&drill, &furnace]
+            // Standing: the exit it still has. Planned: the exit chosen by
+            // laying the rest of the cell on a fork with each candidate
+            // reserved, see `choose_exit`. Then the cell for real.
+            let exit = if was_standing {
+                offtake.exit.clone()
             } else {
-                [&furnace, &drill]
+                let candidates = product_exits(&ctx.state, &offtake.sink, &offtake.arm, &[]);
+                let chosen = choose_exit(
+                    ctx,
+                    &steps,
+                    &spec,
+                    cell,
+                    &offtake,
+                    &source,
+                    &buffer,
+                    &plate_chests,
+                    &reserved,
+                    candidates.clone(),
+                );
+                if chosen.is_empty() {
+                    candidates.into_iter().next().unwrap_or_default()
+                } else {
+                    chosen
+                }
             };
-            for machine in order.into_iter().flatten() {
-                steps.extend(feed(ctx, &local_entity, machine)?);
+            let offtake = Offtake { exit, ..offtake };
+            // And its exit joins the ground no coal run may take.
+            for tile in &offtake.exit {
+                if !reserved.iter().any(|r| Pos::from(r) == Pos::from(tile)) {
+                    reserved.push(tile.clone());
+                }
             }
+            belt_cell(
+                ctx,
+                &mut steps,
+                &spec,
+                cell,
+                &offtake,
+                &source,
+                &buffer,
+                &plate_chests,
+                &reserved,
+            )?;
             index += 1;
             // The next cell, sited now that this one's belts stand in the
             // overlay. See the note above the first cell for why the siting
             // is staggered rather than done in one call.
             if index == cells.len() && to_build > 0 {
-                cells.extend(site_one_cell(ctx, &spec, &source.buffer, &mut steps)?);
+                cells.extend(site_one_cell(
+                    ctx,
+                    &spec,
+                    &source.buffer,
+                    &mut steps,
+                    &reserved,
+                )?);
                 to_build -= 1;
             }
         }
@@ -2128,6 +2459,85 @@ mod tests {
     /// back to filling its output slot.
     ///
     /// So: a machine delivers into it, and no bot's hands do.
+    /// The plate chest keeps a way OUT once every coal run of the cell is
+    /// laid: one side an arm and a belt still fit on, and a run from that
+    /// chest to another can actually be made against the built world.
+    ///
+    /// `run-1788920460-08860` is the measurement: the cell stood and ran, and
+    /// the assembly half of the same bundle refused with the plate chest's
+    /// four neighbours named -- three of them spent by this method's own
+    /// coal runs passing by. Asked of the built world with `product_exit`,
+    /// which is `is_area_free`'s answer, and then of `connect` itself, which
+    /// is the caller that was refused.
+    ///
+    /// The exit is also asserted to be the one the offtake DECLARED, so a
+    /// green here cannot come from a chest that happened to keep a different
+    /// side: the reservation is what is under test, not the fixture's luck.
+    #[test]
+    fn the_plate_chest_keeps_a_side_for_the_product_to_leave_by() {
+        let roster = [BotId(1)];
+        let state = near_state();
+        let net = expand(&[goal()], &state, &registry_for(&roster), BotId(1))
+            .expect("iron and coal are within one belt window of each other");
+        let (built, _) = built_world(&net, &state);
+        let spec = cell_spec(&built, "iron-plate").expect("a stone furnace smelts iron");
+        let cells = crate::method::produce::standing_cells(&built, &spec);
+        let cell = cells.first().expect("a cell stands");
+        let offtake = standing_offtake(&built, &cell.furnace).expect("the furnace has an offtake");
+
+        assert_eq!(
+            offtake.exit.len(),
+            2,
+            "the standing plate chest at {} has no side left for its product to leave by",
+            offtake.sink
+        );
+        // The exit `standing_offtake` reads off the built world is the one
+        // `choose_exit` kept on this fixture -- EAST, not the straight-line
+        // north the preference order starts with, because north sat in the
+        // branch's corridor and cost the furnace's run a tunnel. Pinned so a
+        // green here cannot come from a chest that kept a side by luck.
+        assert_eq!(
+            offtake.exit,
+            vec![
+                Position::new(offtake.sink.x() + 1., offtake.sink.y()),
+                Position::new(offtake.sink.x() + 2., offtake.sink.y()),
+            ],
+            "the exit kept is the one the trial chose"
+        );
+        let tunnels = net
+            .actions()
+            .filter(|action| {
+                matches!(&action.kind, crate::action::ActionKind::Place { entity }
+                    if entity.name == crate::method::connect::UNDERGROUND)
+            })
+            .count();
+        assert_eq!(
+            tunnels, 0,
+            "and every coal run of the cell stayed on the surface"
+        );
+
+        // And the caller that was refused live: a run OUT of the plate chest.
+        let plate_chest = built
+            .entity_at(&offtake.sink)
+            .expect("the plate chest stands");
+        // Not on the exit itself: the nearest free tile IS the exit, and a
+        // chest standing there would be the test boxing in its own subject.
+        let away = crate::method::util::free_area_near_where(&built, &offtake.sink, BUFFER, |at| {
+            (at.x() - offtake.sink.x()).abs() + (at.y() - offtake.sink.y()).abs() > 3.
+        })
+        .expect("open ground for a chest to carry the plates to");
+        let mut out = ExpansionCtx::new(built.fork(), BotId(1));
+        let sink = sized(&out.state, BUFFER, &away, Direction::North).expect("a chest");
+        out.state.create_entity(sink.clone());
+        connect_steps_reserving(&mut out, &plate_chest, &sink, &spec.item, ARM, &[])
+            .unwrap_or_else(|refusal| {
+                panic!(
+                    "nothing can carry {} out of the plate chest at {}: {refusal}",
+                    spec.item, offtake.sink
+                )
+            });
+    }
+
     #[test]
     fn the_offtake_arm_is_belted_its_own_coal() {
         let roster = [BotId(1)];

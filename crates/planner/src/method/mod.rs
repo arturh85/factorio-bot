@@ -314,6 +314,44 @@ pub trait Method {
         true
     }
 
+    /// Would this method rather a **later** method in the registry took this
+    /// goal at this site?
+    ///
+    /// `find` consults methods in registration order and stops at the first
+    /// that claims and is applicable. That order is a *cost* ranking, and a
+    /// cost ranking fixed at registration cannot depend on the size of the
+    /// bill in front of it — which is exactly what separates `Chop` from
+    /// `Stockpile`. `Chop` is ordered ahead of `Stockpile` because for a bill
+    /// two swings cover outright the chest's round trips are most of the work
+    /// (the table in `registry_for` measured that). The same order then hands
+    /// `Chop` a 666-coal bill, which one bot swings at 28 times while three
+    /// stand idle.
+    ///
+    /// This is the escape hatch, and it is deliberately **not** a second
+    /// `applicable`: a method that yields here is saying "somebody after me is
+    /// better at *this* one", not "I cannot do it". If nothing after it claims
+    /// the goal, the goal goes unclaimed and the driver refuses by name —
+    /// which is the honest outcome, since a method that yields has said the
+    /// plan it would produce is the wrong one.
+    ///
+    /// It takes the [`GoalSite`] as well as the goal, and that is what makes
+    /// yielding terminate. `Stockpile` deals the bill out as supplier shares
+    /// expanded at [`GoalSite::converging`], and those shares come back round
+    /// to the very method that yielded. A size test alone would yield them
+    /// too, and the bill would fall through to whatever is last in the
+    /// registry — for coal that is `Mine`, and three bots hand-mining 666 coal
+    /// is 82,000 ticks of work against 12,960 ticks of swinging. Measured:
+    /// yielding on size alone took `producing:iron-plate:261` from 42,780
+    /// ticks to 35,616 with the roster busy and the *total work* nearly
+    /// sextupled, and regressed `gathered:crude-oil` from 2,330/354,699 to
+    /// 2,477/361,589.
+    ///
+    /// Defaults to `false`. A method that overrides it owes a reason a later
+    /// method is better, and a site test that stops the goal coming back.
+    fn yields_at(&self, _site: GoalSite, _goal: &Goal, _state: &PlanState) -> bool {
+        false
+    }
+
     /// Does this method's decomposition require several *produced* items to
     /// meet in one inventory?
     ///
@@ -455,7 +493,9 @@ impl MethodRegistry {
     pub fn find(&self, goal: &Goal, state: &PlanState, site: GoalSite) -> Option<&dyn Method> {
         self.methods
             .iter()
-            .find(|m| m.claims(site) && m.applicable(goal, state))
+            .find(|m| {
+                m.claims(site) && !m.yields_at(site, goal, state) && m.applicable(goal, state)
+            })
             .map(|m| m.as_ref())
     }
 

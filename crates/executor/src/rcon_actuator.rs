@@ -921,6 +921,45 @@ impl Actuator for RconActuator {
             .map_err(classify)
     }
 
+    async fn create_platform(
+        &self,
+        name: &str,
+        planet: &str,
+        starter_pack: &str,
+    ) -> Result<ActionTicks, ActuatorFailure> {
+        // No player, no reach check and no `Placement` to record: the call is
+        // force-level and builds nothing on this surface. The three names are
+        // validated by `FactorioRcon::create_space_platform`, which refuses
+        // anything that is not a plain Factorio name -- they land inside a Lua
+        // string the game executes, so that refusal is a sandbox boundary and
+        // not a tidiness check.
+        //
+        // The reply is the platform's name, which nothing downstream can use:
+        // the surface it will eventually own never reaches the world model
+        // (`mods/BotBridge/control.lua` drops every non-Nauvis chunk), so
+        // there is nothing here to attach it to. Discarded deliberately rather
+        // than plumbed to a reader that does not exist.
+        //
+        // **`classify` does not apply here and `ActionTicks::UNKNOWN` is the
+        // honest answer.** Every other dispatch on this type goes through a
+        // `*_timed` call that hands back an `ActionFailure` carrying the tick
+        // the game had reached; `create_space_platform` is a plain
+        // `/silent-command` with no `action_id` and no completion event, so
+        // there is no tick pair to report. Reporting a made-up one would put a
+        // number in the record that nothing measured.
+        //
+        // A refusal from the game is `Rejected`, not `NoVerdict`: the call
+        // distinguishes the two itself -- it answers `Err` with the game's own
+        // reason when the game refused, and with "the game answered nothing"
+        // when nothing came back -- so anything reaching here is a judgement
+        // that was made and read.
+        self.rcon
+            .create_space_platform(name, planet, starter_pack)
+            .await
+            .map_err(|e| ActuatorError::Rejected(e.to_string()).at(ActionTicks::UNKNOWN))?;
+        Ok(ActionTicks::UNKNOWN)
+    }
+
     async fn set_recipe(
         &self,
         bot: BotId,

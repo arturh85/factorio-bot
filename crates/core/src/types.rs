@@ -3471,6 +3471,21 @@ pub enum EntityType {
     ElectricPole,
     Generator,
     SolarPanel,
+    // The launch pad, added 2026-09-09 for the same reason and by the same
+    // argument as the three above: without it
+    // `EntityType::from_str("rocket-silo")` is an `Err`, `EntityGraph::add`
+    // drops the entity before its whitelist is consulted, and a rocket silo a
+    // live world already contains is **invisible by name**. That is not a
+    // cosmetic gap -- `method::orbit` looks a silo up to decide where the
+    // starter pack goes, and an invisible one makes `PlatformNeedsSilo` fire
+    // on a world where a silo is standing: a refusal that reads as a fact
+    // about the map and is a fact about this whitelist.
+    //
+    // Readable, not modelled. A silo draws no edges (`connect`'s match ends
+    // `_ => {}`) and `FlowGraph` prunes what it does not model, so this adds a
+    // node and the ability to name it, and claims nothing about rocket parts,
+    // cargo, or launches.
+    RocketSilo,
     FlyingText,
     StraightRail,
     CurvedRail,

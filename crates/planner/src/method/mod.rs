@@ -7,6 +7,7 @@ pub mod cellstock;
 pub mod connect;
 pub mod dispose;
 pub mod extract;
+pub mod orbit;
 pub mod fabricate;
 pub mod gather;
 pub mod have;

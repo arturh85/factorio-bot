@@ -482,6 +482,8 @@ fn refusal_for(err: &PlannerError) -> Option<PlanRefusal> {
         | PlannerError::NoExtractor { .. }
         | PlannerError::ExtractorLocked { .. }
         | PlannerError::ExtractionNotModelled { .. }
+        // A fact about the world a caller can act on: build a rocket silo.
+        | PlannerError::PlatformNeedsSilo { .. }
         | PlannerError::NoFluidBuffer { .. }
         | PlannerError::NoTankSite { .. }
         | PlannerError::NoPipeRoute { .. }
@@ -956,6 +958,50 @@ end
 -- @raise if the entity name is empty, or `unlocks` is present but not a
 --   non-empty string
 function goal.gathered(entity_name, opts)
+end
+"#,
+        ),
+    )?;
+    map_table.set(
+        "__doc_entry_orbiting",
+        String::from(
+            r#"
+--- builds a goal value: a space platform is in orbit of a planet
+--
+-- Pure, like `goal.have`. The third *act* goal beside `goal.extracted` and
+-- `goal.gathered`, and the one that opens Space Age: creating a platform is
+-- the `create-space-platform` research trigger of the `space-platform`
+-- technology, which is what unlocks the asteroid-collector, crusher and
+-- cargo-bay recipes. So it is not a late step -- it is the step the rest is
+-- behind.
+--
+-- The plan is a starter pack in a bot's hands, one force-level call, and one
+-- insert of the pack into a rocket the silo is already building. **Nothing
+-- launches it**: a silo with valid cargo and somewhere to send it launches
+-- itself, established live on 2.1.17.
+--
+-- **Both arguments default and the first platform does not move.** A
+-- `space-platform-thruster` costs 500 space science, so there is nothing to
+-- fuel a thruster with until after this goal is met; `planet` defaults to
+-- "nauvis" and `starter_pack` to "space-platform-starter-pack".
+--
+-- **It refuses without a rocket silo standing**, by name
+-- (`planner::platform_needs_silo`). Siting a silo, feeding it rocket parts and
+-- telling whether it is mid-build are outside what this planner models.
+--
+-- **The platform it creates is invisible to `world.*`.** The bridge drops
+-- every chunk that is not Nauvis', so nothing on a platform -- tile, entity or
+-- character -- reaches the model. The goal is satisfied by having done the
+-- act, which is what the game rewards; it says nothing about seeing the
+-- result.
+--
+-- `unlocks` is the same claim it is on `goal.produced`, and just as unchecked.
+-- @tparam[opt="nauvis"] string planet the planet to orbit
+-- @tparam[opt] table opts `{ starter_pack = "<item>", unlocks = "<technology>" }`
+-- @treturn table a goal value
+-- @raise if `planet` or `starter_pack` is present but not a non-empty string,
+--   or `unlocks` is present but not a non-empty string
+function goal.orbiting(planet, opts)
 end
 "#,
         ),
@@ -1711,6 +1757,15 @@ mod tests {
 
     #[async_trait]
     impl Actuator for StubActuator {
+        async fn create_platform(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+        ) -> Result<ActionTicks, ActuatorFailure> {
+            Ok(self.tick())
+        }
+
         async fn walk(
             &self,
             _bot: BotId,
@@ -2253,7 +2308,7 @@ mod tests {
             r#"
             local expected = { have=true, researched=true, producing=true,
                                produced=true, sustain=true,
-                               extracted=true, gathered=true,
+                               extracted=true, gathered=true, orbiting=true,
                                built=true, charted=true, all=true, plan=true, run=true,
                                start=true, holds=true, refusal=true }
             local actual = {}
@@ -2445,6 +2500,15 @@ mod tests {
 
     #[async_trait]
     impl Actuator for RecordingActuator {
+        async fn create_platform(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+        ) -> Result<ActionTicks, ActuatorFailure> {
+            self.note(BotId(1))
+        }
+
         async fn walk(
             &self,
             bot: BotId,

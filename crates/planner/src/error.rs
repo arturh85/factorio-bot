@@ -250,6 +250,34 @@ pub enum PlannerError {
     )]
     NoRoomToWork { goal: String, holders: u32 },
 
+    /// [`crate::Goal::Orbiting`] on a world with no rocket silo standing.
+    ///
+    /// A platform is delivered by a rocket, and this planner does none of the
+    /// three things that would put a silo under one: siting a 9x9 building,
+    /// feeding it rocket parts, or knowing whether it is currently mid-build.
+    /// So the goal refuses here rather than emitting a placement it cannot
+    /// cost -- [`PlannerError::NoExtractor`]'s reasoning, one rung up. Named
+    /// so a caller learns *which* step is not modelled instead of receiving a
+    /// makespan that is quietly missing a rocket silo.
+    #[error(
+        "a platform in orbit of {planet} is delivered by a rocket, and no {silo} stands in this \
+         world for one to launch from"
+    )]
+    #[diagnostic(
+        code(planner::platform_needs_silo),
+        help(
+            "build a rocket silo first; siting one, feeding it rocket parts and telling whether \
+             it is mid-build are all outside what this planner models"
+        )
+    )]
+    PlatformNeedsSilo {
+        /// The planet the platform was to orbit, as the goal named it.
+        planet: String,
+        /// The prototype that was looked for, so the message does not have to
+        /// be trusted to have spelled it the same way the search did.
+        silo: String,
+    },
+
     /// A Factorio 2.0 `research_trigger` technology whose trigger this planner
     /// has no goal for.
     ///

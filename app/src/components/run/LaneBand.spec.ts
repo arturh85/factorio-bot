@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import {describe, expect, it} from 'vitest';
 import {mount} from '@vue/test-utils';
+import {Event} from '@/api/types';
 import {loadFixtureRun} from '@/lib/fixtureRun';
 import LaneBand from './LaneBand.vue';
 
@@ -42,5 +43,24 @@ describe('LaneBand', () => {
         expect(failed.attributes('stroke')).toBe('var(--color-status-critical)');
         expect(Number(open.attributes('x')) + Number(open.attributes('width'))).toBeCloseTo(1000, 0);
         expect(open.find('title').text()).toContain('never settled');
+    });
+    it('draws an abandoned step as a hollow mark that does not count as work', () => {
+        const lanes = [{bot: 1, id: 9, action: 'abandoned: predecessor 5 failed', from_tick: 5000, to_tick: 5000, status: 'abandoned', error: 'abandoned: predecessor 5 failed'}];
+        const w = mount(LaneBand, {props: {scale, clock, cursor: run.lo, lanes, events: []}});
+        const seg = w.get('rect.segment');
+        expect(seg.attributes('fill')).toBe('none');
+        expect(seg.find('title').text()).toContain('never dispatched');
+        expect(w.text()).toContain('idle 100%');
+    });
+    it('draws a refused replan as a critical dashed line across every row', () => {
+        const events: Event[] = [
+            {kind: 'planning_timed', tick: 452, planning_ms: 1, paused: true, reason: null, tick_before: 452, tick_after: 452} as Event,
+            {kind: 'plan_created', tick: 452, milestone_index: 1, steps: 1, makespan: 1, bots: [1], plan: []} as Event,
+            {kind: 'planning_timed', tick: 48017, planning_ms: 1, paused: true, reason: null, tick_before: 48017, tick_after: 48017} as Event
+        ];
+        const w = mount(LaneBand, {props: {scale, clock, cursor: run.lo, lanes: run.lanes, events}});
+        const lines = w.findAll('line.replan-refused');
+        expect(lines).toHaveLength(1);
+        expect(w.text()).toContain('replan refused');
     });
 });

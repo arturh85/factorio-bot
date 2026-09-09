@@ -1,7 +1,7 @@
 import {describe, expect, it} from 'vitest';
 import {Event, Lane} from '@/api/types';
 import {loadFixtureRun} from './fixtureRun';
-import {idleIntervals, idleTicks, laneSegments, replanBoundaries, verbClass} from './runIdle';
+import {idleIntervals, idleTicks, laneSegments, refusedReplans, replanBoundaries, verbClass} from './runIdle';
 
 const lane = (bot: number, from: number, to: number | null, action = 'mine 1 coal', id: number | null = 1): Lane =>
     ({bot, id, action, from_tick: from, to_tick: to, status: to === null ? null : 'success', error: null});
@@ -60,5 +60,25 @@ describe('idleIntervals', () => {
         const gaps = idleIntervals(run.lanes, 1, {from: run.lo, to: run.hi});
         expect(gaps.length).toBe(85);
         expect(idleTicks(gaps)).toBe(6984);
+    });
+    it('excludes an abandoned zero-length lane from busy, so it does not shrink the idle figure', () => {
+        const gaps = idleIntervals(
+            [lane(1, 100, 200), {bot: 1, id: 9, action: 'abandoned: predecessor 5 failed', from_tick: 300, to_tick: 300, status: 'abandoned', error: null}],
+            1, scale
+        );
+        expect(gaps).toEqual([{from: 0, to: 100}, {from: 200, to: 1000}]);
+    });
+});
+
+const planningTimed = (tick: number): Event => ({kind: 'planning_timed', tick, planning_ms: 1, paused: true, reason: null, tick_before: tick, tick_after: tick} as Event);
+
+describe('refusedReplans', () => {
+    it('names a planning_timed with no plan_created before the next one, or the end of the log', () => {
+        expect(refusedReplans([planningTimed(452), {kind: 'plan_created', tick: 452, milestone_index: 1, steps: 1, makespan: 1, bots: [1], plan: []} as Event, planningTimed(48017)]))
+            .toEqual([48017]);
+    });
+    it('is empty when every planning_timed is followed by a plan_created', () => {
+        expect(refusedReplans([planningTimed(10), {kind: 'plan_created', tick: 12, milestone_index: 1, steps: 1, makespan: 1, bots: [1], plan: []} as Event]))
+            .toEqual([]);
     });
 });

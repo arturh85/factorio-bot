@@ -45,6 +45,32 @@ export function replanBoundaries(events: Event[]): number[] {
     return events.filter((e) => e.kind === 'plan_created').map((e) => e.tick).sort((a, b) => a - b);
 }
 
+/**
+ * The tick of every `planning_timed` that produced no plan, ascending.
+ *
+ * `planning_timed` is written by the plan itself, before `plan_created` --
+ * "written by the plan itself rather than folded into `plan_created` ... a
+ * plan that raised has no `plan_created` and still cost time"
+ * (`EventKind::PlanningTimed`'s own doc). So a `planning_timed` with no
+ * `plan_created` before the next `planning_timed`, or before the end of the
+ * log, is a replan that was attempted and refused -- real Space Age record:
+ * `run-1788923927-04849` has two `planning_timed` (452, 48017) and one
+ * `plan_created` (452), the second attempt refusing right after 48 abandoned
+ * steps.
+ */
+export function refusedReplans(events: Event[]): number[] {
+    const timed = events.filter((e) => e.kind === 'planning_timed').map((e) => e.tick).sort((a, b) => a - b);
+    const created = new Set(replanBoundaries(events));
+    const refused: number[] = [];
+    for (let i = 0; i < timed.length; i++) {
+        const from = timed[i];
+        const to = i + 1 < timed.length ? timed[i + 1] : Infinity;
+        const answered = [...created].some((t) => t >= from && t < to);
+        if (!answered) refused.push(from);
+    }
+    return refused;
+}
+
 export function laneSegments(lanes: Lane[], boundaries: number[]): LaneSegment[] {
     return lanes.map((l) => ({
         bot: l.bot,
@@ -78,7 +104,9 @@ export interface Interval {
  */
 export function idleIntervals(lanes: Lane[], bot: number, scale: Interval): Interval[] {
     const busy = lanes
-        .filter((l) => l.bot === bot)
+        // An abandoned step is not work: the bot never touched it, so its
+        // zero-length lane must not carve a gap out of the bot's idle time.
+        .filter((l) => l.bot === bot && l.status !== 'abandoned')
         .map((l) => ({from: Math.max(scale.from, l.from_tick), to: Math.min(scale.to, l.to_tick ?? scale.to)}))
         .filter((i) => i.to >= i.from)
         .sort((a, b) => a.from - b.from);

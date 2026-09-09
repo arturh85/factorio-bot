@@ -61,6 +61,7 @@ use crate::action::ActionKind;
 use crate::ids::{ActionId, BotId};
 use crate::network::ActionNetwork;
 use crate::state::PlanState;
+use factorio_bot_core::constants::BOT_FORCE;
 use factorio_bot_core::factorio::world::FactorioSurface;
 use factorio_bot_core::miette::Result;
 use factorio_bot_core::num_traits::FromPrimitive;
@@ -79,7 +80,10 @@ use std::sync::Arc;
 /// so `PlanState::from_world` over either is the state the supervisor's next
 /// round would build.
 ///
-/// Bots named in the snapshot are moved and given the snapshot's inventory;
+/// A technology the snapshot names is marked researched on the acting force
+/// (`BOT_FORCE`), so a recipe it unlocks reads open to `recipe_gate` -- the
+/// caller's stated hypothesis, never a fact off the record. Bots named in
+/// the snapshot are moved and given the snapshot's inventory;
 /// a bot the dump does not know is skipped and counted in
 /// [`Standing::unapplied`], because inventing a player is the fabricated
 /// roster this repo already warns about. Each entity's collision box is
@@ -145,6 +149,24 @@ pub fn world_with(
             standing.recipes_set += 1;
         }
     }
+    // Research is on the force, which lives in the globals; `probe` shares
+    // the world now, so `Arc::get_mut` is closed and this goes in through
+    // the force map's own interior mutability -- the door `update_force`
+    // uses.
+    for tech in &snapshot.researched {
+        let mut done = false;
+        if let Some(mut force) = world.globals.forces.get_mut(BOT_FORCE)
+            && let Some(technology) = force.technologies.get_mut(tech)
+        {
+            technology.researched = true;
+            done = true;
+        }
+        if done {
+            standing.researched += 1;
+        } else {
+            standing.unapplied += 1;
+        }
+    }
     (world, standing)
 }
 
@@ -201,6 +223,8 @@ pub struct Standing {
     pub chopped: usize,
     /// Resource tiles debited.
     pub mined: usize,
+    /// Technologies marked researched on the acting force.
+    pub researched: usize,
     /// What was asked for and not applied: actions this module does not
     /// model (crafts, inserts, walks, research...), a snapshot entity with
     /// no prototype to size it, a snapshot bot the dump has no player for.
@@ -494,14 +518,16 @@ mod tests {
                 position: at.clone(),
                 recipe: "iron-plate".to_string(),
             }],
+            researched: vec!["no-such-technology".to_string()],
             ..StandingSnapshot::default()
         };
         let (world, standing) = world_with(&base, &snapshot);
         assert_eq!(standing.placed, 1, "{standing:?}");
         assert_eq!(standing.recipes_set, 1, "{standing:?}");
         assert_eq!(
-            standing.unapplied, 2,
-            "the unknown prototype and the unknown bot are counted: {standing:?}"
+            standing.unapplied, 3,
+            "the unknown prototype, the unknown bot and the unknown technology are counted: \
+             {standing:?}"
         );
         let fresh = PlanState::from_world(world, &[BotId(1)]);
         let found = fresh.entity_at(&at).expect("the furnace stands");

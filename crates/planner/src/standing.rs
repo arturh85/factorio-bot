@@ -65,7 +65,46 @@ use factorio_bot_core::factorio::world::FactorioSurface;
 use factorio_bot_core::miette::Result;
 use factorio_bot_core::num_traits::FromPrimitive;
 use factorio_bot_core::types::Direction;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
+
+/// What a batch leaves done when `failed` fails: everything except it and
+/// every action downstream of it.
+///
+/// This is the executor's own rule -- a failed step abandons its dependents
+/// and nothing else (`abandoned: predecessor 643 failed`), while every other
+/// bot's work and the failed bot's independent steps go on. The live replans
+/// of 2026-09-09 met exactly this world: `take 10 copper-plate from the cell`
+/// failed and 48 steps behind it were abandoned, the science tail among
+/// them, while the copper cell and every coal run stood finished.
+///
+/// A cut by tick cannot produce this shape. The abandoned subtree is a
+/// dependency cone, not a suffix of the schedule: the supply link's first
+/// belt at `[27.5,-43.5]` stood while its arm did not, because the belt was
+/// upstream of the take and the arm downstream. That partial link is what
+/// the live replan then tripped over.
+pub fn survivors_of_failure(net: &ActionNetwork, failed: ActionId) -> BTreeSet<ActionId> {
+    let mut successors: BTreeMap<ActionId, Vec<ActionId>> = BTreeMap::new();
+    for action in net.actions() {
+        for (pred, _) in net.preds(action.id) {
+            successors.entry(pred).or_default().push(action.id);
+        }
+    }
+    let mut abandoned: BTreeSet<ActionId> = BTreeSet::new();
+    let mut frontier = vec![failed];
+    while let Some(id) = frontier.pop() {
+        if !abandoned.insert(id) {
+            continue;
+        }
+        if let Some(next) = successors.get(&id) {
+            frontier.extend(next.iter().copied());
+        }
+    }
+    net.actions()
+        .map(|action| action.id)
+        .filter(|id| !abandoned.contains(id))
+        .collect()
+}
 
 /// What [`world_after`] put on the surface, so a caller can say whether the
 /// standing world it is about to replan against actually has anything in it.
@@ -291,6 +330,40 @@ mod tests {
             fresh.entity_at(&at).unwrap().recipe.as_deref(),
             Some("iron-gear-wheel")
         );
+    }
+
+    /// A failure abandons its cone and nothing else.
+    #[test]
+    fn a_failure_abandons_its_dependents_and_spares_the_rest() {
+        let state = state();
+        let mut net = ActionNetwork::new();
+        let a = place(
+            &mut net,
+            FactorioEntity::new_stone_furnace(&Position::new(10.5, 10.5), Direction::North),
+        );
+        let b = place(
+            &mut net,
+            FactorioEntity::new_stone_furnace(&Position::new(14.5, 10.5), Direction::North),
+        );
+        let c = place(
+            &mut net,
+            FactorioEntity::new_stone_furnace(&Position::new(18.5, 10.5), Direction::North),
+        );
+        let other = place(
+            &mut net,
+            FactorioEntity::new_stone_furnace(&Position::new(30.5, 10.5), Direction::North),
+        );
+        net.link(a, b, 0);
+        net.link(b, c, 0);
+        let done = survivors_of_failure(&net, b);
+        assert!(done.contains(&a), "upstream of the failure is done");
+        assert!(!done.contains(&b), "the failed action itself is not");
+        assert!(!done.contains(&c), "downstream is abandoned");
+        assert!(done.contains(&other), "an unrelated action goes on");
+        let (world, standing) = world_after(&state, &net, |id| done.contains(&id)).unwrap();
+        assert_eq!(standing.placed, 2);
+        let fresh = PlanState::from_world(world, &[BotId(1)]);
+        assert!(fresh.entity_at(&Position::new(14.5, 10.5)).is_none());
     }
 
     /// Actions this module does not model are counted, not silently dropped.

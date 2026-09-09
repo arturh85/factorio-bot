@@ -38,7 +38,7 @@ use factorio_bot_core::serde_json;
 use factorio_bot_core::types::Position;
 use factorio_bot_planner::goal::{Goal, Holder};
 use factorio_bot_planner::method::have::registry_for;
-use factorio_bot_planner::standing::{Standing, world_after};
+use factorio_bot_planner::standing::{Standing, survivors_of_failure, world_after};
 use factorio_bot_planner::{
   ActionId, BotId, PlanReport, PlanState, PlannerError, StepKind, Ticks, pick_chain_actor,
   plan_best,
@@ -173,6 +173,18 @@ impl Subcommand for ThisCommand {
           .value_parser(value_parser!(u32))
           .requires("replan")
           .help("with --replan: only steps a schedule finishes by this tick count as built"),
+      )
+      .arg(
+        Arg::new("fail")
+          .long("fail")
+          .value_name("label")
+          .value_parser(value_parser!(String))
+          .requires("replan")
+          .conflicts_with("done-by")
+          .help(
+            "with --replan: the first action whose label contains this fails, abandoning \
+             everything downstream of it; the rest counts as built",
+          ),
       )
       .arg(
         Arg::new("dump-standing")
@@ -377,6 +389,10 @@ pub(crate) struct Replan {
   /// Only steps a schedule finishes by this tick are applied to the world
   /// before the next round; `None` applies the whole plan.
   pub done_by: Option<Ticks>,
+  /// The first action whose label contains this fails, and its dependency
+  /// cone is abandoned -- the executor's rule, and the shape the live
+  /// replans met. See `standing::survivors_of_failure`.
+  pub fail: Option<String>,
   /// Where to write the last standing world, if anywhere.
   pub dump_standing: Option<PathBuf>,
 }
@@ -545,16 +561,35 @@ fn plan_from_dump(
     }
     // What this round built, as the world the next one meets. `done_by`
     // reads the SCHEDULE, not the network: a step's end tick is the only
-    // place "finished by tick T" is defined.
-    let done: BTreeSet<ActionId> = scheduled
-      .steps
-      .iter()
-      .filter(|step| replan.done_by.is_none_or(|tick| step.end <= tick))
-      .filter_map(|step| match &step.what {
-        StepKind::Act { action, .. } => Some(*action),
-        StepKind::Walk { .. } => None,
-      })
-      .collect();
+    // place "finished by tick T" is defined. `fail` reads the network,
+    // because an abandoned subtree is a dependency cone, not a suffix.
+    let done: BTreeSet<ActionId> = if let Some(needle) = &replan.fail {
+      let failed = scheduled
+        .steps
+        .iter()
+        .find_map(|step| match &step.what {
+          StepKind::Act { action, label } if label.contains(needle.as_str()) => Some(*action),
+          _ => None,
+        })
+        .ok_or_else(|| {
+          miette!("--fail: no action in plan {round} has a label containing `{needle}`")
+        })?;
+      notes.push(format!(
+        "plan {round}: `{}` fails, abandoning everything downstream of it",
+        net.action(failed).map(|a| a.label.as_str()).unwrap_or("?")
+      ));
+      survivors_of_failure(&net, failed)
+    } else {
+      scheduled
+        .steps
+        .iter()
+        .filter(|step| replan.done_by.is_none_or(|tick| step.end <= tick))
+        .filter_map(|step| match &step.what {
+          StepKind::Act { action, .. } => Some(*action),
+          StepKind::Walk { .. } => None,
+        })
+        .collect()
+    };
     let (next, built) = world_after(&state, &net, |id| done.contains(&id))
       .map_err(|err| miette!("could not apply plan {round} to the world: {err}"))?;
     standing = Some(built);
@@ -637,6 +672,7 @@ fn run(args: &ArgMatches, _context: &mut Context) -> Result<()> {
   let replan = Replan {
     rounds: args.get_one::<u32>("replan").copied().unwrap_or(0),
     done_by: args.get_one::<u32>("done-by").copied(),
+    fail: args.get_one::<String>("fail").cloned(),
     dump_standing: args.get_one::<PathBuf>("dump-standing").cloned(),
   };
 
@@ -735,6 +771,7 @@ mod tests {
       &Replan {
         rounds: 1,
         done_by: None,
+        fail: None,
         dump_standing: None,
       },
     )
@@ -768,6 +805,7 @@ mod tests {
       &Replan {
         rounds: 1,
         done_by: Some(0),
+        fail: None,
         dump_standing: None,
       },
     )
@@ -799,6 +837,7 @@ mod tests {
       &Replan {
         rounds: 1,
         done_by: None,
+        fail: None,
         dump_standing: Some(standing_path.clone()),
       },
     )

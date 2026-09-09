@@ -64,6 +64,39 @@ is harder to notice because `git log` looks right while `target/` does not.
 
 Check the binary's mtime against `git log -1` before quoting anything from it.
 
+## Every baseline here is an OFFLINE plan from t=0, and that is a blind spot
+
+**A baseline cannot see the replan path.** Every number in this file is
+`factorio-bot plan --world <dump>`, and every dump is t=0-shaped, so the planner
+always meets a clean world. A live run does not: the supervisor plans, executes,
+and *replans* whenever a batch truncates — and the second expansion meets a world
+where the first plan's work already stands as map facts.
+
+**This is not hypothetical. It swallowed a reviewed, merged fix on 2026-09-09.**
+`9f549b1c` was written to remove a specific refusal, moved all eight baselines
+correctly, and was measured at **885 / 52,891** planning cleanly through to both
+assembling machines. The live run on that exact binary refused with the
+**byte-identical** blocker:
+
+```
+a cell already makes copper-plate at [29.5,-46.5] and nothing can carry it to the
+supply chest at [30.5,-24.5]
+```
+
+**"a cell ALREADY MAKES copper-plate" is a sentence only a replan can say.**
+Offline there is no cell, so the case never arises and the fix looks perfect.
+
+So when a change touches anything reachable on a replan — siting, routing,
+reservations, recovery, anything that reads standing entities — **the numbers in
+this file are necessary and not sufficient, and saying so is part of reporting
+them.** The failure mode is not a wrong number; it is eight right numbers and a
+broken run.
+
+**The remedy exists and nothing uses it.** `--resume-from <run>[:<milestone>]`
+starts from a milestone savepoint, and every milestone writes one, so planning
+against a half-built world costs a short start rather than a whole prelude. A
+replan-shaped regression must begin from a standing world.
+
 ## Goals that only exist on a categories world
 
 `have:sulfur:10`, `have:battery:1`, `have:plastic-bar:10`,

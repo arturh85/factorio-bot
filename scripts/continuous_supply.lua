@@ -44,14 +44,16 @@
 --
 -- Two readings that mean different things, and the record can tell them apart:
 -- a plateau with `no_ingredients` on the assembling machine means a belt is
--- not delivering (read which mouth's arm is idle); a plateau with the output
--- chest FULL means the cell is output-bound instead, which is a different bug.
+-- not delivering (read which mouth's arm is idle); a plateau with the pack
+-- machine on `full_output` and the lab full means the research finished and
+-- nothing else was queued -- output-bound, which is the plan's shape and not
+-- a bug in the line.
 --
 -- # Judged on rate and census, not makespan
 --
 -- Price it offline first: `factorio-bot plan --world workspace/scripts/map.json
 -- --goal sustain:iron-plate:12:36000 --goal sustain:copper-plate:6:36000
--- --goal producing:automation-science-pack:6 --bots 1,2,3,4`. One risk stated
+-- --goal researched:logistics --bots 1,2,3,4`. One risk stated
 -- in advance: each run's load arm sits at a burner cell with no network and
 -- gets a wire of its own, and poles cost wood, so a wood shortfall refuses BY
 -- NAME (`Have 1 wood`) rather than silently.
@@ -93,15 +95,26 @@ end
 -- Both plates, in the order the cell's mouths take them. The sustains go
 -- first because `goal.all` expands in order and the cell refuses without a
 -- standing source for each.
+--
+-- **The cell's output goes into a lab, and the lab researches** (phase 3,
+-- 2026-09-09): a research whose pack a standing-sourced cell makes is FED BY
+-- THE CELL -- the cell is built inline with a lab as its sink, no pack is
+-- crafted, carried or inserted by anybody, and the research waits on the
+-- cell. `logistics` is twenty units of red at 900 ticks each, which one lab
+-- burns at four packs a minute against the cell's six: one lab, the chain
+-- length the rate supports (`assemble::labs_fed_by`). So the goal is the
+-- research, not `producing` -- a `producing` goal alone would build the same
+-- cell and lab and leave the packs to pile up in a lab nobody set to work.
+local RESEARCH = "logistics"
 local sup = supervisor.new(
   supervisor.list { goal.all { goal.sustain("iron-plate", 2 * PER_MINUTE, 36000),
                                goal.sustain("copper-plate", PER_MINUTE, 36000),
-                               goal.producing("automation-science-pack", PER_MINUTE) } },
+                               goal.researched(RESEARCH) } },
   { bots = bots, stall_limit = 3, max_iterations = 10, roster = current_roster }
 )
 
-print(string.format("goal: sustain iron-plate %d + sustain copper-plate %d + producing:automation-science-pack:%d",
-  2 * PER_MINUTE, PER_MINUTE, PER_MINUTE))
+print(string.format("goal: sustain iron-plate %d + sustain copper-plate %d + researched:%s (fed by the cell)",
+  2 * PER_MINUTE, PER_MINUTE, RESEARCH))
 
 -- **The supervisor does not record; the driver does.** `sup:step()` returns a
 -- transition and the record plumbing hangs off it -- `record.actions`,

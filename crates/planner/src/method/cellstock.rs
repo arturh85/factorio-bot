@@ -37,6 +37,17 @@
 //! taken. A plan that walks a bot to an empty chest is worse than one that
 //! hand-crafts, so this method is asked first and prices the wait.
 //!
+//! # Which cells this still serves, since the output goes into a lab
+//!
+//! **Not a science pack's.** Since 2026-09-09 a pack cell sinks straight into
+//! a lab chain (`crate::method::assemble::Sink::Labs`) and the research is
+//! linked from the cell (`crate::method::have::Researched`), so no pack is
+//! ever in a chest or a hand and nothing here is asked for one:
+//! `cell_output_chests` names chests only, and a lab-sunk cell has none. What
+//! remains is every cell whose product no research eats -- steel, belts --
+//! which still sinks into a chest a hand can reach into, and that is what the
+//! ledger below is written for.
+//!
 //! # What is drawn, and why it is bounded
 //!
 //! A cell yields what its sources deliver -- the

@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(nix develop -c cargo test *)",
+      "Bash(nix develop -c cargo clippy *)",
+      "Bash(nix develop -c cargo check *)",
+      "Bash(command ls *)",
+      "Bash(just analyse *)",
+      "Bash(rustfmt --edition 2024 *)",
+      "Bash(git worktree list)",
+      "Bash(git merge-base *)"
+    ]
+  }
+}

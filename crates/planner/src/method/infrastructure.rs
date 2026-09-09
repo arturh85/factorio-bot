@@ -17,11 +17,11 @@ use crate::method::{ExpansionCtx, Step};
 use std::collections::BTreeMap;
 
 /// How many pairs to build per item below the threshold.
-const MIN_PAIRS: u32 = 2;
+const MIN_PAIRS: u32 = 8;
 
 /// How many ticks to fuel Phase 0 pairs (10 minutes, matching
 /// [`produce::CELL_FUELLED_TICKS`] which is private to that module).
-const PHASE0_FUELLED_TICKS: Ticks = 36_000;
+const PHASE0_FUELLED_TICKS: Ticks = 72_000;
 
 /// Items a Phase 0 cell can produce.
 const SMELTABLE_ITEMS: &[&str] = &["iron-plate", "copper-plate", "stone-brick"];
@@ -29,7 +29,7 @@ const SMELTABLE_ITEMS: &[&str] = &["iron-plate", "copper-plate", "stone-brick"];
 /// Minimum plate demand needed to trigger Phase 0 (in plates).
 /// Phase 0 only fires for substantial plate counts (>500).
 /// Below this threshold, hand-mining and hand-smelting is more efficient.
-const MIN_DEMAND_THRESHOLD: u32 = 500;
+const MIN_DEMAND_THRESHOLD: u32 = 200;
 
 /// Survey aggregate plate demand and build direct-insertion pairs if worth it.
 ///
@@ -57,6 +57,16 @@ pub fn ensure_infrastructure(
 
     for &item in SMELTABLE_ITEMS {
         if !demand.contains_key(item) {
+            continue;
+        }
+        // Skip if the bots already hold enough of this item to meet demand
+        let needed = *demand.get(item).unwrap_or(&0);
+        let held = ctx.state.total_count(&item);
+        if held >= needed {
+            continue;
+        }
+        // Also skip if any infrastructure already stands
+        if !ctx.state.entities_named("burner-mining-drill").is_empty() {
             continue;
         }
 

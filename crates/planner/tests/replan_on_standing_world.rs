@@ -99,8 +99,8 @@ fn dump() -> Option<Arc<FactorioSurface>> {
 
 /// `continuous_supply.lua`'s goal, verbatim: PER_MINUTE is 6 there, and
 /// since 2026-09-09 both plates are sustained ahead of the cell, at the
-/// cell's own demand -- a red cell has no chest but the output one and is
-/// belted from a standing source for each.
+/// cell's own demand -- a red cell has no chest at all, is belted from a
+/// standing source for each plate, and sinks into the lab that researches.
 fn continuous_supply() -> Goal {
     Goal::All(vec![
         Goal::Sustain {
@@ -113,10 +113,9 @@ fn continuous_supply() -> Goal {
             per_minute: 6,
             window_ticks: 36_000,
         },
-        Goal::Producing {
-            item: "automation-science-pack".to_string(),
-            per_minute: 6,
-        },
+        // The research the cell feeds (phase 3): the cell sinks into a lab
+        // and `logistics` is what that lab researches.
+        Goal::Researched("logistics".to_string()),
     ])
 }
 

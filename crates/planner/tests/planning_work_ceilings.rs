@@ -88,18 +88,19 @@ fn work_for(world: Arc<FactorioSurface>, goal: Goal) -> (usize, WorkCounts) {
 
 /// Ceilings for the two composed bundles: (goals expanded, threat queries,
 /// preds, forks), twice what each read on the first binary that planned them
-/// (2026-09-09, this dump, four bots):
+/// (2026-09-09, this dump, four bots; the red row re-measured once its output
+/// went into a lab -- phase 3 -- and the belt row unchanged by it):
 ///
 /// ```text
 ///   goal                                        actions  goals  threats  preds   forks
-///   all{iron:12, copper:6, red:6}                 1,559  1,739   64,125  3,118  65,544
+///   all{iron:12, copper:6, red:6}                 1,518  1,696   63,797  3,036  68,966
 ///   all{iron:30, transport-belt:6}                1,501  1,740   62,610  3,002  59,413
 /// ```
 ///
 /// Forks sit at 50% of these by construction; the old green row's 60,756
 /// ceiling stood at 81%, so the composed red bundle has more headroom than
 /// the lone green cell had, not less.
-const CEIL_RED: (u64, u64, u64, u64) = (3_478, 128_250, 6_236, 131_088);
+const CEIL_RED: (u64, u64, u64, u64) = (3_392, 127_594, 6_072, 137_932);
 const CEIL_BELT: (u64, u64, u64, u64) = (3_480, 125_220, 6_004, 118_826);
 
 /// Every ceiling in one place, so one dump load covers all three goals.
@@ -203,7 +204,7 @@ fn the_three_map_json_baselines_stay_within_their_work_ceilings() {
                 6,
                 &[("iron-plate", 12), ("copper-plate", 6)],
             ),
-            1_559,
+            1_518,
             WorkCounts {
                 goals_expanded: CEIL_RED.0,
                 resource_patches: 16,

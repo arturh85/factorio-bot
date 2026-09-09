@@ -4209,6 +4209,96 @@ fn machine_made_packs(
     goals
 }
 
+/// A research fed straight from a cell: the cell, its labs, and what the
+/// research waits on.
+struct LabFed {
+    steps: Vec<Step>,
+    labs: Vec<Position>,
+    carriers: Vec<ActionId>,
+    ticks_per_item: Ticks,
+}
+
+/// Build the cell that feeds `technology`'s lab chain, when there is one to
+/// build it from.
+///
+/// # What qualifies
+///
+/// * the technology researches with **one** pack type. Two cells feeding two
+///   chains would put red packs in one lab and green in another, and a unit
+///   needs both in the *same* lab -- a mixed chain is a later rung;
+/// * a cell of this shape makes the pack (`assembly_spec`), and every smelted
+///   ingredient of it has a **standing source** (`sources_stand_for`) --
+///   otherwise the packs are hand-crafted and inserted, exactly as before
+///   cells existed;
+/// * and the technology is not the one that unlocks the cell's own machine,
+///   [`machine_made_packs`]'s bootstrap rule: a cell for the packs that pay
+///   for the machine the cell is made of is a cycle.
+///
+/// # Why the cell is built HERE, inline
+///
+/// A subgoal is expanded after this method returns, and the research action
+/// has to name the labs the cell places (`EntityAt`, `Powered`) and wait on
+/// the action the cell is complete at. So `assemble::build_cells` -- the whole
+/// of `BuildAssemblyCell::expand` as a function -- is called from this
+/// expansion, the way `plant_steps` builds a plant inline for the same reason.
+///
+/// # How long the chain is
+///
+/// The fewer of what pays (`labs_worth_building`, the break-even that has
+/// always governed extra labs) and what the cell keeps fed
+/// (`assemble::labs_fed_by`): labs pass packs forward only, so a chain longer
+/// than the cell's rate feeds starves at the far end. On shipped 2.1.17 that
+/// is **one lab** for every `automation`-era research, because one red cell
+/// makes six packs a minute and `automation` burns six a minute in one lab.
+///
+/// `None` when the path does not apply -- the caller takes the hand-fed
+/// path -- and `Some` with no labs is impossible: a cell whose sink is a
+/// chest (one standing from before labs were sinks) answers `None` too, and
+/// `DrawFromCell` then empties that chest as it always did.
+fn lab_fed_research(
+    ctx: &mut ExpansionCtx,
+    technology: &str,
+    tech: &FactorioTechnology,
+    bots: &[BotId],
+    lab_bill: Ticks,
+    roster: usize,
+) -> Result<Option<LabFed>, PlannerError> {
+    let packs = research_ingredients(tech);
+    let [(pack, _)] = packs.as_slice() else {
+        return Ok(None);
+    };
+    // A world in which nothing unlocks the machine has no bootstrap to
+    // protect -- the machine's recipe is open from the start -- so only a
+    // technology that IS the unlocker is turned away. `sources_stand_for`
+    // below is what keeps a stub world with no sources on the hand-fed path.
+    if crate::method::util::unlocking_technology(&ctx.state, crate::method::assemble::MACHINE)
+        .is_some_and(|unlocker| unlocker == technology)
+    {
+        return Ok(None);
+    }
+    let Some(spec) = crate::method::assemble::assembly_spec(&ctx.state, pack) else {
+        return Ok(None);
+    };
+    if !crate::method::assemble::sources_stand_for(&ctx.state, pack) {
+        return Ok(None);
+    }
+    let per_minute = spec.tempo_per_minute();
+    let labs = labs_worth_building(tech, lab_bill, u32::try_from(roster).unwrap_or(1))
+        .min(crate::method::assemble::labs_fed_by(per_minute, pack, tech))
+        .max(1);
+    let sink = crate::method::assemble::Sink::Labs(u8::try_from(labs).unwrap_or(u8::MAX));
+    let plan = crate::method::assemble::build_cells(ctx, bots, pack, per_minute, sink)?;
+    if plan.labs.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(LabFed {
+        steps: plan.steps,
+        labs: plan.labs,
+        carriers: plan.carriers,
+        ticks_per_item: plan.ticks_per_item,
+    }))
+}
+
 impl Method for Researched {
     fn name(&self) -> &'static str {
         "research"
@@ -4487,6 +4577,72 @@ impl Method for Researched {
             push_owned(&mut steps, builder, vec![Step::Subgoal(subgoal)], alone);
             return Ok(steps);
         }
+
+        // **A research whose pack a standing-sourced cell makes is FED BY
+        // THE CELL**: the cell is built inline with a chain of labs as its
+        // sink, no pack is crafted, carried or inserted by anybody, and the
+        // research waits on the cell. See [`lab_fed_research`] for what
+        // qualifies and why the cell has to be built here rather than as a
+        // subgoal.
+        let lab_bill = lab_bill_ticks(&ctx.state);
+        if let Some(fed) = lab_fed_research(ctx, name, &tech, &self.bots, lab_bill, roster.len())? {
+            steps.extend(fed.steps);
+            let mut pre: Vec<Condition> = prerequisites
+                .iter()
+                .map(|prerequisite| Condition::Researched(prerequisite.clone()))
+                .collect();
+            for pos in &fed.labs {
+                pre.push(Condition::EntityAt {
+                    pos: pos.clone(),
+                    name: LAB.into(),
+                });
+                pre.push(Condition::Powered {
+                    pos: pos.clone(),
+                    entity: LAB.into(),
+                    kw: LAB_POWER_KW,
+                });
+                if let Some(area) = ctx.state.collision_area(LAB, pos) {
+                    for (position, name) in ctx.state.powering_entities(&area) {
+                        let standing = Condition::EntityAt {
+                            pos: position,
+                            name,
+                        };
+                        if !pre.contains(&standing) {
+                            pre.push(standing);
+                        }
+                    }
+                }
+            }
+            let labs = u32::try_from(fed.labs.len()).unwrap_or(1).max(1);
+            let research_id = ctx.ids.next();
+            steps.push(Step::Act(Box::new(Action {
+                id: research_id,
+                kind: ActionKind::Research { tech: name.clone() },
+                pre,
+                eff: vec![Effect::Researched(name.clone())],
+                duration: research_ticks_in_labs(&tech, labs),
+                pinned: None,
+                label: format!("research {} (fed by the cell)", name),
+            })));
+            // The packs are made by the cell after it is complete, one per
+            // cell cycle, and the research cannot finish before the last of
+            // them is made: the wait rides on the edge from each cell's
+            // completion, sized as `cellstock` sizes a draw -- the cell's
+            // tempo times the count, which is a lower bound (a source slower
+            // than the cell makes it longer) and is stated as one.
+            let lag = fed
+                .ticks_per_item
+                .saturating_mul(u32::try_from(tech.research_unit_count).unwrap_or(u32::MAX));
+            for from in fed.carriers {
+                steps.push(Step::Link {
+                    from,
+                    to: research_id,
+                    lag,
+                });
+            }
+            return Ok(steps);
+        }
+
         // Where this research will happen. Chosen before the bill is emitted so
         // that a research with no power refuses without first planning the
         // mining, smelting and crafting of packs nothing would ever consume.
@@ -4578,7 +4734,6 @@ impl Method for Researched {
         // [`lab_build_steps`] for the steps and the reservation, and
         // [`labs_worth_building`] for why the builder's pack share shrinks
         // by what the lab costs.
-        let lab_bill = lab_bill_ticks(&ctx.state);
         let first_builder = match lead {
             Some(lead) if ctx.state.available(&Holder::Share(ctx.chain_actor), LAB) == 0 => lead,
             _ => ctx.chain_actor,

@@ -43,8 +43,10 @@ and record what that binary was built from.
 |---|---|---|---|
 | `researched:automation` | `map.json` | 176 / 21,784 | stable across the night, unchanged by no-chests |
 | `producing:automation-science-pack:6` | `map.json` | **REFUSES** (`assembly_no_standing_source`) | no-chests, 2026-09-09; was 316 / 22,457 |
-| `all{sustain:iron-plate:12, sustain:copper-plate:6, producing:automation-science-pack:6}` | `map.json` | **1,559 / 96,221** | no-chests, 2026-09-09 -- the number that replaces the row above |
-| `all{sustain:iron-plate:30, sustain:copper-plate:15, producing:automation-science-pack:6}` | `map.json` | 1,997 / 95,899 | no-chests, 2026-09-09; **refused in `sustain` before it** |
+| `all{sustain:iron-plate:12, sustain:copper-plate:6, producing:automation-science-pack:6}` | `map.json` | **1,518 / 71,341** | labs phase 3, 2026-09-09 (was 1,559 / 96,221 with an output chest) |
+| `all{sustain:iron-plate:12, sustain:copper-plate:6, researched:logistics}` | `map.json` | **1,519 / 108,330** | labs phase 3, 2026-09-09 -- the research fed by the cell; `continuous_supply.lua`'s goal |
+| `all{sustain:iron-plate:30, sustain:copper-plate:15, producing:automation-science-pack:6}` | `map.json` | 2,048 / 107,038 | labs phase 3 (was 1,997 / 95,899); **refused in `sustain` before no-chests** |
+| `all{sustain:iron-plate:30, sustain:copper-plate:15, researched:logistic-science-pack}` | `map.json` | 2,049 / 168,119 | labs phase 3, 2026-09-09 |
 | `producing:logistic-science-pack:6` | `map.json` | **REFUSES** (`assembly_no_standing_source`, its iron is belted) | no-chests, 2026-09-09; was 559 / 52,298 |
 | `all{sustain:iron-plate:30, sustain:copper-plate:15, producing:logistic-science-pack:6}` | `map.json` | REFUSES (`no room ... within 12 tiles`) | no-chests, 2026-09-09 -- green is phase 2, see below |
 | `producing:iron-plate:261` | `map.json` | 194 / 33,645 | `71f9227c`, unchanged by no-chests |
@@ -84,6 +86,22 @@ Three rows moved for reasons that are not the cell:
   haul -- every two-sustain bundle refused with `laid no belt to branch the
   offtake arm's own fuel off` before, in both orders -- and it also moves the
   tap point of a lone sustain.
+
+### The output goes into a lab, and the lab researches (phase 3, 2026-09-09)
+
+A science pack's cell sinks into a **lab** (`assemble::Sink::Labs`), on the
+product machine's south face, with one pole per lab; every further lab of a
+chain sits one pitch south with an inserter between, because labs pass packs
+to each other. A research whose one pack such a cell makes, with both sources
+standing, is **fed by the cell** (`have::lab_fed_research`): the cell is built
+inline, no pack is crafted, carried or inserted, and the research waits on the
+cell's completion by `units x ticks_per_item`. The chain length is the fewer
+of what pays (`labs_worth_building`) and what the cell's rate feeds
+(`assemble::labs_fed_by`) -- **one lab for every `automation`-era research**,
+because a red cell makes six packs a minute and one lab burns six (`automation`,
+600 ticks a unit) or four (`logistics`, 900). A cell for an item no research
+eats (steel, belts) keeps its chest and `DrawFromCell`. Note:
+`2026-09-09-no-chests-phase-3-labs.md`.
 
 **Green is not a phase-1 result.** Its gears and inserters still arrive in
 hand-filled chests (nothing here makes them), its iron is belted, and on

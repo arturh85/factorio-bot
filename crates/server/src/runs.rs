@@ -343,6 +343,14 @@ pub struct RunSavepointsResponse {
     /// command that uses one. Excludes any milestone whose metadata parsed
     /// but whose `.zip` is missing -- see `missing_zip`.
     pub savepoints: Vec<Savepoint>,
+    // "did not parse" below is the published description and is deliberately
+    // left byte-identical -- it is in `openapi.snapshot.json`, and editing it
+    // costs a snapshot regeneration for no change in meaning on the wire. What
+    // it counts is slightly wider than its wording: a file that could not be
+    // READ (permissions, a file that vanished between the listing and the read,
+    // a directory of that name) is counted here too, because both failures
+    // leave the caller without that milestone's metadata and neither must read
+    // the same as "this milestone was never saved". See `get_run_savepoints`.
     /// Metadata files that did not parse -- in practice a truncated or
     /// corrupt `milestone-N.json`. Reported rather than swallowed, matching
     /// the sibling responses' `skipped`: a corrupt file must not read the
@@ -378,9 +386,18 @@ pub async fn get_run_savepoints(
             entries
                 .filter_map(Result::ok)
                 .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
-                .filter_map(|e| std::fs::read(e.path()).ok())
-                .filter_map(|bytes| {
-                    let parsed = serde_json::from_slice::<Savepoint>(&bytes).ok();
+                // Read and parse in ONE fallible expression on purpose. They
+                // were two stages, and the read's failure was dropped before
+                // the counter -- so an unreadable `milestone-N.json` (a
+                // permission failure, a file that vanished between the listing
+                // and the read, a directory of that name) came back as
+                // `skipped: 0`, indistinguishable from a milestone that was
+                // never saved. Both failures are the same fact to a reader:
+                // this milestone's metadata did not arrive.
+                .filter_map(|e| {
+                    let parsed = std::fs::read(e.path())
+                        .ok()
+                        .and_then(|bytes| serde_json::from_slice::<Savepoint>(&bytes).ok());
                     if parsed.is_none() {
                         skipped += 1;
                     }

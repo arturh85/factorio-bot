@@ -523,6 +523,13 @@ async fn savepoints_are_listed_in_milestone_order_and_absent_is_empty() {
         r#"{"schema":1,"run_id":"alpha","milestone_index":4,"tick":1200,"created_unix":1080,"bytes":10,"file":"milestone-4.zip","mods":null}"#,
     )
     .unwrap();
+    // Metadata that cannot be READ at all. A directory answers `std::fs::read`
+    // with an error on every platform, which is the portable stand-in for a
+    // permission failure or a vanished file. It must count exactly as the
+    // corrupt one does: unreadable and unparseable are the same fact to a
+    // reader -- this milestone's metadata did not arrive -- and dropping one
+    // of them silently is what makes `skipped: 0` a lie.
+    std::fs::create_dir_all(dir.join("milestone-9.json")).unwrap();
     // The two real savepoints actually have their zips on disk.
     std::fs::write(dir.join("milestone-1.zip"), b"").unwrap();
     std::fs::write(dir.join("milestone-2.zip"), b"").unwrap();
@@ -535,7 +542,10 @@ async fn savepoints_are_listed_in_milestone_order_and_absent_is_empty() {
         .collect();
     assert_eq!(idx, vec![1, 2]);
     assert_eq!(body["savepoints"][0]["mods"]["digest"], "f3200cfb");
-    assert_eq!(body["skipped"], 1, "the corrupt metadata file is counted");
+    assert_eq!(
+        body["skipped"], 2,
+        "the corrupt metadata file AND the one that could not be read are both counted"
+    );
     assert_eq!(
         body["missing_zip"].as_array().unwrap(),
         &vec![Value::from(4)],

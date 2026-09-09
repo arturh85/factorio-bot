@@ -498,6 +498,18 @@ async fn savepoints_are_listed_in_milestone_order_and_absent_is_empty() {
         r#"{"schema":1,"run_id":"alpha","milestone_index":1,"tick":300,"created_unix":1020,"bytes":10,"file":"milestone-1.zip","mods":{"version":"0.0.1","digest":"f3200cfb","files":6}}"#,
     )
     .unwrap();
+    // Corrupt metadata: must be counted, not silently dropped.
+    std::fs::write(dir.join("milestone-3.json"), "{not valid json").unwrap();
+    // Metadata that parses but whose zip never landed: must be named as
+    // `missing_zip` and excluded from `savepoints`, not offered as resumable.
+    std::fs::write(
+        dir.join("milestone-4.json"),
+        r#"{"schema":1,"run_id":"alpha","milestone_index":4,"tick":1200,"created_unix":1080,"bytes":10,"file":"milestone-4.zip","mods":null}"#,
+    )
+    .unwrap();
+    // The two real savepoints actually have their zips on disk.
+    std::fs::write(dir.join("milestone-1.zip"), b"").unwrap();
+    std::fs::write(dir.join("milestone-2.zip"), b"").unwrap();
     let (_, body) = get_json(state_with_workspace(&ws), "/api/v1/runs/alpha/savepoints").await;
     let idx: Vec<u64> = body["savepoints"]
         .as_array()
@@ -507,4 +519,10 @@ async fn savepoints_are_listed_in_milestone_order_and_absent_is_empty() {
         .collect();
     assert_eq!(idx, vec![1, 2]);
     assert_eq!(body["savepoints"][0]["mods"]["digest"], "f3200cfb");
+    assert_eq!(body["skipped"], 1, "the corrupt metadata file is counted");
+    assert_eq!(
+        body["missing_zip"].as_array().unwrap(),
+        &vec![Value::from(4)],
+        "a savepoint with no zip on disk must be named, not offered as resumable"
+    );
 }

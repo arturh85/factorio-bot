@@ -172,7 +172,9 @@ impl TickWindow {
 /// `TickWindow` plus the sample `kind` (`bots`, `force`, `machines`).
 #[derive(Debug, Default, Deserialize, utoipa::IntoParams)]
 pub struct SampleFilter {
+    /// First tick to include.
     pub from: Option<u64>,
+    /// Last tick to include.
     pub to: Option<u64>,
     /// Return only samples of this `kind`.
     pub kind: Option<String>,
@@ -338,8 +340,18 @@ pub async fn get_run_provenance(
 pub struct RunSavepointsResponse {
     /// Ascending by milestone index. Each names its `.zip` relative to the
     /// run's `savepoints/` directory; `--resume-from <run>:<index>` is the
-    /// command that uses one.
+    /// command that uses one. Excludes any milestone whose metadata parsed
+    /// but whose `.zip` is missing -- see `missing_zip`.
     pub savepoints: Vec<Savepoint>,
+    /// Metadata files that did not parse -- in practice a truncated or
+    /// corrupt `milestone-N.json`. Reported rather than swallowed, matching
+    /// the sibling responses' `skipped`: a corrupt file must not read the
+    /// same as "this milestone was never saved".
+    pub skipped: usize,
+    /// Milestone indices whose metadata parsed but whose `file` is not on
+    /// disk. Named here and NOT listed in `savepoints`, because listing them
+    /// would offer a resume that cannot happen.
+    pub missing_zip: Vec<u32>,
 }
 
 /// The milestone savepoints a run wrote.
@@ -359,18 +371,39 @@ pub async fn get_run_savepoints(
     Path(id): Path<String>,
 ) -> Result<Json<RunSavepointsResponse>, ErrorResponse> {
     let dir = run_dir(&runs_root(&state).await?, &id)?.join(SAVEPOINTS_DIR);
+    let mut skipped = 0usize;
+    let mut missing_zip = Vec::new();
     let mut savepoints: Vec<Savepoint> = std::fs::read_dir(&dir)
         .map(|entries| {
             entries
                 .filter_map(Result::ok)
                 .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
                 .filter_map(|e| std::fs::read(e.path()).ok())
-                .filter_map(|bytes| serde_json::from_slice::<Savepoint>(&bytes).ok())
+                .filter_map(|bytes| {
+                    let parsed = serde_json::from_slice::<Savepoint>(&bytes).ok();
+                    if parsed.is_none() {
+                        skipped += 1;
+                    }
+                    parsed
+                })
+                .filter(|savepoint| {
+                    if dir.join(&savepoint.file).is_file() {
+                        true
+                    } else {
+                        missing_zip.push(savepoint.milestone_index);
+                        false
+                    }
+                })
                 .collect()
         })
         .unwrap_or_default();
     savepoints.sort_by_key(|s| s.milestone_index);
-    Ok(Json(RunSavepointsResponse { savepoints }))
+    missing_zip.sort_unstable();
+    Ok(Json(RunSavepointsResponse {
+        savepoints,
+        skipped,
+        missing_zip,
+    }))
 }
 
 /// A run's event log.

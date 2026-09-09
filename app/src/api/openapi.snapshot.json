@@ -3669,16 +3669,32 @@
       "RunSavepointsResponse": {
         "description": "`GET /api/v1/runs/{id}/savepoints` response.",
         "properties": {
+          "missing_zip": {
+            "description": "Milestone indices whose metadata parsed but whose `file` is not on\ndisk. Named here and NOT listed in `savepoints`, because listing them\nwould offer a resume that cannot happen.",
+            "items": {
+              "format": "int32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": "array"
+          },
           "savepoints": {
-            "description": "Ascending by milestone index. Each names its `.zip` relative to the\nrun's `savepoints/` directory; `--resume-from <run>:<index>` is the\ncommand that uses one.",
+            "description": "Ascending by milestone index. Each names its `.zip` relative to the\nrun's `savepoints/` directory; `--resume-from <run>:<index>` is the\ncommand that uses one. Excludes any milestone whose metadata parsed\nbut whose `.zip` is missing -- see `missing_zip`.",
             "items": {
               "$ref": "#/components/schemas/Savepoint"
             },
             "type": "array"
+          },
+          "skipped": {
+            "description": "Metadata files that did not parse -- in practice a truncated or\ncorrupt `milestone-N.json`. Reported rather than swallowed, matching\nthe sibling responses' `skipped`: a corrupt file must not read the\nsame as \"this milestone was never saved\".",
+            "minimum": 0,
+            "type": "integer"
           }
         },
         "required": [
-          "savepoints"
+          "savepoints",
+          "skipped",
+          "missing_zip"
         ],
         "type": "object"
       },
@@ -6144,6 +6160,7 @@
             }
           },
           {
+            "description": "First tick to include.",
             "in": "query",
             "name": "from",
             "required": false,
@@ -6157,6 +6174,7 @@
             }
           },
           {
+            "description": "Last tick to include.",
             "in": "query",
             "name": "to",
             "required": false,

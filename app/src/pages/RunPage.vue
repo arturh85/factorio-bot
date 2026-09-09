@@ -9,7 +9,7 @@
 import {computed, onBeforeUnmount, onMounted, watch} from 'vue';
 import {useRoute} from 'vue-router';
 import {useRunsStore} from '@/store/runsStore';
-import {compareSplits, formatTicks, formatWhen, startedUnixOf} from '@/lib/runTimeline';
+import {compareSplits, formatTicks, formatWhen, startedUnixOf, stuckReasons} from '@/lib/runTimeline';
 import {rateItems} from '@/lib/runRates';
 import {headline} from '@/lib/runHeadline';
 import {machineRows, positionKey} from '@/lib/machineTimeline';
@@ -94,6 +94,22 @@ const highlight = computed(() => {
 });
 const otherRuns = computed(() => store.runs.filter((r) => r.run_id !== id.value));
 
+/** Every stuck milestone's planner refusal, by split index -- fed to the ribbon's segment titles. */
+const reasons = computed(() => stuckReasons(store.events));
+/**
+ * The refusal behind the run's own last milestone, when it is a stuck one.
+ *
+ * Read off the *last* split rather than any stuck split: an earlier stuck
+ * milestone that later recovered and closed is history, not the reason this
+ * run is where it is now.
+ */
+const lastStuckReason = computed(() => {
+    const splits = store.detail?.splits ?? [];
+    const last = splits[splits.length - 1];
+    if (last === undefined || last.outcome !== 'stuck') return null;
+    return reasons.value.get(last.index) ?? null;
+});
+
 const LEGEND = [
     ['walk', 'verb-walk'], ['mine / chop', 'verb-mine'], ['craft', 'verb-craft'], ['place', 'verb-place'],
     ['feed (insert · stock · take · fuel)', 'verb-feed'], ['research', 'verb-research'],
@@ -118,6 +134,7 @@ const LEGEND = [
         {{ formatWhen(startedUnixOf(store.detail.summary)) }} ·
         <router-link :to="`/runs/${id}/analysis`" class="underline">overrun and divergence tables</router-link>
       </p>
+      <p v-if="lastStuckReason" data-testid="stuck-reason" class="px-5 py-1 text-sm text-warn-dark">last refusal: {{ lastStuckReason }}</p>
 
       <!-- Gated on `scale` alone, not `scale && win`: a run with a drawn axis
            still has bands to show even when `/events` failed and left `win`
@@ -126,7 +143,7 @@ const LEGEND = [
       <template v-if="scale">
         <div class="grid grid-cols-[10.5rem_1fr] border-b border-divider">
           <div class="border-r border-divider bg-surface px-3 py-2 text-[11px] font-semibold uppercase tracking-wider text-ink-muted">Milestones</div>
-          <MilestoneRibbon :scale="scale" :clock="clock" :splits="store.detail.splits" :cursor="store.cursor"/>
+          <MilestoneRibbon :scale="scale" :clock="clock" :splits="store.detail.splits" :cursor="store.cursor" :reasons="reasons"/>
         </div>
         <BandFrame title="Axis" :subtitle="store.leadIn > 0 ? `axis starts ${formatTicks(store.leadIn)} after run start` : 'minutes of game time · 5-min marks'">
           <TickAxis :scale="scale" :clock="clock" :cursor="store.cursor"/>

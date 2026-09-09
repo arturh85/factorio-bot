@@ -7,7 +7,7 @@
  * wrong in a way you would not notice by looking.
  */
 
-import {Lane, RunSummary, Split, TickRange} from '@/api/types';
+import {Event, Lane, RunSummary, Split, TickRange} from '@/api/types';
 
 /**
  * The tick range the timeline spans.
@@ -228,6 +228,24 @@ export function formatWhen(unix: number | null): string {
         hour: '2-digit',
         minute: '2-digit'
     });
+}
+
+/**
+ * Every stuck milestone's planner refusal, by split index.
+ *
+ * A `milestone_stuck` event can close with no refusal recorded at all --
+ * `last_error` is `null` rather than absent -- and that silence is not a
+ * message worth showing, so only a non-null error contributes an entry. The
+ * last matching event wins when a milestone gets stuck more than once: it is
+ * the refusal that was still standing when the record ended.
+ */
+export function stuckReasons(events: Event[]): Map<number, string> {
+    const reasons = new Map<number, string>();
+    for (const event of events) {
+        if (event.kind !== 'milestone_stuck' || event.last_error === null) continue;
+        reasons.set(event.index, event.last_error);
+    }
+    return reasons;
 }
 
 /** How long ago, coarsely: "just now", "12 min ago", "3 h ago", "2 d ago". */

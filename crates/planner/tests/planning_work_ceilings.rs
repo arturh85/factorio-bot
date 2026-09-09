@@ -174,7 +174,13 @@ fn the_three_map_json_baselines_stay_within_their_work_ceilings() {
                 item: "logistic-science-pack".to_owned(),
                 per_minute: 6,
             },
-            571,
+            // 571 until `assemble::supply_chest_is_reachable` (2026-09-09):
+            // the sixth cell at [43.5,-11.5] had its supply chest opening
+            // onto the plan's own plant gap at [43.5,-6.5] -- a belt tile no
+            // run could enter -- and is refused; the cells pack differently
+            // from there and the plan reads 559 / 52,298. See
+            // `docs/superpowers/notes/2026-09-09-the-ring-was-the-other-end.md`.
+            559,
             WorkCounts {
                 goals_expanded: 2_642,
                 resource_patches: 16,

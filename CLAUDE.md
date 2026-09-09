@@ -722,6 +722,20 @@ BotBridge Mod (Factorio mod for RPC)
     and so is a replan recognising its own half-built link: the live replan
     refused the furnace end because the link's first belt at `[27.5,-43.5]`
     stood while its arm did not.
+    **AMENDED 2026-09-09 (`docs/superpowers/notes/2026-09-09-the-ring-was-the-other-end.md`):
+    that sealing was measured on `a69ae64c`'s layout and the layout has
+    moved. On the current one the kept exit opens north-east and a 2-span
+    pair crosses what the plan's own link later lays across it. The "span
+    of 7" that stopped `run-1788936524-99544` was the SINK -- a science
+    cell sited on the shore with its supply chest's one free belt tile in
+    the gap between the steam engine and the boiler -- and `SpanTooLong`'s
+    number is read off the straight line from the source, so it cannot say
+    which end is shut. A sealed sink is now refused by its four walls, and
+    `assemble` sites a cell only where a belt can reach its supply chest
+    (`supply_chest_is_reachable`, the same `belt_reaches_open_ground`
+    question `choose_exit` asks). Reproduce any of these in ten seconds
+    with `plan --standing-from-run <run> --at-tick <tick>` before naming
+    a ring.**
     **And that fix was green offline and did not hold live**
     (`run-1788923927-04849`, same four tiles, same 48 abandoned). Read off
     the record: `[30.5,-46.5]` — the kept exit — was under a `stone-furnace`

@@ -275,6 +275,54 @@ fn span_too_long_is_withheld_when_undergrounds_cannot_be_the_reason() {
 }
 
 #[test]
+fn a_sealed_destination_names_its_own_walls_and_never_a_span() {
+    // A wall seven cells wide across the whole window, so no surface route
+    // exists and the straight line from `from` to `to` crosses a run wider
+    // than any pair -- exactly the grid that used to come back as
+    // `SpanTooLong { needed: 8 }`. And the destination ringed on all four
+    // sides, which is what actually stops the route: no jump can land on a
+    // cell it cannot leave, and no span fixes that.
+    //
+    // Measured in `run-1788936524-99544`: the science cell's supply chest
+    // sat in the one-tile gap between the steam engine and the boiler, and
+    // the refusal said "an underground span of 7 tiles" about the sink's
+    // own four neighbours. Three notes read that as a wall round the SOURCE.
+    let mut grid = open_grid();
+    for x in 15..=21 {
+        for y in 0..GRID {
+            block(&mut grid, x, y);
+        }
+    }
+    let to = (30, 10);
+    for (x, y) in [(30, 9), (31, 10), (30, 11), (29, 10)] {
+        block(&mut grid, x, y);
+    }
+
+    let err = route_belt(&grid, (0.0, 0.0), (10, 10), to, Some(5))
+        .expect_err("a destination with every side taken has no route");
+
+    match err {
+        RouteError::NoPath { blocked } => {
+            let mut named: Vec<(i64, i64)> = blocked
+                .iter()
+                .map(|p| (p.x().floor() as i64, p.y().floor() as i64))
+                .collect();
+            named.sort_unstable();
+            assert_eq!(
+                named,
+                vec![(29, 10), (30, 9), (30, 11), (31, 10)],
+                "the refusal names the four walls round the destination, not the frontier \
+                 the search died on: {blocked:?}"
+            );
+        }
+        other => panic!(
+            "expected NoPath naming the sink's walls (the sink is sealed; the seven-wide \
+             wall is not what stopped the route), got {other:?}"
+        ),
+    }
+}
+
+#[test]
 fn adjacent_jumps_cannot_share_a_tile_as_both_exit_and_entry() {
     // Two three-tile walls separated by a single free column at x = 15.
     // Neither wall alone needs more than a span of four, but there is no

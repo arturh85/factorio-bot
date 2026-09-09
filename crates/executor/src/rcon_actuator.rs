@@ -1236,17 +1236,30 @@ mod tests {
 
     #[test]
     fn every_slot_resolves_once_the_game_reports_its_table() {
-        // Numbers as `runtime-api.json` orders them for 2.1.17. They are only
-        // ever read from the game at runtime; they appear here so the lookup
-        // itself is exercised end to end.
-        let json = r#"{
-            "fuel": 0,
-            "chest": 2,
-            "lab_input": 20,
-            "crafter_input": 50,
-            "crafter_output": 51
-        }"#;
-        let d = InventoryDefines::from_json(json).expect("parses");
+        // **Built from `FACTORIO_2_1_INVENTORY_DEFINES`, not hand-listed.**
+        // It used to be five keys typed out here, and when `InventorySlot::ALL`
+        // grew a `RocketSiloRocket` this test failed with `no mapping for
+        // RocketSiloRocket` -- correctly, but for the wrong reason: the game
+        // publishes `rocket_silo_rocket` perfectly well, and it was the fixture
+        // that had not grown. Deriving it means a new slot whose key the game
+        // really has just passes, while one whose key the game does NOT have
+        // fails loudly and by name -- which is the only failure worth having.
+        //
+        // The VALUES are positional and deliberately meaningless: this test
+        // exercises the name lookup, and `runtime-api.json` carries only `name`
+        // and `order`, never the constants (see CLAUDE.md -- reading an integer
+        // out of that file yields a sort key, and doing so has already produced
+        // four wrong numbers here).
+        let json = format!(
+            "{{{}}}",
+            FACTORIO_2_1_INVENTORY_DEFINES
+                .iter()
+                .enumerate()
+                .map(|(i, name)| format!("\"{name}\":{i}"))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let d = InventoryDefines::from_json(&json).expect("parses");
         for slot in InventorySlot::ALL {
             assert!(d.get(slot).is_ok(), "no mapping for {slot:?}");
         }

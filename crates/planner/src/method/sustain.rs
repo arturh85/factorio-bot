@@ -1888,6 +1888,115 @@ mod tests {
         }
     }
 
+    /// The world after the arrangement [`goal`] plans has been put down --
+    /// the state `a_replan_over_the_arrangement_it_just_built_adds_nothing`
+    /// builds, as a fixture, so the next test can ask about a bundle.
+    fn state_with_the_arrangement_standing() -> PlanState {
+        let roster = [BotId(1)];
+        let state = near_state();
+        let net = expand(&[goal()], &state, &registry_for(&roster), BotId(1))
+            .expect("iron and coal are within one belt window of each other");
+        let mut built = state.fork();
+        let mut placed = 0usize;
+        for action in net.actions() {
+            if let crate::action::ActionKind::Place { entity } = &action.kind {
+                built.create_entity((**entity).clone());
+                placed += 1;
+            }
+        }
+        assert!(
+            placed > 30,
+            "the first expansion has to have built the arrangement: {placed} placements"
+        );
+        built
+    }
+
+    /// **A standing sustain must not answer for the rest of its bundle.**
+    ///
+    /// The refusal the test above pins is what `supervisor.lua` turns into a
+    /// satisfied milestone -- and the milestone is whatever `goal.plan` was
+    /// handed, which may be an `All`. `run-1788914717-24351` ran
+    /// `all { sustain copper-plate, producing automation-science-pack }`: the
+    /// batch stopped on a rejected placement before the science cell's steps
+    /// were reached, the replan expanded the sustain first, it refused
+    /// `SustainSupplyNotStanding` because the copper chain stood, and the
+    /// `?` in the driver's `All` loop ended the bundle there. The science
+    /// conjunct was never asked; the supervisor read the refusal as
+    /// "everything stands" and reported the milestone satisfied with **zero
+    /// science packs and no assembling machine on the map**.
+    ///
+    /// So: the arrangement standing, ask for it AND for something plainly not
+    /// held. The answer must be a plan for the second conjunct, by name --
+    /// not the standing refusal, and not a second arrangement either.
+    #[test]
+    fn a_standing_sustain_does_not_satisfy_the_rest_of_its_bundle() {
+        let roster = [BotId(1)];
+        let built = state_with_the_arrangement_standing();
+        let unmet = Goal::Have {
+            item: "coal".into(),
+            count: 1,
+            whose: Holder::Anyone,
+            via: None,
+        };
+        assert_eq!(
+            holds(&unmet, &built),
+            Some(false),
+            "the second conjunct has to be genuinely unmet for this to prove anything"
+        );
+        // Sustain first, as the run had it: the order in which the bundle is
+        // written is the order the driver expands it.
+        let bundle = Goal::All(vec![goal(), unmet.clone()]);
+        let net = match expand(&[bundle], &built, &registry_for(&roster), BotId(1)) {
+            Ok(net) => net,
+            Err(PlannerError::SustainSupplyNotStanding { .. }) => panic!(
+                "the standing sustain answered for the whole bundle; the unmet conjunct \
+                 was never expanded -- this is the false green of run-1788914717-24351"
+            ),
+            Err(other) => panic!("the bundle refused for an unrelated reason: {other}"),
+        };
+        assert!(
+            !net.is_empty(),
+            "the unmet conjunct must have produced the plan for itself"
+        );
+        let placed: Vec<String> = net
+            .actions()
+            .filter_map(|a| match &a.kind {
+                crate::action::ActionKind::Place { entity } => Some(entity.name.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            placed.is_empty(),
+            "the standing sustain must still add nothing of its own: {placed:?}"
+        );
+    }
+
+    /// The other half of the contract, so the driver's reading survives: a
+    /// bundle in which EVERY conjunct is either standing or met still refuses
+    /// by the standing name, because then "the whole arrangement stands" is
+    /// true of the bundle.
+    #[test]
+    fn a_bundle_with_nothing_left_to_build_still_refuses_by_the_standing_name() {
+        let roster = [BotId(1)];
+        let built = state_with_the_arrangement_standing();
+        let met = Goal::Have {
+            item: "coal".into(),
+            count: 0,
+            whose: Holder::Anyone,
+            via: None,
+        };
+        assert_eq!(holds(&met, &built), Some(true));
+        let bundle = Goal::All(vec![met, goal()]);
+        match expand(&[bundle], &built, &registry_for(&roster), BotId(1)) {
+            Err(PlannerError::SustainSupplyNotStanding { .. }) => {}
+            Err(other) => panic!("expected the standing refusal, got: {other}"),
+            Ok(net) => panic!(
+                "a bundle with nothing to build produced {} actions",
+                net.len()
+            ),
+        }
+    }
+
     /// And on a map whose fuel is further away than one belt window reaches,
     /// the answer is a **named refusal about the ground**, not a plan that
     /// would be measured `roster-fed`.

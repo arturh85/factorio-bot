@@ -7,11 +7,11 @@ pub mod cellstock;
 pub mod connect;
 pub mod dispose;
 pub mod extract;
-pub mod orbit;
 pub mod fabricate;
 pub mod gather;
 pub mod have;
 pub mod machine;
+pub mod orbit;
 pub mod pipe;
 pub mod power;
 pub mod produce;
@@ -855,8 +855,46 @@ fn expand_goal_body(
     // mining to one bot while asking whether a different one was satisfied.
     // (The rebind itself happens in `expand_goal`, which also restores it.)
     if let Goal::All(inner) = goal {
+        // **A conjunct that has nothing left to build does not end the
+        // bundle.** `Goal::Sustain` refuses with `SustainSupplyNotStanding`
+        // when its whole arrangement stands -- an empty plan is this
+        // planner's word for "done", and the method will not say "done" for
+        // a rate it cannot read (see `method::sustain`). That refusal is
+        // about ONE conjunct. Propagated with `?` from here, it ended the
+        // whole `All` before any later conjunct was asked, and the driver --
+        // which turns exactly that code into a satisfied milestone -- reported
+        // `all { sustain copper-plate, producing automation-science-pack }`
+        // satisfied with **no assembling machine ever placed**
+        // (`workspace/runs/run-1788914717-24351`: the science conjunct was
+        // never expanded on the replan, and its 226 tail steps never ran).
+        //
+        // So the standing refusal is held back while the remaining conjuncts
+        // expand, and re-raised only when the bundle as a whole emitted
+        // nothing -- then every conjunct is either met (empty expansion) or
+        // standing, and "the whole arrangement stands" is true of the
+        // bundle, which is what the driver reads it as. Any other error still
+        // ends the bundle at once: a refusal about the ground or a construction
+        // fault is not "nothing to build".
+        //
+        // Safe to continue past, and only past this one: the refusal is
+        // raised exactly when the method emitted no step, so it has written
+        // nothing into the overlay or the network, and `expand_goal` restores
+        // the context on every exit path.
+        let before = net.len();
+        let mut standing = None;
         for g in inner {
-            expand_goal(g, ctx, net, registry)?;
+            match expand_goal(g, ctx, net, registry) {
+                Ok(()) => {}
+                Err(refusal @ PlannerError::SustainSupplyNotStanding { .. }) => {
+                    standing.get_or_insert(refusal);
+                }
+                Err(other) => return Err(other),
+            }
+        }
+        if net.len() == before
+            && let Some(refusal) = standing
+        {
+            return Err(refusal);
         }
         return Ok(());
     }

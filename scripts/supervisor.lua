@@ -1521,6 +1521,21 @@ function Sup:step()
             -- the reason word. The verdict belongs to
             -- `tools/run_analysis.py --sustain`, exactly as
             -- `supervisor.sustain`'s does.
+            --
+            -- **When the milestone is an `all { ... }`, this code means the
+            -- whole bundle has nothing left to build**, and it means that
+            -- since 2026-09-09 only. Before, the planner's `All` loop
+            -- propagated the FIRST conjunct's refusal with `?`, so a bundle
+            -- `all { sustain copper-plate, producing science }` whose copper
+            -- chain stood refused here before the science conjunct was ever
+            -- expanded -- and this branch closed the milestone satisfied with
+            -- no assembling machine on the map (`run-1788914717-24351`, whose
+            -- summary read `satisfied ... last error: player blocks placement
+            -- in all directions`). The planner now holds a standing refusal
+            -- back until every other conjunct has expanded, and re-raises it
+            -- only when the bundle emitted nothing at all
+            -- (`crates/planner/src/method/mod.rs`, `expand_goal_body`;
+            -- `a_standing_sustain_does_not_satisfy_the_rest_of_its_bundle`).
             if refusal.code == "planner::sustain_supply_not_standing" then
                 self:_close("satisfied")
                 self.state = "acquiring"

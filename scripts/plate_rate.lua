@@ -112,6 +112,28 @@ while not sup:finished() do
       record.roster_changed(t.bots, t.left, t.returned, t.reason)
       print(string.format("   ROSTER CHANGED -- %s%s",
         tostring(t.reason), nd > 0 and (" (+" .. nd .. " death events)") or ""))
+    elseif t.action == "satisfied" then
+      -- Closes the milestone in the record. Without this the analyser reads
+      -- `OPEN (never ended; scored to the last recorded tick)` for every
+      -- milestone of every run this driver has made, which is what it did.
+      record.milestone_satisfied(t.milestone_index, t.iteration or 0, t.reason)
+      print("   SATISFIED (" .. tostring(t.reason) .. ")")
+    elseif t.action == "halted" then
+      -- **This branch is why three runs could not say why they stopped.**
+      -- `record.refusals()` sounds like it covers this and does not: it drains
+      -- `world.unreported_placement_refusals()`, i.e. refusals the GAME handed
+      -- down, and reported `+0` in every run while the milestone was refusing
+      -- by name the whole time. Two different things wearing one word.
+      --
+      -- `t.refusal` is the PLANNER's verdict about the world ("a cell already
+      -- makes copper-plate ... and nothing can carry it to the supply chest"),
+      -- not an action that failed. It leads, because it is what closed the
+      -- milestone; `sup.first_error` may also be set from an earlier run in the
+      -- same milestone, and that is a different fact.
+      local why = (t.refusal and t.refusal.message) or sup.first_error
+      record.milestone_stuck(t.milestone_index, t.state, why, t.best)
+      print("   HALTED: " .. tostring(t.state)
+        .. (t.refusal and (" -- refused: " .. t.refusal.message) or ""))
     elseif t.action == "ran" then
       local n = 0
       if t.steps ~= nil and t.actions ~= nil then n = record.actions(t.steps, t.actions) end

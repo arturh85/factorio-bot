@@ -11,7 +11,7 @@ use crate::state::PlanState;
 use factorio_bot_core::blueprint::UndergroundHalf;
 use factorio_bot_core::graph::enclosure::GRID;
 use factorio_bot_core::graph::route::{
-    RouteError, TileKind, route_belt_with_tunnels, tunnel_axis, tunnel_cells,
+    Route, RouteError, TileKind, route_belt_with_tunnels, tunnel_axis, tunnel_cells,
 };
 use factorio_bot_core::types::{Direction, FactorioEntity, Position, Rect};
 use std::collections::BTreeMap;
@@ -344,11 +344,34 @@ struct Endpoint {
     belt: (usize, usize),
 }
 
-/// The first free `(inserter, belt)` pair on `footprint`'s perimeter.
+/// The first free `(inserter, belt)` pair on `footprint`'s perimeter -- a
+/// pair the plan has KEPT for this end taken before any other.
 ///
 /// Both cells are required free together: an inserter with nowhere to put the
 /// belt is not a usable end, and taking the inserter tile anyway is what made
 /// the old chain bend into a diagonal.
+///
+/// # The kept pair goes first, and only a whole pair counts
+///
+/// `kept` is the ground `PlanState::reserve_ground` holds for the run that
+/// leaves this machine (`method::sustain`'s product exit: the arm's tile and
+/// the belt's tile beyond it). Until 2026-09-09 this scan had no way to see
+/// it: the call site exempted a kept tile from the obstacle grid, so the exit
+/// was *usable*, and then walked the perimeter North, East, South, West and
+/// took the first free pair -- which on `run-1788936524-99544` was the plate
+/// chest's NORTH side, with the kept east exit standing open one tile away.
+/// The link's own belt and pole then sealed that exit into a pocket, and the
+/// replan tunnelled out of it. A side kept for a run and not taken by it is
+/// kept for nothing.
+///
+/// So a candidate whose inserter cell AND belt cell are both in `kept` is
+/// tried first; every other candidate follows in the fixed order. **Both
+/// cells, deliberately.** A reservation is two tiles in a line out of one
+/// chest, and only that exact pair is this end's exit. A neighbouring chest's
+/// exit can put one of its tiles on this perimeter as a lone inserter cell or
+/// a lone belt cell, and preferring that would spend another cell's way out
+/// on a run it was never kept for. With `kept` empty the scan is byte for
+/// byte what it was.
 ///
 /// `Err` names every occupied tile that stopped it, deduplicated and in
 /// ascending cell order -- a fixed order rather than an artefact of the scan.
@@ -358,9 +381,21 @@ fn first_free_perimeter(
     blocked: &[bool],
     origin: (f64, f64),
     footprint: &Footprint,
+    kept: &[(usize, usize)],
 ) -> Result<Endpoint, Vec<Position>> {
     let mut stopped: Vec<(usize, usize)> = Vec::new();
-    for ((x, y), (dx, dy)) in perimeter(footprint) {
+    let candidates = perimeter(footprint);
+    let is_kept = |((x, y), (dx, dy)): &((i64, i64), (i64, i64))| {
+        matches!(
+            (in_grid(*x, *y), in_grid(x + dx, y + dy)),
+            (Some(inserter), Some(belt)) if kept.contains(&inserter) && kept.contains(&belt)
+        )
+    };
+    let ordered = candidates
+        .iter()
+        .filter(|candidate| is_kept(candidate))
+        .chain(candidates.iter().filter(|candidate| !is_kept(candidate)));
+    for &((x, y), (dx, dy)) in ordered {
         let (Some(inserter), Some(belt), Some(anchor)) = (
             in_grid(x, y),
             in_grid(x + dx, y + dy),
@@ -1060,7 +1095,15 @@ pub fn connect_steps_reserving(
     // exemption: a reserved tile on the perimeter of this run's own `from`
     // or `to` is this run's to use. The ground is kept FOR the run that
     // leaves the chest it borders, and that run must find its end there;
-    // to every other route it is a wall like the caller's own.
+    // to every other route it is a wall like the caller's own. And the
+    // `from` end does not merely MAY use it: the kept pair on its perimeter
+    // is the pair it takes first (`first_free_perimeter`'s `kept`), because
+    // a reservation is a product exit -- the arm's tile and the belt's tile
+    // out of the chest -- and the run OUT of the chest is what it was kept
+    // for. The `to` end keeps the plain order: a run INTO a chest is not the
+    // run its exit was kept for, and the reservation carries no direction
+    // of its own (`keeper` is prose), so the one purpose it has today is
+    // read off which end the chest is.
     let ground_reserved: Vec<(usize, usize)> = ctx
         .state
         .reserved_ground()
@@ -1085,9 +1128,19 @@ pub fn connect_steps_reserving(
                 })
             })
     };
+    let from_perimeter = |cell: (usize, usize)| {
+        perimeter(&from_footprint)
+            .into_iter()
+            .any(|((x, y), (dx, dy))| {
+                in_grid(x, y) == Some(cell) || in_grid(x + dx, y + dy) == Some(cell)
+            })
+    };
+    let mut kept_exit: Vec<(usize, usize)> = Vec::new();
     for cell in ground_reserved {
         if !own_perimeter(cell) {
             blocked[enclosure::cell_index(cell.0, cell.1)] = true;
+        } else if from_perimeter(cell) {
+            kept_exit.push(cell);
         }
     }
 
@@ -1117,7 +1170,15 @@ pub fn connect_steps_reserving(
         None => vec![0u8; GRID * GRID],
     };
 
-    // Each end is claimed onto `blocked` as soon as it is chosen, so the
+    // What stands in the window is settled; choosing the two ends and
+    // searching between them is one attempt over a COPY of the grid, so it
+    // can be made twice -- see `attempt`'s doc and the call below it.
+    let sides = container_sides(ctx, &area, origin);
+    let threatened = threatened_cells(ctx, origin);
+
+    // One attempt at the run: both ends chosen, then the search.
+    //
+    // Each end is claimed onto the grid as soon as it is chosen, so the
     // second search sees what the first took. Without this, both ends are
     // "the first free perimeter pair of X" against the same static grid and
     // neither knows what the other claimed -- in tight geometry the two could
@@ -1126,81 +1187,112 @@ pub fn connect_steps_reserving(
     // the tile is no longer free for whichever search asks next, so it keeps
     // looking, and if nothing is left it refuses via `first_free_perimeter`'s
     // `Err` exactly as an ordinary blocked tile would.
-    let source = first_free_perimeter(&blocked, origin, &from_footprint)
-        .map_err(|blocked| ConnectRefusal::NoRoute { blocked })?;
-    blocked[enclosure::cell_index(source.inserter.0, source.inserter.1)] = true;
-    blocked[enclosure::cell_index(source.belt.0, source.belt.1)] = true;
-
-    let sink = first_free_perimeter(&blocked, origin, &to_footprint)
-        .map_err(|blocked| ConnectRefusal::NoRoute { blocked })?;
-    blocked[enclosure::cell_index(sink.inserter.0, sink.inserter.1)] = true;
-
-    // A CHEST'S OTHER SIDES ARE RESERVED, not routed over. Measured
-    // 2026-09-09 on seed 31337: the haul into a cell's coal chest ended on
-    // its north side and ran its last belts down the chest's EAST side on
-    // the way in, so the chest's fourth side -- the one the next cell
-    // needed -- was spent by a belt that had no business there, and the
-    // next run refused with all four neighbours named. `method::sustain`'s
-    // doc had already said where the fix belonged: "a real fix reserves the
-    // perimeter in `method::connect`". So once the two ends are chosen, a
-    // chest at either end closes every other side to this route.
     //
-    // **Only this call's own two machines, and only if they are chests.**
-    // The first version closed every chest in the window, and the one-cell
-    // sustain arrangement in the fixtures -- three chests within a few
-    // tiles -- lost every surface route and reached for a tunnel it cannot
-    // craft. A bystander's sides are the bystander's own call's business.
-    for (cell, owner) in container_sides(ctx, &area, origin) {
-        let ours = same_tile(&owner, &from.position) || same_tile(&owner, &to.position);
-        let chosen = [source.inserter, source.belt, sink.inserter, sink.belt].contains(&cell);
-        if ours && !chosen {
-            blocked[enclosure::cell_index(cell.0, cell.1)] = true;
-        }
-    }
+    // `kept` is handed to the `from` end only -- see the reservation note
+    // above -- and an attempt with it empty is the search this function has
+    // always run.
+    let attempt = |kept: &[(usize, usize)]| -> Result<(Endpoint, Endpoint, Route), ConnectRefusal> {
+        let mut blocked = blocked.clone();
+        let source = first_free_perimeter(&blocked, origin, &from_footprint, kept)
+            .map_err(|blocked| ConnectRefusal::NoRoute { blocked })?;
+        blocked[enclosure::cell_index(source.inserter.0, source.inserter.1)] = true;
+        blocked[enclosure::cell_index(source.belt.0, source.belt.1)] = true;
 
-    // THREATS: a belt is a standing structure, so the route prefers to keep
-    // out of a charted enemy structure's reach -- but never at the price of
-    // the route itself. `threatened_cells` is OR-ed onto a *copy* of the grid
-    // and tried first; a refusal there falls through to the plain grid, which
-    // is the search this function has always run. So the guard can move a
-    // belt and can never delete one, the same prefer-then-fall-back shape
-    // `method::util::free_area_near_where` uses for siting, and for the same
-    // measured reason (a standing thing cannot walk out of range).
-    //
-    // The endpoints are deliberately NOT part of it: they are fixed by the
-    // machines, and blocking them would refuse every route on the first
-    // attempt and make the whole pass a wasted search.
-    //
-    // ORDER: surface first, on both grids, and only then a tunnel. A pair
-    // is a last resort -- it costs the iron of some sixteen belts, needs a
-    // recipe that is disabled at t=0, and reserves the ground beneath it --
-    // so a route the surface can make, however long its detour, is the
-    // route. This is what keeps every plan that routed before undergrounds
-    // existed byte-for-byte the same plan.
-    let avoiding = threatened_cells(ctx, origin).map(|threatened| {
-        let mut avoiding = blocked.clone();
-        for (cell, is_threatened) in threatened.iter().enumerate() {
-            if *is_threatened {
-                avoiding[cell] = true;
+        let sink = first_free_perimeter(&blocked, origin, &to_footprint, &[])
+            .map_err(|blocked| ConnectRefusal::NoRoute { blocked })?;
+        blocked[enclosure::cell_index(sink.inserter.0, sink.inserter.1)] = true;
+
+        // A CHEST'S OTHER SIDES ARE RESERVED, not routed over. Measured
+        // 2026-09-09 on seed 31337: the haul into a cell's coal chest ended
+        // on its north side and ran its last belts down the chest's EAST
+        // side on the way in, so the chest's fourth side -- the one the next
+        // cell needed -- was spent by a belt that had no business there, and
+        // the next run refused with all four neighbours named.
+        // `method::sustain`'s doc had already said where the fix belonged:
+        // "a real fix reserves the perimeter in `method::connect`". So once
+        // the two ends are chosen, a chest at either end closes every other
+        // side to this route.
+        //
+        // **Only this call's own two machines, and only if they are chests.**
+        // The first version closed every chest in the window, and the
+        // one-cell sustain arrangement in the fixtures -- three chests within
+        // a few tiles -- lost every surface route and reached for a tunnel it
+        // cannot craft. A bystander's sides are the bystander's own call's
+        // business.
+        for (cell, owner) in &sides {
+            let ours = same_tile(owner, &from.position) || same_tile(owner, &to.position);
+            let chosen = [source.inserter, source.belt, sink.inserter, sink.belt].contains(cell);
+            if ours && !chosen {
+                blocked[enclosure::cell_index(cell.0, cell.1)] = true;
             }
         }
-        avoiding[enclosure::cell_index(source.belt.0, source.belt.1)] = false;
-        avoiding[enclosure::cell_index(sink.belt.0, sink.belt.1)] = false;
-        avoiding
-    });
-    let search = |grid: &[bool], reach: Option<u8>| {
-        route_belt_with_tunnels(grid, &tunnels, origin, source.belt, sink.belt, reach)
+
+        // THREATS: a belt is a standing structure, so the route prefers to
+        // keep out of a charted enemy structure's reach -- but never at the
+        // price of the route itself. `threatened_cells` is OR-ed onto a
+        // *copy* of the grid and tried first; a refusal there falls through
+        // to the plain grid, which is the search this function has always
+        // run. So the guard can move a belt and can never delete one, the
+        // same prefer-then-fall-back shape `method::util::free_area_near_where`
+        // uses for siting, and for the same measured reason (a standing
+        // thing cannot walk out of range).
+        //
+        // The endpoints are deliberately NOT part of it: they are fixed by
+        // the machines, and blocking them would refuse every route on the
+        // first attempt and make the whole pass a wasted search.
+        //
+        // ORDER: surface first, on both grids, and only then a tunnel. A
+        // pair is a last resort -- it costs the iron of some sixteen belts,
+        // needs a recipe that is disabled at t=0, and reserves the ground
+        // beneath it -- so a route the surface can make, however long its
+        // detour, is the route. This is what keeps every plan that routed
+        // before undergrounds existed byte-for-byte the same plan.
+        let avoiding = threatened.as_ref().map(|threatened| {
+            let mut avoiding = blocked.clone();
+            for (cell, is_threatened) in threatened.iter().enumerate() {
+                if *is_threatened {
+                    avoiding[cell] = true;
+                }
+            }
+            avoiding[enclosure::cell_index(source.belt.0, source.belt.1)] = false;
+            avoiding[enclosure::cell_index(sink.belt.0, sink.belt.1)] = false;
+            avoiding
+        });
+        let search = |grid: &[bool], reach: Option<u8>| {
+            route_belt_with_tunnels(grid, &tunnels, origin, source.belt, sink.belt, reach)
+        };
+        let route = avoiding
+            .as_ref()
+            .and_then(|grid| search(grid, None).ok())
+            .or_else(|| search(&blocked, None).ok())
+            .or_else(|| {
+                reach.and_then(|_| avoiding.as_ref().and_then(|grid| search(grid, reach).ok()))
+            })
+            .map_or_else(|| search(&blocked, reach), Ok)
+            .map_err(|error| match error {
+                RouteError::NoPath { blocked } => ConnectRefusal::NoRoute { blocked },
+                RouteError::SpanTooLong { needed, max } => {
+                    ConnectRefusal::SpanTooLong { needed, max }
+                }
+            })?;
+        Ok((source, sink, route))
     };
-    let route = avoiding
-        .as_ref()
-        .and_then(|grid| search(grid, None).ok())
-        .or_else(|| search(&blocked, None).ok())
-        .or_else(|| reach.and_then(|_| avoiding.as_ref().and_then(|grid| search(grid, reach).ok())))
-        .map_or_else(|| search(&blocked, reach), Ok)
-        .map_err(|error| match error {
-            RouteError::NoPath { blocked } => ConnectRefusal::NoRoute { blocked },
-            RouteError::SpanTooLong { needed, max } => ConnectRefusal::SpanTooLong { needed, max },
-        })?;
+
+    // THE KEPT EXIT FIRST, THE PLAIN ORDER IF IT REFUSES. A side kept for
+    // this run is preferred, never imposed: the plan reserved it while the
+    // cell was sited, and what has stood up since -- another method's
+    // machine, a coal run, a tunnel -- can have shut the ground beyond it
+    // without touching the pair itself. A refusal with the kept pair is then
+    // a fact about that pair and not about the chest, so the run is tried
+    // once more the way it always was, and only both refusing is a refusal.
+    // The second attempt's refusal is the one reported: it names the tiles
+    // the old search would have named. With nothing kept there is exactly
+    // one attempt, as before.
+    let (source, sink, route) = match attempt(&kept_exit) {
+        Ok(found) => found,
+        Err(_) if !kept_exit.is_empty() => attempt(&[])?,
+        Err(refusal) => return Err(refusal),
+    };
 
     let source_anchor_pos = enclosure::cell_to_position(origin, source.anchor);
     let sink_anchor_pos = enclosure::cell_to_position(origin, sink.anchor);
@@ -2320,6 +2412,142 @@ mod tests {
             boxed.state.entities_within(&sink.position, 30.).len(),
             before,
             "a refusal must leave the overlay exactly as it found it"
+        );
+    }
+
+    /// The load arm of a run out of `from`, by position.
+    fn load_arm(steps: &[Step]) -> Position {
+        placements(steps, INSERTER)
+            .into_iter()
+            .next()
+            .map(|(at, _)| at)
+            .expect("a run places its load arm first")
+    }
+
+    /// A pair the plan has KEPT for the run out of a chest is the pair the
+    /// run takes -- not the first free side in the scan's fixed order.
+    ///
+    /// On open ground the scan's first free side of the source at
+    /// `(4.5, 5.5)` is NORTH (arm `(4.5, 4.5)`), which is the control. With
+    /// its EAST pair reserved in the state as a product exit, the run leaves
+    /// by the east arm at `(5.5, 5.5)`; `run-1788936524-99544`'s first plan
+    /// took the north side of exactly such a chest with the kept exit
+    /// standing open beside it, and its own belt then sealed the exit.
+    ///
+    /// And the reservation is a way OUT: the sink's own reserved pair is
+    /// not preferred for the run INTO it, because a run into a chest is not
+    /// the run its exit was kept for. The unload arm stays where the plain
+    /// order puts it.
+    #[test]
+    fn a_run_out_of_a_chest_leaves_by_the_pair_kept_for_it() {
+        let (mut plain, source, sink) = crate::test_world::two_chests_on_open_ground();
+        let control =
+            connect_steps_with(&mut plain, &source, &sink, &"iron-plate".into(), INSERTER)
+                .expect("the control: two chests on open ground");
+        assert_eq!(
+            load_arm(&control),
+            Position::new(4.5, 4.5),
+            "fixture precondition: unkept, the scan's first free side of the source is north"
+        );
+
+        let (mut kept, source, sink) = crate::test_world::two_chests_on_open_ground();
+        let east_exit = [Position::new(5.5, 5.5), Position::new(6.5, 5.5)];
+        kept.state
+            .reserve_ground(&east_exit, "a cell's product exit");
+        // The sink's west pair, reserved as if it were its exit: a run INTO
+        // the sink must not take it.
+        let sink_exit = [Position::new(11.5, 5.5), Position::new(10.5, 5.5)];
+        kept.state
+            .reserve_ground(&sink_exit, "a cell's product exit");
+        let steps = connect_steps_with(&mut kept, &source, &sink, &"iron-plate".into(), INSERTER)
+            .expect("a kept exit on open ground routes");
+        let arms = placements(&steps, INSERTER);
+        assert_eq!(
+            arms[0].0,
+            Position::new(5.5, 5.5),
+            "the run leaves by the kept east exit: {arms:?}"
+        );
+        assert!(
+            placements(&steps, BELT)
+                .iter()
+                .any(|(at, _)| *at == Position::new(6.5, 5.5)),
+            "and its first belt stands on the kept belt tile: {:?}",
+            placements(&steps, BELT)
+        );
+        assert_eq!(
+            arms[1].0,
+            Position::new(12.5, 4.5),
+            "the run INTO the sink keeps the plain order, not the sink's kept exit: {arms:?}"
+        );
+    }
+
+    /// Only a whole pair -- inserter cell AND belt cell -- is this chest's
+    /// exit. A neighbour's reservation that puts one of its tiles on this
+    /// perimeter is that neighbour's way out, and the run does not prefer
+    /// it: with `(6.5, 5.5)` and `(7.5, 5.5)` kept (a pair out of a chest
+    /// that would stand at `(5.5, 5.5)`), the source's east candidate has
+    /// its belt cell kept and its arm cell not, and the run still leaves by
+    /// the north.
+    #[test]
+    fn a_lone_kept_tile_on_the_perimeter_is_not_this_chests_exit() {
+        let (mut ctx, source, sink) = crate::test_world::two_chests_on_open_ground();
+        let neighbours_exit = [Position::new(6.5, 5.5), Position::new(7.5, 5.5)];
+        ctx.state
+            .reserve_ground(&neighbours_exit, "a cell's product exit");
+        let steps = connect_steps_with(&mut ctx, &source, &sink, &"iron-plate".into(), INSERTER)
+            .expect("a neighbour's reservation on open ground routes");
+        assert_eq!(
+            load_arm(&steps),
+            Position::new(4.5, 4.5),
+            "the run leaves by the plain first free side, north"
+        );
+    }
+
+    /// A kept pair the run cannot leave by is not imposed. The source's east
+    /// pair is kept and free, and the belt tile is sealed into a one-tile
+    /// pocket: a block of wall seven columns wide east of it -- wider than
+    /// the reach -- and the three tiles west of the chest walled too, because
+    /// the first version of this fixture left them open and the run
+    /// tunnelled WEST out of the pocket, under its own arm and the chest it
+    /// was loading from, to `(1.5, 5.5)`. Legal, and not the case under
+    /// test. With no landing there, a run from the kept pair refuses, the
+    /// run falls back to the plain order and leaves by the north, and
+    /// places everything it promised: a preference that turned a routable
+    /// chest into a refusal would be worse than the scan it replaced.
+    #[test]
+    fn a_kept_pair_the_run_cannot_leave_by_falls_back_to_the_plain_order() {
+        use crate::test_world::{connect_ctx_with_roster, iron_chest, stone_wall};
+        let source = iron_chest(&Position::new(4.5, 5.5));
+        let sink = iron_chest(&Position::new(4.5, 15.5));
+        let mut entities = vec![source.clone(), sink.clone()];
+        for x in 6..=12 {
+            for y in -30..=30 {
+                let at = Position::new(f64::from(x) + 0.5, f64::from(y) + 0.5);
+                if at == Position::new(6.5, 5.5) {
+                    continue;
+                }
+                entities.push(stone_wall(&at));
+            }
+        }
+        for x in [1.5, 2.5, 3.5] {
+            entities.push(stone_wall(&Position::new(x, 5.5)));
+        }
+        let mut ctx = connect_ctx_with_roster(entities, &[]);
+        let east_exit = [Position::new(5.5, 5.5), Position::new(6.5, 5.5)];
+        ctx.state
+            .reserve_ground(&east_exit, "a cell's product exit");
+        let steps = connect_steps_with(&mut ctx, &source, &sink, &"iron-plate".into(), INSERTER)
+            .expect("a sealed kept pair falls back to the plain order rather than refusing");
+        assert_eq!(
+            load_arm(&steps),
+            Position::new(4.5, 4.5),
+            "the run leaves by the north, the plain order's first free side"
+        );
+        assert!(
+            !placements(&steps, BELT)
+                .iter()
+                .any(|(at, _)| *at == Position::new(6.5, 5.5)),
+            "and nothing stands in the pocket"
         );
     }
 }

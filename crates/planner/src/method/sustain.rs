@@ -734,6 +734,43 @@ impl Offtake {
     }
 }
 
+/// The pair of tiles the plan has already kept as the exit of the 1x1 chest
+/// at `sink`: the arm's tile beside it and the belt's tile beyond, both
+/// reserved (`PlanState::reserve_ground`), in a line out of the chest.
+/// `None` when no side of the chest is kept whole.
+///
+/// # Why a standing chest must ask this before it asks `product_exits`
+///
+/// `Sustain::expand` reserves every standing cell's exit before it lays a
+/// run (the seed at the top of the cell loop), and then reads each standing
+/// cell's offtake AGAIN inside the loop. That second read went through
+/// [`product_exits`], which counts a side only when both tiles are free --
+/// and the tiles the first read had just reserved are `Occupant::Reserved`,
+/// so the east exit no longer counted, the read ranked NORTH first, and the
+/// loop reserved a second pair on the same chest. Two kept sides, and
+/// `connect` then took the first in its scan order: north, exactly where
+/// `run-1788936524-99544`'s link stood while the exit kept at t=0 was open
+/// beside it. The reservation blinded its own author. Read off the state's
+/// own promise first, and the second read agrees with the first.
+///
+/// Both tiles, in a line: a lone reserved tile beside the chest is some
+/// other chest's exit passing by, and is not this chest's.
+fn kept_exit_of(state: &PlanState, sink: &Position) -> Option<Vec<Position>> {
+    let kept = |at: &Position| {
+        state
+            .reserved_ground()
+            .iter()
+            .any(|(area, _)| Pos::from(&area.center()) == Pos::from(at))
+    };
+    [(0., -1.), (1., 0.), (0., 1.), (-1., 0.)]
+        .into_iter()
+        .find_map(|(dx, dy)| {
+            let neighbour = Position::new(sink.x() + dx, sink.y() + dy);
+            let beyond = Position::new(sink.x() + 2. * dx, sink.y() + 2. * dy);
+            (kept(&neighbour) && kept(&beyond)).then_some(vec![neighbour, beyond])
+        })
+}
+
 /// Every side of the 1x1 chest at `sink` that could be kept free for the
 /// product's way out -- each as the tile an arm would stand on and the tile
 /// beyond it for its belt -- in preference order.
@@ -845,11 +882,16 @@ fn standing_offtake(state: &PlanState, at: &Position) -> Option<Offtake> {
         if found.is_none() {
             // A standing chest keeps whatever exit it still has; one with
             // no side left is reported with none, because nothing here can
-            // free one and a replan must not refuse the cell over it.
-            let exit = product_exits(state, &sink.position, &arm.position, &[])
-                .into_iter()
-                .next()
-                .unwrap_or_default();
+            // free one and a replan must not refuse the cell over it. And
+            // an exit the plan has ALREADY kept is the exit, before any
+            // side `product_exits` would rank first -- see `kept_exit_of`
+            // for the second reservation this used to make.
+            let exit = kept_exit_of(state, &sink.position).unwrap_or_else(|| {
+                product_exits(state, &sink.position, &arm.position, &[])
+                    .into_iter()
+                    .next()
+                    .unwrap_or_default()
+            });
             found = Some(Offtake {
                 arm: arm.position.clone(),
                 arm_name: arm.name.clone(),
@@ -3112,6 +3154,109 @@ mod tests {
                     spec.item, offtake.sink
                 )
             });
+    }
+
+    /// A replan over the standing cell keeps ONE exit, and it is the one the
+    /// first plan kept. `Sustain::expand` reserves the standing chest's exit
+    /// before its cell loop and reads the offtake again inside it; until
+    /// `kept_exit_of` the second read ranked the reserved pair as taken and
+    /// reserved the chest's NORTH side as a second exit, which is the side
+    /// `connect` then scanned first. Every reserved tile within two of the
+    /// sink must lie on the pair the standing offtake declares.
+    ///
+    /// **Mutation finding**: with `kept_exit_of` removed this test stays
+    /// green on `near_state`, because the second read finds no other free
+    /// side there and reserves nothing. The direct falsifier is
+    /// [`a_standing_chest_reports_the_exit_the_plan_kept`] below, on open
+    /// ground; the composed one is `replan_sealed_supply::
+    /// the_link_of_run_1788936524_99544_leaves_by_the_kept_exit`.
+    #[test]
+    fn a_replan_keeps_the_same_single_exit_for_a_standing_plate_chest() {
+        let roster = [BotId(1)];
+        let state = near_state();
+        let net = expand(&[goal()], &state, &registry_for(&roster), BotId(1))
+            .expect("iron and coal are within one belt window of each other");
+        let (built, _) = built_world(&net, &state);
+        let spec = cell_spec(&built, "iron-plate").expect("a stone furnace smelts iron");
+        let cells = crate::method::produce::standing_cells(&built, &spec);
+        let cell = cells.first().expect("a cell stands");
+        let offtake = standing_offtake(&built, &cell.furnace).expect("the furnace has an offtake");
+        assert_eq!(
+            offtake.exit.len(),
+            2,
+            "fixture precondition: the chest has an exit"
+        );
+
+        let mut replan = ExpansionCtx::new(built.fork(), BotId(1));
+        // Standing or not is the method's call; what is under test is the
+        // ground it spoke for on the way.
+        let _ = Sustain.expand(&goal(), &mut replan);
+        let near_sink: Vec<Position> = replan
+            .state
+            .reserved_ground()
+            .iter()
+            .map(|(area, _)| area.center())
+            .filter(|at| {
+                (at.x() - offtake.sink.x()).abs() + (at.y() - offtake.sink.y()).abs() <= 2.
+            })
+            .collect();
+        assert!(
+            !near_sink.is_empty(),
+            "the replan reserved nothing beside the standing plate chest at {}",
+            offtake.sink
+        );
+        for tile in &near_sink {
+            assert!(
+                offtake
+                    .exit
+                    .iter()
+                    .any(|kept| Pos::from(kept) == Pos::from(tile)),
+                "the replan kept {tile} beside the plate chest at {}, off the exit it declared \
+                 {:?}: two sides kept, and connect takes the first in scan order",
+                offtake.sink,
+                offtake.exit
+            );
+        }
+    }
+
+    /// A standing offtake on open ground -- furnace, arm, chest, every side
+    /// of the chest free -- with the chest's SOUTH pair reserved in the state
+    /// as its exit, read back by `standing_offtake`: the exit is the kept
+    /// south pair. `product_exits` alone would rank the side opposite the
+    /// arm (east) first and, with south reserved, would never name south;
+    /// the state's promise outranks the ranking, so the read agrees with
+    /// whoever kept it.
+    #[test]
+    fn a_standing_chest_reports_the_exit_the_plan_kept() {
+        let furnace = FactorioEntity::new_stone_furnace(&Position::new(5.0, 5.0), Direction::North);
+        // Picks up from the west -- the furnace -- and drops east into the chest.
+        let arm = FactorioEntity::new_named_inserter(
+            ARM.into(),
+            &Position::new(6.5, 5.5),
+            Direction::West,
+        );
+        let chest = crate::test_world::iron_chest(&Position::new(7.5, 5.5));
+        let mut ctx = crate::test_world::connect_ctx_with_roster(
+            vec![furnace.clone(), arm, chest],
+            &[BotId(1)],
+        );
+        let unkept = standing_offtake(&ctx.state, &furnace.position)
+            .expect("the arm carries the furnace's output into the chest");
+        assert_eq!(
+            unkept.exit,
+            vec![Position::new(8.5, 5.5), Position::new(9.5, 5.5)],
+            "fixture precondition: unkept, the exit ranked first is east, opposite the arm"
+        );
+
+        let south = [Position::new(7.5, 6.5), Position::new(7.5, 7.5)];
+        ctx.state.reserve_ground(&south, EXIT_KEEPER);
+        let kept = standing_offtake(&ctx.state, &furnace.position)
+            .expect("the same offtake, read with the exit kept");
+        assert_eq!(
+            kept.exit,
+            south.to_vec(),
+            "the standing chest reports the exit the plan kept, not the side ranked first"
+        );
     }
 
     #[test]

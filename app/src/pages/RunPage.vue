@@ -156,7 +156,7 @@ const LEGEND = [
           <p v-if="store.eventsError" class="px-3 py-2 text-sm text-warn-dark">{{ store.eventsError }}</p>
           <CoverageBand v-else :scale="scale" :cursor="store.cursor" :events="store.events" :samples="store.samples" :run-end="win?.hi ?? scale.to" :skipped="store.eventsSkipped"/>
         </BandFrame>
-        <CursorBar :scale="scale" :cursor="store.cursor" :playing="store.playing" :rate="store.rate"
+        <CursorBar :scale="scale" :clock="clock" :cursor="store.cursor" :playing="store.playing" :rate="store.rate"
                    @seek="store.seek($event)" @toggle="store.togglePlay()" @rate="store.rate = $event"/>
         <div class="flex flex-wrap gap-x-4 gap-y-1.5 border-t border-divider px-5 py-2 text-xs text-ink-muted">
           <span v-for="[label, token] in LEGEND" :key="label" class="inline-flex items-center gap-1.5">

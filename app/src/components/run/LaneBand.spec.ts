@@ -52,6 +52,11 @@ describe('LaneBand', () => {
         expect(seg.find('title').text()).toContain('never dispatched');
         expect(w.text()).toContain('idle 100%');
     });
+    it('idle share is measured over the analysis window', () => {
+        const trimmed = {from: run.lo + 175, to: run.hi};
+        const w = mount(LaneBand, {props: {scale: trimmed, clock: {from: run.lo, to: run.hi}, cursor: run.lo, lanes: run.lanes, events: run.events}});
+        expect(w.text()).toContain('idle 32%'); // 6984 / 21982, the tool's figure
+    });
     it('draws a refused replan as a critical dashed line across every row', () => {
         const events: Event[] = [
             {kind: 'planning_timed', tick: 452, planning_ms: 1, paused: true, reason: null, tick_before: 452, tick_after: 452} as Event,

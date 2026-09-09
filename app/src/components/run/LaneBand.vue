@@ -13,8 +13,11 @@ import {laneBots} from '@/lib/runTimeline';
 import {AXIS_WIDTH, formatGameTime, TickScale, tickX} from '@/lib/tickScale';
 
 /**
- * `scale` is the drawn axis (positions and the idle denominator); `clock` is
- * the analysis window (labels). See the header of `@/lib/tickScale`.
+ * `scale` is the drawn axis (positions); `clock` is the analysis window
+ * (labels, and the idle share's denominator and interval bound) -- the idle
+ * percentage is the share of the run the headline talks about, not of
+ * whatever the axis happens to be trimmed to. See the header of
+ * `@/lib/tickScale`.
  */
 const props = defineProps<{scale: TickScale; clock: TickScale; cursor: number; lanes: Lane[]; events: Event[]}>();
 const ROW = 30;
@@ -25,8 +28,8 @@ const boundaries = computed(() => replanBoundaries(props.events));
 const refused = computed(() => refusedReplans(props.events));
 const segments = computed(() => laneSegments(props.lanes, boundaries.value));
 const idlePct = computed(() => Object.fromEntries(bots.value.map((b) => {
-    const span = props.scale.to - props.scale.from;
-    return [b, span > 0 ? Math.round((idleTicks(idleIntervals(props.lanes, b, props.scale)) / span) * 100) : 0];
+    const span = props.clock.to - props.clock.from;
+    return [b, span > 0 ? Math.round((idleTicks(idleIntervals(props.lanes, b, props.clock)) / span) * 100) : 0];
 })));
 const botColor = (b: number) => `var(--color-bot-${Math.min(8, Math.max(1, b))})`;
 const rowY = (b: number) => bots.value.indexOf(b) * ROW;

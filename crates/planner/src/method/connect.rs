@@ -6,12 +6,14 @@ use crate::goal::{Goal, Holder};
 use crate::ids::{BotId, ItemId, Ticks};
 use crate::method::have::{HANDOVER_WALK_TICKS, PLACE_TICKS, participants_that_can_work};
 use crate::method::produce::{CRAFT_TICKS_MAX_DEPTH, craft_ticks};
+use crate::method::util::{mine_bill, mining_ticks};
 use crate::method::{ExpansionCtx, Step};
 use crate::state::PlanState;
 use factorio_bot_core::blueprint::UndergroundHalf;
 use factorio_bot_core::graph::enclosure::GRID;
 use factorio_bot_core::graph::route::{
-    Route, RouteError, TileKind, route_belt_with_tunnels, tunnel_axis, tunnel_cells,
+    Route, RouteError, RouteTile, TileKind, route_belt_launching, route_belt_with_tunnels,
+    tunnel_axis, tunnel_cells,
 };
 use factorio_bot_core::types::{Direction, FactorioEntity, Pos, Position, Rect};
 use std::collections::BTreeMap;
@@ -31,6 +33,27 @@ pub(crate) const UNDERGROUND: &str = "underground-belt";
 /// places one before `electronics` is researched refuses on the bill. A
 /// `burner-inserter` is 1 iron plate and 1 gear and is enabled from the start.
 const INSERTER: &str = "inserter";
+
+/// The prototype a [`tap_standing_run`] splices into a standing belt run.
+///
+/// **Its shape, read off the prototype and off `EntityGraph`'s own splitter
+/// arm, not off a picture of one**: a splitter is **two tiles wide across
+/// the direction of travel and one tile long along it** -- collision box
+/// 1.796875 x 0.796875 facing north (`crates/core/tests/entity-prototype-
+/// fixtures.json`), so it straddles two side-by-side belt lanes and takes
+/// one step of each. Both lanes enter on its back edge and both leave on
+/// its front edge; `entity_graph.rs` derives the two output tiles as
+/// `(-0.5, -1)` and `(0.5, -1)` turned to the facing, and a splitter's
+/// `position` is the midpoint of its two tiles (a half-integer on one axis
+/// and a whole number on the other). It divides what arrives across the two
+/// outputs and sends everything to whichever one is not backed up, so a
+/// belt run tapped by one keeps its whole flow when the branch is full and
+/// loses nothing when the original destination is.
+///
+/// Its recipe is disabled at t=0 -- it needs `logistics`, like
+/// [`UNDERGROUND`] -- so a plan that taps carries that research; the
+/// `Goal::Have` for it says so through the ordinary shortfall machinery.
+const SPLITTER: &str = "splitter";
 
 /// Half the collision box of the *largest* thing this module places, on each
 /// axis: a `transport-belt` is `0.796875` tiles across
@@ -169,6 +192,19 @@ pub enum ConnectRefusal {
     /// and `dy` came out non-zero half-integers and [`inserter_facing`]
     /// answered `None` every time.
     NotCardinal,
+    /// The source's perimeter has no free `(inserter, belt)` pair -- the
+    /// [`NoRoute`](Self::NoRoute) refusal, `blocked` naming the same tiles --
+    /// AND the fallback that a boxed-in source gets, tapping a belt run that
+    /// already leaves it with a splitter ([`tap_standing_run`]), refused
+    /// too. `why` is the tap's own sentence: no run leaves the source, no
+    /// straight stretch of it has a free side, or no branch could be routed
+    /// from any splice to the destination.
+    ///
+    /// A variant of its own rather than a longer `NoRoute`, so a reader of
+    /// the refusal can tell "nothing was tried" from "the tap was tried and
+    /// this is why it failed" -- silence about a fallback is how a fallback
+    /// goes unmeasured.
+    TapRefused { blocked: Vec<Position>, why: String },
 }
 
 impl std::fmt::Display for ConnectRefusal {
@@ -204,6 +240,16 @@ impl std::fmt::Display for ConnectRefusal {
                 "an inserter's machine and its belt tile are not opposite each other \
                  on one axis"
             ),
+            ConnectRefusal::TapRefused { blocked, why } => {
+                write!(
+                    f,
+                    "{}; and the run already leaving it could not be tapped with a \
+                     splitter: {why}",
+                    ConnectRefusal::NoRoute {
+                        blocked: blocked.clone()
+                    }
+                )
+            }
         }
     }
 }
@@ -584,6 +630,595 @@ fn arms_only(
         to.name, from.name
     );
     steps.push(place_step(ctx, unload, build, &note));
+    Ok(steps)
+}
+
+// ---------------------------------------------------------------------------
+// The tap: a boxed-in source whose run already leaves it
+// ---------------------------------------------------------------------------
+
+/// One tile of a belt chain leaving the source, as [`outbound_chains`]
+/// reads it off the state.
+#[derive(Debug, Clone, Copy)]
+struct ChainTile {
+    cell: (usize, usize),
+    facing: Direction,
+}
+
+/// Every belt chain that leaves `from` through an arm that picks up from
+/// it, each as its tiles from the door's belt cell downstream, in chain
+/// order. Belts only: a chain is followed to the first tile that is not a
+/// `transport-belt`, exactly as [`standing_run`] follows one.
+///
+/// The door test is the arm's FACING: an inserter on a perimeter cell whose
+/// `direction` is the one [`inserter_facing`] gives for picking up from the
+/// machine and dropping on the belt cell beyond. An arm facing the other way
+/// is a run INTO the machine, and tapping it would carry the wrong thing
+/// backwards; it is not a door here. Nothing tracks who laid the arm or the
+/// belts -- a run is a run -- and nothing here can say what the run carries:
+/// it carries whatever that arm lifts out of `from`, which for the chests
+/// and machines this module joins is the one thing they hold.
+fn outbound_chains(
+    state: &PlanState,
+    origin: (f64, f64),
+    from_footprint: &Footprint,
+) -> Vec<Vec<ChainTile>> {
+    use factorio_bot_core::num_traits::{FromPrimitive, ToPrimitive};
+    let belt_at = |cell: (usize, usize)| -> Option<FactorioEntity> {
+        let at = enclosure::cell_to_position(origin, cell);
+        state
+            .entity_at(&at)
+            .filter(|entity| entity.name == BELT && Pos::from(&entity.position) == Pos::from(&at))
+    };
+    let mut chains = Vec::new();
+    for ((x, y), (dx, dy)) in perimeter(from_footprint) {
+        let (Some(anchor), Some(arm), Some(belt)) = (
+            in_grid(x - dx, y - dy),
+            in_grid(x, y),
+            in_grid(x + dx, y + dy),
+        ) else {
+            continue;
+        };
+        let arm_pos = enclosure::cell_to_position(origin, arm);
+        let Some(standing) = state
+            .entity_at(&arm_pos)
+            .filter(|entity| Pos::from(&entity.position) == Pos::from(&arm_pos))
+        else {
+            continue;
+        };
+        if standing.entity_type != "inserter" && !standing.name.ends_with("inserter") {
+            continue;
+        }
+        let anchor_pos = enclosure::cell_to_position(origin, anchor);
+        let belt_pos = enclosure::cell_to_position(origin, belt);
+        let picks_up_from_machine = inserter_facing(&anchor_pos, &belt_pos)
+            .and_then(|facing| facing.to_u8())
+            .is_some_and(|facing| facing == standing.direction);
+        if !picks_up_from_machine {
+            continue;
+        }
+        let Some(head) = belt_at(belt) else {
+            continue;
+        };
+        let mut chain = Vec::new();
+        let mut visited = vec![false; GRID * GRID];
+        let mut at = belt;
+        let mut tile = head;
+        loop {
+            visited[enclosure::cell_index(at.0, at.1)] = true;
+            let Some(facing) = Direction::from_u8(tile.direction) else {
+                break;
+            };
+            chain.push(ChainTile { cell: at, facing });
+            let Some(step) = Position::new(0., -1.).turn(facing) else {
+                break;
+            };
+            let Some(next) = in_grid(
+                at.0 as i64 + step.x().round() as i64,
+                at.1 as i64 + step.y().round() as i64,
+            ) else {
+                break;
+            };
+            if visited[enclosure::cell_index(next.0, next.1)] {
+                break;
+            }
+            let Some(next_tile) = belt_at(next) else {
+                break;
+            };
+            at = next;
+            tile = next_tile;
+        }
+        if !chain.is_empty() {
+            chains.push(chain);
+        }
+    }
+    chains
+}
+
+/// Where a splitter can be spliced into a standing chain, and where its new
+/// branch leaves.
+#[derive(Debug, Clone, Copy)]
+struct Splice {
+    /// The chain tile the splitter replaces: a belt with a same-facing belt
+    /// before it and a same-facing belt after it.
+    belt: (usize, usize),
+    /// The direction of travel there, which the splitter faces.
+    facing: Direction,
+    /// The free tile beside `belt` the splitter's other half stands on.
+    side: (usize, usize),
+    /// The tile behind `side`: the splitter's second INPUT. Kept off the
+    /// branch, so the branch can never curl round and feed itself back in.
+    side_in: Option<(usize, usize)>,
+    /// The tile in front of `side`: the splitter's second OUTPUT, where the
+    /// branch starts, facing `facing`.
+    side_out: (usize, usize),
+}
+
+impl Splice {
+    /// The splitter's `position`: the midpoint of its two tiles.
+    fn splitter_position(&self, origin: (f64, f64)) -> Position {
+        let a = enclosure::cell_to_position(origin, self.belt);
+        let b = enclosure::cell_to_position(origin, self.side);
+        Position::new((a.x() + b.x()) / 2., (a.y() + b.y()) / 2.)
+    }
+}
+
+/// The offset of one cell in `facing`, in grid steps.
+fn step_of(facing: Direction) -> Option<(i64, i64)> {
+    let step = Position::new(0., -1.).turn(facing)?;
+    Some((step.x().round() as i64, step.y().round() as i64))
+}
+
+/// Every place on `chains` a splitter fits, nearest branch start to `sink`
+/// first, then chain order, then the left side before the right.
+///
+/// # What "fits" means, and each rule's reason
+///
+/// - **Three same-facing belts in a row**, the middle one replaced. The
+///   splitter's back edge must be fed straight (the tile before it), its
+///   front edge must feed a belt facing away (the tile after it -- a belt
+///   turning on the output tile would be side-loaded, one lane), and a
+///   chain's first tile is its door's belt cell, which the arm drops on and
+///   which no splitter may replace.
+/// - **The side tile is free on the caller's grid** -- the placement grid
+///   with every obstacle, reservation and tunnel already on it -- and so is
+///   the tile in front of it, where the branch starts.
+/// - **Nothing feeds the second input.** A belt-connectable entity behind
+///   the side tile facing the splitter's way would merge onto the run; that
+///   candidate is skipped rather than merged silently.
+fn tap_candidates(
+    state: &PlanState,
+    origin: (f64, f64),
+    blocked: &[bool],
+    chains: &[Vec<ChainTile>],
+    sink: (usize, usize),
+) -> Vec<Splice> {
+    use factorio_bot_core::num_traits::FromPrimitive;
+    let feeds_into = |cell: (usize, usize), facing: Direction| -> bool {
+        let at = enclosure::cell_to_position(origin, cell);
+        state
+            .entity_at(&at)
+            .filter(|entity| Pos::from(&entity.position) == Pos::from(&at))
+            .is_some_and(|entity| {
+                matches!(
+                    entity.entity_type.as_str(),
+                    "transport-belt" | "underground-belt" | "splitter"
+                ) && Direction::from_u8(entity.direction) == Some(facing)
+            })
+    };
+    let mut out: Vec<(u32, usize, usize, Splice)> = Vec::new();
+    for chain in chains {
+        for index in 1..chain.len().saturating_sub(1) {
+            let (before, here, after) = (chain[index - 1], chain[index], chain[index + 1]);
+            let facing = here.facing;
+            if before.facing != facing || after.facing != facing {
+                continue;
+            }
+            let Some((fx, fy)) = step_of(facing) else {
+                continue;
+            };
+            for (side_index, lateral) in [Position::new(-1., 0.), Position::new(1., 0.)]
+                .into_iter()
+                .enumerate()
+            {
+                let Some(lateral) = lateral.turn(facing) else {
+                    continue;
+                };
+                let (sx, sy) = (lateral.x().round() as i64, lateral.y().round() as i64);
+                let (bx, by) = (here.cell.0 as i64, here.cell.1 as i64);
+                let (Some(side), Some(side_out)) = (
+                    in_grid(bx + sx, by + sy),
+                    in_grid(bx + sx + fx, by + sy + fy),
+                ) else {
+                    continue;
+                };
+                if blocked[enclosure::cell_index(side.0, side.1)]
+                    || blocked[enclosure::cell_index(side_out.0, side_out.1)]
+                {
+                    continue;
+                }
+                let side_in = in_grid(bx + sx - fx, by + sy - fy);
+                if side_in.is_some_and(|cell| feeds_into(cell, facing)) {
+                    continue;
+                }
+                let distance = side_out.0.abs_diff(sink.0) + side_out.1.abs_diff(sink.1);
+                out.push((
+                    u32::try_from(distance).unwrap_or(u32::MAX),
+                    index,
+                    side_index,
+                    Splice {
+                        belt: here.cell,
+                        facing,
+                        side,
+                        side_in,
+                        side_out,
+                    },
+                ));
+            }
+        }
+    }
+    out.sort_by_key(|(distance, index, side, _)| (*distance, *index, *side));
+    out.into_iter().map(|(_, _, _, splice)| splice).collect()
+}
+
+/// What [`connect_steps_reserving`] settled about the window before it chose
+/// an end: the grid, the tunnels, and the two footprints. Bundled so the tap
+/// takes the same view of the ground the plain run took, byte for byte.
+struct Window<'a> {
+    origin: (f64, f64),
+    blocked: &'a [bool],
+    tunnels: &'a [u8],
+    reach: Option<u8>,
+    sides: &'a [((usize, usize), Position)],
+    threatened: Option<&'a [bool]>,
+    from_footprint: Footprint,
+    to_footprint: Footprint,
+}
+
+/// A belt tile of a route as the entity to place: a belt, or the half of
+/// an underground pair `route_belt` says it is.
+fn route_tile_entity(tile: &RouteTile) -> FactorioEntity {
+    match underground_half_for_tile_kind(tile.kind) {
+        None => FactorioEntity::new_transport_belt(&tile.position, tile.direction),
+        // Both halves carry the tunnel's direction; `route_belt` keeps
+        // the exit's step straight, so `tile.direction` is that for both.
+        Some(half) => FactorioEntity::new_underground_belt(&tile.position, tile.direction, half),
+    }
+}
+
+/// Tap a belt run that already leaves `from` with a splitter, and carry the
+/// branch to `to`. **The fallback for a source with no free side**, and
+/// only that -- see the call in [`connect_steps_reserving`].
+///
+/// # Why this exists
+///
+/// `run-1788941729-70024` and `run-1788946451-86723` (seed 31337, four
+/// headless bots) both ended `stuck` on one shape: a `method::sustain`
+/// plate chest whose four sides were all spent -- three by the cell's own
+/// coal arms, the fourth by the arm carrying its plates onto the run the
+/// plan had already laid -- and a second consumer wanting plates from that
+/// same chest. `first_free_perimeter` refused, correctly: the perimeter
+/// genuinely has no tile, and two arms cannot share one. The owner's ruling
+/// (2026-09-09) was to **splice a splitter into the run the source already
+/// has** rather than find a tile that is not there or build a second chest.
+///
+/// # What it does
+///
+/// 1. Reads every belt chain leaving `from` through an arm that picks up
+///    from it ([`outbound_chains`]).
+/// 2. Chooses the destination's end exactly as a fresh run would
+///    (`first_free_perimeter` on `to`).
+/// 3. Lists every splice that fits ([`tap_candidates`]) and, nearest first,
+///    routes the branch from the splitter's second output to that end with
+///    [`route_belt_launching`] -- the first branch tile continues the run's
+///    direction, by construction -- on the same grids in the same order the
+///    plain run uses: threats avoided first, surface before tunnel.
+/// 4. Emits: the bill (one `splitter`, the branch's belts and pairs, ONE
+///    inserter -- the load arm already stands), the branch, the unload arm,
+///    then a `Chop` of the belt tile the splitter replaces and the
+///    splitter's `Place`, linked chop-before-place. The branch and its arm
+///    go down first so the tap is complete the moment it opens.
+///
+/// The belt is chopped rather than fast-replaced because the plan speaks in
+/// `AreaFree` and `RemoveEntity`: the chop's effect is what makes the
+/// splitter's precondition true in the overlay, and the belt comes back to
+/// the bot's hands as one `transport-belt`. (The mod's `rcon_place_entity`
+/// does pass `fast_replace`, so the game would accept the splitter over the
+/// belt; the planner would not have, and a placement the planner cannot
+/// state is not one it can order.)
+///
+/// # What it refuses, by name
+///
+/// `Err(why)` before anything is placed -- the promise every refusal in this
+/// module makes -- when no run leaves the source, when `to` has no free
+/// side, when no straight stretch of any run has a free side for the
+/// splitter's other half, or when no branch routes from any splice. The
+/// caller wraps it as [`ConnectRefusal::TapRefused`] beside the perimeter
+/// refusal that sent it here.
+///
+/// # Scope, stated
+///
+/// Phase 1. The branch is emitted flat under the chain actor -- no bands --
+/// and a splice needs three same-facing belts in a row; a run that turns
+/// every other tile has no splice and refuses. Undergrounds in the standing
+/// run end a chain (they end `standing_run`'s too). The splitter's
+/// input/output priority and filter are left at the prototype's defaults,
+/// which divide by availability -- the property the fallback rests on.
+fn tap_standing_run(
+    ctx: &mut ExpansionCtx,
+    from: &FactorioEntity,
+    to: &FactorioEntity,
+    item: &ItemId,
+    inserter: &str,
+    window: &Window<'_>,
+) -> Result<Vec<Step>, String> {
+    let origin = window.origin;
+    let chains = outbound_chains(&ctx.state, origin, &window.from_footprint);
+    if chains.is_empty() {
+        return Err(format!(
+            "no belt run leaves the {} through an arm that picks up from it",
+            from.name
+        ));
+    }
+    let followed: usize = chains.iter().map(Vec::len).sum();
+    let mut blocked = window.blocked.to_vec();
+    let sink =
+        first_free_perimeter(&blocked, origin, &window.to_footprint, &[]).map_err(|stopped| {
+            let named: Vec<String> = stopped.iter().map(ToString::to_string).collect();
+            format!(
+                "the {} has no free side for the branch's arm, blocked by {}",
+                to.name,
+                named.join(" ")
+            )
+        })?;
+    blocked[enclosure::cell_index(sink.inserter.0, sink.inserter.1)] = true;
+    let candidates = tap_candidates(&ctx.state, origin, &blocked, &chains, sink.belt);
+    if candidates.is_empty() {
+        return Err(format!(
+            "no straight stretch of the {} belt tile(s) leaving the {} has a free side \
+             for a splitter's other half",
+            followed, from.name
+        ));
+    }
+    // SURFACE FROM ANY SPLICE BEFORE A TUNNEL FROM THE NEAREST. The plain
+    // run's cascade -- surface first, then a pair -- is per endpoint; here
+    // the endpoint is chosen from a list, and a jump out of the nearest
+    // splice must not beat a plain belt out of the next one. Measured on
+    // this module's own fixture: the nearest splice's launch tile faced
+    // the destination's standing arm, and the branch went UNDER it rather
+    // than leaving from the splice one tile back.
+    let mut last: Option<String> = None;
+    let passes: Vec<Option<u8>> = match window.reach {
+        Some(reach) => vec![None, Some(reach)],
+        None => vec![None],
+    };
+    for pass in passes {
+        for splice in &candidates {
+            let mut grid = blocked.clone();
+            grid[enclosure::cell_index(splice.side.0, splice.side.1)] = true;
+            if let Some(side_in) = splice.side_in {
+                grid[enclosure::cell_index(side_in.0, side_in.1)] = true;
+            }
+            // A chest at either end closes its other sides to the branch,
+            // as to any route of this module -- see the plain attempt.
+            let chosen = [
+                splice.belt,
+                splice.side,
+                splice.side_out,
+                sink.inserter,
+                sink.belt,
+            ];
+            for (cell, owner) in window.sides {
+                let ours = same_tile(owner, &from.position) || same_tile(owner, &to.position);
+                if ours && !chosen.contains(cell) {
+                    grid[enclosure::cell_index(cell.0, cell.1)] = true;
+                }
+            }
+            let avoiding = window.threatened.map(|threatened| {
+                let mut avoiding = grid.clone();
+                for (cell, is_threatened) in threatened.iter().enumerate() {
+                    if *is_threatened {
+                        avoiding[cell] = true;
+                    }
+                }
+                avoiding[enclosure::cell_index(splice.side_out.0, splice.side_out.1)] = false;
+                avoiding[enclosure::cell_index(sink.belt.0, sink.belt.1)] = false;
+                avoiding
+            });
+            let search = |grid: &[bool]| {
+                route_belt_launching(
+                    grid,
+                    window.tunnels,
+                    origin,
+                    splice.side_out,
+                    sink.belt,
+                    pass,
+                    splice.facing,
+                )
+            };
+            let found = avoiding
+                .as_ref()
+                .and_then(|grid| search(grid).ok())
+                .map_or_else(|| search(&grid), Ok);
+            match found {
+                Ok(route) => {
+                    return tap_steps(ctx, from, to, item, inserter, origin, splice, &sink, &route)
+                        .map_err(|refusal| refusal.to_string());
+                }
+                Err(error) => {
+                    let why = match error {
+                        RouteError::NoPath { blocked } => ConnectRefusal::NoRoute { blocked },
+                        RouteError::SpanTooLong { needed, max } => {
+                            ConnectRefusal::SpanTooLong { needed, max }
+                        }
+                    };
+                    last = Some(format!(
+                        "from the splice at {}: {why}",
+                        enclosure::cell_to_position(origin, splice.belt)
+                    ));
+                }
+            }
+        }
+    }
+    Err(format!(
+        "a splitter fits at {} place(s) on the run leaving the {} and no branch routes from \
+         any of them to the {}; the last: {}",
+        candidates.len(),
+        from.name,
+        to.name,
+        last.unwrap_or_default()
+    ))
+}
+
+/// The steps of a tap once its splice and branch are chosen. See
+/// [`tap_standing_run`] for the order and why.
+#[allow(clippy::too_many_arguments)]
+fn tap_steps(
+    ctx: &mut ExpansionCtx,
+    from: &FactorioEntity,
+    to: &FactorioEntity,
+    item: &ItemId,
+    inserter: &str,
+    origin: (f64, f64),
+    splice: &Splice,
+    sink: &Endpoint,
+    route: &Route,
+) -> Result<Vec<Step>, ConnectRefusal> {
+    let sink_anchor_pos = enclosure::cell_to_position(origin, sink.anchor);
+    let belt_end_pos = enclosure::cell_to_position(origin, sink.belt);
+    let dst_inserter_pos = enclosure::cell_to_position(origin, sink.inserter);
+    let unload_facing =
+        inserter_facing(&belt_end_pos, &sink_anchor_pos).ok_or(ConnectRefusal::NotCardinal)?;
+    let undergrounds = u32::try_from(
+        route
+            .tiles
+            .iter()
+            .filter(|t| t.kind != TileKind::Belt)
+            .count(),
+    )
+    .unwrap_or(u32::MAX);
+    let belts = u32::try_from(route.tiles.len())
+        .unwrap_or(u32::MAX)
+        .saturating_sub(undergrounds);
+    let build = ctx
+        .state
+        .bot(ctx.chain_actor)
+        .map(|b| b.build_distance)
+        .unwrap_or(10.0);
+    let reach = ctx
+        .state
+        .bot(ctx.chain_actor)
+        .map(|b| b.reach_distance)
+        .unwrap_or(10.0);
+
+    // Nothing above this line has touched `ctx`. From here every step is
+    // emitted and mirrored into the overlay in the same breath.
+    let mut steps = Vec::with_capacity(route.tiles.len() + 7);
+    let have = |item: &str, count: u32| {
+        Step::Subgoal(Goal::Have {
+            item: item.into(),
+            count,
+            whose: Holder::Share(ctx.chain_actor),
+            via: None,
+        })
+    };
+    steps.push(have(SPLITTER, 1));
+    if belts > 0 {
+        steps.push(have(BELT, belts));
+    }
+    if undergrounds > 0 {
+        steps.push(have(UNDERGROUND, undergrounds));
+    }
+    steps.push(have(inserter, 1));
+
+    let note = format!(
+        "carry {item} from {} to {} (branched off its standing run by a splitter)",
+        from.name, to.name
+    );
+    for tile in &route.tiles {
+        steps.push(place_step(ctx, route_tile_entity(tile), build, &note));
+    }
+    let unload =
+        FactorioEntity::new_named_inserter(inserter.to_string(), &dst_inserter_pos, unload_facing);
+    let note = format!("unload {item} into {} (off the branch)", to.name);
+    steps.push(place_step(ctx, unload, build, &note));
+
+    // The belt the splitter replaces comes up first. Its `RemoveEntity` is
+    // what makes the splitter's `AreaFree` true, in the overlay now and in
+    // the network's ordering; the link below states the order outright
+    // rather than leaving it to `infer_edges`, whose position match is on
+    // the whole tile and the splitter's position is between two.
+    let belt_pos = enclosure::cell_to_position(origin, splice.belt);
+    let mut bill = mine_bill(&ctx.state, BELT);
+    if bill.is_empty() {
+        bill.insert(BELT.to_string(), 1);
+    }
+    let mut eff = vec![Effect::RemoveEntity {
+        pos: belt_pos.clone(),
+    }];
+    for (yielded, count) in &bill {
+        eff.push(Effect::GainItem {
+            who: Actor::Role,
+            item: yielded.as_str().into(),
+            count: *count,
+        });
+    }
+    let chop_id = ctx.ids.next();
+    steps.push(Step::Act(Box::new(Action {
+        id: chop_id,
+        kind: ActionKind::Chop {
+            pos: belt_pos.clone(),
+            entity: BELT.to_string(),
+            item: BELT.into(),
+            count: 1,
+        },
+        pre: vec![
+            Condition::AtPosition {
+                who: Actor::Role,
+                pos: belt_pos.clone(),
+                radius: reach,
+                min_radius: ctx.state.placement_clearance(BELT).unwrap_or(0.0),
+            },
+            // THE RUN IS NOT OPENED UNTIL THE SPLITTER IS IN HAND. Nothing
+            // is spent here -- the `Place` below does that -- but the
+            // condition is a real one: between the chop and the splitter
+            // the run is cut and the source's arm feeds a stub. Without
+            // this the scheduler was free to chop at tick 4,509 and place
+            // at 37,140, on the far side of `research logistics` and the
+            // craft (measured on `run-1788946451-86723`'s replan), which
+            // starves the run's original destination for the whole gap.
+            // Stated as a `HasItem`, the chop is linked to the splitter's
+            // producer like any consumer and lands beside the placement.
+            Condition::HasItem {
+                who: Actor::Role,
+                item: SPLITTER.into(),
+                count: 1,
+            },
+        ],
+        eff,
+        duration: mining_ticks(&ctx.state, BELT),
+        pinned: None,
+        label: format!(
+            "chop {BELT} at {belt_pos} -- open the run from {} for a splitter",
+            from.name
+        ),
+    })));
+    ctx.state.remove_entity(&belt_pos);
+
+    let splitter = FactorioEntity::new_splitter(&splice.splitter_position(origin), splice.facing);
+    let note = format!(
+        "tap the run from {} for {item}, one output on to where it went, one to {}",
+        from.name, to.name
+    );
+    let place = place_step(ctx, splitter, build, &note);
+    if let Step::Act(action) = &place {
+        steps.push(Step::Link {
+            from: chop_id,
+            to: action.id,
+            lag: 0,
+        });
+    }
+    steps.push(place);
     Ok(steps)
 }
 
@@ -1463,8 +2098,53 @@ pub fn connect_steps_reserving(
     // one attempt, as before.
     let (source, sink, route) = match attempt(&kept_exit) {
         Ok(found) => found,
-        Err(_) if !kept_exit.is_empty() => attempt(&[])?,
-        Err(refusal) => return Err(refusal),
+        Err(refusal) => {
+            let refusal = if kept_exit.is_empty() {
+                Err(refusal)
+            } else {
+                attempt(&[])
+            };
+            match refusal {
+                Ok(found) => found,
+                // A SOURCE WITH NO SIDE LEFT IS TAPPED, NOT REFUSED -- when
+                // a run already leaves it. The perimeter refusal is a fact
+                // (two arms cannot share a tile), and the plain search has
+                // just proved it twice; what a boxed-in source still has is
+                // the belt its one arm feeds, and a splitter spliced into
+                // that carries the same items on to a second destination.
+                // Only the `from` end's perimeter sends a run here: a sink
+                // with no side, or a route that found no path, is refused
+                // as it always was. The tap's own refusal rides beside the
+                // perimeter's, so the reader sees both.
+                Err(refusal) => {
+                    let from_has_no_side =
+                        first_free_perimeter(&blocked, origin, &from_footprint, &[]).is_err();
+                    let ConnectRefusal::NoRoute { blocked: stopped } = &refusal else {
+                        return Err(refusal);
+                    };
+                    if !from_has_no_side {
+                        return Err(refusal);
+                    }
+                    let window = Window {
+                        origin,
+                        blocked: &blocked,
+                        tunnels: &tunnels,
+                        reach,
+                        sides: &sides,
+                        threatened: threatened.as_deref(),
+                        from_footprint,
+                        to_footprint,
+                    };
+                    return match tap_standing_run(ctx, from, to, item, inserter, &window) {
+                        Ok(steps) => Ok(steps),
+                        Err(why) => Err(ConnectRefusal::TapRefused {
+                            blocked: stopped.clone(),
+                            why,
+                        }),
+                    };
+                }
+            }
+        }
     };
 
     let source_anchor_pos = enclosure::cell_to_position(origin, source.anchor);
@@ -1549,17 +2229,7 @@ pub fn connect_steps_reserving(
     let note = format!("load {item} out of {}", from.name);
     steps.push(place_step(ctx, load, build, &note));
 
-    let tile_entity =
-        |tile: &factorio_bot_core::graph::route::RouteTile| match underground_half_for_tile_kind(
-            tile.kind,
-        ) {
-            None => FactorioEntity::new_transport_belt(&tile.position, tile.direction),
-            // Both halves carry the tunnel's direction; `route_belt` keeps
-            // the exit's step straight, so `tile.direction` is that for both.
-            Some(half) => {
-                FactorioEntity::new_underground_belt(&tile.position, tile.direction, half)
-            }
-        };
+    let tile_entity = route_tile_entity;
     if bands.len() <= 1 {
         let note = format!("carry {item} from {} to {}", from.name, to.name);
         for tile in &route.tiles {
@@ -2781,6 +3451,299 @@ mod tests {
                 .iter()
                 .any(|(at, _)| *at == Position::new(6.5, 5.5)),
             "and nothing stands in the pocket"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // The tap
+    // -----------------------------------------------------------------------
+
+    /// Every `Chop` in `steps`, as `(position, entity)`.
+    fn chops(steps: &[Step]) -> Vec<(Position, String)> {
+        let mut out = Vec::new();
+        for step in steps {
+            match step {
+                Step::Act(action) => {
+                    if let ActionKind::Chop { pos, entity, .. } = &action.kind {
+                        out.push((pos.clone(), entity.clone()));
+                    }
+                }
+                Step::Owned { steps, .. } => out.extend(chops(steps)),
+                _ => {}
+            }
+        }
+        out
+    }
+
+    /// The source chest of `two_chests_on_open_ground`, its run to the
+    /// second chest STANDING (belts and both arms, as the fresh run laid
+    /// them), the source's three other sides taken by chests, and a third
+    /// chest to the south-east that wants the same thing the run carries.
+    ///
+    /// The shape of `run-1788946451-86723`'s stuck replan in miniature: a
+    /// 1x1 source with no free side and one run already leaving it.
+    fn boxed_source_with_a_standing_run(
+        box_east: bool,
+    ) -> (ExpansionCtx, FactorioEntity, FactorioEntity, Vec<Position>) {
+        use factorio_bot_core::num_traits::FromPrimitive;
+        let item: ItemId = "copper-plate".into();
+        let (mut plain, source, first) = crate::test_world::two_chests_on_open_ground();
+        let fresh = connect_steps_with(&mut plain, &source, &first, &item, INSERTER)
+            .expect("the control: two chests on open ground");
+        let mut entities = vec![source.clone(), first.clone()];
+        let mut standing_belts = Vec::new();
+        for (at, facing) in placements(&fresh, BELT) {
+            let facing = Direction::from_u8(facing).expect("a belt has a facing");
+            entities.push(FactorioEntity::new_transport_belt(&at, facing));
+            standing_belts.push(at);
+        }
+        for (at, facing) in placements(&fresh, INSERTER) {
+            let facing = Direction::from_u8(facing).expect("an arm has a facing");
+            entities.push(FactorioEntity::new_named_inserter(
+                INSERTER.to_string(),
+                &at,
+                facing,
+            ));
+        }
+        // The fresh run leaves by the NORTH side (`first_free_perimeter`'s
+        // order); the other three are spent here.
+        let mut blockers = vec![Position::new(4.5, 6.5), Position::new(3.5, 5.5)];
+        if box_east {
+            blockers.push(Position::new(5.5, 5.5));
+        }
+        for at in blockers {
+            entities.push(crate::test_world::iron_chest(&at));
+        }
+        let second = crate::test_world::iron_chest(&Position::new(12.5, 10.5));
+        entities.push(second.clone());
+        let ctx = crate::test_world::connect_ctx_with_roster(entities, &[]);
+        (ctx, source, second, standing_belts)
+    }
+
+    /// The owner's ruling of 2026-09-09 ("1 sounds good"): a source with no
+    /// free side and a run already leaving it is tapped with a splitter
+    /// spliced into that run, not refused. One splitter, facing the run's
+    /// way, over one chopped belt tile and one free tile beside it; the
+    /// branch starts in front of the free tile facing the same way; one
+    /// arm, at the destination; and the chop is ordered before the
+    /// splitter.
+    #[test]
+    fn a_source_with_no_free_side_is_tapped_where_its_run_already_leaves() {
+        use factorio_bot_core::num_traits::FromPrimitive;
+        let (mut ctx, source, second, standing) = boxed_source_with_a_standing_run(true);
+        let item: ItemId = "copper-plate".into();
+        let steps = connect_steps_with(&mut ctx, &source, &second, &item, INSERTER).unwrap_or_else(
+            |refusal| panic!("a boxed-in source with a run out is tapped: {refusal}"),
+        );
+
+        let splitters = placements(&steps, SPLITTER);
+        assert_eq!(splitters.len(), 1, "exactly one splitter: {splitters:?}");
+        let (splitter_at, splitter_facing) = splitters[0].clone();
+        assert_eq!(
+            splitter_facing,
+            dir(Direction::East),
+            "the splitter faces the way the standing run runs"
+        );
+
+        let chopped = chops(&steps);
+        assert_eq!(chopped.len(), 1, "exactly one belt comes up: {chopped:?}");
+        let (chopped_at, chopped_entity) = chopped[0].clone();
+        assert_eq!(chopped_entity, BELT);
+        assert!(
+            standing.contains(&chopped_at),
+            "the chopped tile {chopped_at} is a belt of the standing run {standing:?}"
+        );
+        // The splitter straddles the chopped tile and the tile beside it:
+        // its position is their midpoint, half a tile off the chopped one
+        // across the direction of travel.
+        assert_eq!(
+            splitter_at.x(),
+            chopped_at.x(),
+            "same column as the chopped belt"
+        );
+        assert_eq!(
+            (splitter_at.y() - chopped_at.y()).abs(),
+            0.5,
+            "half a tile off it across the run: splitter {splitter_at}, belt {chopped_at}"
+        );
+        let side_y = chopped_at.y() + 2. * (splitter_at.y() - chopped_at.y());
+        assert!(
+            !standing.contains(&Position::new(chopped_at.x(), side_y)),
+            "the splitter's other half stands on free ground, not on the run"
+        );
+
+        // The branch: its first tile is in front of the splitter's free
+        // half, facing the run's way, and none of it lies on the run. On
+        // open ground it is belts only -- a surface route from the next
+        // splice back beats a tunnel from the nearest one, and the nearest
+        // one here launches straight at the first chest's standing arm.
+        assert!(
+            placements(&steps, UNDERGROUND).is_empty(),
+            "no tunnel where a surface branch exists: {:?}",
+            placements(&steps, UNDERGROUND)
+        );
+        let branch = placements(&steps, BELT);
+        assert!(!branch.is_empty(), "the branch lays belts");
+        let (first_at, first_facing) = branch[0].clone();
+        assert_eq!(
+            first_at,
+            Position::new(chopped_at.x() + 1., side_y),
+            "the branch starts on the splitter's second output tile: {branch:?}"
+        );
+        assert_eq!(
+            Direction::from_u8(first_facing),
+            Some(Direction::East),
+            "and continues the splitter's direction rather than turning on its output"
+        );
+        for (at, _) in &branch {
+            assert!(
+                !standing.contains(at),
+                "the branch is laid over the standing run at {at}"
+            );
+        }
+
+        // One arm, at the destination, picking up from the branch.
+        let arms = placements(&steps, INSERTER);
+        assert_eq!(
+            arms.len(),
+            1,
+            "the load arm stands; only the unload arm is placed: {arms:?}"
+        );
+        let (arm_at, _) = arms[0].clone();
+        assert_eq!(
+            (arm_at.x() - second.position.x()).abs() + (arm_at.y() - second.position.y()).abs(),
+            1.0,
+            "the arm is on the destination's perimeter"
+        );
+
+        // Ordering: the chop is emitted before the splitter's placement, and
+        // a link states it.
+        let index_of = |pred: &dyn Fn(&Action) -> bool| {
+            steps
+                .iter()
+                .position(|s| matches!(s, Step::Act(a) if pred(a)))
+        };
+        let chop_index = index_of(&|a| matches!(a.kind, ActionKind::Chop { .. })).unwrap();
+        let splitter_index = index_of(
+            &|a| matches!(&a.kind, ActionKind::Place { entity } if entity.name == SPLITTER),
+        )
+        .unwrap();
+        assert!(
+            chop_index < splitter_index,
+            "the belt comes up before the splitter goes down"
+        );
+        let chop_id = match &steps[chop_index] {
+            Step::Act(a) => a.id,
+            _ => unreachable!(),
+        };
+        let splitter_id = match &steps[splitter_index] {
+            Step::Act(a) => a.id,
+            _ => unreachable!(),
+        };
+        assert!(
+            steps
+                .iter()
+                .any(|s| matches!(s, Step::Link { from, to, .. } if *from == chop_id && *to == splitter_id)),
+            "a stated edge orders the chop before the splitter"
+        );
+
+        // The bill names the splitter and exactly one arm.
+        let have = |name: &str| -> Option<u32> {
+            steps.iter().find_map(|s| match s {
+                Step::Subgoal(Goal::Have { item, count, .. }) if item.as_str() == name => {
+                    Some(*count)
+                }
+                _ => None,
+            })
+        };
+        assert_eq!(have(SPLITTER), Some(1));
+        assert_eq!(have(INSERTER), Some(1));
+
+        // And the overlay agrees with the steps: the chopped tile is gone,
+        // the splitter stands.
+        assert!(
+            ctx.state
+                .entity_at(&chopped_at)
+                .is_none_or(|e| e.name != BELT),
+            "the chopped belt has left the overlay"
+        );
+        assert!(
+            ctx.state
+                .entity_at(&splitter_at)
+                .is_some_and(|e| e.name == SPLITTER),
+            "the splitter is in the overlay"
+        );
+    }
+
+    /// The tap is a FALLBACK. With one side of the source still free the
+    /// plain run is laid from it, byte for byte as before, and no splitter
+    /// or chop appears -- every plan that routed before this existed is the
+    /// same plan.
+    #[test]
+    fn a_source_with_a_free_side_is_never_tapped() {
+        let (mut ctx, source, second, _) = boxed_source_with_a_standing_run(false);
+        let item: ItemId = "copper-plate".into();
+        let steps = connect_steps_with(&mut ctx, &source, &second, &item, INSERTER)
+            .expect("a source with its east side free is routed from it");
+        assert!(placements(&steps, SPLITTER).is_empty(), "no splitter");
+        assert!(chops(&steps).is_empty(), "no chop");
+        assert_eq!(
+            placements(&steps, INSERTER).len(),
+            2,
+            "a fresh run with an arm at each end"
+        );
+        assert_eq!(
+            placements(&steps, INSERTER)[0].0,
+            Position::new(5.5, 5.5),
+            "from the source's free east side"
+        );
+    }
+
+    /// A source with no free side and NO run leaving it refuses as it
+    /// always did -- the four tiles named -- and says the tap was tried and
+    /// why it could not be: silence about a fallback is how a fallback goes
+    /// unmeasured.
+    #[test]
+    fn a_boxed_in_source_with_no_run_out_refuses_and_says_the_tap_was_tried() {
+        let (source, _) = (crate::test_world::iron_chest(&Position::new(4.5, 5.5)), ());
+        let mut entities = vec![source.clone()];
+        for at in [
+            Position::new(4.5, 4.5),
+            Position::new(5.5, 5.5),
+            Position::new(4.5, 6.5),
+            Position::new(3.5, 5.5),
+        ] {
+            entities.push(crate::test_world::iron_chest(&at));
+        }
+        let sink = crate::test_world::iron_chest(&Position::new(12.5, 5.5));
+        entities.push(sink.clone());
+        let mut ctx = crate::test_world::connect_ctx_with_roster(entities, &[]);
+        let before = ctx.state.entities_within(&source.position, 30.).len();
+        let refusal = connect_steps_with(&mut ctx, &source, &sink, &"iron-plate".into(), INSERTER)
+            .expect_err("a chest with no side and no run out cannot be connected");
+        match &refusal {
+            ConnectRefusal::TapRefused { blocked, why } => {
+                assert_eq!(
+                    blocked.len(),
+                    4,
+                    "the four neighbours, as before: {blocked:?}"
+                );
+                assert!(
+                    why.contains("no belt run leaves"),
+                    "the tap says why it could not be: {why}"
+                );
+            }
+            other => panic!("expected TapRefused, got {other:?}"),
+        }
+        let text = refusal.to_string();
+        assert!(
+            text.starts_with("no belt route, blocked by 4 tile(s):"),
+            "the refusal opens with the sentence it always had: {text}"
+        );
+        assert_eq!(
+            ctx.state.entities_within(&source.position, 30.).len(),
+            before,
+            "and nothing landed in the overlay"
         );
     }
 }

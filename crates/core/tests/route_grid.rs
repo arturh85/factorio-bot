@@ -1,6 +1,7 @@
 use factorio_bot_core::graph::enclosure::{GRID, cell_index};
 use factorio_bot_core::graph::route::{
-    RouteError, TUNNEL_EW, TUNNEL_NS, TileKind, route_belt, route_belt_with_tunnels,
+    RouteError, TUNNEL_EW, TUNNEL_NS, TileKind, route_belt, route_belt_launching,
+    route_belt_with_tunnels,
 };
 use factorio_bot_core::types::Direction;
 
@@ -828,4 +829,81 @@ fn a_refusal_names_the_map_and_never_the_route_itself() {
             }
         }
     }
+}
+
+/// A launched route's first tile faces the launch direction -- the property
+/// a splitter's output needs -- and only then turns. The plain search from
+/// the same cell turns at once, which is what makes this a different
+/// answer rather than the same one restated.
+#[test]
+fn a_launched_route_leaves_in_its_launch_direction_before_it_turns() {
+    let grid = open_grid();
+    let tunnels = vec![0u8; GRID * GRID];
+    // The destination is due NORTH of the start.
+    let plain =
+        route_belt(&grid, (0.0, 0.0), (10, 10), (10, 6), None).expect("an empty grid has a route");
+    assert_eq!(
+        plain.tiles[0].direction,
+        Direction::North,
+        "the control: the free start turns north on its first tile"
+    );
+
+    let launched = route_belt_launching(
+        &grid,
+        &tunnels,
+        (0.0, 0.0),
+        (10, 10),
+        (10, 6),
+        None,
+        Direction::East,
+    )
+    .expect("a launched route on an empty grid");
+    assert_eq!(
+        launched.tiles[0].direction,
+        Direction::East,
+        "the first tile faces the launch direction: {:?}",
+        launched
+            .tiles
+            .iter()
+            .map(|t| t.direction)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        launched.tiles[1].position.x(),
+        11.5,
+        "and the second tile is the cell east of the start, so the route really stepped that way"
+    );
+    assert_eq!(
+        launched
+            .tiles
+            .last()
+            .map(|t| (t.position.x(), t.position.y())),
+        Some((10.5, 6.5)),
+        "and it still arrives"
+    );
+    assert!(
+        launched.tiles.len() > plain.tiles.len(),
+        "the launch costs a detour, it does not buy one for free"
+    );
+}
+
+/// A launched route whose start IS its destination is the one tile, facing
+/// the launch direction -- not a tile facing whichever seed the heap popped
+/// first.
+#[test]
+fn a_launched_route_of_one_tile_faces_its_launch() {
+    let grid = open_grid();
+    let tunnels = vec![0u8; GRID * GRID];
+    let route = route_belt_launching(
+        &grid,
+        &tunnels,
+        (0.0, 0.0),
+        (10, 10),
+        (10, 10),
+        None,
+        Direction::West,
+    )
+    .expect("from == to is a route of one tile");
+    assert_eq!(route.tiles.len(), 1);
+    assert_eq!(route.tiles[0].direction, Direction::West);
 }

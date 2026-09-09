@@ -136,8 +136,24 @@ Steps 1 and 2, the unambiguous part of class (b):
 
 Behaviour on every existing run is unchanged by construction: every player
 the mod has ever reported is on `nauvis` or reports no surface, so the filter
-admits everyone and `bots_elsewhere` is empty. The three offline baselines
-are re-measured after the change on one binary and reported in the commit.
+admits everyone and `bots_elsewhere` is empty. Measured, not assumed: on one
+release binary built in this worktree (`cli,lua`), before and after, against
+`workspace/scripts/map.json` with bots 1,2,3,4 --
+`researched:automation` 176 / 21,784 · `producing:automation-science-pack:6`
+316 / 22,457 · `producing:logistic-science-pack:6` 571 / 54,371. Identical.
+
+Two things that bit on the way, for the next person:
+
+- `crates/scripting_lua/src/doc_guard.rs` reads a bindings file **up to its
+  first `#[cfg(test)]`** as the production half. Gating a now-test-only
+  helper with `#[cfg(test)]` above `install_goal_holds` made the guard
+  report `goal.holds` as never installed. `#[cfg_attr(not(test),
+  allow(dead_code))]` is the form that keeps the file whole.
+- `crates/planner/tests/planning_work_ceilings.rs` returns early without
+  `workspace/scripts/map.json`, which no worktree has. A symlink
+  (`.worktrees/<x>/workspace/scripts/map.json` -> the main checkout's) makes
+  it run; the log line `the_three_map_json_baselines_stay_within_their_work_ceilings ... ok`
+  is the proof it did, and `SKIPPED` is the proof it did not.
 
 ## Left as owner decisions or follow-ups
 

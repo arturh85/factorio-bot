@@ -1,7 +1,9 @@
 #[cfg_attr(test, mockall_double::double)]
 use crate::factorio::rcon::FactorioRcon;
 use crate::factorio::world::FactorioSurface;
-use crate::types::{EntityName, PlayerChangedMainInventoryEvent, Pos, Position, RequestEntity};
+use crate::types::{
+    EntityName, PlayerChangedMainInventoryEvent, Pos, Position, RequestEntity, SurfaceId,
+};
 use miette::Result;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -158,6 +160,17 @@ pub struct Planner {
     pub plan_world: Arc<FactorioSurface>,
     /// See [`ServerOwnership`].
     pub server: ServerOwnership,
+    /// Which surface [`Planner::real_world`] is, when the caller said.
+    ///
+    /// An `Arc<FactorioSurface>` does not know its own name -- the name is
+    /// the key of `FactorioWorld::surfaces` and lives nowhere else -- so the
+    /// moment a caller took the surface out of the world, the identity the
+    /// lua CLI had resolved from `--surface` was gone. This is where it is
+    /// kept. `None` is **the caller never said**, not Nauvis: the porting seam
+    /// `FactorioWorld::only_surface` is, carried one layer further. Stated
+    /// through [`Planner::on_surface`]; read by `run_lua`, which hands it to
+    /// `goal.plan` so a `PlanState` can say what surface it is on.
+    pub surface: Option<SurfaceId>,
 }
 
 impl Planner {
@@ -167,7 +180,18 @@ impl Planner {
             plan_world: world.clone(),
             real_world: world,
             server: ServerOwnership::Owned,
+            surface: None,
         }
+    }
+
+    /// States which surface the world this planner holds is.
+    ///
+    /// The caller is the one that took `real_world` out of a `FactorioWorld`
+    /// under this id; nothing here can check the pairing, because the surface
+    /// does not carry its name. See the `surface` field.
+    pub fn on_surface(mut self, surface: SurfaceId) -> Planner {
+        self.surface = Some(surface);
+        self
     }
 
     /// [`Planner::new`] for a server this process did not start.

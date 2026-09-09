@@ -25,6 +25,7 @@ use factorio_bot_core::factorio::world::FactorioSurface;
 use factorio_bot_core::miette::miette;
 use factorio_bot_core::mlua::prelude::*;
 use factorio_bot_core::plan::planner::{Planner, ServerOwnership};
+use factorio_bot_core::types::SurfaceId;
 use factorio_bot_executor::walk_memory::reprobe_benched;
 use factorio_bot_executor::{Actuator, RconActuator};
 use factorio_bot_planner::{BotId, PlanState, PlannerError, holds};
@@ -604,6 +605,7 @@ pub fn create_lua_goal(
     rcon: Option<Arc<FactorioRcon>>,
     bots: Vec<u8>,
     server: ServerOwnership,
+    surface: Option<SurfaceId>,
 ) -> LuaResult<LuaTable> {
     // Cloned before the actuator factory takes ownership of `rcon`: the
     // pre-check, the buffer refresh and the actuator all need it and none of
@@ -708,14 +710,53 @@ pub fn create_lua_goal(
             },
         },
     });
-    create_lua_goal_with(lua, plan_world, actuator, bots, checker, refresher, clock)
+    create_lua_goal_on(
+        surface, lua, plan_world, actuator, bots, checker, refresher, clock,
+    )
 }
 
 /// [`create_lua_goal`] with the actuator supplied rather than built from RCON.
 ///
-/// The only caller in production is `create_lua_goal`; the tests use it to drive
-/// the real bindings — `goal.start`/`goal.run` included — against a stub.
+/// Test-only since 2026-09-09: production goes through [`create_lua_goal_on`]
+/// with the surface it was given, and the tests use this to drive the real
+/// bindings — `goal.start`/`goal.run` included — against a stub, on a surface
+/// nobody named.
+///
+/// `cfg_attr` rather than `#[cfg(test)]`: `doc_guard` reads this file up to
+/// its first `#[cfg(test)]` as the production half, and a gate here would hide
+/// every binding installed below it from the guard.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn create_lua_goal_with(
+    lua: &Lua,
+    plan_world: Arc<FactorioSurface>,
+    actuator: ActuatorFactory,
+    bots: Vec<u8>,
+    placement_checker: Option<PlacementChecker>,
+    buffer_refresher: Option<BufferRefresher>,
+    planning_clock: Option<PlanningClockSeam>,
+) -> LuaResult<LuaTable> {
+    create_lua_goal_on(
+        None,
+        lua,
+        plan_world,
+        actuator,
+        bots,
+        placement_checker,
+        buffer_refresher,
+        planning_clock,
+    )
+}
+
+/// [`create_lua_goal_with`] on a surface the caller names.
+///
+/// `surface` is what `PlanState::on_surface` will be told; `None` is "the
+/// caller never said" and builds through `PlanState::from_world`, which is
+/// what every test above this seam does and what every run did before
+/// 2026-09-09. A `plan_world` does not know its own name -- see
+/// `Planner::surface` for where the name comes from.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn create_lua_goal_on(
+    surface: Option<SurfaceId>,
     lua: &Lua,
     plan_world: Arc<FactorioSurface>,
     actuator: ActuatorFactory,
@@ -1285,6 +1326,7 @@ end
     plan::install_goal_plan(
         lua,
         &map_table,
+        surface.clone(),
         plan_world.clone(),
         roster.clone(),
         placement_checker,
@@ -1328,7 +1370,13 @@ end
 "#,
         ),
     )?;
-    install_goal_holds(lua, &map_table, plan_world.clone(), roster.clone())?;
+    install_goal_holds(
+        lua,
+        &map_table,
+        surface.clone(),
+        plan_world.clone(),
+        roster.clone(),
+    )?;
 
     // `goal.refusal`: the classifier that makes a refusal survivable.
     map_table.set(
@@ -1511,6 +1559,49 @@ fn refuse_unknown_bots(state: &PlanState) -> LuaResult<()> {
     )))
 }
 
+/// Refuses to plan against a bot the world places on another surface.
+///
+/// The sibling of [`refuse_unknown_bots`], for the other way a roster bot can
+/// be unreal *here*: the plan names its surface, the mod reported the bot's,
+/// and they differ. Every walk the scheduler would price for that bot is a
+/// coordinate distance on the wrong planet -- dispatched, settled and recorded
+/// as a success (`docs/superpowers/notes/2026-09-06-surfaces-survey.md`,
+/// rung 2). Cannot fire on any run to date: the mod's Nauvis guard has never
+/// let a bot be reported anywhere else, and a plan that did not name its
+/// surface (`PlanState::from_world`) has nothing to compare against.
+fn refuse_bots_elsewhere(state: &PlanState) -> LuaResult<()> {
+    let elsewhere = state.bots_elsewhere();
+    if elsewhere.is_empty() {
+        return Ok(());
+    }
+    let here = state
+        .surface()
+        .map(|surface| surface.as_str().to_owned())
+        .unwrap_or_else(|| "<unstated>".to_owned());
+    let names = elsewhere
+        .iter()
+        .map(|(bot, surface)| format!("{bot} on {}", surface.as_str()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(goal_error(format!(
+        "bot(s) {names} are not on this plan's surface ({here}); refusing to plan walks \
+         on a surface they are not standing on"
+    )))
+}
+
+/// The `PlanState` `goal.plan`, `goal.holds` and a recovery all build: on
+/// the surface the run named, or unnamed when nobody did.
+pub(crate) fn plan_state_on(
+    surface: Option<&SurfaceId>,
+    world: Arc<FactorioSurface>,
+    roster: &[BotId],
+) -> PlanState {
+    match surface {
+        Some(surface) => PlanState::on_surface(surface.clone(), world, roster),
+        None => PlanState::from_world(world, roster),
+    }
+}
+
 /// Installs `goal.holds` on `table`.
 ///
 /// The one call on this surface that answers a question *about the world*
@@ -1529,6 +1620,7 @@ fn refuse_unknown_bots(state: &PlanState) -> LuaResult<()> {
 fn install_goal_holds(
     lua: &Lua,
     table: &LuaTable,
+    surface: Option<SurfaceId>,
     world: Arc<FactorioSurface>,
     default_roster: Vec<BotId>,
 ) -> LuaResult<()> {
@@ -1537,8 +1629,9 @@ fn install_goal_holds(
         lua.create_function(move |_lua, (g, opts): (LuaTable, Option<LuaTable>)| {
             let goal = value::goal_from_lua(&g)?;
             let roster = plan::resolve_roster(opts.as_ref(), &default_roster)?;
-            let state = PlanState::from_world(world.clone(), &roster);
+            let state = plan_state_on(surface.as_ref(), world.clone(), &roster);
             refuse_unknown_bots(&state)?;
+            refuse_bots_elsewhere(&state)?;
             // `Option<bool>` reaches Lua as a boolean or `nil` -- the three
             // answers the planner gives, unflattened. Collapsing the third
             // into `false` here would put the guess back one layer down.
@@ -2002,6 +2095,7 @@ mod tests {
                 whose: Holder::Anyone,
                 via: None,
             },
+            surface: None,
             world: seeded_world_for(&ids),
             roster: roster.to_vec(),
         })

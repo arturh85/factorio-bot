@@ -410,3 +410,71 @@ async fn an_unfinished_run_has_null_coverage() {
     assert!(body["summary"]["map"].is_null());
     assert!(body["summary"]["samples_lag_ticks"].is_null());
 }
+
+const SAMPLES: &str = concat!(
+    r#"{"schema":3,"tick":600,"run":"alpha","kind":"bots","bots":[]}"#,
+    "\n",
+    r#"{"schema":3,"tick":600,"run":"alpha","kind":"force","research":null,"techs_unlocked":0,"production":{"made":{},"consumed":{}},"power":{"generated_kw":0.0,"consumed_kw":0.0,"satisfaction":1.0,"networks":{}},"pollution":null}"#,
+    "\n",
+    r#"{"schema":3,"tick":900,"run":"alpha","kind":"machines","machines":{},"truncated":0}"#,
+    "\n",
+    r#"{"schema":3,"tick":1200,"run":"alpha","kind":"force","research":null,"techs_unlocked":0,"production":{"made":{},"consumed":{}},"power":{"generated_kw":0.0,"consumed_kw":0.0,"satisfaction":1.0,"networks":{}},"pollution":null}"#,
+    "\n",
+);
+
+#[tokio::test]
+async fn samples_can_be_sliced_by_tick_and_kind() {
+    let ws = workspace("slice");
+    seed_run(&ws, "alpha", MILESTONES, Some(MANIFEST), None);
+    std::fs::write(ws.join("runs/alpha/samples.jsonl"), SAMPLES).unwrap();
+    let st = || state_with_workspace(&ws);
+    let (_, all) = get_json(st(), "/api/v1/runs/alpha/samples").await;
+    assert_eq!(all["samples"].as_array().unwrap().len(), 4);
+    let (_, window) = get_json(st(), "/api/v1/runs/alpha/samples?from=700&to=1200").await;
+    let ticks: Vec<u64> = window["samples"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["tick"].as_u64().unwrap())
+        .collect();
+    assert_eq!(ticks, vec![900, 1200], "inclusive bounds");
+    let (_, force) = get_json(st(), "/api/v1/runs/alpha/samples?kind=force").await;
+    assert_eq!(force["samples"].as_array().unwrap().len(), 2);
+    assert!(
+        force["samples"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|s| s["kind"] == "force")
+    );
+    let (_, both) = get_json(st(), "/api/v1/runs/alpha/samples?kind=force&to=600").await;
+    assert_eq!(both["samples"].as_array().unwrap().len(), 1);
+}
+
+const MAP_LINES: &str = concat!(
+    r#"{"tick":10,"kind":"keyframe","bounds":{"left":0,"top":0,"right":1,"bottom":1},"game":[],"model":[],"divergence":[]}"#,
+    "\n",
+    r#"{"tick":500,"kind":"placed","bot":1,"intent":{"name":"stone-furnace","position":{"x":1,"y":2},"direction":0},"actual":{"name":"stone-furnace","position":{"x":1,"y":2},"direction":0},"drift":null}"#,
+    "\n",
+    r#"{"tick":900,"kind":"placed","bot":2,"intent":{"name":"wooden-chest","position":{"x":3,"y":2},"direction":0},"actual":{"name":"wooden-chest","position":{"x":3,"y":2},"direction":0},"drift":null}"#,
+    "\n",
+);
+
+#[tokio::test]
+async fn the_map_can_be_sliced_by_tick() {
+    let ws = workspace("mapslice");
+    seed_run(&ws, "alpha", MILESTONES, Some(MANIFEST), None);
+    std::fs::write(ws.join("runs/alpha/map.jsonl"), MAP_LINES).unwrap();
+    let (_, body) = get_json(
+        state_with_workspace(&ws),
+        "/api/v1/runs/alpha/map?from=100&to=600",
+    )
+    .await;
+    let ticks: Vec<u64> = body["map"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["tick"].as_u64().unwrap())
+        .collect();
+    assert_eq!(ticks, vec![500]);
+}

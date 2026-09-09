@@ -89,6 +89,16 @@ const QUERY_OPERATIONS: &[QueryOperation] = &[
     ("/api/v1/scripts/file", "post", &[("path", true)]),
     ("/api/v1/scripts/file", "delete", &[("path", true)]),
     ("/api/v1/fs/exists", "get", &[("path", true)]),
+    (
+        "/api/v1/runs/{id}/samples",
+        "get",
+        &[("from", false), ("to", false), ("kind", false)],
+    ),
+    (
+        "/api/v1/runs/{id}/map",
+        "get",
+        &[("from", false), ("to", false)],
+    ),
 ];
 
 /// Operations that exist only in a build that has an interpreter.
@@ -311,12 +321,20 @@ async fn query_parameters_are_published_as_query_parameters() {
             );
         }
 
+        // Counted over `in: query` only, not every parameter: a route like
+        // `GET /api/v1/runs/{id}/samples` legitimately mixes a path parameter
+        // (from `Path<String>`, untouched by the inference bug this test
+        // guards) with the query parameters under test, and the path
+        // parameter is not this test's business.
+        let query_params = parameters
+            .iter()
+            .filter(|parameter| parameter["in"] == "query")
+            .count();
         assert_eq!(
-            parameters.len(),
+            query_params,
             expected.len(),
-            "{} {path} publishes {} parameters, expected {}",
+            "{} {path} publishes {query_params} query parameters, expected {}",
             method.to_uppercase(),
-            parameters.len(),
             expected.len()
         );
     }

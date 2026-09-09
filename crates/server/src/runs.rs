@@ -22,7 +22,8 @@ use factorio_bot_core::record::video::{
     TICKS_FILE, VIDEO_DIR, VideoManifest, clock::read_tick_samples, read_video_dir,
 };
 use factorio_bot_core::record::{
-    Event, Lane, Manifest, Sample, Split, derive_lanes, derive_splits, read_events, read_samples,
+    Event, Lane, Manifest, Sample, SampleKind, Split, derive_lanes, derive_splits, read_events,
+    read_samples,
 };
 use factorio_bot_core::scripts::resolve_script_path;
 use serde::{Deserialize, Serialize};
@@ -148,6 +149,44 @@ pub struct RunMapResponse {
 pub struct EventFilter {
     /// Return only events of this `kind`.
     pub kind: Option<String>,
+}
+
+/// Narrows a stream to a tick window. Both bounds inclusive; either may be
+/// absent. The whole file is still read -- the record is line-oriented and
+/// has no index -- so this saves the wire and the browser, not the disk.
+#[derive(Debug, Default, Deserialize, utoipa::IntoParams)]
+pub struct TickWindow {
+    /// First tick to include.
+    pub from: Option<u64>,
+    /// Last tick to include.
+    pub to: Option<u64>,
+}
+
+impl TickWindow {
+    fn contains(&self, tick: u64) -> bool {
+        self.from.is_none_or(|f| tick >= f) && self.to.is_none_or(|t| tick <= t)
+    }
+}
+
+/// `TickWindow` plus the sample `kind` (`bots`, `force`, `machines`).
+#[derive(Debug, Default, Deserialize, utoipa::IntoParams)]
+pub struct SampleFilter {
+    pub from: Option<u64>,
+    pub to: Option<u64>,
+    /// Return only samples of this `kind`.
+    pub kind: Option<String>,
+}
+
+/// The wire name of a sample's kind, without a second serialisation: the
+/// enum's `#[serde(tag = "kind")]` is the contract, and matching the variants
+/// here keeps this in step with it at compile time.
+fn sample_kind(sample: &Sample) -> &'static str {
+    match sample.kind {
+        SampleKind::Bots { .. } => "bots",
+        SampleKind::Force { .. } => "force",
+        SampleKind::Machines { .. } => "machines",
+        SampleKind::Unknown => "unknown",
+    }
 }
 
 async fn runs_root(state: &AppState) -> Result<PathBuf, ErrorResponse> {
@@ -363,7 +402,7 @@ pub async fn get_run_lanes(
     get,
     path = "/api/v1/runs/{id}/samples",
     tag = "Runs",
-    params(("id" = String, Path, description = "the run id")),
+    params(("id" = String, Path, description = "the run id"), SampleFilter),
     responses(
         (status = 200, body = RunSamplesResponse),
         (status = 400, body = crate::error::ErrorResponse),
@@ -373,6 +412,7 @@ pub async fn get_run_lanes(
 pub async fn get_run_samples(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    Query(filter): Query<SampleFilter>,
 ) -> Result<Json<RunSamplesResponse>, ErrorResponse> {
     let dir = run_dir(&runs_root(&state).await?, &id)?;
     let path = dir.join("samples.jsonl");
@@ -386,8 +426,18 @@ pub async fn get_run_samples(
     }
     let read = read_samples(&path)
         .map_err(|err| ErrorResponse::internal(format!("failed to read samples: {err}")))?;
+    let window = TickWindow {
+        from: filter.from,
+        to: filter.to,
+    };
+    let samples = read
+        .samples
+        .into_iter()
+        .filter(|s| window.contains(s.tick))
+        .filter(|s| filter.kind.as_deref().is_none_or(|k| sample_kind(s) == k))
+        .collect();
     Ok(Json(RunSamplesResponse {
-        samples: read.samples,
+        samples,
         skipped: read.skipped,
     }))
 }
@@ -397,7 +447,7 @@ pub async fn get_run_samples(
     get,
     path = "/api/v1/runs/{id}/map",
     tag = "Runs",
-    params(("id" = String, Path, description = "the run id")),
+    params(("id" = String, Path, description = "the run id"), TickWindow),
     responses(
         (status = 200, body = RunMapResponse),
         (status = 400, body = crate::error::ErrorResponse),
@@ -407,6 +457,7 @@ pub async fn get_run_samples(
 pub async fn get_run_map(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    Query(window): Query<TickWindow>,
 ) -> Result<Json<RunMapResponse>, ErrorResponse> {
     let dir = run_dir(&runs_root(&state).await?, &id)?;
     let path = dir.join("map.jsonl");
@@ -420,8 +471,13 @@ pub async fn get_run_map(
     }
     let read = read_map(&path)
         .map_err(|err| ErrorResponse::internal(format!("failed to read map: {err}")))?;
+    let map = read
+        .records
+        .into_iter()
+        .filter(|r| window.contains(r.tick))
+        .collect();
     Ok(Json(RunMapResponse {
-        map: read.records,
+        map,
         skipped: read.skipped,
     }))
 }

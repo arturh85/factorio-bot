@@ -32,6 +32,16 @@ const chips = computed<Chip[]>(() => {
     ];
 });
 
+/**
+ * The counts for ONE plan: the last `goal.run` batch of this run.
+ *
+ * `replay.json` is overwritten by each batch (`LiveRecord::write_replay`), and
+ * the supervisor plans once per milestone, so a run with three milestones wrote
+ * three replays and kept the third. The chip therefore says `last plan` rather
+ * than `plan` -- `176 steps` under a bare `plan` reads as the whole run, which
+ * would understate every multi-milestone run by however many batches came
+ * before.
+ */
 const plan = computed(() => {
     const c = props.replayCounts;
     if (c === null) return null;
@@ -63,10 +73,12 @@ const plan = computed(() => {
         <!-- lag <= 0: the last sample is at or past the run's end -- coverage, not a gap. -->
         samples <b class="font-medium text-ink">{{ lagTicks === null ? 'not sampled' : lagTicks <= 0 ? 'cover to end' : `lag ${lagTicks.toLocaleString()} ticks` }}</b>
       </span>
+      <!-- "last plan", not "plan": see the `plan` computed above. -->
       <span v-if="plan" data-chip="plan" :data-state="plan.truncated ? 'truncated' : 'present'"
+            title="the last goal.run batch of this run; earlier batches are not in replay.json"
             class="mb-1.5 mr-1.5 rounded border px-2 py-1 font-mono text-xs"
             :class="plan.truncated ? 'border-warn/60 bg-warn/10 text-warn-dark' : 'border-divider bg-surface text-ink-muted'">
-        plan <b class="font-medium" :class="plan.truncated ? 'text-warn-dark' : 'text-ink'">{{ plan.text }}</b>
+        last plan <b class="font-medium" :class="plan.truncated ? 'text-warn-dark' : 'text-ink'">{{ plan.text }}</b>
       </span>
       <span v-for="s in savepoints" :key="s.milestone_index" data-chip="resume" data-state="present"
             class="mb-1.5 mr-1.5 rounded border border-divider bg-surface px-2 py-1 font-mono text-xs text-ink-muted"

@@ -30,6 +30,11 @@ describe('RunHeadline', () => {
     it('shows the plan counts and flags an abandoned tail', () => {
         const w = mount(RunHeadline, {props: {...base, provenance, provenanceError: null, replayCounts: {steps: 176, abandoned: 48, lost: 0, failed: 1, pending: 0, believed: 52}}});
         const plan = w.get('[data-chip="plan"]');
+        // "last plan", not "plan": replay.json holds the LAST goal.run batch
+        // and the supervisor plans once per milestone, so a run with three
+        // milestones has three plans and this chip describes one of them.
+        expect(plan.text().trim().startsWith('last plan')).toBe(true);
+        expect(plan.attributes('title')).toContain('earlier batches are not in replay.json');
         expect(plan.text()).toContain('176 steps');
         expect(plan.text()).toContain('48 abandoned');
         expect(plan.text()).not.toContain('0 lost');

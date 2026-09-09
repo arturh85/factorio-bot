@@ -152,6 +152,10 @@ export const useRunsStore = defineStore('runs', {
          * `unknown` body: a document that fails to narrow sets `replayError`
          * exactly like a failed fetch would, because a malformed replay is
          * exactly as unusable as a missing one.
+         *
+         * **This is the last `goal.run` batch of the run, not the whole run.**
+         * Each batch overwrites `replay.json` and the supervisor plans once per
+         * milestone, so earlier batches are not in `replay.json`.
          */
         replay: null as Replay | null,
         replayError: null as string | null,

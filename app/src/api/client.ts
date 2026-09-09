@@ -207,6 +207,10 @@ export function getRunProvenance(id: string): Promise<Provenance> {
  * plan, answers **404, not an empty document**: an empty replay would read as
  * a run that planned nothing, which is a different fact from "this wasn't
  * recorded".
+ *
+ * **This is the last `goal.run` batch of the run, not the whole run.** Each
+ * batch overwrites `replay.json` and the supervisor plans once per milestone,
+ * so earlier batches are not in `replay.json`.
  */
 export function getRunReplay(id: string): Promise<unknown> {
     return request<unknown>(`/api/v1/runs/${encodeURIComponent(id)}/replay`);

@@ -77,15 +77,101 @@ pub const FURNACE: &str = "stone-furnace";
 /// [`tests::every_facing_puts_both_machines_on_their_own_grid`], not a comment.
 const FURNACE_OFFSET: (f64, f64) = (0., -2.);
 
-/// How far from the anchor tile a cell site is looked for, in tiles.
+/// The floor under [`cell_search_radius`], in tiles.
 ///
-/// The same 12 `crate::method::util::free_area_near` uses, and for the same
-/// reason: a cell has to sit at a patch *edge* — its drill on the ore and its
-/// furnace off it — so the search has to be able to walk out of the middle of a
-/// patch to reach one. Twelve rings is 625 candidate tiles times four facings,
-/// and only the candidates that pass both free-area checks pay for anything
-/// more than that.
-const CELL_SEARCH_RADIUS: i32 = 12;
+/// The same 12 `crate::method::util::free_area_near` uses, and it was the
+/// whole radius until 2026-09-09. It stays as a floor so that a *tiny* patch —
+/// one whose own extent is under twelve tiles — searches exactly the
+/// neighbourhood it always did, and so that every one-cell plan on the ladder
+/// stays bit-identical.
+const CELL_SEARCH_RADIUS_MIN: i32 = 12;
+
+/// The ceiling over [`cell_search_radius`], in tiles.
+///
+/// A bound on **work**, the sibling of [`MAX_CELLS`]: the ring walk is
+/// `(2R+1)^2` candidate tiles times four facings, so the cost of one refusal
+/// is quadratic in the radius while the cells it can find are not. Sixty-four
+/// is `(129)^2 * 4` = 66,564 candidate-facings, which the measurement in
+/// [`cell_search_radius`] prices; it also happens to be past the extent of
+/// every patch on this project's benchmark map, so it binds on nothing we run
+/// and exists for the map that would otherwise hang.
+///
+/// **It is not a claim that a site 64 tiles away is a good one.** It is the
+/// point past which searching for one costs more than it can be worth.
+const CELL_SEARCH_RADIUS_CAP: i32 = 64;
+
+/// How far from the anchor tile a cell site is looked for, in tiles — **the
+/// patch's own answer, not a constant**.
+///
+/// # What the search has to be able to reach
+///
+/// A cell sits at a patch *edge*: its drill stands on ore with its furnace two
+/// tiles ahead standing **off** it ([`fit`]), so a site only ever exists
+/// within a tile or two of the rim. The anchor, though, is
+/// [`nearest_resource_tile`] — any ore tile, rim or interior. So the radius
+/// has to carry the search from wherever the anchor landed to the rim, and,
+/// once the near rim is full, on around the rim to whatever is still free.
+/// The exact requirement is therefore *"every tile of the patch the anchor is
+/// on, plus the furnace's own two tiles"* — anything less is a search that
+/// refuses while the patch still has room, which is a lie about the ground
+/// wearing the name of a bound.
+///
+/// The ring walk is Chebyshev (a square ring per radius), so this is the
+/// Chebyshev distance from the anchor to the furthest corner of the patch's
+/// bounding box, plus `FURNACE_OFFSET`'s two tiles, plus one for the drill's
+/// own 2x2 footprint straddling the rim.
+///
+/// # Why the twelve it replaces was the binding constraint
+///
+/// Measured on `workspace/scripts/map.json` (seed 31337, t=0): the iron patch
+/// is **one** connected component of 940 tiles spanning 38 x 36, and its
+/// Chebyshev **inradius is exactly 12** — the deepest ore tile is twelve tiles
+/// from any non-ore ground. So an anchor that walked into the middle of that
+/// patch could not reach its own rim in twelve rings, and the search refused
+/// with `NoRoomForCell` on a patch that was nowhere near full. The two numbers
+/// coinciding is why nothing had noticed: at twelve it worked from *most*
+/// anchors.
+///
+/// The refusal ceiling that measures, at `--bots 1,2,3,4` against that dump:
+/// `producing:iron-plate:700` planned (47 cells) and `:750` refused, while the
+/// references stand 73 drills. With the radius derived it is the patch that
+/// answers instead.
+///
+/// # The anchor walk is not made redundant by this, and vice versa
+///
+/// [`plan_cells`] sites each cell from its predecessor, which is what keeps
+/// successive cells contiguous (`method::sustain` belts them) and what keeps
+/// the search *cheap* — a near anchor finds its site in the first few rings
+/// and never pays the outer ones. The radius is the fallback for when the
+/// near ground is gone. Raising [`MAX_CELLS`] alone moved the ceiling by
+/// nothing because the walk was missing; widening the radius alone would have
+/// made every cell pay a full quadratic search. Both, or neither.
+fn cell_search_radius(state: &PlanState, ore: &str, anchor: &Position) -> i32 {
+    let reach = state
+        .resource_patches(ore)
+        .iter()
+        .filter(|patch| patch.contains(Pos::from(anchor)))
+        .map(|patch| {
+            let corners = [
+                (patch.rect.left_top.x(), patch.rect.left_top.y()),
+                (patch.rect.right_bottom.x(), patch.rect.right_bottom.y()),
+            ];
+            corners
+                .iter()
+                .map(|(x, y)| (anchor.x() - x).abs().max((anchor.y() - y).abs()).ceil() as i32)
+                .max()
+                .unwrap_or(0)
+        })
+        .max()
+        .unwrap_or(0);
+    // The furnace's own offset, and one tile for the drill's 2x2 straddling
+    // the rim: a site whose drill tile is the last ore tile still needs its
+    // furnace two tiles further out to be inside the searched square.
+    let margin = FURNACE_OFFSET.1.abs().ceil() as i32 + 1;
+    reach
+        .saturating_add(margin)
+        .clamp(CELL_SEARCH_RADIUS_MIN, CELL_SEARCH_RADIUS_CAP)
+}
 
 /// How far around a drill a candidate furnace is looked for when *counting*
 /// cells that already stand, in tiles.
@@ -169,7 +255,7 @@ const CELL_FUELLED_TICKS: Ticks = 36_000;
 ///
 /// **It is still not a claim about the map.** The patch answers that, by
 /// refusing with [`PlannerError::NoRoomForCell`] once
-/// [`CELL_SEARCH_RADIUS`] holds no further site — a *different* refusal,
+/// [`cell_search_radius`] holds no further site — a *different* refusal,
 /// naming the ground rather than the bound, which is the whole reason both
 /// exist.
 const MAX_CELLS: u32 = 64;
@@ -681,7 +767,8 @@ pub fn plan_cell(
         }
     })?;
     let base = Pos::from(&anchor);
-    for radius in 0..=CELL_SEARCH_RADIUS {
+    let search_radius = cell_search_radius(state, &spec.ore, &anchor);
+    for radius in 0..=search_radius {
         for dy in -radius..=radius {
             for dx in -radius..=radius {
                 // Only the ring at exactly this radius; inner ones were done.
@@ -708,7 +795,10 @@ pub fn plan_cell(
     }
     Err(PlannerError::NoRoomForCell {
         ore: spec.ore.clone(),
-        radius: CELL_SEARCH_RADIUS,
+        // The radius actually walked, not the constant that used to be it: a
+        // refusal naming a number the search did not use is a refusal nobody
+        // can act on.
+        radius: search_radius,
     })
 }
 
@@ -730,7 +820,7 @@ pub fn plan_cells(
     // # The anchor WALKS, and that is what decides how big a plan can be
     //
     // [`plan_cell`] re-derives its anchor as the resource tile nearest `from`
-    // and then rings out to [`CELL_SEARCH_RADIUS`]. Holding `from` at the
+    // and then rings out to [`cell_search_radius`]. Holding `from` at the
     // bot's position for every cell therefore searches the *same* 25x25
     // window `count` times, so a patch fifty tiles across is planned as if it
     // were twelve: measured on the seed-31337 t=0 dump,
@@ -804,8 +894,12 @@ pub fn standing_cells(state: &PlanState, spec: &CellSpec) -> Vec<Cell> {
         // The patch's own half-diagonal, plus the furthest a cell's drill can
         // sit from a tile of it. `calculate_distance` is Euclidean, which is
         // what `entities_within` measures with.
+        // A cell's drill stands ON ore ([`fit`]), so it is always inside the
+        // patch's own box however far the *search* reached; the floor is
+        // slack for the footprint and the offsets, not a term that has to
+        // track [`cell_search_radius`].
         let reach = (patch.rect.width() / 2.).hypot(patch.rect.height() / 2.)
-            + f64::from(CELL_SEARCH_RADIUS)
+            + f64::from(CELL_SEARCH_RADIUS_MIN)
             + CELL_PAIR_RADIUS;
         for drill in state.entities_within(&centre, reach) {
             if drill.name != DRILL {
@@ -2142,8 +2236,12 @@ fn drill_fed_pairs(
             (patch.rect.left_top.x() + patch.rect.right_bottom.x()) / 2.,
             (patch.rect.left_top.y() + patch.rect.right_bottom.y()) / 2.,
         );
+        // A cell's drill stands ON ore ([`fit`]), so it is always inside the
+        // patch's own box however far the *search* reached; the floor is
+        // slack for the footprint and the offsets, not a term that has to
+        // track [`cell_search_radius`].
         let reach = (patch.rect.width() / 2.).hypot(patch.rect.height() / 2.)
-            + f64::from(CELL_SEARCH_RADIUS)
+            + f64::from(CELL_SEARCH_RADIUS_MIN)
             + CELL_PAIR_RADIUS;
         for drill in state.entities_within(&centre, reach) {
             if drill.name != DRILL || !seen.insert(Pos::from(&drill.position)) {
@@ -3733,20 +3831,129 @@ mod tests {
         world
     }
 
+    /// The radius is the patch's, not a constant: from any tile of a patch the
+    /// search reaches every other tile of it, plus the furnace's own offset.
+    ///
+    /// # Why this fixture, and what the numbers mean
+    ///
+    /// The ribbon is 6 x 120 (`world_with_a_long_ribbon`). From an anchor at
+    /// one end, the furthest corner of its bounding box is ~120 tiles away, so
+    /// the derived radius is the cap; from a fixture only twelve tiles across
+    /// it is the floor. Both ends of the clamp are asserted, because a
+    /// derivation that silently saturates would look identical to one that
+    /// works.
+    ///
+    /// The number this replaces was **12, and the seed-31337 iron patch's own
+    /// Chebyshev inradius is exactly 12** -- 940 tiles in one component,
+    /// 38 x 36 -- so an anchor that walked into the middle of it could not
+    /// reach its own rim. Measured offline at `--bots 1,2,3,4` against
+    /// `workspace/scripts/map.json`: `producing:iron-plate:700` planned and
+    /// `:750` refused, on a patch that was not full.
+    #[test]
+    fn the_search_radius_is_the_patch_and_not_a_constant() {
+        let s = PlanState::from_world(Arc::new(world_with_a_long_ribbon()), &[BotId(1)]);
+        let spec = iron();
+        let anchor = nearest_resource_tile(&s, &spec.ore, &Position::new(0., 0.), 1)
+            .expect("the ribbon is a patch this fixture can find");
+        assert_eq!(
+            cell_search_radius(&s, &spec.ore, &anchor),
+            CELL_SEARCH_RADIUS_CAP,
+            "a 120-tile ribbon asks for more than the cap allows, so it gets the cap"
+        );
+
+        // A patch smaller than the floor gets the floor, not its own extent:
+        // the neighbourhood a one-cell plan has always searched.
+        let small = PlanState::from_world(Arc::new(fixture_world()), &[BotId(1)]);
+        let tile = nearest_resource_tile(&small, &spec.ore, &Position::new(0., 0.), 1)
+            .expect("the default fixture has iron ore");
+        assert!(
+            cell_search_radius(&small, &spec.ore, &tile) >= CELL_SEARCH_RADIUS_MIN,
+            "the floor is a floor"
+        );
+    }
+
+    /// The derived radius is LOAD-BEARING, and this is the case that needs it:
+    /// a **static** origin whose near ground is already built on.
+    ///
+    /// # Why the walking caller could not have shown this
+    ///
+    /// Measured offline on `workspace/scripts/map.json` at `--bots 1,2,3,4`:
+    /// deriving the radius moved `producing:iron-plate`'s ceiling by **exactly
+    /// nothing** — `:700` planned and `:750` refused both before and after,
+    /// because `plan_cells` walks its anchor and so finds every site of the
+    /// seed-31337 iron patch within seven rings anyway. The refusal only got
+    /// honest: it names 36 tiles instead of 12.
+    ///
+    /// The callers that need it are the ones holding `from` still —
+    /// [`cell_room_to_spare`], and every replan that sites from a bot's
+    /// position onto a patch whose near rim a previous plan already used. A
+    /// probe of the same goal recorded those finding sites at ring **17 and
+    /// 25**, both of which the old twelve refused outright. That is a refusal
+    /// on a patch with dozens of sites left, which is a lie about the ground.
+    ///
+    /// So this fixture holds the origin still and builds out from it, exactly
+    /// as `cell_room_to_spare` does, and asserts a site lands past the old
+    /// radius. It fails if the radius goes back to a constant twelve.
+    #[test]
+    fn a_static_origin_reaches_past_the_old_twelve_once_its_near_ground_is_used() {
+        let s = PlanState::from_world(Arc::new(world_with_a_long_ribbon()), &[BotId(1)]);
+        let spec = iron();
+        let from = Position::new(0., 0.);
+
+        let mut trial = s.fork();
+        let mut furthest_ring = 0i32;
+        for _ in 0..24 {
+            let anchor = nearest_resource_tile(&trial, &spec.ore, &from, 1)
+                .expect("the ribbon is a patch this fixture can find");
+            let cell =
+                plan_cell(&trial, &from, &spec, 1).expect("the ribbon has room for two dozen");
+            // The ring the walk found it on: Chebyshev, as the ring walk is.
+            let ring = (cell.drill.x() - anchor.x())
+                .abs()
+                .max((cell.drill.y() - anchor.y()).abs())
+                .ceil() as i32;
+            furthest_ring = furthest_ring.max(ring);
+            for entity in parts(&trial, &cell) {
+                trial.create_entity(entity);
+            }
+        }
+        assert!(
+            furthest_ring > CELL_SEARCH_RADIUS_MIN,
+            "a static origin whose near ground is used has to reach further than the twelve \
+             rings this search used to walk, or it refuses on a patch that has room: \
+             furthest ring reached is {furthest_ring}, against {CELL_SEARCH_RADIUS_MIN}"
+        );
+    }
+
     /// `plan_cells` walks its anchor, so a plan is bounded by the ore and not
     /// by one search window.
     ///
     /// # Why the assertion is a DISTANCE and not a count
     ///
-    /// A count would pass for the wrong reason. [`CELL_SEARCH_RADIUS`] is 12,
-    /// so a static anchor still sees a 25x25 window and could well pack more
+    /// A count would pass for the wrong reason. The old fixed radius was 12,
+    /// so a static anchor still saw a 25x25 window and could well pack more
     /// than a dozen cells into it on a generous fixture -- an expected value
     /// the system can produce by accident proves nothing. What a static anchor
     /// **cannot** do at any count is put a drill further from its one anchor
     /// tile than the radius it searches. That is the property, so that is what
-    /// is asserted.
+    /// is asserted, against [`CELL_SEARCH_RADIUS_MIN`] -- the radius this
+    /// search had before [`cell_search_radius`] derived it from the patch.
     ///
-    /// Measured on the real map before this existed: `producing:iron-plate:195`
+    /// # And the distance ALONE no longer isolates the walk, which is stated
+    /// rather than hidden
+    ///
+    /// Since the radius is the patch's own extent, a static anchor on this
+    /// ribbon can reach the far end too -- so a distance test can now pass
+    /// without the walk. The second assertion is the discriminator that
+    /// survives: sited from **one** anchor, cells come out on an expanding
+    /// front and consecutive ones can land on opposite sides of it; sited from
+    /// its predecessor, each is the nearest free site to the last, so the
+    /// sequence is contiguous. `method::sustain` belts these in order, so
+    /// contiguity is the property that actually has a consumer. The static
+    /// control is computed here rather than asserted about, so the test fails
+    /// the day the walk is removed instead of merely looking weaker.
+    ///
+    /// Measured on the real map before the walk existed: `producing:iron-plate:195`
     /// refused `NoRoomForCell` at cell 13 with the seed-31337 iron patch
     /// nowhere near full, and raising `MAX_CELLS` from 12 to 64 moved that
     /// ceiling by nothing at all.
@@ -3766,10 +3973,40 @@ mod tests {
             .map(|cell| factorio_bot_core::factorio::util::calculate_distance(&cell.drill, &anchor))
             .fold(0.0_f64, f64::max);
         assert!(
-            furthest > f64::from(CELL_SEARCH_RADIUS),
-            "a static anchor can never exceed its own search radius, so exceeding it is \
-             the walk: furthest drill is {furthest:.1} tiles from the anchor at {anchor}, \
-             against a radius of {CELL_SEARCH_RADIUS}"
+            furthest > f64::from(CELL_SEARCH_RADIUS_MIN),
+            "a static anchor of the old twelve tiles could never exceed its own search \
+             radius: furthest drill is {furthest:.1} tiles from the anchor at {anchor}, \
+             against a radius of {CELL_SEARCH_RADIUS_MIN}"
+        );
+
+        // The static control: every cell sited from the caller's `from`, which
+        // is what `plan_cells` did before it walked.
+        let mut trial = s.fork();
+        let mut static_cells = Vec::new();
+        for _ in 0..20 {
+            let cell = plan_cell(&trial, &from, &spec, 1).expect("the ribbon holds twenty cells");
+            for entity in parts(&trial, &cell) {
+                trial.create_entity(entity);
+            }
+            static_cells.push(cell);
+        }
+        let gap = |cells: &[Cell]| {
+            cells
+                .windows(2)
+                .map(|pair| {
+                    factorio_bot_core::factorio::util::calculate_distance(
+                        &pair[0].drill,
+                        &pair[1].drill,
+                    )
+                })
+                .fold(0.0_f64, f64::max)
+        };
+        let (walked, statics) = (gap(&cells), gap(&static_cells));
+        assert!(
+            walked < statics,
+            "sited from its predecessor a cell is the nearest free site to the last, so the \
+             sequence is contiguous; sited from one anchor it is an expanding front. \
+             widest consecutive gap: walked {walked:.1} tiles, static {statics:.1}"
         );
     }
 
